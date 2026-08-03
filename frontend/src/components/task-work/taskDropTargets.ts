@@ -66,3 +66,32 @@ export function taskDropAutoScrollDelta(pointerY: number, rect: Pick<TaskDropRec
 export function sameTaskDropTarget(left?: TaskExternalDropTarget | null, right?: TaskExternalDropTarget | null) {
   return left?.type === right?.type && left?.id === right?.id && left?.label === right?.label && left?.color === right?.color
 }
+
+export function pointerFromTaskDragActivator(event: Event): TaskDropPoint | null {
+  const pointer = event as MouseEvent
+  if (Number.isFinite(pointer.clientX) && Number.isFinite(pointer.clientY)) return { x: pointer.clientX, y: pointer.clientY }
+  const touch = (event as TouchEvent).touches?.[0] || (event as TouchEvent).changedTouches?.[0]
+  return touch ? { x: touch.clientX, y: touch.clientY } : null
+}
+
+export function measureTaskNavigationTargets(root: ParentNode = document): MeasuredTaskDropTarget[] {
+  return Array.from(root.querySelectorAll<HTMLElement>('[data-task-drop-list],[data-task-drop-folder]')).flatMap(element => {
+    const listID = element.dataset.taskDropList
+    const folderID = element.dataset.taskDropFolder
+    const id = listID || folderID
+    if (!id) return []
+    const rect = element.getBoundingClientRect()
+    if (!rect.width || !rect.height) return []
+    return [{
+      type: listID ? 'list' as const : 'folder' as const,
+      id,
+      label: element.dataset.taskDropLabel || (listID ? 'lista' : 'carpeta'),
+      color: element.dataset.taskDropColor,
+      rect: { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom },
+    }]
+  })
+}
+
+export function taskExternalListDropNeedsWrite(sourceListIDs: string[], destinationListID: string) {
+  return sourceListIDs.length > 0 && sourceListIDs.some(listID => listID !== destinationListID)
+}

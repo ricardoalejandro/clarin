@@ -72,7 +72,7 @@ type Server struct {
 func NewServer(cfg *config.Config, services *service.Services, repos *repository.Repositories, hub *ws.Hub, pool *whatsapp.DevicePool, store *storage.Storage, kommoSyncSvc *kommo.SyncService, kommoManager *kommo.Manager, c *cache.Cache, gc *googleclient.Client, version string) *Server {
 	app := fiber.New(fiber.Config{
 		AppName:               "Clarin CRM",
-		BodyLimit:             48 * 1024 * 1024, // video status (30 MB) + optional editor overlay
+		BodyLimit:             52 * 1024 * 1024, // task files (50 MB) + multipart overhead
 		DisableStartupMessage: false,
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			code := fiber.StatusInternalServerError
@@ -705,30 +705,47 @@ func (s *Server) setupRoutes() {
 
 	// Task routes
 	tasks := protected.Group("/tasks", s.requirePermission(domain.PermTasks))
+	tasks.Get("/environments", s.handleListTaskEnvironments)
+	tasks.Post("/environments", s.handleCreateTaskEnvironment)
+	tasks.Get("/environments/:environmentId", s.handleGetTaskEnvironment)
+	tasks.Put("/environments/:environmentId", s.handleUpdateTaskEnvironment)
+	tasks.Patch("/environments/:environmentId", s.handleUpdateTaskEnvironment)
+	tasks.Post("/environments/:environmentId/archive", s.handleArchiveTaskEnvironment)
+	tasks.Post("/environments/:environmentId/restore", s.handleRestoreTaskEnvironment)
+	tasks.Get("/environments/:environmentId/hierarchy", s.handleGetTaskEnvironmentHierarchy)
+	tasks.Get("/environments/:environmentId/folders", s.handleListTaskEnvironmentFolders)
+	tasks.Get("/environments/:environmentId/lists", s.handleListTaskEnvironmentLists)
+	tasks.Get("/environments/:environmentId/shared-resources", s.handleListTaskEnvironmentSharedResources)
+	tasks.Get("/environments/:environmentId/access", s.handleGetTaskEnvironmentAccess)
+	tasks.Put("/environments/:environmentId/access", s.handlePutTaskEnvironmentAccess)
 	tasks.Get("/hierarchy", s.handleGetTaskHierarchy)
 	tasks.Get("/trash-policy", s.handleGetTaskTrashPolicy)
 	tasks.Put("/trash-policy", s.handlePutTaskTrashPolicy)
 	tasks.Get("/trash/containers", s.handleGetTaskTrashContainers)
 	tasks.Post("/folders", s.handleCreateTaskFolder)
-	tasks.Put("/folders/:folderId", s.handleUpdateTaskFolder)
-	tasks.Put("/folders/:folderId/structure", s.handleReorderTaskFolder)
-	tasks.Post("/folders/:folderId/restore", s.handleRestoreTaskFolder)
-	tasks.Delete("/folders/:folderId/purge", s.handlePurgeTaskFolder)
-	tasks.Delete("/folders/:folderId", s.handleArchiveTaskFolder)
+	tasks.Get("/folders/:folderId/access", s.handleGetTaskFolderAccess)
+	tasks.Put("/folders/:folderId/access", s.handlePutTaskFolderAccess)
+	tasks.Put("/folders/:folderId", s.requireTaskContainerAccessParam("folderId", "folder", domain.TaskAccessFull), s.handleUpdateTaskFolder)
+	tasks.Put("/folders/:folderId/structure", s.requireTaskContainerAccessParam("folderId", "folder", domain.TaskAccessFull), s.handleReorderTaskFolder)
+	tasks.Post("/folders/:folderId/restore", s.requireTaskContainerAccessParam("folderId", "folder", domain.TaskAccessFull), s.handleRestoreTaskFolder)
+	tasks.Delete("/folders/:folderId/purge", s.requireTaskContainerAccessParam("folderId", "folder", domain.TaskAccessFull), s.handlePurgeTaskFolder)
+	tasks.Delete("/folders/:folderId", s.requireTaskContainerAccessParam("folderId", "folder", domain.TaskAccessFull), s.handleArchiveTaskFolder)
 	tasks.Get("/workflows", s.handleGetTaskWorkflows)
 	tasks.Post("/workflows", s.handleCreateTaskWorkflow)
-	tasks.Post("/workflows/:workflowId/statuses", s.handleCreateTaskStatus)
-	tasks.Put("/workflows/:workflowId/statuses/reorder", s.handleReorderTaskStatuses)
-	tasks.Put("/statuses/:statusId", s.handleUpdateTaskStatus)
-	tasks.Delete("/statuses/:statusId", s.handleDeleteTaskStatus)
+	tasks.Post("/workflows/:workflowId/statuses", s.requireTaskContainerAccessParam("workflowId", "workflow", domain.TaskAccessFull), s.handleCreateTaskStatus)
+	tasks.Put("/workflows/:workflowId/statuses/reorder", s.requireTaskContainerAccessParam("workflowId", "workflow", domain.TaskAccessFull), s.handleReorderTaskStatuses)
+	tasks.Put("/statuses/:statusId", s.requireTaskContainerAccessParam("statusId", "status", domain.TaskAccessFull), s.handleUpdateTaskStatus)
+	tasks.Delete("/statuses/:statusId", s.requireTaskContainerAccessParam("statusId", "status", domain.TaskAccessFull), s.handleDeleteTaskStatus)
 	tasks.Get("/lists", s.handleGetTaskLists)
 	tasks.Post("/lists", s.handleCreateTaskList)
 	tasks.Post("/lists/reorder", s.handleReorderLists)
-	tasks.Put("/lists/:listId/structure", s.handleUpdateTaskListStructure)
-	tasks.Put("/lists/:listId", s.handleUpdateTaskList)
-	tasks.Post("/lists/:listId/restore", s.handleRestoreTaskList)
-	tasks.Delete("/lists/:listId/purge", s.handlePurgeTaskList)
-	tasks.Delete("/lists/:listId", s.handleDeleteTaskList)
+	tasks.Get("/lists/:listId/access", s.handleGetTaskListAccess)
+	tasks.Put("/lists/:listId/access", s.handlePutTaskListAccess)
+	tasks.Put("/lists/:listId/structure", s.requireTaskContainerAccessParam("listId", "list", domain.TaskAccessFull), s.handleUpdateTaskListStructure)
+	tasks.Put("/lists/:listId", s.requireTaskContainerAccessParam("listId", "list", domain.TaskAccessFull), s.handleUpdateTaskList)
+	tasks.Post("/lists/:listId/restore", s.requireTaskContainerAccessParam("listId", "list", domain.TaskAccessFull), s.handleRestoreTaskList)
+	tasks.Delete("/lists/:listId/purge", s.requireTaskContainerAccessParam("listId", "list", domain.TaskAccessFull), s.handlePurgeTaskList)
+	tasks.Delete("/lists/:listId", s.requireTaskContainerAccessParam("listId", "list", domain.TaskAccessFull), s.handleDeleteTaskList)
 	tasks.Get("/calendar", s.handleGetTasksCalendar)
 	tasks.Get("/stats", s.handleGetTaskStats)
 	tasks.Get("/summary", s.handleGetTaskWorkSummary)
@@ -744,40 +761,48 @@ func (s *Server) setupRoutes() {
 	tasks.Post("/gantt/reschedule", s.handleGanttReschedule)
 	tasks.Post("/", s.handleCreateTask)
 	tasks.Get("/", s.handleGetTasks)
+	tasks.Get("/:id/access", s.handleGetTaskAccess)
+	tasks.Put("/:id/access", s.handlePutTaskAccess)
 	tasks.Get("/:id", s.handleGetTask)
-	tasks.Put("/:id", s.handleUpdateTask)
-	tasks.Post("/:id/move", s.handleMoveTask)
+	tasks.Put("/:id", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleUpdateTask)
+	tasks.Post("/:id/move", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleMoveTask)
 	tasks.Delete("/:id/purge", s.handlePurgeTask)
-	tasks.Delete("/:id", s.handleDeleteTask)
-	tasks.Post("/:id/complete", s.handleCompleteTask)
-	tasks.Post("/:id/star", s.handleToggleStar)
+	tasks.Delete("/:id", s.requireTaskAccessParam("id", domain.TaskAccessFull), s.handleDeleteTask)
+	tasks.Post("/:id/complete", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleCompleteTask)
+	tasks.Post("/:id/star", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleToggleStar)
 	tasks.Post("/:id/restore", s.handleRestoreTask)
-	tasks.Get("/:id/children", s.handleGetTaskChildren)
-	tasks.Post("/:id/children", s.handleCreateTaskChild)
-	tasks.Put("/:id/collaborators", s.handleSetTaskCollaborators)
-	tasks.Get("/:id/comments", s.handleGetTaskComments)
-	tasks.Post("/:id/comments", s.handleCreateTaskComment)
-	tasks.Put("/:id/comments/:commentId", s.handleUpdateTaskComment)
-	tasks.Delete("/:id/comments/:commentId", s.handleDeleteTaskComment)
-	tasks.Get("/:id/activity", s.handleGetTaskActivity)
-	tasks.Get("/:id/attachments", s.handleGetTaskAttachments)
-	tasks.Post("/:id/attachments", s.handleAddTaskAttachment)
-	tasks.Get("/:id/attachments/:attachmentId/preview", s.handleGetTaskAttachmentPreview)
-	tasks.Post("/:id/attachments/:attachmentId/preview/retry", s.handleRetryTaskAttachmentPreview)
-	tasks.Get("/:id/attachments/:attachmentId/comments", s.handleGetTaskAttachmentComments)
-	tasks.Post("/:id/attachments/:attachmentId/comments", s.handleCreateTaskAttachmentComment)
-	tasks.Put("/:id/attachments/:attachmentId/comments/:commentId", s.handleUpdateTaskAttachmentComment)
-	tasks.Put("/:id/attachments/:attachmentId/comments/:commentId/resolve", s.handleResolveTaskAttachmentComment)
-	tasks.Delete("/:id/attachments/:attachmentId/comments/:commentId", s.handleDeleteTaskAttachmentComment)
-	tasks.Delete("/:id/attachments/:attachmentId", s.handleDeleteTaskAttachment)
-	tasks.Get("/:id/dependencies", s.handleGetTaskDependencies)
-	tasks.Post("/:id/dependencies", s.handleAddTaskDependency)
-	tasks.Delete("/:id/dependencies/:dependencyId", s.handleDeleteTaskDependency)
-	tasks.Get("/:id/subtasks", s.handleGetSubtasks)
-	tasks.Post("/:id/subtasks", s.handleCreateSubtask)
-	tasks.Put("/:id/subtasks/:subId", s.handleUpdateSubtask)
-	tasks.Delete("/:id/subtasks/:subId", s.handleDeleteSubtask)
-	tasks.Post("/:id/subtasks/:subId/toggle", s.handleToggleSubtask)
+	tasks.Get("/:id/children", s.requireTaskAccessParam("id", domain.TaskAccessView), s.handleGetTaskChildren)
+	tasks.Post("/:id/children", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleCreateTaskChild)
+	tasks.Put("/:id/collaborators", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleSetTaskCollaborators)
+	tasks.Get("/:id/comments", s.requireTaskAccessParam("id", domain.TaskAccessView), s.handleGetTaskComments)
+	tasks.Post("/:id/comments", s.requireTaskAccessParam("id", domain.TaskAccessComment), s.handleCreateTaskComment)
+	tasks.Put("/:id/comments/:commentId", s.requireTaskAccessParam("id", domain.TaskAccessComment), s.handleUpdateTaskComment)
+	tasks.Delete("/:id/comments/:commentId", s.requireTaskAccessParam("id", domain.TaskAccessComment), s.handleDeleteTaskComment)
+	tasks.Get("/:id/activity", s.requireTaskAccessParam("id", domain.TaskAccessView), s.handleGetTaskActivity)
+	tasks.Get("/:id/attachments", s.requireTaskAccessParam("id", domain.TaskAccessView), s.handleGetTaskAttachments)
+	tasks.Post("/:id/attachments", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleAddTaskAttachment)
+	// Upload authorization is context-sensitive inside the handler: ordinary
+	// task files require Edit, while hidden comment drafts require Comment and
+	// are promoted only by the matching comment transaction.
+	tasks.Post("/:id/attachments/upload", s.handleUploadTaskAttachment)
+	tasks.Get("/:id/attachments/:attachmentId/download", s.requireTaskAccessParam("id", domain.TaskAccessView), s.handleDownloadTaskAttachment)
+	tasks.Get("/:id/attachments/:attachmentId/preview/download", s.requireTaskAccessParam("id", domain.TaskAccessView), s.handleDownloadTaskAttachmentPreview)
+	tasks.Get("/:id/attachments/:attachmentId/preview", s.requireTaskAccessParam("id", domain.TaskAccessView), s.handleGetTaskAttachmentPreview)
+	tasks.Post("/:id/attachments/:attachmentId/preview/retry", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleRetryTaskAttachmentPreview)
+	tasks.Get("/:id/attachments/:attachmentId/comments", s.requireTaskAccessParam("id", domain.TaskAccessView), s.handleGetTaskAttachmentComments)
+	tasks.Post("/:id/attachments/:attachmentId/comments", s.requireTaskAccessParam("id", domain.TaskAccessComment), s.handleCreateTaskAttachmentComment)
+	tasks.Put("/:id/attachments/:attachmentId/comments/:commentId", s.requireTaskAccessParam("id", domain.TaskAccessComment), s.handleUpdateTaskAttachmentComment)
+	tasks.Put("/:id/attachments/:attachmentId/comments/:commentId/resolve", s.requireTaskAccessParam("id", domain.TaskAccessComment), s.handleResolveTaskAttachmentComment)
+	tasks.Delete("/:id/attachments/:attachmentId/comments/:commentId", s.requireTaskAccessParam("id", domain.TaskAccessComment), s.handleDeleteTaskAttachmentComment)
+	tasks.Delete("/:id/attachments/:attachmentId", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleDeleteTaskAttachment)
+	tasks.Get("/:id/dependencies", s.requireTaskAccessParam("id", domain.TaskAccessView), s.handleGetTaskDependencies)
+	tasks.Post("/:id/dependencies", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleAddTaskDependency)
+	tasks.Delete("/:id/dependencies/:dependencyId", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleDeleteTaskDependency)
+	tasks.Get("/:id/subtasks", s.requireTaskAccessParam("id", domain.TaskAccessView), s.handleGetSubtasks)
+	tasks.Post("/:id/subtasks", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleCreateSubtask)
+	tasks.Put("/:id/subtasks/:subId", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleUpdateSubtask)
+	tasks.Delete("/:id/subtasks/:subId", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleDeleteSubtask)
+	tasks.Post("/:id/subtasks/:subId/toggle", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleToggleSubtask)
 
 	// Contact interactions and events
 	contacts.Get("/:id/interactions", s.handleGetContactInteractions)
@@ -882,15 +907,23 @@ func (s *Server) setupRoutes() {
 	surveys.Get("/:id", s.handleGetSurvey)
 	surveys.Put("/:id", s.handleUpdateSurvey)
 	surveys.Delete("/:id", s.handleDeleteSurvey)
+	surveys.Post("/:id/archive", s.handleArchiveSurvey)
+	surveys.Post("/:id/restore", s.handleRestoreSurvey)
+	// PATCH remains as a compatibility alias for clients released before the
+	// lifecycle contract was standardized on POST actions.
+	surveys.Patch("/:id/archive", s.handleArchiveSurvey)
+	surveys.Patch("/:id/restore", s.handleRestoreSurvey)
 	surveys.Patch("/:id/status", s.handleSetSurveyStatus)
 	surveys.Post("/:id/duplicate", s.handleDuplicateSurvey)
 	surveys.Get("/:id/questions", s.handleGetSurveyQuestions)
+	surveys.Get("/:id/questions/:questionId/text-answers", s.handleListSurveyTextAnswers)
 	surveys.Put("/:id/questions", s.handleSaveSurveyQuestions)
 	surveys.Get("/:id/responses", s.handleListSurveyResponses)
 	surveys.Get("/:id/responses/:rid", s.handleGetSurveyResponse)
 	surveys.Delete("/:id/responses/:rid", s.handleDeleteSurveyResponse)
 	surveys.Get("/:id/analytics", s.handleGetSurveyAnalytics)
 	surveys.Get("/:id/export", s.handleExportSurveyCSV)
+	surveys.Post("/:id/export/xlsx", s.handleExportSurveyXLSX)
 
 	// Dynamic routes
 	dynamics := protected.Group("/dynamics", s.requirePermission(domain.PermDynamics))
@@ -3771,17 +3804,17 @@ func mediaProxyURLFromObjectKey(objectKey string) string {
 	return "/api/media/file/" + objectKey
 }
 
-// findNonStatusMediaAsset keeps an intermediate raw-hash status asset from
-// being reused by chats or uploads. Clean installations continue using the raw
-// SHA; only a collision with the reserved status namespace uses a domain-safe
-// fallback hash.
+// findNonStatusMediaAsset keeps private status and Work assets from being
+// reused by public media surfaces such as chats, survey branding or generic
+// uploads. Clean installations continue using the raw SHA; only a collision
+// with a protected namespace uses a domain-safe fallback hash.
 func (s *Server) findNonStatusMediaAsset(ctx context.Context, accountID uuid.UUID, rawContentHash string) (*domain.MediaAsset, string, error) {
 	contentHash := rawContentHash
 	existing, err := s.repos.MediaAsset.GetByHash(ctx, accountID, contentHash)
 	if err != nil {
 		return nil, contentHash, err
 	}
-	if existing != nil && storage.IsAccountStatusObjectKey(accountID, existing.ObjectKey) {
+	if existing != nil && (storage.IsAccountStatusObjectKey(accountID, existing.ObjectKey) || storage.IsProtectedTaskObjectKey(existing.ObjectKey)) {
 		contentHash = domain.MediaAssetHashNonStatusFallback + rawContentHash
 		existing, err = s.repos.MediaAsset.GetByHash(ctx, accountID, contentHash)
 		if err != nil {
@@ -4091,11 +4124,10 @@ func (s *Server) handleListStorageFiles(c *fiber.Ctx) error {
 
 	allFiles := make([]storageFileRow, 0, len(objects))
 	for _, object := range objects {
-		// Own WhatsApp status media is intentionally managed only through the
-		// authenticated status center and its retention worker. It still counts
-		// toward quota and remains visible to the orphan scanner, but its private
-		// object key must not be enumerated by the general storage UI.
-		if storage.IsProtectedStatusObjectKey(object.Key) {
+		// Private status and Work media are managed only through their owning
+		// resource and durable cleanup workers. They still count toward quota and
+		// orphan detection, but their keys must not be enumerated by this generic UI.
+		if storage.IsProtectedMediaObjectKey(object.Key) {
 			continue
 		}
 		mediaURL := mediaProxyURLFromObjectKey(object.Key)
@@ -4257,6 +4289,10 @@ func (s *Server) handleDeleteStorageFiles(c *fiber.Ctx) error {
 			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "La foto pertenece a un Contacto; reemplázala o quítala desde su ficha"})
 			continue
 		}
+		if storage.IsProtectedTaskObjectKey(objectKey) {
+			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "El archivo pertenece a Work y se elimina únicamente desde su tarea o Papelera"})
+			continue
+		}
 		if storage.IsProtectedStatusObjectKey(objectKey) {
 			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "La media privada de estados se elimina únicamente mediante su retención"})
 			continue
@@ -4271,6 +4307,18 @@ func (s *Server) handleDeleteStorageFiles(c *fiber.Ctx) error {
 		}
 		if statusRefs > 0 {
 			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "El archivo pertenece a un estado de WhatsApp y se eliminará con su retención"})
+			continue
+		}
+		var taskRefs int
+		if err := s.repos.DB().QueryRow(c.Context(), `
+			SELECT (SELECT COUNT(*) FROM task_attachments WHERE account_id=$1 AND media_asset_id=$2)
+			     + (SELECT COUNT(*) FROM task_attachment_previews WHERE account_id=$1 AND derivative_asset_id=$2)
+		`, accountID, assetID).Scan(&taskRefs); err != nil {
+			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "No se pudieron validar las referencias de Work"})
+			continue
+		}
+		if taskRefs > 0 {
+			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "El archivo pertenece a Work y se elimina únicamente desde su tarea o Papelera"})
 			continue
 		}
 		if info, statErr := s.storage.GetFileInfo(c.Context(), objectKey); statErr == nil {
@@ -4314,6 +4362,10 @@ func (s *Server) handleDeleteStorageFiles(c *fiber.Ctx) error {
 			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "La foto pertenece a un Contacto; reemplázala o quítala desde su ficha"})
 			continue
 		}
+		if storage.IsProtectedTaskObjectKey(objectKey) {
+			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "El archivo pertenece a Work y se elimina únicamente desde su tarea o Papelera"})
+			continue
+		}
 		if storage.IsProtectedStatusObjectKey(objectKey) {
 			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "La media privada de estados se elimina únicamente mediante su retención"})
 			continue
@@ -4336,6 +4388,21 @@ func (s *Server) handleDeleteStorageFiles(c *fiber.Ctx) error {
 		}
 		if statusRefs > 0 {
 			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "El archivo pertenece a un estado de WhatsApp y se eliminará con su retención"})
+			continue
+		}
+		var taskRefs int
+		if err := s.repos.DB().QueryRow(c.Context(), `
+			SELECT COUNT(*) FROM media_assets asset
+			WHERE asset.account_id=$1 AND asset.object_key=$2 AND (
+				EXISTS(SELECT 1 FROM task_attachments attachment WHERE attachment.account_id=asset.account_id AND attachment.media_asset_id=asset.id)
+				OR EXISTS(SELECT 1 FROM task_attachment_previews preview WHERE preview.account_id=asset.account_id AND preview.derivative_asset_id=asset.id)
+			)
+		`, accountID, objectKey).Scan(&taskRefs); err != nil {
+			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "No se pudieron validar las referencias de Work"})
+			continue
+		}
+		if taskRefs > 0 {
+			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "El archivo pertenece a Work y se elimina únicamente desde su tarea o Papelera"})
 			continue
 		}
 		var activeMessageRefs int
@@ -4786,7 +4853,12 @@ func sanitizeUploadFolder(raw, fallback string) (string, error) {
 	if len(clean) == 0 {
 		return "", fmt.Errorf("Invalid upload folder")
 	}
-	return strings.Join(clean, "/"), nil
+	folder := strings.Join(clean, "/")
+	if folder == "tasks/attachments" || strings.HasPrefix(folder, "tasks/attachments/") ||
+		folder == "task-previews" || strings.HasPrefix(folder, "task-previews/") {
+		return "", fmt.Errorf("Invalid upload folder")
+	}
+	return folder, nil
 }
 
 func sanitizeUploadFilename(raw string) (string, error) {
@@ -4811,7 +4883,7 @@ func (s *Server) handleMediaProxy(c *fiber.Ctx) error {
 	if decoded, err := url.PathUnescape(objectKey); err == nil {
 		objectKey = decoded
 	}
-	if storage.IsProtectedStatusObjectKey(objectKey) {
+	if storage.IsProtectedMediaObjectKey(objectKey) {
 		c.Set("Cache-Control", "private, no-store, max-age=0")
 		c.Set("Vary", "Cookie, Authorization")
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "File not found"})
@@ -4825,8 +4897,12 @@ func (s *Server) serveStorageObject(c *fiber.Ctx, objectKey, cacheControl string
 	}
 
 	// Detect content type from extension
-	contentType := "application/octet-stream"
-	if dotIdx := strings.LastIndex(objectKey, "."); dotIdx >= 0 {
+	contentType := strings.TrimSpace(c.GetRespHeader(fiber.HeaderContentType))
+	hasContentTypeOverride := contentType != ""
+	if !hasContentTypeOverride {
+		contentType = "application/octet-stream"
+	}
+	if dotIdx := strings.LastIndex(objectKey, "."); !hasContentTypeOverride && dotIdx >= 0 {
 		ext := strings.ToLower(objectKey[dotIdx:])
 		switch ext {
 		case ".jpg", ".jpeg":
@@ -4879,7 +4955,9 @@ func (s *Server) serveStorageObject(c *fiber.Ctx, objectKey, cacheControl string
 		if strings.Contains(cacheControl, "private") {
 			c.Set("Vary", "Cookie, Authorization")
 		}
-		c.Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filepath.Base(objectKey)))
+		if c.GetRespHeader(fiber.HeaderContentDisposition) == "" {
+			c.Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filepath.Base(objectKey)))
+		}
 	}
 
 	ifNoneMatch := c.Get("If-None-Match")
@@ -9756,7 +9834,10 @@ func (s *Server) handleDeleteContactsBatch(c *fiber.Ctx) error {
 
 func (s *Server) handleGetContactDuplicates(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
-	groups, err := s.services.Contact.FindDuplicateGroups(c.Context(), accountID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	claims, _ := c.Locals("claims").(*service.JWTClaims)
+	taskDataAllowed := hasModulePermission(claimsPermissions(claims), domain.PermTasks)
+	groups, err := s.services.Contact.FindDuplicateGroupsForActor(c.Context(), accountID, userID, taskDataAllowed)
 	if err != nil {
 		log.Printf("[contacts] duplicate scan failed for account %s: %v", accountID, err)
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudieron cargar los duplicados"})
@@ -9775,6 +9856,7 @@ func (s *Server) handleGetContactLeadDuplicates(c *fiber.Ctx) error {
 
 func (s *Server) handlePreviewMergeContacts(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	var body struct {
 		KeepID   uuid.UUID   `json:"keep_id"`
 		MergeIDs []uuid.UUID `json:"merge_ids"`
@@ -9785,7 +9867,9 @@ func (s *Server) handlePreviewMergeContacts(c *fiber.Ctx) error {
 	if body.KeepID == uuid.Nil || len(body.MergeIDs) == 0 {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "provide keep_id and merge_ids"})
 	}
-	preview, err := s.services.Contact.PreviewMergeContacts(c.Context(), accountID, body.KeepID, body.MergeIDs)
+	claims, _ := c.Locals("claims").(*service.JWTClaims)
+	taskDataAllowed := hasModulePermission(claimsPermissions(claims), domain.PermTasks)
+	preview, err := s.services.Contact.PreviewMergeContactsForActor(c.Context(), accountID, userID, taskDataAllowed, body.KeepID, body.MergeIDs)
 	if err != nil {
 		log.Printf("[contacts] merge preview failed for account %s: %v", accountID, err)
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No se pudo preparar la combinación de contactos"})
@@ -9807,7 +9891,9 @@ func (s *Server) handleMergeContacts(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "provide keep_id and merge_ids"})
 	}
 
-	result, err := s.services.Contact.MergeContacts(c.Context(), accountID, body.KeepID, body.MergeIDs, &userID)
+	claims, _ := c.Locals("claims").(*service.JWTClaims)
+	taskDataAllowed := hasModulePermission(claimsPermissions(claims), domain.PermTasks)
+	result, err := s.services.Contact.MergeContactsForActor(c.Context(), accountID, userID, taskDataAllowed, body.KeepID, body.MergeIDs, &userID)
 	if err != nil {
 		log.Printf("[contacts] merge failed for account %s: %v", accountID, err)
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No se pudieron combinar los contactos"})
@@ -16485,7 +16571,11 @@ func (s *Server) handleAdminDeleteUser(c *fiber.Ctx) error {
 	// Invalidate active sessions before deleting
 	s.services.Auth.InvalidateUserSessions(id)
 
-	if err := s.services.Account.DeleteUser(c.Context(), id); err != nil {
+	if err := s.services.Account.DeleteUserAs(c.Context(), id, claims.UserID); err != nil {
+		if errors.Is(err, repository.ErrTaskLastAccessManager) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "last_private_access_manager",
+				"error": "Reasigna la gestión de los Entornos o tareas privadas antes de eliminar al usuario"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
@@ -16759,7 +16849,11 @@ func (s *Server) handleAdminRemoveUserAccount(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	if err := s.services.Account.RemoveUserAccount(c.Context(), userID, accountID); err != nil {
+	if err := s.services.Account.RemoveUserAccountAs(c.Context(), userID, accountID, actorID); err != nil {
+		if errors.Is(err, repository.ErrTaskLastAccessManager) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "last_private_access_manager",
+				"error": "Reasigna la gestión de los Entornos o tareas privadas antes de retirar esta cuenta"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	accountsList, err := s.adminUserAccountsResponse(c.Context(), userID)

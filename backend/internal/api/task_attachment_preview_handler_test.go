@@ -21,7 +21,7 @@ func TestSetTaskAttachmentCommentPermissionsKeepsResolvedThreadsReadOnly(t *test
 		{ID: uuid.New(), AuthorID: ownerID, Deleted: true},
 	}
 
-	setTaskAttachmentCommentPermissions(items, ownerID, false)
+	setTaskAttachmentCommentPermissions(items, ownerID, false, true)
 	if !items[0].CanResolve || !items[0].CanEdit || !items[0].CanDelete {
 		t.Fatal("an active root owned by the viewer must be editable, deletable and resolvable")
 	}
@@ -35,9 +35,14 @@ func TestSetTaskAttachmentCommentPermissionsKeepsResolvedThreadsReadOnly(t *test
 		t.Fatal("a tombstone must not expose mutations")
 	}
 
-	setTaskAttachmentCommentPermissions(items[:2], otherID, true)
+	setTaskAttachmentCommentPermissions(items[:2], otherID, true, true)
 	if !items[0].CanEdit || !items[1].CanDelete {
 		t.Fatal("an account administrator must be able to edit and delete active comments")
+	}
+
+	setTaskAttachmentCommentPermissions(items[:2], ownerID, false, false)
+	if items[0].CanResolve || items[0].CanEdit || items[1].CanDelete {
+		t.Fatal("view access must not expose comment mutation controls")
 	}
 }
 

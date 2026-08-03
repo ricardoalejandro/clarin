@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/service"
 )
 
@@ -73,7 +74,7 @@ func (s *Server) quickPerformanceOverviewScoped(ctx context.Context, accountID u
 
 // quickFollowupPriority applies an explicit operational score. It is kept
 // deterministic and read-only so the card does not need a model turn.
-func (s *Server) quickFollowupPriority(ctx context.Context, accountID uuid.UUID, values map[string]any) (*service.OperationalLeadQueryResult, error) {
+func (s *Server) quickFollowupPriority(ctx context.Context, accountID, actorID uuid.UUID, taskDataAllowed bool, values map[string]any) (*service.OperationalLeadQueryResult, error) {
 	limit := intValue(values["limit"], 20)
 	if limit < 1 {
 		limit = 20
@@ -82,6 +83,11 @@ func (s *Server) quickFollowupPriority(ctx context.Context, accountID uuid.UUID,
 		limit = 100
 	}
 	args := []any{accountID}
+	taskAccessPredicate := " AND FALSE"
+	if taskDataAllowed {
+		args = append(args, actorID)
+		taskAccessPredicate = " AND " + repository.TaskActorCanViewSQL("t", "task_list", "$2")
+	}
 	pipelineWhere := ""
 	if pipeline := strings.TrimSpace(fmt.Sprint(values["pipeline"])); pipeline != "" && pipeline != "<nil>" {
 		if pipeline == "__no_pipeline__" {
@@ -136,7 +142,10 @@ func (s *Server) quickFollowupPriority(ctx context.Context, accountID uuid.UUID,
 			SELECT COUNT(*) FILTER (WHERE t.status='pending' AND t.due_at<NOW()) AS overdue_count,
 			       MIN(t.due_at) FILTER (WHERE t.status='pending') AS next_due_at
 			FROM tasks t
-			WHERE t.account_id=l.account_id AND (t.lead_id=l.id OR (t.lead_id IS NULL AND t.contact_id=l.contact_id))
+			JOIN task_lists task_list ON task_list.account_id=t.account_id AND task_list.id=t.list_id
+			WHERE t.account_id=l.account_id AND t.deleted_at IS NULL
+			  AND (t.lead_id=l.id OR (t.lead_id IS NULL AND t.contact_id=l.contact_id))
+			  `+taskAccessPredicate+`
 		) task_stats ON TRUE
 		WHERE l.account_id=$1 AND l.deleted_at IS NULL AND NOT l.is_archived AND l.status='open'
 		  AND NOT COALESCE(c.do_not_contact,false)`+pipelineWhere+`

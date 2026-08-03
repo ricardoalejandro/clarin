@@ -10,7 +10,7 @@ import {
 } from '@dnd-kit/core'
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { Check, ChevronRight, FolderOpen, GripVertical, Info, Loader2, LockKeyhole, MoreHorizontal, Undo2 } from 'lucide-react'
+import { AlertCircle, Check, ChevronRight, FolderOpen, GripVertical, Info, Loader2, LockKeyhole, MoreHorizontal, RotateCcw, Undo2 } from 'lucide-react'
 import { apiPut } from '@/lib/api'
 import type { TaskFolder, TaskList } from '@/types/task'
 import { TaskAppearanceDialog, TaskContainerIcon } from './TaskContainerAppearance'
@@ -18,8 +18,10 @@ import { ensureExpandedFolder, folderAutoExpandedForScope, normalizeExpandedFold
 import type { TaskExternalDropTarget } from './taskDropTargets'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { hierarchyCountTooltip, hierarchyItemOpenCount } from './taskHierarchyCounts'
+import type { TaskFolderChildrenState, TaskHierarchyLoadPhase } from './taskHierarchyLazy'
+import type { TaskAccountUser } from './TaskEditorModal'
 
-type HierarchyScope = { type: 'all' | 'trash' } | { type: 'folder' | 'list'; id: string }
+type HierarchyScope = { type: 'all' | 'shared' | 'trash' } | { type: 'environment' | 'folder' | 'list'; id: string }
 type ContainerID = `container:${string}` | 'root'
 type OrderedLists = Record<string, TaskList[]>
 type AppearanceTarget = { type: 'list'; item: TaskList } | { type: 'folder'; item: TaskFolder }
@@ -35,6 +37,20 @@ interface Props {
   onOperation?: (operationID: string, active: boolean) => void
   taskDropTarget?: TaskExternalDropTarget | null
   taskDragActive?: boolean
+  hierarchyPhase?: TaskHierarchyLoadPhase
+  hierarchyError?: string
+  hasMoreFolders?: boolean
+  hasMoreRootLists?: boolean
+  loadingMoreFolders?: boolean
+  loadingMoreRootLists?: boolean
+  folderChildrenState?: Record<string, TaskFolderChildrenState>
+  onRetryHierarchy?: () => void
+  onLoadMoreFolders?: () => void
+  onLoadMoreRootLists?: () => void
+  onExpandFolder?: (folderID: string) => void
+  onRetryFolderLists?: (folderID: string) => void
+  onLoadMoreFolderLists?: (folderID: string) => void
+  users?: TaskAccountUser[]
 }
 
 interface PendingMove {
@@ -50,6 +66,8 @@ const listItemID = (id: string) => `list:${id}`
 const folderItemID = (id: string) => `folder:${id}`
 const listIDFromItem = (id: string) => id.startsWith('list:') ? id.slice(5) : ''
 const folderIDFromItem = (id: string) => id.startsWith('folder:') ? id.slice(7) : ''
+export const taskHierarchyCanReceiveTasks = (item: TaskList | TaskFolder) => item.permissions?.can_edit === true
+export const taskHierarchyCanManageStructure = (item: TaskList | TaskFolder) => item.permissions?.can_delete === true
 
 function buildOrderedLists(folders: TaskFolder[], rootLists: TaskList[]): OrderedLists {
   return Object.fromEntries([
@@ -87,23 +105,29 @@ function movePreview(ordered: OrderedLists, listID: string, destination: Contain
 function SortableListRow({ list, containerID, active, selected, taskDropActive, onSelect, onEdit }: {
   list: TaskList; containerID: ContainerID; active: boolean; selected: boolean; taskDropActive: boolean; onSelect: () => void; onEdit: () => void
 }) {
-  const sortable = useSortable({ id: listItemID(list.id), data: { type: 'list', listID: list.id, containerID } })
-  return <div ref={sortable.setNodeRef} style={{ transform: CSS.Transform.toString(sortable.transform), transition: sortable.transition }} data-task-hierarchy-list={list.id} data-task-drop-list={list.id} data-task-drop-label={list.name} data-task-drop-color={list.color}>
-    <div data-task-drop-highlight={taskDropActive || undefined} className={`group relative flex items-center rounded-lg transition-all duration-150 ${active ? 'opacity-30' : ''} ${taskDropActive ? 'z-10 scale-[1.02] bg-emerald-50 text-emerald-800 shadow-[0_8px_22px_rgba(16,185,129,0.18)] ring-2 ring-emerald-400' : selected ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}>
+  const canManage = taskHierarchyCanManageStructure(list)
+  const canReceiveTasks = taskHierarchyCanReceiveTasks(list)
+  const sortable = useSortable({ id: listItemID(list.id), disabled: !canManage, data: { type: 'list', listID: list.id, containerID, canManage } })
+  const dropActive = canReceiveTasks && taskDropActive
+  return <div ref={sortable.setNodeRef} style={{ transform: CSS.Transform.toString(sortable.transform), transition: sortable.transition }} data-task-hierarchy-list={list.id} data-task-drop-list={canReceiveTasks ? list.id : undefined} data-task-drop-label={canReceiveTasks ? list.name : undefined} data-task-drop-color={canReceiveTasks ? list.color : undefined}>
+    <div data-task-drop-highlight={dropActive || undefined} className={`group relative flex items-center rounded-lg transition-all duration-150 ${active ? 'opacity-30' : ''} ${dropActive ? 'z-10 scale-[1.02] bg-emerald-50 text-emerald-800 shadow-[0_8px_22px_rgba(16,185,129,0.18)] ring-2 ring-emerald-400' : selected ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}>
     <button type="button" onClick={onSelect} title={hierarchyCountTooltip(list)} className={`flex min-w-0 flex-1 items-center gap-2 py-1.5 text-left text-xs ${selected ? 'font-semibold' : ''}`}><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md" style={{ color: list.color, backgroundColor: `${list.color}16` }}><TaskContainerIcon value={list.icon} className="h-3 w-3" /></span><span className="min-w-0 flex-1 truncate">{list.name}</span><span aria-label={`${list.open_task_count || 0} tareas abiertas`} className="text-[9px] text-slate-400">{list.open_task_count || 0}</span></button>
-    {taskDropActive && <span className="pointer-events-none absolute right-1 top-full z-20 mt-1 whitespace-nowrap rounded-full bg-emerald-700 px-2 py-1 text-[9px] font-black text-white shadow-lg">Soltar en {list.name}</span>}
-    <button type="button" onClick={onEdit} aria-label={`Personalizar ${list.name}`} title="Personalizar lista" className="flex h-7 w-7 items-center justify-center rounded-md text-slate-300 opacity-0 hover:bg-white hover:text-slate-600 focus:opacity-100 group-hover:opacity-100"><MoreHorizontal className="h-3.5 w-3.5" /></button>
-    <button type="button" ref={sortable.setActivatorNodeRef} {...sortable.attributes} {...sortable.listeners} aria-label={`Mover ${list.name}`} title={`Arrastrar ${list.name}`} className="mr-0.5 flex h-7 w-7 cursor-grab items-center justify-center rounded-md text-slate-300 opacity-0 hover:bg-white hover:text-slate-600 focus:opacity-100 active:cursor-grabbing group-hover:opacity-100"><GripVertical className="h-3.5 w-3.5" /></button>
+    {dropActive && <span className="pointer-events-none absolute right-1 top-full z-20 mt-1 whitespace-nowrap rounded-full bg-emerald-700 px-2 py-1 text-[9px] font-black text-white shadow-lg">Soltar en {list.name}</span>}
+    {canManage && <button type="button" onClick={onEdit} aria-label={`Personalizar ${list.name}`} title="Personalizar lista" className="flex h-7 w-7 items-center justify-center rounded-md text-slate-300 opacity-0 hover:bg-white hover:text-slate-600 focus:opacity-100 group-hover:opacity-100"><MoreHorizontal className="h-3.5 w-3.5" /></button>}
+    {canManage && <button type="button" ref={sortable.setActivatorNodeRef} {...sortable.attributes} {...sortable.listeners} aria-label={`Mover ${list.name}`} title={`Arrastrar ${list.name}`} className="mr-0.5 flex h-7 w-7 cursor-grab items-center justify-center rounded-md text-slate-300 opacity-0 hover:bg-white hover:text-slate-600 focus:opacity-100 active:cursor-grabbing group-hover:opacity-100"><GripVertical className="h-3.5 w-3.5" /></button>}
     </div>
   </div>
 }
 
 function DefaultListRow({ list, selected, taskDropActive, onSelect, onEdit }: { list: TaskList; selected: boolean; taskDropActive: boolean; onSelect: () => void; onEdit: () => void }) {
-  return <div data-task-default-list data-task-drop-list={list.id} data-task-drop-label={list.name} data-task-drop-color={list.color} data-task-drop-highlight={taskDropActive || undefined} className={`group relative flex items-center rounded-xl transition-all duration-150 ${taskDropActive ? 'z-10 scale-[1.02] bg-emerald-50 text-emerald-800 shadow-[0_8px_22px_rgba(16,185,129,0.18)] ring-2 ring-emerald-400' : selected ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-50'}`}><button type="button" onClick={onSelect} title={hierarchyCountTooltip(list)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left text-xs font-semibold"><span className="flex h-6 w-6 items-center justify-center rounded-lg" style={{ color: list.color, backgroundColor: `${list.color}16` }}><TaskContainerIcon value={list.icon || 'inbox'} className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1 truncate">{list.name}</span><span aria-label={`${list.open_task_count || 0} tareas abiertas`} className="text-[9px] text-slate-400">{list.open_task_count || 0}</span></button>{taskDropActive && <span className="pointer-events-none absolute right-1 top-full z-20 mt-1 whitespace-nowrap rounded-full bg-emerald-700 px-2 py-1 text-[9px] font-black text-white shadow-lg">Soltar en {list.name}</span>}<button type="button" onClick={onEdit} aria-label={`Personalizar ${list.name}`} className="flex h-7 w-7 items-center justify-center rounded-md text-slate-300 opacity-0 hover:bg-white hover:text-slate-600 focus:opacity-100 group-hover:opacity-100"><MoreHorizontal className="h-3.5 w-3.5" /></button><span title="La Bandeja general permanece fija en la raíz" className="mr-1 flex h-7 w-7 items-center justify-center text-slate-300"><LockKeyhole className="h-3 w-3" /></span></div>
+  const canManage = taskHierarchyCanManageStructure(list)
+  const canReceiveTasks = taskHierarchyCanReceiveTasks(list)
+  const dropActive = canReceiveTasks && taskDropActive
+  return <div data-task-default-list data-task-drop-list={canReceiveTasks ? list.id : undefined} data-task-drop-label={canReceiveTasks ? list.name : undefined} data-task-drop-color={canReceiveTasks ? list.color : undefined} data-task-drop-highlight={dropActive || undefined} className={`group relative flex items-center rounded-xl transition-all duration-150 ${dropActive ? 'z-10 scale-[1.02] bg-emerald-50 text-emerald-800 shadow-[0_8px_22px_rgba(16,185,129,0.18)] ring-2 ring-emerald-400' : selected ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-50'}`}><button type="button" onClick={onSelect} title={hierarchyCountTooltip(list)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left text-xs font-semibold"><span className="flex h-6 w-6 items-center justify-center rounded-lg" style={{ color: list.color, backgroundColor: `${list.color}16` }}><TaskContainerIcon value={list.icon || 'inbox'} className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1 truncate">{list.name}</span><span aria-label={`${list.open_task_count || 0} tareas abiertas`} className="text-[9px] text-slate-400">{list.open_task_count || 0}</span></button>{dropActive && <span className="pointer-events-none absolute right-1 top-full z-20 mt-1 whitespace-nowrap rounded-full bg-emerald-700 px-2 py-1 text-[9px] font-black text-white shadow-lg">Soltar en {list.name}</span>}{canManage && <button type="button" onClick={onEdit} aria-label={`Personalizar ${list.name}`} className="flex h-7 w-7 items-center justify-center rounded-md text-slate-300 opacity-0 hover:bg-white hover:text-slate-600 focus:opacity-100 group-hover:opacity-100"><MoreHorizontal className="h-3.5 w-3.5" /></button>}<span title="La Bandeja general permanece fija en la raíz" className="mr-1 flex h-7 w-7 items-center justify-center text-slate-300"><LockKeyhole className="h-3 w-3" /></span></div>
 }
 
-function ListDropContainer({ id, active, children, label }: { id: ContainerID; active: boolean; children: React.ReactNode; label: string }) {
-  const droppable = useDroppable({ id, data: { type: 'container', containerID: id } })
+function ListDropContainer({ id, active, children, label, disabled = false }: { id: ContainerID; active: boolean; children: React.ReactNode; label: string; disabled?: boolean }) {
+  const droppable = useDroppable({ id, disabled, data: { type: 'container', containerID: id, canManage: !disabled } })
   return <div ref={droppable.setNodeRef} data-task-hierarchy-container={id} aria-label={label} className={`rounded-xl transition-all duration-200 ${active || droppable.isOver ? 'bg-emerald-50/80 ring-2 ring-inset ring-emerald-300' : ''}`}>{children}</div>
 }
 
@@ -113,17 +137,25 @@ function ListGroup({ items, containerID, activeListID, scope, taskDropTarget, on
   return <SortableContext items={items.map(item => listItemID(item.id))} strategy={verticalListSortingStrategy}><div>{highlighted && <div data-task-hierarchy-placeholder className="mb-1 flex h-8 animate-pulse items-center justify-center rounded-lg border border-dashed border-emerald-300 bg-emerald-50 text-[10px] font-semibold text-emerald-600">Soltar aquí</div>}{items.map(list => <SortableListRow key={list.id} list={list} containerID={containerID} active={activeListID === list.id} selected={scope.type === 'list' && scope.id === list.id} taskDropActive={taskDropTarget?.type === 'list' && taskDropTarget.id === list.id} onSelect={() => onSelect({ type: 'list', id: list.id })} onEdit={() => onEdit(list)} />)}</div></SortableContext>
 }
 
-function SortableFolderBlock({ folder, items, activeFolderID, activeListID, highlighted, taskDropTarget, expanded, scope, onSelect, onToggle, onEditFolder, onEditList }: {
-  folder: TaskFolder; items: TaskList[]; activeFolderID: string; activeListID: string; highlighted: boolean; taskDropTarget?: TaskExternalDropTarget | null; expanded: boolean; scope: HierarchyScope; onSelect: Props['onSelect']; onToggle: () => void; onEditFolder: () => void; onEditList: (list: TaskList) => void
+function SortableFolderBlock({ folder, items, activeFolderID, activeListID, highlighted, taskDropTarget, expanded, scope, childrenState, onSelect, onToggle, onRetryChildren, onLoadMoreChildren, onEditFolder, onEditList }: {
+  folder: TaskFolder; items: TaskList[]; activeFolderID: string; activeListID: string; highlighted: boolean; taskDropTarget?: TaskExternalDropTarget | null; expanded: boolean; scope: HierarchyScope; childrenState?: TaskFolderChildrenState; onSelect: Props['onSelect']; onToggle: () => void; onRetryChildren: () => void; onLoadMoreChildren: () => void; onEditFolder: () => void; onEditList: (list: TaskList) => void
 }) {
-  const sortable = useSortable({ id: folderItemID(folder.id), data: { type: 'folder', folderID: folder.id } })
+  const canManage = taskHierarchyCanManageStructure(folder)
+  const canReceiveTasks = taskHierarchyCanReceiveTasks(folder)
+  const sortable = useSortable({ id: folderItemID(folder.id), disabled: !canManage, data: { type: 'folder', folderID: folder.id, canManage } })
   const containerID = containerFor(folder.id)
   const selected = scope.type === 'folder' && scope.id === folder.id
-  const taskDropActive = taskDropTarget?.type === 'folder' && taskDropTarget.id === folder.id
-  return <div ref={sortable.setNodeRef} style={{ transform: CSS.Transform.toString(sortable.transform), transition: sortable.transition }} data-task-drop-folder={folder.id} data-task-drop-label={folder.name} data-task-drop-color={folder.color} className={activeFolderID === folder.id ? 'opacity-30' : ''}>
-    <ListDropContainer id={containerID} active={highlighted} label={`Carpeta ${folder.name}`}>
-      <div data-task-drop-highlight={taskDropActive || undefined} className={`group relative flex items-center rounded-xl transition-all duration-150 ${taskDropActive ? 'z-10 scale-[1.02] bg-emerald-50 shadow-[0_8px_22px_rgba(16,185,129,0.18)] ring-2 ring-emerald-400' : ''}`}><button type="button" onClick={onToggle} aria-label={`${expanded ? 'Contraer' : 'Expandir'} ${folder.name}`} aria-expanded={expanded} className="ml-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"><ChevronRight className={`h-3.5 w-3.5 transition-transform duration-200 ${expanded ? 'rotate-90' : ''}`} /></button><button type="button" onClick={() => onSelect({ type: 'folder', id: folder.id })} title={hierarchyCountTooltip(folder)} className={`flex min-w-0 flex-1 items-center gap-2 rounded-xl px-1 py-2 text-sm font-medium ${taskDropActive ? 'text-emerald-800' : selected ? 'bg-slate-100 text-slate-900' : 'text-slate-600 hover:bg-slate-50'}`}><span className="flex h-7 w-7 items-center justify-center rounded-lg" style={{ color: folder.color, backgroundColor: `${folder.color}16` }}>{taskDropActive || highlighted || expanded ? <FolderOpen className="h-4 w-4" /> : <TaskContainerIcon value={folder.icon} className="h-4 w-4" />}</span><span className="min-w-0 flex-1 truncate text-left">{folder.name}</span><span aria-label={`${folder.open_task_count || 0} tareas abiertas`} className="text-[10px] text-slate-400">{folder.open_task_count || 0}</span></button>{taskDropActive && <span className="pointer-events-none absolute right-1 top-full z-20 mt-1 whitespace-nowrap rounded-full bg-emerald-700 px-2 py-1 text-[9px] font-black text-white shadow-lg">Suelta para elegir una lista</span>}<button type="button" onClick={onEditFolder} aria-label={`Personalizar ${folder.name}`} className="flex h-7 w-7 items-center justify-center rounded-md text-slate-300 opacity-0 hover:bg-white hover:text-slate-600 focus:opacity-100 group-hover:opacity-100"><MoreHorizontal className="h-3.5 w-3.5" /></button><button type="button" ref={sortable.setActivatorNodeRef} {...sortable.attributes} {...sortable.listeners} aria-label={`Mover carpeta ${folder.name}`} className="mr-1 flex h-7 w-7 cursor-grab items-center justify-center rounded-md text-slate-300 opacity-0 hover:bg-white hover:text-slate-600 focus:opacity-100 active:cursor-grabbing group-hover:opacity-100"><GripVertical className="h-3.5 w-3.5" /></button></div>
-      <div aria-hidden={!expanded && !highlighted} className={`grid overflow-hidden transition-[grid-template-rows,opacity] duration-200 ease-out ${expanded || highlighted ? 'visible grid-rows-[1fr] opacity-100' : 'invisible grid-rows-[0fr] opacity-0'}`}><div className="min-h-0 overflow-hidden"><div className={`ml-5 border-l pl-2 transition ${highlighted ? 'border-emerald-300' : 'border-slate-200'} ${highlighted && !items.length ? 'min-h-9 py-1' : ''}`}><ListGroup items={items} containerID={containerID} activeListID={activeListID} scope={scope} taskDropTarget={taskDropTarget} onSelect={onSelect} onEdit={onEditList} highlighted={highlighted} /></div></div></div>
+  const taskDropActive = canReceiveTasks && taskDropTarget?.type === 'folder' && taskDropTarget.id === folder.id
+  return <div ref={sortable.setNodeRef} style={{ transform: CSS.Transform.toString(sortable.transform), transition: sortable.transition }} data-task-drop-folder={canReceiveTasks ? folder.id : undefined} data-task-drop-label={canReceiveTasks ? folder.name : undefined} data-task-drop-color={canReceiveTasks ? folder.color : undefined} className={activeFolderID === folder.id ? 'opacity-30' : ''}>
+    <ListDropContainer id={containerID} active={canManage && highlighted} label={`Carpeta ${folder.name}`} disabled={!canManage}>
+      <div data-task-drop-highlight={taskDropActive || undefined} className={`group relative flex items-center rounded-xl transition-all duration-150 ${taskDropActive ? 'z-10 scale-[1.02] bg-emerald-50 shadow-[0_8px_22px_rgba(16,185,129,0.18)] ring-2 ring-emerald-400' : ''}`}><button type="button" onClick={onToggle} aria-label={`${expanded ? 'Contraer' : 'Expandir'} ${folder.name}`} aria-expanded={expanded} className="ml-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"><ChevronRight className={`h-3.5 w-3.5 transition-transform duration-200 ${expanded ? 'rotate-90' : ''}`} /></button><button type="button" onClick={() => onSelect({ type: 'folder', id: folder.id })} title={hierarchyCountTooltip(folder)} className={`flex min-w-0 flex-1 items-center gap-2 rounded-xl px-1 py-2 text-sm font-medium ${taskDropActive ? 'text-emerald-800' : selected ? 'bg-slate-100 text-slate-900' : 'text-slate-600 hover:bg-slate-50'}`}><span className="flex h-7 w-7 items-center justify-center rounded-lg" style={{ color: folder.color, backgroundColor: `${folder.color}16` }}>{taskDropActive || (canManage && highlighted) || expanded ? <FolderOpen className="h-4 w-4" /> : <TaskContainerIcon value={folder.icon} className="h-4 w-4" />}</span><span className="min-w-0 flex-1 truncate text-left">{folder.name}</span><span aria-label={`${folder.open_task_count || 0} tareas abiertas`} className="text-[10px] text-slate-400">{folder.open_task_count || 0}</span></button>{taskDropActive && <span className="pointer-events-none absolute right-1 top-full z-20 mt-1 whitespace-nowrap rounded-full bg-emerald-700 px-2 py-1 text-[9px] font-black text-white shadow-lg">Suelta para elegir una lista</span>}{canManage && <button type="button" onClick={onEditFolder} aria-label={`Personalizar ${folder.name}`} className="flex h-7 w-7 items-center justify-center rounded-md text-slate-300 opacity-0 hover:bg-white hover:text-slate-600 focus:opacity-100 group-hover:opacity-100"><MoreHorizontal className="h-3.5 w-3.5" /></button>}{canManage && <button type="button" ref={sortable.setActivatorNodeRef} {...sortable.attributes} {...sortable.listeners} aria-label={`Mover carpeta ${folder.name}`} className="mr-1 flex h-7 w-7 cursor-grab items-center justify-center rounded-md text-slate-300 opacity-0 hover:bg-white hover:text-slate-600 focus:opacity-100 active:cursor-grabbing group-hover:opacity-100"><GripVertical className="h-3.5 w-3.5" /></button>}</div>
+      <div aria-hidden={!expanded && !highlighted} className={`grid overflow-hidden transition-[grid-template-rows,opacity] duration-200 ease-out ${expanded || highlighted ? 'visible grid-rows-[1fr] opacity-100' : 'invisible grid-rows-[0fr] opacity-0'}`}><div className="min-h-0 overflow-hidden"><div className={`ml-5 border-l pl-2 transition ${highlighted ? 'border-emerald-300' : 'border-slate-200'} ${highlighted && !items.length ? 'min-h-9 py-1' : ''}`}>
+        {childrenState?.phase === 'loading' && !items.length && <div role="status" className="flex items-center gap-2 px-2 py-2 text-[10px] font-semibold text-slate-400"><Loader2 className="h-3 w-3 animate-spin" /> Cargando listas…</div>}
+        {childrenState?.phase === 'error' && <div role="alert" className="my-1 rounded-lg border border-rose-100 bg-rose-50 px-2 py-2 text-[10px] text-rose-700"><p>{childrenState.error || 'No se pudieron cargar las listas.'}</p><button type="button" onClick={onRetryChildren} className="mt-1 inline-flex items-center gap-1 font-bold"><RotateCcw className="h-3 w-3" /> Reintentar</button></div>}
+        <ListGroup items={items} containerID={containerID} activeListID={activeListID} scope={scope} taskDropTarget={taskDropTarget} onSelect={onSelect} onEdit={onEditList} highlighted={highlighted} />
+        {childrenState?.nextCursor && <button type="button" disabled={childrenState.phase === 'loading'} onClick={onLoadMoreChildren} className="my-1 flex w-full items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">{childrenState.phase === 'loading' && <Loader2 className="h-3 w-3 animate-spin" />} Cargar más listas</button>}
+        {childrenState?.phase === 'ready' && !items.length && !highlighted && <p className="px-2 py-2 text-[10px] text-slate-400">Esta carpeta no tiene listas.</p>}
+      </div></div></div>
     </ListDropContainer>
   </div>
 }
@@ -133,10 +165,11 @@ function MoveConfirmation({ move, folder, busy, onConfirm, onCancel }: { move: P
   return createPortal(<div className="fixed inset-0 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm" style={{ zIndex: TASK_OVERLAY_LAYERS.confirmation }} role="presentation" onMouseDown={event => event.target === event.currentTarget && !busy && onCancel()}><div role="dialog" aria-modal="true" className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl"><div className="flex items-start gap-3"><div className="rounded-2xl bg-amber-50 p-3 text-amber-600"><FolderOpen className="h-5 w-5" /></div><div><h2 className="text-lg font-black text-slate-900">Mover lista y adaptar estados</h2><p className="mt-1 text-sm leading-6 text-slate-500"><strong>{move.list.name}</strong> heredará el flujo de <strong>{folder.name}</strong>. La operación se cancelará completa si falta una equivalencia.</p></div></div><div className="mt-6 flex justify-end gap-2"><button type="button" disabled={busy} onClick={onCancel} className="rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-100">Cancelar</button><button type="button" disabled={busy} onClick={onConfirm} className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white">{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Mover lista</button></div></div></div>, document.body)
 }
 
-export default function TaskHierarchyTree({ folders, rootLists, scope, collapsed, onSelect, onChanged, onError, onOperation, taskDropTarget, taskDragActive = false }: Props) {
+export default function TaskHierarchyTree({ folders, rootLists, scope, collapsed, users = [], onSelect, onChanged, onError, onOperation, taskDropTarget, taskDragActive = false, hierarchyPhase = 'ready', hierarchyError = '', hasMoreFolders = false, hasMoreRootLists = false, loadingMoreFolders = false, loadingMoreRootLists = false, folderChildrenState = {}, onRetryHierarchy, onLoadMoreFolders, onLoadMoreRootLists, onExpandFolder, onRetryFolderLists, onLoadMoreFolderLists }: Props) {
   const canonical = useMemo(() => buildOrderedLists(folders, rootLists), [folders, rootLists])
   const canonicalFolders = useMemo(() => [...folders].sort((a, b) => a.sort_order - b.sort_order || a.created_at.localeCompare(b.created_at)), [folders])
   const defaultList = rootLists.find(item => item.is_default)
+  const canManageRoot = Boolean(defaultList && taskHierarchyCanManageStructure(defaultList))
   const [ordered, setOrdered] = useState(canonical)
   const [orderedFolders, setOrderedFolders] = useState(canonicalFolders)
   const [activeListID, setActiveListID] = useState('')
@@ -177,6 +210,10 @@ export default function TaskHierarchyTree({ folders, rootLists, scope, collapsed
     if (activeParentID) setExpandedFolderIDs(current => ensureExpandedFolder(current, activeParentID))
   }, [allLists, scope])
   useEffect(() => {
+    if (!onExpandFolder) return
+    expandedFolderIDs.forEach(folderID => onExpandFolder(folderID))
+  }, [expandedFolderIDs, onExpandFolder])
+  useEffect(() => {
     if (taskDragActive && !taskDragExpansionSnapshotRef.current) taskDragExpansionSnapshotRef.current = new Set(expandedFolderIDs)
     if (!taskDragActive && taskDragExpansionSnapshotRef.current) {
       setExpandedFolderIDs(new Set(taskDragExpansionSnapshotRef.current))
@@ -186,7 +223,7 @@ export default function TaskHierarchyTree({ folders, rootLists, scope, collapsed
   useEffect(() => {
     if (taskDragAutoExpandTimerRef.current) clearTimeout(taskDragAutoExpandTimerRef.current)
     taskDragAutoExpandTimerRef.current = null
-    if (!taskDragActive || taskDropTarget?.type !== 'folder' || expandedFolderIDs.has(taskDropTarget.id)) return
+    if (!taskDragActive || taskDropTarget?.type !== 'folder' || expandedFolderIDs.has(taskDropTarget.id) || folders.find(folder => folder.id === taskDropTarget.id)?.permissions?.can_edit !== true) return
     const folderID = taskDropTarget.id
     taskDragAutoExpandTimerRef.current = setTimeout(() => {
       setExpandedFolderIDs(current => ensureExpandedFolder(current, folderID))
@@ -196,7 +233,7 @@ export default function TaskHierarchyTree({ folders, rootLists, scope, collapsed
       if (taskDragAutoExpandTimerRef.current) clearTimeout(taskDragAutoExpandTimerRef.current)
       taskDragAutoExpandTimerRef.current = null
     }
-  }, [expandedFolderIDs, taskDragActive, taskDropTarget])
+  }, [expandedFolderIDs, folders, taskDragActive, taskDropTarget])
   useEffect(() => () => {
     if (autoExpandTimerRef.current) clearTimeout(autoExpandTimerRef.current)
     if (taskDragAutoExpandTimerRef.current) clearTimeout(taskDragAutoExpandTimerRef.current)
@@ -207,6 +244,7 @@ export default function TaskHierarchyTree({ folders, rootLists, scope, collapsed
     const type = args.active.data.current?.type
     const valid = (item: ReturnType<typeof pointerWithin>[number]) => {
       if (item.id === args.active.id) return false
+      if (item.data?.droppableContainer.data.current?.canManage !== true) return false
       const candidateType = item.data?.droppableContainer.data.current?.type
       return type === 'folder' ? candidateType === 'folder' : candidateType === 'list' || candidateType === 'container'
     }
@@ -217,6 +255,7 @@ export default function TaskHierarchyTree({ folders, rootLists, scope, collapsed
   const restore = () => { setOrdered(listSnapshotRef.current); setOrderedFolders(folderSnapshotRef.current); setExpandedFolderIDs(new Set(expansionSnapshotRef.current)); setActiveListID(''); setActiveFolderID(''); setOverContainerID(null); if (autoExpandTimerRef.current) clearTimeout(autoExpandTimerRef.current); autoExpandTargetRef.current = '' }
   const targetFromOver = (over: DragOverEvent['over']) => {
     const data = over?.data.current
+    if (data?.canManage !== true) return null
     if (data?.type === 'container') return { containerID: data.containerID as ContainerID, beforeListID: undefined }
     if (data?.type === 'list') return { containerID: data.containerID as ContainerID, beforeListID: data.listID as string }
     return null
@@ -228,8 +267,8 @@ export default function TaskHierarchyTree({ folders, rootLists, scope, collapsed
     listSnapshotRef.current = ordered
     folderSnapshotRef.current = orderedFolders
     expansionSnapshotRef.current = new Set(expandedFolderIDs)
-    if (listID) setActiveListID(listID)
-    if (folderID) setActiveFolderID(folderID)
+    if (listID && allLists.find(item => item.id === listID)?.permissions?.can_delete === true) setActiveListID(listID)
+    if (folderID && folders.find(item => item.id === folderID)?.permissions?.can_delete === true) setActiveFolderID(folderID)
   }
   const handleOver = (event: DragOverEvent) => {
     if (!activeListID && !listIDFromItem(String(event.active.id))) return
@@ -284,7 +323,7 @@ export default function TaskHierarchyTree({ folders, rootLists, scope, collapsed
     if (listID) {
       const list = allLists.find(item => item.id === listID)
       const target = targetFromOver(event.over)
-      if (!list || list.is_default || !target) { restore(); return }
+      if (!list || list.is_default || list.permissions?.can_delete !== true || !target) { restore(); return }
       let beforeListID = target.beforeListID
       if (beforeListID && event.active.rect.current.translated && event.active.rect.current.translated.top > event.over!.rect.top + event.over!.rect.height / 2) {
         const candidates = (listSnapshotRef.current[target.containerID] || []).filter(item => item.id !== listID)
@@ -302,7 +341,7 @@ export default function TaskHierarchyTree({ folders, rootLists, scope, collapsed
     }
     const folderID = folderIDFromItem(String(event.active.id))
     const overFolderID = folderIDFromItem(String(event.over?.id || ''))
-    if (!folderID || !overFolderID || folderID === overFolderID) { restore(); return }
+    if (!folderID || !overFolderID || folderID === overFolderID || folders.find(item => item.id === folderID)?.permissions?.can_delete !== true || folders.find(item => item.id === overFolderID)?.permissions?.can_delete !== true) { restore(); return }
     const candidates = folderSnapshotRef.current.filter(item => item.id !== folderID)
     let targetIndex = candidates.findIndex(item => item.id === overFolderID)
     if (targetIndex < 0) { restore(); return }
@@ -314,24 +353,29 @@ export default function TaskHierarchyTree({ folders, rootLists, scope, collapsed
   }
 
   if (collapsed) return <div className="space-y-1.5 px-1">
-    {defaultList && <button type="button" data-task-drop-list={defaultList.id} data-task-drop-label={defaultList.name} data-task-drop-color={defaultList.color} title={`${defaultList.name} · ${hierarchyCountTooltip(defaultList)}`} onClick={() => onSelect({ type: 'list', id: defaultList.id })} className={`relative flex h-10 w-full items-center justify-center rounded-xl border transition ${taskDropTarget?.type === 'list' && taskDropTarget.id === defaultList.id ? 'scale-105 border-emerald-400 bg-emerald-50 text-emerald-700 shadow-lg ring-2 ring-emerald-200' : scope.type === 'list' && scope.id === defaultList.id ? 'border-emerald-200 bg-emerald-50 text-emerald-700 shadow-sm' : 'border-transparent text-slate-500 hover:border-slate-200 hover:bg-slate-50'}`}><TaskContainerIcon value={defaultList.icon || 'inbox'} className="h-4 w-4" />{Boolean(hierarchyItemOpenCount(defaultList)) && <span aria-label={`${hierarchyItemOpenCount(defaultList)} tareas abiertas`} className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-slate-900 px-1 text-[8px] font-black leading-4 text-white">{hierarchyItemOpenCount(defaultList)}</span>}</button>}
-    {(ordered.root || []).map(list => <button key={list.id} type="button" data-task-drop-list={list.id} data-task-drop-label={list.name} data-task-drop-color={list.color} title={`${list.name} · ${hierarchyCountTooltip(list)}`} onClick={() => onSelect({ type: 'list', id: list.id })} className={`relative flex h-10 w-full items-center justify-center rounded-xl border transition ${taskDropTarget?.type === 'list' && taskDropTarget.id === list.id ? 'scale-105 border-emerald-400 bg-emerald-50 text-emerald-700 shadow-lg ring-2 ring-emerald-200' : scope.type === 'list' && scope.id === list.id ? 'border-emerald-200 bg-emerald-50 text-emerald-700 shadow-sm' : 'border-transparent text-slate-500 hover:border-slate-200 hover:bg-slate-50'}`}><TaskContainerIcon value={list.icon} className="h-4 w-4" />{Boolean(hierarchyItemOpenCount(list)) && <span aria-label={`${hierarchyItemOpenCount(list)} tareas abiertas`} className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-slate-900 px-1 text-[8px] font-black leading-4 text-white">{hierarchyItemOpenCount(list)}</span>}</button>)}
+    {hierarchyPhase === 'loading' && !rootLists.length && !folders.length && <div role="status" aria-label="Cargando jerarquía" className="flex h-10 items-center justify-center text-slate-400"><Loader2 className="h-4 w-4 animate-spin" /></div>}
+    {hierarchyPhase === 'error' && !rootLists.length && !folders.length && <button type="button" aria-label="Reintentar jerarquía" title={hierarchyError} onClick={onRetryHierarchy} className="flex h-10 w-full items-center justify-center rounded-xl bg-rose-50 text-rose-600"><AlertCircle className="h-4 w-4" /></button>}
+    {defaultList && <button type="button" data-task-drop-list={taskHierarchyCanReceiveTasks(defaultList) ? defaultList.id : undefined} data-task-drop-label={taskHierarchyCanReceiveTasks(defaultList) ? defaultList.name : undefined} data-task-drop-color={taskHierarchyCanReceiveTasks(defaultList) ? defaultList.color : undefined} title={`${defaultList.name} · ${hierarchyCountTooltip(defaultList)}`} onClick={() => onSelect({ type: 'list', id: defaultList.id })} className={`relative flex h-10 w-full items-center justify-center rounded-xl border transition ${taskHierarchyCanReceiveTasks(defaultList) && taskDropTarget?.type === 'list' && taskDropTarget.id === defaultList.id ? 'scale-105 border-emerald-400 bg-emerald-50 text-emerald-700 shadow-lg ring-2 ring-emerald-200' : scope.type === 'list' && scope.id === defaultList.id ? 'border-emerald-200 bg-emerald-50 text-emerald-700 shadow-sm' : 'border-transparent text-slate-500 hover:border-slate-200 hover:bg-slate-50'}`}><TaskContainerIcon value={defaultList.icon || 'inbox'} className="h-4 w-4" />{Boolean(hierarchyItemOpenCount(defaultList)) && <span aria-label={`${hierarchyItemOpenCount(defaultList)} tareas abiertas`} className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-slate-900 px-1 text-[8px] font-black leading-4 text-white">{hierarchyItemOpenCount(defaultList)}</span>}</button>}
+    {(ordered.root || []).map(list => <button key={list.id} type="button" data-task-drop-list={taskHierarchyCanReceiveTasks(list) ? list.id : undefined} data-task-drop-label={taskHierarchyCanReceiveTasks(list) ? list.name : undefined} data-task-drop-color={taskHierarchyCanReceiveTasks(list) ? list.color : undefined} title={`${list.name} · ${hierarchyCountTooltip(list)}`} onClick={() => onSelect({ type: 'list', id: list.id })} className={`relative flex h-10 w-full items-center justify-center rounded-xl border transition ${taskHierarchyCanReceiveTasks(list) && taskDropTarget?.type === 'list' && taskDropTarget.id === list.id ? 'scale-105 border-emerald-400 bg-emerald-50 text-emerald-700 shadow-lg ring-2 ring-emerald-200' : scope.type === 'list' && scope.id === list.id ? 'border-emerald-200 bg-emerald-50 text-emerald-700 shadow-sm' : 'border-transparent text-slate-500 hover:border-slate-200 hover:bg-slate-50'}`}><TaskContainerIcon value={list.icon} className="h-4 w-4" />{Boolean(hierarchyItemOpenCount(list)) && <span aria-label={`${hierarchyItemOpenCount(list)} tareas abiertas`} className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-slate-900 px-1 text-[8px] font-black leading-4 text-white">{hierarchyItemOpenCount(list)}</span>}</button>)}
     <div className="mx-auto my-2 h-px w-7 bg-slate-200" />
-    {orderedFolders.map(folder => <button key={folder.id} type="button" data-task-drop-folder={folder.id} data-task-drop-label={folder.name} data-task-drop-color={folder.color} title={`${folder.name} · ${hierarchyCountTooltip(folder)}`} onClick={() => onSelect({ type: 'folder', id: folder.id })} className={`relative flex h-10 w-full items-center justify-center rounded-xl border transition ${taskDropTarget?.type === 'folder' && taskDropTarget.id === folder.id ? 'scale-105 border-emerald-400 bg-emerald-50 text-emerald-700 shadow-lg ring-2 ring-emerald-200' : scope.type === 'folder' && scope.id === folder.id ? 'border-emerald-200 bg-emerald-50 text-emerald-700 shadow-sm' : 'border-transparent text-slate-500 hover:border-slate-200 hover:bg-slate-50'}`}>{taskDropTarget?.type === 'folder' && taskDropTarget.id === folder.id ? <FolderOpen className="h-4 w-4" /> : <TaskContainerIcon value={folder.icon} className="h-4 w-4" />}{Boolean(hierarchyItemOpenCount(folder)) && <span aria-label={`${hierarchyItemOpenCount(folder)} tareas abiertas`} className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-slate-900 px-1 text-[8px] font-black leading-4 text-white">{hierarchyItemOpenCount(folder)}</span>}</button>)}
+    {orderedFolders.map(folder => <button key={folder.id} type="button" data-task-drop-folder={taskHierarchyCanReceiveTasks(folder) ? folder.id : undefined} data-task-drop-label={taskHierarchyCanReceiveTasks(folder) ? folder.name : undefined} data-task-drop-color={taskHierarchyCanReceiveTasks(folder) ? folder.color : undefined} title={`${folder.name} · ${hierarchyCountTooltip(folder)}`} onClick={() => onSelect({ type: 'folder', id: folder.id })} className={`relative flex h-10 w-full items-center justify-center rounded-xl border transition ${taskHierarchyCanReceiveTasks(folder) && taskDropTarget?.type === 'folder' && taskDropTarget.id === folder.id ? 'scale-105 border-emerald-400 bg-emerald-50 text-emerald-700 shadow-lg ring-2 ring-emerald-200' : scope.type === 'folder' && scope.id === folder.id ? 'border-emerald-200 bg-emerald-50 text-emerald-700 shadow-sm' : 'border-transparent text-slate-500 hover:border-slate-200 hover:bg-slate-50'}`}>{taskHierarchyCanReceiveTasks(folder) && taskDropTarget?.type === 'folder' && taskDropTarget.id === folder.id ? <FolderOpen className="h-4 w-4" /> : <TaskContainerIcon value={folder.icon} className="h-4 w-4" />}{Boolean(hierarchyItemOpenCount(folder)) && <span aria-label={`${hierarchyItemOpenCount(folder)} tareas abiertas`} className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-slate-900 px-1 text-[8px] font-black leading-4 text-white">{hierarchyItemOpenCount(folder)}</span>}</button>)}
   </div>
 
   return <>
+    {hierarchyError && <div role="alert" className="mb-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2 text-[10px] text-rose-700"><p>{hierarchyError}</p><button type="button" onClick={onRetryHierarchy} className="mt-1 inline-flex items-center gap-1 font-bold"><RotateCcw className="h-3 w-3" /> Reintentar</button></div>}
+    {hierarchyPhase === 'loading' && !rootLists.length && !folders.length && <div role="status" className="flex items-center gap-2 rounded-xl px-3 py-4 text-xs font-semibold text-slate-400"><Loader2 className="h-4 w-4 animate-spin" /> Cargando carpetas y listas…</div>}
     <DndContext sensors={sensors} collisionDetection={collisionDetection} measuring={{ droppable: { strategy: MeasuringStrategy.Always } }} onDragStart={handleStart} onDragOver={handleOver} onDragEnd={handleEnd} onDragCancel={(_event: DragCancelEvent) => restore()}>
       <div className="space-y-1">
         {defaultList && <DefaultListRow list={defaultList} selected={scope.type === 'list' && scope.id === defaultList.id} taskDropActive={taskDropTarget?.type === 'list' && taskDropTarget.id === defaultList.id} onSelect={() => onSelect({ type: 'list', id: defaultList.id })} onEdit={() => setAppearance({ type: 'list', item: defaultList })} />}
-        <ListDropContainer id="root" active={overContainerID === 'root'} label="Listas independientes"><div title="Listas que no pertenecen a una carpeta" className={`mb-0.5 mt-1 flex items-center gap-2 rounded-lg px-2 py-1 text-[9px] font-bold uppercase tracking-[0.12em] ${overContainerID === 'root' ? 'text-emerald-700' : 'text-slate-400'}`}>{overContainerID === 'root' ? <Undo2 className="h-3 w-3" /> : <Info className="h-3 w-3" />}{overContainerID === 'root' ? 'Soltar para mover al nivel principal' : 'Listas independientes'}</div><div className="px-1"><ListGroup items={ordered.root || []} containerID="root" activeListID={activeListID} scope={scope} taskDropTarget={taskDropTarget} onSelect={onSelect} onEdit={list => setAppearance({ type: 'list', item: list })} highlighted={overContainerID === 'root'} /></div></ListDropContainer>
+        <ListDropContainer id="root" active={canManageRoot && overContainerID === 'root'} label="Listas independientes" disabled={!canManageRoot}><div title="Listas que no pertenecen a una carpeta" className={`mb-0.5 mt-1 flex items-center gap-2 rounded-lg px-2 py-1 text-[9px] font-bold uppercase tracking-[0.12em] ${canManageRoot && overContainerID === 'root' ? 'text-emerald-700' : 'text-slate-400'}`}>{canManageRoot && overContainerID === 'root' ? <Undo2 className="h-3 w-3" /> : <Info className="h-3 w-3" />}{canManageRoot && overContainerID === 'root' ? 'Soltar para mover al nivel principal' : 'Listas independientes'}</div><div className="px-1"><ListGroup items={ordered.root || []} containerID="root" activeListID={activeListID} scope={scope} taskDropTarget={taskDropTarget} onSelect={onSelect} onEdit={list => setAppearance({ type: 'list', item: list })} highlighted={canManageRoot && overContainerID === 'root'} />{hasMoreRootLists && <button type="button" disabled={loadingMoreRootLists} onClick={onLoadMoreRootLists} className="my-1 flex w-full items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">{loadingMoreRootLists && <Loader2 className="h-3 w-3 animate-spin" />}Cargar más listas</button>}</div></ListDropContainer>
         <div className="px-2 pb-1 pt-2 text-[9px] font-bold uppercase tracking-[0.12em] text-slate-400">Carpetas</div>
-        <SortableContext items={orderedFolders.map(item => folderItemID(item.id))} strategy={verticalListSortingStrategy}>{orderedFolders.map(folder => <SortableFolderBlock key={folder.id} folder={folder} items={ordered[containerFor(folder.id)] || []} activeFolderID={activeFolderID} activeListID={activeListID} highlighted={overContainerID === containerFor(folder.id)} taskDropTarget={taskDropTarget} expanded={expandedFolderIDs.has(folder.id)} scope={scope} onSelect={next => { if (next.type === 'folder' && next.id === folder.id) setExpandedFolderIDs(current => toggleExpandedFolder(current, folder.id)); onSelect(next) }} onToggle={() => setExpandedFolderIDs(current => toggleExpandedFolder(current, folder.id))} onEditFolder={() => setAppearance({ type: 'folder', item: folder })} onEditList={list => setAppearance({ type: 'list', item: list })} />)}</SortableContext>
+        <SortableContext items={orderedFolders.map(item => folderItemID(item.id))} strategy={verticalListSortingStrategy}>{orderedFolders.map(folder => <SortableFolderBlock key={folder.id} folder={folder} items={ordered[containerFor(folder.id)] || []} activeFolderID={activeFolderID} activeListID={activeListID} highlighted={overContainerID === containerFor(folder.id)} taskDropTarget={taskDropTarget} expanded={expandedFolderIDs.has(folder.id)} scope={scope} childrenState={folderChildrenState[folder.id]} onSelect={next => { if (next.type === 'folder' && next.id === folder.id) setExpandedFolderIDs(current => toggleExpandedFolder(current, folder.id)); onSelect(next) }} onToggle={() => setExpandedFolderIDs(current => toggleExpandedFolder(current, folder.id))} onRetryChildren={() => onRetryFolderLists?.(folder.id)} onLoadMoreChildren={() => onLoadMoreFolderLists?.(folder.id)} onEditFolder={() => setAppearance({ type: 'folder', item: folder })} onEditList={list => setAppearance({ type: 'list', item: list })} />)}</SortableContext>
+        {hasMoreFolders && <button type="button" disabled={loadingMoreFolders} onClick={onLoadMoreFolders} className="mt-1 flex w-full items-center justify-center gap-1.5 rounded-xl px-3 py-2.5 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">{loadingMoreFolders && <Loader2 className="h-3 w-3 animate-spin" />}Cargar más carpetas</button>}
       </div>
       <DragOverlay dropAnimation={{ duration: 180, easing: 'ease-out' }}>{(activeList || activeFolder) && <div data-task-hierarchy-overlay className="flex w-60 items-center gap-2 rounded-xl border border-emerald-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-700 shadow-2xl"><GripVertical className="h-4 w-4 text-emerald-500" /><TaskContainerIcon value={activeList?.icon || activeFolder?.icon} className="h-4 w-4" /><span className="min-w-0 flex-1 truncate">{activeList?.name || activeFolder?.name}</span></div>}</DragOverlay>
     </DndContext>
     {pendingMove && <MoveConfirmation move={pendingMove} folder={folders.find(folder => folder.id === folderIDFromContainer(pendingMove.containerID))!} busy={saving} onConfirm={() => void persistListMove(pendingMove)} onCancel={() => { setPendingMove(null); restore() }} />}
-    {appearance && <TaskAppearanceDialog item={appearance.item} type={appearance.type} onClose={() => setAppearance(null)} onSaved={onChanged} onError={onError} onOperation={onOperation} />}
+    {appearance && taskHierarchyCanManageStructure(appearance.item) && <TaskAppearanceDialog item={appearance.item} type={appearance.type} users={users} onClose={() => setAppearance(null)} onSaved={onChanged} onError={onError} onOperation={onOperation} />}
     {saving && <div className="pointer-events-none fixed bottom-5 left-1/2 z-[100] flex -translate-x-1/2 items-center gap-2 rounded-full bg-slate-900 px-4 py-2 text-xs font-semibold text-white shadow-xl"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Guardando estructura…</div>}
   </>
 }

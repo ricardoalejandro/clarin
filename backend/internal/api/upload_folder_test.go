@@ -36,6 +36,10 @@ func TestSanitizeUploadFolder(t *testing.T) {
 		"uploads/_private/statuses",
 		"statuses",
 		"uploads/statuses",
+		"tasks/attachments",
+		"tasks/attachments/raw",
+		"task-previews",
+		"task-previews/attachment",
 	} {
 		if got, err := sanitizeUploadFolder(raw, "uploads"); err == nil {
 			t.Fatalf("unsafe folder %q was accepted as %q", raw, got)

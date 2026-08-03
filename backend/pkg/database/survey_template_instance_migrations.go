@@ -65,6 +65,44 @@ func surveyTemplateInstanceMigrations() []string {
 		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS opens_at TIMESTAMPTZ`,
 		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS closes_at TIMESTAMPTZ`,
 		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS legacy_instance BOOLEAN NOT NULL DEFAULT FALSE`,
+		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ`,
+		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS archived_by UUID REFERENCES users(id) ON DELETE SET NULL`,
+		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS archived_from_status TEXT`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname='surveys_archived_by_fkey' AND conrelid='surveys'::regclass
+			) THEN
+				ALTER TABLE surveys ADD CONSTRAINT surveys_archived_by_fkey
+					FOREIGN KEY (archived_by) REFERENCES users(id) ON DELETE SET NULL;
+			END IF;
+		END $$`,
+		`UPDATE surveys
+		 SET archived_from_status=CASE WHEN status IN ('draft','active','closed') THEN status ELSE 'closed' END,
+			 status='closed'
+		 WHERE archived_at IS NOT NULL AND archived_from_status IS NULL`,
+		`UPDATE surveys SET archived_by=NULL,archived_from_status=NULL
+		 WHERE archived_at IS NULL AND (archived_by IS NOT NULL OR archived_from_status IS NOT NULL)`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname='surveys_archived_from_status_check' AND conrelid='surveys'::regclass
+			) THEN
+				ALTER TABLE surveys ADD CONSTRAINT surveys_archived_from_status_check
+					CHECK (archived_from_status IS NULL OR archived_from_status IN ('draft','active','closed'));
+			END IF;
+		END $$`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname='surveys_archive_shape_check' AND conrelid='surveys'::regclass
+			) THEN
+				ALTER TABLE surveys ADD CONSTRAINT surveys_archive_shape_check CHECK (
+					(archived_at IS NULL AND archived_from_status IS NULL)
+					OR (archived_at IS NOT NULL AND archived_from_status IS NOT NULL AND status='closed')
+				);
+			END IF;
+		END $$`,
 		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS analytics_tracking_started_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
 		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS measurement_config JSONB NOT NULL DEFAULT '{"dimensions":[]}'::jsonb`,
 		`ALTER TABLE surveys ADD COLUMN IF NOT EXISTS measurement_signature TEXT NOT NULL DEFAULT ''`,
@@ -90,6 +128,7 @@ func surveyTemplateInstanceMigrations() []string {
 		END $$`,
 		`CREATE INDEX IF NOT EXISTS idx_surveys_template_history ON surveys(account_id, template_id, created_at DESC) WHERE template_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_surveys_program_history ON surveys(account_id, program_id, created_at DESC) WHERE program_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_surveys_account_archive ON surveys(account_id, archived_at, created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS survey_branding_asset_refs (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,

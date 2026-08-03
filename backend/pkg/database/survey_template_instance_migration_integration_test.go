@@ -1,17 +1,21 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/repository"
+	"github.com/naperu/clarin/internal/service"
 )
 
 // TestSurveyTemplateInstanceMigration runs only against an explicitly enabled
@@ -60,6 +64,7 @@ func TestSurveyTemplateInstanceMigration(t *testing.T) {
 	}
 
 	accountA, accountB := uuid.New(), uuid.New()
+	actorA := uuid.New()
 	surveyA, surveyB := uuid.New(), uuid.New()
 	questionA, questionB := uuid.New(), uuid.New()
 	responseA, responseB := uuid.New(), uuid.New()
@@ -69,6 +74,8 @@ func TestSurveyTemplateInstanceMigration(t *testing.T) {
 		args  []any
 	}{
 		{`INSERT INTO accounts (id,name) VALUES ($1,'Encuestas A'),($2,'Encuestas B')`, []any{accountA, accountB}},
+		{`INSERT INTO users(id,account_id,username,email,password_hash) VALUES($1,$2,$3,$4,'test')`, []any{actorA, accountA, "survey-a-" + actorA.String(), actorA.String() + "@test.invalid"}},
+		{`INSERT INTO user_accounts(user_id,account_id,is_default) VALUES($1,$2,TRUE)`, []any{actorA, accountA}},
 		{`INSERT INTO surveys (id,account_id,name,slug,status,is_template,template_id,legacy_instance)
 		  VALUES ($1,$2,'Plantilla histórica A','historica-a','active',TRUE,NULL,FALSE),
 		         ($3,$4,'Encuesta histórica B','historica-b','closed',FALSE,NULL,FALSE)`, []any{surveyA, accountA, surveyB, accountB}},
@@ -104,6 +111,26 @@ func TestSurveyTemplateInstanceMigration(t *testing.T) {
 	}
 	if err := Migrate(db); err != nil {
 		t.Fatalf("idempotent survey split migrate: %v", err)
+	}
+	deletedAccountID, historicalSurveyID := uuid.New(), uuid.New()
+	if _, err := db.Exec(ctx, `INSERT INTO accounts(id,name) VALUES($1,'Cuenta de retiro de enlace')`, deletedAccountID); err != nil {
+		t.Fatalf("seed disposable deleted account: %v", err)
+	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO survey_public_slug_reservations(slug,owner_account_id,survey_id)
+		VALUES ('enlace-de-cuenta-eliminada',$1,$2)
+	`, deletedAccountID, historicalSurveyID); err != nil {
+		t.Fatalf("reserve historical deleted-account slug: %v", err)
+	}
+	if _, err := db.Exec(ctx, `DELETE FROM accounts WHERE id=$1`, deletedAccountID); err != nil {
+		t.Fatalf("delete disposable account: %v", err)
+	}
+	var historicalReservationCount int
+	if err := db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM survey_public_slug_reservations
+		WHERE slug='enlace-de-cuenta-eliminada' AND owner_account_id=$1 AND survey_id=$2
+	`, deletedAccountID, historicalSurveyID).Scan(&historicalReservationCount); err != nil || historicalReservationCount != 1 {
+		t.Fatalf("account deletion released its historical public link: count=%d error=%v", historicalReservationCount, err)
 	}
 
 	var templateA, templateB uuid.UUID
@@ -145,6 +172,9 @@ func TestSurveyTemplateInstanceMigration(t *testing.T) {
 	legacySnapshot, err := repository.NewRepositories(db).Survey.GetByID(ctx, surveyA, accountA)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if legacySnapshot.CanDelete || !legacySnapshot.CanArchive || legacySnapshot.CanRestore {
+		t.Fatalf("migrated legacy application cannot be preserved reversibly: %#v", legacySnapshot)
 	}
 	legacySnapshot.Name = "Mutación legacy activa"
 	if err := repository.NewRepositories(db).Survey.Update(ctx, legacySnapshot); !errors.Is(err, repository.ErrSurveyPublishedImmutable) {
@@ -309,9 +339,321 @@ func TestSurveyTemplateInstanceMigration(t *testing.T) {
 	if createdApplication.MeasurementSignature != measurementSignature || createdApplication.AnalyticsTrackingStartedAt.IsZero() {
 		t.Fatalf("application did not freeze measurement/tracking metadata: %#v", createdApplication)
 	}
+	if !createdApplication.CanDelete || !createdApplication.CanArchive || createdApplication.CanRestore {
+		t.Fatalf("new application returned stale lifecycle capabilities: %#v", createdApplication)
+	}
 	applicationQuestions, err := repos.Survey.GetQuestionsScoped(ctx, accountA, createdApplication.ID)
 	if err != nil || len(applicationQuestions) != 2 || applicationQuestions[0].ID == copiedQuestions[0].ID {
 		t.Fatalf("application did not freeze independent question identities: count=%d error=%v", len(applicationQuestions), err)
+	}
+	if _, err := repos.Survey.ListTextAnswers(ctx, accountA, createdApplication.ID, applicationQuestions[0].ID, 25, nil, nil); !errors.Is(err, repository.ErrSurveyQuestionNotText) {
+		t.Fatalf("non-text question accepted by text answers endpoint: %v", err)
+	}
+
+	// Global slug reservation is the serialization point. Two accounts may ask
+	// for the same friendly URL concurrently; both creations succeed, but only
+	// one receives the exact value and the other receives a non-leaking suffix.
+	type concurrentSlugResult struct {
+		instance *domain.SurveyInstanceSummary
+		err      error
+	}
+	concurrentResults := make(chan concurrentSlugResult, 2)
+	surveyTemplateService := service.NewSurveyTemplateService(repos)
+	for _, request := range []domain.CreateSurveyInstanceInput{
+		{TemplateID: copyTemplate.ID, AccountID: accountA, Name: "Colisión global A", Slug: "enlace-global-concurrente", Status: "active", AudienceMode: "public"},
+		{TemplateID: templateB, AccountID: accountB, Name: "Colisión global B", Slug: "enlace-global-concurrente", Status: "active", AudienceMode: "public"},
+	} {
+		request := request
+		go func() {
+			instance, createErr := surveyTemplateService.CreateInstance(ctx, request)
+			concurrentResults <- concurrentSlugResult{instance: instance, err: createErr}
+		}()
+	}
+	exactSlugCount := 0
+	for range 2 {
+		result := <-concurrentResults
+		if result.err != nil || result.instance == nil {
+			t.Fatalf("concurrent global slug creation failed: %#v", result)
+		}
+		if result.instance.Slug == "enlace-global-concurrente" {
+			exactSlugCount++
+		} else if !strings.HasPrefix(result.instance.Slug, "enlace-global-concurrente-") {
+			t.Fatalf("unexpected concurrent slug variant: %q", result.instance.Slug)
+		}
+	}
+	if exactSlugCount != 1 {
+		t.Fatalf("exact public slug owners=%d, want 1", exactSlugCount)
+	}
+
+	// Application archive/restore is reversible but never reopens implicitly.
+	lifecycleApplication, err := repos.SurveyTemplate.CreateInstance(ctx, domain.CreateSurveyInstanceInput{
+		TemplateID: canonicalTemplateID, AccountID: accountA, Name: "Aplicación para archivar",
+		Slug: "aplicacion-para-archivar", Status: "active", AudienceMode: "public",
+	})
+	if err != nil {
+		t.Fatalf("create lifecycle application: %v", err)
+	}
+	if err := repos.Survey.Archive(ctx, accountA, lifecycleApplication.ID, actorA); err != nil {
+		t.Fatalf("archive lifecycle application: %v", err)
+	}
+	archivedApplication, err := repos.Survey.GetByID(ctx, lifecycleApplication.ID, accountA)
+	if err != nil || archivedApplication.ArchivedAt == nil || archivedApplication.ArchivedBy == nil || *archivedApplication.ArchivedBy != actorA || archivedApplication.ArchivedFromStatus != "active" || archivedApplication.Status != "closed" {
+		t.Fatalf("archive did not retain source status and close application: %#v error=%v", archivedApplication, err)
+	}
+	var archivedWorkbook bytes.Buffer
+	if filename, exportErr := service.NewSurveyService(repos).WriteSurveyResultsXLSX(
+		ctx, accountA, lifecycleApplication.ID, service.SurveyXLSXExportRequest{}, &archivedWorkbook,
+	); exportErr != nil || archivedWorkbook.Len() == 0 || !strings.HasSuffix(filename, ".xlsx") {
+		t.Fatalf("archived zero-response application did not export: filename=%q bytes=%d error=%v", filename, archivedWorkbook.Len(), exportErr)
+	}
+	if _, exportErr := service.NewSurveyService(repos).WriteSurveyResultsXLSX(
+		ctx, accountB, lifecycleApplication.ID, service.SurveyXLSXExportRequest{}, &bytes.Buffer{},
+	); !errors.Is(exportErr, pgx.ErrNoRows) {
+		t.Fatalf("cross-account XLSX export error=%v", exportErr)
+	}
+	if _, exportErr := service.NewSurveyService(repos).WriteSurveyResultsXLSX(
+		ctx, accountA, canonicalTemplateID, service.SurveyXLSXExportRequest{}, &bytes.Buffer{},
+	); !errors.Is(exportErr, service.ErrSurveyApplicationRequired) {
+		t.Fatalf("template XLSX export error=%v", exportErr)
+	}
+	activeApplications, err := repos.SurveyTemplate.ListTemplateInstances(ctx, accountA, canonicalTemplateID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, application := range activeApplications {
+		if application.ID == lifecycleApplication.ID {
+			t.Fatal("archived application leaked into the active-only list")
+		}
+	}
+	allApplications, err := repos.SurveyTemplate.ListTemplateInstances(ctx, accountA, canonicalTemplateID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundArchived bool
+	for _, application := range allApplications {
+		foundArchived = foundArchived || application.ID == lifecycleApplication.ID && application.ArchivedAt != nil
+	}
+	if !foundArchived {
+		t.Fatal("archived application was absent from the explicit history list")
+	}
+	if err := repos.Survey.Restore(ctx, accountA, lifecycleApplication.ID); err != nil {
+		t.Fatalf("restore lifecycle application: %v", err)
+	}
+	restoredApplication, err := repos.Survey.GetByID(ctx, lifecycleApplication.ID, accountA)
+	if err != nil || restoredApplication.ArchivedAt != nil || restoredApplication.ArchivedFromStatus != "" || restoredApplication.Status != "closed" {
+		t.Fatalf("restore reopened or retained archive metadata: %#v error=%v", restoredApplication, err)
+	}
+	if err := repos.Survey.Delete(ctx, lifecycleApplication.ID, accountB); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("cross-account delete error=%v", err)
+	}
+	// A frozen recipient that remains pending is audience metadata, not an
+	// interaction. Even when it already has an invitation timestamp it must not
+	// force an otherwise untouched application into archival retention.
+	if _, err := db.Exec(ctx, `
+		INSERT INTO survey_instance_recipients (account_id,survey_id,status,invited_at)
+		VALUES ($1,$2,'pending',NOW())
+	`, accountA, lifecycleApplication.ID); err != nil {
+		t.Fatalf("seed pending frozen recipient: %v", err)
+	}
+	if err := repos.Survey.Delete(ctx, lifecycleApplication.ID, accountA); err != nil {
+		t.Fatalf("delete empty canonical application: %v", err)
+	}
+	if _, err := repos.Survey.GetBySlug(ctx, lifecycleApplication.Slug); !errors.Is(err, repository.ErrSurveyLinkRetired) {
+		t.Fatalf("deleted public link did not become a permanent 410 tombstone: %v", err)
+	}
+	retiredUnavailable, err := repos.Survey.SlugExists(ctx, lifecycleApplication.Slug, nil)
+	if err != nil || !retiredUnavailable {
+		t.Fatalf("retired public link became available: exists=%t error=%v", retiredUnavailable, err)
+	}
+	replacement, err := service.NewSurveyTemplateService(repos).CreateInstance(ctx, domain.CreateSurveyInstanceInput{
+		TemplateID: canonicalTemplateID, AccountID: accountA, Name: "Aplicación posterior al retiro",
+		Slug: lifecycleApplication.Slug, Status: "active", AudienceMode: "public",
+	})
+	if err != nil {
+		t.Fatalf("create safe replacement after retired link: %v", err)
+	}
+	if replacement.Slug == lifecycleApplication.Slug || !strings.HasPrefix(replacement.Slug, lifecycleApplication.Slug+"-") {
+		t.Fatalf("retired slug was reused instead of receiving a suffix: %q", replacement.Slug)
+	}
+
+	createLifecycleApplication := func(name, slug string) *domain.SurveyInstanceSummary {
+		t.Helper()
+		application, createErr := repos.SurveyTemplate.CreateInstance(ctx, domain.CreateSurveyInstanceInput{
+			TemplateID: canonicalTemplateID, AccountID: accountA, Name: name,
+			Slug: slug, Status: "active", AudienceMode: "public",
+		})
+		if createErr != nil {
+			t.Fatalf("create %s: %v", name, createErr)
+		}
+		return application
+	}
+	activityApplication := createLifecycleApplication("Aplicación con apertura", "aplicacion-con-apertura")
+	if err := repos.Survey.TrackSession(ctx, domain.SurveySessionEvent{
+		AccountID: accountA, SurveyID: activityApplication.ID, RespondentToken: uuid.New(),
+		Phase: domain.SurveySessionOpened, Source: "direct",
+	}); err != nil {
+		t.Fatalf("track lifecycle opening: %v", err)
+	}
+	if err := repos.Survey.Delete(ctx, activityApplication.ID, accountA); !errors.Is(err, repository.ErrSurveyDeleteHasActivity) {
+		t.Fatalf("application with opening delete error=%v", err)
+	}
+
+	recipientApplication := createLifecycleApplication("Aplicación con destinatario abierto", "aplicacion-destinatario-abierto")
+	recipientID := uuid.New()
+	if _, err := db.Exec(ctx, `
+		INSERT INTO survey_instance_recipients (id,account_id,survey_id,status)
+		VALUES ($1,$2,$3,'pending')
+	`, recipientID, accountA, recipientApplication.ID); err != nil {
+		t.Fatalf("seed lifecycle recipient: %v", err)
+	}
+	if err := repos.SurveyTemplate.MarkRecipientOpened(ctx, recipientID, accountA); err != nil {
+		t.Fatalf("mark lifecycle recipient opened: %v", err)
+	}
+	if err := repos.Survey.Delete(ctx, recipientApplication.ID, accountA); !errors.Is(err, repository.ErrSurveyDeleteHasActivity) {
+		t.Fatalf("application with recipient opening delete error=%v", err)
+	}
+
+	archivedRaceApplication := createLifecycleApplication("Aplicación archivada antes de abrir", "archivada-antes-de-abrir")
+	archivedRecipientID := uuid.New()
+	if _, err := db.Exec(ctx, `
+		INSERT INTO survey_instance_recipients (id,account_id,survey_id,status)
+		VALUES ($1,$2,$3,'pending')
+	`, archivedRecipientID, accountA, archivedRaceApplication.ID); err != nil {
+		t.Fatalf("seed archived lifecycle recipient: %v", err)
+	}
+	if err := repos.Survey.Archive(ctx, accountA, archivedRaceApplication.ID, actorA); err != nil {
+		t.Fatalf("archive before recipient opening: %v", err)
+	}
+	if err := repos.Survey.TrackSession(ctx, domain.SurveySessionEvent{
+		AccountID: accountA, SurveyID: archivedRaceApplication.ID, RecipientID: &archivedRecipientID,
+		RespondentToken: uuid.New(), Phase: domain.SurveySessionOpened, Source: "direct",
+	}); !errors.Is(err, repository.ErrSurveyArchived) {
+		t.Fatalf("session opening after archive error=%v", err)
+	}
+	if err := repos.SurveyTemplate.MarkRecipientOpened(ctx, archivedRecipientID, accountA); !errors.Is(err, repository.ErrSurveyArchived) {
+		t.Fatalf("recipient opening after archive error=%v", err)
+	}
+	archivedQuestions, err := repos.Survey.GetQuestionsScoped(ctx, accountA, archivedRaceApplication.ID)
+	if err != nil || len(archivedQuestions) != 1 {
+		t.Fatalf("load archived lifecycle question: count=%d error=%v", len(archivedQuestions), err)
+	}
+	archivedResponseAt := time.Now()
+	archivedResponse := &domain.SurveyResponse{
+		SurveyID: archivedRaceApplication.ID, AccountID: accountA, RespondentToken: uuid.NewString(),
+		Source: "direct", StartedAt: archivedResponseAt.Add(-time.Minute), CompletedAt: &archivedResponseAt,
+	}
+	if err := repos.Survey.CreateResponse(ctx, archivedResponse, []domain.SurveyAnswer{{QuestionID: archivedQuestions[0].ID, Value: "No debe guardarse"}}); !errors.Is(err, repository.ErrSurveyArchived) {
+		t.Fatalf("response after archive error=%v", err)
+	}
+	var archivedRecipientStatus string
+	var archivedRecipientOpenedAt *time.Time
+	if err := db.QueryRow(ctx, `
+		SELECT status,opened_at FROM survey_instance_recipients
+		WHERE account_id=$1 AND survey_id=$2 AND id=$3
+	`, accountA, archivedRaceApplication.ID, archivedRecipientID).Scan(&archivedRecipientStatus, &archivedRecipientOpenedAt); err != nil {
+		t.Fatal(err)
+	}
+	if archivedRecipientStatus != "pending" || archivedRecipientOpenedAt != nil {
+		t.Fatalf("archived recipient was mutated: status=%q opened_at=%v", archivedRecipientStatus, archivedRecipientOpenedAt)
+	}
+
+	uploadApplication := createLifecycleApplication("Aplicación con archivo", "aplicacion-con-archivo")
+	uploadQuestions, err := repos.Survey.GetQuestionsScoped(ctx, accountA, uploadApplication.ID)
+	if err != nil || len(uploadQuestions) != 1 {
+		t.Fatalf("load upload lifecycle question: count=%d error=%v", len(uploadQuestions), err)
+	}
+	if _, err := db.Exec(ctx, `UPDATE survey_questions SET type='file_upload' WHERE survey_id=$1 AND id=$2`, uploadApplication.ID, uploadQuestions[0].ID); err != nil {
+		t.Fatalf("prepare file question fixture: %v", err)
+	}
+	preparedUpload, err := repos.Survey.PrepareSurveyFileUpload(ctx, repository.PrepareSurveyFileUploadInput{
+		AccountID: accountA, SurveyID: uploadApplication.ID, QuestionID: uploadQuestions[0].ID,
+		RespondentToken: uuid.NewString(), ObjectKey: accountA.String() + "/survey-uploads/test",
+		OriginalFilename: "evidencia.png", ContentType: "image/png", SizeBytes: 128,
+		ContentHash: "integration-survey-upload", ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("prepare lifecycle upload: %v", err)
+	}
+	if err := repos.Survey.Delete(ctx, uploadApplication.ID, accountA); !errors.Is(err, repository.ErrSurveyDeleteHasUploads) {
+		t.Fatalf("application with live upload delete error=%v", err)
+	}
+	if _, err := db.Exec(ctx, `
+		UPDATE survey_file_uploads SET status='deleted',updated_at=NOW()
+		WHERE account_id=$1 AND survey_id=$2 AND id=$3
+	`, accountA, uploadApplication.ID, preparedUpload.ID); err != nil {
+		t.Fatalf("mark lifecycle upload deleted: %v", err)
+	}
+	if err := repos.Survey.Delete(ctx, uploadApplication.ID, accountA); err != nil {
+		t.Fatalf("deleted upload still blocked canonical deletion: %v", err)
+	}
+	incompleteApplication := createLifecycleApplication("Aplicación con respuesta incompleta", "aplicacion-respuesta-incompleta")
+	if _, err := db.Exec(ctx, `
+		INSERT INTO survey_responses (survey_id,account_id,respondent_token,started_at,completed_at)
+		VALUES ($1,$2,$3,NOW(),NULL)
+	`, incompleteApplication.ID, accountA, uuid.NewString()); err != nil {
+		t.Fatalf("seed incomplete lifecycle response: %v", err)
+	}
+	if err := repos.Survey.Delete(ctx, incompleteApplication.ID, accountA); !errors.Is(err, repository.ErrSurveyDeleteHasResponses) {
+		t.Fatalf("application with incomplete response delete error=%v", err)
+	}
+
+	// Free-text inspection is completed-only, account-scoped and does not put
+	// unbounded values into the analytics payload.
+	textApplication, err := repos.SurveyTemplate.CreateInstance(ctx, domain.CreateSurveyInstanceInput{
+		TemplateID: canonicalTemplateID, AccountID: accountA, Name: "Aplicación de texto",
+		Slug: "aplicacion-de-texto", Status: "active", AudienceMode: "public",
+	})
+	if err != nil {
+		t.Fatalf("create text application: %v", err)
+	}
+	textQuestions, err := repos.Survey.GetQuestionsScoped(ctx, accountA, textApplication.ID)
+	if err != nil || len(textQuestions) != 1 {
+		t.Fatalf("load text application question: count=%d error=%v", len(textQuestions), err)
+	}
+	textCompletedAt := time.Now().UTC().Truncate(time.Microsecond)
+	textResponse := &domain.SurveyResponse{SurveyID: textApplication.ID, AccountID: accountA, RespondentToken: uuid.NewString(), Source: "direct", StartedAt: textCompletedAt.Add(-time.Minute), CompletedAt: &textCompletedAt}
+	if err := repos.Survey.CreateResponse(ctx, textResponse, []domain.SurveyAnswer{{QuestionID: textQuestions[0].ID, Value: "Primera línea\nSegunda línea"}}); err != nil {
+		t.Fatalf("save text response: %v", err)
+	}
+	unicodeText := "Observación ágil — 你好 — 🙂\n" + strings.Repeat("detalle ", 120)
+	secondTextResponse := &domain.SurveyResponse{SurveyID: textApplication.ID, AccountID: accountA, RespondentToken: uuid.NewString(), Source: "direct", StartedAt: textCompletedAt.Add(-time.Minute), CompletedAt: &textCompletedAt}
+	if err := repos.Survey.CreateResponse(ctx, secondTextResponse, []domain.SurveyAnswer{{QuestionID: textQuestions[0].ID, Value: unicodeText}}); err != nil {
+		t.Fatalf("save unicode text response: %v", err)
+	}
+	incompleteResponseID := uuid.New()
+	if _, err := db.Exec(ctx, `
+		INSERT INTO survey_responses (id,survey_id,account_id,respondent_token,started_at,completed_at)
+		VALUES ($1,$2,$3,$4,NOW(),NULL)
+	`, incompleteResponseID, textApplication.ID, accountA, uuid.NewString()); err != nil {
+		t.Fatalf("seed incomplete text response: %v", err)
+	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO survey_answers (response_id,survey_id,question_id,value)
+		VALUES ($1,$2,$3,'No debe aparecer')
+	`, incompleteResponseID, textApplication.ID, textQuestions[0].ID); err != nil {
+		t.Fatalf("seed incomplete text answer: %v", err)
+	}
+	textService := service.NewSurveyService(repos)
+	firstTextPage, err := textService.ListTextAnswers(ctx, accountA, textApplication.ID, textQuestions[0].ID, 1, "")
+	if err != nil || firstTextPage.Total != 2 || len(firstTextPage.Items) != 1 || firstTextPage.NextCursor == "" || firstTextPage.Items[0].ContactName != "" {
+		t.Fatalf("unexpected first text answer page: %#v error=%v", firstTextPage, err)
+	}
+	secondTextPage, err := textService.ListTextAnswers(ctx, accountA, textApplication.ID, textQuestions[0].ID, 1, firstTextPage.NextCursor)
+	if err != nil || secondTextPage.Total != 2 || len(secondTextPage.Items) != 1 || secondTextPage.NextCursor != "" {
+		t.Fatalf("unexpected second text answer page: %#v error=%v", secondTextPage, err)
+	}
+	if firstTextPage.Items[0].ResponseID == secondTextPage.Items[0].ResponseID {
+		t.Fatal("text cursor repeated a response")
+	}
+	values := map[string]bool{firstTextPage.Items[0].Value: true, secondTextPage.Items[0].Value: true}
+	if !values["Primera línea\nSegunda línea"] || !values[unicodeText] || values["No debe aparecer"] {
+		t.Fatalf("text pagination lost or leaked values: %#v", values)
+	}
+	if _, err := repos.Survey.ListTextAnswers(ctx, accountB, textApplication.ID, textQuestions[0].ID, 25, nil, nil); !errors.Is(err, repository.ErrSurveyQuestionNotFound) {
+		t.Fatalf("cross-account text answers error=%v", err)
+	}
+	if err := repos.Survey.Delete(ctx, textApplication.ID, accountA); !errors.Is(err, repository.ErrSurveyDeleteHasResponses) {
+		t.Fatalf("application with response delete error=%v", err)
 	}
 	measurementContactID, measurementParticipantID := uuid.New(), uuid.New()
 	if _, err := db.Exec(ctx, `
@@ -323,6 +665,45 @@ func TestSurveyTemplateInstanceMigration(t *testing.T) {
 		INSERT INTO program_participants (id,program_id,contact_id,status) VALUES ($1,$2,$3,'active')
 	`, measurementParticipantID, programID, measurementContactID); err != nil {
 		t.Fatalf("seed measurement participant: %v", err)
+	}
+	programTextApplication, err := repos.SurveyTemplate.CreateInstance(ctx, domain.CreateSurveyInstanceInput{
+		TemplateID: canonicalTemplateID, AccountID: accountA, ProgramID: &programID,
+		Name: "Observaciones del programa", Slug: "observaciones-del-programa", Status: "active",
+		AudienceMode: "program_participants",
+	})
+	if err != nil {
+		t.Fatalf("create program text application: %v", err)
+	}
+	programTextQuestions, err := repos.Survey.GetQuestionsScoped(ctx, accountA, programTextApplication.ID)
+	if err != nil || len(programTextQuestions) != 1 {
+		t.Fatalf("load program text question: count=%d error=%v", len(programTextQuestions), err)
+	}
+	var programTextRecipientID uuid.UUID
+	if err := db.QueryRow(ctx, `
+		SELECT id FROM survey_instance_recipients
+		WHERE account_id=$1 AND survey_id=$2 AND program_participant_id=$3
+	`, accountA, programTextApplication.ID, measurementParticipantID).Scan(&programTextRecipientID); err != nil {
+		t.Fatalf("load program text recipient: %v", err)
+	}
+	programTextCompletedAt := time.Now()
+	programTextResponse := &domain.SurveyResponse{
+		SurveyID: programTextApplication.ID, AccountID: accountA, RespondentToken: uuid.NewString(),
+		RecipientID: &programTextRecipientID, ContactID: &measurementContactID, ProgramID: &programID,
+		ProgramParticipantID: &measurementParticipantID, Source: "direct",
+		StartedAt: programTextCompletedAt.Add(-time.Minute), CompletedAt: &programTextCompletedAt,
+	}
+	if err := repos.Survey.CreateResponse(ctx, programTextResponse, []domain.SurveyAnswer{{
+		QuestionID: programTextQuestions[0].ID, Value: "Observación específica del programa",
+	}}); err != nil {
+		t.Fatalf("save program text response: %v", err)
+	}
+	programTextPage, err := service.NewSurveyService(repos).ListTextAnswers(
+		ctx, accountA, programTextApplication.ID, programTextQuestions[0].ID, 25, "",
+	)
+	if err != nil || len(programTextPage.Items) != 1 || programTextPage.Items[0].ContactID == nil ||
+		*programTextPage.Items[0].ContactID != measurementContactID || programTextPage.Items[0].ProgramParticipantID == nil ||
+		*programTextPage.Items[0].ProgramParticipantID != measurementParticipantID || programTextPage.Items[0].ContactName != "Participante de medición" {
+		t.Fatalf("program text identity is not participation-specific: %#v error=%v", programTextPage, err)
 	}
 	programApplications := make([]*domain.SurveyInstanceSummary, 0, 2)
 	for index, name := range []string{"Medición inicial", "Medición final"} {
@@ -483,6 +864,13 @@ func TestSurveyTemplateInstanceMigration(t *testing.T) {
 			t.Fatalf("seed contact-merge survey fixture: %v\n%s", err, fixture.query)
 		}
 	}
+	// File reservations are now accepted only while an application is active.
+	// Open this isolated fixture for the reservation and close it again before
+	// exercising the merge so the test does not model an impossible public
+	// upload against the closed immutable application.
+	if _, err := db.Exec(ctx, `UPDATE surveys SET status='active' WHERE account_id=$1 AND id=$2`, accountA, canonicalSurveyID); err != nil {
+		t.Fatalf("open contact-merge upload fixture: %v", err)
+	}
 	upload, err := repos.Survey.PrepareSurveyFileUpload(ctx, repository.PrepareSurveyFileUploadInput{
 		AccountID:        accountA,
 		SurveyID:         canonicalSurveyID,
@@ -498,6 +886,9 @@ func TestSurveyTemplateInstanceMigration(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("seed contact-merge upload: %v", err)
+	}
+	if _, err := db.Exec(ctx, `UPDATE surveys SET status='closed' WHERE account_id=$1 AND id=$2`, accountA, canonicalSurveyID); err != nil {
+		t.Fatalf("close contact-merge upload fixture: %v", err)
 	}
 	if _, err := repos.Contact.MergeContacts(ctx, accountA, keepContactID, []uuid.UUID{sourceContactID, secondSourceContactID}, nil); err != nil {
 		t.Fatalf("merge contacts with survey history: %v", err)

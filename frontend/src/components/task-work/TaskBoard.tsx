@@ -66,17 +66,20 @@ import type { TaskAccountUser } from './TaskEditorModal'
 import { TaskListPicker } from './TaskSelectPicker'
 import { cardClickSelectsTask, selectionAfterToggle, selectionForDrag, taskStackLayers, touchHoldSelectsTask, uniqueBulkItems } from './taskBoardSelection'
 import {
+  measureTaskNavigationTargets,
+  pointerFromTaskDragActivator,
   resolveTaskDropTarget,
   sameTaskDropTarget,
   taskDropAutoScrollDelta,
-  type MeasuredTaskDropTarget,
   type TaskDropPoint,
   type TaskExternalDropTarget,
 } from './taskDropTargets'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
+import { taskLocationLabel } from './taskBreadcrumbVisibility'
 import { taskWorkspaceMenuPosition } from './taskInteractionVisuals'
 import TaskDateTimePicker from './TaskDateTimePicker'
 import type { TaskHierarchyCounts } from './taskHierarchyCounts'
+import { allTasksCanBeAdministered, canAdministerTask, canEditTask } from './taskPermissionActions'
 
 export interface TaskInlineDraft {
   title: string
@@ -105,6 +108,7 @@ interface Props {
   onCollapsedStatusIdsChange: (ids: string[]) => void
   onTasksChange: Dispatch<SetStateAction<Task[]>>
   onCanonicalTask: (task: Task, action?: string) => boolean
+  onCanonicalTasks: (tasks: Task[], action?: string) => Task[]
   onHierarchyCounts?: (counts?: TaskHierarchyCounts | null, operationID?: string) => boolean | void
   onOperation: (operationId: string, active: boolean) => void
   onTaskCreated: (task: Task, operationId: string, hierarchyCounts?: TaskHierarchyCounts) => void
@@ -120,6 +124,8 @@ interface Props {
   onQuickUpdate: (task: Task, body: Record<string, unknown>) => Promise<Task | undefined>
   onRefresh: () => void | Promise<void>
   onError: (message: string) => void
+  canCreate?: boolean
+  canManageStructure?: boolean
 }
 
 type ColumnOrders = Record<string, string[]>
@@ -292,31 +298,6 @@ function stopControlStart(event: React.SyntheticEvent) {
   event.stopPropagation()
 }
 
-function pointerFromActivator(event: Event): TaskDropPoint | null {
-  const pointer = event as MouseEvent
-  if (Number.isFinite(pointer.clientX) && Number.isFinite(pointer.clientY)) return { x: pointer.clientX, y: pointer.clientY }
-  const touch = (event as TouchEvent).touches?.[0] || (event as TouchEvent).changedTouches?.[0]
-  return touch ? { x: touch.clientX, y: touch.clientY } : null
-}
-
-function measuredNavigationTargets(): MeasuredTaskDropTarget[] {
-  return Array.from(document.querySelectorAll<HTMLElement>('[data-task-drop-list],[data-task-drop-folder]')).flatMap(element => {
-    const listID = element.dataset.taskDropList
-    const folderID = element.dataset.taskDropFolder
-    const id = listID || folderID
-    if (!id) return []
-    const rect = element.getBoundingClientRect()
-    if (!rect.width || !rect.height) return []
-    return [{
-      type: listID ? 'list' as const : 'folder' as const,
-      id,
-      label: element.dataset.taskDropLabel || (listID ? 'lista' : 'carpeta'),
-      color: element.dataset.taskDropColor,
-      rect: { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom },
-    }]
-  })
-}
-
 function TaskBoardCard({
   task,
   columnId,
@@ -346,6 +327,7 @@ function TaskBoardCard({
   selectionMode: boolean
   onSelect: (shift: boolean) => void
 }) {
+  const editable = canEditTask(task)
   const touchHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const touchOriginRef = useRef<TaskDropPoint | null>(null)
   const touchSelectedRef = useRef(false)
@@ -354,6 +336,7 @@ function TaskBoardCard({
     id: task.id,
     data: sortableData,
     animateLayoutChanges: animateTaskLayoutChanges,
+    disabled: !editable,
   })
   const overdue = Boolean(task.due_at && new Date(task.due_at) < new Date() && !['done', 'cancelled'].includes(task.status_detail?.category || ''))
   const done = task.status_detail?.category === 'done'
@@ -372,7 +355,7 @@ function TaskBoardCard({
     style={{ transform: CSS.Transform.toString(transform), transition }}
     onTouchStartCapture={event => {
       const touch = event.touches[0]
-      if (!touch || selected) return
+      if (!editable || !touch || selected) return
       touchOriginRef.current = { x: touch.clientX, y: touch.clientY }
       touchHoldTimerRef.current = setTimeout(() => {
         if (!touchHoldSelectsTask(Boolean(selected), 0)) return
@@ -394,7 +377,7 @@ function TaskBoardCard({
         event.preventDefault()
         return
       }
-      if (cardClickSelectsTask(event)) {
+      if (editable && cardClickSelectsTask(event)) {
         event.preventDefault()
         onSelect(event.shiftKey)
         return
@@ -407,7 +390,7 @@ function TaskBoardCard({
     <div className="flex items-start gap-2">
       <button
         type="button"
-        disabled={!onComplete}
+        disabled={!editable || !onComplete}
         onPointerDown={stopControlStart}
         onMouseDown={stopControlStart}
         onTouchStart={stopControlStart}
@@ -416,10 +399,10 @@ function TaskBoardCard({
         className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border transition disabled:cursor-not-allowed disabled:opacity-50 ${done ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-slate-300 bg-white hover:border-emerald-500 hover:bg-emerald-50'}`}
       >{done && <Check className="h-3 w-3" />}</button>
       <h4 className={`min-w-0 flex-1 text-sm font-semibold leading-5 ${done ? 'text-slate-400 line-through' : 'text-slate-800'}`}>{task.title}</h4>
-      <button ref={setActivatorNodeRef} type="button" {...attributes} {...listeners} onClick={event => event.stopPropagation()} aria-label={`Arrastrar ${task.title}`} title="Arrastrar tarea" className="mt-[-3px] flex h-7 w-6 shrink-0 cursor-grab items-center justify-center rounded-lg text-slate-300 outline-none transition hover:bg-slate-100 hover:text-slate-600 focus:ring-2 focus:ring-emerald-400 active:cursor-grabbing"><GripVertical className="h-4 w-4" /></button>
+      <button ref={setActivatorNodeRef} type="button" {...attributes} {...listeners} disabled={!editable} onClick={event => event.stopPropagation()} aria-label={editable ? `Arrastrar ${task.title}` : `${task.title}: solo lectura`} title={editable ? 'Arrastrar tarea' : 'No tienes permiso para mover esta tarea'} className="mt-[-3px] flex h-7 w-6 shrink-0 cursor-grab items-center justify-center rounded-lg text-slate-300 outline-none transition hover:bg-slate-100 hover:text-slate-600 focus:ring-2 focus:ring-emerald-400 active:cursor-grabbing disabled:cursor-default disabled:opacity-25"><GripVertical className="h-4 w-4" /></button>
     </div>
 
-    {showListName && <p className="ml-7 mt-1 truncate text-[10px] font-medium text-slate-400">{task.list_name || 'Bandeja general'}</p>}
+    {showListName && <p className="ml-7 mt-1 truncate text-[10px] font-medium text-slate-400">{taskLocationLabel(task)}</p>}
 
     <div className="ml-7 mt-2.5 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px]">
       {(task.priority === 'high' || task.priority === 'urgent') && <span className={`inline-flex items-center gap-1 rounded-md px-1.5 py-1 font-semibold ${priority.bg} ${priority.color}`}><Flag className="h-3 w-3" />{priority.label}</span>}
@@ -430,14 +413,14 @@ function TaskBoardCard({
       <span className="ml-auto flex h-6 min-w-6 items-center justify-center rounded-full bg-slate-100 px-1.5 font-bold text-slate-500" title={task.assigned_to_name || 'Sin responsable'}>{(task.assigned_to_name || '?').slice(0, 2).toUpperCase()}</span>
     </div>
 
-    <div className={`absolute right-9 top-2 flex items-center gap-0.5 rounded-lg border border-slate-200 bg-white p-0.5 shadow-lg transition ${selectionMode ? 'pointer-events-auto translate-y-0 opacity-100' : 'pointer-events-none -translate-y-1 opacity-0 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100 [@media(pointer:coarse)]:pointer-events-auto [@media(pointer:coarse)]:translate-y-0 [@media(pointer:coarse)]:opacity-100'}`}>
+    {editable && <div className={`absolute right-9 top-2 flex items-center gap-0.5 rounded-lg border border-slate-200 bg-white p-0.5 shadow-lg transition ${selectionMode ? 'pointer-events-auto translate-y-0 opacity-100' : 'pointer-events-none -translate-y-1 opacity-0 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100 [@media(pointer:coarse)]:pointer-events-auto [@media(pointer:coarse)]:translate-y-0 [@media(pointer:coarse)]:opacity-100'}`}>
       <button type="button" role="checkbox" aria-checked={selected} aria-label={`${selected ? 'Quitar' : 'Seleccionar'} ${task.title}`} onPointerDown={stopControlStart} onMouseDown={stopControlStart} onTouchStart={stopControlStart} onClick={event => { event.stopPropagation(); onSelect(event.shiftKey) }} title={selected ? 'Quitar de la selección' : 'Seleccionar tarea'} className={`rounded-md p-1.5 transition ${selected ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:bg-emerald-50 hover:text-emerald-700'}`}><Check className="h-3.5 w-3.5" /></button>
       {!selectionMode && <>
       <button type="button" onPointerDown={stopControlStart} onMouseDown={stopControlStart} onTouchStart={stopControlStart} onClick={event => { event.stopPropagation(); onCreateSubtask() }} title="Crear subtarea" className="rounded-md p-1.5 text-slate-400 hover:bg-emerald-50 hover:text-emerald-700"><Plus className="h-3.5 w-3.5" /></button>
       <button type="button" onPointerDown={stopControlStart} onMouseDown={stopControlStart} onTouchStart={stopControlStart} onClick={event => { event.stopPropagation(); onEdit() }} title="Editar tarea" className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><Pencil className="h-3.5 w-3.5" /></button>
       <button type="button" onPointerDown={stopControlStart} onMouseDown={stopControlStart} onTouchStart={stopControlStart} onClick={event => { event.stopPropagation(); onStar() }} title={task.starred ? 'Quitar de favoritas' : 'Añadir a favoritas'} className={`rounded-md p-1.5 hover:bg-amber-50 ${task.starred ? 'text-amber-500' : 'text-slate-400 hover:text-amber-500'}`}><Star className={`h-3.5 w-3.5 ${task.starred ? 'fill-current' : ''}`} /></button>
       </>}
-    </div>
+    </div>}
   </article>
 }
 
@@ -563,6 +546,8 @@ function BoardColumn({
   recentlyCreatedTaskId,
   selectedTaskIds,
   onSelectTask,
+  canCreate,
+  canManageStructure,
 }: {
   status: TaskWorkflowStatus
   taskIds: string[]
@@ -590,10 +575,12 @@ function BoardColumn({
   recentlyCreatedTaskId?: string
   selectedTaskIds: Set<string>
   onSelectTask: (taskID: string, shift: boolean, orderedIDs: string[]) => void
+  canCreate: boolean
+  canManageStructure: boolean
 }) {
   const expanded = !collapsed || temporarilyExpanded
   const defaultList = lists.find(item => item.id === defaultListId)
-  const canReceive = !activeTask || Boolean(resolvedStatus(activeTask, status, allStatuses))
+  const canReceive = !activeTask || (canEditTask(activeTask) && Boolean(resolvedStatus(activeTask, status, allStatuses)))
   const droppableData = useMemo(() => ({ type: 'column', columnId: status.id }), [status.id])
   const { setNodeRef, isOver } = useDroppable({ id: `column:${status.id}`, data: droppableData, disabled: !canReceive })
   const [menuOpen, setMenuOpen] = useState(false)
@@ -660,14 +647,14 @@ function BoardColumn({
       <h3 className="min-w-0 truncate text-xs font-black uppercase tracking-[.08em] text-slate-700">{status.name}</h3>
       <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold tabular-nums text-slate-500">{taskIds.length}</span>
       <div className="ml-auto flex items-center gap-0.5">
-        <button type="button" onClick={() => onCreateFull(resolvedCreateStatus(status, defaultList, allStatuses)?.id)} title="Crear tarea con todos los campos" className="rounded-lg p-1.5 text-slate-400 hover:bg-emerald-50 hover:text-emerald-700"><Plus className="h-3.5 w-3.5" /></button>
+        {canCreate && <button type="button" onClick={() => onCreateFull(resolvedCreateStatus(status, defaultList, allStatuses)?.id)} title="Crear tarea con todos los campos" className="rounded-lg p-1.5 text-slate-400 hover:bg-emerald-50 hover:text-emerald-700"><Plus className="h-3.5 w-3.5" /></button>}
         <button ref={menuButtonRef} type="button" onClick={() => setMenuOpen(value => !value)} aria-expanded={menuOpen} aria-haspopup="menu" aria-controls={`task-column-menu-${status.id}`} title="Opciones de columna" className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><MoreHorizontal className="h-4 w-4" /></button>
       </div>
     </header>
 
     {menuOpen && typeof document !== 'undefined' && createPortal(<div ref={menuRef} id={`task-column-menu-${status.id}`} data-task-column-menu role="menu" aria-label={`Opciones de ${status.name}`} style={{ position: 'fixed', left: menuPosition.left, top: menuPosition.top, zIndex: TASK_OVERLAY_LAYERS.workspacePopover }} onKeyDown={event => { const items = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]')); const current = items.indexOf(document.activeElement as HTMLElement); if (event.key === 'ArrowDown') { event.preventDefault(); items[(current + 1 + items.length) % items.length]?.focus() } else if (event.key === 'ArrowUp') { event.preventDefault(); items[(current - 1 + items.length) % items.length]?.focus() } else if (event.key === 'Home') { event.preventDefault(); items[0]?.focus() } else if (event.key === 'End') { event.preventDefault(); items.at(-1)?.focus() } }} className="w-48 rounded-xl border border-slate-200 bg-white p-1.5 shadow-2xl shadow-slate-900/15 outline-none">
       <button type="button" role="menuitem" onClick={() => { closeMenu(false); onCollapse() }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-600 outline-none hover:bg-slate-50 focus:bg-emerald-50 focus:text-emerald-800"><ChevronLeft className="h-3.5 w-3.5" />Contraer columna</button>
-      {!isSyntheticStatus(status) && <button type="button" role="menuitem" onClick={() => { closeMenu(false); onConfigureStatuses() }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-600 outline-none hover:bg-slate-50 focus:bg-emerald-50 focus:text-emerald-800"><Pencil className="h-3.5 w-3.5" />Modificar estados</button>}
+      {!isSyntheticStatus(status) && canManageStructure && <button type="button" role="menuitem" onClick={() => { closeMenu(false); onConfigureStatuses() }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-slate-600 outline-none hover:bg-slate-50 focus:bg-emerald-50 focus:text-emerald-800"><Pencil className="h-3.5 w-3.5" />Modificar estados</button>}
     </div>, document.body)}
 
     <div className="kanban-col-scroll min-h-0 overflow-y-auto overscroll-contain p-2">
@@ -677,12 +664,12 @@ function BoardColumn({
             const task = tasksById.get(taskId)
             if (!task) return null
             const toggleStatus = allStatuses.find(item => item.workflow_id === task.status_detail?.workflow_id && item.category === (task.status_detail?.category === 'done' ? 'not_started' : 'done'))
-            return <TaskBoardCard key={task.id} task={task} columnId={status.id} showListName={showListName} suppressOpen={suppressOpen} onOpen={() => onOpen(task)} onEdit={() => onEdit(task)} onCreateSubtask={() => onCreateSubtask(task)} onStar={() => onStar(task)} onComplete={toggleStatus ? () => onComplete(task, toggleStatus) : undefined} highlighted={recentlyCreatedTaskId === task.id} selected={selectedTaskIds.has(task.id)} selectionMode={selectedTaskIds.size > 0} onSelect={shift => onSelectTask(task.id, shift, taskIds)} />
+            return <TaskBoardCard key={task.id} task={task} columnId={status.id} showListName={showListName} suppressOpen={suppressOpen} onOpen={() => onOpen(task)} onEdit={() => onEdit(task)} onCreateSubtask={() => onCreateSubtask(task)} onStar={() => onStar(task)} onComplete={canEditTask(task) && toggleStatus ? () => onComplete(task, toggleStatus) : undefined} highlighted={recentlyCreatedTaskId === task.id} selected={selectedTaskIds.has(task.id)} selectionMode={selectedTaskIds.size > 0} onSelect={shift => onSelectTask(task.id, shift, taskIds)} />
           })}
           {!taskIds.length && isOver && <div className="flex h-12 items-center justify-center rounded-xl border border-dashed border-emerald-400 bg-white text-xs font-semibold text-emerald-700">Suelta aquí</div>}
         </div>
       </SortableContext>
-      <div className={taskIds.length ? 'mt-2' : ''}><InlineCreate status={status} allStatuses={allStatuses} lists={lists} defaultListId={defaultListId} users={users} currentUserId={currentUserId} onCreated={onTaskCreated} onOperation={onOperation} onMore={onCreateFull} /></div>
+      {canCreate && <div className={taskIds.length ? 'mt-2' : ''}><InlineCreate status={status} allStatuses={allStatuses} lists={lists} defaultListId={defaultListId} users={users} currentUserId={currentUserId} onCreated={onTaskCreated} onOperation={onOperation} onMore={onCreateFull} /></div>}
       {!taskIds.length && !isOver && <p className="px-2 pb-1 text-[10px] font-medium text-slate-400">Sin tareas en este estado</p>}
     </div>
     </div>
@@ -714,6 +701,7 @@ export default function TaskBoard({
   onCollapsedStatusIdsChange,
   onTasksChange,
   onCanonicalTask,
+  onCanonicalTasks,
   onHierarchyCounts,
   onOperation,
   onTaskCreated,
@@ -729,6 +717,8 @@ export default function TaskBoard({
   onQuickUpdate,
   onRefresh,
   onError,
+  canCreate = true,
+  canManageStructure = true,
 }: Props) {
   const [localTasks, setLocalTasks] = useState(tasks)
   const groupByList = Boolean(showListName)
@@ -776,6 +766,13 @@ export default function TaskBoard({
     setOrders(nextOrders)
     ordersRef.current = nextOrders
   }, [activeId, groupByList, lists, statuses, tasks])
+
+  useEffect(() => {
+    setSelectedTaskIds(current => current.filter(id => {
+      const item = tasks.find(task => task.id === id)
+      return Boolean(item && canEditTask(item))
+    }))
+  }, [tasks])
 
   useEffect(() => {
     if (!recentlyCreatedTaskId) return
@@ -871,9 +868,10 @@ export default function TaskBoard({
   const suppressOpen = useCallback(() => Date.now() - lastDragEndRef.current < 160, [])
   const toggleCollapsed = (statusId: string) => onCollapsedStatusIdsChange(collapsedStatusIds.includes(statusId) ? collapsedStatusIds.filter(id => id !== statusId) : [...collapsedStatusIds, statusId])
   const selectTask = useCallback((taskID: string, shift: boolean, orderedIDs: string[]) => {
+    if (!canEditTask(tasksById.get(taskID))) return
     setSelectedTaskIds(current => selectionAfterToggle(current, taskID, orderedIDs, shift, selectionAnchorID))
     setSelectionAnchorID(taskID)
-  }, [selectionAnchorID])
+  }, [selectionAnchorID, tasksById])
 
   const resetDrag = () => {
     if (recentlyMovedFrameRef.current !== null) {
@@ -901,7 +899,7 @@ export default function TaskBoard({
   }
 
   const bulkMove = useCallback(async (taskIDs: string[], destinationListID?: string, destinationCategory?: string) => {
-    const movingTasks = taskIDs.map(id => tasksById.get(id)).filter((task): task is Task => Boolean(task && !task.parent_task_id))
+    const movingTasks = taskIDs.map(id => tasksById.get(id)).filter((task): task is Task => Boolean(task && !task.parent_task_id && canEditTask(task)))
     const items = uniqueBulkItems(movingTasks.map(task => ({ id: task.id, version: task.version || 1 })))
     if (!items.length) return
     const operationID = crypto.randomUUID()
@@ -923,7 +921,7 @@ export default function TaskBoard({
         return
       }
       onHierarchyCounts?.(result.data.hierarchy_counts, result.data.operation_id || operationID)
-      result.data.tasks.forEach(task => onCanonicalTask(task, 'bulk_moved'))
+      onCanonicalTasks(result.data.tasks, 'bulk_moved')
       setSelectedTaskIds([])
       setSelectionAnchorID('')
       setMoveError(null)
@@ -932,11 +930,15 @@ export default function TaskBoard({
     } finally {
       onOperation(operationID, false)
     }
-  }, [onCanonicalTask, onError, onHierarchyCounts, onOperation, onRefresh, tasksById])
+  }, [onCanonicalTasks, onError, onHierarchyCounts, onOperation, onRefresh, tasksById])
 
   const bulkTrash = useCallback(async () => {
-    const affected = selectedTaskIds.map(id => tasksById.get(id)).filter((task): task is Task => Boolean(task && !task.parent_task_id))
-    if (!affected.length) return
+    const selectedTasks = selectedTaskIds.map(id => tasksById.get(id)).filter((task): task is Task => Boolean(task && !task.parent_task_id))
+    const affected = selectedTasks.filter(canAdministerTask)
+    if (!affected.length || affected.length !== selectedTasks.length) {
+      onError('Necesitas Administrar en todas las tareas seleccionadas para enviarlas a Papelera.')
+      return
+    }
     setBulkActionBusy(true)
     const operationID = crypto.randomUUID()
     onOperation(operationID, true)
@@ -963,7 +965,7 @@ export default function TaskBoard({
   const move = useCallback(async (taskId: string, destinationColumnId: string, nextOrders: ColumnOrders, snapshot: { tasks: Task[]; orders: ColumnOrders }) => {
     const task = snapshot.tasks.find(item => item.id === taskId) || localTasks.find(item => item.id === taskId)
     const boardStatus = statuses.find(status => status.id === destinationColumnId)
-    if (!task || !boardStatus) return
+    if (!task || !boardStatus || !canEditTask(task)) return
     const targetStatus = resolvedStatus(task, boardStatus, allStatuses)
     if (!targetStatus) {
       rollback(snapshot)
@@ -1027,8 +1029,9 @@ export default function TaskBoard({
   const handleDragStart = (event: DragStartEvent) => {
     const id = String(event.active.id)
     const task = tasksById.get(id)
-    const group = selectionForDrag(selectedTaskIds, id)
-    dragPointerOriginRef.current = pointerFromActivator(event.activatorEvent)
+    if (!task || !canEditTask(task)) return
+    const group = selectionForDrag(selectedTaskIds, id).filter(taskID => canEditTask(tasksById.get(taskID)))
+    dragPointerOriginRef.current = pointerFromTaskDragActivator(event.activatorEvent)
     if (!selectedTaskIds.includes(id)) setSelectedTaskIds([])
     setSelectionAnchorID(id)
     setDragTaskIds(group)
@@ -1057,7 +1060,7 @@ export default function TaskBoard({
     const origin = dragPointerOriginRef.current
     if (!origin) return
     const point = { x: origin.x + event.delta.x, y: origin.y + event.delta.y }
-    const targets = measuredNavigationTargets()
+    const targets = measureTaskNavigationTargets()
     const next = resolveTaskDropTarget(point, targets, externalDropTarget)
     setExternalDropTarget(current => sameTaskDropTarget(current, next) ? current : next)
     const navigation = document.querySelector<HTMLElement>('[data-task-navigation-scroll]')
@@ -1155,6 +1158,7 @@ export default function TaskBoard({
   }
 
   const quickComplete = async (task: Task, status: TaskWorkflowStatus) => {
+    if (!canEditTask(task)) return
     const operationId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${task.id}-complete`
     onOperation(operationId, true)
     const optimisticPatch = (items: Task[]) => items.map(item => item.id === task.id ? updateTaskStatus(item, status) : item)
@@ -1172,10 +1176,14 @@ export default function TaskBoard({
     }
   }
 
+  const selectedTasks = selectedTaskIds.map(id => tasksById.get(id)).filter((task): task is Task => Boolean(task))
+  const selectedCanTrash = allTasksCanBeAdministered(selectedTasks)
+  const editableDestinationLists = allLists.filter(list => list.permissions?.can_edit === true)
+
   return <div className="relative flex h-full min-h-[430px] flex-col">
     <div className="sr-only" aria-live="polite">{announcement}</div>
     {moveError && <div className="mb-2 flex shrink-0 items-center gap-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700"><span className="min-w-0 flex-1">{moveError.message}</span><button type="button" onClick={moveError.retry} className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-white px-2.5 py-1.5 font-bold shadow-sm"><RotateCcw className="h-3 w-3" />Reintentar</button><button type="button" onClick={() => setMoveError(null)} aria-label="Cerrar" className="rounded p-1 hover:bg-white"><X className="h-3.5 w-3.5" /></button></div>}
-    {selectedTaskIds.length > 0 && !activeId && <div data-task-bulk-actions className="mx-3 mb-2 flex shrink-0 flex-wrap items-center gap-2 rounded-2xl border border-emerald-200 bg-white px-3 py-2 shadow-lg shadow-emerald-950/5 sm:mx-4"><span className="rounded-full bg-emerald-600 px-2.5 py-1 text-[11px] font-black text-white">{selectedTaskIds.length}</span><span className="text-xs font-semibold text-slate-700">{selectedTaskIds.length === 1 ? 'tarea seleccionada' : 'tareas seleccionadas'}</span><div className="ml-auto flex items-center gap-2"><button type="button" onClick={() => setBulkMoveDialogOpen(true)} className="min-h-9 rounded-xl border border-slate-200 px-3 text-xs font-bold text-slate-600 hover:border-emerald-300 hover:bg-emerald-50">Mover a lista…</button><button type="button" onClick={() => setBulkTrashDialogOpen(true)} className="inline-flex min-h-9 items-center gap-1.5 rounded-xl border border-rose-200 px-3 text-xs font-bold text-rose-600 hover:bg-rose-50"><Trash2 className="h-3.5 w-3.5" />Papelera</button><button type="button" onClick={() => { setSelectedTaskIds([]); setSelectionAnchorID('') }} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100" aria-label="Limpiar selección"><X className="h-4 w-4" /></button></div></div>}
+    {selectedTaskIds.length > 0 && !activeId && <div data-task-bulk-actions className="mx-3 mb-2 flex shrink-0 flex-wrap items-center gap-2 rounded-2xl border border-emerald-200 bg-white px-3 py-2 shadow-lg shadow-emerald-950/5 sm:mx-4"><span className="rounded-full bg-emerald-600 px-2.5 py-1 text-[11px] font-black text-white">{selectedTaskIds.length}</span><span className="text-xs font-semibold text-slate-700">{selectedTaskIds.length === 1 ? 'tarea seleccionada' : 'tareas seleccionadas'}</span><div className="ml-auto flex items-center gap-2"><button type="button" onClick={() => setBulkMoveDialogOpen(true)} className="min-h-9 rounded-xl border border-slate-200 px-3 text-xs font-bold text-slate-600 hover:border-emerald-300 hover:bg-emerald-50">Mover a lista…</button>{selectedCanTrash && <button type="button" onClick={() => setBulkTrashDialogOpen(true)} className="inline-flex min-h-9 items-center gap-1.5 rounded-xl border border-rose-200 px-3 text-xs font-bold text-rose-600 hover:bg-rose-50"><Trash2 className="h-3.5 w-3.5" />Papelera</button>}<button type="button" onClick={() => { setSelectedTaskIds([]); setSelectionAnchorID('') }} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100" aria-label="Limpiar selección"><X className="h-4 w-4" /></button></div></div>}
     <DndContext
       sensors={sensors}
       collisionDetection={collisionDetectionStrategy}
@@ -1211,6 +1219,8 @@ export default function TaskBoard({
           recentlyCreatedTaskId={recentlyCreatedTaskId}
           selectedTaskIds={selectedTaskIDSet}
           onSelectTask={selectTask}
+          canCreate={canCreate}
+          canManageStructure={canManageStructure}
           onCreateFull={onCreateFull}
           onOpen={onOpen}
           onEdit={onEdit}
@@ -1222,8 +1232,8 @@ export default function TaskBoard({
       <DragOverlay dropAnimation={{ duration: 180, easing: 'ease-out' }} style={{ zIndex: TASK_OVERLAY_LAYERS.dragOverlay }}>{activeTask ? <OverlayCard task={activeTask} count={Math.max(1, dragTaskIds.length)} destination={externalDropTarget?.label || statuses.find(status => status.id === overColumnId)?.name} destinationColor={externalDropTarget?.color} /> : null}</DragOverlay>
     </DndContext>
     {gatherGhosts.length > 0 && typeof document !== 'undefined' && createPortal(<div className="pointer-events-none fixed inset-0 z-[160] motion-reduce:hidden" aria-hidden="true">{gatherGhosts.map(ghost => <div key={ghost.id} data-task-gather-ghost className="fixed overflow-hidden rounded-xl border border-emerald-300 bg-white px-3 py-2 shadow-xl" style={{ left: ghost.left, top: ghost.top, width: ghost.width, height: ghost.height, '--task-gather-x': `${ghost.dx}px`, '--task-gather-y': `${ghost.dy}px` } as React.CSSProperties}><span className="line-clamp-2 text-sm font-semibold text-slate-700">{ghost.title}</span></div>)}</div>, document.body)}
-    {bulkMoveDialogOpen && typeof document !== 'undefined' && createPortal(<div className="fixed inset-0 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm" style={{ zIndex: TASK_OVERLAY_LAYERS.confirmation }}><div role="dialog" aria-modal="true" className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Acción preparada</p><h2 className="mt-1 text-xl font-black text-slate-900">Mover {selectedTaskIds.length} tareas</h2><p className="mt-2 text-sm leading-6 text-slate-500">Seleccionar una lista solo prepara el destino. Las subtareas acompañarán a sus tareas principales y los estados se remapearán por categoría cuando confirmes.</p><label className="mt-4 block text-xs font-bold text-slate-600">Lista destino<span className="mt-2 block"><TaskListPicker value={pendingBulkListID} lists={allLists} folders={folders} onChange={setPendingBulkListID} /></span></label>{pendingBulkListID && <p className="mt-3 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700">Destino: {allLists.find(list => list.id === pendingBulkListID)?.name}</p>}<div className="mt-6 flex justify-end gap-2"><button type="button" onClick={() => { setBulkMoveDialogOpen(false); setPendingBulkListID('') }} className="rounded-xl px-4 py-2.5 text-sm font-bold text-slate-600">Cancelar</button><button type="button" disabled={!pendingBulkListID || bulkActionBusy} onClick={() => { const ids = [...selectedTaskIds]; const destination = pendingBulkListID; setBulkActionBusy(true); void bulkMove(ids, destination).finally(() => { setBulkActionBusy(false); setBulkMoveDialogOpen(false); setPendingBulkListID('') }) }} className="rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">{bulkActionBusy ? 'Moviendo…' : 'Confirmar movimiento'}</button></div></div></div>, document.body)}
+    {bulkMoveDialogOpen && typeof document !== 'undefined' && createPortal(<div className="fixed inset-0 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm" style={{ zIndex: TASK_OVERLAY_LAYERS.confirmation }}><div role="dialog" aria-modal="true" className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Acción preparada</p><h2 className="mt-1 text-xl font-black text-slate-900">Mover {selectedTaskIds.length} tareas</h2><p className="mt-2 text-sm leading-6 text-slate-500">Seleccionar una lista solo prepara el destino. Las subtareas acompañarán a sus tareas principales y los estados se remapearán por categoría cuando confirmes.</p><label className="mt-4 block text-xs font-bold text-slate-600">Lista destino<span className="mt-2 block"><TaskListPicker value={pendingBulkListID} lists={editableDestinationLists} folders={folders} onChange={setPendingBulkListID} /></span></label>{pendingBulkListID && <p className="mt-3 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700">Destino: {allLists.find(list => list.id === pendingBulkListID)?.name}</p>}<div className="mt-6 flex justify-end gap-2"><button type="button" onClick={() => { setBulkMoveDialogOpen(false); setPendingBulkListID('') }} className="rounded-xl px-4 py-2.5 text-sm font-bold text-slate-600">Cancelar</button><button type="button" disabled={!pendingBulkListID || bulkActionBusy} onClick={() => { const ids = [...selectedTaskIds]; const destination = pendingBulkListID; setBulkActionBusy(true); void bulkMove(ids, destination).finally(() => { setBulkActionBusy(false); setBulkMoveDialogOpen(false); setPendingBulkListID('') }) }} className="rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">{bulkActionBusy ? 'Moviendo…' : 'Confirmar movimiento'}</button></div></div></div>, document.body)}
     {bulkTrashDialogOpen && typeof document !== 'undefined' && createPortal(<div className="fixed inset-0 flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" style={{ zIndex: TASK_OVERLAY_LAYERS.confirmation }}><div role="alertdialog" aria-modal="true" className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><p className="text-[10px] font-black uppercase tracking-[.16em] text-rose-600">Acción masiva protegida</p><h2 className="mt-1 text-xl font-black text-slate-900">Mover a Papelera</h2><p className="mt-2 text-sm leading-6 text-slate-500">Se moverán {selectedTaskIds.length} tareas principales y sus subtareas. Podrás restaurarlas dentro de la retención configurada; esto no es borrado permanente.</p><label className="mt-4 block text-xs font-bold text-slate-600">Escribe exactamente <strong>MOVER {selectedTaskIds.length} TAREAS</strong><input value={bulkTrashPhrase} onChange={event => setBulkTrashPhrase(event.target.value)} className="mt-2 min-h-11 w-full rounded-xl border border-slate-200 px-3 outline-none focus:border-rose-400 focus:ring-4 focus:ring-rose-100" /></label><div className="mt-6 flex justify-end gap-2"><button type="button" onClick={() => { setBulkTrashDialogOpen(false); setBulkTrashPhrase('') }} className="rounded-xl px-4 py-2.5 text-sm font-bold text-slate-600">Cancelar</button><button type="button" disabled={bulkTrashPhrase !== `MOVER ${selectedTaskIds.length} TAREAS` || bulkActionBusy} onClick={() => void bulkTrash()} className="rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-black text-white disabled:opacity-40">{bulkActionBusy ? 'Moviendo…' : 'Mover a Papelera'}</button></div></div></div>, document.body)}
-    {pendingFolderDrop && <div className="fixed inset-0 z-[150] flex items-center justify-center bg-slate-950/35 p-4 backdrop-blur-sm" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setPendingFolderDrop(null) }}><div role="dialog" aria-modal="true" aria-labelledby="task-folder-drop-title" className="w-full max-w-md rounded-3xl bg-white p-5 shadow-2xl"><div className="flex items-start justify-between gap-3"><div><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Elegir destino</p><h2 id="task-folder-drop-title" className="mt-1 text-lg font-black text-slate-900">{pendingFolderDrop.folder.name}</h2><p className="mt-1 text-sm text-slate-500">Las tareas siempre pertenecen a una lista. Selecciona la lista concreta dentro de esta carpeta.</p></div><button type="button" onClick={() => setPendingFolderDrop(null)} className="rounded-xl p-2 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button></div><div className="mt-4 space-y-2">{pendingFolderDrop.folder.lists.map(list => <button key={list.id} type="button" onClick={() => { const ids = pendingFolderDrop.taskIDs; setPendingFolderDrop(null); void bulkMove(ids, list.id) }} className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3 text-left transition hover:border-emerald-300 hover:bg-emerald-50"><span className="h-3 w-3 rounded-full" style={{ backgroundColor: list.color }} /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-bold text-slate-700">{list.name}</span><span className="text-[10px] text-slate-400">{pendingFolderDrop.folder.name} / {list.name}</span></span></button>)}{!pendingFolderDrop.folder.lists.length && <div className="rounded-2xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-400">Esta carpeta no tiene listas disponibles.</div>}</div></div></div>}
+    {pendingFolderDrop && <div className="fixed inset-0 z-[150] flex items-center justify-center bg-slate-950/35 p-4 backdrop-blur-sm" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setPendingFolderDrop(null) }}><div role="dialog" aria-modal="true" aria-labelledby="task-folder-drop-title" className="w-full max-w-md rounded-3xl bg-white p-5 shadow-2xl"><div className="flex items-start justify-between gap-3"><div><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Elegir destino</p><h2 id="task-folder-drop-title" className="mt-1 text-lg font-black text-slate-900">{pendingFolderDrop.folder.name}</h2><p className="mt-1 text-sm text-slate-500">Las tareas siempre pertenecen a una lista. Selecciona la lista concreta dentro de esta carpeta.</p></div><button type="button" onClick={() => setPendingFolderDrop(null)} className="rounded-xl p-2 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button></div><div className="mt-4 space-y-2">{pendingFolderDrop.folder.lists.filter(list => list.permissions?.can_edit === true).map(list => <button key={list.id} type="button" onClick={() => { const ids = pendingFolderDrop.taskIDs; setPendingFolderDrop(null); void bulkMove(ids, list.id) }} className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3 text-left transition hover:border-emerald-300 hover:bg-emerald-50"><span className="h-3 w-3 rounded-full" style={{ backgroundColor: list.color }} /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-bold text-slate-700">{list.name}</span><span className="text-[10px] text-slate-400">{pendingFolderDrop.folder.name} / {list.name}</span></span></button>)}{!pendingFolderDrop.folder.lists.some(list => list.permissions?.can_edit === true) && <div className="rounded-2xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-400">No hay listas editables en esta carpeta.</div>}</div></div></div>}
   </div>
 }

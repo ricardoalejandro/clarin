@@ -65,7 +65,7 @@ func (s *Server) handleRetryTaskAttachmentPreview(c *fiber.Ctx) error {
 		return taskWorkError(c, err)
 	}
 	if requeued {
-		s.broadcastTaskWork(accountID, "attachment_preview_retried", fiber.Map{"task_id": taskID, "attachment_id": attachmentID, "preview": preview, "operation_id": operationID})
+		s.broadcastTaskWork(c.Context(), accountID, "attachment_preview_retried", fiber.Map{"task_id": taskID, "attachment_id": attachmentID, "preview": preview, "operation_id": operationID})
 	}
 	return c.JSON(fiber.Map{"success": true, "preview": preview, "requeued": requeued, "operation_id": operationID})
 }
@@ -86,10 +86,16 @@ func (s *Server) handleGetTaskAttachmentComments(c *fiber.Ctx) error {
 }
 
 func (s *Server) setTaskAttachmentCommentPermissions(c *fiber.Ctx, accountID, userID uuid.UUID, items []*domain.TaskAttachmentComment) {
-	setTaskAttachmentCommentPermissions(items, userID, s.isAccountAdmin(c, accountID, userID))
+	canComment := false
+	if taskID, err := uuid.Parse(c.Params("id")); err == nil {
+		if access, accessErr := s.repos.TaskWork.ResolveTaskAccess(c.Context(), accountID, userID, taskID); accessErr == nil {
+			canComment = access.CanComment
+		}
+	}
+	setTaskAttachmentCommentPermissions(items, userID, s.isAccountAdmin(c, accountID, userID), canComment)
 }
 
-func setTaskAttachmentCommentPermissions(items []*domain.TaskAttachmentComment, userID uuid.UUID, admin bool) {
+func setTaskAttachmentCommentPermissions(items []*domain.TaskAttachmentComment, userID uuid.UUID, admin, canComment bool) {
 	resolvedRoots := make(map[uuid.UUID]bool, len(items))
 	for _, item := range items {
 		if item.ParentID == nil {
@@ -101,9 +107,9 @@ func setTaskAttachmentCommentPermissions(items []*domain.TaskAttachmentComment, 
 		if item.ParentID != nil {
 			threadResolved = resolvedRoots[*item.ParentID]
 		}
-		item.CanEdit = !item.Deleted && !threadResolved && (admin || item.AuthorID == userID)
+		item.CanEdit = canComment && !item.Deleted && !threadResolved && (admin || item.AuthorID == userID)
 		item.CanDelete = item.CanEdit
-		item.CanResolve = !item.Deleted && item.ParentID == nil
+		item.CanResolve = canComment && !item.Deleted && item.ParentID == nil
 	}
 }
 
@@ -173,7 +179,7 @@ func (s *Server) handleCreateTaskAttachmentComment(c *fiber.Ctx) error {
 	}
 	s.setTaskAttachmentCommentPermissions(c, accountID, userID, items)
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, taskID, &userID, "attachment_comment_added", fiber.Map{"attachment_id": attachmentID, "comment_id": item.ID})
-	s.broadcastTaskWork(accountID, "attachment_comment_added", fiber.Map{"task_id": taskID, "attachment_id": attachmentID, "comment": attachmentCommentForRealtime(item)})
+	s.broadcastTaskWork(c.Context(), accountID, "attachment_comment_added", fiber.Map{"task_id": taskID, "attachment_id": attachmentID, "comment": attachmentCommentForRealtime(item)})
 	return c.JSON(fiber.Map{"success": true, "comment": item})
 }
 
@@ -214,7 +220,7 @@ func (s *Server) handleResolveTaskAttachmentComment(c *fiber.Ctx) error {
 		if req.Resolved {
 			action = "attachment_comment_resolved"
 		}
-		s.broadcastTaskWork(accountID, action, fiber.Map{"task_id": taskID, "attachment_id": attachmentID, "comment_id": commentID, "comment": attachmentCommentForRealtime(item), "operation_id": operationID})
+		s.broadcastTaskWork(c.Context(), accountID, action, fiber.Map{"task_id": taskID, "attachment_id": attachmentID, "comment_id": commentID, "comment": attachmentCommentForRealtime(item), "operation_id": operationID})
 		return c.JSON(fiber.Map{"success": true, "comment": item, "operation_id": operationID})
 	}
 	return c.SendStatus(404)
@@ -260,7 +266,7 @@ func (s *Server) handleUpdateTaskAttachmentComment(c *fiber.Ctx) error {
 	if item == nil {
 		return c.SendStatus(404)
 	}
-	s.broadcastTaskWork(accountID, "attachment_comment_updated", fiber.Map{"task_id": taskID, "attachment_id": attachmentID, "comment_id": commentID, "comment": attachmentCommentForRealtime(item), "operation_id": operationID})
+	s.broadcastTaskWork(c.Context(), accountID, "attachment_comment_updated", fiber.Map{"task_id": taskID, "attachment_id": attachmentID, "comment_id": commentID, "comment": attachmentCommentForRealtime(item), "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "comment": item, "operation_id": operationID})
 }
 
@@ -295,6 +301,6 @@ func (s *Server) handleDeleteTaskAttachmentComment(c *fiber.Ctx) error {
 	}
 	s.setTaskAttachmentCommentPermissions(c, accountID, userID, items)
 	item := findTaskAttachmentComment(items, commentID)
-	s.broadcastTaskWork(accountID, "attachment_comment_deleted", fiber.Map{"task_id": taskID, "attachment_id": attachmentID, "comment_id": commentID, "comment": attachmentCommentForRealtime(item), "operation_id": operationID})
+	s.broadcastTaskWork(c.Context(), accountID, "attachment_comment_deleted", fiber.Map{"task_id": taskID, "attachment_id": attachmentID, "comment_id": commentID, "comment": attachmentCommentForRealtime(item), "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "comment": item, "deleted_comment_id": commentID, "operation_id": operationID})
 }

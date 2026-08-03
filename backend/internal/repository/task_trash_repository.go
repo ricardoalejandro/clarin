@@ -55,7 +55,7 @@ func trashEligibility(archivedAt time.Time, days *int, now time.Time) (*time.Tim
 	return &next, !next.After(now)
 }
 
-func (r *TaskWorkRepository) ListTrashContainers(ctx context.Context, accountID uuid.UUID, now time.Time) ([]*domain.TaskTrashContainer, error) {
+func (r *TaskWorkRepository) ListTrashContainers(ctx context.Context, accountID, actorID uuid.UUID, now time.Time) ([]*domain.TaskTrashContainer, error) {
 	days, err := r.GetTrashRetentionDays(ctx, accountID)
 	if err != nil {
 		return nil, err
@@ -66,10 +66,13 @@ func (r *TaskWorkRepository) ListTrashContainers(ctx context.Context, accountID 
 			COUNT(DISTINCT list.id),COUNT(DISTINCT task.id),
 			MAX(GREATEST(COALESCE(list.archived_at,folder.archived_at),COALESCE(task.deleted_at,folder.archived_at)))
 		FROM task_folders folder
+		JOIN task_environments environment ON environment.account_id=folder.account_id AND environment.id=folder.environment_id
 		LEFT JOIN task_lists list ON list.account_id=folder.account_id AND list.folder_id=folder.id
 		LEFT JOIN tasks task ON task.account_id=folder.account_id AND task.list_id=list.id
-		WHERE folder.account_id=$1 AND folder.archived_at IS NOT NULL
-		GROUP BY folder.id ORDER BY folder.archived_at DESC,folder.id`, accountID)
+			AND `+taskActorCanViewSQL("task", "list", "$2")+`
+		WHERE folder.account_id=$1 AND folder.archived_at IS NOT NULL AND environment.archived_at IS NULL
+		  AND (`+environmentActorAccessRankSQL("environment", "$2")+`)>=4
+		GROUP BY folder.id ORDER BY folder.archived_at DESC,folder.id`, accountID, actorID)
 	if err != nil {
 		return nil, err
 	}
@@ -94,12 +97,15 @@ func (r *TaskWorkRepository) ListTrashContainers(ctx context.Context, accountID 
 			COALESCE(folder.name,''),list.archived_with_folder,folder.archived_at,
 			COUNT(task.id),MAX(COALESCE(task.deleted_at,list.archived_at))
 		FROM task_lists list
+		JOIN task_environments environment ON environment.account_id=list.account_id AND environment.id=list.environment_id
 		LEFT JOIN task_folders folder ON folder.account_id=list.account_id AND folder.id=list.folder_id
 		LEFT JOIN tasks task ON task.account_id=list.account_id AND task.list_id=list.id
+			AND `+taskActorCanViewSQL("task", "list", "$2")+`
 		WHERE list.account_id=$1 AND list.archived_at IS NOT NULL AND NOT list.is_default
-			AND NOT list.archived_with_folder
+			AND NOT list.archived_with_folder AND environment.archived_at IS NULL
+			AND (`+environmentActorAccessRankSQL("environment", "$2")+`)>=4
 		GROUP BY list.id,folder.id
-		ORDER BY list.archived_at DESC,list.id`, accountID)
+		ORDER BY list.archived_at DESC,list.id`, accountID, actorID)
 	if err != nil {
 		return nil, err
 	}
@@ -120,18 +126,22 @@ func (r *TaskWorkRepository) ListTrashContainers(ctx context.Context, accountID 
 	return items, listRows.Err()
 }
 
-func (r *TaskWorkRepository) ArchiveListConfirmed(ctx context.Context, accountID, listID uuid.UUID, expectedName string) error {
+func (r *TaskWorkRepository) ArchiveListConfirmed(ctx context.Context, accountID, actorID, listID uuid.UUID, expectedName string) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 	var name string
+	var environmentID uuid.UUID
 	var isDefault bool
-	if err := tx.QueryRow(ctx, `SELECT name,is_default FROM task_lists WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, accountID, listID).Scan(&name, &isDefault); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT name,is_default,environment_id FROM task_lists WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, accountID, listID).Scan(&name, &isDefault, &environmentID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound
 		}
+		return err
+	}
+	if err := lockAndRequireActiveEnvironmentAccessTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessFull); err != nil {
 		return err
 	}
 	if isDefault {
@@ -153,17 +163,21 @@ func (r *TaskWorkRepository) ArchiveListConfirmed(ctx context.Context, accountID
 	return tx.Commit(ctx)
 }
 
-func (r *TaskWorkRepository) ArchiveFolderConfirmed(ctx context.Context, accountID, folderID uuid.UUID, expectedName string) error {
+func (r *TaskWorkRepository) ArchiveFolderConfirmed(ctx context.Context, accountID, actorID, folderID uuid.UUID, expectedName string) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 	var name string
-	if err := tx.QueryRow(ctx, `SELECT name FROM task_folders WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, accountID, folderID).Scan(&name); err != nil {
+	var environmentID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT name,environment_id FROM task_folders WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, accountID, folderID).Scan(&name, &environmentID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound
 		}
+		return err
+	}
+	if err := lockAndRequireActiveEnvironmentAccessTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessFull); err != nil {
 		return err
 	}
 	if expectedName != name {
@@ -204,18 +218,22 @@ func (r *TaskWorkRepository) ArchiveFolderConfirmed(ctx context.Context, account
 	return tx.Commit(ctx)
 }
 
-func (r *TaskWorkRepository) RestoreList(ctx context.Context, accountID, listID uuid.UUID) error {
+func (r *TaskWorkRepository) RestoreList(ctx context.Context, accountID, actorID, listID uuid.UUID) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 	var folderID *uuid.UUID
+	var environmentID uuid.UUID
 	var isDefault bool
-	if err := tx.QueryRow(ctx, `SELECT folder_id,is_default FROM task_lists WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL FOR UPDATE`, accountID, listID).Scan(&folderID, &isDefault); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT folder_id,is_default,environment_id FROM task_lists WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL FOR UPDATE`, accountID, listID).Scan(&folderID, &isDefault, &environmentID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound
 		}
+		return err
+	}
+	if err := lockAndRequireActiveEnvironmentAccessTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessFull); err != nil {
 		return err
 	}
 	if isDefault {
@@ -240,16 +258,20 @@ func (r *TaskWorkRepository) RestoreList(ctx context.Context, accountID, listID 
 	return tx.Commit(ctx)
 }
 
-func (r *TaskWorkRepository) RestoreFolder(ctx context.Context, accountID, folderID uuid.UUID) error {
+func (r *TaskWorkRepository) RestoreFolder(ctx context.Context, accountID, actorID, folderID uuid.UUID) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if err := tx.QueryRow(ctx, `SELECT id FROM task_folders WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL FOR UPDATE`, accountID, folderID).Scan(new(uuid.UUID)); err != nil {
+	var environmentID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT environment_id FROM task_folders WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL FOR UPDATE`, accountID, folderID).Scan(&environmentID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound
 		}
+		return err
+	}
+	if err := lockAndRequireActiveEnvironmentAccessTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessFull); err != nil {
 		return err
 	}
 	rows, err := tx.Query(ctx, `SELECT id FROM task_lists WHERE account_id=$1 AND folder_id=$2 ORDER BY id FOR UPDATE`, accountID, folderID)
@@ -316,14 +338,20 @@ func enqueueTaskMediaForTasks(ctx context.Context, tx pgx.Tx, accountID uuid.UUI
 	return err
 }
 
-func (r *TaskWorkRepository) PurgeTask(ctx context.Context, accountID, taskID uuid.UUID, expectedTitle string, now time.Time) (*domain.TaskTrashPurgeResult, error) {
+func (r *TaskWorkRepository) PurgeTask(ctx context.Context, accountID, actorID, taskID uuid.UUID, expectedTitle string, now time.Time) (*domain.TaskTrashPurgeResult, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockAndRequireTaskAccountAdminTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
 	days, err := lockTrashPolicy(ctx, tx, accountID)
 	if err != nil {
+		return nil, err
+	}
+	if err := lockAndRequireDeletedTaskAccessTx(ctx, tx, accountID, actorID, []uuid.UUID{taskID}, domain.TaskAccessFull); err != nil {
 		return nil, err
 	}
 	var title string
@@ -379,23 +407,30 @@ func (r *TaskWorkRepository) PurgeTask(ctx context.Context, accountID, taskID uu
 	return &domain.TaskTrashPurgeResult{Tasks: len(ids)}, nil
 }
 
-func (r *TaskWorkRepository) PurgeList(ctx context.Context, accountID, listID uuid.UUID, expectedName string, now time.Time) (*domain.TaskTrashPurgeResult, error) {
+func (r *TaskWorkRepository) PurgeList(ctx context.Context, accountID, actorID, listID uuid.UUID, expectedName string, now time.Time) (*domain.TaskTrashPurgeResult, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockAndRequireTaskAccountAdminTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
 	days, err := lockTrashPolicy(ctx, tx, accountID)
 	if err != nil {
 		return nil, err
 	}
 	var name string
 	var archivedAt time.Time
+	var environmentID uuid.UUID
 	var isDefault bool
-	if err := tx.QueryRow(ctx, `SELECT name,archived_at,is_default FROM task_lists WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL FOR UPDATE`, accountID, listID).Scan(&name, &archivedAt, &isDefault); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT name,archived_at,is_default,environment_id FROM task_lists WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL FOR UPDATE`, accountID, listID).Scan(&name, &archivedAt, &isDefault, &environmentID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrTaskWorkNotFound
 		}
+		return nil, err
+	}
+	if err := lockAndRequireActiveEnvironmentAccessTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessFull); err != nil {
 		return nil, err
 	}
 	if isDefault {
@@ -452,22 +487,29 @@ func (r *TaskWorkRepository) PurgeList(ctx context.Context, accountID, listID uu
 	return &domain.TaskTrashPurgeResult{Tasks: len(ids), Lists: 1}, nil
 }
 
-func (r *TaskWorkRepository) PurgeFolder(ctx context.Context, accountID, folderID uuid.UUID, expectedName string, now time.Time) (*domain.TaskTrashPurgeResult, error) {
+func (r *TaskWorkRepository) PurgeFolder(ctx context.Context, accountID, actorID, folderID uuid.UUID, expectedName string, now time.Time) (*domain.TaskTrashPurgeResult, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockAndRequireTaskAccountAdminTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
 	days, err := lockTrashPolicy(ctx, tx, accountID)
 	if err != nil {
 		return nil, err
 	}
 	var name string
 	var archivedAt time.Time
-	if err := tx.QueryRow(ctx, `SELECT name,archived_at FROM task_folders WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL FOR UPDATE`, accountID, folderID).Scan(&name, &archivedAt); err != nil {
+	var environmentID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT name,archived_at,environment_id FROM task_folders WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL FOR UPDATE`, accountID, folderID).Scan(&name, &archivedAt, &environmentID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrTaskWorkNotFound
 		}
+		return nil, err
+	}
+	if err := lockAndRequireActiveEnvironmentAccessTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessFull); err != nil {
 		return nil, err
 	}
 	if expectedName != name {
@@ -588,6 +630,28 @@ func (r *TaskWorkRepository) PrepareTaskMediaGCDeletion(ctx context.Context, job
 	if objectKey != job.ObjectKey {
 		return false, nil
 	}
+	// Comment uploads remain hidden drafts until a comment transaction claims
+	// them. Once their durable TTL expires, remove the draft reference under the
+	// same media lock so the ordinary reference proof below can safely collect
+	// the object. A published comment deletes this GC job transactionally.
+	if _, err := tx.Exec(ctx, `DELETE FROM task_attachments
+		WHERE account_id=$1 AND media_asset_id=$2 AND attachment_scope='comment_draft'
+		  AND draft_expires_at<=NOW()`, job.AccountID, job.MediaAssetID); err != nil {
+		return false, err
+	}
+	var nextDraftExpiry *time.Time
+	if err := tx.QueryRow(ctx, `SELECT MIN(draft_expires_at) FROM task_attachments
+		WHERE account_id=$1 AND media_asset_id=$2 AND attachment_scope='comment_draft'`, job.AccountID, job.MediaAssetID).
+		Scan(&nextDraftExpiry); err != nil {
+		return false, err
+	}
+	if nextDraftExpiry != nil {
+		if _, err := tx.Exec(ctx, `UPDATE task_media_gc_jobs SET status='pending',claim_token=NULL,last_error='',
+			available_at=$3,updated_at=NOW() WHERE id=$1 AND claim_token=$2`, job.ID, job.ClaimToken, *nextDraftExpiry); err != nil {
+			return false, err
+		}
+		return false, tx.Commit(ctx)
+	}
 	var referenced bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(
 		SELECT 1 FROM task_attachments WHERE account_id=$1 AND media_asset_id=$2
@@ -614,15 +678,34 @@ func (r *TaskWorkRepository) CompleteTaskMediaGCJob(ctx context.Context, job *do
 		return err
 	}
 	defer tx.Rollback(ctx)
+	// A later upload can reuse the account-scoped content hash after Prepare
+	// has committed and reset this durable job to a new object key/claim. Lock
+	// and verify the original claim before changing inventory so a stale worker
+	// can never mark that newer reservation as deleted.
+	var claimedObjectKey string
+	if err := tx.QueryRow(ctx, `SELECT object_key FROM task_media_gc_jobs
+		WHERE id=$1 AND account_id=$2 AND media_asset_id=$3 AND claim_token=$4 FOR UPDATE`,
+		job.ID, job.AccountID, job.MediaAssetID, job.ClaimToken).Scan(&claimedObjectKey); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return tx.Commit(ctx)
+		}
+		return err
+	}
+	if claimedObjectKey != job.ObjectKey {
+		return tx.Commit(ctx)
+	}
 	if deleted {
-		if _, err = tx.Exec(ctx, `UPDATE media_assets SET status='deleted',deleted_at=NOW(),updated_at=NOW() WHERE account_id=$1 AND id=$2`, job.AccountID, job.MediaAssetID); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE media_assets SET status='deleted',deleted_at=NOW(),updated_at=NOW()
+			WHERE account_id=$1 AND id=$2 AND object_key=$3 AND status='task_gc_deleting'`, job.AccountID, job.MediaAssetID, job.ObjectKey); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(ctx, `UPDATE storage_objects SET status='deleted',deleted_at=NOW(),updated_at=NOW() WHERE account_id=$1 AND object_key=$2`, job.AccountID, job.ObjectKey); err != nil {
 			return err
 		}
 	}
-	if _, err = tx.Exec(ctx, `DELETE FROM task_media_gc_jobs WHERE id=$1 AND claim_token=$2`, job.ID, job.ClaimToken); err != nil {
+	if _, err = tx.Exec(ctx, `DELETE FROM task_media_gc_jobs
+		WHERE id=$1 AND account_id=$2 AND media_asset_id=$3 AND object_key=$4 AND claim_token=$5`,
+		job.ID, job.AccountID, job.MediaAssetID, job.ObjectKey, job.ClaimToken); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

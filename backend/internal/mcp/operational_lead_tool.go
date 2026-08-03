@@ -12,6 +12,7 @@ import (
 	mdmcp "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/eroscontext"
 	"github.com/naperu/clarin/internal/service"
 )
 
@@ -79,6 +80,14 @@ func (s *MCPServer) toolQueryLeadsOperational(ctx context.Context, req mdmcp.Cal
 		}), nil
 	}
 	filters.AccountID = accountID
+	erosClaims, erosClaimsErr := s.getErosContextClaims(ctx, req)
+	if erosClaimsErr == nil && !erosClaims.Legacy {
+		if actorID, parseErr := uuid.Parse(erosClaims.UserID); parseErr == nil {
+			filters.ActorID = &actorID
+			taskDataAllowed := eroscontext.HasPermission(erosClaims, domain.PermTasks)
+			filters.TaskDataAllowed = &taskDataAllowed
+		}
+	}
 
 	result, err := service.NewOperationalLeadQueryService(s.repos).Query(ctx, filters)
 	if err != nil {
@@ -90,10 +99,9 @@ func (s *MCPServer) toolQueryLeadsOperational(ctx context.Context, req mdmcp.Cal
 		return mcpStructuredError("QUERY_FAILED", "no se pudo ejecutar la consulta operativa de leads", nil), nil
 	}
 	if result.Mode == service.OperationalLeadQueryModeList && len(result.Items) > 0 {
-		claims, claimsErr := s.getErosContextClaims(ctx, req)
-		if claimsErr == nil && !claims.Legacy {
-			runID, _ := uuid.Parse(claims.RunID)
-			userID, _ := uuid.Parse(claims.UserID)
+		if erosClaimsErr == nil && !erosClaims.Legacy {
+			runID, _ := uuid.Parse(erosClaims.RunID)
+			userID, _ := uuid.Parse(erosClaims.UserID)
 			ids := operationalResultIDs(result.Items)
 			if len(ids) > 0 {
 				filtersJSON, _ := json.Marshal(sanitizedErosToolArgs(req))
@@ -156,7 +164,8 @@ func (s *MCPServer) toolReuseErosResultSet(ctx context.Context, req mdmcp.CallTo
 	if !containsString(fields, "id") {
 		fields = append([]string{"id"}, fields...)
 	}
-	result, err := service.NewOperationalLeadQueryService(s.repos).Query(ctx, service.OperationalLeadFilters{AccountID: accountID, Mode: service.OperationalLeadQueryModeList, Fields: fields, Limit: len(set.EntityIDs), IDs: set.EntityIDs, PreserveIDOrder: true})
+	taskDataAllowed := eroscontext.HasPermission(claims, domain.PermTasks)
+	result, err := service.NewOperationalLeadQueryService(s.repos).Query(ctx, service.OperationalLeadFilters{AccountID: accountID, ActorID: &userID, TaskDataAllowed: &taskDataAllowed, Mode: service.OperationalLeadQueryModeList, Fields: fields, Limit: len(set.EntityIDs), IDs: set.EntityIDs, PreserveIDOrder: true})
 	if err != nil {
 		return mcpStructuredError("QUERY_FAILED", "no se pudo actualizar el resultado guardado", nil), nil
 	}

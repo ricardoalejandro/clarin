@@ -96,18 +96,17 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		`UPDATE task_lists SET icon=CASE WHEN is_default THEN 'inbox' ELSE 'list' END
 		 WHERE icon IS NULL OR BTRIM(icon)='' OR icon NOT IN ('inbox','list','folder','briefcase','rocket','target','users','megaphone','graduation-cap','building','clipboard-list','layers','calendar','flag','phone','message-circle','bell','check-square','archive','award','book-open','box','brain','bug','camera','money','cloud','code','coffee','compass','file-text','gem','gift','globe','heart','home','key','laptop','lightbulb','link','lock','map-pin','package','palette','plane','settings','shield','shopping-cart','sparkles','star','store','tag','thumbs-up','trophy','truck','user','video','wallet','wrench')`,
 		`ALTER TABLE task_folders ADD COLUMN IF NOT EXISTS icon TEXT NOT NULL DEFAULT 'folder'`,
-		`UPDATE task_folders SET icon='folder'
-		 WHERE icon IS NULL OR BTRIM(icon)='' OR icon NOT IN ('inbox','list','folder','briefcase','rocket','target','users','megaphone','graduation-cap','building','clipboard-list','layers','calendar','flag','phone','message-circle','bell','check-square','archive','award','book-open','box','brain','bug','camera','money','cloud','code','coffee','compass','file-text','gem','gift','globe','heart','home','key','laptop','lightbulb','link','lock','map-pin','package','palette','plane','settings','shield','shopping-cart','sparkles','star','store','tag','thumbs-up','trophy','truck','user','video','wallet','wrench')`,
+		`UPDATE task_folders SET icon='folder' WHERE icon IS DISTINCT FROM 'folder'`,
 		`DO $$ BEGIN ALTER TABLE task_lists ADD CONSTRAINT task_lists_icon_check
 			CHECK (icon IN ('inbox','list','folder','briefcase','rocket','target','users','megaphone','graduation-cap','building','clipboard-list','layers','calendar','flag','phone','message-circle','bell','check-square','archive','award','book-open','box','brain','bug','camera','money','cloud','code','coffee','compass','file-text','gem','gift','globe','heart','home','key','laptop','lightbulb','link','lock','map-pin','package','palette','plane','settings','shield','shopping-cart','sparkles','star','store','tag','thumbs-up','trophy','truck','user','video','wallet','wrench'));
 			EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`DO $$ BEGIN ALTER TABLE task_folders ADD CONSTRAINT task_folders_icon_check
-			CHECK (icon IN ('inbox','list','folder','briefcase','rocket','target','users','megaphone','graduation-cap','building','clipboard-list','layers','calendar','flag','phone','message-circle','bell','check-square','archive','award','book-open','box','brain','bug','camera','money','cloud','code','coffee','compass','file-text','gem','gift','globe','heart','home','key','laptop','lightbulb','link','lock','map-pin','package','palette','plane','settings','shield','shopping-cart','sparkles','star','store','tag','thumbs-up','trophy','truck','user','video','wallet','wrench'));
+			CHECK (icon = 'folder');
 			EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE task_lists DROP CONSTRAINT IF EXISTS task_lists_icon_check`,
 		`ALTER TABLE task_lists ADD CONSTRAINT task_lists_icon_check CHECK (icon IN ('inbox','list','folder','briefcase','rocket','target','users','megaphone','graduation-cap','building','clipboard-list','layers','calendar','flag','phone','message-circle','bell','check-square','archive','award','book-open','box','brain','bug','camera','money','cloud','code','coffee','compass','file-text','gem','gift','globe','heart','home','key','laptop','lightbulb','link','lock','map-pin','package','palette','plane','settings','shield','shopping-cart','sparkles','star','store','tag','thumbs-up','trophy','truck','user','video','wallet','wrench'))`,
 		`ALTER TABLE task_folders DROP CONSTRAINT IF EXISTS task_folders_icon_check`,
-		`ALTER TABLE task_folders ADD CONSTRAINT task_folders_icon_check CHECK (icon IN ('inbox','list','folder','briefcase','rocket','target','users','megaphone','graduation-cap','building','clipboard-list','layers','calendar','flag','phone','message-circle','bell','check-square','archive','award','book-open','box','brain','bug','camera','money','cloud','code','coffee','compass','file-text','gem','gift','globe','heart','home','key','laptop','lightbulb','link','lock','map-pin','package','palette','plane','settings','shield','shopping-cart','sparkles','star','store','tag','thumbs-up','trophy','truck','user','video','wallet','wrench'))`,
+		`ALTER TABLE task_folders ADD CONSTRAINT task_folders_icon_check CHECK (icon = 'folder')`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_lists_account_id ON task_lists(account_id, id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_lists_default ON task_lists(account_id) WHERE is_default AND archived_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_task_lists_folder_order ON task_lists(account_id, folder_id, archived_at, sort_order)`,
@@ -198,10 +197,39 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 			task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 			media_asset_id UUID NOT NULL REFERENCES media_assets(id) ON DELETE RESTRICT,
 			uploaded_by UUID REFERENCES users(id) ON DELETE SET NULL,
+			attachment_scope VARCHAR(20) NOT NULL DEFAULT 'task',
+			draft_owner_id UUID,
+			draft_expires_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			UNIQUE(task_id, media_asset_id)
+			CONSTRAINT task_attachments_scope_check CHECK (
+				(attachment_scope='comment_draft' AND draft_owner_id IS NOT NULL AND draft_expires_at IS NOT NULL)
+				OR (attachment_scope IN ('task','comment') AND draft_owner_id IS NULL AND draft_expires_at IS NULL)
+			)
 		)`,
+		`ALTER TABLE task_attachments ADD COLUMN IF NOT EXISTS attachment_scope VARCHAR(20) NOT NULL DEFAULT 'task'`,
+		`ALTER TABLE task_attachments ADD COLUMN IF NOT EXISTS draft_owner_id UUID`,
+		`ALTER TABLE task_attachments ADD COLUMN IF NOT EXISTS draft_expires_at TIMESTAMPTZ`,
+		`DO $$ BEGIN ALTER TABLE task_attachments ADD CONSTRAINT task_attachments_scope_check CHECK (
+			(attachment_scope='comment_draft' AND draft_owner_id IS NOT NULL AND draft_expires_at IS NOT NULL)
+			OR (attachment_scope IN ('task','comment') AND draft_owner_id IS NULL AND draft_expires_at IS NULL)
+		); EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE task_attachments ADD CONSTRAINT task_attachments_draft_owner_fkey
+			FOREIGN KEY(account_id,draft_owner_id) REFERENCES user_accounts(account_id,user_id) ON DELETE CASCADE;
+			EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		// The historical task-wide uniqueness mixed an attachment reference with
+		// comment-draft ownership. Identical bytes are account-deduplicated in
+		// media_assets, but two commenters still need independent private drafts.
+		`ALTER TABLE task_attachments DROP CONSTRAINT IF EXISTS task_attachments_task_id_media_asset_id_key`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_attachments_task_asset
+			ON task_attachments(account_id,task_id,media_asset_id) WHERE attachment_scope='task'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_attachments_comment_draft_owner_asset
+			ON task_attachments(account_id,task_id,media_asset_id,draft_owner_id)
+			WHERE attachment_scope='comment_draft'`,
 		`CREATE INDEX IF NOT EXISTS idx_task_attachments_task ON task_attachments(account_id, task_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_task_attachments_expired_comment_drafts
+			ON task_attachments(account_id,draft_expires_at,media_asset_id) WHERE attachment_scope='comment_draft'`,
+		`CREATE INDEX IF NOT EXISTS idx_task_attachments_draft_owner
+			ON task_attachments(account_id,draft_owner_id) WHERE draft_owner_id IS NOT NULL`,
 		`CREATE TABLE IF NOT EXISTS task_media_gc_jobs (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -403,7 +431,7 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		BEGIN
 			INSERT INTO task_workflows(account_id,name,is_default)
 			VALUES(NEW.id,'Flujo general',TRUE)
-			ON CONFLICT(account_id,name) DO UPDATE SET is_default=TRUE,updated_at=NOW()
+			ON CONFLICT DO NOTHING
 			RETURNING id INTO workflow_uuid;
 			INSERT INTO task_statuses(account_id,workflow_id,name,color,category,sort_order,is_default)
 			VALUES
@@ -427,7 +455,7 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 			SELECT NEW.account_id,w.id,TRUE,'Bandeja general','Tareas sin una lista específica','#10B981','inbox',0,NEW.user_id,TRUE
 			FROM task_workflows w
 			WHERE w.account_id=NEW.account_id AND w.is_default
-			ON CONFLICT (account_id) WHERE is_default AND archived_at IS NULL DO NOTHING;
+			ON CONFLICT DO NOTHING;
 			RETURN NEW;
 		END;
 		$$ LANGUAGE plpgsql`,
@@ -452,7 +480,7 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		SELECT a.id, 'Flujo general', TRUE
 		FROM accounts a
 		WHERE NOT EXISTS (SELECT 1 FROM task_workflows w WHERE w.account_id=a.id AND w.is_default)
-		ON CONFLICT (account_id,name) DO UPDATE SET is_default=TRUE,updated_at=NOW()
+		ON CONFLICT DO NOTHING
 	`); err != nil {
 		return fmt.Errorf("task work default workflow migration failed: %w", err)
 	}
@@ -498,7 +526,13 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 
 	// Reuse an existing root list named Bandeja general when possible, then
 	// create exactly one durable default list for every account membership.
-	if _, err := db.Exec(ctx, `
+	var environmentScoped bool
+	if err := db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.columns
+		WHERE table_schema=current_schema() AND table_name='task_lists' AND column_name='environment_id')`).Scan(&environmentScoped); err != nil {
+		return fmt.Errorf("inspect task environment migration state: %w", err)
+	}
+	if !environmentScoped {
+		if _, err := db.Exec(ctx, `
 		WITH ranked AS (
 			SELECT id,account_id,ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY created_at,id) AS position
 			FROM task_lists
@@ -511,9 +545,9 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		UPDATE task_lists list SET is_default=TRUE,updated_at=NOW()
 		FROM missing WHERE list.id=missing.id
 	`); err != nil {
-		return fmt.Errorf("task work default list adoption failed: %w", err)
-	}
-	if _, err := db.Exec(ctx, `
+			return fmt.Errorf("task work default list adoption failed: %w", err)
+		}
+		if _, err := db.Exec(ctx, `
 		INSERT INTO task_lists(account_id,workflow_id,workflow_inherited,name,description,color,icon,sort_order,created_by,is_default)
 		SELECT a.id,w.id,TRUE,'Bandeja general','Tareas sin una lista específica','#10B981','inbox',0,owner.user_id,TRUE
 		FROM accounts a
@@ -528,9 +562,10 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 			ORDER BY candidate.created_at,candidate.user_id LIMIT 1
 		) owner ON TRUE
 		WHERE NOT EXISTS (SELECT 1 FROM task_lists existing WHERE existing.account_id=a.id AND existing.is_default AND existing.archived_at IS NULL)
-		ON CONFLICT (account_id) WHERE is_default AND archived_at IS NULL DO NOTHING
-	`); err != nil {
-		return fmt.Errorf("task work default list creation failed: %w", err)
+		ON CONFLICT DO NOTHING
+		`); err != nil {
+			return fmt.Errorf("task work default list creation failed: %w", err)
+		}
 	}
 	if _, err := db.Exec(ctx, `
 		UPDATE task_lists SET folder_id=NULL,sort_order=0,icon='inbox',updated_at=NOW()
@@ -538,10 +573,14 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 	`); err != nil {
 		return fmt.Errorf("task work default list root repair failed: %w", err)
 	}
-	if _, err := db.Exec(ctx, `
+	listOrderPartition := "account_id,folder_id"
+	if environmentScoped {
+		listOrderPartition = "account_id,environment_id,folder_id"
+	}
+	if _, err := db.Exec(ctx, fmt.Sprintf(`
 		WITH ranked AS (
 			SELECT id,account_id,folder_id,
-				ROW_NUMBER() OVER(PARTITION BY account_id,folder_id ORDER BY sort_order,created_at,id) AS position
+				ROW_NUMBER() OVER(PARTITION BY %s ORDER BY sort_order,created_at,id) AS position
 			FROM task_lists WHERE NOT is_default AND archived_at IS NULL
 		), normalized AS (
 			SELECT id,CASE WHEN folder_id IS NULL THEN (position+1)*1024 ELSE position*1024 END AS repaired_order
@@ -549,15 +588,24 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		)
 		UPDATE task_lists list SET sort_order=normalized.repaired_order,updated_at=NOW()
 		FROM normalized WHERE list.id=normalized.id AND list.sort_order IS DISTINCT FROM normalized.repaired_order
-	`); err != nil {
+	`, listOrderPartition)); err != nil {
 		return fmt.Errorf("task work list hierarchy order repair failed: %w", err)
 	}
-	if _, err := db.Exec(ctx, `
+	defaultListBackfillSQL := `
 		UPDATE tasks task SET list_id=list.id,updated_at=NOW()
 		FROM task_lists list
 		WHERE list.account_id=task.account_id AND list.is_default AND list.archived_at IS NULL
 		  AND task.parent_task_id IS NULL AND task.list_id IS NULL
-	`); err != nil {
+	`
+	if environmentScoped {
+		defaultListBackfillSQL = `UPDATE tasks task SET list_id=list.id,updated_at=NOW()
+			FROM task_lists list JOIN task_environments environment
+			  ON environment.account_id=list.account_id AND environment.id=list.environment_id
+			WHERE list.account_id=task.account_id AND list.is_default AND list.archived_at IS NULL
+			  AND environment.is_default AND environment.archived_at IS NULL
+			  AND task.parent_task_id IS NULL AND task.list_id IS NULL`
+	}
+	if _, err := db.Exec(ctx, defaultListBackfillSQL); err != nil {
 		return fmt.Errorf("task work default list backfill failed: %w", err)
 	}
 	if _, err := db.Exec(ctx, `
@@ -569,20 +617,24 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 		return fmt.Errorf("task work child list backfill failed: %w", err)
 	}
 
-	if _, err := db.Exec(ctx, `
+	listWorkflowJoin := "w.account_id=l.account_id AND w.is_default"
+	if environmentScoped {
+		listWorkflowJoin = "w.account_id=l.account_id AND w.environment_id=l.environment_id AND w.is_default"
+	}
+	if _, err := db.Exec(ctx, fmt.Sprintf(`
 		UPDATE task_lists l
 		SET workflow_id=w.id
 		FROM task_workflows w
-		WHERE w.account_id=l.account_id AND w.is_default AND l.workflow_id IS NULL
-	`); err != nil {
+		WHERE %s AND l.workflow_id IS NULL
+	`, listWorkflowJoin)); err != nil {
 		return fmt.Errorf("task list workflow backfill failed: %w", err)
 	}
 
 	if _, err := db.Exec(ctx, `
 		UPDATE tasks t SET status_id=(
-			SELECT s.id FROM task_workflows w
-			JOIN task_statuses s ON s.workflow_id=w.id AND s.account_id=w.account_id
-			WHERE w.account_id=t.account_id AND w.is_default
+			SELECT s.id FROM task_lists list_item
+			JOIN task_statuses s ON s.workflow_id=list_item.workflow_id AND s.account_id=list_item.account_id
+			WHERE list_item.account_id=t.account_id AND list_item.id=t.list_id
 			  AND s.category=CASE t.status
 				WHEN 'completed' THEN 'done'
 				WHEN 'cancelled' THEN 'cancelled'
@@ -622,10 +674,10 @@ func migrateTaskWork(ctx context.Context, db *pgxpool.Pool) error {
 			s.id, s.sort_order, s.created_at, s.updated_at
 		FROM subtasks s
 		JOIN tasks p ON p.id=s.task_id AND p.account_id=s.account_id
-		JOIN task_workflows w ON w.account_id=s.account_id AND w.is_default
+		JOIN task_lists parent_list ON parent_list.account_id=p.account_id AND parent_list.id=p.list_id
 		JOIN LATERAL (
 			SELECT candidate.id FROM task_statuses candidate
-			WHERE candidate.workflow_id=w.id AND candidate.account_id=w.account_id
+			WHERE candidate.workflow_id=parent_list.workflow_id AND candidate.account_id=parent_list.account_id
 			  AND candidate.category=CASE WHEN s.completed THEN 'done' ELSE 'not_started' END
 			ORDER BY candidate.is_default DESC,candidate.sort_order LIMIT 1
 		) status_match ON TRUE

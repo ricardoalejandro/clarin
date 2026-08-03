@@ -267,8 +267,46 @@ func (r *UserRepository) IsErosEnabled(ctx context.Context, userID uuid.UUID) (b
 }
 
 func (r *UserRepository) Delete(ctx context.Context, userID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID)
-	return err
+	return r.deleteWithTaskACLActor(ctx, userID, nil)
+}
+
+func (r *UserRepository) DeleteWithActor(ctx context.Context, userID, actorID uuid.UUID) error {
+	return r.deleteWithTaskACLActor(ctx, userID, &actorID)
+}
+
+func (r *UserRepository) deleteWithTaskACLActor(ctx context.Context, userID uuid.UUID, actorID *uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `SELECT account_id FROM user_accounts WHERE user_id=$1 ORDER BY account_id FOR UPDATE`, userID)
+	if err != nil {
+		return err
+	}
+	accountIDs := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var accountID uuid.UUID
+		if err := rows.Scan(&accountID); err != nil {
+			rows.Close()
+			return err
+		}
+		accountIDs = append(accountIDs, accountID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, accountID := range accountIDs {
+		if err := removeTaskMembershipACLTx(ctx, tx, accountID, userID, actorID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM users WHERE id=$1`, userID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *UserRepository) GetGroqAPIKey(ctx context.Context, userID uuid.UUID) (string, error) {
@@ -489,8 +527,23 @@ func (r *UserAccountRepository) UpdateRole(ctx context.Context, userID, accountI
 }
 
 func (r *UserAccountRepository) Remove(ctx context.Context, userID, accountID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `DELETE FROM user_accounts WHERE user_id = $1 AND account_id = $2`, userID, accountID)
-	return err
+	return r.removeWithTaskACLActor(ctx, userID, accountID, nil)
+}
+
+func (r *UserAccountRepository) RemoveWithActor(ctx context.Context, userID, accountID, actorID uuid.UUID) error {
+	return r.removeWithTaskACLActor(ctx, userID, accountID, &actorID)
+}
+
+func (r *UserAccountRepository) removeWithTaskACLActor(ctx context.Context, userID, accountID uuid.UUID, actorID *uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := removeTaskMembershipACLTx(ctx, tx, accountID, userID, actorID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *UserAccountRepository) SetDefault(ctx context.Context, userID, accountID uuid.UUID) error {
@@ -2760,6 +2813,10 @@ func (r *ContactRepository) FindDuplicates(ctx context.Context, accountID uuid.U
 }
 
 func (r *ContactRepository) FindDuplicateGroups(ctx context.Context, accountID uuid.UUID) ([]*domain.ContactDuplicateGroup, error) {
+	return r.FindDuplicateGroupsForActor(ctx, accountID, uuid.Nil, false)
+}
+
+func (r *ContactRepository) FindDuplicateGroupsForActor(ctx context.Context, accountID, actorID uuid.UUID, taskDataAllowed bool) ([]*domain.ContactDuplicateGroup, error) {
 	rows, err := r.db.Query(ctx, `
 		WITH normalized AS (
 			SELECT c.id,
@@ -2802,7 +2859,7 @@ func (r *ContactRepository) FindDuplicateGroups(ctx context.Context, accountID u
 		); err != nil {
 			return nil, err
 		}
-		counts, _ := r.countContactRelations(ctx, accountID, []uuid.UUID{contact.ID})
+		counts, _ := r.countContactRelations(ctx, accountID, actorID, taskDataAllowed, []uuid.UUID{contact.ID})
 		if _, ok := grouped[normalizedPhone]; !ok {
 			order = append(order, normalizedPhone)
 		}
@@ -2828,6 +2885,10 @@ func (r *ContactRepository) FindDuplicateGroups(ctx context.Context, accountID u
 }
 
 func (r *ContactRepository) PreviewMergeContacts(ctx context.Context, accountID, keepID uuid.UUID, mergeIDs []uuid.UUID) (*domain.ContactMergePreview, error) {
+	return r.PreviewMergeContactsForActor(ctx, accountID, uuid.Nil, false, keepID, mergeIDs)
+}
+
+func (r *ContactRepository) PreviewMergeContactsForActor(ctx context.Context, accountID, actorID uuid.UUID, taskDataAllowed bool, keepID uuid.UUID, mergeIDs []uuid.UUID) (*domain.ContactMergePreview, error) {
 	mergeIDs = uniqueUUIDsExcluding(mergeIDs, keepID)
 	if len(mergeIDs) == 0 {
 		return nil, fmt.Errorf("provide merge_ids")
@@ -2844,7 +2905,7 @@ func (r *ContactRepository) PreviewMergeContacts(ctx context.Context, accountID,
 	if keep == nil {
 		return nil, fmt.Errorf("contact to keep not found")
 	}
-	counts, _ := r.countContactRelations(ctx, accountID, mergeIDs)
+	counts, _ := r.countContactRelations(ctx, accountID, actorID, taskDataAllowed, mergeIDs)
 	leads, err := r.getMergeLeadPreview(ctx, accountID, allIDs)
 	if err != nil {
 		return nil, err
@@ -2876,11 +2937,15 @@ func (r *ContactRepository) GetContactsWithDuplicateLeads(ctx context.Context, a
 }
 
 func (r *ContactRepository) MergeContacts(ctx context.Context, accountID, keepID uuid.UUID, mergeIDs []uuid.UUID, mergedBy *uuid.UUID) (*domain.ContactMergeResult, error) {
+	return r.MergeContactsForActor(ctx, accountID, uuid.Nil, false, keepID, mergeIDs, mergedBy)
+}
+
+func (r *ContactRepository) MergeContactsForActor(ctx context.Context, accountID, actorID uuid.UUID, taskDataAllowed bool, keepID uuid.UUID, mergeIDs []uuid.UUID, mergedBy *uuid.UUID) (*domain.ContactMergeResult, error) {
 	mergeIDs = uniqueUUIDsExcluding(mergeIDs, keepID)
 	if len(mergeIDs) == 0 {
 		return nil, fmt.Errorf("provide merge_ids")
 	}
-	movedCounts, _ := r.countContactRelations(ctx, accountID, mergeIDs)
+	movedCounts, _ := r.countContactRelations(ctx, accountID, actorID, taskDataAllowed, mergeIDs)
 
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -2992,7 +3057,7 @@ func recommendedContactToKeep(candidates []*domain.ContactDuplicateCandidate) uu
 	return best.Contact.ID
 }
 
-func (r *ContactRepository) countContactRelations(ctx context.Context, accountID uuid.UUID, contactIDs []uuid.UUID) (domain.ContactRelationCounts, error) {
+func (r *ContactRepository) countContactRelations(ctx context.Context, accountID, actorID uuid.UUID, taskDataAllowed bool, contactIDs []uuid.UUID) (domain.ContactRelationCounts, error) {
 	var counts domain.ContactRelationCounts
 	if len(contactIDs) == 0 {
 		return counts, nil
@@ -3001,14 +3066,17 @@ func (r *ContactRepository) countContactRelations(ctx context.Context, accountID
 		SELECT
 			(SELECT COUNT(*) FROM leads WHERE account_id = $1 AND contact_id = ANY($2)),
 			(SELECT COUNT(*) FROM chats WHERE account_id = $1 AND contact_id = ANY($2)),
-			(SELECT COUNT(*) FROM tasks WHERE account_id = $1 AND contact_id = ANY($2)),
+			(SELECT COUNT(*) FROM tasks task
+			 JOIN task_lists task_list ON task_list.account_id=task.account_id AND task_list.id=task.list_id
+			 WHERE task.account_id = $1 AND task.contact_id = ANY($2) AND task.deleted_at IS NULL
+			   AND $3::boolean AND `+taskActorCanViewSQL("task", "task_list", "$4")+`),
 			(SELECT COUNT(*) FROM interactions WHERE account_id = $1 AND contact_id = ANY($2)),
 			(SELECT COUNT(*) FROM event_participants ep JOIN events e ON e.id = ep.event_id WHERE e.account_id = $1 AND ep.contact_id = ANY($2)),
 			(SELECT COUNT(*) FROM program_participants pp JOIN programs p ON p.id = pp.program_id WHERE p.account_id = $1 AND pp.contact_id = ANY($2)),
 			(SELECT COUNT(*) FROM campaign_recipients cr JOIN campaigns ca ON ca.id = cr.campaign_id WHERE ca.account_id = $1 AND cr.contact_id = ANY($2)),
 			(SELECT COUNT(*) FROM custom_field_values WHERE contact_id = ANY($2)),
 			(SELECT COUNT(*) FROM contact_tags WHERE contact_id = ANY($2))
-	`, accountID, contactIDs).Scan(
+	`, accountID, contactIDs, taskDataAllowed, actorID).Scan(
 		&counts.Leads, &counts.Chats, &counts.Tasks, &counts.Interactions, &counts.Events,
 		&counts.Programs, &counts.CampaignRecipients, &counts.CustomFields, &counts.Tags,
 	)

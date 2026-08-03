@@ -46,6 +46,37 @@ func TestPrivateObjectKey(t *testing.T) {
 	}
 }
 
+func TestProtectedTaskObjectKeysAreExactAndAccountScoped(t *testing.T) {
+	accountID := uuid.New()
+	protected := []string{
+		accountID.String() + "/tasks/attachments/hash-file.pdf",
+		accountID.String() + "/task-previews/" + uuid.NewString() + "/hash.pdf",
+		PrivateObjectKey(accountID, "tasks", "attachments", "hash-file.pdf"),
+		PrivateObjectKey(accountID, "tasks", "previews", uuid.NewString(), "hash.pdf"),
+	}
+	for _, key := range protected {
+		if !IsProtectedTaskObjectKey(key) || !IsProtectedMediaObjectKey(key) {
+			t.Fatalf("task key was not protected: %q", key)
+		}
+		if url := (&Storage{publicURL: "https://media.example", bucket: "media"}).GetPublicURL(key); url != "" {
+			t.Fatalf("protected task key received a public URL: %q", url)
+		}
+	}
+	public := []string{
+		accountID.String() + "/chats/attachments/photo.webp",
+		accountID.String() + "/surveys/uploads/answer.pdf",
+		accountID.String() + "/tasks/banner.png",
+		accountID.String() + "/task-previews-only/banner.png",
+		"not-an-account/tasks/attachments/file.pdf",
+		accountID.String() + "/tasks/attachments",
+	}
+	for _, key := range public {
+		if IsProtectedTaskObjectKey(key) {
+			t.Fatalf("unrelated key was marked as a Work attachment: %q", key)
+		}
+	}
+}
+
 func TestAccountScopedObjectKey(t *testing.T) {
 	accountID := uuid.New()
 	if key, err := accountScopedObjectKey(accountID, "uploads", "photo.jpg"); err != nil || key != accountID.String()+"/uploads/photo.jpg" {
@@ -56,6 +87,8 @@ func TestAccountScopedObjectKey(t *testing.T) {
 		{"../victim", "file"},
 		{"_private/statuses", "file"},
 		{"statuses", "file"},
+		{"tasks/attachments", "file"},
+		{"task-previews/attachment", "file"},
 	} {
 		if key, err := accountScopedObjectKey(accountID, test.folder, test.filename); err == nil {
 			t.Fatalf("unsafe key escaped: folder=%q filename=%q key=%q", test.folder, test.filename, key)
@@ -92,6 +125,8 @@ func TestPublicAndPrivateBucketsIntegration(t *testing.T) {
 	publicKey := accountID.String() + "/uploads/public.txt"
 	privateKey := PrivateObjectKey(accountID, "statuses", "private.txt")
 	legacyKey := accountID.String() + "/statuses/legacy.txt"
+	legacyTaskKey := accountID.String() + "/tasks/attachments/legacy.txt"
+	privateTaskKey := PrivateObjectKey(accountID, "tasks", "attachments", "private-task.txt")
 	if _, err := store.UploadObject(ctx, publicKey, []byte("public"), "text/plain"); err != nil {
 		t.Fatalf("upload public object: %v", err)
 	}
@@ -100,6 +135,12 @@ func TestPublicAndPrivateBucketsIntegration(t *testing.T) {
 	}
 	if directURL, err := store.UploadObject(ctx, privateKey, []byte("private"), "text/plain"); err != nil || directURL != "" {
 		t.Fatalf("upload private object: directURL=%q err=%v", directURL, err)
+	}
+	if directURL, err := store.UploadObject(ctx, legacyTaskKey, []byte("legacy-task"), "text/plain"); err != nil || directURL != "" {
+		t.Fatalf("upload legacy task object: directURL=%q err=%v", directURL, err)
+	}
+	if directURL, err := store.UploadObject(ctx, privateTaskKey, []byte("private-task"), "text/plain"); err != nil || directURL != "" {
+		t.Fatalf("upload private task object: directURL=%q err=%v", directURL, err)
 	}
 	if data, err := store.GetFile(ctx, privateKey); err != nil || string(data) != "private" {
 		t.Fatalf("read private object with service credentials: data=%q err=%v", data, err)
@@ -124,6 +165,17 @@ func TestPublicAndPrivateBucketsIntegration(t *testing.T) {
 	if data, err := store.GetFile(ctx, legacyKey); err != nil || string(data) != "legacy" {
 		t.Fatalf("read legacy object with service credentials: data=%q err=%v", data, err)
 	}
+	legacyTaskResponse, err := http.Get("http://" + endpoint + "/" + bucket + "/" + legacyTaskKey) // #nosec G107 -- disposable integration endpoint
+	if err != nil {
+		t.Fatalf("anonymous legacy task GET: %v", err)
+	}
+	legacyTaskResponse.Body.Close()
+	if legacyTaskResponse.StatusCode == http.StatusOK {
+		t.Fatal("legacy task object was anonymously readable")
+	}
+	if data, err := store.GetFile(ctx, legacyTaskKey); err != nil || string(data) != "legacy-task" {
+		t.Fatalf("read legacy task object with service credentials: data=%q err=%v", data, err)
+	}
 	privateResponse, err := http.Get("http://" + endpoint + "/" + bucket + "-private/" + privateKey) // #nosec G107 -- disposable integration endpoint
 	if err != nil {
 		t.Fatalf("anonymous private GET: %v", err)
@@ -132,17 +184,25 @@ func TestPublicAndPrivateBucketsIntegration(t *testing.T) {
 	if privateResponse.StatusCode == http.StatusOK {
 		t.Fatal("private object was anonymously readable")
 	}
+	privateTaskResponse, err := http.Get("http://" + endpoint + "/" + bucket + "-private/" + privateTaskKey) // #nosec G107 -- disposable integration endpoint
+	if err != nil {
+		t.Fatalf("anonymous private task GET: %v", err)
+	}
+	privateTaskResponse.Body.Close()
+	if privateTaskResponse.StatusCode == http.StatusOK {
+		t.Fatal("private task object was anonymously readable")
+	}
 
 	objects, err := store.ListPrefix(ctx, accountID.String()+"/")
-	if err != nil || len(objects) != 3 {
+	if err != nil || len(objects) != 5 {
 		t.Fatalf("combined inventory: objects=%#v err=%v", objects, err)
 	}
 	size, count, err := store.UsagePrefix(ctx, accountID.String()+"/")
-	if err != nil || count != 3 || size != int64(len("public")+len("private")+len("legacy")) {
+	if err != nil || count != 5 || size != int64(len("public")+len("private")+len("legacy")+len("legacy-task")+len("private-task")) {
 		t.Fatalf("combined quota: size=%d count=%d err=%v", size, count, err)
 	}
 	deleted, err := store.DeletePrefix(ctx, accountID.String()+"/")
-	if err != nil || deleted != 3 {
+	if err != nil || deleted != 5 {
 		t.Fatalf("combined purge: deleted=%d err=%v", deleted, err)
 	}
 }

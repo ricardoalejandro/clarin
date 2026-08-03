@@ -6,7 +6,7 @@ import {
   ChevronDown, ChevronUp, Check, Star, Upload, Loader2,
   ArrowRight, AlertCircle
 } from 'lucide-react';
-import { buildSurveySessionEvent, surveySessionStorageKey, type SurveySessionPhase } from '@/lib/surveySession';
+import { buildSurveySessionEvent, surveySessionRequestHeaders, surveySessionStorageKey, type SurveySessionPhase } from '@/lib/surveySession';
 
 interface SurveyBranding {
   logo_url?: string;
@@ -143,18 +143,33 @@ export default function PublicFormPage() {
     const loadSurvey = async () => {
       try {
         const query = recipientToken ? `?recipient=${encodeURIComponent(recipientToken)}` : '';
-        const res = await fetch(`/api/public/surveys/${encodeURIComponent(slug)}${query}`, { signal: controller.signal });
+        const res = await fetch(`/api/public/surveys/${encodeURIComponent(slug)}${query}`, {
+          signal: controller.signal,
+          headers: surveySessionRequestHeaders(respondentTokenRef.current),
+        });
         if (controller.signal.aborted || flowEpochRef.current !== epoch) return;
         if (!res.ok) {
-          setError('Encuesta no encontrada o no está activa.');
+          if (res.status === 410) {
+            const payload = await res.json().catch(() => null) as { code?: string } | null;
+            setError(payload?.code === 'survey_archived'
+              ? 'Esta encuesta fue archivada y ya no recibe respuestas.'
+              : payload?.code === 'survey_link_retired'
+                ? 'Este enlace de encuesta fue retirado permanentemente y ya no está disponible.'
+                : 'Esta encuesta ya no está disponible.');
+          } else {
+            setError('Encuesta no encontrada o no está activa.');
+          }
           return;
         }
         const data = await res.json();
         if (controller.signal.aborted || flowEpochRef.current !== epoch) return;
+        if (typeof data.respondent_token === 'string' && data.respondent_token) {
+          respondentTokenRef.current = data.respondent_token;
+          try { window.sessionStorage.setItem(storageKey, data.respondent_token); } catch { /* best effort */ }
+        }
         setSurvey(data.survey);
         setQuestions(data.questions || []);
         setStep(data.survey.welcome_title || data.survey.welcome_description ? -1 : 0);
-        trackSession('opened');
       } catch (loadError) {
         if (controller.signal.aborted || flowEpochRef.current !== epoch) return;
         setError(loadError instanceof Error ? 'Error al cargar la encuesta.' : 'Error al cargar la encuesta.');
@@ -171,7 +186,7 @@ export default function PublicFormPage() {
       telemetryControllersRef.current.forEach(activeController => activeController.abort());
       telemetryControllersRef.current.clear();
     };
-  }, [slug, recipientToken, trackSession]);
+  }, [slug, recipientToken]);
 
   const currentQuestion = step >= 0 && step < questions.length ? questions[step] : null;
 

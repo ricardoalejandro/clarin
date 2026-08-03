@@ -26,6 +26,8 @@ type Storage struct {
 
 const privateObjectFolder = "_private"
 const legacyStatusObjectFolder = "statuses"
+const legacyTaskAttachmentFolder = "tasks/attachments"
+const legacyTaskPreviewFolder = "task-previews"
 
 type ObjectSummary struct {
 	Key          string
@@ -113,6 +115,39 @@ func IsProtectedStatusObjectKey(objectKey string) bool {
 	return IsPrivateObjectKey(objectKey) || IsLegacyStatusObjectKey(objectKey)
 }
 
+// IsProtectedTaskObjectKey recognizes every namespace reserved for Clarin Work
+// attachments and their generated previews. Historical objects live in the
+// public bucket, so this predicate is also used by the public proxy and bucket
+// policy to keep those legacy keys private without affecting chat, survey or
+// other ordinary account media.
+func IsProtectedTaskObjectKey(objectKey string) bool {
+	raw := strings.TrimSpace(objectKey)
+	if raw == "" || strings.HasPrefix(raw, "/") || path.Clean(raw) != raw {
+		return false
+	}
+	parts := strings.Split(raw, "/")
+	if len(parts) < 3 {
+		return false
+	}
+	if _, err := uuid.Parse(parts[0]); err != nil {
+		return false
+	}
+	if parts[1] == "task-previews" {
+		return len(parts) >= 4
+	}
+	if parts[1] == "tasks" && parts[2] == "attachments" {
+		return len(parts) >= 4
+	}
+	if len(parts) >= 5 && parts[1] == privateObjectFolder && parts[2] == "tasks" {
+		return parts[3] == "attachments" || parts[3] == "previews"
+	}
+	return false
+}
+
+func IsProtectedMediaObjectKey(objectKey string) bool {
+	return IsProtectedStatusObjectKey(objectKey) || IsProtectedTaskObjectKey(objectKey)
+}
+
 // IsAccountStatusObjectKey is the stricter predicate required before a
 // destructive operation. It rejects normalized traversal, another account's
 // key, and private namespaces that are not the status-media namespace.
@@ -159,7 +194,7 @@ func (s *Storage) bucketForObjectKey(objectKey string) string {
 
 func accountScopedObjectKey(accountID uuid.UUID, folder, filename string) (string, error) {
 	objectKey := path.Join(accountID.String(), folder, filename)
-	if !strings.HasPrefix(objectKey, accountID.String()+"/") || IsProtectedStatusObjectKey(objectKey) {
+	if !strings.HasPrefix(objectKey, accountID.String()+"/") || IsProtectedMediaObjectKey(objectKey) {
 		return "", fmt.Errorf("object key is outside the account scope")
 	}
 	return objectKey, nil
@@ -179,9 +214,8 @@ func (s *Storage) ensureBucket(ctx context.Context) error {
 	}
 
 	// Keep ordinary media public for backwards compatibility, but explicitly
-	// omit both the historical status namespace and any accidentally uploaded
-	// private key. Authenticated service credentials can still read these keys
-	// so the reconciliation worker can move them into the private bucket.
+	// omit historical status/Work namespaces and any accidentally uploaded
+	// private key. Authenticated service credentials can still read these keys.
 	policy := fmt.Sprintf(`{
 		"Version": "2012-10-17",
 		"Statement": [
@@ -191,11 +225,14 @@ func (s *Storage) ensureBucket(ctx context.Context) error {
 				"Action": ["s3:GetObject"],
 				"NotResource": [
 					"arn:aws:s3:::%s/*/%s/*",
+					"arn:aws:s3:::%s/*/%s/*",
+					"arn:aws:s3:::%s/*/%s/*",
 					"arn:aws:s3:::%s/*/%s/*"
 				]
 			}
 		]
-	}`, s.bucket, legacyStatusObjectFolder, s.bucket, privateObjectFolder)
+	}`, s.bucket, legacyStatusObjectFolder, s.bucket, privateObjectFolder,
+		s.bucket, legacyTaskAttachmentFolder, s.bucket, legacyTaskPreviewFolder)
 	if err := s.client.SetBucketPolicy(ctx, s.bucket, policy); err != nil {
 		return fmt.Errorf("failed to enforce public bucket policy: %w", err)
 	}
@@ -427,7 +464,7 @@ func (s *Storage) DeletePrefix(ctx context.Context, prefix string) (int64, error
 
 // GetPublicURL returns the public URL for an object
 func (s *Storage) GetPublicURL(objectKey string) string {
-	if IsProtectedStatusObjectKey(objectKey) {
+	if IsProtectedMediaObjectKey(objectKey) {
 		return ""
 	}
 	return fmt.Sprintf("%s/%s/%s", s.publicURL, s.bucket, objectKey)

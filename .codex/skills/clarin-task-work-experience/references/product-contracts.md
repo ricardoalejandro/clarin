@@ -8,6 +8,8 @@
 - Dropping on a folder never assigns its first list implicitly. A concrete list choice is required. Column drops map each real workflow by category; list drops preserve each task's current category.
 - Escape, incompatible workflow, `409`, network failure and invalid targets restore the captured task/order/selection state without partial backend writes.
 - Resolve navigation targets from the real pointer coordinates and current measured list/folder rectangles, never from the translated card rectangle. Prefer a concrete list over its containing folder, use hysteresis at narrow boundaries, highlight destinations declaratively, and keep one write per completed gesture.
+- Reconcile every canonical move response as one batch against the active scope. A task leaves its source-list view, remains in a folder only when its destination list is still inside that folder, and remains visible with its new location in Todo el Entorno. Reevaluate filters and closed visibility, clear selection only after success, and mark moved IDs authoritative so a paginated refresh cannot preserve an absent task as stale tail data.
+- HTTP and WebSocket echoes share the same canonical reducer. Deduplicate side effects by `operation_id`, but always apply newer task versions and `hierarchy_counts`; a `409` or network failure preserves the exact source rows, selection and order for retry.
 - Ordinary cards expose only completion persistently. Selection is adaptive through hover/focus actions, Ctrl/Cmd click, Shift range, stationary touch hold, or an already-active selection; Escape clears selection without mutating tasks.
 
 ## Calendar creation
@@ -17,10 +19,24 @@
 
 Read the sections relevant to the requested task change before editing.
 
+## Environments, Access, And Scale
+
+- The canonical hierarchy is `Cuenta -> Entorno -> optional Folder -> List -> Task -> one-level Subtask`. Entorno is an account-scoped collaboration boundary and never a second tenant. A task has one environment truth derived from its list; folders, lists, workflows and statuses each belong to one Entorno.
+- Every account has one migrated General Entorno that preserves existing functional task access and IDs/order. A new Entorno is private and atomically creates its default workflow, statuses, pinned inbox and an explicit Administrar grant with access governance for its creator.
+- Entorno Ver is a hard prerequisite for every folder, list and task grant. Effective access resolves in strict order from most specific to broadest: account admin recovery, root-task grant, private-task boundary, list grant, list privacy, folder grant, folder privacy, Entorno grant and Entorno default. Specific grants may raise, lower or deny inheritance. Subtasks inherit their root task and cannot own grants.
+- Ver reads visible work and files; Comentar additionally comments, mentions and attaches to comments; Editar additionally creates/changes tasks, order, participants and task attachments; Administrar additionally controls structure, workflows, archive/Trash/restore and privacy. `can_manage_access` is a separate governance bit requiring Administrar.
+- Hidden resources return `404`; visible resources with insufficient action return `403`. Actor-aware SQL must filter every task surface, including comments, files, dependencies, reminders, reports, summary, calendar, Gantt, Trash, Eros, search and counts. Handler-only authorization is insufficient.
+- Owner/collaborator membership does not silently grant access. Adding a participant without Editar requires a confirmed, atomic task grant. Removing the participant preserves that grant until access is explicitly edited. A private resource must retain one explicit manager; account admins retain recovery.
+- “Todo el Entorno” never mixes tasks from another Entorno. “Compartidas conmigo” is a Hub scoped to the active Entorno and shows only directly granted folder, list and root-task resources; inherited descendants do not become duplicate Hub roots. A directly shared child hides every inaccessible parent breadcrumb, sibling and hierarchy count. Realtime uses authorized recipient sets and a revocation gives the removed user only a minimal tombstone.
+- Creating a folder/list/task grant for a user without Entorno Ver is rejected. Historical child grants remain durable for audit but inactive, and may be preserved by later ACL edits without bypassing the Entorno boundary.
+- Only tasks may move across Entornos. Require Administrar at origin and Editar at destination, require every participant retained by the task to see the destination Entorno, map status by workflow category, confirm only valid child grants and roll back the task, children, order and access together on any incompatibility.
+- Entorno/list/task collections use stable opaque cursors, default 50 and maximum 200. Load one active hierarchy at a time, fetch folder children lazily, and debounce searchable remote catalogs exactly 500 ms with cancellation and stale-response rejection.
+- Actor-scoped task, list, folder and Entorno DTOs expose `effective_access_level`, explicit `can_manage_access` (including `false`) and `capabilities`. The legacy `permissions` object remains a compatibility alias of the same canonical capability result; neither field may be derived from role names or visibility in the client.
+
 ## Hierarchy And Workflow
 
-- A task belongs to one `account_id` and one task list. The default account list is a compatibility fallback, not permission to create invisible unscoped tasks.
-- Folders contain lists; lists resolve one workflow; workflows own ordered statuses.
+- A task belongs to one `account_id` and one task list inside one Entorno. The default Entorno inbox is a compatibility fallback, not permission to create invisible unscoped tasks.
+- Folders contain lists; lists resolve one same-Entorno workflow; workflows own ordered statuses.
 - A status is valid only for a task whose list resolves the same workflow.
 - In aggregate views, group heterogeneous workflows by category and map a drop to the equivalent real status for each task. Disable a destination when no equivalent exists.
 - Renaming or changing a status affects every list sharing that workflow; explain that scope before saving.
@@ -30,7 +46,7 @@ Read the sections relevant to the requested task change before editing.
 - A structural list move must lock the source and destination folders, every active list in both ordering scopes, and the destination anchor before writing. The anchor must be active, same-account, and already inside the final folder/root scope. Workflow inheritance, task-status remapping, location, and normalized destination order commit or roll back together.
 - The default account list is fixed at the root with `sort_order=0` and cannot be dragged, reparented, reordered, or archived. It may still be renamed and use a validated catalog color/icon; its safe default icon is `inbox`.
 - Clicking a folder's main row selects its aggregate scope and toggles that accordion. Its chevron changes expansion only. An active folder may remain collapsed; navigation to a concrete child list is the only scope change that forces its parent open.
-- Folder/list icons are stable catalog identifiers rather than arbitrary components, paths, or markup. Validate the same allowlist in the API and database, return icons in every hierarchy response, and render a safe fallback for legacy data.
+- Folder icons are always the immutable identifier `folder`; creation ignores legacy custom values, updates accept only `folder` as a compatibility no-op, and the database constraint normalizes and rejects every other value. List icons remain configurable stable catalog identifiers validated by the same API/database allowlist and rendered with a safe fallback.
 - Archiving a list or folder is allowed only when it contains no active tasks. Restoring a child task requires an active parent and an active list/folder chain.
 - Create, restore, move, archive, and workflow-remap paths must lock and revalidate their parent/list/folder/status dependencies after waiting; a pre-lock read is never sufficient proof under concurrency.
 
@@ -38,7 +54,7 @@ Read the sections relevant to the requested task change before editing.
 
 - Completion and trash are independent lifecycles. A task in `done`, its `completed_at`, progress, due date, or appearance in a report never starts retention and never hides or archives it.
 - Retention starts only after an explicit “Mover a Papelera” mutation writes `tasks.deleted_at`, `task_lists.archived_at`, or `task_folders.archived_at`. The account policy is 7–365 days or `NULL` for “Nunca”; policy changes recalculate eligibility and never schedule or execute automatic purge.
-- Users with task access may archive and restore. Only account administrators may configure retention or permanently purge, and every irreversible action requires the exact canonical title/name under the same transaction lock used for eligibility.
+- Users with effective Administrar may archive and restore visible task resources. Only account administrators may configure retention or permanently purge, and every irreversible action requires the exact canonical title/name under the same transaction lock used for eligibility.
 - The default list cannot be archived or purged. Lists and folders may enter Trash only without active tasks; completed-but-active tasks still count as active because they have no `deleted_at`.
 - Folder archive marks only the child lists archived by that folder operation. Folder restore restores those lists together but preserves lists that were archived individually; an individual list whose original folder is archived must wait for the folder restore.
 - List/folder purge locks the account policy, target, descendants, and anchors, and commits only when every descendant is archived/deleted and every relevant timestamp has reached the cutoff. One ineligible or active descendant rolls back the entire tree.
@@ -82,7 +98,10 @@ Read the sections relevant to the requested task change before editing.
 - Every create may carry one optional UUID `operation_id`; the response and `task_update/created` event return the same value. The initiating client deduplicates the HTTP result and WebSocket echo by ID, version, and operation ID.
 - If search or filters would hide a task just created by the current user, clear both while preserving the current folder/list scope, insert the canonical task once, scroll to it, highlight it temporarily, and explain why the query was cleared.
 - Full task creation uses the same window behavior as detail: floating and docked desktop modes leave the workspace interactive, maximized and mobile modes are modal, and the remembered geometry is clamped to the measured viewport. Support header drag, edge/corner resize, right docking, maximize/restore, and double-click maximize.
+- Keep preferred floating geometry separate from its effective viewport clamp. Persist only manual floating drag/resize with keys scoped by account, user and surface; docking, maximize, responsive layout and zoom never overwrite the preference. Discard unsafe legacy geometry, preserve only its mode, and expose Restablecer tamaño.
 - Escape closes an untouched creation form immediately. Once the user changes any field, Escape/close must offer “continue editing” or explicit discard and preserve the complete draft when discard is cancelled.
+- Ctrl/Command+Enter creates exactly once from the form or expanded description editor. Ignore IME composition, an invalid form, an open portaled picker and repeats during the active request; any failure or `409` preserves window, focus and the complete draft.
+- Pre-create attachments live in a local validated queue with previews, removal and object-URL cleanup. Clipboard paste accepts image files only and never steals ordinary text paste. Create the task once, then upload the queue; a partial failure exposes pending attachments and retries only those files.
 - List, folder, workflow, recurrence, reminder, category, color, and icon choices use accessible viewport-aware portaled pickers. The task-list picker is searchable and grouped by default list, independent lists, and folders with a real breadcrumb.
 - Task dialogs, workspace popovers, confirmations, picker backdrops, picker menus, drag overlays and notifications use one monotonic layer contract. A child picker must always render above its owning dialog, restore focus, reposition on scroll/resize and stay within the viewport.
 
@@ -141,8 +160,9 @@ Read the sections relevant to the requested task change before editing.
 - Merge comments and activity chronologically while hiding a `comment_created` event when the corresponding comment is already rendered.
 - Load the latest bounded comment page first and page older comments explicitly. Preserve chronological rendering and scroll position when prepending; do not silently truncate long conversations.
 - Preserve mentions, attachments, author permissions, composer draft, edit draft, scroll proximity, and keyboard shortcuts during realtime updates.
+- A comment image upload may create an owner-scoped expiring `comment_draft`, but task attachment lists must hide it. Creating/updating the comment validates account, task, actor and attachment IDs and promotes the drafts in the same transaction; abandoned or failed drafts remain inventoried durable cleanup candidates.
 - Page boundaries remain correct when comments are created or deleted. A canonical remote edit must update an already-loaded older comment by ID without replacing the recipient's locally-authorized edit/delete permissions.
-- Events include account scope, stable task ID, action, canonical version, and operation ID when initiated optimistically.
+- Events include account scope, stable task ID, action, canonical version, access revision and operation ID when initiated optimistically, and are delivered only to the intersection of users authorized for every represented resource.
 - Under an active search or filter, remote create/update events never flash an unverified task into the UI; reconcile against the latest abortable canonical server response instead.
 - Keep a maximum accepted version and versioned delete tombstone per task in the workspace. Reject older task/order/HTTP payloads, and clear a tombstone only with a strictly compatible canonical restore, so out-of-order update/delete/restore delivery cannot resurrect or hide work.
 - Patch task moves and ordinary updates. Reload folders/lists/workflows only for structural events.

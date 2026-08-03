@@ -2,12 +2,23 @@ import { expect, test } from '@playwright/test'
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:3001'
 
+test('un enlace retirado muestra un cierre permanente y accesible', async ({ page }) => {
+  await page.route('**/api/public/surveys/enlace-retirado', route => route.fulfill({
+    status: 410,
+    contentType: 'application/json',
+    body: JSON.stringify({ code: 'survey_link_retired', error: 'Este enlace de encuesta fue retirado' }),
+  }))
+  await page.goto(`${baseURL}/f/enlace-retirado`, { waitUntil: 'domcontentloaded' })
+  await expect(page.getByText('Este enlace de encuesta fue retirado permanentemente y ya no está disponible.')).toBeVisible()
+})
+
 test('la lógica condicional omite una requerida y Atrás conserva el recorrido real', async ({ page }) => {
   const firstID = '10000000-0000-4000-8000-000000000001'
   const skippedID = '10000000-0000-4000-8000-000000000002'
   const finalID = '10000000-0000-4000-8000-000000000003'
   let submittedPayload: { answers?: Array<{ question_id: string; value: string }> } | null = null
   const trackedPhases: Array<{ phase: string; question_id?: string }> = []
+  let openedSessionToken = ''
 
   await page.route('**/api/public/surveys/flujo-condicional/session', async route => {
     trackedPhases.push(route.request().postDataJSON())
@@ -15,10 +26,12 @@ test('la lógica condicional omite una requerida y Atrás conserva el recorrido 
   })
 
   await page.route('**/api/public/surveys/flujo-condicional?recipient=destinatario-1', async route => {
+    openedSessionToken = route.request().headers()['x-survey-session-token'] || ''
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({
+        respondent_token: openedSessionToken,
         survey: {
           id: '20000000-0000-4000-8000-000000000001',
           name: 'Encuesta condicional',
@@ -86,7 +99,8 @@ test('la lógica condicional omite una requerida y Atrás conserva el recorrido 
   await expect(page.getByRole('button', { name: 'Cerrar' })).toBeVisible()
   expect(submittedPayload).not.toBeNull()
   expect(submittedPayload!.answers?.map(answer => answer.question_id)).toEqual([firstID, finalID])
-  await expect.poll(() => trackedPhases.map(event => event.phase)).toContain('opened')
+  expect(openedSessionToken).toMatch(/^[0-9a-f-]{36}$/)
+  expect(trackedPhases.some(event => event.phase === 'opened')).toBe(false)
   expect(trackedPhases.some(event => event.phase === 'started')).toBe(true)
   expect(trackedPhases.some(event => event.phase === 'reached' && event.question_id === finalID)).toBe(true)
   expect(trackedPhases.some(event => event.phase === 'answered' && event.question_id === firstID)).toBe(true)

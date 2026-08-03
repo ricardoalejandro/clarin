@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +35,18 @@ func taskWorkError(c *fiber.Ctx, err error) error {
 	switch {
 	case errors.Is(err, repository.ErrTaskWorkNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Recurso de tareas no encontrado"})
+	case errors.Is(err, repository.ErrTaskAccessDenied):
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"success": false, "error": "No tienes acceso suficiente a este recurso", "code": "task_access_denied"})
+	case errors.Is(err, repository.ErrTaskAccessInvalid):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "La configuración de acceso no es válida", "code": "invalid_task_access"})
+	case errors.Is(err, repository.ErrTaskAccessRevisionConflict):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Los permisos cambiaron en otra sesión", "code": "access_revision_conflict"})
+	case errors.Is(err, repository.ErrTaskLastAccessManager):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Debe permanecer al menos un gestor explícito", "code": "last_access_manager"})
+	case errors.Is(err, repository.ErrTaskEnvironmentDefault):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "El entorno General no se puede archivar", "code": "default_environment_invariant"})
+	case errors.Is(err, repository.ErrTaskEnvironmentNameConflict):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Ya existe un Entorno activo con ese nombre", "code": "environment_name_conflict"})
 	case errors.Is(err, repository.ErrTaskDependencyCycle):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La dependencia crearía un ciclo", "code": "dependency_cycle"})
 	case errors.Is(err, repository.ErrTaskStatusInUse):
@@ -110,6 +123,20 @@ func validTaskContainerIcon(value string) bool {
 	return ok
 }
 
+var errTaskFolderIconImmutable = errors.New("task folder icon is immutable")
+
+func normalizeTaskFolderIconUpdate(icon *string) error {
+	if icon == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*icon)
+	*icon = trimmed
+	if trimmed != "folder" {
+		return errTaskFolderIconImmutable
+	}
+	return nil
+}
+
 func parseNullableTaskUUID(raw json.RawMessage) (*uuid.UUID, bool, error) {
 	if len(raw) == 0 {
 		return nil, false, nil
@@ -164,12 +191,107 @@ func (s *Server) setTaskCommentPermissions(c *fiber.Ctx, accountID, userID uuid.
 	}
 }
 
-func (s *Server) broadcastTaskWork(accountID uuid.UUID, action string, payload fiber.Map) {
+func taskBroadcastUUIDs(value any) []uuid.UUID {
+	result := make([]uuid.UUID, 0)
+	switch typed := value.(type) {
+	case uuid.UUID:
+		result = append(result, typed)
+	case string:
+		if parsed, err := uuid.Parse(typed); err == nil {
+			result = append(result, parsed)
+		}
+	case []uuid.UUID:
+		result = append(result, typed...)
+	case []string:
+		for _, raw := range typed {
+			if parsed, err := uuid.Parse(raw); err == nil {
+				result = append(result, parsed)
+			}
+		}
+	}
+	return result
+}
+
+func (s *Server) broadcastTaskWork(ctx context.Context, accountID uuid.UUID, action string, payload fiber.Map) {
 	if s.hub == nil {
 		return
 	}
-	payload["action"] = action
-	s.hub.BroadcastToAccountWithPermission(accountID, domain.PermTasks, ws.EventTaskUpdate, payload)
+	taskIDs := make([]uuid.UUID, 0)
+	environmentIDs := make([]uuid.UUID, 0)
+	lookupFailed := false
+	appendContainerEnvironment := func(resourceType string, value any) {
+		for _, resourceID := range taskBroadcastUUIDs(value) {
+			environmentID, err := s.repos.TaskWork.ContainerEnvironmentID(ctx, accountID, resourceID, resourceType)
+			if err != nil {
+				lookupFailed = true
+				continue
+			}
+			environmentIDs = append(environmentIDs, environmentID)
+		}
+	}
+	for key, value := range payload {
+		switch key {
+		case "task_id", "task_ids":
+			taskIDs = append(taskIDs, taskBroadcastUUIDs(value)...)
+		case "task":
+			if task, ok := value.(*domain.Task); ok && task != nil {
+				taskIDs = append(taskIDs, task.ID)
+			}
+		case "tasks":
+			if tasks, ok := value.([]*domain.Task); ok {
+				for _, task := range tasks {
+					if task != nil {
+						taskIDs = append(taskIDs, task.ID)
+					}
+				}
+			}
+		case "folder_id":
+			appendContainerEnvironment("folder", value)
+		case "list_id":
+			appendContainerEnvironment("list", value)
+		case "workflow_id":
+			appendContainerEnvironment("workflow", value)
+		case "status_id", "status_ids":
+			appendContainerEnvironment("status", value)
+		case "folder":
+			if item, ok := value.(*domain.TaskFolder); ok && item != nil {
+				environmentIDs = append(environmentIDs, item.EnvironmentID)
+			}
+		case "workflow":
+			if item, ok := value.(*domain.TaskWorkflow); ok && item != nil {
+				environmentIDs = append(environmentIDs, item.EnvironmentID)
+			}
+		case "status":
+			if item, ok := value.(*domain.TaskStatus); ok && item != nil {
+				appendContainerEnvironment("status", item.ID)
+			}
+		}
+	}
+	if lookupFailed {
+		return
+	}
+	viewerSets := make([][]uuid.UUID, 0, len(taskIDs)+len(environmentIDs))
+	for _, taskID := range taskIDs {
+		viewers, err := s.repos.TaskWork.TaskViewerUserIDs(ctx, accountID, taskID)
+		if err != nil {
+			return
+		}
+		viewerSets = append(viewerSets, viewers)
+	}
+	for _, environmentID := range environmentIDs {
+		viewers, err := s.repos.TaskWork.EnvironmentViewerUserIDs(ctx, accountID, environmentID)
+		if err != nil {
+			return
+		}
+		viewerSets = append(viewerSets, viewers)
+	}
+	recipients := intersectTaskViewerSets(viewerSets)
+	if len(recipients) == 0 {
+		return
+	}
+	realtimePayload := taskRealtimePayload(payload)
+	realtimePayload["action"] = action
+	s.hub.BroadcastToAccountUsersWithPermission(accountID, recipients, domain.PermTasks, ws.EventTaskUpdate, realtimePayload)
 }
 
 func validTaskSavedViewMode(value string) bool {
@@ -380,7 +502,8 @@ func (s *Server) applyTaskSavedViewRequest(c *fiber.Ctx, view *domain.TaskSavedV
 	if view.ScopeType == "all" {
 		view.ScopeID = nil
 	}
-	exists, err := s.repos.TaskWork.SavedViewScopeExists(c.Context(), view.AccountID, view.ScopeType, view.ScopeID)
+	actorID := c.Locals("user_id").(uuid.UUID)
+	exists, err := s.repos.TaskWork.SavedViewScopeExists(c.Context(), view.AccountID, actorID, view.ScopeType, view.ScopeID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo validar el alcance de la vista"})
 	}
@@ -527,13 +650,62 @@ func (s *Server) handleMoveTask(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Tarea inválida"})
 	}
 	var req struct {
-		StatusID     string  `json:"status_id"`
-		BeforeTaskID *string `json:"before_task_id"`
-		Version      *int64  `json:"version"`
-		OperationID  string  `json:"operation_id"`
+		StatusID      string  `json:"status_id"`
+		BeforeTaskID  *string `json:"before_task_id"`
+		TargetListID  *string `json:"target_list_id"`
+		ConfirmGrants bool    `json:"confirm_grants"`
+		Version       *int64  `json:"version"`
+		OperationID   string  `json:"operation_id"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
+	}
+	if req.TargetListID != nil && strings.TrimSpace(*req.TargetListID) != "" {
+		destinationListID, parseErr := uuid.Parse(strings.TrimSpace(*req.TargetListID))
+		if parseErr != nil || req.Version == nil || *req.Version < 1 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Lista de destino y versión son obligatorias"})
+		}
+		operationUUID, operationErr := taskStructureOperationID(req.OperationID)
+		if operationErr != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "operation_id inválido"})
+		}
+		beforeViewers, viewersErr := s.repos.TaskWork.TaskViewerUserIDs(c.Context(), accountID, taskID)
+		if viewersErr != nil {
+			return taskWorkError(c, viewersErr)
+		}
+		_, affected, moveErr := s.repos.TaskWork.MoveTaskToEnvironment(c.Context(), accountID, userID, taskID, destinationListID,
+			*req.Version, req.ConfirmGrants, operationUUID)
+		if errors.Is(moveErr, repository.ErrTaskMoveAccessConfirmation) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false,
+				"code": "access_change_confirmation_required", "affected_user_ids": affected})
+		}
+		if moveErr != nil {
+			return taskWorkError(c, moveErr)
+		}
+		full, loadErr := s.services.Task.GetByIDForActor(c.Context(), taskID, accountID, userID)
+		if loadErr != nil {
+			return taskWorkError(c, loadErr)
+		}
+		afterViewers, viewersErr := s.repos.TaskWork.TaskViewerUserIDs(c.Context(), accountID, taskID)
+		if viewersErr != nil {
+			return taskWorkError(c, viewersErr)
+		}
+		if s.hub != nil {
+			realtimePayload := taskRealtimePayload(fiber.Map{
+				"task": full, "version": full.Version, "operation_id": operationUUID,
+			})
+			realtimePayload["action"] = "environment_moved"
+			s.hub.BroadcastToAccountUsersWithPermission(accountID, afterViewers, domain.PermTasks, ws.EventTaskUpdate,
+				realtimePayload)
+			revoked := subtractTaskAccessRecipients(beforeViewers, afterViewers)
+			if len(revoked) > 0 {
+				s.hub.BroadcastToAccountUsersWithPermission(accountID, revoked, domain.PermTasks, ws.EventTaskUpdate,
+					fiber.Map{"action": "access_revoked", "target_type": domain.TaskAccessTargetTask,
+						"target_id": taskID, "operation_id": operationUUID})
+			}
+		}
+		s.invalidateTasksCache(accountID)
+		return c.JSON(fiber.Map{"success": true, "task": full, "operation_id": operationUUID})
 	}
 	statusID, err := uuid.Parse(strings.TrimSpace(req.StatusID))
 	if err != nil || req.Version == nil || *req.Version < 1 {
@@ -584,15 +756,18 @@ func (s *Server) handleMoveTask(c *fiber.Ctx) error {
 	} else {
 		s.services.Task.RebuildReminder(c.Context(), full)
 	}
+	if err := s.repos.TaskWork.ApplyTaskAccess(c.Context(), accountID, userID, []*domain.Task{full}); err != nil || full.Permissions == nil || !full.Permissions.CanView {
+		return taskWorkError(c, repository.ErrTaskWorkNotFound)
+	}
 	order := fiber.Map{"list_id": move.ListID, "status_id": move.StatusID, "task_ids": move.TaskIDs}
 	s.invalidateTasksCache(accountID)
-	counts := s.taskHierarchyCounts(c.Context(), accountID)
+	counts := s.taskHierarchyCounts(c.Context(), accountID, userID)
 	payload := putTaskHierarchyCounts(fiber.Map{
 		"operation_id": operationID,
 		"task":         full,
 		"order":        order,
 	}, counts)
-	s.broadcastTaskWork(accountID, "moved", payload)
+	s.broadcastTaskWork(c.Context(), accountID, "moved", payload)
 	return c.JSON(putTaskHierarchyCounts(fiber.Map{
 		"success":      true,
 		"operation_id": operationID,
@@ -680,20 +855,37 @@ func (s *Server) handleBulkMoveTasks(c *fiber.Ctx) error {
 		}
 		canonical = append(canonical, full)
 	}
+	if err := s.repos.TaskWork.ApplyTaskAccess(c.Context(), accountID, userID, canonical); err != nil {
+		return taskWorkError(c, err)
+	}
+	for _, task := range canonical {
+		if task.Permissions == nil || !task.Permissions.CanView {
+			return taskWorkError(c, repository.ErrTaskWorkNotFound)
+		}
+	}
 	s.invalidateTasksCache(accountID)
-	counts := s.taskHierarchyCounts(c.Context(), accountID)
+	counts := s.taskHierarchyCounts(c.Context(), accountID, userID)
 	payload := putTaskMutationReconciliation(fiber.Map{"tasks": canonical, "orders": result.Orders}, operationID, counts)
-	s.broadcastTaskWork(accountID, "bulk_moved", payload)
+	s.broadcastTaskWork(c.Context(), accountID, "bulk_moved", payload)
 	return c.JSON(putTaskMutationReconciliation(fiber.Map{"success": true, "tasks": canonical, "orders": result.Orders}, operationID, counts))
 }
 
 func (s *Server) handleGetTaskHierarchy(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
-	folders, rootLists, err := s.repos.TaskWork.ListFolders(c.Context(), accountID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	var environmentID *uuid.UUID
+	if raw := strings.TrimSpace(c.Query("environment_id")); raw != "" {
+		parsed, parseErr := uuid.Parse(raw)
+		if parseErr != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Entorno inválido"})
+		}
+		environmentID = &parsed
+	}
+	folders, rootLists, err := s.repos.TaskWork.ListFoldersForActor(c.Context(), accountID, userID, environmentID)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
-	counts, err := s.repos.TaskWork.HierarchyCounts(c.Context(), accountID)
+	counts, err := s.repos.TaskWork.HierarchyCountsForActor(c.Context(), accountID, userID, environmentID)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
@@ -704,28 +896,26 @@ func (s *Server) handleCreateTaskFolder(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	userID := c.Locals("user_id").(uuid.UUID)
 	var req struct {
-		Name        string  `json:"name"`
-		Description string  `json:"description"`
-		Color       string  `json:"color"`
-		Icon        string  `json:"icon"`
-		WorkflowID  *string `json:"workflow_id"`
+		EnvironmentID string  `json:"environment_id"`
+		Name          string  `json:"name"`
+		Description   string  `json:"description"`
+		Color         string  `json:"color"`
+		Icon          string  `json:"icon"`
+		WorkflowID    *string `json:"workflow_id"`
 	}
 	if err := c.BodyParser(&req); err != nil || strings.TrimSpace(req.Name) == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "El nombre es obligatorio"})
+	}
+	environmentID, err := s.resolveRequestedTaskEnvironment(c, req.EnvironmentID, domain.TaskAccessFull)
+	if err != nil {
+		return taskWorkError(c, err)
 	}
 	normalizedColor, colorErr := normalizeTaskColor(req.Color, "#10B981")
 	if colorErr != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Color inválido; usa #RRGGBB"})
 	}
 	req.Color = normalizedColor
-	req.Icon = strings.TrimSpace(req.Icon)
-	if req.Icon == "" {
-		req.Icon = "folder"
-	}
-	if !validTaskContainerIcon(req.Icon) {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Icono inválido"})
-	}
-	folder := &domain.TaskFolder{AccountID: accountID, CreatedBy: userID, Name: strings.TrimSpace(req.Name), Description: strings.TrimSpace(req.Description), Color: req.Color, Icon: req.Icon}
+	folder := &domain.TaskFolder{AccountID: accountID, EnvironmentID: environmentID, CreatedBy: userID, Name: strings.TrimSpace(req.Name), Description: strings.TrimSpace(req.Description), Color: req.Color, Icon: "folder", AccessMode: "inherit", AccessRevision: 1}
 	if req.WorkflowID != nil && *req.WorkflowID != "" {
 		id, err := uuid.Parse(*req.WorkflowID)
 		if err != nil {
@@ -736,7 +926,10 @@ func (s *Server) handleCreateTaskFolder(c *fiber.Ctx) error {
 	if err := s.repos.TaskWork.CreateFolder(c.Context(), folder); err != nil {
 		return taskWorkError(c, err)
 	}
-	s.broadcastTaskWork(accountID, "folder_created", fiber.Map{"folder": folder})
+	if access, _, accessErr := s.repos.TaskWork.ResolveContainerAccess(c.Context(), accountID, userID, folder.ID, domain.TaskAccessTargetFolder); accessErr == nil {
+		folder.SetEffectiveAccess(access)
+	}
+	s.broadcastTaskWork(c.Context(), accountID, "folder_created", fiber.Map{"folder": folder})
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true, "folder": folder})
 }
 
@@ -774,12 +967,8 @@ func (s *Server) handleUpdateTaskFolder(c *fiber.Ctx) error {
 		}
 		req.Name = &trimmed
 	}
-	if req.Icon != nil {
-		trimmed := strings.TrimSpace(*req.Icon)
-		req.Icon = &trimmed
-	}
-	if req.Icon != nil && !validTaskContainerIcon(*req.Icon) {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Icono inválido"})
+	if err := normalizeTaskFolderIconUpdate(req.Icon); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "El icono de las carpetas es fijo", "code": "folder_icon_immutable"})
 	}
 	if colorErr := normalizeOptionalTaskColor(&req.Color); colorErr != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Color inválido; usa #RRGGBB"})
@@ -788,16 +977,17 @@ func (s *Server) handleUpdateTaskFolder(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "operation_id inválido"})
 	}
-	if err := s.repos.TaskWork.UpdateFolder(c.Context(), accountID, folderID, req.Name, req.Description, req.Color, req.Icon, workflowID, workflowProvided); err != nil {
+	if err := s.repos.TaskWork.UpdateFolder(c.Context(), accountID, folderID, req.Name, req.Description, req.Color, workflowID, workflowProvided); err != nil {
 		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "folder_updated", fiber.Map{"folder_id": folderID, "operation_id": operationID})
+	s.broadcastTaskWork(c.Context(), accountID, "folder_updated", fiber.Map{"folder_id": folderID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
 }
 
 func (s *Server) handleReorderTaskFolder(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	folderID, err := uuid.Parse(c.Params("folderId"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Carpeta inválida"})
@@ -820,17 +1010,22 @@ func (s *Server) handleReorderTaskFolder(c *fiber.Ctx) error {
 	if err := s.repos.TaskWork.ReorderFolder(c.Context(), accountID, folderID, beforeFolderID); err != nil {
 		return taskWorkError(c, err)
 	}
-	folders, rootLists, err := s.repos.TaskWork.ListFolders(c.Context(), accountID)
+	environmentID, err := s.repos.TaskWork.ContainerEnvironmentID(c.Context(), accountID, folderID, "folder")
+	if err != nil {
+		return taskWorkError(c, err)
+	}
+	folders, rootLists, err := s.repos.TaskWork.ListFoldersForActor(c.Context(), accountID, userID, &environmentID)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "folder_updated", fiber.Map{"folder_id": folderID, "operation_id": operationID, "operation": "reordered"})
+	s.broadcastTaskWork(c.Context(), accountID, "folder_updated", fiber.Map{"folder_id": folderID, "operation_id": operationID, "operation": "reordered"})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID, "folders": folders, "root_lists": rootLists})
 }
 
 func (s *Server) handleArchiveTaskFolder(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	folderID, err := uuid.Parse(c.Params("folderId"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Carpeta inválida"})
@@ -839,16 +1034,17 @@ func (s *Server) handleArchiveTaskFolder(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	if err := s.repos.TaskWork.ArchiveFolderConfirmed(c.Context(), accountID, folderID, request.ConfirmationName); err != nil {
+	if err := s.repos.TaskWork.ArchiveFolderConfirmed(c.Context(), accountID, userID, folderID, request.ConfirmationName); err != nil {
 		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "folder_archived", fiber.Map{"folder_id": folderID, "operation_id": operationID})
+	s.broadcastTaskWork(c.Context(), accountID, "folder_archived", fiber.Map{"folder_id": folderID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
 }
 
 func (s *Server) handleUpdateTaskListStructure(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	listID, err := uuid.Parse(c.Params("listId"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Lista inválida"})
@@ -912,18 +1108,31 @@ func (s *Server) handleUpdateTaskListStructure(c *fiber.Ctx) error {
 	if err := s.repos.TaskWork.UpdateListLocation(c.Context(), accountID, listID, folderID, folderProvided, beforeListID, orderProvided, workflowID, inherited, req.Description, req.Name, req.Color, req.Icon); err != nil {
 		return taskWorkError(c, err)
 	}
-	folders, rootLists, err := s.repos.TaskWork.ListFolders(c.Context(), accountID)
+	environmentID, err := s.repos.TaskWork.ContainerEnvironmentID(c.Context(), accountID, listID, "list")
+	if err != nil {
+		return taskWorkError(c, err)
+	}
+	folders, rootLists, err := s.repos.TaskWork.ListFoldersForActor(c.Context(), accountID, userID, &environmentID)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "list_updated", fiber.Map{"list_id": listID, "operation_id": operationID})
+	s.broadcastTaskWork(c.Context(), accountID, "list_updated", fiber.Map{"list_id": listID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID, "folders": folders, "root_lists": rootLists})
 }
 
 func (s *Server) handleGetTaskWorkflows(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
-	items, err := s.repos.TaskWork.ListWorkflows(c.Context(), accountID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	var environmentID *uuid.UUID
+	if raw := strings.TrimSpace(c.Query("environment_id")); raw != "" {
+		parsed, parseErr := uuid.Parse(raw)
+		if parseErr != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Entorno inválido"})
+		}
+		environmentID = &parsed
+	}
+	items, err := s.repos.TaskWork.ListWorkflowsForActor(c.Context(), accountID, userID, environmentID)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
@@ -938,14 +1147,19 @@ func (s *Server) handleCreateTaskWorkflow(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	userID := c.Locals("user_id").(uuid.UUID)
 	var req struct {
-		Name     string `json:"name"`
-		Statuses []struct {
+		EnvironmentID string `json:"environment_id"`
+		Name          string `json:"name"`
+		Statuses      []struct {
 			Name, Color, Category string
 			IsDefault             bool `json:"is_default"`
 		} `json:"statuses"`
 	}
 	if err := c.BodyParser(&req); err != nil || strings.TrimSpace(req.Name) == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "El nombre es obligatorio"})
+	}
+	environmentID, err := s.resolveRequestedTaskEnvironment(c, req.EnvironmentID, domain.TaskAccessFull)
+	if err != nil {
+		return taskWorkError(c, err)
 	}
 	statuses := defaultWorkflowStatuses()
 	if len(req.Statuses) > 0 {
@@ -990,11 +1204,11 @@ func (s *Server) handleCreateTaskWorkflow(c *fiber.Ctx) error {
 			}
 		}
 	}
-	workflow := &domain.TaskWorkflow{AccountID: accountID, Name: strings.TrimSpace(req.Name), CreatedBy: &userID}
+	workflow := &domain.TaskWorkflow{AccountID: accountID, EnvironmentID: environmentID, Name: strings.TrimSpace(req.Name), CreatedBy: &userID}
 	if err := s.repos.TaskWork.CreateWorkflow(c.Context(), workflow, statuses); err != nil {
 		return taskWorkError(c, err)
 	}
-	s.broadcastTaskWork(accountID, "workflow_created", fiber.Map{"workflow": workflow})
+	s.broadcastTaskWork(c.Context(), accountID, "workflow_created", fiber.Map{"workflow": workflow})
 	return c.Status(201).JSON(fiber.Map{"success": true, "workflow": workflow})
 }
 
@@ -1031,7 +1245,7 @@ func (s *Server) handleCreateTaskStatus(c *fiber.Ctx) error {
 	if err := s.repos.TaskWork.CreateStatus(c.Context(), status); err != nil {
 		return taskWorkError(c, err)
 	}
-	s.broadcastTaskWork(accountID, "status_created", fiber.Map{"status": status})
+	s.broadcastTaskWork(c.Context(), accountID, "status_created", fiber.Map{"status": status})
 	return c.Status(201).JSON(fiber.Map{"success": true, "status": status})
 }
 
@@ -1058,7 +1272,7 @@ func (s *Server) handleUpdateTaskStatus(c *fiber.Ctx) error {
 		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "status_updated", fiber.Map{"status_id": statusID})
+	s.broadcastTaskWork(c.Context(), accountID, "status_updated", fiber.Map{"status_id": statusID})
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -1086,7 +1300,7 @@ func (s *Server) handleReorderTaskStatuses(c *fiber.Ctx) error {
 		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "status_updated", fiber.Map{"workflow_id": workflowID, "status_ids": statusIDs, "operation": "reordered"})
+	s.broadcastTaskWork(c.Context(), accountID, "status_updated", fiber.Map{"workflow_id": workflowID, "status_ids": statusIDs, "operation": "reordered"})
 	return c.JSON(fiber.Map{"success": true, "workflow_id": workflowID, "status_ids": statusIDs})
 }
 
@@ -1108,7 +1322,7 @@ func (s *Server) handleDeleteTaskStatus(c *fiber.Ctx) error {
 		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "status_deleted", fiber.Map{"status_id": statusID})
+	s.broadcastTaskWork(c.Context(), accountID, "status_deleted", fiber.Map{"status_id": statusID})
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -1120,8 +1334,10 @@ func (s *Server) handleSetTaskCollaborators(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Tarea inválida"})
 	}
 	var req struct {
-		UserIDs []string `json:"user_ids"`
-		Version *int64   `json:"version"`
+		UserIDs       []string `json:"user_ids"`
+		Version       *int64   `json:"version"`
+		ConfirmGrants bool     `json:"confirm_grants"`
+		OperationID   string   `json:"operation_id"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
@@ -1150,10 +1366,19 @@ func (s *Server) handleSetTaskCollaborators(c *fiber.Ctx) error {
 			ids = append(ids, id)
 		}
 	}
-	if _, err := s.repos.TaskWork.SetCollaborators(c.Context(), accountID, taskID, actorID, ids, *req.Version); err != nil {
+	operationID, operationErr := parseTaskOperationID(req.OperationID)
+	if operationErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "operation_id inválido"})
+	}
+	if _, err := s.repos.TaskWork.SetCollaborators(c.Context(), accountID, taskID, actorID, ids, *req.Version, req.ConfirmGrants, operationID); err != nil {
+		var confirmation *repository.TaskParticipantAccessConfirmationError
+		if errors.As(err, &confirmation) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "access_change_confirmation_required",
+				"affected_user_ids": confirmation.AffectedUserIDs})
+		}
 		return taskWorkError(c, err)
 	}
-	full, err := s.services.Task.GetByID(c.Context(), taskID, accountID)
+	full, err := s.services.Task.GetByIDForActor(c.Context(), taskID, accountID, actorID)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
@@ -1162,12 +1387,13 @@ func (s *Server) handleSetTaskCollaborators(c *fiber.Ctx) error {
 	}
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, taskID, &actorID, "collaborators_updated", fiber.Map{"count": len(ids)})
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "collaborators_updated", fiber.Map{"task_id": taskID, "task": full, "collaborators": full.Collaborators})
+	s.broadcastTaskWork(c.Context(), accountID, "collaborators_updated", fiber.Map{"task_id": taskID, "task": full, "collaborators": full.Collaborators})
 	return c.JSON(fiber.Map{"success": true, "task": full, "collaborators": full.Collaborators, "version": full.Version})
 }
 
 func (s *Server) handleGetTaskChildren(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	taskID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Tarea inválida"})
@@ -1197,6 +1423,14 @@ func (s *Server) handleGetTaskChildren(c *fiber.Ctx) error {
 			child.Collaborators = []*domain.TaskCollaborator{}
 		}
 	}
+	if e := s.repos.TaskWork.ApplyTaskAccess(c.Context(), accountID, userID, items); e != nil {
+		return taskWorkError(c, e)
+	}
+	for _, child := range items {
+		if child.Permissions == nil || !child.Permissions.CanView {
+			return taskWorkError(c, repository.ErrTaskWorkNotFound)
+		}
+	}
 	return c.JSON(fiber.Map{"success": true, "tasks": items})
 }
 
@@ -1215,14 +1449,16 @@ func (s *Server) handleCreateTaskChild(c *fiber.Ctx) error {
 		return c.Status(422).JSON(fiber.Map{"success": false, "error": "Sólo se permite un nivel de subtareas"})
 	}
 	var req struct {
-		Title       string  `json:"title"`
-		Description string  `json:"description"`
-		AssignedTo  *string `json:"assigned_to"`
-		StatusID    *string `json:"status_id"`
-		Priority    string  `json:"priority"`
-		StartAt     *string `json:"start_at"`
-		DueAt       *string `json:"due_at"`
-		IsAllDay    bool    `json:"is_all_day"`
+		Title         string  `json:"title"`
+		Description   string  `json:"description"`
+		AssignedTo    *string `json:"assigned_to"`
+		StatusID      *string `json:"status_id"`
+		Priority      string  `json:"priority"`
+		StartAt       *string `json:"start_at"`
+		DueAt         *string `json:"due_at"`
+		IsAllDay      bool    `json:"is_all_day"`
+		ConfirmGrants bool    `json:"confirm_grants"`
+		OperationID   string  `json:"operation_id"`
 	}
 	if err := c.BodyParser(&req); err != nil || strings.TrimSpace(req.Title) == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "El título es obligatorio"})
@@ -1251,7 +1487,11 @@ func (s *Server) handleCreateTaskChild(c *fiber.Ctx) error {
 	if e != nil {
 		return taskWorkError(c, e)
 	}
-	child := &domain.Task{AccountID: accountID, CreatedBy: userID, AssignedTo: assigned, Title: strings.TrimSpace(req.Title), Description: req.Description, Type: domain.TaskTypeReminder, Priority: req.Priority, Status: domain.TaskStatusPending, StatusID: &status.ID, ListID: parent.ListID, ParentTaskID: &parentID, IsAllDay: req.IsAllDay, MutationActor: &userID}
+	operationID, operationErr := parseTaskOperationID(req.OperationID)
+	if operationErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "operation_id inválido"})
+	}
+	child := &domain.Task{AccountID: accountID, CreatedBy: userID, AssignedTo: assigned, Title: strings.TrimSpace(req.Title), Description: req.Description, Type: domain.TaskTypeReminder, Priority: req.Priority, Status: domain.TaskStatusPending, StatusID: &status.ID, ListID: parent.ListID, ParentTaskID: &parentID, IsAllDay: req.IsAllDay, MutationActor: &userID, MutationOperationID: operationID, ConfirmParticipantGrants: req.ConfirmGrants}
 	if child.Priority == "" {
 		child.Priority = domain.TaskPriorityMedium
 	}
@@ -1280,9 +1520,14 @@ func (s *Server) handleCreateTaskChild(c *fiber.Ctx) error {
 		return c.Status(422).JSON(fiber.Map{"success": false, "error": "La fecha final no puede ser anterior al inicio"})
 	}
 	if err := s.services.Task.Create(c.Context(), child); err != nil {
+		var confirmation *repository.TaskParticipantAccessConfirmationError
+		if errors.As(err, &confirmation) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "access_change_confirmation_required",
+				"affected_user_ids": confirmation.AffectedUserIDs})
+		}
 		return taskWorkError(c, err)
 	}
-	full, loadErr := s.services.Task.GetByID(c.Context(), child.ID, accountID)
+	full, loadErr := s.services.Task.GetByIDForActor(c.Context(), child.ID, accountID, userID)
 	if loadErr != nil {
 		return taskWorkError(c, loadErr)
 	}
@@ -1376,7 +1621,7 @@ func (s *Server) handleCreateTaskComment(c *fiber.Ctx) error {
 	s.setTaskCommentPermissions(c, accountID, userID, []*domain.TaskComment{full})
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, taskID, &userID, "comment_created", fiber.Map{"comment_id": comment.ID})
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "comment_created", fiber.Map{"task_id": taskID, "comment_id": comment.ID, "comment": taskCommentForRealtime(full)})
+	s.broadcastTaskWork(c.Context(), accountID, "comment_created", fiber.Map{"task_id": taskID, "comment_id": comment.ID, "comment": taskCommentForRealtime(full)})
 	if s.hub != nil && len(full.Mentions) > 0 {
 		task, _ := s.services.Task.GetByID(c.Context(), taskID, accountID)
 		title := "Tarea"
@@ -1387,9 +1632,16 @@ func (s *Server) handleCreateTaskComment(c *fiber.Ctx) error {
 		for _, mention := range full.Mentions {
 			targetIDs = append(targetIDs, mention.UserID)
 		}
-		s.hub.BroadcastToAccountUsersWithPermission(accountID, targetIDs, domain.PermTasks, ws.EventTaskMention, fiber.Map{
-			"task_id": taskID, "comment_id": comment.ID, "task_title": title, "author_name": full.AuthorName,
-		})
+		if viewers, viewerErr := s.repos.TaskWork.TaskViewerUserIDs(c.Context(), accountID, taskID); viewerErr == nil {
+			targetIDs = intersectTaskViewerSets([][]uuid.UUID{targetIDs, viewers})
+		} else {
+			targetIDs = []uuid.UUID{}
+		}
+		if len(targetIDs) > 0 {
+			s.hub.BroadcastToAccountUsersWithPermission(accountID, targetIDs, domain.PermTasks, ws.EventTaskMention, fiber.Map{
+				"task_id": taskID, "comment_id": comment.ID, "task_title": title, "author_name": full.AuthorName,
+			})
+		}
 	}
 	return c.Status(201).JSON(fiber.Map{"success": true, "comment": full})
 }
@@ -1436,7 +1688,7 @@ func (s *Server) handleUpdateTaskComment(c *fiber.Ctx) error {
 		return taskWorkError(c, err)
 	}
 	s.setTaskCommentPermissions(c, accountID, userID, []*domain.TaskComment{full})
-	s.broadcastTaskWork(accountID, "comment_updated", fiber.Map{"task_id": taskID, "comment_id": commentID, "comment": taskCommentForRealtime(full)})
+	s.broadcastTaskWork(c.Context(), accountID, "comment_updated", fiber.Map{"task_id": taskID, "comment_id": commentID, "comment": taskCommentForRealtime(full)})
 	if s.hub != nil {
 		newMentionIDs := make([]uuid.UUID, 0, len(full.Mentions))
 		for _, mention := range full.Mentions {
@@ -1450,9 +1702,16 @@ func (s *Server) handleUpdateTaskComment(c *fiber.Ctx) error {
 			if task != nil {
 				title = task.Title
 			}
-			s.hub.BroadcastToAccountUsersWithPermission(accountID, newMentionIDs, domain.PermTasks, ws.EventTaskMention, fiber.Map{
-				"task_id": taskID, "comment_id": commentID, "task_title": title, "author_name": full.AuthorName,
-			})
+			if viewers, viewerErr := s.repos.TaskWork.TaskViewerUserIDs(c.Context(), accountID, taskID); viewerErr == nil {
+				newMentionIDs = intersectTaskViewerSets([][]uuid.UUID{newMentionIDs, viewers})
+			} else {
+				newMentionIDs = []uuid.UUID{}
+			}
+			if len(newMentionIDs) > 0 {
+				s.hub.BroadcastToAccountUsersWithPermission(accountID, newMentionIDs, domain.PermTasks, ws.EventTaskMention, fiber.Map{
+					"task_id": taskID, "comment_id": commentID, "task_title": title, "author_name": full.AuthorName,
+				})
+			}
 		}
 	}
 	return c.JSON(fiber.Map{"success": true, "comment": full})
@@ -1485,17 +1744,18 @@ func (s *Server) handleDeleteTaskComment(c *fiber.Ctx) error {
 		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "comment_deleted", fiber.Map{"task_id": taskID, "comment_id": commentID})
+	s.broadcastTaskWork(c.Context(), accountID, "comment_deleted", fiber.Map{"task_id": taskID, "comment_id": commentID})
 	return c.JSON(fiber.Map{"success": true})
 }
 
 func (s *Server) handleGetTaskActivity(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	taskID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Tarea inválida"})
 	}
-	items, err := s.repos.TaskWork.ListActivity(c.Context(), accountID, taskID, 100)
+	items, err := s.repos.TaskWork.ListActivityForActor(c.Context(), accountID, userID, taskID, 100)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
@@ -1537,7 +1797,7 @@ func (s *Server) handleAddTaskAttachment(c *fiber.Ctx) error {
 	}
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, taskID, &userID, "attachment_added", fiber.Map{"attachment_id": item.ID})
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "attachment_added", fiber.Map{"task_id": taskID, "attachment": item})
+	s.broadcastTaskWork(c.Context(), accountID, "attachment_added", fiber.Map{"task_id": taskID, "attachment": item})
 	return c.Status(201).JSON(fiber.Map{"success": true, "attachment": item})
 }
 func (s *Server) handleDeleteTaskAttachment(c *fiber.Ctx) error {
@@ -1556,17 +1816,18 @@ func (s *Server) handleDeleteTaskAttachment(c *fiber.Ctx) error {
 	}
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, taskID, &userID, "attachment_deleted", fiber.Map{"attachment_id": attachmentID})
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(accountID, "attachment_deleted", fiber.Map{"task_id": taskID, "attachment_id": attachmentID})
+	s.broadcastTaskWork(c.Context(), accountID, "attachment_deleted", fiber.Map{"task_id": taskID, "attachment_id": attachmentID})
 	return c.JSON(fiber.Map{"success": true})
 }
 
 func (s *Server) handleGetTaskDependencies(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	taskID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Tarea inválida"})
 	}
-	items, err := s.repos.TaskWork.ListDependencies(c.Context(), accountID, taskID)
+	items, err := s.repos.TaskWork.ListDependenciesForActor(c.Context(), accountID, userID, taskID)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
@@ -1591,13 +1852,13 @@ func (s *Server) handleAddTaskDependency(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Predecesora inválida"})
 	}
 	dep := &domain.TaskDependency{AccountID: accountID, PredecessorTaskID: predecessorID, SuccessorTaskID: successorID, DependencyType: "finish_to_start", LagMinutes: req.LagMinutes, CreatedBy: &userID}
-	if err := s.repos.TaskWork.AddDependency(c.Context(), dep); err != nil {
+	if err := s.repos.TaskWork.AddDependencyForActor(c.Context(), dep, userID); err != nil {
 		return taskWorkError(c, err)
 	}
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, successorID, &userID, "dependency_added", fiber.Map{"predecessor_task_id": predecessorID})
 	relatedTaskIDs := []uuid.UUID{predecessorID, successorID}
-	s.broadcastTaskWork(accountID, "dependency_added", fiber.Map{"task_id": predecessorID, "related_task_ids": relatedTaskIDs, "dependency": dep})
-	s.broadcastTaskWork(accountID, "dependency_added", fiber.Map{"task_id": successorID, "related_task_ids": relatedTaskIDs, "dependency": dep})
+	s.broadcastTaskWorkToCommonViewers(c.Context(), accountID, relatedTaskIDs, "dependency_added", fiber.Map{"task_id": predecessorID, "related_task_ids": relatedTaskIDs, "dependency": dep})
+	s.broadcastTaskWorkToCommonViewers(c.Context(), accountID, relatedTaskIDs, "dependency_added", fiber.Map{"task_id": successorID, "related_task_ids": relatedTaskIDs, "dependency": dep})
 	return c.Status(201).JSON(fiber.Map{"success": true, "dependency": dep})
 }
 func (s *Server) handleDeleteTaskDependency(c *fiber.Ctx) error {
@@ -1611,14 +1872,14 @@ func (s *Server) handleDeleteTaskDependency(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Dependencia inválida"})
 	}
-	dependency, err := s.repos.TaskWork.DeleteDependency(c.Context(), accountID, taskID, dependencyID)
+	dependency, err := s.repos.TaskWork.DeleteDependencyForActor(c.Context(), accountID, userID, taskID, dependencyID)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, taskID, &userID, "dependency_deleted", fiber.Map{"dependency_id": dependencyID})
 	relatedTaskIDs := []uuid.UUID{dependency.PredecessorTaskID, dependency.SuccessorTaskID}
-	s.broadcastTaskWork(accountID, "dependency_deleted", fiber.Map{"task_id": dependency.PredecessorTaskID, "related_task_ids": relatedTaskIDs, "dependency_id": dependencyID})
-	s.broadcastTaskWork(accountID, "dependency_deleted", fiber.Map{"task_id": dependency.SuccessorTaskID, "related_task_ids": relatedTaskIDs, "dependency_id": dependencyID})
+	s.broadcastTaskWorkToCommonViewers(c.Context(), accountID, relatedTaskIDs, "dependency_deleted", fiber.Map{"task_id": dependency.PredecessorTaskID, "related_task_ids": relatedTaskIDs, "dependency_id": dependencyID})
+	s.broadcastTaskWorkToCommonViewers(c.Context(), accountID, relatedTaskIDs, "dependency_deleted", fiber.Map{"task_id": dependency.SuccessorTaskID, "related_task_ids": relatedTaskIDs, "dependency_id": dependencyID})
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -1633,7 +1894,7 @@ func (s *Server) handleRestoreTask(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	if err := s.repos.TaskWork.RestoreTask(c.Context(), accountID, taskID); err != nil {
+	if err := s.repos.TaskWork.RestoreTask(c.Context(), accountID, userID, taskID); err != nil {
 		return taskWorkError(c, err)
 	}
 	full, err := s.services.Task.GetByID(c.Context(), taskID, accountID)
@@ -1646,10 +1907,13 @@ func (s *Server) handleRestoreTask(c *fiber.Ctx) error {
 			s.services.Task.RebuildReminder(c.Context(), child)
 		}
 	}
+	if err := s.repos.TaskWork.ApplyTaskAccess(c.Context(), accountID, userID, []*domain.Task{full}); err != nil || full.Permissions == nil || !full.Permissions.CanView {
+		return taskWorkError(c, repository.ErrTaskWorkNotFound)
+	}
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, taskID, &userID, "restored", fiber.Map{})
 	s.invalidateTasksCache(accountID)
-	counts := s.taskHierarchyCounts(c.Context(), accountID)
-	s.broadcastTaskWork(accountID, "restored", putTaskMutationReconciliation(fiber.Map{"task_id": taskID, "task": full}, operationID, counts))
+	counts := s.taskHierarchyCounts(c.Context(), accountID, userID)
+	s.broadcastTaskWork(c.Context(), accountID, "restored", putTaskMutationReconciliation(fiber.Map{"task_id": taskID, "task": full}, operationID, counts))
 	parentID := taskID
 	if full.ParentTaskID != nil {
 		parentID = *full.ParentTaskID
@@ -1678,11 +1942,34 @@ func parseTaskScope(c *fiber.Ctx) (*uuid.UUID, *uuid.UUID, error) {
 }
 func (s *Server) handleGetTaskWorkSummary(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	folderID, listID, err := parseTaskScope(c)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Ámbito inválido"})
 	}
-	summary, err := s.repos.TaskWork.Summary(c.Context(), accountID, folderID, listID)
+	var environmentID *uuid.UUID
+	if raw := strings.TrimSpace(c.Query("environment_id")); raw != "" {
+		id, parseErr := uuid.Parse(raw)
+		if parseErr != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Entorno inválido"})
+		}
+		environmentID = &id
+		if _, accessErr := s.repos.TaskWork.RequireEnvironmentAccess(c.Context(), accountID, userID, id, domain.TaskAccessView); accessErr != nil {
+			return taskWorkError(c, accessErr)
+		}
+	}
+	if folderID != nil {
+		if _, accessErr := s.repos.TaskWork.RequireContainerAccess(c.Context(), accountID, userID, *folderID, "folder", domain.TaskAccessView); accessErr != nil {
+			return taskWorkError(c, accessErr)
+		}
+	}
+	if listID != nil {
+		if _, accessErr := s.repos.TaskWork.RequireContainerAccess(c.Context(), accountID, userID, *listID, "list", domain.TaskAccessView); accessErr != nil {
+			return taskWorkError(c, accessErr)
+		}
+	}
+	sharedOnly := strings.EqualFold(strings.TrimSpace(c.Query("shared_with_me")), "true")
+	summary, err := s.repos.TaskWork.Summary(c.Context(), accountID, userID, environmentID, folderID, listID, sharedOnly)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
@@ -1691,6 +1978,7 @@ func (s *Server) handleGetTaskWorkSummary(c *fiber.Ctx) error {
 
 func (s *Server) handleGetTaskGantt(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
 	folderID, listID, err := parseTaskScope(c)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Ámbito inválido"})
@@ -1711,7 +1999,7 @@ func (s *Server) handleGetTaskGantt(c *fiber.Ctx) error {
 	}
 	const ganttPageSize = 1000
 	const ganttMaxTasks = 5000
-	allTasks, total, err := s.services.Task.GetByAccount(c.Context(), accountID, filters, ganttPageSize, 0)
+	allTasks, total, err := s.services.Task.GetByAccountForActor(c.Context(), accountID, userID, filters, ganttPageSize, 0)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
@@ -1722,7 +2010,7 @@ func (s *Server) handleGetTaskGantt(c *fiber.Ctx) error {
 		})
 	}
 	for offset := len(allTasks); offset < total; offset = len(allTasks) {
-		page, _, pageErr := s.services.Task.GetByAccount(c.Context(), accountID, filters, ganttPageSize, offset)
+		page, _, pageErr := s.services.Task.GetByAccountForActor(c.Context(), accountID, userID, filters, ganttPageSize, offset)
 		if pageErr != nil {
 			return taskWorkError(c, pageErr)
 		}

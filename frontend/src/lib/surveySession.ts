@@ -14,3 +14,6 @@ export function buildSurveySessionEvent(respondentToken: string, recipientToken:
   };
 }
 
+export function surveySessionRequestHeaders(respondentToken: string): Record<string, string> {
+  return { 'X-Survey-Session-Token': respondentToken };
+}

@@ -44,6 +44,7 @@ type Services struct {
 	Survey           *SurveyService
 	SurveyTemplate   *SurveyTemplateService
 	Task             *TaskService
+	TaskAccess       *TaskAccessService
 	DocumentTemplate *DocumentTemplateService
 	Report           *ReportService
 }
@@ -70,6 +71,7 @@ func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub 
 		Survey:           NewSurveyService(repos),
 		SurveyTemplate:   NewSurveyTemplateService(repos),
 		Task:             NewTaskService(repos, hub),
+		TaskAccess:       NewTaskAccessService(repos),
 		DocumentTemplate: NewDocumentTemplateService(repos),
 		Report:           NewReportService(repos, pool),
 	}
@@ -732,6 +734,10 @@ func (s *AccountService) DeleteUser(ctx context.Context, userID uuid.UUID) error
 	return s.repos.User.Delete(ctx, userID)
 }
 
+func (s *AccountService) DeleteUserAs(ctx context.Context, userID, actorID uuid.UUID) error {
+	return s.repos.User.DeleteWithActor(ctx, userID, actorID)
+}
+
 func (s *AccountService) AssignUserAccount(ctx context.Context, ua *domain.UserAccount) error {
 	if err := s.repos.UserAccount.Assign(ctx, ua); err != nil {
 		return err
@@ -740,6 +746,14 @@ func (s *AccountService) AssignUserAccount(ctx context.Context, ua *domain.UserA
 }
 
 func (s *AccountService) RemoveUserAccount(ctx context.Context, userID, accountID uuid.UUID) error {
+	return s.removeUserAccount(ctx, userID, accountID, nil)
+}
+
+func (s *AccountService) RemoveUserAccountAs(ctx context.Context, userID, accountID, actorID uuid.UUID) error {
+	return s.removeUserAccount(ctx, userID, accountID, &actorID)
+}
+
+func (s *AccountService) removeUserAccount(ctx context.Context, userID, accountID uuid.UUID, actorID *uuid.UUID) error {
 	count, err := s.repos.UserAccount.CountByUserID(ctx, userID)
 	if err != nil {
 		return err
@@ -747,8 +761,14 @@ func (s *AccountService) RemoveUserAccount(ctx context.Context, userID, accountI
 	if count <= 1 {
 		return fmt.Errorf("el usuario debe conservar al menos una cuenta asignada")
 	}
-	if err := s.repos.UserAccount.Remove(ctx, userID, accountID); err != nil {
-		return err
+	var removeErr error
+	if actorID != nil {
+		removeErr = s.repos.UserAccount.RemoveWithActor(ctx, userID, accountID, *actorID)
+	} else {
+		removeErr = s.repos.UserAccount.Remove(ctx, userID, accountID)
+	}
+	if removeErr != nil {
+		return removeErr
 	}
 	return s.repos.UserAccount.NormalizeForUser(ctx, userID)
 }
@@ -1229,12 +1249,24 @@ func (s *ContactService) FindDuplicateGroups(ctx context.Context, accountID uuid
 	return s.repos.Contact.FindDuplicateGroups(ctx, accountID)
 }
 
+func (s *ContactService) FindDuplicateGroupsForActor(ctx context.Context, accountID, actorID uuid.UUID, taskDataAllowed bool) ([]*domain.ContactDuplicateGroup, error) {
+	return s.repos.Contact.FindDuplicateGroupsForActor(ctx, accountID, actorID, taskDataAllowed)
+}
+
 func (s *ContactService) PreviewMergeContacts(ctx context.Context, accountID, keepID uuid.UUID, mergeIDs []uuid.UUID) (*domain.ContactMergePreview, error) {
 	return s.repos.Contact.PreviewMergeContacts(ctx, accountID, keepID, mergeIDs)
 }
 
+func (s *ContactService) PreviewMergeContactsForActor(ctx context.Context, accountID, actorID uuid.UUID, taskDataAllowed bool, keepID uuid.UUID, mergeIDs []uuid.UUID) (*domain.ContactMergePreview, error) {
+	return s.repos.Contact.PreviewMergeContactsForActor(ctx, accountID, actorID, taskDataAllowed, keepID, mergeIDs)
+}
+
 func (s *ContactService) MergeContacts(ctx context.Context, accountID, keepID uuid.UUID, mergeIDs []uuid.UUID, mergedBy *uuid.UUID) (*domain.ContactMergeResult, error) {
 	return s.repos.Contact.MergeContacts(ctx, accountID, keepID, mergeIDs, mergedBy)
+}
+
+func (s *ContactService) MergeContactsForActor(ctx context.Context, accountID, actorID uuid.UUID, taskDataAllowed bool, keepID uuid.UUID, mergeIDs []uuid.UUID, mergedBy *uuid.UUID) (*domain.ContactMergeResult, error) {
+	return s.repos.Contact.MergeContactsForActor(ctx, accountID, actorID, taskDataAllowed, keepID, mergeIDs, mergedBy)
 }
 
 func (s *ContactService) ResetFromDevice(ctx context.Context, contactID uuid.UUID) error {

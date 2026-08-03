@@ -101,8 +101,10 @@ var operationalLeadDefaultFields = []string{
 }
 
 type OperationalLeadFilters struct {
-	AccountID uuid.UUID                `json:"-"`
-	Mode      OperationalLeadQueryMode `json:"mode"`
+	AccountID       uuid.UUID                `json:"-"`
+	ActorID         *uuid.UUID               `json:"-"`
+	TaskDataAllowed *bool                    `json:"-"`
+	Mode            OperationalLeadQueryMode `json:"mode"`
 
 	Search      string `json:"search,omitempty"`
 	Pipeline    string `json:"pipeline,omitempty"` // UUID, exact name, or __no_pipeline__.
@@ -367,6 +369,15 @@ func buildOperationalLeadBaseSQL(filters OperationalLeadFilters, cursor *operati
 	b := &operationalSQLBuilder{}
 	b.where = append(b.where, "l.account_id = "+b.addArg(filters.AccountID))
 	required := requiredOperationalJoins(filters)
+	// Task signals are opt-in actor data. Legacy/global MCP callers do not carry
+	// a protected user decision, so a missing value must fail closed instead of
+	// inheriting account-wide task visibility.
+	taskDataAllowed := filters.TaskDataAllowed != nil && *filters.TaskDataAllowed
+	taskActorExpression := ""
+	needsTaskScope := required["tasks"] || required["activity"] || (filters.TaskState != "" && filters.TaskState != OperationalTaskAny)
+	if filters.ActorID != nil && needsTaskScope && taskDataAllowed {
+		taskActorExpression = b.addArg(*filters.ActorID)
+	}
 	if len(filters.IDs) > 0 {
 		b.where = append(b.where, "l.id = ANY("+b.addArg(filters.IDs)+")")
 	}
@@ -449,16 +460,26 @@ func buildOperationalLeadBaseSQL(filters OperationalLeadFilters, cursor *operati
 		}
 	}
 
-	taskPredicate := "filter_task.account_id = l.account_id AND (filter_task.lead_id = l.id OR (filter_task.lead_id IS NULL AND filter_task.contact_id = l.contact_id))"
+	taskFrom := "tasks filter_task"
+	taskPredicate := "filter_task.account_id = l.account_id AND filter_task.deleted_at IS NULL AND (filter_task.lead_id = l.id OR (filter_task.lead_id IS NULL AND filter_task.contact_id = l.contact_id))"
+	if taskActorExpression != "" {
+		taskFrom += " JOIN task_lists filter_task_list ON filter_task_list.account_id=filter_task.account_id AND filter_task_list.id=filter_task.list_id"
+		taskPredicate += " AND " + repository.TaskActorCanViewSQL("filter_task", "filter_task_list", taskActorExpression)
+	} else if !taskDataAllowed {
+		taskPredicate += " AND FALSE"
+	}
+	taskExists := func(extra string) string {
+		return "EXISTS (SELECT 1 FROM " + taskFrom + " WHERE " + taskPredicate + extra + ")"
+	}
 	switch filters.TaskState {
 	case OperationalTaskNone:
-		b.where = append(b.where, "NOT EXISTS (SELECT 1 FROM tasks filter_task WHERE "+taskPredicate+")")
+		b.where = append(b.where, "NOT "+taskExists(""))
 	case OperationalTaskPresent:
-		b.where = append(b.where, "EXISTS (SELECT 1 FROM tasks filter_task WHERE "+taskPredicate+")")
+		b.where = append(b.where, taskExists(""))
 	case OperationalTaskPending:
-		b.where = append(b.where, "EXISTS (SELECT 1 FROM tasks filter_task WHERE "+taskPredicate+" AND filter_task.status = 'pending')")
+		b.where = append(b.where, taskExists(" AND filter_task.status = 'pending'"))
 	case OperationalTaskOverdue:
-		b.where = append(b.where, "EXISTS (SELECT 1 FROM tasks filter_task WHERE "+taskPredicate+" AND filter_task.status = 'pending' AND filter_task.due_at < NOW())")
+		b.where = append(b.where, taskExists(" AND filter_task.status = 'pending' AND filter_task.due_at < NOW()"))
 	}
 
 	if filters.ActivityFrom != nil {
@@ -479,7 +500,7 @@ func buildOperationalLeadBaseSQL(filters OperationalLeadFilters, cursor *operati
 		LEFT JOIN pipelines p ON p.id = l.pipeline_id AND p.account_id = l.account_id
 		LEFT JOIN pipeline_stages ps ON ps.id = l.stage_id AND ps.pipeline_id = l.pipeline_id
 	`
-	from += operationalLateralJoins(required)
+	from += operationalLateralJoins(required, taskActorExpression, taskDataAllowed)
 	return from + " WHERE " + strings.Join(b.where, " AND "), b.args, required
 }
 
@@ -526,7 +547,7 @@ func requiredOperationalJoins(filters OperationalLeadFilters) map[string]bool {
 	return required
 }
 
-func operationalLateralJoins(required map[string]bool) string {
+func operationalLateralJoins(required map[string]bool, taskActorExpression string, taskDataAllowed bool) string {
 	var joins strings.Builder
 	if required["tags"] {
 		joins.WriteString(` LEFT JOIN LATERAL (
@@ -555,21 +576,40 @@ func operationalLateralJoins(required map[string]bool) string {
 		) interaction_stats ON true `)
 	}
 	if required["tasks"] {
+		taskJoin, taskAccess := "", ""
+		if !taskDataAllowed {
+			taskAccess = " AND FALSE"
+		} else if taskActorExpression != "" {
+			taskJoin = " JOIN task_lists operational_task_list ON operational_task_list.account_id=task.account_id AND operational_task_list.id=task.list_id"
+			taskAccess = " AND " + repository.TaskActorCanViewSQL("task", "operational_task_list", taskActorExpression)
+		}
 		joins.WriteString(` LEFT JOIN LATERAL (
 			SELECT COUNT(*)::int AS task_count,
 				COUNT(*) FILTER (WHERE task.status = 'pending' AND task.due_at < NOW())::int AS overdue_task_count,
 				MIN(task.due_at) FILTER (WHERE task.status = 'pending') AS next_task_due_at
-			FROM tasks task
-			WHERE task.account_id = l.account_id AND (task.lead_id = l.id OR (task.lead_id IS NULL AND task.contact_id = l.contact_id))
+			FROM tasks task` + taskJoin + `
+			WHERE task.account_id = l.account_id AND task.deleted_at IS NULL AND (task.lead_id = l.id OR (task.lead_id IS NULL AND task.contact_id = l.contact_id))
+			` + taskAccess + `
 		) task_stats ON true `)
 	}
 	if required["activity"] {
+		activityTaskFrom := "tasks activity_task"
+		activityTaskAccess := ""
+		if taskActorExpression != "" {
+			activityTaskFrom += " JOIN task_lists activity_task_list ON activity_task_list.account_id=activity_task.account_id AND activity_task_list.id=activity_task.list_id"
+			activityTaskAccess = " AND " + repository.TaskActorCanViewSQL("activity_task", "activity_task_list", taskActorExpression)
+		}
+		activityTaskBranch := ""
+		if taskDataAllowed {
+			activityTaskBranch = `
+				UNION ALL SELECT MAX(activity_task.updated_at) FROM ` + activityTaskFrom + ` WHERE activity_task.account_id = l.account_id AND activity_task.deleted_at IS NULL AND (activity_task.lead_id = l.id OR (activity_task.lead_id IS NULL AND activity_task.contact_id = l.contact_id))` + activityTaskAccess
+		}
 		joins.WriteString(` LEFT JOIN LATERAL (
 			SELECT MAX(activity_at) AS last_activity_at FROM (
 				SELECT l.updated_at AS activity_at
 				UNION ALL SELECT MAX(activity_message.timestamp) FROM chats activity_chat JOIN messages activity_message ON activity_message.chat_id = activity_chat.id AND activity_message.account_id = l.account_id AND NOT COALESCE(activity_message.is_revoked, false) WHERE activity_chat.account_id = l.account_id AND activity_chat.contact_id = l.contact_id
 				UNION ALL SELECT MAX(activity_interaction.created_at) FROM interactions activity_interaction WHERE activity_interaction.account_id = l.account_id AND (activity_interaction.lead_id = l.id OR activity_interaction.contact_id = l.contact_id)
-				UNION ALL SELECT MAX(activity_task.updated_at) FROM tasks activity_task WHERE activity_task.account_id = l.account_id AND (activity_task.lead_id = l.id OR (activity_task.lead_id IS NULL AND activity_task.contact_id = l.contact_id))
+				` + activityTaskBranch + `
 			) activity_values
 		) activity_stats ON true `)
 	}

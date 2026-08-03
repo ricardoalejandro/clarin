@@ -13,18 +13,83 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/naperu/clarin/internal/domain"
 )
 
 var (
-	ErrRawSurveyMutationDisabled = errors.New("las encuestas se crean desde plantillas; crea una plantilla o una aplicación desde una plantilla existente")
-	ErrSurveyPublishedImmutable  = errors.New("una aplicación de encuesta es inmutable; edita la plantilla y crea una nueva aplicación")
-	ErrSurveyCannotReturnToDraft = errors.New("una aplicación publicada no puede volver a borrador")
+	ErrRawSurveyMutationDisabled   = errors.New("las encuestas se crean desde plantillas; crea una plantilla o una aplicación desde una plantilla existente")
+	ErrSurveyPublishedImmutable    = errors.New("una aplicación de encuesta es inmutable; edita la plantilla y crea una nueva aplicación")
+	ErrSurveyCannotReturnToDraft   = errors.New("una aplicación publicada no puede volver a borrador")
+	ErrSurveyArchived              = errors.New("la aplicación de encuesta está archivada")
+	ErrSurveyNotAcceptingResponses = errors.New("la aplicación de encuesta no está recibiendo respuestas")
+	ErrSurveyDeleteLegacy          = errors.New("una aplicación heredada no se puede eliminar; archívala para conservar su historial")
+	ErrSurveyDeleteHasResponses    = errors.New("la aplicación tiene respuestas y no se puede eliminar")
+	ErrSurveyDeleteHasActivity     = errors.New("la aplicación ya fue abierta o distribuida y no se puede eliminar")
+	ErrSurveyDeleteHasUploads      = errors.New("la aplicación tiene archivos activos y no se puede eliminar")
+	ErrSurveyQuestionNotFound      = errors.New("la pregunta de encuesta no existe")
+	ErrSurveyQuestionNotText       = errors.New("la pregunta no admite respuestas de texto")
+	ErrSurveySlugUnavailable       = errors.New("el enlace público ya está reservado")
+	ErrSurveyLinkRetired           = errors.New("el enlace público fue retirado")
 )
+
+const (
+	SurveyDeletionBlockLegacy       = "legacy"
+	SurveyDeletionBlockHasResponses = "has_responses"
+	SurveyDeletionBlockHasActivity  = "has_activity"
+	SurveyDeletionBlockHasUploads   = "has_uploads"
+)
+
+func surveyDeletionBlockReason(isTemplate, legacy, missingTemplate, hasResponses, hasActivity, hasUploads bool) string {
+	switch {
+	case isTemplate || legacy || missingTemplate:
+		return SurveyDeletionBlockLegacy
+	case hasResponses:
+		return SurveyDeletionBlockHasResponses
+	case hasActivity:
+		return SurveyDeletionBlockHasActivity
+	case hasUploads:
+		return SurveyDeletionBlockHasUploads
+	default:
+		return ""
+	}
+}
+
+func applySurveyLifecycleCapabilities(survey *domain.Survey, deletionBlockReason string) {
+	survey.DeletionBlockReason = deletionBlockReason
+	survey.CanDelete = deletionBlockReason == ""
+	// surveys is now the application table. Historical rows may still retain
+	// is_template=true, but the migration gives each of them a real template_id
+	// and marks them as legacy instances. They must remain archivable/restorable
+	// even though permanent deletion is intentionally blocked.
+	isApplication := survey.TemplateID != nil
+	survey.CanArchive = isApplication && survey.ArchivedAt == nil
+	survey.CanRestore = isApplication && survey.ArchivedAt != nil
+}
+
+const surveyDeletionBlockSQL = `CASE
+	WHEN s.is_template OR s.legacy_instance OR s.template_id IS NULL THEN 'legacy'
+	WHEN EXISTS (SELECT 1 FROM survey_responses deletion_response
+		WHERE deletion_response.account_id=s.account_id AND deletion_response.survey_id=s.id) THEN 'has_responses'
+	WHEN EXISTS (SELECT 1 FROM survey_response_sessions deletion_session
+		WHERE deletion_session.account_id=s.account_id AND deletion_session.survey_id=s.id)
+	  OR EXISTS (SELECT 1 FROM survey_instance_recipients deletion_recipient
+		WHERE deletion_recipient.account_id=s.account_id AND deletion_recipient.survey_id=s.id
+		  AND (deletion_recipient.status<>'pending'
+			OR deletion_recipient.opened_at IS NOT NULL OR deletion_recipient.completed_at IS NOT NULL)) THEN 'has_activity'
+	WHEN EXISTS (SELECT 1 FROM survey_file_uploads deletion_upload
+		WHERE deletion_upload.account_id=s.account_id AND deletion_upload.survey_id=s.id
+		  AND deletion_upload.status<>'deleted') THEN 'has_uploads'
+	ELSE '' END`
 
 type SurveyRepository struct {
 	db *pgxpool.Pool
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
 // ─── Survey CRUD ──────────────────────────────────────────────────────────────
@@ -36,48 +101,64 @@ func (r *SurveyRepository) Create(ctx context.Context, s *domain.Survey) error {
 func (r *SurveyRepository) GetByID(ctx context.Context, id, accountID uuid.UUID) (*domain.Survey, error) {
 	s := &domain.Survey{}
 	var brandingJSON, measurementJSON []byte
-	err := r.db.QueryRow(ctx, `
+	var deletionBlockReason string
+	err := r.db.QueryRow(ctx, fmt.Sprintf(`
 		SELECT s.id, s.account_id, s.name, s.description, s.slug, s.status,
 			s.welcome_title, s.welcome_description, s.thank_you_title, s.thank_you_message,
 			s.thank_you_redirect_url, s.branding, s.measurement_config,s.measurement_signature,
 			s.analytics_tracking_started_at,s.is_template, s.template_id, s.template_revision,
 			s.origin_type, s.program_id, s.origin_label, s.audience_mode, s.opens_at, s.closes_at,
-			s.legacy_instance, s.created_by, s.created_at, s.updated_at,
+			s.legacy_instance, s.archived_at, s.archived_by, COALESCE(s.archived_from_status,''),
+			s.created_by, s.created_at, s.updated_at,
 			(SELECT COUNT(*) FROM survey_questions WHERE survey_id = s.id) AS question_count,
-			(SELECT COUNT(*) FROM survey_responses WHERE survey_id = s.id AND completed_at IS NOT NULL) AS response_count
+			(SELECT COUNT(*) FROM survey_responses WHERE survey_id = s.id AND completed_at IS NOT NULL) AS response_count,
+			%s AS deletion_block_reason
 		FROM surveys s
 		WHERE s.id = $1 AND s.account_id = $2
-	`, id, accountID).Scan(
+	`, surveyDeletionBlockSQL), id, accountID).Scan(
 		&s.ID, &s.AccountID, &s.Name, &s.Description, &s.Slug, &s.Status,
 		&s.WelcomeTitle, &s.WelcomeDescription, &s.ThankYouTitle, &s.ThankYouMessage,
 		&s.ThankYouRedirectURL, &brandingJSON, &measurementJSON, &s.MeasurementSignature,
 		&s.AnalyticsTrackingStartedAt, &s.IsTemplate, &s.TemplateID, &s.TemplateRevision,
 		&s.OriginType, &s.ProgramID, &s.OriginLabel, &s.AudienceMode, &s.OpensAt, &s.ClosesAt,
-		&s.LegacyInstance, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt,
-		&s.QuestionCount, &s.ResponseCount,
+		&s.LegacyInstance, &s.ArchivedAt, &s.ArchivedBy, &s.ArchivedFromStatus,
+		&s.CreatedBy, &s.CreatedAt, &s.UpdatedAt,
+		&s.QuestionCount, &s.ResponseCount, &deletionBlockReason,
 	)
 	if err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal(brandingJSON, &s.Branding)
 	_ = json.Unmarshal(measurementJSON, &s.MeasurementConfig)
+	applySurveyLifecycleCapabilities(s, deletionBlockReason)
 	return s, nil
 }
 
 func (r *SurveyRepository) List(ctx context.Context, accountID uuid.UUID) ([]*domain.Survey, error) {
-	rows, err := r.db.Query(ctx, `
+	return r.ListWithArchived(ctx, accountID, false)
+}
+
+func (r *SurveyRepository) ListWithArchived(ctx context.Context, accountID uuid.UUID, includeArchived bool) ([]*domain.Survey, error) {
+	query := fmt.Sprintf(`
 		SELECT s.id, s.account_id, s.name, s.description, s.slug, s.status,
 			s.welcome_title, s.welcome_description, s.thank_you_title, s.thank_you_message,
 			s.thank_you_redirect_url, s.branding, s.measurement_config,s.measurement_signature,
 			s.analytics_tracking_started_at,s.is_template, s.template_id, s.template_revision,
 			s.origin_type, s.program_id, s.origin_label, s.audience_mode, s.opens_at, s.closes_at,
-			s.legacy_instance, s.created_by, s.created_at, s.updated_at,
+			s.legacy_instance, s.archived_at, s.archived_by, COALESCE(s.archived_from_status,''),
+			s.created_by, s.created_at, s.updated_at,
 			(SELECT COUNT(*) FROM survey_questions WHERE survey_id = s.id) AS question_count,
-			(SELECT COUNT(*) FROM survey_responses WHERE survey_id = s.id AND completed_at IS NOT NULL) AS response_count
+			(SELECT COUNT(*) FROM survey_responses WHERE survey_id = s.id AND completed_at IS NOT NULL) AS response_count,
+			%s AS deletion_block_reason
 		FROM surveys s
-		WHERE s.account_id = $1
+		WHERE s.account_id = $1`, surveyDeletionBlockSQL)
+	if !includeArchived {
+		query += ` AND s.archived_at IS NULL`
+	}
+	query += `
 		ORDER BY s.is_template DESC, s.created_at DESC
-	`, accountID)
+	`
+	rows, err := r.db.Query(ctx, query, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -87,19 +168,22 @@ func (r *SurveyRepository) List(ctx context.Context, accountID uuid.UUID) ([]*do
 	for rows.Next() {
 		s := &domain.Survey{}
 		var brandingJSON, measurementJSON []byte
+		var deletionBlockReason string
 		if err := rows.Scan(
 			&s.ID, &s.AccountID, &s.Name, &s.Description, &s.Slug, &s.Status,
 			&s.WelcomeTitle, &s.WelcomeDescription, &s.ThankYouTitle, &s.ThankYouMessage,
 			&s.ThankYouRedirectURL, &brandingJSON, &measurementJSON, &s.MeasurementSignature,
 			&s.AnalyticsTrackingStartedAt, &s.IsTemplate, &s.TemplateID, &s.TemplateRevision,
 			&s.OriginType, &s.ProgramID, &s.OriginLabel, &s.AudienceMode, &s.OpensAt, &s.ClosesAt,
-			&s.LegacyInstance, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt,
-			&s.QuestionCount, &s.ResponseCount,
+			&s.LegacyInstance, &s.ArchivedAt, &s.ArchivedBy, &s.ArchivedFromStatus,
+			&s.CreatedBy, &s.CreatedAt, &s.UpdatedAt,
+			&s.QuestionCount, &s.ResponseCount, &deletionBlockReason,
 		); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(brandingJSON, &s.Branding)
 		_ = json.Unmarshal(measurementJSON, &s.MeasurementConfig)
+		applySurveyLifecycleCapabilities(s, deletionBlockReason)
 		surveys = append(surveys, s)
 	}
 	return surveys, nil
@@ -107,11 +191,46 @@ func (r *SurveyRepository) List(ctx context.Context, accountID uuid.UUID) ([]*do
 
 func (r *SurveyRepository) Update(ctx context.Context, s *domain.Survey) error {
 	brandingJSON, _ := json.Marshal(s.Branding)
-	tag, err := r.db.Exec(ctx, `
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var previousSlug string
+	if err := tx.QueryRow(ctx, `
+		SELECT slug FROM surveys WHERE id=$1 AND account_id=$2 FOR UPDATE
+	`, s.ID, s.AccountID).Scan(&previousSlug); err != nil {
+		return err
+	}
+	if previousSlug != s.Slug {
+		retired, err := tx.Exec(ctx, `
+			UPDATE survey_public_slug_reservations
+			SET retired_at=COALESCE(retired_at,NOW())
+			WHERE slug=$1 AND owner_account_id=$2 AND survey_id=$3 AND retired_at IS NULL
+		`, previousSlug, s.AccountID, s.ID)
+		if err != nil {
+			return err
+		}
+		if retired.RowsAffected() != 1 {
+			return errors.New("active survey public slug reservation not found")
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO survey_public_slug_reservations
+				(slug,owner_account_id,survey_id,reserved_at)
+			VALUES ($1,$2,$3,NOW())
+		`, s.Slug, s.AccountID, s.ID); err != nil {
+			if isUniqueViolation(err) {
+				return ErrSurveySlugUnavailable
+			}
+			return err
+		}
+	}
+	tag, err := tx.Exec(ctx, `
 		UPDATE surveys SET name=$1, description=$2, slug=$3, status=$4,
 			welcome_title=$5, welcome_description=$6, thank_you_title=$7, thank_you_message=$8,
 			thank_you_redirect_url=$9, branding=$10, updated_at=NOW()
 		WHERE id=$11 AND account_id=$12
+		  AND archived_at IS NULL
 		  AND NOT (status IN ('active','closed') AND $4::text='draft')
 		  AND (
 			(status='draft' AND (legacy_instance OR template_id IS NULL)) OR (
@@ -128,14 +247,73 @@ func (r *SurveyRepository) Update(ctx context.Context, s *domain.Survey) error {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
+		var archived bool
+		if queryErr := tx.QueryRow(ctx, `SELECT archived_at IS NOT NULL FROM surveys WHERE id=$1 AND account_id=$2`, s.ID, s.AccountID).Scan(&archived); queryErr == nil && archived {
+			return ErrSurveyArchived
+		}
 		return ErrSurveyPublishedImmutable
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (r *SurveyRepository) Delete(ctx context.Context, id, accountID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `DELETE FROM surveys WHERE id=$1 AND account_id=$2`, id, accountID)
-	return err
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var isTemplate, legacy bool
+	var slug string
+	var templateID *uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		SELECT is_template,legacy_instance,template_id,slug
+		FROM surveys WHERE account_id=$1 AND id=$2 FOR UPDATE
+	`, accountID, id).Scan(&isTemplate, &legacy, &templateID, &slug); err != nil {
+		return err
+	}
+	var hasResponses, hasActivity, hasUploads bool
+	if err := tx.QueryRow(ctx, `
+		SELECT
+			EXISTS(SELECT 1 FROM survey_responses WHERE account_id=$1 AND survey_id=$2),
+			EXISTS(SELECT 1 FROM survey_response_sessions WHERE account_id=$1 AND survey_id=$2)
+			OR EXISTS(SELECT 1 FROM survey_instance_recipients
+				WHERE account_id=$1 AND survey_id=$2
+				  AND (status<>'pending' OR opened_at IS NOT NULL OR completed_at IS NOT NULL)),
+			EXISTS(SELECT 1 FROM survey_file_uploads
+				WHERE account_id=$1 AND survey_id=$2 AND status<>'deleted')
+	`, accountID, id).Scan(&hasResponses, &hasActivity, &hasUploads); err != nil {
+		return err
+	}
+	switch surveyDeletionBlockReason(isTemplate, legacy, templateID == nil, hasResponses, hasActivity, hasUploads) {
+	case SurveyDeletionBlockLegacy:
+		return ErrSurveyDeleteLegacy
+	case SurveyDeletionBlockHasResponses:
+		return ErrSurveyDeleteHasResponses
+	case SurveyDeletionBlockHasActivity:
+		return ErrSurveyDeleteHasActivity
+	case SurveyDeletionBlockHasUploads:
+		return ErrSurveyDeleteHasUploads
+	}
+	retired, err := tx.Exec(ctx, `
+		UPDATE survey_public_slug_reservations
+		SET retired_at=COALESCE(retired_at,NOW())
+		WHERE slug=$1 AND owner_account_id=$2 AND survey_id=$3 AND retired_at IS NULL
+	`, slug, accountID, id)
+	if err != nil {
+		return err
+	}
+	if retired.RowsAffected() != 1 {
+		return errors.New("active survey public slug reservation not found")
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM surveys WHERE account_id=$1 AND id=$2`, accountID, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *SurveyRepository) HasDistribution(ctx context.Context, accountID, surveyID uuid.UUID) (bool, error) {
@@ -152,16 +330,72 @@ func (r *SurveyRepository) HasDistribution(ctx context.Context, accountID, surve
 	return distributed, err
 }
 
+func (r *SurveyRepository) Archive(ctx context.Context, accountID, surveyID, actorID uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var status string
+	var archivedAt *time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT status,archived_at FROM surveys
+		WHERE account_id=$1 AND id=$2 AND template_id IS NOT NULL FOR UPDATE
+	`, accountID, surveyID).Scan(&status, &archivedAt); err != nil {
+		return err
+	}
+	if archivedAt == nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE surveys
+			SET archived_at=NOW(),archived_by=$4,archived_from_status=$3,status='closed',updated_at=NOW()
+			WHERE account_id=$1 AND id=$2
+		`, accountID, surveyID, status, actorID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *SurveyRepository) Restore(ctx context.Context, accountID, surveyID uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var archivedAt *time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT archived_at FROM surveys
+		WHERE account_id=$1 AND id=$2 AND template_id IS NOT NULL FOR UPDATE
+	`, accountID, surveyID).Scan(&archivedAt); err != nil {
+		return err
+	}
+	if archivedAt != nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE surveys
+			SET archived_at=NULL,archived_by=NULL,archived_from_status=NULL,status='closed',updated_at=NOW()
+			WHERE account_id=$1 AND id=$2
+		`, accountID, surveyID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 func (r *SurveyRepository) SetStatus(ctx context.Context, id, accountID uuid.UUID, status string) error {
 	tag, err := r.db.Exec(ctx, `
 		UPDATE surveys SET status=$1, updated_at=NOW()
 		WHERE id=$2 AND account_id=$3
+		  AND archived_at IS NULL
 		  AND NOT (status IN ('active','closed') AND $1::text='draft')
 	`, status, id, accountID)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
+		var archived bool
+		if queryErr := r.db.QueryRow(ctx, `SELECT archived_at IS NOT NULL FROM surveys WHERE id=$1 AND account_id=$2`, id, accountID).Scan(&archived); queryErr == nil && archived {
+			return ErrSurveyArchived
+		}
 		return ErrSurveyCannotReturnToDraft
 	}
 	return nil
@@ -170,14 +404,32 @@ func (r *SurveyRepository) SetStatus(ctx context.Context, id, accountID uuid.UUI
 func (r *SurveyRepository) SlugExists(ctx context.Context, slug string, excludeID *uuid.UUID) (bool, error) {
 	var exists bool
 	if excludeID != nil {
-		err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM surveys WHERE slug=$1 AND id!=$2)`, slug, *excludeID).Scan(&exists)
+		err := r.db.QueryRow(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM survey_public_slug_reservations
+				WHERE slug=$1 AND (survey_id<>$2 OR retired_at IS NOT NULL)
+			)
+		`, slug, *excludeID).Scan(&exists)
 		return exists, err
 	}
-	err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM surveys WHERE slug=$1)`, slug).Scan(&exists)
+	err := r.db.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM survey_public_slug_reservations WHERE slug=$1)
+	`, slug).Scan(&exists)
 	return exists, err
 }
 
 func (r *SurveyRepository) GetBySlug(ctx context.Context, slug string) (*domain.Survey, error) {
+	var surveyID, ownerAccountID uuid.UUID
+	var retiredAt *time.Time
+	if err := r.db.QueryRow(ctx, `
+		SELECT survey_id,owner_account_id,retired_at
+		FROM survey_public_slug_reservations WHERE slug=$1
+	`, slug).Scan(&surveyID, &ownerAccountID, &retiredAt); err != nil {
+		return nil, err
+	}
+	if retiredAt != nil {
+		return nil, ErrSurveyLinkRetired
+	}
 	s := &domain.Survey{}
 	var brandingJSON, measurementJSON []byte
 	err := r.db.QueryRow(ctx, `
@@ -186,17 +438,22 @@ func (r *SurveyRepository) GetBySlug(ctx context.Context, slug string) (*domain.
 			thank_you_redirect_url, branding,measurement_config,measurement_signature,
 			analytics_tracking_started_at,is_template, template_id, template_revision,
 			origin_type, program_id, origin_label, audience_mode, opens_at, closes_at,
-			legacy_instance, created_by, created_at, updated_at
-		FROM surveys WHERE slug = $1
-	`, slug).Scan(
+			legacy_instance, archived_at, archived_by, COALESCE(archived_from_status,''),
+			created_by, created_at, updated_at
+		FROM surveys WHERE id=$1 AND account_id=$2 AND slug=$3
+	`, surveyID, ownerAccountID, slug).Scan(
 		&s.ID, &s.AccountID, &s.Name, &s.Description, &s.Slug, &s.Status,
 		&s.WelcomeTitle, &s.WelcomeDescription, &s.ThankYouTitle, &s.ThankYouMessage,
 		&s.ThankYouRedirectURL, &brandingJSON, &measurementJSON, &s.MeasurementSignature,
 		&s.AnalyticsTrackingStartedAt, &s.IsTemplate, &s.TemplateID, &s.TemplateRevision,
 		&s.OriginType, &s.ProgramID, &s.OriginLabel, &s.AudienceMode, &s.OpensAt, &s.ClosesAt,
-		&s.LegacyInstance, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt,
+		&s.LegacyInstance, &s.ArchivedAt, &s.ArchivedBy, &s.ArchivedFromStatus,
+		&s.CreatedBy, &s.CreatedAt, &s.UpdatedAt,
 	)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrSurveyLinkRetired
+		}
 		return nil, err
 	}
 	_ = json.Unmarshal(brandingJSON, &s.Branding)
@@ -350,6 +607,9 @@ func (r *SurveyRepository) CreateResponse(ctx context.Context, resp *domain.Surv
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockSurveyForResponse(ctx, tx, resp.AccountID, resp.SurveyID); err != nil {
+		return err
+	}
 
 	err = tx.QueryRow(ctx, `
 		INSERT INTO survey_responses (
@@ -430,6 +690,9 @@ func (r *SurveyRepository) TrackSession(ctx context.Context, event domain.Survey
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockSurveyForResponse(ctx, tx, event.AccountID, event.SurveyID); err != nil {
+		return err
+	}
 	if event.QuestionID != nil {
 		var belongs bool
 		if err := tx.QueryRow(ctx, `
@@ -516,6 +779,24 @@ func (r *SurveyRepository) TrackSession(ctx context.Context, event domain.Survey
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+func lockSurveyForResponse(ctx context.Context, tx pgx.Tx, accountID, surveyID uuid.UUID) error {
+	var status string
+	var archivedAt *time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT status,archived_at FROM surveys
+		WHERE account_id=$1 AND id=$2 FOR SHARE
+	`, accountID, surveyID).Scan(&status, &archivedAt); err != nil {
+		return err
+	}
+	if archivedAt != nil {
+		return ErrSurveyArchived
+	}
+	if status != "active" {
+		return ErrSurveyNotAcceptingResponses
+	}
+	return nil
 }
 
 func (r *SurveyRepository) completeSurveySession(ctx context.Context, tx pgx.Tx, resp *domain.SurveyResponse) error {
@@ -632,6 +913,81 @@ func (r *SurveyRepository) ListResponses(ctx context.Context, accountID, surveyI
 		responses = append(responses, r)
 	}
 	return responses, total, rows.Err()
+}
+
+func (r *SurveyRepository) ListTextAnswers(ctx context.Context, accountID, surveyID, questionID uuid.UUID, limit int, cursorCompletedAt *time.Time, cursorResponseID *uuid.UUID) (*domain.SurveyTextAnswersPage, error) {
+	var questionType string
+	if err := r.db.QueryRow(ctx, `
+		SELECT question.type
+		FROM survey_questions question
+		JOIN surveys survey ON survey.id=question.survey_id
+		WHERE survey.account_id=$1 AND survey.id=$2 AND question.id=$3
+	`, accountID, surveyID, questionID).Scan(&questionType); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrSurveyQuestionNotFound
+		}
+		return nil, err
+	}
+	if questionType != "short_text" && questionType != "long_text" {
+		return nil, ErrSurveyQuestionNotText
+	}
+	page := &domain.SurveyTextAnswersPage{
+		Items: []domain.SurveyTextAnswer{},
+	}
+	if err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM survey_answers answer
+		JOIN survey_responses response
+		  ON response.survey_id=answer.survey_id AND response.id=answer.response_id
+		WHERE response.account_id=$1 AND response.survey_id=$2
+		  AND answer.question_id=$3 AND response.completed_at IS NOT NULL
+	`, accountID, surveyID, questionID).Scan(&page.Total); err != nil {
+		return nil, err
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT answer.id,answer.response_id,answer.value,response.completed_at,
+			participant.contact_id,
+			CASE WHEN survey.audience_mode='program_participants' AND participant.id IS NOT NULL THEN
+				COALESCE(NULLIF(BTRIM(contact.custom_name),''),
+					NULLIF(BTRIM(CONCAT_WS(' ',contact.name,contact.last_name)),''),
+					NULLIF(BTRIM(contact.push_name),''),NULLIF(BTRIM(contact.phone),''),'Contacto')
+			ELSE '' END AS contact_name,
+			participant.id
+		FROM survey_answers answer
+		JOIN survey_responses response
+		  ON response.survey_id=answer.survey_id AND response.id=answer.response_id
+		JOIN surveys survey
+		  ON survey.account_id=response.account_id AND survey.id=response.survey_id
+		LEFT JOIN program_participants participant
+		  ON survey.audience_mode='program_participants'
+		 AND participant.id=response.program_participant_id
+		 AND participant.program_id=survey.program_id
+		 AND participant.contact_id=response.contact_id
+		LEFT JOIN contacts contact
+		  ON contact.account_id=survey.account_id AND contact.id=participant.contact_id
+		WHERE response.account_id=$1 AND response.survey_id=$2
+		  AND answer.question_id=$3 AND response.completed_at IS NOT NULL
+		  AND ($4::timestamptz IS NULL OR response.completed_at<$4
+			OR (response.completed_at=$4 AND response.id>$5::uuid))
+		ORDER BY response.completed_at DESC,response.id ASC
+		LIMIT $6
+	`, accountID, surveyID, questionID, cursorCompletedAt, cursorResponseID, limit+1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var answer domain.SurveyTextAnswer
+		if err := rows.Scan(&answer.ID, &answer.ResponseID, &answer.Value, &answer.CompletedAt,
+			&answer.ContactID, &answer.ContactName, &answer.ProgramParticipantID); err != nil {
+			return nil, err
+		}
+		page.Items = append(page.Items, answer)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return page, nil
 }
 
 func (r *SurveyRepository) GetResponse(ctx context.Context, responseID uuid.UUID) (*domain.SurveyResponse, error) {
@@ -1334,8 +1690,8 @@ func (r *SurveyRepository) GetAllAnswersForExport(ctx context.Context, accountID
 
 	rows, err := r.db.Query(ctx, `
 		SELECT response.id,
-			CASE WHEN participant.id IS NOT NULL THEN participant.contact_id END,
-			CASE WHEN participant.id IS NOT NULL THEN participant.id END,
+			CASE WHEN survey.audience_mode='program_participants' THEN response.contact_id END,
+			CASE WHEN survey.audience_mode='program_participants' THEN response.program_participant_id END,
 			CASE WHEN participant.id IS NOT NULL THEN
 				COALESCE(NULLIF(BTRIM(contact.custom_name),''),
 					NULLIF(BTRIM(CONCAT_WS(' ',contact.name,contact.last_name)),''),
@@ -1381,6 +1737,141 @@ func (r *SurveyRepository) GetAllAnswersForExport(ctx context.Context, accountID
 		return nil, err
 	}
 	return buildSurveyExportData(programAudience, questions, records), nil
+}
+
+// WalkCompletedSurveyReportResponses keeps only one completed response in
+// memory while a caller writes the XLSX stream. The query is account scoped and
+// deliberately omits respondent tokens and all technical identity fields.
+func (r *SurveyRepository) WalkCompletedSurveyReportResponses(
+	ctx context.Context,
+	accountID, surveyID uuid.UUID,
+	visit func(domain.SurveyReportResponse) error,
+) error {
+	rows, err := r.db.Query(ctx, `
+		SELECT response.id,
+			CASE WHEN survey.audience_mode='program_participants' THEN response.contact_id END,
+			CASE WHEN survey.audience_mode='program_participants' THEN response.program_participant_id END,
+			CASE WHEN participant.id IS NOT NULL THEN
+				COALESCE(NULLIF(BTRIM(contact.custom_name),''),
+					NULLIF(BTRIM(CONCAT_WS(' ',contact.name,contact.last_name)),''),
+					NULLIF(BTRIM(contact.push_name),''),NULLIF(BTRIM(contact.phone),''),'Contacto')
+			ELSE '' END,
+			CASE WHEN participant.id IS NOT NULL THEN COALESCE(contact.phone,'') ELSE '' END,
+			response.source,response.started_at,response.completed_at,
+			answer.question_id,COALESCE(NULLIF(answer.file_url,''),answer.value)
+		FROM survey_responses response
+		JOIN surveys survey
+		  ON survey.account_id=response.account_id AND survey.id=response.survey_id
+		LEFT JOIN program_participants participant
+		  ON survey.audience_mode='program_participants'
+		 AND participant.id=response.program_participant_id
+		 AND participant.program_id=survey.program_id
+		 AND participant.contact_id=response.contact_id
+		LEFT JOIN contacts contact
+		  ON contact.account_id=survey.account_id AND contact.id=participant.contact_id
+		LEFT JOIN survey_answers answer
+		  ON answer.survey_id=response.survey_id AND answer.response_id=response.id
+		LEFT JOIN survey_questions question
+		  ON question.survey_id=survey.id AND question.id=answer.question_id
+		WHERE survey.account_id=$1 AND survey.id=$2 AND response.completed_at IS NOT NULL
+		ORDER BY response.completed_at DESC,response.id,question.order_index NULLS LAST,
+			question.id NULLS LAST,answer.created_at,answer.id
+	`, accountID, surveyID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var current *domain.SurveyReportResponse
+	anonymousIndex := 0
+	flush := func() error {
+		if current == nil {
+			return nil
+		}
+		return visit(*current)
+	}
+	for rows.Next() {
+		var responseID uuid.UUID
+		var contactID, participantID, questionID *uuid.UUID
+		var contactName, contactPhone, source string
+		var startedAt, completedAt time.Time
+		var value *string
+		if err := rows.Scan(&responseID, &contactID, &participantID, &contactName,
+			&contactPhone, &source, &startedAt, &completedAt, &questionID, &value); err != nil {
+			return err
+		}
+		if current == nil || current.ResponseID != responseID {
+			if err := flush(); err != nil {
+				return err
+			}
+			anonymousIndex++
+			current = &domain.SurveyReportResponse{
+				ResponseID: responseID, AnonymousIndex: anonymousIndex,
+				ContactID: contactID, ProgramParticipantID: participantID,
+				ContactName: contactName, ContactPhone: contactPhone, Source: source,
+				StartedAt: startedAt, CompletedAt: completedAt,
+				Answers: make(map[uuid.UUID]string),
+			}
+		}
+		if questionID != nil && value != nil {
+			current.Answers[*questionID] = *value
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return flush()
+}
+
+func (r *SurveyRepository) WalkCompletedSurveyReportTextAnswers(
+	ctx context.Context,
+	accountID, surveyID uuid.UUID,
+	visit func(domain.SurveyReportTextAnswer) error,
+) error {
+	rows, err := r.db.Query(ctx, `
+		SELECT DENSE_RANK() OVER (ORDER BY response.completed_at DESC,response.id),
+			response.id,question.id,question.title,question.type,answer.value,response.completed_at,
+			CASE WHEN participant.id IS NOT NULL THEN participant.contact_id END,
+			CASE WHEN participant.id IS NOT NULL THEN participant.id END,
+			CASE WHEN participant.id IS NOT NULL THEN
+				COALESCE(NULLIF(BTRIM(contact.custom_name),''),
+					NULLIF(BTRIM(CONCAT_WS(' ',contact.name,contact.last_name)),''),
+					NULLIF(BTRIM(contact.phone),''),'Contacto')
+			ELSE '' END
+		FROM survey_answers answer
+		JOIN survey_responses response
+		  ON response.survey_id=answer.survey_id AND response.id=answer.response_id
+		JOIN surveys survey
+		  ON survey.account_id=response.account_id AND survey.id=response.survey_id
+		JOIN survey_questions question
+		  ON question.survey_id=survey.id AND question.id=answer.question_id
+		LEFT JOIN program_participants participant
+		  ON survey.audience_mode='program_participants'
+		 AND participant.id=response.program_participant_id
+		 AND participant.program_id=survey.program_id
+		 AND participant.contact_id=response.contact_id
+		LEFT JOIN contacts contact
+		  ON contact.account_id=survey.account_id AND contact.id=participant.contact_id
+		WHERE survey.account_id=$1 AND survey.id=$2 AND response.completed_at IS NOT NULL
+		  AND question.type IN ('short_text','long_text')
+		ORDER BY response.completed_at DESC,response.id,question.order_index,question.id,answer.id
+	`, accountID, surveyID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item domain.SurveyReportTextAnswer
+		if err := rows.Scan(&item.AnonymousIndex, &item.ResponseID, &item.QuestionID,
+			&item.QuestionTitle, &item.QuestionType, &item.Value, &item.CompletedAt,
+			&item.ContactID, &item.ProgramParticipantID, &item.ContactName); err != nil {
+			return err
+		}
+		if err := visit(item); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 // GetResponseCount returns {completed, started} for views metrics

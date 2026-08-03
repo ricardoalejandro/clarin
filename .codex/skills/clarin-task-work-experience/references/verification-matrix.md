@@ -1,5 +1,17 @@
 # Clarin Work Verification Matrix
 
+## Entornos, ACL, Pagination, And Realtime
+
+- Migration: run startup migration twice; prove exactly one General per account, unchanged existing IDs/orders, no null `environment_id`, same-account/same-Entorno composite FKs, default uniqueness per Entorno and no orphan grants/audit rows.
+- Provisioning: create a private Entorno and prove one atomic workflow/status/inbox/creator-manager grant. Reject a partially provisioned Entorno and archive while any non-deleted task remains.
+- Authorization: exercise every Ver/Comentar/Editar/Administrar action, governance bit, account-admin recovery, missing `PermTasks`, task/list/folder/environment precedence, explicit raise/lower/deny, private resource, root/subtask inheritance and last explicit manager. Reject new child grants without Entorno Ver; preserve historical grants as inactive. Hidden returns `404`; visible-but-forbidden returns `403`.
+- Peripheral surfaces: prove actor filtering for comments, comment attachments, task attachments, dependencies, reminders, search, summary/reporting, calendar, Gantt, Trash and Eros. Prove “Todo el Entorno” and the direct-share Hub never cross the active Entorno; the Hub contains only direct folder/list/root-task roots and hides inaccessible parent hierarchy/counts/siblings.
+- Participant grants: adding an owner/collaborator without Editar first returns a confirmation contract, then commits participant plus task grant once. Removing participation leaves access unchanged. Reject stale access revision, duplicate operation ID, cross-account user and concurrent revoke/edit.
+- Cross-Entorno move: require Administrar at source and Editar at destination, reject participants without destination Entorno Ver, map every parent/child status by category, confirm affected participant grants and verify exact all-or-nothing rollback for missing mapping, conflict or revocation.
+- Pagination: validate opaque cursor ordering with ties, default 50/max 200, no duplicate/skip during progressive fetch, lazy folder-list loading, aborted stale requests, exact 500 ms search debounce and no N+1 or total-sized payload under stress.
+- Realtime: test authorized, direct-share, revoked and foreign users. Resource recipients are intersected, ordinary updates contain no unauthorized hierarchy, revocation emits only a tombstone, and actor/Entorno caches and counts reconcile without F5.
+- DTO contract: task, list, folder and Entorno responses serialize `effective_access_level`, `can_manage_access` and `capabilities` from the same actor-scoped result as the compatibility `permissions` object; verify an explicit false governance bit and omission on unscoped internal objects.
+
 ## Grouped List, progress, Gantt and previews
 
 - Unit: all seven grouping modes, special empty keys, direction/collapse persistence, one stable drag cursor, relative-order insertion and exact-date confirmation before any due write.
@@ -15,6 +27,8 @@
 - Unit: checkbox toggle, Shift range, dragging selected/unselected cards, maximum stack/ghost counts, reduced motion state, unique payload items, relative order and destination resolution.
 - Backend: same-account top-level tasks only, optimistic versions, deterministic locks, parent/child workflow mapping, archived/incompatible/duplicate rejection and all-or-nothing rollback.
 - Integration: one request per gesture to column/list/folder, one matching `operation_id` in HTTP/WebSocket, no duplicate cards, no React #185, Escape/error rollback and folder list choice.
+- Scope reconciliation: Mauritius → Zambia disappears immediately while remaining on Mauritius, appears in Zambia without F5, remains visible with updated breadcrumbs in Todo el Entorno, and stays only when both lists belong to the active folder. Exercise HTTP-before-WebSocket and WebSocket-before-HTTP; the newer task version and canonical counts win in both orders.
+- Pagination: after a move, refresh removes only authoritative moved IDs that the server no longer returns while preserving unrelated later pages. `409` and network failure leave rows, selection, order and totals untouched.
 - Calendar: month all-day and week/day one-hour slots, direct creation, scope/remembered list selection, keyboard Enter/Escape and draft preservation into the full editor.
 - Accessibility/layout: `aria-live` group counts and destination announcements, keyboard status/list pickers, reduced motion, sidebar expansion/restoration and widths 375, 917, 979, 1249 and 1284 px.
 - Unit: main-row versus chevron accordion transitions, adaptive pointer/keyboard/touch selection, list-first lateral-target resolution, hysteresis, edge autoscroll, overlay ordering and measured Lista density.
@@ -32,7 +46,7 @@
 - Verify task counts, saved-view CRUD/account isolation, cache invalidation, activity, and canonical WebSocket payloads.
 - Archive only empty lists/folders; restore children only under an active parent and active container chain.
 - Move and reorder lists in root and folders, and reorder folders among folders; reject cross-account/wrong-container/archived/self anchors and every structural move of the default list. Verify one transaction performs workflow inheritance, complete category remapping, location and destination order, or leaves every row unchanged.
-- Verify the default list is repaired to root order `0`, non-default root order starts after it, and folder/list icons accept only the shared catalog while round-tripping through hierarchy APIs.
+- Verify the default list is repaired to root order `0` and non-default root order starts after it. Run the migration twice, prove every folder is normalized to `folder`, its check constraint rejects all other values, create ignores a legacy custom icon, update returns `400 folder_icon_immutable`, and list icons still round-trip through the shared catalog.
 - Complete and reopen a task and prove `deleted_at` remains null and no retention appears. Then explicitly archive that completed task and prove eligibility is based on `deleted_at`, never `completed_at`.
 - Test account policies at exact 7, 30, and 365-day boundaries plus `NULL`/“Nunca”; changing policy recalculates displays without deleting rows or enqueueing purge work.
 - Verify task users can archive/restore while only account administrators can update policy or purge. Reject incorrect exact names, stale versions, active/default containers, cross-account IDs, and too-young descendants under lock.
@@ -72,7 +86,7 @@
 - Confirm navigation renders the pinned default list first, then “Listas independientes” with its explanation, then folders in canonical order. Drag folders and lists with mouse, touch long-press, and keyboard; verify overlay/insertion target, one request per gesture, exact Escape/outside/`409`/`500` rollback, and workflow confirmation before a populated list changes workflow.
 - Expand several folders independently by mouse and keyboard, reload persisted state, auto-open the active parent, autoexpand a collapsed drag target after an intentional pause, and restore expansion exactly on Escape/error. With enough folders, verify the themed scrollbar and top/bottom overflow shadows.
 - Select a folder by its main row, collapse it while active, and confirm no scope effect reopens it; selecting one of its child lists must open it again. During task drag, verify the real pointer—not the translated card—selects the highlighted list/folder through navigation scroll and a folder drop opens the concrete-list chooser above the board.
-- Rename a default list, root list, nested list, and folder; choose every supported color/icon by pointer and keyboard, then reload and prove the canonical values return. Reject an icon outside the catalog.
+- Rename a default list, root list, nested list, and folder; choose list colors/icons and folder colors by pointer and keyboard, then reload and prove the canonical values return. Folder creation/editing shows a fixed icon rather than a picker; list creation/editing retains the full picker and rejects icons outside the catalog.
 - At 1398×504, 1024, 768, and 375 px—and with Eros open—verify full-bleed canvas, stable two-row header, primary view tabs, search expansion without height/layout shift, `/` focus, Escape retention, and clear/collapse behavior.
 
 ## Task Detail
@@ -80,6 +94,10 @@
 - Verify docked, floating, resized, maximized, mobile, Escape, focus restoration, and board interaction behind non-modal modes. Assert the canonical 8%/1 px, 18%/2 px and 45%/3 px veil/blur values and modal blocking only for maximized/mobile.
 - Resize Description with pointer and keyboard to both clamps, persist and reload its preferred height, double-click reset, then use the expanded editor through Listo, Ctrl/Command+Enter and Escape. A failed write must keep the shared draft open with visible retry.
 - Apply the same matrix to creation. Verify double-click maximize, geometry persistence/clamping, clean Escape, dirty-draft confirmation, cancelled discard preservation, searchable grouped list selection, and portaled controls at every viewport edge.
+- Verify desktop -> 320/375/mobile or 80–150% zoom -> desktop preserves the manually preferred floating size, discards unsafe legacy dimensions, never persists an effective responsive clamp and restores the documented defaults through Restablecer tamaño.
+- In creation and expanded description, verify Ctrl/Cmd+Enter, IME, invalid form, open picker, double submission, `409` and transport failure. The task is created at most once and every rejected path preserves draft and focus.
+- Paste ordinary text, one/many clipboard images and invalid/oversize MIME data. Verify queue deduplication, preview URL cleanup, 50 MB/quota/account-prefix enforcement, create-once upload order and partial retry without a second task.
+- For comment uploads, verify Comentar succeeds, Ver fails, a draft is hidden before promotion, foreign/cross-account draft IDs fail, promotion is atomic with comment creation/update and abandoned drafts remain cleanup candidates.
 - Open list, responsible, status and priority pickers from calendar/detail/list at narrow and wide widths; assert each menu is above its owner, at least 280 px when possible, keyboard-safe, unclipped, and restores focus. Floating dimming remains non-blocking while maximized/mobile modes remain modal.
 - Edit every supported inline property and recover from version conflict without losing drafts.
 - Operate the status and priority pickers with pointer and keyboard. Add collaborators through search, remove any chip, and remove the final collaborator while asserting `user_ids: []` and an explicitly empty canonical response.

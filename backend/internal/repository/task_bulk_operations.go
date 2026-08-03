@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/naperu/clarin/internal/domain"
 )
 
 var (
@@ -21,11 +22,12 @@ type TaskVersionInput struct {
 }
 
 type TaskBulkUpdateInput struct {
-	Items     []TaskVersionInput
-	Property  string
-	Value     any
-	ActorID   uuid.UUID
-	Operation uuid.UUID
+	Items                    []TaskVersionInput
+	Property                 string
+	Value                    any
+	ActorID                  uuid.UUID
+	Operation                uuid.UUID
+	ConfirmParticipantGrants bool
 }
 
 type TaskBulkMutationResult struct {
@@ -55,10 +57,12 @@ func (r *TaskWorkRepository) BulkUpdateTasks(ctx context.Context, accountID uuid
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	currentAssignees := make(map[uuid.UUID]uuid.UUID, len(items))
 	for _, item := range items {
 		var version int64
 		var parentID *uuid.UUID
-		if err := tx.QueryRow(ctx, `SELECT COALESCE(version,1),parent_task_id FROM tasks WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE`, accountID, item.ID).Scan(&version, &parentID); err != nil {
+		var currentAssignee uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(version,1),parent_task_id,assigned_to FROM tasks WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE`, accountID, item.ID).Scan(&version, &parentID, &currentAssignee); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, ErrTaskBulkUpdateInvalid
 			}
@@ -70,6 +74,52 @@ func (r *TaskWorkRepository) BulkUpdateTasks(ctx context.Context, accountID uuid
 		if version != item.Version {
 			return nil, ErrTaskVersionConflict
 		}
+		currentAssignees[item.ID] = currentAssignee
+	}
+	lockedIDs := make([]uuid.UUID, 0, len(items))
+	for _, item := range items {
+		lockedIDs = append(lockedIDs, item.ID)
+	}
+	if err := lockAndRequireTaskAccessTx(ctx, tx, accountID, input.ActorID, lockedIDs, domain.TaskAccessEdit); err != nil {
+		return nil, err
+	}
+	if input.Property == "assigned_to" {
+		assignee, ok := input.Value.(uuid.UUID)
+		if !ok || assignee == uuid.Nil {
+			return nil, ErrTaskBulkUpdateInvalid
+		}
+		var belongs bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM user_accounts WHERE account_id=$1 AND user_id=$2)`, accountID, assignee).Scan(&belongs); err != nil {
+			return nil, err
+		}
+		if !belongs {
+			return nil, ErrTaskBulkUpdateInvalid
+		}
+		grantTaskIDs := make([]uuid.UUID, 0, len(items))
+		for _, item := range items {
+			if currentAssignees[item.ID] == assignee {
+				continue
+			}
+			affected, err := taskParticipantsNeedingGrant(ctx, tx, accountID, uuid.Nil, &item.ID, []uuid.UUID{assignee})
+			if err != nil {
+				return nil, err
+			}
+			if len(affected) > 0 {
+				grantTaskIDs = append(grantTaskIDs, item.ID)
+			}
+		}
+		if len(grantTaskIDs) > 0 && !input.ConfirmParticipantGrants {
+			return nil, &TaskParticipantAccessConfirmationError{AffectedUserIDs: []uuid.UUID{assignee}}
+		}
+		var operationID *uuid.UUID
+		if input.Operation != uuid.Nil {
+			operationID = &input.Operation
+		}
+		for _, rootTaskID := range grantTaskIDs {
+			if err := confirmTaskParticipantGrants(ctx, tx, accountID, rootTaskID, input.ActorID, []uuid.UUID{assignee}, operationID); err != nil {
+				return nil, err
+			}
+		}
 	}
 	for _, item := range items {
 		var command string
@@ -80,15 +130,8 @@ func (r *TaskWorkRepository) BulkUpdateTasks(ctx context.Context, accountID uuid
 		case "type":
 			command = `UPDATE tasks SET type=$3,updated_at=NOW(),version=version+1 WHERE account_id=$1 AND id=$2`
 		case "assigned_to":
-			assignee, ok := value.(uuid.UUID)
+			_, ok := value.(uuid.UUID)
 			if !ok {
-				return nil, ErrTaskBulkUpdateInvalid
-			}
-			var belongs bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM user_accounts WHERE account_id=$1 AND user_id=$2)`, accountID, assignee).Scan(&belongs); err != nil {
-				return nil, err
-			}
-			if !belongs {
 				return nil, ErrTaskBulkUpdateInvalid
 			}
 			command = `UPDATE tasks SET assigned_to=$3,updated_at=NOW(),version=version+1 WHERE account_id=$1 AND id=$2`
@@ -146,6 +189,13 @@ func (r *TaskWorkRepository) BulkTrashTasks(ctx context.Context, accountID, acto
 			return nil, err
 		}
 	}
+	lockedIDs := make([]uuid.UUID, 0, len(ordered))
+	for _, item := range ordered {
+		lockedIDs = append(lockedIDs, item.ID)
+	}
+	if err := lockAndRequireTaskAccessTx(ctx, tx, accountID, actorID, lockedIDs, domain.TaskAccessFull); err != nil {
+		return nil, err
+	}
 	now := time.Now()
 	ids := make([]uuid.UUID, 0, len(items))
 	for _, item := range items {
@@ -178,20 +228,17 @@ func (r *TaskWorkRepository) RescheduleTaskChain(ctx context.Context, accountID 
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	var oldStart *time.Time
-	var version int64
-	if err := tx.QueryRow(ctx, `SELECT start_at,COALESCE(version,1) FROM tasks WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE`, accountID, input.TaskID).Scan(&oldStart, &version); err != nil {
+	// The account row serializes dependency-graph reads with edge writes. The
+	// complete affected set is then authorized and locked before any date moves.
+	if err := tx.QueryRow(ctx, `SELECT id FROM accounts WHERE id=$1 FOR UPDATE`, accountID).Scan(new(uuid.UUID)); err != nil {
 		return nil, err
-	}
-	if version != input.Version {
-		return nil, ErrTaskVersionConflict
 	}
 	ids := []uuid.UUID{input.TaskID}
 	if input.RescheduleDependencies {
 		rows, queryErr := tx.Query(ctx, `WITH RECURSIVE chain(id) AS (
 			SELECT successor_task_id FROM task_dependencies WHERE account_id=$1 AND predecessor_task_id=$2
 			UNION SELECT d.successor_task_id FROM task_dependencies d JOIN chain c ON c.id=d.predecessor_task_id WHERE d.account_id=$1
-		) SELECT t.id FROM tasks t JOIN chain c ON c.id=t.id WHERE t.account_id=$1 AND t.deleted_at IS NULL ORDER BY t.id FOR UPDATE`, accountID, input.TaskID)
+		) SELECT id FROM chain ORDER BY id`, accountID, input.TaskID)
 		if queryErr != nil {
 			return nil, queryErr
 		}
@@ -208,6 +255,17 @@ func (r *TaskWorkRepository) RescheduleTaskChain(ctx context.Context, accountID 
 			return nil, err
 		}
 		rows.Close()
+	}
+	if err := lockAndRequireTaskAccessTx(ctx, tx, accountID, input.ActorID, ids, domain.TaskAccessEdit); err != nil {
+		return nil, err
+	}
+	var oldStart *time.Time
+	var version int64
+	if err := tx.QueryRow(ctx, `SELECT start_at,COALESCE(version,1) FROM tasks WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL`, accountID, input.TaskID).Scan(&oldStart, &version); err != nil {
+		return nil, err
+	}
+	if version != input.Version {
+		return nil, ErrTaskVersionConflict
 	}
 	if _, err := tx.Exec(ctx, `UPDATE tasks SET start_at=$3,due_at=$4,overdue_notified_at=NULL,updated_at=NOW(),version=version+1 WHERE account_id=$1 AND id=$2`, accountID, input.TaskID, input.StartAt, input.DueAt); err != nil {
 		return nil, err

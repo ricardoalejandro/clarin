@@ -63,6 +63,57 @@ func TestTaskReminderScheduleChanged(t *testing.T) {
 	}
 }
 
+func TestIntersectTaskNotificationTargetsDropsRevokedParticipants(t *testing.T) {
+	owner, collaborator, revoked, unrelated := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	got := intersectTaskNotificationTargets(
+		[]uuid.UUID{owner, collaborator, revoked, collaborator},
+		[]uuid.UUID{unrelated, collaborator, owner},
+	)
+	if len(got) != 2 || got[0] != owner || got[1] != collaborator {
+		t.Fatalf("notification targets=%v, want only visible owner and collaborator", got)
+	}
+	if got := intersectTaskNotificationTargets([]uuid.UUID{revoked}, []uuid.UUID{owner}); len(got) != 0 {
+		t.Fatalf("revoked participant received reminder targets=%v", got)
+	}
+}
+
+func TestAuthorizedTaskEventRecipientsExcludeUnrelatedAccountUser(t *testing.T) {
+	viewerBefore, viewerAfter, unrelated := uuid.New(), uuid.New(), uuid.New()
+	got := authorizedTaskEventRecipients(
+		[]uuid.UUID{viewerBefore, viewerBefore},
+		[]uuid.UUID{viewerAfter},
+	)
+	if len(got) != 2 || got[0] != viewerBefore || got[1] != viewerAfter {
+		t.Fatalf("authorized task recipients=%v", got)
+	}
+	for _, recipient := range got {
+		if recipient == unrelated {
+			t.Fatalf("unrelated account user received task event: %s", unrelated)
+		}
+	}
+}
+
+func TestTaskACLRealtimePayloadRequiresActorScopedReload(t *testing.T) {
+	taskID := uuid.New()
+	privateListID := uuid.New()
+	payload := map[string]interface{}{
+		"action":           "updated",
+		"task":             &domain.Task{ID: taskID, ListID: &privateListID},
+		"hierarchy_counts": &domain.TaskHierarchyCounts{Lists: []domain.TaskListCountSnapshot{{ID: privateListID, TaskCount: 4}}},
+		"operation_id":     uuid.NewString(),
+	}
+	got := taskACLRealtimePayload(taskID, payload)
+	if got["task_id"] != taskID.String() || got["action"] != "updated" || got["operation_id"] != payload["operation_id"] {
+		t.Fatalf("minimal task event lost reconciliation identity: %#v", got)
+	}
+	if _, exists := got["task"]; exists {
+		t.Fatalf("direct share event leaked canonical task breadcrumb: %#v", got)
+	}
+	if _, exists := got["hierarchy_counts"]; exists {
+		t.Fatalf("direct share event leaked private hierarchy counts: %#v", got)
+	}
+}
+
 func TestAssignTaskCollaboratorsKeepsCanonicalUsers(t *testing.T) {
 	withUsers, empty := uuid.New(), uuid.New()
 	userID := uuid.New()

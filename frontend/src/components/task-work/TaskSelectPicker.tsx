@@ -7,6 +7,7 @@ import type { TaskFolder, TaskList } from '@/types/task'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { TaskContainerIcon } from './TaskContainerAppearance'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
+import { TaskRemoteListPicker } from './TaskRemoteHierarchyPicker'
 
 export interface TaskSelectOption {
   value: string
@@ -77,7 +78,22 @@ export function TaskSelectPicker({ value, options, onChange, placeholder = 'Sele
   </>
 }
 
-export function TaskListPicker({ value, lists, folders, onChange, disabled, className }: { value: string; lists: TaskList[]; folders?: TaskFolder[]; onChange: (value: string) => void; disabled?: boolean; className?: string }) {
+export function TaskListPicker({ value, lists, folders, environmentId, selectedLabel, selectedDescription, onChange, onItemsLoaded, disabled, className }: {
+  value: string
+  lists: TaskList[]
+  folders?: TaskFolder[]
+  environmentId?: string
+  selectedLabel?: string
+  selectedDescription?: string
+  onChange: (value: string, list?: TaskList) => void
+  onItemsLoaded?: (lists: TaskList[], folders: TaskFolder[]) => void
+  disabled?: boolean
+  className?: string
+}) {
+  const remoteEnvironmentID = environmentId || lists.find(list => list.environment_id)?.environment_id || ''
+  if (remoteEnvironmentID) {
+    return <TaskRemoteListPicker environmentId={remoteEnvironmentID} value={value} initialLists={lists} initialFolders={folders} selectedLabel={selectedLabel} selectedDescription={selectedDescription} onChange={onChange} onItemsLoaded={onItemsLoaded} disabled={disabled} className={className} />
+  }
   const folderByID = new Map((folders || []).map(folder => [folder.id, folder]))
   const options = [...lists].sort((a, b) => Number(Boolean(b.is_default)) - Number(Boolean(a.is_default)) || a.sort_order - b.sort_order).map(list => {
     const folder = list.folder_id ? folderByID.get(list.folder_id) : undefined

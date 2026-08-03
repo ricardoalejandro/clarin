@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/service"
@@ -24,18 +26,19 @@ import (
 
 func (s *Server) handleListSurveys(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	includeArchived, _ := strconv.ParseBool(c.Query("include_archived", "false"))
 
 	// Redis cache — 30s TTL
 	surveysCacheKey := ""
 	if s.cache != nil {
-		surveysCacheKey = fmt.Sprintf("surveys:%s:all", accountID.String())
+		surveysCacheKey = fmt.Sprintf("surveys:%s:archived:%t", accountID.String(), includeArchived)
 		if cached, err := s.cache.Get(c.Context(), surveysCacheKey); err == nil && cached != nil {
 			c.Set("Content-Type", "application/json")
 			return c.Send(cached)
 		}
 	}
 
-	surveys, err := s.services.Survey.ListSurveys(c.Context(), accountID)
+	surveys, err := s.services.Survey.ListSurveysWithArchived(c.Context(), accountID, includeArchived)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -115,8 +118,14 @@ func (s *Server) handleUpdateSurvey(c *fiber.Ctx) error {
 		if errors.Is(err, service.ErrSurveyRedirectURLInvalid) {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
+		if errors.Is(err, repository.ErrSurveyArchived) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"code": "survey_archived", "error": err.Error()})
+		}
 		if errors.Is(err, repository.ErrSurveyPublishedImmutable) || errors.Is(err, repository.ErrSurveyCannotReturnToDraft) {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+		}
+		if errors.Is(err, repository.ErrSurveySlugUnavailable) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"code": "survey_slug_unavailable", "error": err.Error()})
 		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -138,13 +147,68 @@ func (s *Server) handleDeleteSurvey(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Survey.DeleteSurvey(c.Context(), id, accountID); err != nil {
-		if strings.Contains(err.Error(), "respuestas") {
-			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
-		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return surveyApplicationMutationError(c, err)
 	}
 	s.invalidateSurveysCache(accountID)
-	return c.JSON(fiber.Map{"success": true})
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+func (s *Server) handleArchiveSurvey(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	actorID := c.Locals("user_id").(uuid.UUID)
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"code": "invalid_survey_id", "error": "ID de aplicación inválido"})
+	}
+	instance, err := s.services.Survey.ArchiveSurvey(c.Context(), id, accountID, actorID)
+	if err != nil {
+		return surveyApplicationMutationError(c, err)
+	}
+	s.invalidateSurveysCache(accountID)
+	return c.JSON(instance)
+}
+
+func (s *Server) handleRestoreSurvey(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	id, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"code": "invalid_survey_id", "error": "ID de aplicación inválido"})
+	}
+	instance, err := s.services.Survey.RestoreSurvey(c.Context(), id, accountID)
+	if err != nil {
+		return surveyApplicationMutationError(c, err)
+	}
+	s.invalidateSurveysCache(accountID)
+	return c.JSON(instance)
+}
+
+func surveyApplicationMutationError(c *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows), errors.Is(err, repository.ErrSurveyInstanceNotFound):
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"code": "survey_instance_not_found", "error": "Aplicación de encuesta no encontrada"})
+	case errors.Is(err, repository.ErrSurveyDeleteLegacy),
+		errors.Is(err, repository.ErrSurveyDeleteHasResponses),
+		errors.Is(err, repository.ErrSurveyDeleteHasActivity),
+		errors.Is(err, repository.ErrSurveyDeleteHasUploads):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"code": "survey_application_has_history", "error": err.Error()})
+	default:
+		log.Printf("[SURVEY] Error mutating survey application lifecycle: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"code": "survey_instance_mutation_failed", "error": "No se pudo actualizar la aplicación"})
+	}
+}
+
+func surveyArchivedGone(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusGone).JSON(fiber.Map{
+		"code":  "survey_archived",
+		"error": "Esta encuesta fue archivada",
+	})
+}
+
+func surveyLinkRetiredGone(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusGone).JSON(fiber.Map{
+		"code":  "survey_link_retired",
+		"error": "Este enlace de encuesta fue retirado",
+	})
 }
 
 func (s *Server) handleSetSurveyStatus(c *fiber.Ctx) error {
@@ -162,6 +226,9 @@ func (s *Server) handleSetSurveyStatus(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Survey.SetStatus(c.Context(), id, accountID, req.Status); err != nil {
+		if errors.Is(err, repository.ErrSurveyArchived) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"code": "survey_archived", "error": err.Error()})
+		}
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	s.invalidateSurveysCache(accountID)
@@ -169,6 +236,7 @@ func (s *Server) handleSetSurveyStatus(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleCheckSurveySlug(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		Slug      string     `json:"slug"`
 		ExcludeID *uuid.UUID `json:"exclude_id,omitempty"`
@@ -177,7 +245,7 @@ func (s *Server) handleCheckSurveySlug(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 	}
 
-	available, err := s.services.Survey.CheckSlug(c.Context(), req.Slug, req.ExcludeID)
+	available, err := s.services.Survey.CheckSlug(c.Context(), accountID, req.Slug, req.ExcludeID)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -278,6 +346,37 @@ func (s *Server) handleGetSurveyResponse(c *fiber.Ctx) error {
 	return c.JSON(resp)
 }
 
+func (s *Server) handleListSurveyTextAnswers(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	surveyID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"code": "invalid_survey_id", "error": "ID de aplicación inválido"})
+	}
+	questionID, err := uuid.Parse(c.Params("questionId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"code": "invalid_question_id", "error": "ID de pregunta inválido"})
+	}
+	limit, parseErr := strconv.Atoi(c.Query("limit", "25"))
+	if parseErr != nil || limit < 1 || limit > 100 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"code": "invalid_pagination", "error": "Paginación inválida"})
+	}
+	page, err := s.services.Survey.ListTextAnswers(c.Context(), accountID, surveyID, questionID, limit, c.Query("cursor"))
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrSurveyTextAnswerCursorInvalid):
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"code": "invalid_cursor", "error": "Cursor inválido"})
+		case errors.Is(err, repository.ErrSurveyQuestionNotFound):
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"code": "survey_question_not_found", "error": err.Error()})
+		case errors.Is(err, repository.ErrSurveyQuestionNotText):
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"code": "survey_question_not_text", "error": err.Error()})
+		default:
+			log.Printf("[SURVEY] Error listing text answers: %v", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "No se pudieron cargar las respuestas de texto"})
+		}
+	}
+	return c.JSON(page)
+}
+
 func (s *Server) handleDeleteSurveyResponse(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 		"error": "Las respuestas publicadas son registros históricos y no se pueden eliminar",
@@ -326,6 +425,102 @@ func (s *Server) handleExportSurveyCSV(c *fiber.Ctx) error {
 	c.Set("Content-Type", "text/csv; charset=utf-8")
 	c.Set("Content-Disposition", fmt.Sprintf("attachment; filename=survey_%s.csv", id.String()[:8]))
 	return c.Send(output.Bytes())
+}
+
+type surveyExportTempFile struct {
+	*os.File
+	path string
+}
+
+func (file *surveyExportTempFile) Close() error {
+	err := file.File.Close()
+	removeErr := os.Remove(file.path)
+	if err != nil {
+		return err
+	}
+	return removeErr
+}
+
+func (s *Server) handleExportSurveyXLSX(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	surveyID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"code": "invalid_survey_id", "error": "ID de aplicación inválido"})
+	}
+	var body struct {
+		ChartTypes map[string]string `json:"chart_types"`
+		BaselineID *string           `json:"baseline_id"`
+		FollowupID *string           `json:"followup_id"`
+	}
+	if len(c.Body()) > 0 {
+		if err := c.BodyParser(&body); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"code": "invalid_export_request", "error": "Solicitud de exportación inválida"})
+		}
+	}
+	request := service.SurveyXLSXExportRequest{ChartTypes: make(map[uuid.UUID]string, len(body.ChartTypes))}
+	for rawID, chartType := range body.ChartTypes {
+		questionID, parseErr := uuid.Parse(rawID)
+		if parseErr != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"code": "invalid_chart_question", "error": "La configuración contiene una pregunta inválida"})
+		}
+		request.ChartTypes[questionID] = chartType
+	}
+	parseOptionalBodyID := func(raw *string) (*uuid.UUID, error) {
+		if raw == nil || strings.TrimSpace(*raw) == "" {
+			return nil, nil
+		}
+		value, parseErr := uuid.Parse(strings.TrimSpace(*raw))
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		return &value, nil
+	}
+	request.BaselineID, err = parseOptionalBodyID(body.BaselineID)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"code": "invalid_baseline", "error": "Aplicación inicial inválida"})
+	}
+	request.FollowupID, err = parseOptionalBodyID(body.FollowupID)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"code": "invalid_followup", "error": "Aplicación final inválida"})
+	}
+
+	temporary, err := os.CreateTemp("", "clarin-survey-results-*.xlsx")
+	if err != nil {
+		log.Printf("[SURVEY] Error creating XLSX temporary file: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"code": "survey_export_failed", "error": "No se pudo preparar el informe"})
+	}
+	cleanup := func() {
+		_ = temporary.Close()
+		_ = os.Remove(temporary.Name())
+	}
+	filename, err := s.services.Survey.WriteSurveyResultsXLSX(c.Context(), accountID, surveyID, request, temporary)
+	if err != nil {
+		cleanup()
+		switch {
+		case errors.Is(err, pgx.ErrNoRows), errors.Is(err, repository.ErrSurveyInstanceNotFound):
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"code": "survey_instance_not_found", "error": "Aplicación de encuesta no encontrada"})
+		case errors.Is(err, service.ErrSurveyApplicationRequired):
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"code": "survey_application_required", "error": err.Error()})
+		case errors.Is(err, service.ErrSurveyXLSXRequestInvalid), errors.Is(err, repository.ErrSurveyMeasurementIncompatible):
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"code": "invalid_export_request", "error": err.Error()})
+		default:
+			log.Printf("[SURVEY] Error generating XLSX report: %v", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"code": "survey_export_failed", "error": "No se pudo generar el informe Excel"})
+		}
+	}
+	stat, err := temporary.Stat()
+	if err != nil {
+		cleanup()
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"code": "survey_export_failed", "error": "No se pudo finalizar el informe Excel"})
+	}
+	if _, err := temporary.Seek(0, io.SeekStart); err != nil {
+		cleanup()
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"code": "survey_export_failed", "error": "No se pudo abrir el informe Excel"})
+	}
+	c.Set(fiber.HeaderContentType, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	c.Set(fiber.HeaderContentDisposition, fmt.Sprintf(`attachment; filename="%s"`, filename))
+	c.Set(fiber.HeaderCacheControl, "private, no-store")
+	return c.SendStream(&surveyExportTempFile{File: temporary, path: temporary.Name()}, int(stat.Size()))
 }
 
 func neutralizeSpreadsheetFormula(value string) string {
@@ -377,19 +572,55 @@ func (s *Server) handleGetPublicSurvey(c *fiber.Ctx) error {
 	if slug == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Slug is required"})
 	}
+	c.Set(fiber.HeaderCacheControl, "no-store, max-age=0")
 
 	survey, questions, err := s.services.Survey.GetPublicSurvey(c.Context(), slug)
 	if err != nil {
+		if errors.Is(err, repository.ErrSurveyArchived) {
+			return surveyArchivedGone(c)
+		}
+		if errors.Is(err, repository.ErrSurveyLinkRetired) {
+			return surveyLinkRetiredGone(c)
+		}
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Survey not found or not active"})
 	}
 	recipientToken := strings.TrimSpace(c.Query("recipient"))
 	if survey.AudienceMode == "program_participants" && recipientToken == "" {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Survey recipient not found"})
 	}
+	var recipientID *uuid.UUID
 	if recipientToken != "" {
-		recipient, recipientErr := s.services.SurveyTemplate.ResolveRecipient(c.Context(), survey.ID, recipientToken, true)
+		recipient, recipientErr := s.services.SurveyTemplate.ResolveRecipient(c.Context(), survey.ID, recipientToken, false)
+		if errors.Is(recipientErr, repository.ErrSurveyArchived) {
+			return surveyArchivedGone(c)
+		}
 		if recipientErr != nil || recipient == nil || recipient.Status == "completed" {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Survey recipient not found"})
+		}
+		recipientID = &recipient.ID
+	}
+	respondentToken, tokenErr := uuid.Parse(strings.TrimSpace(c.Get("X-Survey-Session-Token")))
+	if tokenErr != nil {
+		respondentToken, tokenErr = uuid.Parse(strings.TrimSpace(c.Query("respondent_token")))
+	}
+	if tokenErr != nil {
+		respondentToken = uuid.New()
+	}
+	// Commit the opening before returning the form. TrackSession holds the same
+	// survey-row lock used by response creation, so delete/archive cannot win a
+	// concurrent race while this request still reports a successful opening.
+	if err := s.services.Survey.TrackSession(c.Context(), domain.SurveySessionEvent{
+		SurveyID: survey.ID, AccountID: survey.AccountID, RecipientID: recipientID,
+		RespondentToken: respondentToken, Source: "direct", Phase: domain.SurveySessionOpened,
+	}); err != nil {
+		switch {
+		case errors.Is(err, repository.ErrSurveyArchived):
+			return surveyArchivedGone(c)
+		case errors.Is(err, repository.ErrSurveyNotAcceptingResponses), errors.Is(err, pgx.ErrNoRows):
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Survey not found or not active"})
+		default:
+			log.Printf("[SURVEY] Error tracking public survey opening: %v", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "No se pudo abrir la encuesta"})
 		}
 	}
 
@@ -407,6 +638,7 @@ func (s *Server) handleGetPublicSurvey(c *fiber.Ctx) error {
 		})
 	}
 	return c.JSON(fiber.Map{
+		"respondent_token": respondentToken,
 		"survey": fiber.Map{
 			"id":                     survey.ID,
 			"name":                   survey.Name,
@@ -429,7 +661,13 @@ func (s *Server) handleSubmitSurveyResponse(c *fiber.Ctx) error {
 
 	// Resolve survey by slug
 	survey, err := s.repos.Survey.GetBySlug(c.Context(), slug)
-	if err != nil || survey.Status != "active" {
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Survey not found or not active"})
+	}
+	if survey.ArchivedAt != nil {
+		return surveyArchivedGone(c)
+	}
+	if survey.Status != "active" {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Survey not found or not active"})
 	}
 	requestNow := time.Now()
@@ -490,6 +728,12 @@ func (s *Server) handleSubmitSurveyResponse(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Survey.SubmitResponse(c.Context(), resp, req.Answers); err != nil {
+		if errors.Is(err, repository.ErrSurveyArchived) {
+			return surveyArchivedGone(c)
+		}
+		if errors.Is(err, repository.ErrSurveyNotAcceptingResponses) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Survey not found or not active"})
+		}
 		log.Printf("[SURVEY] Error submitting response for %s: %v", slug, err)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -503,7 +747,13 @@ func (s *Server) handleSubmitSurveyResponse(c *fiber.Ctx) error {
 func (s *Server) handleTrackSurveySession(c *fiber.Ctx) error {
 	slug := c.Params("slug")
 	survey, err := s.repos.Survey.GetBySlug(c.Context(), slug)
-	if err != nil || survey.Status != "active" {
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Encuesta no encontrada o inactiva"})
+	}
+	if survey.ArchivedAt != nil {
+		return surveyArchivedGone(c)
+	}
+	if survey.Status != "active" {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Encuesta no encontrada o inactiva"})
 	}
 	now := time.Now()
@@ -541,6 +791,12 @@ func (s *Server) handleTrackSurveySession(c *fiber.Ctx) error {
 		QuestionID: req.QuestionID,
 	}
 	if err := s.services.Survey.TrackSession(c.Context(), event); err != nil {
+		if errors.Is(err, repository.ErrSurveyArchived) {
+			return surveyArchivedGone(c)
+		}
+		if errors.Is(err, repository.ErrSurveyNotAcceptingResponses) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Encuesta no encontrada o inactiva"})
+		}
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})
@@ -554,7 +810,13 @@ func (s *Server) handleUploadSurveyFile(c *fiber.Ctx) error {
 
 	// Verify survey exists and is active
 	survey, err := s.repos.Survey.GetBySlug(c.Context(), slug)
-	if err != nil || survey.Status != "active" {
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Survey not found or not active"})
+	}
+	if survey.ArchivedAt != nil {
+		return surveyArchivedGone(c)
+	}
+	if survey.Status != "active" {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Survey not found or not active"})
 	}
 	now := time.Now()
@@ -657,6 +919,12 @@ func (s *Server) handleUploadSurveyFile(c *fiber.Ctx) error {
 		ExpiresAt:        time.Now().Add(24 * time.Hour),
 	})
 	if err != nil {
+		if errors.Is(err, repository.ErrSurveyArchived) {
+			return surveyArchivedGone(c)
+		}
+		if errors.Is(err, repository.ErrSurveyNotAcceptingResponses) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Survey not found or not active"})
+		}
 		log.Printf("[SURVEY] Error preparing file inventory: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "No se pudo preparar la carga"})
 	}

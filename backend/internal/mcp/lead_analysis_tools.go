@@ -12,10 +12,43 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/eroscontext"
+	"github.com/naperu/clarin/internal/repository"
 )
 
 type analysisCursor struct {
 	Offset int `json:"offset"`
+}
+
+// leadAnalysisTaskActor keeps legacy lead-analysis tools aligned with Work
+// ACL. A global MCP service principal has an account allowlist but no user
+// identity, so it cannot inherit a user's private-environment grants and task
+// data stays fail-closed. Eros-bound calls may include task signals only when
+// their protected user context carries PermTasks.
+func (s *MCPServer) leadAnalysisTaskActor(ctx context.Context, req mcp.CallToolRequest) (uuid.UUID, bool) {
+	principal, err := s.getPrincipal(ctx)
+	if err != nil || !principal.ErosBound {
+		return uuid.Nil, false
+	}
+	claims, err := s.getErosContextClaims(ctx, req)
+	if err != nil || !eroscontext.HasPermission(claims, domain.PermTasks) {
+		return uuid.Nil, false
+	}
+	actorID, err := uuid.Parse(claims.UserID)
+	if err != nil || actorID == uuid.Nil {
+		return uuid.Nil, false
+	}
+	return actorID, true
+}
+
+func leadAnalysisTaskScopeSQL(taskAlias, listAlias, actorExpression string, allowed bool) (string, string) {
+	predicate := " AND " + taskAlias + ".deleted_at IS NULL"
+	if !allowed {
+		return "", predicate + " AND FALSE"
+	}
+	join := " JOIN task_lists " + listAlias + " ON " + listAlias + ".account_id=" + taskAlias + ".account_id AND " + listAlias + ".id=" + taskAlias + ".list_id"
+	return join, predicate + " AND " + repository.TaskActorCanViewSQL(taskAlias, listAlias, actorExpression)
 }
 
 type leadAnalysisBase struct {
@@ -320,15 +353,24 @@ func (s *MCPServer) toolGetLeadAnalysisOverview(ctx context.Context, req mcp.Cal
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
+	taskActorID, taskDataAllowed := s.leadAnalysisTaskActor(ctx, req)
+	taskArgs := append([]any(nil), args...)
+	taskActorExpression := ""
+	if taskDataAllowed {
+		taskArgs = append(taskArgs, taskActorID)
+		taskActorExpression = fmt.Sprintf("$%d", len(taskArgs))
+	}
+	taskJoin, taskPredicate := leadAnalysisTaskScopeSQL("tk", "analysis_task_list", taskActorExpression, taskDataAllowed)
 
 	baseFrom := ` FROM leads l LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id LEFT JOIN pipeline_stages ps ON ps.id=l.stage_id`
 	var total int
 	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*)`+baseFrom+where, args...).Scan(&total)
 
 	overview := map[string]any{
-		"account_id":   accountID.String(),
-		"total_leads":  total,
-		"filters_note": "Los filtros se aplican antes de calcular las distribuciones. active_only=false incluye archivados/bloqueados para analizar toda la base.",
+		"account_id":         accountID.String(),
+		"total_leads":        total,
+		"task_data_included": taskDataAllowed,
+		"filters_note":       "Los filtros se aplican antes de calcular las distribuciones. active_only=false incluye archivados/bloqueados para analizar toda la base.",
 	}
 
 	overview["data_quality"] = s.singleRowMap(ctx, `
@@ -390,15 +432,18 @@ func (s *MCPServer) toolGetLeadAnalysisOverview(ctx context.Context, req mcp.Cal
 			COUNT(DISTINCT sr.id) AS survey_responses,
 			COUNT(DISTINCT dlr.id) AS dynamic_registrations,
 			COUNT(DISTINCT i.id) AS interactions,
-			COUNT(DISTINCT tk.id) AS tasks
+			COALESCE(MAX(task_stats.task_count),0) AS tasks
 	`+baseFrom+`
 		LEFT JOIN program_participants pp ON pp.lead_id = l.id
 		LEFT JOIN campaign_recipients cr ON cr.contact_id = l.contact_id
 		LEFT JOIN survey_responses sr ON sr.lead_id = l.id
 		LEFT JOIN dynamic_link_registrations dlr ON dlr.lead_id = l.id
 		LEFT JOIN interactions i ON i.account_id = l.account_id AND i.lead_id = l.id
-		LEFT JOIN tasks tk ON tk.account_id = l.account_id AND tk.lead_id = l.id
-	`+where, args...)
+		LEFT JOIN LATERAL (
+			SELECT COUNT(*)::int AS task_count FROM tasks tk`+taskJoin+`
+			WHERE tk.account_id=l.account_id AND tk.lead_id=l.id`+taskPredicate+`
+		) task_stats ON TRUE
+	`+where, taskArgs...)
 
 	return jsonResult(overview), nil
 }
@@ -447,11 +492,18 @@ func (s *MCPServer) rowsToMaps(ctx context.Context, sql string, args ...any) []m
 	return out
 }
 
-func (s *MCPServer) fetchLeadAnalysisBase(ctx context.Context, accountID uuid.UUID, req mcp.CallToolRequest, maxScan int) ([]leadAnalysisBase, int, bool, error) {
+func (s *MCPServer) fetchLeadAnalysisBase(ctx context.Context, accountID uuid.UUID, req mcp.CallToolRequest, maxScan int, taskActorID uuid.UUID, taskDataAllowed bool) ([]leadAnalysisBase, int, bool, error) {
 	where, args, err := leadAnalysisWhere(req, accountID)
 	if err != nil {
 		return nil, 0, false, err
 	}
+	taskArgs := append([]any(nil), args...)
+	taskActorExpression := ""
+	if taskDataAllowed {
+		taskArgs = append(taskArgs, taskActorID)
+		taskActorExpression = fmt.Sprintf("$%d", len(taskArgs))
+	}
+	taskJoin, taskPredicate := leadAnalysisTaskScopeSQL("tk", "analysis_task_list", taskActorExpression, taskDataAllowed)
 	baseFrom := ` FROM leads l LEFT JOIN contacts c ON c.id=l.contact_id AND c.account_id=l.account_id LEFT JOIN pipeline_stages ps ON ps.id=l.stage_id`
 	var total int
 	_ = s.repos.DB().QueryRow(ctx, `SELECT COUNT(*)`+baseFrom+where, args...).Scan(&total)
@@ -562,8 +614,8 @@ func (s *MCPServer) fetchLeadAnalysisBase(ctx context.Context, accountID uuid.UU
 		) ig ON true
 		LEFT JOIN LATERAL (
 			SELECT COUNT(tk.id)::int AS task_count
-			FROM tasks tk
-			WHERE tk.account_id = l.account_id AND (tk.lead_id = l.id OR tk.contact_id = l.contact_id)
+			FROM tasks tk` + taskJoin + `
+			WHERE tk.account_id = l.account_id AND (tk.lead_id = l.id OR tk.contact_id = l.contact_id)` + taskPredicate + `
 		) tkg ON true
 		LEFT JOIN LATERAL (
 			SELECT COUNT(cfv.id)::int AS custom_field_count
@@ -582,7 +634,7 @@ func (s *MCPServer) fetchLeadAnalysisBase(ctx context.Context, accountID uuid.UU
 		) dup ON true
 	` + where + fmt.Sprintf(` ORDER BY l.created_at DESC, l.id DESC LIMIT %d`, maxScan)
 
-	rows, err := s.repos.DB().Query(ctx, sql, args...)
+	rows, err := s.repos.DB().Query(ctx, sql, taskArgs...)
 	if err != nil {
 		return nil, total, false, err
 	}
@@ -1083,8 +1135,9 @@ func (s *MCPServer) buildLeadAnalysisReport(ctx context.Context, req mcp.CallToo
 		return nil, err
 	}
 	segment := strings.TrimSpace(stringArg(req, "segment"))
+	taskActorID, taskDataAllowed := s.leadAnalysisTaskActor(ctx, req)
 
-	baseRows, total, scanLimited, err := s.fetchLeadAnalysisBase(ctx, accountID, req, maxScan)
+	baseRows, total, scanLimited, err := s.fetchLeadAnalysisBase(ctx, accountID, req, maxScan, taskActorID, taskDataAllowed)
 	if err != nil {
 		return nil, err
 	}
@@ -1132,19 +1185,20 @@ func (s *MCPServer) buildLeadAnalysisReport(ctx context.Context, req mcp.CallToo
 	}
 
 	return map[string]any{
-		"account_id":       accountID.String(),
-		"total_matching":   total,
-		"scanned":          len(baseRows),
-		"scan_limited":     scanLimited,
-		"segment":          segment,
-		"segment_matching": len(scoredRows),
-		"returned_count":   len(page),
-		"has_more":         nextCursor != "",
-		"next_cursor":      nextCursor,
-		"priority_counts":  priorityCount,
-		"segment_counts":   segmentCount,
-		"leads":            page,
-		"scoring_note":     "El score no infla interés por ads/redes; prioriza respuesta real, confirmación, preguntas concretas, asistencia, disculpa/obstáculo, nueva fecha y datos completos.",
+		"account_id":         accountID.String(),
+		"total_matching":     total,
+		"scanned":            len(baseRows),
+		"scan_limited":       scanLimited,
+		"segment":            segment,
+		"segment_matching":   len(scoredRows),
+		"returned_count":     len(page),
+		"has_more":           nextCursor != "",
+		"next_cursor":        nextCursor,
+		"priority_counts":    priorityCount,
+		"segment_counts":     segmentCount,
+		"leads":              page,
+		"task_data_included": taskDataAllowed,
+		"scoring_note":       "El score no infla interés por ads/redes; prioriza respuesta real, confirmación, preguntas concretas, asistencia, disculpa/obstáculo, nueva fecha y datos completos.",
 	}, nil
 }
 
@@ -1204,6 +1258,14 @@ func (s *MCPServer) toolExportLeadsForAnalysis(ctx context.Context, req mcp.Call
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
+	taskActorID, taskDataAllowed := s.leadAnalysisTaskActor(ctx, req)
+	taskArgs := append([]any(nil), args...)
+	taskActorExpression := ""
+	if taskDataAllowed {
+		taskArgs = append(taskArgs, taskActorID)
+		taskActorExpression = fmt.Sprintf("$%d", len(taskArgs))
+	}
+	taskJoin, taskPredicate := leadAnalysisTaskScopeSQL("tk", "analysis_task_list", taskActorExpression, taskDataAllowed)
 	limit := intArg(req, "limit", 500, 1000)
 	offset, err := decodeAnalysisCursor(stringArg(req, "cursor"))
 	if err != nil {
@@ -1331,8 +1393,8 @@ func (s *MCPServer) toolExportLeadsForAnalysis(ctx context.Context, req mcp.Call
 				'priority', tk.priority, 'status', tk.status, 'due_at', tk.due_at,
 				'notes', tk.notes, 'created_at', tk.created_at
 			) ORDER BY tk.created_at DESC) AS data
-			FROM tasks tk
-			WHERE tk.account_id = l.account_id AND (tk.lead_id = l.id OR tk.contact_id = l.contact_id)
+			FROM tasks tk` + taskJoin + `
+			WHERE tk.account_id = l.account_id AND (tk.lead_id = l.id OR tk.contact_id = l.contact_id)` + taskPredicate + `
 		) tasks_data ON true
 		LEFT JOIN LATERAL (
 			SELECT jsonb_agg(jsonb_build_object(
@@ -1357,7 +1419,7 @@ func (s *MCPServer) toolExportLeadsForAnalysis(ctx context.Context, req mcp.Call
 		) duplicates ON true
 	` + where + fmt.Sprintf(` ORDER BY l.created_at DESC, l.id DESC LIMIT %d OFFSET %d`, limit, offset)
 
-	rows, err := s.repos.DB().Query(ctx, sql, args...)
+	rows, err := s.repos.DB().Query(ctx, sql, taskArgs...)
 	if err != nil {
 		return errResult("error exportando leads: " + err.Error()), nil
 	}
@@ -1439,14 +1501,15 @@ func (s *MCPServer) toolExportLeadsForAnalysis(ctx context.Context, req mcp.Call
 		nextCursor = encodeAnalysisCursor(nextOffset)
 	}
 	return jsonResult(map[string]any{
-		"account_id":      accountID.String(),
-		"total_estimate":  total,
-		"returned_count":  len(leads),
-		"offset":          offset,
-		"has_more":        nextCursor != "",
-		"next_cursor":     nextCursor,
-		"leads":           leads,
-		"pagination_note": "Llama de nuevo con next_cursor hasta que has_more=false para recorrer toda la base.",
+		"account_id":         accountID.String(),
+		"total_estimate":     total,
+		"returned_count":     len(leads),
+		"offset":             offset,
+		"has_more":           nextCursor != "",
+		"next_cursor":        nextCursor,
+		"leads":              leads,
+		"task_data_included": taskDataAllowed,
+		"pagination_note":    "Llama de nuevo con next_cursor hasta que has_more=false para recorrer toda la base.",
 	}), nil
 }
 

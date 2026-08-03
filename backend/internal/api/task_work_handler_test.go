@@ -2,12 +2,15 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/repository"
 )
 
 func TestComputeCriticalPathUsesLongestDependencyChain(t *testing.T) {
@@ -45,6 +48,22 @@ func TestParseTaskOperationID(t *testing.T) {
 	}
 	if _, err := parseTaskOperationID("not-a-uuid"); err == nil {
 		t.Fatal("malformed operation id was accepted")
+	}
+}
+
+func TestNormalizeTaskFolderIconUpdateOnlyAcceptsCompatibilityNoOp(t *testing.T) {
+	if err := normalizeTaskFolderIconUpdate(nil); err != nil {
+		t.Fatalf("an omitted folder icon should remain compatible: %v", err)
+	}
+	compatible := "  folder  "
+	if err := normalizeTaskFolderIconUpdate(&compatible); err != nil || compatible != "folder" {
+		t.Fatalf("the canonical compatibility icon was rejected or not normalized: icon=%q err=%v", compatible, err)
+	}
+	for _, raw := range []string{"rocket", "list", "", " Folder "} {
+		value := raw
+		if !errors.Is(normalizeTaskFolderIconUpdate(&value), errTaskFolderIconImmutable) {
+			t.Fatalf("mutable folder icon %q was accepted", raw)
+		}
 	}
 }
 
@@ -171,6 +190,39 @@ func TestParseTaskListPageRejectsUnsafeBounds(t *testing.T) {
 	}
 }
 
+func TestTaskCursorPageRoundTripAndBounds(t *testing.T) {
+	dueAt := time.Date(2026, time.August, 1, 15, 45, 12, 345, time.UTC)
+	original := &repository.TaskPageCursor{StatusRank: 2, SortOrder: 2048, DueAt: &dueAt, ID: uuid.New()}
+	encoded, err := encodeTaskPageCursor(original)
+	if err != nil || encoded == "" {
+		t.Fatalf("cursor encoding failed: cursor=%q err=%v", encoded, err)
+	}
+	limit, decoded, err := parseTaskCursorPage("500", encoded)
+	if err != nil || limit != 200 || decoded == nil {
+		t.Fatalf("valid cursor rejected: limit=%d cursor=%#v err=%v", limit, decoded, err)
+	}
+	if decoded.StatusRank != original.StatusRank || decoded.SortOrder != original.SortOrder || decoded.ID != original.ID || decoded.DueAt == nil || !decoded.DueAt.Equal(dueAt) {
+		t.Fatalf("cursor changed during round trip: original=%#v decoded=%#v", original, decoded)
+	}
+	for _, invalid := range []string{"not-base64", "e30", strings.Repeat("x", 2049)} {
+		if _, _, err := parseTaskCursorPage("50", invalid); err == nil {
+			t.Fatalf("invalid cursor accepted: %q", invalid)
+		}
+	}
+}
+
+func TestTaskCursorPageSupportsNullDueDate(t *testing.T) {
+	original := &repository.TaskPageCursor{StatusRank: 1, SortOrder: -1024, ID: uuid.New()}
+	encoded, err := encodeTaskPageCursor(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, decoded, err := parseTaskCursorPage("50", encoded)
+	if err != nil || decoded == nil || decoded.DueAt != nil || decoded.ID != original.ID {
+		t.Fatalf("null due date cursor failed: %#v err=%v", decoded, err)
+	}
+}
+
 func TestTaskParentRequestComparisonKeepsHierarchyImmutable(t *testing.T) {
 	parent, same, other := uuid.New(), uuid.Nil, uuid.New()
 	same = parent
@@ -179,6 +231,18 @@ func TestTaskParentRequestComparisonKeepsHierarchyImmutable(t *testing.T) {
 	}
 	if taskRequestUUIDPointersEqual(&parent, nil) || taskRequestUUIDPointersEqual(nil, &parent) || taskRequestUUIDPointersEqual(&parent, &other) {
 		t.Fatal("a hierarchy-changing parent value was accepted")
+	}
+}
+
+func TestDirectTaskEditKeepsTaskGrantAuthoritativeUntilListChanges(t *testing.T) {
+	current := uuid.New()
+	same := current
+	destination := uuid.New()
+	if taskEditRequiresDestinationContainerAccess(&current, &same) {
+		t.Fatal("an in-place edit must not require access to the hidden containing list")
+	}
+	if !taskEditRequiresDestinationContainerAccess(&current, &destination) {
+		t.Fatal("a real list move must still authorize its destination container")
 	}
 }
 

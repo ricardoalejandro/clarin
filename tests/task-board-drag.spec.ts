@@ -46,6 +46,8 @@ function task(id: string, title: string, statusId: string, sortOrder: number) {
     list_name: 'Operaciones QA',
     sort_order: sortOrder,
     progress: status.category === 'done' ? 100 : 0,
+    environment_id: 'env-kanban', environment_name: 'General', access_mode: 'inherit', effective_access_level: 'full',
+    permissions: { level: 'full', can_view: true, can_comment: true, can_edit: true, can_delete: true, can_manage_access: true, inherited_from: 'account_admin' },
     version: 1,
     recurrence_rule: '',
     reminder_minutes: 0,
@@ -98,6 +100,24 @@ async function installTaskBoardMock(page: Page) {
       })
       return
     }
+    if (path === '/api/tasks/environments') {
+      await json(route, { success: true, environments: [{ id: 'env-kanban', account_id: 'account-kanban', name: 'General', description: '', color: '#10b981', icon: 'layers', sort_order: 0, visibility: 'account', default_access_level: 'edit', is_default: true, version: 1, access_revision: 1, created_at: now, updated_at: now, folder_count: 0, list_count: 1, task_count: tasks.length, permissions: { level: 'full', can_view: true, can_comment: true, can_edit: true, can_delete: true, can_manage_access: true } }], can_create: true })
+      return
+    }
+    if (path === '/api/tasks/environments/env-kanban/folders') {
+      await json(route, { success: true, folders: [], next_cursor: null })
+      return
+    }
+    if (path === '/api/tasks/environments/env-kanban/lists') {
+      await json(route, { success: true, lists: [{
+        id: 'list-kanban', account_id: 'account-kanban', environment_id: 'env-kanban', workflow_id: 'workflow-kanban', is_default: true,
+        name: 'Operaciones QA', description: '', color: '#10b981', icon: 'inbox', sort_order: 0, created_by: 'user-kanban',
+        created_at: now, updated_at: now, task_count: tasks.length, open_task_count: tasks.filter(item => !['done', 'cancelled'].includes(item.status_detail.category)).length,
+        completed_task_count: tasks.filter(item => item.status_detail.category === 'done').length, cancelled_task_count: tasks.filter(item => item.status_detail.category === 'cancelled').length,
+        permissions: { level: 'full', can_view: true, can_comment: true, can_edit: true, can_delete: true, can_manage_access: true },
+      }], next_cursor: null })
+      return
+    }
     if (path === '/api/tasks/hierarchy') {
       await json(route, {
         folders: [],
@@ -133,9 +153,10 @@ async function installTaskBoardMock(page: Page) {
       return
     }
     if (path === '/api/tasks' && request.method() === 'GET') {
-      const offset = Number(url.searchParams.get('offset') || 0)
-      const limit = Number(url.searchParams.get('limit') || 200)
-      await json(route, { tasks: tasks.slice(offset, offset + limit), total: tasks.length })
+      const offset = Number(url.searchParams.get('cursor') || 0)
+      const limit = Number(url.searchParams.get('limit') || 50)
+      const next = offset + limit < tasks.length ? String(offset + limit) : null
+      await json(route, { tasks: tasks.slice(offset, offset + limit), total: tasks.length, next_cursor: next, has_more: Boolean(next) })
       return
     }
 
@@ -230,6 +251,10 @@ async function openBoard(page: Page) {
   await page.setViewportSize({ width: 2000, height: 900 })
   await page.goto(`${baseURL}/dashboard/tasks`)
   await expect(page.getByTestId('task-board-viewport')).toBeVisible()
+  const progress = page.locator('[data-task-page-progress]')
+  await expect(progress).toContainText('Mostrando 50 de 90 tareas autorizadas')
+  await progress.getByRole('button', { name: 'Cargar más' }).click()
+  await expect(progress).toHaveCount(0)
   await expect(column(page, 'status-todo').locator('[data-task-id]')).toHaveCount(5)
   await expect(column(page, 'status-active').locator('[data-task-id]')).toHaveCount(6)
   await expect(column(page, 'status-done').locator('[data-task-id]')).toHaveCount(79)

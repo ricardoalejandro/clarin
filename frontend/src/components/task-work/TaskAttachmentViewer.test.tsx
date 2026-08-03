@@ -39,7 +39,7 @@ function attachment(id: string): TaskAttachment {
     content_type: 'application/pdf',
     media_type: 'document',
     size_bytes: 128,
-    url: `/api/media/file/${id}`,
+    url: `/api/tasks/task-${id}/attachments/${id}/download`,
     created_at: '2026-07-31T00:00:00Z',
   }
 }
@@ -52,7 +52,7 @@ function preview(attachmentId: string, kind: TaskAttachmentPreview['kind'], stat
     attachment_id: attachmentId,
     kind,
     status,
-    url: status === 'ready' ? `/api/media/file/${attachmentId}` : undefined,
+    url: status === 'ready' ? `/api/tasks/task-${attachmentId}/attachments/${attachmentId}/preview/download` : undefined,
     page_count: 0,
     version: 1,
     created_at: '2026-07-31T00:00:00Z',
@@ -130,7 +130,7 @@ describe('TaskAttachmentViewer session lifecycle', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('No pudimos abrir la vista previa')
     expect(screen.getByRole('alert')).toHaveTextContent('tardó demasiado')
     expect(screen.getByRole('button', { name: 'Reintentar' })).toBeEnabled()
-    expect(screen.getByRole('link', { name: 'Descargar original' })).toHaveAttribute('href', '/api/media/file/slow')
+    expect(screen.getByRole('link', { name: 'Descargar original' })).toHaveAttribute('href', '/api/tasks/task-slow/attachments/slow/download')
     expect(blobSignals).toHaveLength(1)
     expect(blobSignals[0].aborted).toBe(true)
   })

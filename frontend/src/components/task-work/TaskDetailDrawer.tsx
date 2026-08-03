@@ -1,18 +1,17 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Activity,
   AlertCircle,
+  ArrowRightLeft,
   Calendar,
   Check,
   ChevronRight,
   Download,
-  Expand,
   File,
   Flag,
-  GripHorizontal,
   Link2,
   Loader2,
   Maximize2,
@@ -23,6 +22,7 @@ import {
   Paperclip,
   Pencil,
   Plus,
+  RotateCcw,
   Search,
   Send,
   Trash2,
@@ -51,16 +51,15 @@ import { TaskListPicker } from './TaskSelectPicker'
 import TaskDateTimePicker from './TaskDateTimePicker'
 import TaskAttachmentViewer from './TaskAttachmentViewer'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
-import {
-  TASK_DESCRIPTION_DEFAULT_HEIGHT,
-  TASK_DESCRIPTION_MAX_HEIGHT,
-  TASK_DESCRIPTION_MIN_HEIGHT,
-  clampTaskDescriptionHeight,
-  taskDescriptionHeightFromKey,
-  taskDescriptionEditorRemainsOpen,
-  taskWindowVisualState,
-} from './taskInteractionVisuals'
+import { taskWindowVisualState } from './taskInteractionVisuals'
 import type { TaskHierarchyCounts } from './taskHierarchyCounts'
+import TaskDescriptionEditor from './TaskDescriptionEditor'
+import { taskAttachmentUploadEndpoint, taskAttachmentUploadForm, taskImageFilesFromClipboard } from './taskAttachmentQueue'
+import TaskAccessPanel from './TaskAccessPanel'
+import TaskMoveEnvironmentDialog from './TaskMoveEnvironmentDialog'
+import TaskParticipantGrantConfirmDialog from './TaskParticipantGrantConfirmDialog'
+import { canAdministerTask, canCommentOnTask, canEditTask } from './taskPermissionActions'
+import { mergeCommentAttachmentDrafts, removeCommentAttachmentDrafts, resolveCommentAttachment, type TaskCommentAttachmentLookup } from './taskCommentAttachmentDrafts'
 
 interface Props {
   taskId: string | null
@@ -69,6 +68,7 @@ interface Props {
   lists: TaskList[]
   folders: TaskFolder[]
   workflows: TaskWorkflow[]
+  storageScope?: string
   onClose: () => void
   onEdit: (task: Task) => void
   onOpenTask: (taskId: string) => void
@@ -81,6 +81,14 @@ type DetailTab = 'details' | 'activity'
 type FeedFilter = 'all' | 'comments' | 'changes'
 type PendingOperations = Record<string, number>
 type Failure = { message: string; canRetry: boolean }
+type ParticipantGrantPrompt = { affectedUserIDs: string[]; retry: () => void }
+type TaskMutationResponse = {
+  task?: Task
+  operation_id?: string
+  hierarchy_counts?: TaskHierarchyCounts
+  code?: string
+  affected_user_ids?: string[]
+}
 type TaskCommentPage = { comments: TaskComment[]; has_more: boolean; next_offset: number }
 type FeedItem =
   | { kind: 'comment'; id: string; createdAt: string; comment: TaskComment }
@@ -118,7 +126,6 @@ const resizeHandles: Record<TaskDetailResizeEdge, string> = {
   sw: 'bottom-0 left-0 h-3 w-3 cursor-sw-resize',
 }
 const inputClass = 'w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 disabled:bg-slate-50 disabled:opacity-60'
-const descriptionHeightStorageKey = 'clarin:tasks:description-height:v1'
 
 function localDateTime(value?: string) {
   if (!value) return ''
@@ -132,7 +139,7 @@ function initials(name: string) {
   return name.trim().slice(0, 2).toUpperCase() || 'CL'
 }
 
-export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folders, workflows, onClose, onEdit, onOpenTask, onCreateSubtask, onChanged, onDeleted }: Props) {
+export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folders, workflows, storageScope, onClose, onEdit, onOpenTask, onCreateSubtask, onChanged, onDeleted }: Props) {
   const [task, setTask] = useState<Task | null>(null)
   const [children, setChildren] = useState<Task[]>([])
   const [comments, setComments] = useState<TaskComment[]>([])
@@ -147,12 +154,13 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   const [pending, setPending] = useState<PendingOperations>({})
   const [failure, setFailure] = useState<Failure | null>(null)
   const [archiveConfirmOpen, setArchiveConfirmOpen] = useState(false)
+  const [moveEnvironmentOpen, setMoveEnvironmentOpen] = useState(false)
   const [archiveError, setArchiveError] = useState('')
   const [panelWidth, setPanelWidth] = useState(0)
+  const [participantGrantPrompt, setParticipantGrantPrompt] = useState<ParticipantGrantPrompt | null>(null)
 
   const [titleDraft, setTitleDraft] = useState('')
   const [descriptionDraft, setDescriptionDraft] = useState('')
-  const [descriptionHeight, setDescriptionHeight] = useState(TASK_DESCRIPTION_DEFAULT_HEIGHT)
   const [descriptionExpanded, setDescriptionExpanded] = useState(false)
   const [startDraft, setStartDraft] = useState('')
   const [dueDraft, setDueDraft] = useState('')
@@ -164,6 +172,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   const [comment, setComment] = useState('')
   const [commentMentionIds, setCommentMentionIds] = useState<string[]>([])
   const [commentAttachmentIds, setCommentAttachmentIds] = useState<string[]>([])
+  const [commentAttachmentLookup, setCommentAttachmentLookup] = useState<TaskCommentAttachmentLookup>({})
   const [editingCommentId, setEditingCommentId] = useState('')
   const [editingCommentBody, setEditingCommentBody] = useState('')
   const [editingMentionIds, setEditingMentionIds] = useState<string[]>([])
@@ -204,23 +213,12 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   const editingDescriptionRef = useRef(false)
   const editingDatesRef = useRef(false)
   const editingProgressRef = useRef(false)
-  const descriptionHeightRef = useRef(TASK_DESCRIPTION_DEFAULT_HEIGHT)
-  const updateTaskRef = useRef<(key: string, body: Record<string, unknown>) => Promise<boolean>>(async () => false)
-  const detailWindow = useTaskDetailWindow()
+  const updateTaskRef = useRef<(key: string, body: Record<string, unknown>, confirmGrants?: boolean) => Promise<boolean>>(async () => false)
+  const detailWindow = useTaskDetailWindow(storageScope)
   const windowVisual = taskWindowVisualState(detailWindow.effectiveMode, detailWindow.isMobile)
   const taskOpen = Boolean(taskId)
   onCloseRef.current = onClose
   commentsRef.current = comments
-  descriptionHeightRef.current = descriptionHeight
-
-  useEffect(() => {
-    const stored = Number(localStorage.getItem(descriptionHeightStorageKey))
-    if (!Number.isFinite(stored) || stored <= 0) return
-    const next = clampTaskDescriptionHeight(stored)
-    descriptionHeightRef.current = next
-    setDescriptionHeight(next)
-  }, [])
-
   useEffect(() => { setDescriptionExpanded(false) }, [taskId])
 
   draftBodiesRef.current = {
@@ -363,6 +361,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     setComments(next)
     setCommentAttachmentIds(current => current.filter(id => id !== attachmentId))
     setEditingAttachmentIds(current => current.filter(id => id !== attachmentId))
+    setCommentAttachmentLookup(current => removeCommentAttachmentDrafts(current, [attachmentId]))
   }, [])
 
   const load = useCallback(async () => {
@@ -428,6 +427,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     setComment('')
     setCommentMentionIds([])
     setCommentAttachmentIds([])
+    setCommentAttachmentLookup({})
     setEditingCommentId('')
     setSubtaskTitle('')
     dependencySearchAbortRef.current?.abort()
@@ -590,13 +590,16 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   const statuses = workflow?.statuses || []
   const parentTask = task?.parent_task_id ? allTasks.find(item => item.id === task.parent_task_id) : undefined
   const isWide = panelWidth >= 980
+  const canEdit = canEditTask(task)
+  const canComment = canCommentOnTask(task)
+  const canAdmin = canAdministerTask(task)
 
   const localDependencyCandidates = useMemo(() => allTasks.filter(item => item.id !== taskId && !item.parent_task_id).slice(0, 8), [allTasks, taskId])
   const dependencyCandidates = dependencySearch.trim().length >= 2 ? dependencyResults : localDependencyCandidates
   const dependencySearchPending = !dependencyTaskId && dependencySearch.trim().length >= 2 && dependencySearch.trim() !== dependencySettledSearch
   const selectedDependency = [...dependencyResults, ...allTasks].find(item => item.id === dependencyTaskId)
 
-  const updateTask = useCallback((key: string, body: Record<string, unknown>): Promise<boolean> => {
+  const updateTask = useCallback((key: string, body: Record<string, unknown>, confirmGrants = false): Promise<boolean> => {
     const requestedTaskId = taskIdRef.current
     if (!requestedTaskId) return Promise.resolve(false)
     beginPending(key)
@@ -604,10 +607,22 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     const execute = async () => {
       const current = taskRef.current
       if (!current || current.id !== requestedTaskId || taskIdRef.current !== requestedTaskId) return false
+      if (!canEditTask(current)) {
+        showFailure('No tienes permiso para modificar esta tarea.')
+        return false
+      }
       const operationID = crypto.randomUUID()
-      const result = await apiPut<{ task: Task; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>(`/api/tasks/${requestedTaskId}`, { ...body, version: current.version, operation_id: operationID })
+      const result = await apiPut<TaskMutationResponse>(`/api/tasks/${requestedTaskId}`, { ...body, version: current.version, operation_id: operationID, confirm_grants: confirmGrants })
       if (taskIdRef.current !== requestedTaskId) return false
       if (!result.success || !result.data?.task) {
+        if (result.status === 409 && result.data?.code === 'access_change_confirmation_required') {
+          const retryBody = draftBodiesRef.current[key] || body
+          setParticipantGrantPrompt({
+            affectedUserIDs: result.data.affected_user_ids || [],
+            retry: () => { void updateTaskRef.current(key, retryBody, true) },
+          })
+          return false
+        }
         if (result.status === 409) await refreshTask()
         showFailure(result.status === 409 ? 'La tarea cambió en otra sesión. Conservamos tu borrador para que puedas volver a guardarlo.' : result.error || 'No se pudo guardar el cambio', () => { void updateTaskRef.current(key, draftBodiesRef.current[key] || body) })
         return false
@@ -644,49 +659,6 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     if (task && descriptionDraft !== (task.description || '')) return updateTask('description', { description: descriptionDraft })
     return true
   }
-  const persistDescriptionHeight = useCallback((height: number) => {
-    const panelMaximum = panelRef.current ? Math.max(TASK_DESCRIPTION_MIN_HEIGHT, panelRef.current.clientHeight - 220) : TASK_DESCRIPTION_MAX_HEIGHT
-    const next = clampTaskDescriptionHeight(height, panelMaximum)
-    descriptionHeightRef.current = next
-    setDescriptionHeight(next)
-    localStorage.setItem(descriptionHeightStorageKey, String(next))
-    return next
-  }, [])
-  const beginDescriptionResize = useCallback((event: ReactPointerEvent<HTMLElement>) => {
-    if (event.button !== 0) return
-    event.preventDefault()
-    event.stopPropagation()
-    const startY = event.clientY
-    const startHeight = descriptionHeightRef.current
-    const move = (pointer: PointerEvent) => {
-      pointer.preventDefault()
-      const panelMaximum = panelRef.current ? Math.max(TASK_DESCRIPTION_MIN_HEIGHT, panelRef.current.clientHeight - 220) : TASK_DESCRIPTION_MAX_HEIGHT
-      const next = clampTaskDescriptionHeight(startHeight + pointer.clientY - startY, panelMaximum)
-      descriptionHeightRef.current = next
-      setDescriptionHeight(next)
-    }
-    const end = () => {
-      localStorage.setItem(descriptionHeightStorageKey, String(descriptionHeightRef.current))
-      window.removeEventListener('pointermove', move)
-      window.removeEventListener('pointerup', end)
-      window.removeEventListener('pointercancel', end)
-    }
-    window.addEventListener('pointermove', move, { passive: false })
-    window.addEventListener('pointerup', end, { once: true })
-    window.addEventListener('pointercancel', end, { once: true })
-  }, [])
-  const closeExpandedDescription = async () => {
-    const saved = await saveDescription()
-    if (!saved && task) {
-      const retryBody = { description: descriptionDraft }
-      failureRetryRef.current = () => {
-        void updateTask('description', retryBody).then(retrySaved => {
-          if (retrySaved) setDescriptionExpanded(false)
-        })
-      }
-    }
-    setDescriptionExpanded(taskDescriptionEditorRemainsOpen(saved))
-  }
   const saveDates = async (startValue = startDraft, dueValue = dueDraft) => {
     editingDatesRef.current = false
     if (!task) return
@@ -703,9 +675,9 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     if (task && (mode !== (task.progress_mode || 'manual') || manual !== (task.manual_progress ?? task.progress ?? 0))) await updateTask('progress', { progress_mode: mode, manual_progress: manual })
   }
 
-  const setCollaborator = async (userId: string, intendedSelected?: boolean) => {
+  const setCollaborator = async (userId: string, intendedSelected?: boolean, confirmGrants = false) => {
     const currentTask = taskRef.current
-    if (!currentTask || isPending('collaborators')) return
+    if (!currentTask || !canEditTask(currentTask) || isPending('collaborators')) return
     const ids = currentTask.collaborators?.map(item => item.user_id) || []
     const selected = ids.includes(userId)
     const shouldSelect = intendedSelected ?? !selected
@@ -720,15 +692,24 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
       : (currentTask.collaborators || []).filter(item => item.user_id !== userId)
     beginPending('collaborators')
     applyTask({ ...currentTask, collaborators: optimisticCollaborators })
-    const result = await apiPut<{ task: Task; collaborators: Task['collaborators']; version: number }>(`/api/tasks/${currentTask.id}/collaborators`, {
+    const operationID = crypto.randomUUID()
+    const result = await apiPut<{ task?: Task; collaborators?: Task['collaborators']; version?: number; code?: string; affected_user_ids?: string[] }>(`/api/tasks/${currentTask.id}/collaborators`, {
       user_ids: next,
       version: currentTask.version,
+      operation_id: operationID,
+      confirm_grants: confirmGrants,
     })
     if (taskIdRef.current === currentTask.id && result.success && result.data?.task) {
       const canonical = { ...result.data.task, collaborators: result.data.collaborators ?? [] }
       applyTask(canonical)
       onChanged(canonical)
       clearFailure()
+    } else if (result.status === 409 && result.data?.code === 'access_change_confirmation_required') {
+      if (taskIdRef.current === currentTask.id) applyTask(currentTask)
+      setParticipantGrantPrompt({
+        affectedUserIDs: result.data.affected_user_ids || [],
+        retry: () => { void setCollaborator(userId, shouldSelect, true) },
+      })
     } else if (result.status === 409) {
       await refreshTask()
       showFailure('La tarea cambió en otra sesión. Ya cargamos la versión reciente; puedes aplicar tu selección nuevamente.', () => { void setCollaborator(userId, shouldSelect) })
@@ -748,6 +729,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   }
 
   const toggleChild = async (child: Task) => {
+    if (!canEditTask(taskRef.current)) return
     const done = child.status_detail?.category === 'done'
     const status = statuses.find(item => item.category === (done ? 'not_started' : 'done'))
     if (!status || isPending(`child:${child.id}`)) return
@@ -763,25 +745,31 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     endPending(`child:${child.id}`)
   }
 
-  const createQuickSubtask = async () => {
+  const createQuickSubtask = async (confirmGrants = false) => {
     const currentTask = taskRef.current
     const title = subtaskTitle.trim()
-    if (!currentTask || !title || isPending('subtask-create')) return
+    if (!currentTask || !canEditTask(currentTask) || !title || isPending('subtask-create')) return
     beginPending('subtask-create')
-    const result = await apiPost<{ task: Task }>(`/api/tasks/${currentTask.id}/children`, { title })
+    const result = await apiPost<{ task?: Task; code?: string; affected_user_ids?: string[] }>(`/api/tasks/${currentTask.id}/children`, { title, operation_id: crypto.randomUUID(), confirm_grants: confirmGrants })
     if (taskIdRef.current === currentTask.id && result.success && result.data?.task) {
-      setChildren(current => current.some(item => item.id === result.data!.task.id) ? current : [...current, result.data!.task])
+      const createdChild = result.data.task
+      setChildren(current => current.some(item => item.id === createdChild.id) ? current : [...current, createdChild])
       setSubtaskTitle('')
       setTask(current => current ? { ...current, subtask_count: (current.subtask_count || 0) + 1 } : current)
       onChanged()
       window.setTimeout(() => { void refreshActivity() }, 120)
+    } else if (result.status === 409 && result.data?.code === 'access_change_confirmation_required') {
+      setParticipantGrantPrompt({
+        affectedUserIDs: result.data.affected_user_ids || [],
+        retry: () => { void createQuickSubtask(true) },
+      })
     } else if (!result.success) showFailure(result.error || 'No se pudo crear la subtarea', () => { void createQuickSubtask() })
     endPending('subtask-create')
   }
 
   const sendComment = async () => {
     const currentTask = taskRef.current
-    if (!currentTask || !comment.trim() || isPending('comment-create')) return
+    if (!currentTask || !canCommentOnTask(currentTask) || !comment.trim() || isPending('comment-create')) return
     beginPending('comment-create')
     const result = await apiPost<{ comment: TaskComment }>(`/api/tasks/${currentTask.id}/comments`, {
       body: comment.trim(),
@@ -797,6 +785,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
       setComment('')
       setCommentMentionIds([])
       setCommentAttachmentIds([])
+      setCommentAttachmentLookup(current => removeCommentAttachmentDrafts(current, commentAttachmentIds))
       window.setTimeout(() => { void refreshActivity() }, 120)
     } else if (!result.success) showFailure(result.error || 'No se pudo publicar el comentario', () => { void sendComment() })
     endPending('comment-create')
@@ -805,7 +794,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   const saveComment = async (item: TaskComment) => {
     const currentTask = taskRef.current
     const key = `comment-edit:${item.id}`
-    if (!currentTask || !editingCommentBody.trim() || isPending(key)) return
+    if (!currentTask || !canCommentOnTask(currentTask) || !item.can_edit || !editingCommentBody.trim() || isPending(key)) return
     beginPending(key)
     const result = await apiPut<{ comment: TaskComment }>(`/api/tasks/${currentTask.id}/comments/${item.id}`, {
       body: editingCommentBody.trim(),
@@ -816,6 +805,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
       commentsRef.current = commentsRef.current.map(commentItem => commentItem.id === item.id ? result.data!.comment : commentItem)
       setComments(commentsRef.current)
       setEditingCommentId('')
+      setCommentAttachmentLookup(current => removeCommentAttachmentDrafts(current, editingAttachmentIds))
     } else if (!result.success) showFailure(result.error || 'No se pudo editar el comentario', () => { void saveComment(item) })
     endPending(key)
   }
@@ -823,7 +813,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   const deleteComment = async (item: TaskComment) => {
     const currentTask = taskRef.current
     const key = `comment-delete:${item.id}`
-    if (!currentTask || !window.confirm('¿Eliminar este comentario?') || isPending(key)) return
+    if (!currentTask || !canCommentOnTask(currentTask) || !item.can_delete || !window.confirm('¿Eliminar este comentario?') || isPending(key)) return
     beginPending(key)
     const result = await apiDelete(`/api/tasks/${currentTask.id}/comments/${item.id}`)
     if (taskIdRef.current === currentTask.id && result.success) {
@@ -839,24 +829,34 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   const upload = async (file?: File, target: 'task' | 'comment' | 'edit-comment' = 'task') => {
     const currentTask = taskRef.current
     const key = `upload:${target}`
-    if (!currentTask || !file || isPending(key)) return
+    const allowed = target === 'task' ? canEditTask(currentTask) : canCommentOnTask(currentTask)
+    if (!currentTask || !allowed || !file || isPending(key)) return
     beginPending(key)
-    const form = new FormData()
-    form.append('file', file)
-    form.append('folder', 'tasks/attachments')
-    const uploaded = await apiUpload<{ media_asset_id: string }>('/api/media/upload', form)
-    if (uploaded.success && uploaded.data?.media_asset_id) {
-      const attached = await apiPost<{ attachment: TaskAttachment }>(`/api/tasks/${currentTask.id}/attachments`, { media_asset_id: uploaded.data.media_asset_id })
-      if (taskIdRef.current === currentTask.id && attached.success && attached.data?.attachment) {
-        setAttachments(current => current.some(item => item.id === attached.data!.attachment.id) ? current : [...current, attached.data!.attachment])
-        if (target === 'comment') setCommentAttachmentIds(current => current.includes(attached.data!.attachment.id) ? current : [...current, attached.data!.attachment.id])
-        if (target === 'edit-comment') setEditingAttachmentIds(current => current.includes(attached.data!.attachment.id) ? current : [...current, attached.data!.attachment.id])
-      } else if (!attached.success) showFailure(attached.error || 'No se pudo adjuntar el archivo', () => { void upload(file, target) })
-    } else showFailure(uploaded.error || 'No se pudo cargar el archivo', () => { void upload(file, target) })
+	const form = taskAttachmentUploadForm(file, crypto.randomUUID(), target === 'task' ? 'task' : 'comment')
+    const attached = await apiUpload<{ success?: boolean; attachment: TaskAttachment; deduped?: boolean; operation_id?: string }>(taskAttachmentUploadEndpoint(currentTask.id), form)
+    if (taskIdRef.current === currentTask.id && attached.success && attached.data?.attachment) {
+      const uploaded = attached.data.attachment
+      if (target === 'task') setAttachments(current => current.some(item => item.id === uploaded.id) ? current : [...current, uploaded])
+      else setCommentAttachmentLookup(current => mergeCommentAttachmentDrafts(current, [uploaded]))
+      if (target === 'comment') setCommentAttachmentIds(current => current.includes(uploaded.id) ? current : [...current, uploaded.id])
+      if (target === 'edit-comment') setEditingAttachmentIds(current => current.includes(uploaded.id) ? current : [...current, uploaded.id])
+    } else if (!attached.success || !attached.data?.attachment) showFailure(attached.error || 'No se pudo adjuntar el archivo', () => { void upload(file, target) })
     endPending(key)
     if (fileRef.current) fileRef.current.value = ''
     if (commentFileRef.current) commentFileRef.current.value = ''
     if (editCommentFileRef.current) editCommentFileRef.current.value = ''
+  }
+
+  const uploadFiles = async (files: File[], target: 'task' | 'comment' | 'edit-comment' = 'task') => {
+    for (const file of files) await upload(file, target)
+  }
+
+  const pasteTaskImages = (event: ReactClipboardEvent<HTMLElement>) => {
+    if (!canEditTask(taskRef.current)) return
+    const files = taskImageFilesFromClipboard(event.clipboardData)
+    if (!files.length) return
+    event.preventDefault()
+    void uploadFiles(files)
   }
 
   const addMention = (userId: string, editing = false) => {
@@ -874,7 +874,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
 
   const addDependency = async () => {
     const currentTask = taskRef.current
-    if (!currentTask || !dependencyTaskId || isPending('dependency-create')) return
+    if (!currentTask || !canEditTask(currentTask) || !dependencyTaskId || isPending('dependency-create')) return
     beginPending('dependency-create')
     const result = await apiPost<{ dependency: TaskDependency }>(`/api/tasks/${currentTask.id}/dependencies`, { predecessor_task_id: dependencyTaskId, lag_minutes: 0 })
     if (taskIdRef.current === currentTask.id && result.success) {
@@ -894,7 +894,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   const removeDependency = async (item: TaskDependency) => {
     const currentTask = taskRef.current
     const key = `dependency-delete:${item.id}`
-    if (!currentTask || isPending(key)) return
+    if (!currentTask || !canEditTask(currentTask) || isPending(key)) return
     beginPending(key)
     const result = await apiDelete(`/api/tasks/${currentTask.id}/dependencies/${item.id}`)
     if (result.success) setDependencies(current => current.filter(candidate => candidate.id !== item.id))
@@ -905,7 +905,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   const removeAttachment = async (item: TaskAttachment) => {
     const currentTask = taskRef.current
     const key = `attachment-delete:${item.id}`
-    if (!currentTask || isPending(key)) return
+    if (!currentTask || !canEditTask(currentTask) || isPending(key)) return
     beginPending(key)
     const result = await apiDelete(`/api/tasks/${currentTask.id}/attachments/${item.id}`)
     if (result.success) {
@@ -919,7 +919,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
 
   const removeTask = async () => {
     const currentTask = taskRef.current
-    if (!currentTask) return
+    if (!currentTask || !canAdministerTask(currentTask)) return
     setArchiveError('')
     beginPending('archive')
     const operationID = crypto.randomUUID()
@@ -977,13 +977,13 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0"><p className="truncate text-xs font-bold text-slate-700">{item.author_name}</p><p className="mt-0.5 text-[10px] text-slate-400">{dateFormatter.format(new Date(item.created_at))}{item.updated_at && item.updated_at !== item.created_at ? ' · editado' : ''}</p></div>
           <div className="flex shrink-0 gap-1 opacity-100 sm:opacity-0 sm:transition sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
-            {item.can_edit && <button type="button" aria-label="Editar comentario" onClick={() => { setEditingCommentId(item.id); setEditingCommentBody(item.body); setEditingMentionIds(item.mentions?.map(mention => mention.user_id) || []); setEditingAttachmentIds(item.attachments?.map(file => file.id) || []) }} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"><Pencil className="h-3.5 w-3.5" /></button>}
+            {item.can_edit && <button type="button" aria-label="Editar comentario" onClick={() => { setEditingCommentId(item.id); setEditingCommentBody(item.body); setEditingMentionIds(item.mentions?.map(mention => mention.user_id) || []); setEditingAttachmentIds(item.attachments?.map(file => file.id) || []); setCommentAttachmentLookup(current => mergeCommentAttachmentDrafts(current, item.attachments || [])) }} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"><Pencil className="h-3.5 w-3.5" /></button>}
             {item.can_delete && <button type="button" aria-label="Eliminar comentario" onClick={() => void deleteComment(item)} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600"><Trash2 className="h-3.5 w-3.5" /></button>}
           </div>
         </div>
         {editingCommentId === item.id ? <div className="mt-3 space-y-2">
           <textarea autoFocus rows={3} value={editingCommentBody} onChange={event => setEditingCommentBody(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void saveComment(item) } }} className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-emerald-400 focus:bg-white" />
-          <div className="flex flex-wrap gap-1.5">{editingMentionIds.map(id => { const user = users.find(candidate => candidate.id === id); return <button key={id} onClick={() => setEditingMentionIds(current => current.filter(value => value !== id))} className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold text-emerald-700">@{user?.display_name || user?.username} ×</button> })}{editingAttachmentIds.map(id => { const file = attachments.find(candidate => candidate.id === id); return <button key={id} onClick={() => setEditingAttachmentIds(current => current.filter(value => value !== id))} className="rounded-full bg-slate-200 px-2 py-1 text-[10px] font-semibold text-slate-600">{file?.filename || 'Archivo'} ×</button> })}</div>
+          <div className="flex flex-wrap gap-1.5">{editingMentionIds.map(id => { const user = users.find(candidate => candidate.id === id); return <button key={id} onClick={() => setEditingMentionIds(current => current.filter(value => value !== id))} className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold text-emerald-700">@{user?.display_name || user?.username} ×</button> })}{editingAttachmentIds.map(id => { const file = resolveCommentAttachment(id, commentAttachmentLookup, attachments); return <button key={id} onClick={() => setEditingAttachmentIds(current => current.filter(value => value !== id))} className="rounded-full bg-slate-200 px-2 py-1 text-[10px] font-semibold text-slate-600">{file?.filename || 'Archivo'} ×</button> })}</div>
           <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2"><TaskUserCombobox users={users} value="" onChange={id => addMention(id, true)} excludeIds={editingMentionIds} placeholder="Mencionar a alguien…" /><button onClick={() => editCommentFileRef.current?.click()} className="flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50"><Paperclip className="h-4 w-4" /></button><input ref={editCommentFileRef} type="file" className="hidden" onChange={event => void upload(event.target.files?.[0], 'edit-comment')} /></div>
           <div className="flex justify-end gap-2"><button onClick={() => setEditingCommentId('')} className="min-h-9 rounded-lg px-3 text-xs font-semibold text-slate-500 hover:bg-slate-100">Cancelar</button><button disabled={isPending(editKey) || !editingCommentBody.trim()} onClick={() => void saveComment(item)} className="min-h-9 rounded-lg bg-slate-900 px-3 text-xs font-semibold text-white disabled:opacity-40">{isPending(editKey) ? 'Guardando…' : 'Guardar'}</button></div>
         </div> : <>
@@ -1003,39 +1003,44 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     <div ref={feedScrollRef} onScroll={event => { const element = event.currentTarget; const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 72; feedNearBottomRef.current = nearBottom; if (nearBottom) setNewFeedItems(false) }} className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3">
       {commentsHasMore && feedFilter !== 'changes' && <div className="flex justify-center py-2"><button type="button" disabled={commentsLoadingMore} onClick={() => { void loadOlderComments() }} className="inline-flex min-h-9 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-[11px] font-semibold text-slate-600 shadow-sm hover:border-emerald-200 hover:text-emerald-700 disabled:opacity-50">{commentsLoadingMore && <Loader2 className="h-3.5 w-3.5 animate-spin" />}Cargar comentarios anteriores</button></div>}
       {feed.map(item => item.kind === 'comment' ? renderComment(item.comment) : <div key={item.id} className="relative flex gap-3 py-3 before:absolute before:bottom-0 before:left-[15px] before:top-0 before:w-px before:bg-slate-200 first:before:top-1/2 last:before:bottom-1/2"><div className="z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white"><Activity className="h-3.5 w-3.5 text-emerald-600" /></div><div className="min-w-0 pt-0.5"><p className="text-sm leading-5 text-slate-600"><strong className="font-semibold text-slate-800">{item.activity.actor_name || 'Sistema'}</strong> {activityLabels[item.activity.action] || item.activity.action.replaceAll('_', ' ')}</p><p className="mt-0.5 text-[10px] text-slate-400">{dateFormatter.format(new Date(item.activity.created_at))}</p></div></div>)}
-      {!feed.length && <div className="flex h-full min-h-40 flex-col items-center justify-center text-center"><MessageSquare className="h-8 w-8 text-slate-300" /><p className="mt-2 text-sm font-medium text-slate-500">Todavía no hay actividad aquí.</p><p className="mt-1 max-w-xs text-xs text-slate-400">Escribe el primer comentario para empezar la conversación.</p></div>}
+      {!feed.length && <div className="flex h-full min-h-40 flex-col items-center justify-center text-center"><MessageSquare className="h-8 w-8 text-slate-300" /><p className="mt-2 text-sm font-medium text-slate-500">Todavía no hay actividad aquí.</p><p className="mt-1 max-w-xs text-xs text-slate-400">{canComment ? 'Escribe el primer comentario para empezar la conversación.' : 'Tu nivel actual permite consultar la actividad.'}</p></div>}
       {newFeedItems && <button type="button" onClick={() => { const element = feedScrollRef.current; if (element) element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' }); feedNearBottomRef.current = true; setNewFeedItems(false) }} className="sticky bottom-2 left-1/2 z-10 -translate-x-1/2 rounded-full bg-slate-900 px-3 py-1.5 text-[10px] font-bold text-white shadow-lg">Nueva actividad ↓</button>}
     </div>
-    <div className="shrink-0 border-t border-slate-200 bg-white p-3 sm:p-4">
+    {canComment ? <div className="shrink-0 border-t border-slate-200 bg-white p-3 sm:p-4">
       <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm focus-within:border-emerald-300 focus-within:ring-4 focus-within:ring-emerald-50">
         <textarea rows={2} value={comment} onChange={event => setComment(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void sendComment() } }} placeholder="Escribe un comentario…" className="w-full resize-none bg-transparent px-1 text-sm text-slate-700 outline-none placeholder:text-slate-400" />
-        <div className="mt-2 flex flex-wrap gap-1.5">{commentMentionIds.map(id => { const user = users.find(candidate => candidate.id === id); return <button key={id} onClick={() => setCommentMentionIds(current => current.filter(value => value !== id))} className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold text-emerald-700">@{user?.display_name || user?.username} ×</button> })}{commentAttachmentIds.map(id => { const file = attachments.find(candidate => candidate.id === id); return <button key={id} onClick={() => setCommentAttachmentIds(current => current.filter(value => value !== id))} className="rounded-full bg-slate-200 px-2 py-1 text-[10px] font-semibold text-slate-600">{file?.filename || 'Archivo'} ×</button> })}</div>
+        <div className="mt-2 flex flex-wrap gap-1.5">{commentMentionIds.map(id => { const user = users.find(candidate => candidate.id === id); return <button key={id} onClick={() => setCommentMentionIds(current => current.filter(value => value !== id))} className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold text-emerald-700">@{user?.display_name || user?.username} ×</button> })}{commentAttachmentIds.map(id => { const file = resolveCommentAttachment(id, commentAttachmentLookup, attachments); return <button key={id} onClick={() => setCommentAttachmentIds(current => current.filter(value => value !== id))} className="rounded-full bg-slate-200 px-2 py-1 text-[10px] font-semibold text-slate-600">{file?.filename || 'Archivo'} ×</button> })}</div>
         <div className="mt-2 flex items-end gap-2"><div className="min-w-0 flex-1"><TaskUserCombobox users={users} value="" onChange={id => addMention(id)} excludeIds={commentMentionIds} placeholder="Mencionar a alguien…" className="py-2" /></div><button title="Adjuntar archivo" onClick={() => commentFileRef.current?.click()} disabled={isPending('upload:comment')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-40">{isPending('upload:comment') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}</button><input ref={commentFileRef} type="file" className="hidden" onChange={event => void upload(event.target.files?.[0], 'comment')} /><button title="Publicar comentario (Ctrl/⌘ + Enter)" onClick={() => void sendComment()} disabled={isPending('comment-create') || !comment.trim()} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white transition hover:bg-emerald-700 disabled:opacity-30">{isPending('comment-create') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button></div>
       </div>
       <p className="mt-1.5 hidden text-center text-[10px] text-slate-400 sm:block">Ctrl/⌘ + Enter para publicar</p>
-    </div>
+    </div> : <div className="shrink-0 border-t border-slate-200 bg-white px-4 py-3 text-center text-xs font-semibold text-slate-500">Necesitas Comentar para participar en esta conversación.</div>}
   </div>
 
   const detailsPane = task && <div className="mx-auto w-full max-w-4xl space-y-7 pb-8">
-    <section>
-      <div className="mb-2 flex items-center justify-between gap-3"><h3 className="text-xs font-bold uppercase tracking-[0.14em] text-slate-400">Descripción</h3><div className="flex items-center gap-2">{isPending('description') && <span className="flex items-center gap-1 text-[10px] font-medium text-emerald-600"><Loader2 className="h-3 w-3 animate-spin" /> Guardando</span>}<button type="button" onClick={() => { editingDescriptionRef.current = true; setDescriptionExpanded(true) }} className="inline-flex min-h-8 items-center gap-1.5 rounded-lg px-2 text-[11px] font-semibold text-slate-500 transition hover:bg-slate-100 hover:text-emerald-700" aria-label="Expandir descripción"><Expand className="h-3.5 w-3.5" />Expandir</button></div></div>
-      <div className="relative">
-        <textarea data-task-description value={descriptionDraft} onFocus={() => { editingDescriptionRef.current = true }} onChange={event => setDescriptionDraft(event.target.value)} onBlur={() => { void saveDescription() }} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } }} placeholder="Añade contexto, criterios de éxito o instrucciones…" style={{ height: descriptionHeight }} className="w-full resize-none rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 pb-7 text-sm leading-6 text-slate-700 outline-none transition focus:border-emerald-300 focus:bg-white focus:ring-4 focus:ring-emerald-50" />
-        <div role="slider" tabIndex={0} aria-label="Ajustar altura de la descripción" aria-orientation="vertical" aria-valuemin={TASK_DESCRIPTION_MIN_HEIGHT} aria-valuemax={TASK_DESCRIPTION_MAX_HEIGHT} aria-valuenow={descriptionHeight} title="Arrastra para cambiar la altura. Usa ↑ y ↓ con el teclado." onPointerDown={beginDescriptionResize} onDoubleClick={() => persistDescriptionHeight(TASK_DESCRIPTION_DEFAULT_HEIGHT)} onKeyDown={event => { const next = taskDescriptionHeightFromKey(descriptionHeightRef.current, event.key, panelRef.current ? panelRef.current.clientHeight - 220 : TASK_DESCRIPTION_MAX_HEIGHT); if (next === null) return; event.preventDefault(); persistDescriptionHeight(next) }} className="absolute bottom-1.5 right-2 flex h-6 w-9 cursor-ns-resize items-center justify-center rounded-lg border border-slate-200 bg-white/95 text-slate-400 shadow-sm outline-none transition hover:border-emerald-300 hover:text-emerald-600 focus-visible:ring-2 focus-visible:ring-emerald-400"><GripHorizontal className="h-4 w-4" /></div>
-      </div>
-    </section>
+    <TaskDescriptionEditor
+      key={task.id}
+      value={descriptionDraft}
+      onChange={value => { editingDescriptionRef.current = true; setDescriptionDraft(value) }}
+      storageScope={storageScope}
+      panelRef={panelRef}
+      pending={isPending('description')}
+      disabled={!canEdit}
+      onCommit={saveDescription}
+      onExpandedChange={expanded => { editingDescriptionRef.current = expanded; setDescriptionExpanded(expanded) }}
+      error={failure && <div role="alert" className="mb-3 flex shrink-0 items-start gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 text-xs text-rose-700"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1 leading-5">{failure.message}</span>{failure.canRetry && <button type="button" onClick={() => { const retry = failureRetryRef.current; clearFailure(); retry?.() }} className="shrink-0 rounded-lg bg-white px-2.5 py-1 font-semibold shadow-sm hover:bg-rose-100">Reintentar</button>}</div>}
+    />
 
     <section>
-      <div className="mb-3 flex items-center justify-between"><h3 className="text-xs font-bold uppercase tracking-[0.14em] text-slate-400">Propiedades</h3><button onClick={() => onEdit(task)} className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50">Más opciones</button></div>
+      <div className="mb-3 flex items-center justify-between"><h3 className="text-xs font-bold uppercase tracking-[0.14em] text-slate-400">Propiedades</h3>{canEdit && <button onClick={() => onEdit(task)} className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50">Más opciones</button>}</div>
       <div className="grid gap-x-5 gap-y-4 rounded-2xl border border-slate-200 bg-white p-4 sm:grid-cols-2">
-        <div className="text-xs font-semibold text-slate-500">Estado<div className="mt-1.5"><TaskStatusPicker value={task.status_id || ''} statuses={statuses} pending={isPending('status')} onChange={statusID => { void updateTask('status', { status_id: statusID }) }} /></div></div>
-        <div className="text-xs font-semibold text-slate-500">Responsable<div className="mt-1.5"><TaskUserCombobox users={users} value={task.assigned_to} onChange={userId => { void updateTask('owner', { assigned_to: userId }) }} disabled={isPending('owner')} /></div></div>
-        <div className="text-xs font-semibold text-slate-500">Prioridad<div className="mt-1.5"><TaskPriorityPicker value={task.priority} pending={isPending('priority')} onChange={priority => { void updateTask('priority', { priority }) }} /></div></div>
-        <div className="text-xs font-semibold text-slate-500">Lista<div className="mt-1.5"><TaskListPicker value={task.list_id || ''} lists={lists} folders={folders} disabled={Boolean(task.parent_task_id) || isPending('list')} onChange={listID => { void updateTask('list', { list_id: listID }) }} /></div>{task.parent_task_id && <p className="mt-1.5 text-[10px] font-normal leading-4 text-slate-400">Las subtareas heredan la lista de su tarea principal y se trasladan junto con ella.</p>}</div>
-        <div className="text-xs font-semibold text-slate-500"><span className="mb-1.5 flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Inicio</span><TaskDateTimePicker label="Inicio" value={startDraft} disabled={isPending('dates')} onChange={setStartDraft} onCommit={value => { editingDatesRef.current = false; void saveDates(value, dueDraft) }} /></div>
-        <div className="text-xs font-semibold text-slate-500"><span className="mb-1.5 flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Entrega</span><TaskDateTimePicker label="Entrega" value={dueDraft} min={startDraft} disabled={isPending('dates')} onChange={setDueDraft} onCommit={value => { editingDatesRef.current = false; void saveDates(startDraft, value) }} /></div>
-        <div className="text-xs font-semibold text-slate-500 sm:col-span-2"><div className="flex flex-wrap items-center justify-between gap-2"><span>Progreso</span><div className="flex rounded-xl bg-slate-100 p-1">{(['manual','automatic'] as const).map(mode => <button key={mode} type="button" disabled={isPending('progress')} onClick={() => { setProgressMode(mode); void saveProgress(mode, progressDraft) }} className={`rounded-lg px-3 py-1.5 text-[10px] font-black transition ${progressMode === mode ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-400'}`}>{mode === 'manual' ? 'Manual' : 'Automático'}</button>)}</div></div>
-          {progressMode === 'automatic' ? <div className="mt-3 rounded-2xl border border-emerald-100 bg-emerald-50/60 p-3"><div className="flex items-center justify-between"><span className="text-xs font-bold text-emerald-800">{task.progress || 0}% calculado</span><span className="text-[10px] text-emerald-600">{task.subtask_done || 0}/{task.subtask_count || 0} subtareas</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-white"><div className="h-full rounded-full bg-emerald-500 transition-[width]" style={{ width: `${task.progress || 0}%` }} /></div><p className="mt-2 text-[10px] font-normal leading-4 text-slate-500">Sin subtareas: 0% si está abierta y 100% si está completada.</p></div> : <div className="mt-3 rounded-2xl border border-slate-200 p-3"><div className="flex items-center gap-3"><input aria-label="Progreso manual" type="range" min="0" max="100" step="1" value={progressDraft} disabled={isPending('progress')} onFocus={() => { editingProgressRef.current = true }} onChange={event => setProgressDraft(Number(event.target.value))} onPointerUp={() => { void saveProgress('manual', progressDraft) }} onKeyUp={() => { void saveProgress('manual', progressDraft) }} className="min-w-0 flex-1 accent-emerald-600 disabled:opacity-50" /><div className="flex min-h-10 w-20 items-center rounded-xl bg-slate-50 px-2"><input aria-label="Porcentaje manual" type="number" min="0" max="100" value={progressDraft} onChange={event => setProgressDraft(Math.max(0, Math.min(100, Number(event.target.value))))} onBlur={() => { void saveProgress('manual', progressDraft) }} className="w-full bg-transparent text-right text-sm font-black text-emerald-700 outline-none" /><span className="text-xs text-slate-400">%</span></div></div><div className="mt-2 flex gap-1.5">{[0,25,50,75,100].map(value => <button key={value} type="button" onClick={() => { setProgressDraft(value); void saveProgress('manual', value) }} className="flex-1 rounded-lg bg-slate-50 py-1.5 text-[10px] font-bold text-slate-500 hover:bg-emerald-50 hover:text-emerald-700">{value}%</button>)}</div></div>}
+        <div className="text-xs font-semibold text-slate-500">Estado<div className="mt-1.5"><TaskStatusPicker value={task.status_id || ''} statuses={statuses} disabled={!canEdit} pending={isPending('status')} onChange={statusID => { void updateTask('status', { status_id: statusID }) }} /></div></div>
+        <div className="text-xs font-semibold text-slate-500">Responsable<div className="mt-1.5"><TaskUserCombobox users={users} value={task.assigned_to} onChange={userId => { void updateTask('owner', { assigned_to: userId }) }} disabled={!canEdit || isPending('owner')} /></div></div>
+        <div className="text-xs font-semibold text-slate-500">Prioridad<div className="mt-1.5"><TaskPriorityPicker value={task.priority} disabled={!canEdit} pending={isPending('priority')} onChange={priority => { void updateTask('priority', { priority }) }} /></div></div>
+        <div className="text-xs font-semibold text-slate-500">Lista<div className="mt-1.5"><TaskListPicker value={task.list_id || ''} lists={lists} folders={folders} disabled={!canEdit || Boolean(task.parent_task_id) || isPending('list')} onChange={listID => { void updateTask('list', { list_id: listID }) }} /></div>{task.parent_task_id && <p className="mt-1.5 text-[10px] font-normal leading-4 text-slate-400">Las subtareas heredan la lista de su tarea principal y se trasladan junto con ella.</p>}</div>
+        <div className="text-xs font-semibold text-slate-500"><span className="mb-1.5 flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Inicio</span><TaskDateTimePicker label="Inicio" value={startDraft} disabled={!canEdit || isPending('dates')} onChange={setStartDraft} onCommit={value => { editingDatesRef.current = false; void saveDates(value, dueDraft) }} /></div>
+        <div className="text-xs font-semibold text-slate-500"><span className="mb-1.5 flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Entrega</span><TaskDateTimePicker label="Entrega" value={dueDraft} min={startDraft} disabled={!canEdit || isPending('dates')} onChange={setDueDraft} onCommit={value => { editingDatesRef.current = false; void saveDates(startDraft, value) }} /></div>
+        <div className="text-xs font-semibold text-slate-500 sm:col-span-2"><div className="flex flex-wrap items-center justify-between gap-2"><span>Progreso</span><div className="flex rounded-xl bg-slate-100 p-1">{(['manual','automatic'] as const).map(mode => <button key={mode} type="button" disabled={!canEdit || isPending('progress')} onClick={() => { setProgressMode(mode); void saveProgress(mode, progressDraft) }} className={`rounded-lg px-3 py-1.5 text-[10px] font-black transition disabled:cursor-not-allowed disabled:opacity-50 ${progressMode === mode ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-400'}`}>{mode === 'manual' ? 'Manual' : 'Automático'}</button>)}</div></div>
+          {progressMode === 'automatic' ? <div className="mt-3 rounded-2xl border border-emerald-100 bg-emerald-50/60 p-3"><div className="flex items-center justify-between"><span className="text-xs font-bold text-emerald-800">{task.progress || 0}% calculado</span><span className="text-[10px] text-emerald-600">{task.subtask_done || 0}/{task.subtask_count || 0} subtareas</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-white"><div className="h-full rounded-full bg-emerald-500 transition-[width]" style={{ width: `${task.progress || 0}%` }} /></div><p className="mt-2 text-[10px] font-normal leading-4 text-slate-500">Sin subtareas: 0% si está abierta y 100% si está completada.</p></div> : <div className="mt-3 rounded-2xl border border-slate-200 p-3"><div className="flex items-center gap-3"><input aria-label="Progreso manual" type="range" min="0" max="100" step="1" value={progressDraft} disabled={!canEdit || isPending('progress')} onFocus={() => { editingProgressRef.current = true }} onChange={event => setProgressDraft(Number(event.target.value))} onPointerUp={() => { void saveProgress('manual', progressDraft) }} onKeyUp={() => { void saveProgress('manual', progressDraft) }} className="min-w-0 flex-1 accent-emerald-600 disabled:opacity-50" /><div className="flex min-h-10 w-20 items-center rounded-xl bg-slate-50 px-2"><input aria-label="Porcentaje manual" type="number" min="0" max="100" value={progressDraft} disabled={!canEdit} onChange={event => setProgressDraft(Math.max(0, Math.min(100, Number(event.target.value))))} onBlur={() => { void saveProgress('manual', progressDraft) }} className="w-full bg-transparent text-right text-sm font-black text-emerald-700 outline-none disabled:opacity-50" /><span className="text-xs text-slate-400">%</span></div></div><div className="mt-2 flex gap-1.5">{[0,25,50,75,100].map(value => <button key={value} type="button" disabled={!canEdit} onClick={() => { setProgressDraft(value); void saveProgress('manual', value) }} className="flex-1 rounded-lg bg-slate-50 py-1.5 text-[10px] font-bold text-slate-500 hover:bg-emerald-50 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">{value}%</button>)}</div></div>}
         </div>
       </div>
     </section>
@@ -1043,27 +1048,35 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     <section>
       <div className="mb-1.5 flex items-center gap-2"><UserRound className="h-4 w-4 text-emerald-600" /><h3 className="text-sm font-bold text-slate-800">Colaboradores</h3>{isPending('collaborators') && <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-600" />}</div>
       <p className="mb-3 text-xs leading-5 text-slate-400">Participan y reciben contexto de la tarea; el responsable continúa siendo su único propietario.</p>
-      <TaskCollaboratorPicker users={users} value={task.collaborators?.map(item => item.user_id) || []} ownerID={task.assigned_to} pending={isPending('collaborators')} onChange={setCollaboratorSelection} />
+      <TaskCollaboratorPicker users={users} value={task.collaborators?.map(item => item.user_id) || []} ownerID={task.assigned_to} disabled={!canEdit} pending={isPending('collaborators')} onChange={setCollaboratorSelection} />
     </section>
 
+    <TaskAccessPanel task={task} users={users} onChanged={(changed, operationID) => {
+      if (changed) {
+        setTask(changed)
+        taskRef.current = changed
+      } else void refreshTask()
+      onChanged(changed, operationID)
+    }} />
+
     {!task.parent_task_id && <section>
-      <div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-bold text-slate-800">Subtareas <span className="font-normal text-slate-400">{children.filter(item => item.status_detail?.category === 'done').length}/{children.length}</span></h3><button onClick={() => onCreateSubtask(task)} className="flex min-h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"><Plus className="h-3.5 w-3.5" /> Más opciones</button></div>
-      <div className="mb-2 flex gap-2"><input value={subtaskTitle} disabled={isPending('subtask-create')} onChange={event => setSubtaskTitle(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void createQuickSubtask() } if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setSubtaskTitle('') } }} placeholder="Añadir una subtarea y presionar Enter…" className={`${inputClass} min-w-0 flex-1`} /><button disabled={!subtaskTitle.trim() || isPending('subtask-create')} onClick={() => { void createQuickSubtask() }} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white disabled:opacity-30">{isPending('subtask-create') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}</button></div>
-      <div className="space-y-2">{children.map(child => <div key={child.id} className="group flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5 transition hover:border-emerald-200 hover:bg-emerald-50/30"><button title={child.status_detail?.category === 'done' ? 'Marcar pendiente' : 'Completar'} disabled={isPending(`child:${child.id}`)} onClick={() => { void toggleChild(child) }} className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border ${child.status_detail?.category === 'done' ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-slate-300 bg-white hover:border-emerald-400'}`}>{isPending(`child:${child.id}`) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : child.status_detail?.category === 'done' && <Check className="h-3.5 w-3.5" />}</button><button onClick={() => onOpenTask(child.id)} className="min-w-0 flex-1 text-left"><span className={`block truncate text-sm font-medium ${child.status_detail?.category === 'done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{child.title}</span><span className="mt-0.5 block truncate text-[10px] text-slate-400">{child.assigned_to_name || 'Sin responsable'} · {child.due_at ? dateFormatter.format(new Date(child.due_at)) : 'Sin fecha'}</span></button><span className="hidden shrink-0 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-500 sm:block">{child.status_detail?.name || 'Por hacer'}</span><ChevronRight className="h-4 w-4 shrink-0 text-slate-300 transition group-hover:translate-x-0.5" /></div>)}{!children.length && <div className="rounded-xl border border-dashed border-slate-300 px-4 py-5 text-center text-sm text-slate-400">Divide el trabajo en pasos pequeños y asignables.</div>}</div>
+      <div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-bold text-slate-800">Subtareas <span className="font-normal text-slate-400">{children.filter(item => item.status_detail?.category === 'done').length}/{children.length}</span></h3>{canEdit && <button onClick={() => onCreateSubtask(task)} className="flex min-h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"><Plus className="h-3.5 w-3.5" /> Más opciones</button>}</div>
+      {canEdit && <div className="mb-2 flex gap-2"><input value={subtaskTitle} disabled={isPending('subtask-create')} onChange={event => setSubtaskTitle(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void createQuickSubtask() } if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setSubtaskTitle('') } }} placeholder="Añadir una subtarea y presionar Enter…" className={`${inputClass} min-w-0 flex-1`} /><button disabled={!subtaskTitle.trim() || isPending('subtask-create')} onClick={() => { void createQuickSubtask() }} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white disabled:opacity-30">{isPending('subtask-create') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}</button></div>}
+      <div className="space-y-2">{children.map(child => <div key={child.id} className="group flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5 transition hover:border-emerald-200 hover:bg-emerald-50/30"><button title={canEdit ? child.status_detail?.category === 'done' ? 'Marcar pendiente' : 'Completar' : 'Solo lectura'} disabled={!canEdit || isPending(`child:${child.id}`)} onClick={() => { void toggleChild(child) }} className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border disabled:cursor-not-allowed disabled:opacity-55 ${child.status_detail?.category === 'done' ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-slate-300 bg-white hover:border-emerald-400'}`}>{isPending(`child:${child.id}`) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : child.status_detail?.category === 'done' && <Check className="h-3.5 w-3.5" />}</button><button onClick={() => onOpenTask(child.id)} className="min-w-0 flex-1 text-left"><span className={`block truncate text-sm font-medium ${child.status_detail?.category === 'done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{child.title}</span><span className="mt-0.5 block truncate text-[10px] text-slate-400">{child.assigned_to_name || 'Sin responsable'} · {child.due_at ? dateFormatter.format(new Date(child.due_at)) : 'Sin fecha'}</span></button><span className="hidden shrink-0 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-500 sm:block">{child.status_detail?.name || 'Por hacer'}</span><ChevronRight className="h-4 w-4 shrink-0 text-slate-300 transition group-hover:translate-x-0.5" /></div>)}{!children.length && <div className="rounded-xl border border-dashed border-slate-300 px-4 py-5 text-center text-sm text-slate-400">Divide el trabajo en pasos pequeños y asignables.</div>}</div>
     </section>}
 
     <section>
-      <div className="mb-3 flex items-center justify-between"><h3 className="flex items-center gap-2 text-sm font-bold text-slate-800"><Paperclip className="h-4 w-4 text-emerald-600" /> Archivos <span className="font-normal text-slate-400">{attachments.length}</span></h3><button onClick={() => fileRef.current?.click()} disabled={isPending('upload:task')} className="flex min-h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-40">{isPending('upload:task') && <Loader2 className="h-3.5 w-3.5 animate-spin" />} Adjuntar</button><input ref={fileRef} type="file" className="hidden" onChange={event => void upload(event.target.files?.[0])} /></div>
-      <div className="grid gap-2 sm:grid-cols-2">{attachments.map(item => <div key={item.id} className="group flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-2.5 transition hover:border-emerald-200 hover:shadow-sm"><button type="button" onClick={() => setPreviewAttachment(item)} className="flex min-w-0 flex-1 items-center gap-2 text-left"><div className="rounded-lg bg-slate-100 p-2 transition group-hover:bg-emerald-50"><File className="h-4 w-4 text-slate-500 group-hover:text-emerald-600" /></div><div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-700">{item.filename}</p><p className="text-[10px] text-slate-400">{Math.max(1, Math.round(item.size_bytes / 1024))} KB · Ver y comentar</p></div></button><a aria-label={`Descargar ${item.filename}`} href={item.url} target="_blank" rel="noreferrer" className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><Download className="h-4 w-4" /></a><button aria-label={`Quitar ${item.filename}`} disabled={isPending(`attachment-delete:${item.id}`)} onClick={() => { void removeAttachment(item) }} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600"><X className="h-3.5 w-3.5" /></button></div>)}{!attachments.length && <div className="rounded-xl border border-dashed border-slate-300 px-4 py-5 text-center text-sm text-slate-400 sm:col-span-2">Adjunta documentos, imágenes o entregables.</div>}</div>
+      <div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="flex items-center gap-2 text-sm font-bold text-slate-800"><Paperclip className="h-4 w-4 text-emerald-600" /> Archivos <span className="font-normal text-slate-400">{attachments.length}</span></h3><p className="mt-1 text-[10px] text-slate-400">{canEdit ? 'Adjunta archivos o pega imágenes con Ctrl/⌘ + V.' : 'Puedes consultar y descargar los archivos visibles.'}</p></div>{canEdit && <><button onClick={() => fileRef.current?.click()} disabled={isPending('upload:task')} className="flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-40">{isPending('upload:task') && <Loader2 className="h-3.5 w-3.5 animate-spin" />} Adjuntar</button><input ref={fileRef} type="file" multiple className="hidden" onChange={event => void uploadFiles(Array.from(event.target.files || []))} /></>}</div>
+      <div className="grid gap-2 sm:grid-cols-2">{attachments.map(item => <div key={item.id} className="group flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-2.5 transition hover:border-emerald-200 hover:shadow-sm"><button type="button" onClick={() => setPreviewAttachment(item)} className="flex min-w-0 flex-1 items-center gap-2 text-left"><div className="rounded-lg bg-slate-100 p-2 transition group-hover:bg-emerald-50"><File className="h-4 w-4 text-slate-500 group-hover:text-emerald-600" /></div><div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold text-slate-700">{item.filename}</p><p className="text-[10px] text-slate-400">{Math.max(1, Math.round(item.size_bytes / 1024))} KB · {canComment ? 'Ver y comentar' : 'Ver archivo'}</p></div></button><a aria-label={`Descargar ${item.filename}`} href={item.url} target="_blank" rel="noreferrer" className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><Download className="h-4 w-4" /></a>{canEdit && <button aria-label={`Quitar ${item.filename}`} disabled={isPending(`attachment-delete:${item.id}`)} onClick={() => { void removeAttachment(item) }} className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600"><X className="h-3.5 w-3.5" /></button>}</div>)}{!attachments.length && <div className="rounded-xl border border-dashed border-slate-300 px-4 py-5 text-center text-sm text-slate-400 sm:col-span-2">{canEdit ? 'Adjunta documentos, imágenes o entregables.' : 'No hay archivos en esta tarea.'}</div>}</div>
     </section>
 
     <section>
       <h3 className="mb-3 flex items-center gap-2 text-sm font-bold text-slate-800"><Link2 className="h-4 w-4 text-emerald-600" /> Dependencias <span className="font-normal text-slate-400">{dependencies.length}</span></h3>
-      <div className="space-y-2">{dependencies.map(dep => { const incoming = dep.successor_task_id === task.id; const linkedTaskId = incoming ? dep.predecessor_task_id : dep.successor_task_id; return <div key={dep.id} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"><span className="shrink-0 rounded-lg bg-white px-2 py-1 text-[10px] font-semibold text-slate-500">{incoming ? 'Bloqueada por' : 'Bloquea a'}</span><button onClick={() => onOpenTask(linkedTaskId)} className="min-w-0 flex-1 truncate text-left text-xs font-semibold text-slate-700 hover:text-emerald-700 hover:underline">{incoming ? dep.predecessor_title : dep.successor_title}</button><button aria-label="Eliminar dependencia" disabled={isPending(`dependency-delete:${dep.id}`)} onClick={() => { void removeDependency(dep) }} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600"><X className="h-3.5 w-3.5" /></button></div> })}
-        <div className="relative"><div className="flex gap-2"><div className="relative min-w-0 flex-1"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={dependencySearch} onFocus={() => setDependencyPickerOpen(true)} onChange={event => { dependencySearchAbortRef.current?.abort(); dependencySearchSequenceRef.current += 1; setDependencySearching(false); setDependencySearch(event.target.value); if (!event.target.value.trim()) setDependencySettledSearch(''); setDependencyTaskId(''); setDependencyPickerOpen(true) }} placeholder="Buscar tarea predecesora…" className={`${inputClass} pl-9 pr-9`} />{(dependencySearchPending || dependencySearching) && <Loader2 aria-label={dependencySearchPending ? 'Esperando para buscar' : 'Buscando dependencias'} className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-600" />}</div><button onClick={() => { void addDependency() }} disabled={!dependencyTaskId || isPending('dependency-create')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white disabled:opacity-30">{isPending('dependency-create') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}</button></div>
+      <div className="space-y-2">{dependencies.map(dep => { const incoming = dep.successor_task_id === task.id; const linkedTaskId = incoming ? dep.predecessor_task_id : dep.successor_task_id; return <div key={dep.id} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"><span className="shrink-0 rounded-lg bg-white px-2 py-1 text-[10px] font-semibold text-slate-500">{incoming ? 'Bloqueada por' : 'Bloquea a'}</span><button onClick={() => onOpenTask(linkedTaskId)} className="min-w-0 flex-1 truncate text-left text-xs font-semibold text-slate-700 hover:text-emerald-700 hover:underline">{incoming ? dep.predecessor_title : dep.successor_title}</button>{canEdit && <button aria-label="Eliminar dependencia" disabled={isPending(`dependency-delete:${dep.id}`)} onClick={() => { void removeDependency(dep) }} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600"><X className="h-3.5 w-3.5" /></button>}</div> })}
+        {canEdit && <div className="relative"><div className="flex gap-2"><div className="relative min-w-0 flex-1"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={dependencySearch} onFocus={() => setDependencyPickerOpen(true)} onChange={event => { dependencySearchAbortRef.current?.abort(); dependencySearchSequenceRef.current += 1; setDependencySearching(false); setDependencySearch(event.target.value); if (!event.target.value.trim()) setDependencySettledSearch(''); setDependencyTaskId(''); setDependencyPickerOpen(true) }} placeholder="Buscar tarea predecesora…" className={`${inputClass} pl-9 pr-9`} />{(dependencySearchPending || dependencySearching) && <Loader2 aria-label={dependencySearchPending ? 'Esperando para buscar' : 'Buscando dependencias'} className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-600" />}</div><button onClick={() => { void addDependency() }} disabled={!dependencyTaskId || isPending('dependency-create')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white disabled:opacity-30">{isPending('dependency-create') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}</button></div>
           {selectedDependency && <p className="mt-1.5 truncate text-[10px] font-medium text-emerald-700">Seleccionada: {selectedDependency.title}</p>}
-          {dependencyPickerOpen && !dependencyTaskId && <div className="mt-2 max-h-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">{dependencyCandidates.map(candidate => <button key={candidate.id} onClick={() => { dependencySearchAbortRef.current?.abort(); dependencySearchSequenceRef.current += 1; setDependencyTaskId(candidate.id); setDependencySearch(candidate.title); setDependencySettledSearch(candidate.title.trim()); setDependencySearching(false); setDependencyPickerOpen(false) }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left hover:bg-emerald-50"><span className="min-w-0 flex-1 truncate text-xs font-semibold text-slate-700">{candidate.title}</span><span className="shrink-0 text-[10px] text-slate-400">{candidate.list_name || 'Bandeja'}</span></button>)}{!dependencyCandidates.length && !dependencySearching && !dependencySearchPending && <p className="px-3 py-5 text-center text-xs text-slate-400">No encontramos tareas disponibles.</p>}</div>}
-        </div>
+          {dependencyPickerOpen && !dependencyTaskId && <div className="mt-2 max-h-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">{dependencyCandidates.map(candidate => <button key={candidate.id} onClick={() => { dependencySearchAbortRef.current?.abort(); dependencySearchSequenceRef.current += 1; setDependencyTaskId(candidate.id); setDependencySearch(candidate.title); setDependencySettledSearch(candidate.title.trim()); setDependencySearching(false); setDependencyPickerOpen(false) }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left hover:bg-emerald-50"><span className="min-w-0 flex-1 truncate text-xs font-semibold text-slate-700">{candidate.title}</span><span className="shrink-0 text-[10px] text-slate-400">{candidate.breadcrumbs_visible === false ? 'Compartida contigo' : candidate.list_name || 'Bandeja'}</span></button>)}{!dependencyCandidates.length && !dependencySearching && !dependencySearchPending && <p className="px-3 py-5 text-center text-xs text-slate-400">No encontramos tareas disponibles.</p>}</div>}
+        </div>}
       </div>
     </section>
   </div>
@@ -1071,42 +1084,45 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   if (!taskId || typeof document === 'undefined') return null
   return createPortal(
     <div data-task-detail-window data-window-mode={detailWindow.effectiveMode} data-backdrop-mode={windowVisual.blocksWorkspace ? 'modal' : detailWindow.effectiveMode} style={{ ...windowVisual.backdropStyle, zIndex: TASK_OVERLAY_LAYERS.window }} className={`fixed inset-0 transition-[background-color,backdrop-filter] duration-200 ${windowVisual.blocksWorkspace ? '' : 'pointer-events-none'}`} onMouseDown={event => { if (windowVisual.blocksWorkspace && event.target === event.currentTarget) onClose() }}>
-      <aside ref={panelRef} tabIndex={-1} role="dialog" aria-modal={windowVisual.blocksWorkspace} aria-label="Detalle de tarea" style={detailWindow.panelStyle} className={`pointer-events-auto absolute flex flex-col overflow-hidden bg-white shadow-[0_32px_90px_rgba(15,23,42,0.32)] ring-1 ring-slate-900/10 outline-none ${detailWindow.effectiveMode === 'docked' ? 'border-l border-slate-200' : detailWindow.isMobile ? '' : 'rounded-2xl border border-white/80'}`}>
+      <aside ref={panelRef} onPaste={pasteTaskImages} tabIndex={-1} role="dialog" aria-modal={windowVisual.blocksWorkspace} aria-label="Detalle de tarea" style={detailWindow.panelStyle} className={`pointer-events-auto absolute flex flex-col overflow-hidden bg-white shadow-[0_32px_90px_rgba(15,23,42,0.32)] ring-1 ring-slate-900/10 outline-none ${detailWindow.effectiveMode === 'docked' ? 'border-l border-slate-200' : detailWindow.isMobile ? '' : 'rounded-2xl border border-white/80'}`}>
         {detailWindow.effectiveMode === 'floating' && (Object.entries(resizeHandles) as [TaskDetailResizeEdge, string][]).map(([edge, classes]) => <div key={edge} className={`absolute z-30 ${classes}`} onPointerDown={event => detailWindow.beginResize(edge, event)} />)}
         {loading && !task ? <div className="flex flex-1 flex-col items-center justify-center"><Loader2 className="h-7 w-7 animate-spin text-emerald-600" /><p className="mt-3 text-sm text-slate-400">Abriendo tarea…</p></div> : task ? <>
           <header onPointerDown={detailWindow.beginDrag} onDoubleClick={event => { if (!(event.target as HTMLElement).closest('button,a,input,textarea,select,[data-no-window-drag]')) detailWindow.toggleMaximized() }} className={`shrink-0 select-none border-b border-slate-200 bg-white px-4 py-3 sm:px-6 sm:py-4 ${detailWindow.effectiveMode === 'floating' ? 'cursor-move' : ''}`}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
-                <div className="mb-1.5 flex min-w-0 items-center gap-1.5 overflow-hidden text-[11px] text-slate-400">{parentTask && <><button data-no-window-drag onClick={() => onOpenTask(parentTask.id)} className="max-w-44 truncate font-semibold text-emerald-700 hover:underline">{parentTask.title}</button><ChevronRight className="h-3 w-3 shrink-0" /></>}<span className="truncate">{task.folder_name || 'Clarin Work'}</span><ChevronRight className="h-3 w-3 shrink-0" /><span className="truncate">{task.list_name || 'Bandeja general'}</span>{task.is_milestone && <span className="ml-1 flex shrink-0 items-center gap-1 rounded-full bg-violet-50 px-2 py-1 font-medium text-violet-700"><Flag className="h-3 w-3" /> Hito</span>}</div>
-                <div data-no-window-drag className="relative"><textarea rows={1} value={titleDraft} disabled={isPending('title')} onFocus={() => { editingTitleRef.current = true }} onChange={event => setTitleDraft(event.target.value.replace(/\n/g, ' '))} onBlur={() => { void saveTitle() }} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); skipTitleSaveRef.current = true; setTitleDraft(task.title); event.currentTarget.blur() } }} aria-label="Título de la tarea" className="block min-h-9 w-full resize-none overflow-hidden rounded-lg border border-transparent bg-transparent py-1 pr-8 text-lg font-bold leading-7 text-slate-900 outline-none transition hover:border-slate-200 focus:border-emerald-300 focus:bg-white focus:px-2 focus:ring-4 focus:ring-emerald-50 sm:text-xl" />{isPending('title') && <Loader2 className="absolute right-2 top-2 h-4 w-4 animate-spin text-emerald-600" />}</div>
+                <div className="mb-1.5 flex min-w-0 items-center gap-1.5 overflow-hidden text-[11px] text-slate-400">{parentTask && <><button data-no-window-drag onClick={() => onOpenTask(parentTask.id)} className="max-w-44 truncate font-semibold text-emerald-700 hover:underline">{parentTask.title}</button><ChevronRight className="h-3 w-3 shrink-0" /></>}{task.breadcrumbs_visible === false ? <span className="truncate font-semibold text-violet-600">Compartida contigo</span> : <><span className="truncate">{task.folder_name || 'Clarin Work'}</span><ChevronRight className="h-3 w-3 shrink-0" /><span className="truncate">{task.list_name || 'Bandeja general'}</span></>}{task.is_milestone && <span className="ml-1 flex shrink-0 items-center gap-1 rounded-full bg-violet-50 px-2 py-1 font-medium text-violet-700"><Flag className="h-3 w-3" /> Hito</span>}</div>
+                <div data-no-window-drag className="relative"><textarea rows={1} value={titleDraft} disabled={!canEdit || isPending('title')} onFocus={() => { editingTitleRef.current = true }} onChange={event => setTitleDraft(event.target.value.replace(/\n/g, ' '))} onBlur={() => { void saveTitle() }} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); skipTitleSaveRef.current = true; setTitleDraft(task.title); event.currentTarget.blur() } }} aria-label="Título de la tarea" className="block min-h-9 w-full resize-none overflow-hidden rounded-lg border border-transparent bg-transparent py-1 pr-8 text-lg font-bold leading-7 text-slate-900 outline-none transition hover:border-slate-200 focus:border-emerald-300 focus:bg-white focus:px-2 focus:ring-4 focus:ring-emerald-50 disabled:opacity-80 sm:text-xl" />{isPending('title') && <Loader2 className="absolute right-2 top-2 h-4 w-4 animate-spin text-emerald-600" />}</div>
               </div>
               <div data-no-window-drag className="flex shrink-0 gap-0.5">
                 {!detailWindow.isMobile && <><button title="Acoplar a la derecha" onClick={() => detailWindow.setMode('docked')} className={`flex h-9 w-9 items-center justify-center rounded-xl hover:bg-slate-100 ${detailWindow.effectiveMode === 'docked' ? 'text-emerald-600' : 'text-slate-400'}`}><PanelRight className="h-4 w-4" /></button><button title="Ventana flotante" onClick={() => detailWindow.setMode('floating')} className={`flex h-9 w-9 items-center justify-center rounded-xl hover:bg-slate-100 ${detailWindow.effectiveMode === 'floating' ? 'text-emerald-600' : 'text-slate-400'}`}><Move className="h-4 w-4" /></button></>}
+                {!detailWindow.isMobile && detailWindow.effectiveMode === 'floating' && <button title="Restablecer tamaño" aria-label="Restablecer tamaño" onClick={detailWindow.resetGeometry} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700"><RotateCcw className="h-4 w-4" /></button>}
                 {!detailWindow.isMobile && <button title={detailWindow.effectiveMode === 'maximized' ? 'Restaurar ventana' : 'Maximizar'} onClick={detailWindow.toggleMaximized} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700">{detailWindow.effectiveMode === 'maximized' ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button>}
-                <button title="Editar todas las propiedades" onClick={() => onEdit(task)} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700"><Pencil className="h-4 w-4" /></button>
-                <button title="Mover a Papelera" disabled={isPending('archive')} onClick={() => { setArchiveError(''); setArchiveConfirmOpen(true) }} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"><Trash2 className="h-4 w-4" /></button>
+                {canEdit && <button title="Editar todas las propiedades" onClick={() => onEdit(task)} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700"><Pencil className="h-4 w-4" /></button>}
+                {!task.parent_task_id && canAdmin && <button title="Mover a otro Entorno" onClick={() => setMoveEnvironmentOpen(true)} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-violet-50 hover:text-violet-700"><ArrowRightLeft className="h-4 w-4" /></button>}
+                {canAdmin && <button title="Mover a Papelera" disabled={isPending('archive')} onClick={() => { setArchiveError(''); setArchiveConfirmOpen(true) }} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"><Trash2 className="h-4 w-4" /></button>}
                 <button title="Cerrar" onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X className="h-5 w-5" /></button>
               </div>
             </div>
             {!isWide && <nav data-no-window-drag className="mt-3 flex rounded-xl bg-slate-100 p-1">{([['details', 'Detalles'], ['activity', `Actividad${comments.length ? ` · ${comments.length}${commentsHasMore ? '+' : ''}` : ''}`]] as [DetailTab, string][]).map(([key, label]) => <button key={key} onClick={() => setTab(key)} className={`min-h-9 flex-1 rounded-lg px-3 text-xs font-semibold transition ${tab === key ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>{label}</button>)}</nav>}
           </header>
 
-          {descriptionExpanded && <section data-task-description-expanded className="absolute inset-0 z-40 flex flex-col bg-white" aria-label="Editor ampliado de descripción">
-            <header className="flex shrink-0 items-center justify-between gap-4 border-b border-slate-200 px-5 py-4 sm:px-6"><div><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Detalle de tarea</p><h2 className="mt-1 text-lg font-black text-slate-900">Descripción</h2></div><button type="button" disabled={isPending('description')} onClick={() => { void closeExpandedDescription() }} className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-bold text-white shadow-sm transition hover:bg-slate-800 disabled:opacity-50">{isPending('description') && <Loader2 className="h-4 w-4 animate-spin" />}Listo</button></header>
-            <div className="flex min-h-0 flex-1 flex-col p-4 sm:p-6">
-              {failure && <div role="alert" className="mb-3 flex shrink-0 items-start gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 text-xs text-rose-700"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1 leading-5">{failure.message}</span>{failure.canRetry && <button type="button" onClick={() => { const retry = failureRetryRef.current; clearFailure(); retry?.() }} className="shrink-0 rounded-lg bg-white px-2.5 py-1 font-semibold shadow-sm hover:bg-rose-100">Reintentar</button>}</div>}
-              <textarea autoFocus value={descriptionDraft} onFocus={() => { editingDescriptionRef.current = true }} onChange={event => setDescriptionDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); void closeExpandedDescription() } else if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void closeExpandedDescription() } }} placeholder="Añade contexto, criterios de éxito o instrucciones…" className="min-h-0 flex-1 resize-none rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm leading-7 text-slate-700 outline-none transition focus:border-emerald-300 focus:bg-white focus:ring-4 focus:ring-emerald-50" />
-              <p className="mt-3 text-center text-[10px] text-slate-400">Ctrl/⌘ + Enter para guardar · Escape para guardar y volver</p>
-            </div>
-          </section>}
-
+          {!canEdit && !descriptionExpanded && <div role="status" className="mx-4 mt-3 rounded-xl border border-violet-100 bg-violet-50 px-3 py-2.5 text-xs font-semibold text-violet-700 sm:mx-6">Acceso {canComment ? 'Comentar' : 'Ver'} · puedes consultar esta tarea{canComment ? ' y participar en la conversación' : ''}.</div>}
           {failure && !descriptionExpanded && <div className="mx-4 mt-3 flex shrink-0 items-start gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 text-xs text-rose-700 sm:mx-6"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1 leading-5">{failure.message}</span>{failure.canRetry && <button onClick={() => { const retry = failureRetryRef.current; clearFailure(); retry?.() }} className="shrink-0 rounded-lg bg-white px-2.5 py-1 font-semibold shadow-sm hover:bg-rose-100">Reintentar</button>}<button aria-label="Cerrar aviso" onClick={clearFailure} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg hover:bg-rose-100"><X className="h-3.5 w-3.5" /></button></div>}
 
           {isWide ? <div className="flex min-h-0 flex-1"><main className="min-w-0 flex-1 overflow-y-auto overscroll-contain px-6 py-6 lg:px-8">{detailsPane}</main><section className="flex w-[390px] min-h-0 shrink-0 flex-col border-l border-slate-200">{activityPane}</section></div> : tab === 'details' ? <main className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-6">{detailsPane}</main> : activityPane}
         </> : <div className="flex flex-1 flex-col items-center justify-center px-6 text-center"><AlertCircle className="h-8 w-8 text-rose-300" /><p className="mt-3 text-sm font-semibold text-slate-700">No pudimos abrir esta tarea.</p><button onClick={() => { void load() }} className="mt-3 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white">Reintentar</button></div>}
       </aside>
-      <TaskDestructiveConfirmDialog open={archiveConfirmOpen} title="Mover tarea a Papelera" description={`${task?.subtask_count ? `También se moverán ${task.subtask_count} subtarea${task.subtask_count === 1 ? '' : 's'}. ` : ''}La tarea podrá restaurarse durante el plazo configurado. Completar una tarea nunca la envía aquí.`} actionLabel="Mover a Papelera" busy={isPending('archive')} error={archiveError} onClose={() => { if (!isPending('archive')) { setArchiveConfirmOpen(false); setArchiveError('') } }} onConfirm={() => { void removeTask() }} />
-      {previewAttachment && task && task.id === taskId && previewAttachment.task_id === taskId && <TaskAttachmentViewer key={`${task.id}:${previewAttachment.id}`} taskId={task.id} attachment={previewAttachment} users={users} onClose={() => setPreviewAttachment(null)} />}
+      {canAdmin && <TaskDestructiveConfirmDialog open={archiveConfirmOpen} title="Mover tarea a Papelera" description={`${task?.subtask_count ? `También se moverán ${task.subtask_count} subtarea${task.subtask_count === 1 ? '' : 's'}. ` : ''}La tarea podrá restaurarse durante el plazo configurado. Completar una tarea nunca la envía aquí.`} actionLabel="Mover a Papelera" busy={isPending('archive')} error={archiveError} onClose={() => { if (!isPending('archive')) { setArchiveConfirmOpen(false); setArchiveError('') } }} onConfirm={() => { void removeTask() }} />}
+      {task && canAdmin && <TaskMoveEnvironmentDialog open={moveEnvironmentOpen} task={task} onClose={() => setMoveEnvironmentOpen(false)} onMoved={(moved, operationID) => { setMoveEnvironmentOpen(false); onChanged(moved, operationID); onClose() }} />}
+      {previewAttachment && task && task.id === taskId && previewAttachment.task_id === taskId && <TaskAttachmentViewer key={`${task.id}:${previewAttachment.id}`} taskId={task.id} attachment={previewAttachment} users={users} canComment={canComment} onClose={() => setPreviewAttachment(null)} />}
+      <TaskParticipantGrantConfirmDialog
+        open={Boolean(participantGrantPrompt)}
+        affectedUserIDs={participantGrantPrompt?.affectedUserIDs || []}
+        users={users}
+        busy={false}
+        onClose={() => setParticipantGrantPrompt(null)}
+        onConfirm={() => { const retry = participantGrantPrompt?.retry; setParticipantGrantPrompt(null); retry?.() }}
+      />
     </div>,
     document.body,
   )

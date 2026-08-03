@@ -3,21 +3,27 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
-import { api } from '@/lib/api';
+import { api, apiBlob } from '@/lib/api';
 import { Survey, SurveyQuestion, SurveyQuestionConfig, SurveyLogicRule, SurveyAnalytics, SurveyResponse, SurveyBranding, SurveyMeasurementDimension, SurveyQuestionMeasurement, QUESTION_TYPE_LABELS, QuestionType, FONT_OPTIONS, TITLE_SIZE_OPTIONS, BUTTON_STYLE_OPTIONS } from '@/types/survey';
 import type { SurveyInstanceSummary, SurveyMeasurementSeries, SurveyTemplate, SurveyTemplateQuestion } from '@/types/survey-template';
 import DuplicateSurveyTemplateDialog from '@/components/surveys/DuplicateSurveyTemplateDialog';
 import SurveyInstanceNameField from '@/components/surveys/SurveyInstanceNameField';
 import ArchiveSurveyTemplateDialog from '@/components/surveys/ArchiveSurveyTemplateDialog';
 import SurveyDesignEditor, { type DesignMediaDraft } from '@/components/surveys/SurveyDesignEditor';
+import SurveyTextAnswersPanel from '@/components/surveys/SurveyTextAnswersPanel';
+import SurveyApplicationLifecycleActions from '@/components/surveys/SurveyApplicationLifecycleActions';
 import { formatSurveyDuration } from '@/lib/surveyAnalytics';
+import { surveyNonChartAnswerLabel } from '@/lib/surveyQuestionAnswerLabel';
+import { buildSurveyResultsExportPayload, createSurveyResultsExportSingleFlight, saveSurveyResultsBlob } from '@/lib/surveyResultsExport';
+import { createSurveySlugAvailabilityController, type SurveySlugAvailabilityController } from '@/lib/surveySlugAvailability';
+import { partitionSurveyInstances, reconcileTemplateInstanceCounts, removeSurveyInstance, replaceSurveyInstance } from '@/lib/surveyInstanceLifecycle';
 import {
   ArrowLeft, Save, Plus, Trash2, GripVertical, Eye, Share2, BarChart3,
   Type, AlignLeft, CircleDot, CheckSquare, Star, SlidersHorizontal,
   Calendar, Mail, Phone, Paperclip, ChevronDown, ChevronUp, Copy,
   ExternalLink, CheckCircle2, XCircle, PenLine, Settings2, Loader2,
   Download, FileText, Hash, Clock, TrendingUp, Users, Palette, PieChart, Radar,
-  Layers3
+  Layers3, Archive
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -153,6 +159,9 @@ function templateAsSurvey(template: SurveyTemplate): Survey {
     updated_at: template.updated_at,
     question_count: template.question_count,
     response_count: template.response_count,
+    can_delete: false,
+    can_archive: false,
+    can_restore: false,
   };
 }
 
@@ -217,7 +226,7 @@ function SurveyTemplateEditorPage({ templateId }: { templateId: string }) {
   const loadInstances = useCallback(async () => {
     setInstancesLoading(true);
     try {
-      const response = await api<SurveyInstanceSummary[]>(`/api/survey-templates/${templateId}/instances`);
+      const response = await api<SurveyInstanceSummary[]>(`/api/survey-templates/${templateId}/instances?include_archived=true`);
       if (!response.success) throw new Error(response.error || 'No se pudo cargar el historial.');
       setInstances(response.data || []);
       setInstancesLoaded(true);
@@ -351,6 +360,18 @@ function SurveyTemplateEditorPage({ templateId }: { templateId: string }) {
     ? true
     : window.confirm('Hay cambios sin guardar. ¿Quieres salir y descartarlos?');
 
+  const updateApplicationLifecycle = (updated: SurveyInstanceSummary) => {
+    const previous = instances.find(instance => instance.id === updated.id);
+    setInstances(current => replaceSurveyInstance(current, updated));
+    if (previous) setTemplate(current => current ? reconcileTemplateInstanceCounts(current, previous, updated) : current);
+  };
+
+  const deleteApplication = (id: string) => {
+    const previous = instances.find(instance => instance.id === id);
+    setInstances(current => removeSurveyInstance(current, id));
+    if (previous) setTemplate(current => current ? reconcileTemplateInstanceCounts(current, previous, null) : current);
+  };
+
   if (loading) return <div className="flex h-full items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-emerald-600" /></div>;
   if (loadError || !template) return <div className="flex h-full items-center justify-center p-6"><div className="max-w-md rounded-2xl border border-rose-200 bg-rose-50 p-5 text-center text-sm text-rose-700"><p>{loadError || 'Plantilla no encontrada.'}</p><button type="button" onClick={() => void loadTemplate()} className="mt-3 min-h-11 font-semibold underline">Reintentar</button></div></div>;
 
@@ -381,7 +402,7 @@ function SurveyTemplateEditorPage({ templateId }: { templateId: string }) {
         {activeTab === 'builder' && <BuilderTab questions={questions} selectedQ={selectedQ} setSelectedQ={setSelectedQ} addQuestion={addQuestion} removeQuestion={removeQuestion} updateQuestion={updateQuestion} moveQuestion={moveQuestion} allQuestions={questions} />}
         {activeTab === 'design' && <SurveyDesignEditor survey={editorSurvey} onSave={saveDesign} onDirtyChange={setEditorDraftDirty} saving={saving} />}
         {activeTab === 'measurement' && <MeasurementTab template={template} questions={questions} onDirtyChange={setEditorDraftDirty} onSaved={(savedTemplate, savedQuestions) => { setTemplate(savedTemplate); setQuestions(savedQuestions.map(templateQuestionToEditor)); setMessage({ type: 'success', text: 'Configuración de medición guardada. Solo afectará nuevas aplicaciones.' }); }} />}
-        {activeTab === 'instances' && <TemplateInstancesTab template={template} instances={instances} loading={instancesLoading} onRefresh={() => void loadInstances()} onCreate={() => setCreateInstanceOpen(true)} />}
+        {activeTab === 'instances' && <TemplateInstancesTab template={template} instances={instances} loading={instancesLoading} onRefresh={() => void loadInstances()} onCreate={() => setCreateInstanceOpen(true)} onUpdated={updateApplicationLifecycle} onDeleted={deleteApplication} />}
       </main>
 
       {message && <div className={`fixed bottom-[max(1.5rem,env(safe-area-inset-bottom))] left-1/2 z-[100] flex w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 items-center gap-2 rounded-xl px-4 py-3 text-sm font-medium text-white shadow-xl ${message.type === 'success' ? 'bg-emerald-600' : 'bg-rose-600'}`} role="status">{message.type === 'success' ? <CheckCircle2 className="h-4 w-4 shrink-0" /> : <XCircle className="h-4 w-4 shrink-0" />}<span className="min-w-0 flex-1">{message.text}</span><button type="button" onClick={() => setMessage(null)} className="min-h-8 min-w-8" aria-label="Cerrar mensaje">×</button></div>}
@@ -504,11 +525,28 @@ function MeasurementTab({ template, questions, onDirtyChange, onSaved }: {
   </div></div>;
 }
 
-function TemplateInstancesTab({ template, instances, loading, onRefresh, onCreate }: { template: SurveyTemplate; instances: SurveyInstanceSummary[]; loading: boolean; onRefresh: () => void; onCreate: () => void }) {
-  return <div className="h-full overflow-y-auto p-4 sm:p-6"><div className="mx-auto max-w-5xl"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold text-slate-900">Aplicaciones e historial</h2><p className="text-sm text-slate-500">Cada aplicación conserva la versión exacta que se publicó.</p></div><button type="button" onClick={onCreate} disabled={template.status === 'archived' || template.question_count === 0} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white disabled:opacity-50"><Plus className="h-4 w-4" />Aplicar plantilla</button></div>
-    <div className="mt-5 grid grid-cols-3 gap-2 sm:gap-3"><div className="rounded-2xl border border-slate-200 bg-white p-3 text-center sm:p-4"><p className="text-xl font-bold text-slate-900">{template.instance_count}</p><p className="text-xs text-slate-500">Aplicaciones</p></div><div className="rounded-2xl border border-slate-200 bg-white p-3 text-center sm:p-4"><p className="text-xl font-bold text-slate-900">{template.response_count}</p><p className="text-xs text-slate-500">Respuestas</p></div><div className="rounded-2xl border border-slate-200 bg-white p-3 text-center sm:p-4"><p className="text-xl font-bold text-slate-900">v{template.revision}</p><p className="text-xs text-slate-500">Versión actual</p></div></div>
-    {loading ? <div className="flex min-h-56 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-emerald-600" /></div> : instances.length === 0 ? <div className="mt-5 flex min-h-56 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white p-8 text-center"><Layers3 className="mb-3 h-9 w-9 text-slate-300" /><p className="font-medium text-slate-700">Todavía no hay aplicaciones</p><p className="mt-1 max-w-md text-sm text-slate-500">Aplícala desde un programa para crear enlaces individuales, o crea una aplicación pública independiente.</p><button type="button" onClick={onRefresh} className="mt-4 min-h-11 text-sm font-semibold text-emerald-700">Actualizar</button></div> : <div className="mt-5 space-y-3">{instances.map(instance => <article key={instance.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="flex items-start gap-3"><span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${instance.status === 'active' ? 'bg-emerald-500' : instance.status === 'draft' ? 'bg-amber-400' : 'bg-slate-300'}`} /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="truncate font-semibold text-slate-900">{instance.name}</h3><span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">v{instance.template_revision}</span></div><p className="mt-1 text-sm text-slate-500">{instance.origin_label} · {instance.response_count} respuestas{instance.recipient_count > 0 ? ` de ${instance.recipient_count} destinatarios` : ''}</p><p className="mt-1 text-xs text-slate-400">Creada {format(new Date(instance.created_at), "d MMM yyyy, HH:mm", { locale: es })}</p></div><Link href={`/dashboard/surveys/${instance.id}?mode=instance&tab=analytics`} className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50" aria-label={`Ver resultados de ${instance.name}`}><BarChart3 className="h-4 w-4" /></Link></div>{instance.audience_mode === 'public' && instance.status === 'active' && <div className="mt-3 flex items-center gap-2 border-t border-slate-100 pt-3"><code className="min-w-0 flex-1 truncate rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">/f/{instance.slug}</code><a href={`/f/${instance.slug}`} target="_blank" rel="noreferrer" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-600" aria-label="Abrir aplicación"><ExternalLink className="h-4 w-4" /></a></div>}</article>)}</div>}
+function TemplateInstancesTab({ template, instances, loading, onRefresh, onCreate, onUpdated, onDeleted }: {
+  template: SurveyTemplate;
+  instances: SurveyInstanceSummary[];
+  loading: boolean;
+  onRefresh: () => void;
+  onCreate: () => void;
+  onUpdated: (instance: SurveyInstanceSummary) => void;
+  onDeleted: (id: string) => void;
+}) {
+  const [showArchived, setShowArchived] = useState(false);
+  const partitioned = partitionSurveyInstances(instances);
+  const visible = showArchived ? partitioned.archived : partitioned.active;
+  return <div className="h-full overflow-y-auto p-4 sm:p-6"><div className="mx-auto max-w-5xl">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold text-slate-900">Aplicaciones e historial</h2><p className="text-sm text-slate-500">Cada aplicación conserva la versión exacta que se publicó.</p></div><button type="button" onClick={onCreate} disabled={template.status === 'archived' || template.question_count === 0} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white disabled:opacity-50"><Plus className="h-4 w-4" />Aplicar plantilla</button></div>
+    <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3"><MetricCard value={template.instance_count} label="Activas" /><MetricCard value={template.archived_instance_count || 0} label="Archivadas" /><MetricCard value={template.response_count} label="Respuestas" /><MetricCard value={`v${template.revision}`} label="Versión actual" /></div>
+    <div className="mt-4 grid min-h-11 grid-cols-2 rounded-xl bg-slate-100 p-1" role="group" aria-label="Filtrar aplicaciones"><button type="button" onClick={() => setShowArchived(false)} className={`rounded-lg text-sm font-medium ${!showArchived ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}>Activas ({partitioned.active.length})</button><button type="button" onClick={() => setShowArchived(true)} className={`rounded-lg text-sm font-medium ${showArchived ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}>Archivadas ({partitioned.archived.length})</button></div>
+    {loading ? <div className="flex min-h-56 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-emerald-600" /></div> : visible.length === 0 ? <div className="mt-5 flex min-h-56 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white p-8 text-center"><Layers3 className="mb-3 h-9 w-9 text-slate-300" /><p className="font-medium text-slate-700">{showArchived ? 'No hay aplicaciones archivadas' : 'Todavía no hay aplicaciones activas'}</p><p className="mt-1 max-w-md text-sm text-slate-500">{showArchived ? 'Las aplicaciones que archives aparecerán aquí con todas sus respuestas.' : 'Aplícala desde un programa o crea una aplicación pública independiente.'}</p><button type="button" onClick={onRefresh} className="mt-4 min-h-11 text-sm font-semibold text-emerald-700">Actualizar</button></div> : <div className="mt-5 space-y-3">{visible.map(instance => <article key={instance.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="flex flex-col gap-3 sm:flex-row sm:items-start"><div className="flex min-w-0 flex-1 items-start gap-3"><span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${instance.archived_at ? 'bg-slate-300' : instance.status === 'active' ? 'bg-emerald-500' : instance.status === 'draft' ? 'bg-amber-400' : 'bg-slate-300'}`} /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="truncate font-semibold text-slate-900">{instance.name}</h3><span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">v{instance.template_revision}</span>{instance.archived_at && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">Archivada</span>}</div><p className="mt-1 text-sm text-slate-500">{instance.origin_label} · {instance.response_count} respuestas{instance.recipient_count > 0 ? ` de ${instance.recipient_count} destinatarios` : ''}</p><p className="mt-1 text-xs text-slate-400">Creada {format(new Date(instance.created_at), 'd MMM yyyy, HH:mm', { locale: es })}</p></div></div><div className="flex items-center justify-end gap-2"><SurveyApplicationLifecycleActions target={instance} onUpdated={onUpdated} onDeleted={onDeleted} /><Link href={`/dashboard/surveys/${instance.id}?mode=instance&tab=analytics`} className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50" aria-label={`Ver resultados de ${instance.name}`}><BarChart3 className="h-4 w-4" /></Link></div></div>{instance.audience_mode === 'public' && instance.status === 'active' && !instance.archived_at && <div className="mt-3 flex items-center gap-2 border-t border-slate-100 pt-3"><code className="min-w-0 flex-1 truncate rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">/f/{instance.slug}</code><a href={`/f/${instance.slug}`} target="_blank" rel="noreferrer" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-600" aria-label="Abrir aplicación"><ExternalLink className="h-4 w-4" /></a></div>}</article>)}</div>}
   </div></div>;
+}
+
+function MetricCard({ value, label }: { value: number | string; label: string }) {
+  return <div className="rounded-2xl border border-slate-200 bg-white p-3 text-center sm:p-4"><p className="text-xl font-bold text-slate-900">{value}</p><p className="text-xs text-slate-500">{label}</p></div>;
 }
 
 function StandaloneApplicationDialog({ template, onClose, onCreated }: { template: SurveyTemplate; onClose: () => void; onCreated: (instance: SurveyInstanceSummary) => void }) {
@@ -551,6 +589,7 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
   // Share tab
   const [slugInput, setSlugInput] = useState('');
   const [slugAvailable, setSlugAvailable] = useState<boolean | null>(null);
+  const [slugCheckError, setSlugCheckError] = useState('');
 
   // Analytics tab
   const [resultsState, setResultsState] = useState<SurveyResultsState>(() => emptySurveyResultsState(surveyId));
@@ -560,6 +599,7 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
   const responsesRequestSequence = useRef(0);
   const responseDetailRequestSequence = useRef(0);
   const responseDetailRequestRef = useRef<AbortController | null>(null);
+  const slugAvailabilityControllerRef = useRef<SurveySlugAvailabilityController | null>(null);
   const {
     analytics,
     responses,
@@ -831,14 +871,26 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
     }
   };
 
-  const checkSlug = useCallback(async (slug: string) => {
-    if (!slug || slug.length < 2) { setSlugAvailable(null); return; }
-    const res = await api<{ available: boolean }>('/api/surveys/check-slug', {
-      method: 'POST',
-      body: JSON.stringify({ slug, exclude_id: surveyId }),
+  useEffect(() => {
+    const controller = createSurveySlugAvailabilityController({
+      request: async (slug, signal) => {
+        const response = await api<{ available: boolean }>('/api/surveys/check-slug', {
+        method: 'POST',
+          body: JSON.stringify({ slug, exclude_id: surveyId }),
+          signal,
+        });
+        if (!response.success || !response.data) throw new Error(response.error || 'No se pudo comprobar el enlace.');
+        return response.data.available;
+      },
+      onPending: () => { setSlugAvailable(null); setSlugCheckError(''); },
+      onResult: available => { setSlugAvailable(available); setSlugCheckError(''); },
+      onError: setSlugCheckError,
     });
-    if (res.success && res.data) setSlugAvailable(res.data.available);
+    slugAvailabilityControllerRef.current = controller;
+    return () => { controller.cancel(); slugAvailabilityControllerRef.current = null; };
   }, [surveyId]);
+
+  const checkSlug = useCallback((slug: string) => slugAvailabilityControllerRef.current?.check(slug), []);
 
   // Question operations
   const addQuestion = (type: QuestionType) => {
@@ -869,10 +921,6 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
     setQuestions(newList);
     setSelectedQ(newIdx);
     setHasChanges(true);
-  };
-
-  const handleExportCSV = () => {
-    window.open(`/api/surveys/${surveyId}/export`, '_blank');
   };
 
   const setSelectedResponse = useCallback((response: SurveyResponse | null) => {
@@ -954,9 +1002,7 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
             </button>
             <div className="min-w-0">
               <h1 className="truncate text-sm font-semibold text-slate-900">{survey.name}</h1>
-              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${statusCfg.bg} ${statusCfg.text}`}>
-                {statusCfg.icon} {statusCfg.label}
-              </span>
+              <div className="flex flex-wrap items-center gap-2"><span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${statusCfg.bg} ${statusCfg.text}`}>{statusCfg.icon} {statusCfg.label}</span>{survey.archived_at && <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700"><Archive className="h-3 w-3" />Archivada</span>}</div>
             </div>
           </div>
           <div className="flex min-w-0 items-center gap-2 overflow-x-auto">
@@ -974,6 +1020,11 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
                 </button>
               ))}
             </div>
+            <SurveyApplicationLifecycleActions
+              target={survey}
+              onUpdated={updated => { setSurvey(current => current ? { ...current, status: updated.status, archived_at: updated.archived_at, archived_by: updated.archived_by, archived_from_status: updated.archived_from_status, can_delete: updated.can_delete, can_archive: updated.can_archive, can_restore: updated.can_restore, deletion_block_reason: updated.deletion_block_reason, updated_at: updated.updated_at } : current); setSaveMessage({ type: 'success', text: updated.archived_at ? 'Aplicación archivada y cerrada.' : 'Aplicación restaurada; permanece cerrada.' }); }}
+              onDeleted={() => router.push(survey.template_id ? `/dashboard/surveys/${survey.template_id}?mode=template` : '/dashboard/surveys')}
+            />
             {!immutableInstance && <button onClick={() => setShowSettings(true)} className="p-2 rounded-lg hover:bg-slate-100 text-slate-500">
               <Settings2 className="w-4 h-4" />
             </button>}
@@ -992,11 +1043,12 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
       </div>
 
       {/* Content area */}
+      {survey.archived_at && <div className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-xs font-medium text-amber-800">Aplicación archivada: conserva resultados, pero su enlace público responde como archivado y no admite nuevas respuestas.</div>}
       <div className="flex-1 overflow-hidden">
         {effectiveActiveTab === 'builder' && (immutableInstance ? <PublishedQuestionsView survey={survey} questions={questions} /> : <BuilderTab questions={questions} selectedQ={selectedQ} setSelectedQ={setSelectedQ} addQuestion={addQuestion} removeQuestion={removeQuestion} updateQuestion={updateQuestion} moveQuestion={moveQuestion} allQuestions={questions} />)}
         {effectiveActiveTab === 'design' && <DesignTab survey={survey} onSave={(branding) => handleSaveBranding(branding)} saving={saving} />}
-        {effectiveActiveTab === 'share' && <ShareTab survey={survey} publicUrl={publicUrl} slugInput={slugInput} setSlugInput={setSlugInput} slugAvailable={slugAvailable} checkSlug={checkSlug} handleStatusChange={handleStatusChange} handleSaveSurvey={handleSaveSurvey} saving={saving} />}
-        {effectiveActiveTab === 'analytics' && <AnalyticsTab survey={survey} analytics={analytics} responses={responses} responsesTotal={responsesTotal} programAudience={survey.audience_mode === 'program_participants'} loading={loadingAnalytics} selectedResponse={selectedResponse} setSelectedResponse={setSelectedResponse} handleViewResponse={handleViewResponse} handleExportCSV={handleExportCSV} questions={questions} responsePage={responsePage} handleResponsePageChange={handleResponsePageChange} />}
+        {effectiveActiveTab === 'share' && <ShareTab survey={survey} publicUrl={publicUrl} slugInput={slugInput} setSlugInput={setSlugInput} slugAvailable={slugAvailable} slugCheckError={slugCheckError} checkSlug={checkSlug} handleStatusChange={handleStatusChange} handleSaveSurvey={handleSaveSurvey} saving={saving} />}
+        {effectiveActiveTab === 'analytics' && <AnalyticsTab survey={survey} analytics={analytics} responses={responses} responsesTotal={responsesTotal} programAudience={survey.audience_mode === 'program_participants'} loading={loadingAnalytics} selectedResponse={selectedResponse} setSelectedResponse={setSelectedResponse} handleViewResponse={handleViewResponse} questions={questions} responsePage={responsePage} handleResponsePageChange={handleResponsePageChange} />}
       </div>
 
       {/* Save message toast */}
@@ -1710,9 +1762,9 @@ function DesignTab({ survey, onSave, onDirtyChange, saving }: {
 
 // ─── Share Tab ──────────────────────────────────────────────────────────────
 
-function ShareTab({ survey, publicUrl, slugInput, setSlugInput, slugAvailable, checkSlug, handleStatusChange, handleSaveSurvey, saving }: {
+function ShareTab({ survey, publicUrl, slugInput, setSlugInput, slugAvailable, slugCheckError, checkSlug, handleStatusChange, handleSaveSurvey, saving }: {
   survey: Survey; publicUrl: string; slugInput: string; setSlugInput: (s: string) => void;
-  slugAvailable: boolean | null; checkSlug: (s: string) => void;
+  slugAvailable: boolean | null; slugCheckError: string; checkSlug: (s: string) => void;
   handleStatusChange: (s: string) => void; handleSaveSurvey: () => void; saving: boolean;
 }) {
   const immutableInstance = isImmutableSurveyApplication(survey);
@@ -1731,16 +1783,17 @@ function ShareTab({ survey, publicUrl, slugInput, setSlugInput, slugAvailable, c
                 <button
                   key={s}
                   onClick={() => handleStatusChange(s)}
+                  disabled={Boolean(survey.archived_at)}
                   className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl border-2 text-sm font-medium transition-all ${
                     survey.status === s ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-500 hover:border-slate-300'
-                  }`}
+                  } disabled:cursor-not-allowed disabled:opacity-50`}
                 >
                   {cfg.icon} {cfg.label}
                 </button>
               );
             })}
           </div>
-          {survey.status !== 'active' && (
+          {survey.archived_at ? <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">Restáurala antes de cambiar su estado. Al restaurar permanecerá cerrada.</p> : survey.status !== 'active' && (
             <p className="text-xs text-amber-600 mt-3 bg-amber-50 px-3 py-2 rounded-lg">
               La encuesta debe estar activa para recibir respuestas.
             </p>
@@ -1775,6 +1828,7 @@ function ShareTab({ survey, publicUrl, slugInput, setSlugInput, slugAvailable, c
                   onChange={(e) => { setSlugInput(e.target.value); checkSlug(e.target.value); }}
                   disabled={immutableInstance}
                   aria-label={immutableInstance ? 'Enlace congelado en esta aplicación' : 'Identificador del enlace público'}
+                  aria-describedby="survey-public-link-help survey-public-link-status"
                   className="min-w-0 flex-1 bg-transparent text-sm font-medium text-slate-900 focus:outline-none disabled:cursor-not-allowed disabled:text-slate-500"
                 />
                 {slugAvailable !== null && (
@@ -1783,19 +1837,24 @@ function ShareTab({ survey, publicUrl, slugInput, setSlugInput, slugAvailable, c
                     : <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
                 )}
               </div>
+              <p id="survey-public-link-help" className="text-xs leading-5 text-slate-500">Este enlace es único en todo Clarin y, una vez utilizado, nunca podrá asignarse a otra cuenta o encuesta.</p>
+              <p id="survey-public-link-status" role="status" aria-live="polite" className={`mt-1 min-h-5 text-xs ${slugAvailable === false || slugCheckError ? 'text-rose-600' : 'text-emerald-700'}`}>
+                {slugCheckError || (slugAvailable === true ? 'Enlace disponible globalmente.' : slugAvailable === false ? 'Este enlace ya está ocupado o fue utilizado anteriormente.' : !immutableInstance && slugInput !== survey.slug && slugInput.trim().length >= 2 ? 'Comprobando disponibilidad…' : '')}
+              </p>
               {!immutableInstance && slugInput !== survey.slug && (
-                <button onClick={handleSaveSurvey} disabled={saving || slugAvailable === false} className="text-sm text-emerald-600 hover:text-emerald-700 font-medium disabled:opacity-50">
+                <button onClick={handleSaveSurvey} disabled={saving || slugAvailable !== true} className="text-sm text-emerald-600 hover:text-emerald-700 font-medium disabled:opacity-50">
                   {saving ? 'Guardando...' : 'Guardar nuevo slug'}
                 </button>
               )}
               <div className="flex flex-wrap items-center gap-2 mt-3">
                 <button
                   onClick={() => navigator.clipboard.writeText(publicUrl)}
-                  className="flex min-h-11 items-center gap-1.5 rounded-lg bg-slate-100 px-3 text-sm text-slate-700 transition-colors hover:bg-slate-200"
+                  disabled={Boolean(survey.archived_at)}
+                  className="flex min-h-11 items-center gap-1.5 rounded-lg bg-slate-100 px-3 text-sm text-slate-700 transition-colors hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Copy className="w-3.5 h-3.5" /> Copiar enlace
                 </button>
-                {survey.status === 'active' && (
+                {survey.status === 'active' && !survey.archived_at && (
                   <a href={`/f/${survey.slug}`} target="_blank" rel="noopener noreferrer" className="flex min-h-11 items-center gap-1.5 rounded-lg bg-emerald-600 px-3 text-sm text-white transition-colors hover:bg-emerald-700">
                     <ExternalLink className="w-3.5 h-3.5" /> Abrir
                   </a>
@@ -1803,8 +1862,9 @@ function ShareTab({ survey, publicUrl, slugInput, setSlugInput, slugAvailable, c
               </div>
             </div>
 
-            {/* QR Code */}
-            <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-6">
+            {/* QR Code: an archived application keeps its slug for history,
+                but must not expose a fresh share/download affordance. */}
+            {!survey.archived_at && <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-6">
               <h3 className="font-semibold text-slate-900 mb-3">Código QR</h3>
               <p className="text-sm text-slate-500 mb-4">Escanea este código para abrir la encuesta directamente.</p>
               <div className="flex flex-col items-center gap-4">
@@ -1842,7 +1902,7 @@ function ShareTab({ survey, publicUrl, slugInput, setSlugInput, slugAvailable, c
               <div className="qr-download-area hidden">
                 <QRCodeSVG value={publicUrl} size={400} level="M" />
               </div>
-            </div>
+            </div>}
           </>
         )}
       </div>
@@ -1962,12 +2022,12 @@ function QuestionChart({ stat, chartType }: { stat: { question_id: string; quest
   );
 }
 
-function AnalyticsTab({ survey, analytics, responses, responsesTotal, programAudience, loading, selectedResponse, setSelectedResponse, handleViewResponse, handleExportCSV, questions, responsePage, handleResponsePageChange }: {
+function AnalyticsTab({ survey, analytics, responses, responsesTotal, programAudience, loading, selectedResponse, setSelectedResponse, handleViewResponse, questions, responsePage, handleResponsePageChange }: {
   survey: Survey;
   analytics: SurveyAnalytics | null; responses: SurveyResponse[]; responsesTotal: number;
   programAudience: boolean;
   loading: boolean; selectedResponse: SurveyResponse | null; setSelectedResponse: (r: SurveyResponse | null) => void;
-  handleViewResponse: (rid: string) => void; handleExportCSV: () => void; questions: SurveyQuestion[];
+  handleViewResponse: (rid: string) => void; questions: SurveyQuestion[];
   responsePage: number; handleResponsePageChange: (page: number) => void;
 }) {
   const [chartTypes, setChartTypes] = useState<Record<string, ChartType>>({});
@@ -1976,12 +2036,17 @@ function AnalyticsTab({ survey, analytics, responses, responsesTotal, programAud
   const [measurementSeriesError, setMeasurementSeriesError] = useState('');
   const [baselineId, setBaselineId] = useState('');
   const [followupId, setFollowupId] = useState('');
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState('');
+  const exportSingleFlightRef = useRef(createSurveyResultsExportSingleFlight());
 
   useEffect(() => {
     setBaselineId('');
     setFollowupId('');
     setMeasurementSeries(null);
     setMeasurementSeriesError('');
+    setChartTypes({});
+    setExportError('');
   }, [survey.id]);
 
   useEffect(() => {
@@ -2015,9 +2080,54 @@ function AnalyticsTab({ survey, analytics, responses, responsesTotal, programAud
     setChartTypes(prev => ({ ...prev, [qid]: type }));
   };
 
+  const exportResults = async () => {
+    await exportSingleFlightRef.current.run(async () => {
+      setExporting(true);
+      setExportError('');
+      try {
+        const payload = buildSurveyResultsExportPayload(questions.map(question => question.id), chartTypes, baselineId, followupId);
+        const response = await apiBlob(`/api/surveys/${survey.id}/export/xlsx`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!response.success || !response.blob) throw new Error(response.error || 'No se pudo generar el informe Excel.');
+        const fallbackName = `resultados_${survey.slug || 'encuesta'}_${format(new Date(), 'yyyy-MM-dd')}.xlsx`;
+        saveSurveyResultsBlob(response.blob, response.filename || fallbackName);
+      } catch (failure) {
+        setExportError(failure instanceof Error ? failure.message : 'No se pudo generar el informe Excel.');
+      } finally {
+        setExporting(false);
+      }
+    });
+  };
+
   return (
     <div className="h-full overflow-auto p-3 sm:p-8">
       <div className="max-w-4xl mx-auto space-y-6">
+        <section className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:p-5">
+          <div className="min-w-0">
+            <h2 className="font-semibold text-slate-900">Informe completo de resultados</h2>
+            <p className="mt-1 text-xs leading-5 text-slate-500">Incluye resumen, gráficos editables, respuestas y textos en un archivo Excel.</p>
+            {survey.archived_at && <p className="mt-1 text-xs font-medium text-amber-700">La aplicación está archivada; sus resultados históricos permanecen exportables.</p>}
+          </div>
+          <button
+            type="button"
+            onClick={() => void exportResults()}
+            disabled={exporting}
+            aria-describedby={exportError ? 'survey-export-error' : undefined}
+            className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-wait disabled:opacity-70"
+          >
+            {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+            {exporting ? 'Generando Excel…' : 'Exportar resultados'}
+          </button>
+          {exportError && (
+            <div id="survey-export-error" role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 sm:basis-full">
+              <p>{exportError}</p>
+              <button type="button" onClick={() => void exportResults()} className="mt-2 min-h-9 rounded-lg bg-white px-3 text-xs font-semibold shadow-sm hover:bg-rose-100">Reintentar</button>
+            </div>
+          )}
+        </section>
         {/* Reliable observed funnel */}
         {analytics && (
           <section className="space-y-3">
@@ -2117,9 +2227,11 @@ function AnalyticsTab({ survey, analytics, responses, responsesTotal, programAud
                   {/* Chart */}
                   {hasChart && <QuestionChart stat={stat} chartType={ct} />}
 
-                  {/* Text-based questions without options */}
-                  {!hasChart && stat.total_answers > 0 && (
-                    <p className="text-sm text-slate-500 ml-8">{stat.total_answers} respuestas de texto libre</p>
+                  {!hasChart && stat.total_answers > 0 && (stat.question_type === 'short_text' || stat.question_type === 'long_text') && (
+                    <SurveyTextAnswersPanel surveyId={survey.id} questionId={stat.question_id} answerCount={stat.total_answers} programAudience={programAudience} />
+                  )}
+                  {!hasChart && stat.total_answers > 0 && stat.question_type !== 'short_text' && stat.question_type !== 'long_text' && (
+                    <p className="ml-8 text-sm text-slate-500">{surveyNonChartAnswerLabel(stat.question_type, stat.total_answers)}</p>
                   )}
                 </div>
               );
@@ -2131,9 +2243,6 @@ function AnalyticsTab({ survey, analytics, responses, responsesTotal, programAud
         <div className="rounded-xl border border-slate-200 bg-white p-4 sm:p-6">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <h3 className="font-semibold text-slate-900">Respuestas individuales ({responsesTotal})</h3>
-            <button onClick={handleExportCSV} className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 rounded-lg text-sm text-slate-700 hover:bg-slate-200 transition-colors">
-              <Download className="w-3.5 h-3.5" /> Exportar CSV
-            </button>
           </div>
           {responses.length === 0 ? (
             <p className="text-sm text-slate-400 text-center py-8">No hay respuestas aún</p>

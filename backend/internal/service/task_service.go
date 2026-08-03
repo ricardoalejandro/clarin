@@ -34,7 +34,6 @@ func (s *TaskService) Create(ctx context.Context, task *domain.Task) error {
 
 	s.RebuildReminder(ctx, canonical)
 
-	// Broadcast
 	if s.hub != nil {
 		payload := taskCreatedEventPayload(canonical, operationID)
 		if canonical.ParentTaskID != nil {
@@ -47,10 +46,7 @@ func (s *TaskService) Create(ctx context.Context, task *domain.Task) error {
 				payload["operation_id"] = operationID.String()
 			}
 		}
-		if canonical.ParentTaskID == nil {
-			s.attachTaskHierarchyCounts(ctx, canonical.AccountID, payload)
-		}
-		s.hub.BroadcastToAccountWithPermission(canonical.AccountID, domain.PermTasks, ws.EventTaskUpdate, payload)
+		s.broadcastTaskACL(ctx, canonical.AccountID, canonical.ID, nil, payload)
 	}
 	if canonical.ParentTaskID != nil {
 		s.NotifySubtasksUpdated(ctx, canonical.AccountID, *canonical.ParentTaskID)
@@ -70,6 +66,7 @@ func taskCreatedEventPayload(task *domain.Task, operationID *uuid.UUID) map[stri
 func (s *TaskService) Update(ctx context.Context, task *domain.Task) error {
 	operationID := task.MutationOperationID
 	previous, _ := s.GetByID(ctx, task.ID, task.AccountID)
+	previousViewers := s.taskViewerIDs(ctx, task.AccountID, task.ID)
 	if err := s.repos.Task.Update(ctx, task); err != nil {
 		return err
 	}
@@ -94,10 +91,7 @@ func (s *TaskService) Update(ctx context.Context, task *domain.Task) error {
 		if canonical.MutationOperationID != nil {
 			payload["operation_id"] = canonical.MutationOperationID.String()
 		}
-		if taskHierarchyCountsChanged(previous, canonical) {
-			s.attachTaskHierarchyCounts(ctx, canonical.AccountID, payload)
-		}
-		s.hub.BroadcastToAccountWithPermission(canonical.AccountID, domain.PermTasks, ws.EventTaskUpdate, payload)
+		s.broadcastTaskACL(ctx, canonical.AccountID, canonical.ID, previousViewers, payload)
 		if previous != nil && previous.ParentTaskID == nil && !taskNullableUUIDEqual(previous.ListID, canonical.ListID) {
 			subtaskPayload := map[string]interface{}{
 				"action":  "subtasks_updated",
@@ -106,7 +100,7 @@ func (s *TaskService) Update(ctx context.Context, task *domain.Task) error {
 			if canonical.MutationOperationID != nil {
 				subtaskPayload["operation_id"] = canonical.MutationOperationID.String()
 			}
-			s.hub.BroadcastToAccountWithPermission(canonical.AccountID, domain.PermTasks, ws.EventTaskUpdate, subtaskPayload)
+			s.broadcastTaskACL(ctx, canonical.AccountID, canonical.ID, previousViewers, subtaskPayload)
 		}
 	}
 	if canonical.ParentTaskID != nil {
@@ -159,6 +153,7 @@ func taskCanScheduleReminder(task *domain.Task) bool {
 }
 
 func (s *TaskService) Delete(ctx context.Context, id, accountID uuid.UUID) error {
+	previousViewers := s.taskViewerIDs(ctx, accountID, id)
 	_ = s.repos.Task.DeleteRemindersByTask(ctx, id)
 	if err := s.repos.Task.Delete(ctx, id, accountID); err != nil {
 		return err
@@ -169,8 +164,7 @@ func (s *TaskService) Delete(ctx context.Context, id, accountID uuid.UUID) error
 			"action":  "deleted",
 			"task_id": id.String(),
 		}
-		s.attachTaskHierarchyCounts(ctx, accountID, payload)
-		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermTasks, ws.EventTaskUpdate, payload)
+		s.broadcastTaskACL(ctx, accountID, id, previousViewers, payload)
 	}
 
 	return nil
@@ -195,10 +189,7 @@ func (s *TaskService) Complete(ctx context.Context, id, accountID, completedBy u
 			"action": "completed",
 			"task":   canonical,
 		}
-		if canonical.ParentTaskID == nil {
-			s.attachTaskHierarchyCounts(ctx, accountID, payload)
-		}
-		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermTasks, ws.EventTaskUpdate, payload)
+		s.broadcastTaskACL(ctx, accountID, canonical.ID, nil, payload)
 	}
 	if canonical.ParentTaskID != nil {
 		s.NotifySubtasksUpdated(ctx, canonical.AccountID, *canonical.ParentTaskID)
@@ -250,15 +241,6 @@ func taskClosedCategory(task *domain.Task) string {
 	}
 }
 
-func (s *TaskService) attachTaskHierarchyCounts(ctx context.Context, accountID uuid.UUID, payload map[string]interface{}) {
-	counts, err := s.repos.TaskWork.HierarchyCounts(ctx, accountID)
-	if err != nil {
-		log.Printf("[TASK] Warning: failed to load hierarchy counts for account %s: %v", accountID, err)
-		return
-	}
-	payload["hierarchy_counts"] = counts
-}
-
 // NotifySubtasksUpdated broadcasts the canonical parent after a child mutation.
 // Consumers can update counters immediately without treating the child as a
 // top-level task or issuing an account-wide refresh.
@@ -270,7 +252,7 @@ func (s *TaskService) NotifySubtasksUpdated(ctx context.Context, accountID, pare
 	if err != nil {
 		return
 	}
-	s.hub.BroadcastToAccountWithPermission(accountID, domain.PermTasks, ws.EventTaskUpdate, taskSubtasksUpdatedPayload(parent))
+	s.broadcastTaskACL(ctx, accountID, parentID, nil, taskSubtasksUpdatedPayload(parent))
 }
 
 func taskSubtasksUpdatedPayload(parent *domain.Task) map[string]interface{} {
@@ -279,6 +261,68 @@ func taskSubtasksUpdatedPayload(parent *domain.Task) map[string]interface{} {
 		"task_id": parent.ID.String(),
 		"task":    parent,
 	}
+}
+
+// taskViewerIDs is fail-closed. A task mutation has already committed by the
+// time most events are emitted, so an ACL lookup failure must suppress the
+// notification instead of falling back to an account-wide audience.
+func (s *TaskService) taskViewerIDs(ctx context.Context, accountID, taskID uuid.UUID) []uuid.UUID {
+	viewers, err := s.repos.TaskWork.TaskViewerUserIDs(ctx, accountID, taskID)
+	if err != nil {
+		return []uuid.UUID{}
+	}
+	return viewers
+}
+
+func authorizedTaskEventRecipients(groups ...[]uuid.UUID) []uuid.UUID {
+	seen := make(map[uuid.UUID]struct{})
+	result := make([]uuid.UUID, 0)
+	for _, group := range groups {
+		for _, userID := range group {
+			if userID == uuid.Nil {
+				continue
+			}
+			if _, duplicate := seen[userID]; duplicate {
+				continue
+			}
+			seen[userID] = struct{}{}
+			result = append(result, userID)
+		}
+	}
+	return result
+}
+
+// taskACLRealtimePayload deliberately omits canonical task structs and
+// hierarchy snapshots. Direct task shares authorize task content but not the
+// surrounding private breadcrumb; each recipient reloads the stable task ID
+// through its own actor-scoped endpoint.
+func taskACLRealtimePayload(taskID uuid.UUID, payload map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{}, len(payload)+1)
+	for key, value := range payload {
+		switch key {
+		case "task", "subtask", "tasks", "hierarchy_counts":
+			continue
+		default:
+			result[key] = value
+		}
+	}
+	if _, exists := result["task_id"]; !exists && taskID != uuid.Nil {
+		result["task_id"] = taskID.String()
+	}
+	return result
+}
+
+func (s *TaskService) broadcastTaskACL(ctx context.Context, accountID, taskID uuid.UUID, priorViewers []uuid.UUID, payload map[string]interface{}) {
+	if s.hub == nil {
+		return
+	}
+	currentViewers := s.taskViewerIDs(ctx, accountID, taskID)
+	recipients := authorizedTaskEventRecipients(priorViewers, currentViewers)
+	if len(recipients) == 0 {
+		return
+	}
+	s.hub.BroadcastToAccountUsersWithPermission(accountID, recipients, domain.PermTasks, ws.EventTaskUpdate,
+		taskACLRealtimePayload(taskID, payload))
 }
 
 // EnsureNextOccurrence creates exactly one following occurrence for supported
@@ -377,6 +421,25 @@ func (s *TaskService) GetByID(ctx context.Context, id, accountID uuid.UUID) (*do
 	return task, nil
 }
 
+func (s *TaskService) GetByIDForActor(ctx context.Context, id, accountID, actorID uuid.UUID) (*domain.Task, error) {
+	task, err := s.repos.Task.GetByIDForActor(ctx, id, accountID, actorID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repos.TaskWork.ApplyTaskAccess(ctx, accountID, actorID, []*domain.Task{task}); err != nil {
+		return nil, err
+	}
+	if task.Permissions == nil || !task.Permissions.CanView {
+		return nil, repository.ErrTaskWorkNotFound
+	}
+	collaborators, err := s.repos.TaskWork.ListCollaborators(ctx, accountID, id)
+	if err != nil {
+		return nil, err
+	}
+	task.Collaborators = collaborators
+	return task, nil
+}
+
 func (s *TaskService) GetByAccount(ctx context.Context, accountID uuid.UUID, filters map[string]string, limit, offset int) ([]*domain.Task, int, error) {
 	tasks, total, err := s.repos.Task.GetByAccount(ctx, accountID, filters, limit, offset)
 	if err != nil || len(tasks) == 0 {
@@ -388,12 +451,54 @@ func (s *TaskService) GetByAccount(ctx context.Context, accountID uuid.UUID, fil
 	return tasks, total, nil
 }
 
+func (s *TaskService) GetByAccountForActor(ctx context.Context, accountID, actorID uuid.UUID, filters map[string]string, limit, offset int) ([]*domain.Task, int, error) {
+	tasks, total, err := s.repos.Task.GetByAccountForActor(ctx, accountID, actorID, filters, limit, offset)
+	if err != nil || len(tasks) == 0 {
+		return tasks, total, err
+	}
+	if err := s.hydrateCollaborators(ctx, accountID, tasks); err != nil {
+		return nil, 0, err
+	}
+	if err := s.repos.TaskWork.ApplyTaskAccess(ctx, accountID, actorID, tasks); err != nil {
+		return nil, 0, err
+	}
+	return tasks, total, nil
+}
+
+func (s *TaskService) GetByAccountForActorCursor(ctx context.Context, accountID, actorID uuid.UUID, filters map[string]string, limit int, cursor *repository.TaskPageCursor) ([]*domain.Task, int, *repository.TaskPageCursor, error) {
+	tasks, total, next, err := s.repos.Task.GetByAccountForActorCursor(ctx, accountID, actorID, filters, limit, cursor)
+	if err != nil || len(tasks) == 0 {
+		return tasks, total, next, err
+	}
+	if err := s.hydrateCollaborators(ctx, accountID, tasks); err != nil {
+		return nil, 0, nil, err
+	}
+	if err := s.repos.TaskWork.ApplyTaskAccess(ctx, accountID, actorID, tasks); err != nil {
+		return nil, 0, nil, err
+	}
+	return tasks, total, next, nil
+}
+
 func (s *TaskService) GetCalendarRange(ctx context.Context, accountID uuid.UUID, from, to time.Time, assignedTo *uuid.UUID) ([]*domain.Task, error) {
 	tasks, err := s.repos.Task.GetCalendarRange(ctx, accountID, from, to, assignedTo)
 	if err != nil || len(tasks) == 0 {
 		return tasks, err
 	}
 	if err := s.hydrateCollaborators(ctx, accountID, tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+func (s *TaskService) GetCalendarRangeForActor(ctx context.Context, accountID, actorID uuid.UUID, from, to time.Time, assignedTo, environmentID *uuid.UUID) ([]*domain.Task, error) {
+	tasks, err := s.repos.Task.GetCalendarRangeForActor(ctx, accountID, actorID, from, to, assignedTo, environmentID)
+	if err != nil || len(tasks) == 0 {
+		return tasks, err
+	}
+	if err := s.hydrateCollaborators(ctx, accountID, tasks); err != nil {
+		return nil, err
+	}
+	if err := s.repos.TaskWork.ApplyTaskAccess(ctx, accountID, actorID, tasks); err != nil {
 		return nil, err
 	}
 	return tasks, nil
@@ -422,8 +527,12 @@ func assignTaskCollaborators(tasks []*domain.Task, byTask map[uuid.UUID][]*domai
 	}
 }
 
-func (s *TaskService) GetStats(ctx context.Context, accountID, assignedTo uuid.UUID) (map[string]int, error) {
-	return s.repos.Task.GetStats(ctx, accountID, assignedTo)
+func (s *TaskService) GetStats(ctx context.Context, accountID, actorID, assignedTo uuid.UUID) (map[string]int, error) {
+	return s.repos.Task.GetStats(ctx, accountID, actorID, assignedTo)
+}
+
+func (s *TaskService) GetDueTasksForActor(ctx context.Context, accountID, actorID, assignedTo uuid.UUID, before time.Time, limit int) ([]*domain.Task, error) {
+	return s.repos.Task.GetDueTasksForActor(ctx, accountID, actorID, assignedTo, before, limit)
 }
 
 // ProcessOverdueTasks marks overdue tasks and broadcasts notifications
@@ -482,17 +591,41 @@ func (s *TaskService) ProcessReminders(ctx context.Context) {
 }
 
 func (s *TaskService) taskNotificationTargets(ctx context.Context, accountID, taskID, assignedTo uuid.UUID) []uuid.UUID {
-	targets := []uuid.UUID{assignedTo}
+	candidates := []uuid.UUID{assignedTo}
 	seen := map[uuid.UUID]bool{assignedTo: true}
 	collaborators, err := s.repos.TaskWork.ListCollaborators(ctx, accountID, taskID)
-	if err != nil {
-		return targets
-	}
-	for _, collaborator := range collaborators {
-		if !seen[collaborator.UserID] {
-			seen[collaborator.UserID] = true
-			targets = append(targets, collaborator.UserID)
+	if err == nil {
+		for _, collaborator := range collaborators {
+			if !seen[collaborator.UserID] {
+				seen[collaborator.UserID] = true
+				candidates = append(candidates, collaborator.UserID)
+			}
 		}
 	}
-	return targets
+	viewers, err := s.repos.TaskWork.TaskViewerUserIDs(ctx, accountID, taskID)
+	if err != nil {
+		// Notification privacy is fail-closed: a transient ACL lookup failure is
+		// safer than sending a task title to a participant whose access was revoked.
+		return []uuid.UUID{}
+	}
+	return intersectTaskNotificationTargets(candidates, viewers)
+}
+
+func intersectTaskNotificationTargets(candidates, viewers []uuid.UUID) []uuid.UUID {
+	allowed := make(map[uuid.UUID]struct{}, len(viewers))
+	for _, viewerID := range viewers {
+		allowed[viewerID] = struct{}{}
+	}
+	result := make([]uuid.UUID, 0, len(candidates))
+	seen := make(map[uuid.UUID]struct{}, len(candidates))
+	for _, candidateID := range candidates {
+		if _, duplicate := seen[candidateID]; duplicate {
+			continue
+		}
+		seen[candidateID] = struct{}{}
+		if _, visible := allowed[candidateID]; visible {
+			result = append(result, candidateID)
+		}
+	}
+	return result
 }

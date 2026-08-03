@@ -302,6 +302,7 @@ const ALL_MODULES = [
   { key: 'surveys', label: 'Encuestas', color: 'amber' },
   { key: 'dynamics', label: 'Dinámicas', color: 'rose' },
   { key: 'tasks', label: 'Tareas', color: 'lime' },
+  { key: 'tasks.environments.create', label: 'Crear Entornos de Work', color: 'lime' },
   { key: 'documents', label: 'Plantillas', color: 'purple' },
   { key: 'reports', label: 'Reportería', color: 'emerald' },
 ]

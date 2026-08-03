@@ -20,6 +20,7 @@ export interface SurveyTemplate {
   updated_at: string;
   question_count: number;
   instance_count: number;
+  archived_instance_count: number;
   response_count: number;
 }
 
@@ -54,14 +55,23 @@ export interface SurveyInstanceSummary {
   opens_at?: string;
   closes_at?: string;
   legacy_instance: boolean;
+  archived_at?: string;
+  archived_by?: string;
+  archived_from_status?: 'draft' | 'active' | 'closed';
   measurement_signature?: string;
   analytics_tracking_started_at: string;
   question_count: number;
   recipient_count: number;
   response_count: number;
+  can_delete: boolean;
+  can_archive: boolean;
+  can_restore: boolean;
+  deletion_block_reason?: SurveyDeletionBlockReason;
   created_at: string;
   updated_at: string;
 }
+
+export type SurveyDeletionBlockReason = 'legacy' | 'has_responses' | 'has_activity' | 'has_uploads';
 
 export interface SurveyMeasurementApplicationPoint {
   survey_id: string;

@@ -25,6 +25,7 @@ interface Props {
   taskId: string
   attachment: TaskAttachment
   users: TaskAccountUser[]
+  canComment?: boolean
   onClose: () => void
 }
 
@@ -39,7 +40,7 @@ type ViewerResources = {
   pollTimer?: number
 }
 
-export default function TaskAttachmentViewer({ taskId, attachment, users, onClose }: Props) {
+export default function TaskAttachmentViewer({ taskId, attachment, users, canComment = true, onClose }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const dialogRef = useRef<HTMLElement>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
@@ -466,7 +467,7 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, onClos
     setReloadKey(value => value + 1)
   }
   const send = async () => {
-    if (!body.trim()) return
+    if (!canComment || !body.trim()) return
     const replyRoot = replyTo ? comments.find(comment => comment.id === replyTo) : undefined
     if (replyRoot?.resolved_at) {
       setCommentError('Reabre el hilo antes de responder.')
@@ -696,7 +697,7 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, onClos
       {renderCommentActions(comment)}
     </div>
     {renderCommentBody(comment)}
-    {!comment.resolved_at && !comment.deleted && editingID !== comment.id && <button type="button" onClick={() => { setReplyTo(comment.id); setCommentError('') }} className="mt-2 text-[10px] font-bold text-emerald-700 hover:text-emerald-900">Responder</button>}
+    {canComment && !comment.resolved_at && !comment.deleted && editingID !== comment.id && <button type="button" onClick={() => { setReplyTo(comment.id); setCommentError('') }} className="mt-2 text-[10px] font-bold text-emerald-700 hover:text-emerald-900">Responder</button>}
     {comment.resolved_at && <p className="mt-2 text-[9px] font-semibold text-slate-400">Resuelto{comment.resolved_by_name ? ` por ${comment.resolved_by_name}` : ''}. Reabre el hilo para responder o modificarlo.</p>}
     {comments.filter(reply => reply.parent_id === comment.id).map(renderReply)}
     {renderDeleteConfirmation(comment)}
@@ -718,13 +719,13 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, onClos
         {resolvedOpen && <div className="mt-2">{resolvedRoots.map(renderThread)}</div>}
       </section>}
     </div>
-    <div className="border-t border-slate-200 p-3">
+    {canComment ? <div className="border-t border-slate-200 p-3">
       {replyTo && <button type="button" onClick={() => setReplyTo(undefined)} className="mb-2 rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-bold text-emerald-700">Respondiendo · cancelar</button>}
       <textarea value={body} onChange={event => setBody(event.target.value)} placeholder="Comenta sobre este punto…" className="min-h-20 w-full resize-none rounded-xl border border-slate-200 p-3 text-xs outline-none focus:border-emerald-300 focus:ring-4 focus:ring-emerald-50" />
       <p className={`mt-1 text-[10px] ${pendingCommentAnchor && hasUsableAttachmentAnchor(pendingCommentAnchor) ? 'text-emerald-600' : 'text-amber-600'}`}>{pendingCommentAnchor && hasUsableAttachmentAnchor(pendingCommentAnchor) ? 'Ancla lista para comentar.' : 'Selecciona un punto, página o fragmento de texto.'}</p>
       <div className="mt-2 flex gap-2"><div className="min-w-0 flex-1"><TaskUserCombobox users={users} value="" excludeIds={mentionIDs} onChange={id => setMentionIDs(current => [...current, id])} placeholder="Mencionar…" className="!min-h-9 !py-1" /></div><button type="button" aria-label="Publicar comentario" disabled={!canPublishComment || saving} onClick={() => void send()} className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-white disabled:opacity-40">{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button></div>
       {commentError && <p role="alert" className="mt-2 text-[10px] font-semibold text-rose-600">{commentError}</p>}
-    </div>
+    </div> : <div className="border-t border-slate-200 bg-slate-50 px-3 py-3 text-center text-[10px] font-semibold text-slate-500">Necesitas Comentar para crear hilos anclados.</div>}
   </>
 
   return createPortal(<div data-task-attachment-viewer className="fixed inset-0 flex items-center justify-center bg-slate-950/70 p-2 backdrop-blur-[3px] sm:p-5" style={{ zIndex: TASK_OVERLAY_LAYERS.confirmation }} role="presentation">

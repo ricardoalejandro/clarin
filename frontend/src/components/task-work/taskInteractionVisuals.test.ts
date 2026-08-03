@@ -3,6 +3,7 @@ import {
   TASK_DESCRIPTION_DEFAULT_HEIGHT,
   TASK_DESCRIPTION_MAX_HEIGHT,
   clampTaskDescriptionHeight,
+  isTaskEditorSubmitShortcut,
   taskAccordionVisualState,
   taskDescriptionHeightFromKey,
   taskDescriptionEditorRemainsOpen,
@@ -31,6 +32,13 @@ describe('Clarin Work interaction visuals', () => {
   it('keeps the expanded editor open when persistence fails', () => {
     expect(taskDescriptionEditorRemainsOpen(false)).toBe(true)
     expect(taskDescriptionEditorRemainsOpen(true)).toBe(false)
+  })
+
+  it('recognizes Ctrl/Command+Enter but ignores IME composition', () => {
+    expect(isTaskEditorSubmitShortcut({ key: 'Enter', ctrlKey: true, metaKey: false, isComposing: false })).toBe(true)
+    expect(isTaskEditorSubmitShortcut({ key: 'Enter', ctrlKey: false, metaKey: true, isComposing: false })).toBe(true)
+    expect(isTaskEditorSubmitShortcut({ key: 'Enter', ctrlKey: true, metaKey: false, isComposing: true })).toBe(false)
+    expect(isTaskEditorSubmitShortcut({ key: 'Escape', ctrlKey: true, metaKey: false, isComposing: false })).toBe(false)
   })
 
   it('flips and clamps a portaled workspace menu inside the viewport', () => {

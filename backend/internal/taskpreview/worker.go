@@ -25,6 +25,10 @@ type job struct {
 	attempts                               int
 }
 
+func previewObjectKey(accountID, attachmentID uuid.UUID, hash string) string {
+	return storage.PrivateObjectKey(accountID, "tasks", "previews", attachmentID.String(), hash+".pdf")
+}
+
 func Run(ctx context.Context, db *pgxpool.Pool, store *storage.Storage) error {
 	if store == nil {
 		return fmt.Errorf("task preview worker requires storage")
@@ -127,7 +131,7 @@ func process(parent context.Context, db *pgxpool.Pool, store *storage.Storage, i
 	}
 	digest := sha256.Sum256(pdf)
 	hash := hex.EncodeToString(digest[:])
-	objectKey := fmt.Sprintf("%s/task-previews/%s/%s.pdf", item.accountID, item.attachmentID, hash)
+	objectKey := previewObjectKey(item.accountID, item.attachmentID, hash)
 	if _, err := store.UploadObject(ctx, objectKey, pdf, "application/pdf"); err != nil {
 		return err
 	}

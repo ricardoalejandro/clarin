@@ -500,36 +500,36 @@ func (s *SurveyTemplateService) CreateInstance(ctx context.Context, input domain
 	if base == "" {
 		base = "encuesta"
 	}
-	input.Slug = base
-	for attempts := 0; attempts < 4; attempts++ {
-		exists, err := s.repos.Survey.SlugExists(ctx, input.Slug, nil)
-		if err != nil {
-			return nil, err
+	for attempt := 0; attempt < 8; attempt++ {
+		if attempt == 0 {
+			input.Slug = base
+		} else {
+			input.Slug = base + "-" + uuid.NewString()[:6]
 		}
-		if !exists {
-			break
+		instance, createErr := s.repos.SurveyTemplate.CreateInstance(ctx, input)
+		if createErr == nil {
+			return instance, nil
 		}
-		input.Slug = base + "-" + uuid.NewString()[:6]
-		if attempts == 3 {
-			return nil, errors.New("no se pudo generar un enlace único")
+		if !errors.Is(createErr, repository.ErrSurveySlugUnavailable) {
+			return nil, createErr
 		}
 	}
-	return s.repos.SurveyTemplate.CreateInstance(ctx, input)
+	return nil, errors.New("no se pudo generar un enlace único")
 }
 
-func (s *SurveyTemplateService) ListTemplateInstances(ctx context.Context, accountID, templateID uuid.UUID) ([]*domain.SurveyInstanceSummary, error) {
+func (s *SurveyTemplateService) ListTemplateInstances(ctx context.Context, accountID, templateID uuid.UUID, includeArchived bool) ([]*domain.SurveyInstanceSummary, error) {
 	if _, err := s.repos.SurveyTemplate.Get(ctx, accountID, templateID); err != nil {
 		return nil, err
 	}
-	return s.repos.SurveyTemplate.ListTemplateInstances(ctx, accountID, templateID)
+	return s.repos.SurveyTemplate.ListTemplateInstances(ctx, accountID, templateID, includeArchived)
 }
 
-func (s *SurveyTemplateService) ListProgramInstances(ctx context.Context, accountID, programID uuid.UUID) ([]*domain.SurveyInstanceSummary, error) {
+func (s *SurveyTemplateService) ListProgramInstances(ctx context.Context, accountID, programID uuid.UUID, includeArchived bool) ([]*domain.SurveyInstanceSummary, error) {
 	program, err := s.repos.Program.GetByID(ctx, accountID, programID)
 	if err != nil || program == nil {
 		return nil, repository.ErrSurveyInstanceNotFound
 	}
-	return s.repos.SurveyTemplate.ListProgramInstances(ctx, accountID, programID)
+	return s.repos.SurveyTemplate.ListProgramInstances(ctx, accountID, programID, includeArchived)
 }
 
 func (s *SurveyTemplateService) ListProgramRecipients(ctx context.Context, accountID, programID, surveyID uuid.UUID, search string, limit, offset int) ([]*domain.SurveyInstanceRecipient, int, error) {

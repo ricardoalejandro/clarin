@@ -5,6 +5,63 @@ export type TaskStatusCategory = 'not_started' | 'active' | 'done' | 'cancelled'
 export type TaskViewMode = 'list' | 'board' | 'calendar' | 'gantt' | 'summary'
 export type TaskGroupBy = 'none' | 'status' | 'list' | 'assignee' | 'priority' | 'type' | 'due'
 export type TaskGroupDirection = 'asc' | 'desc'
+export type TaskAccessLevel = 'none' | 'view' | 'comment' | 'edit' | 'full'
+
+export interface TaskPermissions {
+  level: TaskAccessLevel
+  can_view: boolean
+  can_comment: boolean
+  can_edit: boolean
+  can_delete: boolean
+  can_manage_access: boolean
+  inherited_from?: 'account_admin' | 'environment_grant' | 'environment_default' | 'environment_private' | 'environment_required' | 'folder_grant' | 'folder_private' | 'list_grant' | 'list_private' | 'task_grant' | 'task_private' | 'folder_policy' | 'list_policy' | 'not_visible'
+}
+
+export interface TaskEnvironment {
+  id: string
+  account_id: string
+  name: string
+  description?: string
+  color: string
+  icon: string
+  sort_order: number
+  visibility: 'account' | 'restricted'
+  default_access_level: TaskAccessLevel
+  is_default: boolean
+  created_by?: string
+  archived_at?: string
+  version: number
+  access_revision: number
+  created_at: string
+  updated_at: string
+  folder_count: number
+  list_count: number
+  task_count: number
+  effective_access_level?: TaskAccessLevel
+  can_manage_access?: boolean
+  capabilities?: TaskPermissions
+  permissions: TaskPermissions
+}
+
+export interface TaskAccessGrant {
+  user_id: string
+  display_name?: string
+  username?: string
+  access_level: TaskAccessLevel
+  can_manage_access: boolean
+}
+
+export interface TaskSharedResource {
+  type: 'folder' | 'list' | 'task'
+  id: string
+  environment_id: string
+  name: string
+  color?: string
+  icon?: string
+  access_mode?: 'inherit' | 'private'
+  effective_access_level: TaskAccessLevel
+  capabilities: TaskPermissions
+}
 
 export interface TaskWorkflowStatus {
   id: string
@@ -22,6 +79,7 @@ export interface TaskWorkflowStatus {
 export interface TaskWorkflow {
   id: string
   account_id: string
+  environment_id?: string
   name: string
   is_default: boolean
   created_by?: string
@@ -60,6 +118,14 @@ export interface Task {
   program_id?: string
   contact_id?: string
   list_id?: string
+  environment_id?: string
+  environment_name?: string
+  breadcrumbs_visible?: boolean
+  access_mode?: 'inherit' | 'private'
+  effective_access_level?: TaskAccessLevel
+  can_manage_access?: boolean
+  capabilities?: TaskPermissions
+  permissions?: TaskPermissions
   parent_task_id?: string
   starred?: boolean
   sort_order?: number
@@ -125,7 +191,7 @@ export interface TaskSavedView {
   account_id: string
   user_id: string
   name: string
-  scope_type: 'all' | 'folder' | 'list'
+  scope_type: 'all' | 'environment' | 'folder' | 'list'
   scope_id?: string
   view_mode: TaskViewMode
   filters: TaskFilters
@@ -193,6 +259,7 @@ export const REMINDER_OPTIONS = [
 export interface TaskList {
   id: string
   account_id: string
+  environment_id?: string
   folder_id?: string
   workflow_id?: string
   workflow_inherited?: boolean
@@ -205,12 +272,18 @@ export interface TaskList {
   created_by: string
   archived_at?: string
   archived_with_folder?: boolean
+  access_mode?: 'inherit' | 'private'
+  access_revision?: number
   created_at: string
   updated_at: string
   task_count: number
   open_task_count: number
   completed_task_count: number
   cancelled_task_count: number
+  effective_access_level?: TaskAccessLevel
+  can_manage_access?: boolean
+  capabilities?: TaskPermissions
+  permissions?: TaskPermissions
 }
 
 export interface TaskTrashPolicy {
@@ -238,6 +311,7 @@ export interface TaskTrashContainer {
 export interface TaskFolder {
   id: string
   account_id: string
+  environment_id?: string
   workflow_id?: string
   name: string
   description?: string
@@ -246,12 +320,18 @@ export interface TaskFolder {
   sort_order: number
   created_by: string
   archived_at?: string
+  access_mode?: 'inherit' | 'private'
+  access_revision?: number
   created_at: string
   updated_at: string
   task_count: number
   open_task_count: number
   completed_task_count: number
   cancelled_task_count: number
+  effective_access_level?: TaskAccessLevel
+  can_manage_access?: boolean
+  capabilities?: TaskPermissions
+  permissions?: TaskPermissions
   lists: TaskList[]
 }
 

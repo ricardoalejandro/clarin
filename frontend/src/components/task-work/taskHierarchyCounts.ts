@@ -210,6 +210,27 @@ export function hierarchyCountSnapshotCursor(
 }
 
 export function hierarchyCountTooltip(value: Partial<TaskCountValues>) {
-  const counts = normalizedCounts(value)
-  return `${counts.open_task_count} abiertas · ${counts.completed_task_count} completadas · ${counts.cancelled_task_count} canceladas · ${counts.task_count} total`
+	const counts = normalizedCounts(value)
+	return `${counts.open_task_count} abiertas · ${counts.completed_task_count} completadas · ${counts.cancelled_task_count} canceladas · ${counts.task_count} total`
+}
+
+const MINIMAL_TASK_EVENTS_REQUIRING_HIERARCHY = new Set([
+	'created', 'updated', 'completed', 'moved', 'bulk_moved', 'bulk_deleted',
+	'environment_moved', 'restored',
+])
+
+/**
+ * ACL-safe realtime events intentionally omit task objects and hierarchy
+ * snapshots because each recipient may see a different Entorno/breadcrumb.
+ * These mutations can change navigation inventory, so the client silently
+ * reloads its own actor-scoped hierarchy. Comments, attachments, stars and
+ * pure ordering events stay on the cheaper task-only reconciliation path.
+ */
+export function shouldReloadHierarchyForMinimalTaskEvent(payload: {
+	action?: string
+	task?: unknown
+	hierarchy_counts?: unknown
+}) {
+	if (payload.task || payload.hierarchy_counts) return false
+	return MINIMAL_TASK_EVENTS_REQUIRING_HIERARCHY.has(payload.action || '')
 }

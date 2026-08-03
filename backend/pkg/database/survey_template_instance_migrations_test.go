@@ -79,3 +79,23 @@ func TestSurveyBrandingMediaReferencesAreAccountScoped(t *testing.T) {
 		}
 	}
 }
+
+func TestSurveyApplicationArchiveMigrationIsIdempotentAndIndexed(t *testing.T) {
+	t.Parallel()
+	joined := strings.Join(surveyTemplateInstanceMigrations(), "\n")
+	for _, invariant := range []string{
+		"ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ",
+		"ADD COLUMN IF NOT EXISTS archived_by UUID",
+		"ADD COLUMN IF NOT EXISTS archived_from_status TEXT",
+		"surveys_archived_by_fkey",
+		"archived_at IS NOT NULL AND archived_from_status IS NULL",
+		"archived_at IS NULL AND (archived_by IS NOT NULL OR archived_from_status IS NOT NULL)",
+		"surveys_archived_from_status_check",
+		"surveys_archive_shape_check",
+		"idx_surveys_account_archive",
+	} {
+		if !strings.Contains(joined, invariant) {
+			t.Fatalf("survey application archive migration is missing %q", invariant)
+		}
+	}
+}

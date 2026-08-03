@@ -330,14 +330,21 @@ export const apiDelete = <T>(endpoint: string, body?: unknown) =>
 		...(body === undefined ? {} : { body: JSON.stringify(body) }),
 	})
 
-export async function apiBlob(endpoint: string, options: { signal?: AbortSignal } = {}): Promise<{ success: boolean; blob?: Blob; error?: string }> {
-  const request = () => fetch(`${API_BASE}${endpoint}`, { credentials: 'include', signal: options.signal })
+export async function apiBlob(endpoint: string, options: { signal?: AbortSignal; method?: string; body?: BodyInit; headers?: HeadersInit } = {}): Promise<{ success: boolean; blob?: Blob; filename?: string; error?: string; status?: number }> {
+  const request = () => fetch(`${API_BASE}${endpoint}`, {
+    credentials: 'include', signal: options.signal, method: options.method, body: options.body, headers: options.headers,
+  })
   try {
     let response = await request()
     if (response.status === 401 && !options.signal?.aborted && await tryRefreshToken()) response = await request()
-    if (!response.ok) return { success: false, error: `No se pudo abrir el archivo (${response.status})` }
+    if (!response.ok) {
+      const payload = await response.json().catch(() => undefined) as { error?: string } | undefined
+      return { success: false, error: payload?.error || `No se pudo abrir el archivo (${response.status})`, status: response.status }
+    }
     markAuthActivity()
-    return { success: true, blob: await response.blob() }
+    const disposition = response.headers.get('content-disposition') || ''
+    const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+    return { success: true, blob: await response.blob(), filename, status: response.status }
   } catch (error) {
     if ((error instanceof Error && error.name === 'AbortError') || options.signal?.aborted) {
       return { success: false, error: 'Solicitud cancelada' }

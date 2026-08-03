@@ -10,6 +10,7 @@ import {
   reduceHierarchyForTaskMutation,
   shouldApplyHierarchyCountSnapshot,
   shouldIgnoreTaskOperationEcho,
+  shouldReloadHierarchyForMinimalTaskEvent,
   taskHierarchyCountMutationDecision,
   type TaskHierarchyCounts,
 } from './taskHierarchyCounts'
@@ -138,5 +139,15 @@ describe('task hierarchy counts', () => {
     expect(shouldIgnoreTaskOperationEcho('operation-1', false, true)).toBe(true)
     expect(shouldIgnoreTaskOperationEcho('operation-remote', false, false)).toBe(false)
     expect(shouldIgnoreTaskOperationEcho(undefined, true, true)).toBe(false)
+  })
+
+  it('reloads actor-scoped hierarchy for minimal task mutations but not comments', () => {
+	for (const action of ['created', 'updated', 'completed', 'moved', 'bulk_moved', 'bulk_deleted', 'environment_moved', 'restored']) {
+	  expect(shouldReloadHierarchyForMinimalTaskEvent({ action })).toBe(true)
+	}
+	expect(shouldReloadHierarchyForMinimalTaskEvent({ action: 'comment_created' })).toBe(false)
+	expect(shouldReloadHierarchyForMinimalTaskEvent({ action: 'attachment_added' })).toBe(false)
+	expect(shouldReloadHierarchyForMinimalTaskEvent({ action: 'updated', task: { id: 'task' } })).toBe(false)
+	expect(shouldReloadHierarchyForMinimalTaskEvent({ action: 'updated', hierarchy_counts: { revision: 3 } })).toBe(false)
   })
 })

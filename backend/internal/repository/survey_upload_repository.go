@@ -67,6 +67,9 @@ func (r *SurveyRepository) PrepareSurveyFileUpload(ctx context.Context, input Pr
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockSurveyForResponse(ctx, tx, input.AccountID, input.SurveyID); err != nil {
+		return nil, err
+	}
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO media_assets (

@@ -1,6 +1,34 @@
 # Changelog — Clarin CRM
 
+## 2026-08-02
+
+### Build 2 — Traslados inmediatos e identidad fija de carpetas
+- 🐛 Mover una tarea entre listas reconcilia de inmediato el alcance activo: desaparece del origen, actualiza ubicación y contadores, y no sobrevive como fila paginada residual ni requiere F5.
+- 🔄 HTTP y WebSocket comparten una reconciliación canónica por lote; `operation_id` evita efectos duplicados sin descartar versiones, filtros ni conteos autoritativos.
+- 📁 Las carpetas usan exclusivamente el icono estándar `folder` en interfaz, API y PostgreSQL; nombre y color siguen editables, mientras las listas conservan íntegro su catálogo de iconos.
+- ✅ 220 pruebas Vitest, suite Go completa, builds y 59 flujos Playwright Chromium validan movimiento, rollback, paginación, iconos y migración antes del despliegue.
+
+### Build 1 — Resultados visuales y enlaces públicos irrepetibles
+- 📊 “Exportar resultados” genera un Excel completo con resumen, embudo, gráficos editables por pregunta, respuestas, textos completos y evolución compatible de Programa.
+- 🔒 Las respuestas públicas permanecen anónimas, las de Programa conservan su `program_participant_id` exacto y todo texto de usuario se escribe sin fórmulas, macros ni conexiones externas.
+- 🔗 Cada `/f/:slug` queda reservado globalmente para siempre: archivar conserva la URL, eliminarla la retira con `410` y ninguna cuenta puede reutilizarla.
+- ⚡ Respuestas y textos se escriben incrementalmente; el informe también es válido sin respuestas y la descarga ofrece estado pendiente, reintento y protección contra doble envío.
+- ✅ PostgreSQL concurrente, Excelize, LibreOffice, 199 pruebas frontend y 56 flujos Chromium forman el gate de esta entrega.
+
 ## 2026-08-01
+
+### Build 3 — Grants directos coherentes hasta la mutación
+- 🐛 Un usuario con acceso directo `Editar` sobre una tarea privada puede modificarla sin recibir acceso ni revelar el Entorno o la lista que la contiene.
+- 🔒 Cambiar realmente de lista sigue exigiendo permiso `Editar` en el destino; la excepción se limita a mutaciones dentro de la tarea ya compartida.
+- ✅ El smoke aislado post-despliegue valida la matriz Ver/Editar/Administrar y la revocación en tiempo real antes de retirar todos los registros QA.
+
+### Build 2 — Entornos privados, permisos explícitos y Encuestas trazables
+- ✨ Clarin Work incorpora Entornos entre la cuenta y su jerarquía, con General migrado sin cambiar IDs, creación privada atómica y catálogos paginados para carpetas y listas.
+- 🔒 Ver, Comentar, Editar y Administrar se resuelven por actor en backend; tareas privadas pueden reemplazar la herencia, Compartidas conmigo no revela breadcrumbs y las revocaciones emiten tombstones mínimos.
+- 🧭 Lista y Tablero reconocen destinos laterales reales, priorizan listas, autoexpanden carpetas y conservan selección y orden ante cancelación o conflicto.
+- 🪟 Creación comparte el editor ampliable del detalle, acepta Ctrl/⌘ + Enter e imágenes pegadas, reintenta adjuntos sin duplicar la tarea y restaura una geometría flotante sana tras móvil o zoom.
+- 📊 Las aplicaciones de Encuestas ahora se eliminan solo sin interacción, se archivan/restauran con historia y muestran respuestas textuales completas mediante paginación lazy.
+- ✅ Migraciones idempotentes, aislamiento por cuenta, ACL concurrente, almacenamiento inventariado, unit tests, builds y Playwright forman el gate previo al despliegue.
 
 ### Build 1 — Comentarios anclados confiables y completos
 - 🐛 Resolver y reabrir comentarios de adjuntos tipa explícitamente UUID, booleanos y versiones en PostgreSQL, eliminando el error `500` sin perder hilos existentes.

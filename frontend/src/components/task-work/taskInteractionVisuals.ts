@@ -48,6 +48,10 @@ export function taskDescriptionEditorRemainsOpen(saveSucceeded: boolean) {
   return !saveSucceeded
 }
 
+export function isTaskEditorSubmitShortcut(event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'isComposing'>) {
+  return event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing
+}
+
 export type ViewportRect = { width: number; height: number }
 export type FloatingRect = { left: number; top: number; width: number; height: number }
 

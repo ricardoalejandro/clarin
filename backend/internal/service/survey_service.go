@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/url"
 	"regexp"
@@ -13,6 +14,8 @@ import (
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/repository"
 )
+
+var ErrSurveyTextAnswerCursorInvalid = errors.New("invalid survey text answer cursor")
 
 type SurveyService struct {
 	repo *repository.Repositories
@@ -84,6 +87,10 @@ func (svc *SurveyService) ListSurveys(ctx context.Context, accountID uuid.UUID) 
 	return svc.repo.Survey.List(ctx, accountID)
 }
 
+func (svc *SurveyService) ListSurveysWithArchived(ctx context.Context, accountID uuid.UUID, includeArchived bool) ([]*domain.Survey, error) {
+	return svc.repo.Survey.ListWithArchived(ctx, accountID, includeArchived)
+}
+
 func (svc *SurveyService) UpdateSurvey(ctx context.Context, s *domain.Survey) error {
 	if s.Name == "" {
 		return errors.New("survey name is required")
@@ -97,6 +104,9 @@ func (svc *SurveyService) UpdateSurvey(ctx context.Context, s *domain.Survey) er
 	if err != nil {
 		return err
 	}
+	if current.ArchivedAt != nil {
+		return repository.ErrSurveyArchived
+	}
 	if err := validateSurveyStatusTransition(current.Status, s.Status); err != nil {
 		return err
 	}
@@ -108,7 +118,7 @@ func (svc *SurveyService) UpdateSurvey(ctx context.Context, s *domain.Survey) er
 			return err
 		}
 		if exists {
-			return errors.New("slug already exists")
+			return repository.ErrSurveySlugUnavailable
 		}
 	}
 	if err := validateSurveyPresentationMutation(current, s); err != nil {
@@ -119,30 +129,30 @@ func (svc *SurveyService) UpdateSurvey(ctx context.Context, s *domain.Survey) er
 }
 
 func (svc *SurveyService) DeleteSurvey(ctx context.Context, id, accountID uuid.UUID) error {
-	s, err := svc.repo.Survey.GetByID(ctx, id, accountID)
-	if err != nil {
-		return err
-	}
-	if s.IsTemplate {
-		return errors.New("las encuestas modelo no se pueden eliminar")
-	}
-	if s.Status != "draft" || s.LegacyInstance || s.TemplateID == nil || s.OpensAt != nil {
-		return errors.New("solo se puede anular un borrador canónico que nunca fue publicado ni distribuido")
-	}
-	distributed, err := svc.repo.Survey.HasDistribution(ctx, accountID, id)
-	if err != nil {
-		return err
-	}
-	if distributed {
-		return errors.New("una aplicación distribuida no se puede eliminar; ciérrala para conservar su historial")
-	}
 	return svc.repo.Survey.Delete(ctx, id, accountID)
+}
+
+func (svc *SurveyService) ArchiveSurvey(ctx context.Context, id, accountID, actorID uuid.UUID) (*domain.SurveyInstanceSummary, error) {
+	if err := svc.repo.Survey.Archive(ctx, accountID, id, actorID); err != nil {
+		return nil, err
+	}
+	return svc.repo.SurveyTemplate.GetInstance(ctx, accountID, id)
+}
+
+func (svc *SurveyService) RestoreSurvey(ctx context.Context, id, accountID uuid.UUID) (*domain.SurveyInstanceSummary, error) {
+	if err := svc.repo.Survey.Restore(ctx, accountID, id); err != nil {
+		return nil, err
+	}
+	return svc.repo.SurveyTemplate.GetInstance(ctx, accountID, id)
 }
 
 func (svc *SurveyService) SetStatus(ctx context.Context, id, accountID uuid.UUID, status string) error {
 	current, err := svc.repo.Survey.GetByID(ctx, id, accountID)
 	if err != nil {
 		return err
+	}
+	if current.ArchivedAt != nil {
+		return repository.ErrSurveyArchived
 	}
 	if err := validateSurveyStatusTransition(current.Status, status); err != nil {
 		return err
@@ -189,10 +199,17 @@ func validateSurveyPresentationMutation(current, next *domain.Survey) error {
 	return nil
 }
 
-func (svc *SurveyService) CheckSlug(ctx context.Context, slug string, excludeID *uuid.UUID) (bool, error) {
+func (svc *SurveyService) CheckSlug(ctx context.Context, accountID uuid.UUID, slug string, excludeID *uuid.UUID) (bool, error) {
 	slug = Slugify(slug)
 	if slug == "" {
 		return false, errors.New("slug cannot be empty")
+	}
+	if excludeID != nil {
+		if _, err := svc.repo.Survey.GetByID(ctx, *excludeID, accountID); err != nil {
+			// Availability is intentionally non-enumerating: an excluded survey
+			// outside the active account is treated as if no exclusion was sent.
+			excludeID = nil
+		}
 	}
 	exists, err := svc.repo.Survey.SlugExists(ctx, slug, excludeID)
 	return !exists, err // returns true if available
@@ -278,6 +295,62 @@ func (svc *SurveyService) GetResponseScoped(ctx context.Context, accountID, surv
 	return svc.repo.Survey.GetResponseScoped(ctx, accountID, surveyID, responseID)
 }
 
+func (svc *SurveyService) ListTextAnswers(ctx context.Context, accountID, surveyID, questionID uuid.UUID, limit int, rawCursor string) (*domain.SurveyTextAnswersPage, error) {
+	limit = normalizeSurveyTextAnswerLimit(limit)
+	completedAt, responseID, err := decodeSurveyTextAnswerCursor(rawCursor)
+	if err != nil {
+		return nil, err
+	}
+	page, err := svc.repo.Survey.ListTextAnswers(ctx, accountID, surveyID, questionID, limit, completedAt, responseID)
+	if err != nil {
+		return nil, err
+	}
+	if len(page.Items) > limit {
+		page.Items = page.Items[:limit]
+		last := page.Items[len(page.Items)-1]
+		page.NextCursor = encodeSurveyTextAnswerCursor(last.CompletedAt, last.ResponseID)
+	}
+	return page, nil
+}
+
+func normalizeSurveyTextAnswerLimit(limit int) int {
+	if limit <= 0 {
+		limit = 25
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	return limit
+}
+
+func encodeSurveyTextAnswerCursor(completedAt time.Time, responseID uuid.UUID) string {
+	raw := completedAt.UTC().Format(time.RFC3339Nano) + "|" + responseID.String()
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+func decodeSurveyTextAnswerCursor(raw string) (*time.Time, *uuid.UUID, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil, nil
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(raw))
+	if err != nil {
+		return nil, nil, ErrSurveyTextAnswerCursorInvalid
+	}
+	parts := strings.SplitN(string(decoded), "|", 2)
+	if len(parts) != 2 {
+		return nil, nil, ErrSurveyTextAnswerCursorInvalid
+	}
+	completedAt, err := time.Parse(time.RFC3339Nano, parts[0])
+	if err != nil {
+		return nil, nil, ErrSurveyTextAnswerCursorInvalid
+	}
+	responseID, err := uuid.Parse(parts[1])
+	if err != nil {
+		return nil, nil, ErrSurveyTextAnswerCursorInvalid
+	}
+	return &completedAt, &responseID, nil
+}
+
 func (svc *SurveyService) DeleteResponse(ctx context.Context, responseID uuid.UUID) error {
 	return svc.repo.Survey.DeleteResponse(ctx, responseID)
 }
@@ -298,6 +371,9 @@ func (svc *SurveyService) GetPublicSurvey(ctx context.Context, slug string) (*do
 	survey, err := svc.repo.Survey.GetBySlug(ctx, slug)
 	if err != nil {
 		return nil, nil, err
+	}
+	if survey.ArchivedAt != nil {
+		return nil, nil, repository.ErrSurveyArchived
 	}
 	if survey.Status != "active" {
 		return nil, nil, errors.New("survey is not active")
@@ -325,6 +401,9 @@ func (svc *SurveyService) SubmitResponse(ctx context.Context, resp *domain.Surve
 		return err
 	}
 	if err := svc.repo.Survey.CreateResponse(ctx, resp, answers); err != nil {
+		if errors.Is(err, repository.ErrSurveyArchived) || errors.Is(err, repository.ErrSurveyNotAcceptingResponses) {
+			return err
+		}
 		if errors.Is(err, repository.ErrSurveyUploadInvalid) {
 			return errors.New("el archivo no pertenece a esta encuesta, pregunta o destinatario, o ya venció")
 		}

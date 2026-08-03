@@ -87,17 +87,28 @@ func (r *TaskWorkRepository) TaskBelongsToAccount(ctx context.Context, accountID
 }
 
 func (r *TaskWorkRepository) EnsureDefaultList(ctx context.Context, accountID, userID uuid.UUID) (*uuid.UUID, error) {
+	var environmentID uuid.UUID
+	if err := r.db.QueryRow(ctx, `SELECT id FROM task_environments
+		WHERE account_id=$1 AND is_default AND archived_at IS NULL`, accountID).Scan(&environmentID); err != nil {
+		return nil, err
+	}
+	return r.EnsureDefaultListForEnvironment(ctx, accountID, environmentID, userID)
+}
+
+func (r *TaskWorkRepository) EnsureDefaultListForEnvironment(ctx context.Context, accountID, environmentID, userID uuid.UUID) (*uuid.UUID, error) {
 	if _, err := r.db.Exec(ctx, `
-		INSERT INTO task_lists(account_id,workflow_id,workflow_inherited,is_default,name,description,color,icon,sort_order,created_by)
-		SELECT $1,w.id,TRUE,TRUE,'Bandeja general','Tareas sin una lista específica','#10B981','inbox',0,$2
+		INSERT INTO task_lists(account_id,environment_id,workflow_id,workflow_inherited,is_default,name,description,color,icon,sort_order,created_by)
+		SELECT $1,$2,w.id,TRUE,TRUE,'Bandeja general','Tareas sin una lista específica','#10B981','inbox',0,$3
 		FROM task_workflows w
-		WHERE w.account_id=$1 AND w.is_default
-		ON CONFLICT (account_id) WHERE is_default AND archived_at IS NULL DO NOTHING
-	`, accountID, userID); err != nil {
+		JOIN task_environments environment ON environment.account_id=w.account_id AND environment.id=w.environment_id
+		WHERE w.account_id=$1 AND w.environment_id=$2 AND w.is_default AND environment.archived_at IS NULL
+		ON CONFLICT (account_id,environment_id) WHERE is_default AND archived_at IS NULL DO NOTHING
+	`, accountID, environmentID, userID); err != nil {
 		return nil, err
 	}
 	var id uuid.UUID
-	if err := r.db.QueryRow(ctx, `SELECT id FROM task_lists WHERE account_id=$1 AND is_default AND archived_at IS NULL LIMIT 1`, accountID).Scan(&id); err != nil {
+	if err := r.db.QueryRow(ctx, `SELECT id FROM task_lists
+		WHERE account_id=$1 AND environment_id=$2 AND is_default AND archived_at IS NULL`, accountID, environmentID).Scan(&id); err != nil {
 		return nil, err
 	}
 	return &id, nil
@@ -109,7 +120,7 @@ func (r *TaskWorkRepository) ListFolders(ctx context.Context, accountID uuid.UUI
 
 func listTaskFolders(ctx context.Context, querier taskListQuerier, accountID uuid.UUID) ([]*domain.TaskFolder, []*domain.TaskList, error) {
 	rows, err := querier.Query(ctx, `
-		SELECT f.id,f.account_id,f.workflow_id,f.name,f.description,f.color,f.icon,f.sort_order,f.created_by,
+		SELECT f.id,f.account_id,f.environment_id,f.workflow_id,COALESCE(f.workflow_inherited,TRUE),f.name,f.description,f.color,f.icon,f.sort_order,f.created_by,
 			f.archived_at,f.created_at,f.updated_at
 		FROM task_folders f
 		WHERE f.account_id=$1 AND f.archived_at IS NULL
@@ -123,7 +134,7 @@ func listTaskFolders(ctx context.Context, querier taskListQuerier, accountID uui
 	byID := map[uuid.UUID]*domain.TaskFolder{}
 	for rows.Next() {
 		folder := &domain.TaskFolder{}
-		if err := rows.Scan(&folder.ID, &folder.AccountID, &folder.WorkflowID, &folder.Name, &folder.Description,
+		if err := rows.Scan(&folder.ID, &folder.AccountID, &folder.EnvironmentID, &folder.WorkflowID, &folder.WorkflowInherited, &folder.Name, &folder.Description,
 			&folder.Color, &folder.Icon, &folder.SortOrder, &folder.CreatedBy, &folder.ArchivedAt, &folder.CreatedAt,
 			&folder.UpdatedAt); err != nil {
 			return nil, nil, err
@@ -271,56 +282,71 @@ func buildTaskHierarchyCounts(folders []*domain.TaskFolder, rootLists []*domain.
 }
 
 func (r *TaskWorkRepository) CreateFolder(ctx context.Context, folder *domain.TaskFolder) error {
+	if folder.EnvironmentID == uuid.Nil {
+		return ErrTaskWorkNotFound
+	}
 	folder.ID = uuid.New()
 	folder.CreatedAt = time.Now()
 	folder.UpdatedAt = folder.CreatedAt
 	if folder.WorkflowID == nil {
 		var workflowID uuid.UUID
-		if err := r.db.QueryRow(ctx, `SELECT id FROM task_workflows WHERE account_id=$1 AND is_default LIMIT 1`, folder.AccountID).Scan(&workflowID); err != nil {
+		if err := r.db.QueryRow(ctx, `SELECT workflow.id FROM task_workflows workflow
+			JOIN task_environments environment ON environment.account_id=workflow.account_id AND environment.id=workflow.environment_id
+			WHERE workflow.account_id=$1 AND workflow.environment_id=$2 AND workflow.is_default AND environment.archived_at IS NULL
+			LIMIT 1`, folder.AccountID, folder.EnvironmentID).Scan(&workflowID); err != nil {
 			return err
 		}
 		folder.WorkflowID = &workflowID
+		folder.WorkflowInherited = true
 	} else {
 		var valid bool
-		if err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_workflows WHERE account_id=$1 AND id=$2)`, folder.AccountID, folder.WorkflowID).Scan(&valid); err != nil {
+		if err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_workflows
+			WHERE account_id=$1 AND environment_id=$2 AND id=$3)`, folder.AccountID, folder.EnvironmentID, folder.WorkflowID).Scan(&valid); err != nil {
 			return err
 		}
 		if !valid {
 			return ErrTaskWorkNotFound
 		}
+		folder.WorkflowInherited = false
 	}
 	if folder.Color == "" {
 		folder.Color = "#10B981"
 	}
-	if folder.Icon == "" {
-		folder.Icon = "folder"
-	}
+	folder.Icon = "folder"
 	return r.db.QueryRow(ctx, `
-		INSERT INTO task_folders(id,account_id,workflow_id,name,description,color,icon,sort_order,created_by,created_at,updated_at)
-		SELECT $1,$2,$3,$4,$5,$6,$7,COALESCE(MAX(sort_order)+1024,1024),$8,$9,$9
-		FROM task_folders WHERE account_id=$2
+		INSERT INTO task_folders(id,account_id,environment_id,workflow_id,workflow_inherited,name,description,color,icon,sort_order,created_by,created_at,updated_at)
+		SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE(MAX(sort_order)+1024,1024),$10,$11,$11
+		FROM task_folders WHERE account_id=$2 AND environment_id=$3
 		RETURNING sort_order
-	`, folder.ID, folder.AccountID, folder.WorkflowID, folder.Name, folder.Description, folder.Color, folder.Icon,
+	`, folder.ID, folder.AccountID, folder.EnvironmentID, folder.WorkflowID, folder.WorkflowInherited, folder.Name, folder.Description, folder.Color, folder.Icon,
 		folder.CreatedBy, folder.CreatedAt).Scan(&folder.SortOrder)
 }
 
-func (r *TaskWorkRepository) UpdateFolder(ctx context.Context, accountID, folderID uuid.UUID, name, description, color, icon *string, workflowID *uuid.UUID, workflowProvided bool) error {
+func (r *TaskWorkRepository) UpdateFolder(ctx context.Context, accountID, folderID uuid.UUID, name, description, color *string, workflowID *uuid.UUID, workflowProvided bool) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	var environmentID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT environment_id FROM task_folders
+		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, accountID, folderID).Scan(&environmentID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrTaskWorkNotFound
+		}
+		return err
+	}
 	resolvedWorkflowID := workflowID
 	if workflowProvided && resolvedWorkflowID == nil {
 		var defaultWorkflowID uuid.UUID
-		if err := tx.QueryRow(ctx, `SELECT id FROM task_workflows WHERE account_id=$1 AND is_default`, accountID).Scan(&defaultWorkflowID); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT id FROM task_workflows WHERE account_id=$1 AND environment_id=$2 AND is_default`, accountID, environmentID).Scan(&defaultWorkflowID); err != nil {
 			return err
 		}
 		resolvedWorkflowID = &defaultWorkflowID
 	}
 	if resolvedWorkflowID != nil {
 		var valid bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_workflows WHERE account_id=$1 AND id=$2)`, accountID, resolvedWorkflowID).Scan(&valid); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_workflows WHERE account_id=$1 AND environment_id=$2 AND id=$3)`, accountID, environmentID, resolvedWorkflowID).Scan(&valid); err != nil {
 			return err
 		}
 		if !valid {
@@ -330,10 +356,12 @@ func (r *TaskWorkRepository) UpdateFolder(ctx context.Context, accountID, folder
 	command, err := tx.Exec(ctx, `
 		UPDATE task_folders SET
 			name=COALESCE($3::text,name), description=COALESCE($4::text,description),
-			color=COALESCE($5::text,color), icon=COALESCE($6::text,icon),
-			workflow_id=CASE WHEN $8::boolean THEN $7::uuid ELSE workflow_id END, updated_at=NOW()
+			color=COALESCE($5::text,color),
+			workflow_id=CASE WHEN $7::boolean THEN $6::uuid ELSE workflow_id END,
+			workflow_inherited=CASE WHEN $7::boolean THEN ($6::uuid=(SELECT id FROM task_workflows WHERE account_id=$1 AND environment_id=$8 AND is_default)) ELSE workflow_inherited END,
+			updated_at=NOW()
 		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL
-	`, accountID, folderID, name, description, color, icon, resolvedWorkflowID, workflowProvided)
+	`, accountID, folderID, name, description, color, resolvedWorkflowID, workflowProvided, environmentID)
 	if err != nil {
 		return err
 	}
@@ -507,12 +535,13 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 		return err
 	}
 	defer tx.Rollback(ctx)
+	var environmentID uuid.UUID
 	var observedFolderID *uuid.UUID
 	var observedWorkflowID uuid.UUID
 	var observedInherited, observedDefault bool
-	if err := tx.QueryRow(ctx, `SELECT folder_id,workflow_id,workflow_inherited,is_default FROM task_lists
+	if err := tx.QueryRow(ctx, `SELECT environment_id,folder_id,workflow_id,workflow_inherited,is_default FROM task_lists
 		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL`, accountID, listID).
-		Scan(&observedFolderID, &observedWorkflowID, &observedInherited, &observedDefault); err != nil {
+		Scan(&environmentID, &observedFolderID, &observedWorkflowID, &observedInherited, &observedDefault); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound
 		}
@@ -540,7 +569,7 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 	folderWorkflows := make(map[uuid.UUID]uuid.UUID, len(folderIDs))
 	if len(folderIDs) > 0 {
 		folderRows, err := tx.Query(ctx, `SELECT id,workflow_id,archived_at FROM task_folders
-			WHERE account_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE`, accountID, folderIDs)
+			WHERE account_id=$1 AND environment_id=$3 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE`, accountID, folderIDs, environmentID)
 		if err != nil {
 			return err
 		}
@@ -577,10 +606,10 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 	}
 	lockedRows, err := tx.Query(ctx, `SELECT id,folder_id,workflow_id,workflow_inherited,is_default,sort_order,created_at
 		FROM task_lists
-		WHERE account_id=$1 AND archived_at IS NULL AND (
+		WHERE account_id=$1 AND environment_id=$5 AND archived_at IS NULL AND (
 			id=$2 OR folder_id IS NOT DISTINCT FROM $3::uuid OR folder_id IS NOT DISTINCT FROM $4::uuid
 		)
-		ORDER BY id FOR UPDATE`, accountID, listID, observedFolderID, finalFolderID)
+		ORDER BY id FOR UPDATE`, accountID, listID, observedFolderID, finalFolderID, environmentID)
 	if err != nil {
 		return err
 	}
@@ -648,12 +677,12 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 	if finalInherited {
 		if folderWorkflowID != nil {
 			finalWorkflowID = *folderWorkflowID
-		} else if err := tx.QueryRow(ctx, `SELECT id FROM task_workflows WHERE account_id=$1 AND is_default`, accountID).Scan(&finalWorkflowID); err != nil {
+		} else if err := tx.QueryRow(ctx, `SELECT id FROM task_workflows WHERE account_id=$1 AND environment_id=$2 AND is_default`, accountID, environmentID).Scan(&finalWorkflowID); err != nil {
 			return err
 		}
 	}
 	var workflowValid bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_workflows WHERE account_id=$1 AND id=$2)`, accountID, finalWorkflowID).Scan(&workflowValid); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_workflows WHERE account_id=$1 AND environment_id=$2 AND id=$3)`, accountID, environmentID, finalWorkflowID).Scan(&workflowValid); err != nil {
 		return err
 	}
 	if !workflowValid {
@@ -709,7 +738,7 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 		}
 		if finalFolderID == nil {
 			if _, err := tx.Exec(ctx, `UPDATE task_lists SET sort_order=0,updated_at=NOW()
-				WHERE account_id=$1 AND is_default AND archived_at IS NULL`, accountID); err != nil {
+				WHERE account_id=$1 AND environment_id=$2 AND is_default AND archived_at IS NULL`, accountID, environmentID); err != nil {
 				return err
 			}
 		}
@@ -723,13 +752,21 @@ func (r *TaskWorkRepository) ReorderFolder(ctx context.Context, accountID, folde
 		return err
 	}
 	defer tx.Rollback(ctx)
+	var environmentID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT environment_id FROM task_folders
+		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, accountID, folderID).Scan(&environmentID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrTaskWorkNotFound
+		}
+		return err
+	}
 	type orderedFolder struct {
 		ID        uuid.UUID
 		SortOrder int
 		CreatedAt time.Time
 	}
 	rows, err := tx.Query(ctx, `SELECT id,sort_order,created_at FROM task_folders
-		WHERE account_id=$1 AND archived_at IS NULL ORDER BY id FOR UPDATE`, accountID)
+		WHERE account_id=$1 AND environment_id=$2 AND archived_at IS NULL ORDER BY id FOR UPDATE`, accountID, environmentID)
 	if err != nil {
 		return err
 	}
@@ -791,7 +828,7 @@ func (r *TaskWorkRepository) ReorderFolder(ctx context.Context, accountID, folde
 
 func (r *TaskWorkRepository) ListWorkflows(ctx context.Context, accountID uuid.UUID) ([]*domain.TaskWorkflow, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT w.id,w.account_id,w.name,w.is_default,w.created_by,w.created_at,w.updated_at,
+		SELECT w.id,w.account_id,w.environment_id,w.name,w.is_default,w.created_by,w.created_at,w.updated_at,
 			s.id,s.name,s.color,s.category,s.sort_order,s.is_default,s.created_at,s.updated_at
 		FROM task_workflows w
 		LEFT JOIN task_statuses s ON s.account_id=w.account_id AND s.workflow_id=w.id
@@ -805,7 +842,7 @@ func (r *TaskWorkRepository) ListWorkflows(ctx context.Context, accountID uuid.U
 	workflows := []*domain.TaskWorkflow{}
 	byID := map[uuid.UUID]*domain.TaskWorkflow{}
 	for rows.Next() {
-		var workflowID, workflowAccountID uuid.UUID
+		var workflowID, workflowAccountID, workflowEnvironmentID uuid.UUID
 		var name string
 		var isDefault bool
 		var createdBy *uuid.UUID
@@ -815,13 +852,13 @@ func (r *TaskWorkRepository) ListWorkflows(ctx context.Context, accountID uuid.U
 		var sortOrder *int
 		var statusDefault *bool
 		var statusCreatedAt, statusUpdatedAt *time.Time
-		if err := rows.Scan(&workflowID, &workflowAccountID, &name, &isDefault, &createdBy, &createdAt, &updatedAt,
+		if err := rows.Scan(&workflowID, &workflowAccountID, &workflowEnvironmentID, &name, &isDefault, &createdBy, &createdAt, &updatedAt,
 			&statusID, &statusName, &color, &category, &sortOrder, &statusDefault, &statusCreatedAt, &statusUpdatedAt); err != nil {
 			return nil, err
 		}
 		workflow := byID[workflowID]
 		if workflow == nil {
-			workflow = &domain.TaskWorkflow{ID: workflowID, AccountID: workflowAccountID, Name: name,
+			workflow = &domain.TaskWorkflow{ID: workflowID, AccountID: workflowAccountID, EnvironmentID: workflowEnvironmentID, Name: name,
 				IsDefault: isDefault, CreatedBy: createdBy, CreatedAt: createdAt, UpdatedAt: updatedAt,
 				Statuses: []*domain.TaskStatus{}}
 			workflows = append(workflows, workflow)
@@ -840,6 +877,9 @@ func (r *TaskWorkRepository) CreateWorkflow(ctx context.Context, workflow *domai
 	if !taskWorkflowStatusesValid(statuses) {
 		return ErrTaskWorkflowInvalid
 	}
+	if workflow.EnvironmentID == uuid.Nil {
+		return ErrTaskWorkNotFound
+	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -848,8 +888,15 @@ func (r *TaskWorkRepository) CreateWorkflow(ctx context.Context, workflow *domai
 	workflow.ID = uuid.New()
 	workflow.CreatedAt = time.Now()
 	workflow.UpdatedAt = workflow.CreatedAt
-	if _, err := tx.Exec(ctx, `INSERT INTO task_workflows(id,account_id,name,is_default,created_by,created_at,updated_at)
-		VALUES($1,$2,$3,FALSE,$4,$5,$5)`, workflow.ID, workflow.AccountID, workflow.Name, workflow.CreatedBy, workflow.CreatedAt); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT id FROM task_environments WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR KEY SHARE`,
+		workflow.AccountID, workflow.EnvironmentID).Scan(new(uuid.UUID)); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrTaskWorkNotFound
+		}
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO task_workflows(id,account_id,environment_id,name,is_default,created_by,created_at,updated_at)
+		VALUES($1,$2,$3,$4,FALSE,$5,$6,$6)`, workflow.ID, workflow.AccountID, workflow.EnvironmentID, workflow.Name, workflow.CreatedBy, workflow.CreatedAt); err != nil {
 		return err
 	}
 	for i, status := range statuses {
@@ -1595,19 +1642,21 @@ func (r *TaskWorkRepository) BulkMoveTasks(ctx context.Context, accountID, actor
 		listIDs = append(listIDs, id)
 	}
 	sort.Slice(listIDs, func(i, j int) bool { return listIDs[i].String() < listIDs[j].String() })
-	listRows, err := tx.Query(ctx, `SELECT id,workflow_id FROM task_lists
+	listRows, err := tx.Query(ctx, `SELECT id,workflow_id,environment_id FROM task_lists
 		WHERE account_id=$1 AND id=ANY($2::uuid[]) AND archived_at IS NULL ORDER BY id FOR UPDATE`, accountID, listIDs)
 	if err != nil {
 		return nil, err
 	}
 	listWorkflows := make(map[uuid.UUID]uuid.UUID, len(listIDs))
+	listEnvironments := make(map[uuid.UUID]uuid.UUID, len(listIDs))
 	for listRows.Next() {
-		var listID, workflowID uuid.UUID
-		if err := listRows.Scan(&listID, &workflowID); err != nil {
+		var listID, workflowID, environmentID uuid.UUID
+		if err := listRows.Scan(&listID, &workflowID, &environmentID); err != nil {
 			listRows.Close()
 			return nil, err
 		}
 		listWorkflows[listID] = workflowID
+		listEnvironments[listID] = environmentID
 	}
 	if err := listRows.Err(); err != nil {
 		listRows.Close()
@@ -1630,6 +1679,31 @@ func (r *TaskWorkRepository) BulkMoveTasks(ctx context.Context, accountID, actor
 		statusChanged := (item.statusID == nil) != (before.statusID == nil) || (item.statusID != nil && before.statusID != nil && *item.statusID != *before.statusID)
 		if item.version != expectedVersions[id] || item.listID != before.listID || statusChanged {
 			return nil, ErrTaskVersionConflict
+		}
+		actorAccess, accessErr := resolveTaskAccessWith(ctx, tx, accountID, actorID, id)
+		if accessErr != nil {
+			return nil, accessErr
+		}
+		if !TaskAccessAllows(actorAccess.Access, domain.TaskAccessEdit) {
+			if !actorAccess.Access.CanView {
+				return nil, ErrTaskWorkNotFound
+			}
+			return nil, ErrTaskAccessDenied
+		}
+		if destinationListID != nil && listEnvironments[item.listID] != listEnvironments[*destinationListID] {
+			return nil, ErrTaskBulkMoveInvalid
+		}
+	}
+	if destinationListID != nil {
+		destinationAccess, _, accessErr := resolveEnvironmentAccessWith(ctx, tx, accountID, actorID, listEnvironments[*destinationListID])
+		if accessErr != nil {
+			return nil, accessErr
+		}
+		if !TaskAccessAllows(destinationAccess, domain.TaskAccessEdit) {
+			if !destinationAccess.CanView {
+				return nil, ErrTaskWorkNotFound
+			}
+			return nil, ErrTaskAccessDenied
 		}
 	}
 	var anchorListID *uuid.UUID
@@ -1864,7 +1938,24 @@ func (r *TaskWorkRepository) BulkMoveTasks(ctx context.Context, accountID, actor
 	return &TaskBulkMoveResult{TaskIDs: requestedIDs, Orders: orders}, nil
 }
 
-func (r *TaskWorkRepository) SavedViewScopeExists(ctx context.Context, accountID uuid.UUID, scopeType string, scopeID *uuid.UUID) (bool, error) {
+func taskSavedViewActorScopeSQL(viewAlias, actorExpression string) string {
+	return `(` + viewAlias + `.scope_type='all'
+		OR (` + viewAlias + `.scope_type='environment' AND EXISTS(SELECT 1 FROM task_environments environment
+			WHERE environment.account_id=` + viewAlias + `.account_id AND environment.id=` + viewAlias + `.scope_id
+			  AND environment.archived_at IS NULL AND (` + environmentActorAccessRankSQL("environment", actorExpression) + `)>=1))
+		OR (` + viewAlias + `.scope_type='folder' AND EXISTS(SELECT 1 FROM task_folders folder
+			JOIN task_environments environment ON environment.account_id=folder.account_id AND environment.id=folder.environment_id
+			WHERE folder.account_id=` + viewAlias + `.account_id AND folder.id=` + viewAlias + `.scope_id
+			  AND folder.archived_at IS NULL AND environment.archived_at IS NULL
+			  AND (` + environmentActorAccessRankSQL("environment", actorExpression) + `)>=1))
+		OR (` + viewAlias + `.scope_type='list' AND EXISTS(SELECT 1 FROM task_lists list_item
+			JOIN task_environments environment ON environment.account_id=list_item.account_id AND environment.id=list_item.environment_id
+			WHERE list_item.account_id=` + viewAlias + `.account_id AND list_item.id=` + viewAlias + `.scope_id
+			  AND list_item.archived_at IS NULL AND environment.archived_at IS NULL
+			  AND (` + environmentActorAccessRankSQL("environment", actorExpression) + `)>=1)))`
+}
+
+func (r *TaskWorkRepository) SavedViewScopeExists(ctx context.Context, accountID, actorID uuid.UUID, scopeType string, scopeID *uuid.UUID) (bool, error) {
 	if scopeType == "all" {
 		return scopeID == nil, nil
 	}
@@ -1872,20 +1963,32 @@ func (r *TaskWorkRepository) SavedViewScopeExists(ctx context.Context, accountID
 		return false, nil
 	}
 	table := "task_lists"
-	if scopeType == "folder" {
+	if scopeType == "environment" {
+		table = "task_environments"
+	} else if scopeType == "folder" {
 		table = "task_folders"
 	} else if scopeType != "list" {
 		return false, nil
 	}
+	environmentReference := "resource.environment_id"
+	if scopeType == "environment" {
+		environmentReference = "resource.id"
+	}
 	var exists bool
-	err := r.db.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s WHERE account_id=$1 AND id=$2 AND archived_at IS NULL)`, table), accountID, *scopeID).Scan(&exists)
+	err := r.db.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s resource
+		JOIN task_environments environment ON environment.account_id=resource.account_id AND environment.id=%s
+		WHERE resource.account_id=$1 AND resource.id=$2 AND resource.archived_at IS NULL AND environment.archived_at IS NULL
+		  AND (%s)>=1)`, table,
+		environmentReference,
+		environmentActorAccessRankSQL("environment", "$3")), accountID, *scopeID, actorID).Scan(&exists)
 	return exists, err
 }
 
 func (r *TaskWorkRepository) ListSavedViews(ctx context.Context, accountID, userID uuid.UUID) ([]*domain.TaskSavedView, error) {
 	rows, err := r.db.Query(ctx, `SELECT id,account_id,user_id,name,scope_type,scope_id,view_mode,filters,
 		collapsed_status_ids,group_by,group_direction,collapsed_group_keys,is_default,created_at,updated_at
-		FROM task_saved_views WHERE account_id=$1 AND user_id=$2
+		FROM task_saved_views view_item WHERE account_id=$1 AND user_id=$2
+		  AND `+taskSavedViewActorScopeSQL("view_item", "$2")+`
 		ORDER BY is_default DESC,updated_at DESC,name`, accountID, userID)
 	if err != nil {
 		return nil, err
@@ -1907,7 +2010,8 @@ func (r *TaskWorkRepository) GetSavedView(ctx context.Context, accountID, userID
 	view := &domain.TaskSavedView{}
 	err := r.db.QueryRow(ctx, `SELECT id,account_id,user_id,name,scope_type,scope_id,view_mode,filters,
 		collapsed_status_ids,group_by,group_direction,collapsed_group_keys,is_default,created_at,updated_at
-		FROM task_saved_views WHERE account_id=$1 AND user_id=$2 AND id=$3`, accountID, userID, viewID).
+		FROM task_saved_views view_item WHERE account_id=$1 AND user_id=$2 AND id=$3
+		  AND `+taskSavedViewActorScopeSQL("view_item", "$2"), accountID, userID, viewID).
 		Scan(&view.ID, &view.AccountID, &view.UserID, &view.Name, &view.ScopeType, &view.ScopeID,
 			&view.ViewMode, &view.Filters, &view.CollapsedStatusIDs, &view.GroupBy, &view.GroupDirection, &view.CollapsedGroupKeys, &view.IsDefault, &view.CreatedAt, &view.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -2005,16 +2109,18 @@ func (r *TaskWorkRepository) DeleteSavedView(ctx context.Context, accountID, use
 	return err
 }
 
-func (r *TaskWorkRepository) SetCollaborators(ctx context.Context, accountID, taskID, actorID uuid.UUID, userIDs []uuid.UUID, expectedVersion int64) (int64, error) {
+func (r *TaskWorkRepository) SetCollaborators(ctx context.Context, accountID, taskID, actorID uuid.UUID, userIDs []uuid.UUID, expectedVersion int64, confirmGrants bool, operationID *uuid.UUID) (int64, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
-	var ownerID uuid.UUID
+	var ownerID, rootTaskID, environmentID uuid.UUID
 	var currentVersion int64
-	if err := tx.QueryRow(ctx, `SELECT assigned_to,COALESCE(version,1) FROM tasks
-		WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE`, accountID, taskID).Scan(&ownerID, &currentVersion); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT task.assigned_to,COALESCE(task.version,1),COALESCE(task.parent_task_id,task.id),list_item.environment_id
+		FROM tasks task JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
+		WHERE task.account_id=$1 AND task.id=$2 AND task.deleted_at IS NULL FOR UPDATE OF task`, accountID, taskID).
+		Scan(&ownerID, &currentVersion, &rootTaskID, &environmentID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, ErrTaskWorkNotFound
 		}
@@ -2022,6 +2128,16 @@ func (r *TaskWorkRepository) SetCollaborators(ctx context.Context, accountID, ta
 	}
 	if currentVersion != expectedVersion {
 		return 0, ErrTaskVersionConflict
+	}
+	actorAccess, accessErr := resolveTaskAccessWith(ctx, tx, accountID, actorID, taskID)
+	if accessErr != nil {
+		return 0, accessErr
+	}
+	if !TaskAccessAllows(actorAccess.Access, domain.TaskAccessEdit) {
+		if !actorAccess.Access.CanView {
+			return 0, ErrTaskWorkNotFound
+		}
+		return 0, ErrTaskAccessDenied
 	}
 	seen := make(map[uuid.UUID]struct{}, len(userIDs))
 	cleanIDs := make([]uuid.UUID, 0, len(userIDs))
@@ -2044,6 +2160,14 @@ func (r *TaskWorkRepository) SetCollaborators(ctx context.Context, accountID, ta
 			return 0, ErrTaskCollaboratorInvalid
 		}
 	}
+	participantIDs := canonicalTaskParticipantIDs(ownerID, cleanIDs)
+	affectedParticipants, err := taskParticipantsNeedingGrant(ctx, tx, accountID, environmentID, &rootTaskID, participantIDs)
+	if err != nil {
+		return 0, err
+	}
+	if len(affectedParticipants) > 0 && !confirmGrants {
+		return 0, &TaskParticipantAccessConfirmationError{AffectedUserIDs: affectedParticipants}
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM task_collaborators WHERE account_id=$1 AND task_id=$2`, accountID, taskID); err != nil {
 		return 0, err
 	}
@@ -2059,6 +2183,10 @@ func (r *TaskWorkRepository) SetCollaborators(ctx context.Context, accountID, ta
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, ErrTaskVersionConflict
 		}
+		return 0, err
+	}
+	if err := confirmTaskParticipantGrants(ctx, tx, accountID, rootTaskID, actorID,
+		affectedParticipants, operationID); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -2208,7 +2336,7 @@ func (r *TaskWorkRepository) hydrateCommentRelations(ctx context.Context, accoun
 			&attachment.Filename, &attachment.ContentType, &attachment.MediaType, &attachment.SizeBytes, &key, &attachment.UploadedBy, &attachment.CreatedAt); err != nil {
 			return err
 		}
-		attachment.URL = "/api/media/file/" + key
+		attachment.URL = taskAttachmentDownloadURL(attachment.TaskID, attachment.ID)
 		if comment := byID[commentID]; comment != nil {
 			comment.Attachments = append(comment.Attachments, attachment)
 		}
@@ -2235,6 +2363,77 @@ func (r *TaskWorkRepository) GetComment(ctx context.Context, accountID, taskID, 
 	return comment, nil
 }
 
+// claimTaskCommentAttachmentTx enforces that a comment draft can only be
+// consumed by its uploader, inside the same account and task. Promotion and
+// the comment relation share one transaction, so a failed comment never makes
+// the draft visible or cancels its durable cleanup job.
+func claimTaskCommentAttachmentTx(ctx context.Context, tx pgx.Tx, accountID, taskID, attachmentID, actorID uuid.UUID) (uuid.UUID, error) {
+	var scope string
+	var ownerID *uuid.UUID
+	var expiresAt *time.Time
+	var assetID uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT COALESCE(attachment_scope,'task'),draft_owner_id,draft_expires_at,media_asset_id
+		FROM task_attachments WHERE account_id=$1 AND task_id=$2 AND id=$3 FOR UPDATE`, accountID, taskID, attachmentID).
+		Scan(&scope, &ownerID, &expiresAt, &assetID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrTaskWorkNotFound
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if scope == TaskAttachmentScopeCommentDraft {
+		if ownerID == nil || *ownerID != actorID || expiresAt == nil || !expiresAt.After(time.Now()) {
+			return uuid.Nil, ErrTaskWorkNotFound
+		}
+		if _, err := tx.Exec(ctx, `UPDATE task_attachments SET attachment_scope='comment',draft_owner_id=NULL,draft_expires_at=NULL
+			WHERE account_id=$1 AND task_id=$2 AND id=$3`, accountID, taskID, attachmentID); err != nil {
+			return uuid.Nil, err
+		}
+		if err := reconcileTaskCommentDraftGCJobTx(ctx, tx, accountID, assetID); err != nil {
+			return uuid.Nil, err
+		}
+	}
+	return attachmentID, nil
+}
+
+func scheduleOrphanedCommentAttachmentsTx(ctx context.Context, tx pgx.Tx, accountID, taskID, actorID uuid.UUID, attachmentIDs []uuid.UUID) error {
+	if len(attachmentIDs) == 0 {
+		return nil
+	}
+	expiresAt := time.Now().UTC().Add(taskCommentAttachmentDraftTTL)
+	rows, err := tx.Query(ctx, `UPDATE task_attachments attachment SET
+		attachment_scope='comment_draft',draft_owner_id=$3,draft_expires_at=$4
+		WHERE attachment.account_id=$1 AND attachment.task_id=$2 AND attachment.id=ANY($5::uuid[])
+		  AND attachment.attachment_scope='comment'
+		  AND NOT EXISTS(SELECT 1 FROM task_comment_attachments relation
+			WHERE relation.account_id=attachment.account_id AND relation.task_id=attachment.task_id
+			  AND relation.attachment_id=attachment.id)
+		RETURNING attachment.media_asset_id`, accountID, taskID, actorID, expiresAt, attachmentIDs)
+	if err != nil {
+		return err
+	}
+	assetIDs := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var assetID uuid.UUID
+		if err := rows.Scan(&assetID); err != nil {
+			rows.Close()
+			return err
+		}
+		assetIDs = append(assetIDs, assetID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, assetID := range assetIDs {
+		if err := reconcileTaskCommentDraftGCJobTx(ctx, tx, accountID, assetID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *TaskWorkRepository) CreateComment(ctx context.Context, comment *domain.TaskComment, mentionIDs, attachmentIDs []uuid.UUID) error {
 	comment.ID = uuid.New()
 	comment.CreatedAt = time.Now()
@@ -2244,6 +2443,10 @@ func (r *TaskWorkRepository) CreateComment(ctx context.Context, comment *domain.
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockAndRequireTaskAccessTx(ctx, tx, comment.AccountID, comment.AuthorID,
+		[]uuid.UUID{comment.TaskID}, domain.TaskAccessComment); err != nil {
+		return err
+	}
 	if err := tx.QueryRow(ctx, `INSERT INTO task_comments(id,account_id,task_id,author_id,body,created_at,updated_at)
 		SELECT $1,$2,$3,$4,$5,$6,$6 WHERE EXISTS(SELECT 1 FROM tasks WHERE account_id=$2 AND id=$3 AND deleted_at IS NULL)
 		RETURNING id`, comment.ID, comment.AccountID, comment.TaskID, comment.AuthorID, comment.Body, comment.CreatedAt).Scan(&comment.ID); err != nil {
@@ -2273,8 +2476,12 @@ func (r *TaskWorkRepository) CreateComment(ctx context.Context, comment *domain.
 			continue
 		}
 		seenAttachments[attachmentID] = struct{}{}
+		claimedID, err := claimTaskCommentAttachmentTx(ctx, tx, comment.AccountID, comment.TaskID, attachmentID, comment.AuthorID)
+		if err != nil {
+			return err
+		}
 		command, err := tx.Exec(ctx, `INSERT INTO task_comment_attachments(account_id,task_id,comment_id,attachment_id)
-			SELECT $1,$2,$3,$4 WHERE EXISTS(SELECT 1 FROM task_attachments WHERE account_id=$1 AND task_id=$2 AND id=$4)`, comment.AccountID, comment.TaskID, comment.ID, attachmentID)
+			VALUES($1,$2,$3,$4)`, comment.AccountID, comment.TaskID, comment.ID, claimedID)
 		if err != nil || command.RowsAffected() == 0 {
 			if err != nil {
 				return err
@@ -2291,6 +2498,10 @@ func (r *TaskWorkRepository) UpdateComment(ctx context.Context, accountID, taskI
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockAndRequireTaskAccessTx(ctx, tx, accountID, actorID,
+		[]uuid.UUID{taskID}, domain.TaskAccessComment); err != nil {
+		return err
+	}
 	command, err := tx.Exec(ctx, `UPDATE task_comments SET body=$4,edited_at=NOW(),updated_at=NOW()
 		WHERE account_id=$1 AND task_id=$6 AND id=$2 AND deleted_at IS NULL AND (author_id=$3 OR $5)`, accountID, commentID, actorID, body, admin, taskID)
 	if err == nil && command.RowsAffected() == 0 {
@@ -2302,6 +2513,25 @@ func (r *TaskWorkRepository) UpdateComment(ctx context.Context, accountID, taskI
 	if _, err := tx.Exec(ctx, `DELETE FROM task_comment_mentions WHERE account_id=$1 AND task_id=$2 AND comment_id=$3`, accountID, taskID, commentID); err != nil {
 		return err
 	}
+	previousRows, err := tx.Query(ctx, `SELECT attachment_id FROM task_comment_attachments
+		WHERE account_id=$1 AND task_id=$2 AND comment_id=$3`, accountID, taskID, commentID)
+	if err != nil {
+		return err
+	}
+	previousAttachmentIDs := make([]uuid.UUID, 0)
+	for previousRows.Next() {
+		var attachmentID uuid.UUID
+		if err := previousRows.Scan(&attachmentID); err != nil {
+			previousRows.Close()
+			return err
+		}
+		previousAttachmentIDs = append(previousAttachmentIDs, attachmentID)
+	}
+	if err := previousRows.Err(); err != nil {
+		previousRows.Close()
+		return err
+	}
+	previousRows.Close()
 	if _, err := tx.Exec(ctx, `DELETE FROM task_comment_attachments WHERE account_id=$1 AND task_id=$2 AND comment_id=$3`, accountID, taskID, commentID); err != nil {
 		return err
 	}
@@ -2329,8 +2559,12 @@ func (r *TaskWorkRepository) UpdateComment(ctx context.Context, accountID, taskI
 			continue
 		}
 		seenAttachments[attachmentID] = struct{}{}
+		claimedID, err := claimTaskCommentAttachmentTx(ctx, tx, accountID, taskID, attachmentID, actorID)
+		if err != nil {
+			return err
+		}
 		inserted, err := tx.Exec(ctx, `INSERT INTO task_comment_attachments(account_id,task_id,comment_id,attachment_id)
-			SELECT $1,$2,$3,$4 WHERE EXISTS(SELECT 1 FROM task_attachments WHERE account_id=$1 AND task_id=$2 AND id=$4)`, accountID, taskID, commentID, attachmentID)
+			VALUES($1,$2,$3,$4)`, accountID, taskID, commentID, claimedID)
 		if err != nil || inserted.RowsAffected() == 0 {
 			if err != nil {
 				return err
@@ -2338,16 +2572,53 @@ func (r *TaskWorkRepository) UpdateComment(ctx context.Context, accountID, taskI
 			return ErrTaskWorkNotFound
 		}
 	}
+	if err := scheduleOrphanedCommentAttachmentsTx(ctx, tx, accountID, taskID, actorID, previousAttachmentIDs); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
 func (r *TaskWorkRepository) DeleteComment(ctx context.Context, accountID, taskID, commentID, actorID uuid.UUID, admin bool) error {
-	command, err := r.db.Exec(ctx, `UPDATE task_comments SET deleted_at=NOW(),updated_at=NOW()
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockAndRequireTaskAccessTx(ctx, tx, accountID, actorID,
+		[]uuid.UUID{taskID}, domain.TaskAccessComment); err != nil {
+		return err
+	}
+	command, err := tx.Exec(ctx, `UPDATE task_comments SET deleted_at=NOW(),updated_at=NOW()
 		WHERE account_id=$1 AND task_id=$5 AND id=$2 AND deleted_at IS NULL AND (author_id=$3 OR $4)`, accountID, commentID, actorID, admin, taskID)
-	if err == nil && command.RowsAffected() == 0 {
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
 		return ErrTaskWorkNotFound
 	}
-	return err
+	rows, err := tx.Query(ctx, `DELETE FROM task_comment_attachments WHERE account_id=$1 AND task_id=$2 AND comment_id=$3
+		RETURNING attachment_id`, accountID, taskID, commentID)
+	if err != nil {
+		return err
+	}
+	attachmentIDs := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var attachmentID uuid.UUID
+		if err := rows.Scan(&attachmentID); err != nil {
+			rows.Close()
+			return err
+		}
+		attachmentIDs = append(attachmentIDs, attachmentID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if err := scheduleOrphanedCommentAttachmentsTx(ctx, tx, accountID, taskID, actorID, attachmentIDs); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *TaskWorkRepository) LogActivity(ctx context.Context, accountID, taskID uuid.UUID, actorID *uuid.UUID, action string, metadata any) error {
@@ -2378,10 +2649,63 @@ func (r *TaskWorkRepository) ListActivity(ctx context.Context, accountID, taskID
 	return result, rows.Err()
 }
 
+func taskActivityPublicMetadata(raw json.RawMessage) json.RawMessage {
+	var source map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &source) != nil {
+		return json.RawMessage(`{}`)
+	}
+	// Structural, workflow and dependency identifiers stay in the durable audit
+	// row but are not part of the public activity feed. In particular, a task
+	// shared directly outside its environment must not expose list/environment
+	// breadcrumbs or the existence of a hidden dependency through metadata.
+	allowed := map[string]struct{}{
+		"version": {}, "operation_id": {}, "count": {},
+		"attachment_id": {}, "comment_id": {}, "subtask_id": {},
+	}
+	public := make(map[string]any)
+	for key, value := range source {
+		if _, ok := allowed[key]; ok {
+			public[key] = value
+		}
+	}
+	encoded, err := json.Marshal(public)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return encoded
+}
+
+func (r *TaskWorkRepository) ListActivityForActor(ctx context.Context, accountID, actorID, taskID uuid.UUID, limit int) ([]*domain.TaskActivity, error) {
+	rows, err := r.db.Query(ctx, `SELECT activity.id,activity.account_id,activity.task_id,activity.actor_id,
+		COALESCE(account_user.display_name,account_user.username,''),activity.action,activity.metadata,activity.created_at
+		FROM task_activity activity
+		JOIN tasks task ON task.account_id=activity.account_id AND task.id=activity.task_id AND task.deleted_at IS NULL
+		JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
+		LEFT JOIN users account_user ON account_user.id=activity.actor_id
+		WHERE activity.account_id=$1 AND activity.task_id=$3
+		  AND `+taskActorCanViewSQL("task", "list_item", "$2")+`
+		ORDER BY activity.created_at DESC LIMIT $4`, accountID, actorID, taskID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]*domain.TaskActivity, 0)
+	for rows.Next() {
+		item := &domain.TaskActivity{}
+		if err := rows.Scan(&item.ID, &item.AccountID, &item.TaskID, &item.ActorID, &item.ActorName,
+			&item.Action, &item.Metadata, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.Metadata = taskActivityPublicMetadata(item.Metadata)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 func (r *TaskWorkRepository) ListAttachments(ctx context.Context, accountID, taskID uuid.UUID) ([]*domain.TaskAttachment, error) {
 	rows, err := r.db.Query(ctx, `SELECT ta.id,ta.account_id,ta.task_id,ta.media_asset_id,ma.filename,ma.content_type,ma.media_type,ma.size_bytes,ma.object_key,ta.uploaded_by,ta.created_at
 		FROM task_attachments ta JOIN media_assets ma ON ma.account_id=ta.account_id AND ma.id=ta.media_asset_id AND ma.status='active'
-		WHERE ta.account_id=$1 AND ta.task_id=$2 ORDER BY ta.created_at`, accountID, taskID)
+		WHERE ta.account_id=$1 AND ta.task_id=$2 AND COALESCE(ta.attachment_scope,'task')='task' ORDER BY ta.created_at`, accountID, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -2393,7 +2717,7 @@ func (r *TaskWorkRepository) ListAttachments(ctx context.Context, accountID, tas
 		if err := rows.Scan(&item.ID, &item.AccountID, &item.TaskID, &item.MediaAssetID, &item.Filename, &item.ContentType, &item.MediaType, &item.SizeBytes, &key, &item.UploadedBy, &item.CreatedAt); err != nil {
 			return nil, err
 		}
-		item.URL = "/api/media/file/" + key
+		item.URL = taskAttachmentDownloadURL(item.TaskID, item.ID)
 		result = append(result, item)
 	}
 	return result, rows.Err()
@@ -2448,7 +2772,50 @@ func (r *TaskWorkRepository) ListDependencies(ctx context.Context, accountID, ta
 	return result, rows.Err()
 }
 
+// ListDependenciesForActor returns an edge only when the actor can see both
+// endpoints. This prevents a task shared directly with a user from revealing
+// a private predecessor/successor title, ID, or environment relationship.
+func taskDependenciesForActorSQL() string {
+	return `SELECT d.id,d.account_id,d.predecessor_task_id,d.successor_task_id,d.dependency_type,d.lag_minutes,
+		p.title,s.title,d.created_by,d.created_at FROM task_dependencies d
+		JOIN tasks p ON p.account_id=d.account_id AND p.id=d.predecessor_task_id
+		JOIN task_lists predecessor_list ON predecessor_list.account_id=p.account_id AND predecessor_list.id=p.list_id
+		JOIN tasks s ON s.account_id=d.account_id AND s.id=d.successor_task_id
+		JOIN task_lists successor_list ON successor_list.account_id=s.account_id AND successor_list.id=s.list_id
+		WHERE d.account_id=$1 AND (d.predecessor_task_id=$3 OR d.successor_task_id=$3)
+		  AND p.deleted_at IS NULL AND s.deleted_at IS NULL
+		  AND ` + taskActorCanViewSQL("p", "predecessor_list", "$2") + `
+		  AND ` + taskActorCanViewSQL("s", "successor_list", "$2") + `
+		ORDER BY d.created_at,d.id`
+}
+
+func (r *TaskWorkRepository) ListDependenciesForActor(ctx context.Context, accountID, actorID, taskID uuid.UUID) ([]*domain.TaskDependency, error) {
+	rows, err := r.db.Query(ctx, taskDependenciesForActorSQL(), accountID, actorID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]*domain.TaskDependency, 0)
+	for rows.Next() {
+		item := &domain.TaskDependency{}
+		if err := rows.Scan(&item.ID, &item.AccountID, &item.PredecessorTaskID, &item.SuccessorTaskID, &item.DependencyType,
+			&item.LagMinutes, &item.PredecessorTitle, &item.SuccessorTitle, &item.CreatedBy, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 func (r *TaskWorkRepository) AddDependency(ctx context.Context, dependency *domain.TaskDependency) error {
+	return r.addDependency(ctx, dependency, nil)
+}
+
+func (r *TaskWorkRepository) AddDependencyForActor(ctx context.Context, dependency *domain.TaskDependency, actorID uuid.UUID) error {
+	return r.addDependency(ctx, dependency, &actorID)
+}
+
+func (r *TaskWorkRepository) addDependency(ctx context.Context, dependency *domain.TaskDependency, actorID *uuid.UUID) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -2462,6 +2829,12 @@ func (r *TaskWorkRepository) AddDependency(ctx context.Context, dependency *doma
 	// account-scoped row lock guards every validation+insert in this graph.
 	if err := tx.QueryRow(ctx, `SELECT id FROM accounts WHERE id=$1 FOR UPDATE`, dependency.AccountID).Scan(new(uuid.UUID)); err != nil {
 		return err
+	}
+	if actorID != nil {
+		if err := lockAndRequireTaskAccessTx(ctx, tx, dependency.AccountID, *actorID,
+			[]uuid.UUID{dependency.PredecessorTaskID, dependency.SuccessorTaskID}, domain.TaskAccessEdit); err != nil {
+			return err
+		}
 	}
 	// Lock both endpoints in UUID order before inspecting the graph. Inverse
 	// concurrent inserts (A→B and B→A) then serialize, so the second transaction
@@ -2526,6 +2899,41 @@ func (r *TaskWorkRepository) DeleteDependency(ctx context.Context, accountID, ta
 	return dependency, nil
 }
 
+func (r *TaskWorkRepository) DeleteDependencyForActor(ctx context.Context, accountID, actorID, taskID, dependencyID uuid.UUID) (*domain.TaskDependency, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	if err := tx.QueryRow(ctx, `SELECT id FROM accounts WHERE id=$1 FOR UPDATE`, accountID).Scan(new(uuid.UUID)); err != nil {
+		return nil, err
+	}
+	dependency := &domain.TaskDependency{ID: dependencyID, AccountID: accountID}
+	if err := tx.QueryRow(ctx, `SELECT predecessor_task_id,successor_task_id FROM task_dependencies
+		WHERE account_id=$1 AND id=$2 AND (predecessor_task_id=$3 OR successor_task_id=$3)
+		FOR UPDATE`, accountID, dependencyID, taskID).Scan(&dependency.PredecessorTaskID, &dependency.SuccessorTaskID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrTaskWorkNotFound
+		}
+		return nil, err
+	}
+	if err := lockAndRequireTaskAccessTx(ctx, tx, accountID, actorID,
+		[]uuid.UUID{dependency.PredecessorTaskID, dependency.SuccessorTaskID}, domain.TaskAccessEdit); err != nil {
+		return nil, err
+	}
+	command, err := tx.Exec(ctx, `DELETE FROM task_dependencies WHERE account_id=$1 AND id=$2`, accountID, dependencyID)
+	if err != nil {
+		return nil, err
+	}
+	if command.RowsAffected() != 1 {
+		return nil, ErrTaskWorkNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return dependency, nil
+}
+
 func (r *TaskWorkRepository) SoftDeleteTask(ctx context.Context, accountID, taskID, userID uuid.UUID) error {
 	return r.SoftDeleteTaskVersioned(ctx, accountID, taskID, userID, nil)
 }
@@ -2536,6 +2944,9 @@ func (r *TaskWorkRepository) SoftDeleteTaskVersioned(ctx context.Context, accoun
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockAndRequireTaskAccessTx(ctx, tx, accountID, userID, []uuid.UUID{taskID}, domain.TaskAccessFull); err != nil {
+		return err
+	}
 	var observedListID, observedParentID *uuid.UUID
 	var observedVersion int64
 	if err := tx.QueryRow(ctx, `SELECT list_id,parent_task_id,version FROM tasks
@@ -2582,12 +2993,15 @@ func (r *TaskWorkRepository) SoftDeleteTaskVersioned(ctx context.Context, accoun
 	}
 	return tx.Commit(ctx)
 }
-func (r *TaskWorkRepository) RestoreTask(ctx context.Context, accountID, taskID uuid.UUID) error {
+func (r *TaskWorkRepository) RestoreTask(ctx context.Context, accountID, actorID, taskID uuid.UUID) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockAndRequireDeletedTaskAccessTx(ctx, tx, accountID, actorID, []uuid.UUID{taskID}, domain.TaskAccessFull); err != nil {
+		return err
+	}
 	var listID, parentID *uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT list_id,parent_task_id FROM tasks
 		WHERE account_id=$1 AND id=$2 AND deleted_at IS NOT NULL`, accountID, taskID).Scan(&listID, &parentID); err != nil {
@@ -2612,7 +3026,9 @@ func (r *TaskWorkRepository) RestoreTask(ctx context.Context, accountID, taskID 
 		}
 	}
 	var originalArchivedAt *time.Time
-	if err := tx.QueryRow(ctx, `SELECT archived_at FROM task_lists WHERE account_id=$1 AND id=$2`, accountID, *listID).Scan(&originalArchivedAt); err != nil {
+	var environmentID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT archived_at,environment_id FROM task_lists WHERE account_id=$1 AND id=$2`, accountID, *listID).
+		Scan(&originalArchivedAt, &environmentID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound
 		}
@@ -2623,8 +3039,10 @@ func (r *TaskWorkRepository) RestoreTask(ctx context.Context, accountID, taskID 
 		if parentID != nil {
 			return ErrTaskWorkNotFound
 		}
-		if err := tx.QueryRow(ctx, `SELECT id FROM task_lists
-			WHERE account_id=$1 AND is_default AND archived_at IS NULL`, accountID).Scan(&targetListID); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT list_item.id FROM task_lists list_item
+			JOIN task_environments environment ON environment.account_id=list_item.account_id AND environment.id=list_item.environment_id
+			WHERE list_item.account_id=$1 AND list_item.environment_id=$2 AND list_item.is_default
+			  AND list_item.archived_at IS NULL AND environment.archived_at IS NULL`, accountID, environmentID).Scan(&targetListID); err != nil {
 			return err
 		}
 	}
@@ -2758,10 +3176,15 @@ func (r *TaskWorkRepository) RestoreTask(ctx context.Context, accountID, taskID 
 	return tx.Commit(ctx)
 }
 
-func (r *TaskWorkRepository) Summary(ctx context.Context, accountID uuid.UUID, folderID, listID *uuid.UUID) (map[string]any, error) {
-	conditions := []string{"t.account_id=$1", "t.deleted_at IS NULL", "t.parent_task_id IS NULL"}
-	args := []any{accountID}
-	idx := 2
+func (r *TaskWorkRepository) Summary(ctx context.Context, accountID, actorID uuid.UUID, environmentID, folderID, listID *uuid.UUID, sharedOnly bool) (map[string]any, error) {
+	conditions := []string{"t.account_id=$1", "t.deleted_at IS NULL", "t.parent_task_id IS NULL", taskActorCanViewSQL("t", "l", "$2")}
+	args := []any{accountID, actorID}
+	idx := 3
+	if environmentID != nil {
+		conditions = append(conditions, fmt.Sprintf("l.environment_id=$%d", idx))
+		args = append(args, *environmentID)
+		idx++
+	}
 	if folderID != nil {
 		conditions = append(conditions, fmt.Sprintf("l.folder_id=$%d", idx))
 		args = append(args, *folderID)
@@ -2770,12 +3193,17 @@ func (r *TaskWorkRepository) Summary(ctx context.Context, accountID uuid.UUID, f
 	if listID != nil {
 		conditions = append(conditions, fmt.Sprintf("t.list_id=$%d", idx))
 		args = append(args, *listID)
+		idx++
+	}
+	if sharedOnly {
+		conditions = append(conditions, taskActorDirectSharedSQL("t", "l", fmt.Sprintf("$%d", idx)))
+		args = append(args, actorID)
 	}
 	where := strings.Join(conditions, " AND ")
 	query := fmt.Sprintf(`SELECT COUNT(*),COUNT(*) FILTER(WHERE s.category='done'),COUNT(*) FILTER(WHERE s.category='active'),
 		COUNT(*) FILTER(WHERE t.due_at<NOW() AND s.category NOT IN('done','cancelled')),
 		COUNT(DISTINCT t.assigned_to),COALESCE(AVG(CASE WHEN s.category='cancelled' THEN NULL ELSE t.progress END),0)
-		FROM tasks t LEFT JOIN task_lists l ON l.account_id=t.account_id AND l.id=t.list_id LEFT JOIN task_statuses s ON s.account_id=t.account_id AND s.id=t.status_id WHERE %s`, where)
+		FROM tasks t JOIN task_lists l ON l.account_id=t.account_id AND l.id=t.list_id LEFT JOIN task_statuses s ON s.account_id=t.account_id AND s.id=t.status_id WHERE %s`, where)
 	var total, done, active, overdue, owners int
 	var progress float64
 	if err := r.db.QueryRow(ctx, query, args...).Scan(&total, &done, &active, &overdue, &owners, &progress); err != nil {

@@ -19,6 +19,16 @@ type TaskRepository struct {
 	db *pgxpool.Pool
 }
 
+// TaskPageCursor is the stable keyset used by the task collection endpoint.
+// It mirrors the complete SQL ordering so concurrent inserts do not shift an
+// already-issued page boundary as offset pagination would.
+type TaskPageCursor struct {
+	StatusRank int
+	SortOrder  int
+	DueAt      *time.Time
+	ID         uuid.UUID
+}
+
 type taskListQuerier interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
@@ -74,7 +84,7 @@ func synchronizeTaskStatusCategory(task *domain.Task, category string) {
 const taskSelectFields = `
 	t.id, t.account_id, t.created_by, t.assigned_to, t.title, t.description, t.type,
 	t.start_at, t.due_at, t.due_end_at, COALESCE(t.is_all_day,FALSE), t.priority, t.status, t.status_id, t.completed_at, t.completed_by,
-	t.lead_id, t.event_id, t.program_id, t.contact_id, t.list_id,
+		t.lead_id, t.event_id, t.program_id, t.contact_id, t.list_id, tl.environment_id, COALESCE(t.access_mode,'inherit'),
 	t.parent_task_id,
 	COALESCE(t.starred, FALSE) AS starred, COALESCE(t.sort_order, 0) AS sort_order,
 	CASE WHEN COALESCE(t.progress_mode,'manual')='automatic' THEN
@@ -100,7 +110,8 @@ const taskSelectFields = `
 	COALESCE((SELECT COUNT(*) FROM tasks st WHERE st.parent_task_id = t.id AND st.account_id=t.account_id AND st.deleted_at IS NULL), 0) AS subtask_count,
 	COALESCE((SELECT COUNT(*) FROM tasks st JOIN task_statuses child_status ON child_status.id=st.status_id AND child_status.account_id=st.account_id WHERE st.parent_task_id = t.id AND st.account_id=t.account_id AND st.deleted_at IS NULL AND child_status.category='done'), 0) AS subtask_done,
 	COALESCE((SELECT COUNT(*) FROM task_comments comment WHERE comment.account_id=t.account_id AND comment.task_id=t.id AND comment.deleted_at IS NULL), 0) AS comment_count,
-	COALESCE((SELECT COUNT(*) FROM task_attachments attachment WHERE attachment.account_id=t.account_id AND attachment.task_id=t.id), 0) AS attachment_count
+	COALESCE((SELECT COUNT(*) FROM task_attachments attachment WHERE attachment.account_id=t.account_id AND attachment.task_id=t.id
+		AND COALESCE(attachment.attachment_scope,'task')='task'), 0) AS attachment_count
 `
 
 const taskJoins = `
@@ -127,7 +138,7 @@ func (r *TaskRepository) scanTask(row interface {
 	err := row.Scan(
 		&t.ID, &t.AccountID, &t.CreatedBy, &t.AssignedTo, &t.Title, &t.Description, &t.Type,
 		&t.StartAt, &t.DueAt, &t.DueEndAt, &t.IsAllDay, &t.Priority, &t.Status, &t.StatusID, &t.CompletedAt, &t.CompletedBy,
-		&t.LeadID, &t.EventID, &t.ProgramID, &t.ContactID, &t.ListID,
+		&t.LeadID, &t.EventID, &t.ProgramID, &t.ContactID, &t.ListID, &t.EnvironmentID, &t.AccessMode,
 		&t.ParentTaskID,
 		&t.Starred, &t.SortOrder,
 		&t.Progress, &t.ProgressMode, &t.ManualProgress, &t.ProgressSource, &t.IsMilestone, &t.DeletedAt, &t.DeletedBy, &t.Version,
@@ -174,10 +185,19 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	var environmentID uuid.UUID
 	// Serialize placement per list. This prevents simultaneous quick creates
 	// from receiving the same order while keeping different lists independent.
 	if t.ListID != nil {
-		if err := tx.QueryRow(ctx, `SELECT id FROM task_lists WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, t.AccountID, *t.ListID).Scan(new(uuid.UUID)); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT environment_id FROM task_lists WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, t.AccountID, *t.ListID).Scan(&environmentID); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT id FROM task_environments
+			WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR SHARE`, t.AccountID, environmentID).
+			Scan(new(uuid.UUID)); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrTaskWorkNotFound
+			}
 			return err
 		}
 	} else {
@@ -198,6 +218,42 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 		if grandparentID != nil || !taskUUIDPointersEqual(parentListID, t.ListID) {
 			return ErrTaskWorkNotFound
 		}
+	}
+	if t.MutationActor != nil {
+		destinationAccess, _, accessErr := resolveEnvironmentAccessWith(ctx, tx, t.AccountID, *t.MutationActor, environmentID)
+		if accessErr != nil {
+			return accessErr
+		}
+		if !TaskAccessAllows(destinationAccess, domain.TaskAccessEdit) {
+			if !destinationAccess.CanView {
+				return ErrTaskWorkNotFound
+			}
+			return ErrTaskAccessDenied
+		}
+		if t.ParentTaskID != nil {
+			parentAccess, accessErr := resolveTaskAccessWith(ctx, tx, t.AccountID, *t.MutationActor, *t.ParentTaskID)
+			if accessErr != nil {
+				return accessErr
+			}
+			if !TaskAccessAllows(parentAccess.Access, domain.TaskAccessEdit) {
+				if !parentAccess.Access.CanView {
+					return ErrTaskWorkNotFound
+				}
+				return ErrTaskAccessDenied
+			}
+		}
+	}
+	participantIDs := canonicalTaskParticipantIDs(t.AssignedTo, t.CollaboratorIDs)
+	var participantRootID *uuid.UUID
+	if t.ParentTaskID != nil {
+		participantRootID = t.ParentTaskID
+	}
+	affectedParticipants, err := taskParticipantsNeedingGrant(ctx, tx, t.AccountID, environmentID, participantRootID, participantIDs)
+	if err != nil {
+		return err
+	}
+	if len(affectedParticipants) > 0 && !t.ConfirmParticipantGrants {
+		return &TaskParticipantAccessConfirmationError{AffectedUserIDs: affectedParticipants}
 	}
 	if t.ListID != nil && t.StatusID != nil {
 		var statusCategory string
@@ -261,6 +317,20 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 			return err
 		}
 	}
+	if len(affectedParticipants) > 0 {
+		rootTaskID := t.ID
+		if t.ParentTaskID != nil {
+			rootTaskID = *t.ParentTaskID
+		}
+		actorID := t.CreatedBy
+		if t.MutationActor != nil {
+			actorID = *t.MutationActor
+		}
+		if err := confirmTaskParticipantGrants(ctx, tx, t.AccountID, rootTaskID, actorID,
+			affectedParticipants, t.MutationOperationID); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
 }
 
@@ -284,6 +354,8 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 		return ErrTaskWorkNotFound
 	}
 	listIDs := make([]uuid.UUID, 0, 2)
+	var affectedParticipants []uuid.UUID
+	var participantEnvironmentID, participantRootID uuid.UUID
 	if observedListID != nil {
 		listIDs = append(listIDs, *observedListID)
 	}
@@ -291,20 +363,25 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 		listIDs = append(listIDs, *t.ListID)
 	}
 	if len(listIDs) > 0 {
-		rows, err := tx.Query(ctx, `SELECT id,archived_at FROM task_lists
+		rows, err := tx.Query(ctx, `SELECT id,environment_id,archived_at FROM task_lists
 			WHERE account_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE`, t.AccountID, listIDs)
 		if err != nil {
 			return err
 		}
-		lockedLists := make(map[uuid.UUID]*time.Time, len(listIDs))
+		type lockedTaskList struct {
+			environmentID uuid.UUID
+			archivedAt    *time.Time
+		}
+		lockedLists := make(map[uuid.UUID]lockedTaskList, len(listIDs))
 		for rows.Next() {
 			var id uuid.UUID
+			var environmentID uuid.UUID
 			var archivedAt *time.Time
-			if err := rows.Scan(&id, &archivedAt); err != nil {
+			if err := rows.Scan(&id, &environmentID, &archivedAt); err != nil {
 				rows.Close()
 				return err
 			}
-			lockedLists[id] = archivedAt
+			lockedLists[id] = lockedTaskList{environmentID: environmentID, archivedAt: archivedAt}
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -314,8 +391,56 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 		if len(lockedLists) != len(listIDs) {
 			return ErrTaskWorkNotFound
 		}
-		if t.ListID != nil && lockedLists[*t.ListID] != nil {
+		environmentSet := make(map[uuid.UUID]struct{}, len(lockedLists))
+		for _, listItem := range lockedLists {
+			environmentSet[listItem.environmentID] = struct{}{}
+		}
+		environmentIDs := make([]uuid.UUID, 0, len(environmentSet))
+		for environmentID := range environmentSet {
+			environmentIDs = append(environmentIDs, environmentID)
+		}
+		environmentRows, lockErr := tx.Query(ctx, `SELECT id FROM task_environments
+			WHERE account_id=$1 AND id=ANY($2::uuid[]) AND archived_at IS NULL ORDER BY id FOR SHARE`,
+			t.AccountID, environmentIDs)
+		if lockErr != nil {
+			return lockErr
+		}
+		lockedEnvironmentCount := 0
+		for environmentRows.Next() {
+			var lockedEnvironmentID uuid.UUID
+			if err := environmentRows.Scan(&lockedEnvironmentID); err != nil {
+				environmentRows.Close()
+				return err
+			}
+			lockedEnvironmentCount++
+		}
+		if err := environmentRows.Err(); err != nil {
+			environmentRows.Close()
+			return err
+		}
+		environmentRows.Close()
+		if lockedEnvironmentCount != len(environmentIDs) {
 			return ErrTaskWorkNotFound
+		}
+		if t.ListID != nil && lockedLists[*t.ListID].archivedAt != nil {
+			return ErrTaskWorkNotFound
+		}
+		if t.ListID != nil {
+			participantRootID = t.ID
+			if t.ParentTaskID != nil {
+				participantRootID = *t.ParentTaskID
+			}
+			participantEnvironmentID = lockedLists[*t.ListID].environmentID
+			participantIDs := canonicalTaskParticipantIDs(t.AssignedTo, t.CollaboratorIDs)
+			var accessErr error
+			affectedParticipants, accessErr = taskParticipantsNeedingGrant(ctx, tx, t.AccountID,
+				participantEnvironmentID, &participantRootID, participantIDs)
+			if accessErr != nil {
+				return accessErr
+			}
+			if len(affectedParticipants) > 0 && !t.ConfirmParticipantGrants {
+				return &TaskParticipantAccessConfirmationError{AffectedUserIDs: affectedParticipants}
+			}
 		}
 	} else if err := tx.QueryRow(ctx, `SELECT id FROM accounts WHERE id=$1 FOR UPDATE`, t.AccountID).Scan(new(uuid.UUID)); err != nil {
 		return err
@@ -341,6 +466,21 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 	}
 	if currentVersion != t.Version || !taskUUIDPointersEqual(observedListID, currentListID) || !taskUUIDPointersEqual(observedParentID, currentParentID) {
 		return ErrTaskVersionConflict
+	}
+	if t.MutationActor != nil {
+		currentAccess, accessErr := resolveTaskAccessWith(ctx, tx, t.AccountID, *t.MutationActor, t.ID)
+		if accessErr != nil {
+			return accessErr
+		}
+		if !TaskAccessAllows(currentAccess.Access, domain.TaskAccessEdit) {
+			if !currentAccess.Access.CanView {
+				return ErrTaskWorkNotFound
+			}
+			return ErrTaskAccessDenied
+		}
+		if t.ListID != nil && currentAccess.EnvironmentID != participantEnvironmentID {
+			return ErrTaskBulkMoveInvalid
+		}
 	}
 	if t.ListID != nil && t.StatusID != nil {
 		var statusCategory string
@@ -411,6 +551,16 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 	} else if _, err := tx.Exec(ctx, `DELETE FROM task_collaborators WHERE account_id=$1 AND task_id=$2 AND user_id=$3`, t.AccountID, t.ID, t.AssignedTo); err != nil {
 		return err
 	}
+	if len(affectedParticipants) > 0 {
+		actorID := t.CreatedBy
+		if t.MutationActor != nil {
+			actorID = *t.MutationActor
+		}
+		if err := confirmTaskParticipantGrants(ctx, tx, t.AccountID, participantRootID,
+			actorID, affectedParticipants, t.MutationOperationID); err != nil {
+			return err
+		}
+	}
 	if t.ParentTaskID == nil && t.ListID != nil && !taskUUIDPointersEqual(currentListID, t.ListID) {
 		var childMappingMissing bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(
@@ -469,6 +619,23 @@ func (r *TaskRepository) GetByID(ctx context.Context, id, accountID uuid.UUID) (
 		WHERE t.id=$1 AND t.account_id=$2
 	`, id, accountID)
 	return r.scanTask(row)
+}
+
+// GetByIDForActor applies the visibility predicate in the row-producing SQL.
+// Callers may enrich the task only after this query succeeds, so a hidden task
+// never reaches collaborators, breadcrumbs or other relationship loaders.
+func (r *TaskRepository) GetByIDForActor(ctx context.Context, id, accountID, actorID uuid.UUID) (*domain.Task, error) {
+	row := r.db.QueryRow(ctx, `
+		SELECT `+taskSelectFields+`
+		FROM tasks t `+taskJoins+`
+		WHERE t.id=$1 AND t.account_id=$2 AND t.deleted_at IS NULL
+		  AND `+taskActorCanViewSQL("t", "tl", "$3")+`
+	`, id, accountID, actorID)
+	task, err := r.scanTask(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrTaskWorkNotFound
+	}
+	return task, err
 }
 
 func (r *TaskRepository) MarkCompleted(ctx context.Context, id, accountID, completedBy uuid.UUID) error {
@@ -575,8 +742,27 @@ func normalizeTaskDateFilter(key, value, operator string) (string, string) {
 	return parsed.Format(time.RFC3339), operator
 }
 
+func taskDependencyPresencePredicate(actorExpression string) string {
+	base := "EXISTS(SELECT 1 FROM task_dependencies dependency WHERE dependency.account_id=t.account_id AND (dependency.predecessor_task_id=t.id OR dependency.successor_task_id=t.id))"
+	if strings.TrimSpace(actorExpression) == "" {
+		return base
+	}
+	return `EXISTS(SELECT 1 FROM task_dependencies dependency
+		JOIN tasks related_task ON related_task.account_id=dependency.account_id
+		  AND related_task.id=CASE WHEN dependency.predecessor_task_id=t.id THEN dependency.successor_task_id ELSE dependency.predecessor_task_id END
+		JOIN task_lists related_list ON related_list.account_id=related_task.account_id AND related_list.id=related_task.list_id
+		WHERE dependency.account_id=t.account_id
+		  AND (dependency.predecessor_task_id=t.id OR dependency.successor_task_id=t.id)
+		  AND related_task.deleted_at IS NULL
+		  AND ` + taskActorCanViewSQL("related_task", "related_list", actorExpression) + `)`
+}
+
 // GetByAccount returns tasks for an account with optional filters
 func (r *TaskRepository) GetByAccount(ctx context.Context, accountID uuid.UUID, filters map[string]string, limit, offset int) ([]*domain.Task, int, error) {
+	return r.getByAccount(ctx, accountID, filters, limit, offset, nil)
+}
+
+func (r *TaskRepository) getByAccount(ctx context.Context, accountID uuid.UUID, filters map[string]string, limit, offset int, cursor *TaskPageCursor) ([]*domain.Task, int, error) {
 	where := []string{"t.account_id=$1"}
 	if filters["deleted"] == "true" {
 		where = append(where, "t.deleted_at IS NOT NULL")
@@ -585,6 +771,12 @@ func (r *TaskRepository) GetByAccount(ctx context.Context, accountID uuid.UUID, 
 	}
 	args := []interface{}{accountID}
 	idx := 2
+	actorID, actorScoped := uuid.Parse(strings.TrimSpace(filters["_actor_user_id"]))
+	if actorScoped == nil {
+		where = append(where, taskActorCanViewSQL("t", "tl", fmt.Sprintf("$%d", idx)))
+		args = append(args, actorID)
+		idx++
+	}
 	if taskFiltersExcludeClosed(filters) {
 		where = append(where, "COALESCE(ts.category,CASE t.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END) NOT IN ('done','cancelled')")
 	}
@@ -626,6 +818,24 @@ func (r *TaskRepository) GetByAccount(ctx context.Context, accountID uuid.UUID, 
 		where = append(where, fmt.Sprintf("tl.folder_id=$%d", idx))
 		args = append(args, v)
 		idx++
+	}
+	if v := strings.TrimSpace(filters["environment_id"]); v != "" {
+		if environmentID, err := uuid.Parse(v); err == nil {
+			where = append(where, fmt.Sprintf("tl.environment_id=$%d", idx))
+			args = append(args, environmentID)
+			idx++
+		} else {
+			where = append(where, "FALSE")
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(filters["shared_with_me"]), "true") {
+		if actorScoped == nil {
+			where = append(where, taskActorDirectSharedSQL("t", "tl", fmt.Sprintf("$%d", idx)))
+			args = append(args, actorID)
+			idx++
+		} else {
+			where = append(where, "FALSE")
+		}
 	}
 	if v, ok := filters["parent_task_id"]; ok && v != "" {
 		where = append(where, fmt.Sprintf("t.parent_task_id=$%d", idx))
@@ -796,14 +1006,18 @@ func (r *TaskRepository) GetByAccount(ctx context.Context, accountID uuid.UUID, 
 			idx++
 		}
 	}
+	dependencyPresence := taskDependencyPresencePredicate("")
+	if actorScoped == nil {
+		dependencyPresence = taskDependencyPresencePredicate("$2")
+	}
 	for _, presence := range []struct {
 		key       string
 		predicate string
 	}{
 		{key: "has_subtasks", predicate: "EXISTS(SELECT 1 FROM tasks child WHERE child.account_id=t.account_id AND child.parent_task_id=t.id AND child.deleted_at IS NULL)"},
 		{key: "has_comments", predicate: "EXISTS(SELECT 1 FROM task_comments comment WHERE comment.account_id=t.account_id AND comment.task_id=t.id AND comment.deleted_at IS NULL)"},
-		{key: "has_attachments", predicate: "EXISTS(SELECT 1 FROM task_attachments attachment WHERE attachment.account_id=t.account_id AND attachment.task_id=t.id)"},
-		{key: "has_dependencies", predicate: "EXISTS(SELECT 1 FROM task_dependencies dependency WHERE dependency.account_id=t.account_id AND (dependency.predecessor_task_id=t.id OR dependency.successor_task_id=t.id))"},
+		{key: "has_attachments", predicate: "EXISTS(SELECT 1 FROM task_attachments attachment WHERE attachment.account_id=t.account_id AND attachment.task_id=t.id AND COALESCE(attachment.attachment_scope,'task')='task')"},
+		{key: "has_dependencies", predicate: dependencyPresence},
 	} {
 		if value := strings.ToLower(strings.TrimSpace(filters[presence.key])); value == "true" {
 			where = append(where, presence.predicate)
@@ -826,13 +1040,32 @@ func (r *TaskRepository) GetByAccount(ctx context.Context, accountID uuid.UUID, 
 		return nil, 0, err
 	}
 
+	if cursor != nil {
+		statusRankSQL := "CASE t.status WHEN 'overdue' THEN 0 WHEN 'pending' THEN 1 WHEN 'completed' THEN 2 WHEN 'cancelled' THEN 3 ELSE 4 END"
+		cursorParts := []string{
+			fmt.Sprintf("%s > $%d", statusRankSQL, idx),
+			fmt.Sprintf("(%s = $%d AND t.sort_order > $%d)", statusRankSQL, idx, idx+1),
+		}
+		args = append(args, cursor.StatusRank, cursor.SortOrder)
+		if cursor.DueAt == nil {
+			cursorParts = append(cursorParts, fmt.Sprintf("(%s = $%d AND t.sort_order = $%d AND t.due_at IS NULL AND t.id > $%d)", statusRankSQL, idx, idx+1, idx+2))
+			args = append(args, cursor.ID)
+			idx += 3
+		} else {
+			cursorParts = append(cursorParts, fmt.Sprintf("(%s = $%d AND t.sort_order = $%d AND (t.due_at > $%d::timestamptz OR t.due_at IS NULL OR (t.due_at = $%d::timestamptz AND t.id > $%d)))", statusRankSQL, idx, idx+1, idx+2, idx+2, idx+3))
+			args = append(args, cursor.DueAt.UTC(), cursor.ID)
+			idx += 4
+		}
+		whereClause += " AND (" + strings.Join(cursorParts, " OR ") + ")"
+	}
+
 	// Fetch
 	fetchSQL := fmt.Sprintf(`
 		SELECT %s
 		FROM tasks t %s
 		WHERE %s
 		ORDER BY
-			CASE t.status WHEN 'overdue' THEN 0 WHEN 'pending' THEN 1 WHEN 'completed' THEN 2 WHEN 'cancelled' THEN 3 END,
+			CASE t.status WHEN 'overdue' THEN 0 WHEN 'pending' THEN 1 WHEN 'completed' THEN 2 WHEN 'cancelled' THEN 3 ELSE 4 END,
 			t.sort_order ASC,
 			t.due_at ASC NULLS LAST,
 			t.id ASC
@@ -855,6 +1088,55 @@ func (r *TaskRepository) GetByAccount(ctx context.Context, accountID uuid.UUID, 
 		tasks = append(tasks, t)
 	}
 	return tasks, total, nil
+}
+
+func (r *TaskRepository) GetByAccountForActor(ctx context.Context, accountID, actorID uuid.UUID, filters map[string]string, limit, offset int) ([]*domain.Task, int, error) {
+	scoped := make(map[string]string, len(filters)+1)
+	for key, value := range filters {
+		scoped[key] = value
+	}
+	scoped["_actor_user_id"] = actorID.String()
+	return r.GetByAccount(ctx, accountID, scoped, limit, offset)
+}
+
+func taskStatusPageRank(status string) int {
+	switch status {
+	case domain.TaskStatusOverdue:
+		return 0
+	case domain.TaskStatusPending:
+		return 1
+	case domain.TaskStatusCompleted:
+		return 2
+	case domain.TaskStatusCancelled:
+		return 3
+	default:
+		return 4
+	}
+}
+
+func TaskCursorFromTask(task *domain.Task) *TaskPageCursor {
+	if task == nil {
+		return nil
+	}
+	return &TaskPageCursor{StatusRank: taskStatusPageRank(task.Status), SortOrder: task.SortOrder, DueAt: task.DueAt, ID: task.ID}
+}
+
+func (r *TaskRepository) GetByAccountForActorCursor(ctx context.Context, accountID, actorID uuid.UUID, filters map[string]string, limit int, cursor *TaskPageCursor) ([]*domain.Task, int, *TaskPageCursor, error) {
+	scoped := make(map[string]string, len(filters)+1)
+	for key, value := range filters {
+		scoped[key] = value
+	}
+	scoped["_actor_user_id"] = actorID.String()
+	tasks, total, err := r.getByAccount(ctx, accountID, scoped, limit+1, 0, cursor)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	var next *TaskPageCursor
+	if len(tasks) > limit {
+		tasks = tasks[:limit]
+		next = TaskCursorFromTask(tasks[len(tasks)-1])
+	}
+	return tasks, total, next, nil
 }
 
 // GetCalendarRange returns tasks for a date range (for calendar view)
@@ -890,47 +1172,81 @@ func (r *TaskRepository) GetCalendarRange(ctx context.Context, accountID uuid.UU
 	return tasks, nil
 }
 
-// GetStats returns task status counts for a user/account
-func (r *TaskRepository) GetStats(ctx context.Context, accountID, assignedTo uuid.UUID) (map[string]int, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT CASE
-			WHEN t.due_at < NOW() AND COALESCE(ts.category,'not_started') NOT IN ('done','cancelled') THEN 'overdue'
-			WHEN ts.category='done' THEN 'completed'
-			WHEN ts.category='cancelled' THEN 'cancelled'
-			ELSE 'pending'
-		END AS bucket, COUNT(*)
-		FROM tasks t
-		LEFT JOIN task_statuses ts ON ts.id=t.status_id AND ts.account_id=t.account_id
-		WHERE t.account_id=$1 AND t.assigned_to=$2 AND t.deleted_at IS NULL AND t.parent_task_id IS NULL
-		GROUP BY bucket
-	`, accountID, assignedTo)
+func (r *TaskRepository) GetCalendarRangeForActor(ctx context.Context, accountID, actorID uuid.UUID, from, to time.Time, assignedTo, environmentID *uuid.UUID) ([]*domain.Task, error) {
+	query := `SELECT ` + taskSelectFields + ` FROM tasks t ` + taskJoins + `
+		WHERE t.account_id=$1 AND t.deleted_at IS NULL AND t.due_at >= $2 AND t.due_at <= $3
+		  AND ($4::uuid IS NULL OR t.assigned_to=$4)
+		  AND ($5::uuid IS NULL OR tl.environment_id=$5)
+		  AND ` + taskActorCanViewSQL("t", "tl", "$6") + `
+		ORDER BY t.due_at ASC NULLS LAST,t.id`
+	rows, err := r.db.Query(ctx, query, accountID, from, to, assignedTo, environmentID, actorID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
-	stats := map[string]int{"pending": 0, "completed": 0, "overdue": 0, "cancelled": 0}
+	result := make([]*domain.Task, 0)
 	for rows.Next() {
-		var status string
-		var count int
-		if err := rows.Scan(&status, &count); err != nil {
+		task, err := r.scanTask(rows)
+		if err != nil {
 			return nil, err
 		}
-		stats[status] = count
+		result = append(result, task)
 	}
+	return result, rows.Err()
+}
 
-	// Also count today's tasks
-	var todayCount int
-	_ = r.db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM tasks t
+func taskStatsSQL() string {
+	category := `COALESCE(ts.category,CASE t.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END)`
+	return `SELECT
+		COUNT(*) FILTER (WHERE ` + category + ` NOT IN ('done','cancelled') AND NOT (t.due_at IS NOT NULL AND t.due_at<NOW()))::int,
+		COUNT(*) FILTER (WHERE ` + category + `='done')::int,
+		COUNT(*) FILTER (WHERE ` + category + ` NOT IN ('done','cancelled') AND t.due_at<NOW())::int,
+		COUNT(*) FILTER (WHERE ` + category + `='cancelled')::int,
+		COUNT(*) FILTER (WHERE ` + category + ` NOT IN ('done','cancelled') AND
+			(t.due_at AT TIME ZONE 'America/Lima')::date=(NOW() AT TIME ZONE 'America/Lima')::date)::int
+		FROM tasks t
+		JOIN task_lists tl ON tl.account_id=t.account_id AND tl.id=t.list_id
 		LEFT JOIN task_statuses ts ON ts.id=t.status_id AND ts.account_id=t.account_id
-		WHERE t.account_id=$1 AND t.assigned_to=$2 AND t.deleted_at IS NULL AND t.parent_task_id IS NULL
-		AND COALESCE(ts.category,'not_started') NOT IN ('done','cancelled')
-		AND t.due_at IS NOT NULL AND t.due_at >= CURRENT_DATE AND t.due_at < CURRENT_DATE + INTERVAL '1 day'
-	`, accountID, assignedTo).Scan(&todayCount)
-	stats["today"] = todayCount
+		WHERE t.account_id=$1 AND t.assigned_to=$3 AND t.deleted_at IS NULL AND t.parent_task_id IS NULL
+		  AND ` + taskActorCanViewSQL("t", "tl", "$2")
+}
 
-	return stats, nil
+// GetStats keeps the querying actor distinct from the assignee being
+// summarized. An admin-style assignee filter must never turn into the ACL
+// identity used by the visibility predicate.
+func (r *TaskRepository) GetStats(ctx context.Context, accountID, actorID, assignedTo uuid.UUID) (map[string]int, error) {
+	var pending, completed, overdue, cancelled, today int
+	if err := r.db.QueryRow(ctx, taskStatsSQL(), accountID, actorID, assignedTo).
+		Scan(&pending, &completed, &overdue, &cancelled, &today); err != nil {
+		return nil, err
+	}
+	return map[string]int{"pending": pending, "completed": completed, "overdue": overdue, "cancelled": cancelled, "today": today}, nil
+}
+
+func (r *TaskRepository) GetDueTasksForActor(ctx context.Context, accountID, actorID, assignedTo uuid.UUID, before time.Time, limit int) ([]*domain.Task, error) {
+	if limit < 1 || limit > 100 {
+		limit = 5
+	}
+	query := `SELECT ` + taskSelectFields + ` FROM tasks t ` + taskJoins + `
+		WHERE t.account_id=$1 AND t.assigned_to=$3 AND t.deleted_at IS NULL AND t.parent_task_id IS NULL
+		  AND t.due_at IS NOT NULL AND t.due_at<$4
+		  AND COALESCE(ts.category,CASE t.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END) NOT IN ('done','cancelled')
+		  AND ` + taskActorCanViewSQL("t", "tl", "$2") + `
+		ORDER BY t.due_at,t.id LIMIT $5`
+	rows, err := r.db.Query(ctx, query, accountID, actorID, assignedTo, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]*domain.Task, 0, limit)
+	for rows.Next() {
+		task, err := r.scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, task)
+	}
+	return result, rows.Err()
 }
 
 // MarkOverdue claims newly overdue tasks for notification. Overdue is a
@@ -1149,7 +1465,7 @@ func (r *TaskRepository) GetListsByAccount(ctx context.Context, accountID uuid.U
 
 func getTaskListsByAccount(ctx context.Context, querier taskListQuerier, accountID uuid.UUID) ([]*domain.TaskList, error) {
 	rows, err := querier.Query(ctx, `
-		SELECT tl.id, tl.account_id, tl.folder_id, tl.workflow_id, COALESCE(tl.workflow_inherited,TRUE), COALESCE(tl.is_default,FALSE), tl.name, COALESCE(tl.description,''), tl.color, COALESCE(tl.icon,CASE WHEN tl.is_default THEN 'inbox' ELSE 'list' END),
+		SELECT tl.id, tl.account_id, tl.environment_id, tl.folder_id, tl.workflow_id, COALESCE(tl.workflow_inherited,TRUE), COALESCE(tl.is_default,FALSE), tl.name, COALESCE(tl.description,''), tl.color, COALESCE(tl.icon,CASE WHEN tl.is_default THEN 'inbox' ELSE 'list' END),
 			tl.sort_order, tl.created_by, tl.archived_at, tl.created_at, tl.updated_at,
 			COALESCE(task_counts.task_count,0), COALESCE(task_counts.open_task_count,0),
 			COALESCE(task_counts.completed_task_count,0), COALESCE(task_counts.cancelled_task_count,0)
@@ -1177,7 +1493,7 @@ func getTaskListsByAccount(ctx context.Context, querier taskListQuerier, account
 	var lists []*domain.TaskList
 	for rows.Next() {
 		l := &domain.TaskList{}
-		if err := rows.Scan(&l.ID, &l.AccountID, &l.FolderID, &l.WorkflowID, &l.WorkflowInherited, &l.IsDefault, &l.Name, &l.Description, &l.Color, &l.Icon,
+		if err := rows.Scan(&l.ID, &l.AccountID, &l.EnvironmentID, &l.FolderID, &l.WorkflowID, &l.WorkflowInherited, &l.IsDefault, &l.Name, &l.Description, &l.Color, &l.Icon,
 			&l.SortOrder, &l.CreatedBy, &l.ArchivedAt, &l.CreatedAt, &l.UpdatedAt, &l.TaskCount,
 			&l.OpenTaskCount, &l.CompletedTaskCount, &l.CancelledTaskCount); err != nil {
 			return nil, err
@@ -1191,6 +1507,9 @@ func getTaskListsByAccount(ctx context.Context, querier taskListQuerier, account
 }
 
 func (r *TaskRepository) CreateList(ctx context.Context, l *domain.TaskList) error {
+	if l.EnvironmentID == uuid.Nil {
+		return ErrTaskWorkNotFound
+	}
 	l.ID = uuid.New()
 	now := time.Now()
 	l.CreatedAt = now
@@ -1210,7 +1529,7 @@ func (r *TaskRepository) CreateList(ctx context.Context, l *domain.TaskList) err
 	var inheritedWorkflowID uuid.UUID
 	if l.FolderID != nil {
 		if err := tx.QueryRow(ctx, `SELECT workflow_id FROM task_folders
-			WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, l.AccountID, *l.FolderID).Scan(&inheritedWorkflowID); err != nil {
+			WHERE account_id=$1 AND environment_id=$2 AND id=$3 AND archived_at IS NULL FOR UPDATE`, l.AccountID, l.EnvironmentID, *l.FolderID).Scan(&inheritedWorkflowID); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrTaskWorkNotFound
 			}
@@ -1226,7 +1545,7 @@ func (r *TaskRepository) CreateList(ctx context.Context, l *domain.TaskList) err
 		} else {
 			var workflowID uuid.UUID
 			if err := tx.QueryRow(ctx, `SELECT id FROM task_workflows
-				WHERE account_id=$1 AND is_default ORDER BY id LIMIT 1 FOR KEY SHARE`, l.AccountID).Scan(&workflowID); err != nil {
+				WHERE account_id=$1 AND environment_id=$2 AND is_default ORDER BY id LIMIT 1 FOR KEY SHARE`, l.AccountID, l.EnvironmentID).Scan(&workflowID); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return ErrTaskWorkNotFound
 				}
@@ -1237,21 +1556,22 @@ func (r *TaskRepository) CreateList(ctx context.Context, l *domain.TaskList) err
 	}
 	var lockedWorkflowID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT id FROM task_workflows
-		WHERE account_id=$1 AND id=$2 FOR KEY SHARE`, l.AccountID, *l.WorkflowID).Scan(&lockedWorkflowID); err != nil {
+		WHERE account_id=$1 AND environment_id=$2 AND id=$3 FOR KEY SHARE`, l.AccountID, l.EnvironmentID, *l.WorkflowID).Scan(&lockedWorkflowID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound
 		}
 		return err
 	}
 	var maxOrder int
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(sort_order), -1) FROM task_lists WHERE account_id=$1`, l.AccountID).Scan(&maxOrder); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(sort_order), -1) FROM task_lists
+		WHERE account_id=$1 AND environment_id=$2 AND folder_id IS NOT DISTINCT FROM $3::uuid`, l.AccountID, l.EnvironmentID, l.FolderID).Scan(&maxOrder); err != nil {
 		return err
 	}
 	l.SortOrder = maxOrder + 1
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO task_lists (id, account_id, folder_id, workflow_id, workflow_inherited, is_default, name, description, color, icon, sort_order, created_by, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-	`, l.ID, l.AccountID, l.FolderID, l.WorkflowID, l.WorkflowInherited, l.IsDefault, l.Name, l.Description, l.Color, l.Icon, l.SortOrder, l.CreatedBy, l.CreatedAt, l.UpdatedAt); err != nil {
+		INSERT INTO task_lists (id, account_id, environment_id, folder_id, workflow_id, workflow_inherited, is_default, name, description, color, icon, sort_order, created_by, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+	`, l.ID, l.AccountID, l.EnvironmentID, l.FolderID, l.WorkflowID, l.WorkflowInherited, l.IsDefault, l.Name, l.Description, l.Color, l.Icon, l.SortOrder, l.CreatedBy, l.CreatedAt, l.UpdatedAt); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -1319,17 +1639,31 @@ func (r *TaskRepository) DeleteList(ctx context.Context, id, accountID uuid.UUID
 	return tx.Commit(ctx)
 }
 
-func (r *TaskRepository) ToggleStar(ctx context.Context, id, accountID uuid.UUID) (bool, error) {
+func (r *TaskRepository) ToggleStar(ctx context.Context, id, accountID, actorID uuid.UUID) (bool, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockAndRequireTaskAccessTx(ctx, tx, accountID, actorID, []uuid.UUID{id}, domain.TaskAccessEdit); err != nil {
+		return false, err
+	}
 	var starred bool
-	err := r.db.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		UPDATE tasks SET starred = NOT COALESCE(starred, FALSE), updated_at=NOW(),version=COALESCE(version,1)+1
 		WHERE id=$1 AND account_id=$2 AND deleted_at IS NULL
 		RETURNING starred
 	`, id, accountID).Scan(&starred)
-	return starred, err
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return starred, nil
 }
 
-func (r *TaskRepository) ReorderTasks(ctx context.Context, accountID uuid.UUID, taskIDs []uuid.UUID) error {
+func (r *TaskRepository) ReorderTasks(ctx context.Context, accountID, actorID uuid.UUID, taskIDs []uuid.UUID) error {
 	if len(taskIDs) == 0 {
 		return ErrTaskOrderInvalid
 	}
@@ -1345,6 +1679,9 @@ func (r *TaskRepository) ReorderTasks(ctx context.Context, accountID uuid.UUID, 
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockAndRequireTaskAccessTx(ctx, tx, accountID, actorID, taskIDs, domain.TaskAccessEdit); err != nil {
+		return err
+	}
 
 	rows, err := tx.Query(ctx, `SELECT id,list_id,parent_task_id FROM tasks
 		WHERE account_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL`, accountID, taskIDs)
@@ -1426,18 +1763,124 @@ func taskUUIDPointersEqual(left, right *uuid.UUID) bool {
 	return *left == *right
 }
 
-func (r *TaskRepository) ReorderLists(ctx context.Context, accountID uuid.UUID, listIDs []uuid.UUID) error {
+func taskListOrderIsComplete(requested []uuid.UUID, available map[uuid.UUID]struct{}) bool {
+	if len(requested) == 0 || len(requested) != len(available) {
+		return false
+	}
+	seen := make(map[uuid.UUID]struct{}, len(requested))
+	for _, id := range requested {
+		if _, duplicate := seen[id]; duplicate {
+			return false
+		}
+		seen[id] = struct{}{}
+		if _, exists := available[id]; !exists {
+			return false
+		}
+	}
+	return true
+}
+
+func taskListOrderScopeMatches(environmentID uuid.UUID, folderID *uuid.UUID, candidateEnvironmentID uuid.UUID, candidateFolderID *uuid.UUID, candidateDefault bool) bool {
+	return !candidateDefault && environmentID == candidateEnvironmentID && taskUUIDPointersEqual(folderID, candidateFolderID)
+}
+
+func (r *TaskRepository) ReorderLists(ctx context.Context, accountID, actorID uuid.UUID, listIDs []uuid.UUID) error {
+	if len(listIDs) == 0 {
+		return ErrTaskListOrderInvalid
+	}
+	seen := make(map[uuid.UUID]struct{}, len(listIDs))
+	for _, id := range listIDs {
+		if _, duplicate := seen[id]; duplicate {
+			return ErrTaskListOrderInvalid
+		}
+		seen[id] = struct{}{}
+	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 
-	for i, id := range listIDs {
-		_, err := tx.Exec(ctx, `UPDATE task_lists SET sort_order=$1, updated_at=NOW() WHERE id=$2 AND account_id=$3`, i, id, accountID)
-		if err != nil {
+	rows, err := tx.Query(ctx, `SELECT list_item.id,list_item.environment_id,list_item.folder_id,list_item.is_default
+		FROM task_lists list_item
+		JOIN task_environments environment ON environment.account_id=list_item.account_id
+			AND environment.id=list_item.environment_id AND environment.archived_at IS NULL
+		WHERE list_item.account_id=$1 AND list_item.id=ANY($2::uuid[]) AND list_item.archived_at IS NULL
+		ORDER BY list_item.id FOR UPDATE OF list_item,environment`, accountID, listIDs)
+	if err != nil {
+		return err
+	}
+	var environmentID uuid.UUID
+	var folderID *uuid.UUID
+	loaded := 0
+	for rows.Next() {
+		var id, candidateEnvironmentID uuid.UUID
+		var candidateFolderID *uuid.UUID
+		var isDefault bool
+		if err := rows.Scan(&id, &candidateEnvironmentID, &candidateFolderID, &isDefault); err != nil {
+			rows.Close()
 			return err
 		}
+		if isDefault {
+			rows.Close()
+			return ErrTaskListOrderInvalid
+		}
+		if loaded == 0 {
+			environmentID, folderID = candidateEnvironmentID, candidateFolderID
+		} else if !taskListOrderScopeMatches(environmentID, folderID, candidateEnvironmentID, candidateFolderID, isDefault) {
+			rows.Close()
+			return ErrTaskListOrderInvalid
+		}
+		loaded++
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if loaded != len(listIDs) {
+		return ErrTaskListOrderInvalid
+	}
+	access, _, err := resolveEnvironmentAccessWith(ctx, tx, accountID, actorID, environmentID)
+	if err != nil {
+		return err
+	}
+	if !TaskAccessAllows(access, domain.TaskAccessFull) {
+		if access == nil || !access.CanView {
+			return ErrTaskWorkNotFound
+		}
+		return ErrTaskAccessDenied
+	}
+
+	rows, err = tx.Query(ctx, `SELECT id FROM task_lists
+		WHERE account_id=$1 AND environment_id=$2 AND folder_id IS NOT DISTINCT FROM $3::uuid
+			AND archived_at IS NULL AND NOT is_default
+		ORDER BY sort_order,id FOR UPDATE`, accountID, environmentID, folderID)
+	if err != nil {
+		return err
+	}
+	available := make(map[uuid.UUID]struct{}, len(listIDs))
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		available[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if !taskListOrderIsComplete(listIDs, available) {
+		return ErrTaskListOrderInvalid
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE task_lists list_item SET sort_order=ordered.position::int*1024,updated_at=NOW()
+		FROM unnest($2::uuid[]) WITH ORDINALITY AS ordered(id,position)
+		WHERE list_item.account_id=$1 AND list_item.id=ordered.id`, accountID, listIDs); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }

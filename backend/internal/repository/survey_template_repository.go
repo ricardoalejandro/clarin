@@ -47,7 +47,8 @@ const surveyTemplateSelect = `
 		st.thank_you_redirect_url,st.branding,st.measurement_config,st.revision,st.system_key,st.legacy_survey_id,
 		st.created_by,st.created_at,st.updated_at,
 		(SELECT COUNT(*) FROM survey_template_questions q WHERE q.account_id=st.account_id AND q.template_id=st.id AND q.is_active),
-		(SELECT COUNT(*) FROM surveys s WHERE s.account_id=st.account_id AND s.template_id=st.id),
+		(SELECT COUNT(*) FROM surveys s WHERE s.account_id=st.account_id AND s.template_id=st.id AND s.archived_at IS NULL),
+		(SELECT COUNT(*) FROM surveys s WHERE s.account_id=st.account_id AND s.template_id=st.id AND s.archived_at IS NOT NULL),
 		(SELECT COUNT(*) FROM survey_responses sr JOIN surveys s ON s.id=sr.survey_id AND s.account_id=sr.account_id
 		 WHERE s.account_id=st.account_id AND s.template_id=st.id AND sr.completed_at IS NOT NULL)
 	FROM survey_templates st`
@@ -63,7 +64,8 @@ func scanSurveyTemplate(row surveyTemplateScanner) (*domain.SurveyTemplate, erro
 		&t.ID, &t.AccountID, &t.Name, &t.Description, &t.Status,
 		&t.WelcomeTitle, &t.WelcomeDescription, &t.ThankYouTitle, &t.ThankYouMessage,
 		&t.ThankYouRedirectURL, &branding, &measurement, &t.Revision, &t.SystemKey, &t.LegacySurveyID,
-		&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.QuestionCount, &t.InstanceCount, &t.ResponseCount,
+		&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &t.QuestionCount, &t.InstanceCount,
+		&t.ArchivedInstanceCount, &t.ResponseCount,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrSurveyTemplateNotFound
@@ -755,18 +757,29 @@ func (r *SurveyTemplateRepository) CreateInstance(ctx context.Context, input dom
 	if err != nil {
 		return nil, err
 	}
+	instanceID := uuid.New()
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO survey_public_slug_reservations
+			(slug,owner_account_id,survey_id,reserved_at)
+		VALUES ($1,$2,$3,NOW())
+	`, input.Slug, input.AccountID, instanceID); err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrSurveySlugUnavailable
+		}
+		return nil, err
+	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO surveys (
-			account_id,name,description,slug,status,welcome_title,welcome_description,
+			id,account_id,name,description,slug,status,welcome_title,welcome_description,
 			thank_you_title,thank_you_message,thank_you_redirect_url,branding,
 			measurement_config,measurement_signature,created_by,
 			is_template,template_id,template_revision,origin_type,program_id,origin_label,
 			audience_mode,opens_at,closes_at,legacy_instance
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,FALSE,$15,$16,$17,$18,$19,$20,$21,$22,FALSE)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,FALSE,$16,$17,$18,$19,$20,$21,$22,$23,FALSE)
 		RETURNING id,account_id,template_id,template_revision,program_id,origin_type,origin_label,
 			name,slug,status,audience_mode,opens_at,closes_at,legacy_instance,
 			measurement_signature,analytics_tracking_started_at,created_at,updated_at
-	`, input.AccountID, name, template.Description, input.Slug, status,
+	`, instanceID, input.AccountID, name, template.Description, input.Slug, status,
 		template.WelcomeTitle, template.WelcomeDescription, template.ThankYouTitle,
 		template.ThankYouMessage, template.ThankYouRedirectURL, branding, measurement,
 		input.MeasurementSignature, input.CreatedBy,
@@ -871,41 +884,57 @@ func (r *SurveyTemplateRepository) CreateInstance(ctx context.Context, input dom
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	instance.CanDelete = true
+	instance.CanArchive = true
 	return instance, nil
 }
 
-const surveyInstanceSummarySelect = `
+var surveyInstanceSummarySelect = fmt.Sprintf(`
 	SELECT s.id,s.account_id,s.template_id,s.template_revision,s.program_id,s.origin_type,
 		s.origin_label,s.name,s.slug,s.status,s.audience_mode,s.opens_at,s.closes_at,
-		s.legacy_instance,s.measurement_signature,s.analytics_tracking_started_at,
+		s.legacy_instance,s.archived_at,s.archived_by,COALESCE(s.archived_from_status,''),
+		s.measurement_signature,s.analytics_tracking_started_at,
 		(SELECT COUNT(*) FROM survey_questions q WHERE q.survey_id=s.id),
 		(SELECT COUNT(*) FROM survey_instance_recipients r
 		 WHERE r.account_id=s.account_id AND r.survey_id=s.id AND r.merged_into_recipient_id IS NULL),
 		(SELECT COUNT(*) FROM survey_responses sr WHERE sr.account_id=s.account_id AND sr.survey_id=s.id AND sr.completed_at IS NOT NULL),
+		%s AS deletion_block_reason,
 		s.created_at,s.updated_at
-	FROM surveys s`
+	FROM surveys s`, surveyDeletionBlockSQL)
 
 func scanSurveyInstance(row surveyTemplateScanner) (*domain.SurveyInstanceSummary, error) {
 	i := &domain.SurveyInstanceSummary{}
 	if err := row.Scan(&i.ID, &i.AccountID, &i.TemplateID, &i.TemplateRevision, &i.ProgramID,
 		&i.OriginType, &i.OriginLabel, &i.Name, &i.Slug, &i.Status, &i.AudienceMode,
-		&i.OpensAt, &i.ClosesAt, &i.LegacyInstance, &i.MeasurementSignature,
+		&i.OpensAt, &i.ClosesAt, &i.LegacyInstance, &i.ArchivedAt, &i.ArchivedBy, &i.ArchivedFromStatus,
+		&i.MeasurementSignature,
 		&i.AnalyticsTrackingStartedAt, &i.QuestionCount, &i.RecipientCount,
-		&i.ResponseCount, &i.CreatedAt, &i.UpdatedAt); err != nil {
+		&i.ResponseCount, &i.DeletionBlockReason, &i.CreatedAt, &i.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrSurveyInstanceNotFound
 		}
 		return nil, err
 	}
+	i.CanDelete = i.DeletionBlockReason == ""
+	i.CanArchive = i.ArchivedAt == nil
+	i.CanRestore = i.ArchivedAt != nil
 	return i, nil
 }
 
-func (r *SurveyTemplateRepository) ListTemplateInstances(ctx context.Context, accountID, templateID uuid.UUID) ([]*domain.SurveyInstanceSummary, error) {
-	return r.listInstances(ctx, surveyInstanceSummarySelect+` WHERE s.account_id=$1 AND s.template_id=$2 ORDER BY s.created_at DESC,s.id`, accountID, templateID)
+func (r *SurveyTemplateRepository) ListTemplateInstances(ctx context.Context, accountID, templateID uuid.UUID, includeArchived bool) ([]*domain.SurveyInstanceSummary, error) {
+	query := surveyInstanceSummarySelect + ` WHERE s.account_id=$1 AND s.template_id=$2`
+	if !includeArchived {
+		query += ` AND s.archived_at IS NULL`
+	}
+	return r.listInstances(ctx, query+` ORDER BY s.created_at DESC,s.id`, accountID, templateID)
 }
 
-func (r *SurveyTemplateRepository) ListProgramInstances(ctx context.Context, accountID, programID uuid.UUID) ([]*domain.SurveyInstanceSummary, error) {
-	return r.listInstances(ctx, surveyInstanceSummarySelect+` WHERE s.account_id=$1 AND s.program_id=$2 ORDER BY s.created_at DESC,s.id`, accountID, programID)
+func (r *SurveyTemplateRepository) ListProgramInstances(ctx context.Context, accountID, programID uuid.UUID, includeArchived bool) ([]*domain.SurveyInstanceSummary, error) {
+	query := surveyInstanceSummarySelect + ` WHERE s.account_id=$1 AND s.program_id=$2`
+	if !includeArchived {
+		query += ` AND s.archived_at IS NULL`
+	}
+	return r.listInstances(ctx, query+` ORDER BY s.created_at DESC,s.id`, accountID, programID)
 }
 
 func (r *SurveyTemplateRepository) GetInstance(ctx context.Context, accountID, surveyID uuid.UUID) (*domain.SurveyInstanceSummary, error) {
@@ -970,12 +999,40 @@ func (r *SurveyTemplateRepository) GetRecipientByToken(ctx context.Context, surv
 }
 
 func (r *SurveyTemplateRepository) MarkRecipientOpened(ctx context.Context, recipientID, accountID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var surveyID uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		SELECT survey_id FROM survey_instance_recipients
+		WHERE account_id=$1 AND id=$2
+	`, accountID, recipientID).Scan(&surveyID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrSurveyRecipientInvalid
+		}
+		return err
+	}
+	// The same survey-row lock is used by response/session creation and
+	// conflicts with archive/delete. Therefore an opening can never be recorded
+	// after archive/delete has won the race, and a successful opening becomes
+	// visible to the deletion-history check before deletion can continue.
+	if err := lockSurveyForResponse(ctx, tx, accountID, surveyID); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `
 		UPDATE survey_instance_recipients SET status=CASE WHEN status='pending' THEN 'opened' ELSE status END,
 			opened_at=COALESCE(opened_at,NOW()),updated_at=NOW()
-		WHERE account_id=$1 AND id=$2
-	`, accountID, recipientID)
-	return err
+		WHERE account_id=$1 AND survey_id=$2 AND id=$3
+	`, accountID, surveyID, recipientID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrSurveyRecipientInvalid
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *SurveyTemplateRepository) ListProgramRecipients(ctx context.Context, accountID, programID, surveyID uuid.UUID, search string, limit, offset int) ([]*domain.SurveyInstanceRecipient, int, error) {

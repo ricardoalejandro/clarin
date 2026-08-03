@@ -10,6 +10,8 @@ import {
 import { apiDelete, apiPut } from '@/lib/api'
 import type { TaskFolder, TaskList } from '@/types/task'
 import TaskDestructiveConfirmDialog from './TaskDestructiveConfirmDialog'
+import TaskContainerAccessPanel from './TaskContainerAccessPanel'
+import type { TaskAccountUser } from './TaskEditorModal'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 
@@ -302,9 +304,10 @@ export function TaskIconPicker({ value, onChange, label = 'Icono', disabled = fa
   </>
 }
 
-export function TaskAppearanceDialog({ item, type, onClose, onSaved, onError, onOperation }: {
+export function TaskAppearanceDialog({ item, type, users = [], onClose, onSaved, onError, onOperation }: {
   item: TaskList | TaskFolder
   type: 'list' | 'folder'
+  users?: TaskAccountUser[]
   onClose: () => void
   onSaved: () => Promise<void> | void
   onError: (message: string) => void
@@ -330,7 +333,10 @@ export function TaskAppearanceDialog({ item, type, onClose, onSaved, onError, on
     onOperation?.(operationID, true)
     try {
       const path = type === 'folder' ? `/api/tasks/folders/${item.id}` : `/api/tasks/lists/${item.id}/structure`
-      const result = await apiPut(path, { name: name.trim(), color, icon, operation_id: operationID })
+      const payload = type === 'folder'
+        ? { name: name.trim(), color, operation_id: operationID }
+        : { name: name.trim(), color, icon, operation_id: operationID }
+      const result = await apiPut(path, payload)
       if (!result.success) {
         onError(result.error || `No se pudo actualizar ${type === 'folder' ? 'la carpeta' : 'la lista'}.`)
         return
@@ -357,12 +363,13 @@ export function TaskAppearanceDialog({ item, type, onClose, onSaved, onError, on
     } catch { setArchiveError('No se pudo mover a Papelera. Reintenta.') } finally { setSaving(false) }
   }
   return createPortal(<div className="fixed inset-0 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm" style={{ zIndex: TASK_OVERLAY_LAYERS.dialog }} role="presentation" onMouseDown={event => event.target === event.currentTarget && !saving && onClose()}>
-    <section role="dialog" aria-modal="true" aria-labelledby="task-appearance-title" className="w-full max-w-lg overflow-hidden rounded-3xl border border-white/70 bg-white shadow-2xl">
-      <header className="flex items-center border-b border-slate-100 px-5 py-4"><div className="flex h-10 w-10 items-center justify-center rounded-2xl" style={{ color, backgroundColor: `${color}18` }}><TaskContainerIcon value={icon} className="h-5 w-5" /></div><div className="ml-3 min-w-0 flex-1"><h2 id="task-appearance-title" className="text-base font-black text-slate-900">Personalizar {type === 'folder' ? 'carpeta' : 'lista'}</h2><p className="text-xs text-slate-400">Nombre, color e icono visibles en todo Clarin Work.</p></div><button type="button" disabled={saving} onClick={onClose} className="rounded-xl p-2 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button></header>
-      <div className="space-y-5 p-5">
+    <section role="dialog" aria-modal="true" aria-labelledby="task-appearance-title" className="flex max-h-[calc(100vh-32px)] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-white/70 bg-white shadow-2xl">
+      <header className="flex items-center border-b border-slate-100 px-5 py-4"><div className="flex h-10 w-10 items-center justify-center rounded-2xl" style={{ color, backgroundColor: `${color}18` }}><TaskContainerIcon value={type === 'folder' ? 'folder' : icon} className="h-5 w-5" /></div><div className="ml-3 min-w-0 flex-1"><h2 id="task-appearance-title" className="text-base font-black text-slate-900">Personalizar {type === 'folder' ? 'carpeta' : 'lista'}</h2><p className="text-xs text-slate-400">{type === 'folder' ? 'Nombre y color visibles en todo Clarin Work. El icono de carpeta es fijo.' : 'Nombre, color e icono visibles en todo Clarin Work.'}</p></div><button type="button" disabled={saving} onClick={onClose} className="rounded-xl p-2 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button></header>
+      <div className="min-h-0 space-y-5 overflow-y-auto p-5">
         <label className="block text-xs font-bold text-slate-600">Nombre<input autoFocus value={name} onChange={event => setName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void save() }} maxLength={120} className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-semibold text-slate-800 outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100" /></label>
         <div><p className="mb-1.5 text-xs font-bold text-slate-600">Color</p><TaskColorPicker value={color} onChange={setColor} label={`Color de ${type === 'folder' ? 'carpeta' : 'lista'}`} disabled={saving} /></div>
-        <div><p className="mb-1.5 text-xs font-bold text-slate-600">Icono</p><TaskIconPicker value={icon} onChange={setIcon} label={`Icono de ${type === 'folder' ? 'carpeta' : 'lista'}`} disabled={saving} /></div>
+        {type === 'folder' ? <div><p className="mb-1.5 text-xs font-bold text-slate-600">Icono</p><div className="flex min-h-11 items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3" aria-label="Icono fijo de carpeta"><span className="flex h-8 w-8 items-center justify-center rounded-xl bg-white text-slate-600"><TaskContainerIcon value="folder" className="h-4 w-4" /></span><span><span className="block text-xs font-bold text-slate-700">Carpeta</span><span className="block text-[10px] text-slate-400">Icono estándar fijo</span></span></div></div> : <div><p className="mb-1.5 text-xs font-bold text-slate-600">Icono</p><TaskIconPicker value={icon} onChange={setIcon} label="Icono de lista" disabled={saving} /></div>}
+        {item.permissions?.can_manage_access && <TaskContainerAccessPanel item={item} type={type} users={users} onChanged={onSaved} />}
       </div>
       <footer className="flex items-center gap-2 border-t border-slate-100 bg-slate-50/70 px-5 py-4">{!isDefault && <button type="button" disabled={saving || item.task_count > 0} title={item.task_count > 0 ? 'Mueve o envía primero las tareas activas a Papelera' : 'Mover a Papelera'} onClick={() => { setArchiveError(''); setArchiveOpen(true) }} className="mr-auto rounded-xl px-3 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-30">Mover a Papelera</button>}<button type="button" disabled={saving} onClick={onClose} className="rounded-xl px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-white">Cancelar</button><button type="button" disabled={saving || !name.trim()} onClick={() => void save()} className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg disabled:opacity-40">{saving ? 'Guardando…' : 'Guardar cambios'}</button></footer>
     </section>

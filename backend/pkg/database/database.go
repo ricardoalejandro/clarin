@@ -3787,6 +3787,7 @@ func Migrate(db *pgxpool.Pool) error {
 			EXECUTE FUNCTION sync_contact_identity_snapshots()`,
 	}
 	migrations = append(migrations, surveyTemplateInstanceMigrations()...)
+	migrations = append(migrations, surveyPublicSlugReservationMigrations()...)
 
 	var dataTx pgx.Tx
 	skipDataMigration := false
@@ -3848,6 +3849,9 @@ func Migrate(db *pgxpool.Pool) error {
 		return fmt.Errorf("program event retirement migration failed: %w", err)
 	}
 	if err := migrateTaskWork(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateTaskEnvironments(ctx, db); err != nil {
 		return err
 	}
 

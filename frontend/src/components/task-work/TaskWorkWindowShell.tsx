@@ -21,6 +21,7 @@ const RESIZE_HANDLES: Record<TaskWindowResizeEdge, string> = {
 interface Props {
   open: boolean
   storageKey: string
+  storageScope?: string
   title: string
   eyebrow: string
   description?: string
@@ -49,6 +50,7 @@ function isTemporaryOverlayOpen() {
 export default function TaskWorkWindowShell({
   open,
   storageKey,
+  storageScope,
   title,
   eyebrow,
   description,
@@ -67,7 +69,7 @@ export default function TaskWorkWindowShell({
   contentClassName = 'min-h-0 flex-1 overflow-y-auto',
   dataAttribute = 'task-work-window',
 }: Props) {
-  const windowState = useTaskWindow({ storageKey, defaultMode, defaultWidth, defaultHeight, minWidth, minHeight, align })
+  const windowState = useTaskWindow({ storageKey, storageScope, defaultMode, defaultWidth, defaultHeight, minWidth, minHeight, align })
   const panelRef = useRef<HTMLDivElement>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
   const closeRef = useRef(onRequestClose)

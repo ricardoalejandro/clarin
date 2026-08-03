@@ -470,7 +470,8 @@ func (s *Server) handleListSurveyTemplateInstances(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
-	instances, err := s.services.SurveyTemplate.ListTemplateInstances(c.Context(), accountID, templateID)
+	includeArchived, _ := strconv.ParseBool(c.Query("include_archived", "false"))
+	instances, err := s.services.SurveyTemplate.ListTemplateInstances(c.Context(), accountID, templateID, includeArchived)
 	if err != nil {
 		return surveyTemplateError(c, err)
 	}
@@ -497,7 +498,8 @@ func (s *Server) handleListProgramSurveyInstances(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ID inválido"})
 	}
-	instances, err := s.services.SurveyTemplate.ListProgramInstances(c.Context(), accountID, programID)
+	includeArchived, _ := strconv.ParseBool(c.Query("include_archived", "false"))
+	instances, err := s.services.SurveyTemplate.ListProgramInstances(c.Context(), accountID, programID, includeArchived)
 	if err != nil {
 		return surveyTemplateError(c, err)
 	}

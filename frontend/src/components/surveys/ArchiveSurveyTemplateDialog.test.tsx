@@ -9,7 +9,7 @@ const template = {
   id: 'template-1', account_id: 'account-1', name: 'Encuesta de cierre', description: '', status: 'active',
   welcome_title: '', welcome_description: '', thank_you_title: '', thank_you_message: '', thank_you_redirect_url: '',
   branding: {}, measurement_config: { dimensions: [] }, revision: 1, created_at: '', updated_at: '',
-  question_count: 8, instance_count: 3, response_count: 42,
+  question_count: 8, instance_count: 3, archived_instance_count: 0, response_count: 42,
 } satisfies SurveyTemplate;
 
 describe('ArchiveSurveyTemplateDialog', () => {

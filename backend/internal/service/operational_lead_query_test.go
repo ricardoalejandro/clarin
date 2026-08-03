@@ -142,6 +142,85 @@ func TestBuildOperationalLeadCountDoesNotBindUnusedInteractionTypes(t *testing.T
 	}
 }
 
+func TestOperationalTaskSignalsAreActorScopedAcrossFiltersAndAggregates(t *testing.T) {
+	actorID := uuid.New()
+	allowed := true
+	filters, cursor, err := validateOperationalLeadFilters(OperationalLeadFilters{
+		AccountID: uuid.New(), ActorID: &actorID, TaskDataAllowed: &allowed, TaskState: OperationalTaskPresent,
+		Fields: []string{"id", "task_count", "last_activity_at"}, Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("validate filters: %v", err)
+	}
+	query, args := buildOperationalLeadListSQL(filters, cursor)
+	for _, check := range []string{
+		"JOIN task_lists filter_task_list",
+		"JOIN task_lists operational_task_list",
+		"JOIN task_lists activity_task_list",
+		"filter_task.deleted_at IS NULL",
+		"task.deleted_at IS NULL",
+		"activity_task.deleted_at IS NULL",
+		"task_access_grants",
+		"task_environment_grants",
+	} {
+		if !strings.Contains(query, check) {
+			t.Errorf("actor-scoped operational SQL missing %q:\n%s", check, query)
+		}
+	}
+	if len(args) < 2 || args[1] != actorID {
+		t.Fatalf("actor argument missing or misplaced: %#v", args)
+	}
+}
+
+func TestOperationalTaskSignalsFailClosedWithoutPermissionDecision(t *testing.T) {
+	actorID := uuid.New()
+	filters, cursor, err := validateOperationalLeadFilters(OperationalLeadFilters{
+		AccountID: uuid.New(), ActorID: &actorID,
+		TaskState: OperationalTaskPresent, Fields: []string{"id", "task_count", "last_activity_at"}, Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("validate filters: %v", err)
+	}
+	query, args := buildOperationalLeadListSQL(filters, cursor)
+	if strings.Count(query, "AND FALSE") < 2 {
+		t.Fatalf("missing permission decision did not force task signals empty: %s", query)
+	}
+	for _, forbidden := range []string{"JOIN task_lists filter_task_list", "JOIN task_lists operational_task_list", "activity_task.updated_at", "direct_grant.user_id"} {
+		if strings.Contains(query, forbidden) {
+			t.Fatalf("missing permission decision retained task scope %q: %s", forbidden, query)
+		}
+	}
+	for _, arg := range args {
+		if arg == actorID {
+			t.Fatalf("unused actor leaked into fail-closed arguments: %#v", args)
+		}
+	}
+}
+
+func TestOperationalTaskSignalsAreEmptyWithoutTasksModulePermission(t *testing.T) {
+	actorID := uuid.New()
+	allowed := false
+	filters, cursor, err := validateOperationalLeadFilters(OperationalLeadFilters{
+		AccountID: uuid.New(), ActorID: &actorID, TaskDataAllowed: &allowed,
+		TaskState: OperationalTaskPresent, Fields: []string{"id", "task_count", "last_activity_at"}, Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("validate filters: %v", err)
+	}
+	query, args := buildOperationalLeadListSQL(filters, cursor)
+	if strings.Count(query, "AND FALSE") < 2 {
+		t.Fatalf("task signals were not forced empty without Tasks permission: %s", query)
+	}
+	if strings.Contains(query, "activity_task.updated_at") || strings.Contains(query, "direct_grant.user_id") {
+		t.Fatalf("task activity or ACL metadata remained in denied query: %s", query)
+	}
+	for _, arg := range args {
+		if arg == actorID {
+			t.Fatalf("unused actor leaked into denied query arguments: %#v", args)
+		}
+	}
+}
+
 func TestOperationalLeadSnapshotUsesOnlyIDsAndPreservesOrder(t *testing.T) {
 	ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
 	filters, cursor, err := validateOperationalLeadFilters(OperationalLeadFilters{AccountID: uuid.New(), IDs: ids, PreserveIDOrder: true, Fields: []string{"id", "phone"}, Limit: len(ids)})

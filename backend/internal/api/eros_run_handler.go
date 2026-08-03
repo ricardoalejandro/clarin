@@ -828,6 +828,9 @@ func (s *Server) processErosQuickTask(ctx context.Context, run *domain.ErosRun) 
 		if err != nil {
 			return err
 		}
+		taskDataAllowed := hasModulePermission(run.Permissions, domain.PermTasks)
+		filters.ActorID = &run.UserID
+		filters.TaskDataAllowed = &taskDataAllowed
 		payload, err = service.NewOperationalLeadQueryService(s.repos).Query(ctx, filters)
 		if err != nil {
 			return err
@@ -835,7 +838,7 @@ func (s *Server) processErosQuickTask(ctx context.Context, run *domain.ErosRun) 
 	case service.ErosQuickTaskActionLeadCycleSummary:
 		payload, err = s.quickLeadCycleSummary(ctx, run.AccountID, values)
 	case service.ErosQuickTaskActionFollowupPriority:
-		payload, err = s.quickFollowupPriority(ctx, run.AccountID, values)
+		payload, err = s.quickFollowupPriority(ctx, run.AccountID, run.UserID, hasModulePermission(run.Permissions, domain.PermTasks), values)
 	case service.ErosQuickTaskActionLeadDataQuality:
 		payload, err = s.quickLeadDataQualityScoped(ctx, run.AccountID, values)
 	case service.ErosQuickTaskActionPerformanceOverview:

@@ -51,12 +51,13 @@ export const EMPTY_TASK_FILTERS: TaskFilters = {
   completed_to: '',
 }
 
-type ScopeDescriptor = { type: 'all' | 'folder' | 'list'; id?: string }
+type ScopeDescriptor = { type: 'all' | 'environment' | 'folder' | 'list'; id?: string }
 
 interface Props {
   filters: TaskFilters
   statuses: TaskWorkflowStatus[]
   users: TaskAccountUser[]
+  storageScope?: string
   scope: ScopeDescriptor
   view: TaskViewMode
   collapsedStatusIds: string[]
@@ -301,7 +302,7 @@ export function TaskFilterChips({ filters, statuses, users, onChange, onOpenFilt
   </div>
 }
 
-export default function TaskFilterToolbar({ filters, statuses, users, scope, view, collapsedStatusIds, groupBy, groupDirection, collapsedGroupKeys, onChange, onApplyView, applyDefaultOnLoad, onDefaultLoadHandled, onError, showChips = true }: Props) {
+export default function TaskFilterToolbar({ filters, statuses, users, storageScope, scope, view, collapsedStatusIds, groupBy, groupDirection, collapsedGroupKeys, onChange, onApplyView, applyDefaultOnLoad, onDefaultLoadHandled, onError, showChips = true }: Props) {
   const filterButtonRef = useRef<HTMLButtonElement>(null)
   const viewsButtonRef = useRef<HTMLButtonElement>(null)
   const [mode, setMode] = useState<'filters' | 'views' | null>(null)
@@ -370,7 +371,7 @@ export default function TaskFilterToolbar({ filters, statuses, users, scope, vie
     {showChips && chips.slice(0, 4).map(chip => <span key={`${chip.key}:${chip.value || chip.label}`} className="inline-flex max-w-36 items-center gap-1 rounded-lg bg-slate-100 px-2 py-1.5 text-[10px] font-semibold text-slate-600"><span className="truncate">{chip.label}</span><button type="button" onClick={() => onChange(removeFilterChip(filters, chip.key, chip.value))} aria-label={`Quitar ${chip.label}`} className="rounded text-slate-400 hover:text-slate-700"><X className="h-3 w-3" /></button></span>)}
     {showChips && chips.length > 4 && <button type="button" onClick={openFilters} className="rounded-lg bg-slate-100 px-2 py-1.5 text-[10px] font-bold text-slate-500">+{chips.length - 4}</button>}
 
-    <TaskWorkWindowShell open={mode === 'filters'} storageKey="clarin:tasks:filter-window:v1" title="Filtrar tareas" eyebrow="Clarin Work" description="Prepara varios criterios y aplícalos juntos sin recargar el trabajo por cada clic." icon={Filter} defaultWidth={760} defaultHeight={720} minWidth={520} minHeight={500} onRequestClose={closeFilters} dataAttribute="task-filter-window" footer={<div className="flex flex-wrap items-center gap-2"><button type="button" onClick={() => setFilterDraft({ ...EMPTY_TASK_FILTERS })} disabled={!taskFilterCount(filterDraft)} className="mr-auto rounded-xl px-3 py-2 text-sm font-semibold text-slate-500 transition hover:bg-white disabled:opacity-35">Limpiar borrador</button><button type="button" onClick={closeFilters} className="rounded-xl px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-white">Cancelar</button><button type="button" onClick={applyFilters} className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-black text-white shadow-lg shadow-emerald-600/15 transition hover:bg-emerald-700"><Check className="h-4 w-4" />Aplicar filtros ({taskFilterCount(filterDraft)})</button></div>}><FilterPanel filters={filterDraft} statuses={uniqueStatuses} users={users} onChange={setFilterDraft} /></TaskWorkWindowShell>
+    <TaskWorkWindowShell open={mode === 'filters'} storageKey="clarin:tasks:filter-window" storageScope={storageScope} title="Filtrar tareas" eyebrow="Clarin Work" description="Prepara varios criterios y aplícalos juntos sin recargar el trabajo por cada clic." icon={Filter} defaultWidth={760} defaultHeight={720} minWidth={520} minHeight={500} onRequestClose={closeFilters} dataAttribute="task-filter-window" footer={<div className="flex flex-wrap items-center gap-2"><button type="button" onClick={() => setFilterDraft({ ...EMPTY_TASK_FILTERS })} disabled={!taskFilterCount(filterDraft)} className="mr-auto rounded-xl px-3 py-2 text-sm font-semibold text-slate-500 transition hover:bg-white disabled:opacity-35">Limpiar borrador</button><button type="button" onClick={closeFilters} className="rounded-xl px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-white">Cancelar</button><button type="button" onClick={applyFilters} className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-black text-white shadow-lg shadow-emerald-600/15 transition hover:bg-emerald-700"><Check className="h-4 w-4" />Aplicar filtros ({taskFilterCount(filterDraft)})</button></div>}><FilterPanel filters={filterDraft} statuses={uniqueStatuses} users={users} onChange={setFilterDraft} /></TaskWorkWindowShell>
     {mode === 'views' && typeof document !== 'undefined' && createPortal(<><button type="button" aria-label="Cerrar panel" onMouseDown={close} className="fixed inset-0 cursor-default bg-slate-950/30 backdrop-blur-[2px]" style={{ zIndex: TASK_OVERLAY_LAYERS.workspacePopover - 1 }} /><div role="dialog" aria-modal="true" aria-label="Vistas guardadas" style={{ ...style, zIndex: TASK_OVERLAY_LAYERS.workspacePopover }} className="fixed overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/25"><SavedViewsPanel views={views} loading={viewsLoading} filters={filters} scope={scope} view={view} collapsedStatusIds={collapsedStatusIds} groupBy={groupBy} groupDirection={groupDirection} collapsedGroupKeys={collapsedGroupKeys} onReload={loadViews} onApply={saved => { onApplyView({ ...saved, filters: normalizeTaskFilters(saved.filters) }); close() }} onError={onError} onClose={close} /></div></>, document.body)}
   </div>
 }

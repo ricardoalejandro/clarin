@@ -541,41 +541,21 @@ func (s *Server) getDashboardChatSummary(c *fiber.Ctx, accountID uuid.UUID) (*da
 
 func (s *Server) getDashboardTaskSummary(c *fiber.Ctx, accountID, userID uuid.UUID) (*dashboardTaskSummary, error) {
 	summary := &dashboardTaskSummary{Items: make([]dashboardTaskItem, 0)}
-	now := time.Now()
-	localNow := now.In(dashboardLocation())
+	localNow := time.Now().In(dashboardLocation())
 	tomorrow := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, dashboardLocation()).AddDate(0, 0, 1)
-
-	err := s.repos.DB().QueryRow(c.Context(), `
-		SELECT
-			COUNT(*) FILTER (WHERE due_at < $3)::int,
-			COUNT(*) FILTER (WHERE due_at >= $3 AND due_at < $4)::int
-		FROM tasks
-		WHERE account_id=$1 AND assigned_to=$2 AND status IN ('pending','overdue') AND due_at IS NOT NULL
-	`, accountID, userID, now, tomorrow).Scan(&summary.Overdue, &summary.DueToday)
+	stats, err := s.services.Task.GetStats(c.Context(), accountID, userID, userID)
 	if err != nil {
 		return nil, err
 	}
-
-	rows, err := s.repos.DB().Query(c.Context(), `
-		SELECT id, title, due_at, status, type
-		FROM tasks
-		WHERE account_id=$1 AND assigned_to=$2 AND status IN ('pending','overdue')
-			AND due_at IS NOT NULL AND due_at < $3
-		ORDER BY due_at ASC, id ASC
-		LIMIT 5
-	`, accountID, userID, tomorrow)
+	summary.Overdue, summary.DueToday = stats["overdue"], stats["today"]
+	tasks, err := s.services.Task.GetDueTasksForActor(c.Context(), accountID, userID, userID, tomorrow, 5)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		item := dashboardTaskItem{}
-		if err := rows.Scan(&item.ID, &item.Title, &item.DueAt, &item.Status, &item.Type); err != nil {
-			return nil, err
-		}
-		summary.Items = append(summary.Items, item)
+	for _, task := range tasks {
+		summary.Items = append(summary.Items, dashboardTaskItem{ID: task.ID, Title: task.Title, DueAt: task.DueAt, Status: task.Status, Type: task.Type})
 	}
-	return summary, rows.Err()
+	return summary, nil
 }
 
 func (s *Server) getDashboardEventSummary(c *fiber.Ctx, accountID uuid.UUID) (*dashboardEventSummary, error) {

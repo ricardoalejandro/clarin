@@ -65,7 +65,7 @@ func classifyTaskAttachmentPreview(filename, contentType string) (kind, status s
 
 func (r *TaskWorkRepository) EnsureAttachmentPreview(ctx context.Context, accountID, taskID, attachmentID uuid.UUID) (*domain.TaskAttachmentPreview, error) {
 	var filename, contentType string
-	if err := r.db.QueryRow(ctx, `SELECT ma.filename,ma.content_type FROM task_attachments ta JOIN media_assets ma ON ma.account_id=ta.account_id AND ma.id=ta.media_asset_id AND ma.status='active' WHERE ta.account_id=$1 AND ta.task_id=$2 AND ta.id=$3`, accountID, taskID, attachmentID).Scan(&filename, &contentType); err != nil {
+	if err := r.db.QueryRow(ctx, `SELECT ma.filename,ma.content_type FROM task_attachments ta JOIN media_assets ma ON ma.account_id=ta.account_id AND ma.id=ta.media_asset_id AND ma.status='active' WHERE ta.account_id=$1 AND ta.task_id=$2 AND ta.id=$3 AND COALESCE(ta.attachment_scope,'task')<>'comment_draft'`, accountID, taskID, attachmentID).Scan(&filename, &contentType); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrTaskWorkNotFound
 		}
@@ -106,7 +106,7 @@ func (r *TaskWorkRepository) hydrateAttachmentPreviewURL(ctx context.Context, it
 			}
 			return err
 		}
-		item.URL = "/api/media/file/" + key
+		item.URL = taskAttachmentPreviewDownloadURL(item.TaskID, item.AttachmentID)
 	}
 	return nil
 }
@@ -124,6 +124,7 @@ func (r *TaskWorkRepository) RetryAttachmentPreview(ctx context.Context, account
 	item, err := scanTaskAttachmentPreview(tx.QueryRow(ctx, `SELECT p.id,p.account_id,p.task_id,p.attachment_id,p.kind,p.status,p.derivative_asset_id,p.page_count,p.error,p.version,p.created_at,p.updated_at
 		FROM task_attachment_previews p
 		JOIN task_attachments ta ON ta.account_id=p.account_id AND ta.task_id=p.task_id AND ta.id=p.attachment_id
+			AND COALESCE(ta.attachment_scope,'task')<>'comment_draft'
 		WHERE p.account_id=$1 AND p.task_id=$2 AND p.attachment_id=$3
 		FOR UPDATE OF p`, accountID, taskID, attachmentID))
 	if err != nil {
@@ -244,7 +245,7 @@ func (r *TaskWorkRepository) CreateAttachmentComment(ctx context.Context, item *
 			return ErrTaskAttachmentCommentThreadClosed
 		}
 	}
-	command, err := tx.Exec(ctx, `INSERT INTO task_attachment_comments(id,account_id,task_id,attachment_id,parent_id,author_id,body,anchor,version,created_at,updated_at) SELECT $1,$2,$3,$4,$5,$6,$7,$8::jsonb,1,$9,$9 WHERE EXISTS(SELECT 1 FROM task_attachments WHERE account_id=$2 AND task_id=$3 AND id=$4)`, item.ID, item.AccountID, item.TaskID, item.AttachmentID, item.ParentID, item.AuthorID, strings.TrimSpace(item.Body), item.Anchor, item.CreatedAt)
+	command, err := tx.Exec(ctx, `INSERT INTO task_attachment_comments(id,account_id,task_id,attachment_id,parent_id,author_id,body,anchor,version,created_at,updated_at) SELECT $1,$2,$3,$4,$5,$6,$7,$8::jsonb,1,$9,$9 WHERE EXISTS(SELECT 1 FROM task_attachments WHERE account_id=$2 AND task_id=$3 AND id=$4 AND COALESCE(attachment_scope,'task')<>'comment_draft')`, item.ID, item.AccountID, item.TaskID, item.AttachmentID, item.ParentID, item.AuthorID, strings.TrimSpace(item.Body), item.Anchor, item.CreatedAt)
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -30,9 +31,10 @@ func parseTaskVersionInputs(raw []taskBulkVersionRequest) ([]repository.TaskVers
 }
 
 func (s *Server) canonicalTasks(c *fiber.Ctx, accountID uuid.UUID, ids []uuid.UUID) ([]*domain.Task, error) {
+	actorID := c.Locals("user_id").(uuid.UUID)
 	result := make([]*domain.Task, 0, len(ids))
 	for _, id := range ids {
-		task, err := s.services.Task.GetByID(c.Context(), id, accountID)
+		task, err := s.services.Task.GetByIDForActor(c.Context(), id, accountID, actorID)
 		if err != nil {
 			return nil, err
 		}
@@ -45,16 +47,24 @@ func (s *Server) handleBulkUpdateTasks(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	actorID := c.Locals("user_id").(uuid.UUID)
 	var req struct {
-		Items       []taskBulkVersionRequest `json:"items"`
-		Property    string                   `json:"property"`
-		Value       json.RawMessage          `json:"value"`
-		OperationID string                   `json:"operation_id"`
+		Items         []taskBulkVersionRequest `json:"items"`
+		Property      string                   `json:"property"`
+		Value         json.RawMessage          `json:"value"`
+		OperationID   string                   `json:"operation_id"`
+		ConfirmGrants bool                     `json:"confirm_grants"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
 	items, err := parseTaskVersionInputs(req.Items)
 	if err != nil {
+		return taskWorkError(c, err)
+	}
+	taskIDs := make([]uuid.UUID, 0, len(items))
+	for _, item := range items {
+		taskIDs = append(taskIDs, item.ID)
+	}
+	if err := s.requireTaskIDsAccess(c, taskIDs, domain.TaskAccessEdit); err != nil {
 		return taskWorkError(c, err)
 	}
 	parsedOperation, err := parseTaskOperationID(req.OperationID)
@@ -107,8 +117,16 @@ func (s *Server) handleBulkUpdateTasks(c *fiber.Ctx) error {
 	default:
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Propiedad masiva no soportada"})
 	}
-	result, err := s.repos.TaskWork.BulkUpdateTasks(c.Context(), accountID, repository.TaskBulkUpdateInput{Items: items, Property: property, Value: value, ActorID: actorID, Operation: operation})
+	result, err := s.repos.TaskWork.BulkUpdateTasks(c.Context(), accountID, repository.TaskBulkUpdateInput{
+		Items: items, Property: property, Value: value, ActorID: actorID, Operation: operation,
+		ConfirmParticipantGrants: req.ConfirmGrants,
+	})
 	if err != nil {
+		var confirmation *repository.TaskParticipantAccessConfirmationError
+		if errors.As(err, &confirmation) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "access_change_confirmation_required",
+				"affected_user_ids": confirmation.AffectedUserIDs})
+		}
 		return taskWorkError(c, err)
 	}
 	tasks, err := s.canonicalTasks(c, accountID, result.TaskIDs)
@@ -116,9 +134,9 @@ func (s *Server) handleBulkUpdateTasks(c *fiber.Ctx) error {
 		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
-	counts := s.taskHierarchyCounts(c.Context(), accountID)
+	counts := s.taskHierarchyCounts(c.Context(), accountID, actorID)
 	payload := putTaskMutationReconciliation(fiber.Map{"property": property, "tasks": tasks}, operation, counts)
-	s.broadcastTaskWork(accountID, "bulk_updated", payload)
+	s.broadcastTaskWork(c.Context(), accountID, "bulk_updated", payload)
 	return c.JSON(putTaskMutationReconciliation(fiber.Map{"success": true, "tasks": tasks}, operation, counts))
 }
 
@@ -141,6 +159,13 @@ func (s *Server) handleBulkTrashTasks(c *fiber.Ctx) error {
 	if err != nil {
 		return taskWorkError(c, repository.ErrTaskBulkTrashInvalid)
 	}
+	taskIDs := make([]uuid.UUID, 0, len(items))
+	for _, item := range items {
+		taskIDs = append(taskIDs, item.ID)
+	}
+	if err := s.requireTaskIDsAccess(c, taskIDs, domain.TaskAccessFull); err != nil {
+		return taskWorkError(c, err)
+	}
 	parsedOperation, err := parseTaskOperationID(req.OperationID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "operation_id inválido"})
@@ -154,9 +179,9 @@ func (s *Server) handleBulkTrashTasks(c *fiber.Ctx) error {
 		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
-	counts := s.taskHierarchyCounts(c.Context(), accountID)
+	counts := s.taskHierarchyCounts(c.Context(), accountID, actorID)
 	payload := putTaskMutationReconciliation(fiber.Map{"task_ids": result.TaskIDs}, operation, counts)
-	s.broadcastTaskWork(accountID, "bulk_deleted", payload)
+	s.broadcastTaskWork(c.Context(), accountID, "bulk_deleted", payload)
 	return c.JSON(putTaskMutationReconciliation(fiber.Map{"success": true, "task_ids": result.TaskIDs}, operation, counts))
 }
 
@@ -177,6 +202,9 @@ func (s *Server) handleGanttReschedule(c *fiber.Ctx) error {
 	taskID, err := uuid.Parse(req.TaskID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Tarea inválida"})
+	}
+	if _, accessErr := s.repos.TaskWork.RequireTaskAccess(c.Context(), accountID, actorID, taskID, domain.TaskAccessEdit); accessErr != nil {
+		return taskWorkError(c, accessErr)
 	}
 	start, err := time.Parse(time.RFC3339, req.StartAt)
 	if err != nil {
@@ -204,6 +232,6 @@ func (s *Server) handleGanttReschedule(c *fiber.Ctx) error {
 	}
 	s.invalidateTasksCache(accountID)
 	payload := fiber.Map{"operation_id": operation.String(), "tasks": tasks}
-	s.broadcastTaskWork(accountID, "gantt_rescheduled", payload)
+	s.broadcastTaskWorkToCommonViewers(c.Context(), accountID, result.TaskIDs, "gantt_rescheduled", payload)
 	return c.JSON(fiber.Map{"success": true, "operation_id": operation.String(), "tasks": tasks})
 }

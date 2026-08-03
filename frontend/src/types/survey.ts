@@ -67,11 +67,18 @@ export interface Survey {
   opens_at?: string;
   closes_at?: string;
   legacy_instance?: boolean;
+  archived_at?: string;
+  archived_by?: string;
+  archived_from_status?: 'draft' | 'active' | 'closed';
   created_by?: string;
   created_at: string;
   updated_at: string;
   question_count?: number;
   response_count?: number;
+  can_delete: boolean;
+  can_archive: boolean;
+  can_restore: boolean;
+  deletion_block_reason?: 'legacy' | 'has_responses' | 'has_activity' | 'has_uploads';
 }
 
 export interface SurveyQuestionConfig {
@@ -144,6 +151,22 @@ export interface SurveyAnswer {
   file_url?: string;
   upload_id?: string;
   created_at: string;
+}
+
+export interface SurveyTextAnswer {
+  id: string;
+  response_id: string;
+  value: string;
+  completed_at: string;
+  contact_id?: string;
+  contact_name?: string;
+  program_participant_id?: string;
+}
+
+export interface SurveyTextAnswersPage {
+  items: SurveyTextAnswer[];
+  total: number;
+  next_cursor?: string;
 }
 
 export interface SurveyResponse {

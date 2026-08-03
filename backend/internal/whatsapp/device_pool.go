@@ -1699,7 +1699,8 @@ func (p *DevicePool) downloadAndStoreMediaWithSource(ctx context.Context, instan
 
 	if p.repos != nil && p.repos.MediaAsset != nil {
 		existing, lookupErr := p.repos.MediaAsset.GetByHash(ctx, instance.AccountID, contentHash)
-		if lookupErr == nil && existing != nil && source != "whatsapp_status" && storage.IsAccountStatusObjectKey(instance.AccountID, existing.ObjectKey) {
+		if lookupErr == nil && existing != nil && source != "whatsapp_status" &&
+			(storage.IsAccountStatusObjectKey(instance.AccountID, existing.ObjectKey) || storage.IsProtectedTaskObjectKey(existing.ObjectKey)) {
 			contentHash = domain.MediaAssetHashNonStatusFallback + rawContentHash
 			existing, lookupErr = p.repos.MediaAsset.GetByHash(ctx, instance.AccountID, contentHash)
 		}

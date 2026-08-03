@@ -10,6 +10,8 @@ import { api } from '@/lib/api';
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue';
 import type { SurveyInstanceRecipient, SurveyInstanceSummary, SurveyTemplate } from '@/types/survey-template';
 import SurveyInstanceNameField from '@/components/surveys/SurveyInstanceNameField';
+import SurveyApplicationLifecycleActions from '@/components/surveys/SurveyApplicationLifecycleActions';
+import { partitionSurveyInstances, removeSurveyInstance, replaceSurveyInstance } from '@/lib/surveyInstanceLifecycle';
 
 interface ProgramSurveyPanelProps {
   programId: string;
@@ -33,12 +35,13 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
   const [nameAvailable, setNameAvailable] = useState<boolean | null>(null);
   const [conflictSuggestion, setConflictSuggestion] = useState('');
   const [recipientInstance, setRecipientInstance] = useState<SurveyInstanceSummary | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
 
   const loadInstances = useCallback(async () => {
     setLoading(true);
     setLoadError('');
     try {
-      const response = await api<SurveyInstanceSummary[]>(`/api/programs/${programId}/surveys`);
+      const response = await api<SurveyInstanceSummary[]>(`/api/programs/${programId}/surveys?include_archived=true`);
       if (!response.success) throw new Error(response.error || 'No se pudieron cargar las encuestas.');
       setInstances(response.data || []);
     } catch (error) {
@@ -72,6 +75,8 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
     () => templates.find(template => template.id === selectedTemplateId) || null,
     [selectedTemplateId, templates],
   );
+  const partitionedInstances = useMemo(() => partitionSurveyInstances(instances), [instances]);
+  const visibleInstances = showArchived ? partitionedInstances.archived : partitionedInstances.active;
 
   const createInstance = async () => {
     if (!selectedTemplate) return;
@@ -120,22 +125,23 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
       </div>
 
       <div className="p-4 sm:p-5">
+        {!loading && !loadError && instances.length > 0 && <div className="mb-4 grid min-h-11 grid-cols-2 rounded-xl bg-slate-100 p-1" role="group" aria-label="Filtrar encuestas del programa"><button type="button" onClick={() => setShowArchived(false)} className={`rounded-lg text-sm font-medium ${!showArchived ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}>Activas ({partitionedInstances.active.length})</button><button type="button" onClick={() => setShowArchived(true)} className={`rounded-lg text-sm font-medium ${showArchived ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}>Archivadas ({partitionedInstances.archived.length})</button></div>}
         {loading ? (
           <div className="flex min-h-32 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-emerald-600" /></div>
         ) : loadError ? (
           <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
             <p>{loadError}</p><button type="button" onClick={() => void loadInstances()} className="mt-3 min-h-11 font-semibold underline">Reintentar</button>
           </div>
-        ) : instances.length === 0 ? (
+        ) : visibleInstances.length === 0 ? (
           <div className="flex min-h-40 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-5 text-center">
             <FileText className="mb-3 h-8 w-8 text-slate-300" />
-            <p className="font-medium text-slate-700">Todavía no hay encuestas</p>
-            <p className="mt-1 max-w-sm text-sm text-slate-500">Aplica una plantilla y guarda los resultados dentro de este programa.</p>
-            {canManageSurveys && <button type="button" onClick={() => void openCreate()} className="mt-4 min-h-11 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white">Crear encuesta</button>}
+            <p className="font-medium text-slate-700">{showArchived ? 'No hay encuestas archivadas' : 'Todavía no hay encuestas activas'}</p>
+            <p className="mt-1 max-w-sm text-sm text-slate-500">{showArchived ? 'Las aplicaciones archivadas conservarán aquí sus resultados.' : 'Aplica una plantilla y guarda los resultados dentro de este programa.'}</p>
+            {canManageSurveys && !showArchived && <button type="button" onClick={() => void openCreate()} className="mt-4 min-h-11 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white">Crear encuesta</button>}
           </div>
         ) : (
           <div className="space-y-3">
-            {instances.map(instance => {
+            {visibleInstances.map(instance => {
               const completion = instance.recipient_count > 0 ? Math.round(instance.response_count / instance.recipient_count * 100) : 0;
               return (
                 <article key={instance.id} className="rounded-2xl border border-slate-200 p-4 transition hover:border-emerald-200">
@@ -144,12 +150,11 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="truncate font-semibold text-slate-900">{instance.name}</h3>
                         <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${instance.status === 'active' ? 'bg-emerald-50 text-emerald-700' : instance.status === 'closed' ? 'bg-slate-100 text-slate-600' : 'bg-amber-50 text-amber-700'}`}>{statusLabel[instance.status] || instance.status}</span>
+                        {instance.archived_at && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">Archivada</span>}
                       </div>
                       <p className="mt-1 text-xs text-slate-500">Plantilla v{instance.template_revision} · {instance.question_count} preguntas</p>
                     </div>
-                    <Link href={`/dashboard/surveys/${instance.id}?mode=instance&tab=analytics`} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50" aria-label={`Ver resultados de ${instance.name}`}>
-                      <BarChart3 className="h-4 w-4" />
-                    </Link>
+                    <div className="flex shrink-0 items-center gap-2">{canManageSurveys && <SurveyApplicationLifecycleActions target={instance} onUpdated={updated => setInstances(current => replaceSurveyInstance(current, updated))} onDeleted={id => setInstances(current => removeSurveyInstance(current, id))} />}<Link href={`/dashboard/surveys/${instance.id}?mode=instance&tab=analytics`} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50" aria-label={`Ver resultados de ${instance.name}`}><BarChart3 className="h-4 w-4" /></Link></div>
                   </div>
                   <div className="mt-4 grid grid-cols-3 gap-2 text-center">
                     <Metric value={instance.recipient_count} label="Invitados" />
@@ -157,13 +162,13 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
                     <Metric value={`${completion}%`} label="Completado" />
                   </div>
                   <div className="mt-4 flex items-center gap-2 border-t border-slate-100 pt-3">
-                    {instance.audience_mode === 'program_participants' ? (
+                    {!instance.archived_at && instance.audience_mode === 'program_participants' ? (
                       <button type="button" onClick={() => setRecipientInstance(instance)} className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-slate-100 px-3 text-sm font-semibold text-slate-700 hover:bg-slate-200">
                         <Send className="h-4 w-4" /> Enlaces por participante
                       </button>
-                    ) : (
+                    ) : !instance.archived_at ? (
                       <CopyPublicLink slug={instance.slug} />
-                    )}
+                    ) : <span className="flex min-h-11 flex-1 items-center justify-center rounded-xl bg-amber-50 px-3 text-sm font-medium text-amber-700">Archivada · solo historial</span>}
                     <Link href={`/dashboard/surveys/${instance.id}?mode=instance&tab=analytics`} className="inline-flex min-h-11 items-center gap-1 rounded-xl px-3 text-sm font-semibold text-emerald-700 hover:bg-emerald-50">Resultados <ChevronRight className="h-4 w-4" /></Link>
                   </div>
                 </article>

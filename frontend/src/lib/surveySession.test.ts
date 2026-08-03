@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSurveySessionEvent, surveySessionStorageKey } from './surveySession';
+import { buildSurveySessionEvent, surveySessionRequestHeaders, surveySessionStorageKey } from './surveySession';
 
 describe('survey session telemetry helpers', () => {
   it('keeps public and recipient sessions independent', () => {
@@ -11,5 +11,8 @@ describe('survey session telemetry helpers', () => {
     expect(buildSurveySessionEvent('respondent', '', 'opened')).not.toHaveProperty('question_id');
     expect(buildSurveySessionEvent('respondent', 'recipient', 'answered', 'question')).toMatchObject({ phase: 'answered', question_id: 'question' });
   });
-});
 
+  it('sends the stable respondent token while the opening document is loaded', () => {
+    expect(surveySessionRequestHeaders('respondent-1')).toEqual({ 'X-Survey-Session-Token': 'respondent-1' });
+  });
+});

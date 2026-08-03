@@ -1,11 +1,79 @@
 package repository
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
 )
+
+func TestTaskStatsSQLSeparatesActorFromAssignee(t *testing.T) {
+	query := taskStatsSQL()
+	for _, fragment := range []string{"t.account_id=$1", "direct_grant.user_id=$2", "environment_grant.user_id=$2", "t.assigned_to=$3", "JOIN task_lists tl"} {
+		if !strings.Contains(query, fragment) {
+			t.Errorf("stats SQL missing %q: %s", fragment, query)
+		}
+	}
+}
+
+func TestTaskDependencyPresenceDoesNotRevealHiddenRelation(t *testing.T) {
+	t.Parallel()
+	predicate := taskDependencyPresencePredicate("$2")
+	for _, invariant := range []string{
+		"JOIN tasks related_task",
+		"related_task.deleted_at IS NULL",
+		"JOIN task_lists related_list",
+		"direct_grant.user_id=$2",
+		"environment_grant.user_id=$2",
+	} {
+		if !strings.Contains(predicate, invariant) {
+			t.Fatalf("dependency presence leaked a hidden relation; missing %q: %s", invariant, predicate)
+		}
+	}
+}
+
+func TestGetTaskByIDForActorFiltersBeforeHydration(t *testing.T) {
+	t.Parallel()
+	source := readRepositorySource(t, "task_repository.go")
+	for _, invariant := range []string{
+		"func (r *TaskRepository) GetByIDForActor",
+		"t.deleted_at IS NULL",
+		"taskActorCanViewSQL(\"t\", \"tl\", \"$3\")",
+	} {
+		if !strings.Contains(source, invariant) {
+			t.Fatalf("actor task lookup lost SQL visibility invariant %q", invariant)
+		}
+	}
+}
+
+func TestTaskCreateAndUpdateLockEnvironmentDuringACLRecheck(t *testing.T) {
+	t.Parallel()
+	source := readRepositorySource(t, "task_repository.go")
+	for _, invariant := range []string{
+		"AND archived_at IS NULL FOR SHARE",
+		"id=ANY($2::uuid[]) AND archived_at IS NULL ORDER BY id FOR SHARE",
+		"resolveEnvironmentAccessWith(ctx, tx, t.AccountID, *t.MutationActor, environmentID)",
+		"resolveTaskAccessWith(ctx, tx, t.AccountID, *t.MutationActor, t.ID)",
+	} {
+		if !strings.Contains(source, invariant) {
+			t.Fatalf("task write lost transactional environment ACL invariant %q", invariant)
+		}
+	}
+}
+
+func TestTaskCursorFromTaskMirrorsCollectionOrder(t *testing.T) {
+	dueAt := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
+	id := uuid.New()
+	cursor := TaskCursorFromTask(&domain.Task{ID: id, Status: domain.TaskStatusCompleted, SortOrder: 4096, DueAt: &dueAt})
+	if cursor == nil || cursor.StatusRank != 2 || cursor.SortOrder != 4096 || cursor.ID != id || cursor.DueAt == nil || !cursor.DueAt.Equal(dueAt) {
+		t.Fatalf("task cursor does not mirror task ordering: %#v", cursor)
+	}
+	if rank := taskStatusPageRank("legacy-unknown"); rank != 4 {
+		t.Fatalf("unknown statuses must sort last, got rank %d", rank)
+	}
+}
 
 func TestTaskFilterValuesDeduplicatesAndTrims(t *testing.T) {
 	values := taskFilterValues(" high,urgent, high ,,medium ")
