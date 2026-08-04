@@ -5,18 +5,17 @@ import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api, apiBlob } from '@/lib/api';
 import { Survey, SurveyQuestion, SurveyQuestionConfig, SurveyLogicRule, SurveyAnalytics, SurveyResponse, SurveyBranding, SurveyMeasurementDimension, SurveyQuestionMeasurement, QUESTION_TYPE_LABELS, QuestionType, FONT_OPTIONS, TITLE_SIZE_OPTIONS, BUTTON_STYLE_OPTIONS } from '@/types/survey';
-import type { SurveyInstanceSummary, SurveyMeasurementSeries, SurveyTemplate, SurveyTemplateQuestion } from '@/types/survey-template';
+import type { SurveyMeasurementSeries, SurveyTemplate, SurveyTemplateQuestion } from '@/types/survey-template';
 import DuplicateSurveyTemplateDialog from '@/components/surveys/DuplicateSurveyTemplateDialog';
-import SurveyInstanceNameField from '@/components/surveys/SurveyInstanceNameField';
 import ArchiveSurveyTemplateDialog from '@/components/surveys/ArchiveSurveyTemplateDialog';
 import SurveyDesignEditor, { type DesignMediaDraft } from '@/components/surveys/SurveyDesignEditor';
 import SurveyTextAnswersPanel from '@/components/surveys/SurveyTextAnswersPanel';
 import SurveyApplicationLifecycleActions from '@/components/surveys/SurveyApplicationLifecycleActions';
+import SurveyApplicationsBrowser from '@/components/surveys/SurveyApplicationsBrowser';
 import { formatSurveyDuration } from '@/lib/surveyAnalytics';
 import { surveyNonChartAnswerLabel } from '@/lib/surveyQuestionAnswerLabel';
 import { buildSurveyResultsExportPayload, createSurveyResultsExportSingleFlight, saveSurveyResultsBlob } from '@/lib/surveyResultsExport';
 import { createSurveySlugAvailabilityController, type SurveySlugAvailabilityController } from '@/lib/surveySlugAvailability';
-import { partitionSurveyInstances, reconcileTemplateInstanceCounts, removeSurveyInstance, replaceSurveyInstance } from '@/lib/surveyInstanceLifecycle';
 import {
   ArrowLeft, Save, Plus, Trash2, GripVertical, Eye, Share2, BarChart3,
   Type, AlignLeft, CircleDot, CheckSquare, Star, SlidersHorizontal,
@@ -179,10 +178,6 @@ function SurveyTemplateEditorPage({ templateId }: { templateId: string }) {
   const [hasChanges, setHasChanges] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [instances, setInstances] = useState<SurveyInstanceSummary[]>([]);
-  const [instancesLoading, setInstancesLoading] = useState(false);
-  const [instancesLoaded, setInstancesLoaded] = useState(false);
-  const [createInstanceOpen, setCreateInstanceOpen] = useState(false);
   const [duplicateOpen, setDuplicateOpen] = useState(false);
   const [editorDraftDirty, setEditorDraftDirty] = useState(false);
 
@@ -222,24 +217,6 @@ function SurveyTemplateEditorPage({ templateId }: { templateId: string }) {
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
   }, [editorDraftDirty, hasChanges]);
-
-  const loadInstances = useCallback(async () => {
-    setInstancesLoading(true);
-    try {
-      const response = await api<SurveyInstanceSummary[]>(`/api/survey-templates/${templateId}/instances?include_archived=true`);
-      if (!response.success) throw new Error(response.error || 'No se pudo cargar el historial.');
-      setInstances(response.data || []);
-      setInstancesLoaded(true);
-    } catch (error) {
-      setMessage({ type: 'error', text: error instanceof Error ? error.message : 'No se pudo cargar el historial.' });
-    } finally {
-      setInstancesLoading(false);
-    }
-  }, [templateId]);
-
-  useEffect(() => {
-    if (activeTab === 'instances' && !instancesLoaded) void loadInstances();
-  }, [activeTab, instancesLoaded, loadInstances]);
 
   const updateQuestion = (idx: number, updates: Partial<SurveyQuestion>) => {
     setQuestions(current => current.map((question, index) => index === idx ? { ...question, ...updates } : question));
@@ -360,18 +337,6 @@ function SurveyTemplateEditorPage({ templateId }: { templateId: string }) {
     ? true
     : window.confirm('Hay cambios sin guardar. ¿Quieres salir y descartarlos?');
 
-  const updateApplicationLifecycle = (updated: SurveyInstanceSummary) => {
-    const previous = instances.find(instance => instance.id === updated.id);
-    setInstances(current => replaceSurveyInstance(current, updated));
-    if (previous) setTemplate(current => current ? reconcileTemplateInstanceCounts(current, previous, updated) : current);
-  };
-
-  const deleteApplication = (id: string) => {
-    const previous = instances.find(instance => instance.id === id);
-    setInstances(current => removeSurveyInstance(current, id));
-    if (previous) setTemplate(current => current ? reconcileTemplateInstanceCounts(current, previous, null) : current);
-  };
-
   if (loading) return <div className="flex h-full items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-emerald-600" /></div>;
   if (loadError || !template) return <div className="flex h-full items-center justify-center p-6"><div className="max-w-md rounded-2xl border border-rose-200 bg-rose-50 p-5 text-center text-sm text-rose-700"><p>{loadError || 'Plantilla no encontrada.'}</p><button type="button" onClick={() => void loadTemplate()} className="mt-3 min-h-11 font-semibold underline">Reintentar</button></div></div>;
 
@@ -402,12 +367,11 @@ function SurveyTemplateEditorPage({ templateId }: { templateId: string }) {
         {activeTab === 'builder' && <BuilderTab questions={questions} selectedQ={selectedQ} setSelectedQ={setSelectedQ} addQuestion={addQuestion} removeQuestion={removeQuestion} updateQuestion={updateQuestion} moveQuestion={moveQuestion} allQuestions={questions} />}
         {activeTab === 'design' && <SurveyDesignEditor survey={editorSurvey} onSave={saveDesign} onDirtyChange={setEditorDraftDirty} saving={saving} />}
         {activeTab === 'measurement' && <MeasurementTab template={template} questions={questions} onDirtyChange={setEditorDraftDirty} onSaved={(savedTemplate, savedQuestions) => { setTemplate(savedTemplate); setQuestions(savedQuestions.map(templateQuestionToEditor)); setMessage({ type: 'success', text: 'Configuración de medición guardada. Solo afectará nuevas aplicaciones.' }); }} />}
-        {activeTab === 'instances' && <TemplateInstancesTab template={template} instances={instances} loading={instancesLoading} onRefresh={() => void loadInstances()} onCreate={() => setCreateInstanceOpen(true)} onUpdated={updateApplicationLifecycle} onDeleted={deleteApplication} />}
+        {activeTab === 'instances' && <SurveyApplicationsBrowser template={template} variant="embedded" onCountsChange={counts => setTemplate(current => current ? { ...current, instance_count: counts.current, archived_instance_count: counts.archived } : current)} />}
       </main>
 
       {message && <div className={`fixed bottom-[max(1.5rem,env(safe-area-inset-bottom))] left-1/2 z-[100] flex w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 items-center gap-2 rounded-xl px-4 py-3 text-sm font-medium text-white shadow-xl ${message.type === 'success' ? 'bg-emerald-600' : 'bg-rose-600'}`} role="status">{message.type === 'success' ? <CheckCircle2 className="h-4 w-4 shrink-0" /> : <XCircle className="h-4 w-4 shrink-0" />}<span className="min-w-0 flex-1">{message.text}</span><button type="button" onClick={() => setMessage(null)} className="min-h-8 min-w-8" aria-label="Cerrar mensaje">×</button></div>}
       {showSettings && <TemplateSettingsDialog template={template} saving={saving} onClose={() => setShowSettings(false)} onArchive={() => { setArchiveError(''); setArchiveOpen(true); }} onRestore={async () => { const saved = await updateTemplate({ status: 'active' }, 'Plantilla restaurada.'); if (saved) setShowSettings(false); }} onSave={async changes => { const saved = await updateTemplate(changes, 'Configuración de plantilla guardada.'); if (saved) setShowSettings(false); }} />}
-      {createInstanceOpen && <StandaloneApplicationDialog template={template} onClose={() => setCreateInstanceOpen(false)} onCreated={instance => { setInstances(current => [instance, ...current]); setInstancesLoaded(true); setTemplate(current => current ? { ...current, instance_count: current.instance_count + 1 } : current); setCreateInstanceOpen(false); setMessage({ type: 'success', text: 'Aplicación creada. Ya puedes compartir su enlace.' }); }} />}
       {duplicateOpen && <DuplicateSurveyTemplateDialog sourceName={template.name} questionCount={template.question_count} measurementDimensionCount={template.measurement_config?.dimensions?.length || 0} onClose={() => setDuplicateOpen(false)} onDuplicate={duplicateTemplate} />}
       {archiveOpen && <ArchiveSurveyTemplateDialog template={template} archiving={saving} error={archiveError} onClose={() => !saving && setArchiveOpen(false)} onConfirm={async () => { const saved = await updateTemplate({ status: 'archived' }, 'Plantilla archivada.'); if (saved) { setArchiveOpen(false); setShowSettings(false); } else setArchiveError('No se pudo archivar la plantilla.'); }} />}
     </div>
@@ -523,52 +487,6 @@ function MeasurementTab({ template, questions, onDirtyChange, onSaved }: {
     {dimensions.length === 0 ? <div className="flex min-h-48 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white p-6 text-center"><TrendingUp className="h-9 w-9 text-slate-300" /><p className="mt-3 font-medium text-slate-700">Todavía no hay dimensiones</p><p className="mt-1 max-w-md text-sm text-slate-500">Las analíticas descriptivas seguirán funcionando. Agrega una dimensión solo cuando exista una interpretación definida.</p><button type="button" onClick={addDimension} className="mt-4 min-h-11 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white">Agregar dimensión</button></div> : <div className="space-y-3">{dimensions.map((dimension, index) => <article key={`${dimension.key}-${index}`} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="grid gap-3 md:grid-cols-[1fr_0.8fr_0.7fr_auto]"><label className="block"><span className="mb-1 block text-xs font-medium text-slate-500">Nombre</span><input value={dimension.name} maxLength={120} onChange={event => setDimensions(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item))} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label><label className="block"><span className="mb-1 block text-xs font-medium text-slate-500">Clave estable</span><input value={dimension.key} maxLength={64} onChange={event => renameDimension(index, event.target.value)} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 font-mono text-sm" /></label><label className="block"><span className="mb-1 block text-xs font-medium text-slate-500">Mínimo respondido</span><div className="relative"><input type="number" min={1} max={100} value={Math.round(dimension.minimum_answered_ratio * 100)} onChange={event => setDimensions(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, minimum_answered_ratio: Math.max(0.01, Math.min(1, Number(event.target.value) / 100)) } : item))} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 pr-8 text-sm" /><span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">%</span></div></label><button type="button" onClick={() => removeDimension(index)} className="mt-5 inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl text-rose-500 hover:bg-rose-50" aria-label={`Eliminar ${dimension.name}`}><Trash2 className="h-4 w-4" /></button></div><label className="mt-3 block"><span className="mb-1 block text-xs font-medium text-slate-500">Descripción</span><input value={dimension.description || ''} onChange={event => setDimensions(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, description: event.target.value } : item))} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" placeholder="Qué representa este puntaje" /></label></article>)}</div>}
     <section><div className="mb-3"><h3 className="font-semibold text-slate-900">Preguntas medibles</h3><p className="mt-1 text-sm text-slate-500">Rating, Likert y opción única. Las demás preguntas permanecen como resultados descriptivos.</p></div>{measurableQuestions.length === 0 ? <p className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-500">Agrega al menos una pregunta numérica o de opción única.</p> : <div className="space-y-3">{measurableQuestions.map((question, index) => { const measurement = assignments[question.id]; return <article key={question.id} className="rounded-2xl border border-slate-200 bg-white p-4"><div className="flex items-start gap-3"><span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-xs font-bold text-slate-600">{index + 1}</span><div className="min-w-0 flex-1"><h4 className="text-sm font-medium text-slate-800">{question.title}</h4><p className="mt-0.5 text-xs text-slate-400">{QUESTION_TYPE_LABELS[question.type]}</p></div></div><div className="mt-4 grid gap-3 sm:grid-cols-3"><label className="block"><span className="mb-1 block text-xs font-medium text-slate-500">Dimensión</span><select value={measurement?.dimension_key || ''} onChange={event => assignDimension(question, event.target.value)} disabled={dimensions.length === 0} className="min-h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm disabled:bg-slate-50"><option value="">No puntuar</option>{dimensions.map(dimension => <option key={dimension.key} value={dimension.key}>{dimension.name}</option>)}</select></label>{measurement && <><label className="block"><span className="mb-1 block text-xs font-medium text-slate-500">Peso</span><input type="number" min={0.01} max={100} step={0.1} value={measurement.weight} onChange={event => setAssignments(current => ({ ...current, [question.id]: { ...measurement, weight: Number(event.target.value) } }))} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label><label className="flex min-h-11 items-center gap-3 self-end rounded-xl border border-slate-200 px-3 text-sm text-slate-700"><input type="checkbox" checked={Boolean(measurement.reverse)} onChange={event => setAssignments(current => ({ ...current, [question.id]: { ...measurement, reverse: event.target.checked } }))} className="h-4 w-4 rounded border-slate-300 text-emerald-600" />Invertir sentido</label></>}</div>{measurement && question.type === 'single_choice' && <div className="mt-3 grid gap-2 sm:grid-cols-2">{(question.config.options || []).map(option => <label key={option} className="flex min-h-11 items-center gap-2 rounded-xl bg-slate-50 px-3"><span className="min-w-0 flex-1 truncate text-xs text-slate-600">{option}</span><input type="number" value={measurement.option_scores?.[option] ?? 0} onChange={event => setAssignments(current => ({ ...current, [question.id]: { ...measurement, option_scores: { ...(measurement.option_scores || {}), [option]: Number(event.target.value) } } }))} className="h-9 w-24 rounded-lg border border-slate-200 bg-white px-2 text-right text-sm" aria-label={`Puntaje de ${option}`} /></label>)}</div>}</article>; })}</div>}</section>
   </div></div>;
-}
-
-function TemplateInstancesTab({ template, instances, loading, onRefresh, onCreate, onUpdated, onDeleted }: {
-  template: SurveyTemplate;
-  instances: SurveyInstanceSummary[];
-  loading: boolean;
-  onRefresh: () => void;
-  onCreate: () => void;
-  onUpdated: (instance: SurveyInstanceSummary) => void;
-  onDeleted: (id: string) => void;
-}) {
-  const [showArchived, setShowArchived] = useState(false);
-  const partitioned = partitionSurveyInstances(instances);
-  const visible = showArchived ? partitioned.archived : partitioned.active;
-  return <div className="h-full overflow-y-auto p-4 sm:p-6"><div className="mx-auto max-w-5xl">
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold text-slate-900">Aplicaciones e historial</h2><p className="text-sm text-slate-500">Cada aplicación conserva la versión exacta que se publicó.</p></div><button type="button" onClick={onCreate} disabled={template.status === 'archived' || template.question_count === 0} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white disabled:opacity-50"><Plus className="h-4 w-4" />Aplicar plantilla</button></div>
-    <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3"><MetricCard value={template.instance_count} label="Activas" /><MetricCard value={template.archived_instance_count || 0} label="Archivadas" /><MetricCard value={template.response_count} label="Respuestas" /><MetricCard value={`v${template.revision}`} label="Versión actual" /></div>
-    <div className="mt-4 grid min-h-11 grid-cols-2 rounded-xl bg-slate-100 p-1" role="group" aria-label="Filtrar aplicaciones"><button type="button" onClick={() => setShowArchived(false)} className={`rounded-lg text-sm font-medium ${!showArchived ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}>Activas ({partitioned.active.length})</button><button type="button" onClick={() => setShowArchived(true)} className={`rounded-lg text-sm font-medium ${showArchived ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}>Archivadas ({partitioned.archived.length})</button></div>
-    {loading ? <div className="flex min-h-56 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-emerald-600" /></div> : visible.length === 0 ? <div className="mt-5 flex min-h-56 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white p-8 text-center"><Layers3 className="mb-3 h-9 w-9 text-slate-300" /><p className="font-medium text-slate-700">{showArchived ? 'No hay aplicaciones archivadas' : 'Todavía no hay aplicaciones activas'}</p><p className="mt-1 max-w-md text-sm text-slate-500">{showArchived ? 'Las aplicaciones que archives aparecerán aquí con todas sus respuestas.' : 'Aplícala desde un programa o crea una aplicación pública independiente.'}</p><button type="button" onClick={onRefresh} className="mt-4 min-h-11 text-sm font-semibold text-emerald-700">Actualizar</button></div> : <div className="mt-5 space-y-3">{visible.map(instance => <article key={instance.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="flex flex-col gap-3 sm:flex-row sm:items-start"><div className="flex min-w-0 flex-1 items-start gap-3"><span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${instance.archived_at ? 'bg-slate-300' : instance.status === 'active' ? 'bg-emerald-500' : instance.status === 'draft' ? 'bg-amber-400' : 'bg-slate-300'}`} /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="truncate font-semibold text-slate-900">{instance.name}</h3><span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">v{instance.template_revision}</span>{instance.archived_at && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">Archivada</span>}</div><p className="mt-1 text-sm text-slate-500">{instance.origin_label} · {instance.response_count} respuestas{instance.recipient_count > 0 ? ` de ${instance.recipient_count} destinatarios` : ''}</p><p className="mt-1 text-xs text-slate-400">Creada {format(new Date(instance.created_at), 'd MMM yyyy, HH:mm', { locale: es })}</p></div></div><div className="flex items-center justify-end gap-2"><SurveyApplicationLifecycleActions target={instance} onUpdated={onUpdated} onDeleted={onDeleted} /><Link href={`/dashboard/surveys/${instance.id}?mode=instance&tab=analytics`} className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50" aria-label={`Ver resultados de ${instance.name}`}><BarChart3 className="h-4 w-4" /></Link></div></div>{instance.audience_mode === 'public' && instance.status === 'active' && !instance.archived_at && <div className="mt-3 flex items-center gap-2 border-t border-slate-100 pt-3"><code className="min-w-0 flex-1 truncate rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">/f/{instance.slug}</code><a href={`/f/${instance.slug}`} target="_blank" rel="noreferrer" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-600" aria-label="Abrir aplicación"><ExternalLink className="h-4 w-4" /></a></div>}</article>)}</div>}
-  </div></div>;
-}
-
-function MetricCard({ value, label }: { value: number | string; label: string }) {
-  return <div className="rounded-2xl border border-slate-200 bg-white p-3 text-center sm:p-4"><p className="text-xl font-bold text-slate-900">{value}</p><p className="text-xs text-slate-500">{label}</p></div>;
-}
-
-function StandaloneApplicationDialog({ template, onClose, onCreated }: { template: SurveyTemplate; onClose: () => void; onCreated: (instance: SurveyInstanceSummary) => void }) {
-  const [name, setName] = useState('');
-  const [nameAvailable, setNameAvailable] = useState<boolean | null>(null);
-  const [opensAt, setOpensAt] = useState('');
-  const [closesAt, setClosesAt] = useState('');
-  const [creating, setCreating] = useState(false);
-  const [error, setError] = useState('');
-  const [conflictSuggestion, setConflictSuggestion] = useState('');
-  const create = async () => {
-    setCreating(true); setError(''); setConflictSuggestion('');
-    try {
-      const response = await api<SurveyInstanceSummary & { suggested_name?: string }>(`/api/survey-templates/${template.id}/instances`, { method: 'POST', body: JSON.stringify({ name: name.trim(), status: 'active', audience_mode: 'public', opens_at: opensAt ? new Date(opensAt).toISOString() : null, closes_at: closesAt ? new Date(closesAt).toISOString() : null }) });
-      if (!response.success || !response.data) {
-        if (response.status === 409 && response.data?.suggested_name) setConflictSuggestion(response.data.suggested_name);
-        throw new Error(response.error || 'No se pudo crear la aplicación.');
-      }
-      onCreated(response.data);
-    } catch (creationError) { setError(creationError instanceof Error ? creationError.message : 'No se pudo crear la aplicación.'); } finally { setCreating(false); }
-  };
-  return <div className="fixed inset-0 z-[95] flex items-end justify-center bg-slate-950/45 sm:items-center sm:p-4" role="dialog" aria-modal="true" aria-labelledby="standalone-survey-title"><div className="w-full bg-white shadow-2xl sm:max-w-lg sm:rounded-2xl"><header className="flex items-center justify-between border-b border-slate-200 px-4 py-3.5"><div><h2 id="standalone-survey-title" className="font-semibold text-slate-900">Aplicación pública</h2><p className="text-xs text-slate-500">Creará una copia inmutable de la plantilla v{template.revision}.</p></div><button type="button" onClick={onClose} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl text-slate-500" aria-label="Cerrar"><XCircle className="h-5 w-5" /></button></header><div className="space-y-4 p-4 sm:p-5"><SurveyInstanceNameField templateId={template.id} value={name} onChange={setName} onAvailabilityChange={setNameAvailable} autoFocus /><div className="grid gap-4 sm:grid-cols-2"><label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Apertura <span className="font-normal text-slate-400">(opcional)</span></span><input type="datetime-local" value={opensAt} onChange={event => setOpensAt(event.target.value)} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label><label className="block"><span className="mb-1.5 block text-sm font-medium text-slate-700">Cierre <span className="font-normal text-slate-400">(opcional)</span></span><input type="datetime-local" value={closesAt} onChange={event => setClosesAt(event.target.value)} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" /></label></div>{error && <div className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700"><p>{error}</p>{conflictSuggestion && <button type="button" onClick={() => setName(conflictSuggestion)} className="mt-2 min-h-9 rounded-lg bg-white px-3 text-xs font-semibold shadow-sm">Usar “{conflictSuggestion}”</button>}</div>}</div><footer className="flex gap-3 border-t border-slate-200 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><button type="button" onClick={onClose} className="min-h-11 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700">Cancelar</button><button type="button" onClick={() => void create()} disabled={creating || !name.trim() || nameAvailable === false} className="inline-flex min-h-11 flex-[1.4] items-center justify-center gap-2 rounded-xl bg-emerald-600 text-sm font-semibold text-white disabled:opacity-50">{creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Layers3 className="h-4 w-4" />}Crear aplicación</button></footer></div></div>;
 }
 
 function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {

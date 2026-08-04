@@ -899,6 +899,7 @@ func (s *Server) setupRoutes() {
 	surveyTemplates.Put("/:templateId/questions", s.handleReplaceSurveyTemplateQuestions)
 	surveyTemplates.Get("/:templateId/instances", s.handleListSurveyTemplateInstances)
 	surveyTemplates.Post("/:templateId/instances", s.handleCreateStandaloneSurveyInstance)
+	surveyTemplates.Get("/:templateId/applications", s.handleListSurveyTemplateApplications)
 
 	surveys := protected.Group("/surveys", s.requirePermission(domain.PermSurveys))
 	surveys.Get("/", s.handleListSurveys)
@@ -1242,7 +1243,7 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 		return err
 	}
 
-	token, refreshToken, user, userAccounts, err := s.services.Auth.Login(c.Context(), username, req.Password, s.cfg.JWTSecret)
+	token, refreshToken, user, accountCount, err := s.services.Auth.Login(c.Context(), username, req.Password, s.cfg.JWTSecret)
 	if err != nil {
 		eventType := "login_failure"
 		if strings.Contains(strings.ToLower(err.Error()), "bloqueada") || strings.Contains(strings.ToLower(err.Error()), "bloqueado") {
@@ -1257,40 +1258,13 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 
 	s.setAuthCookies(c, token, refreshToken)
 
-	// Build accounts list for response
-	accountsList := make([]fiber.Map, 0)
-	for _, ua := range userAccounts {
-		accountsList = append(accountsList, fiber.Map{
-			"account_id":   ua.AccountID,
-			"account_name": ua.AccountName,
-			"account_slug": ua.AccountSlug,
-			"role":         ua.Role,
-			"is_default":   ua.IsDefault,
-		})
-	}
-
 	// Build permissions for response (mirrors JWT logic)
 	// Per-account admin/super_admin gets full access
 	activeRole := user.Role
-	for _, ua := range userAccounts {
-		if ua.AccountID == user.AccountID {
-			activeRole = ua.Role
-			break
-		}
-	}
 	isAdmin := user.IsAdmin || user.IsSuperAdmin || activeRole == domain.RoleAdmin || activeRole == domain.RoleSuperAdmin
 	permissions := []string{domain.PermAll}
 	if !isAdmin {
-		for _, ua := range userAccounts {
-			if ua.AccountID == user.AccountID {
-				if ua.Permissions != nil {
-					permissions = ua.Permissions
-				} else {
-					permissions = []string{}
-				}
-				break
-			}
-		}
+		permissions, _ = s.repos.UserAccount.GetUserPermissions(c.Context(), user.ID, user.AccountID)
 	}
 
 	return c.JSON(fiber.Map{
@@ -1307,7 +1281,7 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 			"account_name":   user.AccountName,
 			"permissions":    permissions,
 		},
-		"accounts": accountsList,
+		"account_count": accountCount,
 	})
 }
 
@@ -1423,34 +1397,21 @@ func (s *Server) handleGetMe(c *fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "User not found"})
 	}
 
-	// Get user's accounts
-	userAccounts, _ := s.services.Auth.GetUserAccounts(c.Context(), userID)
-	accountsList := make([]fiber.Map, 0)
-	activeAccountName := user.AccountName
-	for _, ua := range userAccounts {
-		accountsList = append(accountsList, fiber.Map{
-			"account_id":   ua.AccountID,
-			"account_name": ua.AccountName,
-			"account_slug": ua.AccountSlug,
-			"role":         ua.Role,
-			"is_default":   ua.IsDefault,
-		})
-		if ua.AccountID == accountID {
-			activeAccountName = ua.AccountName
-		}
+	membership, membershipErr := s.repos.UserAccount.GetByUserAndAccount(c.Context(), userID, accountID)
+	if membershipErr != nil {
+		return c.Status(403).JSON(fiber.Map{"success": false, "error": "Account access revoked"})
 	}
+	accountCount, countErr := s.repos.UserAccount.CountByUserID(c.Context(), userID)
+	if countErr != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudieron cargar las cuentas"})
+	}
+	activeAccountName := membership.AccountName
 
 	// Extract permissions from JWT claims (already computed and embedded)
 	claims := c.Locals("claims").(*service.JWTClaims)
 
 	// Compute per-account admin status (same logic as login/switchAccount)
-	var activeRole string
-	for _, ua := range userAccounts {
-		if ua.AccountID == accountID {
-			activeRole = ua.Role
-			break
-		}
-	}
+	activeRole := membership.Role
 	isAdmin := user.IsAdmin || user.IsSuperAdmin || activeRole == domain.RoleAdmin || activeRole == domain.RoleSuperAdmin
 
 	// Compute permissions: admins get wildcard, agents get role-based permissions
@@ -1523,7 +1484,7 @@ func (s *Server) handleGetMe(c *fiber.Ctx) error {
 			"permissions":            permissions,
 			"kommo_enabled":          kommoEnabled,
 		},
-		"accounts": accountsList,
+		"account_count": accountCount,
 	})
 }
 
@@ -16656,24 +16617,15 @@ func (s *Server) handleSwitchAccount(c *fiber.Ctx) error {
 
 func (s *Server) handleGetMyAccounts(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(uuid.UUID)
-
-	userAccounts, err := s.services.Auth.GetUserAccounts(c.Context(), userID)
+	accountID := c.Locals("account_id").(uuid.UUID)
+	page, err := s.listMyAccountOptions(c.Context(), userID, accountID, c.Query("query"), c.Query("cursor"), c.Query("limit"))
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		if errors.Is(err, errInvalidAccountOptionsPage) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Paginación de cuentas inválida"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudieron cargar las cuentas"})
 	}
-
-	accountsList := make([]fiber.Map, 0)
-	for _, ua := range userAccounts {
-		accountsList = append(accountsList, fiber.Map{
-			"account_id":   ua.AccountID,
-			"account_name": ua.AccountName,
-			"account_slug": ua.AccountSlug,
-			"role":         ua.Role,
-			"is_default":   ua.IsDefault,
-		})
-	}
-
-	return c.JSON(fiber.Map{"success": true, "accounts": accountsList})
+	return c.JSON(page)
 }
 
 // --- Admin User-Account Assignment Handlers ---

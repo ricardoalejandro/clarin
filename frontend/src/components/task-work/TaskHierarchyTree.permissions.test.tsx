@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { TaskFolder, TaskList, TaskPermissions } from '@/types/task'
 import TaskHierarchyTree, { taskHierarchyCanManageStructure, taskHierarchyCanReceiveTasks } from './TaskHierarchyTree'
@@ -49,7 +49,7 @@ function folder(permissions?: TaskPermissions): TaskFolder {
   }
 }
 
-function tree(collapsed: boolean) {
+function tree(collapsed: boolean, onOpenStructure?: () => void) {
   return render(<TaskHierarchyTree
     folders={[folder(view)]}
     rootLists={[list('default', 'Bandeja general', full, true), list('edit', 'Editar solamente', edit), list('unknown', 'Sin capability')]}
@@ -58,6 +58,7 @@ function tree(collapsed: boolean) {
     onSelect={vi.fn()}
     onChanged={vi.fn()}
     onError={vi.fn()}
+    onOpenStructure={onOpenStructure}
   />)
 }
 
@@ -84,5 +85,13 @@ describe('TaskHierarchyTree permissions', () => {
     const unknown = list('unknown', 'Sin capability')
     expect(taskHierarchyCanReceiveTasks(unknown)).toBe(false)
     expect(taskHierarchyCanManageStructure(unknown)).toBe(false)
+  })
+
+  it('keeps structure management beside the compact folders heading', () => {
+    const onOpenStructure = vi.fn()
+    tree(false, onOpenStructure)
+    expect(document.querySelector('[data-task-folders-heading]')).toHaveTextContent('Carpetas')
+    fireEvent.click(screen.getByRole('button', { name: 'Organizar carpetas y listas' }))
+    expect(onOpenStructure).toHaveBeenCalledTimes(1)
   })
 })

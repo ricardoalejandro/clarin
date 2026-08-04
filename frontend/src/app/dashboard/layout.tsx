@@ -7,6 +7,7 @@ import Link from 'next/link'
 import NotificationProvider from '@/components/NotificationProvider'
 import ErosAssistant from '@/components/ErosAssistant'
 import TaskBadge from '@/components/TaskBadge'
+import AccountSwitcher from '@/components/AccountSwitcher'
 import { ChatMobileChromeProvider } from '@/components/chat/ChatMobileChromeContext'
 import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshToken, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthSession } from '@/lib/api'
 import { dashboardSidebarHeaderState } from '@/lib/dashboardSidebarState'
@@ -22,8 +23,6 @@ import {
   PanelLeftOpen,
   Tags,
   Shield,
-  ChevronsUpDown,
-  Building2,
   BookOpenCheck,
   Workflow,
   CalendarCheck,
@@ -62,14 +61,6 @@ interface User {
   kommo_enabled?: boolean
 }
 
-interface UserAccount {
-  account_id: string
-  account_name: string
-  account_slug: string
-  role: string
-  is_default: boolean
-}
-
 function subscriptionLabel(status?: string) {
   const labels: Record<string, string> = {
     trialing: 'Prueba',
@@ -101,12 +92,10 @@ export default function DashboardLayout({
   const router = useRouter()
   const pathname = usePathname()
   const [user, setUser] = useState<User | null>(null)
-  const [accounts, setAccounts] = useState<UserAccount[]>([])
+  const [accountCount, setAccountCount] = useState(1)
   const [loading, setLoading] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [showAccountSwitcher, setShowAccountSwitcher] = useState(false)
-  const accountSwitcherRef = useRef<HTMLDivElement>(null)
   const [updateAvailable, setUpdateAvailable] = useState(false)
   const [serverVersion, setServerVersion] = useState<string | null>(null)
   const [showChangelog, setShowChangelog] = useState(false)
@@ -213,16 +202,6 @@ export default function DashboardLayout({
   }, [])
 
   useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (accountSwitcherRef.current && !accountSwitcherRef.current.contains(e.target as Node)) {
-        setShowAccountSwitcher(false)
-      }
-    }
-    if (showAccountSwitcher) document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [showAccountSwitcher])
-
-  useEffect(() => {
     const saved = localStorage.getItem('sidebar_collapsed')
     if (saved === 'true') setSidebarCollapsed(true)
   }, [])
@@ -267,7 +246,7 @@ export default function DashboardLayout({
               const retryData = await retryRes.json()
               if (retryData.success) {
                 setUser(retryData.user)
-                if (retryData.accounts) setAccounts(retryData.accounts)
+                setAccountCount(Math.max(1, Number(retryData.account_count) || 1))
                 localStorage.setItem('kommo_enabled', String(retryData.user.kommo_enabled || false))
                 markAuthSession()
                 initIdleTimeout()
@@ -283,7 +262,7 @@ export default function DashboardLayout({
         const data = await res.json()
         if (data.success) {
           setUser(data.user)
-          if (data.accounts) setAccounts(data.accounts)
+          setAccountCount(Math.max(1, Number(data.account_count) || 1))
           localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
           markAuthSession()
           initIdleTimeout() // Start idle timeout detector
@@ -378,7 +357,7 @@ export default function DashboardLayout({
     await logoutFromBrowser('manual')
   }
 
-  const handleSwitchAccount = async (accountId: string) => {
+  const handleSwitchAccount = async (accountId: string): Promise<string | null> => {
     try {
       const res = await fetch('/api/auth/switch-account', {
         method: 'POST',
@@ -391,11 +370,13 @@ export default function DashboardLayout({
         markAuthSession()
         localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
         setUser(data.user)
-        setShowAccountSwitcher(false)
         window.location.href = '/dashboard'
+        return null
       }
+      return data.error || 'No se pudo cambiar de cuenta.'
     } catch (e) {
       console.error('Failed to switch account:', e)
+      return 'No se pudo cambiar de cuenta. Revisa tu conexión e inténtalo de nuevo.'
     }
   }
 
@@ -602,53 +583,9 @@ export default function DashboardLayout({
         </div>
 
         {/* Account name / switcher */}
-        {accounts.length >= 1 && (
-          <div ref={accountSwitcherRef} className={`shrink-0 border-t border-slate-700/50 ${isCollapsed ? 'p-2' : 'px-2.5 py-2'} relative`}>
-            {accounts.length > 1 ? (
-              <button
-                onClick={() => setShowAccountSwitcher(!showAccountSwitcher)}
-                title={isCollapsed ? (user.account_name || 'Cambiar cuenta') : undefined}
-                className={`w-full flex items-center ${isCollapsed ? 'justify-center p-2' : 'gap-2 px-2.5 py-1.5'} rounded-lg hover:bg-slate-700/50 transition-all duration-200 text-slate-400 hover:text-slate-300`}
-              >
-                <Building2 className="w-4 h-4 shrink-0 text-slate-500" />
-                {!isCollapsed && (
-                  <>
-                    <span className="flex-1 text-left text-xs truncate font-medium">{user.account_name || 'Cuenta'}</span>
-                    <ChevronsUpDown className="w-3.5 h-3.5 shrink-0 text-slate-500" />
-                  </>
-                )}
-              </button>
-            ) : (
-              <div
-                title={isCollapsed ? (user.account_name || 'Cuenta') : undefined}
-                className={`w-full flex items-center ${isCollapsed ? 'justify-center p-2' : 'gap-2 px-2.5 py-1.5'} text-slate-400`}
-              >
-                <Building2 className="w-4 h-4 shrink-0 text-slate-500" />
-                {!isCollapsed && (
-                  <span className="flex-1 text-left text-xs truncate font-medium">{user.account_name || 'Cuenta'}</span>
-                )}
-              </div>
-            )}
-            {showAccountSwitcher && (
-              <div className={`absolute ${isCollapsed ? 'left-full ml-2 bottom-0' : 'left-3 right-3 bottom-full mb-1'} bg-white border border-slate-200 rounded-xl shadow-lg shadow-slate-200/50 z-50 py-1 min-w-[180px]`}>
-                <div className="px-3 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Cambiar cuenta</div>
-                {accounts.map((acc) => (
-                  <button
-                    key={acc.account_id}
-                    onClick={() => handleSwitchAccount(acc.account_id)}
-                    className={`w-full text-left px-3 py-2 text-sm hover:bg-slate-50 transition-colors flex items-center gap-2 ${
-                      acc.account_id === user.account_id ? 'text-emerald-700 bg-emerald-50 font-medium' : 'text-slate-600'
-                    }`}
-                  >
-                    <Building2 className="w-3.5 h-3.5 shrink-0" />
-                    <span className="truncate">{acc.account_name}</span>
-                    {acc.account_id === user.account_id && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-emerald-500" />}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+        <div className={`shrink-0 border-t border-slate-700/50 ${isCollapsed ? 'p-2' : 'px-2.5 py-2'}`}>
+          <AccountSwitcher currentAccount={{ id: user.account_id, name: user.account_name || 'Cuenta' }} accountCount={accountCount} collapsed={isCollapsed} onSwitch={handleSwitchAccount} />
+        </div>
 
         {/* User section */}
         <div className={`shrink-0 ${isCollapsed ? 'p-2' : 'px-2.5 py-3'} border-t border-slate-700/50`}>

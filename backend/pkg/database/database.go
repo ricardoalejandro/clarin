@@ -455,6 +455,8 @@ func Migrate(db *pgxpool.Pool) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_accounts_unique ON user_accounts(user_id, account_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_user_accounts_user ON user_accounts(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_user_accounts_account ON user_accounts(account_id)`,
+		`ALTER TABLE user_accounts ADD COLUMN IF NOT EXISTS last_selected_at TIMESTAMPTZ`,
+		`CREATE INDEX IF NOT EXISTS idx_user_accounts_user_last_selected ON user_accounts(user_id, last_selected_at DESC, account_id)`,
 
 		// Programs (Courses, Workshops, etc.)
 		`CREATE TABLE IF NOT EXISTS programs (

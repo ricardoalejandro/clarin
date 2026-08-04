@@ -337,7 +337,7 @@ type UserAccountRepository struct {
 
 func (r *UserAccountRepository) GetByUserID(ctx context.Context, userID uuid.UUID) ([]*domain.UserAccount, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT ua.id, ua.user_id, ua.account_id, ua.role, ua.is_default, ua.created_at,
+		SELECT ua.id, ua.user_id, ua.account_id, ua.role, ua.is_default, ua.created_at, ua.last_selected_at,
 		       a.name, COALESCE(a.slug, ''),
 		       ua.role_id, COALESCE(ro.name, ''), COALESCE(ro.permissions, '{}')
 		FROM user_accounts ua
@@ -354,13 +354,106 @@ func (r *UserAccountRepository) GetByUserID(ctx context.Context, userID uuid.UUI
 	var accounts []*domain.UserAccount
 	for rows.Next() {
 		ua := &domain.UserAccount{}
-		if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt,
+		if err := rows.Scan(&ua.ID, &ua.UserID, &ua.AccountID, &ua.Role, &ua.IsDefault, &ua.CreatedAt, &ua.LastSelectedAt,
 			&ua.AccountName, &ua.AccountSlug, &ua.RoleID, &ua.RoleName, &ua.Permissions); err != nil {
 			return nil, err
 		}
 		accounts = append(accounts, ua)
 	}
 	return accounts, nil
+}
+
+const userAccountProjection = `
+	SELECT ua.id,ua.user_id,ua.account_id,ua.role,ua.is_default,ua.created_at,ua.last_selected_at,
+		a.name,COALESCE(a.slug,''),ua.role_id,COALESCE(ro.name,''),COALESCE(ro.permissions,'{}')
+	FROM user_accounts ua
+	JOIN accounts a ON a.id=ua.account_id
+	LEFT JOIN roles ro ON ro.id=ua.role_id`
+
+func scanUserAccount(row pgx.Row) (*domain.UserAccount, error) {
+	item := &domain.UserAccount{}
+	if err := row.Scan(&item.ID, &item.UserID, &item.AccountID, &item.Role, &item.IsDefault,
+		&item.CreatedAt, &item.LastSelectedAt, &item.AccountName, &item.AccountSlug,
+		&item.RoleID, &item.RoleName, &item.Permissions); err != nil {
+		return nil, err
+	}
+	return item, nil
+}
+
+func (r *UserAccountRepository) GetByUserAndAccount(ctx context.Context, userID, accountID uuid.UUID) (*domain.UserAccount, error) {
+	return scanUserAccount(r.db.QueryRow(ctx, userAccountProjection+`
+		WHERE ua.user_id=$1 AND ua.account_id=$2`, userID, accountID))
+}
+
+func (r *UserAccountRepository) GetPreferredByUserID(ctx context.Context, userID uuid.UUID) (*domain.UserAccount, error) {
+	return scanUserAccount(r.db.QueryRow(ctx, userAccountProjection+`
+		WHERE ua.user_id=$1
+		ORDER BY ua.is_default DESC,ua.created_at,ua.id
+		LIMIT 1`, userID))
+}
+
+func (r *UserAccountRepository) MarkSelected(ctx context.Context, userID, accountID uuid.UUID) error {
+	tag, err := r.db.Exec(ctx, `UPDATE user_accounts SET last_selected_at=NOW() WHERE user_id=$1 AND account_id=$2`, userID, accountID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (r *UserAccountRepository) ListRecentForUser(ctx context.Context, userID, activeAccountID uuid.UUID, limit int) ([]*domain.UserAccount, error) {
+	rows, err := r.db.Query(ctx, userAccountProjection+`
+		WHERE ua.user_id=$1
+		ORDER BY (ua.account_id=$2) DESC,ua.last_selected_at DESC NULLS LAST,ua.is_default DESC,LOWER(a.name),ua.account_id
+		LIMIT $3`, userID, activeAccountID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]*domain.UserAccount, 0, limit)
+	for rows.Next() {
+		item, scanErr := scanUserAccount(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+type UserAccountSearchCursor struct {
+	Name string
+	ID   uuid.UUID
+}
+
+func (r *UserAccountRepository) SearchForUser(ctx context.Context, userID uuid.UUID, search string, limit int, cursor *UserAccountSearchCursor) ([]*domain.UserAccount, error) {
+	cursorName := ""
+	cursorID := uuid.Nil
+	if cursor != nil {
+		cursorName = cursor.Name
+		cursorID = cursor.ID
+	}
+	rows, err := r.db.Query(ctx, userAccountProjection+`
+		WHERE ua.user_id=$1
+		  AND (LOWER(a.name) LIKE '%'||LOWER($2::text)||'%' OR LOWER(COALESCE(a.slug,'')) LIKE '%'||LOWER($2::text)||'%')
+		  AND ($3::text='' OR LOWER(a.name)>$3::text OR (LOWER(a.name)=$3::text AND ua.account_id>$4::uuid))
+		ORDER BY LOWER(a.name),ua.account_id
+		LIMIT $5`, userID, search, cursorName, cursorID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]*domain.UserAccount, 0, limit)
+	for rows.Next() {
+		item, scanErr := scanUserAccount(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (r *UserAccountRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.UserAccount, error) {

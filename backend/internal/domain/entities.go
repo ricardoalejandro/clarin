@@ -197,13 +197,14 @@ type Role struct {
 
 // UserAccount represents a user's assignment to an account (many-to-many)
 type UserAccount struct {
-	ID        uuid.UUID  `json:"id"`
-	UserID    uuid.UUID  `json:"user_id"`
-	AccountID uuid.UUID  `json:"account_id"`
-	Role      string     `json:"role"`
-	RoleID    *uuid.UUID `json:"role_id,omitempty"`
-	IsDefault bool       `json:"is_default"`
-	CreatedAt time.Time  `json:"created_at"`
+	ID             uuid.UUID  `json:"id"`
+	UserID         uuid.UUID  `json:"user_id"`
+	AccountID      uuid.UUID  `json:"account_id"`
+	Role           string     `json:"role"`
+	RoleID         *uuid.UUID `json:"role_id,omitempty"`
+	IsDefault      bool       `json:"is_default"`
+	CreatedAt      time.Time  `json:"created_at"`
+	LastSelectedAt *time.Time `json:"last_selected_at,omitempty"`
 
 	// Populated on demand
 	AccountName string   `json:"account_name,omitempty"`

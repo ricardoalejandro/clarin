@@ -75,7 +75,7 @@ func TestWriteSurveyWorkbookProducesEditableInternalChartsAndSafeText(t *testing
 		t.Fatalf("reopen workbook: %v", err)
 	}
 	defer workbook.Close()
-	wantSheets := []string{"RESUMEN", "RESULTADOS", "RESPUESTAS", "TEXTOS", "DATOS_GRÁFICOS"}
+	wantSheets := []string{"RESUMEN", "RESULTADOS", "RESPUESTAS", "DATOS_GRÁFICOS"}
 	if got := workbook.GetSheetList(); strings.Join(got, "|") != strings.Join(wantSheets, "|") {
 		t.Fatalf("unexpected sheets: %v", got)
 	}
@@ -93,13 +93,16 @@ func TestWriteSurveyWorkbookProducesEditableInternalChartsAndSafeText(t *testing
 			t.Fatalf("formula-like response became a formula: %q", formula)
 		}
 	}
-	textValue, _ := workbook.GetCellValue("TEXTOS", "D2")
+	textValue, _ := workbook.GetCellValue("RESULTADOS", "C27")
 	if textValue != formulaLikeText {
-		t.Fatalf("text sheet lost multiline/unicode content: %q", textValue)
+		t.Fatalf("inline text table lost multiline/unicode content: %q", textValue)
 	}
-	textFormula, _ := workbook.GetCellFormula("TEXTOS", "D2")
+	textFormula, _ := workbook.GetCellFormula("RESULTADOS", "C27")
 	if textFormula != "" {
-		t.Fatalf("formula-like text became a formula: %q", textFormula)
+		t.Fatalf("formula-like inline text became a formula: %q", textFormula)
+	}
+	if value, _ := workbook.GetCellValue("RESULTADOS", "B26"); value != "Respuesta" {
+		t.Fatalf("missing inline text table header: %q", value)
 	}
 
 	archive, err := zip.NewReader(bytes.NewReader(output.Bytes()), int64(output.Len()))
@@ -154,6 +157,49 @@ func TestWriteSurveyWorkbookIsValidWithoutResponses(t *testing.T) {
 	defer workbook.Close()
 	if value, _ := workbook.GetCellValue("RESPUESTAS", "A1"); value != "Respuesta" {
 		t.Fatalf("missing response header: %q", value)
+	}
+}
+
+func TestWriteSurveyWorkbookKeepsProgramIdentityInInlineTextTable(t *testing.T) {
+	now := time.Date(2026, 8, 3, 2, 0, 0, 0, time.UTC)
+	surveyID, templateID, questionID := uuid.New(), uuid.New(), uuid.New()
+	contactID, participantID := uuid.New(), uuid.New()
+	model := surveyWorkbookModel{
+		Survey: &domain.Survey{
+			ID: surveyID, TemplateID: &templateID, Name: "Seguimiento", Status: "closed",
+			AudienceMode: "program_participants", CreatedAt: now,
+		},
+		Questions: []*domain.SurveyQuestion{{ID: questionID, SurveyID: surveyID, Type: "long_text", Title: "Comentario"}},
+		Analytics: &domain.SurveyAnalytics{TotalResponses: 1, QuestionStats: []domain.SurveyQuestionStats{{
+			QuestionID: questionID, QuestionType: "long_text", Title: "Comentario", TotalAnswers: 1,
+		}}},
+		ChartTypes: map[uuid.UUID]string{}, GeneratedAt: now,
+	}
+	emptyResponses := func(func(domain.SurveyReportResponse) error) error { return nil }
+	walkTexts := func(visit func(domain.SurveyReportTextAnswer) error) error {
+		return visit(domain.SurveyReportTextAnswer{
+			QuestionID: questionID, QuestionTitle: "Comentario", QuestionType: "long_text",
+			Value: "Acompañamiento pendiente", CompletedAt: now, ContactID: &contactID,
+			ProgramParticipantID: &participantID, ContactName: "Ana Torres",
+		})
+	}
+	var output bytes.Buffer
+	if err := writeSurveyWorkbook(model, &output, emptyResponses, walkTexts); err != nil {
+		t.Fatalf("write workbook: %v", err)
+	}
+	workbook, err := excelize.OpenReader(bytes.NewReader(output.Bytes()))
+	if err != nil {
+		t.Fatalf("reopen workbook: %v", err)
+	}
+	defer workbook.Close()
+	checks := map[string]string{
+		"B6": "contact_id", "C6": "program_participant_id", "D6": "Contacto", "E6": "Texto",
+		"B7": contactID.String(), "C7": participantID.String(), "D7": "Ana Torres", "E7": "Acompañamiento pendiente",
+	}
+	for cell, expected := range checks {
+		if value, _ := workbook.GetCellValue("RESULTADOS", cell); value != expected {
+			t.Fatalf("cell %s=%q want %q", cell, value, expected)
+		}
 	}
 }
 

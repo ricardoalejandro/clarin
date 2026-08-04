@@ -127,6 +127,7 @@ func surveyTemplateInstanceMigrations() []string {
 			END IF;
 		END $$`,
 		`CREATE INDEX IF NOT EXISTS idx_surveys_template_history ON surveys(account_id, template_id, created_at DESC) WHERE template_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_surveys_template_applications_page ON surveys(account_id, template_id, archived_at, created_at DESC, id DESC) WHERE template_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_surveys_program_history ON surveys(account_id, program_id, created_at DESC) WHERE program_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_surveys_account_archive ON surveys(account_id, archived_at, created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS survey_branding_asset_refs (

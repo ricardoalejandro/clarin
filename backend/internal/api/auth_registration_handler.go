@@ -46,22 +46,11 @@ func (s *Server) handleRegister(c *fiber.Ctx) error {
 		}
 	}
 
-	token, refreshToken, user, userAccounts, err := s.services.Auth.Login(c.Context(), strings.TrimSpace(req.Email), req.Password, s.cfg.JWTSecret)
+	token, refreshToken, user, accountCount, err := s.services.Auth.Login(c.Context(), strings.TrimSpace(req.Email), req.Password, s.cfg.JWTSecret)
 	if err != nil {
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true, "account": result.Account, "requires_login": true})
 	}
 	s.setAuthCookies(c, token, refreshToken)
-
-	accountsList := make([]fiber.Map, 0, len(userAccounts))
-	for _, userAccount := range userAccounts {
-		accountsList = append(accountsList, fiber.Map{
-			"account_id":   userAccount.AccountID,
-			"account_name": userAccount.AccountName,
-			"account_slug": userAccount.AccountSlug,
-			"role":         userAccount.Role,
-			"is_default":   userAccount.IsDefault,
-		})
-	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"success":      true,
@@ -82,7 +71,7 @@ func (s *Server) handleRegister(c *fiber.Ctx) error {
 			"subscription_status": result.Subscription.Status,
 			"permissions":         []string{domain.PermAll},
 		},
-		"accounts": accountsList,
+		"account_count": accountCount,
 	})
 }
 

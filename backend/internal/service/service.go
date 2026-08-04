@@ -129,9 +129,9 @@ type refreshTokenData struct {
 	CreatedAt int64  `json:"created_at"`
 }
 
-func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret string) (string, string, *domain.User, []*domain.UserAccount, error) {
+func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret string) (string, string, *domain.User, int, error) {
 	if s.cache == nil {
-		return "", "", nil, nil, fmt.Errorf("session service unavailable")
+		return "", "", nil, 0, fmt.Errorf("session service unavailable")
 	}
 
 	// Check login rate limiting
@@ -141,7 +141,7 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 		if data != nil {
 			var failures int
 			if err := json.Unmarshal(data, &failures); err == nil && failures >= maxLoginAttempts {
-				return "", "", nil, nil, fmt.Errorf("cuenta bloqueada temporalmente, intente en 15 minutos")
+				return "", "", nil, 0, fmt.Errorf("cuenta bloqueada temporalmente, intente en 15 minutos")
 			}
 		}
 	}
@@ -149,16 +149,16 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	user, err := s.repos.User.GetByUsername(ctx, username)
 	if err != nil {
 		s.recordLoginFailure(ctx, username)
-		return "", "", nil, nil, fmt.Errorf("invalid credentials")
+		return "", "", nil, 0, fmt.Errorf("invalid credentials")
 	}
 	if user == nil {
 		s.recordLoginFailure(ctx, username)
-		return "", "", nil, nil, fmt.Errorf("invalid credentials")
+		return "", "", nil, 0, fmt.Errorf("invalid credentials")
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
 		s.recordLoginFailure(ctx, username)
-		return "", "", nil, nil, fmt.Errorf("invalid credentials")
+		return "", "", nil, 0, fmt.Errorf("invalid credentials")
 	}
 
 	// Clear login failures on success
@@ -169,22 +169,18 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 
 	// Get user's account assignments
 	if err := s.repos.UserAccount.NormalizeForUser(ctx, user.ID); err != nil {
-		return "", "", nil, nil, fmt.Errorf("failed to normalize user accounts: %w", err)
+		return "", "", nil, 0, fmt.Errorf("failed to normalize user accounts: %w", err)
 	}
-	userAccounts, _ := s.repos.UserAccount.GetByUserID(ctx, user.ID)
-
-	// Determine first/default account
-	activeAccountID := user.AccountID
-	activeRole := user.Role
-	if len(userAccounts) > 0 {
-		for _, ua := range userAccounts {
-			if ua.IsDefault {
-				activeAccountID = ua.AccountID
-				activeRole = ua.Role
-				break
-			}
-		}
+	membership, err := s.repos.UserAccount.GetPreferredByUserID(ctx, user.ID)
+	if err != nil {
+		return "", "", nil, 0, fmt.Errorf("no account assignment available: %w", err)
 	}
+	accountCount, err := s.repos.UserAccount.CountByUserID(ctx, user.ID)
+	if err != nil {
+		return "", "", nil, 0, fmt.Errorf("failed to count account assignments: %w", err)
+	}
+	activeAccountID := membership.AccountID
+	activeRole := membership.Role
 
 	// Generate JWT with default account
 	// Admins/super_admins get wildcard; agents get their role's permissions
@@ -198,7 +194,7 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 
 	sessionID, sessionCreatedAt, err := s.createSession(ctx, user.ID, activeAccountID, user.Username)
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", "", nil, 0, err
 	}
 
 	jti := uuid.New().String()
@@ -222,7 +218,7 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := token.SignedString([]byte(jwtSecret))
 	if err != nil {
-		return "", "", nil, nil, fmt.Errorf("failed to sign token: %w", err)
+		return "", "", nil, 0, fmt.Errorf("failed to sign token: %w", err)
 	}
 
 	// Generate refresh token and store in Redis
@@ -240,14 +236,12 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	// Update user fields to match active account
 	user.AccountID = activeAccountID
 	user.Role = activeRole
-	for _, ua := range userAccounts {
-		if ua.AccountID == activeAccountID {
-			user.AccountName = ua.AccountName
-			break
-		}
+	user.AccountName = membership.AccountName
+	if err := s.repos.UserAccount.MarkSelected(ctx, user.ID, activeAccountID); err != nil {
+		return "", "", nil, 0, fmt.Errorf("failed to remember selected account: %w", err)
 	}
 
-	return tokenString, refreshToken, user, userAccounts, nil
+	return tokenString, refreshToken, user, accountCount, nil
 }
 
 func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID uuid.UUID, sessionID, jwtSecret string) (string, string, *domain.User, error) {
@@ -265,26 +259,13 @@ func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID
 		return "", "", nil, fmt.Errorf("user not found")
 	}
 
-	// Verify user has access to the target account
-	exists, err := s.repos.UserAccount.Exists(ctx, userID, targetAccountID)
+	// Resolve the exact membership instead of loading every assigned account.
+	membership, err := s.repos.UserAccount.GetByUserAndAccount(ctx, userID, targetAccountID)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("failed to check access: %w", err)
-	}
-	if !exists {
 		return "", "", nil, fmt.Errorf("no tiene acceso a esta cuenta")
 	}
-
-	// Get the role for this specific account
-	userAccounts, _ := s.repos.UserAccount.GetByUserID(ctx, userID)
-	accountRole := user.Role
-	accountName := ""
-	for _, ua := range userAccounts {
-		if ua.AccountID == targetAccountID {
-			accountRole = ua.Role
-			accountName = ua.AccountName
-			break
-		}
-	}
+	accountRole := membership.Role
+	accountName := membership.AccountName
 
 	// Generate new JWT for the target account
 	isAdmin := user.IsAdmin || user.IsSuperAdmin || accountRole == domain.RoleAdmin || accountRole == domain.RoleSuperAdmin
@@ -335,6 +316,9 @@ func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID
 	user.AccountID = targetAccountID
 	user.Role = accountRole
 	user.AccountName = accountName
+	if err := s.repos.UserAccount.MarkSelected(ctx, userID, targetAccountID); err != nil {
+		return "", "", nil, fmt.Errorf("failed to remember selected account: %w", err)
+	}
 
 	return tokenString, refreshToken, user, nil
 }
@@ -508,16 +492,13 @@ func (s *AuthService) RefreshToken(ctx context.Context, oldRefreshToken, jwtSecr
 		return "", "", fmt.Errorf("account access revoked")
 	}
 
-	// Get current permissions
-	// Get role for this account
-	userAccounts, _ := s.repos.UserAccount.GetByUserID(ctx, userID)
-	accountRole := user.Role
-	for _, ua := range userAccounts {
-		if ua.AccountID == accountID {
-			accountRole = ua.Role
-			break
-		}
+	// Resolve current role directly for the active account.
+	membership, err := s.repos.UserAccount.GetByUserAndAccount(ctx, userID, accountID)
+	if err != nil {
+		_ = s.cache.Del(ctx, refreshTokenKeyPrefix+oldRefreshToken)
+		return "", "", fmt.Errorf("account access revoked")
 	}
+	accountRole := membership.Role
 
 	// Get current permissions — per-account admin gets full access
 	isAdmin := user.IsAdmin || user.IsSuperAdmin || accountRole == domain.RoleAdmin || accountRole == domain.RoleSuperAdmin

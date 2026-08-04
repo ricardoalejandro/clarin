@@ -154,19 +154,17 @@ export default function TaskEnvironmentSwitcher({
       ref={triggerRef}
       type="button"
       title={active ? `Entorno: ${active.name}` : 'Seleccionar Entorno'}
+      aria-label={active ? `Entorno ${active.name}` : 'Seleccionar Entorno'}
       aria-haspopup="dialog"
       aria-expanded={open}
       onClick={() => setOpen(value => !value)}
-      className={`group flex w-full items-center rounded-2xl border border-slate-200 bg-slate-50/80 text-left transition hover:border-emerald-200 hover:bg-emerald-50/50 ${collapsed ? 'h-11 justify-center px-2' : 'gap-3 px-3 py-2.5'}`}
+      className={`group flex h-11 w-full items-center rounded-xl border border-slate-200 bg-slate-50/80 text-left transition hover:border-emerald-200 hover:bg-emerald-50/50 focus:outline-none focus:ring-4 focus:ring-emerald-100 ${collapsed ? 'justify-center px-2' : 'gap-2.5 px-2.5'}`}
     >
       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-white shadow-sm" style={{ backgroundColor: active?.color || '#6366F1' }}>
         <TaskContainerIcon value={active?.icon || 'layers'} className="h-4 w-4" />
       </span>
       {!collapsed && <>
-        <span className="min-w-0 flex-1">
-          <span className="block text-[9px] font-black uppercase tracking-[.16em] text-slate-400">Entorno</span>
-          <span className="mt-0.5 block truncate text-sm font-bold text-slate-800">{active?.name || 'Seleccionar'}</span>
-        </span>
+        <span className="min-w-0 flex-1 truncate text-sm font-bold text-slate-800">{active?.name || 'Seleccionar Entorno'}</span>
         {active?.visibility === 'restricted' ? <LockKeyhole className="h-3.5 w-3.5 text-slate-400" aria-label="Entorno privado" /> : <Globe2 className="h-3.5 w-3.5 text-slate-400" aria-label="Visible para la cuenta" />}
         <ChevronDown className={`h-4 w-4 text-slate-400 transition ${open ? 'rotate-180' : ''}`} />
       </>}

@@ -130,7 +130,7 @@ func writeSurveyWorkbook(model surveyWorkbookModel, output io.Writer, walkRespon
 	if err := file.SetSheetName("Sheet1", "RESUMEN"); err != nil {
 		return err
 	}
-	for _, sheet := range []string{"RESULTADOS", "RESPUESTAS", "TEXTOS"} {
+	for _, sheet := range []string{"RESULTADOS", "RESPUESTAS"} {
 		if _, err := file.NewSheet(sheet); err != nil {
 			return err
 		}
@@ -150,13 +150,10 @@ func writeSurveyWorkbook(model surveyWorkbookModel, output io.Writer, walkRespon
 	if err := writeSurveySummarySheet(file, model, styles); err != nil {
 		return err
 	}
-	if err := writeSurveyResultsSheet(file, model, styles); err != nil {
+	if err := writeSurveyResultsSheet(file, model, styles, walkTexts); err != nil {
 		return err
 	}
 	if err := writeSurveyResponsesSheet(file, model, styles, walkResponses); err != nil {
-		return err
-	}
-	if err := writeSurveyTextsSheet(file, model, styles, walkTexts); err != nil {
 		return err
 	}
 	if model.Evolution != nil && len(model.Evolution.Applications) > 0 {
@@ -301,15 +298,26 @@ func writeSurveySummarySheet(file *excelize.File, model surveyWorkbookModel, sty
 	})
 }
 
-func writeSurveyResultsSheet(file *excelize.File, model surveyWorkbookModel, styles surveyWorkbookStyles) error {
+type surveyResultTextLayout struct {
+	QuestionIndex int
+	HeaderRow     int
+	NextRow       int
+	ExpectedEnd   int
+	Written       int
+}
+
+func writeSurveyResultsSheet(file *excelize.File, model surveyWorkbookModel, styles surveyWorkbookStyles, walkTexts surveyReportTextWalker) error {
 	const sheet = "RESULTADOS"
 	_ = file.MergeCell(sheet, "A1", "L1")
 	_ = file.SetCellValue(sheet, "A1", "Resultados por pregunta")
 	_ = file.SetCellStyle(sheet, "A1", "L1", styles.title)
 	_ = file.SetRowHeight(sheet, 1, 34)
 	_ = file.SetColWidth(sheet, "A", "A", 4)
-	_ = file.SetColWidth(sheet, "B", "B", 38)
-	_ = file.SetColWidth(sheet, "C", "E", 16)
+	_ = file.SetColWidth(sheet, "B", "B", 28)
+	_ = file.SetColWidth(sheet, "C", "C", 44)
+	_ = file.SetColWidth(sheet, "D", "D", 24)
+	_ = file.SetColWidth(sheet, "E", "E", 64)
+	_ = file.SetColWidth(sheet, "F", "F", 20)
 	_ = file.SetColWidth(sheet, "G", "N", 12)
 	statsByQuestion := make(map[uuid.UUID]domain.SurveyQuestionStats, len(model.Analytics.QuestionStats))
 	for _, stat := range model.Analytics.QuestionStats {
@@ -317,6 +325,8 @@ func writeSurveyResultsSheet(file *excelize.File, model surveyWorkbookModel, sty
 	}
 	dataRow := 8
 	resultRow := 3
+	textLayouts := make(map[uuid.UUID]*surveyResultTextLayout)
+	programAudience := model.Survey.AudienceMode == "program_participants"
 	for questionIndex, question := range model.Questions {
 		stat := statsByQuestion[question.ID]
 		sectionEnd := resultRow + 1
@@ -336,13 +346,36 @@ func writeSurveyResultsSheet(file *excelize.File, model surveyWorkbookModel, sty
 			_ = file.SetCellStyle(sheet, fmt.Sprintf("C%d", resultRow+2), fmt.Sprintf("C%d", resultRow+2), styles.decimal)
 			sectionEnd = resultRow + 2
 		}
+		if question.Type == "short_text" || question.Type == "long_text" {
+			tableHeader := sectionEnd + 2
+			headers := []string{"Respuesta", "Texto", "Completada"}
+			if programAudience {
+				headers = []string{"contact_id", "program_participant_id", "Contacto", "Texto", "Completada"}
+			}
+			for column, value := range headers {
+				cell, _ := excelize.CoordinatesToCellName(column+2, tableHeader)
+				_ = file.SetCellValue(sheet, cell, value)
+				_ = file.SetCellStyle(sheet, cell, cell, styles.header)
+			}
+			if stat.TotalAnswers == 0 {
+				_ = file.SetCellValue(sheet, fmt.Sprintf("B%d", tableHeader+1), "Sin respuestas de texto")
+				_ = file.SetCellStyle(sheet, fmt.Sprintf("B%d", tableHeader+1), fmt.Sprintf("E%d", tableHeader+1), styles.text)
+				resultRow = tableHeader + 4
+				continue
+			}
+			textLayouts[question.ID] = &surveyResultTextLayout{
+				QuestionIndex: questionIndex,
+				HeaderRow:     tableHeader,
+				NextRow:       tableHeader + 1,
+				ExpectedEnd:   tableHeader + stat.TotalAnswers,
+			}
+			resultRow = tableHeader + stat.TotalAnswers + 2
+			continue
+		}
+
 		labels, counts := questionDistribution(question, stat)
 		if len(labels) == 0 {
-			message := "Sin respuestas para representar"
-			if question.Type == "short_text" || question.Type == "long_text" {
-				message = "Las respuestas completas están en la hoja TEXTOS"
-			}
-			_ = file.SetCellValue(sheet, fmt.Sprintf("B%d", sectionEnd+2), message)
+			_ = file.SetCellValue(sheet, fmt.Sprintf("B%d", sectionEnd+2), "Sin respuestas para representar")
 			_ = file.SetCellStyle(sheet, fmt.Sprintf("B%d", sectionEnd+2), fmt.Sprintf("E%d", sectionEnd+2), styles.text)
 			resultRow = sectionEnd + 6
 			continue
@@ -403,10 +436,77 @@ func writeSurveyResultsSheet(file *excelize.File, model surveyWorkbookModel, sty
 		}
 		resultRow = chartBottom + 2
 	}
+
+	if err := walkTexts(func(answer domain.SurveyReportTextAnswer) error {
+		layout := textLayouts[answer.QuestionID]
+		if layout == nil {
+			return nil
+		}
+		if layout.NextRow > layout.ExpectedEnd {
+			return fmt.Errorf("text answer count exceeded analytics sample for question %s", answer.QuestionID)
+		}
+		row := layout.NextRow
+		column := 2
+		if programAudience {
+			values := []string{optionalUUID(answer.ContactID), optionalUUID(answer.ProgramParticipantID), answer.ContactName, answer.Value}
+			for _, value := range values {
+				cell, _ := excelize.CoordinatesToCellName(column, row)
+				if err := setSurveyResultTextCell(file, sheet, cell, value, styles.text); err != nil {
+					return err
+				}
+				column++
+			}
+		} else {
+			if err := setSurveyResultTextCell(file, sheet, fmt.Sprintf("B%d", row), fmt.Sprintf("Respuesta anónima %d", answer.AnonymousIndex), styles.text); err != nil {
+				return err
+			}
+			if err := setSurveyResultTextCell(file, sheet, fmt.Sprintf("C%d", row), answer.Value, styles.text); err != nil {
+				return err
+			}
+			column = 4
+		}
+		dateCell, _ := excelize.CoordinatesToCellName(column, row)
+		if err := file.SetCellValue(sheet, dateCell, answer.CompletedAt); err != nil {
+			return err
+		}
+		if err := file.SetCellStyle(sheet, dateCell, dateCell, styles.date); err != nil {
+			return err
+		}
+		_ = file.SetRowHeight(sheet, row, 32)
+		layout.NextRow++
+		layout.Written++
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, layout := range textLayouts {
+		if layout.Written == 0 {
+			continue
+		}
+		lastColumn := "D"
+		if programAudience {
+			lastColumn = "F"
+		}
+		if err := file.AddTable(sheet, &excelize.Table{
+			Range:          fmt.Sprintf("B%d:%s%d", layout.HeaderRow, lastColumn, layout.HeaderRow+layout.Written),
+			Name:           fmt.Sprintf("TextosPregunta%03d", layout.QuestionIndex+1),
+			StyleName:      "TableStyleMedium4",
+			ShowRowStripes: boolPtr(true),
+		}); err != nil {
+			return err
+		}
+	}
 	_ = file.SetPageLayout(sheet, &excelize.PageLayoutOptions{Orientation: stringPtr("landscape"), FitToWidth: intPtr(1), FitToHeight: intPtr(0)})
 	_ = file.SetSheetDimension(sheet, fmt.Sprintf("A1:N%d", maxInt(resultRow, 20)))
 	_ = file.SetSheetDimension("DATOS_GRÁFICOS", fmt.Sprintf("A1:E%d", maxInt(dataRow, 16)))
 	return nil
+}
+
+func setSurveyResultTextCell(file *excelize.File, sheet, cell, value string, style int) error {
+	if err := file.SetCellStr(sheet, cell, strings.ToValidUTF8(value, "�")); err != nil {
+		return err
+	}
+	return file.SetCellStyle(sheet, cell, cell, style)
 }
 
 func writeSurveyResponsesSheet(
@@ -480,83 +580,6 @@ func writeSurveyResponsesSheet(
 	if err := stream.AddTable(&excelize.Table{
 		Range: fmt.Sprintf("A1:%s%d", lastColumn, rowNumber),
 		Name:  "RespuestasCompletadas", StyleName: "TableStyleMedium4", ShowRowStripes: boolPtr(true),
-	}); err != nil {
-		return err
-	}
-	if err := stream.Flush(); err != nil {
-		return err
-	}
-	return file.SetSheetDimension(sheet, fmt.Sprintf("A1:%s%d", lastColumn, maxInt(rowNumber, 2)))
-}
-
-func writeSurveyTextsSheet(
-	file *excelize.File,
-	model surveyWorkbookModel,
-	styles surveyWorkbookStyles,
-	walk surveyReportTextWalker,
-) error {
-	const sheet = "TEXTOS"
-	programAudience := model.Survey.AudienceMode == "program_participants"
-	headers := []string{"Respuesta", "Pregunta", "Tipo", "Texto", "Completada"}
-	if programAudience {
-		headers = []string{"contact_id", "program_participant_id", "Contacto", "Pregunta", "Tipo", "Texto", "Completada"}
-	}
-	textAnswerCount := 0
-	for _, stat := range model.Analytics.QuestionStats {
-		if stat.QuestionType == "short_text" || stat.QuestionType == "long_text" {
-			textAnswerCount += stat.TotalAnswers
-		}
-	}
-	lastColumn, _ := excelize.ColumnNumberToName(len(headers))
-	if err := file.SetSheetDimension(sheet, fmt.Sprintf("A1:%s%d", lastColumn, maxInt(textAnswerCount+1, 2))); err != nil {
-		return err
-	}
-	stream, err := file.NewStreamWriter(sheet)
-	if err != nil {
-		return err
-	}
-	headerRow := make([]interface{}, len(headers))
-	for index, header := range headers {
-		headerRow[index] = excelize.Cell{StyleID: styles.header, Value: header}
-	}
-	if err := stream.SetRow("A1", headerRow, excelize.RowOpts{Height: 32}); err != nil {
-		return err
-	}
-	_ = stream.SetPanes(&excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft"})
-	_ = stream.SetColWidth(1, len(headers), 22)
-	textColumn := 4
-	if programAudience {
-		textColumn = 6
-	}
-	_ = stream.SetColWidth(textColumn, textColumn, 64)
-	rowNumber := 1
-	err = walk(func(answer domain.SurveyReportTextAnswer) error {
-		rowNumber++
-		row := make([]interface{}, 0, len(headers))
-		if programAudience {
-			row = append(row,
-				textCell(optionalUUID(answer.ContactID), styles.text),
-				textCell(optionalUUID(answer.ProgramParticipantID), styles.text),
-				textCell(answer.ContactName, styles.text),
-			)
-		} else {
-			row = append(row, textCell(fmt.Sprintf("Respuesta anónima %d", answer.AnonymousIndex), styles.text))
-		}
-		row = append(row,
-			textCell(answer.QuestionTitle, styles.text),
-			textCell(questionTypeLabel(answer.QuestionType), styles.text),
-			textCell(answer.Value, styles.text),
-			excelize.Cell{StyleID: styles.date, Value: answer.CompletedAt},
-		)
-		cell, _ := excelize.CoordinatesToCellName(1, rowNumber)
-		return stream.SetRow(cell, row, excelize.RowOpts{Height: 32})
-	})
-	if err != nil {
-		return err
-	}
-	if err := stream.AddTable(&excelize.Table{
-		Range: fmt.Sprintf("A1:%s%d", lastColumn, rowNumber),
-		Name:  "RespuestasDeTexto", StyleName: "TableStyleMedium4", ShowRowStripes: boolPtr(true),
 	}); err != nil {
 		return err
 	}

@@ -524,6 +524,19 @@ func (s *SurveyTemplateService) ListTemplateInstances(ctx context.Context, accou
 	return s.repos.SurveyTemplate.ListTemplateInstances(ctx, accountID, templateID, includeArchived)
 }
 
+func (s *SurveyTemplateService) ListTemplateApplicationsPage(
+	ctx context.Context,
+	accountID, templateID uuid.UUID,
+	filters repository.SurveyApplicationFilters,
+	limit int,
+	cursor *repository.SurveyApplicationCursor,
+) ([]*domain.SurveyInstanceSummary, *repository.SurveyApplicationCursor, repository.SurveyApplicationCounts, error) {
+	if _, err := s.repos.SurveyTemplate.Get(ctx, accountID, templateID); err != nil {
+		return nil, nil, repository.SurveyApplicationCounts{}, err
+	}
+	return s.repos.SurveyTemplate.ListTemplateApplicationsPage(ctx, accountID, templateID, filters, limit, cursor)
+}
+
 func (s *SurveyTemplateService) ListProgramInstances(ctx context.Context, accountID, programID uuid.UUID, includeArchived bool) ([]*domain.SurveyInstanceSummary, error) {
 	program, err := s.repos.Program.GetByID(ctx, accountID, programID)
 	if err != nil || program == nil {

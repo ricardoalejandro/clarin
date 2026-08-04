@@ -1,7 +1,7 @@
 export type SurveyCatalogView = 'cards' | 'list' | 'compact';
 
 export function parseSurveyCatalogView(value: string | null): SurveyCatalogView {
-  return value === 'list' || value === 'compact' || value === 'cards' ? value : 'cards';
+  return value === 'list' || value === 'compact' || value === 'cards' ? value : 'compact';
 }
 
 export function resolveSurveyCatalogView(preferred: SurveyCatalogView, availableWidth: number): SurveyCatalogView {

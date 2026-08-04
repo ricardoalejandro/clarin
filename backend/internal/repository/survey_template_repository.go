@@ -929,6 +929,80 @@ func (r *SurveyTemplateRepository) ListTemplateInstances(ctx context.Context, ac
 	return r.listInstances(ctx, query+` ORDER BY s.created_at DESC,s.id`, accountID, templateID)
 }
 
+type SurveyApplicationFilters struct {
+	ArchiveState string
+	Status       string
+	OriginType   string
+	Query        string
+}
+
+type SurveyApplicationCursor struct {
+	CreatedAt time.Time
+	ID        uuid.UUID
+}
+
+type SurveyApplicationCounts struct {
+	Current  int `json:"current"`
+	Archived int `json:"archived"`
+}
+
+func (r *SurveyTemplateRepository) ListTemplateApplicationsPage(
+	ctx context.Context,
+	accountID, templateID uuid.UUID,
+	filters SurveyApplicationFilters,
+	limit int,
+	cursor *SurveyApplicationCursor,
+) ([]*domain.SurveyInstanceSummary, *SurveyApplicationCursor, SurveyApplicationCounts, error) {
+	var cursorCreatedAt *time.Time
+	cursorID := uuid.Nil
+	if cursor != nil {
+		cursorCreatedAt = &cursor.CreatedAt
+		cursorID = cursor.ID
+	}
+	query := surveyInstanceSummarySelect + `
+		WHERE s.account_id=$1 AND s.template_id=$2
+		  AND (($3::text='current' AND s.archived_at IS NULL) OR ($3::text='archived' AND s.archived_at IS NOT NULL))
+		  AND ($4::text='all' OR s.status=$4::text)
+		  AND ($5::text='all' OR s.origin_type=$5::text)
+		  AND ($6::text='' OR s.name ILIKE '%'||$6::text||'%' OR s.origin_label ILIKE '%'||$6::text||'%' OR s.slug ILIKE '%'||$6::text||'%')
+		  AND ($7::timestamptz IS NULL OR s.created_at<$7::timestamptz OR (s.created_at=$7::timestamptz AND s.id<$8::uuid))
+		ORDER BY s.created_at DESC,s.id DESC
+		LIMIT $9`
+	rows, err := r.db.Query(ctx, query, accountID, templateID, filters.ArchiveState, filters.Status,
+		filters.OriginType, filters.Query, cursorCreatedAt, cursorID, limit+1)
+	if err != nil {
+		return nil, nil, SurveyApplicationCounts{}, err
+	}
+	defer rows.Close()
+	items := make([]*domain.SurveyInstanceSummary, 0, limit+1)
+	for rows.Next() {
+		item, scanErr := scanSurveyInstance(rows)
+		if scanErr != nil {
+			return nil, nil, SurveyApplicationCounts{}, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, SurveyApplicationCounts{}, err
+	}
+
+	var counts SurveyApplicationCounts
+	if err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*) FILTER (WHERE archived_at IS NULL),COUNT(*) FILTER (WHERE archived_at IS NOT NULL)
+		FROM surveys WHERE account_id=$1 AND template_id=$2
+	`, accountID, templateID).Scan(&counts.Current, &counts.Archived); err != nil {
+		return nil, nil, SurveyApplicationCounts{}, err
+	}
+
+	var next *SurveyApplicationCursor
+	if len(items) > limit {
+		items = items[:limit]
+		last := items[len(items)-1]
+		next = &SurveyApplicationCursor{CreatedAt: last.CreatedAt, ID: last.ID}
+	}
+	return items, next, counts, nil
+}
+
 func (r *SurveyTemplateRepository) ListProgramInstances(ctx context.Context, accountID, programID uuid.UUID, includeArchived bool) ([]*domain.SurveyInstanceSummary, error) {
 	query := surveyInstanceSummarySelect + ` WHERE s.account_id=$1 AND s.program_id=$2`
 	if !includeArchived {

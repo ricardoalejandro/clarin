@@ -93,6 +93,7 @@ func TestSurveyApplicationArchiveMigrationIsIdempotentAndIndexed(t *testing.T) {
 		"surveys_archived_from_status_check",
 		"surveys_archive_shape_check",
 		"idx_surveys_account_archive",
+		"idx_surveys_template_applications_page",
 	} {
 		if !strings.Contains(joined, invariant) {
 			t.Fatalf("survey application archive migration is missing %q", invariant)

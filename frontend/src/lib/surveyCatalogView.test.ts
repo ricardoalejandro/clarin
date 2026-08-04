@@ -4,8 +4,8 @@ import { parseSurveyCatalogView, resolveSurveyCatalogView } from './surveyCatalo
 describe('survey catalog view', () => {
   it('restores only supported persisted values', () => {
     expect(parseSurveyCatalogView('compact')).toBe('compact');
-    expect(parseSurveyCatalogView('table')).toBe('cards');
-    expect(parseSurveyCatalogView(null)).toBe('cards');
+    expect(parseSurveyCatalogView('table')).toBe('compact');
+    expect(parseSurveyCatalogView(null)).toBe('compact');
   });
 
   it('uses cards when the measured content width cannot sustain dense views', () => {
