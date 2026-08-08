@@ -17,8 +17,18 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
 import ContactSelector, { SelectedPerson } from '@/components/ContactSelector'
 import ChatPanel from '@/components/chat/ChatPanel'
-import LeadDetailPanel from '@/components/LeadDetailPanel'
 import ContactDetailSurface from '@/components/contact-details/ContactDetailSurface'
+import OperationalWindowShell from '@/components/operational-window/OperationalWindowShell'
+import CrmDetailWorkspace from '@/components/crm-detail/CrmDetailWorkspace'
+import EventParticipantContextPanel from '@/components/crm-detail/EventParticipantContextPanel'
+import DetachedEventParticipantDetail, { type DetachedParticipantPatch } from '@/components/crm-detail/DetachedEventParticipantDetail'
+import ScopedActivityPanel from '@/components/crm-detail/ScopedActivityPanel'
+import RelatedTasksPanel from '@/components/task-work/RelatedTasksPanel'
+import useCrmPipelineCardDrag from '@/components/crm-detail/useCrmPipelineCardDrag'
+import CrmPipelineDndContext, { useCrmPipelineStageDrop } from '@/components/crm-detail/CrmPipelineDndContext'
+import { CRM_PIPELINE_UNASSIGNED_STAGE_ID, moveCrmPipelineItems, reconcileCrmPipelineCanonicalItem } from '@/components/crm-detail/crmPipelineDrag'
+import useCrmWindowStorageScope from '@/components/crm-detail/useCrmWindowStorageScope'
+import { crmMessageIsPending, crmMessageTemporaryMode, type CrmMessagePhase } from '@/components/crm-detail/crmMessageWorkflow'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import ObservationHistoryModal from '@/components/ObservationHistoryModal'
 import FormulaEditor from '@/components/FormulaEditor'
@@ -91,7 +101,7 @@ interface Participant {
   last_name?: string; short_name?: string; phone?: string; email?: string
   age?: number; status: string; notes?: string; dni?: string; birth_date?: string
   company?: string; address?: string; distrito?: string; ocupacion?: string
-  stage_id?: string; stage_name?: string; stage_color?: string
+  stage_id?: string | null; stage_name?: string | null; stage_color?: string | null
   next_action?: string; next_action_date?: string; invited_at?: string
   confirmed_at?: string; attended_at?: string; last_interaction?: string
   tags?: TagItem[]
@@ -184,42 +194,6 @@ function hexToRgb(hex: string) {
 }
 function hexBgLight(hex: string) { const { r, g, b } = hexToRgb(hex); return `rgba(${r},${g},${b},0.08)` }
 
-/** Map a Participant to a Lead-like object for LeadDetailPanel */
-function participantToLead(p: Participant): any {
-  return {
-    id: p.id,
-    original_lead_id: null,
-    name: p.name || '',
-    last_name: p.last_name || null,
-    short_name: p.short_name || null,
-    phone: p.phone || '',
-    email: p.email || '',
-    company: p.company || null,
-    age: p.age || null,
-    dni: p.dni || null,
-    birth_date: p.birth_date || null,
-    address: p.address || null,
-    distrito: p.distrito || null,
-    ocupacion: p.ocupacion || null,
-    status: p.status,
-    pipeline_id: null,
-    stage_id: p.stage_id || null,
-    stage_name: p.stage_name || null,
-    stage_color: p.stage_color || null,
-    notes: p.notes || '',
-    tags: [],
-    structured_tags: p.tags?.map(t => ({ id: t.id, account_id: t.account_id || '', name: t.name, color: t.color })) || null,
-    kommo_id: null,
-    jid: '',
-    contact_id: p.contact_id || null,
-    assigned_to: '',
-    created_at: '',
-    updated_at: '',
-    is_archived: p.is_archived || false,
-    is_blocked: p.is_blocked || false,
-  }
-}
-
 function mergeContactProfileIntoParticipant(participant: Participant, contact: ContactProfileContact): Participant {
   if (participant.contact_id !== contact.id) return participant
   return {
@@ -240,29 +214,6 @@ function mergeContactProfileIntoParticipant(participant: Participant, contact: C
   }
 }
 
-function mergeLegacyLeadIntoParticipant(participant: Participant, updatedLead: any): Participant {
-  return {
-    ...participant,
-    name: updatedLead.name ?? participant.name,
-    last_name: updatedLead.last_name ?? participant.last_name,
-    short_name: updatedLead.short_name ?? participant.short_name,
-    phone: updatedLead.phone ?? participant.phone,
-    email: updatedLead.email ?? participant.email,
-    age: updatedLead.age ?? participant.age,
-    dni: updatedLead.dni ?? participant.dni,
-    birth_date: updatedLead.birth_date ?? participant.birth_date,
-    company: updatedLead.company ?? participant.company,
-    address: updatedLead.address ?? participant.address,
-    distrito: updatedLead.distrito ?? participant.distrito,
-    ocupacion: updatedLead.ocupacion ?? participant.ocupacion,
-    notes: updatedLead.notes ?? participant.notes,
-    stage_id: updatedLead.stage_id || participant.stage_id,
-    stage_name: updatedLead.stage_name || participant.stage_name,
-    stage_color: updatedLead.stage_color || participant.stage_color,
-    tags: updatedLead.structured_tags?.map((tag: any) => ({ id: tag.id, account_id: tag.account_id || '', name: tag.name, color: tag.color, created_at: '' })),
-  }
-}
-
 // ─── Memoized ParticipantCard ────────────────────────────────────────────────
 interface ParticipantCardProps {
   participant: Participant
@@ -275,8 +226,8 @@ interface ParticipantCardProps {
   onToggleSelection: (id: string) => void
   onOpenDetail: (p: Participant) => void
   onDelete: (id: string) => void
-  onDragStart: (e: React.DragEvent, id: string) => void
-  onDragEnd: (e: React.DragEvent) => void
+  onAccessibleDrop: (id: string, stageId: string, operationId?: string) => void
+  selectedCount: number
   stageOptions: Array<{ id: string; name: string }>
   onStageChange: (id: string, stageId: string) => void
   compactLayout: boolean
@@ -286,23 +237,38 @@ const ParticipantCard = memo(function ParticipantCard({
   participant: p, isSelected, isDetailActive, isDragged, selectionMode,
   canDrag = true,
   canDelete = true,
-  onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd,
+  onToggleSelection, onOpenDetail, onDelete, onAccessibleDrop, selectedCount,
   stageOptions, onStageChange, compactLayout,
 }: ParticipantCardProps) {
+  const accessibleDrag = useCrmPipelineCardDrag({
+    entityId: p.id,
+    label: p.name || 'Participante',
+    count: isSelected && selectedCount > 1 ? selectedCount : 1,
+    currentStageId: p.stage_id || CRM_PIPELINE_UNASSIGNED_STAGE_ID,
+    stages: stageOptions,
+    disabled: !canDrag || (selectionMode && !isSelected),
+    singular: 'participante',
+    plural: 'participantes',
+    onCommit: (stageId, operationId) => onAccessibleDrop(p.id, stageId, operationId),
+  })
   return (
     <div
-      draggable={!selectionMode && canDrag}
-      onDragStart={(e) => onDragStart(e, p.id)}
-      onDragEnd={onDragEnd}
+      ref={accessibleDrag.setNodeRef}
+      data-crm-pipeline-card={p.id}
+      data-crm-pipeline-label={p.name || 'Participante'}
+      data-crm-selected={isSelected ? 'true' : 'false'}
       className={`bg-white p-3 rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer ${
         isSelected ? 'border-emerald-500 ring-2 ring-emerald-100'
         : isDetailActive ? 'border-emerald-400 ring-2 ring-emerald-200 bg-emerald-50/50'
         : 'border-slate-100'
-      } ${isDragged ? 'opacity-50' : ''} ${!selectionMode && canDrag ? 'cursor-grab active:cursor-grabbing' : ''}`}
-      onClick={() => selectionMode ? onToggleSelection(p.id) : onOpenDetail(p)}
+      } ${isDragged || accessibleDrag.isDragging ? 'opacity-[0.22]' : ''}`}
+      onClick={() => { selectionMode ? onToggleSelection(p.id) : onOpenDetail(p) }}
     >
+      <span id={`participant-drag-help-${p.id}`} className="sr-only" aria-live="polite">{accessibleDrag.instructions}</span>
+      {accessibleDrag.overlay}
       <div className="flex items-start justify-between gap-2 group">
         <div className="flex items-center gap-2">
+          {canDrag && (!selectionMode || isSelected) && <button ref={accessibleDrag.setActivatorNodeRef} {...accessibleDrag.listeners} {...accessibleDrag.attributes} type="button" data-no-crm-drag onClick={event => event.stopPropagation()} aria-label={`Mover ${p.name || 'participante'}`} className="inline-flex h-8 w-7 shrink-0 touch-none items-center justify-center rounded-lg text-slate-300 transition hover:bg-emerald-50 hover:text-emerald-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 active:cursor-grabbing"><GripVertical className="h-4 w-4" /></button>}
           {selectionMode ? (
             <button onClick={(e) => { e.stopPropagation(); onToggleSelection(p.id) }} className={`p-0.5 ${compactLayout ? 'min-h-11 min-w-11 flex items-center justify-center' : ''}`} aria-label={isSelected ? 'Quitar participante de la selección' : 'Seleccionar participante'}>
               {isSelected ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> : <div className="w-4 h-4 rounded border-2 border-slate-300" />}
@@ -358,7 +324,7 @@ const ParticipantCard = memo(function ParticipantCard({
         >
           Mover a etapa
           <select
-            value={p.stage_id || ''}
+            value={p.stage_id || CRM_PIPELINE_UNASSIGNED_STAGE_ID}
             onChange={(event) => {
               event.stopPropagation()
               if (event.target.value && event.target.value !== p.stage_id) onStageChange(p.id, event.target.value)
@@ -367,7 +333,7 @@ const ParticipantCard = memo(function ParticipantCard({
             className="mt-1 min-h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-base text-slate-700 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
             aria-label={`Mover a etapa a ${p.name || 'participante'}`}
           >
-            {!p.stage_id && <option value="">Sin etapa</option>}
+            <option value={CRM_PIPELINE_UNASSIGNED_STAGE_ID}>Sin etapa</option>
             {stageOptions.map(stage => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
           </select>
         </label>
@@ -385,9 +351,7 @@ interface VirtualColumnProps {
   draggedId: string | null; dragOverColumn: string | null; selectionMode: boolean
   onToggleSelection: (id: string) => void; onOpenDetail: (p: Participant) => void
   onDelete: (id: string) => void
-  onDragStart: (e: React.DragEvent, id: string) => void; onDragEnd: (e: React.DragEvent) => void
-  onDragOver: (e: React.DragEvent, stageId: string) => void; onDragLeave: (e: React.DragEvent) => void
-  onDrop: (e: React.DragEvent, stageId: string) => void
+  onAccessibleDrop: (id: string, stageId: string, operationId?: string) => void
   onRenameStage?: (stageId: string, newName: string) => void
   onColorStage?: (stageId: string, color: string) => void
   onDeleteStage?: (stageId: string, stageName: string, totalCount: number) => void
@@ -405,12 +369,13 @@ interface VirtualColumnProps {
 const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
   column, totalCount, hasMore, loadingMore, onLoadMore,
   selectedIds, detailParticipantId, draggedId, dragOverColumn, selectionMode,
-  onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop,
+  onToggleSelection, onOpenDetail, onDelete, onAccessibleDrop,
   onRenameStage, onColorStage, onDeleteStage, canManageStage = true, canDragParticipants = true,
   stageEditMode = false, onStageDragStart, onStageDrop, isStageDragging = false,
   stageOptions, onParticipantStageChange, compactLayout,
 }: VirtualColumnProps) {
-  const parentRef = useRef<HTMLDivElement>(null)
+  const parentRef = useRef<HTMLDivElement | null>(null)
+  const stageDrop = useCrmPipelineStageDrop(column.id, !canDragParticipants || stageEditMode)
   const [editingName, setEditingName] = useState(false)
   const [editName, setEditName] = useState(column.name)
   const editInputRef = useRef<HTMLInputElement>(null)
@@ -516,15 +481,14 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
         </div>
       )}
       <div
-        ref={parentRef}
-        className={`bg-slate-50/80 p-2 flex-1 overflow-y-auto kanban-col-scroll transition-colors ${
-          canDragParticipants && dragOverColumn === column.id ? 'bg-emerald-50 ring-2 ring-emerald-300 ring-inset' : ''
+        ref={node => { parentRef.current = node; stageDrop.setNodeRef(node) }}
+        data-crm-pipeline-stage={column.id}
+        className={`relative bg-slate-50/80 p-2 flex-1 overflow-y-auto kanban-col-scroll transition-colors ${
+          canDragParticipants && (stageDrop.isOver || dragOverColumn === column.id) ? 'ring-2 ring-inset' : ''
         }`}
-        style={{ minHeight: 200 }}
-        onDragOver={canDragParticipants ? (e) => onDragOver(e, column.id) : undefined}
-        onDragLeave={canDragParticipants ? onDragLeave : undefined}
-        onDrop={canDragParticipants ? (e) => onDrop(e, column.id) : undefined}
+        style={{ minHeight: 200, backgroundColor: stageDrop.isOver ? `${column.color}12` : undefined, '--tw-ring-color': `${column.color}99` } as React.CSSProperties}
       >
+        {stageDrop.isOver && <div aria-hidden className="pointer-events-none absolute inset-x-2 top-2 z-20 flex h-11 items-center justify-center rounded-xl border-2 border-dashed bg-white/90 text-xs font-bold shadow-sm" style={{ borderColor: column.color, color: column.color }}>Suelta en {column.name}</div>}
         <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
           {virtualizer.getVirtualItems().map((vi) => {
             const p = column.participants[vi.index]
@@ -540,8 +504,8 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
                     onToggleSelection={onToggleSelection}
                     onOpenDetail={onOpenDetail}
                     onDelete={onDelete}
-                    onDragStart={onDragStart}
-                    onDragEnd={onDragEnd}
+                    onAccessibleDrop={onAccessibleDrop}
+                    selectedCount={selectedIds.size}
                     canDrag={canDragParticipants}
                     canDelete={canDragParticipants}
                     stageOptions={stageOptions}
@@ -573,6 +537,7 @@ export default function EventDetailPage() {
   const searchParams = useSearchParams()
   const { ref: pageRef, width: pageWidth } = useContainerWidth<HTMLDivElement>()
   const eventId = params.id as string
+  const crmWindowStorageScope = useCrmWindowStorageScope('events')
   const folderParam = searchParams.get('folder')
 
   // Core data
@@ -625,8 +590,6 @@ export default function EventDetailPage() {
   const [detailParticipantLoading, setDetailParticipantLoading] = useState(false)
   const [detailParticipantError, setDetailParticipantError] = useState('')
   const detailParticipantRequestRef = useRef(0)
-  const detailPanelDialogRef = useRef<HTMLDivElement>(null)
-  const detailPreviousFocusRef = useRef<HTMLElement | null>(null)
   const [showMembershipHistory, setShowMembershipHistory] = useState(false)
   const [membershipHistory, setMembershipHistory] = useState<MembershipHistoryEntry[]>([])
   const [membershipHistoryLoading, setMembershipHistoryLoading] = useState(false)
@@ -634,19 +597,56 @@ export default function EventDetailPage() {
   // Track own stage changes to avoid WebSocket refetch race condition
   const ownStageChangeRef = useRef(false)
   const ownStageTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const ownStageOperationIdsRef = useRef(new Set<string>())
 
   // WhatsApp inline chat
   const [showInlineChat, setShowInlineChat] = useState(false)
+  const [messagePhase, setMessagePhase] = useState<CrmMessagePhase>('idle')
   const [inlineChatId, setInlineChatId] = useState('')
   const [inlineChat, setInlineChat] = useState<Chat | null>(null)
   const [inlineChatDeviceId, setInlineChatDeviceId] = useState('')
   const [inlineChatReadOnly, setInlineChatReadOnly] = useState(false)
   const [showDeviceSelector, setShowDeviceSelector] = useState(false)
   const [devices, setDevices] = useState<Device[]>([])
+  const [chatDevices, setChatDevices] = useState<Device[]>([])
   const [whatsappPhone, setWhatsappPhone] = useState('')
   const [existingChatForWA, setExistingChatForWA] = useState<Chat | null>(null)
   const [whatsappHistoricalPhone, setWhatsappHistoricalPhone] = useState('')
   const whatsappPhoneRef = useRef('')
+  const crmMessageTriggerRef = useRef<HTMLElement | null>(null)
+  const whatsappRequestRef = useRef(0)
+  const activeParticipantIdRef = useRef<string | null>(null)
+  const deviceSelectorDialogRef = useRef<HTMLDivElement>(null)
+  const deviceSelectorCancelRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    activeParticipantIdRef.current = detailParticipant?.id || null
+  }, [detailParticipant?.id])
+
+  const resetInlineChatState = useCallback(() => {
+    whatsappRequestRef.current += 1
+    setMessagePhase('idle')
+    setShowDeviceSelector(false)
+    setChatDevices([])
+    setWhatsappPhone('')
+    whatsappPhoneRef.current = ''
+    setShowInlineChat(false)
+    setInlineChatId('')
+    setInlineChat(null)
+    setInlineChatDeviceId('')
+    setInlineChatReadOnly(false)
+    setExistingChatForWA(null)
+    setWhatsappHistoricalPhone('')
+  }, [])
+
+  const closeInlineChatAndRestoreFocus = useCallback(() => {
+    resetInlineChatState()
+    requestAnimationFrame(() => crmMessageTriggerRef.current?.focus({ preventScroll: true }))
+  }, [resetInlineChatState])
+
+  const isCurrentWhatsAppRequest = useCallback((requestId: number, participantId: string | null) => {
+    return whatsappRequestRef.current === requestId && activeParticipantIdRef.current === participantId
+  }, [])
 
   // Add participant
   const [showAddModal, setShowAddModal] = useState(false)
@@ -890,7 +890,7 @@ export default function EventDetailPage() {
     const generation = participantGenerationRef.current
     setLoadingMoreStages(prev => new Set(prev).add(stageId))
     try {
-      const isUnassigned = stageId === '__unassigned__'
+      const isUnassigned = stageId === CRM_PIPELINE_UNASSIGNED_STAGE_ID
       const currentParticipants = isUnassigned
         ? unassignedData.participants
         : stageData.find(s => s.id === stageId)?.participants || []
@@ -1091,11 +1091,7 @@ export default function EventDetailPage() {
   )
   const eventHasMembershipRules = event?.has_membership_rules ?? Boolean(event?.tag_formula?.trim())
   const eventIsReadOnly = event?.status === 'completed' || event?.status === 'cancelled'
-  const detailPanelOpen = showDetailPanel || showInlineChat
   const isCompactLayout = pageWidth > 0 && pageWidth < 768
-  // The split reserves the 360 px detail panel and at least 480 px for ChatPanel.
-  const isSingleSurfaceLayout = pageWidth > 0 && pageWidth < 960
-
   const activeDraftStages = useMemo(() => (
     draftStages
       .filter(stage => !stage.isDeleted)
@@ -1153,66 +1149,24 @@ export default function EventDetailPage() {
   const participantsWithPhone = useMemo(() => allFilteredParticipants.filter(p => p.phone), [allFilteredParticipants])
 
   // ─── Drag & Drop ────────────────────────────────────────────────────────────
-  const handleDragStart = useCallback((e: React.DragEvent, pid: string) => {
-    setDraggedId(pid)
-    e.dataTransfer.effectAllowed = 'move'
-    e.dataTransfer.setData('text/plain', pid)
-    if (e.currentTarget instanceof HTMLElement) e.currentTarget.style.opacity = '0.5'
-  }, [])
-
-  const handleDragEnd = useCallback((e: React.DragEvent) => {
-    setDraggedId(null)
-    setDragOverColumn(null)
-    if (e.currentTarget instanceof HTMLElement) e.currentTarget.style.opacity = '1'
-  }, [])
-
-  const handleDragOver = useCallback((e: React.DragEvent, stageId: string) => {
-    e.preventDefault()
-    e.dataTransfer.dropEffect = 'move'
-    setDragOverColumn(stageId)
-  }, [])
-
-  const handleDragLeave = useCallback(() => setDragOverColumn(null), [])
-
-  const handleStageChange = useCallback(async (pid: string, targetStageId: string) => {
-    const stage = pipelineStages.find(s => s.id === targetStageId) || stageData.find(s => s.id === targetStageId)
+  const handleStageChange = useCallback(async (pid: string, targetStageId: string, operationId?: string) => {
+    const stageSnapshot = stageData
+    const unassignedSnapshot = unassignedData
+    const listSnapshot = listParticipants
+    const detailSnapshot = detailParticipant
+    const clearingStage = targetStageId === CRM_PIPELINE_UNASSIGNED_STAGE_ID
+    const stage = clearingStage ? undefined : pipelineStages.find(s => s.id === targetStageId) || stageData.find(s => s.id === targetStageId)
     const updatedProps = {
-      stage_id: targetStageId,
-      stage_name: stage?.name || undefined,
-      stage_color: stage?.color || undefined,
+      stage_id: clearingStage ? null : targetStageId,
+      stage_name: stage?.name || null,
+      stage_color: stage?.color || null,
     }
-    // Optimistic move: remove from old stage, add to new
-    setStageData(prev => {
-      let movedP: Participant | undefined
-      const afterRemove = prev.map(s => {
-        const idx = s.participants.findIndex(p => p.id === pid)
-        if (idx >= 0) {
-          movedP = { ...s.participants[idx], ...updatedProps }
-          return { ...s, participants: s.participants.filter(p => p.id !== pid), total_count: Math.max(0, s.total_count - 1) }
-        }
-        return s
-      })
-      if (movedP) {
-        return afterRemove.map(s => s.id === targetStageId
-          ? { ...s, participants: [movedP!, ...s.participants], total_count: s.total_count + 1 }
-          : s
-        )
-      }
-      return afterRemove
-    })
-    // Check unassigned→stage
-    setUnassignedData(prev => {
-      const idx = prev.participants.findIndex(p => p.id === pid)
-      if (idx >= 0) {
-        const movedP = { ...prev.participants[idx], ...updatedProps }
-        setStageData(sd => sd.map(s => s.id === targetStageId
-          ? { ...s, participants: [movedP, ...s.participants], total_count: s.total_count + 1 }
-          : s
-        ))
-        return { ...prev, participants: prev.participants.filter(p => p.id !== pid), total_count: Math.max(0, prev.total_count - 1) }
-      }
-      return prev
-    })
+    const optimistic = moveCrmPipelineItems({
+      columns: stageSnapshot.map(column => ({ id: column.id, totalCount: column.total_count, items: column.participants })),
+      unassigned: { id: CRM_PIPELINE_UNASSIGNED_STAGE_ID, totalCount: unassignedSnapshot.total_count, items: unassignedSnapshot.participants },
+    }, [pid], targetStageId, participant => participant.id, participant => ({ ...participant, ...updatedProps }))
+    setStageData(stageSnapshot.map((column, index) => ({ ...column, participants: optimistic.snapshot.columns[index].items, total_count: optimistic.snapshot.columns[index].totalCount })))
+    setUnassignedData({ ...unassignedSnapshot, participants: optimistic.snapshot.unassigned.items, total_count: optimistic.snapshot.unassigned.totalCount })
     setListParticipants(prev => prev.map(p => p.id === pid ? { ...p, ...updatedProps } : p))
     if (detailParticipant?.id === pid) {
       setDetailParticipant(prev => prev ? { ...prev, ...updatedProps } : null)
@@ -1220,74 +1174,121 @@ export default function EventDetailPage() {
     try {
       // Mark that we initiated this stage change (prevents WebSocket refetch from reverting)
       ownStageChangeRef.current = true
+      if (operationId) {
+        ownStageOperationIdsRef.current.add(operationId)
+        window.setTimeout(() => ownStageOperationIdsRef.current.delete(operationId), 5000)
+      }
       if (ownStageTimerRef.current) clearTimeout(ownStageTimerRef.current)
       ownStageTimerRef.current = setTimeout(() => { ownStageChangeRef.current = false }, 3000)
       const res = await fetch(`/api/events/${eventId}/participants/${pid}/stage`, {
         method: 'PATCH',
         headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stage_id: targetStageId }),
+        body: JSON.stringify({ stage_id: clearingStage ? null : targetStageId, operation_id: operationId }),
       })
       const data = await res.json()
       if (!res.ok || !data.success) {
         ownStageChangeRef.current = false
-        alert(data.error || 'No se pudo mover al participante. Se restaurará la etapa anterior.')
-        fetchParticipantsPaginated()
+        setStageData(stageSnapshot)
+        setUnassignedData(unassignedSnapshot)
+        setListParticipants(listSnapshot)
+        setDetailParticipant(current => detailSnapshot?.id === pid && current?.id === pid ? detailSnapshot : current)
+        alert(data.error || 'No se pudo mover al participante. Restauramos exactamente la etapa anterior.')
+        return false
       }
+      if (data.participant) {
+        const canonical = data.participant as Participant
+        updateParticipantInStages(pid, () => canonical)
+        setListParticipants(current => current.map(participant => participant.id === pid ? canonical : participant))
+        setDetailParticipant(current => current?.id === pid ? canonical : current)
+      }
+      return true
     } catch {
       ownStageChangeRef.current = false
-      alert('No se pudo conectar para mover al participante. Se restaurará la etapa anterior.')
-      fetchParticipantsPaginated()
+      setStageData(stageSnapshot)
+      setUnassignedData(unassignedSnapshot)
+      setListParticipants(listSnapshot)
+      setDetailParticipant(current => detailSnapshot?.id === pid && current?.id === pid ? detailSnapshot : current)
+      alert('No se pudo conectar para mover al participante. Restauramos exactamente la etapa anterior.')
+      return false
     }
-  }, [eventId, pipelineStages, stageData, detailParticipant, fetchParticipantsPaginated])
+  }, [eventId, pipelineStages, stageData, unassignedData, listParticipants, detailParticipant])
 
-  const handleDrop = useCallback((e: React.DragEvent, targetStageId: string) => {
-    e.preventDefault()
-    setDragOverColumn(null)
-    const pid = e.dataTransfer.getData('text/plain')
-    if (!pid) { setDraggedId(null); return }
-    // Check if bulk
-    if (selectedIds.has(pid) && selectedIds.size > 1) {
-      setDraggedId(null)
-      handleBulkMove(targetStageId)
-      return
-    }
-    const p = findParticipantById(pid)
-    if (p && p.stage_id !== targetStageId) {
-      handleStageChange(pid, targetStageId)
-    }
-    setDraggedId(null)
-  }, [selectedIds, findParticipantById, handleStageChange])
-
-  const handleBulkMove = useCallback(async (targetStageId: string) => {
+  const handleBulkMove = useCallback(async (targetStageId: string, operationId?: string) => {
     if (selectedIds.size === 0) return
     setBulkMoving(true)
     const ids = Array.from(selectedIds)
-    const stage = pipelineStages.find(s => s.id === targetStageId) || stageData.find(s => s.id === targetStageId)
-    // Optimistic update
-    ids.forEach(id => {
-      updateParticipantInStages(id, p => ({
-        ...p, stage_id: targetStageId, stage_name: stage?.name || undefined, stage_color: stage?.color || undefined,
-      }))
-    })
+    const clearingStage = targetStageId === CRM_PIPELINE_UNASSIGNED_STAGE_ID
+    const stage = clearingStage ? undefined : pipelineStages.find(s => s.id === targetStageId) || stageData.find(s => s.id === targetStageId)
+    const stageSnapshot = stageData
+    const unassignedSnapshot = unassignedData
+    const listSnapshot = listParticipants
+    const selectionSnapshot = new Set(selectedIds)
+    const optimistic = moveCrmPipelineItems({
+      columns: stageSnapshot.map(column => ({ id: column.id, totalCount: column.total_count, items: column.participants })),
+      unassigned: { id: CRM_PIPELINE_UNASSIGNED_STAGE_ID, totalCount: unassignedSnapshot.total_count, items: unassignedSnapshot.participants },
+    }, ids, targetStageId, participant => participant.id, participant => ({ ...participant, stage_id: clearingStage ? null : targetStageId, stage_name: stage?.name || null, stage_color: stage?.color || null }))
+    setStageData(stageSnapshot.map((column, index) => ({ ...column, participants: optimistic.snapshot.columns[index].items, total_count: optimistic.snapshot.columns[index].totalCount })))
+    setUnassignedData({ ...unassignedSnapshot, participants: optimistic.snapshot.unassigned.items, total_count: optimistic.snapshot.unassigned.totalCount })
+    setListParticipants(listSnapshot.map(participant => selectedIds.has(participant.id) ? { ...participant, stage_id: clearingStage ? null : targetStageId, stage_name: stage?.name || null, stage_color: stage?.color || null } : participant))
     setSelectedIds(new Set())
     setSelectionMode(false)
     try {
+      ownStageChangeRef.current = true
+      if (operationId) {
+        ownStageOperationIdsRef.current.add(operationId)
+        window.setTimeout(() => ownStageOperationIdsRef.current.delete(operationId), 5000)
+      }
+      if (ownStageTimerRef.current) clearTimeout(ownStageTimerRef.current)
+      ownStageTimerRef.current = setTimeout(() => { ownStageChangeRef.current = false }, 3000)
       const response = await fetch(`/api/events/${eventId}/participants/bulk-stage`, {
         method: 'PATCH',
         headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ participant_ids: ids, stage_id: targetStageId }),
+        body: JSON.stringify({ participant_ids: ids, stage_id: clearingStage ? null : targetStageId, operation_id: operationId }),
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok || !data.success) {
-        alert(data.error || 'No se pudieron mover los participantes seleccionados.')
+        ownStageChangeRef.current = false
+        setStageData(stageSnapshot)
+        setUnassignedData(unassignedSnapshot)
+        setListParticipants(listSnapshot)
+        setSelectedIds(selectionSnapshot)
+        setSelectionMode(true)
+        alert(data.error || 'No se pudieron mover los participantes. Restauramos tarjetas, selección y contadores.')
+        return false
       }
-      fetchParticipantsPaginated()
+      if (Array.isArray(data.participants)) {
+        const canonicalById = new Map((data.participants as Array<Partial<Participant> & { id: string }>).map(participant => [participant.id, participant]))
+        setStageData(current => current.map(column => ({ ...column, participants: column.participants.map(participant => canonicalById.has(participant.id) ? { ...participant, ...canonicalById.get(participant.id) } : participant) })))
+        setListParticipants(current => current.map(participant => canonicalById.has(participant.id) ? { ...participant, ...canonicalById.get(participant.id) } : participant))
+        setDetailParticipant(current => current && canonicalById.has(current.id) ? { ...current, ...canonicalById.get(current.id) } : current)
+      }
+      return true
     } catch {
-      alert('No se pudo conectar para mover los participantes seleccionados.')
-      fetchParticipantsPaginated()
+      ownStageChangeRef.current = false
+      setStageData(stageSnapshot)
+      setUnassignedData(unassignedSnapshot)
+      setListParticipants(listSnapshot)
+      setSelectedIds(selectionSnapshot)
+      setSelectionMode(true)
+      alert('No se pudo conectar para mover los participantes. Restauramos tarjetas, selección y contadores.')
+      return false
     }
     finally { setBulkMoving(false) }
-  }, [selectedIds, eventId, pipelineStages, stageData, updateParticipantInStages, fetchParticipantsPaginated])
+  }, [selectedIds, eventId, pipelineStages, stageData, unassignedData, listParticipants])
+
+  const handleAccessibleDragSession = useCallback((participantId: string | null, stageId: string | null) => {
+    setDraggedId(participantId)
+    setDragOverColumn(stageId)
+  }, [])
+
+  const handleAccessibleParticipantDrop = useCallback((participantId: string, targetStageId: string, operationId?: string) => {
+    if (selectedIds.has(participantId) && selectedIds.size > 1) {
+      void handleBulkMove(targetStageId, operationId)
+      return
+    }
+    const participant = findParticipantById(participantId)
+    if (participant && participant.stage_id !== targetStageId) void handleStageChange(participantId, targetStageId, operationId)
+  }, [findParticipantById, handleBulkMove, handleStageChange, selectedIds])
 
   const applyStageManagementResponse = useCallback((data: any) => {
     const pipelineChanged = Boolean(data.pipeline_id && event?.pipeline_id && data.pipeline_id !== event.pipeline_id)
@@ -1648,13 +1649,14 @@ export default function EventDetailPage() {
       const data = await res.json()
       if (!res.ok || !data.success) { alert(data.error || 'No se pudo sacar al participante'); return }
       removeParticipantFromStages(pid)
-      if (detailParticipant?.id === pid) { setShowDetailPanel(false); setShowInlineChat(false) }
+      if (detailParticipant?.id === pid) { setShowDetailPanel(false); resetInlineChatState() }
       fetchEvent()
     } catch (e) { console.error(e) }
-  }, [eventId, detailParticipant, removeParticipantFromStages, fetchEvent])
+  }, [eventId, detailParticipant, removeParticipantFromStages, fetchEvent, resetInlineChatState])
 
   // ─── Detail Panel ──────────────────────────────────────────────────────────
   const openDetailPanel = useCallback((p: Participant) => {
+    resetInlineChatState()
     setDetailParticipant(p)
     setShowDetailPanel(true)
     setDetailParticipantLoading(true)
@@ -1686,7 +1688,7 @@ export default function EventDetailPage() {
         if (requestID === detailParticipantRequestRef.current) setDetailParticipantLoading(false)
       }
     })()
-  }, [eventId, fetchParticipantsPaginated])
+  }, [eventId, fetchParticipantsPaginated, resetInlineChatState])
 
   const handleViewExistingParticipant = useCallback((person: SelectedPerson) => {
     if (!person.participant_id) return
@@ -1719,17 +1721,24 @@ export default function EventDetailPage() {
 
   // ─── WhatsApp ──────────────────────────────────────────────────────────────
   const handleSendWhatsApp = async (phone: string) => {
+    crmMessageTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const cleanPhone = (phone || '').replace(/[^0-9]/g, '')
     if (!cleanPhone) {
       alert('Este participante no tiene un número válido')
       return
     }
+    const participantId = activeParticipantIdRef.current
+    resetInlineChatState()
+    const requestId = whatsappRequestRef.current
+    setMessagePhase('resolving')
     setWhatsappPhone(cleanPhone)
     whatsappPhoneRef.current = cleanPhone
     try {
       const resolution = await resolveWhatsAppChat(cleanPhone)
+      if (!isCurrentWhatsAppRequest(requestId, participantId)) return
       if (!resolution.success) {
         alert(resolution.error || 'Error al resolver conversación')
+        closeInlineChatAndRestoreFocus()
         return
       }
       setExistingChatForWA(resolution.chat || null)
@@ -1740,40 +1749,61 @@ export default function EventDetailPage() {
         setInlineChatDeviceId(resolution.chat.device_id || '')
         setInlineChatReadOnly(true)
         setShowInlineChat(true)
+        setMessagePhase('chat')
         return
       }
       if (resolution.mode === 'open_direct' && resolution.devices[0]) {
-        await handleDeviceSelectedForChat(resolution.devices[0] as Device, cleanPhone)
+        await handleDeviceSelectedForChat(resolution.devices[0] as Device, cleanPhone, requestId, participantId)
         return
       }
       if (resolution.mode === 'choose_device') {
-        setDevices(resolution.devices as Device[])
+        setChatDevices(resolution.devices as Device[])
         setShowDeviceSelector(true)
+        setMessagePhase('choosing_device')
         return
       }
       alert('No hay dispositivos conectados para enviar')
-    } catch { alert('Error de conexión') }
+      closeInlineChatAndRestoreFocus()
+    } catch {
+      if (!isCurrentWhatsAppRequest(requestId, participantId)) return
+      alert('Error de conexión')
+      closeInlineChatAndRestoreFocus()
+    }
   }
 
-  const handleDeviceSelectedForChat = async (device: Device, phone?: string) => {
+  const handleDeviceSelectedForChat = async (
+    device: Device,
+    phone?: string,
+    requestId: number = whatsappRequestRef.current,
+    participantId: string | null = activeParticipantIdRef.current,
+  ) => {
     setShowDeviceSelector(false)
     setInlineChatReadOnly(false)
+    setMessagePhase('opening_chat')
     const cleanPhone = (phone || whatsappPhoneRef.current || whatsappPhone).replace(/[^0-9]/g, '')
     if (!cleanPhone) {
       alert('No hay número seleccionado para abrir el chat')
+      closeInlineChatAndRestoreFocus()
       return
     }
     try {
       const data = await createWhatsAppChat(device.id, cleanPhone)
+      if (!isCurrentWhatsAppRequest(requestId, participantId)) return
       if (data.success && data.chat) {
         setInlineChatId(data.chat.id)
         setInlineChat(data.chat)
         setInlineChatDeviceId(device.id)
         setShowInlineChat(true)
+        setMessagePhase('chat')
       } else {
         alert(data.error || 'Error al crear conversación')
+        closeInlineChatAndRestoreFocus()
       }
-    } catch { alert('Error de conexión') }
+    } catch {
+      if (!isCurrentWhatsAppRequest(requestId, participantId)) return
+      alert('Error de conexión')
+      closeInlineChatAndRestoreFocus()
+    }
   }
 
   // ─── Archive / Block ───────────────────────────────────────────────────────
@@ -1794,6 +1824,12 @@ export default function EventDetailPage() {
     doNotContactDialogRef,
     () => { if (!savingBlock) setShowBlockModal(false) },
     doNotContactFirstChoiceRef,
+  )
+  useAccessibleDialog(
+    showDeviceSelector,
+    deviceSelectorDialogRef,
+    closeInlineChatAndRestoreFocus,
+    deviceSelectorCancelRef,
   )
 
   const openBlockModal = (contactId: string) => {
@@ -1817,7 +1853,7 @@ export default function EventDetailPage() {
       if (!response.ok || !data.success) throw new Error(data.error || 'No se pudo actualizar el contacto')
       setShowBlockModal(false)
       setShowDetailPanel(false)
-      setShowInlineChat(false)
+      resetInlineChatState()
       fetchEvent()
     } catch (err) {
       console.error('Failed to block:', err)
@@ -1837,7 +1873,7 @@ export default function EventDetailPage() {
       const data = await response.json()
       if (!response.ok || !data.success) throw new Error(data.error || 'No se pudo actualizar el contacto')
       setShowDetailPanel(false)
-      setShowInlineChat(false)
+      resetInlineChatState()
       fetchEvent()
     } catch (err) { console.error('Failed to unblock:', err) }
   }
@@ -2266,16 +2302,57 @@ export default function EventDetailPage() {
   const participantDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
-	  const msg = data as { event?: string; action?: string; event_id?: string; data?: { action?: string; event_id?: string } }
-	  const payload = msg.data || msg
+	  type ParticipantSocketPayload = {
+		action?: string
+		event_id?: string
+		participant?: Participant
+		participants?: Array<Partial<Participant> & { id: string }>
+		operation_id?: string
+	  }
+	  const msg = data as ParticipantSocketPayload & { event?: string; data?: ParticipantSocketPayload }
+	  const payload: ParticipantSocketPayload = msg.data ?? msg
 	  if (msg.event === 'contact_update') {
 		fetchParticipantsPaginated()
 		if (viewMode === 'list') fetchListParticipants(true)
 		return
 	  }
 	  if (msg.event === 'event_participant_update' && payload.event_id === eventId) {
-        // Skip refetch if we just changed a stage ourselves (prevents reverting optimistic update)
-		if (payload.action === 'stage_changed' && ownStageChangeRef.current) return
+        if (payload.action === 'stage_changed' || payload.action === 'bulk_stage_changed') {
+          const canonical = payload.participant ? [payload.participant] : payload.participants || []
+          if (canonical.length > 0) {
+            let snapshot = {
+              columns: stageData.map(column => ({ id: column.id, totalCount: column.total_count, items: column.participants })),
+              unassigned: { id: CRM_PIPELINE_UNASSIGNED_STAGE_ID, totalCount: unassignedData.total_count, items: unassignedData.participants },
+            }
+            const loadedIds = new Set([...stageData.flatMap(column => column.participants), ...unassignedData.participants].map(participant => participant.id))
+            canonical.forEach(participant => {
+              if (!Object.prototype.hasOwnProperty.call(participant, 'stage_id')) return
+              snapshot = reconcileCrmPipelineCanonicalItem(
+                snapshot,
+                participant as Participant,
+                participant.stage_id || CRM_PIPELINE_UNASSIGNED_STAGE_ID,
+                item => item.id,
+                (current, server) => ({ ...current, ...server }),
+              )
+            })
+            setStageData(current => current.map((column, index) => ({ ...column, participants: snapshot.columns[index]?.items || column.participants, total_count: snapshot.columns[index]?.totalCount ?? column.total_count })))
+            setUnassignedData(current => ({ ...current, participants: snapshot.unassigned.items, total_count: snapshot.unassigned.totalCount }))
+            setListParticipants(current => current.map(item => {
+              const server = canonical.find(participant => participant.id === item.id)
+              return server ? { ...item, ...server } : item
+            }))
+            setDetailParticipant(current => {
+              const server = current && canonical.find(participant => participant.id === current.id)
+              return current && server ? { ...current, ...server } : current
+            })
+            if (canonical.every(participant => loadedIds.has(participant.id))) return
+          }
+          // Older or unloaded canonical entities need one silent collection reconciliation.
+          if (!payload.operation_id && ownStageChangeRef.current) return
+          fetchParticipantsPaginated()
+          if (viewMode === 'list') fetchListParticipants(true)
+          return
+        }
 		if (payload.action === 'tag_sync_reconcile' || payload.action === 'rule_reconciled' || payload.action === 'membership_reconciled') {
           // Background sync reconciliation — debounce to avoid refresh storms
           if (participantDebounceRef.current) clearTimeout(participantDebounceRef.current)
@@ -2315,47 +2392,13 @@ export default function EventDetailPage() {
       unsubscribe()
       if (participantDebounceRef.current) clearTimeout(participantDebounceRef.current)
     }
-  }, [eventId, fetchParticipantsPaginated, fetchEvent, viewMode, fetchListParticipants, fetchLogbooks, listObservations, fetchBatchObservations])
-
-  useEffect(() => {
-    if (!detailPanelOpen) return
-    detailPreviousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const frame = window.requestAnimationFrame(() => detailPanelDialogRef.current?.focus({ preventScroll: true }))
-    const trapFocus = (keyboardEvent: KeyboardEvent) => {
-      if (keyboardEvent.key !== 'Tab') return
-      const dialog = detailPanelDialogRef.current
-      if (!dialog) return
-      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
-        'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])',
-      )).filter(element => element.offsetParent !== null)
-      if (focusable.length === 0) {
-        keyboardEvent.preventDefault()
-        dialog.focus()
-        return
-      }
-      const first = focusable[0]
-      const last = focusable[focusable.length - 1]
-      if (keyboardEvent.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
-        keyboardEvent.preventDefault()
-        last.focus()
-      } else if (!keyboardEvent.shiftKey && document.activeElement === last) {
-        keyboardEvent.preventDefault()
-        first.focus()
-      }
-    }
-    document.addEventListener('keydown', trapFocus, true)
-    return () => {
-      window.cancelAnimationFrame(frame)
-      document.removeEventListener('keydown', trapFocus, true)
-      detailPreviousFocusRef.current?.focus({ preventScroll: true })
-      detailPreviousFocusRef.current = null
-    }
-  }, [detailPanelOpen])
+	  }, [eventId, fetchParticipantsPaginated, fetchEvent, viewMode, fetchListParticipants, fetchLogbooks, listObservations, fetchBatchObservations, stageData, unassignedData])
 
   // Escape key
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented) return
+      if (document.querySelector('[data-task-editor-modal], [data-task-detail-window], [data-operational-picker-backdrop], [data-operational-confirmation]')) return
 
       // These dialogs own their Escape handling (focus trap + topmost popover).
       // Returning here prevents the page from navigating while they are open.
@@ -2373,9 +2416,9 @@ export default function EventDetailPage() {
       if (showMembershipHistory) { closeLayer(() => setShowMembershipHistory(false)); return }
       if (showGoogleSyncModal) { closeLayer(() => { if (!googleSyncing) setShowGoogleSyncModal(false) }); return }
       if (showExportModal) { closeLayer(() => { if (!exporting) setShowExportModal(false) }); return }
-      if (showDeviceSelector) { closeLayer(() => setShowDeviceSelector(false)); return }
+      if (showDeviceSelector) { closeLayer(closeInlineChatAndRestoreFocus); return }
       if (showCampaignModal) { closeLayer(() => { if (!creatingCampaign) setShowCampaignModal(false) }); return }
-      if (showInlineChat) { closeLayer(() => setShowInlineChat(false)); return }
+      if (showInlineChat) { closeLayer(closeInlineChatAndRestoreFocus); return }
       if (showStageModal) { closeLayer(() => setShowStageModal(false)); return }
       if (showNewLogbookModal) { closeLayer(() => { if (!creatingLogbook) setShowNewLogbookModal(false) }); return }
       if (showLogbookSettingsModal) { closeLayer(() => { if (!logbookSettingsUpdating) setShowLogbookSettingsModal(false) }); return }
@@ -2387,7 +2430,7 @@ export default function EventDetailPage() {
       if (editingLogbookNotes) { closeLayer(() => setEditingLogbookNotes(false)); return }
       if (editingLogbookTitle) { closeLayer(() => setEditingLogbookTitle(false)); return }
       if (editingLogbookDate) { closeLayer(() => setEditingLogbookDate(false)); return }
-      if (showDetailPanel) { closeLayer(() => setShowDetailPanel(false)); return }
+      if (showDetailPanel) { closeLayer(() => { setShowDetailPanel(false); resetInlineChatState() }); return }
       if (selectionMode) { closeLayer(() => { setSelectionMode(false); setSelectedIds(new Set()) }); return }
       if (selectedLogbook) { closeLayer(() => setSelectedLogbook(null)); return }
       // If in logbook mode, return to kanban view instead of leaving the event
@@ -2406,6 +2449,7 @@ export default function EventDetailPage() {
     cancelStageEditMode, showMoreMenu, showFilterDropdown, editingEventName,
     editingEntryId, editingLogbookNotes, editingLogbookTitle, editingLogbookDate,
     showDetailPanel, selectionMode, selectedLogbook, viewMode, router, folderParam,
+    closeInlineChatAndRestoreFocus, resetInlineChatState,
   ])
 
   // Close more menu on outside click
@@ -3145,6 +3189,7 @@ export default function EventDetailPage() {
 
       {/* ═══ Kanban View ═══ */}
       {viewMode === 'kanban' && (
+        <CrmPipelineDndContext stages={[...displayStages.map(stage => ({ id: stage.id, name: stage.name, color: stage.color })), { id: CRM_PIPELINE_UNASSIGNED_STAGE_ID, name: 'Sin etapa', color: '#64748b' }]} onSessionChange={handleAccessibleDragSession} disabled={stageEditMode || eventIsReadOnly}>
         <div className="flex-1 min-h-0 flex flex-col animate-view-enter">
           <div ref={topScrollRef} onScroll={handleTopScroll} className="overflow-x-auto kanban-scroll-top flex-shrink-0" style={{ height: 12 }}>
             <div style={{ width: `${kanbanColumnCount * 288}px`, height: 1 }} />
@@ -3167,11 +3212,7 @@ export default function EventDetailPage() {
                   onToggleSelection={toggleSelection}
                   onOpenDetail={openDetailPanel}
                   onDelete={handleDeleteParticipant}
-                  onDragStart={handleDragStart}
-                  onDragEnd={handleDragEnd}
-                  onDragOver={handleDragOver}
-                  onDragLeave={handleDragLeave}
-                  onDrop={handleDrop}
+                  onAccessibleDrop={handleAccessibleParticipantDrop}
                   onRenameStage={handleRenameStage}
                   onColorStage={handleColorStage}
                   onDeleteStage={handleDeleteStage}
@@ -3188,12 +3229,12 @@ export default function EventDetailPage() {
               ))}
               {unassignedData.total_count > 0 && (
                 <VirtualKanbanColumn
-                  key="__unassigned__"
-                  column={{ id: '__unassigned__', name: 'Sin etapa', color: '#64748b', participants: unassignedData.participants }}
+                  key={CRM_PIPELINE_UNASSIGNED_STAGE_ID}
+                  column={{ id: CRM_PIPELINE_UNASSIGNED_STAGE_ID, name: 'Sin etapa', color: '#64748b', participants: unassignedData.participants }}
                   totalCount={unassignedData.total_count}
                   hasMore={unassignedData.has_more}
-                  loadingMore={loadingMoreStages.has('__unassigned__')}
-                  onLoadMore={() => loadMoreForStage('__unassigned__')}
+                  loadingMore={loadingMoreStages.has(CRM_PIPELINE_UNASSIGNED_STAGE_ID)}
+                  onLoadMore={() => loadMoreForStage(CRM_PIPELINE_UNASSIGNED_STAGE_ID)}
                   selectedIds={selectedIds}
                   detailParticipantId={detailParticipant?.id || null}
                   draggedId={draggedId}
@@ -3202,11 +3243,7 @@ export default function EventDetailPage() {
                   onToggleSelection={toggleSelection}
                   onOpenDetail={openDetailPanel}
                   onDelete={handleDeleteParticipant}
-                  onDragStart={handleDragStart}
-                  onDragEnd={handleDragEnd}
-                  onDragOver={handleDragOver}
-                  onDragLeave={handleDragLeave}
-                  onDrop={handleDrop}
+                  onAccessibleDrop={handleAccessibleParticipantDrop}
                   canManageStage={false}
                   canDragParticipants={!stageEditMode && !eventIsReadOnly}
                   stageOptions={displayStages}
@@ -3217,6 +3254,7 @@ export default function EventDetailPage() {
             </div>
           </div>
         </div>
+        </CrmPipelineDndContext>
       )}
 
       {/* ═══ List View — Virtualized ═══ */}
@@ -4334,35 +4372,43 @@ export default function EventDetailPage() {
         />
       )}
 
-      {/* ═══ Detail Panel (Slide-over) with Inline Chat ═══ */}
-      {(showDetailPanel || showInlineChat) && detailParticipant && (
-        <div className="app-viewport fixed inset-0 z-[70] flex justify-end overflow-hidden">
-          <div
-            className="absolute inset-0 bg-black/25"
-            onClick={() => { setShowDetailPanel(false); setShowInlineChat(false) }}
-          />
-          <div
-            ref={detailPanelDialogRef}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Detalle del participante"
-            tabIndex={-1}
-            className={`relative bg-white shadow-2xl flex transition-all duration-200 motion-reduce:transition-none border-l border-slate-200 outline-none ${isSingleSurfaceLayout ? 'h-[var(--app-height)] w-full max-w-none border-l-0' : showInlineChat ? 'h-full w-[85vw] max-w-6xl' : 'h-full w-full max-w-md'} ${isSingleSurfaceLayout && showInlineChat ? 'pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]' : ''}`}
-          >
-            {showInlineChat && inlineChatId && (
-              <div className={`${isSingleSurfaceLayout ? 'w-full border-r-0' : 'flex-1 border-r'} min-w-0 border-slate-200 flex flex-col h-full bg-slate-50/50`}>
-                <ChatPanel
-                  chatId={inlineChatId}
-                  deviceId={inlineChatDeviceId}
-                  initialChat={inlineChat || undefined}
-                  readOnly={inlineChatReadOnly}
-                  onClose={() => setShowInlineChat(false)}
-                  className="h-full"
-                />
-              </div>
-            )}
-            <div className={`${isSingleSurfaceLayout && showInlineChat ? 'hidden' : 'flex'} ${showInlineChat && !isSingleSurfaceLayout ? 'w-[360px] shrink-0' : 'w-full'} flex-col h-full bg-white min-w-0`}>
-              {detailParticipant.contact_id ? (
+      {/* ═══ Operational participant detail with an honest Event context ═══ */}
+      {detailParticipant && (
+        <OperationalWindowShell
+          open={showDetailPanel || showInlineChat}
+          storageKey="clarin:crm-event-participant-window"
+          storageScope={crmWindowStorageScope}
+          title={event?.name || 'Evento'}
+          eyebrow="Participación en evento"
+          description={`${event?.name || 'Evento'} · ${detailParticipant.stage_name || 'Sin etapa'}`}
+          icon={Users}
+          defaultMode="docked"
+          defaultWidth={1120}
+          defaultHeight={820}
+          minWidth={560}
+          minHeight={520}
+          dockedWidth={760}
+          temporaryMode={crmMessageTemporaryMode(messagePhase)}
+          align="right"
+          overlayZIndex={110}
+          temporaryOverlaySelector="[data-task-editor-modal], [data-task-detail-window], [data-task-picker-backdrop], [data-task-destructive-dialog], [data-operational-picker-backdrop], [data-operational-confirmation]"
+          onRequestClose={() => { setShowDetailPanel(false); resetInlineChatState() }}
+          contentClassName="min-h-0 flex-1 overflow-hidden"
+        >
+          <CrmDetailWorkspace
+            chatOpen={showInlineChat && Boolean(inlineChatId)}
+            onBackToDetail={closeInlineChatAndRestoreFocus}
+            chat={showInlineChat && inlineChatId ? (
+              <ChatPanel
+                chatId={inlineChatId}
+                deviceId={inlineChatDeviceId}
+                initialChat={inlineChat || undefined}
+                readOnly={inlineChatReadOnly}
+                onClose={closeInlineChatAndRestoreFocus}
+                className="h-full"
+              />
+            ) : undefined}
+            detail={detailParticipant.contact_id ? (
               <ContactDetailSurface
                 contactId={detailParticipant.contact_id}
                 context={{ type: 'event_participant', id: detailParticipant.id }}
@@ -4386,8 +4432,11 @@ export default function EventDetailPage() {
                 }}
                 title="Detalles"
                 subtitle="Contacto y participación en el evento"
-                readOnly={eventIsReadOnly}
-                onClose={() => { setShowDetailPanel(false); setShowInlineChat(false) }}
+                contextActionsDisabled={eventIsReadOnly || detailParticipant.membership_state === 'inactive'}
+                hideHeader
+                onClose={() => { setShowDetailPanel(false); resetInlineChatState() }}
+                onSendMessage={(phone: string) => handleSendWhatsApp(phone)}
+                sendingMessage={crmMessageIsPending(messagePhase)}
                 onContactChange={(contact) => {
                   updateParticipantInStages(detailParticipant.id, participant => mergeContactProfileIntoParticipant(participant, contact))
                   setDetailParticipant(current => current ? mergeContactProfileIntoParticipant(current, contact) : current)
@@ -4398,145 +4447,68 @@ export default function EventDetailPage() {
                     setLoadingListObs(new Set())
                   }
                 }}
-                contextContent={(
-              <LeadDetailPanel
-                lead={participantToLead(detailParticipant)}
-                eventMode={true}
-                eventId={eventId}
-                eventStages={displayStages.map(s => ({ id: s.id, pipeline_id: s.pipeline_id || '', name: s.name, color: s.color, position: s.position, lead_count: 0 }))}
-                participantId={detailParticipant.id}
-                relatedLeads={detailParticipant.related_leads || []}
-                relatedLeadsLoading={detailParticipantLoading}
-                relatedLeadsError={detailParticipantError}
-                onRetryRelatedLeads={() => openDetailPanel(detailParticipant)}
-                eventMembership={{
-                  state: detailParticipant.membership_state,
-                  source: detailParticipant.membership_source,
-                  reason: detailParticipant.membership_reason,
-                  autoTagSync: detailParticipant.auto_tag_sync,
-                  changedAt: detailParticipant.membership_changed_at,
-                }}
-                readOnly={eventIsReadOnly}
-                hideDelete={eventIsReadOnly}
-                onLeadChange={(updatedLead: any) => {
-                  updateParticipantInStages(detailParticipant.id, participant => mergeLegacyLeadIntoParticipant(participant, updatedLead))
-                  setDetailParticipant(current => current ? mergeLegacyLeadIntoParticipant(current, updatedLead) : null)
-                }}
-                onStageChange={(stageId: string, stageName: string, stageColor: string) => {
-                  // Optimistic kanban move — LeadDetailPanel already sent the PATCH
-                  const updatedProps = { stage_id: stageId, stage_name: stageName || undefined, stage_color: stageColor || undefined }
-                  setStageData(prev => {
-                    let movedP: Participant | undefined
-                    const afterRemove = prev.map(s => {
-                      const idx = s.participants.findIndex(p => p.id === detailParticipant.id)
-                      if (idx >= 0) {
-                        movedP = { ...s.participants[idx], ...updatedProps }
-                        return { ...s, participants: s.participants.filter(p => p.id !== detailParticipant.id), total_count: Math.max(0, s.total_count - 1) }
-                      }
-                      return s
+                contextSummary={(
+                  <EventParticipantContextPanel
+                    embedded
+                    participant={detailParticipant}
+                    eventName={event?.name || 'Evento'}
+                    stages={displayStages.map(stage => ({ id: stage.id, name: stage.name, color: stage.color }))}
+                    relatedLeads={detailParticipant.related_leads || []}
+                    relatedLeadsLoading={detailParticipantLoading}
+                    relatedLeadsError={detailParticipantError}
+                    readOnly={eventIsReadOnly || detailParticipant.membership_state === 'inactive'}
+                    readOnlyReason={eventIsReadOnly ? 'event' : detailParticipant.membership_state === 'inactive' ? 'participant' : undefined}
+                    onStageChange={(stageId) => handleStageChange(detailParticipant.id, stageId)}
+                    onRetryRelatedLeads={() => openDetailPanel(detailParticipant)}
+                  />
+                )}
+                contextActivity={<ScopedActivityPanel scope={{ kind: 'event_participant', eventId, participantId: detailParticipant.id, contactId: detailParticipant.contact_id }} description="Solo registros ligados directamente a esta participación." readOnly={eventIsReadOnly || detailParticipant.membership_state === 'inactive'} onChange={() => { if (viewMode === 'list') { setListObservations(new Map()); setLoadingListObs(new Set()) } }} />}
+                relatedTasks={<RelatedTasksPanel scope={{ contactId: detailParticipant.contact_id, eventId }} readOnly={eventIsReadOnly || detailParticipant.membership_state === 'inactive'} />}
+              />
+            ) : (
+              <DetachedEventParticipantDetail
+                participant={detailParticipant}
+                eventName={event?.name || 'Evento'}
+                readOnly={eventIsReadOnly || detailParticipant.membership_state === 'inactive'}
+                context={(
+                  <EventParticipantContextPanel
+                    embedded
+                    participant={detailParticipant}
+                    eventName={event?.name || 'Evento'}
+                    stages={displayStages.map(stage => ({ id: stage.id, name: stage.name, color: stage.color }))}
+                    relatedLeads={detailParticipant.related_leads || []}
+                    relatedLeadsLoading={detailParticipantLoading}
+                    relatedLeadsError={detailParticipantError}
+                    readOnly={eventIsReadOnly || detailParticipant.membership_state === 'inactive'}
+                    readOnlyReason={eventIsReadOnly ? 'event' : detailParticipant.membership_state === 'inactive' ? 'participant' : undefined}
+                    onStageChange={(stageId) => handleStageChange(detailParticipant.id, stageId)}
+                    onRetryRelatedLeads={() => openDetailPanel(detailParticipant)}
+                  />
+                )}
+                activity={<ScopedActivityPanel embedded scope={{ kind: 'event_participant', eventId, participantId: detailParticipant.id }} description="Solo registros ligados directamente a esta participación." readOnly={eventIsReadOnly || detailParticipant.membership_state === 'inactive'} onChange={() => { if (viewMode === 'list') { setListObservations(new Map()); setLoadingListObs(new Set()) } }} />}
+                onMessage={(phone) => handleSendWhatsApp(phone)}
+                onRemove={() => { void handleDeleteParticipant(detailParticipant.id) }}
+                onSave={async (patch: DetachedParticipantPatch) => {
+                  try {
+                    const response = await fetch(`/api/events/${eventId}/participants/${detailParticipant.id}`, {
+                      method: 'PUT',
+                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
+                      body: JSON.stringify(patch),
                     })
-                    if (movedP) {
-                      return afterRemove.map(s => s.id === stageId
-                        ? { ...s, participants: [movedP!, ...s.participants], total_count: s.total_count + 1 }
-                        : s
-                      )
-                    }
-                    return afterRemove
-                  })
-                  setUnassignedData(prev => {
-                    const idx = prev.participants.findIndex(p => p.id === detailParticipant.id)
-                    if (idx >= 0) {
-                      const movedP = { ...prev.participants[idx], ...updatedProps }
-                      setStageData(sd => sd.map(s => s.id === stageId
-                        ? { ...s, participants: [movedP, ...s.participants], total_count: s.total_count + 1 }
-                        : s
-                      ))
-                      return { ...prev, participants: prev.participants.filter(p => p.id !== detailParticipant.id), total_count: Math.max(0, prev.total_count - 1) }
-                    }
-                    return prev
-                  })
-                  setListParticipants(prev => prev.map(p => p.id === detailParticipant.id ? { ...p, ...updatedProps } : p))
-                  // Block incoming WebSocket refetch
-                  ownStageChangeRef.current = true
-                  if (ownStageTimerRef.current) clearTimeout(ownStageTimerRef.current)
-                  ownStageTimerRef.current = setTimeout(() => { ownStageChangeRef.current = false }, 3000)
-                }}
-                onClose={() => { setShowDetailPanel(false); setShowInlineChat(false) }}
-                onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
-                onBlock={() => {
-                  if (detailParticipant.contact_id) openBlockModal(detailParticipant.contact_id)
-                }}
-                onUnblock={() => {
-                  if (detailParticipant.contact_id) handleUnblock(detailParticipant.contact_id)
-                }}
-                onObservationChange={() => {
-                  if (viewMode === 'list') {
-                    setListObservations(new Map())
-                    setLoadingListObs(new Set())
+                    const data = await response.json()
+                    if (!response.ok || !data.success || !data.participant) return { success: false, error: data.error || 'No se pudieron guardar los datos.' }
+                    const canonical = data.participant as Participant
+                    updateParticipantInStages(detailParticipant.id, current => ({ ...current, ...canonical }))
+                    setDetailParticipant(current => current?.id === detailParticipant.id ? { ...current, ...canonical } : current)
+                    return { success: true }
+                  } catch {
+                    return { success: false, error: 'No pudimos conectar con el servidor. Revisa tu conexión e inténtalo nuevamente.' }
                   }
                 }}
-                onDelete={(id: string) => {
-                  removeParticipantFromStages(detailParticipant.id)
-                  setShowDetailPanel(false)
-                  setShowInlineChat(false)
-                  fetchEvent()
-                }}
-                hideWhatsApp={showInlineChat}
-                hideHeader
-                hideIdentity
-                commercialOnly
-                parentOwnsScroll
-                hideTabs
-                hideCustomFields
-                hideObservations
               />
-                )}
-              />
-              ) : (
-                <LeadDetailPanel
-                  lead={participantToLead(detailParticipant)}
-                  eventMode
-                  eventId={eventId}
-                  eventStages={displayStages.map(stage => ({ id: stage.id, pipeline_id: stage.pipeline_id || '', name: stage.name, color: stage.color, position: stage.position, lead_count: 0 }))}
-                  participantId={detailParticipant.id}
-                  relatedLeads={detailParticipant.related_leads || []}
-                  relatedLeadsLoading={detailParticipantLoading}
-                  relatedLeadsError={detailParticipantError}
-                  onRetryRelatedLeads={() => openDetailPanel(detailParticipant)}
-                  eventMembership={{
-                    state: detailParticipant.membership_state,
-                    source: detailParticipant.membership_source,
-                    reason: detailParticipant.membership_reason,
-                    autoTagSync: detailParticipant.auto_tag_sync,
-                    changedAt: detailParticipant.membership_changed_at,
-                  }}
-                  readOnly={eventIsReadOnly}
-                  hideDelete={eventIsReadOnly}
-                  onLeadChange={(updatedLead: any) => {
-                    updateParticipantInStages(detailParticipant.id, participant => mergeLegacyLeadIntoParticipant(participant, updatedLead))
-                    setDetailParticipant(current => current ? mergeLegacyLeadIntoParticipant(current, updatedLead) : null)
-                  }}
-                  onStageChange={() => { void fetchParticipantsPaginated(); void fetchEvent() }}
-                  onClose={() => { setShowDetailPanel(false); setShowInlineChat(false) }}
-                  onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
-                  onObservationChange={() => {
-                    if (viewMode === 'list') {
-                      setListObservations(new Map())
-                      setLoadingListObs(new Set())
-                    }
-                  }}
-                  onDelete={() => {
-                    removeParticipantFromStages(detailParticipant.id)
-                    setShowDetailPanel(false)
-                    setShowInlineChat(false)
-                    void fetchEvent()
-                  }}
-                  hideWhatsApp={showInlineChat}
-                />
-              )}
-            </div>
-          </div>
-        </div>
+            )}
+          />
+        </OperationalWindowShell>
       )}
       {/* ═══ Contact communication preference ═══ */}
       {showBlockModal && (
@@ -4740,20 +4712,20 @@ export default function EventDetailPage() {
       )}
       {/* ═══ Device Selector ═══ */}
       {showDeviceSelector && (
-        <div className={`app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-sm ${isCompactLayout ? 'p-0' : 'p-4'}`}>
-          <div className={`bg-white shadow-2xl p-4 sm:p-6 w-full border border-slate-100 overflow-y-auto ${isCompactLayout ? 'h-[var(--app-height)] max-w-none rounded-none border-0 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]' : 'max-w-sm rounded-2xl'}`}>
-            <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
+        <div data-operational-picker-backdrop className={`app-viewport fixed inset-0 z-[170] flex items-center justify-center bg-black/40 backdrop-blur-sm ${isCompactLayout ? 'p-0' : 'p-4'}`}>
+          <div ref={deviceSelectorDialogRef} role="dialog" aria-modal="true" aria-labelledby="event-device-selector-title" className={`bg-white shadow-2xl p-4 sm:p-6 w-full border border-slate-100 overflow-y-auto ${isCompactLayout ? 'h-[var(--app-height)] max-w-none rounded-none border-0 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]' : 'max-w-sm rounded-2xl'}`}>
+            <h2 id="event-device-selector-title" className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
             <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para el chat con {whatsappPhone}</p>
             {existingChatForWA && (
               <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-3">
                 Ya existe historial{whatsappHistoricalPhone ? ` con el numero ${whatsappHistoricalPhone}` : ' con numero historico desconocido'}.
               </p>
             )}
-            {devices.length === 0 ? (
+            {chatDevices.length === 0 ? (
               <p className="text-xs text-slate-400 text-center py-4">No hay dispositivos conectados</p>
             ) : (
               <div className="space-y-2">
-                {devices.map(device => (
+                {chatDevices.map(device => (
                   <button key={device.id} onClick={() => handleDeviceSelectedForChat(device)}
                     className="w-full min-h-11 flex items-center gap-3 p-3 border border-slate-100 rounded-xl hover:bg-emerald-50 hover:border-emerald-200 transition text-left"
                   >
@@ -4769,7 +4741,7 @@ export default function EventDetailPage() {
                 ))}
               </div>
             )}
-            <button onClick={() => setShowDeviceSelector(false)} className="w-full min-h-11 mt-4 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">Cancelar</button>
+            <button ref={deviceSelectorCancelRef} onClick={closeInlineChatAndRestoreFocus} className="w-full min-h-11 mt-4 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">Cancelar</button>
           </div>
         </div>
       )}

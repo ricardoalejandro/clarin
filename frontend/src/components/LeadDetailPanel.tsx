@@ -58,6 +58,8 @@ interface LeadDetailPanelProps {
   hideIdentity?: boolean
   /** Embedded CRM view: keep opportunity fields/actions and hide Contact-owned personal data. */
   commercialOnly?: boolean
+  /** A typed parent context already renders title, pipeline, stage and lifecycle status. */
+  hideCommercialSummary?: boolean
   /** Let an embedding panel own the vertical scroll instead of creating a nested viewport. */
   parentOwnsScroll?: boolean
   /** Canonical ContactDetailSurface already owns navigation and Contact fields. */
@@ -66,6 +68,8 @@ interface LeadDetailPanelProps {
   hideNotes?: boolean
   hideTasks?: boolean
   hideObservations?: boolean
+  /** Hide legacy message/sync/document/delete actions when an operational parent owns them. */
+  hideAuxiliaryActions?: boolean
   /** Optional: hide delete button */
   hideDelete?: boolean
   /** Optional: hide WhatsApp button */
@@ -142,12 +146,14 @@ export default function LeadDetailPanel({
   hideHeader = false,
   hideIdentity = false,
   commercialOnly = false,
+  hideCommercialSummary = false,
   parentOwnsScroll = false,
   hideTabs = false,
   hideCustomFields = false,
   hideNotes = false,
   hideTasks = false,
   hideObservations = false,
+  hideAuxiliaryActions = false,
   hideDelete = false,
   hideWhatsApp = false,
   readOnly = false,
@@ -325,7 +331,7 @@ export default function LeadDetailPanel({
 
   // ─── Fetch commercial pipelines only for opportunity mode ───────────────
   useEffect(() => {
-    if (contactMode || eventMode) return
+    if (contactMode || eventMode || hideCommercialSummary) { setPipelines([]); return }
     const token = localStorage.getItem('token')
     fetch('/api/pipelines', { headers: { Authorization: `Bearer ${token}` } })
       .then(res => res.json())
@@ -333,7 +339,7 @@ export default function LeadDetailPanel({
         if (data.success) setPipelines(data.pipelines || [])
       })
       .catch(console.error)
-  }, [eventMode, contactMode])
+  }, [eventMode, contactMode, hideCommercialSummary])
 
   // ─── Fetch custom field definitions + values ───────────────
   useEffect(() => {
@@ -388,14 +394,16 @@ export default function LeadDetailPanel({
     setSavingObservation(false)
     setLeadTasks([])
     if (!hideObservations) fetchObservations(lead.id, requestId)
-    fetchTaskLists()
     if (hideTasks) {
       setLeadTasks([])
     } else if (eventMode && eventId && lead.contact_id) {
+      fetchTaskLists()
       fetchContactTasks(lead.contact_id, eventId, requestId)
     } else if (!contactMode) {
+      fetchTaskLists()
       fetchLeadTasks(lead.id, requestId)
     } else if (contactId) {
+      fetchTaskLists()
       fetchContactTasks(contactId, undefined, requestId)
     }
   }, [leadProp.id, participantId, contactId, hideObservations, hideTasks])
@@ -1046,7 +1054,7 @@ export default function LeadDetailPanel({
           </div>
         </div>
 
-        {!contactMode && !eventMode && (
+        {!contactMode && !eventMode && !hideCommercialSummary && (
           <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
             <div className="mb-1 flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
               <Briefcase className="h-3.5 w-3.5" /> Concepto del lead
@@ -1235,7 +1243,7 @@ export default function LeadDetailPanel({
         </>}
 
         {/* Pipeline & Stage Selector (hidden in contact mode) */}
-        {!contactMode && (
+        {!contactMode && !hideCommercialSummary && (
         <div className="border-t border-slate-100 pt-4" ref={dropdownRef}>
           <h5 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
             {eventMode ? 'Etapa del evento' : 'Etapa de la oportunidad'}
@@ -1524,7 +1532,7 @@ export default function LeadDetailPanel({
         )}
 
         {/* Actions */}
-        <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
+        {!hideAuxiliaryActions && <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
           {contactMode ? (
             <>
               {!hideWhatsApp && onSendWhatsApp && lead.phone && (
@@ -1588,7 +1596,7 @@ export default function LeadDetailPanel({
               Eliminar
             </button>
           )}
-        </div>
+        </div>}
 
         {/* ─── Tasks Section ─── */}
         {!hideTasks && (!contactMode || (contactMode && contactId)) && (

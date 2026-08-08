@@ -4397,7 +4397,7 @@ func (r *LeadRepository) Update(ctx context.Context, lead *domain.Lead) error {
 }
 
 // UpdateStage moves a lead to a different pipeline stage
-func (r *LeadRepository) UpdateStage(ctx context.Context, id uuid.UUID, stageID uuid.UUID) error {
+func (r *LeadRepository) UpdateStage(ctx context.Context, id uuid.UUID, stageID *uuid.UUID) error {
 	_, err := r.db.Exec(ctx, `UPDATE leads SET stage_id = $1, updated_at = NOW() WHERE id = $2`, stageID, id)
 	return err
 }
@@ -7750,14 +7750,16 @@ func (r *ParticipantRepository) BulkUpdateStatus(ctx context.Context, accountID,
 
 // UpdateStage updates a participant's stage after revalidating the stage
 // against the event's current pipeline inside the same transaction.
-func (r *ParticipantRepository) UpdateStage(ctx context.Context, accountID, eventID, id, stageID uuid.UUID) (int64, error) {
+func (r *ParticipantRepository) UpdateStage(ctx context.Context, accountID, eventID, id uuid.UUID, stageID *uuid.UUID) (int64, error) {
 	tx, err := r.beginWritableEventParticipantMutation(ctx, accountID, eventID)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
-	if err := ensureEventStageTx(ctx, tx, accountID, eventID, stageID); err != nil {
-		return 0, err
+	if stageID != nil {
+		if err := ensureEventStageTx(ctx, tx, accountID, eventID, *stageID); err != nil {
+			return 0, err
+		}
 	}
 	result, err := tx.Exec(ctx, `UPDATE event_participants SET stage_id=$1,updated_at=NOW() WHERE id=$2 AND event_id=$3 AND membership_state='active'`, stageID, id, eventID)
 	if err != nil {
@@ -7767,7 +7769,7 @@ func (r *ParticipantRepository) UpdateStage(ctx context.Context, accountID, even
 }
 
 // BulkUpdateStage moves an exact participant set. Partial updates roll back.
-func (r *ParticipantRepository) BulkUpdateStage(ctx context.Context, accountID, eventID uuid.UUID, ids []uuid.UUID, stageID uuid.UUID) (int64, error) {
+func (r *ParticipantRepository) BulkUpdateStage(ctx context.Context, accountID, eventID uuid.UUID, ids []uuid.UUID, stageID *uuid.UUID) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -7776,8 +7778,10 @@ func (r *ParticipantRepository) BulkUpdateStage(ctx context.Context, accountID, 
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
-	if err := ensureEventStageTx(ctx, tx, accountID, eventID, stageID); err != nil {
-		return 0, err
+	if stageID != nil {
+		if err := ensureEventStageTx(ctx, tx, accountID, eventID, *stageID); err != nil {
+			return 0, err
+		}
 	}
 	result, err := tx.Exec(ctx, `UPDATE event_participants SET stage_id=$1,updated_at=NOW() WHERE event_id=$2 AND id=ANY($3::uuid[]) AND membership_state='active'`, stageID, eventID, ids)
 	if err != nil {
@@ -7997,10 +8001,15 @@ func (r *InteractionRepository) Create(ctx context.Context, i *domain.Interactio
 	i.ID = uuid.New()
 	i.CreatedAt = time.Now()
 	return r.db.QueryRow(ctx, `
-		INSERT INTO interactions (id, account_id, contact_id, lead_id, event_id, participant_id, type, direction, outcome, notes, next_action, next_action_date, created_by, created_at, program_id, program_session_id, program_participant_id, source_label)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::text)
-		RETURNING id
-	`, i.ID, i.AccountID, i.ContactID, i.LeadID, i.EventID, i.ParticipantID, i.Type, i.Direction, i.Outcome, i.Notes, i.NextAction, i.NextActionDate, i.CreatedBy, i.CreatedAt, i.ProgramID, i.ProgramSessionID, i.ProgramParticipantID, i.SourceLabel).Scan(&i.ID)
+		WITH inserted AS (
+			INSERT INTO interactions (id, account_id, contact_id, lead_id, event_id, participant_id, type, direction, outcome, notes, next_action, next_action_date, created_by, created_at, program_id, program_session_id, program_participant_id, source_label)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::text)
+			RETURNING id, created_by
+		)
+		SELECT inserted.id, COALESCE(u.display_name, u.username)
+		FROM inserted
+		LEFT JOIN users u ON u.id=inserted.created_by
+	`, i.ID, i.AccountID, i.ContactID, i.LeadID, i.EventID, i.ParticipantID, i.Type, i.Direction, i.Outcome, i.Notes, i.NextAction, i.NextActionDate, i.CreatedBy, i.CreatedAt, i.ProgramID, i.ProgramSessionID, i.ProgramParticipantID, i.SourceLabel).Scan(&i.ID, &i.CreatedByName)
 }
 
 func (r *InteractionRepository) GetByParticipantID(ctx context.Context, participantID uuid.UUID) ([]*domain.Interaction, error) {

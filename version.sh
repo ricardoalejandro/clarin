@@ -1,9 +1,10 @@
 #!/bin/bash
 # version.sh — Generates BUILD_VERSION from CHANGELOG.md
-# Format: YYYY.MM.DD-N where N is the build number for that day
+# Format: YYYY.MM.DD-N-HHMMSSNS-GITSHA. The timestamp and commit make every
+# deployment cache-distinct even when the changelog build number is unchanged.
 #
 # Usage:
-#   ./version.sh          → prints version string (e.g. 2026.03.27-1)
+#   ./version.sh          → prints version string (e.g. 2026.03.27-1-142530123456789-c967995)
 #   source version.sh     → sets BUILD_VERSION env var
 
 set -euo pipefail
@@ -37,5 +38,8 @@ if (( BUILD_NUM == 0 )); then
   BUILD_NUM=1
 fi
 
-export BUILD_VERSION="${TODAY}-${BUILD_NUM}"
+BUILD_STAMP=$(date -u +%H%M%S%N)
+GIT_SHA=$(git -C "$(dirname "$0")" rev-parse --short=12 HEAD 2>/dev/null || true)
+GIT_SHA=${GIT_SHA:-nogit}
+export BUILD_VERSION="${TODAY}-${BUILD_NUM}-${BUILD_STAMP}-${GIT_SHA}"
 echo "$BUILD_VERSION"

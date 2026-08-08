@@ -1308,7 +1308,7 @@ func (s *LeadService) UpdateStatus(ctx context.Context, leadID uuid.UUID, status
 	return s.repos.Lead.UpdateStatus(ctx, leadID, status)
 }
 
-func (s *LeadService) UpdateStage(ctx context.Context, leadID uuid.UUID, stageID uuid.UUID) error {
+func (s *LeadService) UpdateStage(ctx context.Context, leadID uuid.UUID, stageID *uuid.UUID) error {
 	return s.repos.Lead.UpdateStage(ctx, leadID, stageID)
 }
 
@@ -2242,11 +2242,11 @@ func (s *EventService) GetParticipantCountsByStage(ctx context.Context, eventID 
 	return s.repos.EventPipeline.GetParticipantCountsByStage(ctx, eventID)
 }
 
-func (s *EventService) UpdateParticipantStage(ctx context.Context, accountID, eventID, id, stageID uuid.UUID) (int64, error) {
+func (s *EventService) UpdateParticipantStage(ctx context.Context, accountID, eventID, id uuid.UUID, stageID *uuid.UUID) (int64, error) {
 	return s.repos.Participant.UpdateStage(ctx, accountID, eventID, id, stageID)
 }
 
-func (s *EventService) BulkUpdateParticipantStage(ctx context.Context, accountID, eventID uuid.UUID, ids []uuid.UUID, stageID uuid.UUID) (int64, error) {
+func (s *EventService) BulkUpdateParticipantStage(ctx context.Context, accountID, eventID uuid.UUID, ids []uuid.UUID, stageID *uuid.UUID) (int64, error) {
 	return s.repos.Participant.BulkUpdateStage(ctx, accountID, eventID, ids, stageID)
 }
 

@@ -7524,21 +7524,44 @@ func (s *Server) handleGetLeadCounts(c *fiber.Ctx) error {
 // --- Pipeline Handlers ---
 
 func (s *Server) handleUpdateLeadStage(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	leadID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid lead ID"})
 	}
 
 	var req struct {
-		StageID string `json:"stage_id"`
+		StageID     json.RawMessage `json:"stage_id"`
+		OperationID string          `json:"operation_id"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
 
-	stageID, err := uuid.Parse(req.StageID)
+	stageID, err := parseCRMStageTarget(req.StageID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid stage ID"})
+	}
+	operationID, err := parseOptionalCRMOperationID(req.OperationID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid operation ID"})
+	}
+	var valid bool
+	if stageID == nil {
+		err = s.repos.DB().QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM leads WHERE id=$1 AND account_id=$2)`, leadID, accountID).Scan(&valid)
+	} else {
+		err = s.repos.DB().QueryRow(c.Context(), `
+			SELECT EXISTS(
+				SELECT 1
+				FROM leads l
+				JOIN pipelines p ON p.id=l.pipeline_id AND p.account_id=l.account_id
+				JOIN pipeline_stages ps ON ps.pipeline_id=p.id
+				WHERE l.id=$1 AND l.account_id=$2 AND ps.id=$3
+			)
+		`, leadID, accountID, *stageID).Scan(&valid)
+	}
+	if err != nil || !valid {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Lead or stage not found"})
 	}
 
 	if err := s.services.Lead.UpdateStage(c.Context(), leadID, stageID); err != nil {
@@ -7546,7 +7569,6 @@ func (s *Server) handleUpdateLeadStage(c *fiber.Ctx) error {
 	}
 
 	// Push stage change to Kommo (batched via outbox when enabled)
-	accountID := c.Locals("account_id").(uuid.UUID)
 	if kommoSync := s.kommoForAccount(c.Context(), accountID); kommoSync != nil {
 		kommoSync.EnqueuePushLeadStage(accountID, leadID)
 	}
@@ -7554,16 +7576,24 @@ func (s *Server) handleUpdateLeadStage(c *fiber.Ctx) error {
 	s.invalidateLeadsCache(accountID)
 	s.invalidateLeadDetailCache(accountID, leadID)
 	// Broadcast delta with stage info
+	canonicalLead, err := s.services.Lead.GetByID(c.Context(), leadID)
+	if err != nil || canonicalLead == nil || canonicalLead.AccountID != accountID {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Lead moved but canonical state could not be loaded"})
+	}
 	s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, map[string]interface{}{
-		"action":   "stage_changed",
-		"lead_id":  leadID.String(),
-		"stage_id": stageID.String(),
+		"action":       "stage_changed",
+		"lead_id":      leadID.String(),
+		"stage_id":     crmStageIDPayload(stageID),
+		"operation_id": operationID,
+		"lead":         canonicalLead,
 	})
 
 	// Fire lead_stage_changed automation trigger
-	s.triggerAutomationLeadStageChanged(accountID, leadID, stageID)
+	if stageID != nil {
+		s.triggerAutomationLeadStageChanged(accountID, leadID, *stageID)
+	}
 
-	return c.JSON(fiber.Map{"success": true})
+	return c.JSON(fiber.Map{"success": true, "operation_id": operationID, "lead": canonicalLead})
 }
 
 func (s *Server) handleGetPipelines(c *fiber.Ctx) error {
@@ -14628,28 +14658,39 @@ func (s *Server) handleUpdateEventParticipantStage(c *fiber.Ctx) error {
 		return c.Status(409).JSON(fiber.Map{"success": false, "code": "EVENT_PARTICIPANT_INACTIVE", "error": "El participante ya no está activo en el evento"})
 	}
 	var req struct {
-		StageID string `json:"stage_id"`
+		StageID     json.RawMessage `json:"stage_id"`
+		OperationID string          `json:"operation_id"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
-	stageID, err := uuid.Parse(req.StageID)
+	stageID, err := parseCRMStageTarget(req.StageID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid stage ID"})
 	}
-	var stageValid bool
-	if err := s.repos.DB().QueryRow(c.Context(), `
-		SELECT EXISTS(SELECT 1 FROM events e JOIN event_pipeline_stages eps ON eps.pipeline_id=e.pipeline_id WHERE e.id=$1 AND e.account_id=$2 AND eps.id=$3)
-	`, eventID, accountID, stageID).Scan(&stageValid); err != nil || !stageValid {
-		return c.Status(422).JSON(fiber.Map{"success": false, "error": "Stage does not belong to this event"})
+	operationID, err := parseOptionalCRMOperationID(req.OperationID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid operation ID"})
+	}
+	if stageID != nil {
+		var stageValid bool
+		if err := s.repos.DB().QueryRow(c.Context(), `
+			SELECT EXISTS(SELECT 1 FROM events e JOIN event_pipeline_stages eps ON eps.pipeline_id=e.pipeline_id WHERE e.id=$1 AND e.account_id=$2 AND eps.id=$3)
+		`, eventID, accountID, *stageID).Scan(&stageValid); err != nil || !stageValid {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Stage does not belong to this event"})
+		}
 	}
 	if _, err := s.services.Event.UpdateParticipantStage(c.Context(), accountID, eventID, pid, stageID); err != nil {
 		return writeEventParticipantMutationError(c, err)
 	}
-	if s.hub != nil {
-		s.hub.BroadcastToAccount(accountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "stage_changed"})
+	canonicalParticipant, err := s.services.Event.GetParticipantForEvent(c.Context(), accountID, eventID, pid)
+	if err != nil || canonicalParticipant == nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Participant moved but canonical state could not be loaded"})
 	}
-	return c.JSON(fiber.Map{"success": true})
+	if s.hub != nil {
+		s.hub.BroadcastToAccount(accountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "stage_changed", "operation_id": operationID, "participant": canonicalParticipant})
+	}
+	return c.JSON(fiber.Map{"success": true, "operation_id": operationID, "participant": canonicalParticipant})
 }
 
 func (s *Server) handleBulkUpdateEventParticipantStage(c *fiber.Ctx) error {
@@ -14662,21 +14703,28 @@ func (s *Server) handleBulkUpdateEventParticipantStage(c *fiber.Ctx) error {
 		return err
 	}
 	var req struct {
-		ParticipantIDs []string `json:"participant_ids"`
-		StageID        string   `json:"stage_id"`
+		ParticipantIDs []string        `json:"participant_ids"`
+		StageID        json.RawMessage `json:"stage_id"`
+		OperationID    string          `json:"operation_id"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
-	stageID, err := uuid.Parse(req.StageID)
+	stageID, err := parseCRMStageTarget(req.StageID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid stage ID"})
 	}
-	var stageValid bool
-	if err := s.repos.DB().QueryRow(c.Context(), `
-		SELECT EXISTS(SELECT 1 FROM events e JOIN event_pipeline_stages eps ON eps.pipeline_id=e.pipeline_id WHERE e.id=$1 AND e.account_id=$2 AND eps.id=$3)
-	`, eventID, accountID, stageID).Scan(&stageValid); err != nil || !stageValid {
-		return c.Status(422).JSON(fiber.Map{"success": false, "error": "Stage does not belong to this event"})
+	operationID, err := parseOptionalCRMOperationID(req.OperationID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid operation ID"})
+	}
+	if stageID != nil {
+		var stageValid bool
+		if err := s.repos.DB().QueryRow(c.Context(), `
+			SELECT EXISTS(SELECT 1 FROM events e JOIN event_pipeline_stages eps ON eps.pipeline_id=e.pipeline_id WHERE e.id=$1 AND e.account_id=$2 AND eps.id=$3)
+		`, eventID, accountID, *stageID).Scan(&stageValid); err != nil || !stageValid {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Stage does not belong to this event"})
+		}
 	}
 	ids, err := parseStrictUniqueUUIDs(req.ParticipantIDs)
 	if err != nil {
@@ -14696,10 +14744,37 @@ func (s *Server) handleBulkUpdateEventParticipantStage(c *fiber.Ctx) error {
 	if err != nil {
 		return writeEventParticipantMutationError(c, err)
 	}
-	if ev, err := s.services.Event.GetByID(c.Context(), eventID); err == nil && ev != nil && s.hub != nil {
-		s.hub.BroadcastToAccount(ev.AccountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "bulk_stage_changed"})
+	rows, err := s.repos.DB().Query(c.Context(), `
+		SELECT ep.id, ep.stage_id, eps.name, eps.color, ep.updated_at
+		FROM event_participants ep
+		JOIN events e ON e.id=ep.event_id AND e.account_id=$1
+		LEFT JOIN event_pipeline_stages eps ON eps.id=ep.stage_id AND eps.pipeline_id=e.pipeline_id
+		WHERE ep.event_id=$2 AND ep.id=ANY($3)
+	`, accountID, eventID, ids)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Participants moved but canonical state could not be loaded"})
 	}
-	return c.JSON(fiber.Map{"success": true, "updated": updated})
+	canonicalParticipants := make([]fiber.Map, 0, len(ids))
+	for rows.Next() {
+		var participantID uuid.UUID
+		var canonicalStageID *uuid.UUID
+		var stageName, stageColor *string
+		var updatedAt time.Time
+		if err := rows.Scan(&participantID, &canonicalStageID, &stageName, &stageColor, &updatedAt); err != nil {
+			rows.Close()
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": "Participants moved but canonical state could not be read"})
+		}
+		canonicalParticipants = append(canonicalParticipants, fiber.Map{"id": participantID, "stage_id": canonicalStageID, "stage_name": stageName, "stage_color": stageColor, "updated_at": updatedAt})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Participants moved but canonical state could not be read"})
+	}
+	rows.Close()
+	if ev, err := s.services.Event.GetByID(c.Context(), eventID); err == nil && ev != nil && s.hub != nil {
+		s.hub.BroadcastToAccount(ev.AccountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "bulk_stage_changed", "operation_id": operationID, "participants": canonicalParticipants})
+	}
+	return c.JSON(fiber.Map{"success": true, "updated": updated, "operation_id": operationID, "participants": canonicalParticipants})
 }
 
 func (s *Server) handleCreateEventFromLeads(c *fiber.Ctx) error {
@@ -15005,6 +15080,9 @@ func (s *Server) handleLogInteraction(c *fiber.Ctx) error {
 		if interaction.EventID != nil && *interaction.EventID != participantEventID {
 			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Participant does not belong to the selected event"})
 		}
+		if interaction.ContactID != nil && participantContactID != nil && *interaction.ContactID != *participantContactID {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Participant and contact do not represent the same person"})
+		}
 		interaction.ParticipantID = &pid
 		interaction.EventID = &participantEventID
 		if interaction.ContactID == nil {
@@ -15059,14 +15137,7 @@ func (s *Server) handleLogInteraction(c *fiber.Ctx) error {
 
 	// Broadcast interaction update via WebSocket
 	if s.hub != nil {
-		leadIDStr := ""
-		if interaction.LeadID != nil {
-			leadIDStr = interaction.LeadID.String()
-		}
-		s.hub.BroadcastToAccount(accountID, ws.EventInteractionUpdate, map[string]interface{}{
-			"action":  "created",
-			"lead_id": leadIDStr,
-		})
+		s.hub.BroadcastToAccount(accountID, ws.EventInteractionUpdate, interactionUpdatePayload("created", interaction))
 	}
 
 	return c.Status(201).JSON(fiber.Map{"success": true, "interaction": interaction})
@@ -15079,6 +15150,10 @@ func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
 
 	if participantID := c.Query("participant_id"); participantID != "" {
 		if pid, err := uuid.Parse(participantID); err == nil {
+			directParticipantOnly, scopeErr := directParticipantInteractionScope(c.Query("scope"))
+			if scopeErr != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": scopeErr.Error()})
+			}
 			var contactID *uuid.UUID
 			err := s.repos.DB().QueryRow(c.Context(), `
 				SELECT ep.contact_id
@@ -15093,6 +15168,21 @@ func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
 				return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 			}
 
+			participantWhere := `i.account_id = $1
+				  AND (
+				    i.participant_id = $2
+				    OR ($3::uuid IS NOT NULL AND i.contact_id = $3)
+				    OR ($3::uuid IS NOT NULL AND i.lead_id IN (
+				      SELECT l2.id FROM leads l2 WHERE l2.account_id = $1 AND l2.contact_id = $3
+				    ))
+				  )`
+			if directParticipantOnly {
+				participantWhere = directParticipantInteractionWhere()
+			}
+			participantArgs := []interface{}{accountID, pid}
+			if !directParticipantOnly {
+				participantArgs = append(participantArgs, contactID)
+			}
 			rows, err := s.repos.DB().Query(c.Context(), `
 				SELECT DISTINCT ON (i.id)
 				       i.id, i.account_id, i.contact_id, i.lead_id, i.event_id, i.participant_id,
@@ -15100,16 +15190,9 @@ func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
 				       i.created_by, i.created_at, u.display_name AS created_by_name
 				FROM interactions i
 				LEFT JOIN users u ON u.id = i.created_by
-				WHERE i.account_id = $1
-				  AND (
-				    i.participant_id = $2
-				    OR ($3::uuid IS NOT NULL AND i.contact_id = $3)
-				    OR ($3::uuid IS NOT NULL AND i.lead_id IN (
-				      SELECT l2.id FROM leads l2 WHERE l2.account_id = $1 AND l2.contact_id = $3
-				    ))
-				  )
+				WHERE `+participantWhere+`
 				ORDER BY i.id, i.created_at DESC
-			`, accountID, pid, contactID)
+			`, participantArgs...)
 			if err != nil {
 				return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 			}
@@ -15195,18 +15278,104 @@ func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
 	return c.Status(400).JSON(fiber.Map{"success": false, "error": "Provide participant_id, event_id, contact_id, or lead_id query parameter"})
 }
 
+func directParticipantInteractionScope(raw string) (bool, error) {
+	switch strings.TrimSpace(raw) {
+	case "":
+		return false, nil
+	case "participant":
+		return true, nil
+	default:
+		return false, fmt.Errorf("scope must be participant when participant_id is provided")
+	}
+}
+
+func directParticipantInteractionWhere() string {
+	return `i.account_id = $1 AND i.participant_id = $2`
+}
+
+func interactionUpdatePayload(action string, interaction *domain.Interaction) map[string]interface{} {
+	payload := map[string]interface{}{"action": action}
+	if interaction == nil {
+		return payload
+	}
+	if interaction.ID != uuid.Nil {
+		payload["interaction_id"] = interaction.ID.String()
+	}
+	if interaction.ContactID != nil {
+		payload["contact_id"] = interaction.ContactID.String()
+	}
+	if interaction.LeadID != nil {
+		payload["lead_id"] = interaction.LeadID.String()
+	}
+	if interaction.EventID != nil {
+		payload["event_id"] = interaction.EventID.String()
+	}
+	if interaction.ParticipantID != nil {
+		payload["participant_id"] = interaction.ParticipantID.String()
+	}
+	if action == "created" {
+		payload["interaction"] = interaction
+	}
+	return payload
+}
+
+func parseOptionalCRMOperationID(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	return id.String(), nil
+}
+
+func parseCRMStageTarget(raw json.RawMessage) (*uuid.UUID, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return nil, fmt.Errorf("stage_id is required")
+	}
+	if trimmed == "null" {
+		return nil, nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, err
+	}
+	value = strings.TrimSpace(value)
+	if value == "" || value == "__unassigned__" {
+		return nil, nil
+	}
+	id, err := uuid.Parse(value)
+	if err != nil {
+		return nil, err
+	}
+	return &id, nil
+}
+
+func crmStageIDPayload(stageID *uuid.UUID) interface{} {
+	if stageID == nil {
+		return nil
+	}
+	return stageID.String()
+}
+
 func (s *Server) handleDeleteInteraction(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid interaction ID"})
 	}
 
-	// Before deleting, capture lead_id and type for Kommo re-push
+	// Before deleting, capture scope IDs and type for account-scoped reconciliation.
 	accountID := c.Locals("account_id").(uuid.UUID)
+	var interactionContactID *uuid.UUID
 	var interactionLeadID *uuid.UUID
+	var interactionEventID *uuid.UUID
+	var interactionParticipantID *uuid.UUID
 	var interactionProgramID *uuid.UUID
 	var interactionType string
-	if err := s.repos.DB().QueryRow(c.Context(), `SELECT lead_id, program_id, type FROM interactions WHERE id=$1 AND account_id=$2`, id, accountID).Scan(&interactionLeadID, &interactionProgramID, &interactionType); err != nil {
+	if err := s.repos.DB().QueryRow(c.Context(), `SELECT contact_id, lead_id, event_id, participant_id, program_id, type FROM interactions WHERE id=$1 AND account_id=$2`, id, accountID).Scan(&interactionContactID, &interactionLeadID, &interactionEventID, &interactionParticipantID, &interactionProgramID, &interactionType); err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Interaction not found"})
 	}
 	if interactionProgramID != nil {
@@ -15229,14 +15398,10 @@ func (s *Server) handleDeleteInteraction(c *fiber.Ctx) error {
 
 	// Broadcast interaction update via WebSocket
 	if s.hub != nil {
-		leadIDStr := ""
-		if interactionLeadID != nil {
-			leadIDStr = interactionLeadID.String()
-		}
-		s.hub.BroadcastToAccount(accountID, ws.EventInteractionUpdate, map[string]interface{}{
-			"action":  "deleted",
-			"lead_id": leadIDStr,
-		})
+		s.hub.BroadcastToAccount(accountID, ws.EventInteractionUpdate, interactionUpdatePayload("deleted", &domain.Interaction{
+			ID: id, AccountID: accountID, ContactID: interactionContactID, LeadID: interactionLeadID,
+			EventID: interactionEventID, ParticipantID: interactionParticipantID,
+		}))
 	}
 
 	return c.JSON(fiber.Map{"success": true})

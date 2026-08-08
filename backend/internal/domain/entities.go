@@ -856,7 +856,7 @@ type Lead struct {
 	Ocupacion      *string                `json:"ocupacion,omitempty"`
 	Status         *string                `json:"status,omitempty"` // open, won, lost
 	PipelineID     *uuid.UUID             `json:"pipeline_id,omitempty"`
-	StageID        *uuid.UUID             `json:"stage_id,omitempty"`
+	StageID        *uuid.UUID             `json:"stage_id"`
 	Source         *string                `json:"source,omitempty"`
 	Notes          *string                `json:"notes,omitempty"`
 	Tags           []string               `json:"tags,omitempty"`
@@ -1155,7 +1155,7 @@ type EventParticipant struct {
 	EventID             uuid.UUID  `json:"event_id"`
 	ContactID           *uuid.UUID `json:"contact_id,omitempty"`
 	LeadID              *uuid.UUID `json:"lead_id,omitempty"`
-	StageID             *uuid.UUID `json:"stage_id,omitempty"`
+	StageID             *uuid.UUID `json:"stage_id"`
 	Name                string     `json:"name"`
 	LastName            *string    `json:"last_name,omitempty"`
 	ShortName           *string    `json:"short_name,omitempty"`

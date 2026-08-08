@@ -64,6 +64,20 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('TaskEditorModal', () => {
+  it('creates a real Clarin Work task with the supplied CRM links', async () => {
+    vi.mocked(apiPost).mockResolvedValue({ success: true, data: { task: savedTask, operation_id: 'operation-crm' } })
+    renderEditor({ relatedScope: { contactId: 'contact-1', leadId: 'lead-1', eventId: 'event-1' } })
+    fireEvent.change(screen.getByPlaceholderText('¿Qué hay que lograr?'), { target: { value: 'Dar seguimiento' } })
+    fireEvent.click(await screen.findByRole('button', { name: 'Crear tarea' }))
+
+    await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks', expect.objectContaining({
+      contact_id: 'contact-1',
+      lead_id: 'lead-1',
+      event_id: 'event-1',
+    }))
+  })
+
   it('creates once with Ctrl/Command+Enter from the form', async () => {
     vi.mocked(apiPost).mockResolvedValue({ success: true, data: { task: savedTask, operation_id: 'operation-1' } })
     const { props } = renderEditor()

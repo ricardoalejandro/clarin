@@ -49,6 +49,8 @@
 ### Dates And Time
 
 - Use one professional date primitive across a workflow. Include calendar, localized value, optional time, all-day state, timezone, quick values, and clear/remove when those concepts exist.
+- Expose date-only and date-time modes from the same operational primitive. Date-only values remain exact `YYYY-MM-DD` calendar dates and must never pass through UTC conversion; omit time, timezone, all-day, and relative shortcuts when those concepts do not belong to the field.
+- Date-only fields that commonly reach old dates, such as birth dates, provide direct month/year navigation. Their portaled calendar flips/clamps against `visualViewport`, follows scroll/resize, renders above its owning work window, stages changes until Apply, and restores trigger focus after Escape, outside cancellation, Apply, or Quitar.
 - Link start/end controls: explain the relationship, reject invalid ranges, and never silently invent or shift the other endpoint unless the product contract explicitly requires it.
 - Preserve exact values and timezone semantics through display, editing, API payload, reload, and realtime reconciliation.
 - Show native date inputs only when the workflow is truly simple and consistent with surrounding controls; do not mix a primitive input beside richer date behavior for the same entity.
@@ -97,7 +99,9 @@
 - Provide a clear draggable header that does not steal clicks from header actions.
 - Expose resize affordances on borders/corners with correct cursors, keyboard alternatives where practical, and viewport clamps.
 - Support dock-right and maximize/restore when the task is complex enough to justify a work window. Double-clicking the header may toggle maximize when consistent with the surface.
-- Remember geometry per user only after clamping it to the current measured viewport.
+- Keep preferred floating geometry separate from its effective responsive clamp. Persist only deliberate floating drag/resize per account, user, and surface; docking, maximizing, zoom, responsive conversion, and temporary viewport constraints never overwrite that preference.
+- Reject unsafe legacy geometry, clamp the effective rectangle to the current measured viewport, preserve a safe mode when possible, and expose an explicit reset to documented defaults.
+- A temporary mode such as chat-assisted maximization is effective state only: never persist it or overwrite the user's preferred mode/geometry. Restore the prior mode, geometry, scroll, local disclosure state, drafts, and invoking focus when the temporary view closes.
 - Keep floating and docked workspaces interactive when the product contract allows it; maximized/mobile modes may be modal.
 - Protect dirty drafts on close or Escape. A cancelled discard keeps the complete draft and window state.
 - Complex filters use a local draft: option changes do not query, Apply commits once, Cancel/Escape restores the canonical applied state, and Clear edits the draft first. Configuration windows use selection protection, sticky save actions, and contextual inspectors rather than one undifferentiated scrolling form.
@@ -118,6 +122,7 @@
 - Highlight a destination declaratively with tint, border, shadow, label, icon change, or a slight transform near 1.02. Never change layout dimensions and cause target oscillation.
 - Keep the drag overlay lightweight; do not mount duplicate stateful/sortable components inside it.
 - Multi-selection should remain minimal at rest, obvious once active, and understandable during a group drag through a compact stack/count representation.
+- When related modules share one drag language, reuse a generic visual overlay: stable grip, content summary, optional destination label, up to three converging decorative layers, and the true selected count. Product reducers and mutations remain module-specific.
 - Provide keyboard movement and `aria-live` announcements for pickup, count, destination, success, and cancellation.
 - One gesture produces at most one logical backend write unless the product explicitly models a longer workflow.
 

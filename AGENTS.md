@@ -34,6 +34,7 @@ Before changing any area below, read the matching local skill completely:
 - MCP server, MCP admin UI, credentials, sessions, audit, tools, or docs: `.codex/skills/clarin-mcp-security/SKILL.md`
 - Chats, WhatsApp devices/capabilities, messages/replies, chat details, contact avatars, statuses, stickers, or realtime chat UX: `.codex/skills/clarin-chat-whatsapp-experience/SKILL.md` plus every matching layer skill above.
 - Clarin Work, tasks, Kanban, task folders/lists/workflows/statuses, ordering, filters/saved views, task detail, subtasks, comments, dependencies, Gantt/calendar, or task realtime behavior: `.codex/skills/clarin-task-work-experience/SKILL.md` plus every matching layer skill above.
+- Leads, CRM pipelines/stages, Eventos, event participants, their Kanban/list movement, Contact detail inside those modules, scoped observations, related task surfaces, or CRM realtime behavior: `.codex/skills/clarin-leads-events-experience/SKILL.md` plus every matching layer skill above. When the visible behavior creates, opens, updates, or reconciles real Clarin Work tasks, also read `.codex/skills/clarin-task-work-experience/SKILL.md`; do not apply Work-only Entorno or workflow rules to the surrounding CRM entity.
 
 If a task touches multiple areas, read all matching skills before editing.
 
@@ -63,6 +64,19 @@ If a task touches multiple areas, read all matching skills before editing.
 - Programs are groups of classes. New event workflows belong exclusively to the full Eventos module; do not reintroduce `type=event` creation inside Programas or duplicate Evento capabilities there.
 - Contact tag editing must remain usable for very large catalogs: render assigned tags immediately, search a bounded server-side result set, and gate creation of global tags with `PermTags`; never load or render the entire tag catalog in every contact detail.
 - Contact observation history must be user-expandable and lazy-loaded. Keep its count and add action available while collapsed, and keep the observation composer independent from the history list.
+
+## Leads And Events Product Invariants
+
+- Render Contact identity once. A Lead adds only commercial pipeline/lifecycle context, while an event participant adds only the selected Evento's stage, membership provenance and contextual activity; never adapt a participant into a fake Lead as a reusable identity model.
+- Lead and event-participant detail use the measured operational-window contract: docked by default, movable/resizable floating mode, maximized mode and full-screen mobile. Docked/floating modes keep the board interactive; maximized/mobile modes may block it.
+- Put context/stage in the window header, render Contact identity once, and order the single-scroll detail as Contact information, tags, direct observations, contextual data, related tasks, general Contact history, then integrations. The first three start open and the rest collapsed; do not replace this hierarchy with Summary/Activity tabs or a competing activity rail.
+- Keep Observation, Message and Edit visible before scrolling; task creation belongs inside Related tasks. Direct Contact tag changes use bounded 500 ms remote search, permission-gated creation, pending feedback and exact rollback without opening the complete Contact editor.
+- Label activity scope explicitly. Contact history is cross-module, Lead observations belong to one opportunity, and participant observations belong to one event participation; never present their union as one unqualified timeline.
+- Direct observations preserve Nota/Llamada, author/origin and timestamp. Opening Message temporarily maximizes the CRM window and must restore the exact prior mode, geometry, scroll, accordion state and focus when chat closes.
+- Related CRM tasks are real Clarin Work tasks. Query them through actor-authorized task paths and open/create them with the canonical task detail/editor, preserving Entorno, list, workflow, permission and realtime truth.
+- Lead and participant drag changes stage only and uses the shared DndKit visual language from Tareas: explicit handle, 520 ms touch pickup, attenuated source, stable placeholder, highlighted destination, stacked overlay/count and roughly 180 ms drop. It snapshots complete visible state, emits at most one logical write, and restores cards, counts, selection and open detail exactly after cancellation, conflict or failure. Canonical HTTP/WebSocket state wins without skeleton flashes, duplicates or F5.
+- If `Sin etapa` is rendered as a Lead or participant drop target, persist it as an explicit nullable stage (`stage_id: null`) and reconcile its cards, counts, stale stage labels, rollback and realtime payloads exactly; never expose a fake droppable bucket.
+- Completed or cancelled Eventos preserve readable history but disable event-context mutations honestly. Contact-owned edits remain governed by Contact capabilities rather than event lifecycle.
 
 ## Survey Product Invariants
 

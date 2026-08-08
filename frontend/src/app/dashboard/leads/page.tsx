@@ -20,6 +20,18 @@ import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabe
 import ChatPanel from '@/components/chat/ChatPanel'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
 import ContactDetailSurface from '@/components/contact-details/ContactDetailSurface'
+import OperationalWindowShell from '@/components/operational-window/OperationalWindowShell'
+import CrmDetailWorkspace from '@/components/crm-detail/CrmDetailWorkspace'
+import LeadContextPanel from '@/components/crm-detail/LeadContextPanel'
+import DetachedLeadDetail, { type DetachedLeadPatch } from '@/components/crm-detail/DetachedLeadDetail'
+import ScopedActivityPanel from '@/components/crm-detail/ScopedActivityPanel'
+import RelatedTasksPanel from '@/components/task-work/RelatedTasksPanel'
+import useCrmPipelineCardDrag from '@/components/crm-detail/useCrmPipelineCardDrag'
+import CrmPipelineDndContext, { useCrmPipelineStageDrop } from '@/components/crm-detail/CrmPipelineDndContext'
+import { CRM_PIPELINE_UNASSIGNED_STAGE_ID, moveCrmPipelineItems, reconcileCrmPipelineCanonicalItem } from '@/components/crm-detail/crmPipelineDrag'
+import { leadMatchesLifecycleFilter, reconcileLeadLifecycleCounts } from '@/components/crm-detail/leadLifecycleReconciliation'
+import useCrmWindowStorageScope from '@/components/crm-detail/useCrmWindowStorageScope'
+import { crmMessageIsPending, crmMessageTemporaryMode, type CrmMessagePhase } from '@/components/crm-detail/crmMessageWorkflow'
 import ObservationHistoryModal from '@/components/ObservationHistoryModal'
 import BulkGenerateDocumentModal from '@/components/BulkGenerateDocumentModal'
 import PipelineStageManager from '@/components/pipelines/PipelineStageManager'
@@ -97,13 +109,12 @@ interface LeadCardProps {
   stageOptions: PipelineStage[]
   onStageChange: (lead: Lead, stage: PipelineStage) => void
   isTrash: boolean
-  onDragStart: (e: React.DragEvent, id: string) => void
-  onDragEnd: (e: React.DragEvent) => void
+  onAccessibleDrop: (lead: Lead, stage: PipelineStage, operationId?: string) => void
 }
 
 const LeadCard = memo(function LeadCard({
   lead, isSelected, isDetailActive, isDragged, selectionMode,
-  onToggleSelection, onOpenDetail, onDelete, onRestore, onLifecycleAction, stageOptions, onStageChange, isTrash, onDragStart, onDragEnd,
+  onToggleSelection, onOpenDetail, onDelete, onRestore, onLifecycleAction, stageOptions, onStageChange, isTrash, onAccessibleDrop,
 }: LeadCardProps) {
   const [actionsOpen, setActionsOpen] = useState(false)
   const actionsRef = useRef<HTMLDivElement>(null)
@@ -125,20 +136,39 @@ const LeadCard = memo(function LeadCard({
   const trashRemainingDays = isTrash && lead.deleted_at
     ? Math.max(0, 30 - Math.floor((Date.now() - new Date(lead.deleted_at).getTime()) / (24 * 60 * 60 * 1000)))
     : null
+  const accessibleDrag = useCrmPipelineCardDrag({
+    entityId: lead.id,
+    label: lead.name || lead.title || 'Lead',
+    currentStageId: lead.stage_id || CRM_PIPELINE_UNASSIGNED_STAGE_ID,
+    stages: stageOptions,
+    disabled: selectionMode || isTrash,
+    singular: 'lead',
+    plural: 'leads',
+    onCommit: (stageId, operationId) => {
+      const stage = stageId === CRM_PIPELINE_UNASSIGNED_STAGE_ID
+        ? { id: CRM_PIPELINE_UNASSIGNED_STAGE_ID, pipeline_id: lead.pipeline_id || '', name: 'Sin etapa', color: '#64748b', position: -1, stage_type: 'active' as const }
+        : stageOptions.find(option => option.id === stageId)
+      if (stage) onAccessibleDrop(lead, stage, operationId)
+    },
+  })
   return (
     <div
-      draggable={!selectionMode}
-      onDragStart={(e) => onDragStart(e, lead.id)}
-      onDragEnd={onDragEnd}
+      ref={accessibleDrag.setNodeRef}
+      data-crm-pipeline-card={lead.id}
+      data-crm-pipeline-label={lead.name || lead.title || 'Lead'}
+      data-crm-selected={isSelected ? 'true' : 'false'}
       className={`relative bg-white p-3 rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer ${
         isSelected ? 'border-emerald-500 ring-2 ring-emerald-100'
         : isDetailActive ? 'border-emerald-400 ring-2 ring-emerald-200 bg-emerald-50/50'
         : 'border-slate-100'
-      } ${isDragged ? 'opacity-50' : ''} ${!selectionMode ? 'cursor-grab active:cursor-grabbing' : ''}`}
-      onClick={() => selectionMode ? onToggleSelection(lead.id) : onOpenDetail(lead)}
+      } ${isDragged || accessibleDrag.isDragging ? 'opacity-[0.22]' : ''}`}
+      onClick={() => { selectionMode ? onToggleSelection(lead.id) : onOpenDetail(lead) }}
     >
+      <span id={`lead-drag-help-${lead.id}`} className="sr-only" aria-live="polite">{accessibleDrag.instructions}</span>
+      {accessibleDrag.overlay}
       <div className="flex items-start justify-between group">
         <div className="flex items-center gap-2">
+          {!selectionMode && !isTrash && <button ref={accessibleDrag.setActivatorNodeRef} {...accessibleDrag.listeners} {...accessibleDrag.attributes} type="button" data-no-crm-drag onClick={event => event.stopPropagation()} aria-label={`Mover ${lead.name || lead.title || 'lead'}`} className="inline-flex h-8 w-7 shrink-0 touch-none items-center justify-center rounded-lg text-slate-300 transition hover:bg-emerald-50 hover:text-emerald-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 active:cursor-grabbing"><GripVertical className="h-4 w-4" /></button>}
           {selectionMode ? (
             <button onClick={(e) => { e.stopPropagation(); onToggleSelection(lead.id) }} className="p-0.5">
               {isSelected ? <CheckSquare className="w-4 h-4 text-emerald-600" /> : <Square className="w-4 h-4 text-slate-300" />}
@@ -245,15 +275,17 @@ const LeadCard = memo(function LeadCard({
         <label className="touch-stage-visible mt-2 block lg:hidden" onClick={event => event.stopPropagation()}>
           <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Mover a etapa</span>
           <select
-            value={lead.stage_id || ''}
+            value={lead.stage_id || CRM_PIPELINE_UNASSIGNED_STAGE_ID}
             onChange={event => {
-              const stage = stageOptions.find(option => option.id === event.target.value)
+              const stage = event.target.value === CRM_PIPELINE_UNASSIGNED_STAGE_ID
+                ? { id: CRM_PIPELINE_UNASSIGNED_STAGE_ID, pipeline_id: lead.pipeline_id || '', name: 'Sin etapa', color: '#64748b', position: -1, stage_type: 'active' as const }
+                : stageOptions.find(option => option.id === event.target.value)
               if (stage && stage.id !== lead.stage_id) onStageChange(lead, stage)
             }}
             className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
             aria-label={`Mover ${lead.name || 'lead'} a otra etapa`}
           >
-            {!lead.stage_id && <option value="">Sin etapa</option>}
+            <option value={CRM_PIPELINE_UNASSIGNED_STAGE_ID}>Sin etapa</option>
             {stageOptions.map(stage => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
           </select>
         </label>
@@ -265,6 +297,15 @@ const LeadCard = memo(function LeadCard({
     </div>
   )
 })
+
+function TerminalLeadDrop({ stage }: { stage: PipelineStage }) {
+  const drop = useCrmPipelineStageDrop(stage.id)
+  const won = stage.stage_type === 'won'
+  return <div ref={drop.setNodeRef} data-crm-pipeline-stage={stage.id} className={`pointer-events-auto flex min-h-12 items-center justify-center gap-2 rounded-2xl border px-4 text-xs font-bold shadow-xl backdrop-blur-sm transition ${won ? 'border-emerald-300 bg-emerald-50/95 text-emerald-800' : 'border-red-300 bg-red-50/95 text-red-800'} ${drop.isOver ? 'scale-[1.02] ring-2 ring-offset-2 ' + (won ? 'ring-emerald-400' : 'ring-red-400') : ''}`}>
+    {won ? <CheckCircle2 className="h-4 w-4" aria-hidden="true" /> : <XCircle className="h-4 w-4" aria-hidden="true" />}
+    Suelta para marcar como {won ? 'ganado' : 'perdido'}
+  </div>
+}
 
 // --- Virtualized Kanban Column with Infinite Scroll ---
 interface VirtualColumnProps {
@@ -286,20 +327,17 @@ interface VirtualColumnProps {
   stageOptions: PipelineStage[]
   onStageChange: (lead: Lead, stage: PipelineStage) => void
   isTrash: boolean
-  onDragStart: (e: React.DragEvent, id: string) => void
-  onDragEnd: (e: React.DragEvent) => void
-  onDragOver: (e: React.DragEvent, stageId: string) => void
-  onDragLeave: (e: React.DragEvent) => void
-  onDrop: (e: React.DragEvent, stageId: string) => void
+  onAccessibleDrop: (lead: Lead, stage: PipelineStage, operationId?: string) => void
 }
 
 const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
   column, totalCount, hasMore, loadingMore, onLoadMore,
   selectedIds, detailLeadId, draggedLeadId, dragOverColumn, selectionMode,
-  onToggleSelection, onOpenDetail, onDelete, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop,
+  onToggleSelection, onOpenDetail, onDelete, onAccessibleDrop,
   onRestore, onLifecycleAction, stageOptions, onStageChange, isTrash,
 }: VirtualColumnProps) {
-  const parentRef = useRef<HTMLDivElement>(null)
+  const parentRef = useRef<HTMLDivElement | null>(null)
+  const stageDrop = useCrmPipelineStageDrop(column.id, isTrash)
   const virtualizer = useVirtualizer({
     count: column.leads.length,
     getScrollElement: () => parentRef.current,
@@ -338,15 +376,14 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
         </div>
       </div>
       <div
-        ref={parentRef}
-        className={`bg-slate-50/80 p-2 flex-1 overflow-y-auto kanban-col-scroll transition-colors ${
-          dragOverColumn === column.id ? 'bg-emerald-50 ring-2 ring-emerald-300 ring-inset' : ''
+        ref={node => { parentRef.current = node; stageDrop.setNodeRef(node) }}
+        data-crm-pipeline-stage={column.id}
+        className={`relative bg-slate-50/80 p-2 flex-1 overflow-y-auto kanban-col-scroll transition-colors ${
+          stageDrop.isOver || dragOverColumn === column.id ? 'ring-2 ring-inset' : ''
         }`}
-        style={{ minHeight: 200 }}
-        onDragOver={(e) => onDragOver(e, column.id)}
-        onDragLeave={onDragLeave}
-        onDrop={(e) => onDrop(e, column.id)}
+        style={{ minHeight: 200, backgroundColor: stageDrop.isOver ? `${column.color}12` : undefined, '--tw-ring-color': `${column.color}99` } as React.CSSProperties}
       >
+        {stageDrop.isOver && <div aria-hidden className="pointer-events-none absolute inset-x-2 top-2 z-20 flex h-11 items-center justify-center rounded-xl border-2 border-dashed bg-white/90 text-xs font-bold shadow-sm" style={{ borderColor: column.color, color: column.color }}>Suelta en {column.name}</div>}
         <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
           {virtualizer.getVirtualItems().map((virtualItem) => {
             const lead = column.leads[virtualItem.index]
@@ -378,8 +415,7 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
                     stageOptions={stageOptions}
                     onStageChange={onStageChange}
                     isTrash={isTrash}
-                    onDragStart={onDragStart}
-                    onDragEnd={onDragEnd}
+                    onAccessibleDrop={onAccessibleDrop}
                   />
                 </div>
               </div>
@@ -460,6 +496,7 @@ function resolveDatePreset(preset: string, customFrom?: string, customTo?: strin
 
 export default function LeadsPage() {
   const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>()
+  const crmWindowStorageScope = useCrmWindowStorageScope('leads')
   const isCompactListWorkspace = workspaceWidth > 0 && workspaceWidth < 900
   const router = useRouter()
   // Server-side paginated data
@@ -552,6 +589,7 @@ export default function LeadsPage() {
 
   // Device selector for WhatsApp
   const [showDeviceSelector, setShowDeviceSelector] = useState(false)
+  const [messagePhase, setMessagePhase] = useState<CrmMessagePhase>('idle')
   const [devices, setDevices] = useState<Device[]>([])
   const [whatsappPhone, setWhatsappPhone] = useState('')
 
@@ -565,6 +603,9 @@ export default function LeadsPage() {
   const [allDevicesForModal, setAllDevicesForModal] = useState<Device[]>([])
   const [whatsappHistoricalPhone, setWhatsappHistoricalPhone] = useState('')
   const whatsappRequestRef = useRef(0)
+  const crmMessageTriggerRef = useRef<HTMLElement | null>(null)
+  const deviceSelectorDialogRef = useRef<HTMLDivElement>(null)
+  const deviceSelectorCancelRef = useRef<HTMLButtonElement>(null)
   const activeLeadIdRef = useRef<string | null>(null)
   const loadedLeadContextByContactRef = useRef(new Map<string, string>())
   const contactRefreshSequenceRef = useRef(new Map<string, number>())
@@ -584,6 +625,7 @@ export default function LeadsPage() {
 
   const resetInlineChatState = useCallback(() => {
     whatsappRequestRef.current += 1
+    setMessagePhase('idle')
     setShowDeviceSelector(false)
     setWhatsappPhone('')
     setShowInlineChat(false)
@@ -595,6 +637,13 @@ export default function LeadsPage() {
     setAllDevicesForModal([])
     setWhatsappHistoricalPhone('')
   }, [])
+
+  const closeInlineChatAndRestoreFocus = useCallback(() => {
+    resetInlineChatState()
+    requestAnimationFrame(() => crmMessageTriggerRef.current?.focus({ preventScroll: true }))
+  }, [resetInlineChatState])
+
+  useAccessibleDialog(showDeviceSelector, deviceSelectorDialogRef, closeInlineChatAndRestoreFocus, deviceSelectorCancelRef)
 
   const isCurrentWhatsAppRequest = useCallback((requestId: number, leadId: string | null) => {
     return whatsappRequestRef.current === requestId && activeLeadIdRef.current === leadId
@@ -934,7 +983,7 @@ export default function LeadsPage() {
     setLoadingMoreStages(prev => new Set(prev).add(stageId))
     const token = localStorage.getItem('token')
     try {
-      const isUnassigned = stageId === '__unassigned__'
+      const isUnassigned = stageId === CRM_PIPELINE_UNASSIGNED_STAGE_ID
       const currentLeads = isUnassigned
         ? unassignedData.leads
         : stageData.find(s => s.id === stageId)?.leads || []
@@ -1162,7 +1211,7 @@ export default function LeadsPage() {
   // WebSocket: listen for lead_update events — delta updates for paginated data
   useEffect(() => {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
-      const msg = data as { event?: string; action?: string; lead?: Lead; lead_id?: string; stage_id?: string }
+      const msg = data as { event?: string; action?: string; lead?: Lead; lead_id?: string; stage_id?: string | null; operation_id?: string }
       if (msg.event === 'contact_update') {
         const contactId = contactIdFromRealtimeEvent(data)
         if (contactId) void refreshLoadedContact(contactId)
@@ -1201,42 +1250,29 @@ export default function LeadsPage() {
           if (detailLead?.id === msg.lead.id) {
             setShowDetailPanel(false)
           }
-        } else if (msg.action === 'stage_changed' && msg.lead_id && msg.stage_id) {
-          const leadId = msg.lead_id!
-          const newStageId = msg.stage_id!
-          // Move lead between stages
-          setStageData(prev => {
-            let movedLead: Lead | undefined
-            const afterRemove = prev.map(s => {
-              if (s.id === newStageId && s.leads.some(l => l.id === leadId)) return s // already moved
-              const idx = s.leads.findIndex(l => l.id === leadId)
-              if (idx >= 0) {
-                movedLead = { ...s.leads[idx], stage_id: newStageId }
-                return { ...s, leads: s.leads.filter(l => l.id !== leadId), total_count: Math.max(0, s.total_count - 1) }
-              }
-              return s
-            })
-            if (movedLead) {
-              return afterRemove.map(s => s.id === newStageId
-                ? { ...s, leads: [movedLead!, ...s.leads], total_count: s.total_count + 1 }
-                : s
-              )
-            }
-            return prev
-          })
-          // Also check unassigned → stage move
-          setUnassignedData(prev => {
-            const idx = prev.leads.findIndex(l => l.id === leadId)
-            if (idx >= 0) {
-              const movedLead = { ...prev.leads[idx], stage_id: newStageId }
-              setStageData(sd => sd.map(s => s.id === newStageId
-                ? { ...s, leads: [movedLead, ...s.leads], total_count: s.total_count + 1 }
-                : s
-              ))
-              return { ...prev, leads: prev.leads.filter(l => l.id !== leadId), total_count: Math.max(0, prev.total_count - 1) }
-            }
-            return prev
-          })
+        } else if (msg.action === 'stage_changed' && msg.lead_id) {
+          if (msg.lead) {
+            const canonical = { ...msg.lead, stage_id: msg.lead.stage_id ?? msg.stage_id ?? null }
+            const loaded = stageData.some(stage => stage.leads.some(lead => lead.id === canonical.id))
+              || unassignedData.leads.some(lead => lead.id === canonical.id)
+            const snapshot = reconcileCrmPipelineCanonicalItem(
+              {
+                columns: stageData.map(column => ({ id: column.id, totalCount: column.total_count, items: column.leads })),
+                unassigned: { id: CRM_PIPELINE_UNASSIGNED_STAGE_ID, totalCount: unassignedData.total_count, items: unassignedData.leads },
+              },
+              canonical,
+              canonical.stage_id || CRM_PIPELINE_UNASSIGNED_STAGE_ID,
+              lead => lead.id,
+              (current, server) => ({ ...current, ...server, structured_tags: server.structured_tags || current.structured_tags }),
+            )
+            setStageData(current => current.map((column, index) => ({ ...column, leads: snapshot.columns[index]?.items || column.leads, total_count: snapshot.columns[index]?.totalCount ?? column.total_count })))
+            setUnassignedData(current => ({ ...current, leads: snapshot.unassigned.items, total_count: snapshot.unassigned.totalCount }))
+            setListLeads(current => current.map(lead => lead.id === canonical.id ? { ...lead, ...canonical, structured_tags: canonical.structured_tags || lead.structured_tags } : lead))
+            setDetailLead(current => current?.id === canonical.id ? { ...current, ...canonical, structured_tags: canonical.structured_tags || current.structured_tags } : current)
+            if (loaded) return
+          }
+          // Compatibility or an unloaded page tail: reconcile silently without replacing the workspace with skeletons.
+          fetchLeadsPaginated()
         } else if (msg.action !== 'synced') {
           // Fallback: full re-fetch for unknown actions (skip background sync noise)
           fetchLeadsPaginated()
@@ -1278,7 +1314,7 @@ export default function LeadsPage() {
       }
     })
     return () => unsubscribe()
-  }, [fetchLeadsPaginated, updateLeadInStages, removeLeadFromStages, detailLead, activePipeline, refreshLoadedContact, viewMode])
+  }, [fetchLeadsPaginated, updateLeadInStages, removeLeadFromStages, detailLead, activePipeline, refreshLoadedContact, viewMode, stageData, unassignedData])
 
   // Custom field column toggle
   const toggleCfColumn = useCallback((fieldId: string) => {
@@ -1839,7 +1875,7 @@ export default function LeadsPage() {
   const [archiveBatchMode, setArchiveBatchMode] = useState(false)
 
   // Explicit close/reopen flow for terminal stages.
-  const [lifecycleRequest, setLifecycleRequest] = useState<{ lead: Lead; stage: PipelineStage; mode: 'won' | 'lost' | 'reopen' } | null>(null)
+  const [lifecycleRequest, setLifecycleRequest] = useState<{ lead: Lead; stage: PipelineStage; mode: 'won' | 'lost' | 'reopen'; operationId?: string } | null>(null)
   const [lifecycleReason, setLifecycleReason] = useState('')
   const [savingLifecycle, setSavingLifecycle] = useState(false)
   const [lifecycleError, setLifecycleError] = useState('')
@@ -1855,20 +1891,20 @@ export default function LeadsPage() {
   }, [savingBlockPreference])
   useAccessibleDialog(showBlockModal, blockDialogRef, closeBlockDialog, blockFirstChoiceRef)
 
-  const requestLeadStageChange = (lead: Lead, stage: PipelineStage) => {
+  const requestLeadStageChange = (lead: Lead, stage: PipelineStage, operationId?: string) => {
     if (stage.stage_type === 'won' || stage.stage_type === 'lost') {
-      setLifecycleRequest({ lead, stage, mode: stage.stage_type })
+      setLifecycleRequest({ lead, stage, mode: stage.stage_type, operationId })
       setLifecycleReason('')
       setLifecycleError('')
       return
     }
     if (lead.status === 'won' || lead.status === 'lost') {
-      setLifecycleRequest({ lead, stage, mode: 'reopen' })
+      setLifecycleRequest({ lead, stage, mode: 'reopen', operationId })
       setLifecycleReason('')
       setLifecycleError('')
       return
     }
-    void handleUpdateLeadStage(lead.id, stage.id)
+    void handleUpdateLeadStage(lead.id, stage.id, operationId)
   }
 
   const requestLifecycleAction = (lead: Lead, mode: 'won' | 'lost' | 'reopen') => {
@@ -1904,20 +1940,72 @@ export default function LeadsPage() {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           stage_id: lifecycleRequest.stage.id,
+          operation_id: lifecycleRequest.operationId,
           ...(lifecycleRequest.mode === 'lost' ? { close_reason: lifecycleReason.trim() } : {}),
         }),
       })
       const data = await response.json().catch(() => null)
-      if (!response.ok || !data?.success) throw new Error(data?.error || 'No se pudo actualizar la oportunidad.')
+      if (!response.ok || !data?.success || !data.lead) throw new Error(data?.error || 'No se pudo actualizar la oportunidad.')
+
+      const previous = lifecycleRequest.lead
+      const serverLead = data.lead as Lead
+      const canonical = {
+        ...previous,
+        ...serverLead,
+        structured_tags: serverLead.structured_tags || previous.structured_tags,
+      }
+      const remainsInView = leadMatchesLifecycleFilter(canonical, statusFilter)
+      const wasLoadedOnBoard = stageData.some(stage => stage.leads.some(lead => lead.id === canonical.id))
+        || unassignedData.leads.some(lead => lead.id === canonical.id)
+      const wasLoadedInList = listLeads.some(lead => lead.id === canonical.id)
+
+      setStageData(current => {
+        const withoutLead = current.map(stage => {
+          const containedLead = stage.leads.some(lead => lead.id === canonical.id)
+          return containedLead ? {
+            ...stage,
+            leads: stage.leads.filter(lead => lead.id !== canonical.id),
+            total_count: Math.max(0, stage.total_count - 1),
+          } : stage
+        })
+        if (!remainsInView || !wasLoadedOnBoard || !canonical.stage_id) return withoutLead
+        return withoutLead.map(stage => stage.id === canonical.stage_id ? {
+          ...stage,
+          leads: [canonical, ...stage.leads],
+          total_count: stage.total_count + 1,
+        } : stage)
+      })
+      setUnassignedData(current => {
+        const containedLead = current.leads.some(lead => lead.id === canonical.id)
+        const withoutLead = containedLead ? {
+          ...current,
+          leads: current.leads.filter(lead => lead.id !== canonical.id),
+          total_count: Math.max(0, current.total_count - 1),
+        } : current
+        if (!remainsInView || !wasLoadedOnBoard || canonical.stage_id) return withoutLead
+        return {
+          ...withoutLead,
+          leads: [canonical, ...withoutLead.leads],
+          total_count: withoutLead.total_count + 1,
+        }
+      })
+      const remainsInList = remainsInView && (filterStageIds.size === 0 || Boolean(canonical.stage_id && filterStageIds.has(canonical.stage_id)))
+      setListLeads(current => current.flatMap(lead => lead.id === canonical.id
+        ? (remainsInList ? [{ ...lead, ...canonical }] : [])
+        : [lead]))
+      if (wasLoadedInList && !remainsInList) setListTotal(current => Math.max(0, current - 1))
+      setLeadCounts(current => reconcileLeadLifecycleCounts(current, previous, canonical, activePipeline?.id))
+      setSelectedIds(current => {
+        if (remainsInView || !current.has(canonical.id)) return current
+        const next = new Set(current)
+        next.delete(canonical.id)
+        return next
+      })
+      setDetailLead(current => current?.id === canonical.id ? { ...current, ...canonical } : current)
       setLifecycleRequest(null)
       setLifecycleReason('')
       setShowDetailPanel(false)
       resetInlineChatState()
-      await Promise.all([
-        fetchLeadsPaginated(),
-        fetchLeadCounts(),
-        viewMode === 'list' ? fetchListLeads(true) : Promise.resolve(),
-      ])
     } catch (err) {
       setLifecycleError(err instanceof Error ? err.message : 'No se pudo actualizar la oportunidad.')
     } finally {
@@ -2071,10 +2159,15 @@ export default function LeadsPage() {
     }
   }
 
-  const handleUpdateLeadStage = async (leadId: string, stageId: string) => {
+  const handleUpdateLeadStage = async (leadId: string, stageId: string, operationId?: string) => {
     const token = localStorage.getItem('token')
+    const stageSnapshot = stageData
+    const unassignedSnapshot = unassignedData
+    const listSnapshot = listLeads
+    const detailSnapshot = detailLead
 
-    let stage = stages.find(s => s.id === stageId)
+    const clearingStage = stageId === CRM_PIPELINE_UNASSIGNED_STAGE_ID
+    let stage = clearingStage ? undefined : stages.find(s => s.id === stageId)
     if (!stage) {
        for (const p of pipelines) {
          const found = p.stages?.find(s => s.id === stageId)
@@ -2083,44 +2176,18 @@ export default function LeadsPage() {
     }
 
     const updatedProps = {
-      stage_id: stageId,
+      stage_id: clearingStage ? null : stageId,
       stage_name: stage?.name || null,
       stage_color: stage?.color || null,
       stage_position: stage?.position ?? null,
     }
 
-    // Optimistic move between stages
-    setStageData(prev => {
-      let movedLead: Lead | undefined
-      const afterRemove = prev.map(s => {
-        const idx = s.leads.findIndex(l => l.id === leadId)
-        if (idx >= 0) {
-          movedLead = { ...s.leads[idx], ...updatedProps }
-          return { ...s, leads: s.leads.filter(l => l.id !== leadId), total_count: Math.max(0, s.total_count - 1) }
-        }
-        return s
-      })
-      if (movedLead) {
-        return afterRemove.map(s => s.id === stageId
-          ? { ...s, leads: [movedLead!, ...s.leads], total_count: s.total_count + 1 }
-          : s
-        )
-      }
-      return afterRemove
-    })
-    // Handle unassigned → stage move
-    setUnassignedData(prev => {
-      const idx = prev.leads.findIndex(l => l.id === leadId)
-      if (idx >= 0) {
-        const movedLead = { ...prev.leads[idx], ...updatedProps }
-        setStageData(sd => sd.map(s => s.id === stageId
-          ? { ...s, leads: [movedLead, ...s.leads], total_count: s.total_count + 1 }
-          : s
-        ))
-        return { ...prev, leads: prev.leads.filter(l => l.id !== leadId), total_count: Math.max(0, prev.total_count - 1) }
-      }
-      return prev
-    })
+    const optimistic = moveCrmPipelineItems({
+      columns: stageSnapshot.map(column => ({ id: column.id, totalCount: column.total_count, items: column.leads })),
+      unassigned: { id: CRM_PIPELINE_UNASSIGNED_STAGE_ID, totalCount: unassignedSnapshot.total_count, items: unassignedSnapshot.leads },
+    }, [leadId], stageId, lead => lead.id, lead => ({ ...lead, ...updatedProps }))
+    setStageData(stageSnapshot.map((column, index) => ({ ...column, leads: optimistic.snapshot.columns[index].items, total_count: optimistic.snapshot.columns[index].totalCount })))
+    setUnassignedData({ ...unassignedSnapshot, leads: optimistic.snapshot.unassigned.items, total_count: optimistic.snapshot.unassigned.totalCount })
     setListLeads(prev => prev.map(l => l.id === leadId ? { ...l, ...updatedProps } : l))
 
     if (detailLead?.id === leadId) {
@@ -2134,15 +2201,32 @@ export default function LeadsPage() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ stage_id: stageId }),
+        body: JSON.stringify({ stage_id: clearingStage ? null : stageId, operation_id: operationId }),
       })
       const data = await res.json()
-      if (!data.success) {
-        fetchLeadsPaginated() // Rollback on failure
+      if (!res.ok || !data.success) {
+        setStageData(stageSnapshot)
+        setUnassignedData(unassignedSnapshot)
+        setListLeads(listSnapshot)
+        setDetailLead(current => detailSnapshot?.id === leadId && current?.id === leadId ? detailSnapshot : current)
+        setResultsError(data.error || 'No se pudo mover la oportunidad. Restauramos exactamente la etapa anterior.')
+        return false
       }
+      if (data.lead) {
+        const canonical = data.lead as Lead
+        updateLeadInStages(leadId, lead => ({ ...lead, ...canonical, structured_tags: canonical.structured_tags || lead.structured_tags }))
+        setListLeads(current => current.map(lead => lead.id === leadId ? { ...lead, ...canonical, structured_tags: canonical.structured_tags || lead.structured_tags } : lead))
+        setDetailLead(current => current?.id === leadId ? { ...current, ...canonical, structured_tags: canonical.structured_tags || current.structured_tags } : current)
+      }
+      return true
     } catch (err) {
       console.error('Failed to update stage:', err)
-      fetchLeadsPaginated() // Rollback on error
+      setStageData(stageSnapshot)
+      setUnassignedData(unassignedSnapshot)
+      setListLeads(listSnapshot)
+      setDetailLead(current => detailSnapshot?.id === leadId && current?.id === leadId ? detailSnapshot : current)
+      setResultsError('No se pudo conectar para mover la oportunidad. Restauramos exactamente la etapa anterior.')
+      return false
     }
   }
 
@@ -2303,47 +2387,10 @@ export default function LeadsPage() {
     }
   }
 
-  // Drag and drop (using stage_id)
-  const handleDragStart = (e: React.DragEvent, leadId: string) => {
+  const handleAccessibleDragSession = useCallback((leadId: string | null, stageId: string | null) => {
     setDraggedLeadId(leadId)
-    e.dataTransfer.effectAllowed = 'move'
-    e.dataTransfer.setData('text/plain', leadId)
-    if (e.currentTarget instanceof HTMLElement) {
-      e.currentTarget.style.opacity = '0.5'
-    }
-  }
-
-  const handleDragEnd = (e: React.DragEvent) => {
-    setDraggedLeadId(null)
-    setDragOverColumn(null)
-    if (e.currentTarget instanceof HTMLElement) {
-      e.currentTarget.style.opacity = '1'
-    }
-  }
-
-  const handleDragOver = (e: React.DragEvent, stageId: string) => {
-    e.preventDefault()
-    e.dataTransfer.dropEffect = 'move'
     setDragOverColumn(stageId)
-  }
-
-  const handleDragLeave = () => {
-    setDragOverColumn(null)
-  }
-
-  const handleDrop = (e: React.DragEvent, targetStageId: string) => {
-    e.preventDefault()
-    setDragOverColumn(null)
-    const leadId = e.dataTransfer.getData('text/plain')
-    if (leadId) {
-      const lead = findLeadById(leadId)
-      if (lead && lead.stage_id !== targetStageId) {
-        const target = allStages.find(stage => stage.id === targetStageId)
-        if (target) requestLeadStageChange(lead, target)
-      }
-    }
-    setDraggedLeadId(null)
-  }
+  }, [])
 
   // Create event from current lead filters
   const handleCreateEventFromLeads = async () => {
@@ -2384,15 +2431,18 @@ export default function LeadsPage() {
 
   // WhatsApp internal chat — smart device selection
   const handleSendWhatsApp = async (phone: string) => {
+    crmMessageTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const leadId = activeLeadIdRef.current
     resetInlineChatState()
     const requestId = whatsappRequestRef.current
+    setMessagePhase('resolving')
     setWhatsappPhone(phone)
     try {
       const resolution = await resolveWhatsAppChat(phone)
       if (!isCurrentWhatsAppRequest(requestId, leadId)) return
       if (!resolution.success) {
         alert(resolution.error || 'Error al resolver conversación')
+        closeInlineChatAndRestoreFocus()
         return
       }
       setExistingChatForWA(resolution.chat || null)
@@ -2404,6 +2454,7 @@ export default function LeadsPage() {
         setInlineChatDeviceId(resolution.chat.device_id || '')
         setInlineChatReadOnly(true)
         setShowInlineChat(true)
+        setMessagePhase('chat')
         return
       }
       if (resolution.mode === 'open_direct' && resolution.devices[0]) {
@@ -2413,12 +2464,15 @@ export default function LeadsPage() {
       if (resolution.mode === 'choose_device') {
         setAllDevicesForModal(resolution.devices as Device[])
         setShowDeviceSelector(true)
+        setMessagePhase('choosing_device')
         return
       }
       alert('No hay dispositivos conectados para enviar')
+      closeInlineChatAndRestoreFocus()
     } catch {
       if (!isCurrentWhatsAppRequest(requestId, leadId)) return
       alert('Error de conexión')
+      closeInlineChatAndRestoreFocus()
     }
   }
 
@@ -2430,6 +2484,7 @@ export default function LeadsPage() {
   ) => {
     setShowDeviceSelector(false)
     setInlineChatReadOnly(false)
+    setMessagePhase('opening_chat')
     try {
       const data = await createWhatsAppChat(device.id, phoneOverride || whatsappPhone)
       if (!isCurrentWhatsAppRequest(requestId, leadId)) return
@@ -2439,12 +2494,15 @@ export default function LeadsPage() {
         setInlineChat(data.chat)
         setInlineChatDeviceId(device.id)
         setShowInlineChat(true)
+        setMessagePhase('chat')
       } else {
         alert(data.error || 'Error al crear conversación')
+        closeInlineChatAndRestoreFocus()
       }
     } catch {
       if (!isCurrentWhatsAppRequest(requestId, leadId)) return
       alert('Error de conexión')
+      closeInlineChatAndRestoreFocus()
     }
   }
 
@@ -2456,6 +2514,7 @@ export default function LeadsPage() {
       setInlineChatDeviceId(existingChatForWA.device_id || '')
       setInlineChatReadOnly(true)
       setShowInlineChat(true)
+      setMessagePhase('chat')
     }
   }
 
@@ -2463,19 +2522,20 @@ export default function LeadsPage() {
   useEffect(() => {
     const handleEscapeKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !e.defaultPrevented) {
+        if (document.querySelector('[data-task-editor-modal], [data-task-detail-window], [data-operational-picker-backdrop], [data-operational-confirmation]')) return
         if (lifecycleRequest) return // handled by the accessible lifecycle dialog
-        if (showDeviceSelector) { setShowDeviceSelector(false); return }
+        if (showDeviceSelector) { closeInlineChatAndRestoreFocus(); return }
         if (showStageModal) { setShowStageModal(false); return }
         if (showAddModal) { setShowAddModal(false); return }
         if (showEditModal) { setShowEditModal(false); return }
         if (showFilterDropdown) { discardFilterDraft(); return }
-        if (showInlineChat) { resetInlineChatState(); return }
+        if (showInlineChat) { closeInlineChatAndRestoreFocus(); return }
         if (showDetailPanel) { setShowDetailPanel(false); resetInlineChatState(); return }
       }
     }
     window.addEventListener('keydown', handleEscapeKey)
     return () => window.removeEventListener('keydown', handleEscapeKey)
-  }, [resetInlineChatState, lifecycleRequest, showDeviceSelector, showStageModal, showAddModal, showEditModal, showFilterDropdown, showInlineChat, showDetailPanel, discardFilterDraft])
+  }, [closeInlineChatAndRestoreFocus, resetInlineChatState, lifecycleRequest, showDeviceSelector, showStageModal, showAddModal, showEditModal, showFilterDropdown, showInlineChat, showDetailPanel, discardFilterDraft])
 
   // Tags for filter dropdown (from server response)
   const allUniqueTags = useMemo(() =>
@@ -3739,25 +3799,11 @@ export default function LeadsPage() {
 
       {/* Pipeline Kanban — Virtualized */}
       {viewMode === 'kanban' && (
+      <CrmPipelineDndContext stages={[...allStages.map(stage => ({ id: stage.id, name: stage.name, color: stage.color })), { id: CRM_PIPELINE_UNASSIGNED_STAGE_ID, name: 'Sin etapa', color: '#64748b' }]} onSessionChange={handleAccessibleDragSession} disabled={statusFilter === 'trash'}>
       <div className="relative flex flex-1 min-h-0 flex-col">
       {statusFilter === 'active' && draggedLeadId && terminalStages.length > 0 && (
         <div className="pointer-events-none absolute inset-x-4 top-3 z-40 mx-auto grid max-w-xl gap-2 sm:grid-cols-2" aria-label="Destinos para cerrar un lead">
-          {terminalStages.map(stage => {
-            const won = stage.stage_type === 'won'
-            const activeDrop = dragOverColumn === stage.id
-            return (
-              <div
-                key={stage.id}
-                onDragOver={event => handleDragOver(event, stage.id)}
-                onDragLeave={handleDragLeave}
-                onDrop={event => handleDrop(event, stage.id)}
-                className={`pointer-events-auto flex min-h-12 items-center justify-center gap-2 rounded-2xl border px-4 text-xs font-bold shadow-xl backdrop-blur-sm transition ${won ? 'border-emerald-300 bg-emerald-50/95 text-emerald-800' : 'border-red-300 bg-red-50/95 text-red-800'} ${activeDrop ? 'scale-[1.02] ring-2 ring-offset-2 ' + (won ? 'ring-emerald-400' : 'ring-red-400') : ''}`}
-              >
-                {won ? <CheckCircle2 className="h-4 w-4" aria-hidden="true" /> : <XCircle className="h-4 w-4" aria-hidden="true" />}
-                Suelta para marcar como {won ? 'ganado' : 'perdido'}
-              </div>
-            )
-          })}
+          {terminalStages.map(stage => <TerminalLeadDrop key={stage.id} stage={stage} />)}
         </div>
       )}
       {/* Top synced scrollbar */}
@@ -3796,27 +3842,23 @@ export default function LeadsPage() {
               stageOptions={allStages}
               onStageChange={requestLeadStageChange}
               isTrash={statusFilter === 'trash'}
-              onDragStart={handleDragStart}
-              onDragEnd={handleDragEnd}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onDrop={handleDrop}
+              onAccessibleDrop={requestLeadStageChange}
             />
           ))}
           {/* Unassigned column */}
           {unassignedData.total_count > 0 && (
             <VirtualKanbanColumn
-              key="__unassigned__"
+              key={CRM_PIPELINE_UNASSIGNED_STAGE_ID}
               column={{
-                id: '__unassigned__',
+                id: CRM_PIPELINE_UNASSIGNED_STAGE_ID,
                 name: 'Sin etapa',
                 color: '#64748b',
                 leads: unassignedData.leads,
               }}
               totalCount={unassignedData.total_count}
               hasMore={unassignedData.has_more}
-              loadingMore={loadingMoreStages.has('__unassigned__')}
-              onLoadMore={() => loadMoreForStage('__unassigned__')}
+              loadingMore={loadingMoreStages.has(CRM_PIPELINE_UNASSIGNED_STAGE_ID)}
+              onLoadMore={() => loadMoreForStage(CRM_PIPELINE_UNASSIGNED_STAGE_ID)}
               selectedIds={selectedIds}
               detailLeadId={detailLead?.id || null}
               draggedLeadId={draggedLeadId}
@@ -3830,16 +3872,13 @@ export default function LeadsPage() {
               stageOptions={allStages}
               onStageChange={requestLeadStageChange}
               isTrash={statusFilter === 'trash'}
-              onDragStart={handleDragStart}
-              onDragEnd={handleDragEnd}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onDrop={handleDrop}
+              onAccessibleDrop={requestLeadStageChange}
             />
           )}
         </div>
       </div>
       </div>
+      </CrmPipelineDndContext>
       )}
 
       {/* List View — Virtualized */}
@@ -4330,34 +4369,44 @@ export default function LeadsPage() {
         }}
       />
 
-      {/* Lead Detail Panel (Slide-over) with Inline Chat */}
-      {(showDetailPanel || showInlineChat) && detailLead && (
-        <div className="app-viewport fixed inset-0 z-[70] flex justify-end overflow-hidden">
-          <div
-            className="absolute inset-0 bg-black/30"
-            onClick={() => { setShowDetailPanel(false); resetInlineChatState(); setNewObservation(''); setEditingField(null); setEditingNotes(false) }}
-          />
-          <div className={`relative flex h-full w-full border-l border-slate-200 bg-white shadow-2xl transition-all duration-200 motion-reduce:transition-none ${showInlineChat ? 'lg:w-[85vw] lg:max-w-6xl' : 'max-w-md'}`}>
-
-            {/* Chat Panel - Left Side */}
-            {showInlineChat && inlineChatId && (
-              <div className="flex h-full min-w-0 flex-1 flex-col border-r border-slate-200 bg-slate-50/50">
-                <ChatPanel
-                  key={inlineChatId}
-                  chatId={inlineChatId}
-                  deviceId={inlineChatDeviceId}
-                  initialChat={inlineChat || undefined}
-                  readOnly={inlineChatReadOnly}
-                  onClose={resetInlineChatState}
-                  className="h-full"
-                />
-              </div>
-            )}
-
-            {/* Lead Details - Right Side */}
-            <div className={`${showInlineChat ? 'hidden lg:flex lg:w-[360px] lg:shrink-0' : 'flex w-full'} h-full flex-col bg-white`}>
-              {(() => {
-                const hasCanonicalContact = Boolean(detailLead.contact_id)
+      {/* Operational Lead detail: docked, floating or maximized without losing CRM state. */}
+      {detailLead && (
+        <OperationalWindowShell
+          open={showDetailPanel || showInlineChat}
+          storageKey="clarin:crm-lead-window"
+          storageScope={crmWindowStorageScope}
+          title={detailLead.title || 'Oportunidad'}
+          eyebrow="Oportunidad"
+          description={`${detailLead.pipeline_name || detailLead.lead_pipeline_name || 'Pipeline'} · ${detailLead.stage_name || detailLead.lead_stage_name || 'Sin etapa'}`}
+          icon={Building2}
+          defaultMode="docked"
+          defaultWidth={1120}
+          defaultHeight={820}
+          minWidth={560}
+          minHeight={520}
+          dockedWidth={760}
+          temporaryMode={crmMessageTemporaryMode(messagePhase)}
+          align="right"
+          overlayZIndex={110}
+          temporaryOverlaySelector="[data-task-editor-modal], [data-task-detail-window], [data-task-picker-backdrop], [data-task-destructive-dialog], [data-operational-picker-backdrop], [data-operational-confirmation]"
+          onRequestClose={() => { setShowDetailPanel(false); resetInlineChatState(); setScrollToTasks(false); setNewObservation(''); setEditingField(null); setEditingNotes(false) }}
+          contentClassName="min-h-0 flex-1 overflow-hidden"
+        >
+          <CrmDetailWorkspace
+            chatOpen={showInlineChat && Boolean(inlineChatId)}
+            onBackToDetail={closeInlineChatAndRestoreFocus}
+            chat={showInlineChat && inlineChatId ? (
+              <ChatPanel
+                key={inlineChatId}
+                chatId={inlineChatId}
+                deviceId={inlineChatDeviceId}
+                initialChat={inlineChat || undefined}
+                readOnly={inlineChatReadOnly}
+                onClose={closeInlineChatAndRestoreFocus}
+                className="h-full"
+              />
+            ) : undefined}
+            detail={(() => {
                 const opportunityPanel = (
                   <LeadDetailPanel
                     lead={detailLead}
@@ -4375,7 +4424,9 @@ export default function LeadsPage() {
                       setShowDetailPanel(false)
                       resetInlineChatState()
                     }}
-                    hideWhatsApp={showInlineChat}
+                    hideWhatsApp
+                    hideDelete
+                    hideAuxiliaryActions
                     onArchive={(leadId: string, archive: boolean) => {
                       if (archive) {
                         openArchiveModal(leadId, false)
@@ -4393,16 +4444,44 @@ export default function LeadsPage() {
                       setShowDetailPanel(false)
                       resetInlineChatState()
                     }}
-                    hideHeader={hasCanonicalContact}
-                    hideIdentity={hasCanonicalContact}
-                    commercialOnly={hasCanonicalContact}
-                    parentOwnsScroll={hasCanonicalContact}
-                    hideTabs={hasCanonicalContact}
-                    hideCustomFields={hasCanonicalContact}
-                    hideObservations={hasCanonicalContact}
+                    hideHeader
+                    hideIdentity
+                    commercialOnly
+                    hideCommercialSummary
+                    parentOwnsScroll
+                    hideTabs
+                    hideCustomFields
+                    hideObservations
+                    hideTasks
                   />
                 )
-                if (!detailLead.contact_id) return opportunityPanel
+                if (!detailLead.contact_id) return (
+                  <DetachedLeadDetail
+                    lead={detailLead}
+                    context={<><LeadContextPanel lead={detailLead} embedded /><div className="mt-3 border-t border-violet-100 pt-3">{opportunityPanel}</div></>}
+                    activity={<ScopedActivityPanel embedded scope={{ kind: 'lead', leadId: detailLead.id }} description="Solo actividad vinculada a esta oportunidad." onChange={() => { if (viewMode === 'list') { setListObservations(current => { const next = new Map(current); next.delete(detailLead.id); return next }); fetchBatchObservations([detailLead.id]) } }} />}
+                    tasks={<RelatedTasksPanel scope={{ leadId: detailLead.id }} embedded />}
+                    onMessage={(phone) => handleSendWhatsApp(phone)}
+                    onSave={async (patch: DetachedLeadPatch) => {
+                      try {
+                        const response = await fetch(`/api/leads/${detailLead.id}`, {
+                          method: 'PUT',
+                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
+                          body: JSON.stringify(patch),
+                        })
+                        const data = await response.json()
+                        if (!response.ok || !data.success || !data.lead) return { success: false, error: data.error || 'No se pudieron guardar los datos.' }
+                        const canonical = { ...detailLead, ...data.lead, structured_tags: data.lead.structured_tags || detailLead.structured_tags }
+                        setDetailLead(canonical)
+                        updateLeadInStages(detailLead.id, () => canonical)
+                        setListLeads(current => current.map(lead => lead.id === detailLead.id ? canonical : lead))
+                        return { success: true }
+                      } catch {
+                        return { success: false, error: 'No pudimos conectar con el servidor. Revisa tu conexión e inténtalo nuevamente.' }
+                      }
+                    }}
+                  />
+                )
                 return (
                   <ContactDetailSurface
                     contactId={detailLead.contact_id}
@@ -4429,6 +4508,8 @@ export default function LeadsPage() {
                     title="Detalles"
                     subtitle="Contacto y oportunidad"
                     onClose={() => { setShowDetailPanel(false); resetInlineChatState(); setScrollToTasks(false) }}
+                    onSendMessage={(phone: string) => handleSendWhatsApp(phone)}
+                    sendingMessage={crmMessageIsPending(messagePhase)}
                     onContactChange={reconcileContactProfile}
                     onObservationChange={() => {
                       if (viewMode === 'list') {
@@ -4437,21 +4518,23 @@ export default function LeadsPage() {
                         fetchBatchObservations([detailLead.id])
                       }
                     }}
-                    contextContent={opportunityPanel}
+                    contextSummary={<LeadContextPanel lead={detailLead} embedded />}
+                    contextDetails={opportunityPanel}
+                    contextActivity={<ScopedActivityPanel scope={{ kind: 'lead', leadId: detailLead.id, contactId: detailLead.contact_id }} description="Solo actividad vinculada a esta oportunidad." onChange={() => { if (viewMode === 'list') { setListObservations(current => { const next = new Map(current); next.delete(detailLead.id); return next }); fetchBatchObservations([detailLead.id]) } }} />}
+                    relatedTasks={<RelatedTasksPanel scope={{ contactId: detailLead.contact_id, leadId: detailLead.id }} />}
+                    hideHeader
                   />
                 )
               })()}
-
-            </div>
-          </div>
-        </div>
+          />
+        </OperationalWindowShell>
       )}
 
       {/* Device Selector Modal for WhatsApp */}
       {showDeviceSelector && (
-        <div className="app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
-	            <h2 className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
+        <div data-operational-picker-backdrop className="app-viewport fixed inset-0 z-[170] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+          <div ref={deviceSelectorDialogRef} role="dialog" aria-modal="true" aria-labelledby="lead-device-selector-title" className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
+	            <h2 id="lead-device-selector-title" className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
 	            <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para enviar el mensaje a {whatsappPhone}</p>
 	            {existingChatForWA && (
 	              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-3">
@@ -4511,7 +4594,7 @@ export default function LeadsPage() {
                 )}
               </div>
             )}
-            <button onClick={resetInlineChatState} className="w-full mt-4 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">
+            <button ref={deviceSelectorCancelRef} onClick={closeInlineChatAndRestoreFocus} className="w-full min-h-11 mt-4 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">
               Cancelar
             </button>
           </div>

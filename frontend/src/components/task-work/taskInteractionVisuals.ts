@@ -1,5 +1,6 @@
 import type { CSSProperties } from 'react'
 import type { TaskWindowMode } from './useTaskWindow'
+import { operationalWindowVisualState } from '@/components/operational-window/operationalWindowVisuals'
 
 export const TASK_DESCRIPTION_DEFAULT_HEIGHT = 112
 export const TASK_DESCRIPTION_MIN_HEIGHT = 112
@@ -12,23 +13,7 @@ export type TaskWindowVisualState = {
 }
 
 export function taskWindowVisualState(mode: TaskWindowMode, isMobile = false): TaskWindowVisualState {
-  const effectiveMode = isMobile ? 'maximized' : mode
-  if (effectiveMode === 'maximized') {
-    return {
-      backdropStyle: { backgroundColor: 'rgba(2, 6, 23, 0.45)', backdropFilter: 'blur(3px)' },
-      blocksWorkspace: true,
-    }
-  }
-  if (effectiveMode === 'docked') {
-    return {
-      backdropStyle: { backgroundColor: 'rgba(2, 6, 23, 0.08)', backdropFilter: 'blur(1px)' },
-      blocksWorkspace: false,
-    }
-  }
-  return {
-    backdropStyle: { backgroundColor: 'rgba(2, 6, 23, 0.18)', backdropFilter: 'blur(2px)' },
-    blocksWorkspace: false,
-  }
+  return operationalWindowVisualState(mode, isMobile)
 }
 
 export function clampTaskDescriptionHeight(value: number, availableHeight = TASK_DESCRIPTION_MAX_HEIGHT) {

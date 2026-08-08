@@ -9,6 +9,7 @@ import {
   resumeAudioContext,
   type NotificationSettings,
 } from '@/lib/notificationSounds'
+import { shouldDeliverChatNotification } from '@/lib/mobileApp'
 
 interface NotificationContextValue {
   /** Current account's notification settings (reactive) */
@@ -26,10 +27,11 @@ export const useNotifications = () => useContext(NotificationContext)
 
 interface Props {
   accountId: string
+  mobileAppMode?: boolean
   children: React.ReactNode
 }
 
-export default function NotificationProvider({ accountId, children }: Props) {
+export default function NotificationProvider({ accountId, mobileAppMode = false, children }: Props) {
   const [settings, setSettings] = useState<NotificationSettings | null>(null)
   // Load / refresh settings
   const refreshSettings = useCallback(() => {
@@ -56,6 +58,8 @@ export default function NotificationProvider({ accountId, children }: Props) {
   // References for latest values (avoid stale closures in WS handler)
   const settingsRef = useRef(settings)
   useEffect(() => { settingsRef.current = settings }, [settings])
+  const mobileAppModeRef = useRef(mobileAppMode)
+  useEffect(() => { mobileAppModeRef.current = mobileAppMode }, [mobileAppMode])
 
   // Subscribe to shared WebSocket for notifications
   useEffect(() => {
@@ -88,6 +92,7 @@ export default function NotificationProvider({ accountId, children }: Props) {
     message?: { body?: string; provider?: string }
     is_from_me?: boolean
   }) => {
+    if (!shouldDeliverChatNotification(data.message?.provider, mobileAppModeRef.current)) return
     const s = settingsRef.current
     if (!s) return
 

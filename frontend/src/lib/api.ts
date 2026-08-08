@@ -17,6 +17,22 @@ const LAST_ACTIVITY_KEY = 'clarin:last_activity_at'
 const LOGOUT_EVENT_KEY = 'clarin:logout_at'
 const AUTH_REFRESHED_KEY = 'clarin:auth_refreshed_at'
 
+export type LogoutReason = 'manual' | 'idle' | 'expired'
+
+export function getLoginRedirectForLogout(reason: LogoutReason = 'manual') {
+  return reason === 'manual' ? '/login' : `/login?reason=${reason}`
+}
+
+export function getLoginNoticeForLogoutReason(reason: string | null) {
+  if (reason === 'idle') {
+    return 'Tu sesión se cerró después de 30 minutos sin actividad. Inicia sesión para continuar.'
+  }
+  if (reason === 'expired') {
+    return 'Tu sesión expiró. Inicia sesión nuevamente para continuar.'
+  }
+  return ''
+}
+
 export function clearAuthState() {
   if (typeof window === 'undefined') return
   localStorage.removeItem('token')
@@ -47,7 +63,7 @@ export function isAuthIdleExpired() {
   return lastActivity > 0 && Date.now() - lastActivity >= IDLE_TIMEOUT_MS
 }
 
-export async function logoutFromBrowser(reason: 'manual' | 'idle' | 'expired' = 'manual') {
+export async function logoutFromBrowser(reason: LogoutReason = 'manual') {
   if (typeof window === 'undefined') return
   clearIdleTimeout()
   try {
@@ -60,7 +76,7 @@ export async function logoutFromBrowser(reason: 'manual' | 'idle' | 'expired' = 
   }
   clearAuthState()
   localStorage.setItem(LOGOUT_EVENT_KEY, `${Date.now()}:${reason}`)
-  window.location.href = '/login'
+  window.location.href = getLoginRedirectForLogout(reason)
 }
 
 export async function tryRefreshToken(): Promise<boolean> {
@@ -170,7 +186,8 @@ export function initIdleTimeout() {
   _storageListener = (event: StorageEvent) => {
     if (event.key === LOGOUT_EVENT_KEY) {
       clearAuthState()
-      window.location.href = '/login'
+      const reason = event.newValue?.split(':').pop()
+      window.location.href = getLoginRedirectForLogout(reason === 'idle' || reason === 'expired' ? reason : 'manual')
       return
     }
     if (event.key === LAST_ACTIVITY_KEY) scheduleIdleCheck()

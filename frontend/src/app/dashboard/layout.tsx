@@ -9,8 +9,22 @@ import ErosAssistant from '@/components/ErosAssistant'
 import TaskBadge from '@/components/TaskBadge'
 import AccountSwitcher from '@/components/AccountSwitcher'
 import { ChatMobileChromeProvider } from '@/components/chat/ChatMobileChromeContext'
+import {
+  MobileAppBottomNavigation,
+  MobileAppHeader,
+  MobileOfflineStatus,
+  MobileUnavailableSurface,
+} from '@/components/mobile-app/MobileAppChrome'
+import { PwaInstallExperience, PwaInstallMenuAction, PwaRuntimeProvider, usePwaRuntime } from '@/components/mobile-app/PwaRuntime'
 import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshToken, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthSession } from '@/lib/api'
 import { dashboardSidebarHeaderState } from '@/lib/dashboardSidebarState'
+import {
+  availableMobileAppModules,
+  canUseMobileAppModule,
+  firstMobileAppHref,
+  isAllowedMobileAppPath,
+  mobileAppModuleForPath,
+} from '@/lib/mobileApp'
 import {
   MessageSquare,
   Settings,
@@ -89,8 +103,21 @@ export default function DashboardLayout({
 }: {
   children: React.ReactNode
 }) {
+  return (
+    <PwaRuntimeProvider>
+      <DashboardLayoutContent>{children}</DashboardLayoutContent>
+    </PwaRuntimeProvider>
+  )
+}
+
+function DashboardLayoutContent({
+  children,
+}: {
+  children: React.ReactNode
+}) {
   const router = useRouter()
   const pathname = usePathname()
+  const { ready: pwaReady, mobileApp: mobileAppMode } = usePwaRuntime()
   const [user, setUser] = useState<User | null>(null)
   const [accountCount, setAccountCount] = useState(1)
   const [loading, setLoading] = useState(true)
@@ -189,8 +216,9 @@ export default function DashboardLayout({
     }
   }, [pathname])
 
-  // Ctrl+I to toggle Eros
+  // Ctrl+I to toggle Eros in the complete dashboard only.
   useEffect(() => {
+    if (mobileAppMode) return
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'i') {
         e.preventDefault()
@@ -199,7 +227,7 @@ export default function DashboardLayout({
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [])
+  }, [mobileAppMode])
 
   useEffect(() => {
     const saved = localStorage.getItem('sidebar_collapsed')
@@ -434,11 +462,30 @@ export default function DashboardLayout({
     ...(user?.is_super_admin ? [{ href: '/dashboard/admin', icon: Shield, label: 'Admin', desc: 'Administración global' }] : []),
   ].filter(item => hasPermission(item.href))
 
+  const mobileModules = user ? availableMobileAppModules(user) : []
+  const mobileModule = mobileAppModuleForPath(pathname)
+  const mobileDefaultHref = user ? firstMobileAppHref(user) : ''
+  const subscriptionRecoveryPath = Boolean(
+    user?.subscription_active === false && pathname?.startsWith('/dashboard/settings'),
+  )
+  const mobilePathAllowed = user
+    ? isAllowedMobileAppPath(pathname, user, { allowSubscriptionRecovery: subscriptionRecoveryPath })
+    : false
+  const mobilePermissionDenied = Boolean(
+    user && mobileModule && !canUseMobileAppModule(user, mobileModule),
+  )
+
+  useEffect(() => {
+    if (!pwaReady || !mobileAppMode || !user || pathname !== '/dashboard') return
+    const destination = firstMobileAppHref(user)
+    if (destination) router.replace(destination)
+  }, [mobileAppMode, pathname, pwaReady, router, user])
+
   // When mobile overlay is open, always show expanded (not collapsed)
   const isCollapsed = sidebarCollapsed && !sidebarOpen
   const sidebarHeader = dashboardSidebarHeaderState(sidebarCollapsed, sidebarOpen)
 
-  if (loading) {
+  if (loading || !pwaReady || (mobileAppMode && pathname === '/dashboard' && Boolean(mobileDefaultHref))) {
     return (
       <div className="h-screen flex items-center justify-center bg-slate-50">
         <div className="flex flex-col items-center gap-3">
@@ -454,10 +501,12 @@ export default function DashboardLayout({
   if (!user) return null
 
   const subscriptionBlocked = user.subscription_active === false && !pathname?.startsWith('/dashboard/settings')
+  const mobileNoModules = mobileAppMode && mobileModules.length === 0
+  const mobilePathUnavailable = mobileAppMode && !mobileNoModules && pathname !== '/dashboard' && !mobilePathAllowed
 
   if (subscriptionBlocked) {
     return (
-      <NotificationProvider accountId={user.account_id}>
+      <NotificationProvider accountId={user.account_id} mobileAppMode={mobileAppMode}>
         <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
           <div className="w-full max-w-xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl shadow-black/30 p-6 sm:p-8 text-center">
             <div className="w-14 h-14 bg-amber-500/10 border border-amber-500/20 rounded-2xl flex items-center justify-center mx-auto mb-5">
@@ -494,11 +543,11 @@ export default function DashboardLayout({
   }
 
   return (
-    <NotificationProvider accountId={user.account_id}>
+    <NotificationProvider accountId={user.account_id} mobileAppMode={mobileAppMode}>
     <ChatMobileChromeProvider value={chatMobileChromeContextValue}>
     <div className="app-viewport bg-slate-50 flex overflow-hidden">
       {/* Mobile sidebar overlay */}
-      {sidebarOpen && (
+      {!mobileAppMode && sidebarOpen && (
         <div
           className="fixed inset-0 bg-black/30 backdrop-blur-sm z-30 lg:hidden"
           onClick={() => setSidebarOpen(false)}
@@ -506,7 +555,7 @@ export default function DashboardLayout({
       )}
 
       {/* Sidebar */}
-      <aside data-dashboard-sidebar className={`
+      {!mobileAppMode && <aside data-dashboard-sidebar className={`
         fixed lg:static inset-y-0 left-0 z-40
         ${isCollapsed ? 'lg:w-[68px]' : 'lg:w-60'} w-64
         bg-slate-800/95 backdrop-blur-md border-r border-slate-700/50
@@ -561,6 +610,9 @@ export default function DashboardLayout({
             )
           })}
         </nav>
+
+        {/* Installation stays optional and never changes the complete dashboard. */}
+        <PwaInstallMenuAction compact={isCollapsed} onInvoked={() => setSidebarOpen(false)} />
 
         {/* Eros launcher stays visible without exposing the mascot while closed. */}
         <div className={`shrink-0 border-t border-slate-700/50 ${isCollapsed ? 'p-2' : 'px-2.5 py-2'}`}>
@@ -645,7 +697,7 @@ export default function DashboardLayout({
             )}
           </button>
         </div>
-      </aside>
+      </aside>}
 
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0 min-h-0">
@@ -681,41 +733,67 @@ export default function DashboardLayout({
           </div>
         )}
 
-        {/* Top bar - mobile only */}
-        <header data-testid="dashboard-mobile-header" className={`${updateAvailable ? 'h-14' : 'h-[calc(3.5rem+env(safe-area-inset-top))] pt-[env(safe-area-inset-top)]'} ${chatComposerKeyboardOpen || chatComposerAccessoryOpen ? 'hidden' : 'flex'} items-center border-b border-slate-200/80 bg-white pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] sm:px-4 lg:hidden shrink-0`}>
-          <button
-            onClick={() => setSidebarOpen(true)}
-            className="flex h-11 w-11 items-center justify-center hover:bg-slate-100 rounded-lg transition-colors"
-            aria-label="Abrir menú"
-          >
-            <Menu className="w-5 h-5 text-slate-600" />
-          </button>
-          <div className="ml-3 flex items-center gap-2 flex-1">
-            <div className="w-6 h-6 bg-emerald-600 rounded-md flex items-center justify-center">
-              <MessageSquare className="w-3.5 h-3.5 text-white" />
+        {mobileAppMode ? (
+          <MobileAppHeader
+            user={user}
+            accountCount={accountCount}
+            activeLabel={mobileModule?.label || (subscriptionRecoveryPath ? 'Configuración' : 'Clarin móvil')}
+            version={clientVersion}
+            hidden={chatComposerKeyboardOpen || chatComposerAccessoryOpen}
+            onSwitchAccount={handleSwitchAccount}
+            onLogout={handleLogout}
+          />
+        ) : (
+          /* Top bar - mobile only */
+          <header data-testid="dashboard-mobile-header" className={`${updateAvailable ? 'h-14' : 'h-[calc(3.5rem+env(safe-area-inset-top))] pt-[env(safe-area-inset-top)]'} ${chatComposerKeyboardOpen || chatComposerAccessoryOpen ? 'hidden' : 'flex'} items-center border-b border-slate-200/80 bg-white pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] sm:px-4 lg:hidden shrink-0`}>
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="flex h-11 w-11 items-center justify-center hover:bg-slate-100 rounded-lg transition-colors"
+              aria-label="Abrir menú"
+            >
+              <Menu className="w-5 h-5 text-slate-600" />
+            </button>
+            <div className="ml-3 flex items-center gap-2 flex-1">
+              <div className="w-6 h-6 bg-emerald-600 rounded-md flex items-center justify-center">
+                <MessageSquare className="w-3.5 h-3.5 text-white" />
+              </div>
+              <span className="font-semibold text-slate-800 text-sm">Clarin</span>
             </div>
-            <span className="font-semibold text-slate-800 text-sm">Clarin</span>
-          </div>
-          <button
-            type="button"
-            onClick={() => setIsErosOpen(true)}
-            className="flex h-11 w-11 items-center justify-center rounded-lg text-emerald-600 transition-colors hover:bg-emerald-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
-            aria-label="Abrir Eros"
-          >
-            <Sparkles className="h-5 w-5" aria-hidden="true" />
-          </button>
-        </header>
+            <button
+              type="button"
+              onClick={() => setIsErosOpen(true)}
+              className="flex h-11 w-11 items-center justify-center rounded-lg text-emerald-600 transition-colors hover:bg-emerald-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
+              aria-label="Abrir Eros"
+            >
+              <Sparkles className="h-5 w-5" aria-hidden="true" />
+            </button>
+          </header>
+        )}
+
+        {mobileAppMode && <MobileOfflineStatus />}
 
         {/* Page content */}
         <main className={`flex-1 flex flex-col overflow-hidden min-h-0 ${
-          pathname === '/dashboard/chats' || pathname === '/dashboard/chat-api' || pathname === '/dashboard/tasks' || pathname?.startsWith('/dashboard/documents') ? 'p-0' : 'p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-5'
+          mobileNoModules || mobilePathUnavailable || pathname === '/dashboard/chats' || pathname === '/dashboard/chat-api' || pathname === '/dashboard/tasks' || pathname?.startsWith('/dashboard/documents') ? 'p-0' : mobileAppMode ? 'p-3 sm:p-4 lg:p-5' : 'p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-5'
         } ${(chatComposerKeyboardOpen || chatComposerAccessoryOpen) && !updateAvailable ? 'pt-[env(safe-area-inset-top)]' : ''}`}>
-          {children}
+          {mobileNoModules ? (
+            <MobileUnavailableSurface returnHref="" noModules />
+          ) : mobilePathUnavailable ? (
+            <MobileUnavailableSurface returnHref={mobileDefaultHref} permissionDenied={mobilePermissionDenied} />
+          ) : children}
         </main>
+
+        {mobileAppMode && (
+          <MobileAppBottomNavigation
+            modules={mobileModules}
+            pathname={pathname}
+            hidden={chatComposerKeyboardOpen || chatComposerAccessoryOpen || subscriptionRecoveryPath}
+          />
+        )}
       </div>
 
       {/* In docked mode Eros is a real flex sibling and the CRM yields space to it. */}
-      <ErosAssistant isOpenProp={isErosOpen} onClose={() => setIsErosOpen(false)} />
+      {!mobileAppMode && <ErosAssistant isOpenProp={isErosOpen} onClose={() => setIsErosOpen(false)} />}
 
     </div>
 
@@ -808,6 +886,8 @@ export default function DashboardLayout({
         </div>
       </div>
     )}
+
+    {!mobileAppMode && !showChangelog && <PwaInstallExperience />}
 
     </ChatMobileChromeProvider>
     </NotificationProvider>

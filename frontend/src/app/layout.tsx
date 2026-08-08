@@ -1,4 +1,5 @@
 import type { Metadata } from 'next'
+import { buildChunkRecoveryScript } from '@/lib/chunkRecoveryScript'
 import './globals.css'
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://clarin.naperu.cloud'
@@ -6,9 +7,17 @@ const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://clarin.naperu.cloud'
 export const metadata: Metadata = {
   title: 'Clarin CRM - WhatsApp Business',
   description: 'Sistema de gestión de comunicaciones por WhatsApp',
+  applicationName: 'Clarin',
+  manifest: '/manifest.webmanifest',
   metadataBase: new URL(APP_URL),
   icons: {
-    icon: '/favicon.svg',
+    icon: [{ url: '/favicon.svg', type: 'image/svg+xml' }],
+    apple: [{ url: '/icons/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }],
+  },
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: 'black-translucent',
+    title: 'Clarin',
   },
   openGraph: {
     title: 'Clarin CRM - WhatsApp Business',
@@ -33,6 +42,7 @@ export default function RootLayout({
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+        <script dangerouslySetInnerHTML={{ __html: buildChunkRecoveryScript(process.env.NEXT_PUBLIC_BUILD_VERSION || 'dev') }} />
         <script dangerouslySetInnerHTML={{ __html: `
           (function() {
             var frame = 0;
@@ -63,7 +73,9 @@ export default function RootLayout({
           })();
         `}} />
       </head>
-      <body className="h-full bg-slate-50">{children}</body>
+      <body className="h-full bg-slate-50">
+        {children}
+      </body>
     </html>
   )
 }

@@ -54,7 +54,10 @@ const mockCanonicalContact = {
   tags: ['Comunidad'],
   structured_tags: [{ id: 'tag-community', name: 'Comunidad', color: '#10b981' }],
   extra_phones: [{ id: 'phone-extra-1', contact_id: 'contact-1', phone: '51911111111', label: 'Trabajo' }],
-  custom_field_values: [{ id: 'custom-value-1', contact_id: 'contact-1', field_id: 'custom-field-1', field_name: 'Nivel', field_slug: 'nivel', field_type: 'select', value_text: 'intermedio', value_number: null, value_date: null, value_bool: null, value_json: null }],
+  custom_field_values: [
+    { id: 'custom-value-1', contact_id: 'contact-1', field_id: 'custom-field-1', field_name: 'Nivel', field_slug: 'nivel', field_type: 'select', value_text: 'intermedio', value_number: null, value_date: null, value_bool: null, value_json: null },
+    { id: 'custom-value-2', contact_id: 'contact-1', field_id: 'custom-field-date', field_name: 'Renovación', field_slug: 'renovacion', field_type: 'date', value_text: null, value_number: null, value_date: '2026-06-15', value_bool: null, value_json: null },
+  ],
   avatar_url: null,
   created_at: mockNow,
   updated_at: mockNow,
@@ -107,6 +110,9 @@ const mockEventParticipant = {
   phone: '51900000002',
   email: 'snapshot-evento@example.test',
   status: 'confirmed',
+  stage_id: 'event-stage-invited',
+  stage_name: 'Invitados',
+  stage_color: '#3b82f6',
   notes: 'Datos exclusivos de la inscripción',
   tags: [],
   membership_state: 'active',
@@ -411,6 +417,19 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
   if (path === '/api/chats/new') {
     return { success: true, chat: { id: 'chat-1', jid: '51999999999@s.whatsapp.net', name: 'Contacto móvil', device_id: 'device-1', device_name: 'Canal QA', contact_phone: '51999999999', last_message: 'Mensaje de prueba responsiva', last_message_at: mockNow, unread_count: 0 } }
   }
+  if (path === '/api/leads/lead-1/interactions') {
+    return { success: true, interactions: [{ id: 'lead-note-1', contact_id: 'contact-1', lead_id: 'lead-1', type: 'note', notes: 'Seguimiento exclusivo de la oportunidad', created_by_name: 'Asesora QA', created_at: mockNow }] }
+  }
+  if (path === '/api/interactions' && method === 'GET' && url.searchParams.get('participant_id') === 'event-participant-1') {
+    return { success: true, interactions: [
+      { id: 'event-call-1', contact_id: 'contact-1', event_id: 'event-1', participant_id: 'event-participant-1', type: 'call', notes: 'Llamada de confirmación del evento', created_by_name: 'Coordinadora QA', created_at: mockNow },
+      { id: 'event-note-1', contact_id: 'contact-1', event_id: 'event-1', participant_id: 'event-participant-1', type: 'note', notes: 'Nota directa de la participación', created_by_name: 'Responsive QA', created_at: mockNow },
+    ] }
+  }
+  if (path === '/api/interactions' && method === 'POST') {
+    return { success: true, interaction: { id: 'interaction-created', ...requestBody, created_by_name: 'Responsive QA', created_at: mockNow } }
+  }
+  if (path === '/api/tasks') return { success: true, tasks: [], total: 0, next_cursor: '' }
   if (path === '/api/chats') {
     return { success: true, total: 1, chats: [{ id: 'chat-1', jid: '51999999999@s.whatsapp.net', name: 'Contacto móvil', device_id: 'device-1', device_name: 'Canal QA', contact_phone: '51999999999', last_message: 'Mensaje de prueba responsiva', last_message_at: mockNow, unread_count: 2 }] }
   }
@@ -452,7 +471,14 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
           ? patch.extra_phones.map((phone: any, index: number) => ({ ...phone, id: phone.id || `phone-extra-${index + 2}`, contact_id: 'contact-1' }))
           : mockCanonicalContact.extra_phones,
         custom_field_values: Array.isArray(patch.custom_field_values)
-          ? patch.custom_field_values.map((value: any, index: number) => ({ ...value, id: `custom-value-${index + 1}`, contact_id: 'contact-1', field_name: 'Nivel', field_slug: 'nivel', field_type: 'select' }))
+          ? patch.custom_field_values.map((value: any, index: number) => ({
+            ...value,
+            id: `custom-value-${index + 1}`,
+            contact_id: 'contact-1',
+            field_name: value.field_id === 'custom-field-date' ? 'Renovación' : 'Nivel',
+            field_slug: value.field_id === 'custom-field-date' ? 'renovacion' : 'nivel',
+            field_type: value.field_id === 'custom-field-date' ? 'date' : 'select',
+          }))
           : mockCanonicalContact.custom_field_values,
         updated_at: mockNow,
       },
@@ -463,6 +489,8 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
       custom_field_definitions: [{
         id: 'custom-field-1', name: 'Nivel', slug: 'nivel', field_type: 'select', is_required: false, position: 0,
         options: [{ label: 'Inicial', value: 'inicial' }, { label: 'Intermedio', value: 'intermedio' }, { label: 'Avanzado', value: 'avanzado' }],
+      }, {
+        id: 'custom-field-date', name: 'Renovación', slug: 'renovacion', field_type: 'date', is_required: false, position: 1,
       }],
     }
   }
@@ -498,11 +526,17 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
   if (path === '/api/events/event-1/participants/event-participant-1') {
     return { success: true, participant: mockEventParticipant }
   }
+  if (path === '/api/events/event-1/participants/event-participant-1/stage' && method === 'PATCH') {
+    return { success: true, operation_id: requestBody?.operation_id, participant: { ...mockEventParticipant, stage_id: requestBody?.stage_id, stage_name: requestBody?.stage_id === 'event-stage-confirmed' ? 'Confirmados' : 'Invitados', stage_color: requestBody?.stage_id === 'event-stage-confirmed' ? '#10b981' : '#3b82f6' } }
+  }
   if (path === '/api/events/event-1/participants/paginated') {
     return {
       success: true,
-      stages: [],
-      unassigned: { total_count: 1, participants: [mockEventParticipant], has_more: false },
+      stages: [
+        { id: 'event-stage-invited', pipeline_id: 'event-pipeline-1', name: 'Invitados', color: '#3b82f6', position: 0, total_count: 1, participants: [mockEventParticipant], has_more: false },
+        { id: 'event-stage-confirmed', pipeline_id: 'event-pipeline-1', name: 'Confirmados', color: '#10b981', position: 1, total_count: 0, participants: [], has_more: false },
+      ],
+      unassigned: { total_count: 0, participants: [], has_more: false },
       all_tags: [],
     }
   }
@@ -517,7 +551,7 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
       success: true,
       event: {
         id: 'event-1', name: 'Evento móvil QA', description: 'Contexto propio del evento',
-        event_date: mockNow, location: 'Lima', status: 'active', color: '#10b981',
+        event_date: mockNow, location: 'Lima', status: 'active', color: '#10b981', pipeline_id: 'event-pipeline-1',
         total_participants: 1, participant_counts: { confirmed: 1 },
       },
     }
@@ -548,7 +582,10 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
   if (path === '/api/leads/paginated') {
     return {
       success: true,
-      stages: [{ id: 'stage-1', pipeline_id: 'pipeline-1', name: 'Interesado', color: '#10b981', position: 0, total_count: 1, leads: [mockLeadSnapshot], has_more: false }],
+      stages: [
+        { id: 'stage-1', pipeline_id: 'pipeline-1', name: 'Interesado', color: '#10b981', position: 0, total_count: 1, leads: [mockLeadSnapshot], has_more: false },
+        { id: 'stage-2', pipeline_id: 'pipeline-1', name: 'Contactado', color: '#3b82f6', position: 1, total_count: 0, leads: [], has_more: false },
+      ],
       unassigned: { total_count: 0, leads: [], has_more: false },
       all_tags: [],
       hidden_by_status: 0,
@@ -564,7 +601,10 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
       success: true,
       pipelines: [{
         id: 'pipeline-1', account_id: 'account-responsive', name: 'Ventas QA', is_default: true,
-        stages: [{ id: 'stage-1', pipeline_id: 'pipeline-1', name: 'Interesado', color: '#10b981', position: 0, stage_type: 'active', lead_count: 1 }],
+        stages: [
+          { id: 'stage-1', pipeline_id: 'pipeline-1', name: 'Interesado', color: '#10b981', position: 0, stage_type: 'active', lead_count: 1 },
+          { id: 'stage-2', pipeline_id: 'pipeline-1', name: 'Contactado', color: '#3b82f6', position: 1, stage_type: 'active', lead_count: 0 },
+        ],
       }],
     }
   }
@@ -744,11 +784,14 @@ function waitForCanonicalProfileRequest(page: Page, contextType: string, context
 
 async function expectCanonicalContactDetails(page: Page) {
   await expect(page.getByText('Contacto móvil', { exact: true }).last()).toBeVisible()
+  const expandContact = page.getByRole('button', { name: 'Ver todos los datos' }).last()
+  if (await expandContact.isVisible().catch(() => false)) await expandContact.click()
   await expect(page.getByText('movil@example.test', { exact: true }).last()).toBeVisible()
   await expect(page.getByText('Iquitos', { exact: true }).last()).toBeVisible()
   await expect(page.getByText('Ficha canónica compartida', { exact: true }).last()).toBeVisible()
   await expect(page.getByText('Observación canónica visible', { exact: true })).toHaveCount(0)
-  await page.getByRole('button', { name: 'Ver historial' }).last().click()
+  const history = page.getByRole('button', { name: /Historial general del contacto/ }).last()
+  if (await history.getAttribute('aria-expanded') === 'false') await history.click()
   await expect(page.getByText('Observación canónica visible', { exact: true }).last()).toBeVisible()
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
 }
@@ -1221,9 +1264,10 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await snapshotLead.click()
     await profileRequest
 
-    await expect(page.getByRole('heading', { name: 'Detalles' })).toBeVisible()
+    await expect(page.getByRole('dialog', { name: 'Matrícula del programa QA' })).toBeVisible()
     await expectCanonicalContactDetails(page)
-    await expect(page.getByText('Concepto del lead', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: /Contexto de la oportunidad/ }).click()
+    await expect(page.getByText('Oportunidad', { exact: true }).last()).toBeVisible()
     await expect(page.getByText('Matrícula del programa QA', { exact: true }).first()).toBeVisible()
     await expect(page.getByText('snapshot-lead@example.test', { exact: true })).toHaveCount(0)
   })
@@ -1258,14 +1302,198 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await snapshotParticipant.click()
     await profileRequest
 
-    const detail = page.getByRole('dialog', { name: 'Detalle del participante' })
+    const detail = page.getByRole('dialog', { name: 'Evento móvil QA' })
     await expectInsideVisualViewport(page, detail)
     await expectCanonicalContactDetails(page)
+    await detail.getByRole('button', { name: /Contexto del evento/ }).click()
     await expect(detail.getByText('Participación en el evento', { exact: true })).toBeVisible()
-    await expect(detail.getByText('Participante activo', { exact: true })).toBeVisible()
-    await expect(detail.getByText('Oportunidades del contacto', { exact: true })).toBeVisible()
+    await expect(detail.getByText('Participación activa', { exact: true })).toBeVisible()
+    await expect(detail.getByText('Oportunidades relacionadas', { exact: true })).toBeVisible()
     await expect(detail.getByText('snapshot-evento@example.test', { exact: true })).toHaveCount(0)
     await expect.poll(() => detail.evaluate(element => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
+  })
+
+  test('Eventos usa el picker date-only de Tareas sobre la ventana CRM en la matriz acordada', async ({ page }) => {
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width: 1747, height: 818 })
+    await authenticate(page)
+    let contactWrites = 0
+    page.on('request', request => {
+      const url = new URL(request.url())
+      if (url.pathname === '/api/contact-profiles/contact-1' && request.method() === 'PATCH') contactWrites += 1
+    })
+
+    await page.goto(`${baseURL}/dashboard/events/event-1`, { waitUntil: 'domcontentloaded' })
+    await page.getByText('Snapshot de evento desactualizado', { exact: true }).first().click()
+    const detail = page.getByRole('dialog', { name: 'Evento móvil QA' })
+    await expect(detail).toBeVisible({ timeout: 30_000 })
+    await detail.getByRole('button', { name: 'Editar' }).click()
+
+    const editor = detail.getByRole('form', { name: 'Editar contacto' })
+    await expect(editor).toBeVisible()
+    await expect(editor.locator('input[type="date"]')).toHaveCount(0)
+    await expect(editor.getByRole('button', { name: 'Renovación: 15/06/2026' })).toBeVisible()
+    const birthTrigger = editor.getByRole('button', { name: 'Fecha de nacimiento: 03/04/1995' })
+
+    const picker = page.getByRole('dialog', { name: 'Elegir Fecha de nacimiento' })
+    for (const width of [1747, 320, 375, 833, 1024, 1440]) {
+      await page.setViewportSize({ width, height: 818 })
+      await birthTrigger.scrollIntoViewIfNeeded()
+      await birthTrigger.click()
+      await expectInsideVisualViewport(page, picker)
+      await expect(picker.getByLabel('Hora')).toHaveCount(0)
+      await expect(picker.getByText('Todo el día', { exact: true })).toHaveCount(0)
+      await expect(picker.getByText('Mañana', { exact: true })).toHaveCount(0)
+      const layers = await page.evaluate(() => ({
+        picker: Number.parseInt(getComputedStyle(document.querySelector('[data-operational-date-picker]') as HTMLElement).zIndex, 10),
+        window: Number.parseInt(getComputedStyle(document.querySelector('[data-window-kind="operational-window"]') as HTMLElement).zIndex, 10),
+      }))
+      expect(layers.picker).toBeGreaterThan(layers.window)
+      await page.keyboard.press('Escape')
+      await expect(picker).toBeHidden()
+      await expect(editor).toBeVisible()
+      await expect(birthTrigger).toBeFocused()
+      expect(contactWrites).toBe(0)
+    }
+
+    await page.setViewportSize({ width: 1747, height: 818 })
+    await birthTrigger.scrollIntoViewIfNeeded()
+    await birthTrigger.click()
+    await page.getByRole('button', { name: 'Elegir mes y año' }).click()
+    await page.getByRole('spinbutton', { name: 'Año' }).fill('1990')
+    await page.getByRole('button', { name: /^may$/i }).click()
+    await page.locator('[data-date-key="1990-05-08"]').click()
+    await page.getByRole('button', { name: 'Aplicar' }).click()
+    await expect(editor.getByRole('button', { name: 'Fecha de nacimiento: 08/05/1990' })).toBeVisible()
+    expect(contactWrites).toBe(0)
+
+    const patchRequest = page.waitForRequest(request => request.url().includes('/api/contact-profiles/contact-1?') && request.method() === 'PATCH')
+    await editor.getByRole('button', { name: 'Guardar contacto' }).click()
+    const body = (await patchRequest).postDataJSON()
+    expect(body.birth_date).toBe('1990-05-08')
+    expect(body.custom_field_values).toContainEqual({ field_id: 'custom-field-date', value_date: '2026-06-15' })
+    expect(contactWrites).toBe(1)
+  })
+
+  test('Eventos usa la jerarquía operativa, conserva acordeones y maximiza Mensaje desde el primer clic', async ({ page }) => {
+    test.setTimeout(90_000)
+    await page.setViewportSize({ width: 1081, height: 818 })
+    await authenticate(page)
+
+    let releaseResolution!: () => void
+    const resolutionGate = new Promise<void>(resolve => { releaseResolution = resolve })
+    await page.route('**/api/chats/resolve-whatsapp/**', async route => {
+      await resolutionGate
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, phone: '51999999999', jid: '51999999999@s.whatsapp.net', chat: null, historical_phone: '', devices: [{ id: 'device-1', name: 'Canal QA', phone: '51999999999', status: 'connected', provider: 'whatsapp_web', historical_relation: 'new_chat' }], mode: 'open_direct' }),
+      })
+    })
+
+    await page.goto(`${baseURL}/dashboard/events/event-1`, { waitUntil: 'domcontentloaded' })
+    await page.getByText('Snapshot de evento desactualizado', { exact: true }).first().click()
+
+    const shell = page.locator('[data-window-kind="operational-window"]')
+    const detail = page.getByRole('dialog', { name: 'Evento móvil QA' })
+    await expect(detail).toBeVisible({ timeout: 30_000 })
+    await expect(shell).toHaveAttribute('data-window-mode', 'docked')
+    await expect(detail.locator('[data-crm-detail-section]')).toHaveCount(7)
+    expect(await detail.locator('[data-crm-detail-section]').evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.crmDetailSection))).toEqual([
+      'crm-contact-information',
+      'crm-contact-tags',
+      'crm-context-activity',
+      'crm-context',
+      'crm-related-tasks',
+      'crm-contact-history',
+      'crm-integrations',
+    ])
+
+    const contactSection = detail.getByRole('button', { name: /Información del contacto/ })
+    const tagsSection = detail.getByRole('button', { name: /^Etiquetas/ })
+    const activitySection = detail.getByRole('button', { name: /Observaciones de esta participación/ })
+    await expect(contactSection).toHaveAttribute('aria-expanded', 'true')
+    await expect(tagsSection).toHaveAttribute('aria-expanded', 'true')
+    await expect(activitySection).toHaveAttribute('aria-expanded', 'true')
+    await expect(detail.getByText('Llamada', { exact: true })).toBeVisible()
+    await expect(detail.getByText('Coordinadora QA', { exact: true })).toBeVisible()
+    await expect(detail.getByText('Comunidad', { exact: true })).toBeVisible()
+    await expect(detail.getByRole('button', { name: 'Resumen' })).toHaveCount(0)
+    await expect(detail.getByRole('button', { name: 'Actividad' })).toHaveCount(0)
+
+    await contactSection.click()
+    await expect(contactSection).toHaveAttribute('aria-expanded', 'false')
+    const message = detail.getByRole('button', { name: 'Enviar mensaje a Contacto móvil' })
+    await message.click()
+    await expect(shell).toHaveAttribute('data-window-mode', 'maximized')
+    releaseResolution()
+    await expect(page.getByRole('textbox', { name: 'Escribe un mensaje…' })).toBeVisible({ timeout: 30_000 })
+    await page.getByRole('button', { name: 'Volver a la lista de chats' }).click()
+    await expect(shell).toHaveAttribute('data-window-mode', 'docked')
+    await expect(contactSection).toHaveAttribute('aria-expanded', 'false')
+    await expect(message).toBeFocused()
+
+    await page.setViewportSize({ width: 833, height: 818 })
+    await message.click()
+    await expect(shell).toHaveAttribute('data-window-mode', 'maximized')
+    await expect(page.getByRole('button', { name: 'Volver al detalle' })).toBeVisible({ timeout: 30_000 })
+    await page.getByRole('button', { name: 'Volver al detalle' }).click()
+    await expect(shell).toHaveAttribute('data-window-mode', 'docked')
+    await expect(contactSection).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  test('Leads y Eventos muestran el overlay apilado de Tareas y escriben una sola etapa por gesto', async ({ page }) => {
+    test.setTimeout(90_000)
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await authenticate(page)
+    let leadStageWrites = 0
+    let eventStageWrites = 0
+    page.on('request', request => {
+      const path = new URL(request.url()).pathname
+      if (request.method() === 'PATCH' && path === '/api/leads/lead-1/stage') leadStageWrites += 1
+      if (request.method() === 'PATCH' && path === '/api/events/event-1/participants/event-participant-1/stage') eventStageWrites += 1
+    })
+
+    const dragToStage = async (handle: Locator, target: Locator, destination: string) => {
+      const handleBox = await handle.boundingBox()
+      const targetBox = await target.boundingBox()
+      expect(handleBox).not.toBeNull()
+      expect(targetBox).not.toBeNull()
+      await page.mouse.move(handleBox!.x + handleBox!.width / 2, handleBox!.y + handleBox!.height / 2)
+      await page.mouse.down()
+      await page.mouse.move(handleBox!.x + handleBox!.width / 2 + 12, handleBox!.y + handleBox!.height / 2 + 8, { steps: 3 })
+      await page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + Math.min(90, targetBox!.height / 2), { steps: 12 })
+      const overlay = page.locator('[data-operational-drag-overlay]')
+      await expect(overlay).toBeVisible()
+      await expect(overlay).toContainText(`Mover a ${destination}`)
+      await expect(target.getByText(`Suelta en ${destination}`, { exact: true })).toBeVisible()
+      const sourceCard = handle.locator('xpath=ancestor::*[@data-crm-pipeline-card][1]')
+      expect(Number.parseFloat(await sourceCard.evaluate(element => getComputedStyle(element).opacity))).toBeLessThanOrEqual(0.25)
+      await page.mouse.up()
+      await expect(overlay).toBeHidden()
+    }
+
+    await page.goto(`${baseURL}/dashboard/leads`, { waitUntil: 'domcontentloaded' })
+    const leadCard = page.locator('[data-crm-pipeline-card="lead-1"]')
+    const leadTarget = page.locator('[data-crm-pipeline-stage="stage-2"]')
+    const leadRequest = page.waitForRequest(request => request.url().endsWith('/api/leads/lead-1/stage') && request.method() === 'PATCH')
+    await dragToStage(page.getByRole('button', { name: 'Mover Snapshot de lead desactualizado' }), leadTarget, 'Contactado')
+    const leadMove = await leadRequest
+    expect(leadMove.postDataJSON()).toMatchObject({ stage_id: 'stage-2', operation_id: expect.any(String) })
+    await expect(leadTarget.locator('[data-crm-pipeline-card="lead-1"]')).toBeVisible()
+    await expect(leadCard).toHaveCount(1)
+    expect(leadStageWrites).toBe(1)
+
+    await page.goto(`${baseURL}/dashboard/events/event-1`, { waitUntil: 'domcontentloaded' })
+    const participantCard = page.locator('[data-crm-pipeline-card="event-participant-1"]')
+    const eventTarget = page.locator('[data-crm-pipeline-stage="event-stage-confirmed"]')
+    const eventRequest = page.waitForRequest(request => request.url().endsWith('/api/events/event-1/participants/event-participant-1/stage') && request.method() === 'PATCH')
+    await dragToStage(page.getByRole('button', { name: 'Mover Snapshot de evento desactualizado' }), eventTarget, 'Confirmados')
+    const eventMove = await eventRequest
+    expect(eventMove.postDataJSON()).toMatchObject({ stage_id: 'event-stage-confirmed', operation_id: expect.any(String) })
+    await expect(eventTarget.locator('[data-crm-pipeline-card="event-participant-1"]')).toBeVisible()
+    await expect(participantCard).toHaveCount(1)
+    expect(eventStageWrites).toBe(1)
   })
 
   test('Google Sync permanece visible en la ficha canónica de los cinco módulos, móvil y escritorio', async ({ page }) => {

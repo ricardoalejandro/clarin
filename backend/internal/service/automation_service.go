@@ -482,7 +482,7 @@ func (s *AutomationService) execChangeStage(ctx context.Context, exec *domain.Au
 	if strings.TrimSpace(closeReason) == "" {
 		closeReason = "Cerrado por automatización"
 	}
-	if err := s.repos.Lead.MoveToStage(ctx, exec.AccountID, *exec.LeadID, stageID, closeReason, nil); err != nil {
+	if err := s.repos.Lead.MoveToStage(ctx, exec.AccountID, *exec.LeadID, &stageID, closeReason, nil); err != nil {
 		return err
 	}
 	if s.hub != nil {

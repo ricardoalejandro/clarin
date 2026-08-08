@@ -1,0 +1,4 @@
+interface:
+  display_name: "Clarin Leads and Events Experience"
+  short_description: "Leads, eventos y detalle CRM profesional"
+  default_prompt: "Use $clarin-leads-events-experience to improve Clarin Leads and Events with clear CRM scope, polished detail windows, and reliable interactions."

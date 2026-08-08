@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -543,15 +544,20 @@ func (s *Server) handleMoveLeadToStage(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Oportunidad inválida"})
 	}
 	var req struct {
-		StageID     string `json:"stage_id"`
-		CloseReason string `json:"close_reason"`
+		StageID     json.RawMessage `json:"stage_id"`
+		CloseReason string          `json:"close_reason"`
+		OperationID string          `json:"operation_id"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	stageID, err := uuid.Parse(req.StageID)
+	stageID, err := parseCRMStageTarget(req.StageID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Etapa inválida"})
+	}
+	operationID, err := parseOptionalCRMOperationID(req.OperationID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Operación inválida"})
 	}
 	var userID *uuid.UUID
 	if id, ok := c.Locals("user_id").(uuid.UUID); ok {
@@ -566,9 +572,19 @@ func (s *Server) handleMoveLeadToStage(c *fiber.Ctx) error {
 	}
 	s.invalidateLeadsCache(accountID)
 	s.invalidateLeadDetailCache(accountID, leadID)
-	s.broadcastLeadDelta(accountID, "stage_changed", lead)
-	s.triggerAutomationLeadStageChanged(accountID, leadID, stageID)
-	return c.JSON(fiber.Map{"success": true, "lead": lead})
+	if s.hub != nil {
+		s.hub.BroadcastToAccount(accountID, ws.EventLeadUpdate, map[string]interface{}{
+			"action":       "stage_changed",
+			"lead_id":      leadID.String(),
+			"stage_id":     crmStageIDPayload(stageID),
+			"operation_id": operationID,
+			"lead":         lead,
+		})
+	}
+	if stageID != nil {
+		s.triggerAutomationLeadStageChanged(accountID, leadID, *stageID)
+	}
+	return c.JSON(fiber.Map{"success": true, "operation_id": operationID, "lead": lead})
 }
 
 func (s *Server) handleTrashLead(c *fiber.Ctx) error {

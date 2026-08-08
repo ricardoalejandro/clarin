@@ -1,21 +1,9 @@
-export interface TaskStackLayer {
-  index: number
-  x: number
-  y: number
-  rotation: number
-  opacity: number
-}
+import { operationalDragStackLayers, type OperationalDragStackLayer } from '@/components/drag-interaction/operationalDragStack'
+
+export type TaskStackLayer = OperationalDragStackLayer
 
 export function taskStackLayers(selectedCount: number): TaskStackLayer[] {
-  const visible = Math.min(3, Math.max(1, selectedCount))
-  const rotations = [0, -2.2, 2.6]
-  return Array.from({ length: visible }, (_, index) => ({
-    index,
-    x: index * 6,
-    y: index * 6,
-    rotation: rotations[index],
-    opacity: 1 - index * 0.08,
-  })).reverse()
+  return operationalDragStackLayers(selectedCount)
 }
 
 export function selectionAfterToggle(current: string[], taskID: string, orderedIDs: string[], shift: boolean, anchorID?: string) {

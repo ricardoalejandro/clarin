@@ -16,6 +16,7 @@ import {
   TaskType,
   TaskWorkflow,
 } from '@/types/task'
+import type { RelatedTaskScope } from '@/types/crm-detail'
 import TaskUserCombobox from './TaskUserCombobox'
 import TaskCollaboratorPicker from './TaskCollaboratorPicker'
 import { TaskStatusPicker } from './TaskPropertyPicker'
@@ -74,6 +75,7 @@ interface Props {
   folders: TaskFolder[]
   workflows: TaskWorkflow[]
   users: TaskAccountUser[]
+  relatedScope?: RelatedTaskScope
   storageScope?: string
   onClose: () => void
   onSaved: (task: Task, operationId?: string, hierarchyCounts?: TaskHierarchyCounts) => void
@@ -89,7 +91,7 @@ function localDateTime(value?: string) {
   return new Date(date.getTime() - offset).toISOString().slice(0, 16)
 }
 
-export default function TaskEditorModal({ open, environmentId, task, defaultListId, defaultFolderId, defaultStatusId, defaultOwnerId, defaultTitle, defaultPriority, defaultDueAt, defaultStartAt, defaultAllDay, parentTaskId, parentTaskTitle, lists, folders, workflows, users, storageScope, onClose, onSaved, onOperation }: Props) {
+export default function TaskEditorModal({ open, environmentId, task, defaultListId, defaultFolderId, defaultStatusId, defaultOwnerId, defaultTitle, defaultPriority, defaultDueAt, defaultStartAt, defaultAllDay, parentTaskId, parentTaskTitle, lists, folders, workflows, users, relatedScope, storageScope, onClose, onSaved, onOperation }: Props) {
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [type, setType] = useState<TaskType>('reminder')
@@ -343,6 +345,11 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
       is_all_day: allDay, progress, progress_mode: 'manual', manual_progress: progress, is_milestone: milestone,
       recurrence_rule: recurrence, reminder_minutes: reminder || 0,
       ...(parentTaskId && !task ? { parent_task_id: parentTaskId } : {}),
+      ...(!task && relatedScope ? {
+        ...(relatedScope.contactId ? { contact_id: relatedScope.contactId } : {}),
+        ...(relatedScope.leadId ? { lead_id: relatedScope.leadId } : {}),
+        ...(relatedScope.eventId ? { event_id: relatedScope.eventId } : {}),
+      } : {}),
       ...(task ? { version: editVersion } : {}),
       operation_id: operationId,
       confirm_grants: confirmGrants,

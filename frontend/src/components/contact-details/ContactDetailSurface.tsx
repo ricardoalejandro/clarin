@@ -1,7 +1,7 @@
 'use client'
 
-import type { ComponentType, ReactNode } from 'react'
-import { useEffect, useMemo, useState } from 'react'
+import type { ComponentType, ReactElement, ReactNode } from 'react'
+import { cloneElement, isValidElement, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
   Briefcase,
@@ -17,10 +17,12 @@ import {
   Edit2,
   FileText,
   Loader2,
+  ListTodo,
   Mail,
   Map,
   MapPin,
   MessageCircle,
+  MessageSquarePlus,
   Phone,
   Pin,
   Plus,
@@ -47,6 +49,10 @@ import type {
 } from '@/types/contact-profile'
 import { useContactProfile } from './useContactProfile'
 import { useGoogleContactSync } from './useGoogleContactSync'
+import CrmDetailAccordion, { defaultCrmDetailAccordionState, type CrmDetailSectionKey } from '@/components/crm-detail/CrmDetailAccordion'
+import { activityAuthorLabel } from '@/components/crm-detail/ScopedActivityPanel'
+import { beginQuickTagMutation, reconcileQuickTagMutation, rollbackQuickTagMutation } from './quickTagMutation'
+import OperationalDatePicker from '@/components/operational-date/OperationalDatePicker'
 
 interface ContactDetailSurfaceProps {
   contactId: string
@@ -62,9 +68,21 @@ interface ContactDetailSurfaceProps {
   onDeleteContact?: (contact: ContactProfileContact) => void
   /** Context-specific content follows the shared contact history in every module. */
   contextContent?: ReactNode
+  /** CRM context shown immediately after Contact identity and tags. */
+  contextSummary?: ReactNode
+  /** Module-owned fields shown after canonical Contact data. */
+  contextDetails?: ReactNode
+  /** Lead- or event-participant-scoped activity, kept separate from Contact history. */
+  contextActivity?: ReactNode
+  /** Canonical Clarin Work tasks related to the CRM entity. */
+  relatedTasks?: ReactNode
+  /** Visible context actions such as Observation and Task. */
+  quickActions?: ReactNode
   hideHeader?: boolean
   parentOwnsScroll?: boolean
   readOnly?: boolean
+  /** Disables module-context mutations while keeping canonical Contact editing independent. */
+  contextActionsDisabled?: boolean
   className?: string
 }
 
@@ -92,6 +110,24 @@ const profileFields: ProfileField[] = [
 ]
 
 type ContactEditDraft = Record<ContactProfileEditableField, string>
+
+type EmbeddablePanelProps = {
+  embedded?: boolean
+  onCountChange?: (count: number) => void
+}
+
+function embedOperationalPanel(node: ReactNode, onCountChange: (count: number) => void) {
+  if (!isValidElement<EmbeddablePanelProps>(node)) return node
+  const element = node as ReactElement<EmbeddablePanelProps>
+  const originalCountChange = element.props.onCountChange
+  return cloneElement(element, {
+    embedded: true,
+    onCountChange: (count: number) => {
+      onCountChange(count)
+      originalCountChange?.(count)
+    },
+  })
+}
 
 function contactEditDraft(contact: ContactProfileContact): ContactEditDraft {
   return {
@@ -218,9 +254,15 @@ export default function ContactDetailSurface({
   sendingMessage = false,
   onDeleteContact,
   contextContent,
+  contextSummary,
+  contextDetails,
+  contextActivity,
+  relatedTasks,
+  quickActions,
   hideHeader = false,
   parentOwnsScroll = false,
   readOnly = false,
+  contextActionsDisabled = false,
   className = '',
 }: ContactDetailSurfaceProps) {
   const profile = useContactProfile({ contactId, context, initialContact, onContactChange })
@@ -244,6 +286,17 @@ export default function ContactDetailSurface({
   const [tagDraft, setTagDraft] = useState<ContactProfileAvailableTag[]>([])
   const [customFieldDraftValues, setCustomFieldDraftValues] = useState<Record<string, string>>({})
   const [collectionError, setCollectionError] = useState('')
+  const [quickTagDraft, setQuickTagDraft] = useState<ContactProfileAvailableTag[]>([])
+  const [quickTagsOpen, setQuickTagsOpen] = useState(false)
+  const [quickTagError, setQuickTagError] = useState('')
+  const [quickTagPendingId, setQuickTagPendingId] = useState<string | null>(null)
+  const [quickTagRetry, setQuickTagRetry] = useState<ContactProfileAvailableTag[] | null>(null)
+  const [accordionOpen, setAccordionOpen] = useState(defaultCrmDetailAccordionState)
+  const [contactDataExpanded, setContactDataExpanded] = useState(false)
+  const [contextActivityCount, setContextActivityCount] = useState(0)
+  const [relatedTaskCount, setRelatedTaskCount] = useState(0)
+  const surfaceRef = useRef<HTMLDivElement>(null)
+  const quickTagRequestRef = useRef(0)
 
   useEffect(() => {
     setShowObservationComposer(false)
@@ -260,7 +313,20 @@ export default function ContactDetailSurface({
     setTagDraft([])
     setCustomFieldDraftValues({})
     setCollectionError('')
+    setQuickTagsOpen(false)
+    setQuickTagError('')
+    setQuickTagPendingId(null)
+    setQuickTagRetry(null)
+    quickTagRequestRef.current += 1
+    setAccordionOpen(defaultCrmDetailAccordionState())
+    setContactDataExpanded(false)
+    setContextActivityCount(0)
+    setRelatedTaskCount(0)
   }, [contactId, context.id, context.type])
+
+  useEffect(() => {
+    setQuickTagDraft(profile.contact?.structured_tags || [])
+  }, [contactId, profile.contact?.structured_tags])
 
   const missingFields = useMemo(
     () => profile.contact ? profileFields.filter(field => !fieldValue(profile.contact!, field)) : [],
@@ -277,6 +343,12 @@ export default function ContactDetailSurface({
   const canEdit = profile.capabilities.can_edit && !readOnly
   const canManageAvatar = profile.capabilities.can_manage_avatar && !readOnly
   const canManageObservations = profile.capabilities.can_manage_observations && !readOnly
+  const embeddedContextActivity = useMemo(() => embedOperationalPanel(contextActivity, setContextActivityCount), [contextActivity])
+  const embeddedRelatedTasks = useMemo(() => embedOperationalPanel(relatedTasks, setRelatedTaskCount), [relatedTasks])
+
+  const setSectionOpen = (section: CrmDetailSectionKey, open = true) => {
+    setAccordionOpen(current => ({ ...current, [section]: open }))
+  }
 
   const toggleHistory = () => {
     const next = !historyOpen
@@ -409,6 +481,7 @@ export default function ContactDetailSurface({
     }
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
+      if (document.querySelector('[data-operational-date-picker]')) return
       event.preventDefault()
       event.stopImmediatePropagation()
       abandonEdit()
@@ -463,8 +536,44 @@ export default function ContactDetailSurface({
     void googleSync.desync()
   }
 
+  const updateQuickTags = async (next: ContactProfileAvailableTag[]) => {
+    if (!profile.contact || !canEdit || profile.saving || quickTagPendingId) return
+    const previous = quickTagDraft
+    const mutation = beginQuickTagMutation(previous, next)
+    const request = ++quickTagRequestRef.current
+    setQuickTagDraft(next)
+    setQuickTagError('')
+    setQuickTagRetry(null)
+    setQuickTagPendingId(mutation.pendingId)
+    const result = await profile.updateContact({ tag_ids: next.map(tag => tag.id) })
+    if (request !== quickTagRequestRef.current) return
+    setQuickTagPendingId(null)
+    if (!result.success) {
+      const rollback = rollbackQuickTagMutation(mutation)
+      setQuickTagDraft(rollback.tags)
+      setQuickTagRetry(rollback.retry)
+      setQuickTagError(result.error || 'No se pudieron actualizar las etiquetas. Restauramos la selección anterior.')
+      return
+    }
+    setQuickTagRetry(null)
+    setQuickTagDraft(reconcileQuickTagMutation(mutation, result.contact?.structured_tags))
+  }
+
+  const openContextAction = (sectionOrSelector: CrmDetailSectionKey | string, maybeSelector?: string) => {
+    const selector = maybeSelector || sectionOrSelector
+    const section: CrmDetailSectionKey = maybeSelector
+      ? sectionOrSelector as CrmDetailSectionKey
+      : selector.includes('related-task') ? 'tasks' : 'activity'
+    setSectionOpen(section, true)
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const target = surfaceRef.current?.querySelector<HTMLElement>(selector)
+      target?.closest<HTMLElement>('section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      target?.click()
+    }))
+  }
+
   return (
-    <div className={`flex min-h-0 flex-col bg-white motion-reduce:transition-none ${parentOwnsScroll ? 'h-auto' : 'h-full'} ${className}`}>
+    <div ref={surfaceRef} className={`flex min-h-0 flex-col bg-white motion-reduce:transition-none ${parentOwnsScroll ? 'h-auto' : 'h-full'} ${className}`}>
       {!hideHeader && !editMode && (
         <header className="relative z-[82] flex min-h-16 shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 pt-[env(safe-area-inset-top)]">
           <div className="min-w-0">
@@ -507,7 +616,7 @@ export default function ContactDetailSurface({
               <form aria-label="Editar contacto" onSubmit={event => { event.preventDefault(); void saveCompleteContact() }} className="relative z-[81] min-h-full bg-slate-50/60 max-sm:fixed max-sm:inset-0 max-sm:z-[100] max-sm:overflow-y-auto max-sm:overscroll-contain max-sm:animate-in max-sm:fade-in max-sm:duration-200 motion-reduce:animate-none">
                 <section className="border-b border-slate-200 bg-white px-4 pb-4 pt-[max(1rem,env(safe-area-inset-top))] sm:pt-4">
                   <div className="flex items-center gap-3">
-                    <ContactAvatarControl contactId={profile.contact.id} contextType={context.type} contextId={context.id} displayName={displayName(profile.contact)} avatarUrl={profile.contact.avatar_url} compact disabled={!canManageAvatar} onChange={profile.updateAvatarLocally} />
+                    <ContactAvatarControl contactId={profile.contact!.id} contextType={context.type} contextId={context.id} displayName={displayName(profile.contact!)} avatarUrl={profile.contact!.avatar_url} compact disabled={!canManageAvatar} onChange={profile.updateAvatarLocally} />
                     <div className="min-w-0 flex-1"><h3 className="truncate text-base font-bold text-slate-900">Editar contacto</h3><p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-slate-500">Los cambios se reflejarán en Leads, Chats, Eventos y Programas.</p></div>
                     <button type="button" onClick={requestClose} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar detalles"><X className="h-5 w-5" /></button>
                   </div>
@@ -518,7 +627,7 @@ export default function ContactDetailSurface({
                     <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <label className="block sm:col-span-2"><span className="mb-1 block text-xs font-semibold text-slate-600">Nombre visible</span><input autoFocus type="text" value={editDraft.custom_name} onChange={event => updateEditDraft('custom_name', event.target.value)} placeholder="Nombre que verá el equipo" className="h-11 w-full rounded-xl border border-slate-300 px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" /></label>
                       <label className="block sm:col-span-2"><span className="mb-1 block text-xs font-semibold text-slate-600">Nombre de origen</span><input type="text" value={editDraft.name} onChange={event => updateEditDraft('name', event.target.value)} placeholder="Nombre sincronizado o registrado" className="h-11 w-full rounded-xl border border-slate-300 px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" /></label>
-                      {profileFields.map(field => <label key={field.key} className={`block ${field.key === 'address' ? 'sm:col-span-2' : ''}`}><span className="mb-1 block text-xs font-semibold text-slate-600">{field.label}</span><input type={field.inputType || 'text'} inputMode={field.inputType === 'tel' ? 'tel' : field.inputType === 'number' ? 'numeric' : undefined} value={editDraft[field.key]} onChange={event => updateEditDraft(field.key, event.target.value)} placeholder={field.placeholder} min={field.key === 'age' ? 1 : undefined} max={field.key === 'age' ? 150 : undefined} className="h-11 w-full rounded-xl border border-slate-300 px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" /></label>)}
+                      {profileFields.map(field => <div key={field.key} className={`block ${field.key === 'address' ? 'sm:col-span-2' : ''}`}><span className="mb-1 block text-xs font-semibold text-slate-600">{field.label}</span>{field.inputType === 'date' ? <OperationalDatePicker mode="date" label={field.label} placeholder={field.placeholder} value={editDraft[field.key]} onChange={value => updateEditDraft(field.key, value)} /> : <input aria-label={field.label} type={field.inputType || 'text'} inputMode={field.inputType === 'tel' ? 'tel' : field.inputType === 'number' ? 'numeric' : undefined} value={editDraft[field.key]} onChange={event => updateEditDraft(field.key, event.target.value)} placeholder={field.placeholder} min={field.key === 'age' ? 1 : undefined} max={field.key === 'age' ? 150 : undefined} className="h-11 w-full rounded-xl border border-slate-300 px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" />}</div>)}
                       <label className="block sm:col-span-2"><span className="mb-1 block text-xs font-semibold text-slate-600">Notas del contacto</span><textarea rows={4} value={editDraft.notes} onChange={event => updateEditDraft('notes', event.target.value)} placeholder="Notas generales sobre la persona" className="w-full resize-y rounded-xl border border-slate-300 px-3 py-2.5 text-base leading-relaxed text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" /></label>
                     </div>
                   </section>
@@ -534,7 +643,20 @@ export default function ContactDetailSurface({
                     <ContactTagEditor contactId={profile.contact.id} context={context} selected={tagDraft} canCreate={profile.capabilities.can_create_tags} disabled={profile.saving} onChange={tags => { setTagDraft(tags); setEditDirty(true); setCollectionError('') }} />
                   </section>
 
-                  {profile.customFieldDefinitions.length > 0 && <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="flex items-center gap-2"><SlidersHorizontal className="h-4 w-4 text-slate-400" /><h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Campos personalizados</h4></div><div className="mt-3 space-y-3">{profile.customFieldDefinitions.map(definition => { const draft = customFieldDraftValues[definition.id] || ''; const options = definition.options || definition.config?.options || []; const update = (next: string) => { setCustomFieldDraftValues(current => ({ ...current, [definition.id]: next })); setEditDirty(true); setCollectionError('') }; return <div key={definition.id}><label htmlFor={`profile-definition-${definition.id}`} className="mb-1 block text-xs font-semibold text-slate-600">{definition.name}{definition.is_required && <span className="text-red-500"> *</span>}</label>{definition.field_type === 'checkbox' ? <select id={`profile-definition-${definition.id}`} value={draft} onChange={event => update(event.target.value)} className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm"><option value="">Sin valor</option><option value="true">Sí</option><option value="false">No</option></select> : definition.field_type === 'select' && options.length > 0 ? <select id={`profile-definition-${definition.id}`} value={draft} onChange={event => update(event.target.value)} className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm"><option value="">Sin valor</option>{options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select> : definition.field_type === 'multi_select' ? options.length > 0 ? <div id={`profile-definition-${definition.id}`} className="grid grid-cols-1 gap-2 sm:grid-cols-2">{options.map(option => { const selected = parseMultiDraft(draft).includes(option.value); return <button key={option.value} type="button" aria-pressed={selected} onClick={() => { const current = parseMultiDraft(draft); update(JSON.stringify(selected ? current.filter(item => item !== option.value) : [...current, option.value])) }} className={`min-h-11 rounded-xl border px-3 text-left text-sm font-semibold ${selected ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-200 text-slate-600'}`}>{option.label}</button>})}</div> : <input id={`profile-definition-${definition.id}`} type="text" value={parseMultiDraft(draft).join(', ')} onChange={event => update(JSON.stringify(event.target.value.split(',').map(item => item.trim()).filter(Boolean)))} placeholder="Valores separados por coma" className="h-11 w-full rounded-xl border border-slate-300 px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" /> : definition.field_type === 'text' && (definition.config?.text_variant === 'textarea' || definition.config?.text_variant === 'rich') ? <textarea id={`profile-definition-${definition.id}`} rows={4} value={draft} onChange={event => update(event.target.value)} className="w-full resize-y rounded-xl border border-slate-300 px-3 py-2.5 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" /> : <input id={`profile-definition-${definition.id}`} type={definition.field_type === 'number' || definition.field_type === 'currency' ? 'number' : definition.field_type === 'date' ? 'date' : definition.field_type === 'email' ? 'email' : definition.field_type === 'phone' ? 'tel' : 'text'} value={draft} onChange={event => update(event.target.value)} min={definition.config?.min} max={definition.config?.max} maxLength={definition.config?.max_length} className="h-11 w-full rounded-xl border border-slate-300 px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" />}</div>})}</div></section>}
+                  {profile.customFieldDefinitions.length > 0 && <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="flex items-center gap-2"><SlidersHorizontal className="h-4 w-4 text-slate-400" /><h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Campos personalizados</h4></div><div className="mt-3 space-y-3">{profile.customFieldDefinitions.map(definition => {
+                    const draft = customFieldDraftValues[definition.id] || ''
+                    const options = definition.options || definition.config?.options || []
+                    const update = (next: string) => { setCustomFieldDraftValues(current => ({ ...current, [definition.id]: next })); setEditDirty(true); setCollectionError('') }
+                    return <div key={definition.id}>
+                      <label htmlFor={definition.field_type === 'date' ? undefined : `profile-definition-${definition.id}`} className="mb-1 block text-xs font-semibold text-slate-600">{definition.name}{definition.is_required && <span className="text-red-500"> *</span>}</label>
+                      {definition.field_type === 'checkbox' ? <select id={`profile-definition-${definition.id}`} value={draft} onChange={event => update(event.target.value)} className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm"><option value="">Sin valor</option><option value="true">Sí</option><option value="false">No</option></select>
+                        : definition.field_type === 'select' && options.length > 0 ? <select id={`profile-definition-${definition.id}`} value={draft} onChange={event => update(event.target.value)} className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm"><option value="">Sin valor</option>{options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
+                          : definition.field_type === 'multi_select' ? options.length > 0 ? <div id={`profile-definition-${definition.id}`} className="grid grid-cols-1 gap-2 sm:grid-cols-2">{options.map(option => { const selected = parseMultiDraft(draft).includes(option.value); return <button key={option.value} type="button" aria-pressed={selected} onClick={() => { const current = parseMultiDraft(draft); update(JSON.stringify(selected ? current.filter(item => item !== option.value) : [...current, option.value])) }} className={`min-h-11 rounded-xl border px-3 text-left text-sm font-semibold ${selected ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-200 text-slate-600'}`}>{option.label}</button>})}</div> : <input id={`profile-definition-${definition.id}`} type="text" value={parseMultiDraft(draft).join(', ')} onChange={event => update(JSON.stringify(event.target.value.split(',').map(item => item.trim()).filter(Boolean)))} placeholder="Valores separados por coma" className="h-11 w-full rounded-xl border border-slate-300 px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" />
+                            : definition.field_type === 'date' ? <OperationalDatePicker mode="date" label={definition.name} value={draft} onChange={update} />
+                              : definition.field_type === 'text' && (definition.config?.text_variant === 'textarea' || definition.config?.text_variant === 'rich') ? <textarea id={`profile-definition-${definition.id}`} rows={4} value={draft} onChange={event => update(event.target.value)} className="w-full resize-y rounded-xl border border-slate-300 px-3 py-2.5 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" />
+                                : <input id={`profile-definition-${definition.id}`} type={definition.field_type === 'number' || definition.field_type === 'currency' ? 'number' : definition.field_type === 'email' ? 'email' : definition.field_type === 'phone' ? 'tel' : 'text'} value={draft} onChange={event => update(event.target.value)} min={definition.config?.min} max={definition.config?.max} maxLength={definition.config?.max_length} className="h-11 w-full rounded-xl border border-slate-300 px-3 text-base text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 sm:text-sm" />}
+                    </div>
+                  })}</div></section>}
                 </div>
                 <footer className="sticky bottom-0 z-20 border-t border-slate-200 bg-white/95 px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))] shadow-[0_-8px_24px_rgba(15,23,42,0.08)] backdrop-blur">
                   {collectionError && <p className="mb-2 rounded-xl bg-red-50 px-3 py-2 text-xs font-medium text-red-700" role="alert">{collectionError}</p>}
@@ -545,97 +667,80 @@ export default function ContactDetailSurface({
               </>
             ) : (
               <>
-                <section className="border-b border-slate-200 px-4 py-4" aria-labelledby="canonical-contact-name">
-                  <div className="flex items-center gap-3">
-                    <ContactAvatarControl contactId={profile.contact.id} contextType={context.type} contextId={context.id} displayName={displayName(profile.contact)} avatarUrl={profile.contact.avatar_url} compact disabled={!canManageAvatar} onChange={profile.updateAvatarLocally} />
-                    <div className="min-w-0 flex-1">
-                      <h3 id="canonical-contact-name" className="truncate text-base font-bold text-slate-900">{displayName(profile.contact)}</h3>
-                      {profile.contact.phone && <p className="mt-0.5 truncate text-xs font-medium text-slate-500">{profile.contact.phone.startsWith('+') ? profile.contact.phone : `+${profile.contact.phone}`}</p>}
+                <div data-crm-detail-accordion-view className="min-h-full bg-slate-50/70 pb-5">
+                  <section className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 px-3 py-3 shadow-[0_4px_16px_rgba(15,23,42,0.04)] backdrop-blur sm:px-4" aria-labelledby="canonical-contact-name-primary">
+                    <div className="flex items-center gap-3">
+                      <ContactAvatarControl contactId={profile.contact.id} contextType={context.type} contextId={context.id} displayName={displayName(profile.contact)} avatarUrl={profile.contact.avatar_url} compact disabled={!canManageAvatar} onChange={profile.updateAvatarLocally} />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[9px] font-black uppercase tracking-[.16em] text-emerald-600">Contacto</p>
+                        <h3 id="canonical-contact-name-primary" className="truncate text-base font-extrabold text-slate-900">{displayName(profile.contact)}</h3>
+                        <p className="mt-0.5 truncate text-xs font-medium text-slate-500">{profile.contact.phone ? (profile.contact.phone.startsWith('+') ? profile.contact.phone : `+${profile.contact.phone}`) : 'Sin teléfono registrado'}</p>
+                      </div>
+                      {profile.refreshing && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-emerald-600" aria-label="Actualizando ficha" />}
                     </div>
-                    {canEdit && <button type="button" onClick={enterEditMode} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Editar contacto"><Edit2 className="h-4 w-4" /></button>}
+                    {profile.contact.do_not_contact && <div className="mt-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"><span className="font-bold">No contactar.</span>{profile.contact.do_not_contact_reason ? ` ${profile.contact.do_not_contact_reason}` : ''}</div>}
+                    <div className="mt-3 grid grid-cols-3 gap-2" aria-label="Acciones prioritarias">
+                      <button type="button" disabled={!contextActivity || contextActionsDisabled} onClick={() => openContextAction('activity', '[data-crm-activity-add]')} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50/70 px-2 text-xs font-bold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-45"><MessageSquarePlus className="h-4 w-4" />Observación</button>
+                      <button data-crm-message-action type="button" onClick={() => profile.contact?.phone && onSendMessage?.(profile.contact.phone)} disabled={!onSendMessage || !profile.contact.phone || sendingMessage} aria-label={`Enviar mensaje a ${displayName(profile.contact)}`} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-2 text-xs font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45">{sendingMessage ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}{sendingMessage ? 'Abriendo…' : 'Mensaje'}</button>
+                      <button type="button" onClick={enterEditMode} disabled={!canEdit} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2 text-xs font-bold text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"><Edit2 className="h-4 w-4" />Editar</button>
+                    </div>
+                    {quickActions && <div className="mt-2">{quickActions}</div>}
+                  </section>
+
+                  <div className="space-y-3 p-3 sm:p-4">
+                    <CrmDetailAccordion id="crm-contact-information" title="Información del contacto" summary={`${visibleFields.length} dato${visibleFields.length === 1 ? '' : 's'} registrado${visibleFields.length === 1 ? '' : 's'}`} icon={CircleUserRound} tone="emerald" open={accordionOpen.contact} onToggle={() => setSectionOpen('contact', !accordionOpen.contact)}>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {visibleFields.slice(0, contactDataExpanded ? visibleFields.length : 4).map(field => { const Icon = field.icon; return <div key={field.key} className="flex min-h-12 items-center gap-3 rounded-xl border border-slate-100 bg-slate-50/70 px-3 py-2"><Icon className="h-4 w-4 shrink-0 text-emerald-600" /><div className="min-w-0 flex-1"><p className="text-[9px] font-bold uppercase tracking-wider text-slate-400">{field.label}</p><p className="truncate text-sm font-semibold text-slate-800">{fieldValue(profile.contact!, field)}</p></div></div>})}
+                        {visibleFields.length === 0 && <p className="rounded-xl border border-dashed border-slate-200 px-3 py-5 text-center text-xs text-slate-400 sm:col-span-2">Aún no hay datos adicionales.</p>}
+                      </div>
+                      {contactDataExpanded && <div className="mt-3 space-y-3">
+                        {profile.contact.extra_phones.length > 0 && <div className="rounded-xl bg-slate-50 px-3 py-2.5"><p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Otros teléfonos</p>{profile.contact.extra_phones.map(phone => <p key={phone.id || phone.phone} className="flex min-h-10 items-center justify-between gap-3 border-t border-slate-100 text-xs text-slate-700 first:border-0"><span className="font-medium">{phone.phone}</span>{phone.label && <span className="text-slate-400">{phone.label}</span>}</p>)}</div>}
+                        {customFields.length > 0 && <div className="rounded-xl bg-slate-50 px-3 py-2.5"><p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Campos personalizados</p>{customFields.map(({ value, display }) => <div key={value.id || value.field_id} className="flex min-h-10 items-center justify-between gap-3 border-t border-slate-100 text-xs first:border-0"><span className="truncate text-slate-500">{value.field_name || value.field_slug || 'Campo personalizado'}</span><span className="max-w-[55%] break-words text-right font-semibold text-slate-700">{display || 'Sin valor'}</span></div>)}</div>}
+                        <div className="rounded-xl border border-slate-100 bg-slate-50/70 px-3 py-2.5"><p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Notas generales del contacto</p><p className={`mt-1 whitespace-pre-wrap text-sm leading-6 ${cleanText(profile.contact.notes) ? 'text-slate-700' : 'italic text-slate-400'}`}>{cleanText(profile.contact.notes) || 'Sin notas registradas.'}</p></div>
+                      </div>}
+                      {(visibleFields.length > 4 || profile.contact.extra_phones.length > 0 || customFields.length > 0 || cleanText(profile.contact.notes)) && <button type="button" onClick={() => setContactDataExpanded(value => !value)} className="mt-3 inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50">{contactDataExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}{contactDataExpanded ? 'Mostrar menos' : 'Ver todos los datos'}</button>}
+                      {missingFields.length > 0 && canEdit && <button type="button" onClick={enterEditMode} className="mt-2 inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-xl text-xs font-bold text-emerald-700 hover:bg-emerald-50"><Plus className="h-4 w-4" />Completar {missingFields.length} dato{missingFields.length === 1 ? '' : 's'}</button>}
+                    </CrmDetailAccordion>
+
+                    <CrmDetailAccordion id="crm-contact-tags" title="Etiquetas" summary={`${quickTagDraft.length} asignada${quickTagDraft.length === 1 ? '' : 's'}`} icon={Tag} tone="cyan" open={accordionOpen.tags} onToggle={() => setSectionOpen('tags', !accordionOpen.tags)} action={canEdit ? <button type="button" onClick={() => { setSectionOpen('tags', true); setQuickTagsOpen(value => !value); setQuickTagError(''); setQuickTagRetry(null) }} className="inline-flex min-h-9 items-center gap-1 rounded-lg px-2 text-[11px] font-bold text-cyan-700 hover:bg-cyan-50"><Plus className="h-3.5 w-3.5" />Etiqueta</button> : undefined}>
+                      {quickTagDraft.length > 0 ? (
+                        <div className="flex flex-wrap gap-2">
+                          {quickTagDraft.map(tag => {
+                            const pending = quickTagPendingId === tag.id || quickTagPendingId === '__all__'
+                            return <span key={tag.id} className="inline-flex max-w-full items-center gap-1 rounded-full py-1.5 pl-3 pr-1.5 text-xs font-bold text-white shadow-sm" style={{ backgroundColor: tag.color || '#64748b' }}><span className="truncate">{tag.name}</span>{canEdit && <button type="button" disabled={profile.saving || Boolean(quickTagPendingId)} onClick={() => { void updateQuickTags(quickTagDraft.filter(candidate => candidate.id !== tag.id)) }} aria-label={pending ? `Actualizando etiqueta ${tag.name}` : `Quitar etiqueta ${tag.name}`} className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-white/80 hover:bg-black/15 disabled:opacity-70">{pending ? <Loader2 className="h-3 w-3 animate-spin" /> : <X className="h-3 w-3" />}</button>}</span>
+                          })}
+                        </div>
+                      ) : <p className="text-xs italic text-slate-400">Sin etiquetas asignadas.</p>}
+                      {quickTagPendingId && <p role="status" className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-semibold text-cyan-700"><Loader2 className="h-3.5 w-3.5 animate-spin" />Actualizando etiquetas…</p>}
+                      {quickTagsOpen && <div className="mt-3 border-t border-cyan-100 pt-3"><ContactTagEditor contactId={profile.contact.id} context={context} selected={quickTagDraft} canCreate={profile.capabilities.can_create_tags} disabled={profile.saving || Boolean(quickTagPendingId)} showSelected={false} onChange={tags => { void updateQuickTags(tags) }} /></div>}
+                      {quickTagError && <div role="alert" className="mt-2 flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"><AlertCircle className="h-3.5 w-3.5 shrink-0" /><span className="min-w-0 flex-1">{quickTagError}</span>{quickTagRetry && <button type="button" onClick={() => void updateQuickTags(quickTagRetry)} className="inline-flex min-h-9 shrink-0 items-center gap-1 rounded-lg px-2 font-bold hover:bg-red-100"><RefreshCw className="h-3.5 w-3.5" />Reintentar</button>}</div>}
+                    </CrmDetailAccordion>
+
+                    {contextActivity && <CrmDetailAccordion id="crm-context-activity" title={context.type === 'event_participant' ? 'Observaciones de esta participación' : 'Observaciones de esta oportunidad'} summary={`${contextActivityCount} registro${contextActivityCount === 1 ? '' : 's'} · separado del historial general`} icon={MessageSquarePlus} tone="amber" open={accordionOpen.activity} onToggle={() => setSectionOpen('activity', !accordionOpen.activity)}>{embeddedContextActivity}</CrmDetailAccordion>}
+
+                    {(contextSummary || contextDetails) && <CrmDetailAccordion id="crm-context" title={context.type === 'event_participant' ? 'Contexto del evento' : 'Contexto de la oportunidad'} summary={context.type === 'event_participant' ? 'Etapa, estado y oportunidades relacionadas' : 'Pipeline, etapa y datos comerciales'} icon={context.type === 'event_participant' ? Clock3 : Briefcase} tone="violet" open={accordionOpen.context} onToggle={() => setSectionOpen('context', !accordionOpen.context)} contentClassName="p-0"><div className="space-y-3 p-3 sm:p-4">{contextSummary}{contextDetails}</div></CrmDetailAccordion>}
+
+                    {relatedTasks && <CrmDetailAccordion id="crm-related-tasks" title="Tareas relacionadas" summary={`${relatedTaskCount} abierta${relatedTaskCount === 1 ? '' : 's'} en Clarin Work`} icon={ListTodo} tone="blue" open={accordionOpen.tasks} onToggle={() => setSectionOpen('tasks', !accordionOpen.tasks)}>{embeddedRelatedTasks}</CrmDetailAccordion>}
+
+                    <CrmDetailAccordion id="crm-contact-history" title="Historial general del contacto" summary={`${profile.observationCount} registro${profile.observationCount === 1 ? '' : 's'} transversal${profile.observationCount === 1 ? '' : 'es'}`} icon={Clock3} tone="slate" open={accordionOpen.history} onToggle={() => { const next = !accordionOpen.history; setSectionOpen('history', next); setHistoryOpen(next); if (next && !profile.observationsLoaded) void profile.refreshObservations() }}>
+                      {canManageObservations && <button type="button" onClick={() => { setShowObservationComposer(value => !value); setObservationActionError('') }} aria-expanded={showObservationComposer} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-700 hover:bg-slate-50"><Plus className="h-4 w-4" />{showObservationComposer ? 'Cerrar formulario' : 'Añadir nota general'}</button>}
+                      {showObservationComposer && <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 p-3"><textarea autoFocus rows={3} maxLength={4000} value={newObservation} onChange={event => { setNewObservation(event.target.value); setObservationActionError('') }} onKeyDown={event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && newObservation.trim()) { event.preventDefault(); void addObservation() } }} placeholder="Nota transversal del contacto… (Ctrl/Cmd + Enter)" className="w-full resize-y rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-100" /><div className="mt-2 flex justify-end"><button type="button" onClick={() => void addObservation()} disabled={!newObservation.trim() || profile.savingObservation} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-bold text-white disabled:opacity-45">{profile.savingObservation ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}Guardar nota</button></div></div>}
+                      {(observationActionError || profile.observationsError) && <div className="mt-3 flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700" role="alert"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1">{observationActionError || profile.observationsError}</span></div>}
+                      {profile.observationsLoading ? <div className="flex min-h-24 items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-slate-500" /></div> : profile.observations.length === 0 ? <p className="mt-3 rounded-xl border border-dashed border-slate-200 px-3 py-6 text-center text-xs text-slate-400">No hay registros generales.</p> : <div className="mt-3 space-y-2">{profile.observations.slice(0, visibleObservations).map(observation => <article key={observation.id} className={`group rounded-xl border bg-white p-3 ${observation.is_pinned ? 'border-amber-200' : 'border-slate-200'}`}>{editingObservation?.id === observation.id ? <><textarea autoFocus rows={3} value={editingObservationDraft} onChange={event => setEditingObservationDraft(event.target.value)} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" /><div className="mt-2 flex justify-end gap-2"><button type="button" onClick={() => setEditingObservation(null)} className="min-h-10 px-3 text-xs font-bold text-slate-600">Cancelar</button><button type="button" onClick={() => void saveObservationEdit()} className="min-h-10 rounded-lg bg-slate-900 px-3 text-xs font-bold text-white">Guardar</button></div></> : <div className="flex items-start justify-between gap-3"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold ${observationTypeClass(observation.type)}`}>{observationTypeLabel(observation.type)}</span><time className="text-[10px] text-slate-400">{observationDate(observation.created_at)}</time></div><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">{cleanText(observation.notes) || '(sin contenido)'}</p><p className="mt-2 text-[11px] font-semibold text-slate-500">Registrado por {activityAuthorLabel(observation)}</p></div>{observation.type === 'note' && <div className="flex shrink-0"><button type="button" onClick={() => void toggleObservationPin(observation)} className="h-10 w-10 text-slate-400" aria-label={observation.is_pinned ? 'Desfijar nota' : 'Fijar nota'}><Pin className="mx-auto h-4 w-4" /></button>{observation.can_edit && <button type="button" onClick={() => { setEditingObservation(observation); setEditingObservationDraft(observation.notes || '') }} className="h-10 w-10 text-slate-400" aria-label="Editar nota"><Edit2 className="mx-auto h-4 w-4" /></button>}{observation.can_delete && <button type="button" onClick={() => void removeObservation(observation)} className="h-10 w-10 text-slate-400 hover:text-red-600" aria-label="Eliminar nota"><Trash2 className="mx-auto h-4 w-4" /></button>}</div>}</div>}</article>)}</div>}
+                      {profile.observations.length > visibleObservations && <button type="button" onClick={() => setVisibleObservations(value => value + 10)} className="mt-2 min-h-10 w-full text-xs font-bold text-slate-600">Mostrar más</button>}
+                    </CrmDetailAccordion>
+
+                    <CrmDetailAccordion id="crm-integrations" title="Integraciones" summary={googleSync.synced ? 'Google Contacts sincronizado' : googleSync.connected ? 'Google Contacts disponible' : 'Sin integraciones activas'} icon={Cloud} tone="sky" open={accordionOpen.integrations} onToggle={() => setSectionOpen('integrations', !accordionOpen.integrations)}>
+                      {googleSync.statusLoading ? <div className="flex min-h-16 items-center justify-center gap-2 text-xs font-semibold text-slate-500"><Loader2 className="h-4 w-4 animate-spin text-sky-600" />Consultando Google Contacts…</div> : googleSync.statusError && !googleSync.permissionDenied ? <div role="alert" className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800"><AlertCircle className="h-4 w-4" /><span className="flex-1">{googleSync.statusError}</span><button type="button" onClick={() => void googleSync.retryStatus()} className="min-h-10 px-2 font-bold">Reintentar</button></div> : googleSync.connected ? <div className="rounded-xl border border-sky-100 bg-sky-50/50 p-3"><div className="flex items-center gap-2"><div className="flex h-9 w-9 items-center justify-center rounded-xl bg-white text-sky-700">{googleSync.synced ? <Cloud className="h-4 w-4" /> : <CloudOff className="h-4 w-4" />}</div><div><p className="text-xs font-bold text-slate-800">{googleSync.synced ? 'Sincronizado con Google' : 'Google Contacts'}</p><p className="text-[10px] text-slate-500">{googleSync.synced ? 'Los cambios se reflejan en Google.' : 'Guarda este contacto también en Google.'}</p></div></div><div className={`mt-3 grid gap-2 ${googleSync.synced ? 'grid-cols-2' : 'grid-cols-1'}`}><button type="button" onClick={() => void googleSync.sync()} disabled={googleSync.mutation !== null} className="min-h-11 rounded-xl bg-sky-600 px-3 text-xs font-bold text-white disabled:opacity-50">{googleSync.mutation === 'sync' ? 'Sincronizando…' : googleSync.synced ? 'Actualizar' : 'Sincronizar'}</button>{googleSync.synced && <button type="button" onClick={requestGoogleDesync} disabled={googleSync.mutation !== null} className="min-h-11 rounded-xl border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600">{googleSync.mutation === 'desync' ? 'Quitando…' : 'Quitar'}</button>}</div>{(googleSync.actionError || profile.contact.google_sync_error) && <p role="alert" className="mt-2 text-xs text-red-700">{googleSync.actionError || profile.contact.google_sync_error}</p>}{googleSync.feedback && <p role="status" className="mt-2 text-xs text-sky-800">{googleSync.feedback}</p>}</div> : <p className="text-xs text-slate-400">No hay una integración disponible para este contacto.</p>}
+                    </CrmDetailAccordion>
+
+                    {contextContent}
+                    {onDeleteContact && <button type="button" onClick={() => onDeleteContact(profile.contact!)} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-red-200 bg-white px-4 text-sm font-semibold text-red-600 hover:bg-red-50"><Trash2 className="h-4 w-4" />Eliminar contacto</button>}
                   </div>
-                  {profile.contact.do_not_contact && <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"><span className="font-bold">No contactar.</span>{profile.contact.do_not_contact_reason ? ` ${profile.contact.do_not_contact_reason}` : ''}</div>}
-                  {onSendMessage && profile.contact.phone && <button type="button" onClick={() => onSendMessage(profile.contact!.phone!)} disabled={sendingMessage} aria-label={`Enviar mensaje a ${displayName(profile.contact)}`} className="mt-3 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-bold text-white shadow-sm transition duration-200 motion-reduce:transition-none hover:bg-emerald-700 disabled:opacity-60">{sendingMessage ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}{sendingMessage ? 'Abriendo…' : 'Enviar mensaje'}</button>}
-
-                  {googleSync.statusLoading && (
-                    <div role="status" aria-label="Consultando Google Contacts" className="mt-3 flex min-h-11 items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 text-xs font-semibold text-slate-500">
-                      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-sky-600" />
-                      Consultando Google Contacts…
-                    </div>
-                  )}
-
-                  {!googleSync.statusLoading && googleSync.statusError && !googleSync.permissionDenied && (
-                    <div role="alert" className="mt-3 flex min-h-11 items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                      <AlertCircle className="h-4 w-4 shrink-0" />
-                      <span className="min-w-0 flex-1">{googleSync.statusError}</span>
-                      <button type="button" onClick={() => void googleSync.retryStatus()} className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg px-2.5 font-bold hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500" aria-label="Reintentar Google Contacts"><RefreshCw className="h-3.5 w-3.5" /> Reintentar</button>
-                    </div>
-                  )}
-
-                  {!googleSync.statusLoading && googleSync.connected && (
-                    <div className="mt-3 rounded-2xl border border-sky-200 bg-sky-50/60 p-3" role="region" aria-label="Google Contacts">
-                      <div className="flex min-w-0 items-center gap-2.5">
-                        <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${googleSync.synced ? 'bg-sky-100 text-sky-700' : 'bg-white text-slate-500'}`}>
-                          {googleSync.synced ? <Cloud className="h-5 w-5" /> : <CloudOff className="h-5 w-5" />}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-xs font-bold text-slate-800">{googleSync.synced ? 'Sincronizado con Google' : 'Google Contacts'}</p>
-                          <p className="mt-0.5 text-[10px] leading-4 text-slate-500">{googleSync.synced ? 'Los cambios del contacto se reflejan en Google.' : 'Guarda este contacto también en tu cuenta de Google.'}</p>
-                        </div>
-                      </div>
-
-                      <div className={`mt-3 grid gap-2 ${googleSync.synced ? 'grid-cols-2' : 'grid-cols-1'}`}>
-                        <button type="button" onClick={() => void googleSync.sync()} disabled={googleSync.mutation !== null} className="inline-flex min-h-11 min-w-0 items-center justify-center gap-2 rounded-xl bg-sky-600 px-3 text-xs font-bold text-white transition hover:bg-sky-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-55" aria-label={googleSync.synced ? 'Actualizar contacto en Google Contacts' : 'Sincronizar contacto con Google Contacts'}>
-                          {googleSync.mutation === 'sync' ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" /> : <RefreshCw className="h-4 w-4 shrink-0" />}
-                          <span className="truncate">{googleSync.mutation === 'sync' ? 'Sincronizando…' : googleSync.synced ? 'Actualizar' : 'Sincronizar'}</span>
-                        </button>
-                        {googleSync.synced && <button type="button" onClick={requestGoogleDesync} disabled={googleSync.mutation !== null} className="inline-flex min-h-11 min-w-0 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-wait disabled:opacity-55" aria-label="Quitar contacto de Google Contacts">{googleSync.mutation === 'desync' ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" /> : <CloudOff className="h-4 w-4 shrink-0" />}<span className="truncate">{googleSync.mutation === 'desync' ? 'Quitando…' : 'Quitar'}</span></button>}
-                      </div>
-
-                      {(googleSync.actionError || profile.contact.google_sync_error) && <p role="alert" className="mt-2 rounded-xl border border-red-200 bg-white px-3 py-2 text-[11px] leading-4 text-red-700">{googleSync.actionError || profile.contact.google_sync_error}</p>}
-                      {googleSync.feedback && <p role="status" className="mt-2 rounded-xl border border-sky-100 bg-white px-3 py-2 text-[11px] leading-4 text-sky-800">{googleSync.feedback}</p>}
-                    </div>
-                  )}
-                </section>
-                <section className="border-b border-slate-200 px-4 py-4" aria-labelledby="canonical-contact-data-title"><div className="mb-2 flex items-center justify-between gap-3"><h4 id="canonical-contact-data-title" className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Datos del contacto</h4>{canEdit && <button type="button" onClick={enterEditMode} className="inline-flex min-h-10 items-center gap-1.5 rounded-xl px-3 text-xs font-bold text-emerald-700 hover:bg-emerald-50"><Edit2 className="h-3.5 w-3.5" /> Editar contacto</button>}</div><div className="divide-y divide-slate-100 rounded-2xl border border-slate-200 bg-white px-3">{visibleFields.map(field => { const Icon = field.icon; const value = fieldValue(profile.contact!, field); return <div key={field.key} className="flex min-h-12 items-center gap-3 py-2"><Icon className="h-4 w-4 shrink-0 text-emerald-600" /><div className="min-w-0 flex-1"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{field.label}</p><p className="truncate text-sm font-medium text-slate-800">{value}</p></div></div>})}{visibleFields.length === 0 && <p className="py-4 text-center text-xs text-slate-400">Aún no hay datos adicionales.</p>}</div>{missingFields.length > 0 && canEdit && <button type="button" onClick={enterEditMode} className="mt-3 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50/60 px-3 text-sm font-bold text-emerald-700 hover:bg-emerald-50"><Plus className="h-4 w-4" />Completar {missingFields.length} dato{missingFields.length === 1 ? '' : 's'}</button>}{profile.contact.extra_phones.length > 0 && <div className="mt-3 rounded-xl bg-slate-50 px-3 py-2.5"><p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Otros teléfonos</p><div className="mt-1 divide-y divide-slate-200/70">{profile.contact.extra_phones.map(phone => <p key={phone.id || phone.phone} className="flex min-h-11 items-center justify-between gap-3 text-xs text-slate-700"><span className="font-medium">{phone.phone}</span>{phone.label && <span className="text-slate-400">{phone.label}</span>}</p>)}</div></div>}{(profile.contact.device_names || []).length > 0 && <div className="mt-3 rounded-xl bg-slate-50 px-3 py-2.5"><div className="flex items-center gap-2"><Smartphone className="h-3.5 w-3.5 text-slate-400" /><p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Nombres por dispositivo</p></div><div className="mt-1 divide-y divide-slate-200/70">{profile.contact.device_names!.map(deviceName => <div key={deviceName.id || deviceName.device_id} className="flex min-h-11 items-center justify-between gap-3 text-xs"><span className="truncate font-medium text-slate-700">{cleanText(deviceName.name) || cleanText(deviceName.push_name) || cleanText(deviceName.business_name) || 'Sin nombre sincronizado'}</span><span className="max-w-[45%] truncate text-[10px] text-slate-400">{cleanText(deviceName.device_name) || 'Dispositivo WhatsApp'}</span></div>)}</div></div>}</section>
-                <section className="space-y-4 border-b border-slate-200 px-4 py-4"><div><div className="mb-2 flex items-center gap-2"><Tag className="h-4 w-4 text-slate-400" /><h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Etiquetas del contacto</h4></div>{profile.contact.structured_tags.length > 0 ? <div className="flex flex-wrap gap-1.5">{profile.contact.structured_tags.map(tag => <span key={tag.id} className="rounded-full px-2.5 py-1 text-xs font-semibold text-white" style={{ backgroundColor: tag.color || '#64748b' }}>{tag.name}</span>)}</div> : <p className="text-xs italic text-slate-400">Sin etiquetas registradas.</p>}</div>{customFields.length > 0 && <div><div className="mb-2 flex items-center gap-2"><SlidersHorizontal className="h-4 w-4 text-slate-400" /><h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Campos personalizados</h4></div><div className="divide-y divide-slate-100 rounded-xl bg-slate-50 px-3">{customFields.map(({ value, display }) => <div key={value.id || value.field_id} className="flex min-h-11 items-center justify-between gap-3 py-2 text-xs"><span className="min-w-0 truncate text-slate-500">{value.field_name || value.field_slug || 'Campo personalizado'}</span><span className={`max-w-[55%] break-words text-right font-semibold ${display ? 'text-slate-700' : 'italic text-slate-400'}`}>{display || 'Sin valor'}</span></div>)}</div></div>}<div><div className="mb-2 flex items-center gap-2"><FileText className="h-4 w-4 text-slate-400" /><h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Notas del contacto</h4></div><p className={`whitespace-pre-wrap rounded-xl bg-slate-50 px-3 py-2.5 text-sm leading-relaxed ${cleanText(profile.contact.notes) ? 'text-slate-700' : 'italic text-slate-400'}`}>{cleanText(profile.contact.notes) || 'Sin notas registradas.'}</p></div></section>
-
-            <section className="border-b border-slate-200 px-4 py-4" aria-labelledby="canonical-contact-history-title">
-              <div className="flex min-w-0 items-center gap-2"><Clock3 className="h-4 w-4 shrink-0 text-slate-400" /><div><h4 id="canonical-contact-history-title" className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Historial del contacto</h4><p className="text-[10px] text-slate-400">{profile.observationCount} registro{profile.observationCount === 1 ? '' : 's'}{profile.pinnedObservationCount > 0 && ` · ${profile.pinnedObservationCount} fijado${profile.pinnedObservationCount === 1 ? '' : 's'}`}</p></div></div>
-              <div className={`mt-3 grid gap-2 ${canManageObservations ? 'grid-cols-2' : 'grid-cols-1'}`}>
-                <button type="button" onClick={toggleHistory} aria-expanded={historyOpen} className="inline-flex min-h-11 min-w-0 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2 text-xs font-bold text-slate-600 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">{historyOpen ? <ChevronUp className="h-4 w-4 shrink-0" /> : <ChevronDown className="h-4 w-4 shrink-0" />}<span className="truncate">{historyOpen ? 'Ocultar historial' : 'Ver historial'}</span></button>
-                {canManageObservations && <button type="button" onClick={() => { setShowObservationComposer(value => !value); setObservationActionError('') }} aria-expanded={showObservationComposer} className="inline-flex min-h-11 min-w-0 items-center justify-center gap-1.5 rounded-xl border border-emerald-200 bg-white px-2 text-xs font-bold text-emerald-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">{showObservationComposer ? <ChevronUp className="h-4 w-4 shrink-0" /> : <Plus className="h-4 w-4 shrink-0" />}<span className="truncate">{showObservationComposer ? 'Ocultar formulario' : 'Añadir observación'}</span></button>}
-              </div>
-
-              {showObservationComposer && (
-                <div className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50/40 p-3">
-                  <label htmlFor="canonical-contact-observation" className="sr-only">Nueva observación</label>
-                  <textarea id="canonical-contact-observation" autoFocus rows={3} maxLength={4000} value={newObservation} onChange={event => { setNewObservation(event.target.value); setObservationActionError('') }} onKeyDown={event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && newObservation.trim()) { event.preventDefault(); void addObservation() } }} placeholder="Escribir observación… (Ctrl+Enter)" className="w-full resize-y rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm leading-relaxed text-slate-800 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100" />
-                  <div className="mt-2 flex justify-end"><button type="button" onClick={() => void addObservation()} disabled={!newObservation.trim() || profile.savingObservation} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-bold text-white hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-45">{profile.savingObservation ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}{profile.savingObservation ? 'Agregando…' : 'Agregar'}</button></div>
                 </div>
-              )}
 
-              {(observationActionError || (historyOpen && profile.observationsError)) && <div className="mt-3 flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700" role="alert"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1">{observationActionError || profile.observationsError}</span>{historyOpen && profile.observationsError && <button type="button" onClick={profile.refreshObservations} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg hover:bg-red-100" aria-label="Reintentar historial"><RefreshCw className="h-4 w-4" /></button>}</div>}
-
-              {historyOpen && (profile.observationsLoading ? <div className="flex min-h-24 items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-emerald-600" aria-label="Cargando historial" /></div> : profile.observations.length === 0 ? <div className="mt-3 rounded-2xl border border-dashed border-slate-200 px-4 py-7 text-center"><FileText className="mx-auto h-6 w-6 text-slate-300" /><p className="mt-2 text-xs text-slate-400">No hay observaciones registradas.</p></div> : (
-                <div className="mt-3 space-y-2">
-                  {profile.observations.slice(0, visibleObservations).map(observation => (
-                    <article key={observation.id} className={`group rounded-2xl border bg-white p-3 ${observation.is_pinned ? 'border-amber-200 ring-1 ring-amber-100' : 'border-slate-200'}`}>
-                      {editingObservation?.id === observation.id ? <><textarea autoFocus rows={3} maxLength={4000} value={editingObservationDraft} onChange={event => setEditingObservationDraft(event.target.value)} className="w-full resize-y rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-emerald-500"/><div className="mt-2 flex justify-end gap-2"><button type="button" onClick={() => { setEditingObservation(null); setEditingObservationDraft('') }} className="inline-flex min-h-10 items-center gap-1 rounded-lg px-3 text-xs font-semibold text-slate-600"><X className="h-4 w-4"/>Cancelar</button><button type="button" disabled={!editingObservationDraft.trim()} onClick={() => void saveObservationEdit()} className="inline-flex min-h-10 items-center gap-1 rounded-lg bg-emerald-600 px-3 text-xs font-bold text-white disabled:opacity-50"><Save className="h-4 w-4"/>Guardar</button></div></> : <div className="flex items-start justify-between gap-3"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold ${observationTypeClass(observation.type)}`}>{observationTypeLabel(observation.type)}</span>{observation.is_pinned && <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700"><Pin className="h-3 w-3"/>Fijado</span>}<time className="text-[10px] text-slate-400">{observationDate(observation.created_at)}</time></div><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700">{cleanText(observation.notes) || '(sin contenido)'}</p>{observation.source_label && <p className="mt-2 text-[10px] font-semibold text-emerald-700">{observation.source_label}</p>}{observation.created_by_name && <p className="mt-1 text-[10px] text-slate-400">Registrado por {observation.created_by_name}{observation.updated_at && observation.updated_at !== observation.created_at && ` · editado ${observationDate(observation.updated_at)}${observation.updated_by_name ? ` por ${observation.updated_by_name}` : ''}`}</p>}</div>{observation.type === 'note' && <div className="flex shrink-0 gap-1">{observation.can_pin && <button type="button" onClick={() => void toggleObservationPin(observation)} className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 hover:bg-amber-50 hover:text-amber-700" aria-label={observation.is_pinned ? 'Desfijar nota' : 'Fijar nota'}><Pin className="h-4 w-4"/></button>}{observation.can_edit && <button type="button" onClick={() => { setEditingObservation(observation); setEditingObservationDraft(observation.notes || '') }} className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100" aria-label="Editar nota"><Edit2 className="h-4 w-4"/></button>}{observation.can_delete && <button type="button" onClick={() => void removeObservation(observation)} className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-400 hover:bg-red-50 hover:text-red-600" aria-label="Eliminar observación"><Trash2 className="h-4 w-4" /></button>}</div>}</div>}
-                    </article>
-                  ))}
-                  {profile.observations.length > visibleObservations && <button type="button" onClick={() => setVisibleObservations(value => value + 10)} className="inline-flex min-h-11 w-full items-center justify-center rounded-xl text-sm font-bold text-emerald-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">Mostrar {Math.min(10, profile.observations.length - visibleObservations)} más</button>}
-                </div>
-              ))}
-            </section>
-
-            {contextContent}
-
-            {onDeleteContact && (
-              <div className="px-4 py-4"><button type="button" onClick={() => onDeleteContact(profile.contact!)} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-red-200 px-4 text-sm font-semibold text-red-600 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"><Trash2 className="h-4 w-4" /> Eliminar contacto</button></div>
+              </>
             )}
-          </>
-        )}
           </>
         )}
       </div>

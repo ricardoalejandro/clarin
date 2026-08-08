@@ -35,6 +35,8 @@ export interface Observation {
   id: string
   contact_id: string | null
   lead_id: string | null
+  event_id?: string | null
+  participant_id?: string | null
   type: string
   direction: string | null
   outcome: string | null

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Script from 'next/script'
 import { ArrowRight, Eye, EyeOff, Lock, MessageSquare, User } from 'lucide-react'
-import { markAuthSession } from '@/lib/api'
+import { getLoginNoticeForLogoutReason, markAuthSession } from '@/lib/api'
 
 type TurnstileWidgetID = string | number
 
@@ -35,6 +35,7 @@ export default function LoginScreen() {
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [sessionNotice, setSessionNotice] = useState('')
   const [loading, setLoading] = useState(false)
   const [turnstileSiteKey, setTurnstileSiteKey] = useState('')
   const [turnstileRequired, setTurnstileRequired] = useState(false)
@@ -49,6 +50,11 @@ export default function LoginScreen() {
     if (!sessionNotice) return
     sessionStorage.removeItem('clarin:login_notice')
     setNotice(sessionNotice)
+  }, [])
+
+  useEffect(() => {
+    const reason = new URLSearchParams(window.location.search).get('reason')
+    setSessionNotice(getLoginNoticeForLogoutReason(reason))
   }, [])
 
   const renderTurnstile = useCallback(() => {
@@ -170,6 +176,11 @@ export default function LoginScreen() {
           {notice && (
             <div role="status" className="mb-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
               {notice}
+            </div>
+          )}
+          {sessionNotice && (
+            <div role="status" className="mb-5 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800">
+              {sessionNotice}
             </div>
           )}
           {error && (

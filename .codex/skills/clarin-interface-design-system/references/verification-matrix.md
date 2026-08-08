@@ -29,14 +29,17 @@
 ## Dates
 
 - Test localized date-only, date-time, all-day, timezone, quick values, clear, keyboard, and invalid ranges.
+- For date-only mode, assert exact `YYYY-MM-DD` round-trip in multiple timezones, no time/timezone/all-day/relative controls, direct month/year navigation, draft-only selection, Apply, Quitar, Escape/outside cancellation, and trigger-focus restoration.
 - Verify linked start/end constraints without silent date invention.
 - Reload and reconcile through realtime; displayed and persisted values must remain identical.
 - Open the date picker from narrow, floating, docked, maximized, filtered, calendar, and timeline contexts when applicable.
+- Exercise `visualViewport`, zoom, scroll/resize repositioning, top/bottom flipping, and horizontal clamping at the exact reported viewport plus 320, 375, 833x818, 1024, and 1440 px.
 
 ## Windows, Dialogs, And Layers
 
 - Classify the surface first: popover, modal, drawer, or complex work window.
-- For work windows, test header drag, every resize edge/corner, dock, maximize/restore, double-click behavior, remembered geometry, viewport clamps, and mobile conversion.
+- For work windows, test header drag, every resize edge/corner, dock, maximize/restore, explicit geometry reset, double-click behavior, preferred geometry persistence, effective viewport clamps, unsafe legacy geometry, zoom transitions, and mobile conversion without overwriting the desktop preference.
+- Trigger every temporary mode and verify it does not persist, overwrite preferred geometry, lose scroll/disclosure/drafts, or return focus anywhere except the invoking control.
 - Test clean Escape, dirty-draft confirmation, cancelled discard, save failure, retry, and focus restoration.
 - Verify non-blocking modes leave the workspace operable and modal modes actually trap focus and block it.
 - Open nested picker, confirmation, tooltip, and notification surfaces together; assert monotonic overlay order and no clipping.
@@ -50,6 +53,7 @@
 - Test individual, Shift-range, modifier, touch-hold, multi-select, and Escape clear when supported.
 - Drag to empty, populated, collapsed, scrolled, edge, invalid, and outside destinations; verify target clarity without layout movement.
 - Verify lightweight overlay/stack count, reduced-motion fallback, autoscroll, keyboard alternative, one write, success, conflict, network failure, and exact rollback.
+- Where modules claim drag parity, compare the shared grip, destination label, source attenuation, converging layers, true count, and drop timing while keeping each module's domain mutation independent.
 
 ## Motion And Feedback
 

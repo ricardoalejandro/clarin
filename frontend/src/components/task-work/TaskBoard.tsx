@@ -64,7 +64,8 @@ import {
 import TaskUserCombobox from './TaskUserCombobox'
 import type { TaskAccountUser } from './TaskEditorModal'
 import { TaskListPicker } from './TaskSelectPicker'
-import { cardClickSelectsTask, selectionAfterToggle, selectionForDrag, taskStackLayers, touchHoldSelectsTask, uniqueBulkItems } from './taskBoardSelection'
+import { cardClickSelectsTask, selectionAfterToggle, selectionForDrag, touchHoldSelectsTask, uniqueBulkItems } from './taskBoardSelection'
+import OperationalDragOverlay from '@/components/drag-interaction/OperationalDragOverlay'
 import {
   measureTaskNavigationTargets,
   pointerFromTaskDragActivator,
@@ -677,13 +678,7 @@ function BoardColumn({
 }
 
 function OverlayCard({ task, count, destination, destinationColor }: { task: Task; count: number; destination?: string; destinationColor?: string }) {
-  const layers = taskStackLayers(count)
-  return <div className="relative h-[92px] w-[284px] motion-reduce:transition-none" aria-label={`${count} ${count === 1 ? 'tarea' : 'tareas'} seleccionadas`}>
-    {layers.map(layer => <div key={layer.index} className="absolute inset-0 rounded-xl border bg-white p-3 shadow-2xl shadow-slate-900/20 transition-[transform,background-color,border-color] duration-150 motion-reduce:transform-none" style={{ transform: `translate(${layer.x}px, ${layer.y}px) rotate(${layer.rotation}deg)`, opacity: layer.opacity, zIndex: 10 - layer.index, borderColor: destinationColor || '#6ee7b7', backgroundColor: destinationColor ? `${destinationColor}12` : '#ffffff' }}>
-      {layer.index === 0 && <><div className="flex items-start gap-2"><GripVertical className="mt-0.5 h-4 w-4 text-emerald-500" /><p className="line-clamp-2 text-sm font-semibold text-slate-800">{task.title}</p></div><p className="ml-6 mt-2 truncate text-[10px] text-slate-400">{destination ? `Mover a ${destination}` : task.assigned_to_name || 'Sin responsable'}</p></>}
-    </div>)}
-    {count > 1 && <span className="absolute -right-3 -top-3 z-20 rounded-full bg-slate-900 px-2.5 py-1 text-xs font-black text-white shadow-lg">{count} tareas</span>}
-  </div>
+  return <OperationalDragOverlay label={task.title} count={count} singular="tarea" plural="tareas" destination={destination || task.assigned_to_name || undefined} destinationColor={destinationColor} />
 }
 
 export default function TaskBoard({

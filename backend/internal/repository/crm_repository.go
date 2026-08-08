@@ -501,7 +501,7 @@ func (r *LeadRepository) HasOpenDuplicate(ctx context.Context, accountID, contac
 	return result, rows.Err()
 }
 
-func (r *LeadRepository) MoveToStage(ctx context.Context, accountID, leadID, stageID uuid.UUID, closeReason string, closedBy *uuid.UUID) error {
+func (r *LeadRepository) MoveToStage(ctx context.Context, accountID, leadID uuid.UUID, stageID *uuid.UUID, closeReason string, closedBy *uuid.UUID) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -509,15 +509,17 @@ func (r *LeadRepository) MoveToStage(ctx context.Context, accountID, leadID, sta
 	defer tx.Rollback(ctx)
 	var pipelineID uuid.UUID
 	var stageType string
-	if err := tx.QueryRow(ctx, `
-		SELECT ps.pipeline_id, ps.stage_type FROM pipeline_stages ps
-		JOIN pipelines p ON p.id=ps.pipeline_id
-		WHERE ps.id=$1 AND p.account_id=$2
-	`, stageID, accountID).Scan(&pipelineID, &stageType); err != nil {
-		if err == pgx.ErrNoRows {
-			return ErrCRMNotFound
+	if stageID != nil {
+		if err := tx.QueryRow(ctx, `
+			SELECT ps.pipeline_id, ps.stage_type FROM pipeline_stages ps
+			JOIN pipelines p ON p.id=ps.pipeline_id
+			WHERE ps.id=$1 AND p.account_id=$2
+		`, *stageID, accountID).Scan(&pipelineID, &stageType); err != nil {
+			if err == pgx.ErrNoRows {
+				return ErrCRMNotFound
+			}
+			return err
 		}
-		return err
 	}
 	var leadExists bool
 	if err := tx.QueryRow(ctx, `SELECT TRUE FROM leads WHERE id=$1 AND account_id=$2 AND deleted_at IS NULL FOR UPDATE`, leadID, accountID).Scan(&leadExists); err != nil {
@@ -526,17 +528,23 @@ func (r *LeadRepository) MoveToStage(ctx context.Context, accountID, leadID, sta
 		}
 		return err
 	}
+	if stageID == nil {
+		if _, err := tx.Exec(ctx, `UPDATE leads SET stage_id=NULL,status='open',closed_at=NULL,closed_by=NULL,close_reason='',updated_at=NOW() WHERE id=$1 AND account_id=$2`, leadID, accountID); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
 	closeReason = strings.TrimSpace(closeReason)
 	switch stageType {
 	case domain.PipelineStageTypeActive:
-		_, err = tx.Exec(ctx, `UPDATE leads SET pipeline_id=$1, stage_id=$2, status='open', closed_at=NULL, closed_by=NULL, close_reason='', updated_at=NOW() WHERE id=$3 AND account_id=$4`, pipelineID, stageID, leadID, accountID)
+		_, err = tx.Exec(ctx, `UPDATE leads SET pipeline_id=$1, stage_id=$2, status='open', closed_at=NULL, closed_by=NULL, close_reason='', updated_at=NOW() WHERE id=$3 AND account_id=$4`, pipelineID, *stageID, leadID, accountID)
 	case domain.PipelineStageTypeWon:
-		_, err = tx.Exec(ctx, `UPDATE leads SET pipeline_id=$1, stage_id=$2, status='won', closed_at=NOW(), closed_by=$3, close_reason=$4, updated_at=NOW() WHERE id=$5 AND account_id=$6`, pipelineID, stageID, closedBy, closeReason, leadID, accountID)
+		_, err = tx.Exec(ctx, `UPDATE leads SET pipeline_id=$1, stage_id=$2, status='won', closed_at=NOW(), closed_by=$3, close_reason=$4, updated_at=NOW() WHERE id=$5 AND account_id=$6`, pipelineID, *stageID, closedBy, closeReason, leadID, accountID)
 	case domain.PipelineStageTypeLost:
 		if closeReason == "" {
 			return ErrLostReasonRequired
 		}
-		_, err = tx.Exec(ctx, `UPDATE leads SET pipeline_id=$1, stage_id=$2, status='lost', closed_at=NOW(), closed_by=$3, close_reason=$4, updated_at=NOW() WHERE id=$5 AND account_id=$6`, pipelineID, stageID, closedBy, closeReason, leadID, accountID)
+		_, err = tx.Exec(ctx, `UPDATE leads SET pipeline_id=$1, stage_id=$2, status='lost', closed_at=NOW(), closed_by=$3, close_reason=$4, updated_at=NOW() WHERE id=$5 AND account_id=$6`, pipelineID, *stageID, closedBy, closeReason, leadID, accountID)
 	default:
 		return fmt.Errorf("tipo de etapa inválido")
 	}

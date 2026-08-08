@@ -16,6 +16,7 @@ interface ContactTagEditorProps {
   selected: ContactProfileAvailableTag[]
   canCreate: boolean
   disabled?: boolean
+  showSelected?: boolean
   onChange: (tags: ContactProfileAvailableTag[]) => void
 }
 
@@ -27,6 +28,7 @@ export default function ContactTagEditor({
   selected,
   canCreate,
   disabled = false,
+  showSelected = true,
   onChange,
 }: ContactTagEditorProps) {
   const [query, setQuery] = useState('')
@@ -104,7 +106,7 @@ export default function ContactTagEditor({
 
   return (
     <div className="mt-3">
-      {selected.length > 0 ? (
+      {showSelected && (selected.length > 0 ? (
         <div className="flex flex-wrap gap-2" aria-label="Etiquetas seleccionadas">
           {selected.map(tag => (
             <span key={tag.id} className="inline-flex min-h-11 max-w-full items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 pl-3 pr-1 text-sm font-semibold text-slate-700">
@@ -114,7 +116,7 @@ export default function ContactTagEditor({
             </span>
           ))}
         </div>
-      ) : <p className="text-xs italic text-slate-400">Sin etiquetas seleccionadas.</p>}
+      ) : <p className="text-xs italic text-slate-400">Sin etiquetas seleccionadas.</p>)}
 
       <div className="relative mt-3">
         <Search className="pointer-events-none absolute left-3 top-3.5 h-4 w-4 text-slate-400" />
