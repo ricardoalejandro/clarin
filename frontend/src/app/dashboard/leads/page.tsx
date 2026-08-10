@@ -157,7 +157,7 @@ const LeadCard = memo(function LeadCard({
       data-crm-pipeline-card={lead.id}
       data-crm-pipeline-label={lead.name || lead.title || 'Lead'}
       data-crm-selected={isSelected ? 'true' : 'false'}
-      className={`relative bg-white p-3 rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer ${
+      className={`relative w-full min-w-0 max-w-full bg-white p-3 rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer ${
         isSelected ? 'border-emerald-500 ring-2 ring-emerald-100'
         : isDetailActive ? 'border-emerald-400 ring-2 ring-emerald-200 bg-emerald-50/50'
         : 'border-slate-100'
@@ -166,8 +166,8 @@ const LeadCard = memo(function LeadCard({
     >
       <span id={`lead-drag-help-${lead.id}`} className="sr-only" aria-live="polite">{accessibleDrag.instructions}</span>
       {accessibleDrag.overlay}
-      <div className="flex items-start justify-between group">
-        <div className="flex items-center gap-2">
+      <div className="group flex min-w-0 items-start justify-between gap-1">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           {!selectionMode && !isTrash && <button ref={accessibleDrag.setActivatorNodeRef} {...accessibleDrag.listeners} {...accessibleDrag.attributes} type="button" data-no-crm-drag onClick={event => event.stopPropagation()} aria-label={`Mover ${lead.name || lead.title || 'lead'}`} className="inline-flex h-8 w-7 shrink-0 touch-none items-center justify-center rounded-lg text-slate-300 transition hover:bg-emerald-50 hover:text-emerald-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 active:cursor-grabbing"><GripVertical className="h-4 w-4" /></button>}
           {selectionMode ? (
             <button onClick={(e) => { e.stopPropagation(); onToggleSelection(lead.id) }} className="p-0.5">
@@ -179,7 +179,7 @@ const LeadCard = memo(function LeadCard({
             </div>
           )}
           <div className="min-w-0">
-            <p className="max-w-[150px] truncate text-[13px] font-semibold text-slate-900">{lead.name || 'Sin nombre'}</p>
+            <p className="max-w-full truncate text-[13px] font-semibold text-slate-900">{lead.name || 'Sin nombre'}</p>
           </div>
           {lead.kommo_id && (
             <span title={lead.kommo_deleted_at ? `Eliminado de Kommo #${lead.kommo_id}` : `Vinculado a Kommo #${lead.kommo_id}`} className={`flex-shrink-0 flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium leading-none ${lead.kommo_deleted_at ? 'bg-amber-50 text-amber-600' : 'bg-emerald-50 text-emerald-600'}`}>
@@ -250,7 +250,7 @@ const LeadCard = memo(function LeadCard({
         )}
       </div>
       {lead.phone && (
-        <div className="flex items-center gap-1.5 mt-1.5 text-xs text-slate-500"><Phone className="w-3 h-3" />{lead.phone}</div>
+        <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-xs text-slate-500"><Phone className="h-3 w-3 shrink-0" /><span className="truncate">{lead.phone}</span></div>
       )}
       {lead.email && (
         <div className="flex items-center gap-1.5 mt-1 text-xs text-slate-500"><Mail className="w-3 h-3" /><span className="truncate max-w-[180px]">{lead.email}</span></div>
@@ -298,15 +298,6 @@ const LeadCard = memo(function LeadCard({
   )
 })
 
-function TerminalLeadDrop({ stage }: { stage: PipelineStage }) {
-  const drop = useCrmPipelineStageDrop(stage.id)
-  const won = stage.stage_type === 'won'
-  return <div ref={drop.setNodeRef} data-crm-pipeline-stage={stage.id} className={`pointer-events-auto flex min-h-12 items-center justify-center gap-2 rounded-2xl border px-4 text-xs font-bold shadow-xl backdrop-blur-sm transition ${won ? 'border-emerald-300 bg-emerald-50/95 text-emerald-800' : 'border-red-300 bg-red-50/95 text-red-800'} ${drop.isOver ? 'scale-[1.02] ring-2 ring-offset-2 ' + (won ? 'ring-emerald-400' : 'ring-red-400') : ''}`}>
-    {won ? <CheckCircle2 className="h-4 w-4" aria-hidden="true" /> : <XCircle className="h-4 w-4" aria-hidden="true" />}
-    Suelta para marcar como {won ? 'ganado' : 'perdido'}
-  </div>
-}
-
 // --- Virtualized Kanban Column with Infinite Scroll ---
 interface VirtualColumnProps {
   column: { id: string; name: string; color: string; leads: Lead[] }
@@ -343,6 +334,7 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
     getScrollElement: () => parentRef.current,
     estimateSize: () => 120,
     overscan: 5,
+    getItemKey: index => column.leads[index]?.id || `lead-index:${index}`,
   })
 
   // Infinite scroll: load more when near bottom
@@ -383,7 +375,6 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
         }`}
         style={{ minHeight: 200, backgroundColor: stageDrop.isOver ? `${column.color}12` : undefined, '--tw-ring-color': `${column.color}99` } as React.CSSProperties}
       >
-        {stageDrop.isOver && <div aria-hidden className="pointer-events-none absolute inset-x-2 top-2 z-20 flex h-11 items-center justify-center rounded-xl border-2 border-dashed bg-white/90 text-xs font-bold shadow-sm" style={{ borderColor: column.color, color: column.color }}>Suelta en {column.name}</div>}
         <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
           {virtualizer.getVirtualItems().map((virtualItem) => {
             const lead = column.leads[virtualItem.index]
@@ -3801,11 +3792,6 @@ export default function LeadsPage() {
       {viewMode === 'kanban' && (
       <CrmPipelineDndContext stages={[...allStages.map(stage => ({ id: stage.id, name: stage.name, color: stage.color })), { id: CRM_PIPELINE_UNASSIGNED_STAGE_ID, name: 'Sin etapa', color: '#64748b' }]} onSessionChange={handleAccessibleDragSession} disabled={statusFilter === 'trash'}>
       <div className="relative flex flex-1 min-h-0 flex-col">
-      {statusFilter === 'active' && draggedLeadId && terminalStages.length > 0 && (
-        <div className="pointer-events-none absolute inset-x-4 top-3 z-40 mx-auto grid max-w-xl gap-2 sm:grid-cols-2" aria-label="Destinos para cerrar un lead">
-          {terminalStages.map(stage => <TerminalLeadDrop key={stage.id} stage={stage} />)}
-        </div>
-      )}
       {/* Top synced scrollbar */}
       <div
         ref={topScrollRef}
@@ -4386,6 +4372,7 @@ export default function LeadsPage() {
           minHeight={520}
           dockedWidth={760}
           temporaryMode={crmMessageTemporaryMode(messagePhase)}
+          motionProfile="smooth"
           align="right"
           overlayZIndex={110}
           temporaryOverlaySelector="[data-task-editor-modal], [data-task-detail-window], [data-task-picker-backdrop], [data-task-destructive-dialog], [data-operational-picker-backdrop], [data-operational-confirmation]"

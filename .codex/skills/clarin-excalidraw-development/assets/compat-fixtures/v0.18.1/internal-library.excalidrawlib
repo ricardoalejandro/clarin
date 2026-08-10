@@ -1,0 +1,57 @@
+{
+  "type": "excalidrawlib",
+  "version": 2,
+  "source": "https://excalidraw.com",
+  "libraryItems": [
+    {
+      "id": "library-card-item",
+      "status": "unpublished",
+      "created": 1723150200000,
+      "name": "Tarjeta operativa",
+      "elements": [
+        {
+          "id": "library-card-shape", "type": "rectangle", "x": 0, "y": 0, "width": 220, "height": 110, "angle": 0,
+          "strokeColor": "#0f766e", "backgroundColor": "#ecfdf5", "fillStyle": "solid", "strokeWidth": 2,
+          "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": ["library-card-group"], "frameId": null, "index": "a0",
+          "roundness": { "type": 3 }, "seed": 301, "version": 1, "versionNonce": 3001, "isDeleted": false,
+          "boundElements": [{ "type": "text", "id": "library-card-text" }], "updated": 1723150200000,
+          "link": "https://clarin.example.invalid/operaciones", "locked": false,
+          "customData": { "template": "operations-card" },
+          "futureLibraryElementProperty": { "semanticRole": "card" }
+        },
+        {
+          "id": "library-card-text", "type": "text", "x": 40, "y": 39, "width": 140, "height": 30, "angle": 0,
+          "strokeColor": "#134e4a", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 1,
+          "strokeStyle": "solid", "roughness": 0, "opacity": 100, "groupIds": ["library-card-group"], "frameId": null, "index": "a1",
+          "roundness": null, "seed": 302, "version": 1, "versionNonce": 3002, "isDeleted": false,
+          "boundElements": null, "updated": 1723150201000, "link": null, "locked": false,
+          "fontSize": 24, "fontFamily": 5, "text": "Operación", "textAlign": "center", "verticalAlign": "middle",
+          "containerId": "library-card-shape", "originalText": "Operación", "autoResize": true, "lineHeight": 1.25
+        }
+      ],
+      "futureLibraryItemProperty": { "catalog": "account" }
+    },
+    {
+      "id": "library-arrow-item",
+      "status": "published",
+      "created": 1723150210000,
+      "name": "Conector de correo",
+      "elements": [
+        {
+          "id": "library-arrow", "type": "arrow", "x": 0, "y": 0, "width": 180, "height": 40, "angle": 0,
+          "strokeColor": "#334155", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2,
+          "strokeStyle": "dashed", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "index": "a0",
+          "roundness": { "type": 2 }, "seed": 303, "version": 1, "versionNonce": 3003, "isDeleted": false,
+          "boundElements": null, "updated": 1723150210000, "link": "mailto:equipo@example.invalid", "locked": false,
+          "points": [[0, 0], [90, 40], [180, 0]], "lastCommittedPoint": null,
+          "startBinding": null, "endBinding": null, "startArrowhead": "dot", "endArrowhead": "arrow", "elbowed": false,
+          "customData": { "template": "communication-arrow" }
+        }
+      ]
+    }
+  ],
+  "futureLibraryMetadata": {
+    "preserve": true,
+    "catalogRevision": 7
+  }
+}

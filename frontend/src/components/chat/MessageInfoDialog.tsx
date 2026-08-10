@@ -4,6 +4,7 @@ import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, CheckCheck, Clock3, Info, X } from 'lucide-react'
 import type { Message } from '@/types/chat'
+import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
 interface MessageInfoDialogProps {
   message: Message
@@ -38,6 +39,8 @@ function typeLabel(message: Message) {
 export default function MessageInfoDialog({ message, onClose }: MessageInfoDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
+  const operationalPortal = useOperationalOverlayPortal()
+  useOperationalOverlayRegistration(true, `message-info:${message.id}`)
 
   useEffect(() => {
     const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
@@ -45,6 +48,7 @@ export default function MessageInfoDialog({ message, onClose }: MessageInfoDialo
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault()
+        event.stopPropagation()
         onClose()
         return
       }
@@ -79,7 +83,7 @@ export default function MessageInfoDialog({ message, onClose }: MessageInfoDialo
   const preview = message.body?.trim() || message.media_filename || typeLabel(message)
 
   return createPortal(
-    <div className="app-viewport fixed inset-0 z-[110] flex items-end justify-center bg-slate-950/45 sm:items-center sm:p-4" onMouseDown={event => {
+    <div data-chat-overlay="message-info" className="app-viewport pointer-events-auto fixed inset-0 flex items-end justify-center bg-slate-950/45 sm:items-center sm:p-4" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog }} onMouseDown={event => {
       if (event.target === event.currentTarget) onClose()
     }}>
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="message-info-title" tabIndex={-1} className="flex max-h-[min(82dvh,var(--app-height,100dvh))] w-full flex-col overflow-hidden rounded-t-3xl border border-slate-200 bg-white shadow-2xl sm:max-w-md sm:rounded-2xl">
@@ -115,6 +119,6 @@ export default function MessageInfoDialog({ message, onClose }: MessageInfoDialo
         </div>
       </div>
     </div>,
-    document.body,
+    operationalPortal || document.body,
   )
 }

@@ -55,6 +55,7 @@ import {
   Smartphone,
   BarChart3,
   CloudCog,
+  PenTool,
 } from 'lucide-react'
 
 interface User {
@@ -423,6 +424,7 @@ function DashboardLayoutContent({
     '/dashboard/surveys': 'surveys',
     '/dashboard/dynamics': 'dynamics',
     '/dashboard/tasks': 'tasks',
+    '/dashboard/whiteboards': 'whiteboards',
     '/dashboard/documents': 'documents',
     '/dashboard/reports': 'reports',
     '/dashboard/tags': 'tags',
@@ -454,6 +456,7 @@ function DashboardLayoutContent({
     { href: '/dashboard/broadcasts', icon: Radio, label: 'Difusión', desc: 'Mensajes masivos' },
     { href: '/dashboard/surveys', icon: ClipboardList, label: 'Encuestas', desc: 'Formularios y encuestas' },
     { href: '/dashboard/tasks', icon: ListChecks, label: 'Tareas', desc: 'Pendientes y seguimiento' },
+    { href: '/dashboard/whiteboards', icon: PenTool, label: 'Pizarras', desc: 'Lienzos visuales colaborativos' },
     { href: '/dashboard/dynamics', icon: Sparkles, label: 'Dinámicas', desc: 'Actividades interactivas' },
     { href: '/dashboard/documents', icon: Files, label: 'Plantillas', desc: 'Editor de plantillas' },
     { href: '/dashboard/tags', icon: Tags, label: 'Etiquetas', desc: 'Organización por etiquetas' },
@@ -774,7 +777,7 @@ function DashboardLayoutContent({
 
         {/* Page content */}
         <main className={`flex-1 flex flex-col overflow-hidden min-h-0 ${
-          mobileNoModules || mobilePathUnavailable || pathname === '/dashboard/chats' || pathname === '/dashboard/chat-api' || pathname === '/dashboard/tasks' || pathname?.startsWith('/dashboard/documents') ? 'p-0' : mobileAppMode ? 'p-3 sm:p-4 lg:p-5' : 'p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-5'
+          mobileNoModules || mobilePathUnavailable || pathname === '/dashboard/chats' || pathname === '/dashboard/chat-api' || pathname === '/dashboard/tasks' || pathname?.startsWith('/dashboard/documents') || pathname?.startsWith('/dashboard/whiteboards') ? 'p-0' : mobileAppMode ? 'p-3 sm:p-4 lg:p-5' : 'p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-5'
         } ${(chatComposerKeyboardOpen || chatComposerAccessoryOpen) && !updateAvailable ? 'pt-[env(safe-area-inset-top)]' : ''}`}>
           {mobileNoModules ? (
             <MobileUnavailableSurface returnHref="" noModules />

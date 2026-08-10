@@ -172,6 +172,7 @@ const (
 	// itself. Account administrators always bypass the capability check.
 	PermTaskEnvironmentsCreate = "tasks.environments.create"
 	PermDocuments              = "documents"
+	PermWhiteboards            = "whiteboards"
 	PermReports                = "reports"
 	PermAll                    = "*"
 )
@@ -181,7 +182,7 @@ var AllPermissions = []string{
 	PermChats, PermContacts, PermLeads, PermPrograms,
 	PermAutomations, PermBots, PermDevices, PermEvents,
 	PermBroadcasts, PermSurveys, PermTasks, PermTaskEnvironmentsCreate, PermDynamics,
-	PermDocuments, PermReports, PermTags, PermSettings, PermIntegrations,
+	PermDocuments, PermWhiteboards, PermReports, PermTags, PermSettings, PermIntegrations,
 }
 
 // Role represents a named set of module permissions
@@ -309,6 +310,7 @@ const (
 	MediaAssetHashWhatsAppStatusPrefix = "whatsapp_status:"
 	MediaAssetHashNonStatusFallback    = "media:"
 	MediaAssetHashTaskAttachmentPrefix = "task:"
+	MediaAssetHashWhiteboardPrefix     = "whiteboard:"
 )
 
 // DeviceStatus constants
@@ -1332,8 +1334,27 @@ type TaskEffectiveAccess struct {
 	CanComment      bool   `json:"can_comment"`
 	CanEdit         bool   `json:"can_edit"`
 	CanDelete       bool   `json:"can_delete"`
+	CanArchive      bool   `json:"can_archive"`
+	CanTrash        bool   `json:"can_trash"`
+	CanRestore      bool   `json:"can_restore"`
 	CanManageAccess bool   `json:"can_manage_access"`
 	InheritedFrom   string `json:"inherited_from,omitempty"`
+}
+
+const (
+	TaskLifecycleActive   = "active"
+	TaskLifecycleArchived = "archived"
+	TaskLifecycleTrash    = "trash"
+)
+
+func taskContainerLifecycle(archivedAt, deletedAt *time.Time) string {
+	if deletedAt != nil {
+		return TaskLifecycleTrash
+	}
+	if archivedAt != nil {
+		return TaskLifecycleArchived
+	}
+	return TaskLifecycleActive
 }
 
 // taskAccessPresentation keeps the explicit ACL DTO aliases backed by the
@@ -1364,6 +1385,9 @@ type TaskEnvironment struct {
 	IsDefault            bool                 `json:"is_default"`
 	CreatedBy            *uuid.UUID           `json:"created_by,omitempty"`
 	ArchivedAt           *time.Time           `json:"archived_at,omitempty"`
+	DeletedAt            *time.Time           `json:"deleted_at,omitempty"`
+	DeletedBy            *uuid.UUID           `json:"deleted_by,omitempty"`
+	Lifecycle            string               `json:"lifecycle"`
 	Version              int64                `json:"version"`
 	AccessRevision       int64                `json:"access_revision"`
 	CreatedAt            time.Time            `json:"created_at"`
@@ -1375,11 +1399,18 @@ type TaskEnvironment struct {
 	FolderCount          int                  `json:"folder_count"`
 	ListCount            int                  `json:"list_count"`
 	TaskCount            int                  `json:"task_count"`
+	OpenTaskCount        int                  `json:"open_task_count"`
+	CompletedTaskCount   int                  `json:"completed_task_count"`
+	CancelledTaskCount   int                  `json:"cancelled_task_count"`
 }
 
 func (environment *TaskEnvironment) SetEffectiveAccess(access *TaskEffectiveAccess) {
 	environment.EffectiveAccessLevel, environment.CanManageAccess, environment.Capabilities = taskAccessPresentation(access)
 	environment.Permissions = access
+}
+
+func (environment *TaskEnvironment) SetLifecycle() {
+	environment.Lifecycle = taskContainerLifecycle(environment.ArchivedAt, environment.DeletedAt)
 }
 
 type TaskAccessGrant struct {
@@ -1422,6 +1453,10 @@ type TaskList struct {
 	CreatedBy            uuid.UUID            `json:"created_by"`
 	ArchivedAt           *time.Time           `json:"archived_at,omitempty"`
 	ArchivedWithFolder   bool                 `json:"archived_with_folder"`
+	DeletedAt            *time.Time           `json:"deleted_at,omitempty"`
+	DeletedBy            *uuid.UUID           `json:"deleted_by,omitempty"`
+	DeletedWithFolder    bool                 `json:"deleted_with_folder"`
+	Lifecycle            string               `json:"lifecycle"`
 	AccessMode           string               `json:"access_mode"`
 	AccessRevision       int64                `json:"access_revision"`
 	CreatedAt            time.Time            `json:"created_at"`
@@ -1441,6 +1476,10 @@ func (list *TaskList) SetEffectiveAccess(access *TaskEffectiveAccess) {
 	list.Permissions = access
 }
 
+func (list *TaskList) SetLifecycle() {
+	list.Lifecycle = taskContainerLifecycle(list.ArchivedAt, list.DeletedAt)
+}
+
 // TaskTrashPolicy is the account-wide manual trash policy. A nil retention
 // disables permanent deletion without changing what is already archived.
 type TaskTrashPolicy struct {
@@ -1448,18 +1487,21 @@ type TaskTrashPolicy struct {
 	CanManage     bool `json:"can_manage"`
 }
 
-// TaskTrashContainer is an archived list or folder rendered by Clarin Work.
-// Eligibility is derived only from archive timestamps and the account policy.
+// TaskTrashContainer is a deleted environment, list or folder rendered by
+// Clarin Work. Eligibility is derived only from Trash timestamps and policy.
 type TaskTrashContainer struct {
 	ID                 uuid.UUID  `json:"id"`
 	Type               string     `json:"type"`
 	Name               string     `json:"name"`
 	Color              string     `json:"color"`
 	Icon               string     `json:"icon"`
-	ArchivedAt         time.Time  `json:"archived_at"`
+	DeletedAt          time.Time  `json:"deleted_at"`
 	OriginalFolderID   *uuid.UUID `json:"original_folder_id,omitempty"`
 	OriginalFolderName string     `json:"original_folder_name,omitempty"`
-	ArchivedWithFolder bool       `json:"archived_with_folder"`
+	ArchivedWithFolder bool       `json:"archived_with_folder,omitempty"`
+	DeletedWithFolder  bool       `json:"deleted_with_folder"`
+	ArchivedAt         *time.Time `json:"archived_at,omitempty"`
+	Lifecycle          string     `json:"lifecycle"`
 	ListCount          int        `json:"list_count"`
 	TaskCount          int        `json:"task_count"`
 	NextEligibleAt     *time.Time `json:"next_eligible_at,omitempty"`
@@ -1521,6 +1563,9 @@ type TaskFolder struct {
 	SortOrder            int                  `json:"sort_order"`
 	CreatedBy            uuid.UUID            `json:"created_by"`
 	ArchivedAt           *time.Time           `json:"archived_at,omitempty"`
+	DeletedAt            *time.Time           `json:"deleted_at,omitempty"`
+	DeletedBy            *uuid.UUID           `json:"deleted_by,omitempty"`
+	Lifecycle            string               `json:"lifecycle"`
 	AccessMode           string               `json:"access_mode"`
 	AccessRevision       int64                `json:"access_revision"`
 	CreatedAt            time.Time            `json:"created_at"`
@@ -1539,6 +1584,10 @@ type TaskFolder struct {
 func (folder *TaskFolder) SetEffectiveAccess(access *TaskEffectiveAccess) {
 	folder.EffectiveAccessLevel, folder.CanManageAccess, folder.Capabilities = taskAccessPresentation(access)
 	folder.Permissions = access
+}
+
+func (folder *TaskFolder) SetLifecycle() {
+	folder.Lifecycle = taskContainerLifecycle(folder.ArchivedAt, folder.DeletedAt)
 }
 
 // TaskHierarchyCounts is the canonical account-scoped count snapshot returned
@@ -3217,6 +3266,241 @@ type DocumentTemplate struct {
 	CreatedBy       *uuid.UUID      `json:"created_by,omitempty"`
 	CreatedAt       time.Time       `json:"created_at"`
 	UpdatedAt       time.Time       `json:"updated_at"`
+}
+
+// Whiteboard access levels are cumulative. Account administrators and the
+// creator retain recovery access independently from explicit grants.
+const (
+	WhiteboardAccessNone   = "none"
+	WhiteboardAccessView   = "view"
+	WhiteboardAccessEdit   = "edit"
+	WhiteboardAccessManage = "manage"
+
+	WhiteboardAccessPrivate = "private"
+	WhiteboardAccessAccount = "account"
+)
+
+// WhiteboardEffectiveAccess is the canonical capability contract returned by
+// the backend. Clients must not infer permissions from ownership or visibility.
+type WhiteboardEffectiveAccess struct {
+	Level           string `json:"level"`
+	InheritedFrom   string `json:"inherited_from"`
+	CanView         bool   `json:"can_view"`
+	CanComment      bool   `json:"can_comment"`
+	CanEdit         bool   `json:"can_edit"`
+	CanDelete       bool   `json:"can_delete"`
+	CanManageAccess bool   `json:"can_manage_access"`
+}
+
+// WhiteboardFolder is an account-scoped organizational node. Folder names are
+// visible to users with the Whiteboards module; board contents still require the
+// board's actor-authorized access policy.
+type WhiteboardFolder struct {
+	ID          uuid.UUID  `json:"id"`
+	AccountID   uuid.UUID  `json:"account_id"`
+	ParentID    *uuid.UUID `json:"parent_id,omitempty"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	SortOrder   int64      `json:"sort_order"`
+	Version     int64      `json:"version"`
+	CreatedBy   *uuid.UUID `json:"created_by,omitempty"`
+	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// Whiteboard stores the latest canonical Excalidraw-compatible scene. Binary
+// files are never embedded here; they are linked through WhiteboardAsset.
+type Whiteboard struct {
+	ID                    uuid.UUID                  `json:"id"`
+	AccountID             uuid.UUID                  `json:"account_id"`
+	FolderID              *uuid.UUID                 `json:"folder_id,omitempty"`
+	Name                  string                     `json:"name"`
+	Description           string                     `json:"description"`
+	SceneSchemaVersion    string                     `json:"scene_schema_version"`
+	EditorVersion         string                     `json:"editor_version"`
+	SceneSequence         int64                      `json:"scene_sequence"`
+	Version               int64                      `json:"version"`
+	AccessMode            string                     `json:"access_mode"`
+	AccessRevision        int64                      `json:"access_revision"`
+	ThumbnailMediaAssetID *uuid.UUID                 `json:"thumbnail_media_asset_id,omitempty"`
+	ThumbnailAssetID      *uuid.UUID                 `json:"thumbnail_asset_id,omitempty"`
+	ThumbnailURL          string                     `json:"thumbnail_url,omitempty"`
+	CreatedBy             *uuid.UUID                 `json:"created_by,omitempty"`
+	UpdatedBy             *uuid.UUID                 `json:"updated_by,omitempty"`
+	ArchivedAt            *time.Time                 `json:"archived_at,omitempty"`
+	CreatedAt             time.Time                  `json:"created_at"`
+	UpdatedAt             time.Time                  `json:"updated_at"`
+	EffectiveAccess       *WhiteboardEffectiveAccess `json:"effective_access,omitempty"`
+	FolderName            string                     `json:"folder_name,omitempty"`
+	OwnerName             string                     `json:"owner_name,omitempty"`
+	UpdatedByName         string                     `json:"updated_by_name,omitempty"`
+	Shared                bool                       `json:"shared"`
+}
+
+type WhiteboardScene struct {
+	BoardID            uuid.UUID       `json:"board_id"`
+	Scene              json.RawMessage `json:"scene"`
+	SceneSchemaVersion string          `json:"scene_schema_version"`
+	EditorVersion      string          `json:"editor_version"`
+	Sequence           int64           `json:"sequence"`
+	UpdatedAt          time.Time       `json:"updated_at"`
+}
+
+type WhiteboardRevision struct {
+	ID                  uuid.UUID       `json:"id"`
+	AccountID           uuid.UUID       `json:"account_id"`
+	BoardID             uuid.UUID       `json:"board_id"`
+	RevisionNumber      int64           `json:"revision_number"`
+	Sequence            int64           `json:"sequence"`
+	OperationID         uuid.UUID       `json:"operation_id"`
+	WriteKind           string          `json:"write_kind"`
+	RevisionKind        string          `json:"revision_kind"`
+	ExpiresAt           *time.Time      `json:"expires_at,omitempty"`
+	Scene               json.RawMessage `json:"scene,omitempty"`
+	SnapshotObjectKey   string          `json:"-"`
+	SnapshotContentHash string          `json:"snapshot_content_hash,omitempty"`
+	SnapshotSizeBytes   int64           `json:"snapshot_size_bytes"`
+	SnapshotCompression string          `json:"snapshot_compression,omitempty"`
+	SceneSchemaVersion  string          `json:"scene_schema_version"`
+	EditorVersion       string          `json:"editor_version"`
+	ActorID             *uuid.UUID      `json:"actor_id,omitempty"`
+	GuestSessionID      *uuid.UUID      `json:"guest_session_id,omitempty"`
+	CreatedAt           time.Time       `json:"created_at"`
+}
+
+type WhiteboardOperation struct {
+	ID                 uuid.UUID       `json:"id"`
+	AccountID          uuid.UUID       `json:"account_id"`
+	BoardID            uuid.UUID       `json:"board_id"`
+	BaseSequence       int64           `json:"base_sequence"`
+	Sequence           int64           `json:"sequence"`
+	OperationID        uuid.UUID       `json:"operation_id"`
+	OperationKind      string          `json:"operation_kind"`
+	Patch              json.RawMessage `json:"patch,omitempty"`
+	RequestPayloadHash string          `json:"request_payload_hash,omitempty"`
+	ResultSceneHash    string          `json:"result_scene_hash"`
+	ActorID            *uuid.UUID      `json:"actor_id,omitempty"`
+	GuestSessionID     *uuid.UUID      `json:"guest_session_id,omitempty"`
+	CreatedAt          time.Time       `json:"created_at"`
+}
+
+// WhiteboardActivity is the immutable, account-scoped operational timeline.
+// Details contain bounded metadata only; scene contents, passwords and share
+// secrets never belong in this feed.
+type WhiteboardActivity struct {
+	ID               uuid.UUID       `json:"id"`
+	AccountID        uuid.UUID       `json:"account_id"`
+	BoardID          uuid.UUID       `json:"board_id"`
+	ActorID          *uuid.UUID      `json:"actor_id,omitempty"`
+	ActorName        string          `json:"actor_name,omitempty"`
+	GuestSessionID   *uuid.UUID      `json:"guest_session_id,omitempty"`
+	GuestDisplayName string          `json:"guest_display_name,omitempty"`
+	Action           string          `json:"action"`
+	Details          json.RawMessage `json:"details"`
+	OperationID      *uuid.UUID      `json:"operation_id,omitempty"`
+	CreatedAt        time.Time       `json:"created_at"`
+}
+
+type WhiteboardSceneWriteResult struct {
+	Revision          *WhiteboardRevision `json:"revision"`
+	Scene             *WhiteboardScene    `json:"scene"`
+	OperationSequence int64               `json:"operation_sequence"`
+	Idempotent        bool                `json:"idempotent"`
+}
+
+type WhiteboardGrant struct {
+	ID              uuid.UUID  `json:"id"`
+	AccountID       uuid.UUID  `json:"account_id"`
+	BoardID         uuid.UUID  `json:"board_id"`
+	UserID          uuid.UUID  `json:"user_id"`
+	DisplayName     string     `json:"display_name,omitempty"`
+	Email           string     `json:"email,omitempty"`
+	AccessLevel     string     `json:"access_level"`
+	CanManageAccess bool       `json:"can_manage_access"`
+	CreatedBy       *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type WhiteboardAccessPolicy struct {
+	BoardID         uuid.UUID                  `json:"board_id"`
+	AccessMode      string                     `json:"access_mode"`
+	AccessRevision  int64                      `json:"access_revision"`
+	EffectiveAccess *WhiteboardEffectiveAccess `json:"effective_access"`
+	Grants          []*WhiteboardGrant         `json:"grants"`
+}
+
+type WhiteboardShareLink struct {
+	ID                uuid.UUID  `json:"id"`
+	AccountID         uuid.UUID  `json:"account_id"`
+	BoardID           uuid.UUID  `json:"board_id"`
+	Label             string     `json:"label"`
+	AccessLevel       string     `json:"access_level"`
+	PasswordProtected bool       `json:"password_protected"`
+	AllowExport       bool       `json:"allow_export"`
+	ExpiresAt         *time.Time `json:"expires_at,omitempty"`
+	MaxSessions       *int       `json:"max_sessions,omitempty"`
+	SessionCount      int        `json:"session_count"`
+	CreatedBy         *uuid.UUID `json:"created_by,omitempty"`
+	RevokedAt         *time.Time `json:"revoked_at,omitempty"`
+	LastUsedAt        *time.Time `json:"last_used_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
+type WhiteboardGuestSession struct {
+	ID          uuid.UUID  `json:"id"`
+	AccountID   uuid.UUID  `json:"account_id"`
+	BoardID     uuid.UUID  `json:"board_id"`
+	ShareLinkID uuid.UUID  `json:"share_link_id"`
+	DisplayName string     `json:"display_name"`
+	AccessLevel string     `json:"access_level"`
+	ExpiresAt   time.Time  `json:"expires_at"`
+	RevokedAt   *time.Time `json:"revoked_at,omitempty"`
+	LastSeenAt  *time.Time `json:"last_seen_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
+type WhiteboardGuestContext struct {
+	Session     *WhiteboardGuestSession `json:"session"`
+	AllowExport bool                    `json:"allow_export"`
+}
+
+type WhiteboardAsset struct {
+	ID             uuid.UUID  `json:"id"`
+	AccountID      uuid.UUID  `json:"account_id"`
+	BoardID        *uuid.UUID `json:"board_id,omitempty"`
+	LibraryID      *uuid.UUID `json:"library_id,omitempty"`
+	MediaAssetID   uuid.UUID  `json:"media_asset_id"`
+	FileID         string     `json:"file_id"`
+	Kind           string     `json:"kind"`
+	Filename       string     `json:"filename"`
+	ContentType    string     `json:"content_type"`
+	MediaType      string     `json:"media_type"`
+	SizeBytes      int64      `json:"size_bytes"`
+	UploadedBy     *uuid.UUID `json:"uploaded_by,omitempty"`
+	GuestSessionID *uuid.UUID `json:"guest_session_id,omitempty"`
+	CommittedAt    *time.Time `json:"committed_at,omitempty"`
+	DraftExpiresAt *time.Time `json:"draft_expires_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+}
+
+type WhiteboardLibrary struct {
+	ID               uuid.UUID       `json:"id"`
+	AccountID        uuid.UUID       `json:"account_id"`
+	Name             string          `json:"name"`
+	Description      string          `json:"description"`
+	LibraryJSON      json.RawMessage `json:"library_json,omitempty"`
+	ItemCount        int             `json:"item_count"`
+	ContentSizeBytes int64           `json:"content_size_bytes"`
+	Visibility       string          `json:"visibility"`
+	Version          int64           `json:"version"`
+	CreatedBy        *uuid.UUID      `json:"created_by,omitempty"`
+	UpdatedBy        *uuid.UUID      `json:"updated_by,omitempty"`
+	ArchivedAt       *time.Time      `json:"archived_at,omitempty"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
 }
 
 // CustomFieldDefinition represents the schema/configuration of a custom field at account level

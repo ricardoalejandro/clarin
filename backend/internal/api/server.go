@@ -37,6 +37,7 @@ import (
 	"github.com/naperu/clarin/internal/service"
 	"github.com/naperu/clarin/internal/storage"
 	"github.com/naperu/clarin/internal/whatsapp"
+	whiteboardcore "github.com/naperu/clarin/internal/whiteboard"
 	"github.com/naperu/clarin/internal/ws"
 	"github.com/naperu/clarin/pkg/cache"
 	"github.com/naperu/clarin/pkg/config"
@@ -44,29 +45,39 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
+// Keep credentials carried by short-lived collaboration URLs out of the
+// application access log. Fiber's ${path} uses Ctx.Path and excludes the query
+// string; replacing it with ${url} or adding ${queryParams} is security-sensitive.
+const clarinAccessLogFormat = "${time} | ${status} | ${latency} | ${method} ${path}\n"
+
 // strPtr returns a pointer to a string
 func strPtr(s string) *string {
 	return &s
 }
 
 type Server struct {
-	app            *fiber.App
-	cfg            *config.Config
-	services       *service.Services
-	repos          *repository.Repositories
-	hub            *ws.Hub
-	pool           *whatsapp.DevicePool
-	storage        *storage.Storage
-	kommoSync      *kommo.SyncService
-	kommoManager   *kommo.Manager
-	cache          *cache.Cache
-	abuseLimiter   *inMemoryAbuseLimiter
-	googleClient   *googleclient.Client
-	version        string
-	changelog      string
-	erosRunMu      sync.Mutex
-	erosRunCancels map[uuid.UUID]context.CancelFunc
-	erosRunSem     chan struct{}
+	app                    *fiber.App
+	cfg                    *config.Config
+	services               *service.Services
+	repos                  *repository.Repositories
+	hub                    *ws.Hub
+	pool                   *whatsapp.DevicePool
+	storage                *storage.Storage
+	kommoSync              *kommo.SyncService
+	kommoManager           *kommo.Manager
+	cache                  *cache.Cache
+	abuseLimiter           *inMemoryAbuseLimiter
+	googleClient           *googleclient.Client
+	version                string
+	changelog              string
+	erosRunMu              sync.Mutex
+	erosRunCancels         map[uuid.UUID]context.CancelFunc
+	erosRunSem             chan struct{}
+	whiteboardRooms        *whiteboardcore.RoomHub
+	whiteboardInstanceID   uuid.UUID
+	whiteboardFanoutCancel context.CancelFunc
+	whiteboardCheckpointMu sync.Mutex
+	whiteboardCheckpoints  map[string]*whiteboardCheckpointEntry
 }
 
 func NewServer(cfg *config.Config, services *service.Services, repos *repository.Repositories, hub *ws.Hub, pool *whatsapp.DevicePool, store *storage.Storage, kommoSyncSvc *kommo.SyncService, kommoManager *kommo.Manager, c *cache.Cache, gc *googleclient.Client, version string) *Server {
@@ -92,7 +103,7 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 		Level: compress.LevelBestSpeed,
 	}))
 	app.Use(logger.New(logger.Config{
-		Format:     "${time} | ${status} | ${latency} | ${method} ${path}\n",
+		Format:     clarinAccessLogFormat,
 		TimeFormat: "15:04:05",
 	}))
 
@@ -153,22 +164,25 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 	}
 
 	server := &Server{
-		app:            app,
-		cfg:            cfg,
-		services:       services,
-		repos:          repos,
-		hub:            hub,
-		pool:           pool,
-		storage:        store,
-		kommoSync:      kommoSyncSvc,
-		kommoManager:   kommoManager,
-		cache:          c,
-		abuseLimiter:   newInMemoryAbuseLimiter(),
-		googleClient:   gc,
-		version:        version,
-		changelog:      changelogContent,
-		erosRunCancels: make(map[uuid.UUID]context.CancelFunc),
-		erosRunSem:     make(chan struct{}, 2),
+		app:                   app,
+		cfg:                   cfg,
+		services:              services,
+		repos:                 repos,
+		hub:                   hub,
+		pool:                  pool,
+		storage:               store,
+		kommoSync:             kommoSyncSvc,
+		kommoManager:          kommoManager,
+		cache:                 c,
+		abuseLimiter:          newInMemoryAbuseLimiter(),
+		googleClient:          gc,
+		version:               version,
+		changelog:             changelogContent,
+		erosRunCancels:        make(map[uuid.UUID]context.CancelFunc),
+		erosRunSem:            make(chan struct{}, 2),
+		whiteboardRooms:       whiteboardcore.NewRoomHub(),
+		whiteboardInstanceID:  uuid.New(),
+		whiteboardCheckpoints: make(map[string]*whiteboardCheckpointEntry),
 	}
 
 	app.Use(server.validateBrowserOrigin)
@@ -180,8 +194,10 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 	})
 
 	server.setupRoutes()
+	server.startWhiteboardFanout()
 	server.startSurveyUploadCleanupWorker()
 	server.startTaskMediaGCWorker()
+	server.startWhiteboardRetentionGCWorker()
 	// Retention is an invariant of persisted status data, not a publishing
 	// capability. Keep cleanup running even if publication is disabled after a
 	// real-device trial, otherwise old rows and media would outlive 24 hours.
@@ -294,6 +310,19 @@ func (s *Server) setupRoutes() {
 	api.Post("/public/dynamics/share", s.handleShareOnLink)
 	api.Get("/public/dynamics/:slug", s.handleGetPublicDynamic)
 
+	// Public whiteboard guest exchange. The browser reads the share secret from
+	// the URL fragment and posts it in the body; it never appears in access logs.
+	// A successful exchange creates a board-scoped HttpOnly guest cookie.
+	api.Post("/public/whiteboard-links/:id/session", s.guardWhiteboardGuestSessionExchange, s.handleCreateWhiteboardGuestSession)
+	whiteboardGuest := api.Group("/whiteboard-guest")
+	whiteboardGuest.Get("/scene", s.handleGetWhiteboardGuestScene)
+	whiteboardGuest.Put("/scene", s.guardWhiteboardGuestSnapshotWrite, s.handlePutWhiteboardGuestScene)
+	whiteboardGuest.Patch("/scene", s.guardWhiteboardGuestSnapshotWrite, s.handlePatchWhiteboardGuestScene)
+	whiteboardGuest.Post("/collab-ticket", s.handleCreateWhiteboardGuestCollabTicket)
+	whiteboardGuest.Get("/assets", s.handleListWhiteboardGuestAssets)
+	whiteboardGuest.Post("/assets", s.handleUploadWhiteboardGuestAsset)
+	whiteboardGuest.Get("/assets/:assetId", s.handleDownloadWhiteboardGuestAsset)
+
 	// Auth routes (no auth required)
 	auth := api.Group("/auth")
 	auth.Post("/login", s.handleLogin)
@@ -399,6 +428,7 @@ func (s *Server) setupRoutes() {
 	chatAPI.Get("/chats", s.handleGetChatAPIChats)
 	chatAPI.Get("/chats/:id", s.requireChatAPIConversation, s.handleGetChatDetails)
 	chatAPI.Get("/chats/:id/messages", s.requireChatAPIConversation, s.handleGetMessages)
+	chatAPI.Put("/chats/:id/messages/:messageId/reaction", s.requireChatAPIConversation, s.handleSetWhatsAppCloudReaction)
 	chatAPI.Post("/chats/:id/read", s.requireChatAPIConversation, s.handleMarkChatAPIRead)
 	chatAPI.Post("/messages/send", s.handleSendWhatsAppCloudMessage)
 
@@ -727,8 +757,10 @@ func (s *Server) setupRoutes() {
 	tasks.Put("/folders/:folderId/access", s.handlePutTaskFolderAccess)
 	tasks.Put("/folders/:folderId", s.requireTaskContainerAccessParam("folderId", "folder", domain.TaskAccessFull), s.handleUpdateTaskFolder)
 	tasks.Put("/folders/:folderId/structure", s.requireTaskContainerAccessParam("folderId", "folder", domain.TaskAccessFull), s.handleReorderTaskFolder)
-	tasks.Post("/folders/:folderId/restore", s.requireTaskContainerAccessParam("folderId", "folder", domain.TaskAccessFull), s.handleRestoreTaskFolder)
-	tasks.Delete("/folders/:folderId/purge", s.requireTaskContainerAccessParam("folderId", "folder", domain.TaskAccessFull), s.handlePurgeTaskFolder)
+	// Archived containers cannot pass the active-resource middleware. Restore and
+	// purge authorize again inside their locked repository transactions.
+	tasks.Post("/folders/:folderId/restore", s.handleRestoreTaskFolder)
+	tasks.Delete("/folders/:folderId/purge", s.handlePurgeTaskFolder)
 	tasks.Delete("/folders/:folderId", s.requireTaskContainerAccessParam("folderId", "folder", domain.TaskAccessFull), s.handleArchiveTaskFolder)
 	tasks.Get("/workflows", s.handleGetTaskWorkflows)
 	tasks.Post("/workflows", s.handleCreateTaskWorkflow)
@@ -743,8 +775,8 @@ func (s *Server) setupRoutes() {
 	tasks.Put("/lists/:listId/access", s.handlePutTaskListAccess)
 	tasks.Put("/lists/:listId/structure", s.requireTaskContainerAccessParam("listId", "list", domain.TaskAccessFull), s.handleUpdateTaskListStructure)
 	tasks.Put("/lists/:listId", s.requireTaskContainerAccessParam("listId", "list", domain.TaskAccessFull), s.handleUpdateTaskList)
-	tasks.Post("/lists/:listId/restore", s.requireTaskContainerAccessParam("listId", "list", domain.TaskAccessFull), s.handleRestoreTaskList)
-	tasks.Delete("/lists/:listId/purge", s.requireTaskContainerAccessParam("listId", "list", domain.TaskAccessFull), s.handlePurgeTaskList)
+	tasks.Post("/lists/:listId/restore", s.handleRestoreTaskList)
+	tasks.Delete("/lists/:listId/purge", s.handlePurgeTaskList)
 	tasks.Delete("/lists/:listId", s.requireTaskContainerAccessParam("listId", "list", domain.TaskAccessFull), s.handleDeleteTaskList)
 	tasks.Get("/calendar", s.handleGetTasksCalendar)
 	tasks.Get("/stats", s.handleGetTaskStats)
@@ -817,6 +849,66 @@ func (s *Server) setupRoutes() {
 	docTemplates.Put("/:id", s.handleUpdateDocumentTemplate)
 	docTemplates.Delete("/:id", s.handleDeleteDocumentTemplate)
 	docTemplates.Post("/:id/duplicate", s.handleDuplicateDocumentTemplate)
+
+	// Pizarras is isolated from legacy Fabric document templates. Module access
+	// is checked here; every board query applies its own actor ACL as well.
+	whiteboardFolders := protected.Group("/whiteboard-folders", s.requirePermission(domain.PermWhiteboards))
+	whiteboardFolders.Get("/", s.handleListWhiteboardFolders)
+	whiteboardFolders.Post("/", s.handleCreateWhiteboardFolder)
+	whiteboardFolders.Get("/:folderId", s.handleGetWhiteboardFolder)
+	whiteboardFolders.Put("/:folderId", s.handleUpdateWhiteboardFolder)
+	whiteboardFolders.Delete("/:folderId", s.handleArchiveWhiteboardFolder)
+	whiteboardFolders.Post("/:folderId/restore", s.handleRestoreWhiteboardFolder)
+
+	whiteboards := protected.Group("/whiteboards", s.requirePermission(domain.PermWhiteboards))
+	whiteboards.Get("/", s.handleListWhiteboards)
+	whiteboards.Post("/", s.handleCreateWhiteboard)
+	whiteboards.Get("/trash-policy", s.handleGetWhiteboardTrashPolicy)
+	whiteboards.Put("/trash-policy", s.handlePutWhiteboardTrashPolicy)
+	whiteboards.Get("/:id/scene", s.handleGetWhiteboardScene)
+	whiteboards.Get("/:id/activity", s.handleListWhiteboardActivity)
+	whiteboards.Put("/:id/scene", s.handlePutWhiteboardScene)
+	whiteboards.Patch("/:id/scene", s.handlePatchWhiteboardScene)
+	whiteboards.Post("/:id/collab-ticket", s.handleCreateWhiteboardCollabTicket)
+	whiteboards.Get("/:id/operations", s.handleListWhiteboardOperations)
+	whiteboards.Get("/:id/revisions", s.handleListWhiteboardRevisions)
+	whiteboards.Post("/:id/revisions", s.handleCreateWhiteboardRevision)
+	whiteboards.Get("/:id/revisions/:revisionId", s.handleGetWhiteboardRevision)
+	whiteboards.Get("/:id/revisions/:revisionId/assets", s.handleListWhiteboardRevisionAssets)
+	whiteboards.Get("/:id/revisions/:revisionId/assets/:assetId", s.handleDownloadWhiteboardRevisionAsset)
+	whiteboards.Post("/:id/revisions/:revisionId/restore", s.handleRestoreWhiteboardRevision)
+	whiteboards.Get("/:id/access", s.handleGetWhiteboardAccess)
+	whiteboards.Put("/:id/access", s.handlePutWhiteboardAccess)
+	// Public contract name. Keep /access as a compatibility alias for the
+	// current Clarin client while integrations migrate to /grants.
+	whiteboards.Get("/:id/grants", s.handleGetWhiteboardAccess)
+	whiteboards.Put("/:id/grants", s.handlePutWhiteboardAccess)
+	whiteboards.Get("/:id/share-links", s.handleListWhiteboardShareLinks)
+	whiteboards.Post("/:id/share-links", s.handleCreateWhiteboardShareLink)
+	whiteboards.Delete("/:id/share-links/:linkId", s.handleRevokeWhiteboardShareLink)
+	whiteboards.Get("/:id/share-links/:linkId/sessions", s.handleListWhiteboardGuestSessions)
+	whiteboards.Delete("/:id/guest-sessions/:sessionId", s.handleRevokeWhiteboardGuestSession)
+	whiteboards.Get("/:id/assets", s.handleListWhiteboardAssets)
+	whiteboards.Post("/:id/assets", s.handleUploadWhiteboardAsset)
+	whiteboards.Get("/:id/assets/:assetId", s.handleDownloadWhiteboardAsset)
+	whiteboards.Delete("/:id/assets/:assetId", s.handleDeleteWhiteboardAsset)
+	whiteboards.Delete("/:id/purge", s.handlePurgeWhiteboard)
+	whiteboards.Post("/:id/duplicate", s.handleDuplicateWhiteboard)
+	whiteboards.Post("/:id/restore", s.handleRestoreWhiteboard)
+	whiteboards.Get("/:id", s.handleGetWhiteboard)
+	whiteboards.Put("/:id", s.handleUpdateWhiteboard)
+	whiteboards.Delete("/:id", s.handleArchiveWhiteboard)
+
+	whiteboardLibraries := protected.Group("/whiteboard-libraries", s.requirePermission(domain.PermWhiteboards))
+	whiteboardLibraries.Get("/", s.handleListWhiteboardLibraries)
+	whiteboardLibraries.Post("/", s.handleCreateWhiteboardLibrary)
+	whiteboardLibraries.Get("/:libraryId/assets", s.handleListWhiteboardLibraryAssets)
+	whiteboardLibraries.Post("/:libraryId/assets", s.handleUploadWhiteboardLibraryAsset)
+	whiteboardLibraries.Get("/:libraryId/assets/:assetId", s.handleDownloadWhiteboardLibraryAsset)
+	whiteboardLibraries.Delete("/:libraryId/assets/:assetId", s.handleDeleteWhiteboardLibraryAsset)
+	whiteboardLibraries.Get("/:libraryId", s.handleGetWhiteboardLibrary)
+	whiteboardLibraries.Put("/:libraryId", s.handleUpdateWhiteboardLibrary)
+	whiteboardLibraries.Delete("/:libraryId", s.handleArchiveWhiteboardLibrary)
 
 	// Quick replies (canned responses)
 	quickReplies := protected.Group("/quick-replies", s.requirePermission(domain.PermChats))
@@ -968,7 +1060,11 @@ func (s *Server) setupRoutes() {
 	dynamics.Get("/:id/links/:linkId/registrations/export", s.handleExportLinkRegistrations)
 	dynamics.Delete("/:id/links/:linkId/registrations/:regId", s.handleDeleteLinkRegistration)
 
-	// WebSocket route
+	// Board-room collaboration is isolated from the account-wide notification
+	// socket and has its own ACL, guest-session and message-limit contract.
+	s.app.Get("/ws/whiteboards/:id", s.whiteboardWSUpgrade, websocket.New(s.handleWhiteboardWebSocket))
+
+	// Account-wide WebSocket route
 	s.app.Use("/ws", s.wsUpgrade)
 	s.app.Get("/ws", websocket.New(s.handleWebSocket))
 
@@ -3367,38 +3463,54 @@ func (s *Server) handleForwardMessage(c *fiber.Ctx) error {
 func (s *Server) handleSendReaction(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
-		DeviceID        string `json:"device_id"`
-		To              string `json:"to"`
+		ChatID          string `json:"chat_id"`
 		TargetMessageID string `json:"target_message_id"`
-		TargetSenderJID string `json:"target_sender_jid,omitempty"`
-		TargetFromMe    bool   `json:"target_from_me"`
 		Emoji           string `json:"emoji"` // empty to remove
 	}
 	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida", "code": "invalid_request"})
 	}
-
-	deviceID, err := uuid.Parse(req.DeviceID)
+	chatID, err := uuid.Parse(req.ChatID)
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Chat inválido", "code": "invalid_chat_id"})
 	}
-	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
+	chat, err := s.services.Chat.GetByID(c.Context(), chatID)
+	if err != nil || !chatBelongsToAccount(chat, accountID) {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat no encontrado", "code": "chat_not_found"})
 	}
-
-	if req.TargetMessageID == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "target_message_id is required"})
+	if chat.DeviceID == nil {
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "El chat no tiene un dispositivo disponible", "code": "chat_device_missing"})
 	}
-
-	if err := s.services.Chat.SendReaction(c.Context(), deviceID, req.To, req.TargetMessageID, req.TargetSenderJID, req.Emoji, req.TargetFromMe); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	deviceID := *chat.DeviceID
+	if _, err := s.requireManualDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
+		if apiErr, ok := err.(*fiber.Error); ok {
+			return c.Status(apiErr.Code).JSON(fiber.Map{"success": false, "error": apiErr.Message, "code": "device_unavailable"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo validar el dispositivo", "code": "device_validation_failed"})
 	}
-
-	if chat, _ := s.services.Chat.FindByJID(c.Context(), accountID, req.To); chat != nil {
-		s.invalidateMessagesCache(accountID, &chat.ID)
-	} else {
-		s.invalidateMessagesCache(accountID, nil)
+	if strings.TrimSpace(req.TargetMessageID) == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Mensaje inválido", "code": "invalid_message_id"})
 	}
+	message, err := s.services.Chat.GetMessageByID(c.Context(), chat.ID, req.TargetMessageID)
+	if err != nil || !messageBelongsToChatAccount(message, chat.ID, accountID) {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Mensaje no encontrado", "code": "message_not_found"})
+	}
+	if message.DeviceID == nil || *message.DeviceID != deviceID || message.IsRevoked || strings.EqualFold(stringValueOrEmpty(message.MessageType), domain.MessageTypeReaction) {
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Este mensaje no admite reacciones", "code": "reaction_target_invalid"})
+	}
+	emoji, valid := normalizeReactionEmoji(req.Emoji)
+	if !valid {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Selecciona un solo emoji", "code": "invalid_reaction_emoji"})
+	}
+	targetSenderJID := ""
+	if message.FromJID != nil {
+		targetSenderJID = *message.FromJID
+	}
+	if err := s.services.Chat.SendReaction(c.Context(), deviceID, chat.JID, message.MessageID, targetSenderJID, emoji, message.IsFromMe); err != nil {
+		log.Printf("[MessageAction] reaction failed account=%s device=%s chat=%s message=%s: %v", accountID, deviceID, chat.ID, message.ID, err)
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"success": false, "error": "WhatsApp no pudo actualizar la reacción", "code": "provider_reaction_failed"})
+	}
+	s.invalidateMessagesCache(accountID, &chat.ID)
 
 	return c.JSON(fiber.Map{"success": true})
 }
@@ -15603,6 +15715,10 @@ func (s *Server) Listen(addr string) error {
 }
 
 func (s *Server) Shutdown() error {
+	if s.whiteboardFanoutCancel != nil {
+		s.whiteboardFanoutCancel()
+	}
+	s.stopWhiteboardCheckpoints()
 	return s.app.Shutdown()
 }
 
@@ -15963,6 +16079,9 @@ func (s *Server) adminAccountPurgeSummary(ctx context.Context, accountID uuid.UU
 	tables := []string{
 		"user_accounts", "users", "devices", "contacts", "chats", "messages", "leads", "pipelines", "tags",
 		"campaigns", "events", "programs", "documents", "quick_replies", "automation_flows", "google_contacts_sync",
+		"whiteboard_folders", "whiteboards", "whiteboard_grants", "whiteboard_access_audit", "whiteboard_activity",
+		"whiteboard_operations", "whiteboard_revisions", "whiteboard_revision_assets", "whiteboard_share_links", "whiteboard_guest_sessions",
+		"whiteboard_libraries", "whiteboard_assets", "whiteboard_media_gc_jobs", "whiteboard_snapshot_gc_jobs",
 		"kommo_connected_pipelines", "kommo_push_outbox", "integration_instance_accounts",
 	}
 	counts := fiber.Map{}
@@ -16072,6 +16191,7 @@ func (s *Server) storageReferencedObjectKeysWithInventory(ctx context.Context, i
 		{"saved_stickers", "media_url", "", false},
 		{"survey_answers", "file_url", "", false},
 		{"whatsapp_statuses", "media_url", "expires_at > NOW()", false},
+		{"whiteboard_revisions", "snapshot_object_key", "", true},
 	}
 	if includeInventory {
 		columns = append(columns, refColumn{"media_assets", "object_key", "status = 'active'", true})

@@ -257,7 +257,7 @@ const ParticipantCard = memo(function ParticipantCard({
       data-crm-pipeline-card={p.id}
       data-crm-pipeline-label={p.name || 'Participante'}
       data-crm-selected={isSelected ? 'true' : 'false'}
-      className={`bg-white p-3 rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer ${
+      className={`w-full min-w-0 max-w-full bg-white p-3 rounded-xl shadow-sm border hover:shadow-md transition cursor-pointer ${
         isSelected ? 'border-emerald-500 ring-2 ring-emerald-100'
         : isDetailActive ? 'border-emerald-400 ring-2 ring-emerald-200 bg-emerald-50/50'
         : 'border-slate-100'
@@ -266,8 +266,8 @@ const ParticipantCard = memo(function ParticipantCard({
     >
       <span id={`participant-drag-help-${p.id}`} className="sr-only" aria-live="polite">{accessibleDrag.instructions}</span>
       {accessibleDrag.overlay}
-      <div className="flex items-start justify-between gap-2 group">
-        <div className="flex items-center gap-2">
+      <div className="group flex min-w-0 items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           {canDrag && (!selectionMode || isSelected) && <button ref={accessibleDrag.setActivatorNodeRef} {...accessibleDrag.listeners} {...accessibleDrag.attributes} type="button" data-no-crm-drag onClick={event => event.stopPropagation()} aria-label={`Mover ${p.name || 'participante'}`} className="inline-flex h-8 w-7 shrink-0 touch-none items-center justify-center rounded-lg text-slate-300 transition hover:bg-emerald-50 hover:text-emerald-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 active:cursor-grabbing"><GripVertical className="h-4 w-4" /></button>}
           {selectionMode ? (
             <button onClick={(e) => { e.stopPropagation(); onToggleSelection(p.id) }} className={`p-0.5 ${compactLayout ? 'min-h-11 min-w-11 flex items-center justify-center' : ''}`} aria-label={isSelected ? 'Quitar participante de la selección' : 'Seleccionar participante'}>
@@ -278,7 +278,7 @@ const ParticipantCard = memo(function ParticipantCard({
               <span className="text-emerald-700 text-xs font-semibold">{(p.name || '?').charAt(0).toUpperCase()}</span>
             </div>
           )}
-          <p className={`text-[13px] font-medium text-slate-900 truncate ${compactLayout ? 'max-w-[calc(100vw-10rem)]' : 'max-w-[150px]'}`}>
+          <p className="min-w-0 max-w-full flex-1 truncate text-[13px] font-medium text-slate-900">
             {p.name || 'Sin nombre'} {p.last_name || ''}
           </p>
           {p.duplicate_contact && (
@@ -299,7 +299,7 @@ const ParticipantCard = memo(function ParticipantCard({
       </div>
       {p.short_name && <p className="text-[11px] text-slate-400 italic mt-0.5 ml-9">{p.short_name}</p>}
       {p.phone && (
-        <div className="flex items-center gap-1.5 mt-1.5 text-xs text-slate-500"><Phone className="w-3 h-3" />{p.phone}</div>
+        <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-xs text-slate-500"><Phone className="h-3 w-3 shrink-0" /><span className="truncate">{p.phone}</span></div>
       )}
       {p.email && (
         <div className="flex items-center gap-1.5 mt-1 text-xs text-slate-500"><Mail className="w-3 h-3" /><span className="truncate max-w-[180px]">{p.email}</span></div>
@@ -385,6 +385,7 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
     estimateSize: () => 140,
     overscan: 5,
     measureElement: (el) => el?.getBoundingClientRect().height || 140,
+    getItemKey: index => column.participants[index]?.id || `participant-index:${index}`,
   })
 
   useEffect(() => {
@@ -488,7 +489,6 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
         }`}
         style={{ minHeight: 200, backgroundColor: stageDrop.isOver ? `${column.color}12` : undefined, '--tw-ring-color': `${column.color}99` } as React.CSSProperties}
       >
-        {stageDrop.isOver && <div aria-hidden className="pointer-events-none absolute inset-x-2 top-2 z-20 flex h-11 items-center justify-center rounded-xl border-2 border-dashed bg-white/90 text-xs font-bold shadow-sm" style={{ borderColor: column.color, color: column.color }}>Suelta en {column.name}</div>}
         <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
           {virtualizer.getVirtualItems().map((vi) => {
             const p = column.participants[vi.index]
@@ -4389,6 +4389,7 @@ export default function EventDetailPage() {
           minHeight={520}
           dockedWidth={760}
           temporaryMode={crmMessageTemporaryMode(messagePhase)}
+          motionProfile="smooth"
           align="right"
           overlayZIndex={110}
           temporaryOverlaySelector="[data-task-editor-modal], [data-task-detail-window], [data-task-picker-backdrop], [data-task-destructive-dialog], [data-operational-picker-backdrop], [data-operational-confirmation]"

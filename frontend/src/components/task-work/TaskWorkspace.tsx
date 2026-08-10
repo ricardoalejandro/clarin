@@ -217,7 +217,7 @@ function TaskPageProgress({ loaded, total, hasMore, loadingMore, error, onLoadMo
 
 type TrashTarget = { kind: 'task' | 'list' | 'folder'; id: string; name: string }
 
-function TrashView({ tasks, onChanged, onError }: { tasks: Task[]; onChanged: () => Promise<void>; onError: (message: string) => void }) {
+function TrashView({ tasks, environmentId, onChanged, onError }: { tasks: Task[]; environmentId: string; onChanged: () => Promise<void>; onError: (message: string) => void }) {
   const [tab, setTab] = useState<'tasks' | 'containers'>('tasks')
   const [policy, setPolicy] = useState<TaskTrashPolicy>({ retention_days: 30, can_manage: false })
   const [containers, setContainers] = useState<TaskTrashContainer[]>([])
@@ -231,7 +231,7 @@ function TrashView({ tasks, onChanged, onError }: { tasks: Task[]; onChanged: ()
     setLoadingMeta(true)
     const [policyResult, containerResult] = await Promise.all([
       apiGet<TaskTrashPolicy>('/api/tasks/trash-policy'),
-      apiGet<{ containers: TaskTrashContainer[] }>('/api/tasks/trash/containers'),
+      apiGet<{ containers: TaskTrashContainer[] }>(`/api/tasks/trash/containers?environment_id=${encodeURIComponent(environmentId)}`),
     ])
     if (policyResult.success && policyResult.data) {
       setPolicy(policyResult.data)
@@ -240,7 +240,7 @@ function TrashView({ tasks, onChanged, onError }: { tasks: Task[]; onChanged: ()
     if (containerResult.success) setContainers(containerResult.data?.containers || [])
     else onError(containerResult.error || 'No se pudieron cargar las listas y carpetas archivadas.')
     setLoadingMeta(false)
-  }, [onError])
+  }, [environmentId, onError])
   useEffect(() => { void loadMeta() }, [loadMeta])
   useEffect(() => subscribeWebSocket(raw => {
     const message = raw as { event?: string; data?: { action?: string } }
@@ -874,7 +874,10 @@ export default function TaskWorkspace() {
   }, [activeEnvironmentId, commitHierarchy, environmentIndexReady, loadStructure])
   useEffect(() => {
     if (!structureReady) return
-    if (scope.type === 'folder' && !folders.some(folder => folder.id === scope.id)) setScope(activeEnvironmentId ? { type: 'environment', id: activeEnvironmentId } : { type: 'all' })
+    if ((scope.type === 'folder' && !folders.some(folder => folder.id === scope.id))
+      || (scope.type === 'list' && !lists.some(list => list.id === scope.id))) {
+      setScope(activeEnvironmentId ? { type: 'environment', id: activeEnvironmentId } : { type: 'all' })
+    }
   }, [activeEnvironmentId, scope, lists, folders, structureReady])
   useEffect(() => { void loadTasks(!loadedOnce.current) }, [loadTasks])
   useEffect(() => {
@@ -1247,7 +1250,7 @@ export default function TaskWorkspace() {
 
   return <div ref={workspaceRef} data-task-workspace-width={workspaceWidth} className="relative flex h-full min-h-0 w-full overflow-hidden bg-slate-50">
     {sidebarOpen && <button aria-label="Cerrar navegación" onClick={() => setSidebarOpen(false)} className="fixed inset-0 z-40 bg-slate-950/30 lg:hidden" />}
-    <aside className={`absolute inset-y-0 left-0 z-50 flex shrink-0 flex-col border-r border-slate-200 bg-white transition-all lg:relative lg:z-10 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'} ${sidebarCollapsed ? 'w-[72px]' : 'w-[268px]'}`}>
+    <aside className={`absolute inset-y-0 left-0 z-50 flex shrink-0 flex-col border-r border-slate-200 bg-white transition-all lg:relative lg:z-10 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'} ${sidebarCollapsed ? 'w-16' : 'w-[248px]'}`}>
       <div className="flex h-[52px] items-center border-b border-slate-100 px-3"><div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white"><Check className="h-4 w-4" /></div>{!sidebarCollapsed && <div className="ml-2.5 min-w-0"><p className="truncate text-sm font-black leading-4 text-slate-900">Clarin Work</p><p className="text-[9px] font-semibold uppercase tracking-[.14em] text-emerald-600">Tareas y proyectos</p></div>}<button onClick={() => setSidebarCollapsed(value => !value)} className="ml-auto hidden h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 lg:flex" aria-label={sidebarCollapsed ? 'Expandir navegación de Clarin Work' : 'Contraer navegación de Clarin Work'}>{sidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}</button><button onClick={() => setSidebarOpen(false)} aria-label="Cerrar navegación de Clarin Work" className="ml-auto flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 lg:hidden"><X className="h-4 w-4" /></button></div>
       <div className="relative min-h-0 flex-1"><nav ref={navRef} data-task-navigation-scroll className="task-navigation-scroll h-full overflow-y-auto px-2 py-2">
         <div className="mb-2 px-1"><TaskEnvironmentSwitcher active={activeEnvironment} environments={environments} collapsed={sidebarCollapsed} canCreate={canCreateEnvironment} onSelect={selectEnvironment} onCreate={openEnvironmentCreate} onConfigure={openEnvironmentConfigure} /></div>
@@ -1280,7 +1283,7 @@ export default function TaskWorkspace() {
         {notice && <div role="status" className="m-2 mb-3 flex items-center justify-between rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700"><span>{notice}</span><button aria-label="Cerrar aviso" onClick={() => setNotice('')}><X className="h-4 w-4" /></button></div>}
         {error && <div className="m-2 mb-3 flex items-center justify-between rounded-xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700"><span>{error}</span><button onClick={() => setError('')}><X className="h-4 w-4" /></button></div>}
         {loading ? <div className="space-y-3">{Array.from({length:5}).map((_,index) => <div key={index} className="h-16 animate-pulse rounded-2xl bg-slate-200/60" />)}</div> : <div className="h-full min-h-[420px]">
-          {scope.type === 'trash' && <TrashView tasks={tasks} onChanged={async () => { await Promise.all([loadTasks(false), loadHierarchy()]) }} onError={setError} />}
+          {scope.type === 'trash' && <TrashView tasks={tasks} environmentId={activeEnvironmentId} onChanged={async () => { await Promise.all([loadTasks(false), loadHierarchy()]) }} onError={setError} />}
           {scope.type === 'shared' && <TaskSharedHub environmentId={activeEnvironmentId} refreshToken={sharedHubRevision} onOpenFolder={(id, name) => selectScope({ type: 'folder', id }, name)} onOpenList={(id, name) => selectScope({ type: 'list', id }, name)} onOpenTask={setSelectedTaskId} />}
           {scope.type !== 'trash' && scope.type !== 'shared' && view === 'list' && <TaskListView tasks={tasks} statuses={allStatuses} lists={lists} folders={folders} users={users} groupBy={groupBy} groupDirection={groupDirection} collapsedGroupKeys={collapsedGroupKeys} onGroupingChange={updateListGrouping} onOpen={task => setSelectedTaskId(task.id)} onStatus={(task,statusId) => void updateTask(task,{status_id:statusId})} onStar={task => void toggleStar(task)} onCanonicalTasks={reconcileCanonicalTasks} onHierarchyCounts={applyHierarchySnapshot} onOperation={handleBoardOperation} onDragStateChange={handleBoardDragState} onExternalDropTargetChange={setTaskDropTarget} onRefresh={async () => { await Promise.all([loadTasks(false), loadHierarchy()]) }} onError={setError} />}
           {scope.type !== 'trash' && scope.type !== 'shared' && view === 'board' && <TaskBoard tasks={tasks} statuses={boardStatuses} allStatuses={allStatuses} lists={scopedLists} allLists={lists} folders={folders} users={users} currentUserId={currentUserId} defaultListId={boardDefaultListId} showListName={scope.type !== 'list'} collapsedStatusIds={collapsedStatusIds} onCollapsedStatusIdsChange={setCollapsedStatusIds} onTasksChange={setVisibleBoardTasks} onCanonicalTask={reconcileCanonicalTask} onCanonicalTasks={reconcileCanonicalTasks} onHierarchyCounts={applyHierarchySnapshot} onOperation={handleBoardOperation} onTaskCreated={revealCreatedTask} recentlyCreatedTaskId={recentlyCreatedTaskId} onDragStateChange={handleBoardDragState} onExternalDropTargetChange={setTaskDropTarget} onOpen={task => setSelectedTaskId(task.id)} onEdit={task => { if (!canEditTask(task)) return; setSubtaskParent(null); setEditingTask(task); setEditorOpen(true) }} onCreateSubtask={task => { if (!canEditTask(task)) return; setSubtaskParent(task); setEditingTask(null); setCreateStatusId(''); setCreateDraft(null); setEditorOpen(true) }} onCreateFull={openCreate} onConfigureStatuses={() => { if (activeEnvironment?.permissions?.can_delete) setStructureOpen(true) }} onStar={toggleStar} onQuickUpdate={updateTask} onRefresh={async () => { await Promise.all([loadTasks(false), loadHierarchy()]) }} onError={setError} canCreate={Boolean(activeEnvironmentId && activeEnvironment?.permissions?.can_edit === true)} canManageStructure={Boolean(activeEnvironment?.permissions?.can_delete)} />}

@@ -1,10 +1,11 @@
 'use client'
 
-import { useEffect, useRef, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Maximize2, Minimize2, Move, PanelRight, RotateCcw, X, type LucideIcon } from 'lucide-react'
 import useOperationalWindow, { type OperationalWindowMode, type OperationalWindowResizeEdge } from './useOperationalWindow'
 import { operationalWindowVisualState } from './operationalWindowVisuals'
+import { OperationalOverlayProvider } from './OperationalOverlayContext'
 
 const RESIZE_HANDLES: Record<OperationalWindowResizeEdge, string> = {
   n: 'left-3 right-3 top-0 h-2 cursor-n-resize',
@@ -42,6 +43,7 @@ export interface OperationalWindowShellProps {
   overlayZIndex?: number
   temporaryOverlaySelector?: string
   temporaryMode?: OperationalWindowMode
+  motionProfile?: 'standard' | 'smooth'
 }
 
 export default function OperationalWindowShell({
@@ -69,14 +71,30 @@ export default function OperationalWindowShell({
   overlayZIndex = 120,
   temporaryOverlaySelector = '[data-operational-picker-backdrop], [data-operational-confirmation]',
   temporaryMode,
+  motionProfile = 'standard',
 }: OperationalWindowShellProps) {
   const windowState = useOperationalWindow({ storageKey, storageScope, defaultMode, defaultWidth, defaultHeight, minWidth, minHeight, dockedWidth, align, temporaryMode })
   const panelRef = useRef<HTMLDivElement>(null)
+  const overlayHostRef = useRef<HTMLDivElement | null>(null)
+  const [overlayHost, setOverlayHost] = useState<HTMLDivElement | null>(null)
+  const openOverlaysRef = useRef(new Set<string>())
+  const modalRef = useRef(windowState.isModal)
   const previousFocusRef = useRef<HTMLElement | null>(null)
   const closeRef = useRef(onRequestClose)
   const busyRef = useRef(busy)
   closeRef.current = onRequestClose
   busyRef.current = busy
+  modalRef.current = windowState.isModal
+
+  const registerOverlay = useCallback((overlayId: string) => {
+    openOverlaysRef.current.add(overlayId)
+    return () => { openOverlaysRef.current.delete(overlayId) }
+  }, [])
+
+  const setOverlayHostNode = useCallback((node: HTMLDivElement | null) => {
+    overlayHostRef.current = node
+    setOverlayHost(node)
+  }, [])
 
   useEffect(() => {
     if (!open) return
@@ -88,7 +106,16 @@ export default function OperationalWindowShell({
       if (activeElement instanceof HTMLElement && panel.contains(activeElement)) return
       panel.focus({ preventScroll: true })
     })
-    const temporaryOverlayOpen = () => Boolean(document.querySelector(temporaryOverlaySelector))
+    return () => {
+      cancelAnimationFrame(frame)
+      previousFocusRef.current?.focus({ preventScroll: true })
+      previousFocusRef.current = null
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const temporaryOverlayOpen = () => openOverlaysRef.current.size > 0 || Boolean(document.querySelector(temporaryOverlaySelector))
     const keyboard = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         if (event.defaultPrevented || busyRef.current || temporaryOverlayOpen()) return
@@ -96,10 +123,12 @@ export default function OperationalWindowShell({
         closeRef.current()
         return
       }
-      if (event.key !== 'Tab' || !windowState.isModal || temporaryOverlayOpen() || !panelRef.current) return
-      const focusable = Array.from(panelRef.current.querySelectorAll<HTMLElement>(
-        'button:not([disabled]),a[href],input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])',
-      ))
+      if (event.key !== 'Tab' || !modalRef.current || temporaryOverlayOpen() || !panelRef.current) return
+      const selector = 'button:not([disabled]),a[href],input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])'
+      const focusable = [
+        ...Array.from(panelRef.current.querySelectorAll<HTMLElement>(selector)),
+        ...Array.from(overlayHostRef.current?.querySelectorAll<HTMLElement>(selector) || []),
+      ]
       if (!focusable.length) {
         event.preventDefault()
         panelRef.current.focus()
@@ -117,30 +146,31 @@ export default function OperationalWindowShell({
     }
     window.addEventListener('keydown', keyboard)
     return () => {
-      cancelAnimationFrame(frame)
       window.removeEventListener('keydown', keyboard)
-      previousFocusRef.current?.focus({ preventScroll: true })
-      previousFocusRef.current = null
     }
-  }, [open, temporaryOverlaySelector, windowState.isModal])
+  }, [open, temporaryOverlaySelector])
 
   if (!open || typeof document === 'undefined') return null
   const visual = operationalWindowVisualState(windowState.effectiveMode, windowState.isMobile)
   const rounded = windowState.effectiveMode === 'maximized' || windowState.isMobile
     ? 'rounded-none sm:rounded-2xl'
     : windowState.effectiveMode === 'docked' ? 'rounded-l-3xl' : 'rounded-3xl'
+  const panelMotion = motionProfile === 'smooth' && !windowState.isInteracting
+    ? 'transition-[inset,left,top,right,bottom,width,height,border-radius,box-shadow] duration-[220ms] ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none'
+    : ''
 
   return createPortal(
-    <div
-      data-operational-window-shell
-      data-task-work-window-shell={dataAttribute === 'task-work-window' ? '' : undefined}
-      data-window-kind={dataAttribute}
-      data-window-mode={windowState.effectiveMode}
-      data-backdrop-mode={visual.blocksWorkspace ? 'modal' : windowState.effectiveMode}
-      style={{ ...visual.backdropStyle, zIndex: overlayZIndex }}
-      className={`fixed inset-0 transition-[background-color,backdrop-filter] duration-200 motion-reduce:transition-none ${visual.blocksWorkspace ? '' : 'pointer-events-none'}`}
-      onMouseDown={event => { if (visual.blocksWorkspace && event.target === event.currentTarget && !busy) onRequestClose() }}
-    >
+    <OperationalOverlayProvider portalTarget={overlayHost} registerOverlay={registerOverlay}>
+      <div
+        data-operational-window-shell
+        data-task-work-window-shell={dataAttribute === 'task-work-window' ? '' : undefined}
+        data-window-kind={dataAttribute}
+        data-window-mode={windowState.effectiveMode}
+        data-backdrop-mode={visual.blocksWorkspace ? 'modal' : windowState.effectiveMode}
+        style={{ ...visual.backdropStyle, zIndex: overlayZIndex }}
+        className={`fixed inset-0 isolate transition-[background-color,backdrop-filter] duration-200 motion-reduce:transition-none ${visual.blocksWorkspace ? '' : 'pointer-events-none'}`}
+        onMouseDown={event => { if (visual.blocksWorkspace && event.target === event.currentTarget && !busy) onRequestClose() }}
+      >
       <section
         ref={panelRef}
         tabIndex={-1}
@@ -149,7 +179,7 @@ export default function OperationalWindowShell({
         aria-label={title}
         aria-busy={busy}
         style={windowState.panelStyle}
-        className={`pointer-events-auto fixed flex flex-col overflow-hidden border border-white/80 bg-white shadow-[0_32px_90px_rgba(15,23,42,0.30)] ring-1 ring-slate-900/10 outline-none ${rounded}`}
+        className={`pointer-events-auto fixed flex flex-col overflow-hidden border border-white/80 bg-white shadow-[0_32px_90px_rgba(15,23,42,0.30)] ring-1 ring-slate-900/10 outline-none ${rounded} ${panelMotion}`}
       >
         {windowState.effectiveMode === 'floating' && (Object.entries(RESIZE_HANDLES) as Array<[OperationalWindowResizeEdge, string]>).map(([edge, classes]) => (
           <div key={edge} aria-hidden className={`absolute z-30 ${classes}`} onPointerDown={event => windowState.beginResize(edge, event)} />
@@ -178,8 +208,10 @@ export default function OperationalWindowShell({
         </header>
         <div className={contentClassName}>{children}</div>
         {footer && <footer data-no-window-drag className="relative z-20 shrink-0 border-t border-slate-100 bg-slate-50/85 px-5 py-3 backdrop-blur sm:px-6">{footer}</footer>}
-      </section>
-    </div>,
+        </section>
+        <div ref={setOverlayHostNode} data-operational-overlay-host className="pointer-events-none fixed inset-0 z-[70]" />
+      </div>
+    </OperationalOverlayProvider>,
     document.body,
   )
 }

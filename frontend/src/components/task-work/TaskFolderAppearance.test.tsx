@@ -1,9 +1,9 @@
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { apiPut } from '@/lib/api'
 import type { TaskFolder, TaskList } from '@/types/task'
-import { TaskAppearanceDialog } from './TaskContainerAppearance'
+import { TaskAppearanceDialog, taskContainerArchiveState } from './TaskContainerAppearance'
 
 vi.mock('@/lib/api', () => ({
   apiDelete: vi.fn(),
@@ -31,6 +31,17 @@ afterEach(() => {
 })
 
 describe('task container icon rules', () => {
+  it('explains why a non-empty list cannot be archived instead of hiding the action', () => {
+    const list = { ...base, id: 'list-occupied', name: 'Ocupada', icon: 'list', is_default: false, task_count: 3, open_task_count: 1, completed_task_count: 1, cancelled_task_count: 1 } as TaskList
+    expect(taskContainerArchiveState(list)).toMatchObject({ kind: 'blocked' })
+    render(<TaskAppearanceDialog item={list} type="list" onClose={vi.fn()} onSaved={vi.fn()} onError={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Mover a Papelera' }))
+    const dialog = screen.getByRole('alertdialog')
+    expect(within(dialog).getByRole('status')).toHaveTextContent('1 abiertas, 1 completadas y 1 canceladas')
+    expect(within(dialog).queryByRole('button', { name: 'Mover a Papelera' })).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Entendido' })).toBeInTheDocument()
+  })
+
   it('shows the fixed folder icon and never sends an icon update', async () => {
     vi.mocked(apiPut).mockResolvedValue({ success: true })
     const folder = { ...base, id: 'folder-1', name: 'Mauritius', icon: 'rocket', lists: [] } as TaskFolder

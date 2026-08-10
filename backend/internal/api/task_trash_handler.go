@@ -2,11 +2,20 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 )
+
+func parseTaskTrashEnvironmentID(raw string) (uuid.UUID, error) {
+	environmentID, err := uuid.Parse(raw)
+	if err != nil || environmentID == uuid.Nil {
+		return uuid.Nil, errors.New("invalid task trash environment")
+	}
+	return environmentID, nil
+}
 
 type taskTrashMutationRequest struct {
 	ConfirmationName string `json:"confirmation_name"`
@@ -65,7 +74,11 @@ func (s *Server) handlePutTaskTrashPolicy(c *fiber.Ctx) error {
 func (s *Server) handleGetTaskTrashContainers(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	userID := c.Locals("user_id").(uuid.UUID)
-	items, err := s.repos.TaskWork.ListTrashContainers(c.Context(), accountID, userID, time.Now().UTC())
+	environmentID, err := parseTaskTrashEnvironmentID(c.Query("environment_id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Entorno inválido", "code": "invalid_environment_id"})
+	}
+	items, err := s.repos.TaskWork.ListTrashContainers(c.Context(), accountID, userID, environmentID, time.Now().UTC())
 	if err != nil {
 		return taskWorkError(c, err)
 	}

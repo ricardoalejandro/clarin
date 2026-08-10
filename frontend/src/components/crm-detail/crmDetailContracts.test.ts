@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { crmDetailWorkspaceLayout } from './CrmDetailWorkspace'
+import { crmDetailWorkspaceLayout, shouldCloseCrmChatOnEscape } from './CrmDetailWorkspace'
 import { activityAuthorLabel, activityScopeKey, activityScopePayload, activityScopeQuery } from './ScopedActivityPanel'
 
 describe('CRM detail contracts', () => {
@@ -7,6 +7,13 @@ describe('CRM detail contracts', () => {
     expect(crmDetailWorkspaceLayout(1440, false)).toBe('detail')
     expect(crmDetailWorkspaceLayout(979, true)).toBe('chat')
     expect(crmDetailWorkspaceLayout(980, true)).toBe('split')
+  })
+
+  it('lets Escape close only the chat in compact and split layouts', () => {
+    expect(shouldCloseCrmChatOnEscape(true, 'Escape', false)).toBe(true)
+    expect(shouldCloseCrmChatOnEscape(false, 'Escape', false)).toBe(false)
+    expect(shouldCloseCrmChatOnEscape(true, 'Escape', true)).toBe(false)
+    expect(shouldCloseCrmChatOnEscape(true, 'Enter', false)).toBe(false)
   })
 
   it('keeps Lead observations explicitly scoped', () => {

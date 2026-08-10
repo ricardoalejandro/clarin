@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Download, RotateCw, X, ZoomIn, ZoomOut } from 'lucide-react'
+import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
 interface ImageViewerProps {
   src: string
@@ -53,6 +54,8 @@ export default function ImageViewer({ src, alt, isOpen, onClose }: ImageViewerPr
   const gestureRef = useRef<Gesture | null>(null)
   const frameRef = useRef(0)
   const lastTapRef = useRef({ at: 0, x: 0, y: 0 })
+  const operationalPortal = useOperationalOverlayPortal()
+  useOperationalOverlayRegistration(isOpen, 'chat-image-viewer')
 
   const isCompactTouchViewer = useCallback(() => (
     typeof window !== 'undefined'
@@ -140,6 +143,8 @@ export default function ImageViewer({ src, alt, isOpen, onClose }: ImageViewerPr
     const handleKeyDown = (event: KeyboardEvent) => {
       switch (event.key) {
         case 'Escape':
+          event.preventDefault()
+          event.stopPropagation()
           onClose()
           break
         case '+':
@@ -327,7 +332,7 @@ export default function ImageViewer({ src, alt, isOpen, onClose }: ImageViewerPr
   if (!isOpen || typeof document === 'undefined') return null
 
   return createPortal(
-    <div className="app-viewport fixed z-[110] flex flex-col overflow-hidden bg-black/90" role="dialog" aria-modal="true" aria-label={alt || 'Visor de imagen'}>
+    <div data-chat-overlay="image-viewer" className="app-viewport pointer-events-auto fixed flex flex-col overflow-hidden bg-black/90" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog }} role="dialog" aria-modal="true" aria-label={alt || 'Visor de imagen'}>
       <div className="safe-area-top safe-area-x flex min-h-14 shrink-0 items-center justify-between gap-2 bg-black/50 px-2 py-1 backdrop-blur-sm sm:px-4 sm:py-3">
         <div className="max-w-[45%] truncate text-sm font-medium text-white sm:max-w-[50%]">{alt || 'Imagen'}</div>
         <div className="flex items-center gap-0.5 sm:gap-1">
@@ -368,6 +373,6 @@ export default function ImageViewer({ src, alt, isOpen, onClose }: ImageViewerPr
         <span className="hidden sm:inline">Scroll para zoom · Arrastra para mover · Esc para cerrar</span>
       </div>
     </div>,
-    document.body,
+    operationalPortal || document.body,
   )
 }

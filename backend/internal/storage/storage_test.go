@@ -77,6 +77,36 @@ func TestProtectedTaskObjectKeysAreExactAndAccountScoped(t *testing.T) {
 	}
 }
 
+func TestWhiteboardObjectKeysAreExactAndAccountScoped(t *testing.T) {
+	accountID := uuid.New()
+	boardID := uuid.New()
+	valid := []string{
+		PrivateObjectKey(accountID, "whiteboards", boardID.String(), "assets", "image.png"),
+		PrivateObjectKey(accountID, "whiteboards", boardID.String(), "revisions", "scene.json.gz"),
+	}
+	for _, key := range valid {
+		if !IsAccountWhiteboardObjectKey(accountID, key) {
+			t.Fatalf("valid whiteboard key was rejected: %q", key)
+		}
+	}
+	otherAccountID := uuid.New()
+	invalid := []string{
+		"",
+		" " + valid[0],
+		valid[0] + " ",
+		"/" + valid[0],
+		otherAccountID.String() + "/_private/whiteboards/" + boardID.String() + "/assets/image.png",
+		accountID.String() + "/_private/whiteboards",
+		accountID.String() + "/_private/whiteboards/../statuses/image.png",
+		accountID.String() + "/_private/tasks/attachments/image.png",
+	}
+	for _, key := range invalid {
+		if IsAccountWhiteboardObjectKey(accountID, key) {
+			t.Fatalf("unsafe whiteboard key was accepted: %q", key)
+		}
+	}
+}
+
 func TestAccountScopedObjectKey(t *testing.T) {
 	accountID := uuid.New()
 	if key, err := accountScopedObjectKey(accountID, "uploads", "photo.jpg"); err != nil || key != accountID.String()+"/uploads/photo.jpg" {

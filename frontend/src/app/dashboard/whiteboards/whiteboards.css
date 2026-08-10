@@ -1,0 +1,137 @@
+.whiteboard-editor-shell .excalidraw,
+.whiteboard-editor-shell .excalidraw-container {
+  width: 100%;
+  height: 100%;
+}
+
+.whiteboard-editor-shell .excalidraw [data-testid="toolbar-embeddable"],
+.whiteboard-editor-shell .excalidraw [data-testid="toolbar-magicframe"],
+.whiteboard-editor-shell .excalidraw [data-testid="help-menu-item"],
+.whiteboard-editor-shell .excalidraw [data-testid="lib-dropdown--remove"],
+.whiteboard-editor-shell .excalidraw .help-icon,
+.whiteboard-editor-shell .excalidraw .HelpDialog,
+.whiteboard-editor-shell .excalidraw .library-menu-browse-button,
+.whiteboard-editor-shell .excalidraw .publish-library,
+.whiteboard-editor-shell .excalidraw a[href^="about:blank"] {
+  display: none !important;
+}
+
+.whiteboard-editor-shell .excalidraw .App-menu_top {
+  padding-top: max(0.5rem, env(safe-area-inset-top));
+}
+
+.whiteboard-editor-shell .whiteboard-integrated-title {
+  width: min(15rem, 18vw);
+  pointer-events: auto;
+}
+
+.whiteboard-editor-shell .whiteboard-integrated-title label {
+  width: calc(100% - 3.75rem);
+}
+
+.whiteboard-editor-shell[data-whiteboard-layout="compact"] .whiteboard-integrated-title {
+  width: 9.5rem;
+}
+
+.whiteboard-editor-shell .whiteboard-integrated-actions {
+  pointer-events: auto;
+}
+
+.whiteboard-editor-shell .whiteboard-integrated-action {
+  display: inline-flex;
+  width: 2.75rem;
+  height: 2.75rem;
+  flex: 0 0 2.75rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  background: rgba(255, 255, 255, 0.96);
+  color: #64748b;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.whiteboard-editor-shell .whiteboard-integrated-action:hover:not(:disabled) {
+  background: #f8fafc;
+  color: #334155;
+}
+
+.whiteboard-editor-shell .whiteboard-integrated-action:focus-visible {
+  outline: 2px solid #10b981;
+  outline-offset: 2px;
+}
+
+.whiteboard-editor-shell .whiteboard-integrated-action:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.whiteboard-editor-shell .whiteboard-integrated-action--primary {
+  border-color: #0f172a;
+  background: #0f172a;
+  color: #fff;
+}
+
+.whiteboard-editor-shell .whiteboard-integrated-action--primary:hover:not(:disabled) {
+  background: #1e293b;
+  color: #fff;
+}
+
+.whiteboard-editor-shell[data-whiteboard-layout="wide"] .excalidraw .default-sidebar-trigger .sidebar-trigger__label {
+  display: none;
+}
+
+.whiteboard-editor-shell[data-whiteboard-layout="compact"] .excalidraw .default-sidebar-trigger,
+.whiteboard-editor-shell[data-whiteboard-layout="mobile"] .excalidraw .default-sidebar-trigger {
+  display: none !important;
+}
+
+.whiteboard-editor-shell .whiteboard-canvas-notice {
+  pointer-events: auto;
+}
+
+.whiteboard-more-menu {
+  max-height: min(32rem, calc(100vh - 1.5rem));
+  overflow-y: auto;
+}
+
+.whiteboard-more-item {
+  display: flex;
+  min-height: 2.75rem;
+  width: 100%;
+  align-items: center;
+  gap: 0.625rem;
+  border-radius: 0.75rem;
+  padding: 0.625rem 0.75rem;
+  color: #475569;
+  font-size: 0.8125rem;
+  font-weight: 750;
+  text-align: left;
+}
+
+.whiteboard-more-item:hover:not(:disabled) {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+.whiteboard-more-item:focus-visible {
+  outline: 2px solid #10b981;
+  outline-offset: -2px;
+}
+
+@media (max-width: 639px) {
+  .whiteboard-editor-shell .whiteboard-canvas-notice {
+    top: 3.75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .whiteboard-editor-shell .excalidraw *,
+  .whiteboard-editor-shell .excalidraw *::before,
+  .whiteboard-editor-shell .excalidraw *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

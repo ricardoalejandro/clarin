@@ -210,6 +210,36 @@ func TestCloudWebhookPayloadParsesCoexistenceMessageEcho(t *testing.T) {
 	}
 }
 
+func TestCloudWebhookPayloadParsesInboundAndEchoReactions(t *testing.T) {
+	raw := []byte(`{
+		"object":"whatsapp_business_account",
+		"entry":[{"id":"waba-1","changes":[{"field":"messages","value":{
+			"messaging_product":"whatsapp",
+			"metadata":{"phone_number_id":"phone-1"},
+			"messages":[{"id":"wamid.reaction-1","from":"51999999999","timestamp":"1710000000","type":"reaction","reaction":{"message_id":"wamid.target-1","emoji":"👍🏽"}}],
+			"message_echoes":[{"id":"wamid.reaction-2","from":"15550001111","to":"51999999999","timestamp":"1710000001","type":"reaction","reaction":{"message_id":"wamid.target-2","emoji":""}}]
+		}}]}]
+	}`)
+
+	var payload cloudWebhookPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal reactions: %v", err)
+	}
+	value := payload.Entry[0].Changes[0].Value
+	if len(value.Messages) != 1 || value.Messages[0].Reaction == nil {
+		t.Fatalf("inbound reaction was not decoded: %+v", value.Messages)
+	}
+	if got := value.Messages[0].Reaction; got.MessageID != "wamid.target-1" || got.Emoji != "👍🏽" {
+		t.Fatalf("unexpected inbound reaction: %+v", got)
+	}
+	if len(value.MessageEchoes) != 1 || value.MessageEchoes[0].Reaction == nil {
+		t.Fatalf("echo reaction was not decoded: %+v", value.MessageEchoes)
+	}
+	if got := value.MessageEchoes[0].Reaction; got.MessageID != "wamid.target-2" || got.Emoji != "" {
+		t.Fatalf("unexpected echo removal: %+v", got)
+	}
+}
+
 func testWhatsAppCloudSignature(secret string, payload []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write(payload)

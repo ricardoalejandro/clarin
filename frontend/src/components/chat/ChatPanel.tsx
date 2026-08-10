@@ -32,6 +32,7 @@ import { applyReactionMutation, dedupeReactions, hasOwnReaction, SELF_REACTION_A
 import { ChatMediaType, validateChatAttachment } from '@/utils/chatAttachments'
 import { chatMediaIdentity } from '@/utils/chatMediaUrl'
 import { useContainerWidth } from '../responsive/useContainerWidth'
+import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
 type CachedChatMessages = {
   messages: Message[]
@@ -176,6 +177,7 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
   const { ref: panelRef, width: panelWidth } = useContainerWidth<HTMLDivElement>()
   const { setComposerAccessoryOpen } = useChatMobileChrome()
   const compactActions = panelWidth > 0 && panelWidth < 640
+  const operationalPortal = useOperationalOverlayPortal()
   const deviceProvider = device?.provider || 'whatsapp_web'
   const deviceUnavailable = Boolean(device && (device.status !== 'connected' || deviceProvider !== 'whatsapp_web'))
   const effectiveReadOnly = readOnly || !deviceId || deviceUnavailable
@@ -258,6 +260,7 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
   const selectedMessageRef = useRef<Message | null>(null)
   const selectionHistoryActiveRef = useRef(false)
   const [showSelectionMenu, setShowSelectionMenu] = useState(false)
+  useOperationalOverlayRegistration(showSelectionMenu, 'chat-selection-menu')
   const [messageActionPending, setMessageActionPending] = useState<'delete' | null>(null)
   const [infoMessage, setInfoMessage] = useState<Message | null>(null)
 
@@ -2169,12 +2172,12 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
     const requestSeq = (reactionRequestSeqRef.current.get(message.message_id) || 0) + 1
     reactionRequestSeqRef.current.set(message.message_id, requestSeq)
 
-    const rollback = () => {
+    const rollback = (messageText = 'No se pudo actualizar la reacción.') => {
       if (reactionRequestSeqRef.current.get(message.message_id) !== requestSeq) return
       updateMessagesForChat(targetChatId, previous => previous.map(item => (
         item.message_id === message.message_id ? { ...item, reactions: previousReactions } : item
       )))
-      if (activeChatIdRef.current === targetChatId) setComposerFeedback({ kind: 'error', message: 'No se pudo actualizar la reacción.' })
+      if (activeChatIdRef.current === targetChatId) setComposerFeedback({ kind: 'error', message: messageText })
     }
 
     updateMessagesForChat(targetChatId, previous => previous.map(item => {
@@ -2196,16 +2199,13 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
-          device_id: deviceId,
-          to: chat.jid,
+          chat_id: chat.id,
           target_message_id: message.message_id,
-          target_from_me: Boolean(message.is_from_me),
-          target_sender_jid: message.from_jid || '',
           emoji: requestedEmoji,
         }),
       })
       const data = await response.json().catch(() => ({}))
-      if (!response.ok || !data.success) rollback()
+      if (!response.ok || !data.success) rollback(data.error || 'No se pudo actualizar la reacción.')
       else clearMessageSelection()
     } catch {
       rollback()
@@ -2346,8 +2346,8 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
 
          {showSelectionMenu && selectedMessage && compactActions && typeof document !== 'undefined' && createPortal(
            <>
-             <button type="button" className="app-viewport fixed inset-0 z-[99] bg-slate-950/20" onClick={() => setShowSelectionMenu(false)} aria-label="Cerrar acciones del mensaje" />
-             <div role="menu" aria-label="Acciones del mensaje seleccionado" className="fixed inset-x-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] z-[100] max-h-[min(72dvh,28rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl">
+             <button type="button" data-chat-overlay="selection-backdrop" className="app-viewport pointer-events-auto fixed inset-0 bg-slate-950/20" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.sheet }} onClick={() => setShowSelectionMenu(false)} aria-label="Cerrar acciones del mensaje" />
+             <div data-chat-overlay="selection-menu" role="menu" aria-label="Acciones del mensaje seleccionado" className="pointer-events-auto fixed inset-x-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] max-h-[min(72dvh,28rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog }}>
                {!effectiveReadOnly && <><p className="px-3 pb-2 pt-1 text-[11px] font-bold uppercase tracking-wide text-slate-400">Reaccionar</p>
                <div className="grid grid-cols-6 gap-1 px-1 pb-2" role="group" aria-label="Reacciones rápidas">
                  {['👍', '❤️', '😂', '😮', '😢', '🙏'].map(emoji => <button key={emoji} type="button" onClick={() => { setShowSelectionMenu(false); void handleReactMessage(selectedMessage, emoji) }} className="flex h-11 items-center justify-center rounded-xl text-2xl hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label={`Reaccionar con ${emoji}`}>{emoji}</button>)}
@@ -2359,7 +2359,7 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
                </div>
              </div>
            </>,
-           document.body,
+           operationalPortal || document.body,
          )}
 
          {showSearch && (

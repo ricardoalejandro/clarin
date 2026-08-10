@@ -205,7 +205,9 @@ func TestTaskAccessBatchSQLResolvesOneWholePage(t *testing.T) {
 		"task_access_grants",
 		"task_folder_access_grants",
 		"task_list_access_grants",
-		"environment.archived_at IS NULL",
+		"environment.deleted_at IS NULL",
+		"list_item.deleted_at IS NULL",
+		"AS historical",
 	} {
 		if !strings.Contains(sql, invariant) {
 			t.Fatalf("batch task access SQL lost invariant %q:\n%s", invariant, sql)

@@ -91,6 +91,12 @@ type SendRequest struct {
 	To       string
 	Text     string
 	Template *TemplateMessage
+	Reaction *ReactionMessage
+}
+
+type ReactionMessage struct {
+	MessageID string `json:"message_id"`
+	Emoji     string `json:"emoji"`
 }
 
 type TemplateMessage struct {
@@ -256,7 +262,10 @@ func (c *Client) Send(ctx context.Context, accessToken, phoneNumberID string, in
 		"recipient_type":    "individual",
 		"to":                strings.TrimSpace(input.To),
 	}
-	if input.Template != nil {
+	if input.Reaction != nil {
+		payload["type"] = "reaction"
+		payload["reaction"] = input.Reaction
+	} else if input.Template != nil {
 		template := map[string]any{
 			"name": input.Template.Name,
 			"language": map[string]string{

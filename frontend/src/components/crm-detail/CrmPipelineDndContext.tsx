@@ -8,6 +8,7 @@ import {
   MouseSensor,
   TouchSensor,
   closestCenter,
+  pointerWithin,
   useDroppable,
   useSensor,
   useSensors,
@@ -16,6 +17,7 @@ import {
   type DragOverEvent,
   type DragStartEvent,
   type KeyboardCoordinateGetter,
+  type CollisionDetection,
 } from '@dnd-kit/core'
 import { createPortal } from 'react-dom'
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
@@ -49,6 +51,10 @@ export function nextCrmPipelineKeyboardStage(stageIds: string[], currentStageId:
   if (currentIndex < 0) return direction > 0 ? stageIds[0] : stageIds[stageIds.length - 1]
   return stageIds[Math.max(0, Math.min(stageIds.length - 1, currentIndex + direction))]
 }
+
+export const crmPipelineCollisionDetection: CollisionDetection = args => (
+  args.pointerCoordinates ? pointerWithin(args) : closestCenter(args)
+)
 
 const crmPipelineKeyboardCoordinates: KeyboardCoordinateGetter = (event, { context }) => {
   const direction = event.code === 'ArrowRight' || event.code === 'ArrowDown'
@@ -89,6 +95,7 @@ export default function CrmPipelineDndContext({ children, stages, onSessionChang
   const [active, setActive] = useState<CrmPipelineDragData | null>(null)
   const [overStageId, setOverStageId] = useState<string | null>(null)
   const [gatherGhosts, setGatherGhosts] = useState<GatherGhost[]>([])
+  const [activeWidth, setActiveWidth] = useState<number | undefined>()
   const gatherTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => () => { if (gatherTimerRef.current) clearTimeout(gatherTimerRef.current) }, [])
@@ -97,6 +104,7 @@ export default function CrmPipelineDndContext({ children, stages, onSessionChang
     setActive(null)
     setOverStageId(null)
     setGatherGhosts([])
+    setActiveWidth(undefined)
     onSessionChange?.(null, null)
   }
 
@@ -104,6 +112,7 @@ export default function CrmPipelineDndContext({ children, stages, onSessionChang
     const data = event.active.data.current as CrmPipelineDragData | undefined
     if (!data || data.kind !== 'crm-pipeline-card') return
     setActive(data)
+    setActiveWidth(event.active.rect.current.initial?.width)
     setOverStageId(data.sourceStageId || null)
     onSessionChange?.(data.entityId, data.sourceStageId || null)
 
@@ -143,7 +152,7 @@ export default function CrmPipelineDndContext({ children, stages, onSessionChang
   return <>
     <DndContext
       sensors={disabled ? [] : sensors}
-      collisionDetection={closestCenter}
+      collisionDetection={crmPipelineCollisionDetection}
       autoScroll
       measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
       onDragStart={start}
@@ -159,7 +168,7 @@ export default function CrmPipelineDndContext({ children, stages, onSessionChang
     >
       {children}
       <DragOverlay dropAnimation={{ duration: 180, easing: 'ease-out' }} style={{ zIndex: 160 }}>
-        {active ? <OperationalDragOverlay label={active.label} count={active.count} singular={active.singular} plural={active.plural} destination={destination?.name} destinationColor={destination?.color} /> : null}
+        {active ? <OperationalDragOverlay label={active.label} count={active.count} singular={active.singular} plural={active.plural} destination={destination?.name} destinationColor={destination?.color} sourceWidth={activeWidth} /> : null}
       </DragOverlay>
     </DndContext>
     {gatherGhosts.length > 0 && typeof document !== 'undefined' && createPortal(<div className="pointer-events-none fixed inset-0 z-[159] motion-reduce:hidden" aria-hidden="true">{gatherGhosts.map(ghost => <div key={ghost.id} data-operational-gather-ghost className="fixed overflow-hidden rounded-xl border border-emerald-300 bg-white px-3 py-2 shadow-xl" style={{ left: ghost.left, top: ghost.top, width: ghost.width, height: ghost.height, '--task-gather-x': `${ghost.dx}px`, '--task-gather-y': `${ghost.dy}px` } as CSSProperties}><span className="line-clamp-2 text-sm font-semibold text-slate-700">{ghost.label}</span></div>)}</div>, document.body)}

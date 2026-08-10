@@ -108,7 +108,7 @@ func (r *TaskWorkRepository) EnsureDefaultListForEnvironment(ctx context.Context
 	}
 	var id uuid.UUID
 	if err := r.db.QueryRow(ctx, `SELECT id FROM task_lists
-		WHERE account_id=$1 AND environment_id=$2 AND is_default AND archived_at IS NULL`, accountID, environmentID).Scan(&id); err != nil {
+		WHERE account_id=$1 AND environment_id=$2 AND is_default AND archived_at IS NULL AND deleted_at IS NULL`, accountID, environmentID).Scan(&id); err != nil {
 		return nil, err
 	}
 	return &id, nil
@@ -121,9 +121,9 @@ func (r *TaskWorkRepository) ListFolders(ctx context.Context, accountID uuid.UUI
 func listTaskFolders(ctx context.Context, querier taskListQuerier, accountID uuid.UUID) ([]*domain.TaskFolder, []*domain.TaskList, error) {
 	rows, err := querier.Query(ctx, `
 		SELECT f.id,f.account_id,f.environment_id,f.workflow_id,COALESCE(f.workflow_inherited,TRUE),f.name,f.description,f.color,f.icon,f.sort_order,f.created_by,
-			f.archived_at,f.created_at,f.updated_at
+			f.archived_at,f.deleted_at,f.deleted_by,f.created_at,f.updated_at
 		FROM task_folders f
-		WHERE f.account_id=$1 AND f.archived_at IS NULL
+		WHERE f.account_id=$1 AND f.archived_at IS NULL AND f.deleted_at IS NULL
 		ORDER BY f.sort_order,f.created_at
 	`, accountID)
 	if err != nil {
@@ -135,11 +135,12 @@ func listTaskFolders(ctx context.Context, querier taskListQuerier, accountID uui
 	for rows.Next() {
 		folder := &domain.TaskFolder{}
 		if err := rows.Scan(&folder.ID, &folder.AccountID, &folder.EnvironmentID, &folder.WorkflowID, &folder.WorkflowInherited, &folder.Name, &folder.Description,
-			&folder.Color, &folder.Icon, &folder.SortOrder, &folder.CreatedBy, &folder.ArchivedAt, &folder.CreatedAt,
+			&folder.Color, &folder.Icon, &folder.SortOrder, &folder.CreatedBy, &folder.ArchivedAt, &folder.DeletedAt, &folder.DeletedBy, &folder.CreatedAt,
 			&folder.UpdatedAt); err != nil {
 			return nil, nil, err
 		}
 		folder.Lists = []*domain.TaskList{}
+		folder.SetLifecycle()
 		folders = append(folders, folder)
 		byID[folder.ID] = folder
 	}
@@ -474,59 +475,6 @@ func lockTaskWorkflowStatuses(ctx context.Context, tx pgx.Tx, accountID, workflo
 	}
 	rows.Close()
 	return nil
-}
-
-func (r *TaskWorkRepository) ArchiveFolder(ctx context.Context, accountID, folderID uuid.UUID) error {
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if err := tx.QueryRow(ctx, `SELECT id FROM task_folders WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, accountID, folderID).Scan(new(uuid.UUID)); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrTaskWorkNotFound
-		}
-		return err
-	}
-	listRows, err := tx.Query(ctx, `SELECT id FROM task_lists WHERE account_id=$1 AND folder_id=$2 ORDER BY id FOR UPDATE`, accountID, folderID)
-	if err != nil {
-		return err
-	}
-	for listRows.Next() {
-		var lockedListID uuid.UUID
-		if err := listRows.Scan(&lockedListID); err != nil {
-			listRows.Close()
-			return err
-		}
-	}
-	if err := listRows.Err(); err != nil {
-		listRows.Close()
-		return err
-	}
-	listRows.Close()
-	var activeTasks int
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM tasks task JOIN task_lists list
-		ON list.account_id=task.account_id AND list.id=task.list_id
-		WHERE task.account_id=$1 AND list.folder_id=$2 AND task.deleted_at IS NULL`, accountID, folderID).Scan(&activeTasks); err != nil {
-		return err
-	}
-	if activeTasks > 0 {
-		return ErrTaskContainerNotEmpty
-	}
-	command, err := tx.Exec(ctx, `UPDATE task_folders SET archived_at=NOW(),updated_at=NOW() WHERE account_id=$1 AND id=$2 AND archived_at IS NULL`, accountID, folderID)
-	if err == nil && command.RowsAffected() == 0 {
-		return ErrTaskWorkNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE task_lists SET folder_id=NULL,workflow_inherited=TRUE,updated_at=NOW() WHERE account_id=$1 AND folder_id=$2 AND is_default AND archived_at IS NULL`, accountID, folderID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE task_lists SET archived_at=NOW(),archived_with_folder=TRUE,updated_at=NOW() WHERE account_id=$1 AND folder_id=$2 AND NOT is_default AND archived_at IS NULL`, accountID, folderID); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
 }
 
 func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, listID uuid.UUID, folderID *uuid.UUID, folderProvided bool, beforeListID *uuid.UUID, orderProvided bool, workflowID *uuid.UUID, inherited *bool, description, name, color, icon *string) error {

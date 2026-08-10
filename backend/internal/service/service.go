@@ -46,6 +46,7 @@ type Services struct {
 	Task             *TaskService
 	TaskAccess       *TaskAccessService
 	DocumentTemplate *DocumentTemplateService
+	Whiteboard       *WhiteboardService
 	Report           *ReportService
 }
 
@@ -73,6 +74,7 @@ func NewServices(repos *repository.Repositories, pool *whatsapp.DevicePool, hub 
 		Task:             NewTaskService(repos, hub),
 		TaskAccess:       NewTaskAccessService(repos),
 		DocumentTemplate: NewDocumentTemplateService(repos),
+		Whiteboard:       NewWhiteboardService(repos),
 		Report:           NewReportService(repos, pool),
 	}
 }

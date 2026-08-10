@@ -652,3 +652,25 @@ html.kanban-panning * {
 @media (prefers-reduced-motion: reduce) {
   .survey-step-enter { animation: none; }
 }
+@keyframes crm-chat-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(10px, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.crm-chat-enter {
+  animation: crm-chat-enter 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crm-chat-enter {
+    animation: none;
+    will-change: auto;
+  }
+}

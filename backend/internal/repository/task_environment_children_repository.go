@@ -25,7 +25,7 @@ func (r *TaskWorkRepository) ListEnvironmentFolders(ctx context.Context, account
 	cursorSortOrder, cursorID := taskStructureCursorValues(cursor)
 	rows, err := r.db.Query(ctx, `SELECT folder.id,folder.account_id,folder.environment_id,folder.workflow_id,
 		COALESCE(folder.workflow_inherited,TRUE),folder.name,folder.description,folder.color,folder.icon,folder.sort_order,
-		folder.created_by,folder.archived_at,folder.access_mode,folder.access_revision,folder.created_at,folder.updated_at,
+		folder.created_by,folder.archived_at,folder.deleted_at,folder.deleted_by,folder.access_mode,folder.access_revision,folder.created_at,folder.updated_at,
 		(`+taskActorFolderAccessRankSQL("folder", "$3")+`) AS access_rank,
 		(`+taskActorFolderCanManageSQL("folder", "$3")+`) AS can_manage_access,
 		COALESCE(counts.task_count,0),COALESCE(counts.open_count,0),COALESCE(counts.done_count,0),COALESCE(counts.cancelled_count,0)
@@ -37,11 +37,11 @@ func (r *TaskWorkRepository) ListEnvironmentFolders(ctx context.Context, account
 			FROM task_lists list_item
 			JOIN tasks task ON task.account_id=list_item.account_id AND task.list_id=list_item.id
 			LEFT JOIN task_statuses status ON status.account_id=task.account_id AND status.id=task.status_id
-			WHERE list_item.account_id=folder.account_id AND list_item.folder_id=folder.id AND list_item.archived_at IS NULL
+			WHERE list_item.account_id=folder.account_id AND list_item.folder_id=folder.id AND list_item.archived_at IS NULL AND list_item.deleted_at IS NULL
 			  AND task.parent_task_id IS NULL AND task.deleted_at IS NULL
 			  AND `+taskActorCanViewSQL("task", "list_item", "$3")+`
 		) counts ON TRUE
-		WHERE folder.account_id=$1 AND folder.environment_id=$2 AND folder.archived_at IS NULL
+		WHERE folder.account_id=$1 AND folder.environment_id=$2 AND folder.archived_at IS NULL AND folder.deleted_at IS NULL
 		  AND (`+taskActorFolderAccessRankSQL("folder", "$3")+`) >= 1
 		  AND ($4::text='' OR folder.name ILIKE '%' || $4 || '%' OR folder.description ILIKE '%' || $4 || '%')
 		  AND ($5::int IS NULL OR (folder.sort_order,folder.id) > ($5,$6))
@@ -57,12 +57,13 @@ func (r *TaskWorkRepository) ListEnvironmentFolders(ctx context.Context, account
 		var canManageAccess bool
 		if err := rows.Scan(&item.ID, &item.AccountID, &item.EnvironmentID, &item.WorkflowID, &item.WorkflowInherited,
 			&item.Name, &item.Description, &item.Color, &item.Icon, &item.SortOrder, &item.CreatedBy, &item.ArchivedAt,
-			&item.AccessMode, &item.AccessRevision, &item.CreatedAt, &item.UpdatedAt, &accessRank, &canManageAccess,
+			&item.DeletedAt, &item.DeletedBy, &item.AccessMode, &item.AccessRevision, &item.CreatedAt, &item.UpdatedAt, &accessRank, &canManageAccess,
 			&item.TaskCount, &item.OpenTaskCount, &item.CompletedTaskCount,
 			&item.CancelledTaskCount); err != nil {
 			return nil, nil, err
 		}
 		item.SetEffectiveAccess(buildTaskEffectiveAccess(taskAccessLevelFromRank(accessRank), canManageAccess, "folder_policy"))
+		item.SetLifecycle()
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -88,7 +89,8 @@ func (r *TaskWorkRepository) ListEnvironmentLists(ctx context.Context, accountID
 	rows, err := r.db.Query(ctx, `SELECT list_item.id,list_item.account_id,list_item.environment_id,list_item.folder_id,list_item.workflow_id,
 		COALESCE(list_item.workflow_inherited,TRUE),COALESCE(list_item.is_default,FALSE),list_item.name,
 		COALESCE(list_item.description,''),list_item.color,COALESCE(list_item.icon,CASE WHEN list_item.is_default THEN 'inbox' ELSE 'list' END),
-		list_item.sort_order,list_item.created_by,list_item.archived_at,list_item.access_mode,list_item.access_revision,list_item.created_at,list_item.updated_at,
+		list_item.sort_order,list_item.created_by,list_item.archived_at,COALESCE(list_item.archived_with_folder,FALSE),
+		list_item.deleted_at,list_item.deleted_by,COALESCE(list_item.deleted_with_folder,FALSE),list_item.access_mode,list_item.access_revision,list_item.created_at,list_item.updated_at,
 		(`+taskActorListAccessRankSQL("list_item", "$3")+`) AS access_rank,
 		(`+taskActorListCanManageSQL("list_item", "$3")+`) AS can_manage_access,
 		COALESCE(counts.task_count,0),COALESCE(counts.open_count,0),COALESCE(counts.done_count,0),COALESCE(counts.cancelled_count,0)
@@ -101,7 +103,7 @@ func (r *TaskWorkRepository) ListEnvironmentLists(ctx context.Context, accountID
 			WHERE task.account_id=list_item.account_id AND task.list_id=list_item.id AND task.parent_task_id IS NULL
 			  AND task.deleted_at IS NULL AND `+taskActorCanViewSQL("task", "list_item", "$3")+`
 		) counts ON TRUE
-		WHERE list_item.account_id=$1 AND list_item.environment_id=$2 AND list_item.archived_at IS NULL
+		WHERE list_item.account_id=$1 AND list_item.environment_id=$2 AND list_item.archived_at IS NULL AND list_item.deleted_at IS NULL
 		  AND (`+taskActorListAccessRankSQL("list_item", "$3")+`) >= 1
 		  AND ($4::boolean OR (($5::uuid IS NULL AND list_item.folder_id IS NULL) OR list_item.folder_id=$5))
 		  AND ($6::text='' OR list_item.name ILIKE '%' || $6 || '%' OR list_item.description ILIKE '%' || $6 || '%')
@@ -118,12 +120,14 @@ func (r *TaskWorkRepository) ListEnvironmentLists(ctx context.Context, accountID
 		var canManageAccess bool
 		if err := rows.Scan(&item.ID, &item.AccountID, &item.EnvironmentID, &item.FolderID, &item.WorkflowID,
 			&item.WorkflowInherited, &item.IsDefault, &item.Name, &item.Description, &item.Color, &item.Icon, &item.SortOrder,
-			&item.CreatedBy, &item.ArchivedAt, &item.AccessMode, &item.AccessRevision, &item.CreatedAt, &item.UpdatedAt,
+			&item.CreatedBy, &item.ArchivedAt, &item.ArchivedWithFolder, &item.DeletedAt, &item.DeletedBy, &item.DeletedWithFolder,
+			&item.AccessMode, &item.AccessRevision, &item.CreatedAt, &item.UpdatedAt,
 			&accessRank, &canManageAccess, &item.TaskCount, &item.OpenTaskCount,
 			&item.CompletedTaskCount, &item.CancelledTaskCount); err != nil {
 			return nil, nil, err
 		}
 		item.SetEffectiveAccess(buildTaskEffectiveAccess(taskAccessLevelFromRank(accessRank), canManageAccess, "list_policy"))
+		item.SetLifecycle()
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {

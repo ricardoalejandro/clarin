@@ -46,6 +46,27 @@ func TestClientSendUsesBearerProofAndOfficialPayload(t *testing.T) {
 	}
 }
 
+func TestClientSendReactionUsesTargetMessageAndEmoji(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		raw, _ := io.ReadAll(request.Body)
+		body := string(raw)
+		for _, expected := range []string{`"type":"reaction"`, `"message_id":"wamid.target"`, `"emoji":"👍"`} {
+			if !strings.Contains(body, expected) {
+				t.Fatalf("reaction payload missing %s: %s", expected, body)
+			}
+		}
+		if strings.Contains(body, `"text"`) || strings.Contains(body, `"template"`) {
+			t.Fatalf("reaction payload mixed message types: %s", body)
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"messages":[{"id":"wamid.reaction"}]}`))}, nil
+	})
+	client := NewClient("https://graph.example", "v23.0", "app-id", "app-secret", &http.Client{Transport: transport})
+	_, err := client.Send(context.Background(), "business-token", "phone-id", SendRequest{To: "51999999999", Reaction: &ReactionMessage{MessageID: "wamid.target", Emoji: "👍"}})
+	if err != nil {
+		t.Fatalf("Send reaction: %v", err)
+	}
+}
+
 func TestGraphErrorDoesNotExposeCredentials(t *testing.T) {
 	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return &http.Response{

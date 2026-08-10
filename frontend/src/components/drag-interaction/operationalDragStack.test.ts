@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { crmPipelineDropDecision, fallbackOperationalOperationId, operationalDragStackLayers } from './operationalDragStack'
+import { operationalDragOverlayWidth } from './OperationalDragOverlay'
 
 describe('operational drag visuals', () => {
+  it('keeps the overlay inside the measured CRM card footprint', () => {
+    expect(operationalDragOverlayWidth(256)).toBe(244)
+    expect(operationalDragOverlayWidth(160)).toBe(196)
+    expect(operationalDragOverlayWidth(400)).toBe(272)
+    expect(operationalDragOverlayWidth()).toBe(260)
+  })
   it('renders at most three converging layers', () => {
     expect(operationalDragStackLayers(1)).toHaveLength(1)
     expect(operationalDragStackLayers(8)).toHaveLength(3)

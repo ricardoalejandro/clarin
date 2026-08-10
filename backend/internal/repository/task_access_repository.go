@@ -81,7 +81,8 @@ func buildTaskEffectiveAccess(level string, manage bool, inheritedFrom string) *
 	rank := taskAccessRank(level)
 	return &domain.TaskEffectiveAccess{
 		Level: level, CanView: rank >= 1, CanComment: rank >= 2, CanEdit: rank >= 3,
-		CanDelete: rank >= 4, CanManageAccess: rank >= 4 && manage, InheritedFrom: inheritedFrom,
+		CanDelete: rank >= 4, CanArchive: rank >= 4, CanTrash: rank >= 4, CanRestore: rank >= 4,
+		CanManageAccess: rank >= 4 && manage, InheritedFrom: inheritedFrom,
 	}
 }
 
@@ -288,7 +289,7 @@ func requireTaskEnvironmentActive(active bool) error {
 // must treat an archived environment as hidden.
 func (r *TaskWorkRepository) RequireActiveEnvironmentAccess(ctx context.Context, accountID, userID, environmentID uuid.UUID, required string) (*domain.TaskEffectiveAccess, error) {
 	var active bool
-	if err := r.db.QueryRow(ctx, `SELECT archived_at IS NULL FROM task_environments WHERE account_id=$1 AND id=$2`, accountID, environmentID).Scan(&active); err != nil {
+	if err := r.db.QueryRow(ctx, `SELECT archived_at IS NULL AND deleted_at IS NULL FROM task_environments WHERE account_id=$1 AND id=$2`, accountID, environmentID).Scan(&active); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrTaskWorkNotFound
 		}
@@ -317,7 +318,7 @@ func (r *TaskWorkRepository) RequireTaskAccess(ctx context.Context, accountID, u
 func (r *TaskWorkRepository) DefaultEnvironmentID(ctx context.Context, accountID uuid.UUID) (uuid.UUID, error) {
 	var environmentID uuid.UUID
 	err := r.db.QueryRow(ctx, `SELECT id FROM task_environments
-		WHERE account_id=$1 AND is_default AND archived_at IS NULL`, accountID).Scan(&environmentID)
+		WHERE account_id=$1 AND is_default AND archived_at IS NULL AND deleted_at IS NULL`, accountID).Scan(&environmentID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, ErrTaskWorkNotFound
 	}
@@ -366,13 +367,14 @@ func resolveContainerAccessWith(ctx context.Context, q taskAccessQuerier, accoun
 		COALESCE(list_item.access_mode,'inherit'),list_grant.access_level,list_grant.can_manage_access
 	FROM task_lists list_item
 	LEFT JOIN task_folders folder ON folder.account_id=list_item.account_id AND folder.id=list_item.folder_id
-	JOIN task_environments environment ON environment.account_id=list_item.account_id AND environment.id=list_item.environment_id AND environment.archived_at IS NULL
+	JOIN task_environments environment ON environment.account_id=list_item.account_id AND environment.id=list_item.environment_id AND environment.archived_at IS NULL AND environment.deleted_at IS NULL
 	JOIN user_accounts membership ON membership.account_id=environment.account_id AND membership.user_id=$2
 	JOIN users account_user ON account_user.id=membership.user_id
 	LEFT JOIN task_environment_grants environment_grant ON environment_grant.account_id=environment.account_id AND environment_grant.environment_id=environment.id AND environment_grant.user_id=membership.user_id
 	LEFT JOIN task_folder_access_grants folder_grant ON folder_grant.account_id=folder.account_id AND folder_grant.folder_id=folder.id AND folder_grant.user_id=membership.user_id
 	LEFT JOIN task_list_access_grants list_grant ON list_grant.account_id=list_item.account_id AND list_grant.list_id=list_item.id AND list_grant.user_id=membership.user_id
-	WHERE list_item.account_id=$1 AND list_item.id=$3 AND list_item.archived_at IS NULL`
+	WHERE list_item.account_id=$1 AND list_item.id=$3 AND list_item.archived_at IS NULL AND list_item.deleted_at IS NULL
+	  AND (folder.id IS NULL OR (folder.archived_at IS NULL AND folder.deleted_at IS NULL))`
 	if resourceType == domain.TaskAccessTargetFolder {
 		query = `SELECT environment.id,
 			(membership.role IN ('admin','super_admin') OR COALESCE(account_user.is_admin,FALSE) OR COALESCE(account_user.is_super_admin,FALSE)) AS is_admin,
@@ -381,12 +383,12 @@ func resolveContainerAccessWith(ctx context.Context, q taskAccessQuerier, accoun
 			folder.access_mode,folder_grant.access_level,folder_grant.can_manage_access,
 			'inherit'::varchar,NULL::varchar,NULL::boolean
 		FROM task_folders folder
-		JOIN task_environments environment ON environment.account_id=folder.account_id AND environment.id=folder.environment_id AND environment.archived_at IS NULL
+		JOIN task_environments environment ON environment.account_id=folder.account_id AND environment.id=folder.environment_id AND environment.archived_at IS NULL AND environment.deleted_at IS NULL
 		JOIN user_accounts membership ON membership.account_id=environment.account_id AND membership.user_id=$2
 		JOIN users account_user ON account_user.id=membership.user_id
 		LEFT JOIN task_environment_grants environment_grant ON environment_grant.account_id=environment.account_id AND environment_grant.environment_id=environment.id AND environment_grant.user_id=membership.user_id
 		LEFT JOIN task_folder_access_grants folder_grant ON folder_grant.account_id=folder.account_id AND folder_grant.folder_id=folder.id AND folder_grant.user_id=membership.user_id
-		WHERE folder.account_id=$1 AND folder.id=$3 AND folder.archived_at IS NULL`
+		WHERE folder.account_id=$1 AND folder.id=$3 AND folder.archived_at IS NULL AND folder.deleted_at IS NULL`
 	}
 	var environmentID uuid.UUID
 	var admin bool
@@ -892,8 +894,12 @@ func taskActorCanViewIncludingArchivedSQL(taskAlias, listAlias, actorExpression 
 func taskActorCanViewSQL(taskAlias, listAlias, actorExpression string) string {
 	activeEnvironment := fmt.Sprintf(`EXISTS(SELECT 1 FROM task_environments active_environment
 		WHERE active_environment.account_id=%s.account_id AND active_environment.id=%s.environment_id
-		  AND active_environment.archived_at IS NULL)`, listAlias, listAlias)
-	return activeEnvironment + " AND " + taskActorCanViewIncludingArchivedSQL(taskAlias, listAlias, actorExpression)
+		  AND active_environment.archived_at IS NULL AND active_environment.deleted_at IS NULL)`, listAlias, listAlias)
+	activeList := fmt.Sprintf(`%s.archived_at IS NULL AND %s.deleted_at IS NULL`, listAlias, listAlias)
+	activeFolder := fmt.Sprintf(`(%s.folder_id IS NULL OR EXISTS(SELECT 1 FROM task_folders active_folder
+		WHERE active_folder.account_id=%s.account_id AND active_folder.id=%s.folder_id
+		  AND active_folder.archived_at IS NULL AND active_folder.deleted_at IS NULL))`, listAlias, listAlias, listAlias)
+	return activeEnvironment + " AND " + activeList + " AND " + activeFolder + " AND " + taskActorCanViewIncludingArchivedSQL(taskAlias, listAlias, actorExpression)
 }
 
 // TaskActorCanViewSQL exposes the canonical Work visibility predicate to the
@@ -918,7 +924,8 @@ func taskAccessBatchSQL() string {
 		environment_grant.access_level,environment_grant.can_manage_access,
 		folder.access_mode,folder_grant.access_level,folder_grant.can_manage_access,
 		COALESCE(list_item.access_mode,'inherit'),list_grant.access_level,list_grant.can_manage_access,
-		task_grant.access_level,task_grant.can_manage_access
+		task_grant.access_level,task_grant.can_manage_access,
+		(environment.archived_at IS NOT NULL OR list_item.archived_at IS NOT NULL OR folder.archived_at IS NOT NULL) AS historical
 	FROM tasks task
 	JOIN tasks root ON root.account_id=task.account_id AND root.id=COALESCE(task.parent_task_id,task.id)
 	JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
@@ -934,7 +941,9 @@ func taskAccessBatchSQL() string {
 		AND list_grant.list_id=list_item.id AND list_grant.user_id=membership.user_id
 	LEFT JOIN task_access_grants task_grant ON task_grant.account_id=root.account_id
 		AND task_grant.task_id=root.id AND task_grant.user_id=membership.user_id
-	WHERE task.account_id=$1 AND task.id=ANY($2::uuid[]) AND environment.archived_at IS NULL
+	WHERE task.account_id=$1 AND task.id=ANY($2::uuid[])
+	  AND environment.deleted_at IS NULL AND list_item.deleted_at IS NULL
+	  AND (folder.id IS NULL OR folder.deleted_at IS NULL)
 	ORDER BY task.id`
 }
 
@@ -959,14 +968,14 @@ func (r *TaskWorkRepository) ApplyTaskAccess(ctx context.Context, accountID, use
 		var id, environmentID uuid.UUID
 		var accessMode, visibility, defaultLevel, listMode string
 		var folderMode *string
-		var admin bool
+		var admin, historical bool
 		var environmentGrantLevel, folderGrantLevel, listGrantLevel, taskGrantLevel *string
 		var environmentGrantManage, folderGrantManage, listGrantManage, taskGrantManage *bool
 		if err := rows.Scan(&id, &environmentID, &accessMode, &admin, &visibility, &defaultLevel,
 			&environmentGrantLevel, &environmentGrantManage,
 			&folderMode, &folderGrantLevel, &folderGrantManage,
 			&listMode, &listGrantLevel, &listGrantManage,
-			&taskGrantLevel, &taskGrantManage); err != nil {
+			&taskGrantLevel, &taskGrantManage, &historical); err != nil {
 			rows.Close()
 			return err
 		}
@@ -1016,6 +1025,11 @@ func (r *TaskWorkRepository) ApplyTaskAccess(ctx context.Context, accountID, use
 			task.ListName = ""
 			task.FolderID = nil
 			task.FolderName = ""
+		}
+		if historical && task.Permissions != nil && task.Permissions.CanView {
+			// Historical task content remains readable, while every mutation still
+			// requires the ordinary active-resource guards.
+			task.SetEffectiveAccess(buildTaskEffectiveAccess(domain.TaskAccessView, false, "historical_read_only"))
 		}
 	}
 	if err := rows.Err(); err != nil {

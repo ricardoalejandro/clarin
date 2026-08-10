@@ -144,6 +144,7 @@ export default function useOperationalWindow({
   const [preferredGeometry, setPreferredGeometry] = useState<OperationalWindowGeometry>(defaults)
   const [viewport, setViewport] = useState<OperationalWindowViewport>(currentViewport)
   const [hydratedStorageKey, setHydratedStorageKey] = useState('')
+  const [isInteracting, setIsInteracting] = useState(false)
   const restoreModeRef = useRef<RestorableOperationalWindowMode>(defaultMode)
   const effectiveGeometry = useMemo(
     () => clampOperationalWindowGeometry(preferredGeometry, viewport, minWidth, minHeight),
@@ -206,11 +207,13 @@ export default function useOperationalWindow({
     event.preventDefault()
     const startX = event.clientX
     const startY = event.clientY
+    setIsInteracting(true)
     const move = (pointer: PointerEvent) => {
       pointer.preventDefault()
       moveValue(pointer.clientX - startX, pointer.clientY - startY)
     }
     const end = () => {
+      setIsInteracting(false)
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', end)
       window.removeEventListener('pointercancel', end)
@@ -254,5 +257,5 @@ export default function useOperationalWindow({
     return { left: effectiveGeometry.x, top: effectiveGeometry.y, width: effectiveGeometry.width, height: effectiveGeometry.height }
   }, [dockedWidth, effectiveGeometry, effectiveMode, isMobile])
 
-  return { effectiveMode, isMobile, isModal, temporaryModeActive: Boolean(temporaryMode), panelStyle, viewport, effectiveGeometry, setMode, toggleMaximized, resetGeometry, beginDrag, beginResize }
+  return { effectiveMode, isMobile, isModal, isInteracting, temporaryModeActive: Boolean(temporaryMode), panelStyle, viewport, effectiveGeometry, setMode, toggleMaximized, resetGeometry, beginDrag, beginResize }
 }

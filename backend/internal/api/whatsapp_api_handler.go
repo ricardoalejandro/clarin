@@ -90,6 +90,10 @@ type cloudWebhookMessage struct {
 	} `json:"audio"`
 	Interactive map[string]interface{} `json:"interactive"`
 	Button      map[string]interface{} `json:"button"`
+	Reaction    *struct {
+		MessageID string `json:"message_id"`
+		Emoji     string `json:"emoji"`
+	} `json:"reaction"`
 }
 
 type cloudWebhookStatus struct {
@@ -395,6 +399,9 @@ func (s *Server) processCloudAPIMessage(ctx context.Context, device *domain.Devi
 	if err != nil {
 		return fmt.Errorf("failed to get/create chat: %w", err)
 	}
+	if message.Type == domain.MessageTypeReaction {
+		return s.processCloudAPIReaction(ctx, device, chat, message, jid, contactName, false)
+	}
 
 	body, msgType, mediaMimetype, mediaFilename := cloudMessageBody(message)
 	timestamp := parseCloudTimestamp(message.Timestamp)
@@ -485,6 +492,13 @@ func (s *Server) processCloudAPIMessageEcho(ctx context.Context, device *domain.
 	if err != nil {
 		return fmt.Errorf("failed to get/create echo chat: %w", err)
 	}
+	if message.Type == domain.MessageTypeReaction {
+		senderJID := stringValueOrEmpty(device.JID)
+		if senderJID == "" {
+			senderJID = "cloud-device:" + device.ID.String()
+		}
+		return s.processCloudAPIReaction(ctx, device, chat, message, senderJID, "Tú", true)
+	}
 	body, msgType, mediaMimetype, mediaFilename := cloudMessageBody(message)
 	timestamp := parseCloudTimestamp(message.Timestamp)
 	provider := domain.DeviceProviderWhatsAppCloudAPI
@@ -519,6 +533,51 @@ func (s *Server) processCloudAPIMessageEcho(ctx context.Context, device *domain.
 			"message":    dbMessage,
 		})
 		s.hub.BroadcastToAccountWithPermission(device.AccountID, domain.PermChats, ws.EventChatUpdate, map[string]interface{}{"chat_id": chat.ID.String()})
+	}
+	return nil
+}
+
+func (s *Server) processCloudAPIReaction(ctx context.Context, device *domain.Device, chat *domain.Chat, message cloudWebhookMessage, senderJID, senderName string, isFromMe bool) error {
+	if message.Reaction == nil || strings.TrimSpace(message.Reaction.MessageID) == "" {
+		return errors.New("cloud reaction has no target message")
+	}
+	emoji, valid := normalizeReactionEmoji(message.Reaction.Emoji)
+	if !valid {
+		return errors.New("cloud reaction contains an invalid emoji")
+	}
+	targetMessageID := strings.TrimSpace(message.Reaction.MessageID)
+	target, err := s.services.Chat.GetMessageByID(ctx, chat.ID, targetMessageID)
+	if err != nil || !messageBelongsToChatAccount(target, chat.ID, device.AccountID) {
+		return fmt.Errorf("cloud reaction target does not belong to chat: %s", targetMessageID)
+	}
+	if target.DeviceID == nil || *target.DeviceID != device.ID || target.IsRevoked {
+		return fmt.Errorf("cloud reaction target is not available: %s", targetMessageID)
+	}
+	timestamp := parseCloudTimestamp(message.Timestamp)
+	changed := false
+	if emoji == "" {
+		changed, err = s.repos.Reaction.Delete(ctx, device.AccountID, chat.ID, targetMessageID, senderJID, timestamp)
+	} else {
+		changed, err = s.repos.Reaction.Upsert(ctx, &domain.MessageReaction{
+			AccountID: device.AccountID, ChatID: chat.ID, TargetMessageID: targetMessageID,
+			SenderJID: senderJID, SenderName: strPtr(senderName), Emoji: emoji,
+			IsFromMe: isFromMe, Timestamp: timestamp,
+		})
+	}
+	if err != nil {
+		return fmt.Errorf("failed to persist cloud reaction: %w", err)
+	}
+	if !changed {
+		return nil
+	}
+	s.invalidateMessagesCache(device.AccountID, &chat.ID)
+	if s.hub != nil {
+		s.hub.BroadcastToAccountWithPermission(device.AccountID, domain.PermChats, ws.EventMessageReaction, map[string]interface{}{
+			"chat_id": chat.ID.String(), "target_message_id": targetMessageID,
+			"sender_jid": senderJID, "sender_name": senderName, "emoji": emoji,
+			"is_from_me": isFromMe, "removed": emoji == "", "timestamp": timestamp,
+			"provider": domain.DeviceProviderWhatsAppCloudAPI,
+		})
 	}
 	return nil
 }

@@ -16,27 +16,31 @@ export function crmDetailWorkspaceLayout(width: number, chatOpen: boolean) {
   return width >= 980 ? 'split' as const : 'chat' as const
 }
 
+export function shouldCloseCrmChatOnEscape(chatOpen: boolean, key: string, defaultPrevented: boolean) {
+  return chatOpen && key === 'Escape' && !defaultPrevented
+}
+
 export default function CrmDetailWorkspace({ detail, chat, chatOpen = false, onBackToDetail }: Props) {
   const { ref, width } = useContainerWidth<HTMLDivElement>()
   const layout = crmDetailWorkspaceLayout(width, chatOpen)
   const split = layout === 'split'
 
   useEffect(() => {
-    if (!chatOpen || split) return
+    if (!chatOpen) return
     const closeChat = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.defaultPrevented) return
+      if (!shouldCloseCrmChatOnEscape(chatOpen, event.key, event.defaultPrevented)) return
       event.preventDefault()
       event.stopPropagation()
       onBackToDetail?.()
     }
     document.addEventListener('keydown', closeChat, true)
     return () => document.removeEventListener('keydown', closeChat, true)
-  }, [chatOpen, onBackToDetail, split])
+  }, [chatOpen, onBackToDetail])
 
   return (
     <div ref={ref} className="flex h-full min-h-0 min-w-0 bg-slate-50">
       {chatOpen && chat && (
-        <section className={`${split ? 'min-w-[480px] flex-1 border-r' : 'w-full'} flex min-h-0 min-w-0 flex-col border-slate-200 bg-slate-50`} aria-label="Conversación">
+        <section className={`${split ? 'min-w-[480px] flex-1 border-r' : 'w-full'} crm-chat-enter flex min-h-0 min-w-0 flex-col border-slate-200 bg-slate-50`} aria-label="Conversación">
           {!split && (
             <div className="shrink-0 border-b border-slate-200 bg-white px-3 py-2">
               <button type="button" onClick={onBackToDetail} className="inline-flex min-h-10 items-center gap-2 rounded-xl px-3 text-xs font-bold text-slate-700 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">

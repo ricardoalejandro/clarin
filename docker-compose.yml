@@ -192,6 +192,18 @@ services:
       - "traefik.http.services.clarin-api.loadbalancer.server.port=8080"
       - "traefik.http.routers.clarin-api.service=clarin-api"
       - "traefik.http.routers.clarin-api.priority=100"
+      # Public whiteboard link exchange accepts only a tiny JSON credential
+      # envelope. This higher-priority router rejects oversized bodies at the
+      # edge, before Fiber's global 52 MiB upload parser can allocate them.
+      - "traefik.http.routers.clarin-whiteboard-guest-session.rule=Host(`clarin.naperu.cloud`) && Method(`POST`) && PathRegexp(`^/api/public/whiteboard-links/[0-9a-fA-F-]+/session$`)"
+      - "traefik.http.routers.clarin-whiteboard-guest-session.entrypoints=websecure"
+      - "traefik.http.routers.clarin-whiteboard-guest-session.tls=true"
+      - "traefik.http.routers.clarin-whiteboard-guest-session.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.clarin-whiteboard-guest-session.service=clarin-api"
+      - "traefik.http.routers.clarin-whiteboard-guest-session.priority=250"
+      - "traefik.http.routers.clarin-whiteboard-guest-session.middlewares=clarin-whiteboard-guest-session-limit"
+      - "traefik.http.middlewares.clarin-whiteboard-guest-session-limit.buffering.maxRequestBodyBytes=16384"
+      - "traefik.http.middlewares.clarin-whiteboard-guest-session-limit.buffering.memRequestBodyBytes=16384"
       # MCP Server (Model Context Protocol) on port 8081.
       - "traefik.http.routers.clarin-mcp.rule=Host(`clarin.naperu.cloud`) && PathPrefix(`/mcp`)"
       - "traefik.http.routers.clarin-mcp.entrypoints=websecure"

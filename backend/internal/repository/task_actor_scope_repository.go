@@ -13,7 +13,7 @@ type actorTaskListCounts struct {
 
 func (r *TaskWorkRepository) accessibleEnvironmentIDs(ctx context.Context, accountID, userID uuid.UUID, environmentID *uuid.UUID) (map[uuid.UUID]*domain.TaskEffectiveAccess, error) {
 	query := `SELECT environment.id FROM task_environments environment
-		WHERE environment.account_id=$1 AND environment.archived_at IS NULL
+		WHERE environment.account_id=$1 AND environment.archived_at IS NULL AND environment.deleted_at IS NULL
 		  AND ($3::uuid IS NULL OR environment.id=$3)
 		  AND (` + environmentActorAccessRankSQL("environment", "$2") + `) >= 1
 		ORDER BY environment.sort_order,environment.id`
@@ -47,6 +47,7 @@ func (r *TaskWorkRepository) actorVisibleTaskCounts(ctx context.Context, account
 		JOIN tasks task ON task.account_id=list_item.account_id AND task.list_id=list_item.id
 		LEFT JOIN task_statuses status ON status.account_id=task.account_id AND status.id=task.status_id
 		WHERE list_item.account_id=$1 AND ($3::uuid IS NULL OR list_item.environment_id=$3)
+		  AND list_item.archived_at IS NULL AND list_item.deleted_at IS NULL
 		  AND task.parent_task_id IS NULL AND task.deleted_at IS NULL
 		  AND `+taskActorCanViewSQL("task", "list_item", "$2")+`
 		GROUP BY list_item.id`, accountID, userID, environmentID)

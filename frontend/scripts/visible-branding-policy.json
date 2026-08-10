@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "policyId": "clarin-whiteboards-visible-branding-v1",
+  "description": "Copia de compilación de la política canónica de la skill; permite verificar el artefacto dentro del contexto Docker aislado del frontend.",
+  "legalArtifactBasenames": [
+    "LICENSE",
+    "LICENSE.md",
+    "LICENSE.txt",
+    "NOTICE",
+    "NOTICE.md",
+    "NOTICE.txt",
+    "THIRD_PARTY_EXCALIDRAW.md",
+    "THIRD_PARTY_NOTICES.md",
+    "FONT-NOTICES.md",
+    "OFL-1.1.txt",
+    "COMIC-SHANNS-MIT.txt"
+  ],
+  "forbiddenVisibleText": [
+    {
+      "id": "upstream-product-name",
+      "pattern": "(?<![.a-z0-9_-])excalidraw(?:\\s*plus|\\+)?(?![a-z0-9_-])",
+      "flags": "iu",
+      "reason": "La marca upstream no forma parte de la interfaz de Pizarras; los tokens de formato .excalidraw y application/vnd.excalidraw se mantienen compatibles."
+    },
+    {
+      "id": "upstream-public-library-browser",
+      "pattern": "(?:explorar|browse)(?:\\s+(?:las|the))?\\s+(?:bibliotecas|libraries)",
+      "flags": "iu",
+      "reason": "El catálogo público upstream está sustituido por bibliotecas internas de la cuenta."
+    },
+    {
+      "id": "upstream-library-publishing",
+      "pattern": "(?:publica(?:r)?(?:\\s+tu\\s+propia)?|publish(?:\\s+your\\s+own)?)\\s+(?:biblioteca|library)",
+      "flags": "iu",
+      "reason": "La publicación upstream está deshabilitada; los catálogos se gestionan dentro de Clarin."
+    },
+    {
+      "id": "upstream-public-library-repository",
+      "pattern": "(?:biblioteca|library).{0,100}(?:repositorio\\s+p[uú]blico|public\\s+repository)",
+      "flags": "isu",
+      "reason": "No se debe sugerir instalar contenido desde el repositorio público upstream."
+    },
+    {
+      "id": "upstream-blog-navigation",
+      "pattern": "(?:lea\\s+nuestro\\s+blog|read\\s+our\\s+blog)",
+      "flags": "iu",
+      "reason": "La ayuda de Pizarras no navega al blog upstream."
+    },
+    {
+      "id": "upstream-guide-navigation",
+      "pattern": "(?:siga\\s+nuestras\\s+gu[ií]as|follow\\s+our\\s+guides)",
+      "flags": "iu",
+      "reason": "La ayuda de Pizarras no navega a guías upstream."
+    },
+    {
+      "id": "upstream-issue-navigation",
+      "pattern": "(?:ha\\s+encontrado\\s+un\\s+problema|found\\s+an\\s+issue).{0,60}(?:env[ií]elo|submit\\s+it)",
+      "flags": "isu",
+      "reason": "Los errores de Clarin no deben enviar usuarios al tracker upstream."
+    }
+  ]
+}

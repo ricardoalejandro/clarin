@@ -16,7 +16,7 @@ const taskEnvironmentUpdateSQL = `UPDATE task_environments SET name=$4,descripti
 	visibility=$8::varchar,default_access_level=$9::varchar,
 	access_revision=access_revision+CASE WHEN visibility IS DISTINCT FROM $8::varchar OR default_access_level IS DISTINCT FROM $9::varchar THEN 1 ELSE 0 END,
 	version=version+1,updated_at=NOW()
-	WHERE account_id=$1 AND id=$2 AND version=$3 AND archived_at IS NULL`
+	WHERE account_id=$1 AND id=$2 AND version=$3 AND archived_at IS NULL AND deleted_at IS NULL`
 
 func taskEnvironmentWriteError(err error) error {
 	var pgErr *pgconn.PgError
@@ -67,8 +67,9 @@ func (r *TaskWorkRepository) ListEnvironments(ctx context.Context, accountID, us
 	rows, err := r.db.Query(ctx, `
 		SELECT environment.id,environment.account_id,environment.name,environment.description,environment.color,environment.icon,
 			environment.sort_order,environment.visibility,environment.default_access_level,environment.is_default,environment.created_by,
-			environment.archived_at,environment.version,environment.access_revision,environment.created_at,environment.updated_at,
+			environment.archived_at,environment.deleted_at,environment.deleted_by,environment.version,environment.access_revision,environment.created_at,environment.updated_at,
 			COALESCE(counts.folder_count,0),COALESCE(counts.list_count,0),COALESCE(counts.task_count,0),
+			COALESCE(counts.open_task_count,0),COALESCE(counts.completed_task_count,0),COALESCE(counts.cancelled_task_count,0),
 			(`+environmentActorAccessRankSQL("environment", "$2")+`) AS access_rank,
 			CASE WHEN `+environmentActorAdminSQL("environment", "$2")+` THEN TRUE ELSE COALESCE((
 				SELECT environment_grant.can_manage_access FROM task_environment_grants environment_grant
@@ -82,15 +83,31 @@ func (r *TaskWorkRepository) ListEnvironments(ctx context.Context, accountID, us
 		FROM task_environments environment
 		LEFT JOIN LATERAL (
 			SELECT
-				(SELECT COUNT(*) FROM task_folders folder WHERE folder.account_id=environment.account_id AND folder.environment_id=environment.id AND folder.archived_at IS NULL)::int AS folder_count,
-				(SELECT COUNT(*) FROM task_lists list_count WHERE list_count.account_id=environment.account_id AND list_count.environment_id=environment.id AND list_count.archived_at IS NULL)::int AS list_count,
+				(SELECT COUNT(*) FROM task_folders folder WHERE folder.account_id=environment.account_id AND folder.environment_id=environment.id AND folder.archived_at IS NULL AND folder.deleted_at IS NULL)::int AS folder_count,
+				(SELECT COUNT(*) FROM task_lists list_count WHERE list_count.account_id=environment.account_id AND list_count.environment_id=environment.id AND list_count.archived_at IS NULL AND list_count.deleted_at IS NULL)::int AS list_count,
 				(SELECT COUNT(*) FROM tasks task
 				 JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
 				 WHERE task.account_id=environment.account_id AND list_item.environment_id=environment.id
 				   AND task.parent_task_id IS NULL AND task.deleted_at IS NULL
-				   AND `+taskActorCanViewIncludingArchivedSQL("task", "list_item", "$2")+`)::int AS task_count
+				   AND `+taskActorCanViewIncludingArchivedSQL("task", "list_item", "$2")+`)::int AS task_count,
+				(SELECT COUNT(*) FROM tasks task JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
+				 LEFT JOIN task_statuses status ON status.account_id=task.account_id AND status.id=task.status_id
+				 WHERE task.account_id=environment.account_id AND list_item.environment_id=environment.id AND task.deleted_at IS NULL
+				   AND COALESCE(status.category,CASE task.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END) NOT IN ('done','cancelled')
+				   AND `+taskActorCanViewIncludingArchivedSQL("task", "list_item", "$2")+`)::int AS open_task_count,
+				(SELECT COUNT(*) FROM tasks task JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
+				 LEFT JOIN task_statuses status ON status.account_id=task.account_id AND status.id=task.status_id
+				 WHERE task.account_id=environment.account_id AND list_item.environment_id=environment.id AND task.deleted_at IS NULL
+				   AND COALESCE(status.category,CASE task.status WHEN 'completed' THEN 'done' ELSE '' END)='done'
+				   AND `+taskActorCanViewIncludingArchivedSQL("task", "list_item", "$2")+`)::int AS completed_task_count,
+				(SELECT COUNT(*) FROM tasks task JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
+				 LEFT JOIN task_statuses status ON status.account_id=task.account_id AND status.id=task.status_id
+				 WHERE task.account_id=environment.account_id AND list_item.environment_id=environment.id AND task.deleted_at IS NULL
+				   AND COALESCE(status.category,CASE task.status WHEN 'cancelled' THEN 'cancelled' ELSE '' END)='cancelled'
+				   AND `+taskActorCanViewIncludingArchivedSQL("task", "list_item", "$2")+`)::int AS cancelled_task_count
 		) counts ON TRUE
 		WHERE environment.account_id=$1
+		  AND environment.deleted_at IS NULL
 		  AND ($3::boolean OR environment.archived_at IS NULL)
 		  AND ($4::text='' OR environment.name ILIKE '%' || $4::text || '%' OR environment.description ILIKE '%' || $4::text || '%')
 		  AND ($5::int IS NULL OR (environment.sort_order,environment.id) > ($5,$6))
@@ -109,8 +126,9 @@ func (r *TaskWorkRepository) ListEnvironments(ctx context.Context, accountID, us
 		var canManage bool
 		var inheritedFrom string
 		if err := rows.Scan(&item.ID, &item.AccountID, &item.Name, &item.Description, &item.Color, &item.Icon,
-			&item.SortOrder, &item.Visibility, &item.DefaultAccessLevel, &item.IsDefault, &item.CreatedBy, &item.ArchivedAt,
+			&item.SortOrder, &item.Visibility, &item.DefaultAccessLevel, &item.IsDefault, &item.CreatedBy, &item.ArchivedAt, &item.DeletedAt, &item.DeletedBy,
 			&item.Version, &item.AccessRevision, &item.CreatedAt, &item.UpdatedAt, &item.FolderCount, &item.ListCount, &item.TaskCount,
+			&item.OpenTaskCount, &item.CompletedTaskCount, &item.CancelledTaskCount,
 			&accessRank, &canManage, &inheritedFrom); err != nil {
 			return nil, nil, err
 		}
@@ -126,6 +144,7 @@ func (r *TaskWorkRepository) ListEnvironments(ctx context.Context, accountID, us
 			accessLevel = domain.TaskAccessView
 		}
 		item.SetEffectiveAccess(buildTaskEffectiveAccess(accessLevel, canManage, inheritedFrom))
+		item.SetLifecycle()
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -152,20 +171,37 @@ func (r *TaskWorkRepository) GetEnvironment(ctx context.Context, accountID, user
 	item.SetEffectiveAccess(access)
 	err = r.db.QueryRow(ctx, `SELECT environment.id,environment.account_id,environment.name,environment.description,
 		environment.color,environment.icon,environment.sort_order,environment.visibility,environment.default_access_level,
-		environment.is_default,environment.created_by,environment.archived_at,environment.version,environment.access_revision,
+		environment.is_default,environment.created_by,environment.archived_at,environment.deleted_at,environment.deleted_by,environment.version,environment.access_revision,
 		environment.created_at,environment.updated_at,
-		(SELECT COUNT(*) FROM task_folders folder WHERE folder.account_id=environment.account_id AND folder.environment_id=environment.id AND folder.archived_at IS NULL),
-		(SELECT COUNT(*) FROM task_lists list_item WHERE list_item.account_id=environment.account_id AND list_item.environment_id=environment.id AND list_item.archived_at IS NULL),
+		(SELECT COUNT(*) FROM task_folders folder WHERE folder.account_id=environment.account_id AND folder.environment_id=environment.id AND folder.archived_at IS NULL AND folder.deleted_at IS NULL),
+		(SELECT COUNT(*) FROM task_lists list_item WHERE list_item.account_id=environment.account_id AND list_item.environment_id=environment.id AND list_item.archived_at IS NULL AND list_item.deleted_at IS NULL),
 		(SELECT COUNT(*) FROM tasks task JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
 		 WHERE task.account_id=environment.account_id AND list_item.environment_id=environment.id AND task.parent_task_id IS NULL AND task.deleted_at IS NULL
+		   AND `+taskActorCanViewIncludingArchivedSQL("task", "list_item", "$3")+`),
+		(SELECT COUNT(*) FROM tasks task JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
+		 LEFT JOIN task_statuses status ON status.account_id=task.account_id AND status.id=task.status_id
+		 WHERE task.account_id=environment.account_id AND list_item.environment_id=environment.id AND task.deleted_at IS NULL
+		   AND COALESCE(status.category,CASE task.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END) NOT IN ('done','cancelled')
+		   AND `+taskActorCanViewIncludingArchivedSQL("task", "list_item", "$3")+`),
+		(SELECT COUNT(*) FROM tasks task JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
+		 LEFT JOIN task_statuses status ON status.account_id=task.account_id AND status.id=task.status_id
+		 WHERE task.account_id=environment.account_id AND list_item.environment_id=environment.id AND task.deleted_at IS NULL
+		   AND COALESCE(status.category,CASE task.status WHEN 'completed' THEN 'done' ELSE '' END)='done'
+		   AND `+taskActorCanViewIncludingArchivedSQL("task", "list_item", "$3")+`),
+		(SELECT COUNT(*) FROM tasks task JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
+		 LEFT JOIN task_statuses status ON status.account_id=task.account_id AND status.id=task.status_id
+		 WHERE task.account_id=environment.account_id AND list_item.environment_id=environment.id AND task.deleted_at IS NULL
+		   AND COALESCE(status.category,CASE task.status WHEN 'cancelled' THEN 'cancelled' ELSE '' END)='cancelled'
 		   AND `+taskActorCanViewIncludingArchivedSQL("task", "list_item", "$3")+`)
 		FROM task_environments environment WHERE environment.account_id=$1 AND environment.id=$2`, accountID, environmentID, userID).
 		Scan(&item.ID, &item.AccountID, &item.Name, &item.Description, &item.Color, &item.Icon, &item.SortOrder,
-			&item.Visibility, &item.DefaultAccessLevel, &item.IsDefault, &item.CreatedBy, &item.ArchivedAt, &item.Version,
-			&item.AccessRevision, &item.CreatedAt, &item.UpdatedAt, &item.FolderCount, &item.ListCount, &item.TaskCount)
+			&item.Visibility, &item.DefaultAccessLevel, &item.IsDefault, &item.CreatedBy, &item.ArchivedAt, &item.DeletedAt, &item.DeletedBy, &item.Version,
+			&item.AccessRevision, &item.CreatedAt, &item.UpdatedAt, &item.FolderCount, &item.ListCount, &item.TaskCount,
+			&item.OpenTaskCount, &item.CompletedTaskCount, &item.CancelledTaskCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrTaskWorkNotFound
 	}
+	item.SetLifecycle()
 	return item, err
 }
 
@@ -267,7 +303,7 @@ func (r *TaskWorkRepository) UpdateEnvironment(ctx context.Context, accountID, a
 	var previousVisibility, previousDefaultAccess string
 	var previousAccessRevision int64
 	if err := tx.QueryRow(ctx, `SELECT visibility,default_access_level,access_revision FROM task_environments
-		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, accountID, environment.ID).
+		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL AND deleted_at IS NULL FOR UPDATE`, accountID, environment.ID).
 		Scan(&previousVisibility, &previousDefaultAccess, &previousAccessRevision); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound
@@ -330,7 +366,7 @@ func (r *TaskWorkRepository) ArchiveEnvironment(ctx context.Context, accountID, 
 	var isDefault bool
 	var version int64
 	if err := tx.QueryRow(ctx, `SELECT is_default,version FROM task_environments
-		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, accountID, environmentID).Scan(&isDefault, &version); err != nil {
+		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL AND deleted_at IS NULL FOR UPDATE`, accountID, environmentID).Scan(&isDefault, &version); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound
 		}
@@ -349,13 +385,15 @@ func (r *TaskWorkRepository) ArchiveEnvironment(ctx context.Context, accountID, 
 	if version != expectedVersion {
 		return ErrTaskVersionConflict
 	}
-	var activeTasks int
+	var openTasks int
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM tasks task JOIN task_lists list_item
 		ON list_item.account_id=task.account_id AND list_item.id=task.list_id
-		WHERE task.account_id=$1 AND list_item.environment_id=$2 AND task.deleted_at IS NULL`, accountID, environmentID).Scan(&activeTasks); err != nil {
+		LEFT JOIN task_statuses status ON status.account_id=task.account_id AND status.id=task.status_id
+		WHERE task.account_id=$1 AND list_item.environment_id=$2 AND task.deleted_at IS NULL
+		  AND COALESCE(status.category,CASE task.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END) NOT IN ('done','cancelled')`, accountID, environmentID).Scan(&openTasks); err != nil {
 		return err
 	}
-	if activeTasks > 0 {
+	if openTasks > 0 {
 		return ErrTaskContainerNotEmpty
 	}
 	if _, err := tx.Exec(ctx, `UPDATE task_environments SET archived_at=NOW(),version=version+1,updated_at=NOW()
@@ -373,7 +411,7 @@ func (r *TaskWorkRepository) RestoreEnvironment(ctx context.Context, accountID, 
 	defer tx.Rollback(ctx)
 	var version int64
 	if err := tx.QueryRow(ctx, `SELECT version FROM task_environments
-		WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL FOR UPDATE`, accountID, environmentID).Scan(&version); err != nil {
+		WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL AND deleted_at IS NULL FOR UPDATE`, accountID, environmentID).Scan(&version); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound
 		}
@@ -390,7 +428,7 @@ func (r *TaskWorkRepository) RestoreEnvironment(ctx context.Context, accountID, 
 		return ErrTaskVersionConflict
 	}
 	command, err := tx.Exec(ctx, `UPDATE task_environments SET archived_at=NULL,version=version+1,updated_at=NOW()
-		WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL`, accountID, environmentID)
+		WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL AND deleted_at IS NULL`, accountID, environmentID)
 	if err != nil {
 		return err
 	}

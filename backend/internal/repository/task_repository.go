@@ -764,7 +764,8 @@ func (r *TaskRepository) GetByAccount(ctx context.Context, accountID uuid.UUID, 
 
 func (r *TaskRepository) getByAccount(ctx context.Context, accountID uuid.UUID, filters map[string]string, limit, offset int, cursor *TaskPageCursor) ([]*domain.Task, int, error) {
 	where := []string{"t.account_id=$1"}
-	if filters["deleted"] == "true" {
+	lifecycle := strings.ToLower(strings.TrimSpace(filters["lifecycle"]))
+	if lifecycle == domain.TaskLifecycleTrash || filters["deleted"] == "true" {
 		where = append(where, "t.deleted_at IS NOT NULL")
 	} else {
 		where = append(where, "t.deleted_at IS NULL")
@@ -773,11 +774,20 @@ func (r *TaskRepository) getByAccount(ctx context.Context, accountID uuid.UUID, 
 	idx := 2
 	actorID, actorScoped := uuid.Parse(strings.TrimSpace(filters["_actor_user_id"]))
 	if actorScoped == nil {
-		where = append(where, taskActorCanViewSQL("t", "tl", fmt.Sprintf("$%d", idx)))
+		if lifecycle == domain.TaskLifecycleArchived {
+			where = append(where, taskActorCanViewIncludingArchivedSQL("t", "tl", fmt.Sprintf("$%d", idx)))
+			where = append(where, `tl.deleted_at IS NULL AND (tf.id IS NULL OR tf.deleted_at IS NULL)
+				AND EXISTS(SELECT 1 FROM task_environments lifecycle_environment
+					WHERE lifecycle_environment.account_id=tl.account_id AND lifecycle_environment.id=tl.environment_id
+					  AND lifecycle_environment.deleted_at IS NULL
+					  AND (lifecycle_environment.archived_at IS NOT NULL OR tl.archived_at IS NOT NULL OR tf.archived_at IS NOT NULL))`)
+		} else {
+			where = append(where, taskActorCanViewSQL("t", "tl", fmt.Sprintf("$%d", idx)))
+		}
 		args = append(args, actorID)
 		idx++
 	}
-	if taskFiltersExcludeClosed(filters) {
+	if lifecycle != domain.TaskLifecycleArchived && taskFiltersExcludeClosed(filters) {
 		where = append(where, "COALESCE(ts.category,CASE t.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END) NOT IN ('done','cancelled')")
 	}
 
@@ -1466,7 +1476,8 @@ func (r *TaskRepository) GetListsByAccount(ctx context.Context, accountID uuid.U
 func getTaskListsByAccount(ctx context.Context, querier taskListQuerier, accountID uuid.UUID) ([]*domain.TaskList, error) {
 	rows, err := querier.Query(ctx, `
 		SELECT tl.id, tl.account_id, tl.environment_id, tl.folder_id, tl.workflow_id, COALESCE(tl.workflow_inherited,TRUE), COALESCE(tl.is_default,FALSE), tl.name, COALESCE(tl.description,''), tl.color, COALESCE(tl.icon,CASE WHEN tl.is_default THEN 'inbox' ELSE 'list' END),
-			tl.sort_order, tl.created_by, tl.archived_at, tl.created_at, tl.updated_at,
+			tl.sort_order, tl.created_by, tl.archived_at,COALESCE(tl.archived_with_folder,FALSE),
+			tl.deleted_at,tl.deleted_by,COALESCE(tl.deleted_with_folder,FALSE),tl.created_at, tl.updated_at,
 			COALESCE(task_counts.task_count,0), COALESCE(task_counts.open_task_count,0),
 			COALESCE(task_counts.completed_task_count,0), COALESCE(task_counts.cancelled_task_count,0)
 		FROM task_lists tl
@@ -1482,7 +1493,7 @@ func getTaskListsByAccount(ctx context.Context, querier taskListQuerier, account
 			LEFT JOIN task_statuses status ON status.account_id=task.account_id AND status.id=task.status_id
 			WHERE task.account_id=tl.account_id AND task.list_id=tl.id AND task.parent_task_id IS NULL AND task.deleted_at IS NULL
 		) task_counts ON TRUE
-		WHERE tl.account_id=$1 AND tl.archived_at IS NULL
+		WHERE tl.account_id=$1 AND tl.archived_at IS NULL AND tl.deleted_at IS NULL
 		ORDER BY tl.sort_order, tl.created_at
 	`, accountID)
 	if err != nil {
@@ -1494,10 +1505,12 @@ func getTaskListsByAccount(ctx context.Context, querier taskListQuerier, account
 	for rows.Next() {
 		l := &domain.TaskList{}
 		if err := rows.Scan(&l.ID, &l.AccountID, &l.EnvironmentID, &l.FolderID, &l.WorkflowID, &l.WorkflowInherited, &l.IsDefault, &l.Name, &l.Description, &l.Color, &l.Icon,
-			&l.SortOrder, &l.CreatedBy, &l.ArchivedAt, &l.CreatedAt, &l.UpdatedAt, &l.TaskCount,
+			&l.SortOrder, &l.CreatedBy, &l.ArchivedAt, &l.ArchivedWithFolder, &l.DeletedAt, &l.DeletedBy, &l.DeletedWithFolder,
+			&l.CreatedAt, &l.UpdatedAt, &l.TaskCount,
 			&l.OpenTaskCount, &l.CompletedTaskCount, &l.CancelledTaskCount); err != nil {
 			return nil, err
 		}
+		l.SetLifecycle()
 		lists = append(lists, l)
 	}
 	if err := rows.Err(); err != nil {

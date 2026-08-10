@@ -770,3 +770,109 @@ func (s *Server) handleSendWhatsAppCloudMessage(c *fiber.Ctx) error {
 	}
 	return c.JSON(fiber.Map{"success": true, "message": message, "chat": chat})
 }
+
+func (s *Server) handleSetWhatsAppCloudReaction(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	chatID, err := uuid.Parse(strings.TrimSpace(c.Params("id")))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Chat inválido", "code": "invalid_chat_id"})
+	}
+	var request struct {
+		Emoji       string `json:"emoji"`
+		OperationID string `json:"operation_id,omitempty"`
+	}
+	if err := c.BodyParser(&request); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Solicitud inválida", "code": "invalid_request"})
+	}
+	emoji, valid := normalizeReactionEmoji(request.Emoji)
+	if !valid {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Selecciona un solo emoji", "code": "invalid_reaction_emoji"})
+	}
+	chat, err := s.services.Chat.GetByID(c.Context(), chatID)
+	if err != nil || !chatBelongsToAccount(chat, accountID) || chat.DeviceID == nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Chat API no encontrado", "code": "chat_not_found"})
+	}
+	device, err := s.requireCloudDeviceForAccount(c.Context(), accountID, *chat.DeviceID)
+	if err != nil || device.Status == nil || *device.Status != domain.DeviceStatusConnected || !device.APISendingEnabled || device.PhoneNumberID == nil {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "El canal oficial no está disponible", "code": "cloud_channel_not_ready"})
+	}
+	targetMessageID := strings.TrimSpace(c.Params("messageId"))
+	message, err := s.services.Chat.GetMessageByID(c.Context(), chat.ID, targetMessageID)
+	if err != nil || !messageBelongsToChatAccount(message, chat.ID, accountID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Mensaje no encontrado", "code": "message_not_found"})
+	}
+	if message.DeviceID == nil || *message.DeviceID != device.ID || message.IsRevoked || strings.EqualFold(stringValueOrEmpty(message.MessageType), domain.MessageTypeReaction) {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Este mensaje no admite reacciones", "code": "reaction_target_invalid"})
+	}
+	if time.Since(message.Timestamp) > 30*24*time.Hour {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "Meta no admite reacciones a mensajes de más de 30 días", "code": "reaction_too_old"})
+	}
+	canSend, expiresAt, err := s.repos.WhatsAppAPI.CanSendFreeform(c.Context(), accountID, chat.ID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo validar la ventana de conversación"})
+	}
+	if !canSend {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "La ventana de 24 horas está cerrada", "code": "outside_customer_service_window", "window_expires_at": expiresAt})
+	}
+	if err := s.ensureOutboundContactAllowed(c.Context(), accountID, chat.JID); err != nil {
+		if apiError, ok := err.(*fiber.Error); ok {
+			return c.Status(apiError.Code).JSON(fiber.Map{"success": false, "error": apiError.Message, "code": "do_not_contact"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo validar el contacto"})
+	}
+	token, err := s.loadCloudAccessToken(c.Context(), accountID, device.ID)
+	if err != nil {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "cloud_credential_unavailable"})
+	}
+	client, err := s.cloudClient()
+	if err != nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if err := s.checkAbuseLimits(c, "whatsapp_cloud_reaction_rate_limited", device.ID.String(), []abuseLimit{
+		{Key: "abuse:whatsapp-cloud-reaction:account:second:" + accountID.String(), Max: 12, Window: time.Second},
+		{Key: "abuse:whatsapp-cloud-reaction:device:minute:" + device.ID.String(), Max: 240, Window: time.Minute},
+	}); err != nil {
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"success": false, "error": "Demasiadas reacciones en poco tiempo", "code": "cloud_reaction_rate_limited"})
+	}
+	result, err := client.Send(c.Context(), token, *device.PhoneNumberID, whatsappcloud.SendRequest{
+		To: normalizeWhatsAppPhone(chat.JID), Reaction: &whatsappcloud.ReactionMessage{MessageID: message.MessageID, Emoji: emoji},
+	})
+	if err != nil {
+		if errors.Is(err, whatsappcloud.ErrSendOutcomeUnknown) {
+			return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"success": true, "state": "provider_outcome_unknown", "operation_id": request.OperationID})
+		}
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"success": false, "error": "Meta rechazó la reacción", "code": "meta_reaction_failed"})
+	}
+	now := time.Now().UTC()
+	senderJID := stringValueOrEmpty(device.JID)
+	if senderJID == "" {
+		senderJID = "cloud-device:" + device.ID.String()
+	}
+	reaction := &domain.MessageReaction{AccountID: accountID, ChatID: chat.ID, TargetMessageID: message.MessageID, SenderJID: senderJID, SenderName: strPtr("Tú"), Emoji: emoji, IsFromMe: true, Timestamp: now}
+	persisted := true
+	if emoji == "" {
+		_, err = s.repos.Reaction.Delete(c.Context(), accountID, chat.ID, message.MessageID, senderJID, now)
+	} else {
+		_, err = s.repos.Reaction.Upsert(c.Context(), reaction)
+	}
+	if err != nil {
+		persisted = false
+		log.Printf("[WHATSAPP_API] Meta applied reaction but persistence failed account=%s chat=%s target=%s provider_message=%s: %v", accountID, chat.ID, message.MessageID, result.MessageID, err)
+	}
+	s.invalidateMessagesCache(accountID, &chat.ID)
+	removed := emoji == ""
+	if s.hub != nil {
+		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventMessageReaction, map[string]any{
+			"chat_id": chat.ID.String(), "target_message_id": message.MessageID, "sender_jid": senderJID,
+			"sender_name": "Tú", "emoji": emoji, "is_from_me": true, "removed": removed,
+			"timestamp": now, "provider": domain.DeviceProviderWhatsAppCloudAPI, "operation_id": request.OperationID,
+		})
+	}
+	status := fiber.StatusOK
+	state := "applied"
+	if !persisted {
+		status = fiber.StatusAccepted
+		state = "provider_applied_local_pending"
+	}
+	return c.Status(status).JSON(fiber.Map{"success": true, "state": state, "removed": removed, "reaction": reaction, "operation_id": request.OperationID})
+}

@@ -75,7 +75,7 @@ describe('TaskListView compact interaction', () => {
 
   it('renders dense rows and keeps completion, status and star as separate controls', () => {
     render(<TaskListView {...props} />)
-    expect(document.querySelector('[data-task-list-row="task-1"]')).toHaveClass('min-h-14', 'py-1.5')
+    expect(document.querySelector('[data-task-list-row="task-1"]')).toHaveClass('min-h-12', '[@media(pointer:coarse)]:min-h-14')
     expect(screen.getByRole('button', { name: `Completar ${task.title}` })).toBeInTheDocument()
     expect(document.querySelector('[data-task-status-picker]')).toHaveClass('min-h-9')
     expect(screen.getByRole('button', { name: `Destacar ${task.title}` })).toBeInTheDocument()

@@ -5,11 +5,12 @@ import { createPortal } from 'react-dom'
 import { Check, CheckCheck, Download, FileText, Clock, AlertCircle, RefreshCw, Reply, Forward, Star, SmilePlus, BarChart3, Trash2, MapPin, Phone, Eye, Ban, Pencil, Plus, ChevronDown, Loader2, Info, Copy } from 'lucide-react'
 import { renderFormattedText } from '@/lib/whatsappFormat'
 import { Message, Reaction, PollOption } from '@/types/chat'
-import { splitEmojiSegments, getAppleEmojiUrl } from '@/utils/appleEmoji'
+import { splitEmojiSegments } from '@/utils/appleEmoji'
 import dynamic from 'next/dynamic'
 import { canonicalChatMediaUrl, chatMediaIdentity } from '@/utils/chatMediaUrl'
 import { dedupeReactions } from '@/utils/chatReactions'
 import styles from './MessageBubble.module.css'
+import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
 /** Reconstruct WhatsApp-formatted text from DOM nodes (preserves *, _, ~, ` markers on copy) */
 function domToWhatsApp(node: Node): string {
@@ -95,6 +96,9 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
   const longPressTimerRef = useRef<number | null>(null)
   const longPressOriginRef = useRef({ x: 0, y: 0 })
   const suppressClickRef = useRef(false)
+  const operationalPortal = useOperationalOverlayPortal()
+  const overlayOpen = showEmojiPicker || showFullPicker || showContextMenu
+  useOperationalOverlayRegistration(overlayOpen, `message-actions:${message.id}`)
 
   const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏']
 
@@ -226,7 +230,10 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
       }
     }
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeAllPickers()
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      closeAllPickers()
     }
     document.addEventListener('mousedown', handleClick)
     document.addEventListener('keydown', handleKey)
@@ -624,20 +631,18 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
         {Object.values(grouped).map((g) => (
           <button
             key={g.emoji}
+            type="button"
             onClick={() => onReact?.(message, g.emoji)}
+            disabled={!onReact}
+            aria-label={`${g.hasOwn ? 'Quitar' : 'Reaccionar con'} ${g.emoji}${g.count > 1 ? `, ${g.count} reacciones` : ''}`}
+            title={onReact ? undefined : 'Reacciones no disponibles en modo de solo lectura'}
             className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-xs border transition-colors ${
               g.hasOwn
                 ? 'bg-green-100 border-green-300 hover:bg-green-200'
                 : 'bg-gray-100 border-gray-200 hover:bg-gray-200'
             }`}
           >
-            <img
-              src={getAppleEmojiUrl(g.emoji)}
-              alt={g.emoji}
-              className="inline-block"
-              style={{ width: '16px', height: '16px' }}
-              draggable={false}
-            />
+            <span aria-hidden className="text-base leading-none">{g.emoji}</span>
             {g.count > 1 && <span className="text-gray-600">{g.count}</span>}
           </button>
         ))}
@@ -669,6 +674,13 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
 
   const hasVisualMedia = !!message.media_url && ['image', 'video', 'gif'].includes(message.message_type || '') && !message.is_view_once
   const isOptimistic = (message.id || '').startsWith('optimistic-')
+  const hasMessageActions = Boolean(
+    onReact || onReply || onForward
+    || (onCopy && (message.body || message.media_filename))
+    || (onInfo && message.is_from_me)
+    || (onEdit && message.is_from_me && message.message_type === 'text')
+    || (onDelete && message.is_from_me),
+  )
 
   // Detect single-emoji messages (exactly 1 emoji, no text)
   const isEmojiOnly = (() => {
@@ -791,41 +803,13 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
           isEmojiOnly ? (
             <div className={`flex flex-wrap gap-1 ${message.is_from_me ? 'justify-end' : 'justify-start'}`}>
               {splitEmojiSegments(message.body.trim()).filter(s => s.type === 'emoji').map((seg, i) => (
-                <img
-                  key={i}
-                  src={getAppleEmojiUrl(seg.value)}
-                  alt={seg.value}
-                  className="inline-block object-contain"
-                  style={{ width: '66px', height: '66px' }}
-                  draggable={false}
-                  onError={(e) => {
-                    const span = document.createElement('span')
-                    span.textContent = seg.value
-                    span.style.fontSize = '66px'
-                    span.style.lineHeight = '1'
-                    e.currentTarget.replaceWith(span)
-                  }}
-                />
+                <span key={i} aria-label={seg.value} role="img" className="inline-block text-[66px] leading-none">{seg.value}</span>
               ))}
             </div>
           ) : isMultiEmojiOnly ? (
             <div className="flex flex-wrap gap-1 items-end">
               {splitEmojiSegments(message.body.trim()).filter(s => s.type === 'emoji').map((seg, i) => (
-                <img
-                  key={i}
-                  src={getAppleEmojiUrl(seg.value)}
-                  alt={seg.value}
-                  className="inline-block object-contain"
-                  style={{ width: '34px', height: '34px' }}
-                  draggable={false}
-                  onError={(e) => {
-                    const span = document.createElement('span')
-                    span.textContent = seg.value
-                    span.style.fontSize = '34px'
-                    span.style.lineHeight = '1'
-                    e.currentTarget.replaceWith(span)
-                  }}
-                />
+                <span key={i} aria-label={seg.value} role="img" className="inline-block text-[34px] leading-none">{seg.value}</span>
               ))}
             </div>
           ) : (
@@ -876,7 +860,7 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
       </div>
 
       {/* WhatsApp Web-style hover trigger bar — emoji + chevron at top-right of bubble */}
-      {!compactSelection && !isOptimistic && message.message_type !== 'sticker' && !isEmojiOnly && (
+      {!compactSelection && !isOptimistic && hasMessageActions && message.message_type !== 'sticker' && !isEmojiOnly && (
         <div data-open={showContextMenu || showEmojiPicker} className={`${styles.messageActions} ${message.is_from_me ? styles.messageActionsFromMe : styles.messageActionsIncoming} absolute right-1 top-1 z-10 flex items-center rounded-md transition-opacity duration-150 ${message.is_from_me ? 'bg-[#d9fdd3]/90' : 'bg-white/90'}`}>
           {onReact && <button
             ref={reactionBtnRef}
@@ -912,8 +896,9 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
         <div
           ref={contextMenuRef}
           role="menu"
-          className="fixed z-[90] min-w-[190px] overflow-y-auto rounded-lg border border-slate-200 bg-white py-1 shadow-xl"
-          style={menuPos}
+          data-chat-overlay="message-menu"
+          className="pointer-events-auto fixed min-w-[190px] overflow-y-auto rounded-lg border border-slate-200 bg-white py-1 shadow-xl"
+          style={{ ...menuPos, zIndex: OPERATIONAL_OVERLAY_LAYERS.menu }}
         >
           {onReact && <button
             type="button"
@@ -990,15 +975,16 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
             </>
           )}
         </div>,
-        document.body,
+        operationalPortal || document.body,
       )}
 
       {/* Quick reaction bar - positioned above message bubble like WhatsApp Web */}
       {showEmojiPicker && !showFullPicker && typeof document !== 'undefined' && createPortal(
         <div
           ref={emojiPickerRef}
-          className="fixed z-[90] flex items-center gap-0.5 overflow-x-auto rounded-full border border-gray-100 bg-white px-2 py-1.5 shadow-xl"
-          style={{ top: quickReactionPos.top, left: quickReactionPos.left, maxWidth: quickReactionPos.maxWidth }}
+          data-chat-overlay="quick-reactions"
+          className="pointer-events-auto fixed flex items-center gap-0.5 overflow-x-auto rounded-full border border-gray-100 bg-white px-2 py-1.5 shadow-xl"
+          style={{ top: quickReactionPos.top, left: quickReactionPos.left, maxWidth: quickReactionPos.maxWidth, zIndex: OPERATIONAL_OVERLAY_LAYERS.picker }}
         >
           {QUICK_EMOJIS.map((e) => (
             <button
@@ -1007,12 +993,7 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
               onClick={() => { onReact?.(message, e); closeAllPickers() }}
               className={`${styles.reactionOption} rounded-full transition-all hover:scale-110 hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500`}
             >
-              <img
-                src={getAppleEmojiUrl(e)}
-                alt={e}
-                className="w-7 h-7"
-                draggable={false}
-              />
+              <span aria-hidden className="text-2xl leading-none">{e}</span>
             </button>
           ))}
           <div className="w-px h-6 bg-gray-200 mx-0.5" />
@@ -1026,16 +1007,17 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
             <Plus className="w-5 h-5 text-gray-400" />
           </button>
         </div>,
-        document.body,
+        operationalPortal || document.body,
       )}
 
       {/* Full emoji picker for reactions - rendered via portal */}
       {showFullPicker && typeof document !== 'undefined' && createPortal(
         <>
-          <div className="app-viewport fixed inset-0 z-[100]" onClick={closeAllPickers} />
+          <div data-chat-overlay="reaction-backdrop" className="app-viewport pointer-events-auto fixed inset-0" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.sheet }} onClick={closeAllPickers} />
           <div
-            className="fixed z-[101] rounded-xl overflow-hidden shadow-2xl"
-            style={{ top: pickerPos.top, left: pickerPos.left, width: pickerPos.width, height: pickerPos.height }}
+            data-chat-overlay="reaction-picker"
+            className="pointer-events-auto fixed rounded-xl overflow-hidden shadow-2xl"
+            style={{ top: pickerPos.top, left: pickerPos.left, width: pickerPos.width, height: pickerPos.height, zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog }}
           >
             <EmojiPickerReact
               onEmojiClick={(emojiData: any) => { onReact?.(message, emojiData.emoji); closeAllPickers() }}
@@ -1048,7 +1030,7 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
             />
           </div>
         </>,
-        document.body
+        operationalPortal || document.body
       )}
       </div>
     </div>

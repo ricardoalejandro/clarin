@@ -121,7 +121,7 @@ func lockAndRequireTaskAccessStateTx(ctx context.Context, tx pgx.Tx, accountID, 
 
 func lockAndRequireActiveEnvironmentAccessTx(ctx context.Context, tx pgx.Tx, accountID, actorID, environmentID uuid.UUID, required string) error {
 	var active bool
-	if err := tx.QueryRow(ctx, `SELECT archived_at IS NULL FROM task_environments
+	if err := tx.QueryRow(ctx, `SELECT archived_at IS NULL AND deleted_at IS NULL FROM task_environments
 		WHERE account_id=$1 AND id=$2 FOR SHARE`, accountID, environmentID).Scan(&active); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound

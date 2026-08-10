@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "description": "CRM WhatsApp multi-tenant con integración directa de whatsmeow. Soporta hasta 200+ conexiones simultáneas de WhatsApp.",
   "main": "index.js",
-  "scripts": {},
+  "scripts": {
+    "test:whiteboards:e2e": "PLAYWRIGHT_LOCAL_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:3011 playwright test tests/whiteboards-isolation.spec.ts --project=chromium",
+    "test:whiteboards:egress": "WHITEBOARD_EGRESS_TRACE=/tmp/clarin-whiteboard-network-trace.json WHITEBOARD_BRANDING_SNAPSHOT=/tmp/clarin-whiteboard-visible-branding.json PLAYWRIGHT_LOCAL_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:3011 playwright test tests/whiteboards-isolation.spec.ts --project=chromium && node .codex/skills/clarin-excalidraw-development/scripts/scan-runtime-egress.mjs --root frontend/node_modules/@excalidraw/excalidraw/dist/prod && node .codex/skills/clarin-excalidraw-development/scripts/scan-runtime-egress.mjs --trace /tmp/clarin-whiteboard-network-trace.json --strict --allow-origin http://127.0.0.1:3011 --allow-origin ws://127.0.0.1:3011 --allow-origin http://whiteboard-link.invalid && node .codex/skills/clarin-excalidraw-development/scripts/scan-visible-branding.mjs --root frontend/public/vendor/whiteboards-editor/0.18.1 --snapshot /tmp/clarin-whiteboard-visible-branding.json --policy .codex/skills/clarin-excalidraw-development/references/visible-branding-policy.json"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",

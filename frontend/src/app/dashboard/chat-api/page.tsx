@@ -3,14 +3,19 @@
 import Link from 'next/link'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowLeft, CheckCheck, ChevronDown, Clock, CloudCog, FileText, Loader2,
+  ArrowLeft, ChevronDown, Clock, CloudCog, FileText, Loader2,
   MessageCircle, Plus, RefreshCw, Search, Send, Settings, ShieldCheck, X,
 } from 'lucide-react'
-import { apiGet, apiPost, subscribeWebSocket } from '@/lib/api'
+import { apiGet, apiPost, apiPut, subscribeWebSocket } from '@/lib/api'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import { SearchRequestLifecycle } from '@/lib/searchRequestLifecycle'
 import type { Chat, Message } from '@/types/chat'
 import { formatPhone, getChatDisplayName } from '@/utils/chat'
+import MessageBubble from '@/components/chat/MessageBubble'
+import EmojiPicker from '@/components/chat/EmojiPicker'
+import { insertTextAtSelection } from '@/lib/whatsappEditor'
+import { applyReactionMutation, dedupeReactions, hasOwnReaction, SELF_REACTION_ACTOR } from '@/utils/chatReactions'
+import { canReactToCloudMessage } from '@/lib/cloudChatCapabilities'
 
 interface CloudChat extends Chat {
   customer_service_window_expires_at?: string
@@ -67,14 +72,6 @@ function timeLabel(value?: string) {
 function dateLabel(value: string) {
   const date = new Date(value)
   return date.toLocaleDateString('es-PE', { day: '2-digit', month: 'short', year: 'numeric' })
-}
-
-function messagePreview(message: Message) {
-  if (message.body?.trim()) return message.body
-  const labels: Record<string, string> = {
-    image: '📷 Imagen', video: '🎥 Video', audio: '🎵 Audio', document: '📄 Documento', sticker: 'Sticker',
-  }
-  return labels[message.message_type || ''] || 'Mensaje'
 }
 
 function isWindowOpen(chat: CloudChat | null) {
@@ -148,6 +145,7 @@ export default function ChatAPIPage() {
   const [loadingMessages, setLoadingMessages] = useState(false)
   const [sending, setSending] = useState(false)
   const [body, setBody] = useState('')
+  const [emojiPickerOpen, setEmojiPickerOpen] = useState(false)
   const [composerMode, setComposerMode] = useState<'text' | 'template'>('text')
   const [selectedTemplateID, setSelectedTemplateID] = useState('')
   const [templateValues, setTemplateValues] = useState<Record<string, string>>({})
@@ -162,11 +160,13 @@ export default function ChatAPIPage() {
   const [newOptInNote, setNewOptInNote] = useState('')
   const [startingConversation, setStartingConversation] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
   const chatSearchLifecycleRef = useRef(new SearchRequestLifecycle())
   const selectedChatIDRef = useRef<string | null>(null)
   const autoOpenedRef = useRef(false)
   const sendingRef = useRef(false)
   const startingConversationRef = useRef(false)
+  const reactionRequestSeqRef = useRef(new Map<string, number>())
 
   selectedChatIDRef.current = selectedChat?.id || null
 
@@ -243,6 +243,7 @@ export default function ChatAPIPage() {
     setSelectedChat(chat)
     setMessages([])
     setBody('')
+    setEmojiPickerOpen(false)
     setSelectedTemplateID('')
     setTemplateValues({})
     setComposerMode(isWindowOpen(chat) ? 'text' : 'template')
@@ -270,13 +271,22 @@ export default function ChatAPIPage() {
 
   useEffect(() => {
     const unsubscribe = subscribeWebSocket((event) => {
-      const payload = event as { event?: string; data?: { chat_id?: string; message?: Message } }
+      const payload = event as { event?: string; data?: { chat_id?: string; message?: Message; target_message_id?: string; sender_jid?: string; sender_name?: string; emoji?: string; is_from_me?: boolean; removed?: boolean } }
       const chatID = payload.data?.chat_id
       if (payload.event === 'new_message' && chatID && payload.data?.message) {
         if (chatID === selectedChatIDRef.current && (payload.data.message as Message & { provider?: string }).provider === 'whatsapp_cloud_api') {
           setMessages(current => current.some(message => message.message_id === payload.data?.message?.message_id) ? current : [...current, payload.data!.message!])
         }
         void loadChats(true)
+      } else if (payload.event === 'message_reaction' && chatID === selectedChatIDRef.current && payload.data?.target_message_id) {
+        const data = payload.data
+        setMessages(current => current.map(message => message.message_id !== data.target_message_id ? message : ({
+          ...message,
+          reactions: applyReactionMutation(message.reactions, {
+            targetMessageId: data.target_message_id!, senderJid: data.sender_jid, senderName: data.sender_name,
+            emoji: data.emoji || '', isFromMe: !!data.is_from_me, removed: !!data.removed,
+          }),
+        })))
       } else if (payload.event === 'chat_update' || payload.event === 'message_status' || payload.event === 'device_status') {
         void loadChats(true)
         if (selectedChatIDRef.current) void loadMessages(selectedChatIDRef.current, true)
@@ -339,6 +349,54 @@ export default function ChatAPIPage() {
     setTemplateValues({})
     setSelectedTemplateID('')
     await loadChats(true)
+  }
+
+  const insertComposerEmoji = (emoji: string) => {
+    const textarea = composerRef.current
+    const selection = {
+      start: textarea?.selectionStart ?? body.length,
+      end: textarea?.selectionEnd ?? body.length,
+    }
+    const edit = insertTextAtSelection(body, selection, emoji)
+    setBody(edit.value)
+    setEmojiPickerOpen(false)
+    window.requestAnimationFrame(() => {
+      composerRef.current?.focus()
+      composerRef.current?.setSelectionRange(edit.selection.start, edit.selection.end)
+    })
+  }
+
+  const reactToCloudMessage = async (message: Message, emoji: string) => {
+    if (!selectedChat || !canReactToCloudMessage(message, windowOpen)) return
+    const requestedEmoji = hasOwnReaction(message.reactions, emoji) ? '' : emoji
+    const previousReactions = dedupeReactions(message.reactions)
+    const requestSeq = (reactionRequestSeqRef.current.get(message.message_id) || 0) + 1
+    reactionRequestSeqRef.current.set(message.message_id, requestSeq)
+    setFeedback('')
+    setMessages(current => current.map(item => item.message_id !== message.message_id ? item : ({
+      ...item,
+      reactions: applyReactionMutation(item.reactions, {
+        targetMessageId: message.message_id, senderJid: SELF_REACTION_ACTOR, senderName: 'Tú',
+        emoji: requestedEmoji, isFromMe: true, removed: requestedEmoji === '',
+      }),
+    })))
+    const response = await apiPut(`/api/chat-api/chats/${selectedChat.id}/messages/${encodeURIComponent(message.message_id)}/reaction`, {
+      emoji: requestedEmoji,
+      operation_id: `${Date.now()}-${requestSeq}`,
+    })
+    if (response.success || reactionRequestSeqRef.current.get(message.message_id) !== requestSeq) return
+    setMessages(current => current.map(item => item.message_id === message.message_id ? { ...item, reactions: previousReactions } : item))
+    setFeedback(response.error || 'No se pudo actualizar la reacción')
+  }
+
+  const copyCloudMessage = async (message: Message) => {
+    const text = message.body || message.media_filename || ''
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      setFeedback('No se pudo copiar el mensaje')
+    }
   }
 
   const startConversation = async () => {
@@ -430,7 +488,12 @@ export default function ChatAPIPage() {
                     const showDate = !previous || new Date(previous.timestamp).toDateString() !== new Date(message.timestamp).toDateString()
                     return <div key={message.id || message.message_id}>
                       {showDate && <div className="my-3 flex justify-center"><span className="rounded-lg bg-white/85 px-3 py-1 text-[11px] font-medium text-slate-500 shadow-sm">{dateLabel(message.timestamp)}</span></div>}
-                      <div className={`flex ${message.is_from_me ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[85%] rounded-2xl px-3 py-2 shadow-sm sm:max-w-[70%] ${message.is_from_me ? 'rounded-tr-md bg-[#d9fdd3]' : 'rounded-tl-md bg-white'}`}><p className="whitespace-pre-wrap break-words text-sm leading-5 text-slate-800">{messagePreview(message)}</p><div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-slate-400"><span>{timeLabel(message.timestamp)}</span>{message.is_from_me && <CheckCheck className={`h-3.5 w-3.5 ${message.status === 'read' ? 'text-sky-500' : ''}`} />}</div></div></div>
+                      <MessageBubble
+                        message={message}
+                        contactName={displayName(selectedChat)}
+                        onReact={canReactToCloudMessage(message, windowOpen) ? reactToCloudMessage : undefined}
+                        onCopy={message.body || message.media_filename ? copyCloudMessage : undefined}
+                      />
                     </div>
                   })}
                   <div ref={messagesEndRef} />
@@ -443,7 +506,11 @@ export default function ChatAPIPage() {
                 {feedback && <div className="mb-2 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">{feedback}</div>}
                 <div className="mb-2 flex items-center gap-2"><button type="button" onClick={() => setComposerMode('text')} disabled={!windowOpen} className={`min-h-9 rounded-lg px-3 text-xs font-semibold ${composerMode === 'text' ? 'bg-emerald-100 text-emerald-800' : 'text-slate-500 hover:bg-slate-100'} disabled:cursor-not-allowed disabled:opacity-40`}>Mensaje libre</button><button type="button" onClick={() => setComposerMode('template')} disabled={!selectedChannelTemplatesReady} className={`min-h-9 rounded-lg px-3 text-xs font-semibold ${composerMode === 'template' ? 'bg-sky-100 text-sky-800' : 'text-slate-500 hover:bg-slate-100'} disabled:cursor-not-allowed disabled:opacity-40`}>Plantilla</button>{!windowOpen && <span className="text-[11px] text-amber-700">{selectedChannelTemplatesReady ? 'La ventana cerró; Meta exige plantilla.' : 'La ventana cerró y las plantillas deben sincronizarse.'}</span>}</div>
                 {composerMode === 'text' ? (
-                  <div className="flex items-end gap-2"><textarea value={body} onChange={event => setBody(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendCurrentMessage() } }} rows={1} maxLength={4096} placeholder="Escribe un mensaje" className="max-h-32 min-h-11 flex-1 resize-none rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20" /><button type="button" onClick={() => void sendCurrentMessage()} disabled={sending || !body.trim()} className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40">{sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button></div>
+                  <div className="flex items-end gap-2">
+                    <EmojiPicker onEmojiSelect={insertComposerEmoji} isOpen={emojiPickerOpen} onToggle={() => setEmojiPickerOpen(open => !open)} buttonClassName="flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" />
+                    <textarea ref={composerRef} value={body} onChange={event => setBody(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendCurrentMessage() } }} rows={1} maxLength={4096} placeholder="Escribe un mensaje" className="max-h-32 min-h-11 flex-1 resize-none rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20" />
+                    <button type="button" onClick={() => void sendCurrentMessage()} disabled={sending || !body.trim()} className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40">{sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button>
+                  </div>
                 ) : (
                   <div className="space-y-2"><div className="relative"><select value={selectedTemplateID} onChange={event => { setSelectedTemplateID(event.target.value); setTemplateValues({}) }} className="h-11 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 pr-9 text-sm text-slate-800 outline-none focus:border-sky-500"><option value="">Selecciona una plantilla aprobada</option>{templates.filter(template => template.device_id === selectedChat.device_id).map(template => <option key={template.id} value={template.id} disabled={!templateIsSupportedInInbox(template)}>{template.name} · {template.language}{templateIsSupportedInInbox(template) ? '' : ' · no compatible aún'}</option>)}</select><ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /></div>{selectedTemplate && <div className="rounded-xl bg-slate-50 p-3 text-xs text-slate-600"><p className="whitespace-pre-wrap">{templateText(selectedTemplate)}</p></div>}{selectedVariables.map(variable => <input key={variable.key} value={templateValues[variable.key] || ''} onChange={event => setTemplateValues(current => ({ ...current, [variable.key]: event.target.value }))} placeholder={variable.label} className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-sky-500" />)}<button type="button" onClick={() => void sendCurrentMessage()} disabled={sending || !selectedTemplate} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-sky-600 px-4 text-sm font-bold text-white hover:bg-sky-700 disabled:opacity-40">{sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />} Enviar plantilla</button></div>
                 )}

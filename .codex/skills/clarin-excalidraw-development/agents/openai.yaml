@@ -1,0 +1,4 @@
+interface:
+  display_name: "Clarin Excalidraw Development"
+  short_description: "Integración y actualizaciones seguras de Excalidraw"
+  default_prompt: "Usa $clarin-excalidraw-development para integrar o actualizar Excalidraw en Clarin con aislamiento, compatibilidad y cero egreso externo."

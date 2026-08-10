@@ -98,6 +98,19 @@ func IsPrivateObjectKey(objectKey string) bool {
 	return len(parts) >= 3 && parts[1] == privateObjectFolder
 }
 
+// IsAccountWhiteboardObjectKey is the destructive-operation boundary for
+// whiteboard objects. Unlike IsPrivateObjectKey it deliberately rejects
+// normalized traversal, leading slashes and keys owned by another account.
+// Both immutable snapshots and media must stay below this exact namespace.
+func IsAccountWhiteboardObjectKey(accountID uuid.UUID, objectKey string) bool {
+	raw := strings.TrimSpace(objectKey)
+	if accountID == uuid.Nil || raw == "" || raw != objectKey || strings.HasPrefix(raw, "/") || path.Clean(raw) != raw {
+		return false
+	}
+	prefix := accountID.String() + "/" + privateObjectFolder + "/whiteboards/"
+	return strings.HasPrefix(raw, prefix) && len(raw) > len(prefix)
+}
+
 // IsLegacyStatusObjectKey recognizes the public-bucket namespace used by an
 // intermediate status implementation. New status media must never be written
 // there, but it remains protected while existing objects are migrated.

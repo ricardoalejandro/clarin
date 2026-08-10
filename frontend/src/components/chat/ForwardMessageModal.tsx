@@ -1,10 +1,12 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { X, Search, Send, User, Image as ImageIcon, FileText, Video, Mic, Check, RefreshCw } from 'lucide-react'
 import { Chat, Message } from '@/types/chat'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import { SearchRequestLifecycle, type SearchRequestLease } from '@/lib/searchRequestLifecycle'
+import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
 interface Props {
   message: Message
@@ -30,11 +32,17 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
   const [selectedChats, setSelectedChats] = useState<Chat[]>([])
   const searchRef = useRef<HTMLInputElement>(null)
   const searchLifecycleRef = useRef(new SearchRequestLifecycle())
+  const operationalPortal = useOperationalOverlayPortal()
+  useOperationalOverlayRegistration(true, `forward-message:${message.id}`)
 
   useEffect(() => {
     const focusTimer = window.setTimeout(() => searchRef.current?.focus(), 100)
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !sending) onClose()
+      if (event.key === 'Escape' && !sending) {
+        event.preventDefault()
+        event.stopPropagation()
+        onClose()
+      }
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => {
@@ -172,8 +180,8 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
   const selectedIds = new Set(selectedChats.map(chat => chat.id))
   const hasMore = chats.length < total
 
-  return (
-    <div className="app-viewport fixed inset-0 z-[105] flex items-end justify-center bg-black/50 sm:items-center sm:p-4" onMouseDown={event => { if (event.target === event.currentTarget && !sending) onClose() }}>
+  return createPortal(
+    <div data-chat-overlay="forward-message" className="app-viewport pointer-events-auto fixed inset-0 flex items-end justify-center bg-black/50 sm:items-center sm:p-4" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog }} onMouseDown={event => { if (event.target === event.currentTarget && !sending) onClose() }}>
       <div
         role="dialog"
         aria-modal="true"
@@ -308,6 +316,7 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    operationalPortal || document.body,
   )
 }

@@ -1,9 +1,10 @@
 'use client'
 
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useId } from 'react'
 import { createPortal } from 'react-dom'
 import { Smile } from 'lucide-react'
 import dynamic from 'next/dynamic'
+import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayRegistration, useOperationalOverlayTarget } from '@/components/operational-window/OperationalOverlayContext'
 
 const Picker = dynamic(() => import('./LocalizedEmojiPicker'), {
   ssr: false,
@@ -50,6 +51,7 @@ export function EmojiPickerContent({
 
 export default function EmojiPicker({ onEmojiSelect, buttonClassName, isOpen: controlledOpen, onToggle, portalTarget }: EmojiPickerProps) {
   const [internalOpen, setInternalOpen] = useState(false)
+  const overlayId = useId()
   const containerRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popupRef = useRef<HTMLDivElement>(null)
@@ -57,6 +59,8 @@ export default function EmojiPicker({ onEmojiSelect, buttonClassName, isOpen: co
   const [position, setPosition] = useState({ top: 8, left: 8, width: 350, height: 400 })
 
   const isOpen = controlledOpen !== undefined ? controlledOpen : internalOpen
+  const resolvedPortalTarget = useOperationalOverlayTarget(portalTarget)
+  useOperationalOverlayRegistration(isOpen, `chat-emoji-picker:${overlayId}`)
   const toggle = useCallback(() => {
     if (onToggle) onToggle()
     else setInternalOpen(value => !value)
@@ -91,7 +95,12 @@ export default function EmojiPicker({ onEmojiSelect, buttonClassName, isOpen: co
         if (isOpen) close()
       }
     }
-    const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && isOpen) close() }
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || !isOpen) return
+      e.preventDefault()
+      e.stopPropagation()
+      close()
+    }
     document.addEventListener('mousedown', handleClickOutside)
     document.addEventListener('keydown', handleKey)
     return () => {
@@ -139,14 +148,14 @@ export default function EmojiPicker({ onEmojiSelect, buttonClassName, isOpen: co
       </button>
 
       {isOpen && typeof document !== 'undefined' && createPortal(
-        <div ref={popupRef} role="dialog" aria-label="Selector de emojis" className="fixed z-[100] overflow-hidden rounded-xl shadow-2xl" style={{ top: position.top, left: position.left, width: position.width, height: position.height }}>
+        <div data-chat-overlay="emoji-picker" ref={popupRef} role="dialog" aria-label="Selector de emojis" className="pointer-events-auto fixed overflow-hidden rounded-xl shadow-2xl" style={{ top: position.top, left: position.left, width: position.width, height: position.height, zIndex: OPERATIONAL_OVERLAY_LAYERS.picker }}>
           <EmojiPickerContent
             onEmojiSelect={onEmojiSelect}
             width={position.width}
             height={position.height}
           />
         </div>,
-        portalTarget || document.body,
+        resolvedPortalTarget || document.body,
       )}
     </div>
   )

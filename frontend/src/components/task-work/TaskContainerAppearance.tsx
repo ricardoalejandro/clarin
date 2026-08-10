@@ -320,6 +320,7 @@ export function TaskAppearanceDialog({ item, type, users = [], onClose, onSaved,
   const [saving, setSaving] = useState(false)
   const [archiveOpen, setArchiveOpen] = useState(false)
   const [archiveError, setArchiveError] = useState('')
+  const archiveState = taskContainerArchiveState(item)
   useEffect(() => {
     const close = (event: KeyboardEvent) => event.key === 'Escape' && !saving && !document.querySelector('[data-task-destructive-dialog], [data-task-picker-backdrop]') && onClose()
     window.addEventListener('keydown', close)
@@ -351,16 +352,17 @@ export function TaskAppearanceDialog({ item, type, users = [], onClose, onSaved,
     }
   }
   const archive = async () => {
-    if (isDefault || item.task_count > 0 || saving) return
+    if (archiveState.kind !== 'ready' || saving) return
     setArchiveError('')
+    const operationID = crypto.randomUUID()
     setSaving(true)
+    onOperation?.(operationID, true)
     try {
       const path = type === 'folder' ? `/api/tasks/folders/${item.id}` : `/api/tasks/lists/${item.id}`
-      const operationID = crypto.randomUUID()
       const result = await apiDelete(path, { confirmation_name: item.name, operation_id: operationID })
       if (!result.success) { setArchiveError(result.error || 'No se pudo mover a Papelera.'); return }
       setArchiveOpen(false); await onSaved(); onClose()
-    } catch { setArchiveError('No se pudo mover a Papelera. Reintenta.') } finally { setSaving(false) }
+    } catch { setArchiveError('No se pudo mover a Papelera. Reintenta.') } finally { onOperation?.(operationID, false); setSaving(false) }
   }
   return createPortal(<div className="fixed inset-0 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm" style={{ zIndex: TASK_OVERLAY_LAYERS.dialog }} role="presentation" onMouseDown={event => event.target === event.currentTarget && !saving && onClose()}>
     <section role="dialog" aria-modal="true" aria-labelledby="task-appearance-title" className="flex max-h-[calc(100vh-32px)] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-white/70 bg-white shadow-2xl">
@@ -371,8 +373,16 @@ export function TaskAppearanceDialog({ item, type, users = [], onClose, onSaved,
         {type === 'folder' ? <div><p className="mb-1.5 text-xs font-bold text-slate-600">Icono</p><div className="flex min-h-11 items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3" aria-label="Icono fijo de carpeta"><span className="flex h-8 w-8 items-center justify-center rounded-xl bg-white text-slate-600"><TaskContainerIcon value="folder" className="h-4 w-4" /></span><span><span className="block text-xs font-bold text-slate-700">Carpeta</span><span className="block text-[10px] text-slate-400">Icono estándar fijo</span></span></div></div> : <div><p className="mb-1.5 text-xs font-bold text-slate-600">Icono</p><TaskIconPicker value={icon} onChange={setIcon} label="Icono de lista" disabled={saving} /></div>}
         {item.permissions?.can_manage_access && <TaskContainerAccessPanel item={item} type={type} users={users} onChanged={onSaved} />}
       </div>
-      <footer className="flex items-center gap-2 border-t border-slate-100 bg-slate-50/70 px-5 py-4">{!isDefault && <button type="button" disabled={saving || item.task_count > 0} title={item.task_count > 0 ? 'Mueve o envía primero las tareas activas a Papelera' : 'Mover a Papelera'} onClick={() => { setArchiveError(''); setArchiveOpen(true) }} className="mr-auto rounded-xl px-3 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-30">Mover a Papelera</button>}<button type="button" disabled={saving} onClick={onClose} className="rounded-xl px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-white">Cancelar</button><button type="button" disabled={saving || !name.trim()} onClick={() => void save()} className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg disabled:opacity-40">{saving ? 'Guardando…' : 'Guardar cambios'}</button></footer>
+      <footer className="flex items-center gap-2 border-t border-slate-100 bg-slate-50/70 px-5 py-4">{!isDefault && <button type="button" disabled={saving} title={archiveState.kind === 'blocked' ? 'Ver por qué todavía no se puede mover a Papelera' : 'Mover a Papelera'} onClick={() => { setArchiveError(''); setArchiveOpen(true) }} className="mr-auto rounded-xl px-3 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-30">Mover a Papelera</button>}<button type="button" disabled={saving} onClick={onClose} className="rounded-xl px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-white">Cancelar</button><button type="button" disabled={saving || !name.trim()} onClick={() => void save()} className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg disabled:opacity-40">{saving ? 'Guardando…' : 'Guardar cambios'}</button></footer>
     </section>
-    <TaskDestructiveConfirmDialog open={archiveOpen} title={`Mover ${type === 'folder' ? 'carpeta' : 'lista'} a Papelera`} description={type === 'folder' ? 'La carpeta y sus listas activas se archivarán juntas. Podrás restaurarlas desde Papelera.' : 'La lista conservará su ubicación original y podrá restaurarse desde Papelera.'} actionLabel="Mover a Papelera" confirmationName={item.name} busy={saving} error={archiveError} onClose={() => { if (!saving) { setArchiveOpen(false); setArchiveError('') } }} onConfirm={() => { void archive() }} />
+    <TaskDestructiveConfirmDialog open={archiveOpen} title={`Mover ${type === 'folder' ? 'carpeta' : 'lista'} a Papelera`} description={type === 'folder' ? 'La carpeta y sus listas activas se archivarán juntas. Podrás restaurarlas desde Papelera.' : 'La lista conservará su ubicación original y podrá restaurarse desde Papelera.'} actionLabel="Mover a Papelera" confirmationName={archiveState.kind === 'ready' ? item.name : undefined} blockedReason={archiveState.kind === 'blocked' ? archiveState.reason : undefined} busy={saving} error={archiveError} onClose={() => { if (!saving) { setArchiveOpen(false); setArchiveError('') } }} onConfirm={() => { void archive() }} />
   </div>, document.body)
+}
+export function taskContainerArchiveState(item: TaskList | TaskFolder) {
+  if ('is_default' in item && item.is_default) return { kind: 'immutable' as const, reason: 'La Bandeja general debe permanecer activa.' }
+  if (item.task_count > 0) {
+    const details = `${item.open_task_count || 0} abiertas, ${item.completed_task_count || 0} completadas y ${item.cancelled_task_count || 0} canceladas`
+    return { kind: 'blocked' as const, reason: `Contiene ${item.task_count} tarea${item.task_count === 1 ? '' : 's'} (${details}). Mueve o envía esas tareas a Papelera antes de archivar este contenedor.` }
+  }
+  return { kind: 'ready' as const, reason: '' }
 }

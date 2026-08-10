@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-09T00:00:00.000Z",
+  "surfaces": [
+    {
+      "name": "leaked-upstream-controls",
+      "visibleText": [
+        "Hecho con Excalidraw",
+        "Explorar bibliotecas",
+        "Publica tu propia biblioteca"
+      ],
+      "visibleActions": [
+        {
+          "tag": "button",
+          "accessibleName": "Ayuda",
+          "testId": "help-menu-item",
+          "classNames": ["help-icon"]
+        },
+        {
+          "tag": "a",
+          "accessibleName": "Código upstream",
+          "href": "https://github.com/excalidraw/excalidraw"
+        },
+        {
+          "tag": "button",
+          "accessibleName": "Publicar",
+          "classNames": ["publish-library"]
+        }
+      ]
+    }
+  ]
+}

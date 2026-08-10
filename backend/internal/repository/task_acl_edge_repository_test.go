@@ -102,7 +102,7 @@ func TestTrashMutationsKeepACLAndAdminChecksInsideTransaction(t *testing.T) {
 		"ArchiveFolderConfirmed(ctx context.Context, accountID, actorID, folderID uuid.UUID",
 		"RestoreList(ctx context.Context, accountID, actorID, listID uuid.UUID",
 		"RestoreFolder(ctx context.Context, accountID, actorID, folderID uuid.UUID",
-		"lockAndRequireActiveEnvironmentAccessTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessFull)",
+		"requireEnvironmentAccessIncludingArchiveTx(ctx, tx, accountID, actorID, environmentID, domain.TaskAccessFull, false)",
 		"lockAndRequireTaskAccountAdminTx(ctx, tx, accountID, actorID)",
 		"lockAndRequireDeletedTaskAccessTx(ctx, tx, accountID, actorID, []uuid.UUID{taskID}, domain.TaskAccessFull)",
 		"lockTrashPolicy(ctx, tx, accountID)",

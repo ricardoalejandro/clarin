@@ -63,6 +63,7 @@ type Repositories struct {
 	Task               *TaskRepository
 	TaskWork           *TaskWorkRepository
 	DocumentTemplate   *DocumentTemplateRepository
+	Whiteboard         *WhiteboardRepository
 	CustomField        *CustomFieldRepository
 	WhatsAppAPI        *WhatsAppAPIRepository
 	Bot                *BotRepository
@@ -120,6 +121,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		Task:               &TaskRepository{db: db},
 		TaskWork:           &TaskWorkRepository{db: db},
 		DocumentTemplate:   &DocumentTemplateRepository{db: db},
+		Whiteboard:         NewWhiteboardRepository(db),
 		CustomField:        &CustomFieldRepository{db: db},
 		WhatsAppAPI:        &WhatsAppAPIRepository{db: db},
 		Bot:                &BotRepository{db: db},
@@ -1891,7 +1893,9 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 	`, *msg.MediaAssetID, msg.AccountID).Scan(&assetStatus, &contentHash, &objectKey); err != nil {
 		return err
 	}
-	if assetStatus != "active" || strings.HasPrefix(contentHash, domain.MediaAssetHashWhatsAppStatusPrefix) || storage.IsAccountStatusObjectKey(msg.AccountID, objectKey) {
+	if assetStatus != "active" || strings.HasPrefix(contentHash, domain.MediaAssetHashWhatsAppStatusPrefix) ||
+		strings.HasPrefix(contentHash, domain.MediaAssetHashWhiteboardPrefix) ||
+		storage.IsAccountStatusObjectKey(msg.AccountID, objectKey) || storage.IsPrivateObjectKey(objectKey) {
 		return fmt.Errorf("media asset is not active")
 	}
 	if err := insert(tx); err != nil {

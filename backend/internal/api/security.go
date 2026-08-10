@@ -250,6 +250,13 @@ func (s *Server) recordSecurityEventWithRefs(ctx context.Context, eventType, sub
 	}
 	metadata["path"] = c.Path()
 	raw, _ := json.Marshal(metadata)
+	if s.repos == nil || s.repos.DB() == nil {
+		// Unit tests and deliberately reduced diagnostic servers may exercise the
+		// abuse guard without a database. Enforcement must not depend on audit
+		// persistence being available.
+		log.Printf("[SECURITY] event %s could not be persisted: repository unavailable", eventType)
+		return
+	}
 	if _, err := s.repos.DB().Exec(ctx, `
 		INSERT INTO security_events (type, account_id, user_id, subject_hash, ip_hash, user_agent_hash, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)

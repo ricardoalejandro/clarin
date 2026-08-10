@@ -8,6 +8,7 @@ import ContactDetailSurface from '@/components/contact-details/ContactDetailSurf
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import type { Lead, PipelineStage, StructuredTag } from '@/types/contact'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
+import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
 interface Contact {
   id: string
@@ -118,6 +119,8 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
   const [stageChangeError, setStageChangeError] = useState('')
   const [savingStageChange, setSavingStageChange] = useState(false)
   const stageChangeDialogRef = useRef<HTMLDivElement>(null)
+  const operationalPortal = useOperationalOverlayPortal()
+  useOperationalOverlayRegistration(Boolean(stageChangeRequest || showArchiveModal || showBlockModal), 'chat-contact-confirmation')
 
   const getToken = () => localStorage.getItem('token') || ''
 
@@ -938,7 +941,7 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
       )}
 
       {stageChangeRequest && typeof document !== 'undefined' && createPortal(
-        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
+        <div data-chat-overlay="stage-confirmation" className="pointer-events-auto fixed inset-0 flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.confirmation }}>
           <div ref={stageChangeDialogRef} role="dialog" aria-modal="true" aria-labelledby="chat-stage-change-title" aria-describedby="chat-stage-change-description" tabIndex={-1} className="w-full max-w-md overflow-hidden rounded-3xl bg-white shadow-2xl">
             <div className="flex items-start gap-3 border-b border-slate-200 px-5 py-5 sm:px-6">
               <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl ${stageChangeRequest.mode === 'won' ? 'bg-emerald-50 text-emerald-700' : stageChangeRequest.mode === 'lost' ? 'bg-red-50 text-red-700' : 'bg-blue-50 text-blue-700'}`}>
@@ -977,12 +980,12 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
             </div>
           </div>
         </div>,
-        document.body
+        operationalPortal || document.body
       )}
 
       {/* ═══ Archive Reason Modal ═══ */}
       {showArchiveModal && typeof document !== 'undefined' && createPortal(
-        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" onMouseDown={event => { if (event.target === event.currentTarget) closeArchiveModal() }}>
+        <div data-chat-overlay="archive-confirmation" className="pointer-events-auto fixed inset-0 flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.confirmation }} onMouseDown={event => { if (event.target === event.currentTarget) closeArchiveModal() }}>
           <div ref={archiveDialogRef} role="dialog" aria-modal="true" aria-labelledby="chat-archive-title" aria-describedby="chat-archive-description" tabIndex={-1} className="flex max-h-[min(90vh,680px)] w-full max-w-md flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
             <div className="flex items-start gap-3 border-b border-slate-200 px-5 py-5 sm:px-6">
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-amber-50 text-amber-700"><Archive className="h-5 w-5" /></div>
@@ -1011,12 +1014,12 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
             </div>
           </div>
         </div>,
-        document.body
+        operationalPortal || document.body
       )}
 
       {/* ═══ Do-not-contact reason modal ═══ */}
       {showBlockModal && typeof document !== 'undefined' && createPortal(
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" onMouseDown={event => { if (event.target === event.currentTarget) closeBlockModal() }}>
+        <div data-chat-overlay="block-confirmation" className="pointer-events-auto fixed inset-0 flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.confirmation }} onMouseDown={event => { if (event.target === event.currentTarget) closeBlockModal() }}>
           <div ref={blockDialogRef} role="dialog" aria-modal="true" aria-labelledby="contact-dnc-title" aria-describedby="contact-dnc-description" tabIndex={-1} className="flex max-h-[min(90vh,680px)] w-full max-w-md flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
             <div className="flex items-start gap-3 border-b border-slate-200 px-5 py-5 sm:px-6">
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-red-50 text-red-600"><ShieldBan className="h-5 w-5" /></div>
@@ -1048,7 +1051,7 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
             </div>
           </div>
         </div>,
-        document.body
+        operationalPortal || document.body
       )}
     </div>
   )

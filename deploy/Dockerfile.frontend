@@ -42,6 +42,9 @@ ENV HOSTNAME=0.0.0.0
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
+# Keep the complete MIT notice with the distributed editor artifact. The
+# prepare step also exposes a versioned copy beside the local editor assets.
+COPY --from=builder /app/THIRD_PARTY_EXCALIDRAW.md ./THIRD_PARTY_EXCALIDRAW.md
 
 EXPOSE 3000
 

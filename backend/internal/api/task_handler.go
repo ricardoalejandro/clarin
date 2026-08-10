@@ -49,7 +49,7 @@ var taskQueryFilterKeys = []string{
 	"contact_id", "list_id", "folder_id", "parent_task_id", "include_subtasks", "starred", "from", "to",
 	"created_from", "created_to", "completed_from", "completed_to", "has_subtasks", "has_comments",
 	"has_attachments", "has_dependencies", "search", "deleted", "include_closed",
-	"environment_id", "shared_with_me",
+	"environment_id", "shared_with_me", "lifecycle",
 }
 
 func taskQueryFilters(c *fiber.Ctx) map[string]string {
@@ -528,6 +528,13 @@ func (s *Server) handleGetTasks(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(uuid.UUID)
 
 	filters := taskQueryFilters(c)
+	lifecycle := strings.ToLower(strings.TrimSpace(filters["lifecycle"]))
+	if lifecycle != "" && lifecycle != domain.TaskLifecycleActive && lifecycle != domain.TaskLifecycleArchived && lifecycle != domain.TaskLifecycleTrash {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Ciclo de vida inválido", "field": "lifecycle"})
+	}
+	if lifecycle == domain.TaskLifecycleArchived {
+		filters["include_closed"] = "true"
+	}
 	if !normalizeTaskQueryBooleanFilter(filters, "include_closed") {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Filtro booleano inválido", "field": "include_closed"})
 	}
@@ -1654,16 +1661,11 @@ func (s *Server) handleDeleteTaskList(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
 	if err := s.repos.TaskWork.ArchiveListConfirmed(c.Context(), accountID, userID, listID, request.ConfirmationName); err != nil {
-		if errors.Is(err, repository.ErrDefaultTaskList) {
-			return c.Status(409).JSON(fiber.Map{"success": false, "error": "La Bandeja general es la lista predeterminada y no se puede archivar"})
-		}
-		if errors.Is(err, repository.ErrTaskContainerNotEmpty) {
-			return c.Status(409).JSON(fiber.Map{"success": false, "error": "Mueve o elimina las tareas antes de archivar", "code": "task_container_not_empty"})
-		}
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to delete task list"})
+		return taskWorkError(c, err)
 	}
 
-	s.broadcastTaskWork(c.Context(), accountID, "list_deleted", fiber.Map{"list_id": listID, "operation_id": operationID})
+	s.invalidateTasksCache(accountID)
+	s.broadcastTaskWork(c.Context(), accountID, "list_archived", fiber.Map{"list_id": listID, "operation_id": operationID})
 
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
 }
