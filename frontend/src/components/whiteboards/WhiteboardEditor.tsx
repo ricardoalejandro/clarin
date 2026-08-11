@@ -47,6 +47,7 @@ import {
   hasWhiteboardDocumentMutation,
   mergeWhiteboardAcknowledgedElements,
   mergeWhiteboardFileRecords,
+  mergeWhiteboardSessionAppState,
   parseWhiteboardLibraryItems,
   personalWhiteboardLibraryItems,
   reconcileWhiteboardCollaborators,
@@ -1265,7 +1266,10 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       const elements = api
         ? reconcileElements(api.getSceneElementsIncludingDeleted(), reconciled.elements as never, currentAppState)
         : reconciled.elements as readonly ExcalidrawElement[]
-      const appState = { ...currentAppState, ...reconciled.appState } as AppState
+      const appState = mergeWhiteboardSessionAppState(
+        currentAppState as unknown as Record<string, unknown>,
+        reconciled.appState,
+      ) as unknown as AppState
       const files = mergeWhiteboardFileRecords(
         current.files as unknown as Record<string, unknown>,
         canonical.files,
@@ -1513,8 +1517,11 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     const elements = reconciled && api && currentAppState
       ? reconcileElements(api.getSceneElementsIncludingDeleted(), reconciled.elements as never, currentAppState)
       : remoteElements
-    const appState = reconciled && currentAppState
-      ? { ...currentAppState, ...reconciled.appState } as AppState
+    const appState = currentAppState
+      ? mergeWhiteboardSessionAppState(
+        currentAppState as unknown as Record<string, unknown>,
+        reconciled?.appState || scene.appState,
+      ) as unknown as AppState
       : scene.appState as unknown as AppState
     sequenceRef.current = record.sequence
     acknowledgedElementsRef.current = [...remoteElements]

@@ -331,6 +331,20 @@ export function sanitizeWhiteboardAppState(appState: Record<string, unknown>): R
   }, {})
 }
 
+/**
+ * Applies canonical document preferences without replacing the editor session
+ * state (viewport, active tool, selection, or an in-progress interaction).
+ */
+export function mergeWhiteboardSessionAppState(
+  currentAppState: Record<string, unknown>,
+  canonicalAppState: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...currentAppState,
+    ...sanitizeWhiteboardAppState(canonicalAppState),
+  }
+}
+
 const WHITEBOARD_FILE_LOCATION_OR_BINARY_KEYS = new Set([
   'arraybuffer',
   'base64',

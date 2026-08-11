@@ -10,6 +10,8 @@ const fixtureRoot = resolve(process.cwd(), '.codex/skills/clarin-excalidraw-deve
 const sceneFixture = JSON.parse(readFileSync(resolve(fixtureRoot, 'complex-scene.excalidraw'), 'utf8')) as Record<string, any>
 const libraryFixture = JSON.parse(readFileSync(resolve(fixtureRoot, 'internal-library.excalidrawlib'), 'utf8')) as { libraryItems: Array<Record<string, any>> }
 
+test.describe.configure({ mode: 'serial' })
+
 interface VisibleBrandingSurface {
   name: string
   visibleText: string[]
@@ -120,6 +122,22 @@ class WhiteboardRealtimeHarness {
     for (const [socket, owner] of this.sockets) {
       if (owner === userID) socket.send(JSON.stringify({ event: 'access.revoked', code: 'access_revoked' }))
     }
+  }
+
+  broadcastAutomaticSnapshot() {
+    this.sequence += 1
+    const record = this.sceneRecord()
+    const message = JSON.stringify({
+      event: 'scene.snapshot',
+      sequence: this.sequence,
+      data: {
+        scene: record.scene,
+        scene_schema_version: record.scene_schema_version,
+        editor_version: record.editor_version,
+        updated_at: record.updated_at,
+      },
+    })
+    for (const socket of this.sockets.keys()) socket.send(message)
   }
 
   async install(context: BrowserContext, userID: string) {
@@ -738,6 +756,39 @@ async function importLocalSceneWithBlockedEmbed(page: Page, harness: WhiteboardR
   expect(exported.elements.map(element => element.id)).toContain('blocked-external-embed')
   expect(exported.elements.map(element => element.id)).toContain('frame-operaciones')
 }
+
+test('el checkpoint automático conserva zoom y herramienta de la sesión activa', async ({ browser, browserName }) => {
+  test.skip(browserName !== 'chromium', 'La regresión determinista del editor usa Chromium.')
+  test.setTimeout(180_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  const context = await browser.newContext()
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
+  const page = await context.newPage()
+
+  try {
+    await openEditor(page)
+    await expect.poll(() => harness.socketCount()).toBe(1)
+    await page.getByTestId('toolbar-rectangle').check({ force: true })
+    await expect(page.getByTestId('toolbar-rectangle')).toBeChecked()
+    await page.locator('.zoom-in-button').click()
+    await page.locator('.zoom-in-button').click()
+    const zoomBeforeCheckpoint = (await page.locator('.reset-zoom-button').innerText()).trim()
+    expect(zoomBeforeCheckpoint).not.toBe('100%')
+
+    harness.broadcastAutomaticSnapshot()
+    await page.waitForTimeout(500)
+
+    await expect(page.locator('.reset-zoom-button')).toHaveText(zoomBeforeCheckpoint)
+    await expect(page.getByTestId('toolbar-rectangle')).toBeChecked()
+    expect(blocked).toEqual([])
+  } finally {
+    await context.close()
+  }
+})
 
 test('Pizarras stays same-origin and survives two-user lost-ACK reconnect plus revocation', async ({ browser, browserName }, testInfo) => {
   test.skip(browserName !== 'chromium', 'El gate determinista usa dos contextos Chromium; la matriz visual cubre los demás motores.')

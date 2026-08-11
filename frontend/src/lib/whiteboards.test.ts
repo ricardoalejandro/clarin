@@ -20,6 +20,7 @@ import {
   isWhiteboardSceneSequence,
   flattenWhiteboardFolders,
   mergeWhiteboardFileRecords,
+  mergeWhiteboardSessionAppState,
   reconcileWhiteboardSummary,
   reconcileWhiteboardCanonicalAck,
   reconcileWhiteboardLibraryConflict,
@@ -81,6 +82,53 @@ const base: WhiteboardSummary = {
 }
 
 describe('whiteboard frontend contracts', () => {
+  it('merges canonical checkpoints without replacing the active editor session', () => {
+    const activeTool = { type: 'rectangle', customType: null, locked: false, lastActiveTool: null }
+    const selectedElementIds = { 'rect-1': true }
+    const editingTextElement = { id: 'text-1', type: 'text' }
+    const current = {
+      viewBackgroundColor: '#ffffff',
+      gridSize: 20,
+      gridStep: 5,
+      gridModeEnabled: false,
+      scrollX: 900,
+      scrollY: -200,
+      zoom: { value: 1.8 },
+      activeTool,
+      selectedElementIds,
+      editingTextElement,
+      draggingElement: { id: 'rect-1', type: 'rectangle' },
+    }
+
+    const merged = mergeWhiteboardSessionAppState(current, {
+      viewBackgroundColor: '#f8fafc',
+      gridSize: 40,
+      gridStep: 10,
+      gridModeEnabled: true,
+      scrollX: 0,
+      scrollY: 0,
+      zoom: { value: 1 },
+      activeTool: { type: 'selection' },
+      selectedElementIds: {},
+      editingTextElement: null,
+      draggingElement: null,
+    })
+
+    expect(merged).toMatchObject({
+      viewBackgroundColor: '#f8fafc',
+      gridSize: 40,
+      gridStep: 10,
+      gridModeEnabled: true,
+      scrollX: 900,
+      scrollY: -200,
+      zoom: { value: 1.8 },
+    })
+    expect(merged.activeTool).toBe(activeTool)
+    expect(merged.selectedElementIds).toBe(selectedElementIds)
+    expect(merged.editingTextElement).toBe(editingTextElement)
+    expect(merged.draggingElement).toBe(current.draggingElement)
+  })
+
   it('keeps presence, viewport and selection ephemeral while persisting document changes', () => {
     const elements = [{ id: 'rect-1', version: 1, versionNonce: 10, isDeleted: false }]
     const canonicalAppState = { viewBackgroundColor: '#ffffff', gridSize: 20, gridStep: 5, gridModeEnabled: false }

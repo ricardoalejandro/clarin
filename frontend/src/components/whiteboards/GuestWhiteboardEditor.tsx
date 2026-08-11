@@ -19,6 +19,7 @@ import {
   hasWhiteboardDocumentMutation,
   mergeWhiteboardAcknowledgedElements,
   mergeWhiteboardFileRecords,
+  mergeWhiteboardSessionAppState,
   reconcileWhiteboardCollaborators,
   reconcileWhiteboardCanonicalAck,
   retainWhiteboardPendingSave,
@@ -410,7 +411,10 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
       const elements = api
         ? reconcileElements(api.getSceneElementsIncludingDeleted(), reconciled.elements as never, currentAppState)
         : reconciled.elements as readonly ExcalidrawElement[]
-      const appState = { ...currentAppState, ...reconciled.appState } as AppState
+      const appState = mergeWhiteboardSessionAppState(
+        currentAppState as unknown as Record<string, unknown>,
+        reconciled.appState,
+      ) as unknown as AppState
       const files = mergeWhiteboardFileRecords(
         latest.files as unknown as Record<string, unknown>,
         canonical.files,
@@ -648,8 +652,11 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
       const elements = reconciled && api && currentAppState
         ? reconcileElements(api.getSceneElementsIncludingDeleted(), reconciled.elements as never, currentAppState)
         : canonical.elements as readonly ExcalidrawElement[]
-      const appState = reconciled && currentAppState
-        ? { ...currentAppState, ...reconciled.appState } as AppState
+      const appState = currentAppState
+        ? mergeWhiteboardSessionAppState(
+          currentAppState as unknown as Record<string, unknown>,
+          reconciled?.appState || canonical.appState,
+        ) as unknown as AppState
         : canonical.appState as unknown as AppState
       sceneRootExtensionsRef.current = whiteboardSceneRootExtensions(canonical)
       sceneFileMetadataRef.current = sanitizeWhiteboardFilesForPersistence(canonical.files)
@@ -756,17 +763,22 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
           const scene = restoreClarinWhiteboardScene(realtime.scene)
           sceneRootExtensionsRef.current = whiteboardSceneRootExtensions(scene)
           sceneFileMetadataRef.current = sanitizeWhiteboardFilesForPersistence(scene.files)
+          const currentAppState = api.getAppState()
           const elements = dirtyRef.current
-            ? reconcileElements(api.getSceneElementsIncludingDeleted(), scene.elements as never, api.getAppState())
+            ? reconcileElements(api.getSceneElementsIncludingDeleted(), scene.elements as never, currentAppState)
             : scene.elements as readonly ExcalidrawElement[]
+          const appState = mergeWhiteboardSessionAppState(
+            currentAppState as unknown as Record<string, unknown>,
+            scene.appState,
+          ) as unknown as AppState
           acknowledgedElementsRef.current = [...scene.elements]
           acknowledgedAppStateRef.current = sanitizeWhiteboardAppState(scene.appState)
           suppressRef.current = true
-          api.updateScene({ elements, appState: scene.appState as unknown as AppState, captureUpdate: CaptureUpdateAction.NEVER })
+          api.updateScene({ elements, appState, captureUpdate: CaptureUpdateAction.NEVER })
           sequenceRef.current = realtime.sequence
           latestRef.current = {
             elements,
-            appState: { ...api.getAppState(), ...scene.appState } as AppState,
+            appState,
             files: mergeWhiteboardFileRecords(api.getFiles() as unknown as Record<string, unknown>, scene.files) as unknown as BinaryFiles,
           }
           setSaveState(dirtyRef.current ? 'pending' : 'saved')
