@@ -590,6 +590,27 @@ func (s *TaskService) ProcessReminders(ctx context.Context) {
 	}
 }
 
+// ProcessWorkEventReminders delivers each durable event reminder to exactly
+// its intended organizer/attendee. The repository rechecks active event and
+// RSVP state, so removed or declined invitees never receive stale jobs.
+func (s *TaskService) ProcessWorkEventReminders(ctx context.Context) {
+	reminders, err := s.repos.WorkEvent.ClaimPendingReminders(ctx)
+	if err != nil {
+		log.Printf("[WORK EVENT] Error fetching pending reminders: %v", err)
+		return
+	}
+	for _, reminder := range reminders {
+		if s.hub != nil {
+			s.hub.BroadcastToAccountUsersWithPermission(reminder.AccountID, []uuid.UUID{reminder.UserID}, domain.PermTasks,
+				ws.EventWorkEventReminder, map[string]interface{}{
+					"event_id": reminder.EventID, "occurrence_key": reminder.OccurrenceKey,
+					"title": reminder.Title, "start_at": reminder.StartAt, "start_date": reminder.StartDate,
+					"reminder_at": reminder.ReminderAt,
+				})
+		}
+	}
+}
+
 func (s *TaskService) taskNotificationTargets(ctx context.Context, accountID, taskID, assignedTo uuid.UUID) []uuid.UUID {
 	candidates := []uuid.UUID{assignedTo}
 	seen := map[uuid.UUID]bool{assignedTo: true}

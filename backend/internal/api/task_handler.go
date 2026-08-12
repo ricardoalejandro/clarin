@@ -170,6 +170,7 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 		RecurrenceRule  string   `json:"recurrence_rule"`
 		ReminderMinutes *int     `json:"reminder_minutes"`
 		Notes           string   `json:"notes"`
+		Color           *string  `json:"color"`
 		Placement       string   `json:"placement"`
 		OperationID     string   `json:"operation_id"`
 		ConfirmGrants   bool     `json:"confirm_grants"`
@@ -177,6 +178,9 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if err := normalizeOptionalTaskColor(&req.Color); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "El color debe usar #RRGGBB"})
 	}
 	req.Title = strings.TrimSpace(req.Title)
 	if req.Title == "" {
@@ -238,6 +242,7 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 		RecurrenceRule:  req.RecurrenceRule,
 		ReminderMinutes: req.ReminderMinutes,
 		Notes:           req.Notes,
+		Color:           req.Color,
 		Progress:        req.Progress,
 		ProgressMode:    strings.ToLower(strings.TrimSpace(req.ProgressMode)),
 		IsMilestone:     req.IsMilestone,
@@ -494,6 +499,60 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 	return c.JSON(taskCreateResponse(full, *operationID, counts))
 }
 
+// handleUpdateTaskAppearance changes only the shared identity color. Keeping
+// this mutation narrow makes instant picker saves reversible and prevents a
+// stale editor draft from overwriting unrelated task properties.
+func (s *Server) handleUpdateTaskAppearance(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	taskID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Tarea inválida"})
+	}
+	var req struct {
+		Color       json.RawMessage `json:"color"`
+		Version     int64           `json:"version"`
+		OperationID string          `json:"operation_id"`
+	}
+	if err := c.BodyParser(&req); err != nil || len(req.Color) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Color inválido"})
+	}
+	operationID, err := resolveTaskOperationID(req.OperationID)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "operation_id inválido"})
+	}
+	var color *string
+	if string(req.Color) != "null" {
+		var raw string
+		if err := json.Unmarshal(req.Color, &raw); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Color inválido"})
+		}
+		normalized, colorErr := normalizeTaskColor(raw, "")
+		if colorErr != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "El color debe usar #RRGGBB"})
+		}
+		color = &normalized
+	}
+	task, err := s.services.Task.GetByIDForActor(c.Context(), taskID, accountID, userID)
+	if err != nil || task == nil || task.DeletedAt != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Tarea no encontrada"})
+	}
+	if req.Version != 0 && req.Version != task.Version {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La tarea cambió en otra sesión", "code": "version_conflict", "task": task})
+	}
+	task.Color = color
+	task.MutationActor = &userID
+	task.MutationOperationID = operationID
+	if err := s.services.Task.Update(c.Context(), task); err != nil {
+		return taskWorkError(c, err)
+	}
+	canonical, loadErr := s.services.Task.GetByIDForActor(c.Context(), taskID, accountID, userID)
+	if loadErr != nil {
+		canonical = task
+	}
+	return c.JSON(fiber.Map{"success": true, "task": canonical, "operation_id": operationID})
+}
+
 func taskCreateResponse(task *domain.Task, operationID uuid.UUID, counts *domain.TaskHierarchyCounts) fiber.Map {
 	return putTaskMutationReconciliation(fiber.Map{"success": true, "task": task}, operationID, counts)
 }
@@ -529,6 +588,10 @@ func (s *Server) handleGetTasks(c *fiber.Ctx) error {
 
 	filters := taskQueryFilters(c)
 	lifecycle := strings.ToLower(strings.TrimSpace(filters["lifecycle"]))
+	if lifecycle == "archive" {
+		lifecycle = domain.TaskLifecycleArchived
+		filters["lifecycle"] = lifecycle
+	}
 	if lifecycle != "" && lifecycle != domain.TaskLifecycleActive && lifecycle != domain.TaskLifecycleArchived && lifecycle != domain.TaskLifecycleTrash {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Ciclo de vida inválido", "field": "lifecycle"})
 	}
@@ -666,6 +729,9 @@ func (s *Server) handleGetTask(c *fiber.Ctx) error {
 	if err != nil || task.DeletedAt != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Task not found"})
 	}
+	if task.Permissions != nil && task.Permissions.InheritedFrom == "historical_read_only" && !taskHistoricalReadRequested(c) {
+		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Task not found"})
+	}
 
 	return c.JSON(fiber.Map{"success": true, "task": task})
 }
@@ -693,34 +759,35 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 	wasDone := existing.Status == domain.TaskStatusCompleted || (existing.StatusDetail != nil && existing.StatusDetail.Category == domain.TaskStatusCategoryDone)
 
 	var req struct {
-		Title           *string   `json:"title"`
-		Description     *string   `json:"description"`
-		Type            *string   `json:"type"`
-		StartAt         *string   `json:"start_at"`
-		DueAt           *string   `json:"due_at"`
-		DueEndAt        *string   `json:"due_end_at"`
-		IsAllDay        *bool     `json:"is_all_day"`
-		Priority        *string   `json:"priority"`
-		Status          *string   `json:"status"`
-		StatusID        *string   `json:"status_id"`
-		AssignedTo      *string   `json:"assigned_to"`
-		CollaboratorIDs *[]string `json:"collaborator_ids"`
-		LeadID          *string   `json:"lead_id"`
-		EventID         *string   `json:"event_id"`
-		ProgramID       *string   `json:"program_id"`
-		ContactID       *string   `json:"contact_id"`
-		ListID          *string   `json:"list_id"`
-		ParentTaskID    *string   `json:"parent_task_id"`
-		Progress        *int      `json:"progress"`
-		ProgressMode    *string   `json:"progress_mode"`
-		ManualProgress  *int      `json:"manual_progress"`
-		IsMilestone     *bool     `json:"is_milestone"`
-		Version         *int64    `json:"version"`
-		RecurrenceRule  *string   `json:"recurrence_rule"`
-		ReminderMinutes *int      `json:"reminder_minutes"`
-		Notes           *string   `json:"notes"`
-		OperationID     string    `json:"operation_id"`
-		ConfirmGrants   bool      `json:"confirm_grants"`
+		Title           *string         `json:"title"`
+		Description     *string         `json:"description"`
+		Type            *string         `json:"type"`
+		StartAt         *string         `json:"start_at"`
+		DueAt           *string         `json:"due_at"`
+		DueEndAt        *string         `json:"due_end_at"`
+		IsAllDay        *bool           `json:"is_all_day"`
+		Priority        *string         `json:"priority"`
+		Status          *string         `json:"status"`
+		StatusID        *string         `json:"status_id"`
+		AssignedTo      *string         `json:"assigned_to"`
+		CollaboratorIDs *[]string       `json:"collaborator_ids"`
+		LeadID          *string         `json:"lead_id"`
+		EventID         *string         `json:"event_id"`
+		ProgramID       *string         `json:"program_id"`
+		ContactID       *string         `json:"contact_id"`
+		ListID          *string         `json:"list_id"`
+		ParentTaskID    *string         `json:"parent_task_id"`
+		Progress        *int            `json:"progress"`
+		ProgressMode    *string         `json:"progress_mode"`
+		ManualProgress  *int            `json:"manual_progress"`
+		IsMilestone     *bool           `json:"is_milestone"`
+		Version         *int64          `json:"version"`
+		RecurrenceRule  *string         `json:"recurrence_rule"`
+		ReminderMinutes *int            `json:"reminder_minutes"`
+		Notes           *string         `json:"notes"`
+		Color           json.RawMessage `json:"color"`
+		OperationID     string          `json:"operation_id"`
+		ConfirmGrants   bool            `json:"confirm_grants"`
 	}
 
 	if err := c.BodyParser(&req); err != nil {
@@ -742,6 +809,21 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": "El título es obligatorio"})
 		}
 		existing.Title = title
+	}
+	if len(req.Color) > 0 {
+		if string(req.Color) == "null" {
+			existing.Color = nil
+		} else {
+			var raw string
+			if err := json.Unmarshal(req.Color, &raw); err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Color inválido; usa #RRGGBB"})
+			}
+			normalized, colorErr := normalizeTaskColor(raw, "")
+			if colorErr != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Color inválido; usa #RRGGBB"})
+			}
+			existing.Color = &normalized
+		}
 	}
 	if req.Description != nil {
 		existing.Description = *req.Description
@@ -1660,12 +1742,12 @@ func (s *Server) handleDeleteTaskList(c *fiber.Ctx) error {
 	if parseErr != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	if err := s.repos.TaskWork.ArchiveListConfirmed(c.Context(), accountID, userID, listID, request.ConfirmationName); err != nil {
+	if err := s.repos.TaskWork.TrashListConfirmed(c.Context(), accountID, userID, listID, request.ConfirmationName); err != nil {
 		return taskWorkError(c, err)
 	}
 
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(c.Context(), accountID, "list_archived", fiber.Map{"list_id": listID, "operation_id": operationID})
+	s.broadcastTaskWork(c.Context(), accountID, "list_trashed", fiber.Map{"list_id": listID, "operation_id": operationID})
 
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
 }

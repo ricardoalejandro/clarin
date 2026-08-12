@@ -47,19 +47,21 @@ Read the sections relevant to the requested task change before editing.
 - The default account list is fixed at the root with `sort_order=0` and cannot be dragged, reparented, reordered, or archived. It may still be renamed and use a validated catalog color/icon; its safe default icon is `inbox`.
 - Clicking a folder's main row selects its aggregate scope and toggles that accordion. Its chevron changes expansion only. An active folder may remain collapsed; navigation to a concrete child list is the only scope change that forces its parent open.
 - Folder icons are always the immutable identifier `folder`; creation ignores legacy custom values, updates accept only `folder` as a compatibility no-op, and the database constraint normalizes and rejects every other value. List icons remain configurable stable catalog identifiers validated by the same API/database allowlist and rendered with a safe fallback.
-- Archiving a list or folder is allowed only when it contains no active tasks. Restoring a child task requires an active parent and an active list/folder chain.
+- Archiving an Entorno, list, or folder is allowed only when every retained task/subtask in its tree is done or cancelled. Restoring a child task from Trash requires an active parent and an active Entorno/list/folder chain.
 - Create, restore, move, archive, and workflow-remap paths must lock and revalidate their parent/list/folder/status dependencies after waiting; a pre-lock read is never sufficient proof under concurrency.
 
 ## Trash, Completion And Retention
 
-- Completion and trash are independent lifecycles. A task in `done`, its `completed_at`, progress, due date, or appearance in a report never starts retention and never hides or archives it.
-- Retention starts only after an explicit “Mover a Papelera” mutation writes `tasks.deleted_at`, `task_lists.archived_at`, or `task_folders.archived_at`. The account policy is 7–365 days or `NULL` for “Nunca”; policy changes recalculate eligibility and never schedule or execute automatic purge.
-- Users with effective Administrar may archive and restore visible task resources. Only account administrators may configure retention or permanently purge, and every irreversible action requires the exact canonical title/name under the same transaction lock used for eligibility.
-- The default list cannot be archived or purged. Lists and folders may enter Trash only without active tasks; completed-but-active tasks still count as active because they have no `deleted_at`.
-- Folder archive marks only the child lists archived by that folder operation. Folder restore restores those lists together but preserves lists that were archived individually; an individual list whose original folder is archived must wait for the folder restore.
-- List/folder purge locks the account policy, target, descendants, and anchors, and commits only when every descendant is archived/deleted and every relevant timestamp has reached the cutoff. One ineligible or active descendant rolls back the entire tree.
+- Completion, historical Archive, and Trash are independent lifecycles. A task in `done`, its `completed_at`, progress, due date, or appearance in a report never starts retention. Individual tasks keep their existing complete/cancel and Trash lifecycle and do not gain a historical Archive action.
+- `archived_at` means read-only historical Archive for Entornos, lists, and folders. Archive is allowed only when every retained task and subtask in the tree has category `done` or `cancelled`; closed tasks, comments, activity, attachments, and hierarchy remain actor-authorized and readable only through explicit historical reads.
+- Retention starts only after an explicit “Mover a Papelera” mutation writes `deleted_at` on the task, Entorno, list, or folder. Moving a historical container to Trash preserves `archived_at`, so restoring from Trash returns it to Archive. The account policy is 7–365 days or `NULL` for “Nunca”; policy changes recalculate eligibility and never schedule or execute automatic purge.
+- Users with effective Administrar may archive, unarchive, move visible containers to Trash, and restore them. Only account administrators may configure retention or permanently purge, and every irreversible action requires the exact canonical title/name under the same transaction lock used for eligibility.
+- General and the default list cannot be archived, moved to Trash, or purged. Entornos, lists, and folders may enter Trash only when their full tree has no retained tasks, including completed or cancelled tasks whose `deleted_at` remains null.
+- Folder archive marks only active child lists as `archived_with_folder`; folder unarchive restores only those lists and preserves individually archived lists. Entorno archive marks only the Entorno, preserving every child's own lifecycle.
+- Entorno/list/folder purge locks the account policy, target, descendants, tasks, and anchors, and commits only when every descendant is deleted and every relevant `deleted_at` has reached the cutoff. One ineligible or retained descendant rolls back the entire tree.
+- Active reads and every ordinary mutation require an active Entorno, folder, and list. Only explicit `lifecycle=archive` hierarchy/task/detail reads may traverse archived containers, and the resulting permissions are capped at Ver.
 - Attachment candidates are enqueued transactionally and deleted from object storage only by durable cleanup after rechecking every live media reference and the account-scoped object key.
-- Archive, restore, purge, and policy WebSocket events remain account-scoped and carry an operation ID so the initiating client can ignore its own echo.
+- `archived`, `unarchived`, `trashed`, `restored`, `purged`, and policy WebSocket events remain account-scoped and carry an operation ID so the initiating client can reconcile without suppressing canonical derived state.
 
 ## Ordering And Concurrency
 

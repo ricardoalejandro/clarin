@@ -49,6 +49,7 @@ import {
   mergeWhiteboardFileRecords,
   mergeWhiteboardSessionAppState,
   parseWhiteboardLibraryItems,
+  planWhiteboardAssetPersistence,
   personalWhiteboardLibraryItems,
   reconcileWhiteboardCollaborators,
   reconcileWhiteboardCanonicalAck,
@@ -58,6 +59,7 @@ import {
   sanitizeWhiteboardExternalLink,
   sanitizeWhiteboardFilesForPersistence,
   selectWhiteboardPersonalLibrary,
+  snapshotWhiteboardFiles,
   shouldRetryWhiteboardDirtySave,
   shouldApplyWhiteboardRealtimeEvent,
   isWhiteboardSceneSequence,
@@ -143,7 +145,7 @@ declare global {
   }
 }
 
-type SaveState = 'saved' | 'pending' | 'saving' | 'offline' | 'error' | 'conflict'
+type SaveState = 'saved' | 'pending' | 'preparing-assets' | 'uploading-assets' | 'saving' | 'offline' | 'error' | 'conflict'
 type EditorPhase = 'loading' | 'ready' | 'error'
 
 interface LatestScene {
@@ -260,12 +262,19 @@ function SaveIndicator({ state, showLabel = true }: { state: SaveState; showLabe
   const presentation = {
     saved: { label: 'Guardado en Clarin', icon: Check, tone: 'text-emerald-700 bg-emerald-50 border-emerald-100' },
     pending: { label: 'Cambios pendientes', icon: Clock3, tone: 'text-amber-700 bg-amber-50 border-amber-100' },
+    'preparing-assets': { label: 'Preparando imágenes', icon: Loader2, tone: 'text-sky-700 bg-sky-50 border-sky-100' },
+    'uploading-assets': { label: 'Subiendo imágenes', icon: Loader2, tone: 'text-sky-700 bg-sky-50 border-sky-100' },
     saving: { label: 'Guardando en Clarin', icon: Loader2, tone: 'text-sky-700 bg-sky-50 border-sky-100' },
     offline: { label: 'No guardado · Reintentar', icon: WifiOff, tone: 'text-slate-600 bg-slate-100 border-slate-200' },
     error: { label: 'No guardado · Reintentar', icon: CloudOff, tone: 'text-rose-700 bg-rose-50 border-rose-100' },
     conflict: { label: 'No guardado · Reintentar', icon: ShieldAlert, tone: 'text-rose-700 bg-rose-50 border-rose-100' },
   }[state]
-  return <span title={presentation.label} aria-label={presentation.label} className={`inline-flex h-9 items-center gap-2 rounded-xl border px-2.5 text-xs font-bold ${presentation.tone}`}><presentation.icon className={`h-3.5 w-3.5 ${state === 'saving' ? 'animate-spin' : ''}`} />{showLabel ? <span className="hidden sm:inline">{presentation.label}</span> : null}<span className={showLabel ? 'sr-only sm:hidden' : 'sr-only'}>{presentation.label}</span></span>
+  const busy = state === 'preparing-assets' || state === 'uploading-assets' || state === 'saving'
+  return <span title={presentation.label} aria-label={presentation.label} className={`inline-flex h-9 items-center gap-2 rounded-xl border px-2.5 text-xs font-bold ${presentation.tone}`}><presentation.icon className={`h-3.5 w-3.5 ${busy ? 'animate-spin' : ''}`} />{showLabel ? <span className="hidden sm:inline">{presentation.label}</span> : null}<span className={showLabel ? 'sr-only sm:hidden' : 'sr-only'}>{presentation.label}</span></span>
+}
+
+function whiteboardSaveIsBusy(state: SaveState) {
+  return state === 'preparing-assets' || state === 'uploading-assets' || state === 'saving'
 }
 
 export default function WhiteboardEditor({ boardID }: { boardID: string }) {
@@ -288,6 +297,8 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
   const canonicalSyncAppliedSequenceRef = useRef(-1)
   const canonicalSyncLoadingSequenceRef = useRef(-1)
   const uploadedFileIDsRef = useRef(new Set<string>())
+  const assetUploadControllerRef = useRef<AbortController | null>(null)
+  const assetSavingRef = useRef(false)
   const assetHydrationControllerRef = useRef<AbortController | null>(null)
   const assetHydrationGenerationRef = useRef(0)
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -707,6 +718,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     return () => {
       mountedRef.current = false
       controller.abort()
+      assetUploadControllerRef.current?.abort()
       assetHydrationControllerRef.current?.abort()
       assetHydrationGenerationRef.current += 1
       canonicalSyncControllerRef.current?.abort()
@@ -734,7 +746,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     }
     const onOffline = () => setSaveState('offline')
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (!dirtyRef.current && !libraryDirtyRef.current) return
+      if (!dirtyRef.current && !savingRef.current && !assetSavingRef.current && !libraryDirtyRef.current && !librarySavingRef.current) return
       event.preventDefault()
       event.returnValue = ''
     }
@@ -1133,20 +1145,54 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
   }
 
   const uploadPendingFiles = useCallback(async (files: BinaryFiles, elements: readonly unknown[]) => {
-    const referencedFileIDs = new Set(referencedWhiteboardFileIDs(elements))
-    const referencedFiles = Object.fromEntries(Object.entries(files).filter(([fileID]) => referencedFileIDs.has(fileID)))
-    const safeFiles = await rasterizeWhiteboardFiles(referencedFiles as unknown as Record<string, unknown>) as unknown as BinaryFiles
-    for (const [fileID, rawFile] of Object.entries(safeFiles)) {
-      if (uploadedFileIDsRef.current.has(fileID)) continue
-      const file = rawFile as unknown as WhiteboardBinaryFile
-      if (!file.dataURL) continue
-      const blob = dataURLToBlob(file.dataURL)
-      const response = await uploadWhiteboardAsset(boardID, fileID, blob, `${fileID}.${extensionForMimeType(blob.type)}`)
-      if (!response.success) throw new Error(response.error || 'No se pudo guardar un recurso de la pizarra.')
-      uploadedFileIDsRef.current.add(fileID)
+    assetUploadControllerRef.current?.abort()
+    const controller = new AbortController()
+    assetUploadControllerRef.current = controller
+    assetSavingRef.current = true
+    setSaveState('preparing-assets')
+    try {
+      const initialPlan = planWhiteboardAssetPersistence(
+        elements,
+        files as unknown as Record<string, unknown>,
+        uploadedFileIDsRef.current,
+      )
+      const referencedFileIDs = new Set(initialPlan.referencedFileIDs)
+      const referencedFiles = Object.fromEntries(Object.entries(files).filter(([fileID]) => referencedFileIDs.has(fileID)))
+      const safeFiles = await rasterizeWhiteboardFiles(referencedFiles as unknown as Record<string, unknown>) as unknown as BinaryFiles
+      if (controller.signal.aborted) throw whiteboardAbortError()
+      const plan = planWhiteboardAssetPersistence(
+        elements,
+        safeFiles as unknown as Record<string, unknown>,
+        uploadedFileIDsRef.current,
+      )
+      if (plan.missingFileIDs.length > 0) {
+        throw new Error('Una imagen todavía no terminó de prepararse. Tus cambios siguen en el lienzo; reintenta el guardado.')
+      }
+      if (plan.uploadFileIDs.length > 0) {
+        setSaveState('uploading-assets')
+        await mapWhiteboardConcurrently(plan.uploadFileIDs, 4, async fileID => {
+          const file = safeFiles[fileID] as unknown as WhiteboardBinaryFile
+          const blob = dataURLToBlob(file.dataURL)
+          const response = await uploadWhiteboardAsset(
+            boardID,
+            fileID,
+            blob,
+            `${fileID}.${extensionForMimeType(blob.type)}`,
+            controller.signal,
+          )
+          if (controller.signal.aborted) throw whiteboardAbortError()
+          if (!response.success || !response.data?.asset) {
+            throw new Error(response.error || 'No se pudo guardar una imagen de la pizarra.')
+          }
+          uploadedFileIDsRef.current.add(fileID)
+        }, controller.signal)
+      }
+      if (Object.keys(safeFiles).length > 0) editorAPIRef.current?.addFiles(Object.values(safeFiles) as BinaryFileData[])
+      return snapshotWhiteboardFiles({ ...files, ...safeFiles }) as unknown as BinaryFiles
+    } finally {
+      if (assetUploadControllerRef.current === controller) assetUploadControllerRef.current = null
+      assetSavingRef.current = false
     }
-    if (Object.keys(safeFiles).length > 0) editorAPIRef.current?.addFiles(Object.values(safeFiles) as BinaryFileData[])
-    return { ...files, ...safeFiles }
   }, [boardID])
 
   const hydrateReferencedAssets = useCallback(async (elements: readonly unknown[]) => {
@@ -1322,18 +1368,29 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       queuedSaveRef.current = true
       return
     }
-    const scene = latestSceneRef.current
-    if (!scene) return
+    const initialScene = latestSceneRef.current
+    if (!initialScene) return
+    let scene: LatestScene = initialScene
     savingRef.current = true
     queuedSaveRef.current = false
     let capturedVersion = pendingSaveRef.current?.capturedVersion ?? changeVersionRef.current
-    setSaveState('saving')
+    if (pendingSaveRef.current) setSaveState('saving')
     setError(null)
     try {
       let pending = pendingSaveRef.current
       if (!pending) {
         const files = await uploadPendingFiles(scene.files, scene.elements)
-        latestSceneRef.current = { ...scene, files }
+        const currentScene = latestSceneRef.current || scene
+        scene = {
+          ...currentScene,
+          files: snapshotWhiteboardFiles({
+            ...(currentScene.files as unknown as Record<string, unknown>),
+            ...(files as unknown as Record<string, unknown>),
+          }) as unknown as BinaryFiles,
+        }
+        latestSceneRef.current = scene
+        capturedVersion = changeVersionRef.current
+        setSaveState('saving')
         const operationID = createWhiteboardOperationID()
         const writePlan = buildWhiteboardSceneWritePlan(scene.elements, acknowledgedElementsRef.current)
         const canPatch = reason === 'autosave' && writePlan.kind === 'patch'
@@ -1475,7 +1532,9 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
 
   const onChange = useCallback((elements: readonly ExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
     const previous = latestSceneRef.current
-    latestSceneRef.current = { elements, appState, files }
+    const snapshottedElements = elements.map(element => ({ ...element })) as readonly ExcalidrawElement[]
+    const snapshottedFiles = snapshotWhiteboardFiles(files as unknown as Record<string, unknown>) as unknown as BinaryFiles
+    latestSceneRef.current = { elements: snapshottedElements, appState, files: snapshottedFiles }
     if (suppressChangesRef.current || transientSceneSuppressionRef.current > 0 || !canEdit) return
     if (previous && !hasWhiteboardDocumentMutation({
       currentElements: elements,
@@ -1850,13 +1909,14 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       dirty: dirtyRef.current,
       pending: Boolean(pendingSaveRef.current),
       saving: savingRef.current,
+      assetSaving: assetSavingRef.current,
       libraryDirty: libraryDirtyRef.current,
       librarySaving: librarySavingRef.current,
       flushAttempted,
     })
     const waitForActiveWrites = async () => {
       const deadline = Date.now() + 15_000
-      while ((savingRef.current || librarySavingRef.current) && Date.now() < deadline) {
+      while ((savingRef.current || assetSavingRef.current || librarySavingRef.current) && Date.now() < deadline) {
         await new Promise(resolve => window.setTimeout(resolve, 50))
       }
     }
@@ -1980,7 +2040,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
             <button type="button" onClick={() => setLibraryOpen(true)} title="Administrar bibliotecas de Clarin" aria-label="Administrar bibliotecas de Clarin" className="whiteboard-integrated-action"><LibraryBig className="h-4 w-4" /></button>
             {canManageAccess && <button type="button" onClick={() => setShareOpen(true)} title="Compartir desde Clarin" aria-label="Compartir desde Clarin" className="whiteboard-integrated-action"><Share2 className="h-4 w-4" /></button>}
             <button type="button" onClick={() => setHistoryOpen(true)} title="Abrir historial de Clarin" aria-label="Abrir historial de Clarin" className="whiteboard-integrated-action"><History className="h-4 w-4" /></button>
-            {canEdit && <button type="button" onClick={() => void flushSave('manual')} disabled={saveState === 'saving' || saveState === 'saved'} title="Guardar ahora en Clarin" aria-label="Guardar ahora en Clarin" className="whiteboard-integrated-action whiteboard-integrated-action--primary">{saveState === 'saving' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}</button>}
+            {canEdit && <button type="button" onClick={() => void flushSave('manual')} disabled={whiteboardSaveIsBusy(saveState) || saveState === 'saved'} title="Guardar ahora en Clarin" aria-label="Guardar ahora en Clarin" className="whiteboard-integrated-action whiteboard-integrated-action--primary">{whiteboardSaveIsBusy(saveState) ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}</button>}
           </>
         </div>}
         aiEnabled={false}
@@ -2029,7 +2089,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
         <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); setLibraryOpen(true) }} className="whiteboard-more-item"><LibraryBig className="h-4 w-4" />Administrar bibliotecas</button>
         {canManageAccess && <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); setShareOpen(true) }} className="whiteboard-more-item"><Share2 className="h-4 w-4" />Compartir</button>}
         <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); setHistoryOpen(true) }} className="whiteboard-more-item"><History className="h-4 w-4" />Historial</button>
-        {canEdit && <button type="button" role="menuitem" disabled={saveState === 'saving' || saveState === 'saved'} onClick={() => { setMoreOpen(false); void flushSave('manual') }} className="whiteboard-more-item disabled:opacity-40"><Save className="h-4 w-4" />Guardar ahora</button>}
+        {canEdit && <button type="button" role="menuitem" disabled={whiteboardSaveIsBusy(saveState) || saveState === 'saved'} onClick={() => { setMoreOpen(false); void flushSave('manual') }} className="whiteboard-more-item disabled:opacity-40"><Save className="h-4 w-4" />Guardar ahora</button>}
       </div>
       <div className="grid gap-1 border-t border-slate-100 pt-1">
         {canEdit && <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); importInputRef.current?.click() }} className="whiteboard-more-item"><FileUp className="h-4 w-4" />Importar archivo</button>}

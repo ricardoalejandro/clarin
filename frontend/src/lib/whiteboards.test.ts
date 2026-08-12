@@ -28,11 +28,13 @@ import {
   retainWhiteboardPendingSave,
   combineWhiteboardLibraryItems,
   parseWhiteboardLibraryItems,
+  planWhiteboardAssetPersistence,
   personalWhiteboardLibraryItems,
   sameWhiteboardAccessGrants,
   sanitizeWhiteboardExternalLink,
   sanitizeWhiteboardFilesForPersistence,
   selectWhiteboardPersonalLibrary,
+  snapshotWhiteboardFiles,
   shouldApplyWhiteboardRealtimeEvent,
   shouldRetryWhiteboardDirtySave,
   validateWhiteboardImport,
@@ -168,12 +170,49 @@ describe('whiteboard frontend contracts', () => {
       currentFiles: { image: { id: 'image', mimeType: 'image/webp', created: 1 } },
       previousFiles: { image: { id: 'image', mimeType: 'image/png', created: 1 } },
     })).toBe(true)
+
+    expect(hasWhiteboardDocumentMutation({
+      currentElements: [{ id: 'image-1', type: 'image', fileId: 'file-1', status: 'saved', version: 1, versionNonce: 10 }],
+      previousElements: [{ id: 'image-1', type: 'image', fileId: null, status: 'pending', version: 1, versionNonce: 10 }],
+      currentAppState: canonicalAppState,
+      previousAppState: canonicalAppState,
+    })).toBe(true)
+    expect(hasWhiteboardDocumentMutation({
+      currentElements: [{ id: 'image-1', type: 'image', fileId: 'file-1', status: 'saved', version: 1, versionNonce: 10 }],
+      previousElements: [{ id: 'image-1', type: 'image', fileId: 'file-1', status: 'saved', version: 1, versionNonce: 10 }],
+      currentAppState: canonicalAppState,
+      previousAppState: canonicalAppState,
+      currentFiles: { 'file-1': { id: 'file-1', mimeType: 'image/png', dataURL: 'data:image/png;base64,ready' } },
+      previousFiles: { 'file-1': { id: 'file-1', mimeType: 'image/png' } },
+    })).toBe(true)
+  })
+
+  it('snapshots mutable image records and plans only durable referenced assets', () => {
+    const mutable = { id: 'file-1', mimeType: 'image/png' }
+    const snapshot = snapshotWhiteboardFiles({ 'file-1': mutable })
+    ;(mutable as Record<string, unknown>).dataURL = 'data:image/png;base64,ready'
+    expect(snapshot['file-1']).toEqual({ id: 'file-1', mimeType: 'image/png' })
+
+    const plan = planWhiteboardAssetPersistence(
+      [
+        { id: 'image-1', type: 'image', fileId: 'file-1' },
+        { id: 'image-2', type: 'image', fileId: 'file-2' },
+        { id: 'image-3', type: 'image', fileId: 'persisted' },
+        { id: 'deleted', type: 'image', fileId: 'deleted-file', isDeleted: true },
+      ],
+      { 'file-1': mutable, 'file-2': { id: 'file-2', mimeType: 'image/jpeg' } },
+      new Set(['persisted']),
+    )
+    expect(plan.referencedFileIDs).toEqual(['file-1', 'file-2', 'persisted'])
+    expect(plan.uploadFileIDs).toEqual(['file-1'])
+    expect(plan.missingFileIDs).toEqual(['file-2'])
   })
 
   it('flushes before SPA navigation and confirms only after an unsuccessful flush', () => {
     expect(whiteboardNavigationAction({ dirty: false, pending: false, saving: false, flushAttempted: false })).toBe('leave')
     expect(whiteboardNavigationAction({ dirty: true, pending: true, saving: false, flushAttempted: false })).toBe('flush')
     expect(whiteboardNavigationAction({ dirty: true, pending: true, saving: true, flushAttempted: false })).toBe('wait')
+    expect(whiteboardNavigationAction({ dirty: true, pending: true, saving: false, assetSaving: true, flushAttempted: false })).toBe('wait')
     expect(whiteboardNavigationAction({
       dirty: false,
       pending: false,

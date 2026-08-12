@@ -11,6 +11,7 @@ const CACHE_NAME = ${JSON.stringify(CACHE_NAME)};
 const STATIC_FETCH_TIMEOUT_MS = 10000;
 const SHELL_ASSETS = [
   '/offline',
+  '/favicon.svg',
   '/icons/clarin-192.png',
   '/icons/clarin-512.png',
   '/icons/clarin-maskable-512.png'
@@ -94,7 +95,7 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  if (url.pathname.startsWith('/_next/static/') || url.pathname.startsWith('/icons/')) {
+  if (url.pathname.startsWith('/_next/static/') || url.pathname.startsWith('/icons/') || url.pathname === '/favicon.svg') {
     event.respondWith(fetchStaticAsset(request));
   }
 });

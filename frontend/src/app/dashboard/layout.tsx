@@ -8,6 +8,7 @@ import NotificationProvider from '@/components/NotificationProvider'
 import ErosAssistant from '@/components/ErosAssistant'
 import TaskBadge from '@/components/TaskBadge'
 import AccountSwitcher from '@/components/AccountSwitcher'
+import ClarinBrandMark from '@/components/branding/ClarinBrandMark'
 import { ChatMobileChromeProvider } from '@/components/chat/ChatMobileChromeContext'
 import {
   MobileAppBottomNavigation,
@@ -492,9 +493,7 @@ function DashboardLayoutContent({
     return (
       <div className="h-screen flex items-center justify-center bg-slate-50">
         <div className="flex flex-col items-center gap-3">
-          <div className="w-10 h-10 bg-emerald-600 rounded-xl flex items-center justify-center">
-            <MessageSquare className="w-5 h-5 text-white" />
-          </div>
+          <ClarinBrandMark label="Clarín" className="h-10 w-10 rounded-xl" />
           <div className="animate-spin rounded-full h-6 w-6 border-2 border-emerald-200 border-t-emerald-600" />
         </div>
       </div>
@@ -512,6 +511,10 @@ function DashboardLayoutContent({
       <NotificationProvider accountId={user.account_id} mobileAppMode={mobileAppMode}>
         <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
           <div className="w-full max-w-xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl shadow-black/30 p-6 sm:p-8 text-center">
+            <div className="mb-5 flex items-center justify-center gap-2.5">
+              <ClarinBrandMark className="h-8 w-8 rounded-lg" />
+              <span className="text-sm font-bold text-white">Clarin</span>
+            </div>
             <div className="w-14 h-14 bg-amber-500/10 border border-amber-500/20 rounded-2xl flex items-center justify-center mx-auto mb-5">
               <AlertTriangle className="w-7 h-7 text-amber-300" />
             </div>
@@ -570,9 +573,7 @@ function DashboardLayoutContent({
         {/* Brand and desktop collapse control */}
         <div data-dashboard-sidebar-header data-collapsed={sidebarHeader.compact ? 'true' : 'false'} className={`h-14 flex items-center ${sidebarHeader.compact ? 'justify-center px-2' : 'justify-between px-4'} border-b border-slate-700/50 shrink-0`}>
           {sidebarHeader.showBrand && <Link href="/dashboard" aria-label="Ir al inicio de Clarin" className="flex items-center gap-2.5 overflow-hidden group">
-            <div data-dashboard-brand-mark className="w-8 h-8 bg-gradient-to-br from-emerald-500 to-emerald-600 rounded-lg flex items-center justify-center shrink-0 shadow-lg shadow-emerald-500/25 group-hover:shadow-emerald-500/40 transition-all duration-200">
-              <MessageSquare className="w-[18px] h-[18px] text-white" />
-            </div>
+            <ClarinBrandMark data-dashboard-brand-mark className="h-8 w-8 shrink-0 rounded-lg shadow-lg shadow-emerald-500/25 transition-all duration-200 group-hover:shadow-emerald-500/40" />
             <span className="font-bold text-lg text-white whitespace-nowrap tracking-tight">Clarin</span>
           </Link>}
           {sidebarHeader.showExpandControl && <CollapsedSidebarExpandButton onExpand={toggleSidebarCollapsed} />}
@@ -757,9 +758,7 @@ function DashboardLayoutContent({
               <Menu className="w-5 h-5 text-slate-600" />
             </button>
             <div className="ml-3 flex items-center gap-2 flex-1">
-              <div className="w-6 h-6 bg-emerald-600 rounded-md flex items-center justify-center">
-                <MessageSquare className="w-3.5 h-3.5 text-white" />
-              </div>
+              <ClarinBrandMark className="h-6 w-6 rounded-md" />
               <span className="font-semibold text-slate-800 text-sm">Clarin</span>
             </div>
             <button

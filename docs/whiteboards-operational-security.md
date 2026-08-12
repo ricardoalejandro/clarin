@@ -48,6 +48,24 @@ puede dejarlo válido durante su ventana breve.
 - Tras autenticar la sesión, la persistencia completa también se limita por
   pizarra y cuenta antes de comprimir, bloquear PostgreSQL o escribir en MinIO.
 
+## Retención del historial
+
+- Las revisiones automáticas y sus instantáneas inmutables caducan a los 30
+  días. El worker las elimina por lotes y sólo libera imágenes cuando la prueba
+  global de referencias confirma que ningún lienzo, revisión u otro consumidor
+  vivo las utiliza.
+- Las revisiones manuales, la escena inicial del sistema y las restauraciones no
+  caducan. Permanecen hasta la purga permanente y autorizada de la pizarra.
+- Las operaciones `patch`, las operaciones `snapshot` cuya revisión ya fue
+  depurada y la actividad técnica ruidosa (`scene.patched`,
+  `scene.snapshotted`, `thumbnail.updated`) se compactan después de 30 días en
+  lotes acotados. Las operaciones de creación/restauración y la actividad
+  significativa no se seleccionan.
+- Un cliente realtime sólo recibe replay incremental cuando cada operación
+  forma una cadena completa desde su secuencia base hasta la escena canónica.
+  Ante un hueco por compactación, el servidor exige una sincronización de la
+  escena canónica; nunca aplica una cola parcial.
+
 ## Bibliotecas y recursos
 
 El listado de bibliotecas no devuelve `library_json`; entrega resumen, número de

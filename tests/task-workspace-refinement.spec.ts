@@ -7,11 +7,12 @@ const todoStatus = { id: 'status-todo', account_id: 'account-work', workflow_id:
 const activeStatus = { id: 'status-active', account_id: 'account-work', workflow_id: 'workflow-main', name: 'En curso', color: '#3b82f6', category: 'active', sort_order: 1, is_default: false, created_at: now, updated_at: now }
 const doneStatus = { id: 'status-done', account_id: 'account-work', workflow_id: 'workflow-main', name: 'Completada', color: '#10b981', category: 'done', sort_order: 2, is_default: false, created_at: now, updated_at: now }
 const statuses = [todoStatus, activeStatus, doneStatus]
-const fullPermissions = { level: 'full' as const, can_view: true, can_comment: true, can_edit: true, can_delete: true, can_manage_access: true, inherited_from: 'account_admin' as const }
-const viewPermissions = { level: 'view' as const, can_view: true, can_comment: false, can_edit: false, can_delete: false, can_manage_access: false, inherited_from: 'task_grant' as const }
+const fullPermissions = { level: 'full' as const, can_view: true, can_comment: true, can_edit: true, can_delete: true, can_archive: true, can_trash: true, can_restore: true, can_manage_access: true, inherited_from: 'account_admin' as const }
+const containerFullPermissions = { ...fullPermissions, can_delete: false, can_archive: true, can_trash: false }
+const viewPermissions = { level: 'view' as const, can_view: true, can_comment: false, can_edit: false, can_delete: false, can_archive: false, can_trash: false, can_restore: false, can_manage_access: false, inherited_from: 'task_grant' as const }
 
 function list(id: string, name: string, folderId = '', order = 1024, taskCount = 0, isDefault = false) {
-  return { id, account_id: 'account-work', environment_id: 'env-work', folder_id: folderId || undefined, workflow_id: 'workflow-main', workflow_inherited: Boolean(folderId), is_default: isDefault, name, description: '', color: isDefault ? '#10b981' : '#3b82f6', icon: isDefault ? 'inbox' : 'list', sort_order: order, created_by: 'user-owner', created_at: now, updated_at: now, task_count: taskCount, open_task_count: taskCount, completed_task_count: 0, cancelled_task_count: 0, permissions: fullPermissions }
+  return { id, account_id: 'account-work', environment_id: 'env-work', folder_id: folderId || undefined, workflow_id: 'workflow-main', workflow_inherited: Boolean(folderId), is_default: isDefault, name, description: '', color: isDefault ? '#10b981' : '#3b82f6', icon: isDefault ? 'inbox' : 'list', sort_order: order, created_by: 'user-owner', created_at: now, updated_at: now, task_count: taskCount, open_task_count: taskCount, completed_task_count: 0, cancelled_task_count: 0, permissions: { ...containerFullPermissions, can_delete: !isDefault && taskCount === 0, can_trash: !isDefault && taskCount === 0 } }
 }
 
 function makeTask() {
@@ -37,28 +38,29 @@ async function installWorkspaceMock(page: Page) {
   let workspaceSocket: { send(message: string): void } | undefined
   let trashTasks = [{ ...makeTask(), id: 'task-trash', title: 'Tarea eliminada explícitamente', deleted_at: '2026-06-20T12:00:00.000Z', version: 4 }]
   let trashRetentionDays: number | null = 30
-  let trashContainers = [{ id: 'list-trash', type: 'list' as const, name: 'Lista archivada', color: '#3b82f6', icon: 'list', archived_at: '2026-06-20T12:00:00.000Z', original_folder_name: 'Cliente Alfa', list_count: 0, task_count: 0, next_eligible_at: '2026-07-20T12:00:00.000Z', can_purge: true, restore_blocked: false }]
+  let trashContainers = [{ id: 'list-trash', type: 'list' as const, name: 'Lista archivada', color: '#3b82f6', icon: 'list', deleted_at: '2026-06-20T12:00:00.000Z', archived_at: '2026-06-19T12:00:00.000Z', lifecycle: 'trash' as const, original_folder_name: 'Cliente Alfa', list_count: 0, task_count: 0, next_eligible_at: '2026-07-20T12:00:00.000Z', can_purge: true, can_restore: true, restore_blocked: false }]
   let hierarchy = {
     folders: [{
       id: 'folder-client', account_id: 'account-work', workflow_id: 'workflow-main', name: 'Cliente Alfa', description: '', color: '#8b5cf6', sort_order: 1024,
-      environment_id: 'env-work', icon: 'folder', created_by: 'user-owner', created_at: now, updated_at: now, task_count: 0, open_task_count: 0, completed_task_count: 0, cancelled_task_count: 0, permissions: fullPermissions, lists: [list('list-folder', 'Lista de carpeta', 'folder-client', 1024)],
+      environment_id: 'env-work', icon: 'folder', created_by: 'user-owner', created_at: now, updated_at: now, task_count: 0, open_task_count: 0, completed_task_count: 0, cancelled_task_count: 0, permissions: containerFullPermissions, lists: [list('list-folder', 'Lista de carpeta', 'folder-client', 1024)],
     }, {
       id: 'folder-beta', account_id: 'account-work', workflow_id: 'workflow-main', name: 'Cliente Beta', description: '', color: '#f59e0b', sort_order: 2048,
-      environment_id: 'env-work', icon: 'folder', created_by: 'user-owner', created_at: now, updated_at: now, task_count: 0, open_task_count: 0, completed_task_count: 0, cancelled_task_count: 0, permissions: fullPermissions, lists: [],
+      environment_id: 'env-work', icon: 'folder', created_by: 'user-owner', created_at: now, updated_at: now, task_count: 0, open_task_count: 0, completed_task_count: 0, cancelled_task_count: 0, permissions: containerFullPermissions, lists: [],
     }],
     root_lists: [list('list-default', 'Bandeja general', '', 0, 0, true), list('list-work', 'Trabajo principal', '', 2048, 1)],
   }
+  let archivedLists: Array<ReturnType<typeof list> & { archived_at: string; lifecycle: 'archived' }> = []
   const privateEnvironment = {
     id: 'env-private', account_id: 'account-work', name: 'Privado remoto', description: 'Entorno fuera de la primera página', color: '#7c3aed', icon: 'lock', sort_order: 2048,
     visibility: 'restricted' as const, default_access_level: 'none' as const, is_default: false, version: 2, access_revision: 4, created_at: now, updated_at: now,
-    folder_count: 1, list_count: 2, task_count: 1, permissions: fullPermissions,
+    folder_count: 1, list_count: 2, task_count: 1, permissions: containerFullPermissions,
   }
   const privateFolder = {
     id: 'folder-private', account_id: 'account-work', environment_id: privateEnvironment.id, workflow_id: 'workflow-main', name: 'Carpeta reservada', description: '', color: '#7c3aed', sort_order: 1024,
     icon: 'folder', created_by: 'user-owner', created_at: now, updated_at: now, task_count: 1, open_task_count: 1, completed_task_count: 0, cancelled_task_count: 0, lists: [],
   }
-  const privateDefaultList = { ...list('list-private-default', 'Bandeja privada', '', 0, 0, true), environment_id: privateEnvironment.id, permissions: fullPermissions }
-  const privateRemoteList = { ...list('list-private-remote', 'Lista remota especial', privateFolder.id, 1024, 1), environment_id: privateEnvironment.id, permissions: fullPermissions }
+  const privateDefaultList = { ...list('list-private-default', 'Bandeja privada', '', 0, 0, true), environment_id: privateEnvironment.id, permissions: containerFullPermissions }
+  const privateRemoteList = { ...list('list-private-remote', 'Lista remota especial', privateFolder.id, 1024, 1), environment_id: privateEnvironment.id, permissions: containerFullPermissions }
   const sharedTask = {
     ...makeTask(), id: 'task-shared-private', title: 'Tarea privada compartida', list_id: 'list-secret', list_name: 'Lista secreta', folder_id: 'folder-secret', folder_name: 'Carpeta secreta',
     environment_id: 'env-work', environment_name: 'General', breadcrumbs_visible: false, access_mode: 'private' as const, effective_access_level: 'view' as const,
@@ -80,13 +82,17 @@ async function installWorkspaceMock(page: Page) {
   let generalEnvironmentName = 'General'
   let structureRefreshDelayMs = 0
   const structureRefreshCompletions: string[] = []
+  const structureReads: string[] = []
   const environmentDetailReads: string[] = []
   const remoteListQueries: Array<{ search: string; cursor: string; at: number }> = []
   const remoteFolderQueries: Array<{ limit: string; at: number }> = []
   const attachmentUploads: Array<{ taskId: string; filename: string }> = []
   const trashWrites: Array<{ path: string; method: string; body: Record<string, unknown> }> = []
+  const containerLifecycleWrites: Array<{ path: string; method: string; body: Record<string, unknown> }> = []
   const attachmentCommentWrites: Array<Record<string, unknown>> = []
   const attachmentCommentMutations: Array<{ method: string; body: Record<string, unknown> }> = []
+  const eventWrites: Array<Record<string, unknown>> = []
+  const historicalReads: string[] = []
   const textAttachment = {
     id: 'attachment-text', account_id: 'account-work', task_id: 'task-refinement', media_asset_id: 'asset-text',
     filename: 'notas-operativas.txt', content_type: 'text/plain', media_type: 'document', size_bytes: 76,
@@ -106,13 +112,16 @@ async function installWorkspaceMock(page: Page) {
     const path = url.pathname
     let body: Record<string, unknown> = {}
     try { body = request.postDataJSON() } catch { body = {} }
+    if (url.searchParams.get('lifecycle') === 'archive' && path.startsWith(`/api/tasks/${task.id}`)) {
+      historicalReads.push(`${path}?${url.searchParams.toString()}`)
+    }
 
     if (path === '/api/me') {
       await json(route, { success: true, user: { id: 'user-owner', username: 'ricardo', display_name: 'Ricardo Rojas', role: 'admin', is_admin: true, account_id: 'account-work', permissions: ['tasks'] }, accounts: [] })
       return
     }
     if (path === '/api/tasks/environments') {
-      const general = { id: 'env-work', account_id: 'account-work', name: generalEnvironmentName, description: '', color: '#10b981', icon: 'layers', sort_order: 0, visibility: 'account', default_access_level: 'edit', is_default: true, version: 1, access_revision: 1, created_at: now, updated_at: now, folder_count: hierarchy.folders.length, list_count: hierarchy.root_lists.length + hierarchy.folders.flatMap(folder => folder.lists).length, task_count: 1, permissions: fullPermissions }
+      const general = { id: 'env-work', account_id: 'account-work', name: generalEnvironmentName, description: '', color: '#10b981', icon: 'layers', sort_order: 0, visibility: 'account', default_access_level: 'edit', is_default: true, version: 1, access_revision: 1, created_at: now, updated_at: now, folder_count: hierarchy.folders.length, list_count: hierarchy.root_lists.length + hierarchy.folders.flatMap(folder => folder.lists).length, task_count: 1, permissions: containerFullPermissions }
       const search = (url.searchParams.get('search') || '').toLocaleLowerCase()
       const environments = search ? [general, privateEnvironment].filter(environment => environment.name.toLocaleLowerCase().includes(search)) : [general]
       await json(route, { success: true, environments, next_cursor: search ? null : 'environment-page-2', can_create: true })
@@ -121,7 +130,7 @@ async function installWorkspaceMock(page: Page) {
     if (path === '/api/tasks/environments/env-work' && request.method() === 'PATCH') {
       environmentWrites.push(body)
       generalEnvironmentName = String(body.name || generalEnvironmentName)
-      await json(route, { success: true, environment: { id: 'env-work', account_id: 'account-work', name: generalEnvironmentName, description: String(body.description || ''), color: String(body.color || '#10b981'), icon: String(body.icon || 'layers'), sort_order: 0, visibility: 'account', default_access_level: 'edit', is_default: true, version: 2, access_revision: 1, created_at: now, updated_at: now, folder_count: hierarchy.folders.length, list_count: hierarchy.root_lists.length + hierarchy.folders.flatMap(folder => folder.lists).length, task_count: 1, permissions: fullPermissions } })
+      await json(route, { success: true, environment: { id: 'env-work', account_id: 'account-work', name: generalEnvironmentName, description: String(body.description || ''), color: String(body.color || '#10b981'), icon: String(body.icon || 'layers'), sort_order: 0, visibility: 'account', default_access_level: 'edit', is_default: true, version: 2, access_revision: 1, created_at: now, updated_at: now, folder_count: hierarchy.folders.length, list_count: hierarchy.root_lists.length + hierarchy.folders.flatMap(folder => folder.lists).length, task_count: 1, permissions: containerFullPermissions } })
       return
     }
     if (path === `/api/tasks/environments/${privateEnvironment.id}`) {
@@ -130,6 +139,7 @@ async function installWorkspaceMock(page: Page) {
       return
     }
     if (path === '/api/tasks/environments/env-work/folders') {
+      structureReads.push('folders')
       if (structureRefreshDelayMs) {
         await new Promise(resolve => setTimeout(resolve, structureRefreshDelayMs))
         structureRefreshCompletions.push('folders')
@@ -143,6 +153,7 @@ async function installWorkspaceMock(page: Page) {
         structureRefreshCompletions.push('lists')
       }
       const folderID = url.searchParams.get('folder_id')
+      structureReads.push(folderID ? `lists:${folderID}` : 'lists:root')
       const scope = url.searchParams.get('scope')
       const source = scope === 'all'
         ? [...hierarchy.root_lists, ...hierarchy.folders.flatMap(folder => folder.lists)]
@@ -150,12 +161,12 @@ async function installWorkspaceMock(page: Page) {
           ? hierarchy.folders.find(folder => folder.id === folderID)?.lists || []
           : hierarchy.root_lists
       const search = (url.searchParams.get('search') || '').toLocaleLowerCase()
-      await json(route, { success: true, lists: source.filter(item => !search || item.name.toLocaleLowerCase().includes(search)).map(item => ({ ...item, environment_id: 'env-work', permissions: fullPermissions })), next_cursor: null })
+      await json(route, { success: true, lists: source.filter(item => !search || item.name.toLocaleLowerCase().includes(search)).map(item => ({ ...item, environment_id: 'env-work', permissions: item.permissions || containerFullPermissions })), next_cursor: null })
       return
     }
     if (path === '/api/tasks/folders' && request.method() === 'POST') {
       folderCreateWrites.push(body)
-      const folder = { id: `folder-created-${hierarchy.folders.length}`, account_id: 'account-work', environment_id: 'env-work', workflow_id: 'workflow-main', name: String(body.name), description: '', color: String(body.color || '#64748b'), icon: String(body.icon || 'folder'), sort_order: (hierarchy.folders.length + 1) * 1024, created_by: 'user-owner', created_at: now, updated_at: now, task_count: 0, open_task_count: 0, completed_task_count: 0, cancelled_task_count: 0, access_mode: 'inherit', access_revision: 1, permissions: fullPermissions, lists: [] }
+      const folder = { id: `folder-created-${hierarchy.folders.length}`, account_id: 'account-work', environment_id: 'env-work', workflow_id: 'workflow-main', name: String(body.name), description: '', color: String(body.color || '#64748b'), icon: String(body.icon || 'folder'), sort_order: (hierarchy.folders.length + 1) * 1024, created_by: 'user-owner', created_at: now, updated_at: now, task_count: 0, open_task_count: 0, completed_task_count: 0, cancelled_task_count: 0, access_mode: 'inherit', access_revision: 1, permissions: containerFullPermissions, lists: [] }
       hierarchy = { ...hierarchy, folders: [...hierarchy.folders, folder] }
       structureRefreshDelayMs = 2_500
       await json(route, { success: true, folder }, 201)
@@ -197,10 +208,40 @@ async function installWorkspaceMock(page: Page) {
       return
     }
     if (path === '/api/tasks/hierarchy') { await json(route, hierarchy); return }
+    if (path === '/api/tasks/agenda' && request.method() === 'GET') {
+      await json(route, { success: true, items: [], next_cursor: null }); return
+    }
+    if (path === '/api/tasks/events' && request.method() === 'POST') {
+      eventWrites.push(body)
+      await json(route, {
+        success: true,
+        event: {
+          id: `event-created-${eventWrites.length}`, account_id: 'account-work', list_id: body.list_id,
+          organizer_id: 'user-owner', organizer_name: 'Ricardo Rojas', title: body.title,
+          description: '', availability: body.availability, is_all_day: body.is_all_day,
+          start_at: body.start_at, end_at: body.end_at, start_date: body.start_date,
+          end_date_exclusive: body.end_date_exclusive, timezone: body.timezone, recurrence_rule: '',
+          color: null, resolved_color: '#10B981', color_source: 'list', version: 1,
+          operation_id: body.operation_id, lifecycle: 'active', attendees: [],
+          capabilities: { can_view: true, can_edit: true, can_invite: true, can_cancel: true, can_trash: true, can_restore: false, can_purge: false, can_rsvp: false, can_set_reminder: true },
+          created_at: now, updated_at: now,
+        },
+      }, 201)
+      return
+    }
+    if (path === '/api/tasks/environments/env-work/hierarchy' && url.searchParams.get('lifecycle') === 'archive') {
+      historicalReads.push(`${path}?${url.searchParams.toString()}`)
+      const historical = archivedLists.length
+        ? archivedLists
+        : [{ ...hierarchy.root_lists[1], archived_at: now, lifecycle: 'archived' as const, task_count: 1, open_task_count: 0, completed_task_count: 1 }]
+      await json(route, { success: true, lifecycle: 'archived', folders: [], root_lists: historical.map(item => ({ ...item, permissions: { ...viewPermissions, inherited_from: 'historical_read_only' } })) })
+      return
+    }
     if (path === '/api/tasks/trash-policy' && request.method() === 'GET') { await json(route, { success: true, retention_days: trashRetentionDays, can_manage: true }); return }
     if (path === '/api/tasks/trash-policy' && request.method() === 'PUT') { trashWrites.push({ path, method: request.method(), body }); trashRetentionDays = body.retention_days === null ? null : Number(body.retention_days); await json(route, { success: true, retention_days: trashRetentionDays, can_manage: true }); return }
     if (path === '/api/tasks/trash/containers') { await json(route, { success: true, containers: trashContainers }); return }
-    if (path === '/api/tasks/workflows') { await json(route, { workflows: [{ id: 'workflow-main', account_id: 'account-work', name: 'Flujo principal', is_default: true, created_by: 'user-owner', created_at: now, updated_at: now, statuses }] }); return }
+    if (path === '/api/tasks/trash/environments') { await json(route, { success: true, environments: [] }); return }
+    if (path === '/api/tasks/workflows') { structureReads.push('workflows'); await json(route, { workflows: [{ id: 'workflow-main', account_id: 'account-work', name: 'Flujo principal', is_default: true, created_by: 'user-owner', created_at: now, updated_at: now, statuses }] }); return }
     if (path === '/api/account/users') {
       await json(route, { users: [
         { id: 'user-owner', username: 'ricardo', display_name: 'Ricardo Rojas', role: 'Administrador' },
@@ -224,7 +265,9 @@ async function installWorkspaceMock(page: Page) {
         if (requestedFolderID && item.folder_id !== requestedFolderID) return false
         return true
       })
-      const items = url.searchParams.get('deleted') === 'true'
+      const items = url.searchParams.get('lifecycle') === 'archive'
+        ? [{ ...task, status: 'completed', status_id: doneStatus.id, status_detail: doneStatus, permissions: { ...viewPermissions, inherited_from: 'historical_read_only' } }]
+        : url.searchParams.get('deleted') === 'true'
         ? trashTasks
         : sharedWithMe
           ? [sharedTask]
@@ -242,6 +285,35 @@ async function installWorkspaceMock(page: Page) {
     if (path === '/api/tasks/task-trash/purge' && request.method() === 'DELETE') { trashWrites.push({ path, method: request.method(), body }); trashTasks = []; await json(route, { success: true, purged: { tasks: 1, lists: 0, folders: 0 } }); return }
     if (path === '/api/tasks/lists/list-trash/restore' && request.method() === 'POST') { trashWrites.push({ path, method: request.method(), body }); trashContainers = []; await json(route, { success: true }); return }
     if (path === '/api/tasks/lists/list-trash/purge' && request.method() === 'DELETE') { trashWrites.push({ path, method: request.method(), body }); trashContainers = []; await json(route, { success: true, purged: { tasks: 0, lists: 1, folders: 0 } }); return }
+
+    const listArchiveMatch = path.match(/^\/api\/tasks\/lists\/([^/]+)\/archive$/)
+    if (listArchiveMatch && request.method() === 'POST') {
+      const listID = listArchiveMatch[1]
+      const target = [...hierarchy.root_lists, ...hierarchy.folders.flatMap(folder => folder.lists)].find(item => item.id === listID)
+      containerLifecycleWrites.push({ path, method: request.method(), body })
+      if (!target) { await json(route, { success: false, error: 'Lista no encontrada.' }, 404); return }
+      archivedLists = [...archivedLists.filter(item => item.id !== listID), { ...target, archived_at: now, lifecycle: 'archived' }]
+      hierarchy = {
+        root_lists: hierarchy.root_lists.filter(item => item.id !== listID),
+        folders: hierarchy.folders.map(folder => ({ ...folder, lists: folder.lists.filter(item => item.id !== listID) })),
+      }
+      await json(route, { success: true, operation_id: body.operation_id })
+      setTimeout(() => workspaceSocket?.send(JSON.stringify({ event: 'task_update', data: { action: 'list_archived', list_id: listID, operation_id: body.operation_id } })), 20)
+      return
+    }
+
+    const listTrashMatch = path.match(/^\/api\/tasks\/lists\/([^/]+)$/)
+    if (listTrashMatch && request.method() === 'DELETE') {
+      const listID = listTrashMatch[1]
+      containerLifecycleWrites.push({ path, method: request.method(), body })
+      hierarchy = {
+        root_lists: hierarchy.root_lists.filter(item => item.id !== listID),
+        folders: hierarchy.folders.map(folder => ({ ...folder, lists: folder.lists.filter(item => item.id !== listID) })),
+      }
+      await json(route, { success: true, operation_id: body.operation_id })
+      setTimeout(() => workspaceSocket?.send(JSON.stringify({ event: 'task_update', data: { action: 'list_trashed', list_id: listID, operation_id: body.operation_id } })), 20)
+      return
+    }
 
     const structureMatch = path.match(/^\/api\/tasks\/lists\/([^/]+)\/structure$/)
     if (structureMatch && request.method() === 'PUT') {
@@ -407,7 +479,7 @@ async function installWorkspaceMock(page: Page) {
       await json(route, { success: true, operation_id: body.operation_id, tasks: [task, ...createdTasks].filter(item => itemIDs.has(item.id)) })
       return
     }
-    if (path === `/api/tasks/${task.id}`) { await json(route, { task }); return }
+    if (path === `/api/tasks/${task.id}`) { await json(route, { task: url.searchParams.get('lifecycle') === 'archive' ? { ...task, status: 'completed', status_id: doneStatus.id, status_detail: doneStatus, permissions: { ...viewPermissions, inherited_from: 'historical_read_only' } } : task }); return }
     if (path === `/api/tasks/${task.id}/children`) { await json(route, { tasks: [] }); return }
     if (path === `/api/tasks/${task.id}/comments`) { await json(route, { comments: [], total: 0, limit: 100, offset: 0 }); return }
     if (path === `/api/tasks/${task.id}/activity`) { await json(route, { activity: [] }); return }
@@ -457,8 +529,8 @@ async function installWorkspaceMock(page: Page) {
   })
 
   return {
-    structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites, folderCreateWrites, bulkMoves, bulkUpdates, trashWrites, taskQueries, environmentWrites,
-    environmentDetailReads, remoteListQueries, remoteFolderQueries, sharedResourceReads, structureRefreshCompletions, attachmentUploads, attachmentCommentWrites, attachmentCommentMutations,
+    structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites, eventWrites, folderCreateWrites, bulkMoves, bulkUpdates, trashWrites, containerLifecycleWrites, taskQueries, environmentWrites,
+    environmentDetailReads, remoteListQueries, remoteFolderQueries, sharedResourceReads, structureRefreshCompletions, structureReads, attachmentUploads, attachmentCommentWrites, attachmentCommentMutations, historicalReads,
     failNextDescriptionWrite: () => { failNextDescriptionWrite = true },
     failNextAttachmentUpload: () => { failNextAttachmentUpload = true },
     failNextCreateConflict: () => { failNextCreateStatus = 409 },
@@ -469,6 +541,17 @@ async function installWorkspaceMock(page: Page) {
       }, ...createdTasks]
     },
     setCreateDelay: (milliseconds: number) => { createDelayMs = milliseconds },
+    addClosedHistoryList: () => {
+      hierarchy = {
+        ...hierarchy,
+        root_lists: [...hierarchy.root_lists, {
+          ...list('list-ernesto', 'Ernesto', '', 3072, 31),
+          open_task_count: 0,
+          completed_task_count: 31,
+          permissions: { ...containerFullPermissions, can_delete: false, can_archive: true, can_trash: false },
+        }],
+      }
+    },
     emitTaskEvent: (data: Record<string, unknown>) => {
       if (!workspaceSocket) return false
       if (data.action === 'access_revoked' && data.target_type === 'task' && data.target_id === sharedTask.id) sharedResources = []
@@ -573,9 +656,10 @@ test.describe('Clarin Work workspace refinement', () => {
     await page.goto(`${baseURL}/dashboard/tasks`)
     await page.getByRole('button', { name: 'Calendario' }).click()
     await expect(page.locator('[data-task-calendar]')).toBeVisible()
-    await page.locator('[data-task-calendar] .grid button.group').first().click()
-    const composer = page.getByRole('dialog', { name: 'Crear tarea' })
+    await page.locator('[data-task-calendar] [role="button"].group').first().click()
+    const composer = page.getByRole('dialog', { name: 'Crear en este horario' })
     await expect(composer).toBeVisible()
+    await composer.getByRole('button', { name: 'Tarea', exact: true }).click()
     const pickerTriggers = composer.locator('button[aria-haspopup="listbox"]')
     await pickerTriggers.nth(0).click()
     const listPortal = page.getByRole('listbox', { name: 'Seleccionar lista' })
@@ -595,6 +679,48 @@ test.describe('Clarin Work workspace refinement', () => {
     expect(mock.createWrites[0].is_all_day).toBe(true)
     expect(mock.createWrites[0].operation_id).toBeTruthy()
     expect(mock.createWrites[0]).toMatchObject({ list_id: 'list-folder', assigned_to: 'user-analyst' })
+  })
+
+  test('creates a Work event by default and preserves its draft across Evento/Tarea', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await page.getByRole('button', { name: 'Calendario' }).click()
+    await page.locator('[data-task-calendar] [role="button"].group').first().click()
+    const composer = page.getByRole('dialog', { name: 'Crear en este horario' })
+    const eventTitle = composer.getByPlaceholder('Nombre del evento')
+    await eventTitle.fill('Revisión de campaña')
+    await composer.getByRole('button', { name: 'Tarea', exact: true }).click()
+    await expect(composer.getByPlaceholder('¿Qué hay que lograr?')).toHaveValue('Revisión de campaña')
+    await composer.getByRole('button', { name: 'Evento', exact: true }).click()
+    await expect(eventTitle).toHaveValue('Revisión de campaña')
+    await composer.getByRole('button', { name: 'Crear', exact: true }).click()
+    await expect.poll(() => mock.eventWrites.length).toBe(1)
+    expect(mock.eventWrites[0]).toMatchObject({
+      title: 'Revisión de campaña', availability: 'busy', is_all_day: true,
+      recurrence_rule: '', attendees: [], color: null,
+    })
+    expect(mock.eventWrites[0].list_id).toBeTruthy()
+    expect(mock.eventWrites[0].operation_id).toBeTruthy()
+  })
+
+  test('keeps Calendario usable at the six supported responsive widths', async ({ page }) => {
+    await installWorkspaceMock(page)
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await page.getByRole('button', { name: 'Calendario' }).click()
+    const calendar = page.locator('[data-task-calendar]')
+    for (const width of [320, 375, 768, 1024, 1280, 1440]) {
+      await page.setViewportSize({ width, height: width < 768 ? 740 : 820 })
+      await expect(calendar).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Mes', exact: true })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Semana', exact: true })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Día', exact: true })).toBeVisible()
+      await page.getByRole('button', { name: 'Semana', exact: true }).click()
+      const measuredCalendarWidth = await calendar.evaluate(element => element.clientWidth)
+      await expect(calendar.locator('[data-task-calendar-mobile-week]')).toHaveCount(measuredCalendarWidth < 700 ? 1 : 0)
+      const globalOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+      expect(globalOverflow, `desbordamiento global a ${width}px`).toBeLessThanOrEqual(1)
+      await page.getByRole('button', { name: 'Mes', exact: true }).click()
+    }
   })
 
   test('supports keyboard pickup and exact Escape cancellation for a list', async ({ page }) => {
@@ -767,6 +893,30 @@ test.describe('Clarin Work workspace refinement', () => {
     await row.click()
     await expect(page.getByRole('button', { name: 'Contraer Cliente Alfa' })).toHaveAttribute('aria-expanded', 'true')
     await expect(page.locator('[data-task-hierarchy-list="list-folder"]')).toBeVisible()
+  })
+
+  test('keeps active folder and list selection without reloading the active hierarchy', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 620 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    const childList = page.locator('[data-task-hierarchy-list="list-folder"]')
+    await expect(childList).toBeVisible()
+    await page.waitForTimeout(200)
+    mock.structureReads.length = 0
+
+    await page.locator('[data-task-hierarchy-list="list-work"]').click()
+    await expect(page.getByRole('heading', { name: 'Trabajo principal' })).toBeVisible()
+    await expect(childList).toBeVisible()
+    await page.waitForTimeout(200)
+    expect(mock.structureReads).toEqual([])
+
+    await childList.click()
+    await expect(page.getByRole('heading', { name: 'Lista de carpeta' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Contraer Cliente Alfa' })).toHaveAttribute('aria-expanded', 'true')
+    await page.waitForTimeout(200)
+    expect(mock.structureReads).toEqual([])
+
+    await expect(page.getByRole('button', { name: 'Opciones de la lista Lista de carpeta' })).toHaveCount(1)
   })
 
   test('moves a task to a navigation list and opens the folder chooser above the board', async ({ page }) => {
@@ -1537,6 +1687,89 @@ test.describe('Clarin Work workspace refinement', () => {
     expect(mock.trashWrites.find(write => write.path === '/api/tasks/task-refinement')?.body).not.toHaveProperty('completed_at')
   })
 
+  test('recommends Archive for Ernesto, sends no DELETE and reconciles the local plus WebSocket result', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    mock.addClosedHistoryList()
+    await page.setViewportSize({ width: 1398, height: 760 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+
+    const ernesto = page.locator('[data-task-hierarchy-list="list-ernesto"]')
+    await expect(ernesto).toBeVisible()
+    await ernesto.click()
+    await expect(page.getByRole('heading', { name: 'Ernesto', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Opciones de la lista Ernesto' }).click()
+    await expect(page.getByRole('button', { name: 'Archivar como histórico' })).toBeVisible()
+
+    await page.getByRole('button', { name: 'Mover a Papelera' }).click()
+    let dialog = page.getByRole('alertdialog', { name: 'Ernesto no se movió a Papelera' })
+    await expect(dialog).toContainText('31 tareas (0 abiertas, 31 completadas y 0 canceladas)')
+    await expect(dialog.getByRole('button', { name: 'Mover a Papelera' })).toHaveCount(0)
+    expect(mock.containerLifecycleWrites.filter(write => write.method === 'DELETE')).toHaveLength(0)
+
+    await dialog.getByRole('button', { name: 'Archivar como histórico' }).click()
+    dialog = page.getByRole('alertdialog', { name: 'Archivar lista' })
+    await dialog.getByRole('button', { name: 'Archivar como histórico' }).click()
+
+    await expect.poll(() => mock.containerLifecycleWrites.filter(write => write.path === '/api/tasks/lists/list-ernesto/archive').length).toBe(1)
+    expect(mock.containerLifecycleWrites.filter(write => write.method === 'DELETE')).toHaveLength(0)
+    await expect(ernesto).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Todo en General' })).toBeVisible()
+
+    expect(mock.emitTaskEvent({ action: 'list_archived', list_id: 'list-ernesto', operation_id: 'remote-replay' })).toBe(true)
+    await page.waitForTimeout(350)
+    await expect(ernesto).toHaveCount(0)
+
+    await page.getByRole('button', { name: 'Archivo', exact: true }).click()
+    await expect(page.getByText('Ernesto', { exact: true })).toBeVisible()
+    await expect(page.getByText('31 completadas', { exact: false })).toBeVisible()
+  })
+
+  test('trashes an empty nested list once and falls back to the Entorno at 375 px', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 375, height: 760 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+
+    await page.getByRole('button', { name: 'Abrir navegación de Clarin Work' }).click()
+    const nested = page.locator('[data-task-hierarchy-list="list-folder"]')
+    await expect(nested).toBeVisible()
+    await nested.click()
+    await expect(page.getByRole('heading', { name: 'Lista de carpeta' })).toBeVisible()
+    await page.getByRole('button', { name: 'Abrir navegación de Clarin Work' }).click()
+    await page.getByRole('button', { name: 'Opciones de la lista Lista de carpeta' }).click()
+    await page.getByRole('button', { name: 'Mover a Papelera' }).click()
+
+    const dialog = page.getByRole('alertdialog', { name: 'Mover lista a Papelera' })
+    await dialog.getByRole('textbox').fill('Lista de carpeta')
+    await dialog.getByRole('button', { name: 'Mover a Papelera' }).click()
+
+    await expect.poll(() => mock.containerLifecycleWrites.filter(write => write.path === '/api/tasks/lists/list-folder' && write.method === 'DELETE').length).toBe(1)
+    await expect(nested).toHaveCount(0)
+    await page.getByRole('button', { name: 'Cerrar navegación de Clarin Work' }).click()
+    await expect(page.getByRole('heading', { name: 'Todo en General' })).toBeVisible()
+  })
+
+  test('opens historical Archive in read-only mode and requests every task surface explicitly', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1398, height: 760 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await page.getByRole('button', { name: 'Archivo', exact: true }).click()
+
+    await expect(page.getByText('Histórico · solo lectura', { exact: true }).first()).toBeVisible()
+    await expect(page.getByRole('button', { name: /Nueva tarea/i })).toHaveCount(0)
+    await page.getByText('Preparar propuesta profesional', { exact: true }).click()
+
+    await expect.poll(() => new Set(mock.historicalReads.map(read => read.split('?')[0]))).toEqual(new Set([
+      '/api/tasks/environments/env-work/hierarchy',
+      '/api/tasks/task-refinement',
+      '/api/tasks/task-refinement/children',
+      '/api/tasks/task-refinement/comments',
+      '/api/tasks/task-refinement/activity',
+      '/api/tasks/task-refinement/attachments',
+      '/api/tasks/task-refinement/dependencies',
+    ]))
+    await expect(page.getByRole('button', { name: /Enviar comentario/i })).toHaveCount(0)
+  })
+
   test('manages safe retention, restoration and exact-name permanent deletion', async ({ page }) => {
     const mock = await installWorkspaceMock(page)
     await page.setViewportSize({ width: 1398, height: 760 })
@@ -1548,7 +1781,7 @@ test.describe('Clarin Work workspace refinement', () => {
     await expect.poll(() => mock.trashWrites.some(write => write.path === '/api/tasks/trash-policy' && write.body.retention_days === null)).toBeTruthy()
     await page.getByRole('button', { name: '30 días' }).click()
 
-    await page.getByRole('button', { name: /Listas y carpetas/ }).click()
+    await page.getByRole('button', { name: /Estructuras/ }).click()
     await expect(page.getByText('Lista archivada', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Eliminar permanentemente' }).click()
     const dialog = page.getByRole('alertdialog', { name: 'Eliminar lista permanentemente' })

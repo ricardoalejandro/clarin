@@ -18,9 +18,10 @@ import { ensureExpandedFolder, folderAutoExpandedForScope, normalizeExpandedFold
 import type { TaskExternalDropTarget } from './taskDropTargets'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { hierarchyCountTooltip, hierarchyItemOpenCount } from './taskHierarchyCounts'
-import type { TaskFolderChildrenState, TaskHierarchyLoadPhase } from './taskHierarchyLazy'
+import type { TaskContainerLifecycleMutation, TaskFolderChildrenState, TaskHierarchyLoadPhase } from './taskHierarchyLazy'
 import type { TaskAccountUser } from './TaskEditorModal'
 import { showIndependentListsHeading } from './taskWorkspaceChrome'
+import { taskContainerCanManageStructure } from './taskContainerCapabilities'
 
 type HierarchyScope = { type: 'all' | 'shared' | 'trash' } | { type: 'environment' | 'folder' | 'list'; id: string }
 type ContainerID = `container:${string}` | 'root'
@@ -33,7 +34,7 @@ interface Props {
   scope: HierarchyScope
   collapsed: boolean
   onSelect: (scope: HierarchyScope) => void
-  onChanged: () => Promise<void> | void
+  onChanged: (mutation?: TaskContainerLifecycleMutation) => Promise<void> | void
   onError: (message: string) => void
   onOperation?: (operationID: string, active: boolean) => void
   taskDropTarget?: TaskExternalDropTarget | null
@@ -69,7 +70,7 @@ const folderItemID = (id: string) => `folder:${id}`
 const listIDFromItem = (id: string) => id.startsWith('list:') ? id.slice(5) : ''
 const folderIDFromItem = (id: string) => id.startsWith('folder:') ? id.slice(7) : ''
 export const taskHierarchyCanReceiveTasks = (item: TaskList | TaskFolder) => item.permissions?.can_edit === true
-export const taskHierarchyCanManageStructure = (item: TaskList | TaskFolder) => item.permissions?.can_delete === true
+export const taskHierarchyCanManageStructure = (item: TaskList | TaskFolder) => taskContainerCanManageStructure(item)
 
 function buildOrderedLists(folders: TaskFolder[], rootLists: TaskList[]): OrderedLists {
   return Object.fromEntries([
@@ -115,7 +116,7 @@ function SortableListRow({ list, containerID, active, selected, taskDropActive, 
     <div data-task-drop-highlight={dropActive || undefined} className={`group relative flex items-center rounded-lg transition-all duration-150 ${active ? 'opacity-30' : ''} ${dropActive ? 'z-10 scale-[1.02] bg-emerald-50 text-emerald-800 shadow-[0_8px_22px_rgba(16,185,129,0.18)] ring-2 ring-emerald-400' : selected ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}>
     <button type="button" onClick={onSelect} title={hierarchyCountTooltip(list)} className={`flex min-h-10 min-w-0 flex-1 items-center gap-2 text-left text-xs [@media(pointer:coarse)]:min-h-11 ${selected ? 'font-semibold' : ''}`}><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md" style={{ color: list.color, backgroundColor: `${list.color}16` }}><TaskContainerIcon value={list.icon} className="h-3 w-3" /></span><span className="min-w-0 flex-1 truncate">{list.name}</span><span aria-label={`${list.open_task_count || 0} tareas abiertas`} className="text-[9px] text-slate-400">{list.open_task_count || 0}</span></button>
     {dropActive && <span className="pointer-events-none absolute right-1 top-full z-20 mt-1 whitespace-nowrap rounded-full bg-emerald-700 px-2 py-1 text-[9px] font-black text-white shadow-lg">Soltar en {list.name}</span>}
-    {canManage && <button type="button" onClick={onEdit} aria-label={`Opciones de la lista ${list.name}`} title="Opciones: personalizar o mover a Papelera" className={`flex h-8 w-8 items-center justify-center rounded-md text-slate-300 hover:bg-white hover:text-slate-600 focus:opacity-100 group-hover:opacity-100 [@media(pointer:coarse)]:opacity-100 ${selected ? 'opacity-100' : 'opacity-0'}`}><MoreHorizontal className="h-3.5 w-3.5" /></button>}
+    {canManage && <button type="button" onClick={onEdit} aria-label={`Opciones de la lista ${list.name}`} title="Opciones: personalizar, archivar o mover a Papelera" className={`flex h-8 w-8 items-center justify-center rounded-md text-slate-300 hover:bg-white hover:text-slate-600 focus:opacity-100 group-hover:opacity-100 [@media(pointer:coarse)]:opacity-100 ${selected ? 'opacity-100' : 'opacity-0'}`}><MoreHorizontal className="h-3.5 w-3.5" /></button>}
     {canManage && <button type="button" ref={sortable.setActivatorNodeRef} {...sortable.attributes} {...sortable.listeners} aria-label={`Mover ${list.name}`} title={`Arrastrar ${list.name}`} className="mr-0.5 flex h-7 w-7 cursor-grab items-center justify-center rounded-md text-slate-300 opacity-0 hover:bg-white hover:text-slate-600 focus:opacity-100 active:cursor-grabbing group-hover:opacity-100"><GripVertical className="h-3.5 w-3.5" /></button>}
     </div>
   </div>
@@ -274,8 +275,8 @@ export default function TaskHierarchyTree({ folders, rootLists, scope, collapsed
     listSnapshotRef.current = ordered
     folderSnapshotRef.current = orderedFolders
     expansionSnapshotRef.current = new Set(expandedFolderIDs)
-    if (listID && allLists.find(item => item.id === listID)?.permissions?.can_delete === true) setActiveListID(listID)
-    if (folderID && folders.find(item => item.id === folderID)?.permissions?.can_delete === true) setActiveFolderID(folderID)
+    if (listID && taskContainerCanManageStructure(allLists.find(item => item.id === listID))) setActiveListID(listID)
+    if (folderID && taskContainerCanManageStructure(folders.find(item => item.id === folderID))) setActiveFolderID(folderID)
   }
   const handleOver = (event: DragOverEvent) => {
     if (!activeListID && !listIDFromItem(String(event.active.id))) return
@@ -330,7 +331,7 @@ export default function TaskHierarchyTree({ folders, rootLists, scope, collapsed
     if (listID) {
       const list = allLists.find(item => item.id === listID)
       const target = targetFromOver(event.over)
-      if (!list || list.is_default || list.permissions?.can_delete !== true || !target) { restore(); return }
+      if (!list || list.is_default || !taskContainerCanManageStructure(list) || !target) { restore(); return }
       let beforeListID = target.beforeListID
       if (beforeListID && event.active.rect.current.translated && event.active.rect.current.translated.top > event.over!.rect.top + event.over!.rect.height / 2) {
         const candidates = (listSnapshotRef.current[target.containerID] || []).filter(item => item.id !== listID)
@@ -348,7 +349,7 @@ export default function TaskHierarchyTree({ folders, rootLists, scope, collapsed
     }
     const folderID = folderIDFromItem(String(event.active.id))
     const overFolderID = folderIDFromItem(String(event.over?.id || ''))
-    if (!folderID || !overFolderID || folderID === overFolderID || folders.find(item => item.id === folderID)?.permissions?.can_delete !== true || folders.find(item => item.id === overFolderID)?.permissions?.can_delete !== true) { restore(); return }
+    if (!folderID || !overFolderID || folderID === overFolderID || !taskContainerCanManageStructure(folders.find(item => item.id === folderID)) || !taskContainerCanManageStructure(folders.find(item => item.id === overFolderID))) { restore(); return }
     const candidates = folderSnapshotRef.current.filter(item => item.id !== folderID)
     let targetIndex = candidates.findIndex(item => item.id === overFolderID)
     if (targetIndex < 0) { restore(); return }

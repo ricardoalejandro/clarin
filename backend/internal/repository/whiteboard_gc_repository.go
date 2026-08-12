@@ -18,6 +18,38 @@ const (
 	whiteboardGCErrorLength = 1000
 )
 
+const whiteboardTechnicalOperationPruneSQL = `WITH candidates AS (
+	SELECT operation.id,operation.account_id,operation.board_id
+	FROM whiteboard_operations operation
+	WHERE operation.created_at<$1 AND (
+		operation.operation_kind='patch' OR (
+			operation.operation_kind='snapshot' AND NOT EXISTS (
+				SELECT 1 FROM whiteboard_revisions revision
+				WHERE revision.account_id=operation.account_id
+					AND revision.board_id=operation.board_id
+					AND revision.operation_id=operation.operation_id
+			)
+		)
+	)
+	ORDER BY operation.created_at,operation.id
+	FOR UPDATE OF operation SKIP LOCKED LIMIT $2
+)
+DELETE FROM whiteboard_operations operation USING candidates
+WHERE operation.id=candidates.id AND operation.account_id=candidates.account_id AND operation.board_id=candidates.board_id
+RETURNING operation.id`
+
+const whiteboardTechnicalActivityPruneSQL = `WITH candidates AS (
+	SELECT activity.id,activity.account_id,activity.board_id
+	FROM whiteboard_activity activity
+	WHERE activity.created_at<$1
+		AND activity.action IN ('scene.patched','scene.snapshotted','thumbnail.updated')
+	ORDER BY activity.created_at,activity.id
+	FOR UPDATE OF activity SKIP LOCKED LIMIT $2
+)
+DELETE FROM whiteboard_activity activity USING candidates
+WHERE activity.id=candidates.id AND activity.account_id=candidates.account_id AND activity.board_id=candidates.board_id
+RETURNING activity.id`
+
 // WhiteboardMediaGCJob identifies one account-scoped physical media object.
 // ClaimToken prevents a worker whose lease expired from finalizing a newer
 // reservation for the same deduplicated media row.
@@ -62,6 +94,63 @@ func whiteboardGCLimit(limit int) int {
 		return 200
 	}
 	return limit
+}
+
+func whiteboardTechnicalGCLimit(limit int) int {
+	if limit <= 0 {
+		return 100
+	}
+	if limit > 500 {
+		return 500
+	}
+	return limit
+}
+
+func countWhiteboardPrunedRows(rows pgx.Rows) (int, error) {
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		count++
+	}
+	return count, rows.Err()
+}
+
+// PruneWhiteboardTechnicalHistory compacts only replay/audit noise older than
+// the supplied cutoff. Snapshot operations remain while their immutable
+// revision exists, which preserves every manual, system and unexpired
+// automatic recovery point. Create and restore operations are never selected.
+func (r *WhiteboardRepository) PruneWhiteboardTechnicalHistory(ctx context.Context, cutoff time.Time, limit int) (int, int, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	batchLimit := whiteboardTechnicalGCLimit(limit)
+	operationRows, err := tx.Query(ctx, whiteboardTechnicalOperationPruneSQL, cutoff, batchLimit)
+	if err != nil {
+		return 0, 0, err
+	}
+	operationCount, err := countWhiteboardPrunedRows(operationRows)
+	if err != nil {
+		return 0, 0, err
+	}
+	activityRows, err := tx.Query(ctx, whiteboardTechnicalActivityPruneSQL, cutoff, batchLimit)
+	if err != nil {
+		return 0, 0, err
+	}
+	activityCount, err := countWhiteboardPrunedRows(activityRows)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, err
+	}
+	return operationCount, activityCount, nil
 }
 
 func whiteboardGCRetryDelay(attempts int) time.Duration {

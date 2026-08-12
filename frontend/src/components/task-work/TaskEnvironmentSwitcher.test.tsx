@@ -24,6 +24,9 @@ const environment: TaskEnvironment = {
   folder_count: 0,
   list_count: 1,
   task_count: 0,
+  open_task_count: 0,
+  completed_task_count: 0,
+  cancelled_task_count: 0,
   permissions: {
     level: 'full',
     can_view: true,

@@ -26,6 +26,7 @@ interface Props {
   attachment: TaskAttachment
   users: TaskAccountUser[]
   canComment?: boolean
+  historicalReadOnly?: boolean
   onClose: () => void
 }
 
@@ -40,7 +41,7 @@ type ViewerResources = {
   pollTimer?: number
 }
 
-export default function TaskAttachmentViewer({ taskId, attachment, users, canComment = true, onClose }: Props) {
+export default function TaskAttachmentViewer({ taskId, attachment, users, canComment = true, historicalReadOnly = false, onClose }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const dialogRef = useRef<HTMLElement>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
@@ -78,6 +79,9 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, canCom
   const [editBody, setEditBody] = useState('')
   const [editMentionIDs, setEditMentionIDs] = useState<string[]>([])
   const [deleteTargetID, setDeleteTargetID] = useState<string>()
+  const historicalReadURL = useCallback((url: string) => historicalReadOnly && url.startsWith('/api/tasks/')
+    ? `${url}${url.includes('?') ? '&' : '?'}lifecycle=archive`
+    : url, [historicalReadOnly])
 
   const clearLoadTimers = useCallback(() => {
     const resources = resourcesRef.current
@@ -113,7 +117,7 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, canCom
     commentRefreshControllerRef.current?.abort()
     const controller = new AbortController()
     commentRefreshControllerRef.current = controller
-    const result = await apiGet<{ comments: TaskAttachmentComment[] }>(`/api/tasks/${taskId}/attachments/${attachment.id}/comments`, { signal: controller.signal })
+    const result = await apiGet<{ comments: TaskAttachmentComment[] }>(historicalReadURL(`/api/tasks/${taskId}/attachments/${attachment.id}/comments`), { signal: controller.signal })
     if (controller.signal.aborted || identityRef.current !== identity) return
     if (result.success) {
       setComments(result.data?.comments || [])
@@ -121,7 +125,7 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, canCom
     } else if (result.error !== 'Solicitud cancelada') {
       setCommentError(result.error || 'No se pudieron actualizar los comentarios.')
     }
-  }, [attachment.id, taskId])
+  }, [attachment.id, historicalReadURL, taskId])
 
   const closeViewer = useCallback(() => {
     sessionRef.current++
@@ -179,7 +183,7 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, canCom
       }
       setLoading(true)
       setPhase('downloading')
-      const blobResult = await apiBlob(nextPreview.url, { signal: controller.signal })
+      const blobResult = await apiBlob(historicalReadURL(nextPreview.url), { signal: controller.signal })
       if (!isCurrent()) return
       if (!blobResult.success || !blobResult.blob) {
         fail(blobResult.error || 'No se pudo descargar la vista previa.')
@@ -244,7 +248,7 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, canCom
         setLoading(false)
         setPhase('converting')
         resourcesRef.current.pollTimer = window.setTimeout(async () => {
-          const result = await apiGet<{ preview: TaskAttachmentPreview }>(`/api/tasks/${taskId}/attachments/${attachment.id}/preview`, { signal: controller.signal })
+          const result = await apiGet<{ preview: TaskAttachmentPreview }>(historicalReadURL(`/api/tasks/${taskId}/attachments/${attachment.id}/preview`), { signal: controller.signal })
           if (!isCurrent()) return
           if (!result.success || !result.data?.preview) {
             fail(result.error || 'No se pudo consultar la conversión.')
@@ -289,13 +293,13 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, canCom
       setEditMentionIDs([])
       setDeleteTargetID(undefined)
       startLoadDeadline()
-      const commentsRequest = apiGet<{ comments: TaskAttachmentComment[] }>(`/api/tasks/${taskId}/attachments/${attachment.id}/comments`, { signal: controller.signal })
+      const commentsRequest = apiGet<{ comments: TaskAttachmentComment[] }>(historicalReadURL(`/api/tasks/${taskId}/attachments/${attachment.id}/comments`), { signal: controller.signal })
       void commentsRequest.then(commentsResult => {
         if (!isCurrent()) return
         if (commentsResult.success) setComments(commentsResult.data?.comments || [])
         else if (commentsResult.error !== 'Solicitud cancelada') setCommentError(commentsResult.error || 'No se pudieron cargar los comentarios.')
       })
-      const previewResult = await apiGet<{ preview: TaskAttachmentPreview }>(`/api/tasks/${taskId}/attachments/${attachment.id}/preview`, { signal: controller.signal })
+      const previewResult = await apiGet<{ preview: TaskAttachmentPreview }>(historicalReadURL(`/api/tasks/${taskId}/attachments/${attachment.id}/preview`), { signal: controller.signal })
       if (!isCurrent()) return
       if (!previewResult.success || !previewResult.data?.preview) {
         fail(previewResult.error || 'No se pudo preparar la vista previa.')
@@ -308,7 +312,7 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, canCom
       if (sessionRef.current === session) sessionRef.current++
       disposeResources()
     }
-  }, [attachment.id, clearLoadTimers, disposeResources, reloadKey, taskId])
+  }, [attachment.id, clearLoadTimers, disposeResources, historicalReadURL, reloadKey, taskId])
 
   useEffect(() => subscribeWebSocket(raw => {
     const envelope = raw as {
@@ -615,7 +619,7 @@ export default function TaskAttachmentViewer({ taskId, attachment, users, canCom
   const pendingCommentAnchor = replyTo ? comments.find(comment => comment.id === replyTo)?.anchor : anchor
   const canPublishComment = Boolean(body.trim() && pendingCommentAnchor && hasUsableAttachmentAnchor(pendingCommentAnchor))
   const canPreview = preview?.status === 'ready' && ['image', 'pdf', 'word_pdf', 'text'].includes(preview.kind)
-  const download = <a href={attachment.url} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-xs font-bold text-white hover:bg-white/10"><Download className="h-4 w-4" />Descargar original</a>
+  const download = <a href={historicalReadURL(attachment.url)} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-xs font-bold text-white hover:bg-white/10"><Download className="h-4 w-4" />Descargar original</a>
 
   const commentMentionLabel = (comment: TaskAttachmentComment, userID: string) => {
     const existing = comment.mentions.find(mention => mention.user_id === userID)

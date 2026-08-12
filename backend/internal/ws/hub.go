@@ -53,6 +53,10 @@ const (
 	EventTaskReminder           = "task_reminder"
 	EventTaskOverdue            = "task_overdue"
 	EventTaskMention            = "task_mention"
+	EventWorkEventUpdate        = "work_event_update"
+	EventWorkEventInvitation    = "work_event_invitation"
+	EventWorkEventRSVP          = "work_event_rsvp"
+	EventWorkEventReminder      = "work_event_reminder"
 	EventCustomFieldDefUpdate   = "custom_field_def_update"
 	EventWhatsAppStatus         = "whatsapp_status"
 )

@@ -76,7 +76,7 @@ func confirmTaskParticipantGrants(ctx context.Context, tx pgx.Tx, accountID, roo
 	var environmentViewerCount int
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*)
 		FROM user_accounts membership
-		JOIN task_environments environment ON environment.account_id=membership.account_id AND environment.id=$3 AND environment.archived_at IS NULL
+		JOIN task_environments environment ON environment.account_id=membership.account_id AND environment.id=$3 AND environment.archived_at IS NULL AND environment.deleted_at IS NULL
 		WHERE membership.account_id=$1 AND membership.user_id=ANY($2::uuid[])
 		  AND (`+environmentActorAccessRankSQL("environment", "membership.user_id")+`) >= 1`, accountID, affected, environmentID).Scan(&environmentViewerCount); err != nil {
 		return err

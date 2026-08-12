@@ -97,7 +97,10 @@ const taskSelectFields = `
 	CASE WHEN COALESCE(t.progress_mode,'manual')='automatic' THEN 'subtasks' ELSE 'manual' END,
 	COALESCE(t.is_milestone,FALSE), t.deleted_at, t.deleted_by, COALESCE(t.version,1),
 	t.recurrence_rule, t.recurrence_parent_id, t.reminder_minutes,
-	t.notes, t.created_at, t.updated_at,
+	t.notes, t.color,
+	COALESCE(t.color,NULLIF(tl.color,''),'#64748B') AS resolved_color,
+	CASE WHEN t.color IS NOT NULL THEN 'item' WHEN NULLIF(tl.color,'') IS NOT NULL THEN 'list' ELSE 'default' END AS color_source,
+	t.created_at, t.updated_at,
 	COALESCE(ua.display_name, ua.username, '') AS assigned_to_name,
 	COALESCE(uc.display_name, uc.username, '') AS created_by_name,
 	CASE WHEN l.contact_id IS NULL THEN COALESCE(l.name,'') ELSE COALESCE(lc.custom_name,lc.name,lc.push_name,'') END AS lead_name,
@@ -143,7 +146,7 @@ func (r *TaskRepository) scanTask(row interface {
 		&t.Starred, &t.SortOrder,
 		&t.Progress, &t.ProgressMode, &t.ManualProgress, &t.ProgressSource, &t.IsMilestone, &t.DeletedAt, &t.DeletedBy, &t.Version,
 		&t.RecurrenceRule, &t.RecurrenceParentID, &t.ReminderMinutes,
-		&t.Notes, &t.CreatedAt, &t.UpdatedAt,
+		&t.Notes, &t.Color, &t.ResolvedColor, &t.ColorSource, &t.CreatedAt, &t.UpdatedAt,
 		&t.AssignedToName, &t.CreatedByName, &t.LeadName, &t.EventName, &t.ProgramName, &t.ContactName,
 		&t.ListName, &t.FolderID, &t.FolderName,
 		&statusWorkflowID, &statusName, &statusColor, &statusCategory, &statusSortOrder, &statusIsDefault,
@@ -189,11 +192,11 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 	// Serialize placement per list. This prevents simultaneous quick creates
 	// from receiving the same order while keeping different lists independent.
 	if t.ListID != nil {
-		if err := tx.QueryRow(ctx, `SELECT environment_id FROM task_lists WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, t.AccountID, *t.ListID).Scan(&environmentID); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT environment_id FROM task_lists WHERE account_id=$1 AND id=$2 AND archived_at IS NULL AND deleted_at IS NULL FOR UPDATE`, t.AccountID, *t.ListID).Scan(&environmentID); err != nil {
 			return err
 		}
 		if err := tx.QueryRow(ctx, `SELECT id FROM task_environments
-			WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR SHARE`, t.AccountID, environmentID).
+			WHERE account_id=$1 AND id=$2 AND archived_at IS NULL AND deleted_at IS NULL FOR SHARE`, t.AccountID, environmentID).
 			Scan(new(uuid.UUID)); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrTaskWorkNotFound
@@ -260,7 +263,7 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 		var statusWorkflowID uuid.UUID
 		if err := tx.QueryRow(ctx, `SELECT status.category,status.workflow_id FROM task_lists list
 			JOIN task_statuses status ON status.account_id=list.account_id AND status.workflow_id=list.workflow_id
-			WHERE list.account_id=$1 AND list.id=$2 AND list.archived_at IS NULL AND status.id=$3
+			WHERE list.account_id=$1 AND list.id=$2 AND list.archived_at IS NULL AND list.deleted_at IS NULL AND status.id=$3
 			FOR SHARE OF status`, t.AccountID, *t.ListID, *t.StatusID).Scan(&statusCategory, &statusWorkflowID); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrTaskStatusMappingInvalid
@@ -295,13 +298,13 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 			start_at, due_at, due_end_at, is_all_day, priority, status, status_id, completed_at, completed_by,
 			lead_id, event_id, program_id, contact_id, list_id, parent_task_id,
 			starred, sort_order, progress, progress_mode, manual_progress, is_milestone, recurrence_rule, recurrence_parent_id,
-			reminder_minutes, notes, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
+			reminder_minutes, notes, color, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35)
 	`, t.ID, t.AccountID, t.CreatedBy, t.AssignedTo, t.Title, t.Description, t.Type,
 		t.StartAt, t.DueAt, t.DueEndAt, t.IsAllDay, t.Priority, t.Status, t.StatusID,
 		t.CompletedAt, t.CompletedBy, t.LeadID, t.EventID, t.ProgramID, t.ContactID, t.ListID, t.ParentTaskID,
 		t.Starred, t.SortOrder, t.Progress, t.ProgressMode, t.ManualProgress, t.IsMilestone, t.RecurrenceRule, t.RecurrenceParentID,
-		t.ReminderMinutes, t.Notes, t.CreatedAt, t.UpdatedAt,
+		t.ReminderMinutes, t.Notes, t.Color, t.CreatedAt, t.UpdatedAt,
 	)
 	if err != nil {
 		return err
@@ -364,7 +367,7 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 	}
 	if len(listIDs) > 0 {
 		rows, err := tx.Query(ctx, `SELECT id,environment_id,archived_at FROM task_lists
-			WHERE account_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE`, t.AccountID, listIDs)
+			WHERE account_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL ORDER BY id FOR UPDATE`, t.AccountID, listIDs)
 		if err != nil {
 			return err
 		}
@@ -400,7 +403,7 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 			environmentIDs = append(environmentIDs, environmentID)
 		}
 		environmentRows, lockErr := tx.Query(ctx, `SELECT id FROM task_environments
-			WHERE account_id=$1 AND id=ANY($2::uuid[]) AND archived_at IS NULL ORDER BY id FOR SHARE`,
+			WHERE account_id=$1 AND id=ANY($2::uuid[]) AND archived_at IS NULL AND deleted_at IS NULL ORDER BY id FOR SHARE`,
 			t.AccountID, environmentIDs)
 		if lockErr != nil {
 			return lockErr
@@ -487,7 +490,7 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 		var statusWorkflowID uuid.UUID
 		if err := tx.QueryRow(ctx, `SELECT status.category,status.workflow_id FROM task_lists list
 			JOIN task_statuses status ON status.account_id=list.account_id AND status.workflow_id=list.workflow_id
-			WHERE list.account_id=$1 AND list.id=$2 AND list.archived_at IS NULL AND status.id=$3
+			WHERE list.account_id=$1 AND list.id=$2 AND list.archived_at IS NULL AND list.deleted_at IS NULL AND status.id=$3
 			FOR SHARE OF status`, t.AccountID, *t.ListID, *t.StatusID).Scan(&statusCategory, &statusWorkflowID); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrTaskStatusMappingInvalid
@@ -517,14 +520,14 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 			lead_id=$14, event_id=$15, program_id=$16, contact_id=$17,
 			list_id=$18, parent_task_id=$19, starred=$20, sort_order=$21, progress=$22,
 			progress_mode=$23,manual_progress=$24,is_milestone=$25, recurrence_rule=$26, reminder_minutes=$27, notes=$28,
-			updated_at=$29, version=COALESCE(version,1)+1,
+			color=$29, updated_at=$30, version=COALESCE(version,1)+1,
 			overdue_notified_at=CASE WHEN due_at IS DISTINCT FROM $6 OR status_id IS DISTINCT FROM $11 THEN NULL ELSE overdue_notified_at END
-		WHERE id=$30 AND account_id=$31 AND COALESCE(version,1)=$32
+		WHERE id=$31 AND account_id=$32 AND COALESCE(version,1)=$33
 	`, t.AssignedTo, t.Title, t.Description, t.Type,
 		t.StartAt, t.DueAt, t.DueEndAt, t.IsAllDay, t.Priority, t.Status, t.StatusID,
 		t.CompletedAt, t.CompletedBy, t.LeadID, t.EventID, t.ProgramID, t.ContactID,
 		t.ListID, t.ParentTaskID, t.Starred, t.SortOrder, t.Progress, t.ProgressMode, t.ManualProgress, t.IsMilestone,
-		t.RecurrenceRule, t.ReminderMinutes, t.Notes, t.UpdatedAt,
+		t.RecurrenceRule, t.ReminderMinutes, t.Notes, t.Color, t.UpdatedAt,
 		t.ID, t.AccountID, t.Version,
 	)
 	if err != nil {
@@ -629,7 +632,10 @@ func (r *TaskRepository) GetByIDForActor(ctx context.Context, id, accountID, act
 		SELECT `+taskSelectFields+`
 		FROM tasks t `+taskJoins+`
 		WHERE t.id=$1 AND t.account_id=$2 AND t.deleted_at IS NULL
-		  AND `+taskActorCanViewSQL("t", "tl", "$3")+`
+		  AND tl.deleted_at IS NULL AND (tf.id IS NULL OR tf.deleted_at IS NULL)
+		  AND EXISTS(SELECT 1 FROM task_environments environment
+			WHERE environment.account_id=tl.account_id AND environment.id=tl.environment_id AND environment.deleted_at IS NULL)
+		  AND `+taskActorCanViewIncludingArchivedSQL("t", "tl", "$3")+`
 	`, id, accountID, actorID)
 	task, err := r.scanTask(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -1154,7 +1160,10 @@ func (r *TaskRepository) GetCalendarRange(ctx context.Context, accountID uuid.UU
 	query := `
 		SELECT ` + taskSelectFields + `
 		FROM tasks t ` + taskJoins + `
-		WHERE t.account_id=$1 AND t.deleted_at IS NULL AND t.due_at >= $2 AND t.due_at <= $3
+		WHERE t.account_id=$1 AND t.deleted_at IS NULL
+		  AND COALESCE(t.start_at,t.due_at) < $3
+		  AND (COALESCE(t.due_end_at,t.due_at,t.start_at) > $2 OR
+			(COALESCE(t.due_end_at,t.due_at,t.start_at)=COALESCE(t.start_at,t.due_at) AND COALESCE(t.start_at,t.due_at) >= $2))
 	`
 	args := []interface{}{accountID, from, to}
 
@@ -1184,12 +1193,62 @@ func (r *TaskRepository) GetCalendarRange(ctx context.Context, accountID uuid.UU
 
 func (r *TaskRepository) GetCalendarRangeForActor(ctx context.Context, accountID, actorID uuid.UUID, from, to time.Time, assignedTo, environmentID *uuid.UUID) ([]*domain.Task, error) {
 	query := `SELECT ` + taskSelectFields + ` FROM tasks t ` + taskJoins + `
-		WHERE t.account_id=$1 AND t.deleted_at IS NULL AND t.due_at >= $2 AND t.due_at <= $3
+		WHERE t.account_id=$1 AND t.deleted_at IS NULL
+		  AND COALESCE(t.start_at,t.due_at) < $3
+		  AND COALESCE(t.due_end_at,t.due_at,t.start_at) >= $2
 		  AND ($4::uuid IS NULL OR t.assigned_to=$4)
 		  AND ($5::uuid IS NULL OR tl.environment_id=$5)
 		  AND ` + taskActorCanViewSQL("t", "tl", "$6") + `
 		ORDER BY t.due_at ASC NULLS LAST,t.id`
 	rows, err := r.db.Query(ctx, query, accountID, from, to, assignedTo, environmentID, actorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]*domain.Task, 0)
+	for rows.Next() {
+		task, err := r.scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, task)
+	}
+	return result, rows.Err()
+}
+
+// GetAgendaRangeForActor is the range-backed task source for the Work calendar.
+// It is independent from the currently loaded task page and uses real interval
+// overlap so multi-day tasks remain visible throughout their duration.
+func taskAgendaOverlapSQL() string {
+	return `COALESCE(t.start_at,t.due_at) < $3
+		  AND (COALESCE(t.due_end_at,t.due_at,t.start_at) > $2 OR
+			(COALESCE(t.due_end_at,t.due_at,t.start_at)=COALESCE(t.start_at,t.due_at) AND COALESCE(t.start_at,t.due_at) >= $2))`
+}
+
+func (r *TaskRepository) GetAgendaRangeForActor(ctx context.Context, accountID, actorID uuid.UUID, from, to time.Time, environmentID, folderID, listID *uuid.UUID, includeClosed bool, after *time.Time, afterKey string, limit int) ([]*domain.Task, error) {
+	if limit < 1 {
+		limit = 50
+	}
+	if limit > 201 {
+		limit = 201
+	}
+	closedPredicate := ` AND COALESCE(ts.category,CASE t.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END) NOT IN ('done','cancelled')`
+	if includeClosed {
+		closedPredicate = ""
+	}
+	query := `SELECT ` + taskSelectFields + ` FROM tasks t ` + taskJoins + `
+		JOIN task_environments agenda_environment ON agenda_environment.account_id=tl.account_id AND agenda_environment.id=tl.environment_id
+		WHERE t.account_id=$1 AND t.deleted_at IS NULL AND t.parent_task_id IS NULL
+		  AND ` + taskAgendaOverlapSQL() + `
+		  AND ($5::uuid IS NULL OR tl.environment_id=$5)
+		  AND ($6::uuid IS NULL OR tl.folder_id=$6)
+		  AND ($7::uuid IS NULL OR tl.id=$7)
+		  AND ($8::timestamptz IS NULL OR COALESCE(t.start_at,t.due_at)>$8 OR
+			(COALESCE(t.start_at,t.due_at)=$8 AND ('task:' || t.id::text)>$9))
+		  AND agenda_environment.archived_at IS NULL AND agenda_environment.deleted_at IS NULL
+		  AND ` + taskActorCanViewSQL("t", "tl", "$4") + closedPredicate + `
+		ORDER BY COALESCE(t.start_at,t.due_at),t.id LIMIT $10`
+	rows, err := r.db.Query(ctx, query, accountID, from, to, actorID, environmentID, folderID, listID, after, afterKey, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1538,11 +1597,19 @@ func (r *TaskRepository) CreateList(ctx context.Context, l *domain.TaskList) err
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := tx.QueryRow(ctx, `SELECT id FROM task_environments
+		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL AND deleted_at IS NULL FOR KEY SHARE`, l.AccountID, l.EnvironmentID).
+		Scan(new(uuid.UUID)); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrTaskWorkNotFound
+		}
+		return err
+	}
 
 	var inheritedWorkflowID uuid.UUID
 	if l.FolderID != nil {
 		if err := tx.QueryRow(ctx, `SELECT workflow_id FROM task_folders
-			WHERE account_id=$1 AND environment_id=$2 AND id=$3 AND archived_at IS NULL FOR UPDATE`, l.AccountID, l.EnvironmentID, *l.FolderID).Scan(&inheritedWorkflowID); err != nil {
+			WHERE account_id=$1 AND environment_id=$2 AND id=$3 AND archived_at IS NULL AND deleted_at IS NULL FOR UPDATE`, l.AccountID, l.EnvironmentID, *l.FolderID).Scan(&inheritedWorkflowID); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrTaskWorkNotFound
 			}
@@ -1617,7 +1684,7 @@ func (r *TaskRepository) UpdateList(ctx context.Context, id, accountID uuid.UUID
 	}
 
 	args = append(args, id, accountID)
-	query := fmt.Sprintf("UPDATE task_lists SET %s WHERE id=$%d AND account_id=$%d", strings.Join(sets, ", "), idx, idx+1)
+	query := fmt.Sprintf("UPDATE task_lists SET %s WHERE id=$%d AND account_id=$%d AND archived_at IS NULL AND deleted_at IS NULL", strings.Join(sets, ", "), idx, idx+1)
 	_, err := r.db.Exec(ctx, query, args...)
 	return err
 }
@@ -1630,7 +1697,7 @@ func (r *TaskRepository) DeleteList(ctx context.Context, id, accountID uuid.UUID
 	defer tx.Rollback(ctx)
 	var isDefault bool
 	if err := tx.QueryRow(ctx, `SELECT is_default FROM task_lists
-		WHERE id=$1 AND account_id=$2 AND archived_at IS NULL FOR UPDATE`, id, accountID).Scan(&isDefault); err != nil {
+		WHERE id=$1 AND account_id=$2 AND deleted_at IS NULL FOR UPDATE`, id, accountID).Scan(&isDefault); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound
 		}
@@ -1646,7 +1713,7 @@ func (r *TaskRepository) DeleteList(ctx context.Context, id, accountID uuid.UUID
 	if activeTasks > 0 {
 		return ErrTaskContainerNotEmpty
 	}
-	if _, err := tx.Exec(ctx, `UPDATE task_lists SET archived_at=NOW(),archived_with_folder=FALSE,updated_at=NOW() WHERE id=$1 AND account_id=$2`, id, accountID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE task_lists SET deleted_at=NOW(),deleted_with_folder=FALSE,updated_at=NOW() WHERE id=$1 AND account_id=$2`, id, accountID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -1817,8 +1884,8 @@ func (r *TaskRepository) ReorderLists(ctx context.Context, accountID, actorID uu
 	rows, err := tx.Query(ctx, `SELECT list_item.id,list_item.environment_id,list_item.folder_id,list_item.is_default
 		FROM task_lists list_item
 		JOIN task_environments environment ON environment.account_id=list_item.account_id
-			AND environment.id=list_item.environment_id AND environment.archived_at IS NULL
-		WHERE list_item.account_id=$1 AND list_item.id=ANY($2::uuid[]) AND list_item.archived_at IS NULL
+			AND environment.id=list_item.environment_id AND environment.archived_at IS NULL AND environment.deleted_at IS NULL
+		WHERE list_item.account_id=$1 AND list_item.id=ANY($2::uuid[]) AND list_item.archived_at IS NULL AND list_item.deleted_at IS NULL
 		ORDER BY list_item.id FOR UPDATE OF list_item,environment`, accountID, listIDs)
 	if err != nil {
 		return err
@@ -1867,7 +1934,7 @@ func (r *TaskRepository) ReorderLists(ctx context.Context, accountID, actorID uu
 
 	rows, err = tx.Query(ctx, `SELECT id FROM task_lists
 		WHERE account_id=$1 AND environment_id=$2 AND folder_id IS NOT DISTINCT FROM $3::uuid
-			AND archived_at IS NULL AND NOT is_default
+			AND archived_at IS NULL AND deleted_at IS NULL AND NOT is_default
 		ORDER BY sort_order,id FOR UPDATE`, accountID, environmentID, folderID)
 	if err != nil {
 		return err

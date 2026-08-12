@@ -3,7 +3,7 @@
 ## Entornos, ACL, Pagination, And Realtime
 
 - Migration: run startup migration twice; prove exactly one General per account, unchanged existing IDs/orders, no null `environment_id`, same-account/same-Entorno composite FKs, default uniqueness per Entorno and no orphan grants/audit rows.
-- Provisioning: create a private Entorno and prove one atomic workflow/status/inbox/creator-manager grant. Reject a partially provisioned Entorno and archive while any non-deleted task remains.
+- Provisioning: create a private Entorno and prove one atomic workflow/status/inbox/creator-manager grant. Reject a partially provisioned Entorno and historical Archive while any retained task remains open; allow it when every retained task is done/cancelled.
 - Authorization: exercise every Ver/Comentar/Editar/Administrar action, governance bit, account-admin recovery, missing `PermTasks`, task/list/folder/environment precedence, explicit raise/lower/deny, private resource, root/subtask inheritance and last explicit manager. Reject new child grants without Entorno Ver; preserve historical grants as inactive. Hidden returns `404`; visible-but-forbidden returns `403`.
 - Peripheral surfaces: prove actor filtering for comments, comment attachments, task attachments, dependencies, reminders, search, summary/reporting, calendar, Gantt, Trash and Eros. Prove “Todo el Entorno” and the direct-share Hub never cross the active Entorno; the Hub contains only direct folder/list/root-task roots and hides inaccessible parent hierarchy/counts/siblings.
 - Participant grants: adding an owner/collaborator without Editar first returns a confirmation contract, then commits participant plus task grant once. Removing participation leaves access unchanged. Reject stale access revision, duplicate operation ID, cross-account user and concurrent revoke/edit.
@@ -44,13 +44,14 @@
 - Reject stale version, deleted task, subtask board move, cross-account anchor, wrong-list anchor, wrong-workflow status, and migrated Program task.
 - Apply filters while hidden cards exist and prove their order is unchanged.
 - Verify task counts, saved-view CRUD/account isolation, cache invalidation, activity, and canonical WebSocket payloads.
-- Archive only empty lists/folders; restore children only under an active parent and active container chain.
+- Archive Entornos/lists/folders only without open tasks, retaining done/cancelled history; restore Trash children only under an active parent and active container chain.
 - Move and reorder lists in root and folders, and reorder folders among folders; reject cross-account/wrong-container/archived/self anchors and every structural move of the default list. Verify one transaction performs workflow inheritance, complete category remapping, location and destination order, or leaves every row unchanged.
 - Verify the default list is repaired to root order `0` and non-default root order starts after it. Run the migration twice, prove every folder is normalized to `folder`, its check constraint rejects all other values, create ignores a legacy custom icon, update returns `400 folder_icon_immutable`, and list icons still round-trip through the shared catalog.
-- Complete and reopen a task and prove `deleted_at` remains null and no retention appears. Then explicitly archive that completed task and prove eligibility is based on `deleted_at`, never `completed_at`.
+- Complete and reopen a task and prove `deleted_at` remains null and no retention appears. Then explicitly move it to Trash and prove eligibility is based on `deleted_at`, never `completed_at`.
 - Test account policies at exact 7, 30, and 365-day boundaries plus `NULL`/“Nunca”; changing policy recalculates displays without deleting rows or enqueueing purge work.
-- Verify task users can archive/restore while only account administrators can update policy or purge. Reject incorrect exact names, stale versions, active/default containers, cross-account IDs, and too-young descendants under lock.
-- Archive and restore folders with mixed child provenance: restore lists archived by the folder operation, preserve individually archived lists, and block an individual list restore while its original folder remains archived.
+- Verify users with effective Administrar can Archive/unarchive and Trash/restore visible containers while only account administrators can update policy or purge. Reject incorrect exact names, stale versions, General/default containers, cross-account IDs, retained tasks, and too-young descendants under lock.
+- Archive and unarchive folders with mixed child provenance: restore lists archived by the folder operation, preserve individually archived lists, and block an individual list unarchive while its original folder remains archived. Archive an Entorno and prove child lifecycle values remain unchanged.
+- Move an archived container to Trash, restore it, and prove `archived_at` survives while `deleted_at` is cleared. Run the legacy conversion migration twice and prove exact timestamps/provenance and account isolation remain unchanged on the second run.
 - Purge eligible task/list/folder trees atomically; one active or ineligible descendant must leave every row unchanged. Recheck shared media references before physical deletion and retain shared/protected objects.
 
 ## Board
@@ -82,7 +83,7 @@
 - Combine multi-value filters, remove individual chips, clear all, and preserve visible data while loading.
 - Create, apply, update, default, and delete a saved view from another session/device; deny another user/account.
 - Visit Trash and return after initial default-view bootstrap; confirm the default does not reapply over the user's current scope.
-- In Trash, verify Tareas and Listas y carpetas tabs, original location, archived date, countdown/“Nunca”, restore constraints, admin-only policy/purge controls, exact-name irreversible dialog, loading, retry, Escape, and WebSocket reconciliation.
+- In Archive, verify Entornos, folders, lists, closed tasks, read-only detail, restore and eligible Trash actions. In Trash, verify Tareas, Entornos, lists and folders, original location, deletion date, countdown/“Nunca”, prior-Archive restoration, admin-only policy/purge controls, exact-name irreversible dialog, loading, retry, Escape, and WebSocket reconciliation.
 - Confirm navigation renders the pinned default list first, then “Listas independientes” with its explanation, then folders in canonical order. Drag folders and lists with mouse, touch long-press, and keyboard; verify overlay/insertion target, one request per gesture, exact Escape/outside/`409`/`500` rollback, and workflow confirmation before a populated list changes workflow.
 - Expand several folders independently by mouse and keyboard, reload persisted state, auto-open the active parent, autoexpand a collapsed drag target after an intentional pause, and restore expansion exactly on Escape/error. With enough folders, verify the themed scrollbar and top/bottom overflow shadows.
 - Select a folder by its main row, collapse it while active, and confirm no scope effect reopens it; selecting one of its child lists must open it again. During task drag, verify the real pointer—not the translated card—selects the highlighted list/folder through navigation scroll and a folder drop opens the concrete-list chooser above the board.

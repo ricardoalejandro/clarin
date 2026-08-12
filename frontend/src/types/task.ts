@@ -6,6 +6,7 @@ export type TaskViewMode = 'list' | 'board' | 'calendar' | 'gantt' | 'summary'
 export type TaskGroupBy = 'none' | 'status' | 'list' | 'assignee' | 'priority' | 'type' | 'due'
 export type TaskGroupDirection = 'asc' | 'desc'
 export type TaskAccessLevel = 'none' | 'view' | 'comment' | 'edit' | 'full'
+export type TaskContainerLifecycle = 'active' | 'archived' | 'trash'
 
 export interface TaskPermissions {
   level: TaskAccessLevel
@@ -13,8 +14,11 @@ export interface TaskPermissions {
   can_comment: boolean
   can_edit: boolean
   can_delete: boolean
+	can_archive?: boolean
+	can_trash?: boolean
+	can_restore?: boolean
   can_manage_access: boolean
-  inherited_from?: 'account_admin' | 'environment_grant' | 'environment_default' | 'environment_private' | 'environment_required' | 'folder_grant' | 'folder_private' | 'list_grant' | 'list_private' | 'task_grant' | 'task_private' | 'folder_policy' | 'list_policy' | 'not_visible'
+  inherited_from?: 'account_admin' | 'environment_grant' | 'environment_default' | 'environment_private' | 'environment_required' | 'folder_grant' | 'folder_private' | 'list_grant' | 'list_private' | 'task_grant' | 'task_private' | 'folder_policy' | 'list_policy' | 'historical_read_only' | 'not_visible'
 }
 
 export interface TaskEnvironment {
@@ -30,6 +34,9 @@ export interface TaskEnvironment {
   is_default: boolean
   created_by?: string
   archived_at?: string
+	deleted_at?: string
+	deleted_by?: string
+	lifecycle?: TaskContainerLifecycle
   version: number
   access_revision: number
   created_at: string
@@ -37,6 +44,9 @@ export interface TaskEnvironment {
   folder_count: number
   list_count: number
   task_count: number
+	open_task_count: number
+	completed_task_count: number
+	cancelled_task_count: number
   effective_access_level?: TaskAccessLevel
   can_manage_access?: boolean
   capabilities?: TaskPermissions
@@ -141,6 +151,9 @@ export interface Task {
   recurrence_parent_id?: string
   reminder_minutes?: number
   notes: string
+	color?: string
+	resolved_color?: string
+	color_source?: 'item' | 'list' | 'default'
   created_at: string
   updated_at: string
   // Joined fields
@@ -162,6 +175,93 @@ export interface Task {
   dependency_count?: number
   // Populated on demand
   subtasks?: Subtask[]
+}
+
+export type WorkEventRSVP = 'pending' | 'accepted' | 'tentative' | 'declined'
+
+export interface WorkEventCapabilities {
+	can_view: boolean
+	can_edit: boolean
+	can_invite: boolean
+	can_cancel: boolean
+	can_trash: boolean
+	can_restore: boolean
+	can_purge: boolean
+	can_respond: boolean
+	can_set_reminder: boolean
+}
+
+export interface WorkEventAttendee {
+	user_id: string
+	display_name: string
+	username: string
+	attendance_type: 'required' | 'optional'
+	rsvp: WorkEventRSVP
+	reminder_minutes?: number
+	version: number
+	created_at: string
+	updated_at: string
+}
+
+export interface WorkEvent {
+	id: string
+	account_id: string
+	list_id?: string
+	environment_id: string
+	organizer_id: string
+	organizer_name: string
+	title: string
+	description?: string
+	location?: string
+	meeting_url?: string
+	color?: string
+	resolved_color: string
+	color_source: 'item' | 'list' | 'default'
+	availability: 'busy' | 'free'
+	is_all_day: boolean
+	start_at?: string
+	end_at?: string
+	start_date?: string
+	end_date_exclusive?: string
+	timezone: string
+	recurrence_rule?: string
+	series_root_id?: string
+	status: 'scheduled' | 'cancelled'
+	cancelled_at?: string
+	deleted_at?: string
+	version: number
+	operation_id?: string
+	created_by: string
+	created_at: string
+	updated_at: string
+	list_name?: string
+	folder_id?: string
+	folder_name?: string
+	list_visible: boolean
+	actor_rsvp?: WorkEventRSVP
+	attendees: WorkEventAttendee[]
+	capabilities: WorkEventCapabilities
+}
+
+export interface WorkEventOccurrence {
+	event: WorkEvent
+	series_id: string
+	occurrence_key: string
+	start_at?: string
+	end_at?: string
+	start_date?: string
+	end_date_exclusive?: string
+	is_exception: boolean
+	override_version?: number
+}
+
+export type AgendaItem =
+	| { kind: 'task'; key: `task:${string}`; task: Task }
+	| { kind: 'event'; key: string; event: WorkEventOccurrence }
+
+export interface TaskAgendaResponse {
+	items: AgendaItem[]
+	next_cursor?: string
 }
 
 export type TaskDueFilter = '' | 'overdue' | 'today' | 'this_week' | 'no_date'
@@ -272,6 +372,10 @@ export interface TaskList {
   created_by: string
   archived_at?: string
   archived_with_folder?: boolean
+	deleted_at?: string
+	deleted_by?: string
+	deleted_with_folder?: boolean
+	lifecycle?: TaskContainerLifecycle
   access_mode?: 'inherit' | 'private'
   access_revision?: number
   created_at: string
@@ -293,18 +397,23 @@ export interface TaskTrashPolicy {
 
 export interface TaskTrashContainer {
   id: string
-  type: 'list' | 'folder'
+  type: 'environment' | 'list' | 'folder'
   name: string
   color: string
   icon: string
-  archived_at: string
+  deleted_at: string
+  archived_at?: string
+	lifecycle: 'trash'
+	version?: number
   original_folder_id?: string
   original_folder_name?: string
   archived_with_folder?: boolean
+	deleted_with_folder?: boolean
   list_count: number
   task_count: number
   next_eligible_at?: string
   can_purge: boolean
+  can_restore: boolean
   restore_blocked: boolean
 }
 
@@ -320,6 +429,9 @@ export interface TaskFolder {
   sort_order: number
   created_by: string
   archived_at?: string
+	deleted_at?: string
+	deleted_by?: string
+	lifecycle?: TaskContainerLifecycle
   access_mode?: 'inherit' | 'private'
   access_revision?: number
   created_at: string

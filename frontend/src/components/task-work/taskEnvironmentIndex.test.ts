@@ -25,6 +25,9 @@ function environment(id: string, options: Partial<TaskEnvironment> = {}): TaskEn
     folder_count: 0,
     list_count: 0,
     task_count: 0,
+    open_task_count: 0,
+    completed_task_count: 0,
+    cancelled_task_count: 0,
     permissions: { level: 'full', can_view: true, can_comment: true, can_edit: true, can_delete: true, can_manage_access: true },
     ...options,
   }
@@ -39,12 +42,12 @@ describe('task environment index', () => {
     expect(selectActiveTaskEnvironment(merged, 'page-51')?.id).toBe('page-51')
   })
 
-  it('falls back to the active default when the preferred environment is unavailable or archived', () => {
+  it('opens a preferred historical environment and falls back when it is unavailable', () => {
     const environments = [
       environment('preferred', { archived_at: '2026-08-01T00:00:00Z' }),
       environment('general', { is_default: true }),
     ]
-    expect(selectActiveTaskEnvironment(environments, 'preferred')?.id).toBe('general')
+    expect(selectActiveTaskEnvironment(environments, 'preferred')?.id).toBe('preferred')
     expect(selectActiveTaskEnvironment(environments, 'missing')?.id).toBe('general')
   })
 

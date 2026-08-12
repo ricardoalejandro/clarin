@@ -62,6 +62,7 @@ type Repositories struct {
 	Dynamic            *DynamicRepository
 	Task               *TaskRepository
 	TaskWork           *TaskWorkRepository
+	WorkEvent          *WorkEventRepository
 	DocumentTemplate   *DocumentTemplateRepository
 	Whiteboard         *WhiteboardRepository
 	CustomField        *CustomFieldRepository
@@ -120,6 +121,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		Dynamic:            &DynamicRepository{db: db},
 		Task:               &TaskRepository{db: db},
 		TaskWork:           &TaskWorkRepository{db: db},
+		WorkEvent:          &WorkEventRepository{db: db},
 		DocumentTemplate:   &DocumentTemplateRepository{db: db},
 		Whiteboard:         NewWhiteboardRepository(db),
 		CustomField:        &CustomFieldRepository{db: db},

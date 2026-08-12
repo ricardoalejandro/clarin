@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Script from 'next/script'
-import { ArrowRight, Eye, EyeOff, Lock, MessageSquare, User } from 'lucide-react'
+import { ArrowRight, Eye, EyeOff, Lock, User } from 'lucide-react'
+import ClarinBrandMark from '@/components/branding/ClarinBrandMark'
 import { getLoginNoticeForLogoutReason, markAuthSession } from '@/lib/api'
 
 type TurnstileWidgetID = string | number
@@ -165,9 +166,7 @@ export default function LoginScreen() {
       )}
       <section className="mx-auto flex min-h-full w-full max-w-sm flex-col justify-center px-4 py-[max(2rem,env(safe-area-inset-top))] pb-[max(2rem,env(safe-area-inset-bottom))]">
         <div className="mb-6 flex flex-col items-center text-center sm:mb-8">
-          <div className="w-12 h-12 bg-emerald-600 rounded-xl flex items-center justify-center shadow-sm">
-            <MessageSquare className="w-6 h-6 text-white" />
-          </div>
+          <ClarinBrandMark label="Clarín" className="h-12 w-12 rounded-xl shadow-sm" />
           <h1 className="mt-4 text-2xl font-bold text-slate-900">Clarin</h1>
           <p className="mt-1 text-sm text-slate-500">Ingresa a tu dashboard</p>
         </div>

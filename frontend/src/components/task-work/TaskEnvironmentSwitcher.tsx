@@ -10,6 +10,7 @@ import type { TaskEnvironment } from '@/types/task'
 import { TaskContainerIcon } from './TaskContainerAppearance'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { environmentListQuery, taskAccessLabel } from './taskEnvironmentAccess'
+import { taskContainerCanManageStructure } from './taskContainerCapabilities'
 
 type EnvironmentListResponse = {
   environments: TaskEnvironment[]
@@ -243,12 +244,12 @@ export default function TaskEnvironmentSwitcher({
               const selected = environment.id === active?.id
               return <div key={environment.id} ref={virtualizer.measureElement} data-index={row.index} style={{ position: 'absolute', left: 0, top: 0, width: '100%', transform: `translateY(${row.start}px)` }}>
                 <div className={`group flex w-full items-center rounded-2xl transition ${selected ? 'bg-emerald-50 ring-1 ring-emerald-100' : 'hover:bg-slate-50'}`}>
-                  <button type="button" disabled={Boolean(environment.archived_at)} onClick={() => choose(environment)} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left disabled:cursor-default">
+									<button type="button" onClick={() => choose(environment)} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left">
                     <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white" style={{ backgroundColor: environment.color }}><TaskContainerIcon value={environment.icon} className="h-4 w-4" /></span>
-                    <span className="min-w-0 flex-1"><span className="flex items-center gap-1.5"><span className="truncate text-sm font-bold text-slate-700">{environment.name}</span>{environment.is_default && <span className="rounded-md bg-violet-50 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-wide text-violet-600">General</span>}</span><span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-slate-400">{environment.visibility === 'restricted' ? <LockKeyhole className="h-3 w-3" /> : <Globe2 className="h-3 w-3" />}<span>{environment.visibility === 'restricted' ? 'Privado' : 'Cuenta'}</span><span>·</span><span>{taskEnvironmentActorAccessLabel(environment)}</span></span></span>
+										<span className="min-w-0 flex-1"><span className="flex items-center gap-1.5"><span className="truncate text-sm font-bold text-slate-700">{environment.name}</span>{environment.is_default && <span className="rounded-md bg-violet-50 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-wide text-violet-600">General</span>}{environment.archived_at && <span className="rounded-md bg-amber-50 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-wide text-amber-700">Histórico</span>}</span><span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-slate-400">{environment.visibility === 'restricted' ? <LockKeyhole className="h-3 w-3" /> : <Globe2 className="h-3 w-3" />}<span>{environment.visibility === 'restricted' ? 'Privado' : 'Cuenta'}</span><span>·</span><span>{taskEnvironmentActorAccessLabel(environment)}</span></span></span>
                     {selected && <Check className="h-4 w-4 shrink-0 text-emerald-600" />}
                   </button>
-                  {environment.permissions?.can_delete && <button type="button" aria-label={`${environment.archived_at ? 'Restaurar' : 'Administrar'} ${environment.name}`} title={environment.archived_at ? 'Restaurar Entorno' : 'Administrar Entorno'} onClick={() => { onConfigure(environment); close(false) }} className="mr-2 rounded-lg p-1.5 text-slate-400 opacity-100 transition hover:bg-white hover:text-slate-700 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100"><Settings2 className="h-3.5 w-3.5" /></button>}
+                  {taskContainerCanManageStructure(environment) && <button type="button" aria-label={`${environment.archived_at ? 'Restaurar' : 'Administrar'} ${environment.name}`} title={environment.archived_at ? 'Restaurar Entorno' : 'Administrar Entorno'} onClick={() => { onConfigure(environment); close(false) }} className="mr-2 rounded-lg p-1.5 text-slate-400 opacity-100 transition hover:bg-white hover:text-slate-700 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100"><Settings2 className="h-3.5 w-3.5" /></button>}
                 </div>
               </div>
             })}
@@ -259,7 +260,7 @@ export default function TaskEnvironmentSwitcher({
         </div>
 
         <div className="flex items-center gap-2 border-t border-slate-100 bg-slate-50/80 p-3">
-          {active?.permissions?.can_delete && <button type="button" onClick={() => { onConfigure(active); close(false) }} className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-bold text-slate-600 hover:border-slate-300"><Settings2 className="h-3.5 w-3.5" />Administrar</button>}
+          {active && taskContainerCanManageStructure(active) && <button type="button" onClick={() => { onConfigure(active); close(false) }} className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-bold text-slate-600 hover:border-slate-300"><Settings2 className="h-3.5 w-3.5" />Administrar</button>}
           <button type="button" disabled={!allowCreate} title={!allowCreate ? 'Tu rol no permite crear Entornos' : 'Crear Entorno'} onClick={() => { onCreate(); close(false) }} className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-slate-900 px-3 py-2.5 text-xs font-black text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-35"><Plus className="h-3.5 w-3.5" />Nuevo Entorno</button>
         </div>
       </div>

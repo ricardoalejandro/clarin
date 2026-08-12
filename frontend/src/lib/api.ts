@@ -341,6 +341,12 @@ export const apiPut = <T>(endpoint: string, body: unknown) =>
     body: JSON.stringify(body),
   })
 
+export const apiPatch = <T>(endpoint: string, body: unknown) =>
+  api<T>(endpoint, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+
 export const apiDelete = <T>(endpoint: string, body?: unknown) =>
 	api<T>(endpoint, {
 		method: 'DELETE',

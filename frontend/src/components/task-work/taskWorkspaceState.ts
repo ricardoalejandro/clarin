@@ -7,7 +7,12 @@ export type TaskWorkspaceScope =
   | { type: 'shared' }
   | { type: 'folder'; id: string }
   | { type: 'list'; id: string }
+	| { type: 'archive' }
   | { type: 'trash' }
+
+export function taskWorkspaceStructureLifecycle(scope: TaskWorkspaceScope) {
+  return scope.type === 'archive' ? 'archive' as const : 'active' as const
+}
 
 export function hasActiveTaskQuery(search: string, filterCount: number) {
   return search.trim().length > 0 || filterCount > 0
@@ -29,6 +34,7 @@ export function taskBelongsToWorkspaceScope(
 ) {
   if (task.parent_task_id) return false
   if (scope.type === 'trash') return Boolean(task.deleted_at)
+	if (scope.type === 'archive') return !task.deleted_at && task.environment_id === activeEnvironmentID
   if (task.deleted_at) return false
   if (scope.type === 'list') return task.list_id === scope.id
   if (scope.type === 'folder') {

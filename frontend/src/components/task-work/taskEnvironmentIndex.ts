@@ -10,9 +10,9 @@ export function mergeTaskEnvironmentIndex(current: TaskEnvironment[], incoming: 
 }
 
 export function selectActiveTaskEnvironment(environments: TaskEnvironment[], preferredID = '') {
-  return environments.find(environment => environment.id === preferredID && !environment.archived_at)
-    || environments.find(environment => environment.is_default && !environment.archived_at)
-    || environments.find(environment => !environment.archived_at)
+  return environments.find(environment => environment.id === preferredID && !environment.deleted_at)
+    || environments.find(environment => environment.is_default && !environment.archived_at && !environment.deleted_at)
+    || environments.find(environment => !environment.archived_at && !environment.deleted_at)
 }
 
 export function preferredTaskEnvironmentNeedsFetch(environments: TaskEnvironment[], preferredID: string) {

@@ -155,6 +155,36 @@ func TestWhiteboardOperationReplayFallsBackToCanonicalSync(t *testing.T) {
 	}
 }
 
+func TestWhiteboardOperationReplayRequiresAnUnbrokenPatchChain(t *testing.T) {
+	t.Parallel()
+	operation := func(base, sequence int64, kind string, patch string) *domain.WhiteboardOperation {
+		return &domain.WhiteboardOperation{
+			BaseSequence:  base,
+			Sequence:      sequence,
+			OperationKind: kind,
+			Patch:         json.RawMessage(patch),
+		}
+	}
+	complete := []*domain.WhiteboardOperation{
+		operation(7, 8, "patch", `{"elements":[]}`),
+		operation(8, 9, "patch", `{"elements":[]}`),
+	}
+	if !whiteboardOperationReplayComplete(7, 9, complete) {
+		t.Fatal("complete patch chain unnecessarily fell back to a snapshot")
+	}
+	for name, operations := range map[string][]*domain.WhiteboardOperation{
+		"compacted prefix":  {operation(8, 9, "patch", `{"elements":[]}`)},
+		"interior gap":      {operation(7, 8, "patch", `{"elements":[]}`), operation(9, 10, "patch", `{"elements":[]}`)},
+		"snapshot boundary": {operation(7, 8, "snapshot", `{}`)},
+		"missing patch":     {operation(7, 8, "patch", ``)},
+		"stale tail":        {operation(7, 8, "patch", `{"elements":[]}`)},
+	} {
+		if whiteboardOperationReplayComplete(7, 9, operations) {
+			t.Fatalf("%s was accepted as a complete replay chain", name)
+		}
+	}
+}
+
 func assertSyncRequiredSequence(t *testing.T, payload []byte, sequence int64) {
 	t.Helper()
 	var message whiteboardcore.OutgoingMessage

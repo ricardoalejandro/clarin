@@ -20,12 +20,14 @@ import {
   mergeWhiteboardAcknowledgedElements,
   mergeWhiteboardFileRecords,
   mergeWhiteboardSessionAppState,
+  planWhiteboardAssetPersistence,
   reconcileWhiteboardCollaborators,
   reconcileWhiteboardCanonicalAck,
   retainWhiteboardPendingSave,
   sanitizeWhiteboardAppState,
   sanitizeWhiteboardExternalLink,
   sanitizeWhiteboardFilesForPersistence,
+  snapshotWhiteboardFiles,
   shouldApplyWhiteboardRealtimeEvent,
   isWhiteboardSceneSequence,
   shouldRetryWhiteboardDirtySave,
@@ -123,6 +125,10 @@ function extensionForMimeType(mimeType: string) {
   return 'gif'
 }
 
+function guestWhiteboardSaveIsBusy(state: 'saved' | 'pending' | 'preparing-assets' | 'uploading-assets' | 'saving' | 'error') {
+  return state === 'preparing-assets' || state === 'uploading-assets' || state === 'saving'
+}
+
 export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: string }) {
   const initializedRef = useRef(false)
   const secretRef = useRef('')
@@ -140,6 +146,8 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
   const sceneRootExtensionsRef = useRef<Record<string, unknown>>({})
   const sceneFileMetadataRef = useRef<Record<string, unknown>>({})
   const uploadedFileIDsRef = useRef(new Set<string>())
+  const assetUploadControllerRef = useRef<AbortController | null>(null)
+  const assetSavingRef = useRef(false)
   const assetHydrationControllerRef = useRef<AbortController | null>(null)
   const assetHydrationGenerationRef = useRef(0)
   const collaboratorsRef = useRef(new Map<string, WhiteboardCollaboratorState>())
@@ -161,7 +169,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
   const [displayName, setDisplayName] = useState('')
   const [password, setPassword] = useState('')
   const [joining, setJoining] = useState(false)
-  const [saveState, setSaveState] = useState<'saved' | 'pending' | 'saving' | 'error'>('saved')
+  const [saveState, setSaveState] = useState<'saved' | 'pending' | 'preparing-assets' | 'uploading-assets' | 'saving' | 'error'>('saved')
   const [error, setError] = useState<string | null>(null)
   const [assetWarning, setAssetWarning] = useState<string | null>(null)
 
@@ -179,13 +187,14 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
   useEffect(() => {
     mountedRef.current = true
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (!dirtyRef.current) return
+      if (!dirtyRef.current && !savingRef.current && !assetSavingRef.current) return
       event.preventDefault()
       event.returnValue = ''
     }
     window.addEventListener('beforeunload', beforeUnload)
     return () => {
       mountedRef.current = false
+      assetUploadControllerRef.current?.abort()
       assetHydrationControllerRef.current?.abort()
       assetHydrationGenerationRef.current += 1
       canonicalSyncControllerRef.current?.abort()
@@ -365,19 +374,53 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
     setJoining(false)
   }
 
-  const uploadPendingFiles = useCallback(async (files: BinaryFiles) => {
-    const safeFiles = await rasterizeWhiteboardFiles(files as unknown as Record<string, unknown>) as unknown as BinaryFiles
-    for (const [fileID, rawFile] of Object.entries(safeFiles)) {
-      if (uploadedFileIDsRef.current.has(fileID)) continue
-      const file = rawFile as unknown as WhiteboardBinaryFile
-      if (!file.dataURL) continue
-      const blob = dataURLToBlob(file.dataURL)
-      const response = await uploadWhiteboardGuestAsset(shareLinkID, fileID, blob, `${fileID}.${extensionForMimeType(blob.type)}`)
-      if (!response.success) throw new Error(response.error || 'No se pudo guardar un recurso compartido.')
-      uploadedFileIDsRef.current.add(fileID)
+  const uploadPendingFiles = useCallback(async (files: BinaryFiles, elements: readonly unknown[]) => {
+    assetUploadControllerRef.current?.abort()
+    const controller = new AbortController()
+    assetUploadControllerRef.current = controller
+    assetSavingRef.current = true
+    setSaveState('preparing-assets')
+    try {
+      const initialPlan = planWhiteboardAssetPersistence(
+        elements,
+        files as unknown as Record<string, unknown>,
+        uploadedFileIDsRef.current,
+      )
+      const referencedFileIDs = new Set(initialPlan.referencedFileIDs)
+      const referencedFiles = Object.fromEntries(Object.entries(files).filter(([fileID]) => referencedFileIDs.has(fileID)))
+      const safeFiles = await rasterizeWhiteboardFiles(referencedFiles as unknown as Record<string, unknown>) as unknown as BinaryFiles
+      if (controller.signal.aborted) throw whiteboardAbortError()
+      const plan = planWhiteboardAssetPersistence(
+        elements,
+        safeFiles as unknown as Record<string, unknown>,
+        uploadedFileIDsRef.current,
+      )
+      if (plan.missingFileIDs.length > 0) {
+        throw new Error('Una imagen todavía no terminó de prepararse. Tus cambios siguen en el lienzo; reintenta el guardado.')
+      }
+      if (plan.uploadFileIDs.length > 0) {
+        setSaveState('uploading-assets')
+        await mapWhiteboardConcurrently(plan.uploadFileIDs, 4, async fileID => {
+          const file = safeFiles[fileID] as unknown as WhiteboardBinaryFile
+          const blob = dataURLToBlob(file.dataURL)
+          const response = await uploadWhiteboardGuestAsset(
+            shareLinkID,
+            fileID,
+            blob,
+            `${fileID}.${extensionForMimeType(blob.type)}`,
+            controller.signal,
+          )
+          if (controller.signal.aborted) throw whiteboardAbortError()
+          if (!response.success || !response.data?.asset) throw new Error(response.error || 'No se pudo guardar una imagen compartida.')
+          uploadedFileIDsRef.current.add(fileID)
+        }, controller.signal)
+      }
+      if (Object.keys(safeFiles).length > 0) editorAPIRef.current?.addFiles(Object.values(safeFiles) as BinaryFileData[])
+      return snapshotWhiteboardFiles({ ...files, ...safeFiles }) as unknown as BinaryFiles
+    } finally {
+      if (assetUploadControllerRef.current === controller) assetUploadControllerRef.current = null
+      assetSavingRef.current = false
     }
-    if (safeFiles !== files) editorAPIRef.current?.addFiles(Object.values(safeFiles) as BinaryFileData[])
-    return safeFiles
   }, [shareLinkID])
 
   const hydrateReferencedAssets = useCallback(async (elements: readonly unknown[]) => {
@@ -465,14 +508,24 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
     savingRef.current = true
     queuedSaveRef.current = false
     let capturedVersion = pendingSaveRef.current?.capturedVersion ?? changeVersionRef.current
-    const current = latestRef.current
-    setSaveState('saving')
+    let current = latestRef.current
+    if (pendingSaveRef.current) setSaveState('saving')
     setError(null)
     try {
       let pending = pendingSaveRef.current
       if (!pending) {
-        const files = await uploadPendingFiles(current.files)
-        latestRef.current = { ...current, files }
+        const files = await uploadPendingFiles(current.files, current.elements)
+        const latest = latestRef.current || current
+        current = {
+          ...latest,
+          files: snapshotWhiteboardFiles({
+            ...(latest.files as unknown as Record<string, unknown>),
+            ...(files as unknown as Record<string, unknown>),
+          }) as unknown as BinaryFiles,
+        }
+        latestRef.current = current
+        capturedVersion = changeVersionRef.current
+        setSaveState('saving')
         const operationID = createWhiteboardOperationID()
         const writePlan = buildWhiteboardSceneWritePlan(current.elements, acknowledgedElementsRef.current)
         const canPatch = reason === 'autosave' && writePlan.kind === 'patch'
@@ -598,7 +651,9 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
 
   const onChange = useCallback((elements: readonly ExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
     const previous = latestRef.current
-    latestRef.current = { elements, appState, files }
+    const snapshottedElements = elements.map(element => ({ ...element })) as readonly ExcalidrawElement[]
+    const snapshottedFiles = snapshotWhiteboardFiles(files as unknown as Record<string, unknown>) as unknown as BinaryFiles
+    latestRef.current = { elements: snapshottedElements, appState, files: snapshottedFiles }
     if (suppressRef.current || transientSceneSuppressionRef.current > 0 || session?.access_level !== 'edit') return
     if (previous && !hasWhiteboardDocumentMutation({
       currentElements: elements,
@@ -849,7 +904,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
   if (phase === 'error' || !session || !initialData) return <main className="flex min-h-screen items-center justify-center bg-slate-50 p-4"><div className="max-w-md rounded-3xl border border-slate-200 bg-white p-6 text-center"><ShieldAlert className="mx-auto h-9 w-9 text-rose-500" /><h1 className="mt-4 text-xl font-black text-slate-900">Sesión no disponible</h1><p className="mt-2 text-sm text-slate-500">{error}</p><button type="button" onClick={() => void resume()} className="mx-auto mt-5 flex min-h-11 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-bold text-white"><RefreshCw className="h-4 w-4" />Volver a intentar</button></div></main>
 
   return <main className="whiteboard-editor-shell flex h-[100dvh] min-h-0 flex-col overflow-hidden bg-white">
-    <header className="flex h-[58px] shrink-0 items-center gap-3 border-b border-slate-200 bg-white px-3"><div className="min-w-0 flex-1"><p className="text-[9px] font-black uppercase tracking-[.15em] text-emerald-600">Pizarras Clarin</p><h1 className="truncate text-sm font-black text-slate-900">Pizarra compartida</h1></div><span className="hidden text-xs font-semibold text-slate-500 sm:block">{session.display_name} · {session.access_level === 'edit' ? 'Puede editar' : 'Solo lectura'}</span>{saveState === 'saving' ? <Loader2 className="h-4 w-4 animate-spin text-sky-600" /> : saveState === 'saved' ? <Check className="h-4 w-4 text-emerald-600" /> : null}{session.access_level === 'edit' && <button type="button" onClick={() => void save('manual')} disabled={saveState === 'saved' || saveState === 'saving'} className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-900 text-white disabled:opacity-35" aria-label="Guardar ahora"><Save className="h-4 w-4" /></button>}{allowExport && <button type="button" onClick={exportJSON} className="flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-600" aria-label="Exportar copia editable"><Download className="h-4 w-4" /></button>}</header>
+    <header className="flex h-[58px] shrink-0 items-center gap-3 border-b border-slate-200 bg-white px-3"><div className="min-w-0 flex-1"><p className="text-[9px] font-black uppercase tracking-[.15em] text-emerald-600">Pizarras Clarin</p><h1 className="truncate text-sm font-black text-slate-900">Pizarra compartida</h1></div><span className="hidden text-xs font-semibold text-slate-500 sm:block">{session.display_name} · {session.access_level === 'edit' ? 'Puede editar' : 'Solo lectura'}</span>{guestWhiteboardSaveIsBusy(saveState) ? <Loader2 className="h-4 w-4 animate-spin text-sky-600" aria-label={saveState === 'preparing-assets' ? 'Preparando imágenes' : saveState === 'uploading-assets' ? 'Subiendo imágenes' : 'Guardando en Clarin'} /> : saveState === 'saved' ? <Check className="h-4 w-4 text-emerald-600" aria-label="Guardado en Clarin" /> : null}{session.access_level === 'edit' && <button type="button" onClick={() => void save('manual')} disabled={saveState === 'saved' || guestWhiteboardSaveIsBusy(saveState)} className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-900 text-white disabled:opacity-35" aria-label="Guardar ahora"><Save className="h-4 w-4" /></button>}{allowExport && <button type="button" onClick={exportJSON} className="flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-600" aria-label="Exportar copia editable"><Download className="h-4 w-4" /></button>}</header>
     {(error || assetWarning) && <div className={`flex shrink-0 items-center gap-2 border-b px-3 py-2 text-xs font-semibold ${error ? 'border-rose-200 bg-rose-50 text-rose-800' : 'border-sky-200 bg-sky-50 text-sky-800'}`}><span className="min-w-0 flex-1">{error || assetWarning}</span>{error && session.access_level === 'edit' && <button type="button" onClick={() => void save('manual')} className="min-h-9 rounded-lg bg-white px-3 font-black">Reintentar guardado</button>}<button type="button" onClick={() => window.location.reload()} className="min-h-9 rounded-lg bg-white px-3 font-black">Recargar</button></div>}
     <div className="min-h-0 flex-1"><Excalidraw excalidrawAPI={api => {
       editorAPIRef.current = api

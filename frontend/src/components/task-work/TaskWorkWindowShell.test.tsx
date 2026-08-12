@@ -48,6 +48,7 @@ describe('TaskWorkWindowShell', () => {
     const dialog = screen.getByRole('dialog', { name: 'Filtros' })
     expect(dialog).toHaveAttribute('aria-modal', 'false')
     expect(document.querySelector('[data-task-work-window-shell]')).toHaveAttribute('data-backdrop-mode', 'floating')
+    expect(dialog.querySelector('[data-clarin-brand-mark]')).toHaveAttribute('src', '/favicon.svg')
   })
 
   it('preserves a child autofocus target instead of replacing it with the window panel', async () => {

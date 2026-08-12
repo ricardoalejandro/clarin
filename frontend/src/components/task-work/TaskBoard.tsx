@@ -81,6 +81,7 @@ import { taskWorkspaceMenuPosition } from './taskInteractionVisuals'
 import TaskDateTimePicker from './TaskDateTimePicker'
 import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 import { allTasksCanBeAdministered, canAdministerTask, canEditTask } from './taskPermissionActions'
+import { resolveTaskIdentityColor, taskIdentityTint } from './taskIdentityColor'
 
 export interface TaskInlineDraft {
   title: string
@@ -342,6 +343,7 @@ function TaskBoardCard({
   const overdue = Boolean(task.due_at && new Date(task.due_at) < new Date() && !['done', 'cancelled'].includes(task.status_detail?.category || ''))
   const done = task.status_detail?.category === 'done'
   const priority = TASK_PRIORITY_CONFIG[task.priority]
+	const identityColor = task.resolved_color || resolveTaskIdentityColor(task.color).color
   const cancelTouchHold = () => {
     if (touchHoldTimerRef.current) clearTimeout(touchHoldTimerRef.current)
     touchHoldTimerRef.current = null
@@ -353,7 +355,6 @@ function TaskBoardCard({
     ref={setNodeRef}
     data-task-id={task.id}
     data-task-column-id={columnId}
-    style={{ transform: CSS.Transform.toString(transform), transition }}
     onTouchStartCapture={event => {
       const touch = event.touches[0]
       if (!editable || !touch || selected) return
@@ -385,9 +386,10 @@ function TaskBoardCard({
       }
       if (!suppressOpen()) onOpen()
     }}
-    className={`group relative cursor-pointer touch-manipulation select-none overflow-hidden rounded-xl border bg-white p-3 text-left shadow-sm outline-none transition focus-visible:ring-2 focus-visible:ring-emerald-500 ${isDragging ? 'opacity-20' : 'hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md'} ${selected ? 'border-emerald-400 bg-emerald-50/40 ring-2 ring-emerald-100' : highlighted ? 'animate-[task-created-pulse_1.6s_ease-out] border-emerald-400 ring-4 ring-emerald-100' : overdue ? 'border-rose-200' : 'border-slate-200'}`}
+		className={`group relative cursor-pointer touch-manipulation select-none overflow-hidden rounded-xl border p-3 text-left shadow-sm outline-none transition focus-visible:ring-2 focus-visible:ring-emerald-500 ${isDragging ? 'opacity-20' : 'hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md'} ${selected ? 'border-emerald-400 ring-2 ring-emerald-100' : highlighted ? 'animate-[task-created-pulse_1.6s_ease-out] border-emerald-400 ring-4 ring-emerald-100' : overdue ? 'border-rose-200' : 'border-slate-200'}`}
+		style={{ transform: CSS.Transform.toString(transform), transition, backgroundColor: selected ? taskIdentityTint(identityColor, .12) : taskIdentityTint(identityColor, .045) }}
   >
-    <span className="absolute inset-y-0 left-0 w-0.5" style={{ backgroundColor: task.status_detail?.color || '#64748b' }} />
+		<span className="absolute inset-y-0 left-0 w-1" style={{ backgroundColor: identityColor }} aria-hidden />
     <div className="flex items-start gap-2">
       <button
         type="button"

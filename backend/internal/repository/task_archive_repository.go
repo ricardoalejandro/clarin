@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -177,7 +178,14 @@ func (r *TaskWorkRepository) ArchiveList(ctx context.Context, accountID, actorID
 		return err
 	}
 	if open > 0 {
-		return ErrTaskContainerNotEmpty
+		return ErrTaskContainerHasOpenTasks
+	}
+	hasFutureEvents, err := hasFutureScheduledWorkEventsWith(ctx, tx, accountID, []uuid.UUID{listID}, nil, time.Now())
+	if err != nil {
+		return err
+	}
+	if hasFutureEvents {
+		return ErrTaskContainerHasFutureEvents
 	}
 	if _, err := tx.Exec(ctx, `UPDATE task_lists SET archived_at=NOW(),archived_with_folder=FALSE,updated_at=NOW()
 		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL AND deleted_at IS NULL`, accountID, listID); err != nil {
@@ -245,12 +253,14 @@ func (r *TaskWorkRepository) ArchiveFolder(ctx context.Context, accountID, actor
 	if err != nil {
 		return err
 	}
+	listIDs := make([]uuid.UUID, 0)
 	for rows.Next() {
 		var id uuid.UUID
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
 			return err
 		}
+		listIDs = append(listIDs, id)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -266,7 +276,14 @@ func (r *TaskWorkRepository) ArchiveFolder(ctx context.Context, accountID, actor
 		return err
 	}
 	if open > 0 {
-		return ErrTaskContainerNotEmpty
+		return ErrTaskContainerHasOpenTasks
+	}
+	hasFutureEvents, err := hasFutureScheduledWorkEventsWith(ctx, tx, accountID, listIDs, nil, time.Now())
+	if err != nil {
+		return err
+	}
+	if hasFutureEvents {
+		return ErrTaskContainerHasFutureEvents
 	}
 	if _, err := tx.Exec(ctx, `UPDATE task_folders SET archived_at=NOW(),updated_at=NOW() WHERE account_id=$1 AND id=$2`, accountID, folderID); err != nil {
 		return err

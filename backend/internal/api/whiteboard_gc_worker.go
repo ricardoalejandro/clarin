@@ -12,10 +12,12 @@ import (
 )
 
 const (
-	whiteboardGCStartDelay = 18 * time.Second
-	whiteboardGCInterval   = time.Minute
-	whiteboardGCRunTimeout = 45 * time.Second
-	whiteboardGCDrainLimit = 50
+	whiteboardGCStartDelay              = 18 * time.Second
+	whiteboardGCInterval                = time.Minute
+	whiteboardGCRunTimeout              = 45 * time.Second
+	whiteboardGCDrainLimit              = 50
+	whiteboardTechnicalHistoryRetention = 30 * 24 * time.Hour
+	whiteboardTechnicalHistoryBatch     = 500
 )
 
 func validWhiteboardGCObjectKey(accountID uuid.UUID, objectKey string) bool {
@@ -115,6 +117,15 @@ func (s *Server) runWhiteboardRetentionGC(ctx context.Context) {
 		return
 	} else if count > 0 {
 		log.Printf("[WhiteboardGC] enqueued %d expired automatic revisions", count)
+	}
+	if operations, activities, err := s.repos.Whiteboard.PruneWhiteboardTechnicalHistory(
+		ctx,
+		time.Now().UTC().Add(-whiteboardTechnicalHistoryRetention),
+		whiteboardTechnicalHistoryBatch,
+	); err != nil {
+		log.Printf("[WhiteboardGC] technical history compaction failed: %v", err)
+	} else if operations > 0 || activities > 0 {
+		log.Printf("[WhiteboardGC] compacted %d technical operations and %d noisy activity rows", operations, activities)
 	}
 	if count, err := s.repos.Whiteboard.EnqueueUnreferencedWhiteboardAssetLinks(ctx, 100); err != nil {
 		log.Printf("[WhiteboardGC] abandoned asset-link sweep failed: %v", err)

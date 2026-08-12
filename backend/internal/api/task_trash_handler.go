@@ -85,6 +85,130 @@ func (s *Server) handleGetTaskTrashContainers(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "containers": items})
 }
 
+func (s *Server) handleGetTaskTrashEnvironments(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	items, err := s.repos.TaskWork.ListTrashEnvironments(c.Context(), accountID, userID, time.Now().UTC())
+	if err != nil {
+		return taskWorkError(c, err)
+	}
+	return c.JSON(fiber.Map{"success": true, "environments": items})
+}
+
+func (s *Server) handleArchiveTaskList(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	listID, err := uuid.Parse(c.Params("listId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Lista inválida"})
+	}
+	_, operationID, err := parseTaskTrashMutation(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
+	}
+	if err := s.repos.TaskWork.ArchiveList(c.Context(), accountID, userID, listID); err != nil {
+		return taskWorkError(c, err)
+	}
+	s.invalidateTasksCache(accountID)
+	s.broadcastTaskWork(c.Context(), accountID, "list_archived", fiber.Map{"list_id": listID, "operation_id": operationID})
+	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
+}
+
+func (s *Server) handleUnarchiveTaskList(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	listID, err := uuid.Parse(c.Params("listId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Lista inválida"})
+	}
+	_, operationID, err := parseTaskTrashMutation(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
+	}
+	if err := s.repos.TaskWork.UnarchiveList(c.Context(), accountID, userID, listID); err != nil {
+		return taskWorkError(c, err)
+	}
+	s.invalidateTasksCache(accountID)
+	s.broadcastTaskWork(c.Context(), accountID, "list_unarchived", fiber.Map{"list_id": listID, "operation_id": operationID})
+	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
+}
+
+func (s *Server) handleArchiveTaskFolderHistorical(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	folderID, err := uuid.Parse(c.Params("folderId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Carpeta inválida"})
+	}
+	_, operationID, err := parseTaskTrashMutation(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
+	}
+	if err := s.repos.TaskWork.ArchiveFolder(c.Context(), accountID, userID, folderID); err != nil {
+		return taskWorkError(c, err)
+	}
+	s.invalidateTasksCache(accountID)
+	s.broadcastTaskWork(c.Context(), accountID, "folder_archived", fiber.Map{"folder_id": folderID, "operation_id": operationID})
+	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
+}
+
+func (s *Server) handleUnarchiveTaskFolder(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	folderID, err := uuid.Parse(c.Params("folderId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Carpeta inválida"})
+	}
+	_, operationID, err := parseTaskTrashMutation(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
+	}
+	if err := s.repos.TaskWork.UnarchiveFolder(c.Context(), accountID, userID, folderID); err != nil {
+		return taskWorkError(c, err)
+	}
+	s.invalidateTasksCache(accountID)
+	s.broadcastTaskWork(c.Context(), accountID, "folder_unarchived", fiber.Map{"folder_id": folderID, "operation_id": operationID})
+	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
+}
+
+func (s *Server) handleTrashTaskEnvironment(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	environmentID, err := uuid.Parse(c.Params("environmentId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Entorno inválido"})
+	}
+	request, operationID, err := parseTaskTrashMutation(c)
+	if err != nil || request.Version == nil || *request.Version < 1 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Confirmación y versión obligatorias"})
+	}
+	if err := s.repos.TaskWork.TrashEnvironment(c.Context(), accountID, userID, environmentID, request.ConfirmationName, *request.Version); err != nil {
+		return taskWorkError(c, err)
+	}
+	s.invalidateTasksCache(accountID)
+	s.broadcastTaskWork(c.Context(), accountID, "environment_trashed", fiber.Map{"environment_id": environmentID, "operation_id": operationID})
+	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
+}
+
+func (s *Server) handleRestoreTaskEnvironmentFromTrash(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	environmentID, err := uuid.Parse(c.Params("environmentId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Entorno inválido"})
+	}
+	request, operationID, err := parseTaskTrashMutation(c)
+	if err != nil || request.Version == nil || *request.Version < 1 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Versión obligatoria"})
+	}
+	if err := s.repos.TaskWork.RestoreEnvironmentFromTrash(c.Context(), accountID, userID, environmentID, *request.Version); err != nil {
+		return taskWorkError(c, err)
+	}
+	s.invalidateTasksCache(accountID)
+	s.broadcastTaskWork(c.Context(), accountID, "environment_restored", fiber.Map{"environment_id": environmentID, "operation_id": operationID})
+	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
+}
+
 func (s *Server) handleRestoreTaskList(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	userID := c.Locals("user_id").(uuid.UUID)
@@ -199,5 +323,28 @@ func (s *Server) handlePurgeTaskFolder(c *fiber.Ctx) error {
 	}
 	s.invalidateTasksCache(accountID)
 	s.broadcastTaskWork(c.Context(), accountID, "folder_purged", fiber.Map{"folder_id": folderID, "operation_id": operationID})
+	return c.JSON(fiber.Map{"success": true, "operation_id": operationID, "purged": result})
+}
+
+func (s *Server) handlePurgeTaskEnvironment(c *fiber.Ctx) error {
+	if err := s.requireTaskTrashAdmin(c); err != nil {
+		return err
+	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	userID := c.Locals("user_id").(uuid.UUID)
+	environmentID, err := uuid.Parse(c.Params("environmentId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Entorno inválido"})
+	}
+	request, operationID, err := parseTaskTrashMutation(c)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
+	}
+	result, err := s.repos.TaskWork.PurgeEnvironment(c.Context(), accountID, userID, environmentID, request.ConfirmationName, time.Now().UTC())
+	if err != nil {
+		return taskWorkError(c, err)
+	}
+	s.invalidateTasksCache(accountID)
+	s.broadcastTaskWork(c.Context(), accountID, "environment_purged", fiber.Map{"environment_id": environmentID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID, "purged": result})
 }

@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import AccountSwitcher from '@/components/AccountSwitcher'
 import TaskBadge from '@/components/TaskBadge'
+import ClarinBrandMark from '@/components/branding/ClarinBrandMark'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import type { MobileAppModule, MobileAppModuleKey } from '@/lib/mobileApp'
 
@@ -102,7 +103,7 @@ export function MobileAppHeader({
     <>
       <header data-testid="mobile-app-header" className="safe-area-top safe-area-x flex min-h-[calc(3.5rem+env(safe-area-inset-top))] shrink-0 items-center border-b border-slate-700/80 bg-slate-800 text-white shadow-sm">
         <div className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-1.5 sm:px-4">
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-emerald-500 text-white shadow-sm shadow-emerald-950/30"><MessageSquare className="h-[17px] w-[17px]" /></span>
+          <ClarinBrandMark className="h-8 w-8 shrink-0 rounded-xl shadow-sm shadow-emerald-950/30" />
           <div className="min-w-0"><p className="truncate text-sm font-bold leading-4">Clarin</p><p className="mt-0.5 truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-emerald-300">{activeLabel}</p></div>
         </div>
         <button ref={triggerRef} type="button" onClick={() => setOpen(true)} aria-haspopup="dialog" aria-expanded={open} className="mr-3 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-200 transition hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 sm:mr-4" aria-label="Abrir cuenta"><span className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500/15 text-sm font-bold text-emerald-300 ring-1 ring-emerald-400/25">{(user.display_name || user.username).charAt(0).toUpperCase()}</span></button>

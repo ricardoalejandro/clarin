@@ -2,10 +2,21 @@ package api
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/storage"
 )
+
+func TestWhiteboardTechnicalHistoryRetentionIsThirtyDaysAndBounded(t *testing.T) {
+	t.Parallel()
+	if whiteboardTechnicalHistoryRetention != 30*24*time.Hour {
+		t.Fatalf("technical history retention=%s", whiteboardTechnicalHistoryRetention)
+	}
+	if whiteboardTechnicalHistoryBatch <= 0 || whiteboardTechnicalHistoryBatch > 500 {
+		t.Fatalf("unsafe technical history batch=%d", whiteboardTechnicalHistoryBatch)
+	}
+}
 
 func TestWhiteboardGCObjectKeyRequiresExactAccountPrivateNamespace(t *testing.T) {
 	t.Parallel()

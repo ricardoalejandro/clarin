@@ -210,7 +210,10 @@ func resolveTaskAccessWithState(ctx context.Context, q taskAccessQuerier, accoun
 			AND list_grant.list_id=list_item.id AND list_grant.user_id=membership.user_id
 		LEFT JOIN task_access_grants task_grant ON task_grant.account_id=root.account_id
 			AND task_grant.task_id=root.id AND task_grant.user_id=membership.user_id
-		WHERE task.account_id=$1 AND task.id=$3`+deletedPredicate+` AND environment.archived_at IS NULL
+		WHERE task.account_id=$1 AND task.id=$3`+deletedPredicate+`
+		  AND environment.archived_at IS NULL AND environment.deleted_at IS NULL
+		  AND list_item.archived_at IS NULL AND list_item.deleted_at IS NULL
+		  AND (folder.id IS NULL OR (folder.archived_at IS NULL AND folder.deleted_at IS NULL))
 	`, accountID, userID, taskID).Scan(&result.EnvironmentID, &result.RootTaskID, &result.AccessMode, &visibility,
 		&defaultLevel, &result.Admin, &environmentGrantLevel, &environmentGrantManage,
 		&folderMode, &folderGrantLevel, &folderGrantManage, &listMode, &listGrantLevel, &listGrantManage,
@@ -593,7 +596,8 @@ func (r *TaskWorkRepository) ReplaceAccessGrants(ctx context.Context, accountID,
 	var actorAccess *domain.TaskEffectiveAccess
 	if targetType == domain.TaskAccessTargetEnvironment {
 		var visibility string
-		if err := tx.QueryRow(ctx, `SELECT visibility FROM task_environments WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, targetID).Scan(&visibility); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT visibility FROM task_environments
+			WHERE account_id=$1 AND id=$2 AND archived_at IS NULL AND deleted_at IS NULL FOR UPDATE`, accountID, targetID).Scan(&visibility); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, "", 0, ErrTaskWorkNotFound
 			}
@@ -608,7 +612,8 @@ func (r *TaskWorkRepository) ReplaceAccessGrants(ctx context.Context, accountID,
 			resourceTable = "task_lists"
 			table, targetColumn = "task_list_access_grants", "list_id"
 		}
-		if err := tx.QueryRow(ctx, fmt.Sprintf(`SELECT environment_id,access_mode FROM %s WHERE account_id=$1 AND %s=$2 FOR UPDATE`, resourceTable, idColumn), accountID, targetID).Scan(&environmentID, &currentMode); err != nil {
+		if err := tx.QueryRow(ctx, fmt.Sprintf(`SELECT environment_id,access_mode FROM %s
+			WHERE account_id=$1 AND %s=$2 AND archived_at IS NULL AND deleted_at IS NULL FOR UPDATE`, resourceTable, idColumn), accountID, targetID).Scan(&environmentID, &currentMode); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, "", 0, ErrTaskWorkNotFound
 			}
@@ -726,7 +731,7 @@ func (r *TaskWorkRepository) ReplaceAccessGrants(ctx context.Context, accountID,
 				var environmentViewerCount int
 				if err := tx.QueryRow(ctx, `SELECT COUNT(*)
 					FROM user_accounts membership
-					JOIN task_environments environment ON environment.account_id=membership.account_id AND environment.id=$3 AND environment.archived_at IS NULL
+					JOIN task_environments environment ON environment.account_id=membership.account_id AND environment.id=$3 AND environment.archived_at IS NULL AND environment.deleted_at IS NULL
 					WHERE membership.account_id=$1 AND membership.user_id=ANY($2::uuid[])
 					  AND (`+environmentActorAccessRankSQL("environment", "membership.user_id")+`) >= 1`, accountID, newUserIDs, environmentID).Scan(&environmentViewerCount); err != nil {
 					return nil, "", 0, err
@@ -942,6 +947,7 @@ func taskAccessBatchSQL() string {
 	LEFT JOIN task_access_grants task_grant ON task_grant.account_id=root.account_id
 		AND task_grant.task_id=root.id AND task_grant.user_id=membership.user_id
 	WHERE task.account_id=$1 AND task.id=ANY($2::uuid[])
+	  AND task.deleted_at IS NULL AND root.deleted_at IS NULL
 	  AND environment.deleted_at IS NULL AND list_item.deleted_at IS NULL
 	  AND (folder.id IS NULL OR folder.deleted_at IS NULL)
 	ORDER BY task.id`
@@ -1054,6 +1060,20 @@ func (r *TaskWorkRepository) ApplyTaskAccess(ctx context.Context, accountID, use
 	return nil
 }
 
+// RequireTaskReadAccess includes non-Trash historical containers. The batch
+// resolver caps every archived task at Ver, so mutation middleware continues
+// to use RequireTaskAccess and remains active-container only.
+func (r *TaskWorkRepository) RequireTaskReadAccess(ctx context.Context, accountID, userID, taskID uuid.UUID) (*domain.TaskEffectiveAccess, error) {
+	task := &domain.Task{ID: taskID}
+	if err := r.ApplyTaskAccess(ctx, accountID, userID, []*domain.Task{task}); err != nil {
+		return nil, err
+	}
+	if task.Permissions == nil || !task.Permissions.CanView {
+		return task.Permissions, ErrTaskWorkNotFound
+	}
+	return task.Permissions, nil
+}
+
 func (r *TaskWorkRepository) ApplyFolderAccess(ctx context.Context, accountID, userID uuid.UUID, folders []*domain.TaskFolder) error {
 	ids := make([]uuid.UUID, 0, len(folders))
 	byID := make(map[uuid.UUID]*domain.TaskFolder, len(folders))
@@ -1066,8 +1086,8 @@ func (r *TaskWorkRepository) ApplyFolderAccess(ctx context.Context, accountID, u
 		return nil
 	}
 	rows, err := r.db.Query(ctx, `SELECT folder.id,(`+taskActorFolderAccessRankSQL("folder", "$3")+`),(`+taskActorFolderCanManageSQL("folder", "$3")+`)
-		FROM task_folders folder JOIN task_environments environment ON environment.account_id=folder.account_id AND environment.id=folder.environment_id AND environment.archived_at IS NULL
-		WHERE folder.account_id=$1 AND folder.id=ANY($2::uuid[])`, accountID, ids, userID)
+		FROM task_folders folder JOIN task_environments environment ON environment.account_id=folder.account_id AND environment.id=folder.environment_id AND environment.archived_at IS NULL AND environment.deleted_at IS NULL
+		WHERE folder.account_id=$1 AND folder.id=ANY($2::uuid[]) AND folder.archived_at IS NULL AND folder.deleted_at IS NULL`, accountID, ids, userID)
 	if err != nil {
 		return err
 	}
@@ -1106,8 +1126,8 @@ func (r *TaskWorkRepository) ApplyListAccess(ctx context.Context, accountID, use
 		return nil
 	}
 	rows, err := r.db.Query(ctx, `SELECT list_item.id,(`+taskActorListAccessRankSQL("list_item", "$3")+`),(`+taskActorListCanManageSQL("list_item", "$3")+`)
-		FROM task_lists list_item JOIN task_environments environment ON environment.account_id=list_item.account_id AND environment.id=list_item.environment_id AND environment.archived_at IS NULL
-		WHERE list_item.account_id=$1 AND list_item.id=ANY($2::uuid[])`, accountID, ids, userID)
+		FROM task_lists list_item JOIN task_environments environment ON environment.account_id=list_item.account_id AND environment.id=list_item.environment_id AND environment.archived_at IS NULL AND environment.deleted_at IS NULL
+		WHERE list_item.account_id=$1 AND list_item.id=ANY($2::uuid[]) AND list_item.archived_at IS NULL AND list_item.deleted_at IS NULL`, accountID, ids, userID)
 	if err != nil {
 		return err
 	}
@@ -1138,7 +1158,7 @@ func (r *TaskWorkRepository) TaskViewerUserIDs(ctx context.Context, accountID, t
 	rows, err := r.db.Query(ctx, `SELECT membership.user_id
 		FROM tasks t
 		JOIN task_lists tl ON tl.account_id=t.account_id AND tl.id=t.list_id
-		JOIN task_environments environment ON environment.account_id=tl.account_id AND environment.id=tl.environment_id AND environment.archived_at IS NULL
+		JOIN task_environments environment ON environment.account_id=tl.account_id AND environment.id=tl.environment_id AND environment.archived_at IS NULL AND environment.deleted_at IS NULL
 		JOIN user_accounts membership ON membership.account_id=t.account_id
 		WHERE t.account_id=$1 AND t.id=$2 AND `+taskActorCanViewSQL("t", "tl", "membership.user_id")+`
 		ORDER BY membership.user_id`, accountID, taskID)
@@ -1161,15 +1181,15 @@ func (r *TaskWorkRepository) ContainerViewerUserIDs(ctx context.Context, account
 	query := ""
 	if targetType == domain.TaskAccessTargetFolder {
 		query = `SELECT membership.user_id FROM task_folders folder
-			JOIN task_environments environment ON environment.account_id=folder.account_id AND environment.id=folder.environment_id AND environment.archived_at IS NULL
+			JOIN task_environments environment ON environment.account_id=folder.account_id AND environment.id=folder.environment_id AND environment.archived_at IS NULL AND environment.deleted_at IS NULL
 			JOIN user_accounts membership ON membership.account_id=folder.account_id
-			WHERE folder.account_id=$1 AND folder.id=$2 AND (` + taskActorFolderAccessRankSQL("folder", "membership.user_id") + `) >= 1
+			WHERE folder.account_id=$1 AND folder.id=$2 AND folder.archived_at IS NULL AND folder.deleted_at IS NULL AND (` + taskActorFolderAccessRankSQL("folder", "membership.user_id") + `) >= 1
 			ORDER BY membership.user_id`
 	} else if targetType == domain.TaskAccessTargetList {
 		query = `SELECT membership.user_id FROM task_lists list_item
-			JOIN task_environments environment ON environment.account_id=list_item.account_id AND environment.id=list_item.environment_id AND environment.archived_at IS NULL
+			JOIN task_environments environment ON environment.account_id=list_item.account_id AND environment.id=list_item.environment_id AND environment.archived_at IS NULL AND environment.deleted_at IS NULL
 			JOIN user_accounts membership ON membership.account_id=list_item.account_id
-			WHERE list_item.account_id=$1 AND list_item.id=$2 AND (` + taskActorListAccessRankSQL("list_item", "membership.user_id") + `) >= 1
+			WHERE list_item.account_id=$1 AND list_item.id=$2 AND list_item.archived_at IS NULL AND list_item.deleted_at IS NULL AND (` + taskActorListAccessRankSQL("list_item", "membership.user_id") + `) >= 1
 			ORDER BY membership.user_id`
 	} else {
 		return nil, ErrTaskAccessInvalid

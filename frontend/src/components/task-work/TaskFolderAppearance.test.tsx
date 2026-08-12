@@ -1,12 +1,13 @@
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { apiPut } from '@/lib/api'
+import { apiDelete, apiPost, apiPut } from '@/lib/api'
 import type { TaskFolder, TaskList } from '@/types/task'
-import { TaskAppearanceDialog, taskContainerArchiveState } from './TaskContainerAppearance'
+import { TaskAppearanceDialog, taskContainerArchiveState, taskContainerTrashState } from './TaskContainerAppearance'
 
 vi.mock('@/lib/api', () => ({
   apiDelete: vi.fn(),
+  apiPost: vi.fn(),
   apiPut: vi.fn(),
 }))
 
@@ -31,6 +32,92 @@ afterEach(() => {
 })
 
 describe('task container icon rules', () => {
+	it('allows historical archive for closed tasks while keeping Trash blocked', () => {
+		const list = { ...base, id: 'list-history', name: 'Histórico', icon: 'list', is_default: false, task_count: 2, completed_task_count: 1, cancelled_task_count: 1 } as TaskList
+		expect(taskContainerArchiveState(list)).toMatchObject({ kind: 'ready' })
+		expect(taskContainerTrashState(list)).toMatchObject({ kind: 'blocked' })
+	})
+
+  it('recommends Archive for 31 completed tasks and never sends DELETE from the blocked Trash flow', async () => {
+    vi.mocked(apiPost).mockResolvedValue({ success: true })
+    const onSaved = vi.fn()
+    const list = {
+      ...base,
+      id: 'list-ernesto',
+      name: 'Ernesto',
+      icon: 'list',
+      is_default: false,
+      task_count: 31,
+      completed_task_count: 31,
+      capabilities: { level: 'full', can_archive: true, can_trash: false },
+    } as TaskList
+    render(<TaskAppearanceDialog item={list} type="list" onClose={vi.fn()} onSaved={onSaved} onError={vi.fn()} />)
+
+    expect(screen.getByRole('button', { name: 'Archivar como histórico' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Mover a Papelera' }))
+    let dialog = screen.getByRole('alertdialog')
+    expect(within(dialog).getByRole('heading', { name: 'Ernesto no se movió a Papelera' })).toBeInTheDocument()
+    expect(within(dialog).getByRole('status')).toHaveTextContent('31 tareas (0 abiertas, 31 completadas y 0 canceladas)')
+    expect(within(dialog).queryByRole('button', { name: 'Mover a Papelera' })).not.toBeInTheDocument()
+    expect(apiDelete).not.toHaveBeenCalled()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Archivar como histórico' }))
+    dialog = screen.getByRole('alertdialog')
+    expect(within(dialog).getByRole('heading', { name: 'Archivar lista' })).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Archivar como histórico' }))
+
+    await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(apiPost).mock.calls[0][0]).toBe('/api/tasks/lists/list-ernesto/archive')
+    expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ type: 'list', id: 'list-ernesto', action: 'archived' }))
+    expect(apiDelete).not.toHaveBeenCalled()
+  })
+
+  it('moves a truly empty list to Trash once after exact-name confirmation', async () => {
+    vi.mocked(apiDelete).mockResolvedValue({ success: true })
+    const onSaved = vi.fn()
+    const list = {
+      ...base,
+      id: 'list-empty',
+      name: 'Vacía',
+      icon: 'list',
+      is_default: false,
+      capabilities: { level: 'full', can_archive: true, can_trash: true },
+    } as TaskList
+    render(<TaskAppearanceDialog item={list} type="list" onClose={vi.fn()} onSaved={onSaved} onError={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mover a Papelera' }))
+    const dialog = screen.getByRole('alertdialog')
+    fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: 'Vacía' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Mover a Papelera' }))
+
+    await waitFor(() => expect(apiDelete).toHaveBeenCalledTimes(1))
+    expect(apiDelete).toHaveBeenCalledWith('/api/tasks/lists/list-empty', expect.objectContaining({ confirmation_name: 'Vacía' }))
+    expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ type: 'list', id: 'list-empty', action: 'trashed' }))
+  })
+
+  it('keeps the Trash confirmation open with retry feedback after a server conflict', async () => {
+    vi.mocked(apiDelete).mockResolvedValue({ success: false, error: 'La lista cambió. Reintenta.' })
+    const onSaved = vi.fn()
+    const list = {
+      ...base,
+      id: 'list-conflict',
+      name: 'Conflicto',
+      icon: 'list',
+      is_default: false,
+      capabilities: { level: 'full', can_archive: true, can_trash: true },
+    } as TaskList
+    render(<TaskAppearanceDialog item={list} type="list" onClose={vi.fn()} onSaved={onSaved} onError={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mover a Papelera' }))
+    const dialog = screen.getByRole('alertdialog')
+    fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: 'Conflicto' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Mover a Papelera' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('La lista cambió. Reintenta.')
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+    expect(onSaved).not.toHaveBeenCalled()
+  })
+
   it('explains why a non-empty list cannot be archived instead of hiding the action', () => {
     const list = { ...base, id: 'list-occupied', name: 'Ocupada', icon: 'list', is_default: false, task_count: 3, open_task_count: 1, completed_task_count: 1, cancelled_task_count: 1 } as TaskList
     expect(taskContainerArchiveState(list)).toMatchObject({ kind: 'blocked' })
@@ -39,7 +126,6 @@ describe('task container icon rules', () => {
     const dialog = screen.getByRole('alertdialog')
     expect(within(dialog).getByRole('status')).toHaveTextContent('1 abiertas, 1 completadas y 1 canceladas')
     expect(within(dialog).queryByRole('button', { name: 'Mover a Papelera' })).not.toBeInTheDocument()
-    expect(within(dialog).getByRole('button', { name: 'Entendido' })).toBeInTheDocument()
   })
 
   it('shows the fixed folder icon and never sends an icon update', async () => {

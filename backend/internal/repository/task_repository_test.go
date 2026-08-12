@@ -40,7 +40,8 @@ func TestGetTaskByIDForActorFiltersBeforeHydration(t *testing.T) {
 	for _, invariant := range []string{
 		"func (r *TaskRepository) GetByIDForActor",
 		"t.deleted_at IS NULL",
-		"taskActorCanViewSQL(\"t\", \"tl\", \"$3\")",
+		"taskActorCanViewIncludingArchivedSQL(\"t\", \"tl\", \"$3\")",
+		"environment.deleted_at IS NULL",
 	} {
 		if !strings.Contains(source, invariant) {
 			t.Fatalf("actor task lookup lost SQL visibility invariant %q", invariant)
@@ -52,8 +53,8 @@ func TestTaskCreateAndUpdateLockEnvironmentDuringACLRecheck(t *testing.T) {
 	t.Parallel()
 	source := readRepositorySource(t, "task_repository.go")
 	for _, invariant := range []string{
-		"AND archived_at IS NULL FOR SHARE",
-		"id=ANY($2::uuid[]) AND archived_at IS NULL ORDER BY id FOR SHARE",
+		"AND archived_at IS NULL AND deleted_at IS NULL FOR SHARE",
+		"id=ANY($2::uuid[]) AND archived_at IS NULL AND deleted_at IS NULL ORDER BY id FOR SHARE",
 		"resolveEnvironmentAccessWith(ctx, tx, t.AccountID, *t.MutationActor, environmentID)",
 		"resolveTaskAccessWith(ctx, tx, t.AccountID, *t.MutationActor, t.ID)",
 	} {
@@ -196,5 +197,15 @@ func TestTaskWorkflowStatusesRequireOneInitialDefault(t *testing.T) {
 		if taskWorkflowStatusesValid(invalid) {
 			t.Fatalf("invalid workflow status contract was accepted: %#v", invalid)
 		}
+	}
+}
+
+func TestTaskAgendaOverlapUsesHalfOpenIntervalsAndKeepsPointTasks(t *testing.T) {
+	predicate := taskAgendaOverlapSQL()
+	if !strings.Contains(predicate, "> $2") {
+		t.Fatalf("agenda interval must exclude an item ending exactly at range start: %s", predicate)
+	}
+	if !strings.Contains(predicate, ">= $2") || !strings.Contains(predicate, "=COALESCE(t.start_at,t.due_at)") {
+		t.Fatalf("agenda must retain zero-duration due points at the visible range boundary: %s", predicate)
 	}
 }

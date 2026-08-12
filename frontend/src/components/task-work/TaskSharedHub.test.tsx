@@ -14,8 +14,10 @@ describe('TaskSharedHub', () => {
     mockedGet
       .mockResolvedValueOnce({ success: true, data: { items: [{ id: 'task-1', type: 'task', name: 'Tarea compartida', effective_access_level: 'view' }], next_cursor: null } })
       .mockResolvedValueOnce({ success: true, data: { items: [], next_cursor: null } })
+			.mockResolvedValueOnce({ success: true, data: { items: [], next_cursor: null } })
+			.mockResolvedValueOnce({ success: true, data: { items: [], next_cursor: null } })
     const onOpenTask = vi.fn()
-    const props = { environmentId: 'env-active', onOpenFolder: vi.fn(), onOpenList: vi.fn(), onOpenTask }
+		const props = { environmentId: 'env-active', onOpenFolder: vi.fn(), onOpenList: vi.fn(), onOpenTask, onOpenEvent: vi.fn() }
     const view = render(<TaskSharedHub {...props} refreshToken={0} />)
 
     fireEvent.click(await screen.findByRole('button', { name: /Tarea compartida/ }))
@@ -23,7 +25,7 @@ describe('TaskSharedHub', () => {
     expect(mockedGet).toHaveBeenNthCalledWith(1, '/api/tasks/environments/env-active/shared-resources?limit=50', expect.anything())
 
     view.rerender(<TaskSharedHub {...props} refreshToken={1} />)
-    await waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(2))
+		await waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(4))
     await waitFor(() => expect(screen.queryByText('Tarea compartida')).not.toBeInTheDocument())
     expect(screen.getByText(/No tienes recursos compartidos directamente/)).toBeInTheDocument()
   })

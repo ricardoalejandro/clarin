@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestTaskAccessPresentationAliasesShareCanonicalCapabilities(t *testing.T) {
@@ -52,6 +53,33 @@ func TestTaskAccessPresentationAliasesShareCanonicalCapabilities(t *testing.T) {
 					payload["capabilities"], payload["permissions"])
 			}
 		})
+	}
+}
+
+func TestTaskContainerLifecycleCapabilitiesSeparateArchiveAndTrash(t *testing.T) {
+	t.Parallel()
+	full := func() *TaskEffectiveAccess { return &TaskEffectiveAccess{Level: TaskAccessFull, CanDelete: true} }
+
+	closedList := &TaskList{TaskCount: 2, OpenTaskCount: 0}
+	closedList.SetEffectiveAccess(full())
+	closedList.SetLifecycle()
+	if !closedList.Permissions.CanArchive || closedList.Permissions.CanTrash || closedList.Permissions.CanDelete {
+		t.Fatalf("closed history should be archivable but not trashable: %#v", closedList.Permissions)
+	}
+
+	emptyList := &TaskList{}
+	emptyList.SetEffectiveAccess(full())
+	emptyList.SetLifecycle()
+	if !emptyList.Permissions.CanArchive || !emptyList.Permissions.CanTrash || !emptyList.Permissions.CanDelete {
+		t.Fatalf("empty active list should expose Archive and Trash with can_delete alias: %#v", emptyList.Permissions)
+	}
+
+	now := time.Now()
+	archived := &TaskList{ArchivedAt: &now, TaskCount: 1}
+	archived.SetEffectiveAccess(full())
+	archived.SetLifecycle()
+	if archived.Lifecycle != TaskLifecycleArchived || !archived.Permissions.CanRestore || archived.Permissions.CanTrash {
+		t.Fatalf("retained historical list has incorrect lifecycle capabilities: %#v", archived)
 	}
 }
 

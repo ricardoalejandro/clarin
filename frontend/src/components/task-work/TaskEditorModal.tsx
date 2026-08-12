@@ -30,6 +30,8 @@ import TaskDateTimePicker from './TaskDateTimePicker'
 import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 import TaskDescriptionEditor from './TaskDescriptionEditor'
 import TaskParticipantGrantConfirmDialog from './TaskParticipantGrantConfirmDialog'
+import { TaskColorPicker } from './TaskContainerAppearance'
+import { resolveTaskIdentityColor } from './taskIdentityColor'
 import {
   enqueueTaskAttachmentFiles,
   markTaskAttachmentQueueItem,
@@ -107,6 +109,7 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
   const [milestone, setMilestone] = useState(false)
   const [recurrence, setRecurrence] = useState('')
   const [reminder, setReminder] = useState(0)
+	const [color, setColor] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [editVersion, setEditVersion] = useState(1)
@@ -133,6 +136,8 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
 
   const taskEditable = !task || task.permissions?.can_edit === true
   const selectedList = catalogLists.find(item => item.id === listId)
+	const inheritedColor = resolveTaskIdentityColor(null, selectedList?.color).color
+	const effectiveColor = resolveTaskIdentityColor(color, selectedList?.color).color
   const catalogEnvironmentID = environmentId || task?.environment_id || selectedList?.environment_id || ''
   const selectedWorkflowID = selectedList?.workflow_id || (task?.list_id === listId ? task.status_detail?.workflow_id : undefined)
   const workflow = workflows.find(item => item.id === selectedWorkflowID) || workflows.find(item => item.is_default) || workflows[0]
@@ -163,6 +168,7 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
     setMilestone(Boolean(task?.is_milestone))
     setRecurrence(task?.recurrence_rule || '')
     setReminder(task?.reminder_minutes || 0)
+		setColor(task?.color || null)
     setEditVersion(task?.version || 1)
     setError('')
     setDirty(false)
@@ -344,6 +350,7 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
       due_at: dueAt ? new Date(dueAt).toISOString() : '',
       is_all_day: allDay, progress, progress_mode: 'manual', manual_progress: progress, is_milestone: milestone,
       recurrence_rule: recurrence, reminder_minutes: reminder || 0,
+			color,
       ...(parentTaskId && !task ? { parent_task_id: parentTaskId } : {}),
       ...(!task && relatedScope ? {
         ...(relatedScope.contactId ? { contact_id: relatedScope.contactId } : {}),
@@ -443,6 +450,7 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
                 <div className="mb-2 text-xs font-semibold text-slate-500">Prioridad</div>
                 <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">{(Object.keys(TASK_PRIORITY_CONFIG) as TaskPriority[]).map(key => <button key={key} onClick={() => { setPriority(key); markDirty() }} className={`rounded-xl px-2 py-2 text-xs font-medium transition ${priority === key ? `${TASK_PRIORITY_CONFIG[key].bg} ${TASK_PRIORITY_CONFIG[key].color} ring-1 ring-current` : 'bg-slate-100 text-slate-500'}`}>{TASK_PRIORITY_CONFIG[key].label}</button>)}</div>
               </div>
+							<div><div className="mb-2 text-xs font-semibold text-slate-500">Color de identidad</div><button type="button" aria-label="Heredar color de la lista" onClick={() => { setColor(null); markDirty() }} className={`mb-2 flex min-h-11 w-full items-center gap-3 rounded-xl border px-3 text-left ${color === null ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200'}`}><span className="h-7 w-7 rounded-lg border-2 border-white shadow" style={{ backgroundColor: inheritedColor }} /><span className="min-w-0 flex-1"><span className="block text-xs font-bold text-slate-700">Heredar de la lista</span><span className="block truncate text-[10px] text-slate-400">{selectedList?.name || 'Color predeterminado'} · {inheritedColor}</span></span>{color === null && <Check className="h-4 w-4 text-emerald-600" />}</button><TaskColorPicker value={effectiveColor} label="Personalizar color de la tarea" onChange={value => { setColor(value); markDirty() }} /></div>
               <label className="block text-xs font-semibold text-slate-500">Responsable<span className="mt-1.5 block"><TaskUserCombobox users={users} value={ownerId} onChange={value => { setOwnerId(value); markDirty() }} /></span></label>
               <div><div className="mb-1 text-xs font-semibold text-slate-500">Colaboradores</div><p className="mb-2 text-[10px] leading-4 text-slate-400">Participantes adicionales; el responsable continúa siendo el propietario.</p><TaskCollaboratorPicker users={users} value={collaboratorIds} ownerID={ownerId} onChange={value => { setCollaboratorIds(value); markDirty() }} emptyLabel={ownerId ? 'Sin colaboradores adicionales.' : 'Selecciona primero un responsable.'} /></div>
             </section>

@@ -3859,6 +3859,9 @@ func Migrate(db *pgxpool.Pool) error {
 	if err := migrateTaskContainerLifecycle(ctx, db); err != nil {
 		return err
 	}
+	if err := migrateTaskEvents(ctx, db); err != nil {
+		return err
+	}
 	if err := migrateWhiteboards(ctx, db); err != nil {
 		return err
 	}

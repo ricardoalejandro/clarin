@@ -499,7 +499,7 @@ export function downloadWhiteboardRevisionAsset(id: string, versionID: string, a
   )
 }
 
-export function uploadWhiteboardAsset(id: string, fileID: string, blob: Blob, filename: string) {
+export function uploadWhiteboardAsset(id: string, fileID: string, blob: Blob, filename: string, signal?: AbortSignal) {
   const form = new FormData()
   form.set('file_id', fileID)
   form.set('kind', 'asset')
@@ -507,6 +507,7 @@ export function uploadWhiteboardAsset(id: string, fileID: string, blob: Blob, fi
   return api<{ success?: boolean; asset: WhiteboardAsset; deduped: boolean }>(`${WHITEBOARDS_API_ROOT}/${encodeURIComponent(id)}/assets`, {
     method: 'POST',
     body: form,
+    signal,
   })
 }
 
@@ -572,6 +573,7 @@ export async function uploadWhiteboardGuestAsset(
   fileID: string,
   blob: Blob,
   filename: string,
+  signal?: AbortSignal,
 ) {
   const form = new FormData()
   form.set('file_id', fileID)
@@ -582,6 +584,7 @@ export async function uploadWhiteboardGuestAsset(
       method: 'POST',
       body: form,
       credentials: 'include',
+      signal,
     })
     const payload = await response.json().catch(() => ({ error: `Error ${response.status}` })) as { asset?: WhiteboardGuestAsset; deduped?: boolean; error?: string }
     return response.ok && payload.asset

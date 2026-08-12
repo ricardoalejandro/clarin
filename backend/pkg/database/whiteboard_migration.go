@@ -164,6 +164,9 @@ func whiteboardMigrations() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_whiteboard_activity_board
 			ON whiteboard_activity(account_id,board_id,created_at DESC,id DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_whiteboard_activity_technical_retention
+			ON whiteboard_activity(created_at,id)
+			WHERE action IN ('scene.patched','scene.snapshotted','thumbnail.updated')`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_whiteboard_activity_operation
 			ON whiteboard_activity(account_id,board_id,action,operation_id)
 			WHERE operation_id IS NOT NULL`,
@@ -248,6 +251,9 @@ func whiteboardMigrations() []string {
 		`ALTER TABLE whiteboard_operations ADD COLUMN IF NOT EXISTS request_payload_hash CHAR(64)`,
 		`CREATE INDEX IF NOT EXISTS idx_whiteboard_operations_board_sequence
 			ON whiteboard_operations(account_id,board_id,sequence DESC,id DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_whiteboard_operations_technical_retention
+			ON whiteboard_operations(created_at,id)
+			WHERE operation_kind IN ('patch','snapshot')`,
 
 		`CREATE TABLE IF NOT EXISTS whiteboard_revisions (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

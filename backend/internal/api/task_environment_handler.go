@@ -193,6 +193,9 @@ func (s *Server) handleGetTaskEnvironment(c *fiber.Ctx) error {
 	if err != nil {
 		return taskWorkError(c, err)
 	}
+	if environment.ArchivedAt != nil && !taskHistoricalReadRequested(c) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Entorno no encontrado"})
+	}
 	return c.JSON(fiber.Map{"success": true, "environment": environment})
 }
 
@@ -342,7 +345,7 @@ func (s *Server) handleRestoreTaskEnvironment(c *fiber.Ctx) error {
 	if err != nil {
 		return taskWorkError(c, err)
 	}
-	s.broadcastTaskEnvironment(c.Context(), accountID, environmentID, "environment_restored", fiber.Map{"environment": updated, "operation_id": operationID})
+	s.broadcastTaskEnvironment(c.Context(), accountID, environmentID, "environment_unarchived", fiber.Map{"environment": updated, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "environment": updated, "operation_id": operationID})
 }
 
@@ -352,6 +355,14 @@ func (s *Server) handleGetTaskEnvironmentHierarchy(c *fiber.Ctx) error {
 	environmentID, err := parseTaskEnvironmentID(c)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Entorno inválido"})
+	}
+	lifecycle := strings.ToLower(strings.TrimSpace(c.Query("lifecycle")))
+	if lifecycle == "archive" || lifecycle == domain.TaskLifecycleArchived {
+		folders, roots, err := s.repos.TaskWork.ListArchiveHierarchyForActor(c.Context(), accountID, userID, environmentID)
+		if err != nil {
+			return taskWorkError(c, err)
+		}
+		return c.JSON(fiber.Map{"success": true, "environment_id": environmentID, "lifecycle": domain.TaskLifecycleArchived, "folders": folders, "root_lists": roots})
 	}
 	if _, err := s.repos.TaskWork.RequireActiveEnvironmentAccess(c.Context(), accountID, userID, environmentID, domain.TaskAccessView); err != nil {
 		return taskWorkError(c, err)

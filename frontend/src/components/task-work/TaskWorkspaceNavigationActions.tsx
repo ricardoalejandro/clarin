@@ -2,10 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
-import { ChevronRight, Inbox, Settings2, Share2, SlidersHorizontal, Trash2 } from 'lucide-react'
+import { Archive, ChevronRight, Inbox, Settings2, Share2, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 
-type ScopeType = 'all' | 'environment' | 'shared' | 'folder' | 'list' | 'trash'
+type ScopeType = 'all' | 'environment' | 'shared' | 'folder' | 'list' | 'archive' | 'trash'
 
 interface ScopeProps {
   collapsed: boolean
@@ -32,12 +32,14 @@ export function TaskWorkspaceScopeSwitch({ collapsed, environmentName, scopeType
 interface ManagementProps {
   collapsed: boolean
   canManage: boolean
+  archiveSelected: boolean
   trashSelected: boolean
+  onArchive: () => void
   onTrash: () => void
   onManage: () => void
 }
 
-export function TaskWorkspaceManagementActions({ collapsed, canManage, trashSelected, onTrash, onManage }: ManagementProps) {
+export function TaskWorkspaceManagementActions({ collapsed, canManage, archiveSelected, trashSelected, onArchive, onTrash, onManage }: ManagementProps) {
   const triggerRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const [open, setOpen] = useState(false)
@@ -69,19 +71,21 @@ export function TaskWorkspaceManagementActions({ collapsed, canManage, trashSele
   }, [open])
 
   if (!collapsed) {
-    return <div data-task-management-actions className="grid grid-cols-2 gap-1">
+		return <div data-task-management-actions className="grid grid-cols-3 gap-1">
+			<button type="button" onClick={onArchive} title="Archivo histórico" className={`flex min-h-11 min-w-0 items-center justify-center gap-1.5 rounded-xl px-2 text-xs font-semibold transition ${archiveSelected ? 'bg-amber-50 text-amber-800' : 'text-slate-500 hover:bg-amber-50 hover:text-amber-800'}`}><Archive className="h-3.5 w-3.5 shrink-0" /><span className="truncate">Archivo</span></button>
       <button type="button" disabled={!canManage} onClick={onTrash} title={canManage ? 'Papelera' : 'Papelera requiere Administrar'} className={`flex min-h-11 min-w-0 items-center justify-center gap-1.5 rounded-xl px-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-35 ${trashSelected ? 'bg-slate-100 text-slate-800' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><Trash2 className="h-3.5 w-3.5 shrink-0" /><span className="truncate">Papelera</span></button>
       <button type="button" disabled={!canManage} onClick={onManage} title="Administrar Entorno" className="flex min-h-11 min-w-0 items-center justify-center gap-1.5 rounded-xl px-2 text-xs font-semibold text-slate-500 transition hover:bg-slate-50 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-30"><Settings2 className="h-3.5 w-3.5 shrink-0" /><span className="truncate">Administrar</span></button>
     </div>
   }
 
   return <>
-    <button ref={triggerRef} type="button" disabled={!canManage} aria-haspopup="menu" aria-expanded={open} aria-label="Gestión del Entorno" title={canManage ? 'Gestión del Entorno' : 'Gestión requiere Administrar'} onClick={() => setOpen(value => !value)} className={`flex h-11 w-full items-center justify-center rounded-xl transition disabled:cursor-not-allowed disabled:opacity-30 ${trashSelected ? 'bg-slate-100 text-slate-800' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><SlidersHorizontal className="h-4 w-4" /></button>
+		<button ref={triggerRef} type="button" aria-haspopup="menu" aria-expanded={open} aria-label="Gestión del Entorno" title="Archivo, Papelera y administración" onClick={() => setOpen(value => !value)} className={`flex h-11 w-full items-center justify-center rounded-xl transition ${(archiveSelected || trashSelected) ? 'bg-slate-100 text-slate-800' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}><SlidersHorizontal className="h-4 w-4" /></button>
     {open && typeof document !== 'undefined' && createPortal(<>
       <button type="button" aria-label="Cerrar gestión" className="fixed inset-0 cursor-default" style={{ zIndex: TASK_OVERLAY_LAYERS.workspacePopover - 1 }} onMouseDown={() => close()} />
       <div ref={menuRef} role="menu" aria-label="Gestión del Entorno" style={{ ...style, zIndex: TASK_OVERLAY_LAYERS.workspacePopover }} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); close() } }} className="fixed rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl shadow-slate-900/15">
-        <button type="button" role="menuitem" onClick={() => { onTrash(); close(false) }} className={`flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold ${trashSelected ? 'bg-slate-100 text-slate-900' : 'text-slate-600 hover:bg-slate-50'}`}><Trash2 className="h-4 w-4" /><span className="flex-1">Papelera</span><ChevronRight className="h-3.5 w-3.5 text-slate-300" /></button>
-        <button type="button" role="menuitem" onClick={() => { onManage(); close(false) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-50"><Settings2 className="h-4 w-4" /><span className="flex-1">Administrar Entorno</span><ChevronRight className="h-3.5 w-3.5 text-slate-300" /></button>
+				<button type="button" role="menuitem" onClick={() => { onArchive(); close(false) }} className={`flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold ${archiveSelected ? 'bg-amber-50 text-amber-900' : 'text-slate-600 hover:bg-amber-50'}`}><Archive className="h-4 w-4" /><span className="flex-1">Archivo histórico</span><ChevronRight className="h-3.5 w-3.5 text-slate-300" /></button>
+        <button type="button" role="menuitem" disabled={!canManage} onClick={() => { onTrash(); close(false) }} className={`flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-35 ${trashSelected ? 'bg-slate-100 text-slate-900' : 'text-slate-600 hover:bg-slate-50'}`}><Trash2 className="h-4 w-4" /><span className="flex-1">Papelera</span><ChevronRight className="h-3.5 w-3.5 text-slate-300" /></button>
+				<button type="button" role="menuitem" disabled={!canManage} onClick={() => { onManage(); close(false) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-35"><Settings2 className="h-4 w-4" /><span className="flex-1">Administrar Entorno</span><ChevronRight className="h-3.5 w-3.5 text-slate-300" /></button>
       </div>
     </>, document.body)}
   </>

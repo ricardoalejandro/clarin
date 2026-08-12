@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Maximize2, Minimize2, Move, PanelRight, RotateCcw, X, type LucideIcon } from 'lucide-react'
+import ClarinBrandMark from '@/components/branding/ClarinBrandMark'
 import useOperationalWindow, { type OperationalWindowMode, type OperationalWindowResizeEdge } from './useOperationalWindow'
 import { operationalWindowVisualState } from './operationalWindowVisuals'
 import { OperationalOverlayProvider } from './OperationalOverlayContext'
@@ -191,7 +192,10 @@ export default function OperationalWindowShell({
         >
           {Icon && <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700"><Icon className="h-5 w-5" /></span>}
           <div className="min-w-0 flex-1">
-            <p className="text-[10px] font-black uppercase tracking-[.18em] text-emerald-600">{eyebrow}</p>
+            <p className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-[.18em] text-emerald-600">
+              <ClarinBrandMark className="h-4 w-4 shrink-0 rounded-[5px]" />
+              <span className="truncate">{eyebrow}</span>
+            </p>
             <h2 className="mt-1 truncate text-lg font-black text-slate-900 sm:text-xl">{title}</h2>
             {description && <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">{description}</p>}
           </div>

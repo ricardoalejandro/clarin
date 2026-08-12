@@ -159,6 +159,8 @@ export interface WhiteboardVersion {
   actor_id?: string | null
   guest_session_id?: string | null
   write_kind: 'snapshot' | 'patch' | 'restore' | string
+  revision_kind: 'automatic' | 'manual' | 'system' | string
+  expires_at?: string | null
   snapshot_size_bytes?: number
 }
 
@@ -552,6 +554,12 @@ function whiteboardElementPersistenceState(value: unknown) {
   const element = value as Record<string, unknown>
   return {
     ...revision,
+    type: typeof element.type === 'string' ? element.type : null,
+    image: element.type === 'image' ? {
+      fileId: typeof element.fileId === 'string' ? element.fileId : null,
+      status: typeof element.status === 'string' ? element.status : null,
+      scale: Array.isArray(element.scale) ? element.scale : null,
+    } : null,
     relations: Object.fromEntries(WHITEBOARD_RELATIONAL_ELEMENT_KEYS.map(key => [key, element[key] ?? null])),
   }
 }
@@ -689,7 +697,59 @@ export function hasWhiteboardDocumentMutation(input: {
   if (PERSISTED_APP_STATE_KEYS.some(key => !Object.is(currentAppState[key], previousAppState[key]))) return true
   const currentFiles = sanitizeWhiteboardFilesForPersistence(input.currentFiles || {})
   const previousFiles = sanitizeWhiteboardFilesForPersistence(input.previousFiles || {})
-  return !sameWhiteboardSerializableValue(currentFiles, previousFiles)
+  if (!sameWhiteboardSerializableValue(currentFiles, previousFiles)) return true
+  const localFileReadiness = (files: Record<string, unknown> | undefined) => Object.fromEntries(
+    Object.entries(files || {}).map(([fileID, rawFile]) => [
+      fileID,
+      Boolean(rawFile && typeof rawFile === 'object' && !Array.isArray(rawFile)
+        && typeof (rawFile as Record<string, unknown>).dataURL === 'string'
+        && (rawFile as Record<string, unknown>).dataURL),
+    ]),
+  )
+  return !sameWhiteboardSerializableValue(
+    localFileReadiness(input.currentFiles),
+    localFileReadiness(input.previousFiles),
+  )
+}
+
+/**
+ * Excalidraw may mutate its binary-file map while an image is being decoded.
+ * Keep a record snapshot so that the later fileId/dataURL transition remains
+ * observable by autosave instead of aliasing the previous editor state.
+ */
+export function snapshotWhiteboardFiles(files: Record<string, unknown> | undefined) {
+  return Object.fromEntries(Object.entries(files || {}).map(([fileID, rawFile]) => [
+    fileID,
+    rawFile && typeof rawFile === 'object' && !Array.isArray(rawFile)
+      ? { ...(rawFile as Record<string, unknown>) }
+      : rawFile,
+  ]))
+}
+
+export function planWhiteboardAssetPersistence(
+  elements: readonly unknown[],
+  files: Record<string, unknown> | undefined,
+  persistedFileIDs: ReadonlySet<string>,
+) {
+  const referencedFileIDs = Array.from(new Set(elements.flatMap(rawElement => {
+    if (!rawElement || typeof rawElement !== 'object' || Array.isArray(rawElement)) return []
+    const element = rawElement as Record<string, unknown>
+    return element.type === 'image' && element.isDeleted !== true && typeof element.fileId === 'string' && element.fileId
+      ? [element.fileId]
+      : []
+  })))
+  const uploadFileIDs: string[] = []
+  const missingFileIDs: string[] = []
+  for (const fileID of referencedFileIDs) {
+    if (persistedFileIDs.has(fileID)) continue
+    const rawFile = files?.[fileID]
+    const hasDataURL = Boolean(rawFile && typeof rawFile === 'object' && !Array.isArray(rawFile)
+      && typeof (rawFile as Record<string, unknown>).dataURL === 'string'
+      && (rawFile as Record<string, unknown>).dataURL)
+    if (hasDataURL) uploadFileIDs.push(fileID)
+    else missingFileIDs.push(fileID)
+  }
+  return { referencedFileIDs, uploadFileIDs, missingFileIDs }
 }
 
 export type WhiteboardNavigationAction = 'leave' | 'wait' | 'flush' | 'confirm'
@@ -698,12 +758,13 @@ export function whiteboardNavigationAction(input: {
   dirty: boolean
   pending: boolean
   saving: boolean
+  assetSaving?: boolean
   libraryDirty?: boolean
   librarySaving?: boolean
   flushAttempted: boolean
 }): WhiteboardNavigationAction {
-  if (!input.dirty && !input.pending && !input.saving && !input.libraryDirty && !input.librarySaving) return 'leave'
-  if (input.saving || input.librarySaving) return 'wait'
+  if (!input.dirty && !input.pending && !input.saving && !input.assetSaving && !input.libraryDirty && !input.librarySaving) return 'leave'
+  if (input.saving || input.assetSaving || input.librarySaving) return 'wait'
   if (!input.flushAttempted && (input.dirty || input.pending || input.libraryDirty)) return 'flush'
   return 'confirm'
 }

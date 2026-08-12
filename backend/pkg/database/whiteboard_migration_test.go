@@ -26,6 +26,8 @@ func TestWhiteboardMigrationKeepsIsolationRevisionAndGuestInvariants(t *testing.
 		"access_level IN ('view','edit','manage')",
 		"CREATE TABLE IF NOT EXISTS whiteboard_operations",
 		"CREATE TABLE IF NOT EXISTS whiteboard_activity",
+		"idx_whiteboard_operations_technical_retention",
+		"idx_whiteboard_activity_technical_retention",
 		"FOREIGN KEY(account_id,board_id) REFERENCES whiteboards(account_id,id) ON DELETE CASCADE",
 		"UNIQUE(account_id,board_id,operation_id)",
 		"snapshot_object_key TEXT NOT NULL",

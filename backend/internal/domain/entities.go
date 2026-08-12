@@ -1411,6 +1411,13 @@ func (environment *TaskEnvironment) SetEffectiveAccess(access *TaskEffectiveAcce
 
 func (environment *TaskEnvironment) SetLifecycle() {
 	environment.Lifecycle = taskContainerLifecycle(environment.ArchivedAt, environment.DeletedAt)
+	if access := environment.Capabilities; access != nil {
+		managed := access.Level == TaskAccessFull
+		access.CanArchive = managed && !environment.IsDefault && environment.Lifecycle == TaskLifecycleActive && environment.OpenTaskCount == 0
+		access.CanTrash = managed && !environment.IsDefault && environment.Lifecycle != TaskLifecycleTrash && environment.TaskCount == 0
+		access.CanRestore = managed && !environment.IsDefault && environment.Lifecycle != TaskLifecycleActive
+		access.CanDelete = access.CanTrash
+	}
 }
 
 type TaskAccessGrant struct {
@@ -1478,10 +1485,17 @@ func (list *TaskList) SetEffectiveAccess(access *TaskEffectiveAccess) {
 
 func (list *TaskList) SetLifecycle() {
 	list.Lifecycle = taskContainerLifecycle(list.ArchivedAt, list.DeletedAt)
+	if access := list.Capabilities; access != nil {
+		managed := access.Level == TaskAccessFull
+		access.CanArchive = managed && !list.IsDefault && list.Lifecycle == TaskLifecycleActive && list.OpenTaskCount == 0
+		access.CanTrash = managed && !list.IsDefault && list.Lifecycle != TaskLifecycleTrash && list.TaskCount == 0
+		access.CanRestore = managed && !list.IsDefault && list.Lifecycle != TaskLifecycleActive
+		access.CanDelete = access.CanTrash
+	}
 }
 
 // TaskTrashPolicy is the account-wide manual trash policy. A nil retention
-// disables permanent deletion without changing what is already archived.
+// disables permanent deletion without changing what is already in Trash.
 type TaskTrashPolicy struct {
 	RetentionDays *int `json:"retention_days"`
 	CanManage     bool `json:"can_manage"`
@@ -1502,17 +1516,20 @@ type TaskTrashContainer struct {
 	DeletedWithFolder  bool       `json:"deleted_with_folder"`
 	ArchivedAt         *time.Time `json:"archived_at,omitempty"`
 	Lifecycle          string     `json:"lifecycle"`
+	Version            int64      `json:"version,omitempty"`
 	ListCount          int        `json:"list_count"`
 	TaskCount          int        `json:"task_count"`
 	NextEligibleAt     *time.Time `json:"next_eligible_at,omitempty"`
 	CanPurge           bool       `json:"can_purge"`
+	CanRestore         bool       `json:"can_restore"`
 	RestoreBlocked     bool       `json:"restore_blocked"`
 }
 
 type TaskTrashPurgeResult struct {
-	Tasks   int `json:"tasks"`
-	Lists   int `json:"lists"`
-	Folders int `json:"folders"`
+	Tasks        int `json:"tasks"`
+	Lists        int `json:"lists"`
+	Folders      int `json:"folders"`
+	Environments int `json:"environments"`
 }
 
 type TaskMediaGCJob struct {
@@ -1588,6 +1605,13 @@ func (folder *TaskFolder) SetEffectiveAccess(access *TaskEffectiveAccess) {
 
 func (folder *TaskFolder) SetLifecycle() {
 	folder.Lifecycle = taskContainerLifecycle(folder.ArchivedAt, folder.DeletedAt)
+	if access := folder.Capabilities; access != nil {
+		managed := access.Level == TaskAccessFull
+		access.CanArchive = managed && folder.Lifecycle == TaskLifecycleActive && folder.OpenTaskCount == 0
+		access.CanTrash = managed && folder.Lifecycle != TaskLifecycleTrash && folder.TaskCount == 0
+		access.CanRestore = managed && folder.Lifecycle != TaskLifecycleActive
+		access.CanDelete = access.CanTrash
+	}
 }
 
 // TaskHierarchyCounts is the canonical account-scoped count snapshot returned
@@ -1663,6 +1687,9 @@ type Task struct {
 	RecurrenceParentID       *uuid.UUID  `json:"recurrence_parent_id,omitempty"`
 	ReminderMinutes          *int        `json:"reminder_minutes,omitempty"`
 	Notes                    string      `json:"notes,omitempty"`
+	Color                    *string     `json:"color,omitempty"`
+	ResolvedColor            string      `json:"resolved_color"`
+	ColorSource              string      `json:"color_source"`
 	Placement                string      `json:"-"`
 	CollaboratorIDs          []uuid.UUID `json:"-"`
 	CollaboratorsSet         bool        `json:"-"`
@@ -1696,6 +1723,112 @@ type Task struct {
 	SubtaskDone     int `json:"subtask_done"`
 	CommentCount    int `json:"comment_count"`
 	AttachmentCount int `json:"attachment_count"`
+}
+
+const (
+	WorkEventAvailabilityBusy = "busy"
+	WorkEventAvailabilityFree = "free"
+	WorkEventStatusScheduled  = "scheduled"
+	WorkEventStatusCancelled  = "cancelled"
+	WorkEventRSVPPending      = "pending"
+	WorkEventRSVPAccepted     = "accepted"
+	WorkEventRSVPTentative    = "tentative"
+	WorkEventRSVPDeclined     = "declined"
+)
+
+// WorkEvent is a calendar-native item inside Clarin Work. It intentionally has
+// no relationship with the CRM Event entity used for participants/campaigns.
+type WorkEvent struct {
+	ID               uuid.UUID             `json:"id"`
+	AccountID        uuid.UUID             `json:"account_id"`
+	ListID           uuid.UUID             `json:"-"`
+	VisibleListID    *uuid.UUID            `json:"list_id,omitempty"`
+	EnvironmentID    uuid.UUID             `json:"environment_id"`
+	OrganizerID      uuid.UUID             `json:"organizer_id"`
+	OrganizerName    string                `json:"organizer_name"`
+	Title            string                `json:"title"`
+	Description      string                `json:"description,omitempty"`
+	Location         string                `json:"location,omitempty"`
+	MeetingURL       string                `json:"meeting_url,omitempty"`
+	Color            *string               `json:"color,omitempty"`
+	ResolvedColor    string                `json:"resolved_color"`
+	ColorSource      string                `json:"color_source"`
+	ListColor        string                `json:"-"`
+	Availability     string                `json:"availability"`
+	IsAllDay         bool                  `json:"is_all_day"`
+	StartAt          *time.Time            `json:"start_at,omitempty"`
+	EndAt            *time.Time            `json:"end_at,omitempty"`
+	StartDate        *string               `json:"start_date,omitempty"`
+	EndDateExclusive *string               `json:"end_date_exclusive,omitempty"`
+	Timezone         string                `json:"timezone"`
+	RecurrenceRule   string                `json:"recurrence_rule,omitempty"`
+	SeriesRootID     *uuid.UUID            `json:"series_root_id,omitempty"`
+	Status           string                `json:"status"`
+	CancelledAt      *time.Time            `json:"cancelled_at,omitempty"`
+	CancelledBy      *uuid.UUID            `json:"cancelled_by,omitempty"`
+	DeletedAt        *time.Time            `json:"deleted_at,omitempty"`
+	DeletedBy        *uuid.UUID            `json:"deleted_by,omitempty"`
+	Version          int64                 `json:"version"`
+	OperationID      *uuid.UUID            `json:"operation_id,omitempty"`
+	CreatedBy        uuid.UUID             `json:"created_by"`
+	CreatedAt        time.Time             `json:"created_at"`
+	UpdatedAt        time.Time             `json:"updated_at"`
+	ListName         string                `json:"list_name,omitempty"`
+	FolderID         *uuid.UUID            `json:"folder_id,omitempty"`
+	FolderName       string                `json:"folder_name,omitempty"`
+	ListVisible      bool                  `json:"list_visible"`
+	ActorRSVP        string                `json:"actor_rsvp,omitempty"`
+	Attendees        []*WorkEventAttendee  `json:"attendees"`
+	Capabilities     WorkEventCapabilities `json:"capabilities"`
+	AttendeesSet     bool                  `json:"-"`
+}
+
+type WorkEventAttendee struct {
+	UserID          uuid.UUID `json:"user_id"`
+	DisplayName     string    `json:"display_name"`
+	Username        string    `json:"username"`
+	AttendanceType  string    `json:"attendance_type"`
+	RSVP            string    `json:"rsvp"`
+	ReminderMinutes *int      `json:"reminder_minutes,omitempty"`
+	Version         int64     `json:"version"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+type WorkEventCapabilities struct {
+	CanView        bool `json:"can_view"`
+	CanEdit        bool `json:"can_edit"`
+	CanInvite      bool `json:"can_invite"`
+	CanCancel      bool `json:"can_cancel"`
+	CanTrash       bool `json:"can_trash"`
+	CanRestore     bool `json:"can_restore"`
+	CanPurge       bool `json:"can_purge"`
+	CanRespond     bool `json:"can_respond"`
+	CanSetReminder bool `json:"can_set_reminder"`
+}
+
+type WorkEventOccurrence struct {
+	Event            *WorkEvent `json:"event"`
+	SeriesID         uuid.UUID  `json:"series_id"`
+	OccurrenceKey    string     `json:"occurrence_key"`
+	StartAt          *time.Time `json:"start_at,omitempty"`
+	EndAt            *time.Time `json:"end_at,omitempty"`
+	StartDate        *string    `json:"start_date,omitempty"`
+	EndDateExclusive *string    `json:"end_date_exclusive,omitempty"`
+	IsException      bool       `json:"is_exception"`
+	OverrideVersion  int64      `json:"override_version,omitempty"`
+}
+
+type WorkEventReminderJob struct {
+	ID            uuid.UUID  `json:"id"`
+	AccountID     uuid.UUID  `json:"account_id"`
+	EventID       uuid.UUID  `json:"event_id"`
+	OccurrenceKey string     `json:"occurrence_key"`
+	UserID        uuid.UUID  `json:"user_id"`
+	ReminderAt    time.Time  `json:"reminder_at"`
+	Title         string     `json:"title"`
+	StartAt       *time.Time `json:"start_at,omitempty"`
+	StartDate     *string    `json:"start_date,omitempty"`
 }
 
 func (task *Task) SetEffectiveAccess(access *TaskEffectiveAccess) {

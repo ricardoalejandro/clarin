@@ -19,23 +19,26 @@ describe('TaskWorkspace navigation actions', () => {
 
   it('keeps management actions in one row while expanded and preserves permission states', () => {
     const onTrash = vi.fn()
+    const onArchive = vi.fn()
     const onManage = vi.fn()
-    const { rerender } = render(<TaskWorkspaceManagementActions collapsed={false} canManage trashSelected={false} onTrash={onTrash} onManage={onManage} />)
+    const { rerender } = render(<TaskWorkspaceManagementActions collapsed={false} canManage archiveSelected={false} trashSelected={false} onArchive={onArchive} onTrash={onTrash} onManage={onManage} />)
 
     const actions = screen.getByRole('button', { name: 'Papelera' }).parentElement
-    expect(actions).toHaveClass('grid-cols-2')
+    expect(actions).toHaveClass('grid-cols-3')
+    fireEvent.click(screen.getByRole('button', { name: 'Archivo' }))
     fireEvent.click(screen.getByRole('button', { name: 'Papelera' }))
     fireEvent.click(screen.getByRole('button', { name: 'Administrar' }))
+    expect(onArchive).toHaveBeenCalledTimes(1)
     expect(onTrash).toHaveBeenCalledTimes(1)
     expect(onManage).toHaveBeenCalledTimes(1)
 
-    rerender(<TaskWorkspaceManagementActions collapsed={false} canManage={false} trashSelected={false} onTrash={onTrash} onManage={onManage} />)
+    rerender(<TaskWorkspaceManagementActions collapsed={false} canManage={false} archiveSelected={false} trashSelected={false} onArchive={onArchive} onTrash={onTrash} onManage={onManage} />)
     expect(screen.getByRole('button', { name: 'Papelera' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Administrar' })).toBeDisabled()
   })
 
   it('uses one collapsed management trigger, portals its menu and restores focus on Escape', async () => {
-    render(<TaskWorkspaceManagementActions collapsed canManage trashSelected={false} onTrash={() => {}} onManage={() => {}} />)
+    render(<TaskWorkspaceManagementActions collapsed canManage archiveSelected={false} trashSelected={false} onArchive={() => {}} onTrash={() => {}} onManage={() => {}} />)
     const trigger = screen.getByRole('button', { name: 'Gestión del Entorno' })
     fireEvent.click(trigger)
     const menu = screen.getByRole('menu', { name: 'Gestión del Entorno' })

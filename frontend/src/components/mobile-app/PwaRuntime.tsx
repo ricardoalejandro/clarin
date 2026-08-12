@@ -2,7 +2,8 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Download, Share, Smartphone, SquarePlus, X } from 'lucide-react'
+import { Download, Share, SquarePlus, X } from 'lucide-react'
+import ClarinBrandMark from '@/components/branding/ClarinBrandMark'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { isInstallPromptDismissed, isIOSDevice, isMobileAppDevice, isStandaloneApp } from '@/lib/mobileApp'
 
@@ -214,7 +215,7 @@ export function PwaInstallExperience() {
     <div className="app-viewport fixed z-[240] flex items-end justify-center bg-slate-950/50 backdrop-blur-[2px] sm:items-center sm:p-4" onMouseDown={event => { if (event.target === event.currentTarget) runtime.closeInstructions() }}>
       <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="pwa-ios-title" className="animate-view-enter w-full overflow-hidden rounded-t-3xl border border-white/70 bg-white shadow-[0_28px_80px_rgba(15,23,42,0.3)] outline-none motion-reduce:animate-none sm:max-w-md sm:rounded-3xl">
         <header className="flex items-start gap-3 border-b border-slate-100 px-4 py-4 sm:px-5">
-          <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-700"><Smartphone className="h-5 w-5" /></span>
+          <ClarinBrandMark className="h-12 w-12 shrink-0 rounded-2xl" />
           <div className="min-w-0 flex-1"><h2 id="pwa-ios-title" className="text-xl font-bold tracking-tight text-slate-900">Instala Clarin</h2><p className="mt-1 text-sm leading-5 text-slate-500">Añádelo a tu pantalla de inicio para abrirlo como una app.</p></div>
           <button ref={closeRef} type="button" onClick={runtime.closeInstructions} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Cerrar instrucciones"><X className="h-5 w-5" /></button>
         </header>
@@ -233,7 +234,7 @@ export function PwaInstallExperience() {
       {mobileSurface && bannerReady && runtime.installAvailable && !runtime.promptDismissed && !runtime.standalone && (
         <aside className="fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[210] mx-auto max-w-lg rounded-2xl border border-slate-200/90 bg-white/95 p-3 shadow-[0_22px_55px_rgba(15,23,42,0.2)] ring-1 ring-white/80 backdrop-blur-xl" aria-label="Instalar Clarin">
           <div className="flex items-center gap-3">
-            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-sm shadow-emerald-600/25"><Download className="h-5 w-5" /></span>
+            <ClarinBrandMark className="h-11 w-11 shrink-0 rounded-xl shadow-sm shadow-emerald-600/25" />
             <div className="min-w-0 flex-1"><p className="text-sm font-bold text-slate-900">Lleva Clarin contigo</p><p className="mt-0.5 text-xs leading-5 text-slate-500">Instálalo para abrirlo rápido y usar su experiencia móvil.</p></div>
             <button type="button" onClick={runtime.dismissPrompt} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400" aria-label="Recordar más tarde"><X className="h-4 w-4" /></button>
           </div>

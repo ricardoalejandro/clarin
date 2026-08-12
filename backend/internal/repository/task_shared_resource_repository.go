@@ -31,14 +31,14 @@ func (r *TaskWorkRepository) ListDirectSharedResources(ctx context.Context, acco
 			folder.access_mode,(`+taskActorFolderAccessRankSQL("folder", "$2")+`) AS access_rank
 		FROM task_folders folder
 		JOIN task_folder_access_grants direct_grant ON direct_grant.account_id=folder.account_id AND direct_grant.folder_id=folder.id AND direct_grant.user_id=$2 AND direct_grant.access_level<>'none'
-		WHERE folder.account_id=$1 AND folder.environment_id=$3 AND folder.archived_at IS NULL
+		WHERE folder.account_id=$1 AND folder.environment_id=$3 AND folder.archived_at IS NULL AND folder.deleted_at IS NULL
 		  AND (`+taskActorFolderAccessRankSQL("folder", "$2")+`) >= 1
 		UNION ALL
 		SELECT 'list'::text,list_item.id,list_item.environment_id,list_item.name,list_item.color,list_item.icon,
 			list_item.access_mode,(`+taskActorListAccessRankSQL("list_item", "$2")+`) AS access_rank
 		FROM task_lists list_item
 		JOIN task_list_access_grants direct_grant ON direct_grant.account_id=list_item.account_id AND direct_grant.list_id=list_item.id AND direct_grant.user_id=$2 AND direct_grant.access_level<>'none'
-		WHERE list_item.account_id=$1 AND list_item.environment_id=$3 AND list_item.archived_at IS NULL
+		WHERE list_item.account_id=$1 AND list_item.environment_id=$3 AND list_item.archived_at IS NULL AND list_item.deleted_at IS NULL
 		  AND (`+taskActorListAccessRankSQL("list_item", "$2")+`) >= 1
 		UNION ALL
 		SELECT 'task'::text,task.id,list_item.environment_id,task.title,''::varchar,'check-square'::text,

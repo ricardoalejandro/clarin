@@ -5,7 +5,7 @@ import {
   Archive, Boxes, Check, Eye, FileLock2, FolderTree, Globe2, Layers3, Loader2,
   LockKeyhole, MessageCircle, Pencil, Plus, RotateCcw, Save, ShieldCheck, Trash2, UserRound, Workflow, X,
 } from 'lucide-react'
-import { api, apiGet, apiPost, apiPut } from '@/lib/api'
+import { api, apiDelete, apiGet, apiPost, apiPut } from '@/lib/api'
 import type { TaskAccessGrant, TaskAccessLevel, TaskEnvironment, TaskFolder, TaskList, TaskWorkflow } from '@/types/task'
 import type { TaskAccountUser } from './TaskEditorModal'
 import { TaskColorPicker, TaskContainerIcon, TaskIconPicker, normalizeTaskHexColor } from './TaskContainerAppearance'
@@ -15,6 +15,7 @@ import TaskUserCombobox from './TaskUserCombobox'
 import TaskWorkWindowShell from './TaskWorkWindowShell'
 import { normalizeTaskAccessGrants, TASK_ACCESS_LEVELS, taskAccessLabel, validatePrivateAccessManagers } from './taskEnvironmentAccess'
 import { taskEnvironmentSaveError } from './taskEnvironmentErrors'
+import { taskContainerCanManageStructure } from './taskContainerCapabilities'
 
 type EnvironmentTab = 'general' | 'structure' | 'workflows' | 'access' | 'archive'
 
@@ -98,6 +99,7 @@ export default function TaskEnvironmentWindow({
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [confirmArchive, setConfirmArchive] = useState(false)
+  const [confirmTrash, setConfirmTrash] = useState(false)
 
   useEffect(() => {
     if (!open) return
@@ -117,6 +119,7 @@ export default function TaskEnvironmentWindow({
     setError('')
     setNotice('')
     setConfirmArchive(false)
+		setConfirmTrash(false)
   // Initialize only when the work-window opens or switches to another Entorno.
   // Canonical saves below reconcile their own fields; depending on the whole
   // object would erase success/error feedback every time the parent patches it.
@@ -250,14 +253,14 @@ export default function TaskEnvironmentWindow({
     if (!environment) return
     setBusy(true)
     setError('')
-    const action = environment.archived_at ? 'restore' : 'archive'
+		const action = environment.archived_at ? 'unarchive' : 'archive'
     const result = await apiPost<EnvironmentResponse>(`/api/tasks/environments/${environment.id}/${action}`, {
       version: environment.version,
       operation_id: crypto.randomUUID(),
     })
     setBusy(false)
     if (!result.success || !result.data?.environment) {
-      setError(result.status === 409 ? 'Este Entorno tiene tareas activas o cambió en otra sesión. Mueve o envía esas tareas a Papelera antes de archivarlo.' : result.error || `No se pudo ${action === 'archive' ? 'archivar' : 'restaurar'} el Entorno.`)
+		setError(result.status === 409 ? 'Este Entorno todavía tiene tareas abiertas o cambió en otra sesión. Completa o cancela las tareas abiertas antes de archivarlo.' : result.error || `No se pudo ${action === 'archive' ? 'archivar' : 'restaurar'} el Entorno.`)
       return
     }
     onSaved(result.data.environment)
@@ -265,9 +268,29 @@ export default function TaskEnvironmentWindow({
     setNotice(action === 'archive' ? 'Entorno archivado.' : 'Entorno restaurado.')
   }
 
-  const canAdmin = creating || Boolean(environment?.permissions?.can_delete)
+	const moveToTrash = async () => {
+		if (!environment || environment.task_count > 0 || environment.is_default) return
+		setBusy(true)
+		setError('')
+		const result = await apiDelete(`/api/tasks/environments/${environment.id}`, {
+			confirmation_name: environment.name,
+			version: environment.version,
+			operation_id: crypto.randomUUID(),
+		})
+		setBusy(false)
+		if (!result.success) {
+			setError(result.status === 409 ? 'El Entorno conserva tareas o cambió en otra sesión. Vacía el árbol antes de moverlo a Papelera.' : result.error || 'No se pudo mover el Entorno a Papelera.')
+			return
+		}
+		onSaved({ ...environment, deleted_at: new Date().toISOString(), lifecycle: 'trash', version: environment.version + 1 })
+		setConfirmTrash(false)
+		onClose()
+	}
+
+  const canAdmin = creating || taskContainerCanManageStructure(environment)
   const canManageAccess = creating || Boolean(environment?.permissions?.can_manage_access)
-  const archiveBlocked = Boolean(environment?.is_default || (!environment?.archived_at && (environment?.task_count || 0) > 0))
+	const archiveBlocked = Boolean(environment?.is_default || (!environment?.archived_at && (environment?.open_task_count || 0) > 0))
+	const trashBlocked = Boolean(environment?.is_default || (environment?.task_count || 0) > 0)
   const availableUsers = users.filter(user => !grants.some(grant => grant.user_id === user.id))
 
   return <>
@@ -323,9 +346,9 @@ export default function TaskEnvironmentWindow({
           { label: 'Carpetas', value: environment?.folder_count ?? selectedEnvironmentFolders.length, icon: FolderTree },
           { label: 'Listas', value: environment?.list_count ?? selectedEnvironmentLists.length, icon: Boxes },
           { label: 'Tareas activas', value: environment?.task_count || 0, icon: Check },
-        ].map(item => <div key={item.label} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><item.icon className="h-5 w-5 text-emerald-600" /><p className="mt-4 text-2xl font-black text-slate-900">{item.value}</p><p className="mt-1 text-xs font-semibold text-slate-400">{item.label}</p></div>)}</div><section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm"><h3 className="text-base font-black text-slate-900">Carpetas y listas del Entorno</h3><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Las carpetas y listas permanecen dentro de este Entorno y heredan sus permisos. La Bandeja general permanece fija en la raíz.</p><button type="button" disabled={!environment?.permissions?.can_delete} onClick={onOpenStructure} className="mt-5 flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-35"><FolderTree className="h-4 w-4" />Administrar estructura</button></section></div>}
+        ].map(item => <div key={item.label} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><item.icon className="h-5 w-5 text-emerald-600" /><p className="mt-4 text-2xl font-black text-slate-900">{item.value}</p><p className="mt-1 text-xs font-semibold text-slate-400">{item.label}</p></div>)}</div><section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm"><h3 className="text-base font-black text-slate-900">Carpetas y listas del Entorno</h3><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Las carpetas y listas permanecen dentro de este Entorno y heredan sus permisos. La Bandeja general permanece fija en la raíz.</p><button type="button" disabled={!canAdmin} onClick={onOpenStructure} className="mt-5 flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-35"><FolderTree className="h-4 w-4" />Administrar estructura</button></section></div>}
 
-        {tab === 'workflows' && <div className="mx-auto max-w-4xl space-y-3">{selectedEnvironmentWorkflows.map(workflow => <section key={workflow.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center gap-3"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-50 text-violet-700"><Workflow className="h-4 w-4" /></span><div className="min-w-0 flex-1"><p className="truncate text-sm font-black text-slate-800">{workflow.name}</p><p className="mt-0.5 text-[11px] text-slate-400">{workflow.statuses?.length || 0} estados{workflow.is_default ? ' · predeterminado' : ''}</p></div></div><div className="mt-4 flex flex-wrap gap-2">{(workflow.statuses || []).sort((left, right) => left.sort_order - right.sort_order).map(status => <span key={status.id} className="flex items-center gap-1.5 rounded-lg bg-slate-50 px-2.5 py-1.5 text-[10px] font-bold text-slate-600"><i className="h-2 w-2 rounded-full" style={{ backgroundColor: status.color }} />{status.name}</span>)}</div></section>)}{!selectedEnvironmentWorkflows.length && <div className="rounded-3xl border border-dashed border-slate-300 py-16 text-center"><Workflow className="mx-auto h-7 w-7 text-slate-300" /><p className="mt-3 text-sm font-semibold text-slate-500">No hay flujos disponibles.</p></div>}<button type="button" disabled={!environment?.permissions?.can_delete} onClick={onOpenStructure} className="flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-35"><Workflow className="h-4 w-4" />Configurar flujos</button></div>}
+        {tab === 'workflows' && <div className="mx-auto max-w-4xl space-y-3">{selectedEnvironmentWorkflows.map(workflow => <section key={workflow.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center gap-3"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-50 text-violet-700"><Workflow className="h-4 w-4" /></span><div className="min-w-0 flex-1"><p className="truncate text-sm font-black text-slate-800">{workflow.name}</p><p className="mt-0.5 text-[11px] text-slate-400">{workflow.statuses?.length || 0} estados{workflow.is_default ? ' · predeterminado' : ''}</p></div></div><div className="mt-4 flex flex-wrap gap-2">{(workflow.statuses || []).sort((left, right) => left.sort_order - right.sort_order).map(status => <span key={status.id} className="flex items-center gap-1.5 rounded-lg bg-slate-50 px-2.5 py-1.5 text-[10px] font-bold text-slate-600"><i className="h-2 w-2 rounded-full" style={{ backgroundColor: status.color }} />{status.name}</span>)}</div></section>)}{!selectedEnvironmentWorkflows.length && <div className="rounded-3xl border border-dashed border-slate-300 py-16 text-center"><Workflow className="mx-auto h-7 w-7 text-slate-300" /><p className="mt-3 text-sm font-semibold text-slate-500">No hay flujos disponibles.</p></div>}<button type="button" disabled={!canAdmin} onClick={onOpenStructure} className="flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-35"><Workflow className="h-4 w-4" />Configurar flujos</button></div>}
 
         {tab === 'access' && <div className="mx-auto max-w-4xl space-y-5">
           <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6"><div className="flex items-start gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700"><ShieldCheck className="h-5 w-5" /></span><div><h3 className="text-base font-black text-slate-900">Acceso explícito</h3><p className="mt-1 text-xs leading-5 text-slate-400">Administrar acceso es una capacidad de gobernanza y requiere nivel Administrar. Los administradores de cuenta mantienen recuperación total.</p></div></div>
@@ -340,7 +363,7 @@ export default function TaskEnvironmentWindow({
           <div className="rounded-2xl bg-slate-900 p-5 text-white"><p className="text-xs font-black uppercase tracking-[.16em] text-emerald-300">Resolución efectiva</p><p className="mt-2 text-sm leading-6 text-slate-300">Administrador de cuenta → tarea → lista → carpeta → Entorno. Ver el Entorno es siempre el requisito mínimo y la UI nunca infiere capacidades.</p></div>
         </div>}
 
-        {tab === 'archive' && environment && <div className="mx-auto max-w-3xl"><section className={`rounded-3xl border p-6 shadow-sm ${environment.archived_at ? 'border-emerald-200 bg-emerald-50/40' : 'border-amber-200 bg-white'}`}><span className={`flex h-12 w-12 items-center justify-center rounded-2xl ${environment.archived_at ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{environment.archived_at ? <RotateCcw className="h-5 w-5" /> : <Archive className="h-5 w-5" />}</span><h3 className="mt-4 text-lg font-black text-slate-900">{environment.archived_at ? 'Restaurar Entorno' : 'Archivar Entorno'}</h3><p className="mt-2 text-sm leading-6 text-slate-500">{environment.archived_at ? 'Restaurar recupera la estructura y el acceso, sin crear ni mover tareas.' : 'Para proteger el trabajo, no se puede archivar un Entorno mientras tenga tareas activas. Primero muévelas a otro Entorno o envíalas a Papelera.'}</p>{environment.is_default && <p className="mt-4 rounded-xl bg-blue-50 px-3 py-2.5 text-xs font-semibold text-blue-700">General es el Entorno de compatibilidad de la cuenta y no puede archivarse.</p>}{!environment.archived_at && environment.task_count > 0 && <p className="mt-4 rounded-xl bg-amber-50 px-3 py-2.5 text-xs font-semibold text-amber-800">Quedan {environment.task_count} tarea{environment.task_count === 1 ? '' : 's'} activa{environment.task_count === 1 ? '' : 's'}.</p>}<button type="button" disabled={busy || archiveBlocked || !canAdmin} onClick={() => environment.archived_at ? void archiveOrRestore() : setConfirmArchive(true)} className={`mt-5 flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-black text-white disabled:opacity-35 ${environment.archived_at ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-amber-600 hover:bg-amber-700'}`}>{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : environment.archived_at ? <RotateCcw className="h-4 w-4" /> : <Archive className="h-4 w-4" />}{environment.archived_at ? 'Restaurar Entorno' : 'Archivar Entorno'}</button></section><div className="mt-4 flex gap-3 rounded-2xl border border-rose-100 bg-rose-50/60 p-4"><Trash2 className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" /><p className="text-xs leading-5 text-rose-700">Archivar no elimina tareas, historiales ni archivos. La eliminación permanente continúa siendo una operación administrativa separada y sujeta a retención.</p></div></div>}
+        {tab === 'archive' && environment && <div className="mx-auto max-w-3xl space-y-4"><section className={`rounded-3xl border p-6 shadow-sm ${environment.archived_at ? 'border-emerald-200 bg-emerald-50/40' : 'border-amber-200 bg-white'}`}><span className={`flex h-12 w-12 items-center justify-center rounded-2xl ${environment.archived_at ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{environment.archived_at ? <RotateCcw className="h-5 w-5" /> : <Archive className="h-5 w-5" />}</span><h3 className="mt-4 text-lg font-black text-slate-900">{environment.archived_at ? 'Restaurar Entorno' : 'Archivar como histórico'}</h3><p className="mt-2 text-sm leading-6 text-slate-500">{environment.archived_at ? 'Restaurar devuelve el Entorno al trabajo activo y conserva exactamente el estado propio de sus carpetas y listas.' : 'Archivar conserva la estructura y las tareas completadas o canceladas como histórico consultable en modo solo lectura.'}</p>{environment.is_default && <p className="mt-4 rounded-xl bg-blue-50 px-3 py-2.5 text-xs font-semibold text-blue-700">General es el Entorno de compatibilidad de la cuenta y no puede archivarse.</p>}{!environment.archived_at && environment.open_task_count > 0 && <p className="mt-4 rounded-xl bg-amber-50 px-3 py-2.5 text-xs font-semibold text-amber-800">Quedan {environment.open_task_count} tarea{environment.open_task_count === 1 ? '' : 's'} abierta{environment.open_task_count === 1 ? '' : 's'}. Complétalas o cancélalas primero.</p>}<button type="button" disabled={busy || archiveBlocked || !canAdmin} onClick={() => environment.archived_at ? void archiveOrRestore() : setConfirmArchive(true)} className={`mt-5 flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-black text-white disabled:opacity-35 ${environment.archived_at ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-amber-600 hover:bg-amber-700'}`}>{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : environment.archived_at ? <RotateCcw className="h-4 w-4" /> : <Archive className="h-4 w-4" />}{environment.archived_at ? 'Restaurar Entorno' : 'Archivar'}</button></section><section className="rounded-3xl border border-rose-100 bg-rose-50/50 p-6"><span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-rose-100 text-rose-700"><Trash2 className="h-5 w-5" /></span><h3 className="mt-4 text-lg font-black text-slate-900">Mover a Papelera</h3><p className="mt-2 text-sm leading-6 text-slate-600">Inicia la retención y habilita restauración o eliminación permanente. Solo está disponible cuando el Entorno no conserva ninguna tarea, aunque esté completada.</p>{environment.task_count > 0 && <p className="mt-4 rounded-xl bg-white px-3 py-2.5 text-xs font-semibold text-rose-700">El árbol conserva {environment.task_count} tarea{environment.task_count === 1 ? '' : 's'}.</p>}<button type="button" disabled={busy || trashBlocked || !canAdmin} onClick={() => setConfirmTrash(true)} className="mt-5 flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-black text-white hover:bg-rose-700 disabled:opacity-35"><Trash2 className="h-4 w-4" />Mover a Papelera</button></section></div>}
       </div>
     </TaskWorkWindowShell>
 
@@ -354,5 +377,17 @@ export default function TaskEnvironmentWindow({
       onClose={() => { if (!busy) setConfirmArchive(false) }}
       onConfirm={() => void archiveOrRestore()}
     />
+		<TaskDestructiveConfirmDialog
+			open={confirmTrash}
+			title="Mover Entorno a Papelera"
+			description={`“${environment?.name || ''}” y su estructura vacía iniciarán la retención. Si estaba archivado, restaurarlo desde Papelera lo devolverá al Archivo histórico.`}
+			actionLabel="Mover a Papelera"
+			confirmationName={!trashBlocked ? environment?.name : undefined}
+			blockedReason={trashBlocked ? (environment?.is_default ? 'General debe permanecer activo.' : 'El Entorno todavía conserva tareas.') : undefined}
+			busy={busy}
+			error={error}
+			onClose={() => { if (!busy) setConfirmTrash(false) }}
+			onConfirm={() => void moveToTrash()}
+		/>
   </>
 }

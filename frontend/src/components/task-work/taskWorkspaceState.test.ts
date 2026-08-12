@@ -8,6 +8,7 @@ import {
   reconcileCanonicalTaskBatch,
   taskBelongsToWorkspaceScope,
   taskMatchesWorkspaceFilters,
+  taskWorkspaceStructureLifecycle,
   toggleExpandedFolder,
   upsertCanonicalTask,
 } from './taskWorkspaceState'
@@ -16,6 +17,15 @@ import { EMPTY_TASK_FILTERS } from './TaskFilters'
 const task = (id: string, version: number): Task => ({ id, version, title: id } as Task)
 
 describe('task workspace reconciliation', () => {
+  it('changes the structure lifecycle only when entering or leaving Archive', () => {
+    expect(taskWorkspaceStructureLifecycle({ type: 'environment', id: 'environment' })).toBe('active')
+    expect(taskWorkspaceStructureLifecycle({ type: 'folder', id: 'folder' })).toBe('active')
+    expect(taskWorkspaceStructureLifecycle({ type: 'list', id: 'list' })).toBe('active')
+    expect(taskWorkspaceStructureLifecycle({ type: 'shared' })).toBe('active')
+    expect(taskWorkspaceStructureLifecycle({ type: 'trash' })).toBe('active')
+    expect(taskWorkspaceStructureLifecycle({ type: 'archive' })).toBe('archive')
+  })
+
   it('detecta búsqueda o filtros activos sin falsos positivos por espacios', () => {
     expect(hasActiveTaskQuery('   ', 0)).toBe(false)
     expect(hasActiveTaskQuery('finaz', 0)).toBe(true)

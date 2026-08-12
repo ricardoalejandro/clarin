@@ -11,6 +11,7 @@ import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import {
   TASK_PRIORITY_CONFIG, Task, TaskEnvironment, TaskFilters, TaskFolder, TaskGanttData, TaskGroupBy, TaskGroupDirection, TaskList, TaskSavedView,
   TaskTrashContainer, TaskTrashPolicy, TaskViewMode, TaskWorkflow, TaskWorkflowStatus, TaskWorkSummary,
+	WorkEvent, WorkEventOccurrence,
 } from '@/types/task'
 import TaskBoard, { TaskInlineDraft } from './TaskBoard'
 import TaskDetailDrawer from './TaskDetailDrawer'
@@ -34,6 +35,7 @@ import {
   reconcileCanonicalTaskBatch,
   taskBelongsToWorkspaceScope,
   taskMatchesWorkspaceFilters,
+  taskWorkspaceStructureLifecycle,
   upsertCanonicalTask,
 } from './taskWorkspaceState'
 import type { TaskExternalDropTarget } from './taskDropTargets'
@@ -43,7 +45,9 @@ import { taskLocationLabel } from './taskBreadcrumbVisibility'
 import { mergeTaskPage, resolveTaskPageItem, taskPageParams, taskPageQueryKey, type TaskPageResponse } from './taskPagination'
 import {
   folderChildrenShouldLoad, mergeFolderListPage, mergeFolderPage, mergeRootListPage,
-  type TaskFolderChildrenState, type TaskHierarchyLoadPhase,
+  removeTaskContainerFromActiveHierarchy, taskContainerLifecycleMutationFromEvent,
+  taskContainerListIDs, taskScopeAffectedByContainerRemoval,
+  type TaskContainerLifecycleMutation, type TaskFolderChildrenState, type TaskHierarchyLoadPhase,
 } from './taskHierarchyLazy'
 import { shouldPreserveConcurrentTask, taskMatchesClosedVisibility, taskQueryFiltersForView } from './taskClosedVisibility'
 import {
@@ -61,8 +65,10 @@ import {
 } from './taskEnvironmentIndex'
 import { mergeCreatedTaskHierarchy, type TaskHierarchyCreateMutation } from './taskHierarchyCreate'
 import { taskWorkspaceChromeDensity } from './taskWorkspaceChrome'
+import { resolveTaskIdentityColor } from './taskIdentityColor'
+import { taskContainerCanManageStructure, taskContainerLifecycleCapability } from './taskContainerCapabilities'
 
-type Scope = { type: 'all' } | { type: 'environment'; id: string } | { type: 'shared' } | { type: 'folder'; id: string } | { type: 'list'; id: string } | { type: 'trash' }
+type Scope = { type: 'all' } | { type: 'environment'; id: string } | { type: 'shared' } | { type: 'folder'; id: string } | { type: 'list'; id: string } | { type: 'archive' } | { type: 'trash' }
 type CalendarMode = 'month' | 'week' | 'day'
 
 const viewOptions: { id: TaskViewMode; label: string; icon: typeof LayoutList }[] = [
@@ -95,6 +101,11 @@ export function scopeQuery(scope: Scope, activeEnvironmentId = '') {
     params.set('deleted', 'true')
     params.set('include_subtasks', 'true')
   }
+	if (scope.type === 'archive') {
+		params.set('lifecycle', 'archive')
+		params.set('include_closed', 'true')
+		if (activeEnvironmentId) params.set('environment_id', activeEnvironmentId)
+	}
   return params
 }
 
@@ -127,7 +138,7 @@ function appendTaskFilters(params: URLSearchParams, filters: TaskFilters) {
 function TaskCard({ task, compact = false, onOpen, onStar }: { task: Task; compact?: boolean; onOpen: () => void; onStar?: () => void }) {
   const overdue = taskIsOverdue(task)
   return <article onClick={onOpen} className={`group cursor-pointer rounded-xl border bg-white transition hover:-translate-y-0.5 hover:border-emerald-200 hover:shadow-md ${compact ? 'p-3' : 'p-3.5'} ${overdue ? 'border-rose-200' : 'border-slate-200'}`}>
-    <div className="flex items-start gap-2"><span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: task.status_detail?.color || '#64748b' }} /><h4 className={`min-w-0 flex-1 text-sm font-semibold leading-5 ${task.status_detail?.category === 'done' ? 'text-slate-400 line-through' : 'text-slate-800'}`}>{task.title}</h4>{onStar && <button onClick={event => { event.stopPropagation(); onStar() }} className={`rounded p-1 ${task.starred ? 'text-amber-400' : 'text-slate-300 opacity-0 group-hover:opacity-100'}`}><Star className={`h-3.5 w-3.5 ${task.starred ? 'fill-current' : ''}`} /></button>}</div>
+		<div className="flex items-start gap-2"><span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: task.resolved_color || resolveTaskIdentityColor(task.color).color }} /><h4 className={`min-w-0 flex-1 text-sm font-semibold leading-5 ${task.status_detail?.category === 'done' ? 'text-slate-400 line-through' : 'text-slate-800'}`}>{task.title}</h4>{onStar && <button onClick={event => { event.stopPropagation(); onStar() }} className={`rounded p-1 ${task.starred ? 'text-amber-400' : 'text-slate-300 opacity-0 group-hover:opacity-100'}`}><Star className={`h-3.5 w-3.5 ${task.starred ? 'fill-current' : ''}`} /></button>}</div>
     {!compact && task.description && <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-400">{task.description}</p>}
     <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px]"><span className={`rounded-md px-1.5 py-1 font-semibold ${TASK_PRIORITY_CONFIG[task.priority].bg} ${TASK_PRIORITY_CONFIG[task.priority].color}`}>{TASK_PRIORITY_CONFIG[task.priority].label}</span>{task.due_at && <span className={`flex items-center gap-1 font-medium ${overdue ? 'text-rose-600' : 'text-slate-400'}`}><CalendarDays className="h-3 w-3" />{dateShort.format(new Date(task.due_at))}</span>}{Boolean(task.subtask_count) && <span className="text-slate-400">✓ {task.subtask_done}/{task.subtask_count}</span>}<span className="ml-auto flex h-6 min-w-6 items-center justify-center rounded-full bg-slate-100 px-1.5 font-bold text-slate-500" title={task.assigned_to_name}>{(task.assigned_to_name || '?').slice(0, 2).toUpperCase()}</span></div>
     {!compact && Boolean(task.progress) && <div className="mt-2 h-1 overflow-hidden rounded-full bg-slate-100"><div className="h-full bg-emerald-500" style={{ width: `${task.progress}%` }} /></div>}
@@ -215,12 +226,85 @@ function TaskPageProgress({ loaded, total, hasMore, loadingMore, error, onLoadMo
   </footer>
 }
 
-type TrashTarget = { kind: 'task' | 'list' | 'folder'; id: string; name: string }
+type TrashTarget = { kind: 'task' | 'event' | 'environment' | 'list' | 'folder'; id: string; name: string; version?: number }
+
+type ArchiveTarget = { kind: 'environment' | 'list' | 'folder'; id: string; name: string; version?: number }
+
+function ArchiveView({ environment, folders, rootLists, tasks, onOpenTask, onChanged, onEnvironmentChanged, onError }: {
+	environment?: TaskEnvironment
+	folders: TaskFolder[]
+	rootLists: TaskList[]
+	tasks: Task[]
+	onOpenTask: (id: string) => void
+	onChanged: () => Promise<void>
+	onEnvironmentChanged: (environment: TaskEnvironment) => void
+	onError: (message: string) => void
+}) {
+	const [pending, setPending] = useState('')
+	const [trashTarget, setTrashTarget] = useState<ArchiveTarget | null>(null)
+	const [trashError, setTrashError] = useState('')
+	const lists = [...rootLists, ...folders.flatMap(folder => folder.lists)]
+	const historicalFolders = folders.filter(folder => Boolean(folder.archived_at) || Boolean(environment?.archived_at))
+	const historicalLists = lists.filter(list => Boolean(list.archived_at) || Boolean(environment?.archived_at))
+	const restore = async (target: ArchiveTarget) => {
+		if (pending) return
+		const key = `restore-${target.kind}:${target.id}`
+		setPending(key)
+		const endpoint = target.kind === 'environment'
+			? `/api/tasks/environments/${target.id}/unarchive`
+			: `/api/tasks/${target.kind === 'folder' ? 'folders' : 'lists'}/${target.id}/unarchive`
+		const payload = target.kind === 'environment'
+			? { version: target.version, operation_id: crypto.randomUUID() }
+			: { operation_id: crypto.randomUUID() }
+		const result = await apiPost<{ environment?: TaskEnvironment }>(endpoint, payload)
+		if (!result.success) onError(result.error || 'No se pudo restaurar el elemento histórico.')
+		else {
+			if (result.data?.environment) onEnvironmentChanged(result.data.environment)
+			await onChanged()
+		}
+		setPending('')
+	}
+	const moveToTrash = async () => {
+		if (!trashTarget || pending) return
+		const key = `trash-${trashTarget.kind}:${trashTarget.id}`
+		setPending(key)
+		setTrashError('')
+		const endpoint = trashTarget.kind === 'environment'
+			? `/api/tasks/environments/${trashTarget.id}`
+			: `/api/tasks/${trashTarget.kind === 'folder' ? 'folders' : 'lists'}/${trashTarget.id}`
+		const result = await apiDelete(endpoint, {
+			confirmation_name: trashTarget.name,
+			version: trashTarget.version,
+			operation_id: crypto.randomUUID(),
+		})
+		if (!result.success) setTrashError(result.error || 'No se pudo mover a Papelera.')
+		else {
+			setTrashTarget(null)
+			if (trashTarget.kind === 'environment' && environment) {
+				onEnvironmentChanged({ ...environment, lifecycle: 'trash', deleted_at: new Date().toISOString(), version: environment.version + 1 })
+			} else await onChanged()
+		}
+		setPending('')
+	}
+	const row = (item: TaskFolder | TaskList, kind: 'folder' | 'list') => {
+		const archivedOwn = Boolean(item.archived_at)
+		const canTrash = taskContainerLifecycleCapability(item, 'can_trash')
+			?? (item.task_count === 0 && !('is_default' in item && item.is_default))
+		return <div key={`${kind}:${item.id}`} className="flex flex-wrap items-center gap-3 px-4 py-3.5 sm:px-5"><span className="flex h-10 w-10 items-center justify-center rounded-xl" style={{ color: item.color, backgroundColor: `${item.color}18` }}><TaskContainerIcon value={kind === 'folder' ? 'folder' : item.icon} className="h-4 w-4" /></span><div className="min-w-[180px] flex-1"><p className="truncate text-sm font-semibold text-slate-700">{item.name}</p><p className="mt-0.5 text-[10px] text-slate-400">{kind === 'folder' ? `${(item as TaskFolder).lists.length} listas` : 'Lista'} · {item.completed_task_count || 0} completadas · {item.cancelled_task_count || 0} canceladas</p></div>{archivedOwn && <button disabled={Boolean(pending) || Boolean(environment?.archived_at)} title={environment?.archived_at ? 'Restaura primero el Entorno' : 'Restaurar'} onClick={() => void restore({ kind, id: item.id, name: item.name })} className="flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"><RotateCcw className="h-3.5 w-3.5" />Restaurar</button>}<button disabled={Boolean(pending) || !canTrash} title={canTrash ? 'Mover a Papelera' : 'La Papelera exige que no conserve tareas'} onClick={() => { setTrashError(''); setTrashTarget({ kind, id: item.id, name: item.name }) }} className="rounded-xl px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-35">Mover a Papelera</button></div>
+	}
+	return <div className="space-y-3">
+		<section className="rounded-2xl border border-amber-200 bg-amber-50/70 p-4 shadow-sm"><div className="flex flex-wrap items-start gap-3"><ArchiveRestore className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" /><div className="min-w-[220px] flex-1"><h3 className="text-sm font-black text-amber-950">Histórico · solo lectura</h3><p className="mt-1 text-xs leading-5 text-amber-800">Las tareas cerradas, comentarios, actividad y adjuntos se conservan. Crear, editar, arrastrar o comentar está deshabilitado.</p></div>{environment?.archived_at && <button disabled={Boolean(pending)} onClick={() => void restore({ kind: 'environment', id: environment.id, name: environment.name, version: environment.version })} className="flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-2 text-xs font-black text-white disabled:opacity-40"><RotateCcw className="h-3.5 w-3.5" />Restaurar Entorno</button>}{environment?.archived_at && <button disabled={Boolean(pending) || environment.task_count > 0} title={environment.task_count > 0 ? 'El Entorno todavía conserva tareas' : 'Mover a Papelera'} onClick={() => { setTrashError(''); setTrashTarget({ kind: 'environment', id: environment.id, name: environment.name, version: environment.version }) }} className="rounded-xl px-3 py-2 text-xs font-black text-rose-700 hover:bg-rose-100 disabled:opacity-35">Mover a Papelera</button>}</div></section>
+		<section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"><header className="border-b border-slate-100 px-4 py-3"><h3 className="text-sm font-black text-slate-900">Estructura histórica</h3><p className="mt-1 text-xs text-slate-400">{historicalFolders.length} carpetas · {historicalLists.length} listas</p></header><div className="divide-y divide-slate-100">{historicalFolders.map(folder => row(folder, 'folder'))}{historicalLists.map(list => row(list, 'list'))}{!historicalFolders.length && !historicalLists.length && <p className="px-4 py-10 text-center text-sm text-slate-400">No hay carpetas ni listas archivadas en este Entorno.</p>}</div></section>
+		<section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"><header className="border-b border-slate-100 px-4 py-3"><h3 className="text-sm font-black text-slate-900">Tareas conservadas</h3><p className="mt-1 text-xs text-slate-400">Solo completadas o canceladas · {tasks.length} visibles</p></header><div className="divide-y divide-slate-100">{tasks.map(task => <button key={task.id} type="button" onClick={() => onOpenTask(task.id)} className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-slate-50"><i className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: task.resolved_color || resolveTaskIdentityColor(task.color).color }} /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold text-slate-700">{task.title}</span><span className="mt-0.5 block truncate text-[10px] text-slate-400">{taskLocationLabel(task)} · {task.status_detail?.name || task.status}</span></span><ChevronRight className="h-4 w-4 text-slate-300" /></button>)}{!tasks.length && <p className="px-4 py-10 text-center text-sm text-slate-400">No hay tareas históricas visibles.</p>}</div></section>
+		<TaskDestructiveConfirmDialog open={Boolean(trashTarget)} title={`Mover ${trashTarget?.kind === 'environment' ? 'Entorno' : trashTarget?.kind === 'folder' ? 'carpeta' : 'lista'} a Papelera`} description="El elemento conservará su estado de Archivo. Si se restaura desde Papelera volverá al histórico, no al trabajo activo." actionLabel="Mover a Papelera" confirmationName={trashTarget?.name} busy={pending.startsWith('trash-')} error={trashError} onClose={() => { if (!pending.startsWith('trash-')) { setTrashTarget(null); setTrashError('') } }} onConfirm={() => void moveToTrash()} />
+	</div>
+}
 
 function TrashView({ tasks, environmentId, onChanged, onError }: { tasks: Task[]; environmentId: string; onChanged: () => Promise<void>; onError: (message: string) => void }) {
-  const [tab, setTab] = useState<'tasks' | 'containers'>('tasks')
+  const [tab, setTab] = useState<'tasks' | 'events' | 'containers'>('tasks')
   const [policy, setPolicy] = useState<TaskTrashPolicy>({ retention_days: 30, can_manage: false })
   const [containers, setContainers] = useState<TaskTrashContainer[]>([])
+	const [events, setEvents] = useState<WorkEvent[]>([])
   const [loadingMeta, setLoadingMeta] = useState(true)
   const [pending, setPending] = useState('')
   const [purgeTarget, setPurgeTarget] = useState<TrashTarget | null>(null)
@@ -229,23 +313,28 @@ function TrashView({ tasks, environmentId, onChanged, onError }: { tasks: Task[]
 
   const loadMeta = useCallback(async () => {
     setLoadingMeta(true)
-    const [policyResult, containerResult] = await Promise.all([
+		const [policyResult, containerResult, environmentResult, eventResult] = await Promise.all([
       apiGet<TaskTrashPolicy>('/api/tasks/trash-policy'),
       apiGet<{ containers: TaskTrashContainer[] }>(`/api/tasks/trash/containers?environment_id=${encodeURIComponent(environmentId)}`),
+			apiGet<{ environments: TaskTrashContainer[] }>('/api/tasks/trash/environments'),
+			apiGet<{ events: WorkEvent[] }>(`/api/tasks/events/trash?environment_id=${encodeURIComponent(environmentId)}`),
     ])
     if (policyResult.success && policyResult.data) {
       setPolicy(policyResult.data)
       if (policyResult.data.retention_days !== null) setCustomDays(String(policyResult.data.retention_days))
     } else onError(policyResult.error || 'No se pudo cargar la política de Papelera.')
-    if (containerResult.success) setContainers(containerResult.data?.containers || [])
+		if (containerResult.success && environmentResult.success) setContainers([...(environmentResult.data?.environments || []), ...(containerResult.data?.containers || [])])
     else onError(containerResult.error || 'No se pudieron cargar las listas y carpetas archivadas.')
+		if (eventResult.success) setEvents(eventResult.data?.events || [])
+		else onError(eventResult.error || 'No se pudieron cargar los eventos en Papelera.')
     setLoadingMeta(false)
   }, [environmentId, onError])
   useEffect(() => { void loadMeta() }, [loadMeta])
   useEffect(() => subscribeWebSocket(raw => {
     const message = raw as { event?: string; data?: { action?: string } }
-    if (message.event !== 'task_update') return
-    if (['trash_policy_updated', 'folder_archived', 'folder_restored', 'folder_purged', 'list_deleted', 'list_restored', 'list_purged', 'deleted', 'restored', 'task_purged'].includes(message.data?.action || '')) void loadMeta()
+		if (['work_event_update', 'work_event_invitation'].includes(message.event || '')) { void loadMeta(); return }
+		if (message.event !== 'task_update') return
+		if (['trash_policy_updated', 'environment_trashed', 'environment_restored', 'environment_purged', 'folder_trashed', 'folder_restored', 'folder_purged', 'list_trashed', 'list_restored', 'list_purged', 'deleted', 'restored', 'task_purged'].includes(message.data?.action || '')) void loadMeta()
   }), [loadMeta])
 
   const nextForTask = (task: Task) => {
@@ -271,10 +360,17 @@ function TrashView({ tasks, environmentId, onChanged, onError }: { tasks: Task[]
   }
   const restoreContainer = async (item: TaskTrashContainer) => {
     const key = `restore-${item.type}:${item.id}`; if (pending) return; setPending(key)
-    const result = await apiPost(`/api/tasks/${item.type === 'folder' ? 'folders' : 'lists'}/${item.id}/restore`, { operation_id: crypto.randomUUID() })
-    if (result.success) await Promise.all([onChanged(), loadMeta()]); else onError(result.error || `No se pudo restaurar ${item.type === 'folder' ? 'la carpeta' : 'la lista'}.`)
+		const endpoint = item.type === 'environment' ? `/api/tasks/environments/${item.id}/trash/restore` : `/api/tasks/${item.type === 'folder' ? 'folders' : 'lists'}/${item.id}/restore`
+		const result = await apiPost(endpoint, { version: item.version, operation_id: crypto.randomUUID() })
+		if (result.success) await Promise.all([onChanged(), loadMeta()]); else onError(result.error || `No se pudo restaurar ${item.type === 'environment' ? 'el Entorno' : item.type === 'folder' ? 'la carpeta' : 'la lista'}.`)
     setPending('')
   }
+	const restoreEvent = async (event: WorkEvent) => {
+		const key = `restore-event:${event.id}`; if (pending) return; setPending(key)
+		const result = await apiPost(`/api/tasks/events/${event.id}/restore`, { version: event.version, operation_id: crypto.randomUUID() })
+		if (result.success) await Promise.all([onChanged(), loadMeta()]); else onError(result.error || 'No se pudo restaurar el evento.')
+		setPending('')
+	}
   const savePolicy = async (value: number | null) => {
     if (!policy.can_manage || pending || (value !== null && (value < 7 || value > 365))) return
     setPending('policy')
@@ -286,8 +382,8 @@ function TrashView({ tasks, environmentId, onChanged, onError }: { tasks: Task[]
   const purge = async () => {
     if (!purgeTarget || pending) return
     const key = `purge-${purgeTarget.kind}:${purgeTarget.id}`; setPending(key); setPurgeError('')
-    const endpoint = purgeTarget.kind === 'task' ? `/api/tasks/${purgeTarget.id}/purge` : `/api/tasks/${purgeTarget.kind === 'folder' ? 'folders' : 'lists'}/${purgeTarget.id}/purge`
-    const result = await apiDelete(endpoint, { confirmation_name: purgeTarget.name, operation_id: crypto.randomUUID() })
+		const endpoint = purgeTarget.kind === 'task' ? `/api/tasks/${purgeTarget.id}/purge` : purgeTarget.kind === 'event' ? `/api/tasks/events/${purgeTarget.id}/purge` : purgeTarget.kind === 'environment' ? `/api/tasks/environments/${purgeTarget.id}/purge` : `/api/tasks/${purgeTarget.kind === 'folder' ? 'folders' : 'lists'}/${purgeTarget.id}/purge`
+		const result = await apiDelete(endpoint, purgeTarget.kind === 'event' ? { exact_title: purgeTarget.name, version: purgeTarget.version || events.find(event => event.id === purgeTarget.id)?.version, operation_id: crypto.randomUUID() } : { confirmation_name: purgeTarget.name, operation_id: crypto.randomUUID() })
     if (result.success) { setPurgeTarget(null); await Promise.all([onChanged(), loadMeta()]) }
     else setPurgeError(result.error || 'No se pudo eliminar permanentemente. Reintenta.')
     setPending('')
@@ -297,9 +393,9 @@ function TrashView({ tasks, environmentId, onChanged, onError }: { tasks: Task[]
     <div className="border-b border-slate-100 px-4 py-4 sm:px-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-sm font-black text-slate-900">Papelera de Clarin Work</h3><p className="mt-1 max-w-2xl text-xs leading-5 text-slate-500">Solo una acción explícita de “Mover a Papelera” inicia la retención. Las tareas completadas permanecen en sus listas sin plazo de eliminación.</p></div><div className="flex items-center gap-2 rounded-xl bg-emerald-50 px-3 py-2 text-[11px] font-bold text-emerald-700"><ShieldCheck className="h-4 w-4" />{policy.retention_days === null ? 'Nunca eliminar' : `${policy.retention_days} días de retención`}</div></div>
       {policy.can_manage && <div className="mt-4 flex flex-wrap items-center gap-2 rounded-2xl border border-slate-100 bg-slate-50 p-2.5"><span className="mr-1 text-[10px] font-black uppercase tracking-[.12em] text-slate-400">Política de la cuenta</span>{[7, 30, 90, 180, 365].map(value => <button key={value} disabled={pending === 'policy'} onClick={() => void savePolicy(value)} className={`rounded-xl px-3 py-2 text-xs font-bold transition ${policy.retention_days === value ? 'bg-slate-900 text-white shadow-sm' : 'bg-white text-slate-500 hover:text-slate-800'}`}>{value} días</button>)}<button disabled={pending === 'policy'} onClick={() => void savePolicy(null)} className={`rounded-xl px-3 py-2 text-xs font-bold transition ${policy.retention_days === null ? 'bg-slate-900 text-white shadow-sm' : 'bg-white text-slate-500 hover:text-slate-800'}`}>Nunca</button><div className="ml-auto flex items-center gap-1.5"><input aria-label="Días de retención personalizados" type="number" min={7} max={365} value={customDays} onChange={event => setCustomDays(event.target.value)} className="h-9 w-20 rounded-xl border border-slate-200 bg-white px-2 text-center text-xs font-bold text-slate-700 outline-none focus:border-emerald-400" /><button disabled={pending === 'policy' || Number(customDays) < 7 || Number(customDays) > 365} onClick={() => void savePolicy(Number(customDays))} className="h-9 rounded-xl border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 hover:border-emerald-200 hover:text-emerald-700 disabled:opacity-30">Aplicar</button></div></div>}
     </div>
-    <div className="flex border-b border-slate-100 bg-slate-50/60 px-4 pt-2 sm:px-5"><button onClick={() => setTab('tasks')} className={`flex items-center gap-2 border-b-2 px-3 py-2.5 text-xs font-bold ${tab === 'tasks' ? 'border-emerald-500 text-emerald-700' : 'border-transparent text-slate-400'}`}><ListTodo className="h-4 w-4" />Tareas <span className="rounded-full bg-white px-2 py-0.5 text-[10px] text-slate-500">{tasks.length}</span></button><button onClick={() => setTab('containers')} className={`flex items-center gap-2 border-b-2 px-3 py-2.5 text-xs font-bold ${tab === 'containers' ? 'border-emerald-500 text-emerald-700' : 'border-transparent text-slate-400'}`}><FolderOpen className="h-4 w-4" />Listas y carpetas <span className="rounded-full bg-white px-2 py-0.5 text-[10px] text-slate-500">{containers.length}</span></button></div>
-    {tab === 'tasks' ? <div className="divide-y divide-slate-100">{tasks.map(task => { const next = nextForTask(task); const canPurge = taskCanPurge(task); return <div key={task.id} className={`flex flex-wrap items-center gap-3 px-4 py-3.5 sm:px-5 ${task.parent_task_id ? 'pl-8 sm:pl-10' : ''}`}><div className="rounded-xl bg-slate-100 p-2"><Trash2 className="h-4 w-4 text-slate-400" /></div><div className="min-w-[180px] flex-1"><p className="truncate text-sm font-semibold text-slate-700">{task.title}</p><p className="mt-0.5 text-[10px] text-slate-400">{task.parent_task_id ? 'Subtarea' : task.list_name || 'Bandeja general'} · movida {task.deleted_at ? dateShort.format(new Date(task.deleted_at)) : ''}</p></div><div className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-bold ${canPurge ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-500'}`}><Clock3 className="h-3.5 w-3.5" />{timing(next)}</div><button disabled={Boolean(pending)} onClick={() => void restoreTask(task)} className="flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-40"><RotateCcw className="h-3.5 w-3.5" /> Restaurar</button>{policy.can_manage && canPurge && <button disabled={Boolean(pending)} onClick={() => { setPurgeError(''); setPurgeTarget({ kind: 'task', id: task.id, name: task.title }) }} className="rounded-xl px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40">Eliminar permanentemente</button>}</div>})}{!tasks.length && <div className="py-16 text-center"><ArchiveRestore className="mx-auto h-8 w-8 text-slate-300" /><p className="mt-3 text-sm font-semibold text-slate-500">No hay tareas en Papelera.</p></div>}</div> : <div className="divide-y divide-slate-100">{containers.map(item => <div key={`${item.type}:${item.id}`} className="flex flex-wrap items-center gap-3 px-4 py-3.5 sm:px-5"><div className="flex h-10 w-10 items-center justify-center rounded-xl" style={{ color: item.color, backgroundColor: `${item.color}18` }}><TaskContainerIcon value={item.icon} className="h-4 w-4" /></div><div className="min-w-[180px] flex-1"><p className="truncate text-sm font-semibold text-slate-700">{item.name}</p><p className="mt-0.5 text-[10px] text-slate-400">{item.type === 'folder' ? `Carpeta · ${item.list_count} lista${item.list_count === 1 ? '' : 's'}` : `Lista${item.original_folder_name ? ` · ${item.original_folder_name}` : ' · nivel principal'}`} · {item.task_count} tarea{item.task_count === 1 ? '' : 's'}</p></div><div className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-bold ${item.can_purge ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-500'}`}><Clock3 className="h-3.5 w-3.5" />{timing(item.next_eligible_at)}</div><button disabled={Boolean(pending) || item.restore_blocked} title={item.restore_blocked ? 'Restaura primero la carpeta original' : 'Restaurar'} onClick={() => void restoreContainer(item)} className="flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-35"><RotateCcw className="h-3.5 w-3.5" /> Restaurar</button>{policy.can_manage && item.can_purge && <button disabled={Boolean(pending)} onClick={() => { setPurgeError(''); setPurgeTarget({ kind: item.type, id: item.id, name: item.name }) }} className="rounded-xl px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40">Eliminar permanentemente</button>}</div>)}{!containers.length && !loadingMeta && <div className="py-16 text-center"><FolderOpen className="mx-auto h-8 w-8 text-slate-300" /><p className="mt-3 text-sm font-semibold text-slate-500">No hay listas ni carpetas en Papelera.</p></div>}</div>}
-    <TaskDestructiveConfirmDialog open={Boolean(purgeTarget)} permanent title={`Eliminar ${purgeTarget?.kind === 'folder' ? 'carpeta' : purgeTarget?.kind === 'list' ? 'lista' : 'tarea'} permanentemente`} description="Esta acción es irreversible. Se eliminará el elemento archivado y, cuando corresponda, todo su árbol. La operación se bloqueará si algún descendiente aún no cumple la retención." actionLabel="Eliminar permanentemente" confirmationName={purgeTarget?.name} busy={pending.startsWith('purge-')} error={purgeError} onClose={() => { if (!pending.startsWith('purge-')) { setPurgeTarget(null); setPurgeError('') } }} onConfirm={() => void purge()} />
+		<div className="flex overflow-x-auto border-b border-slate-100 bg-slate-50/60 px-4 pt-2 sm:px-5"><button onClick={() => setTab('tasks')} className={`flex items-center gap-2 border-b-2 px-3 py-2.5 text-xs font-bold ${tab === 'tasks' ? 'border-emerald-500 text-emerald-700' : 'border-transparent text-slate-400'}`}><ListTodo className="h-4 w-4" />Tareas <span className="rounded-full bg-white px-2 py-0.5 text-[10px] text-slate-500">{tasks.length}</span></button><button onClick={() => setTab('events')} className={`flex items-center gap-2 border-b-2 px-3 py-2.5 text-xs font-bold ${tab === 'events' ? 'border-emerald-500 text-emerald-700' : 'border-transparent text-slate-400'}`}><CalendarDays className="h-4 w-4" />Eventos <span className="rounded-full bg-white px-2 py-0.5 text-[10px] text-slate-500">{events.length}</span></button><button onClick={() => setTab('containers')} className={`flex items-center gap-2 border-b-2 px-3 py-2.5 text-xs font-bold ${tab === 'containers' ? 'border-emerald-500 text-emerald-700' : 'border-transparent text-slate-400'}`}><FolderOpen className="h-4 w-4" />Estructuras <span className="rounded-full bg-white px-2 py-0.5 text-[10px] text-slate-500">{containers.length}</span></button></div>
+		{tab === 'tasks' ? <div className="divide-y divide-slate-100">{tasks.map(task => { const next = nextForTask(task); const canPurge = taskCanPurge(task); return <div key={task.id} className={`flex flex-wrap items-center gap-3 px-4 py-3.5 sm:px-5 ${task.parent_task_id ? 'pl-8 sm:pl-10' : ''}`}><div className="rounded-xl bg-slate-100 p-2"><Trash2 className="h-4 w-4 text-slate-400" /></div><div className="min-w-[180px] flex-1"><p className="truncate text-sm font-semibold text-slate-700">{task.title}</p><p className="mt-0.5 text-[10px] text-slate-400">{task.parent_task_id ? 'Subtarea' : task.list_name || 'Bandeja general'} · movida {task.deleted_at ? dateShort.format(new Date(task.deleted_at)) : ''}</p></div><div className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-bold ${canPurge ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-500'}`}><Clock3 className="h-3.5 w-3.5" />{timing(next)}</div><button disabled={Boolean(pending)} onClick={() => void restoreTask(task)} className="flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-40"><RotateCcw className="h-3.5 w-3.5" /> Restaurar</button>{policy.can_manage && canPurge && <button disabled={Boolean(pending)} onClick={() => { setPurgeError(''); setPurgeTarget({ kind: 'task', id: task.id, name: task.title }) }} className="rounded-xl px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40">Eliminar permanentemente</button>}</div>})}{!tasks.length && <div className="py-16 text-center"><ArchiveRestore className="mx-auto h-8 w-8 text-slate-300" /><p className="mt-3 text-sm font-semibold text-slate-500">No hay tareas en Papelera.</p></div>}</div> : tab === 'events' ? <div className="divide-y divide-slate-100">{events.map(event => { const next = event.deleted_at && policy.retention_days !== null ? new Date(new Date(event.deleted_at).getTime() + policy.retention_days * 86_400_000) : null; const canPurge = Boolean(next && next.getTime() <= Date.now()); return <div key={event.id} className="flex flex-wrap items-center gap-3 px-4 py-3.5 sm:px-5"><div className="rounded-xl p-2" style={{ color: event.resolved_color, backgroundColor: `${event.resolved_color}18` }}><CalendarDays className="h-4 w-4" /></div><div className="min-w-[180px] flex-1"><p className="truncate text-sm font-semibold text-slate-700">{event.title}</p><p className="mt-0.5 text-[10px] text-slate-400">Evento · {event.list_visible ? event.list_name : 'Invitación compartida'} · movido {event.deleted_at ? dateShort.format(new Date(event.deleted_at)) : ''}</p></div><div className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-bold ${canPurge ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-500'}`}><Clock3 className="h-3.5 w-3.5" />{timing(next)}</div><button disabled={Boolean(pending) || !event.capabilities.can_restore} onClick={() => void restoreEvent(event)} className="flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-40"><RotateCcw className="h-3.5 w-3.5" /> Restaurar</button>{policy.can_manage && canPurge && <button disabled={Boolean(pending)} onClick={() => { setPurgeError(''); setPurgeTarget({ kind: 'event', id: event.id, name: event.title }) }} className="rounded-xl px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40">Eliminar permanentemente</button>}</div>})}{!events.length && <div className="py-16 text-center"><CalendarDays className="mx-auto h-8 w-8 text-slate-300" /><p className="mt-3 text-sm font-semibold text-slate-500">No hay eventos en Papelera.</p></div>}</div> : <div className="divide-y divide-slate-100">{containers.map(item => <div key={`${item.type}:${item.id}`} className="flex flex-wrap items-center gap-3 px-4 py-3.5 sm:px-5"><div className="flex h-10 w-10 items-center justify-center rounded-xl" style={{ color: item.color, backgroundColor: `${item.color}18` }}><TaskContainerIcon value={item.icon} className="h-4 w-4" /></div><div className="min-w-[180px] flex-1"><p className="truncate text-sm font-semibold text-slate-700">{item.name}</p><p className="mt-0.5 text-[10px] text-slate-400">{item.type === 'environment' ? `Entorno · ${item.list_count} lista${item.list_count === 1 ? '' : 's'}` : item.type === 'folder' ? `Carpeta · ${item.list_count} lista${item.list_count === 1 ? '' : 's'}` : `Lista${item.original_folder_name ? ` · ${item.original_folder_name}` : ' · nivel principal'}`} · {item.task_count} tarea{item.task_count === 1 ? '' : 's'}{item.archived_at ? ' · vuelve al Archivo al restaurar' : ''}</p></div><div className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-bold ${item.can_purge ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-500'}`}><Clock3 className="h-3.5 w-3.5" />{timing(item.next_eligible_at)}</div><button disabled={Boolean(pending) || item.restore_blocked} title={item.restore_blocked ? 'Restaura primero la carpeta original' : 'Restaurar'} onClick={() => void restoreContainer(item)} className="flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-35"><RotateCcw className="h-3.5 w-3.5" /> Restaurar</button>{policy.can_manage && item.can_purge && <button disabled={Boolean(pending)} onClick={() => { setPurgeError(''); setPurgeTarget({ kind: item.type, id: item.id, name: item.name }) }} className="rounded-xl px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-40">Eliminar permanentemente</button>}</div>)}{!containers.length && !loadingMeta && <div className="py-16 text-center"><FolderOpen className="mx-auto h-8 w-8 text-slate-300" /><p className="mt-3 text-sm font-semibold text-slate-500">No hay Entornos, listas ni carpetas en Papelera.</p></div>}</div>}
+		<TaskDestructiveConfirmDialog open={Boolean(purgeTarget)} permanent title={`Eliminar ${purgeTarget?.kind === 'environment' ? 'Entorno' : purgeTarget?.kind === 'folder' ? 'carpeta' : purgeTarget?.kind === 'list' ? 'lista' : purgeTarget?.kind === 'event' ? 'evento' : 'tarea'} permanentemente`} description="Esta acción es irreversible. Se eliminará el elemento de Papelera y, cuando corresponda, todo su árbol. La operación se bloqueará si algún descendiente aún no cumple la retención." actionLabel="Eliminar permanentemente" confirmationName={purgeTarget?.name} busy={pending.startsWith('purge-')} error={purgeError} onClose={() => { if (!pending.startsWith('purge-')) { setPurgeTarget(null); setPurgeError('') } }} onConfirm={() => void purge()} />
   </div>
 }
 
@@ -353,6 +449,9 @@ export default function TaskWorkspace() {
   const boardSidebarWasCollapsedRef = useRef(false)
   const [navOverflow, setNavOverflow] = useState({ top: false, bottom: false })
   const [editorOpen, setEditorOpen] = useState(false)
+  const [createEventToken, setCreateEventToken] = useState(0)
+	const [focusedWorkEvent, setFocusedWorkEvent] = useState<WorkEventOccurrence | null>(null)
+  const [createMenuOpen, setCreateMenuOpen] = useState(false)
   const [editingTask, setEditingTask] = useState<Task | null>(null)
   const [subtaskParent, setSubtaskParent] = useState<Task | null>(null)
   const [createStatusId, setCreateStatusId] = useState('')
@@ -390,15 +489,19 @@ export default function TaskWorkspace() {
   const searchInputRef = useRef<HTMLInputElement>(null)
   const navRef = useRef<HTMLElement>(null)
   const hierarchyRef = useRef<TaskHierarchyState>({ folders: [], rootLists: [] })
+  const containerScopeFallbacks = useRef(new Set<string>())
   const hierarchyCountCursor = useRef<TaskHierarchyCountSnapshotCursor>({})
   const hierarchyCountOperations = useRef(new Map<string, TaskHierarchyCountOperationState>())
 
   const lists = useMemo(() => [...rootLists, ...folders.flatMap(folder => folder.lists)], [rootLists, folders])
   const activeEnvironment = environments.find(environment => environment.id === activeEnvironmentId)
+	const historicalReadOnly = scope.type === 'archive'
+  const structureLifecycle = taskWorkspaceStructureLifecycle(scope)
+  const canManageActiveEnvironment = taskContainerCanManageStructure(activeEnvironment) && !activeEnvironment?.archived_at
   const storageScope = `${currentAccountId || 'account'}:${currentUserId || 'user'}`
   const activeList = scope.type === 'list' ? lists.find(list => list.id === scope.id) : undefined
   const activeFolder = scope.type === 'folder' ? folders.find(folder => folder.id === scope.id) : activeList?.folder_id ? folders.find(folder => folder.id === activeList.folder_id) : undefined
-  const scopeName = scope.type === 'all' || scope.type === 'environment' ? `Todo en ${activeEnvironment?.name || 'el Entorno'}` : scope.type === 'shared' ? 'Compartidas conmigo' : scope.type === 'folder' ? activeFolder?.name || sharedScopeLabel || 'Carpeta compartida' : scope.type === 'list' ? activeList?.name || sharedScopeLabel || 'Lista compartida' : 'Papelera'
+	const scopeName = scope.type === 'all' || scope.type === 'environment' ? `Todo en ${activeEnvironment?.name || 'el Entorno'}` : scope.type === 'shared' ? 'Compartidas conmigo' : scope.type === 'folder' ? activeFolder?.name || sharedScopeLabel || 'Carpeta compartida' : scope.type === 'list' ? activeList?.name || sharedScopeLabel || 'Lista compartida' : scope.type === 'archive' ? 'Archivo histórico' : 'Papelera'
 
   const acceptCanonicalTask = useCallback((incoming: Task, action = 'updated') => {
     const incomingVersion = incoming.version || 0
@@ -469,6 +572,71 @@ export default function TaskWorkspace() {
     setRootLists(next.rootLists)
   }, [])
 
+  const applyActiveContainerRemoval = useCallback((mutation: TaskContainerLifecycleMutation) => {
+    const previousHierarchy = hierarchyRef.current
+    const nextHierarchy = removeTaskContainerFromActiveHierarchy(previousHierarchy, mutation)
+    const mutationKey = `${mutation.type}:${mutation.id}`
+    if (nextHierarchy === previousHierarchy) return containerScopeFallbacks.current.has(mutationKey)
+    const selectedScopeRemoved = taskScopeAffectedByContainerRemoval(scope, previousHierarchy, mutation)
+    const removedListIDs = taskContainerListIDs(previousHierarchy, mutation)
+
+    structureAbortRef.current?.abort()
+    hierarchyPageAbortRef.current.forEach(controller => controller.abort())
+    hierarchyPageAbortRef.current.clear()
+    folderChildrenLoadingRef.current.clear()
+    structureSequence.current += 1
+    taskLoadAbortRef.current?.abort()
+    taskMoreAbortRef.current?.abort()
+    loadSequence.current += 1
+    setTaskLoadingMore(false)
+    setTaskLoadMoreError('')
+    commitHierarchy(nextHierarchy)
+
+    if (mutation.type === 'folder') {
+      setFolderChildrenState(current => {
+        if (!(mutation.id in current)) return current
+        const next = { ...current }
+        delete next[mutation.id]
+        return next
+      })
+    }
+
+    const visibleRemovedTasks = tasksRef.current.filter(task => removedListIDs.has(task.list_id || ''))
+    if (visibleRemovedTasks.length) {
+      const removedTaskIDs = new Set(visibleRemovedTasks.map(task => task.id))
+      tasksRef.current = tasksRef.current.filter(task => !removedTaskIDs.has(task.id))
+      setTasks(current => current.filter(task => !removedTaskIDs.has(task.id)))
+      setTaskTotal(current => Math.max(0, current - visibleRemovedTasks.length))
+      if (selectedTaskId && removedTaskIDs.has(selectedTaskId)) setSelectedTaskId(null)
+      if ((editingTask?.list_id && removedListIDs.has(editingTask.list_id)) || (subtaskParent?.list_id && removedListIDs.has(subtaskParent.list_id))) {
+        setEditorOpen(false)
+        setEditingTask(null)
+        setSubtaskParent(null)
+      }
+    }
+
+    if (selectedScopeRemoved) {
+      containerScopeFallbacks.current.add(mutationKey)
+      tasksRef.current = []
+      setTasks([])
+      setTaskTotal(0)
+      taskNextCursorRef.current = null
+      setTaskNextCursor(null)
+      setTaskLoadMoreError('')
+      setSelectedTaskId(null)
+      setEditorOpen(false)
+      setEditingTask(null)
+      setSubtaskParent(null)
+      setCreateDraft(null)
+      setCreateStatusId('')
+      setScope(activeEnvironmentId ? { type: 'environment', id: activeEnvironmentId } : { type: 'all' })
+      setSharedScopeLabel('')
+    }
+
+    setNotice(`La ${mutation.type === 'folder' ? 'carpeta' : 'lista'} pasó a ${mutation.action === 'archived' ? 'Archivo histórico' : 'Papelera'} y dejó el trabajo activo.`)
+    return selectedScopeRemoved
+  }, [activeEnvironmentId, commitHierarchy, editingTask?.list_id, scope, selectedTaskId, subtaskParent?.list_id])
+
   const rememberHierarchyCountOperation = useCallback((operationID: string | undefined, state: TaskHierarchyCountOperationState) => {
     if (!operationID) return
     hierarchyCountOperations.current.set(operationID, state)
@@ -525,7 +693,7 @@ export default function TaskWorkspace() {
     const preferenceKey = taskEnvironmentPreferenceKey(accountID, userID)
     const preferredID = typeof window === 'undefined' ? '' : localStorage.getItem(preferenceKey) || ''
     if (preferredTaskEnvironmentNeedsFetch(available, preferredID)) {
-      const preferredRes = await apiGet<{ environment: TaskEnvironment }>(`/api/tasks/environments/${encodeURIComponent(preferredID)}`)
+      const preferredRes = await apiGet<{ environment: TaskEnvironment }>(`/api/tasks/environments/${encodeURIComponent(preferredID)}?lifecycle=archive`)
       if (preferredRes.success && preferredRes.data?.environment) {
         available = mergeTaskEnvironmentIndex(available, [preferredRes.data.environment])
       }
@@ -550,6 +718,18 @@ export default function TaskWorkspace() {
 
   const loadHierarchy = useCallback(async () => {
     if (!activeEnvironmentId) return false
+		if (structureLifecycle === 'archive') {
+			const result = await apiGet<{ folders: TaskFolder[]; root_lists: TaskList[] }>(`/api/tasks/environments/${encodeURIComponent(activeEnvironmentId)}/hierarchy?lifecycle=archive`)
+			if (!result.success) {
+				setHierarchyError(result.error || 'No se pudo actualizar el Archivo histórico.')
+				return false
+			}
+			commitHierarchy({ folders: result.data?.folders || [], rootLists: result.data?.root_lists || [] })
+			setFolderNextCursor(null)
+			setRootListNextCursor(null)
+			setHierarchyError('')
+			return true
+		}
     const sequence = structureSequence.current
     const controller = new AbortController()
     hierarchyPageAbortRef.current.get('refresh')?.abort()
@@ -571,7 +751,7 @@ export default function TaskWorkspace() {
     commitHierarchy(next)
     setHierarchyError('')
     return true
-  }, [activeEnvironmentId, commitHierarchy, hierarchyPageURL])
+	}, [activeEnvironmentId, commitHierarchy, hierarchyPageURL, structureLifecycle])
 
   const loadStructure = useCallback(async () => {
     if (!activeEnvironmentId) return
@@ -584,6 +764,23 @@ export default function TaskWorkspace() {
     const sequence = ++structureSequence.current
     setHierarchyPhase('loading')
     setHierarchyError('')
+		if (structureLifecycle === 'archive') {
+			const result = await apiGet<{ folders: TaskFolder[]; root_lists: TaskList[] }>(`/api/tasks/environments/${encodeURIComponent(activeEnvironmentId)}/hierarchy?lifecycle=archive`, { signal: controller.signal })
+			if (sequence !== structureSequence.current || controller.signal.aborted) return
+			if (!result.success) {
+				setHierarchyPhase('error')
+				setHierarchyError(result.error || 'No se pudo cargar el Archivo histórico.')
+			} else {
+				commitHierarchy({ folders: result.data?.folders || [], rootLists: result.data?.root_lists || [] })
+				setFolderNextCursor(null)
+				setRootListNextCursor(null)
+				setFolderChildrenState({})
+				setWorkflows([])
+				setHierarchyPhase('ready')
+			}
+			setStructureReady(true)
+			return
+		}
     const [folderRes, rootRes, workflowRes] = await Promise.all([
       apiGet<{ folders: TaskFolder[]; next_cursor?: string | null }>(hierarchyPageURL('folders'), { signal: controller.signal }),
       apiGet<{ lists: TaskList[]; next_cursor?: string | null }>(hierarchyPageURL('lists'), { signal: controller.signal }),
@@ -606,7 +803,7 @@ export default function TaskWorkspace() {
     if (workflowRes.success) setWorkflows(workflowRes.data?.workflows || [])
     else if (!controller.signal.aborted) setError(workflowRes.error || 'No se pudieron cargar los flujos del Entorno.')
     setStructureReady(true)
-  }, [activeEnvironmentId, commitHierarchy, hierarchyPageURL])
+	}, [activeEnvironmentId, commitHierarchy, hierarchyPageURL, structureLifecycle])
 
   const loadMoreHierarchyRoot = useCallback(async (kind: 'folders' | 'lists') => {
     const cursor = kind === 'folders' ? folderNextCursor : rootListNextCursor
@@ -746,6 +943,17 @@ export default function TaskWorkspace() {
     setLoading(false)
   }, [activeEnvironmentId, environmentIndexReady, scope, debouncedSearch, filters, view])
 
+  const handleHierarchyChanged = useCallback(async (mutation?: TaskContainerLifecycleMutation) => {
+    if (!mutation) {
+      await loadStructure()
+      await loadTasks(false)
+      return
+    }
+    const selectedScopeRemoved = applyActiveContainerRemoval(mutation)
+    await loadHierarchy()
+    if (!selectedScopeRemoved) await loadTasks(false)
+  }, [applyActiveContainerRemoval, loadHierarchy, loadStructure, loadTasks])
+
   const loadMoreTasks = useCallback(async () => {
     const cursor = taskNextCursorRef.current
     if (!cursor || taskLoadingMore) return
@@ -862,6 +1070,7 @@ export default function TaskWorkspace() {
   useEffect(() => {
     if (!environmentIndexReady || !activeEnvironmentId) return
     setStructureReady(false)
+    containerScopeFallbacks.current.clear()
     commitHierarchy({ folders: [], rootLists: [] })
     setHierarchyPhase('idle')
     setHierarchyError('')
@@ -921,7 +1130,7 @@ export default function TaskWorkspace() {
     if (taskFromURL) setSelectedTaskId(taskFromURL)
   }, [])
   useEffect(() => subscribeWebSocket(raw => {
-    const message = raw as { event?: string; data?: { action?: string; task?: Task; task_id?: string; target_type?: 'task' | 'list' | 'folder' | 'environment'; target_id?: string; version?: number; operation_id?: string; structure_changed?: boolean; hierarchy_counts?: TaskHierarchyCounts; order?: { list_id?: string; task_ids?: string[] } } }
+    const message = raw as { event?: string; data?: { action?: string; task?: Task; task_id?: string; list_id?: string; folder_id?: string; target_type?: 'task' | 'list' | 'folder' | 'environment'; target_id?: string; version?: number; operation_id?: string; structure_changed?: boolean; hierarchy_counts?: TaskHierarchyCounts; order?: { list_id?: string; task_ids?: string[] } } }
     if (message.event !== 'task_update' && message.event !== 'task_overdue') return
     const payload = message.data || {}
     const action = payload.action || ''
@@ -977,7 +1186,9 @@ export default function TaskWorkspace() {
       return
     }
     if (action === 'access_changed') setSharedHubRevision(current => current + 1)
-    const structureActions = new Set(['folder_created', 'folder_updated', 'folder_archived', 'folder_restored', 'folder_purged', 'list_created', 'list_updated', 'list_archived', 'list_deleted', 'list_restored', 'list_purged', 'workflow_created', 'workflow_updated', 'status_created', 'status_updated', 'status_deleted'])
+		const structureActions = new Set(['environment_archived', 'environment_unarchived', 'environment_trashed', 'environment_restored', 'environment_purged', 'folder_created', 'folder_updated', 'folder_archived', 'folder_unarchived', 'folder_trashed', 'folder_restored', 'folder_purged', 'list_created', 'list_updated', 'list_archived', 'list_unarchived', 'list_trashed', 'list_deleted', 'list_restored', 'list_purged', 'workflow_created', 'workflow_updated', 'status_created', 'status_updated', 'status_deleted'])
+    const lifecycleMutation = structureLifecycle === 'active' ? taskContainerLifecycleMutationFromEvent(action, payload) : null
+    const lifecycleScopeChanged = lifecycleMutation ? applyActiveContainerRemoval(lifecycleMutation) : false
     const operationKnownBeforeSnapshot = Boolean(payload.operation_id && hierarchyCountOperations.current.has(payload.operation_id))
     const countsApplied = applyHierarchySnapshot(payload.hierarchy_counts, payload.operation_id)
     const reloadHierarchyForMinimalEvent = shouldReloadHierarchyForMinimalTaskEvent(payload)
@@ -994,7 +1205,15 @@ export default function TaskWorkspace() {
     }
     if (structureActions.has(action)) {
       if (refreshTimer.current) clearTimeout(refreshTimer.current)
-      refreshTimer.current = setTimeout(() => { void loadStructure(); void loadTasks(false) }, 180)
+      refreshTimer.current = setTimeout(() => {
+        if (lifecycleMutation) {
+          void loadHierarchy()
+          if (!lifecycleScopeChanged) void loadTasks(false)
+          return
+        }
+        void loadStructure()
+        void loadTasks(false)
+      }, 180)
       return
     }
     if (action === 'deleted' && payload.task_id) {
@@ -1053,8 +1272,8 @@ export default function TaskWorkspace() {
       void loadTasks(false)
       if (reloadHierarchyForMinimalEvent) void loadHierarchy()
     }, 180)
-  }), [activeEnvironmentId, applyHierarchySnapshot, applyTaskHierarchyMutation, commitHierarchy, currentAccountId, currentUserId, debouncedSearch, editingTask?.id, filters, loadEnvironmentIndex, loadHierarchy, loadTasks, loadStructure, markTaskDeleted, reconcileCanonicalTasks, scope, search, selectedTaskId, subtaskParent?.id, view])
-  useEffect(() => { const listener = (event: KeyboardEvent) => { if ((event.target as HTMLElement)?.matches('input,textarea,select,[contenteditable="true"]')) return; if (event.key.toLowerCase() === 'n') { event.preventDefault(); if (scope.type === 'trash') setError('Sal de la papelera para crear una tarea.'); else if (!activeEnvironmentId || activeEnvironment?.permissions?.can_edit !== true) setError('No tienes permiso para crear tareas en el Entorno activo.'); else { setSubtaskParent(null); setEditingTask(null); setEditorOpen(true) } } if (event.key === '/') { event.preventDefault(); setSearchOpen(true); requestAnimationFrame(() => searchInputRef.current?.focus()) } }; window.addEventListener('keydown', listener); return () => window.removeEventListener('keydown', listener) }, [activeEnvironment, activeEnvironmentId, scope.type])
+  }), [activeEnvironmentId, applyActiveContainerRemoval, applyHierarchySnapshot, applyTaskHierarchyMutation, commitHierarchy, currentAccountId, currentUserId, debouncedSearch, editingTask?.id, filters, loadEnvironmentIndex, loadHierarchy, loadTasks, loadStructure, markTaskDeleted, reconcileCanonicalTasks, scope, search, selectedTaskId, structureLifecycle, subtaskParent?.id, view])
+	useEffect(() => { const listener = (event: KeyboardEvent) => { if ((event.target as HTMLElement)?.matches('input,textarea,select,[contenteditable="true"]')) return; if (event.key.toLowerCase() === 'n') { event.preventDefault(); if (scope.type === 'trash') setError('Sal de la papelera para crear una tarea.'); else if (scope.type === 'archive') setError('El Archivo histórico es solo lectura. Restaura el elemento para volver a trabajar.'); else if (!activeEnvironmentId || activeEnvironment?.permissions?.can_edit !== true) setError('No tienes permiso para crear tareas en el Entorno activo.'); else { setSubtaskParent(null); setEditingTask(null); setEditorOpen(true) } } if (event.key === '/') { event.preventDefault(); setSearchOpen(true); requestAnimationFrame(() => searchInputRef.current?.focus()) } }; window.addEventListener('keydown', listener); return () => window.removeEventListener('keydown', listener) }, [activeEnvironment, activeEnvironmentId, scope.type])
 
   const defaultWorkflow = workflows.find(item => item.is_default) || workflows[0]
   const scopedLists = useMemo(() => scope.type === 'list'
@@ -1137,12 +1356,22 @@ export default function TaskWorkspace() {
     }
     setError(result.error || 'No se pudo actualizar la tarea favorita. Inténtalo de nuevo.')
   }
-  const selectScope = (next: Scope, sharedLabel = '') => { setSharedScopeLabel(sharedLabel); setScope(next); setSidebarOpen(false) }
+	const selectScope = (next: Scope, sharedLabel = '') => {
+		setSharedScopeLabel(sharedLabel)
+		setScope(next)
+		setSidebarOpen(false)
+		if (next.type === 'archive' || next.type === 'trash') {
+			setEditorOpen(false)
+			setEditingTask(null)
+			setSubtaskParent(null)
+			setStructureOpen(false)
+		}
+	}
   const selectEnvironment = (environment: TaskEnvironment) => {
-    if (environment.archived_at) return
+		setEnvironments(current => mergeTaskEnvironmentIndex(current, [environment]))
     setActiveEnvironmentId(environment.id)
     setSharedScopeLabel('')
-    setScope({ type: 'environment', id: environment.id })
+		setScope(environment.archived_at ? { type: 'archive' } : { type: 'environment', id: environment.id })
     setSelectedTaskId(null)
     setSidebarOpen(false)
     if (typeof window !== 'undefined') localStorage.setItem(`clarin:tasks:${storageScope}:active-environment:v1`, environment.id)
@@ -1152,7 +1381,7 @@ export default function TaskWorkspace() {
     setEnvironmentWindowOpen(true)
   }
   const openEnvironmentConfigure = (environment: TaskEnvironment) => {
-    if (!environment.permissions?.can_delete) {
+    if (!taskContainerCanManageStructure(environment)) {
       setError('Necesitas Administrar para configurar este Entorno.')
       return
     }
@@ -1160,6 +1389,16 @@ export default function TaskWorkspace() {
     setEnvironmentWindowOpen(true)
   }
   const reconcileEnvironment = (environment: TaskEnvironment) => {
+		if (environment.deleted_at) {
+			setEnvironments(current => current.filter(item => item.id !== environment.id))
+			if (activeEnvironmentId === environment.id) {
+				const fallback = environments.find(item => item.id !== environment.id && !item.archived_at && !item.deleted_at && item.is_default)
+					|| environments.find(item => item.id !== environment.id && !item.archived_at && !item.deleted_at)
+				if (fallback) selectEnvironment(fallback)
+				else { setActiveEnvironmentId(''); setScope({ type: 'all' }) }
+			}
+			return
+		}
     setEnvironments(current => {
       const next = current.some(item => item.id === environment.id)
         ? current.map(item => item.id === environment.id ? environment : item)
@@ -1167,21 +1406,24 @@ export default function TaskWorkspace() {
       return next.sort((left, right) => left.sort_order - right.sort_order || left.name.localeCompare(right.name, 'es'))
     })
     setEnvironmentWindowTarget(environment)
-    if (!environment.archived_at) {
+		if (!environment.archived_at) {
       if (!environmentWindowTarget) selectEnvironment(environment)
+			else if (activeEnvironmentId === environment.id && scope.type === 'archive') setScope({ type: 'environment', id: environment.id })
       return
     }
     if (activeEnvironmentId === environment.id) {
-      const fallback = environments.find(item => item.id !== environment.id && !item.archived_at && item.is_default)
-        || environments.find(item => item.id !== environment.id && !item.archived_at)
-      if (fallback) selectEnvironment(fallback)
+			setScope({ type: 'archive' })
     }
   }
   const openCreate = (statusId?: string, draft?: TaskInlineDraft) => {
-    if (scope.type === 'trash') {
+		if (scope.type === 'trash') {
       setError('Sal de la papelera para crear una tarea.')
       return
     }
+		if (scope.type === 'archive') {
+			setError('El Archivo histórico es solo lectura. Restaura el elemento antes de crear tareas.')
+			return
+		}
     if (!activeEnvironmentId || activeEnvironment?.permissions?.can_edit !== true) {
       setError('No tienes permiso para crear tareas en el Entorno activo.')
       return
@@ -1191,6 +1433,11 @@ export default function TaskWorkspace() {
     setCreateStatusId(statusId || draft?.statusId || '')
     setCreateDraft(draft || null)
     setEditorOpen(true)
+  }
+  const openEventCreate = () => {
+    setCreateMenuOpen(false)
+    if (view !== 'calendar') setView('calendar')
+    setCreateEventToken(value => value + 1)
   }
   const closeTaskDetail = () => {
     setSelectedTaskId(null)
@@ -1238,7 +1485,7 @@ export default function TaskWorkspace() {
     localStorage.setItem('tasks:list-collapsed-groups', JSON.stringify(nextCollapsed))
   }
 
-  const immersiveView = scope.type !== 'trash' && ['board', 'calendar', 'gantt'].includes(view)
+	const immersiveView = scope.type !== 'trash' && scope.type !== 'archive' && ['board', 'calendar', 'gantt'].includes(view)
   const searchPending = search.trim() !== debouncedSearch
   const chromeDensity = taskWorkspaceChromeDensity(workspaceWidth)
   const setVisibleBoardTasks = useCallback((action: Task[] | ((current: Task[]) => Task[])) => {
@@ -1251,20 +1498,20 @@ export default function TaskWorkspace() {
   return <div ref={workspaceRef} data-task-workspace-width={workspaceWidth} className="relative flex h-full min-h-0 w-full overflow-hidden bg-slate-50">
     {sidebarOpen && <button aria-label="Cerrar navegación" onClick={() => setSidebarOpen(false)} className="fixed inset-0 z-40 bg-slate-950/30 lg:hidden" />}
     <aside className={`absolute inset-y-0 left-0 z-50 flex shrink-0 flex-col border-r border-slate-200 bg-white transition-all lg:relative lg:z-10 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'} ${sidebarCollapsed ? 'w-16' : 'w-[248px]'}`}>
-      <div className="flex h-[52px] items-center border-b border-slate-100 px-3"><div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white"><Check className="h-4 w-4" /></div>{!sidebarCollapsed && <div className="ml-2.5 min-w-0"><p className="truncate text-sm font-black leading-4 text-slate-900">Clarin Work</p><p className="text-[9px] font-semibold uppercase tracking-[.14em] text-emerald-600">Tareas y proyectos</p></div>}<button onClick={() => setSidebarCollapsed(value => !value)} className="ml-auto hidden h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 lg:flex" aria-label={sidebarCollapsed ? 'Expandir navegación de Clarin Work' : 'Contraer navegación de Clarin Work'}>{sidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}</button><button onClick={() => setSidebarOpen(false)} aria-label="Cerrar navegación de Clarin Work" className="ml-auto flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 lg:hidden"><X className="h-4 w-4" /></button></div>
+		<div className="flex h-[52px] items-center border-b border-slate-100 px-3"><div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white"><Check className="h-4 w-4" /></div>{!sidebarCollapsed && <div className="ml-2.5 min-w-0"><p className="truncate text-sm font-black leading-4 text-slate-900">Clarin Work</p><p className="text-[9px] font-semibold uppercase tracking-[.14em] text-emerald-600">Tareas, proyectos y eventos</p></div>}<button onClick={() => setSidebarCollapsed(value => !value)} className="ml-auto hidden h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 lg:flex" aria-label={sidebarCollapsed ? 'Expandir navegación de Clarin Work' : 'Contraer navegación de Clarin Work'}>{sidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}</button><button onClick={() => setSidebarOpen(false)} aria-label="Cerrar navegación de Clarin Work" className="ml-auto flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 lg:hidden"><X className="h-4 w-4" /></button></div>
       <div className="relative min-h-0 flex-1"><nav ref={navRef} data-task-navigation-scroll className="task-navigation-scroll h-full overflow-y-auto px-2 py-2">
         <div className="mb-2 px-1"><TaskEnvironmentSwitcher active={activeEnvironment} environments={environments} collapsed={sidebarCollapsed} canCreate={canCreateEnvironment} onSelect={selectEnvironment} onCreate={openEnvironmentCreate} onConfigure={openEnvironmentConfigure} /></div>
         <TaskWorkspaceScopeSwitch collapsed={sidebarCollapsed} environmentName={activeEnvironment?.name || 'este Entorno'} scopeType={scope.type} onAll={() => activeEnvironmentId && selectScope({ type: 'environment', id: activeEnvironmentId })} onShared={() => selectScope({ type: 'shared' })} />
-        <TaskHierarchyTree folders={folders} rootLists={rootLists} scope={scope} collapsed={sidebarCollapsed} users={users} taskDragActive={taskDragActiveState} taskDropTarget={taskDropTarget} hierarchyPhase={hierarchyPhase} hierarchyError={hierarchyError} hasMoreFolders={Boolean(folderNextCursor)} hasMoreRootLists={Boolean(rootListNextCursor)} loadingMoreFolders={hierarchyMoreLoading.folders} loadingMoreRootLists={hierarchyMoreLoading.lists} folderChildrenState={folderChildrenState} onRetryHierarchy={() => void loadStructure()} onLoadMoreFolders={() => void loadMoreHierarchyRoot('folders')} onLoadMoreRootLists={() => void loadMoreHierarchyRoot('lists')} onExpandFolder={folderID => void loadFolderChildren(folderID)} onRetryFolderLists={folderID => void loadFolderChildren(folderID, false, true)} onLoadMoreFolderLists={folderID => void loadFolderChildren(folderID, true)} onOpenStructure={() => setStructureOpen(true)} onSelect={selectScope} onChanged={async () => { await loadStructure(); await loadTasks(false) }} onError={setError} onOperation={handleBoardOperation} />
+		{scope.type !== 'archive' && <TaskHierarchyTree folders={folders} rootLists={rootLists} scope={scope} collapsed={sidebarCollapsed} users={users} taskDragActive={taskDragActiveState} taskDropTarget={taskDropTarget} hierarchyPhase={hierarchyPhase} hierarchyError={hierarchyError} hasMoreFolders={Boolean(folderNextCursor)} hasMoreRootLists={Boolean(rootListNextCursor)} loadingMoreFolders={hierarchyMoreLoading.folders} loadingMoreRootLists={hierarchyMoreLoading.lists} folderChildrenState={folderChildrenState} onRetryHierarchy={() => void loadStructure()} onLoadMoreFolders={() => void loadMoreHierarchyRoot('folders')} onLoadMoreRootLists={() => void loadMoreHierarchyRoot('lists')} onExpandFolder={folderID => void loadFolderChildren(folderID)} onRetryFolderLists={folderID => void loadFolderChildren(folderID, false, true)} onLoadMoreFolderLists={folderID => void loadFolderChildren(folderID, true)} onOpenStructure={() => setStructureOpen(true)} onSelect={selectScope} onChanged={handleHierarchyChanged} onError={setError} onOperation={handleBoardOperation} />}
       </nav>{navOverflow.top && <div className="pointer-events-none absolute inset-x-0 top-0 h-5 bg-gradient-to-b from-white to-transparent" />}{navOverflow.bottom && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-5 bg-gradient-to-t from-white to-transparent" />}</div>
-      <div className="border-t border-slate-100 p-2"><TaskWorkspaceManagementActions collapsed={sidebarCollapsed} canManage={activeEnvironment?.permissions?.can_delete === true} trashSelected={scope.type === 'trash'} onTrash={() => selectScope({ type: 'trash' })} onManage={() => activeEnvironment && openEnvironmentConfigure(activeEnvironment)} /></div>
+			<div className="border-t border-slate-100 p-2"><TaskWorkspaceManagementActions collapsed={sidebarCollapsed} canManage={canManageActiveEnvironment} archiveSelected={scope.type === 'archive'} trashSelected={scope.type === 'trash'} onArchive={() => selectScope({ type: 'archive' })} onTrash={() => selectScope({ type: 'trash' })} onManage={() => activeEnvironment && openEnvironmentConfigure(activeEnvironment)} /></div>
     </aside>
 
     <main className="flex min-w-0 flex-1 flex-col">
       <header data-task-workspace-header className="shrink-0 border-b border-slate-200 bg-white">
-        <div className="flex min-h-[52px] items-center gap-2 px-3 py-1 sm:px-5"><button onClick={() => setSidebarOpen(true)} aria-label="Abrir navegación de Clarin Work" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 lg:hidden"><Menu className="h-5 w-5" /></button><div className="min-w-0"><div className="flex items-center gap-1 text-[9px] leading-3 text-slate-400"><span>Clarin Work</span>{activeEnvironment && <><ChevronRight className="h-3 w-3" /><span className="truncate">{activeEnvironment.name}</span></>}{activeFolder && <><ChevronRight className="h-3 w-3" /><span className="truncate">{activeFolder.name}</span></>}</div><h1 className="truncate text-lg font-black leading-5 text-slate-900">{scopeName}</h1></div><div className="ml-auto flex items-center gap-1.5">{activeEnvironment?.permissions?.can_delete && <button onClick={() => openEnvironmentConfigure(activeEnvironment)} title="Administrar Entorno" aria-label="Administrar Entorno" className="hidden h-11 w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-500 transition hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 sm:flex"><Settings2 className="h-4 w-4" /></button>}{scope.type !== 'trash' && <button disabled={!activeEnvironmentId || activeEnvironment?.permissions?.can_edit !== true} onClick={() => openCreate()} className="group flex h-11 items-center gap-2 rounded-2xl border border-emerald-500/20 bg-gradient-to-b from-emerald-500 to-emerald-600 px-3 text-sm font-black text-white shadow-lg shadow-emerald-600/20 transition hover:-translate-y-0.5 hover:from-emerald-600 hover:to-emerald-700 hover:shadow-xl focus:outline-none focus:ring-4 focus:ring-emerald-200 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-35"><span className="flex h-6 w-6 items-center justify-center rounded-lg bg-white/15 ring-1 ring-white/20"><Plus className="h-4 w-4 transition group-hover:rotate-90" /></span><span className="hidden sm:inline">Nueva tarea</span></button>}</div></div>
+				<div className="flex min-h-[52px] items-center gap-2 px-3 py-1 sm:px-5"><button onClick={() => setSidebarOpen(true)} aria-label="Abrir navegación de Clarin Work" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 lg:hidden"><Menu className="h-5 w-5" /></button><div className="min-w-0"><div className="flex items-center gap-1 text-[9px] leading-3 text-slate-400"><span>Clarin Work</span>{activeEnvironment && <><ChevronRight className="h-3 w-3" /><span className="truncate">{activeEnvironment.name}</span></>}{activeFolder && <><ChevronRight className="h-3 w-3" /><span className="truncate">{activeFolder.name}</span></>}</div><h1 className="truncate text-lg font-black leading-5 text-slate-900">{scopeName}</h1></div><div className="ml-auto flex items-center gap-1.5">{!historicalReadOnly && canManageActiveEnvironment && activeEnvironment && <button onClick={() => openEnvironmentConfigure(activeEnvironment)} title="Administrar Entorno" aria-label="Administrar Entorno" className="hidden h-11 w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-500 transition hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700 sm:flex"><Settings2 className="h-4 w-4" /></button>}{scope.type !== 'trash' && !historicalReadOnly && <div className="relative flex h-11 rounded-2xl border border-emerald-500/20 bg-gradient-to-b from-emerald-500 to-emerald-600 text-white shadow-lg shadow-emerald-600/20"><button disabled={!activeEnvironmentId || activeEnvironment?.permissions?.can_edit !== true} onClick={() => view === 'calendar' ? openEventCreate() : openCreate()} className="group flex min-w-0 items-center gap-2 rounded-l-2xl px-3 text-sm font-black transition hover:bg-emerald-700/30 focus:outline-none focus:ring-4 focus:ring-emerald-200 disabled:cursor-not-allowed disabled:opacity-35"><span className="flex h-6 w-6 items-center justify-center rounded-lg bg-white/15 ring-1 ring-white/20"><Plus className="h-4 w-4 transition group-hover:rotate-90" /></span><span className="hidden sm:inline">{view === 'calendar' ? 'Nuevo evento' : 'Nueva tarea'}</span></button><button type="button" disabled={!activeEnvironmentId || activeEnvironment?.permissions?.can_edit !== true} aria-label="Más opciones de creación" aria-expanded={createMenuOpen} onClick={() => setCreateMenuOpen(value => !value)} className="flex w-10 items-center justify-center rounded-r-2xl border-l border-white/20 hover:bg-emerald-700/30 disabled:opacity-35"><ChevronDown className="h-4 w-4" /></button>{createMenuOpen && <><button type="button" aria-label="Cerrar opciones de creación" onClick={() => setCreateMenuOpen(false)} className="fixed inset-0 z-[109] cursor-default" /><div role="menu" className="absolute right-0 top-[calc(100%+8px)] z-[110] min-w-52 rounded-2xl border border-slate-200 bg-white p-1.5 text-slate-700 shadow-2xl"><button role="menuitem" onClick={() => { setCreateMenuOpen(false); if (view === 'calendar') openCreate(); else openEventCreate() }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-bold hover:bg-slate-50">{view === 'calendar' ? <ListTodo className="h-4 w-4 text-emerald-600" /> : <CalendarDays className="h-4 w-4 text-emerald-600" />}{view === 'calendar' ? 'Nueva tarea' : 'Nuevo evento'}</button></div></>}</div>}</div></div>
         {scope.type !== 'shared' && <div className="flex min-w-0 items-center gap-2 px-3 pb-1.5 sm:px-5">
-          {scope.type !== 'trash' && <div data-task-view-tabs className="flex min-w-0 flex-1 overflow-x-auto rounded-xl bg-slate-100 p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">{viewOptions.map(option => { const Icon = option.icon; return <button key={option.id} onClick={() => setView(option.id)} className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-semibold transition sm:px-3 ${view === option.id ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}><Icon className="h-3.5 w-3.5" />{option.label}</button> })}</div>}
+					{scope.type !== 'trash' && !historicalReadOnly && <div data-task-view-tabs className="flex min-w-0 flex-1 overflow-x-auto rounded-xl bg-slate-100 p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">{viewOptions.map(option => { const Icon = option.icon; return <button key={option.id} onClick={() => setView(option.id)} className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-semibold transition sm:px-3 ${view === option.id ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}><Icon className="h-3.5 w-3.5" />{option.label}</button> })}</div>}
           <div className="ml-auto flex shrink-0 items-center gap-2">
             <div className={`relative flex h-11 items-center overflow-hidden rounded-xl border transition-all duration-200 ${searchOpen ? `${workspaceWidth < 850 ? 'w-44' : 'w-64'} border-emerald-300 bg-white shadow-sm` : `w-11 ${search ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white'}`}`}>
               <button type="button" aria-label="Buscar tareas" onClick={() => { setSearchOpen(true); requestAnimationFrame(() => searchInputRef.current?.focus()) }} className="flex h-11 w-11 shrink-0 items-center justify-center text-slate-500"><Search className="h-4 w-4" /></button>
@@ -1273,23 +1520,25 @@ export default function TaskWorkspace() {
               {search && <button type="button" aria-label="Limpiar búsqueda" onClick={() => { taskLoadAbortRef.current?.abort(); setSearch(''); setDebouncedSearch(''); setSearchOpen(false) }} className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X className="h-3.5 w-3.5" /></button>}
               {!searchOpen && search && <span className="absolute right-0.5 top-0.5 h-2 w-2 rounded-full bg-emerald-500" />}
             </div>
-            {scope.type !== 'trash' && structureReady && <TaskFilterToolbar filters={filters} statuses={allStatuses} users={users} scope={scope.type === 'all' ? { type: 'environment', id: activeEnvironmentId } : { type: scope.type, id: scope.id }} view={view} collapsedStatusIds={collapsedStatusIds} groupBy={groupBy} groupDirection={groupDirection} collapsedGroupKeys={collapsedGroupKeys} storageScope={storageScope} onChange={setFilters} onApplyView={applySavedView} applyDefaultOnLoad={!defaultViewLoadHandled.current} onDefaultLoadHandled={() => { defaultViewLoadHandled.current = true }} onError={setError} showChips={false} compact={chromeDensity === 'narrow'} betweenControls={view === 'list' ? <TaskListGroupingControl groupBy={groupBy} direction={groupDirection} collapsedGroupKeys={collapsedGroupKeys} density={chromeDensity} onChange={updateListGrouping} /> : undefined} />}
+						{scope.type !== 'trash' && !historicalReadOnly && structureReady && <TaskFilterToolbar filters={filters} statuses={allStatuses} users={users} scope={scope.type === 'all' ? { type: 'environment', id: activeEnvironmentId } : { type: scope.type, id: scope.id }} view={view} collapsedStatusIds={collapsedStatusIds} groupBy={groupBy} groupDirection={groupDirection} collapsedGroupKeys={collapsedGroupKeys} storageScope={storageScope} onChange={setFilters} onApplyView={applySavedView} applyDefaultOnLoad={!defaultViewLoadHandled.current} onDefaultLoadHandled={() => { defaultViewLoadHandled.current = true }} onError={setError} showChips={false} compact={chromeDensity === 'narrow'} betweenControls={view === 'list' ? <TaskListGroupingControl groupBy={groupBy} direction={groupDirection} collapsedGroupKeys={collapsedGroupKeys} density={chromeDensity} onChange={updateListGrouping} /> : undefined} />}
           </div>
         </div>}
-        {scope.type !== 'trash' && scope.type !== 'shared' && <TaskFilterChips filters={filters} statuses={allStatuses} users={users} onChange={setFilters} />}
+				{scope.type !== 'trash' && scope.type !== 'shared' && !historicalReadOnly && <TaskFilterChips filters={filters} statuses={allStatuses} users={users} onChange={setFilters} />}
       </header>
 
       <div data-task-workspace-canvas className={`min-h-0 flex-1 ${immersiveView ? 'overflow-hidden p-0' : 'overflow-auto p-2 sm:p-3'}`}>
+				{historicalReadOnly && <div role="status" className="m-2 mb-3 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900"><ArchiveRestore className="mt-0.5 h-4 w-4 shrink-0" /><span><strong className="block text-sm">Histórico · solo lectura</strong><span className="mt-0.5 block text-xs text-amber-800">Puedes consultar tareas cerradas, comentarios, actividad y adjuntos. Restaura el elemento para volver a modificarlo.</span></span></div>}
         {notice && <div role="status" className="m-2 mb-3 flex items-center justify-between rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700"><span>{notice}</span><button aria-label="Cerrar aviso" onClick={() => setNotice('')}><X className="h-4 w-4" /></button></div>}
         {error && <div className="m-2 mb-3 flex items-center justify-between rounded-xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700"><span>{error}</span><button onClick={() => setError('')}><X className="h-4 w-4" /></button></div>}
         {loading ? <div className="space-y-3">{Array.from({length:5}).map((_,index) => <div key={index} className="h-16 animate-pulse rounded-2xl bg-slate-200/60" />)}</div> : <div className="h-full min-h-[420px]">
           {scope.type === 'trash' && <TrashView tasks={tasks} environmentId={activeEnvironmentId} onChanged={async () => { await Promise.all([loadTasks(false), loadHierarchy()]) }} onError={setError} />}
-          {scope.type === 'shared' && <TaskSharedHub environmentId={activeEnvironmentId} refreshToken={sharedHubRevision} onOpenFolder={(id, name) => selectScope({ type: 'folder', id }, name)} onOpenList={(id, name) => selectScope({ type: 'list', id }, name)} onOpenTask={setSelectedTaskId} />}
-          {scope.type !== 'trash' && scope.type !== 'shared' && view === 'list' && <TaskListView tasks={tasks} statuses={allStatuses} lists={lists} folders={folders} users={users} groupBy={groupBy} groupDirection={groupDirection} collapsedGroupKeys={collapsedGroupKeys} onGroupingChange={updateListGrouping} onOpen={task => setSelectedTaskId(task.id)} onStatus={(task,statusId) => void updateTask(task,{status_id:statusId})} onStar={task => void toggleStar(task)} onCanonicalTasks={reconcileCanonicalTasks} onHierarchyCounts={applyHierarchySnapshot} onOperation={handleBoardOperation} onDragStateChange={handleBoardDragState} onExternalDropTargetChange={setTaskDropTarget} onRefresh={async () => { await Promise.all([loadTasks(false), loadHierarchy()]) }} onError={setError} />}
-          {scope.type !== 'trash' && scope.type !== 'shared' && view === 'board' && <TaskBoard tasks={tasks} statuses={boardStatuses} allStatuses={allStatuses} lists={scopedLists} allLists={lists} folders={folders} users={users} currentUserId={currentUserId} defaultListId={boardDefaultListId} showListName={scope.type !== 'list'} collapsedStatusIds={collapsedStatusIds} onCollapsedStatusIdsChange={setCollapsedStatusIds} onTasksChange={setVisibleBoardTasks} onCanonicalTask={reconcileCanonicalTask} onCanonicalTasks={reconcileCanonicalTasks} onHierarchyCounts={applyHierarchySnapshot} onOperation={handleBoardOperation} onTaskCreated={revealCreatedTask} recentlyCreatedTaskId={recentlyCreatedTaskId} onDragStateChange={handleBoardDragState} onExternalDropTargetChange={setTaskDropTarget} onOpen={task => setSelectedTaskId(task.id)} onEdit={task => { if (!canEditTask(task)) return; setSubtaskParent(null); setEditingTask(task); setEditorOpen(true) }} onCreateSubtask={task => { if (!canEditTask(task)) return; setSubtaskParent(task); setEditingTask(null); setCreateStatusId(''); setCreateDraft(null); setEditorOpen(true) }} onCreateFull={openCreate} onConfigureStatuses={() => { if (activeEnvironment?.permissions?.can_delete) setStructureOpen(true) }} onStar={toggleStar} onQuickUpdate={updateTask} onRefresh={async () => { await Promise.all([loadTasks(false), loadHierarchy()]) }} onError={setError} canCreate={Boolean(activeEnvironmentId && activeEnvironment?.permissions?.can_edit === true)} canManageStructure={Boolean(activeEnvironment?.permissions?.can_delete)} />}
-          {scope.type !== 'trash' && scope.type !== 'shared' && view === 'calendar' && <TaskCalendarView tasks={tasks} lists={editorLists} folders={folders} statuses={allStatuses} users={users} currentUserID={currentUserId} scopeListID={scope.type === 'list' ? scope.id : undefined} onOpen={task => setSelectedTaskId(task.id)} onCreated={revealCreatedTask} onOperation={handleBoardOperation} onMore={openCreate} canCreate={Boolean(activeEnvironmentId && activeEnvironment?.permissions?.can_edit === true)} />}
-          {scope.type !== 'trash' && scope.type !== 'shared' && view === 'gantt' && <TaskGanttView data={gantt} onOpen={task => setSelectedTaskId(task.id)} onMove={moveGantt} />}
-          {scope.type !== 'trash' && scope.type !== 'shared' && view === 'summary' && <SummaryView tasks={tasks} summary={visibleSummary} users={users} />}
+						{scope.type === 'archive' && <ArchiveView environment={activeEnvironment} folders={folders} rootLists={rootLists} tasks={tasks} onOpenTask={setSelectedTaskId} onChanged={async () => { await Promise.all([loadStructure(), loadTasks(false), loadEnvironmentIndex()]) }} onEnvironmentChanged={reconcileEnvironment} onError={setError} />}
+						{scope.type === 'shared' && <TaskSharedHub environmentId={activeEnvironmentId} refreshToken={sharedHubRevision} onOpenFolder={(id, name) => selectScope({ type: 'folder', id }, name)} onOpenList={(id, name) => selectScope({ type: 'list', id }, name)} onOpenTask={setSelectedTaskId} onOpenEvent={occurrence => { setFocusedWorkEvent(occurrence); setScope({ type: 'environment', id: activeEnvironmentId }); setView('calendar') }} />}
+						{scope.type !== 'trash' && scope.type !== 'archive' && scope.type !== 'shared' && view === 'list' && <TaskListView tasks={tasks} statuses={allStatuses} lists={lists} folders={folders} users={users} groupBy={groupBy} groupDirection={groupDirection} collapsedGroupKeys={collapsedGroupKeys} onGroupingChange={updateListGrouping} onOpen={task => setSelectedTaskId(task.id)} onStatus={(task,statusId) => void updateTask(task,{status_id:statusId})} onStar={task => void toggleStar(task)} onCanonicalTasks={reconcileCanonicalTasks} onHierarchyCounts={applyHierarchySnapshot} onOperation={handleBoardOperation} onDragStateChange={handleBoardDragState} onExternalDropTargetChange={setTaskDropTarget} onRefresh={async () => { await Promise.all([loadTasks(false), loadHierarchy()]) }} onError={setError} />}
+						{scope.type !== 'trash' && scope.type !== 'archive' && scope.type !== 'shared' && view === 'board' && <TaskBoard tasks={tasks} statuses={boardStatuses} allStatuses={allStatuses} lists={scopedLists} allLists={lists} folders={folders} users={users} currentUserId={currentUserId} defaultListId={boardDefaultListId} showListName={scope.type !== 'list'} collapsedStatusIds={collapsedStatusIds} onCollapsedStatusIdsChange={setCollapsedStatusIds} onTasksChange={setVisibleBoardTasks} onCanonicalTask={reconcileCanonicalTask} onCanonicalTasks={reconcileCanonicalTasks} onHierarchyCounts={applyHierarchySnapshot} onOperation={handleBoardOperation} onTaskCreated={revealCreatedTask} recentlyCreatedTaskId={recentlyCreatedTaskId} onDragStateChange={handleBoardDragState} onExternalDropTargetChange={setTaskDropTarget} onOpen={task => setSelectedTaskId(task.id)} onEdit={task => { if (!canEditTask(task)) return; setSubtaskParent(null); setEditingTask(task); setEditorOpen(true) }} onCreateSubtask={task => { if (!canEditTask(task)) return; setSubtaskParent(task); setEditingTask(null); setCreateStatusId(''); setCreateDraft(null); setEditorOpen(true) }} onCreateFull={openCreate} onConfigureStatuses={() => { if (canManageActiveEnvironment) setStructureOpen(true) }} onStar={toggleStar} onQuickUpdate={updateTask} onRefresh={async () => { await Promise.all([loadTasks(false), loadHierarchy()]) }} onError={setError} canCreate={Boolean(activeEnvironmentId && activeEnvironment?.permissions?.can_edit === true)} canManageStructure={canManageActiveEnvironment} />}
+						{scope.type !== 'trash' && scope.type !== 'archive' && scope.type !== 'shared' && view === 'calendar' && <TaskCalendarView lists={editorLists} folders={folders} statuses={allStatuses} users={users} currentUserID={currentUserId} environmentID={activeEnvironmentId} scopeFolderID={scope.type === 'folder' ? scope.id : undefined} scopeListID={scope.type === 'list' ? scope.id : undefined} storageScope={storageScope} createEventToken={createEventToken} focusEvent={focusedWorkEvent} onOpen={task => setSelectedTaskId(task.id)} onCreated={revealCreatedTask} onOperation={handleBoardOperation} onMore={openCreate} canCreate={Boolean(activeEnvironmentId && activeEnvironment?.permissions?.can_edit === true)} />}
+						{scope.type !== 'trash' && scope.type !== 'archive' && scope.type !== 'shared' && view === 'gantt' && <TaskGanttView data={gantt} onOpen={task => setSelectedTaskId(task.id)} onMove={moveGantt} />}
+						{scope.type !== 'trash' && scope.type !== 'archive' && scope.type !== 'shared' && view === 'summary' && <SummaryView tasks={tasks} summary={visibleSummary} users={users} />}
         </div>}
       </div>
       {!loading && scope.type !== 'shared' && view !== 'gantt' && <TaskPageProgress loaded={tasks.length} total={taskTotal} hasMore={Boolean(taskNextCursor)} loadingMore={taskLoadingMore} error={taskLoadMoreError} onLoadMore={() => void loadMoreTasks()} />}
@@ -1312,7 +1561,7 @@ export default function TaskWorkspace() {
       if (!hasCanonicalCounts && (editingTask.list_id !== saved.list_id || editingTask.status_id !== saved.status_id || editingTask.parent_task_id !== saved.parent_task_id)) void loadHierarchy()
       void loadTasks(false)
     }} />
-    <TaskDetailDrawer taskId={selectedTaskId} allTasks={tasks} users={users} lists={lists} folders={folders} workflows={workflows} storageScope={storageScope} onClose={closeTaskDetail} onEdit={task => { if (!canEditTask(task)) return; setSubtaskParent(null); setCreateDraft(null); setEditingTask(task); setEditorOpen(true) }} onOpenTask={setSelectedTaskId} onCreateSubtask={task => { if (!canEditTask(task)) return; setSubtaskParent(task); setEditingTask(null); setCreateStatusId(''); setCreateDraft(null); setEditorOpen(true) }} onChanged={(changed, operationID, hierarchyCounts) => { if (changed) { const previous = tasksRef.current.find(item => item.id === changed.id); if (reconcileCanonicalTask(changed)) { reconcileTaskHierarchyMutation(previous, changed, hierarchyCounts, operationID); const hasCanonicalCounts = Boolean(hierarchyCounts) || Boolean(operationID && hierarchyCountOperations.current.get(operationID) === 'canonical'); if (!hasCanonicalCounts && (previous?.list_id !== changed.list_id || previous?.status_id !== changed.status_id || previous?.parent_task_id !== changed.parent_task_id)) void loadHierarchy() } }; void loadTasks(false) }} onDeleted={(id, version, operationID, hierarchyCounts) => { const accepted = markTaskDeleted(id, version); if (accepted) { const previous = tasksRef.current.find(item => item.id === id); setTasks(current => current.filter(item => item.id !== id)); reconcileTaskHierarchyMutation(previous, null, hierarchyCounts, operationID); const hasCanonicalCounts = Boolean(hierarchyCounts) || Boolean(operationID && hierarchyCountOperations.current.get(operationID) === 'canonical'); if (!hasCanonicalCounts) void loadHierarchy() }; return accepted }} />
+    <TaskDetailDrawer taskId={selectedTaskId} historicalReadOnly={historicalReadOnly} allTasks={tasks} users={users} lists={lists} folders={folders} workflows={workflows} storageScope={storageScope} onClose={closeTaskDetail} onEdit={task => { if (!canEditTask(task)) return; setSubtaskParent(null); setCreateDraft(null); setEditingTask(task); setEditorOpen(true) }} onOpenTask={setSelectedTaskId} onCreateSubtask={task => { if (!canEditTask(task)) return; setSubtaskParent(task); setEditingTask(null); setCreateStatusId(''); setCreateDraft(null); setEditorOpen(true) }} onChanged={(changed, operationID, hierarchyCounts) => { if (changed) { const previous = tasksRef.current.find(item => item.id === changed.id); if (reconcileCanonicalTask(changed)) { reconcileTaskHierarchyMutation(previous, changed, hierarchyCounts, operationID); const hasCanonicalCounts = Boolean(hierarchyCounts) || Boolean(operationID && hierarchyCountOperations.current.get(operationID) === 'canonical'); if (!hasCanonicalCounts && (previous?.list_id !== changed.list_id || previous?.status_id !== changed.status_id || previous?.parent_task_id !== changed.parent_task_id)) void loadHierarchy() } }; void loadTasks(false) }} onDeleted={(id, version, operationID, hierarchyCounts) => { const accepted = markTaskDeleted(id, version); if (accepted) { const previous = tasksRef.current.find(item => item.id === id); setTasks(current => current.filter(item => item.id !== id)); reconcileTaskHierarchyMutation(previous, null, hierarchyCounts, operationID); const hasCanonicalCounts = Boolean(hierarchyCounts) || Boolean(operationID && hierarchyCountOperations.current.get(operationID) === 'canonical'); if (!hasCanonicalCounts) void loadHierarchy() }; return accepted }} />
     <TaskStructureModal open={structureOpen} environmentId={activeEnvironmentId} folders={folders} lists={lists} workflows={workflows} users={users} storageScope={storageScope} onClose={() => setStructureOpen(false)} onCreated={(mutation: TaskHierarchyCreateMutation) => commitHierarchy(mergeCreatedTaskHierarchy(hierarchyRef.current, mutation))} onChanged={async () => { await loadStructure(); await loadTasks(false) }} onOperation={handleBoardOperation} />
     <TaskEnvironmentWindow open={environmentWindowOpen} environment={environmentWindowTarget} users={users} folders={folders} lists={lists} workflows={workflows} storageScope={storageScope} onClose={() => setEnvironmentWindowOpen(false)} onSaved={reconcileEnvironment} onOpenStructure={() => { setEnvironmentWindowOpen(false); setStructureOpen(true) }} />
   </div>

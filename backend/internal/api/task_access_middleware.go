@@ -7,6 +7,11 @@ import (
 	"github.com/google/uuid"
 )
 
+func taskHistoricalReadRequested(c *fiber.Ctx) bool {
+	lifecycle := strings.ToLower(strings.TrimSpace(c.Query("lifecycle")))
+	return lifecycle == "archive" || lifecycle == "archived"
+}
+
 // requireTaskAccessParam is the common server-side gate for every nested task
 // surface. Hidden tasks resolve as 404; visible tasks with an insufficient
 // level resolve as 403 through taskWorkError.
@@ -18,8 +23,14 @@ func (s *Server) requireTaskAccessParam(param, required string) fiber.Handler {
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Tarea inválida"})
 		}
-		if _, err := s.repos.TaskWork.RequireTaskAccess(c.Context(), accountID, userID, taskID, required); err != nil {
-			return taskWorkError(c, err)
+		var accessErr error
+		if required == "view" && taskHistoricalReadRequested(c) {
+			_, accessErr = s.repos.TaskWork.RequireTaskReadAccess(c.Context(), accountID, userID, taskID)
+		} else {
+			_, accessErr = s.repos.TaskWork.RequireTaskAccess(c.Context(), accountID, userID, taskID, required)
+		}
+		if accessErr != nil {
+			return taskWorkError(c, accessErr)
 		}
 		return c.Next()
 	}

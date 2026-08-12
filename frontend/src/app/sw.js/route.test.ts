@@ -11,6 +11,8 @@ describe('PWA service worker', () => {
     expect(source).toContain("request.mode === 'navigate'")
     expect(source).toContain("url.pathname.startsWith('/_next/static/')")
     expect(source).toContain("url.pathname.startsWith('/icons/')")
+    expect(source).toContain("url.pathname === '/favicon.svg'")
+    expect(source).toContain("'/favicon.svg'")
     expect(source).toContain("cache.match('/offline')")
     expect(source).toContain('STATIC_FETCH_TIMEOUT_MS')
     expect(source).toContain("fetchWithTimeout(request, 'reload')")

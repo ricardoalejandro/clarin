@@ -58,7 +58,7 @@ func (r *TaskWorkRepository) MoveTaskToEnvironment(ctx context.Context, accountI
 	listIDs := []uuid.UUID{sourceListID, destinationListID}
 	sort.Slice(listIDs, func(i, j int) bool { return listIDs[i].String() < listIDs[j].String() })
 	rows, err := tx.Query(ctx, `SELECT id,environment_id,workflow_id FROM task_lists
-		WHERE account_id=$1 AND id=ANY($2::uuid[]) AND archived_at IS NULL ORDER BY id FOR UPDATE`, accountID, listIDs)
+		WHERE account_id=$1 AND id=ANY($2::uuid[]) AND archived_at IS NULL AND deleted_at IS NULL ORDER BY id FOR UPDATE`, accountID, listIDs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -83,7 +83,7 @@ func (r *TaskWorkRepository) MoveTaskToEnvironment(ctx context.Context, accountI
 	environmentIDs := []uuid.UUID{lists[sourceListID].environmentID, lists[destinationListID].environmentID}
 	sort.Slice(environmentIDs, func(i, j int) bool { return environmentIDs[i].String() < environmentIDs[j].String() })
 	environmentRows, err := tx.Query(ctx, `SELECT id FROM task_environments
-		WHERE account_id=$1 AND id=ANY($2::uuid[]) AND archived_at IS NULL ORDER BY id FOR UPDATE`, accountID, environmentIDs)
+		WHERE account_id=$1 AND id=ANY($2::uuid[]) AND archived_at IS NULL AND deleted_at IS NULL ORDER BY id FOR UPDATE`, accountID, environmentIDs)
 	if err != nil {
 		return nil, nil, err
 	}

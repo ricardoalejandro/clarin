@@ -72,7 +72,13 @@ func taskWorkError(c *fiber.Ctx, err error) error {
 	case errors.Is(err, repository.ErrTaskStatusOrderInvalid):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "El orden debe contener exactamente todos los estados del flujo", "code": "invalid_status_order"})
 	case errors.Is(err, repository.ErrTaskContainerNotEmpty):
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Mueve o elimina las tareas antes de archivar", "code": "task_container_not_empty"})
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "El contenedor todavía conserva tareas; muévelas o envíalas a Papelera primero", "code": "task_container_not_empty"})
+	case errors.Is(err, repository.ErrTaskContainerHasOpenTasks):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Completa o cancela las tareas abiertas antes de archivar", "code": "task_container_has_open_tasks"})
+	case errors.Is(err, repository.ErrTaskContainerHasFutureEvents):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Cancela o mueve los eventos futuros antes de archivar", "code": "task_container_has_future_events"})
+	case errors.Is(err, repository.ErrTaskContainerHasWorkEvents):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Mueve los eventos a Papelera antes de eliminar este contenedor", "code": "task_container_has_work_events"})
 	case errors.Is(err, repository.ErrTaskParentArchived):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Restaura primero la tarea padre", "code": "task_parent_archived"})
 	case errors.Is(err, repository.ErrTaskBulkMoveInvalid):
@@ -1034,11 +1040,11 @@ func (s *Server) handleArchiveTaskFolder(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	if err := s.repos.TaskWork.ArchiveFolderConfirmed(c.Context(), accountID, userID, folderID, request.ConfirmationName); err != nil {
+	if err := s.repos.TaskWork.TrashFolderConfirmed(c.Context(), accountID, userID, folderID, request.ConfirmationName); err != nil {
 		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(c.Context(), accountID, "folder_archived", fiber.Map{"folder_id": folderID, "operation_id": operationID})
+	s.broadcastTaskWork(c.Context(), accountID, "folder_trashed", fiber.Map{"folder_id": folderID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
 }
 
@@ -1755,7 +1761,7 @@ func (s *Server) handleGetTaskActivity(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Tarea inválida"})
 	}
-	items, err := s.repos.TaskWork.ListActivityForActor(c.Context(), accountID, userID, taskID, 100)
+	items, err := s.repos.TaskWork.ListActivityForActor(c.Context(), accountID, userID, taskID, 100, taskHistoricalReadRequested(c))
 	if err != nil {
 		return taskWorkError(c, err)
 	}
@@ -1827,7 +1833,7 @@ func (s *Server) handleGetTaskDependencies(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Tarea inválida"})
 	}
-	items, err := s.repos.TaskWork.ListDependenciesForActor(c.Context(), accountID, userID, taskID)
+	items, err := s.repos.TaskWork.ListDependenciesForActor(c.Context(), accountID, userID, taskID, taskHistoricalReadRequested(c))
 	if err != nil {
 		return taskWorkError(c, err)
 	}

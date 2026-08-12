@@ -482,15 +482,9 @@ func (s *Server) syncWhiteboardRealtimeClient(ctx context.Context, principal *wh
 		return nil
 	}
 	operations, err := s.whiteboardRealtimeOperations(ctx, principal, baseSequence, 500)
-	if err != nil || len(operations) == 0 || operations[len(operations)-1].Sequence != scene.Sequence {
+	if err != nil || !whiteboardOperationReplayComplete(baseSequence, scene.Sequence, operations) {
 		s.queueWhiteboardMessage(client, whiteboardSceneSnapshotMessage(scene))
 		return nil
-	}
-	for _, operation := range operations {
-		if operation.OperationKind != "patch" || len(operation.Patch) == 0 {
-			s.queueWhiteboardMessage(client, whiteboardSceneSnapshotMessage(scene))
-			return nil
-		}
 	}
 	for _, operation := range operations {
 		operationID := operation.OperationID
@@ -501,6 +495,21 @@ func (s *Server) syncWhiteboardRealtimeClient(ctx context.Context, principal *wh
 		}
 	}
 	return nil
+}
+
+func whiteboardOperationReplayComplete(baseSequence, canonicalSequence int64, operations []*domain.WhiteboardOperation) bool {
+	if baseSequence >= canonicalSequence || len(operations) == 0 {
+		return false
+	}
+	expectedBase := baseSequence
+	for _, operation := range operations {
+		if operation == nil || operation.OperationKind != "patch" || len(operation.Patch) == 0 ||
+			operation.BaseSequence != expectedBase || operation.Sequence <= operation.BaseSequence {
+			return false
+		}
+		expectedBase = operation.Sequence
+	}
+	return expectedBase == canonicalSequence
 }
 
 // queueWhiteboardReplayOperation returns true only when the caller may enqueue

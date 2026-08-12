@@ -32,6 +32,7 @@ export default defineConfig({
       'src/app/sw.js/route.test.ts',
       'src/components/TagInput.test.tsx',
       'src/components/AccountSwitcher.test.tsx',
+      'src/components/branding/**/*.test.{ts,tsx}',
       'src/components/mobile-app/**/*.test.{ts,tsx}',
       'src/components/reports/WhatsAppGroupSelector.test.tsx',
       'src/components/surveys/**/*.test.{ts,tsx}',

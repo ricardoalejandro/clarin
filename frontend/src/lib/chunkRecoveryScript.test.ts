@@ -20,5 +20,6 @@ describe('chunk recovery', () => {
     expect(source).toContain('window.setTimeout(resolve, 1500)')
     expect(source).toContain('window.location.reload()')
     expect(source).toContain('Clarin necesita actualizarse')
+    expect(source).toContain('<img src="/favicon.svg" alt="Clarín"')
   })
 })

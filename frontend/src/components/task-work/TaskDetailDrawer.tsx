@@ -29,7 +29,7 @@ import {
   UserRound,
   X,
 } from 'lucide-react'
-import { apiDelete, apiGet, apiPost, apiPut, apiUpload, subscribeWebSocket } from '@/lib/api'
+import { apiDelete, apiGet, apiPatch, apiPost, apiPut, apiUpload, subscribeWebSocket } from '@/lib/api'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import {
   Task,
@@ -60,9 +60,12 @@ import TaskMoveEnvironmentDialog from './TaskMoveEnvironmentDialog'
 import TaskParticipantGrantConfirmDialog from './TaskParticipantGrantConfirmDialog'
 import { canAdministerTask, canCommentOnTask, canEditTask } from './taskPermissionActions'
 import { mergeCommentAttachmentDrafts, removeCommentAttachmentDrafts, resolveCommentAttachment, type TaskCommentAttachmentLookup } from './taskCommentAttachmentDrafts'
+import { TaskColorPicker } from './TaskContainerAppearance'
+import { resolveTaskIdentityColor } from './taskIdentityColor'
 
 interface Props {
   taskId: string | null
+  historicalReadOnly?: boolean
   allTasks: Task[]
   users: TaskAccountUser[]
   lists: TaskList[]
@@ -139,7 +142,7 @@ function initials(name: string) {
   return name.trim().slice(0, 2).toUpperCase() || 'CL'
 }
 
-export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folders, workflows, storageScope, onClose, onEdit, onOpenTask, onCreateSubtask, onChanged, onDeleted }: Props) {
+export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, allTasks, users, lists, folders, workflows, storageScope, onClose, onEdit, onOpenTask, onCreateSubtask, onChanged, onDeleted }: Props) {
   const [task, setTask] = useState<Task | null>(null)
   const [children, setChildren] = useState<Task[]>([])
   const [comments, setComments] = useState<TaskComment[]>([])
@@ -220,6 +223,9 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   onCloseRef.current = onClose
   commentsRef.current = comments
   useEffect(() => { setDescriptionExpanded(false) }, [taskId])
+  const historicalReadURL = useCallback((url: string) => historicalReadOnly
+    ? `${url}${url.includes('?') ? '&' : '?'}lifecycle=archive`
+    : url, [historicalReadOnly])
 
   draftBodiesRef.current = {
     title: { title: titleDraft.trim() },
@@ -277,22 +283,22 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
   const refreshTask = useCallback(async () => {
     const requestedTaskId = taskIdRef.current
     if (!requestedTaskId) return
-    const response = await apiGet<{ task: Task }>(`/api/tasks/${requestedTaskId}`)
+    const response = await apiGet<{ task: Task }>(historicalReadURL(`/api/tasks/${requestedTaskId}`))
     if (taskIdRef.current !== requestedTaskId) return
     if (response.success && response.data?.task) applyTask(response.data.task)
     else showFailure(response.error || 'No se pudo actualizar la tarea', () => { void refreshTask() })
-  }, [applyTask, showFailure])
+  }, [applyTask, historicalReadURL, showFailure])
 
   const refreshChildren = useCallback(async () => {
     const requestedTaskId = taskIdRef.current
     if (!requestedTaskId) return
-    const response = await apiGet<{ tasks: Task[] }>(`/api/tasks/${requestedTaskId}/children`)
+    const response = await apiGet<{ tasks: Task[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/children`))
     if (taskIdRef.current === requestedTaskId && response.success) setChildren(response.data?.tasks || [])
-  }, [])
+  }, [historicalReadURL])
   const refreshComments = useCallback(async () => {
     const requestedTaskId = taskIdRef.current
     if (!requestedTaskId) return
-    const response = await apiGet<TaskCommentPage>(`/api/tasks/${requestedTaskId}/comments?limit=100&offset=0`)
+    const response = await apiGet<TaskCommentPage>(historicalReadURL(`/api/tasks/${requestedTaskId}/comments?limit=100&offset=0`))
     if (taskIdRef.current !== requestedTaskId || !response.success) return
     const latest = response.data?.comments || []
     const existing = new Map(commentsRef.current.map(item => [item.id, item]))
@@ -309,14 +315,14 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
       commentsNextOffsetRef.current = response.data?.next_offset || latest.length
       setCommentsHasMore(Boolean(response.data?.has_more))
     }
-  }, [])
+  }, [historicalReadURL])
   const loadOlderComments = useCallback(async () => {
     const requestedTaskId = taskIdRef.current
     if (!requestedTaskId || commentsLoadingMore || !commentsHasMore) return
     const offset = commentsNextOffsetRef.current
     setCommentsLoadingMore(true)
     prependScrollHeightRef.current = feedScrollRef.current?.scrollHeight ?? null
-    const response = await apiGet<TaskCommentPage>(`/api/tasks/${requestedTaskId}/comments?limit=100&offset=${offset}`)
+    const response = await apiGet<TaskCommentPage>(historicalReadURL(`/api/tasks/${requestedTaskId}/comments?limit=100&offset=${offset}`))
     if (taskIdRef.current !== requestedTaskId) return
     if (!response.success) {
       prependScrollHeightRef.current = null
@@ -332,25 +338,25 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     commentsNextOffsetRef.current = response.data?.next_offset ?? offset + older.length
     setCommentsHasMore(Boolean(response.data?.has_more))
     setCommentsLoadingMore(false)
-  }, [commentsHasMore, commentsLoadingMore, showFailure])
+  }, [commentsHasMore, commentsLoadingMore, historicalReadURL, showFailure])
   const refreshActivity = useCallback(async () => {
     const requestedTaskId = taskIdRef.current
     if (!requestedTaskId) return
-    const response = await apiGet<{ activity: TaskActivity[] }>(`/api/tasks/${requestedTaskId}/activity`)
+    const response = await apiGet<{ activity: TaskActivity[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/activity`))
     if (taskIdRef.current === requestedTaskId && response.success) setActivity(response.data?.activity || [])
-  }, [])
+  }, [historicalReadURL])
   const refreshAttachments = useCallback(async () => {
     const requestedTaskId = taskIdRef.current
     if (!requestedTaskId) return
-    const response = await apiGet<{ attachments: TaskAttachment[] }>(`/api/tasks/${requestedTaskId}/attachments`)
+    const response = await apiGet<{ attachments: TaskAttachment[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/attachments`))
     if (taskIdRef.current === requestedTaskId && response.success) setAttachments(response.data?.attachments || [])
-  }, [])
+  }, [historicalReadURL])
   const refreshDependencies = useCallback(async () => {
     const requestedTaskId = taskIdRef.current
     if (!requestedTaskId) return
-    const response = await apiGet<{ dependencies: TaskDependency[] }>(`/api/tasks/${requestedTaskId}/dependencies`)
+    const response = await apiGet<{ dependencies: TaskDependency[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/dependencies`))
     if (taskIdRef.current === requestedTaskId && response.success) setDependencies(response.data?.dependencies || [])
-  }, [])
+  }, [historicalReadURL])
 
   const removeAttachmentReferences = useCallback((attachmentId: string) => {
     const next = commentsRef.current.map(item => {
@@ -370,12 +376,12 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     const sequence = ++loadSequenceRef.current
     setLoading(true)
     const [taskRes, childRes, commentRes, activityRes, attachmentRes, dependencyRes] = await Promise.all([
-      apiGet<{ task: Task }>(`/api/tasks/${requestedTaskId}`),
-      apiGet<{ tasks: Task[] }>(`/api/tasks/${requestedTaskId}/children`),
-      apiGet<TaskCommentPage>(`/api/tasks/${requestedTaskId}/comments?limit=100&offset=0`),
-      apiGet<{ activity: TaskActivity[] }>(`/api/tasks/${requestedTaskId}/activity`),
-      apiGet<{ attachments: TaskAttachment[] }>(`/api/tasks/${requestedTaskId}/attachments`),
-      apiGet<{ dependencies: TaskDependency[] }>(`/api/tasks/${requestedTaskId}/dependencies`),
+      apiGet<{ task: Task }>(historicalReadURL(`/api/tasks/${requestedTaskId}`)),
+      apiGet<{ tasks: Task[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/children`)),
+      apiGet<TaskCommentPage>(historicalReadURL(`/api/tasks/${requestedTaskId}/comments?limit=100&offset=0`)),
+      apiGet<{ activity: TaskActivity[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/activity`)),
+      apiGet<{ attachments: TaskAttachment[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/attachments`)),
+      apiGet<{ dependencies: TaskDependency[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/dependencies`)),
     ])
     if (loadSequenceRef.current !== sequence || taskIdRef.current !== requestedTaskId) return
     if (!taskRes.success || !taskRes.data?.task) {
@@ -396,7 +402,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
       showFailure('Algunos datos de la tarea no se pudieron cargar.', () => { void load() })
     }
     setLoading(false)
-  }, [applyTask, showFailure])
+  }, [applyTask, historicalReadURL, showFailure])
 
   useEffect(() => {
     taskIdRef.current = taskId
@@ -638,6 +644,26 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
     return queued.finally(() => endPending(key))
   }, [applyTask, beginPending, clearFailure, endPending, onChanged, refreshTask, showFailure])
   updateTaskRef.current = updateTask
+
+	const changeColor = async (nextColor: string | null) => {
+		const current = taskRef.current
+		if (!current || !canEditTask(current) || isPending('color')) return
+		const listColor = lists.find(item => item.id === current.list_id)?.color
+		const optimisticColor = resolveTaskIdentityColor(nextColor, listColor)
+		const snapshot = current
+		beginPending('color')
+		applyTask({ ...current, color: nextColor || undefined, resolved_color: optimisticColor.color, color_source: optimisticColor.source })
+		const operationID = crypto.randomUUID()
+		const result = await apiPatch<TaskMutationResponse>(`/api/tasks/${current.id}/appearance`, { color: nextColor, version: current.version, operation_id: operationID })
+		endPending('color')
+		if (!result.success || !result.data?.task) {
+			applyTask(snapshot)
+			if (result.status === 409) await refreshTask()
+			showFailure(result.status === 409 ? 'El color cambió en otra sesión. Cargamos la versión canónica.' : result.error || 'No se pudo cambiar el color; restauramos el anterior.', () => { void changeColor(nextColor) })
+			return
+		}
+		clearFailure(); applyTask(result.data.task); onChanged(result.data.task, result.data.operation_id || operationID, result.data.hierarchy_counts)
+	}
 
   const saveTitle = async () => {
     editingTitleRef.current = false
@@ -1037,6 +1063,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
         <div className="text-xs font-semibold text-slate-500">Responsable<div className="mt-1.5"><TaskUserCombobox users={users} value={task.assigned_to} onChange={userId => { void updateTask('owner', { assigned_to: userId }) }} disabled={!canEdit || isPending('owner')} /></div></div>
         <div className="text-xs font-semibold text-slate-500">Prioridad<div className="mt-1.5"><TaskPriorityPicker value={task.priority} disabled={!canEdit} pending={isPending('priority')} onChange={priority => { void updateTask('priority', { priority }) }} /></div></div>
         <div className="text-xs font-semibold text-slate-500">Lista<div className="mt-1.5"><TaskListPicker value={task.list_id || ''} lists={lists} folders={folders} disabled={!canEdit || Boolean(task.parent_task_id) || isPending('list')} onChange={listID => { void updateTask('list', { list_id: listID }) }} /></div>{task.parent_task_id && <p className="mt-1.5 text-[10px] font-normal leading-4 text-slate-400">Las subtareas heredan la lista de su tarea principal y se trasladan junto con ella.</p>}</div>
+				<div className="text-xs font-semibold text-slate-500 sm:col-span-2"><div className="mb-1.5 flex items-center justify-between"><span>Color de identidad</span>{isPending('color') && <span className="inline-flex items-center gap-1 text-[10px] text-emerald-600"><Loader2 className="h-3 w-3 animate-spin" />Guardando</span>}</div><button type="button" disabled={!canEdit || isPending('color')} onClick={() => { void changeColor(null) }} className={`mb-2 flex min-h-11 w-full items-center gap-3 rounded-xl border px-3 text-left disabled:opacity-50 ${!task.color ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200'}`}><span className="h-7 w-7 rounded-lg border-2 border-white shadow" style={{ backgroundColor: resolveTaskIdentityColor(null, list?.color).color }} /><span className="min-w-0 flex-1"><span className="block text-xs font-bold text-slate-700">Heredar de la lista</span><span className="block truncate text-[10px] font-normal text-slate-400">{list?.name || 'Color predeterminado'} · {resolveTaskIdentityColor(null, list?.color).color}</span></span>{!task.color && <Check className="h-4 w-4 text-emerald-600" />}</button><TaskColorPicker value={task.resolved_color || resolveTaskIdentityColor(task.color, list?.color).color} disabled={!canEdit || isPending('color')} label="Cambiar color de la tarea" onChange={value => { void changeColor(value) }} /></div>
         <div className="text-xs font-semibold text-slate-500"><span className="mb-1.5 flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Inicio</span><TaskDateTimePicker label="Inicio" value={startDraft} disabled={!canEdit || isPending('dates')} onChange={setStartDraft} onCommit={value => { editingDatesRef.current = false; void saveDates(value, dueDraft) }} /></div>
         <div className="text-xs font-semibold text-slate-500"><span className="mb-1.5 flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Entrega</span><TaskDateTimePicker label="Entrega" value={dueDraft} min={startDraft} disabled={!canEdit || isPending('dates')} onChange={setDueDraft} onCommit={value => { editingDatesRef.current = false; void saveDates(startDraft, value) }} /></div>
         <div className="text-xs font-semibold text-slate-500 sm:col-span-2"><div className="flex flex-wrap items-center justify-between gap-2"><span>Progreso</span><div className="flex rounded-xl bg-slate-100 p-1">{(['manual','automatic'] as const).map(mode => <button key={mode} type="button" disabled={!canEdit || isPending('progress')} onClick={() => { setProgressMode(mode); void saveProgress(mode, progressDraft) }} className={`rounded-lg px-3 py-1.5 text-[10px] font-black transition disabled:cursor-not-allowed disabled:opacity-50 ${progressMode === mode ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-400'}`}>{mode === 'manual' ? 'Manual' : 'Automático'}</button>)}</div></div>
@@ -1090,7 +1117,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
           <header onPointerDown={detailWindow.beginDrag} onDoubleClick={event => { if (!(event.target as HTMLElement).closest('button,a,input,textarea,select,[data-no-window-drag]')) detailWindow.toggleMaximized() }} className={`shrink-0 select-none border-b border-slate-200 bg-white px-4 py-3 sm:px-6 sm:py-4 ${detailWindow.effectiveMode === 'floating' ? 'cursor-move' : ''}`}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
-                <div className="mb-1.5 flex min-w-0 items-center gap-1.5 overflow-hidden text-[11px] text-slate-400">{parentTask && <><button data-no-window-drag onClick={() => onOpenTask(parentTask.id)} className="max-w-44 truncate font-semibold text-emerald-700 hover:underline">{parentTask.title}</button><ChevronRight className="h-3 w-3 shrink-0" /></>}{task.breadcrumbs_visible === false ? <span className="truncate font-semibold text-violet-600">Compartida contigo</span> : <><span className="truncate">{task.folder_name || 'Clarin Work'}</span><ChevronRight className="h-3 w-3 shrink-0" /><span className="truncate">{task.list_name || 'Bandeja general'}</span></>}{task.is_milestone && <span className="ml-1 flex shrink-0 items-center gap-1 rounded-full bg-violet-50 px-2 py-1 font-medium text-violet-700"><Flag className="h-3 w-3" /> Hito</span>}</div>
+								<div className="mb-1.5 flex min-w-0 items-center gap-1.5 overflow-hidden text-[11px] text-slate-400"><span className="h-3.5 w-3.5 shrink-0 rounded-md border-2 border-white shadow-sm" style={{ backgroundColor: task.resolved_color || resolveTaskIdentityColor(task.color, list?.color).color }} aria-label={`Color de identidad ${task.resolved_color || resolveTaskIdentityColor(task.color, list?.color).color}`} />{parentTask && <><button data-no-window-drag onClick={() => onOpenTask(parentTask.id)} className="max-w-44 truncate font-semibold text-emerald-700 hover:underline">{parentTask.title}</button><ChevronRight className="h-3 w-3 shrink-0" /></>}{task.breadcrumbs_visible === false ? <span className="truncate font-semibold text-violet-600">Compartida contigo</span> : <><span className="truncate">{task.folder_name || 'Clarin Work'}</span><ChevronRight className="h-3 w-3 shrink-0" /><span className="truncate">{task.list_name || 'Bandeja general'}</span></>}{task.is_milestone && <span className="ml-1 flex shrink-0 items-center gap-1 rounded-full bg-violet-50 px-2 py-1 font-medium text-violet-700"><Flag className="h-3 w-3" /> Hito</span>}</div>
                 <div data-no-window-drag className="relative"><textarea rows={1} value={titleDraft} disabled={!canEdit || isPending('title')} onFocus={() => { editingTitleRef.current = true }} onChange={event => setTitleDraft(event.target.value.replace(/\n/g, ' '))} onBlur={() => { void saveTitle() }} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); skipTitleSaveRef.current = true; setTitleDraft(task.title); event.currentTarget.blur() } }} aria-label="Título de la tarea" className="block min-h-9 w-full resize-none overflow-hidden rounded-lg border border-transparent bg-transparent py-1 pr-8 text-lg font-bold leading-7 text-slate-900 outline-none transition hover:border-slate-200 focus:border-emerald-300 focus:bg-white focus:px-2 focus:ring-4 focus:ring-emerald-50 disabled:opacity-80 sm:text-xl" />{isPending('title') && <Loader2 className="absolute right-2 top-2 h-4 w-4 animate-spin text-emerald-600" />}</div>
               </div>
               <div data-no-window-drag className="flex shrink-0 gap-0.5">
@@ -1114,7 +1141,7 @@ export default function TaskDetailDrawer({ taskId, allTasks, users, lists, folde
       </aside>
       {canAdmin && <TaskDestructiveConfirmDialog open={archiveConfirmOpen} title="Mover tarea a Papelera" description={`${task?.subtask_count ? `También se moverán ${task.subtask_count} subtarea${task.subtask_count === 1 ? '' : 's'}. ` : ''}La tarea podrá restaurarse durante el plazo configurado. Completar una tarea nunca la envía aquí.`} actionLabel="Mover a Papelera" busy={isPending('archive')} error={archiveError} onClose={() => { if (!isPending('archive')) { setArchiveConfirmOpen(false); setArchiveError('') } }} onConfirm={() => { void removeTask() }} />}
       {task && canAdmin && <TaskMoveEnvironmentDialog open={moveEnvironmentOpen} task={task} onClose={() => setMoveEnvironmentOpen(false)} onMoved={(moved, operationID) => { setMoveEnvironmentOpen(false); onChanged(moved, operationID); onClose() }} />}
-      {previewAttachment && task && task.id === taskId && previewAttachment.task_id === taskId && <TaskAttachmentViewer key={`${task.id}:${previewAttachment.id}`} taskId={task.id} attachment={previewAttachment} users={users} canComment={canComment} onClose={() => setPreviewAttachment(null)} />}
+      {previewAttachment && task && task.id === taskId && previewAttachment.task_id === taskId && <TaskAttachmentViewer key={`${task.id}:${previewAttachment.id}`} taskId={task.id} attachment={previewAttachment} users={users} canComment={canComment} historicalReadOnly={historicalReadOnly} onClose={() => setPreviewAttachment(null)} />}
       <TaskParticipantGrantConfirmDialog
         open={Boolean(participantGrantPrompt)}
         affectedUserIDs={participantGrantPrompt?.affectedUserIDs || []}

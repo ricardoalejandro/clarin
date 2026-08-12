@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { TaskFolder, TaskList, TaskPermissions } from '@/types/task'
 import TaskHierarchyTree, { taskHierarchyCanManageStructure, taskHierarchyCanReceiveTasks } from './TaskHierarchyTree'
 
-const full: TaskPermissions = { level: 'full', can_view: true, can_comment: true, can_edit: true, can_delete: true, can_manage_access: true }
+const full: TaskPermissions = { level: 'full', can_view: true, can_comment: true, can_edit: true, can_delete: false, can_archive: true, can_trash: false, can_restore: false, can_manage_access: true }
 const edit: TaskPermissions = { level: 'edit', can_view: true, can_comment: true, can_edit: true, can_delete: false, can_manage_access: false }
 const view: TaskPermissions = { level: 'view', can_view: true, can_comment: false, can_edit: false, can_delete: false, can_manage_access: false }
 
@@ -85,6 +85,7 @@ describe('TaskHierarchyTree permissions', () => {
     const unknown = list('unknown', 'Sin capability')
     expect(taskHierarchyCanReceiveTasks(unknown)).toBe(false)
     expect(taskHierarchyCanManageStructure(unknown)).toBe(false)
+    expect(taskHierarchyCanManageStructure(list('retained', 'Histórica activa', full))).toBe(true)
   })
 
   it('keeps structure management beside the compact folders heading', () => {

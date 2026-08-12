@@ -234,6 +234,7 @@ func main() {
 						return
 					case <-reminderTicker.C:
 						services.Task.ProcessReminders(taskCtx)
+						services.Task.ProcessWorkEventReminders(taskCtx)
 					case <-overdueTicker.C:
 						services.Task.ProcessOverdueTasks(taskCtx)
 					}

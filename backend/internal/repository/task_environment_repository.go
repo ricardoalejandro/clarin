@@ -193,7 +193,7 @@ func (r *TaskWorkRepository) GetEnvironment(ctx context.Context, accountID, user
 		 WHERE task.account_id=environment.account_id AND list_item.environment_id=environment.id AND task.deleted_at IS NULL
 		   AND COALESCE(status.category,CASE task.status WHEN 'cancelled' THEN 'cancelled' ELSE '' END)='cancelled'
 		   AND `+taskActorCanViewIncludingArchivedSQL("task", "list_item", "$3")+`)
-		FROM task_environments environment WHERE environment.account_id=$1 AND environment.id=$2`, accountID, environmentID, userID).
+		FROM task_environments environment WHERE environment.account_id=$1 AND environment.id=$2 AND environment.deleted_at IS NULL`, accountID, environmentID, userID).
 		Scan(&item.ID, &item.AccountID, &item.Name, &item.Description, &item.Color, &item.Icon, &item.SortOrder,
 			&item.Visibility, &item.DefaultAccessLevel, &item.IsDefault, &item.CreatedBy, &item.ArchivedAt, &item.DeletedAt, &item.DeletedBy, &item.Version,
 			&item.AccessRevision, &item.CreatedAt, &item.UpdatedAt, &item.FolderCount, &item.ListCount, &item.TaskCount,
@@ -394,7 +394,32 @@ func (r *TaskWorkRepository) ArchiveEnvironment(ctx context.Context, accountID, 
 		return err
 	}
 	if openTasks > 0 {
-		return ErrTaskContainerNotEmpty
+		return ErrTaskContainerHasOpenTasks
+	}
+	rows, err := tx.Query(ctx, `SELECT id FROM task_lists WHERE account_id=$1 AND environment_id=$2 AND deleted_at IS NULL ORDER BY id FOR SHARE`, accountID, environmentID)
+	if err != nil {
+		return err
+	}
+	listIDs := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var listID uuid.UUID
+		if err := rows.Scan(&listID); err != nil {
+			rows.Close()
+			return err
+		}
+		listIDs = append(listIDs, listID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	hasFutureEvents, err := hasFutureScheduledWorkEventsWith(ctx, tx, accountID, listIDs, nil, time.Now())
+	if err != nil {
+		return err
+	}
+	if hasFutureEvents {
+		return ErrTaskContainerHasFutureEvents
 	}
 	if _, err := tx.Exec(ctx, `UPDATE task_environments SET archived_at=NOW(),version=version+1,updated_at=NOW()
 		WHERE account_id=$1 AND id=$2`, accountID, environmentID); err != nil {

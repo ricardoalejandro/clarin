@@ -76,6 +76,47 @@ func TestWhiteboardGCRetryDelayIsBounded(t *testing.T) {
 	}
 }
 
+func TestWhiteboardTechnicalHistoryPruneKeepsRecoveryAndMeaningfulAudit(t *testing.T) {
+	t.Parallel()
+	for _, invariant := range []string{
+		"operation.created_at<$1",
+		"operation.operation_kind='patch'",
+		"operation.operation_kind='snapshot'",
+		"NOT EXISTS",
+		"FROM whiteboard_revisions revision",
+		"revision.account_id=operation.account_id",
+		"revision.board_id=operation.board_id",
+		"revision.operation_id=operation.operation_id",
+		"FOR UPDATE OF operation SKIP LOCKED",
+		"operation.account_id=candidates.account_id",
+		"operation.board_id=candidates.board_id",
+	} {
+		if !strings.Contains(whiteboardTechnicalOperationPruneSQL, invariant) {
+			t.Fatalf("technical operation prune omitted %q", invariant)
+		}
+	}
+	if strings.Contains(whiteboardTechnicalOperationPruneSQL, "operation.operation_kind='create'") ||
+		strings.Contains(whiteboardTechnicalOperationPruneSQL, "operation.operation_kind='restore'") {
+		t.Fatal("technical compaction selected a durable create or restore operation")
+	}
+	for _, invariant := range []string{
+		"activity.created_at<$1",
+		"'scene.patched'",
+		"'scene.snapshotted'",
+		"'thumbnail.updated'",
+		"FOR UPDATE OF activity SKIP LOCKED",
+		"activity.account_id=candidates.account_id",
+		"activity.board_id=candidates.board_id",
+	} {
+		if !strings.Contains(whiteboardTechnicalActivityPruneSQL, invariant) {
+			t.Fatalf("technical activity prune omitted %q", invariant)
+		}
+	}
+	if whiteboardTechnicalGCLimit(1000) != 500 || whiteboardTechnicalGCLimit(0) != 100 {
+		t.Fatal("technical history batches are not safely bounded")
+	}
+}
+
 func TestWhiteboardAssetReservationBlocksPhysicalDeletionWindow(t *testing.T) {
 	t.Parallel()
 	if !whiteboardAssetReservationBlocked("whiteboard_gc_deleting") {
