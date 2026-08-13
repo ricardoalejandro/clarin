@@ -8012,21 +8012,23 @@ func (r *InteractionRepository) Create(ctx context.Context, i *domain.Interactio
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::text)
 			RETURNING id, created_by
 		)
-		SELECT inserted.id, COALESCE(u.display_name, u.username)
+		SELECT inserted.id,
+		       COALESCE(NULLIF(BTRIM(u.display_name), ''), NULLIF(BTRIM(u.username), ''), NULLIF(BTRIM(u.email), ''))
 		FROM inserted
 		LEFT JOIN users u ON u.id=inserted.created_by
 	`, i.ID, i.AccountID, i.ContactID, i.LeadID, i.EventID, i.ParticipantID, i.Type, i.Direction, i.Outcome, i.Notes, i.NextAction, i.NextActionDate, i.CreatedBy, i.CreatedAt, i.ProgramID, i.ProgramSessionID, i.ProgramParticipantID, i.SourceLabel).Scan(&i.ID, &i.CreatedByName)
 }
 
-func (r *InteractionRepository) GetByParticipantID(ctx context.Context, participantID uuid.UUID) ([]*domain.Interaction, error) {
+func (r *InteractionRepository) GetByParticipantID(ctx context.Context, accountID, participantID uuid.UUID) ([]*domain.Interaction, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT i.id, i.account_id, i.contact_id, i.lead_id, i.event_id, i.participant_id, i.type, i.direction, i.outcome, i.notes, i.next_action, i.next_action_date, i.created_by, i.created_at,
-		       u.display_name as created_by_name
+		       COALESCE(NULLIF(BTRIM(u.display_name), ''), NULLIF(BTRIM(u.username), ''), NULLIF(BTRIM(u.email), '')) AS created_by_name,
+		       COALESCE(i.source_label, '')
 		FROM interactions i
 		LEFT JOIN users u ON u.id = i.created_by
-		WHERE i.participant_id = $1
+		WHERE i.account_id = $1 AND i.participant_id = $2
 		ORDER BY i.created_at DESC
-	`, participantID)
+	`, accountID, participantID)
 	if err != nil {
 		return nil, err
 	}
@@ -8035,7 +8037,7 @@ func (r *InteractionRepository) GetByParticipantID(ctx context.Context, particip
 	var interactions []*domain.Interaction
 	for rows.Next() {
 		it := &domain.Interaction{}
-		if err := rows.Scan(&it.ID, &it.AccountID, &it.ContactID, &it.LeadID, &it.EventID, &it.ParticipantID, &it.Type, &it.Direction, &it.Outcome, &it.Notes, &it.NextAction, &it.NextActionDate, &it.CreatedBy, &it.CreatedAt, &it.CreatedByName); err != nil {
+		if err := rows.Scan(&it.ID, &it.AccountID, &it.ContactID, &it.LeadID, &it.EventID, &it.ParticipantID, &it.Type, &it.Direction, &it.Outcome, &it.Notes, &it.NextAction, &it.NextActionDate, &it.CreatedBy, &it.CreatedAt, &it.CreatedByName, &it.SourceLabel); err != nil {
 			return nil, err
 		}
 		interactions = append(interactions, it)
@@ -8043,21 +8045,21 @@ func (r *InteractionRepository) GetByParticipantID(ctx context.Context, particip
 	return interactions, nil
 }
 
-func (r *InteractionRepository) GetByContactID(ctx context.Context, contactID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
+func (r *InteractionRepository) GetByContactID(ctx context.Context, accountID, contactID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := r.db.Query(ctx, `
 		SELECT i.id, i.account_id, i.contact_id, i.lead_id, i.event_id, i.participant_id, i.type, i.direction, i.outcome, i.notes, i.next_action, i.next_action_date, i.created_by, i.created_at,
-		       u.display_name as created_by_name, e.name as event_name,
+		       COALESCE(NULLIF(BTRIM(u.display_name), ''), NULLIF(BTRIM(u.username), ''), NULLIF(BTRIM(u.email), '')) AS created_by_name, e.name as event_name,
 		       i.program_id, i.program_session_id, i.program_participant_id, COALESCE(i.source_label, '')
 		FROM interactions i
 		LEFT JOIN users u ON u.id = i.created_by
 		LEFT JOIN events e ON e.id = i.event_id
-		WHERE i.contact_id = $1
+		WHERE i.account_id = $1 AND i.contact_id = $2
 		ORDER BY i.created_at DESC
-		LIMIT $2 OFFSET $3
-	`, contactID, limit, offset)
+		LIMIT $3 OFFSET $4
+	`, accountID, contactID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -8074,19 +8076,20 @@ func (r *InteractionRepository) GetByContactID(ctx context.Context, contactID uu
 	return interactions, nil
 }
 
-func (r *InteractionRepository) GetByEventID(ctx context.Context, eventID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
+func (r *InteractionRepository) GetByEventID(ctx context.Context, accountID, eventID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := r.db.Query(ctx, `
 		SELECT i.id, i.account_id, i.contact_id, i.lead_id, i.event_id, i.participant_id, i.type, i.direction, i.outcome, i.notes, i.next_action, i.next_action_date, i.created_by, i.created_at,
-		       u.display_name as created_by_name
+		       COALESCE(NULLIF(BTRIM(u.display_name), ''), NULLIF(BTRIM(u.username), ''), NULLIF(BTRIM(u.email), '')) AS created_by_name,
+		       COALESCE(i.source_label, '')
 		FROM interactions i
 		LEFT JOIN users u ON u.id = i.created_by
-		WHERE i.event_id = $1
+		WHERE i.account_id = $1 AND i.event_id = $2
 		ORDER BY i.created_at DESC
-		LIMIT $2 OFFSET $3
-	`, eventID, limit, offset)
+		LIMIT $3 OFFSET $4
+	`, accountID, eventID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -8095,7 +8098,7 @@ func (r *InteractionRepository) GetByEventID(ctx context.Context, eventID uuid.U
 	var interactions []*domain.Interaction
 	for rows.Next() {
 		it := &domain.Interaction{}
-		if err := rows.Scan(&it.ID, &it.AccountID, &it.ContactID, &it.LeadID, &it.EventID, &it.ParticipantID, &it.Type, &it.Direction, &it.Outcome, &it.Notes, &it.NextAction, &it.NextActionDate, &it.CreatedBy, &it.CreatedAt, &it.CreatedByName); err != nil {
+		if err := rows.Scan(&it.ID, &it.AccountID, &it.ContactID, &it.LeadID, &it.EventID, &it.ParticipantID, &it.Type, &it.Direction, &it.Outcome, &it.Notes, &it.NextAction, &it.NextActionDate, &it.CreatedBy, &it.CreatedAt, &it.CreatedByName, &it.SourceLabel); err != nil {
 			return nil, err
 		}
 		interactions = append(interactions, it)
@@ -8116,19 +8119,20 @@ func (r *InteractionRepository) GetLastByParticipantID(ctx context.Context, part
 	return it, err
 }
 
-func (r *InteractionRepository) GetByLeadID(ctx context.Context, leadID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
+func (r *InteractionRepository) GetByLeadID(ctx context.Context, accountID, leadID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := r.db.Query(ctx, `
 		SELECT i.id, i.account_id, i.contact_id, i.lead_id, i.event_id, i.participant_id, i.type, i.direction, i.outcome, i.notes, i.next_action, i.next_action_date, i.created_by, i.created_at,
-		       u.display_name as created_by_name
+		       COALESCE(NULLIF(BTRIM(u.display_name), ''), NULLIF(BTRIM(u.username), ''), NULLIF(BTRIM(u.email), '')) AS created_by_name,
+		       COALESCE(i.source_label, '')
 		FROM interactions i
 		LEFT JOIN users u ON u.id = i.created_by
-		WHERE i.lead_id = $1
+		WHERE i.account_id = $1 AND i.lead_id = $2
 		ORDER BY i.created_at DESC
-		LIMIT $2 OFFSET $3
-	`, leadID, limit, offset)
+		LIMIT $3 OFFSET $4
+	`, accountID, leadID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -8137,7 +8141,7 @@ func (r *InteractionRepository) GetByLeadID(ctx context.Context, leadID uuid.UUI
 	var interactions []*domain.Interaction
 	for rows.Next() {
 		it := &domain.Interaction{}
-		if err := rows.Scan(&it.ID, &it.AccountID, &it.ContactID, &it.LeadID, &it.EventID, &it.ParticipantID, &it.Type, &it.Direction, &it.Outcome, &it.Notes, &it.NextAction, &it.NextActionDate, &it.CreatedBy, &it.CreatedAt, &it.CreatedByName); err != nil {
+		if err := rows.Scan(&it.ID, &it.AccountID, &it.ContactID, &it.LeadID, &it.EventID, &it.ParticipantID, &it.Type, &it.Direction, &it.Outcome, &it.Notes, &it.NextAction, &it.NextActionDate, &it.CreatedBy, &it.CreatedAt, &it.CreatedByName, &it.SourceLabel); err != nil {
 			return nil, err
 		}
 		interactions = append(interactions, it)

@@ -21,7 +21,7 @@ afterEach(cleanup)
 describe('DetachedLeadDetail', () => {
   it('keeps the same ordered CRM hierarchy for a Lead without canonical Contact', () => {
     const html = renderToStaticMarkup(<DetachedLeadDetail lead={lead} context={<div>Contexto</div>} activity={<Panel>Actividad</Panel>} tasks={<Panel>Tareas</Panel>} onMessage={() => {}} onSave={async () => ({ success: true })} />)
-    const headings = ['Información del contacto', 'Etiquetas', 'Observaciones de esta oportunidad', 'Contexto de la oportunidad', 'Tareas relacionadas', 'Historial general del contacto', 'Integraciones']
+    const headings = ['Información del contacto', 'Etiquetas', 'Observaciones de esta oportunidad', 'Historial general del contacto', 'Contexto de la oportunidad', 'Tareas relacionadas', 'Integraciones']
     headings.reduce((previous, heading) => {
       const next = html.indexOf(heading)
       expect(next).toBeGreaterThan(previous)

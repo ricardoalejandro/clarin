@@ -909,11 +909,14 @@ func (r *ContactProfileRepository) ListObservations(ctx context.Context, account
 		SELECT i.id,i.account_id,i.contact_id,i.lead_id,i.event_id,i.participant_id,
 		       i.program_id,i.program_session_id,i.program_participant_id,COALESCE(i.source_label,''),
 		       i.type,i.direction,i.outcome,i.notes,i.next_action,i.next_action_date,
-		       i.created_by,i.created_at,u.display_name,e.name,i.updated_at,i.updated_by,editor.display_name,
+		       i.created_by,i.created_at,
+		       COALESCE(NULLIF(BTRIM(u.display_name),''),NULLIF(BTRIM(u.username),''),NULLIF(BTRIM(u.email),'')),
+		       e.name,i.updated_at,i.updated_by,
+		       COALESCE(NULLIF(BTRIM(editor.display_name),''),NULLIF(BTRIM(editor.username),''),NULLIF(BTRIM(editor.email),'')),
 		       i.is_pinned,i.pinned_at,i.pinned_by
 		FROM interactions i
-		LEFT JOIN users u ON u.id=i.created_by AND u.account_id=i.account_id
-		LEFT JOIN users editor ON editor.id=i.updated_by AND editor.account_id=i.account_id
+		LEFT JOIN users u ON u.id=i.created_by
+		LEFT JOIN users editor ON editor.id=i.updated_by
 		LEFT JOIN events e ON e.id=i.event_id AND e.account_id=i.account_id
 		WHERE i.account_id=$1 AND (
 			i.contact_id=$2
@@ -1083,8 +1086,10 @@ func (r *ContactProfileRepository) CreateObservation(ctx context.Context, accoun
 		SELECT i.id,i.account_id,i.contact_id,i.lead_id,i.event_id,i.participant_id,
 		       i.program_id,i.program_session_id,i.program_participant_id,i.source_label,
 		       i.type,i.direction,i.outcome,i.notes,i.next_action,i.next_action_date,
-		       i.created_by,i.created_at,u.display_name,i.updated_at,i.is_pinned
-		FROM inserted i LEFT JOIN users u ON u.id=i.created_by AND u.account_id=i.account_id
+		       i.created_by,i.created_at,
+		       COALESCE(NULLIF(BTRIM(u.display_name),''),NULLIF(BTRIM(u.username),''),NULLIF(BTRIM(u.email),'')),
+		       i.updated_at,i.is_pinned
+		FROM inserted i LEFT JOIN users u ON u.id=i.created_by
 	`, interaction.ID, interaction.AccountID, interaction.ContactID, interaction.LeadID,
 		interaction.EventID, interaction.ParticipantID, interaction.ProgramID, interaction.ProgramSessionID,
 		interaction.ProgramParticipantID, interaction.SourceLabel, interaction.Type, interaction.Direction,

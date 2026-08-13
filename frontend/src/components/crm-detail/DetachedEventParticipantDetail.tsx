@@ -184,11 +184,11 @@ export default function DetachedEventParticipantDetail({ participant, eventName,
 
         <CrmDetailAccordion id="detached-activity" title="Observaciones de esta participación" summary="Alcance exclusivo del evento" icon={MessageSquarePlus} tone="amber" open={accordionOpen.activity} onToggle={() => toggleSection('activity')}>{activity}</CrmDetailAccordion>
 
+        <CrmDetailAccordion id="detached-history" title="Historial general del contacto" summary="No disponible sin Contact canónico" icon={FileText} tone="slate" open={accordionOpen.history} onToggle={() => toggleSection('history')}><p className="rounded-xl border border-dashed border-slate-200 px-3 py-5 text-center text-xs text-slate-400">Este registro no tiene un historial transversal de Contact.</p></CrmDetailAccordion>
+
         <CrmDetailAccordion id="detached-context" title="Contexto del evento" summary={`${eventName} · etapa y estado`} icon={CalendarDays} tone="violet" open={accordionOpen.context} onToggle={() => toggleSection('context')}>{context}</CrmDetailAccordion>
 
         <CrmDetailAccordion id="detached-tasks" title="Tareas relacionadas" summary="Requiere vincular un Contact canónico" icon={ClipboardList} tone="blue" open={accordionOpen.tasks} onToggle={() => toggleSection('tasks')}><div className="rounded-xl border border-dashed border-blue-200 bg-blue-50/40 px-4 py-5 text-center"><ClipboardList className="mx-auto h-5 w-5 text-blue-400" /><p className="mt-2 text-xs text-slate-500">Las tareas están deshabilitadas para evitar una asociación ambigua.</p><button type="button" disabled title="Disponible al vincular el participante con un Contact" className="mt-3 min-h-10 rounded-xl border border-slate-200 bg-white px-4 text-xs font-bold text-slate-400">Nueva tarea</button></div></CrmDetailAccordion>
-
-        <CrmDetailAccordion id="detached-history" title="Historial general del contacto" summary="No disponible sin Contact canónico" icon={FileText} tone="slate" open={accordionOpen.history} onToggle={() => toggleSection('history')}><p className="rounded-xl border border-dashed border-slate-200 px-3 py-5 text-center text-xs text-slate-400">Este registro no tiene un historial transversal de Contact.</p></CrmDetailAccordion>
 
         <CrmDetailAccordion id="detached-integrations" title="Integraciones" summary="No disponibles sin Contact canónico" icon={CloudOff} tone="sky" open={accordionOpen.integrations} onToggle={() => toggleSection('integrations')}><p className="rounded-xl border border-dashed border-sky-200 bg-sky-50/30 px-3 py-5 text-center text-xs text-slate-500">Vincula un Contact canónico antes de usar integraciones personales.</p></CrmDetailAccordion>
 

@@ -68,7 +68,6 @@ export function activityAuthorLabel(item: Pick<Observation, 'created_by_name' | 
   const source = item.source_label?.trim()
   if (source && /import|kommo|excel/i.test(source)) return `Importación · ${source}`
   if (source && /system|automat|regla/i.test(source)) return `Sistema · ${source}`
-  if (source) return source
   return 'Usuario no disponible'
 }
 

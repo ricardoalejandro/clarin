@@ -7,7 +7,7 @@ afterEach(cleanup)
 describe('DetachedEventParticipantDetail', () => {
   it('keeps legacy event records honest and saves them without adapting them to Lead', async () => {
     const onSave = vi.fn().mockResolvedValue({ success: true })
-    render(
+    const { container } = render(
       <DetachedEventParticipantDetail
         participant={{ id: 'participant-1', name: 'Ana', phone: '+51999999999', birth_date: '1992-05-04', tags: [] }}
         eventName="Taller agosto"
@@ -18,6 +18,12 @@ describe('DetachedEventParticipantDetail', () => {
       />,
     )
 
+    const headings = ['Información del contacto', 'Etiquetas', 'Observaciones de esta participación', 'Historial general del contacto', 'Contexto del evento', 'Tareas relacionadas', 'Integraciones']
+    headings.reduce((previous, heading) => {
+      const next = container.innerHTML.indexOf(heading)
+      expect(next).toBeGreaterThan(previous)
+      return next
+    }, -1)
     expect(screen.getByText('Sin contacto canónico')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Tareas relacionadas/ }))
     expect(screen.getByRole('button', { name: 'Nueva tarea' })).toBeDisabled()

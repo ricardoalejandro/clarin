@@ -34,6 +34,8 @@ describe('CRM detail contracts', () => {
   it('always exposes an honest observation author', () => {
     expect(activityAuthorLabel({ created_by_name: 'María', source_label: null })).toBe('María')
     expect(activityAuthorLabel({ created_by_name: null, source_label: 'Importación Excel' })).toBe('Importación · Importación Excel')
+    expect(activityAuthorLabel({ created_by_name: null, source_label: 'Regla de bienvenida' })).toBe('Sistema · Regla de bienvenida')
+    expect(activityAuthorLabel({ created_by_name: null, source_label: 'Evento · Agosto' })).toBe('Usuario no disponible')
     expect(activityAuthorLabel({ created_by_name: null, source_label: null })).toBe('Usuario no disponible')
   })
 })

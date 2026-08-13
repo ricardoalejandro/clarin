@@ -2467,20 +2467,20 @@ func (s *InteractionService) LogInteraction(ctx context.Context, interaction *do
 	return nil
 }
 
-func (s *InteractionService) GetByParticipantID(ctx context.Context, participantID uuid.UUID) ([]*domain.Interaction, error) {
-	return s.repos.Interaction.GetByParticipantID(ctx, participantID)
+func (s *InteractionService) GetByParticipantID(ctx context.Context, accountID, participantID uuid.UUID) ([]*domain.Interaction, error) {
+	return s.repos.Interaction.GetByParticipantID(ctx, accountID, participantID)
 }
 
-func (s *InteractionService) GetByContactID(ctx context.Context, contactID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
-	return s.repos.Interaction.GetByContactID(ctx, contactID, limit, offset)
+func (s *InteractionService) GetByContactID(ctx context.Context, accountID, contactID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
+	return s.repos.Interaction.GetByContactID(ctx, accountID, contactID, limit, offset)
 }
 
-func (s *InteractionService) GetByEventID(ctx context.Context, eventID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
-	return s.repos.Interaction.GetByEventID(ctx, eventID, limit, offset)
+func (s *InteractionService) GetByEventID(ctx context.Context, accountID, eventID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
+	return s.repos.Interaction.GetByEventID(ctx, accountID, eventID, limit, offset)
 }
 
-func (s *InteractionService) GetByLeadID(ctx context.Context, leadID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
-	return s.repos.Interaction.GetByLeadID(ctx, leadID, limit, offset)
+func (s *InteractionService) GetByLeadID(ctx context.Context, accountID, leadID uuid.UUID, limit, offset int) ([]*domain.Interaction, error) {
+	return s.repos.Interaction.GetByLeadID(ctx, accountID, leadID, limit, offset)
 }
 
 func (s *InteractionService) Delete(ctx context.Context, id uuid.UUID) error {

@@ -4,7 +4,7 @@
 
 - Test Lead with and without canonical Contact; participant with and without Contact; zero/one/many opportunities; long names/phones/fields; no/many tags, observations, and tasks.
 - At 320, 375, 768, 833x818, 1024, 1081x818, 1280, and 1440 px and zoom 80-150%, verify Contact, context/stage, tags, Observation, and Message remain identifiable without scrolling.
-- Assert the accordion order and defaults exactly: Contact, tags, direct observations open; context, related tasks, general history, integrations closed. Changing modes/chat preserves state; changing entity resets it.
+- Assert the accordion order and defaults exactly: Contact, tags, direct observations, general history, context, related tasks, integrations. Contact, tags and direct observations start open; general history and the remaining sections start closed. Changing modes/chat preserves state; changing entity resets it.
 - Confirm there are no Summary/Activity tabs, no competing activity rail, no duplicated identity, and no Google integration block before the primary CRM work.
 - Exercise docked, floating, every resize edge/corner, reset, maximize/restore, double-click, mobile conversion, remembered geometry, backdrop strength, board interaction, Escape, and focus restoration.
 - Open chat with less/more than 980 px measured space and verify temporary maximize, split versus reversible subview, and exact restoration of mode, geometry, scroll, accordion state, and focus.
@@ -19,6 +19,7 @@
 - Keep Contact, Lead, and event-participant histories visibly distinct. A direct participant query must exclude Contact-only and other-event interactions.
 - Create both Nota and Llamada, submit through Ctrl/Cmd+Enter, and verify type, timestamp, returned author name, and honest fallbacks for system/imported/unavailable users.
 - Add while history is collapsed, retry a failed add, switch entities rapidly, and preserve correct count/composer scope.
+- Resolve authors whose primary account differs from the active account, then verify display-name/username/email fallback, unavailable/deleted users, system/import origin, contextual source labels, and cross-account isolation.
 - Verify completed/cancelled Eventos expose history but reject or disable event-context writes.
 
 ## Related Tasks
@@ -29,6 +30,7 @@
 
 ## Pipeline Drag
 
+- In Lead detail, change stage by mouse and keyboard within the current pipeline, select canonical `Sin etapa`, dismiss with Escape, verify focus restoration and portal clamping, and exercise pending, success, terminal confirmation, lost reason, canonical response, failure, and exact rollback.
 - Test pointer, touch long-press, normal touch scroll, keyboard pickup/drop, Escape, outside drop, empty/populated/off-screen stages, and horizontal/vertical autoscroll.
 - Verify touch pickup waits 520 ms; controls do not drag; a short card click opens detail; overlay/placeholder/destination do not change column dimensions.
 - Compare against Clarin Work: 20-25% source opacity, grip, destination label, colored target, up to three converging layers, true count, and 180 ms drop animation.

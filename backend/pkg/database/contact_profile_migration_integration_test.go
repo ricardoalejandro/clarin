@@ -568,6 +568,21 @@ func TestContactProfileCanonicalBackfill(t *testing.T) {
 	if err != nil || len(observations) != 0 {
 		t.Fatalf("empty observation history must be []: len=%d err=%v", len(observations), err)
 	}
+	// The explicit creator remains the historical author when their primary
+	// account differs from the active account. Membership, not users.account_id,
+	// is the multi-account access model.
+	if _, err := db.Exec(ctx, `UPDATE user_accounts SET is_default=FALSE WHERE user_id=$1`, userID); err != nil {
+		t.Fatalf("clear observation author default account: %v", err)
+	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO user_accounts (user_id,account_id,role,is_default) VALUES ($1,$2,'agent',TRUE)
+		ON CONFLICT (user_id,account_id) DO UPDATE SET is_default=EXCLUDED.is_default
+	`, userID, foreignAccountID); err != nil {
+		t.Fatalf("add observation author foreign membership: %v", err)
+	}
+	if _, err := db.Exec(ctx, `UPDATE users SET account_id=$2 WHERE id=$1`, userID, foreignAccountID); err != nil {
+		t.Fatalf("move observation author primary account: %v", err)
+	}
 	type observationExpectation struct {
 		contextType          string
 		contextID            uuid.UUID
@@ -598,6 +613,9 @@ func TestContactProfileCanonicalBackfill(t *testing.T) {
 		}
 		if observation.ContactID == nil || *observation.ContactID != contactID || observation.SourceLabel != expectation.sourceLabel {
 			t.Fatalf("%s observation lost canonical source: contact=%v source=%q", expectation.contextType, observation.ContactID, observation.SourceLabel)
+		}
+		if observation.CreatedByName == nil || *observation.CreatedByName != "Profile editor" {
+			t.Fatalf("%s observation lost its multi-account author: %v", expectation.contextType, observation.CreatedByName)
 		}
 		assertOptionalID := func(field string, got, want *uuid.UUID) {
 			t.Helper()
@@ -630,6 +648,68 @@ func TestContactProfileCanonicalBackfill(t *testing.T) {
 		if _, found := listedIDs[observation.ID]; !found {
 			t.Fatalf("contextual observation %s missing from canonical history", observation.ID)
 		}
+	}
+	usernameAuthorID, emailAuthorID, deletedAuthorID := uuid.New(), uuid.New(), uuid.New()
+	usernameInteractionID, emailInteractionID := uuid.New(), uuid.New()
+	deletedInteractionID, unavailableInteractionID, importedInteractionID, foreignInteractionID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	if _, err := db.Exec(ctx, `
+		INSERT INTO users (id,account_id,username,email,password_hash,display_name) VALUES
+			($1,$3,'fallback-user','fallback-user@example.test','test','   '),
+			($2,$3,'   ','fallback-email@example.test','test','   '),
+			($4,$3,'deleted-user','deleted-user@example.test','test','Deleted author')
+	`, usernameAuthorID, emailAuthorID, foreignAccountID, deletedAuthorID); err != nil {
+		t.Fatalf("seed author fallback users: %v", err)
+	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO user_accounts (user_id,account_id,role,is_default) VALUES
+			($1,$4,'agent',FALSE),($2,$4,'agent',FALSE),($3,$4,'agent',FALSE)
+	`, usernameAuthorID, emailAuthorID, deletedAuthorID, accountID); err != nil {
+		t.Fatalf("seed author fallback memberships: %v", err)
+	}
+	if _, err := db.Exec(ctx, `
+		INSERT INTO interactions (id,account_id,contact_id,type,notes,created_by,source_label) VALUES
+			($1,$7,$12,'note','Fallback username',$10,'Contacto'),
+			($2,$7,$12,'note','Fallback email',$11,'Contacto'),
+			($3,$7,$12,'note','Autor eliminado',$9,'Contacto'),
+			($4,$7,$12,'note','Autor no disponible',NULL,'Evento · A'),
+			($5,$7,$12,'note','Origen importado',NULL,'Importación Excel'),
+			($6,$8,$12,'note','Otra cuenta',NULL,'Importación Excel')
+	`, usernameInteractionID, emailInteractionID, deletedInteractionID, unavailableInteractionID, importedInteractionID,
+		foreignInteractionID, accountID, foreignAccountID, deletedAuthorID, usernameAuthorID, emailAuthorID, contactID); err != nil {
+		t.Fatalf("seed author fallbacks and isolation fixtures: %v", err)
+	}
+	if _, err := db.Exec(ctx, `DELETE FROM users WHERE id=$1`, deletedAuthorID); err != nil {
+		t.Fatalf("delete historical observation author: %v", err)
+	}
+	authorObservations, err := profileRepo.ListObservations(ctx, accountID, contactID, 50, 0)
+	if err != nil {
+		t.Fatalf("list author fallback observations: %v", err)
+	}
+	observationsByID := make(map[uuid.UUID]*domain.Interaction, len(authorObservations))
+	for _, observation := range authorObservations {
+		observationsByID[observation.ID] = observation
+	}
+	assertAuthor := func(id uuid.UUID, expected *string, source string) {
+		t.Helper()
+		observation, found := observationsByID[id]
+		if !found {
+			t.Fatalf("observation %s was not returned", id)
+		}
+		if (observation.CreatedByName == nil) != (expected == nil) || (expected != nil && *observation.CreatedByName != *expected) {
+			t.Fatalf("observation %s author=%v want=%v", id, observation.CreatedByName, expected)
+		}
+		if observation.SourceLabel != source {
+			t.Fatalf("observation %s source=%q want=%q", id, observation.SourceLabel, source)
+		}
+	}
+	usernameFallback, emailFallback := "fallback-user", "fallback-email@example.test"
+	assertAuthor(usernameInteractionID, &usernameFallback, "Contacto")
+	assertAuthor(emailInteractionID, &emailFallback, "Contacto")
+	assertAuthor(deletedInteractionID, nil, "Contacto")
+	assertAuthor(unavailableInteractionID, nil, "Evento · A")
+	assertAuthor(importedInteractionID, nil, "Importación Excel")
+	if _, found := observationsByID[foreignInteractionID]; found {
+		t.Fatal("contact history crossed account boundaries")
 	}
 	attendanceID := uuid.New()
 	if _, err := db.Exec(ctx, `INSERT INTO interactions (id,account_id,contact_id,type,notes,created_by) VALUES ($1,$2,$3,$4,'Protegida',$5)`, attendanceID, accountID, contactID, domain.InteractionTypeAttendance, userID); err != nil {

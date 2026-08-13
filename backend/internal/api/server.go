@@ -5301,11 +5301,11 @@ func (s *Server) invalidateLeadsCache(accountID uuid.UUID) {
 }
 
 func leadInteractionsCacheKey(accountID, leadID uuid.UUID, limit, offset int) string {
-	return fmt.Sprintf("lead_interactions:%s:%s:%d:%d", accountID.String(), leadID.String(), limit, offset)
+	return fmt.Sprintf("lead_interactions:v2:%s:%s:%d:%d", accountID.String(), leadID.String(), limit, offset)
 }
 
 func leadInteractionsCachePattern(accountID, leadID uuid.UUID) string {
-	return fmt.Sprintf("lead_interactions:%s:%s:*", accountID.String(), leadID.String())
+	return fmt.Sprintf("lead_interactions:v2:%s:%s:*", accountID.String(), leadID.String())
 }
 
 // invalidateLeadDetailCache invalidates the detail + interactions cache for a specific lead.
@@ -13250,10 +13250,11 @@ func (s *Server) handleBatchParticipantObservations(c *fiber.Ctx) error {
 	// Query interactions matching participant_id, contact_id, or lead_id using UNION
 	// Priority: direct participant_id match first, then contact_id, then lead_id
 	rows, err := s.repos.DB().Query(c.Context(), `
-		SELECT participant_id, contact_id, lead_id, id, type, direction, outcome, notes, created_by_name, created_at
+		SELECT participant_id, contact_id, lead_id, id, type, direction, outcome, notes, created_by_name, source_label, created_at
 		FROM (
 			SELECT i.participant_id, i.contact_id, i.lead_id, i.id, i.type, i.direction, i.outcome, i.notes,
-			       u.display_name as created_by_name, i.created_at,
+			       COALESCE(NULLIF(BTRIM(u.display_name), ''), NULLIF(BTRIM(u.username), ''), NULLIF(BTRIM(u.email), '')) AS created_by_name,
+			       COALESCE(i.source_label, '') AS source_label, i.created_at,
 			       ROW_NUMBER() OVER (
 			         PARTITION BY COALESCE(i.participant_id::text, i.contact_id::text, i.lead_id::text)
 			         ORDER BY i.created_at DESC
@@ -13286,7 +13287,7 @@ func (s *Server) handleBatchParticipantObservations(c *fiber.Ctx) error {
 	for rows.Next() {
 		var participantID, contactID, leadID *uuid.UUID
 		i := &domain.Interaction{}
-		if err := rows.Scan(&participantID, &contactID, &leadID, &i.ID, &i.Type, &i.Direction, &i.Outcome, &i.Notes, &i.CreatedByName, &i.CreatedAt); err != nil {
+		if err := rows.Scan(&participantID, &contactID, &leadID, &i.ID, &i.Type, &i.Direction, &i.Outcome, &i.Notes, &i.CreatedByName, &i.SourceLabel, &i.CreatedAt); err != nil {
 			log.Printf("[API] Error scanning batch participant observation row: %v", err)
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
@@ -15322,7 +15323,9 @@ func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
 				SELECT DISTINCT ON (i.id)
 				       i.id, i.account_id, i.contact_id, i.lead_id, i.event_id, i.participant_id,
 				       i.type, i.direction, i.outcome, i.notes, i.next_action, i.next_action_date,
-				       i.created_by, i.created_at, u.display_name AS created_by_name
+				       i.created_by, i.created_at,
+				       COALESCE(NULLIF(BTRIM(u.display_name), ''), NULLIF(BTRIM(u.username), ''), NULLIF(BTRIM(u.email), '')) AS created_by_name,
+				       COALESCE(i.source_label, '')
 				FROM interactions i
 				LEFT JOIN users u ON u.id = i.created_by
 				WHERE `+participantWhere+`
@@ -15336,7 +15339,7 @@ func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
 			var all []*domain.Interaction
 			for rows.Next() {
 				it := &domain.Interaction{}
-				if err := rows.Scan(&it.ID, &it.AccountID, &it.ContactID, &it.LeadID, &it.EventID, &it.ParticipantID, &it.Type, &it.Direction, &it.Outcome, &it.Notes, &it.NextAction, &it.NextActionDate, &it.CreatedBy, &it.CreatedAt, &it.CreatedByName); err != nil {
+				if err := rows.Scan(&it.ID, &it.AccountID, &it.ContactID, &it.LeadID, &it.EventID, &it.ParticipantID, &it.Type, &it.Direction, &it.Outcome, &it.Notes, &it.NextAction, &it.NextActionDate, &it.CreatedBy, &it.CreatedAt, &it.CreatedByName, &it.SourceLabel); err != nil {
 					return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 				}
 				all = append(all, it)
@@ -15368,7 +15371,7 @@ func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
 			if err := s.repos.DB().QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM events WHERE id=$1 AND account_id=$2)`, eid, accountID).Scan(&valid); err != nil || !valid {
 				return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 			}
-			interactions, err := s.services.Interaction.GetByEventID(c.Context(), eid, limit, offset)
+			interactions, err := s.services.Interaction.GetByEventID(c.Context(), accountID, eid, limit, offset)
 			if err != nil {
 				return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 			}
@@ -15384,7 +15387,7 @@ func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
 			if err := s.repos.DB().QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM contacts WHERE id=$1 AND account_id=$2)`, cid, accountID).Scan(&valid); err != nil || !valid {
 				return c.Status(404).JSON(fiber.Map{"success": false, "error": "Contact not found"})
 			}
-			interactions, err := s.services.Interaction.GetByContactID(c.Context(), cid, limit, offset)
+			interactions, err := s.services.Interaction.GetByContactID(c.Context(), accountID, cid, limit, offset)
 			if err != nil {
 				return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 			}
@@ -15400,7 +15403,7 @@ func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
 			if err := s.repos.DB().QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM leads WHERE id=$1 AND account_id=$2)`, lid, accountID).Scan(&valid); err != nil || !valid {
 				return c.Status(404).JSON(fiber.Map{"success": false, "error": "Lead not found"})
 			}
-			interactions, err := s.services.Interaction.GetByLeadID(c.Context(), lid, limit, offset)
+			interactions, err := s.services.Interaction.GetByLeadID(c.Context(), accountID, lid, limit, offset)
 			if err != nil {
 				return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 			}
@@ -15554,7 +15557,7 @@ func (s *Server) handleGetContactInteractions(c *fiber.Ctx) error {
 	}
 	limit := c.QueryInt("limit", 50)
 	offset := c.QueryInt("offset", 0)
-	interactions, err := s.services.Interaction.GetByContactID(c.Context(), contactID, limit, offset)
+	interactions, err := s.services.Interaction.GetByContactID(c.Context(), accountID, contactID, limit, offset)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -15586,7 +15589,7 @@ func (s *Server) handleGetLeadInteractions(c *fiber.Ctx) error {
 		}
 	}
 
-	interactions, err := s.services.Interaction.GetByLeadID(c.Context(), leadID, limit, offset)
+	interactions, err := s.services.Interaction.GetByLeadID(c.Context(), accountID, leadID, limit, offset)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -15606,6 +15609,7 @@ func (s *Server) handleGetLeadInteractions(c *fiber.Ctx) error {
 
 // handleBatchLeadObservations returns observations for multiple leads in a single request
 func (s *Server) handleBatchLeadObservations(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
 		LeadIDs []string `json:"lead_ids"`
 		Limit   int      `json:"limit"`
@@ -15635,18 +15639,20 @@ func (s *Server) handleBatchLeadObservations(c *fiber.Ctx) error {
 
 	// Use a window function to get top N observations per lead in a single query
 	rows, err := s.repos.DB().Query(c.Context(), `
-		SELECT lead_id, id, type, direction, outcome, notes, created_by_name, created_at
+		SELECT lead_id, id, type, direction, outcome, notes, created_by_name, source_label, created_at
 		FROM (
 			SELECT i.lead_id, i.id, i.type, i.direction, i.outcome, i.notes,
-			       u.display_name as created_by_name, i.created_at,
+			       COALESCE(NULLIF(BTRIM(u.display_name), ''), NULLIF(BTRIM(u.username), ''), NULLIF(BTRIM(u.email), '')) AS created_by_name,
+			       COALESCE(i.source_label, '') AS source_label, i.created_at,
 			       ROW_NUMBER() OVER (PARTITION BY i.lead_id ORDER BY i.created_at DESC) as rn
 			FROM interactions i
+			JOIN leads l ON l.id = i.lead_id AND l.account_id = $2
 			LEFT JOIN users u ON i.created_by = u.id
-			WHERE i.lead_id = ANY($1)
+			WHERE i.account_id = $2 AND i.lead_id = ANY($1)
 		) sub
-		WHERE rn <= $2
+		WHERE rn <= $3
 		ORDER BY lead_id, created_at DESC
-	`, leadUUIDs, req.Limit)
+	`, leadUUIDs, accountID, req.Limit)
 	if err != nil {
 		log.Printf("[API] Error querying batch observations: %v", err)
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -15657,7 +15663,7 @@ func (s *Server) handleBatchLeadObservations(c *fiber.Ctx) error {
 	for rows.Next() {
 		var leadID uuid.UUID
 		i := &domain.Interaction{}
-		if err := rows.Scan(&leadID, &i.ID, &i.Type, &i.Direction, &i.Outcome, &i.Notes, &i.CreatedByName, &i.CreatedAt); err != nil {
+		if err := rows.Scan(&leadID, &i.ID, &i.Type, &i.Direction, &i.Outcome, &i.Notes, &i.CreatedByName, &i.SourceLabel, &i.CreatedAt); err != nil {
 			log.Printf("[API] Error scanning batch observation row: %v", err)
 			continue
 		}

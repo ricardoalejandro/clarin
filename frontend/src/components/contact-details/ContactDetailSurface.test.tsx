@@ -1,9 +1,14 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ReactNode } from 'react'
 import type { ContactProfileContact } from '@/types/contact-profile'
 import ContactDetailSurface from './ContactDetailSurface'
 
-const mocks = vi.hoisted(() => ({ updateContact: vi.fn() }))
+const mocks = vi.hoisted(() => ({ updateContact: vi.fn(), refreshObservations: vi.fn() }))
+
+function EmbeddedPanel({ children }: { embedded?: boolean; onCountChange?: (count: number) => void; children: ReactNode }) {
+  return <div>{children}</div>
+}
 
 const contact: ContactProfileContact = {
   id: 'contact-1',
@@ -42,7 +47,7 @@ vi.mock('./useContactProfile', () => ({
     observationsError: '',
     savingObservation: false,
     refresh: vi.fn(),
-    refreshObservations: vi.fn(),
+    refreshObservations: mocks.refreshObservations,
     updateContact: mocks.updateContact,
     updateAvatarLocally: vi.fn(),
     updateGoogleSyncLocally: vi.fn(),
@@ -75,9 +80,40 @@ afterEach(cleanup)
 
 beforeEach(() => {
   mocks.updateContact.mockReset().mockResolvedValue({ success: true, contact })
+  mocks.refreshObservations.mockReset().mockResolvedValue(undefined)
 })
 
 describe('ContactDetailSurface date editing', () => {
+  it('keeps scoped and general observations separate, contiguous and lazy', () => {
+    render(
+      <ContactDetailSurface
+        contactId="contact-1"
+        context={{ type: 'lead', id: 'lead-1' }}
+        initialContact={contact}
+        onClose={vi.fn()}
+        contextActivity={<EmbeddedPanel>Actividad directa</EmbeddedPanel>}
+        contextSummary={<div>Contexto comercial</div>}
+        relatedTasks={<EmbeddedPanel>Tareas CRM</EmbeddedPanel>}
+      />,
+    )
+
+    const headings = [
+      'Información del contacto',
+      'Etiquetas',
+      'Observaciones de esta oportunidad',
+      'Historial general del contacto',
+      'Contexto de la oportunidad',
+      'Tareas relacionadas',
+      'Integraciones',
+    ].map(name => screen.getByRole('button', { name: new RegExp(name) }))
+    headings.slice(0, -1).forEach((heading, index) => {
+      expect(heading.compareDocumentPosition(headings[index + 1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    })
+    expect(mocks.refreshObservations).not.toHaveBeenCalled()
+    fireEvent.click(headings[3])
+    expect(mocks.refreshObservations).toHaveBeenCalledTimes(1)
+  })
+
   it('uses date-only drafts for birth and custom fields and writes only on Guardar contacto', async () => {
     render(<ContactDetailSurface contactId="contact-1" context={{ type: 'event_participant', id: 'participant-1' }} initialContact={contact} onClose={vi.fn()} />)
 

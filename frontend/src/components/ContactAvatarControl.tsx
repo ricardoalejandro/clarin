@@ -7,6 +7,11 @@ import {
   ImagePlus, Loader2, Maximize2, RefreshCw, RotateCw, SlidersHorizontal, Trash2, Undo2, X,
 } from 'lucide-react'
 import { api, apiUpload } from '@/lib/api'
+import {
+  OPERATIONAL_OVERLAY_LAYERS,
+  useOperationalOverlayPortal,
+  useOperationalOverlayRegistration,
+} from '@/components/operational-window/OperationalOverlayContext'
 
 export type ContactAvatarContextType = 'contact' | 'lead' | 'chat' | 'event_participant' | 'program_participant'
 
@@ -89,6 +94,59 @@ const avatarMenuWidth = 256
 const avatarMenuMargin = 8
 const avatarMenuGap = 8
 
+export interface ContactAvatarMenuViewport {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+export interface ContactAvatarMenuAnchor {
+  left: number
+  right: number
+  top: number
+  bottom: number
+}
+
+export interface ContactAvatarMenuPosition {
+  top: number
+  left: number
+  width: number
+  maxHeight: number
+}
+
+export function contactAvatarMenuPosition(
+  anchor: ContactAvatarMenuAnchor,
+  measuredHeight: number,
+  viewport: ContactAvatarMenuViewport,
+): ContactAvatarMenuPosition | null {
+  const viewportRight = viewport.left + viewport.width
+  const viewportBottom = viewport.top + viewport.height
+  if (anchor.bottom < viewport.top || anchor.top > viewportBottom || anchor.right < viewport.left || anchor.left > viewportRight) return null
+
+  const width = Math.min(avatarMenuWidth, Math.max(1, viewport.width - avatarMenuMargin * 2))
+  const viewportMaxHeight = Math.max(1, viewport.height - avatarMenuMargin * 2)
+  const desiredHeight = Math.min(Math.max(1, measuredHeight), viewportMaxHeight)
+  const spaceBelow = Math.max(0, viewportBottom - avatarMenuMargin - avatarMenuGap - anchor.bottom)
+  const spaceAbove = Math.max(0, anchor.top - avatarMenuGap - (viewport.top + avatarMenuMargin))
+  const placeBelow = spaceBelow >= desiredHeight || spaceBelow >= spaceAbove
+  const maxHeight = Math.max(1, placeBelow ? spaceBelow : spaceAbove)
+  const height = Math.min(desiredHeight, maxHeight)
+  const preferredTop = placeBelow ? anchor.bottom + avatarMenuGap : anchor.top - avatarMenuGap - height
+  const minTop = viewport.top + avatarMenuMargin
+  const maxTop = Math.max(minTop, viewportBottom - avatarMenuMargin - height)
+  const preferredLeft = anchor.left + width <= viewportRight - avatarMenuMargin ? anchor.left : anchor.right - width
+  const minLeft = viewport.left + avatarMenuMargin
+  const maxLeft = Math.max(minLeft, viewportRight - avatarMenuMargin - width)
+
+  return {
+    top: Math.max(minTop, Math.min(preferredTop, maxTop)),
+    left: Math.max(minLeft, Math.min(preferredLeft, maxLeft)),
+    width,
+    maxHeight,
+  }
+}
+
 export default function ContactAvatarControl({
   contactId,
   contextType,
@@ -102,7 +160,7 @@ export default function ContactAvatarControl({
   const [avatar, setAvatar] = useState<ContactAvatarInfo>({ avatar_url: avatarUrl, revision: 0 })
   const [devices, setDevices] = useState<AvatarDevice[]>([])
   const [menuOpen, setMenuOpen] = useState(false)
-  const [menuPosition, setMenuPosition] = useState<{ top: number; left: number; maxHeight: number } | null>(null)
+  const [menuPosition, setMenuPosition] = useState<ContactAvatarMenuPosition | null>(null)
   const [dialog, setDialog] = useState<DialogMode>('none')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -121,6 +179,7 @@ export default function ContactAvatarControl({
   const menuTriggerRef = useRef<HTMLButtonElement>(null)
   const menuPopupRef = useRef<HTMLDivElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
+  const dialogReturnFocusRef = useRef<HTMLElement | null>(null)
   const metadataRequestRef = useRef(0)
   const operationRequestRef = useRef(0)
   const operationControllerRef = useRef<AbortController | null>(null)
@@ -128,6 +187,11 @@ export default function ContactAvatarControl({
   const busyRef = useRef(false)
   const identityKey = `${contactId}:${contextType}:${contextId}`
   const identityRef = useRef(identityKey)
+  const operationalPortal = useOperationalOverlayPortal()
+  const overlayTarget = operationalPortal ?? (typeof document !== 'undefined' ? document.body : null)
+  const dialogOpen = dialog !== 'none'
+  useOperationalOverlayRegistration(menuOpen, `contact-avatar-menu:${identityKey}`)
+  useOperationalOverlayRegistration(dialogOpen, `contact-avatar-dialog:${identityKey}`)
 
   const updateBusy = useCallback((value: boolean) => {
     busyRef.current = value
@@ -220,25 +284,23 @@ export default function ContactAvatarControl({
     const trigger = menuTriggerRef.current
     if (!trigger) return
     const rect = trigger.getBoundingClientRect()
-    if (rect.bottom < 0 || rect.top > window.innerHeight || rect.right < 0 || rect.left > window.innerWidth) {
+    const visualViewport = window.visualViewport
+    const position = contactAvatarMenuPosition(
+      rect,
+      menuPopupRef.current?.offsetHeight || 300,
+      {
+        left: visualViewport?.offsetLeft || 0,
+        top: visualViewport?.offsetTop || 0,
+        width: visualViewport?.width || window.innerWidth,
+        height: visualViewport?.height || window.innerHeight,
+      },
+    )
+    if (!position) {
       setMenuOpen(false)
       setMenuPosition(null)
       return
     }
-    const maxHeight = Math.max(160, window.innerHeight - avatarMenuMargin * 2)
-    const measuredHeight = Math.min(menuPopupRef.current?.offsetHeight || 300, maxHeight)
-    const below = rect.bottom + avatarMenuGap
-    const above = rect.top - avatarMenuGap - measuredHeight
-    const top = below + measuredHeight <= window.innerHeight - avatarMenuMargin
-      ? below
-      : Math.max(avatarMenuMargin, above)
-    const preferredLeft = rect.left
-    const alternativeLeft = rect.right - avatarMenuWidth
-    const left = Math.min(
-      Math.max(preferredLeft + avatarMenuWidth <= window.innerWidth - avatarMenuMargin ? preferredLeft : alternativeLeft, avatarMenuMargin),
-      Math.max(avatarMenuMargin, window.innerWidth - avatarMenuWidth - avatarMenuMargin),
-    )
-    setMenuPosition({ top, left, maxHeight })
+    setMenuPosition(position)
   }, [])
 
   useEffect(() => {
@@ -268,12 +330,16 @@ export default function ContactAvatarControl({
     document.addEventListener('keydown', escape, true)
     window.addEventListener('resize', reposition)
     window.addEventListener('scroll', reposition, true)
+    window.visualViewport?.addEventListener('resize', reposition)
+    window.visualViewport?.addEventListener('scroll', reposition)
     return () => {
       cancelAnimationFrame(frame)
       document.removeEventListener('mousedown', close)
       document.removeEventListener('keydown', escape, true)
       window.removeEventListener('resize', reposition)
       window.removeEventListener('scroll', reposition, true)
+      window.visualViewport?.removeEventListener('resize', reposition)
+      window.visualViewport?.removeEventListener('scroll', reposition)
     }
   }, [menuOpen, positionMenu])
 
@@ -292,10 +358,11 @@ export default function ContactAvatarControl({
     setDragging(false)
   }, [])
 
-  const dialogOpen = dialog !== 'none'
   useEffect(() => {
     if (!dialogOpen) return
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const returnFocus = dialogReturnFocusRef.current
+      || (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+      || menuTriggerRef.current
     const focusableSelector = 'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
     const frame = window.requestAnimationFrame(() => {
       const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(focusableSelector)
@@ -333,7 +400,9 @@ export default function ContactAvatarControl({
     return () => {
       window.cancelAnimationFrame(frame)
       document.removeEventListener('keydown', handleKeyDown, true)
-      if (previousFocus?.isConnected) previousFocus.focus()
+      const target = returnFocus?.isConnected ? returnFocus : menuTriggerRef.current
+      dialogReturnFocusRef.current = null
+      if (target?.isConnected) window.requestAnimationFrame(() => target.focus({ preventScroll: true }))
     }
   }, [closeDialog, dialogOpen])
 
@@ -372,6 +441,7 @@ export default function ContactAvatarControl({
   }
 
   const beginWhatsAppRefresh = () => {
+    dialogReturnFocusRef.current = menuTriggerRef.current
     setMenuOpen(false)
     setMenuPosition(null)
     setError('')
@@ -412,6 +482,7 @@ export default function ContactAvatarControl({
   }
 
   const openFilePicker = () => {
+    dialogReturnFocusRef.current = menuTriggerRef.current
     setMenuOpen(false)
     setMenuPosition(null)
     filePickerIdentityRef.current = identityRef.current
@@ -590,7 +661,7 @@ export default function ContactAvatarControl({
       <div ref={menuRef} className={`relative inline-flex ${compact ? '' : 'mb-2'}`}>
         <div className={`relative ${compact ? 'h-12 w-12' : 'h-16 w-16'}`}>
           {currentURL ? (
-            <button type="button" onClick={() => setDialog('view')} className="h-full w-full rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2" aria-label={`Ampliar foto de ${displayName}`}>
+            <button type="button" onClick={event => { dialogReturnFocusRef.current = event.currentTarget; setDialog('view') }} className="h-full w-full rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2" aria-label={`Ampliar foto de ${displayName}`}>
               <img
                 key={`${currentURL}:${avatar.revision}`}
                 src={currentURL}
@@ -613,6 +684,7 @@ export default function ContactAvatarControl({
               })}
               className="absolute -bottom-1 -right-1 flex h-7 w-7 items-center justify-center rounded-full border-2 border-white bg-emerald-600 text-white shadow-md transition hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2"
               aria-label="Gestionar foto del contacto"
+              aria-haspopup="menu"
               aria-expanded={menuOpen}
             >
               <Camera className="h-3.5 w-3.5" />
@@ -621,23 +693,26 @@ export default function ContactAvatarControl({
         </div>
       </div>
 
-      {menuOpen && typeof document !== 'undefined' && createPortal(
+      {menuOpen && overlayTarget && createPortal(
         <div
+          data-contact-avatar-menu
           ref={menuPopupRef}
           role="menu"
           aria-label="Opciones de foto del contacto"
           onKeyDown={handleMenuKeyDown}
-          className="fixed z-[95] w-64 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 text-left shadow-2xl shadow-slate-900/20 outline-none"
+          className="pointer-events-auto fixed overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 text-left shadow-2xl shadow-slate-900/20 outline-none"
           style={{
             top: menuPosition?.top ?? 0,
             left: menuPosition?.left ?? 0,
+            width: menuPosition?.width ?? avatarMenuWidth,
             maxHeight: menuPosition?.maxHeight ?? 320,
             visibility: menuPosition ? 'visible' : 'hidden',
+            zIndex: operationalPortal ? OPERATIONAL_OVERLAY_LAYERS.menu : 95,
           }}
         >
           <p className="px-2.5 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Foto del contacto</p>
           {currentURL && (
-            <button role="menuitem" type="button" onClick={() => { setMenuOpen(false); setMenuPosition(null); setDialog('view') }} className="flex min-h-10 w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
+            <button role="menuitem" type="button" onClick={() => { dialogReturnFocusRef.current = menuTriggerRef.current; setMenuOpen(false); setMenuPosition(null); setDialog('view') }} className="flex min-h-10 w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
               <Maximize2 className="h-4 w-4 text-slate-500" /> Ver foto
             </button>
           )}
@@ -648,7 +723,7 @@ export default function ContactAvatarControl({
             <ImagePlus className="h-4 w-4 text-sky-600" /> {currentURL ? 'Subir o reemplazar' : 'Subir una imagen'}
           </button>
           {currentURL && (
-            <button role="menuitem" type="button" onClick={() => { setMenuOpen(false); setMenuPosition(null); setError(''); setDialog('remove') }} className="flex min-h-10 w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-red-600 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500">
+            <button role="menuitem" type="button" onClick={() => { dialogReturnFocusRef.current = menuTriggerRef.current; setMenuOpen(false); setMenuPosition(null); setError(''); setDialog('remove') }} className="flex min-h-10 w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-red-600 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500">
               <Trash2 className="h-4 w-4" /> Quitar foto
             </button>
           )}
@@ -656,7 +731,7 @@ export default function ContactAvatarControl({
             {avatar.source === 'manual' ? 'Imagen subida a Clarin' : avatar.source === 'whatsapp' ? 'Actualizada desde WhatsApp' : avatar.source === 'legacy' ? 'Foto anterior de WhatsApp' : 'Sin foto guardada'}
           </div>
         </div>,
-        document.body,
+        overlayTarget,
       )}
 
       <input
@@ -671,8 +746,15 @@ export default function ContactAvatarControl({
         }}
       />
 
-      {dialog !== 'none' && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/55 p-3 backdrop-blur-[2px]" role="dialog" aria-modal="true" aria-label="Gestionar foto del contacto">
+      {dialog !== 'none' && overlayTarget && createPortal(
+        <div
+          data-contact-avatar-dialog
+          className="pointer-events-auto fixed inset-0 flex items-center justify-center bg-slate-950/55 p-3 backdrop-blur-[2px]"
+          style={{ zIndex: operationalPortal ? OPERATIONAL_OVERLAY_LAYERS.dialog : 100 }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Gestionar foto del contacto"
+        >
           <div ref={dialogRef} tabIndex={-1} className={`flex max-h-[94vh] w-full flex-col overflow-hidden rounded-2xl border border-white/70 bg-white shadow-2xl outline-none ${dialog === 'editor' ? 'max-w-3xl' : 'max-w-lg'}`}>
             <div className="flex min-h-14 items-center justify-between border-b border-slate-200 px-5">
               <div>
@@ -790,7 +872,8 @@ export default function ContactAvatarControl({
               {dialog === 'remove' && <button type="button" disabled={busy} onClick={removeAvatar} className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-red-600 px-4 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-40">{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />} Quitar foto</button>}
             </div>
           </div>
-        </div>
+        </div>,
+        overlayTarget,
       )}
     </>
   )

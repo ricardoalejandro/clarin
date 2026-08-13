@@ -14,7 +14,7 @@
 - Preserve preferred floating geometry independently from viewport clamps. Persist only manual floating geometry by account, user, and surface.
 - Put opportunity/Evento context and stage in the outer header, then render canonical Contact identity once in a compact fixed strip.
 - Keep Observation, Message, and Edit actions above the first scroll boundary. Task creation belongs inside Related tasks.
-- Use one vertical scroll owner and this ordered accordion stack: Contact information, Contact tags, direct observations, opportunity/Evento context, related tasks, general Contact history, integrations. The first three start open; the rest start collapsed.
+- Use one vertical scroll owner and this ordered accordion stack: Contact information, Contact tags, direct observations, general Contact history, opportunity/Evento context, related tasks, integrations. Direct and general observations remain separate but contiguous. The first three start open; the rest start collapsed.
 - Do not use Summary/Activity tabs or a competing activity rail. Accordion state survives maximize/restore and chat, then resets to defaults on entity change.
 - Opening chat forces a temporary maximized mode without persisting it. At 980 measured pixels or more, show compact detail beside chat; below it, chat replaces detail with a return action. Closing restores mode, preferred geometry, scroll, accordion state, and focus exactly.
 - Give each visible pane one primary vertical scroll owner and restore focus when child windows close.
@@ -25,7 +25,7 @@
 - The Contact editor remains the place for identity and extensive fields; tag and observation work never requires opening it.
 - Birth dates and Contact custom fields of type date use the shared operational picker in date-only mode. Display localized `dd/mm/aaaa`, preserve exact `YYYY-MM-DD` or null, expose direct month/year navigation, and omit time, timezone, all-day, and relative due-date actions. Selection updates only the editor draft; Guardar contacto remains the sole write.
 - A Lead or participant without canonical Contact uses the same date-only control for its historical birth date. Do not apply it to Evento dates, filters, or bitácora fields as an accidental scope expansion.
-- Direct observation composers accept `note` and `call`, expose Nota/Llamada visibly, submit with Ctrl/Cmd+Enter, and return/render `created_by_name`. Every item shows type, timestamp, and an honest author/origin fallback.
+- Direct observation composers accept `note` and `call`, expose Nota/Llamada visibly, submit with Ctrl/Cmd+Enter, and return/render `created_by_name`. Resolve explicit creators independently of their primary account with `display_name -> username -> email`; only identified system/import sources may replace an unavailable author, while contextual source labels never masquerade as people.
 - Observation history is lazy and independently collapsible. Its count and add action remain visible while collapsed, and saving one observation leaves the composer available.
 - `scope=participant` returns only direct interactions whose `participant_id` matches the account-scoped participant. The legacy aggregate participant query remains the compatibility default.
 
@@ -38,6 +38,7 @@
 
 ## Pipeline Drag And Reconciliation
 
+- Lead detail exposes a viewport-aware portaled listbox for only the current pipeline's stages plus canonical `Sin etapa` (`stage_id: null`). It uses the same optimistic mutation, canonical response, WebSocket reconciliation, exact rollback, and won/lost/reopen confirmations as board movement; lost still requires a reason.
 - Lead and event boards move entities between stages only; they do not persist within-stage manual order.
 - Pickup captures cards, loaded pagination membership, counts, selected IDs, open detail entity, and source/target stage metadata.
 - DndKit owns pointer, keyboard, Escape, edge autoscroll, and 520 ms touch pickup. An explicit handle owns drag while the card body owns detail opening.

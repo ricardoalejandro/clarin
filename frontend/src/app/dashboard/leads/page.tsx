@@ -30,6 +30,8 @@ import useCrmPipelineCardDrag from '@/components/crm-detail/useCrmPipelineCardDr
 import CrmPipelineDndContext, { useCrmPipelineStageDrop } from '@/components/crm-detail/CrmPipelineDndContext'
 import { CRM_PIPELINE_UNASSIGNED_STAGE_ID, moveCrmPipelineItems, reconcileCrmPipelineCanonicalItem } from '@/components/crm-detail/crmPipelineDrag'
 import { leadMatchesLifecycleFilter, reconcileLeadLifecycleCounts } from '@/components/crm-detail/leadLifecycleReconciliation'
+import { leadStageSelectionMode, leadStageTargetId } from '@/components/crm-detail/leadStageSelection'
+import LeadCardActionsMenu from '@/components/crm-detail/LeadCardActionsMenu'
 import useCrmWindowStorageScope from '@/components/crm-detail/useCrmWindowStorageScope'
 import { crmMessageIsPending, crmMessageTemporaryMode, type CrmMessagePhase } from '@/components/crm-detail/crmMessageWorkflow'
 import ObservationHistoryModal from '@/components/ObservationHistoryModal'
@@ -116,23 +118,6 @@ const LeadCard = memo(function LeadCard({
   lead, isSelected, isDetailActive, isDragged, selectionMode,
   onToggleSelection, onOpenDetail, onDelete, onRestore, onLifecycleAction, stageOptions, onStageChange, isTrash, onAccessibleDrop,
 }: LeadCardProps) {
-  const [actionsOpen, setActionsOpen] = useState(false)
-  const actionsRef = useRef<HTMLDivElement>(null)
-  const mobileActionsRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!actionsOpen) return
-    const close = (event: MouseEvent | KeyboardEvent) => {
-      if (event instanceof KeyboardEvent && event.key !== 'Escape') return
-      if (event instanceof MouseEvent && (actionsRef.current?.contains(event.target as Node) || mobileActionsRef.current?.contains(event.target as Node))) return
-      setActionsOpen(false)
-    }
-    document.addEventListener('mousedown', close)
-    document.addEventListener('keydown', close)
-    return () => {
-      document.removeEventListener('mousedown', close)
-      document.removeEventListener('keydown', close)
-    }
-  }, [actionsOpen])
   const trashRemainingDays = isTrash && lead.deleted_at
     ? Math.max(0, 30 - Math.floor((Date.now() - new Date(lead.deleted_at).getTime()) / (24 * 60 * 60 * 1000)))
     : null
@@ -197,56 +182,12 @@ const LeadCard = memo(function LeadCard({
           </button>
         )}
         {!selectionMode && !isTrash && (
-          <div ref={actionsRef} className="relative">
-            <button
-              type="button"
-              onClick={(event) => { event.stopPropagation(); setActionsOpen(open => !open) }}
-              className="touch-action-visible inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 opacity-100 transition-all hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 lg:h-10 lg:w-10 lg:opacity-0 lg:focus:opacity-100 lg:group-hover:opacity-100"
-              aria-label={`Acciones de ${lead.name || 'lead'}`}
-              aria-haspopup="menu"
-              aria-expanded={actionsOpen}
-            >
-              <MoreHorizontal className="h-4 w-4" />
-            </button>
-            {actionsOpen && (
-              <div role="menu" className="touch-menu-hidden absolute right-0 top-10 z-30 hidden w-48 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl lg:block" onClick={event => event.stopPropagation()}>
-                {lead.status === 'won' || lead.status === 'lost' ? (
-                  <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onLifecycleAction(lead, 'reopen') }} className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-xs font-semibold text-blue-700 hover:bg-blue-50">
-                    <ArchiveRestore className="h-4 w-4" /> Reabrir lead
-                  </button>
-                ) : (
-                  <>
-                    <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onLifecycleAction(lead, 'won') }} className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-xs font-semibold text-emerald-700 hover:bg-emerald-50">
-                      <CheckCircle2 className="h-4 w-4" /> Marcar como ganado
-                    </button>
-                    <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onLifecycleAction(lead, 'lost') }} className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-xs font-semibold text-red-700 hover:bg-red-50">
-                      <XCircle className="h-4 w-4" /> Marcar como perdido
-                    </button>
-                  </>
-                )}
-                <div className="my-1 border-t border-slate-100" />
-                <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onDelete(lead.id) }} className="flex min-h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-xs font-semibold text-slate-600 hover:bg-red-50 hover:text-red-700">
-                  <Trash2 className="h-4 w-4" /> Mover a papelera
-                </button>
-              </div>
-            )}
-            {actionsOpen && typeof document !== 'undefined' && createPortal(
-              <div ref={mobileActionsRef} role="menu" className="touch-menu-visible fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[90] max-h-[70vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl lg:hidden" onClick={event => event.stopPropagation()}>
-                <p className="px-3 py-2 text-xs font-semibold text-slate-500">Acciones de {lead.name || 'lead'}</p>
-                {lead.status === 'won' || lead.status === 'lost' ? (
-                  <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onLifecycleAction(lead, 'reopen') }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-blue-700 hover:bg-blue-50"><ArchiveRestore className="h-4 w-4" /> Reabrir lead</button>
-                ) : (
-                  <>
-                    <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onLifecycleAction(lead, 'won') }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-emerald-700 hover:bg-emerald-50"><CheckCircle2 className="h-4 w-4" /> Marcar como ganado</button>
-                    <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onLifecycleAction(lead, 'lost') }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-red-700 hover:bg-red-50"><XCircle className="h-4 w-4" /> Marcar como perdido</button>
-                  </>
-                )}
-                <div className="my-1 border-t border-slate-100" />
-                <button type="button" role="menuitem" onClick={() => { setActionsOpen(false); onDelete(lead.id) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-red-50 hover:text-red-700"><Trash2 className="h-4 w-4" /> Mover a papelera</button>
-              </div>,
-              document.body,
-            )}
-          </div>
+          <LeadCardActionsMenu
+            leadName={lead.name}
+            status={lead.status}
+            onLifecycleAction={mode => onLifecycleAction(lead, mode)}
+            onDelete={() => onDelete(lead.id)}
+          />
         )}
       </div>
       {lead.phone && (
@@ -1882,20 +1823,15 @@ export default function LeadsPage() {
   }, [savingBlockPreference])
   useAccessibleDialog(showBlockModal, blockDialogRef, closeBlockDialog, blockFirstChoiceRef)
 
-  const requestLeadStageChange = (lead: Lead, stage: PipelineStage, operationId?: string) => {
-    if (stage.stage_type === 'won' || stage.stage_type === 'lost') {
-      setLifecycleRequest({ lead, stage, mode: stage.stage_type, operationId })
+  const requestLeadStageChange = async (lead: Lead, stage: PipelineStage, operationId?: string) => {
+    const mode = leadStageSelectionMode(lead.status, stage)
+    if (mode !== 'direct') {
+      setLifecycleRequest({ lead, stage, mode, operationId })
       setLifecycleReason('')
       setLifecycleError('')
-      return
+      return true
     }
-    if (lead.status === 'won' || lead.status === 'lost') {
-      setLifecycleRequest({ lead, stage, mode: 'reopen', operationId })
-      setLifecycleReason('')
-      setLifecycleError('')
-      return
-    }
-    void handleUpdateLeadStage(lead.id, stage.id, operationId)
+    return handleUpdateLeadStage(lead.id, stage.id, operationId)
   }
 
   const requestLifecycleAction = (lead: Lead, mode: 'won' | 'lost' | 'reopen') => {
@@ -1913,7 +1849,7 @@ export default function LeadsPage() {
         : `Este pipeline no tiene configurada una etapa de ${mode === 'won' ? 'ganados' : 'perdidos'}.`)
       return
     }
-    requestLeadStageChange(lead, target)
+    void requestLeadStageChange(lead, target)
   }
 
   const confirmLifecycleChange = async () => {
@@ -1930,7 +1866,7 @@ export default function LeadsPage() {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
-          stage_id: lifecycleRequest.stage.id,
+          stage_id: leadStageTargetId(lifecycleRequest.stage),
           operation_id: lifecycleRequest.operationId,
           ...(lifecycleRequest.mode === 'lost' ? { close_reason: lifecycleReason.trim() } : {}),
         }),
@@ -4003,7 +3939,7 @@ export default function LeadsPage() {
                             onClick={event => event.stopPropagation()}
                             onChange={event => {
                               const stage = allStages.find(option => option.id === event.target.value)
-                              if (stage && stage.id !== lead.stage_id) requestLeadStageChange(lead, stage)
+                              if (stage && stage.id !== lead.stage_id) void requestLeadStageChange(lead, stage)
                             }}
                             className="h-11 min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-2 text-sm text-slate-700 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
                             aria-label={`Mover ${lead.name || 'lead'} a otra etapa`}
@@ -4394,6 +4330,27 @@ export default function LeadsPage() {
               />
             ) : undefined}
             detail={(() => {
+                const detailStageOptions = pipelines.find(pipeline => pipeline.id === detailLead.pipeline_id)?.stages
+                  || (activePipeline?.id === detailLead.pipeline_id ? allStages : [])
+                const detailStageReadOnly = statusFilter === 'trash' || Boolean(detailLead.deleted_at) || detailLead.is_archived
+                const changeDetailStage = (stage: PipelineStage | null) => requestLeadStageChange(detailLead, stage || {
+                  id: CRM_PIPELINE_UNASSIGNED_STAGE_ID,
+                  pipeline_id: detailLead.pipeline_id || '',
+                  name: 'Sin etapa',
+                  color: '#64748b',
+                  position: -1,
+                  stage_type: 'active',
+                })
+                const leadContextPanel = (
+                  <LeadContextPanel
+                    lead={detailLead}
+                    stages={detailStageOptions}
+                    disabled={detailStageReadOnly}
+                    saving={savingLifecycle}
+                    embedded
+                    onStageChange={changeDetailStage}
+                  />
+                )
                 const opportunityPanel = (
                   <LeadDetailPanel
                     lead={detailLead}
@@ -4402,7 +4359,7 @@ export default function LeadsPage() {
                       setDetailLead(updatedLead as any)
                       updateLeadInStages(updatedLead.id, () => updatedLead as any)
                     }}
-                    onStageChangeRequest={(lead, stage) => requestLeadStageChange(lead, stage)}
+                    onStageChangeRequest={(lead, stage) => { void requestLeadStageChange(lead, stage) }}
                     onLifecycleAction={requestLifecycleAction}
                     onClose={() => { setShowDetailPanel(false); resetInlineChatState(); setScrollToTasks(false) }}
                     onSendWhatsApp={(phone: string) => handleSendWhatsApp(phone)}
@@ -4445,7 +4402,7 @@ export default function LeadsPage() {
                 if (!detailLead.contact_id) return (
                   <DetachedLeadDetail
                     lead={detailLead}
-                    context={<><LeadContextPanel lead={detailLead} embedded /><div className="mt-3 border-t border-violet-100 pt-3">{opportunityPanel}</div></>}
+                    context={<>{leadContextPanel}<div className="mt-3 border-t border-violet-100 pt-3">{opportunityPanel}</div></>}
                     activity={<ScopedActivityPanel embedded scope={{ kind: 'lead', leadId: detailLead.id }} description="Solo actividad vinculada a esta oportunidad." onChange={() => { if (viewMode === 'list') { setListObservations(current => { const next = new Map(current); next.delete(detailLead.id); return next }); fetchBatchObservations([detailLead.id]) } }} />}
                     tasks={<RelatedTasksPanel scope={{ leadId: detailLead.id }} embedded />}
                     onMessage={(phone) => handleSendWhatsApp(phone)}
@@ -4505,7 +4462,7 @@ export default function LeadsPage() {
                         fetchBatchObservations([detailLead.id])
                       }
                     }}
-                    contextSummary={<LeadContextPanel lead={detailLead} embedded />}
+                    contextSummary={leadContextPanel}
                     contextDetails={opportunityPanel}
                     contextActivity={<ScopedActivityPanel scope={{ kind: 'lead', leadId: detailLead.id, contactId: detailLead.contact_id }} description="Solo actividad vinculada a esta oportunidad." onChange={() => { if (viewMode === 'list') { setListObservations(current => { const next = new Map(current); next.delete(detailLead.id); return next }); fetchBatchObservations([detailLead.id]) } }} />}
                     relatedTasks={<RelatedTasksPanel scope={{ contactId: detailLead.contact_id, leadId: detailLead.id }} />}
