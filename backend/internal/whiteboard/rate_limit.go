@@ -52,6 +52,12 @@ func eventLimit(event string) int {
 		return 60
 	case EventPresenceUpdate:
 		return 12
+	case EventPresentationStart, EventPresentationStop:
+		return 3
+	case EventFollowChange:
+		return 12
+	case EventViewportUpdate:
+		return 24
 	default:
 		return 0
 	}

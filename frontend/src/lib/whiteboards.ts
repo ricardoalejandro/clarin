@@ -5,11 +5,16 @@ export const WHITEBOARD_SHARE_EXPORT_DEFAULT = false
 export const WHITEBOARD_THUMBNAIL_DEBOUNCE_MS = 1_500
 export const WHITEBOARD_THUMBNAIL_MIN_INTERVAL_MS = 60_000
 export const WHITEBOARD_SAVE_MAX_AUTOMATIC_FAILURES = 3
+export const WHITEBOARD_MANAGER_VIEW_STORAGE_KEY = 'clarin.whiteboards.view.v1'
+export const WHITEBOARD_SHOW_DEPRECATED_OFFICIAL_FONTS = true
+// Comments remain persisted and API-compatible, but the editor intentionally
+// does not expose their UI until a new product interaction is approved.
+export const WHITEBOARD_COMMENTS_UI_ENABLED = false
 
 export type WhiteboardScope = 'all' | 'mine' | 'recent' | 'shared' | 'trash'
-export type WhiteboardViewMode = 'grid' | 'list'
+export type WhiteboardViewMode = 'grid' | 'compact' | 'list'
 export type WhiteboardManagerLayout = 'narrow' | 'compact' | 'wide'
-export type WhiteboardAccessLevel = 'view' | 'edit' | 'manage'
+export type WhiteboardAccessLevel = 'view' | 'comment' | 'edit' | 'manage'
 
 export function retainWhiteboardPendingSave<T>(pending: T | null, create: () => T) {
   return pending ?? create()
@@ -24,13 +29,27 @@ export function shouldRetryWhiteboardDirtySave(input: {
   return input.dirty && !input.saving && input.online && input.canEdit
 }
 
-export type WhiteboardSaveFailureAction = 'conflict' | 'retry' | 'block'
+export type WhiteboardSaveFailureAction = 'conflict' | 'retry' | 'terminal' | 'transient_exhausted'
+export type WhiteboardSaveRetryBlockReason = Exclude<WhiteboardSaveFailureAction, 'retry'> | null
 export type WhiteboardEditorLayout = 'mobile' | 'compact' | 'wide'
 
 export function whiteboardSaveFailureAction(status: number | undefined, automaticFailures: number): WhiteboardSaveFailureAction {
   if (status === 409) return 'conflict'
-  if (status !== undefined && [400, 401, 403, 404, 410, 422].includes(status)) return 'block'
-  return automaticFailures < WHITEBOARD_SAVE_MAX_AUTOMATIC_FAILURES ? 'retry' : 'block'
+  if (status !== undefined && [400, 401, 403, 404, 410, 422].includes(status)) return 'terminal'
+  return automaticFailures < WHITEBOARD_SAVE_MAX_AUTOMATIC_FAILURES ? 'retry' : 'transient_exhausted'
+}
+
+export function whiteboardSaveRetryStateAfterReconnect(input: {
+  previouslyOpened: boolean
+  automaticFailures: number
+  automaticRetryBlockReason: WhiteboardSaveRetryBlockReason
+}) {
+  const shouldRetry = input.previouslyOpened && input.automaticRetryBlockReason === 'transient_exhausted'
+  return {
+    shouldRetry,
+    automaticFailures: shouldRetry ? 0 : input.automaticFailures,
+    automaticRetryBlockReason: shouldRetry ? null : input.automaticRetryBlockReason,
+  }
 }
 
 export function whiteboardSaveRetryDelay(automaticFailures: number) {
@@ -42,6 +61,41 @@ export function whiteboardEditorLayout(availableWidth: number): WhiteboardEditor
   if (!Number.isFinite(availableWidth) || availableWidth < 760) return 'mobile'
   if (availableWidth < 1_280) return 'compact'
   return 'wide'
+}
+
+export function whiteboardToolbarShowsShare(availableWidth: number, canManageAccess: boolean) {
+  return canManageAccess && Number.isFinite(availableWidth) && availableWidth >= 1_280
+}
+
+export function whiteboardToolbarStacksBelowTools(availableWidth: number) {
+  return !Number.isFinite(availableWidth) || availableWidth < 960
+}
+
+export function whiteboardEditorCanvasActions(allowImageExport: boolean) {
+  return {
+    loadScene: false,
+    saveToActiveFile: false,
+    saveAsImage: allowImageExport,
+    export: false,
+    toggleTheme: false,
+  } as const
+}
+
+export function whiteboardImageExportDialogAppState() {
+  return { openDialog: { name: 'imageExport' as const } }
+}
+
+export function whiteboardMoreMenuPosition(
+  trigger: { right: number; bottom: number },
+  viewport: { width: number; height: number },
+) {
+  const margin = 12
+  const menuWidth = Math.min(336, Math.max(0, viewport.width - margin * 2))
+  const maximumRight = Math.max(margin, viewport.width - menuWidth - margin)
+  return {
+    top: Math.min(trigger.bottom + 8, Math.max(margin, viewport.height - 520)),
+    right: Math.min(Math.max(margin, viewport.width - trigger.right), maximumRight),
+  }
 }
 
 export function whiteboardThumbnailDelay(lastAttemptAt: number, now = Date.now()) {
@@ -83,6 +137,20 @@ export interface WhiteboardEffectiveAccess {
   can_manage_access: boolean
 }
 
+export function whiteboardEditorAccess(
+  access: WhiteboardEffectiveAccess | null | undefined,
+  archivedAt?: string | null,
+) {
+  const active = !archivedAt
+  const canEdit = Boolean(access?.can_edit) && active
+  const canComment = Boolean(access?.can_comment ?? access?.can_edit) && active
+  return {
+    canEdit,
+    canComment,
+    viewModeEnabled: !canEdit,
+  }
+}
+
 export interface WhiteboardFolder {
   id: string
   name: string
@@ -105,6 +173,7 @@ export interface WhiteboardFolderRow {
 
 export interface WhiteboardSummary {
   id: string
+  account_id?: string
   name: string
   folder_id?: string | null
   folder_name?: string | null
@@ -220,7 +289,9 @@ export interface WhiteboardShareLink {
   id: string
   board_id: string
   label: string
-  access_level: Exclude<WhiteboardAccessLevel, 'manage'>
+  // Guest links intentionally stay read/edit only. Comment access belongs to
+  // authenticated members of the cuenta and is never inferred for guests.
+  access_level: 'view' | 'edit'
   password_protected: boolean
   allow_export: boolean
   expires_at?: string | null
@@ -232,7 +303,7 @@ export interface WhiteboardShareLink {
 }
 
 export interface WhiteboardRealtimeEvent {
-  event: 'scene.patch' | 'scene.snapshot' | 'sync.required' | 'ack' | 'presence.snapshot' | 'presence.update' | 'cursor.update' | 'access.revoked' | 'error'
+	event: 'scene.patch' | 'scene.snapshot' | 'sync.required' | 'ack' | 'presence.snapshot' | 'presence.update' | 'cursor.update' | 'room.ready' | 'presentation.snapshot' | 'presentation.changed' | 'follow.change' | 'viewport.update' | 'comment.changed' | 'access.revoked' | 'error'
   sequence?: number
   operation_id?: string
   elements?: readonly unknown[]
@@ -252,6 +323,14 @@ export interface WhiteboardRealtimeActor {
   display_name: string
   access: WhiteboardAccessLevel | string
 }
+
+export interface WhiteboardPresentation {
+	presentation_id: string
+	actor: WhiteboardRealtimeActor
+	started_at: string
+}
+
+export type WhiteboardViewportBounds = readonly [number, number, number, number]
 
 export function isWhiteboardSceneSequence(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
@@ -282,7 +361,7 @@ export interface WhiteboardSavePayload {
     app_state: Record<string, unknown>
   }
   scene_schema_version: 'excalidraw'
-  editor_version: '0.18.1'
+  editor_version: '0.18.1-clarin.4'
 }
 
 export interface WhiteboardScenePatch {
@@ -301,6 +380,19 @@ export interface WhiteboardCursorUpdate {
 export interface WhiteboardPresenceUpdate {
   event: 'presence.update'
   data: { status: 'active' }
+}
+
+export interface WhiteboardFollowChange {
+	event: 'follow.change'
+	data: {
+		target_actor_id: string
+		action: 'FOLLOW' | 'UNFOLLOW'
+	}
+}
+
+export interface WhiteboardViewportUpdate {
+	event: 'viewport.update'
+	data: { bounds: WhiteboardViewportBounds }
 }
 
 export interface WhiteboardSceneWritePlan {
@@ -498,7 +590,7 @@ export function buildWhiteboardSavePayload(input: {
     },
     ...(input.includePatch ? { patch: { elements: input.patchElements || input.elements, app_state: appState } } : {}),
     scene_schema_version: 'excalidraw',
-    editor_version: '0.18.1',
+    editor_version: '0.18.1-clarin.4',
   }
 }
 
@@ -761,10 +853,12 @@ export function whiteboardNavigationAction(input: {
   assetSaving?: boolean
   libraryDirty?: boolean
   librarySaving?: boolean
+  commentSaving?: boolean
+  commentDirty?: boolean
   flushAttempted: boolean
 }): WhiteboardNavigationAction {
-  if (!input.dirty && !input.pending && !input.saving && !input.assetSaving && !input.libraryDirty && !input.librarySaving) return 'leave'
-  if (input.saving || input.assetSaving || input.librarySaving) return 'wait'
+  if (!input.dirty && !input.pending && !input.saving && !input.assetSaving && !input.libraryDirty && !input.librarySaving && !input.commentSaving && !input.commentDirty) return 'leave'
+  if (input.saving || input.assetSaving || input.librarySaving || input.commentSaving) return 'wait'
   if (!input.flushAttempted && (input.dirty || input.pending || input.libraryDirty)) return 'flush'
   return 'confirm'
 }
@@ -774,9 +868,13 @@ export function whiteboardNavigationWritesCovered(input: {
   savedSceneVersion: number
   requiredLibraryVersion: number | null
   savedLibraryVersion: number
+  commentsPending?: boolean
+  commentsDirty?: boolean
 }) {
   return (input.requiredSceneVersion === null || input.savedSceneVersion >= input.requiredSceneVersion)
     && (input.requiredLibraryVersion === null || input.savedLibraryVersion >= input.requiredLibraryVersion)
+    && !input.commentsPending
+    && !input.commentsDirty
 }
 
 export function buildWhiteboardSceneWritePlan(
@@ -1000,7 +1098,19 @@ export function buildWhiteboardCursorUpdate(input: WhiteboardCursorPayload): Whi
 }
 
 export function buildWhiteboardPresenceUpdate(): WhiteboardPresenceUpdate {
-  return { event: 'presence.update', data: { status: 'active' } }
+	return { event: 'presence.update', data: { status: 'active' } }
+}
+
+export function buildWhiteboardFollowChange(targetActorID: string, action: 'FOLLOW' | 'UNFOLLOW'): WhiteboardFollowChange | null {
+	if (!targetActorID.trim()) return null
+	return { event: 'follow.change', data: { target_actor_id: targetActorID, action } }
+}
+
+export function buildWhiteboardViewportUpdate(bounds: WhiteboardViewportBounds): WhiteboardViewportUpdate | null {
+	const normalized = bounds.map(value => Number(value)) as unknown as WhiteboardViewportBounds
+	if (normalized.some(value => !Number.isFinite(value) || Math.abs(value) > 1_000_000)) return null
+	if (normalized[2] <= normalized[0] || normalized[3] <= normalized[1]) return null
+	return { event: 'viewport.update', data: { bounds: normalized } }
 }
 
 function realtimeActor(value: unknown): WhiteboardRealtimeActor | null {
@@ -1105,6 +1215,13 @@ export function shouldApplyWhiteboardRealtimeEvent(input: {
   return isWhiteboardSceneSequence(input.event.sequence) && input.event.sequence > input.currentSceneSequence
 }
 
+export function reconcileWhiteboardConnectionOpen(previouslyOpened: boolean) {
+  return {
+    hasOpened: true,
+    reloadComments: previouslyOpened,
+  }
+}
+
 export function createWhiteboardOperationID() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
   return `whiteboard-${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -1150,6 +1267,10 @@ export function whiteboardManagerLayout(width: number): WhiteboardManagerLayout 
   if (width < 760) return 'narrow'
   if (width < 1080) return 'compact'
   return 'wide'
+}
+
+export function parseWhiteboardViewMode(value: string | null | undefined): WhiteboardViewMode {
+  return value === 'grid' || value === 'list' || value === 'compact' ? value : 'compact'
 }
 
 export function flattenWhiteboardFolders(folders: readonly WhiteboardFolder[]): WhiteboardFolderRow[] {

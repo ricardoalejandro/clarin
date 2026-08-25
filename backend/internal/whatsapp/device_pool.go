@@ -77,6 +77,24 @@ func ownReactionSenderJID(instance *DeviceInstance) string {
 	return canonicalReactionSenderJID(instance.JID)
 }
 
+func reactionEventPayload(chatID uuid.UUID, targetMessageID, senderJID, senderName, emoji string, isFromMe bool, timestamp time.Time, provider, operationID string) map[string]interface{} {
+	payload := map[string]interface{}{
+		"chat_id":           chatID.String(),
+		"target_message_id": targetMessageID,
+		"sender_jid":        senderJID,
+		"sender_name":       senderName,
+		"emoji":             emoji,
+		"is_from_me":        isFromMe,
+		"removed":           emoji == "",
+		"timestamp":         timestamp,
+		"provider":          provider,
+	}
+	if operationID != "" {
+		payload["operation_id"] = operationID
+	}
+	return payload
+}
+
 func reactionTargetSenderJID(chat types.JID, targetSenderJID string, targetFromMe bool) (types.JID, error) {
 	if targetFromMe {
 		return types.EmptyJID, nil
@@ -234,6 +252,10 @@ func (p *DevicePool) SetReceiveMessages(deviceID uuid.UUID, value bool) {
 
 // LoadExistingDevices loads all existing devices and connects them
 func (p *DevicePool) LoadExistingDevices(ctx context.Context) error {
+	// Reconcile proven legacy LID Contact duplicates independently of device
+	// connectivity. This also covers dormant devices without reconnecting them.
+	go p.reconcileAllMappedLIDContacts(context.Background())
+
 	devices, err := p.repos.Device.GetAll(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get devices: %w", err)
@@ -554,8 +576,12 @@ func (p *DevicePool) handleConnected(ctx context.Context, instance *DeviceInstan
 
 	log.Printf("[Device %s] Connected as %s", instance.ID, jid)
 
-	// Sync contacts in background after connection
-	go p.syncContacts(context.Background(), instance)
+	// Reconcile already persisted pending chats before the general contact sync.
+	go func() {
+		backgroundCtx := context.Background()
+		p.reconcilePendingChatIdentities(backgroundCtx, instance)
+		p.syncContacts(backgroundCtx, instance)
+	}()
 }
 
 // handleLoggedOut processes logout events
@@ -946,10 +972,8 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 		if protocolMsg.GetType() == waE2E.ProtocolMessage_REVOKE {
 			revokedID := protocolMsg.GetKey().GetID()
 			chatJID := evt.Info.Chat.ToNonAD().String()
-			if evt.Info.Chat.Server == types.HiddenUserServer {
-				if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, evt.Info.Chat.ToNonAD()); err == nil && !pnJID.IsEmpty() {
-					chatJID = pnJID.User + "@s.whatsapp.net"
-				}
+			if _, identity, identityErr := p.getOrCreateMessageChat(ctx, instance, evt.Info.MessageSource, ""); identityErr == nil && !identity.JID.IsEmpty() {
+				chatJID = identity.JID.ToNonAD().String()
 			}
 
 			// Mark message as revoked in DB
@@ -976,10 +1000,8 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 		if protocolMsg.GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT {
 			editedMsgID := protocolMsg.GetKey().GetID()
 			chatJID := evt.Info.Chat.ToNonAD().String()
-			if evt.Info.Chat.Server == types.HiddenUserServer {
-				if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, evt.Info.Chat.ToNonAD()); err == nil && !pnJID.IsEmpty() {
-					chatJID = pnJID.User + "@s.whatsapp.net"
-				}
+			if _, identity, identityErr := p.getOrCreateMessageChat(ctx, instance, evt.Info.MessageSource, ""); identityErr == nil && !identity.JID.IsEmpty() {
+				chatJID = identity.JID.ToNonAD().String()
 			}
 
 			newBody := ""
@@ -1112,40 +1134,26 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 		body = contactMsg.GetDisplayName()
 	}
 
-	// Get sender info - normalize JIDs to remove device suffix for consistent chat matching
-	// ToNonAD() converts JIDs like "user:5@s.whatsapp.net" to "user@s.whatsapp.net"
-	chatJID := evt.Info.Chat.ToNonAD().String()
+	// Resolve the peer before any CRM identity write. WhatsApp may address the
+	// same person by LID while providing the phone JID in SenderAlt/RecipientAlt.
 	senderJID := evt.Info.Sender.ToNonAD().String()
 	senderName := evt.Info.PushName
 	isFromMe := evt.Info.IsFromMe
-
-	// Resolve phone number BEFORE creating chat — so we use a consistent JID
-	phone := evt.Info.Sender.ToNonAD().User
-	if evt.Info.Chat.Server == types.HiddenUserServer {
-		// Chat JID is @lid — try to resolve to @s.whatsapp.net for consistent chat identity
-		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, evt.Info.Chat.ToNonAD()); err == nil && !pnJID.IsEmpty() {
-			chatJID = pnJID.User + "@s.whatsapp.net"
-			phone = pnJID.User
-			log.Printf("[Message] Resolved chat LID %s -> %s", evt.Info.Chat.ToNonAD().String(), chatJID)
-		}
-	}
-	if !isFromMe && evt.Info.Sender.Server == types.HiddenUserServer {
-		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, evt.Info.Sender.ToNonAD()); err == nil && !pnJID.IsEmpty() {
-			phone = pnJID.User
-		} else if evt.Info.Chat.Server == types.DefaultUserServer {
-			phone = evt.Info.Chat.ToNonAD().User
-		}
-	}
 
 	// Get or create chat - only use sender name for incoming messages (not our own)
 	chatName := ""
 	if !isFromMe {
 		chatName = senderName
 	}
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, chatJID, chatName)
+	chat, identity, err := p.getOrCreateMessageChat(ctx, instance, evt.Info.MessageSource, chatName)
 	if err != nil {
 		log.Printf("[Message] Failed to get/create chat: %v", err)
 		return
+	}
+	chatJID := identity.JID.ToNonAD().String()
+	phone := identity.phone()
+	if !isFromMe && !identity.JID.IsEmpty() {
+		senderJID = identity.JID.ToNonAD().String()
 	}
 
 	// Extract quoted/reply context from incoming message
@@ -1356,7 +1364,7 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 	}
 
 	// Update chat last message
-	_ = p.repos.Chat.UpdateLastMessage(ctx, chat.ID, body, evt.Info.Timestamp, !isFromMe)
+	_ = p.repos.Chat.UpdateLastMessage(ctx, instance.AccountID, chat.ID, body, evt.Info.Timestamp, !isFromMe)
 
 	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
@@ -1400,10 +1408,12 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 				AccountID: instance.AccountID,
 				JID:       contactJID,
 				Name:      strPtr(senderName),
-				Phone:     strPtr(phone),
 				Status:    strPtr(domain.LeadStatusNew),
 				Source:    strPtr("whatsapp"),
 				ContactID: contactID,
+			}
+			if phone != "" {
+				newLead.Phone = strPtr(phone)
 			}
 			if pipelineID, stageID, err := p.repos.Pipeline.ResolveIncomingLeadDestination(ctx, instance.AccountID); err == nil {
 				newLead.PipelineID = pipelineID
@@ -1850,29 +1860,8 @@ func (p *DevicePool) handleReceipt(ctx context.Context, instance *DeviceInstance
 		return
 	}
 
-	chatJID := evt.Chat.ToNonAD().String()
-
-	// Resolve LID to phone JID for consistent matching
-	if evt.Chat.Server == types.HiddenUserServer {
-		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, evt.Chat.ToNonAD()); err == nil && !pnJID.IsEmpty() {
-			chatJID = pnJID.User + "@s.whatsapp.net"
-		} else {
-			log.Printf("[Receipt] WARNING: Could not resolve LID %s to phone JID, receipt may not match", evt.Chat.ToNonAD().String())
-		}
-	}
-
-	// Also try resolving via Sender for receipts where Chat might differ
-	if evt.MessageSource.Sender.Server == types.HiddenUserServer && evt.Chat.Server != types.HiddenUserServer {
-		// Chat already has phone JID, no need to resolve
-	} else if evt.MessageSource.Sender.Server == types.HiddenUserServer {
-		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, evt.MessageSource.Sender.ToNonAD()); err == nil && !pnJID.IsEmpty() {
-			resolvedJID := pnJID.User + "@s.whatsapp.net"
-			if chatJID != resolvedJID && evt.Chat.Server == types.HiddenUserServer {
-				log.Printf("[Receipt] Resolved sender LID %s -> %s (chat was %s)", evt.MessageSource.Sender.ToNonAD().String(), resolvedJID, chatJID)
-				chatJID = resolvedJID
-			}
-		}
-	}
+	identity := p.resolveMessagePeerIdentity(ctx, evt.MessageSource)
+	chatJID := identity.JID.ToNonAD().String()
 
 	log.Printf("[Receipt] type=%s status=%s chat=%s msgs=%v", evt.Type, status, chatJID, evt.MessageIDs)
 
@@ -1896,15 +1885,9 @@ func (p *DevicePool) handleReceipt(ctx context.Context, instance *DeviceInstance
 
 // handleChatPresence processes typing/recording indicators from contacts
 func (p *DevicePool) handleChatPresence(ctx context.Context, instance *DeviceInstance, evt *events.ChatPresence) {
-	jid := evt.MessageSource.Chat.ToNonAD().String()
+	identity := p.resolveMessagePeerIdentity(ctx, evt.MessageSource)
+	jid := identity.JID.ToNonAD().String()
 	senderJID := evt.MessageSource.Sender.ToNonAD().String()
-
-	// Resolve LID to phone JID
-	if evt.MessageSource.Chat.Server == types.HiddenUserServer {
-		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, evt.MessageSource.Chat.ToNonAD()); err == nil && !pnJID.IsEmpty() {
-			jid = pnJID.User + "@s.whatsapp.net"
-		}
-	}
 
 	media := "text"
 	if evt.Media == types.ChatPresenceMediaAudio {
@@ -1934,12 +1917,18 @@ func (p *DevicePool) handlePresence(ctx context.Context, instance *DeviceInstanc
 func (p *DevicePool) handleContactEvent(ctx context.Context, instance *DeviceInstance, evt *events.Contact) {
 	jid := evt.JID.ToNonAD().String()
 	phone := evt.JID.User
+	lidJID := ""
 
 	// Resolve LID
 	if evt.JID.Server == types.HiddenUserServer {
+		lidJID = evt.JID.ToNonAD().String()
 		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, evt.JID.ToNonAD()); err == nil && !pnJID.IsEmpty() {
 			jid = pnJID.User + "@s.whatsapp.net"
 			phone = pnJID.User
+		} else {
+			// A contact-list LID without a proven PN must not create a fake phone
+			// Contact. A real message will create a visible pending identity.
+			return
 		}
 	}
 
@@ -1953,6 +1942,7 @@ func (p *DevicePool) handleContactEvent(ctx context.Context, instance *DeviceIns
 		log.Printf("[ContactEvent] Failed to upsert contact %s: %v", jid, err)
 		return
 	}
+	contact = p.reconcileMappedLIDContact(ctx, instance.AccountID, lidJID, contact)
 
 	// Update per-device name
 	cdn := &domain.ContactDeviceName{
@@ -2067,16 +2057,14 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 			continue // skip groups (g.us), broadcast, newsletter
 		}
 
-		// Resolve LID to phone JID for consistent chat identity
+		// Resolve LID when the durable provider map is available. Unresolved
+		// conversations are still imported into a visible pending chat.
 		chatJID := parsed.ToNonAD().String()
-		phone := parsed.User
 		if parsed.Server == types.HiddenUserServer {
 			if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, parsed.ToNonAD()); err == nil && !pnJID.IsEmpty() {
 				chatJID = pnJID.User + "@s.whatsapp.net"
-				phone = pnJID.User
 			} else {
 				totalLIDFail += len(conv.Messages)
-				continue
 			}
 		}
 
@@ -2126,6 +2114,14 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 				continue
 			}
 
+			if strings.HasSuffix(strings.ToLower(chatJID), "@lid") {
+				resolvedChat, resolvedIdentity, resolveErr := p.getOrCreateMessageChat(ctx, instance, parsedEvt.Info.MessageSource, "")
+				if resolveErr == nil && resolvedChat != nil && !resolvedIdentity.JID.IsEmpty() {
+					chat = resolvedChat
+					chatJID = resolvedIdentity.JID.ToNonAD().String()
+				}
+			}
+
 			// Extract message content — pass nil for instance to SKIP media downloads during history sync.
 			// Media downloads block the event handler for too long with hundreds of conversations.
 			// Messages will have type/mimetype metadata but no media URL.
@@ -2138,9 +2134,10 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 			}
 
 			senderJID := parsedEvt.Info.Sender.ToNonAD().String()
-			if parsedEvt.Info.Sender.Server == types.HiddenUserServer {
-				if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, parsedEvt.Info.Sender.ToNonAD()); err == nil && !pnJID.IsEmpty() {
-					senderJID = pnJID.User + "@s.whatsapp.net"
+			if !parsedEvt.Info.IsFromMe {
+				resolvedIdentity := p.resolveMessagePeerIdentity(ctx, parsedEvt.Info.MessageSource)
+				if !resolvedIdentity.JID.IsEmpty() {
+					senderJID = resolvedIdentity.JID.ToNonAD().String()
 				}
 			}
 
@@ -2198,9 +2195,6 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 
 		// Update chat last message with the newest history message if chat is empty
 		if convSaved > 0 {
-			// Ensure contact exists
-			p.repos.Contact.GetOrCreate(ctx, instance.AccountID, &instance.ID, chatJID, phone, "", "", false)
-
 			log.Printf("[HistorySync] %s: saved %d messages", chatJID, convSaved)
 		}
 	}
@@ -2397,19 +2391,13 @@ func (p *DevicePool) handleReaction(ctx context.Context, instance *DeviceInstanc
 		senderJID = ownReactionSenderJID(instance)
 	}
 
-	// Resolve chat JID
-	chatJID := evt.Info.Chat.ToNonAD().String()
-	if evt.Info.Chat.Server == types.HiddenUserServer {
-		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, evt.Info.Chat.ToNonAD()); err == nil && !pnJID.IsEmpty() {
-			chatJID = pnJID.User + "@s.whatsapp.net"
-		}
-	}
-
-	// Get the chat
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, chatJID, "")
+	chat, identity, err := p.getOrCreateMessageChat(ctx, instance, evt.Info.MessageSource, "")
 	if err != nil {
 		log.Printf("[Reaction] Failed to get chat: %v", err)
 		return
+	}
+	if !isFromMe && !identity.JID.IsEmpty() {
+		senderJID = canonicalReactionSenderJID(identity.JID.ToNonAD().String())
 	}
 
 	changed := false
@@ -2450,37 +2438,31 @@ func (p *DevicePool) handleReaction(ctx context.Context, instance *DeviceInstanc
 	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
 	// Broadcast to frontend
-	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageReaction, map[string]interface{}{
-		"chat_id":           chat.ID.String(),
-		"target_message_id": targetMsgID,
-		"sender_jid":        senderJID,
-		"sender_name":       evt.Info.PushName,
-		"emoji":             emoji,
-		"is_from_me":        isFromMe,
-		"removed":           emoji == "",
-	})
+	p.hub.BroadcastToAccountWithPermission(
+		instance.AccountID,
+		domain.PermChats,
+		ws.EventMessageReaction,
+		reactionEventPayload(chat.ID, targetMsgID, senderJID, evt.Info.PushName, emoji, isFromMe, eventTimestamp, domain.DeviceProviderWhatsAppWeb, ""),
+	)
 }
 
 // handlePollCreation processes incoming poll creation messages
 func (p *DevicePool) handlePollCreation(ctx context.Context, instance *DeviceInstance, evt *events.Message, pollMsg *waE2E.PollCreationMessage) {
-	chatJID := evt.Info.Chat.ToNonAD().String()
 	senderJID := evt.Info.Sender.ToNonAD().String()
 	isFromMe := evt.Info.IsFromMe
-
-	if evt.Info.Chat.Server == types.HiddenUserServer {
-		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, evt.Info.Chat.ToNonAD()); err == nil && !pnJID.IsEmpty() {
-			chatJID = pnJID.User + "@s.whatsapp.net"
-		}
-	}
 
 	chatName := ""
 	if !isFromMe {
 		chatName = evt.Info.PushName
 	}
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, chatJID, chatName)
+	chat, identity, err := p.getOrCreateMessageChat(ctx, instance, evt.Info.MessageSource, chatName)
 	if err != nil {
 		log.Printf("[Poll] Failed to get/create chat: %v", err)
 		return
+	}
+	chatJID := identity.JID.ToNonAD().String()
+	if !isFromMe && !identity.JID.IsEmpty() {
+		senderJID = identity.JID.ToNonAD().String()
 	}
 
 	question := pollMsg.GetName()
@@ -2534,7 +2516,7 @@ func (p *DevicePool) handlePollCreation(ctx context.Context, instance *DeviceIns
 	// Load options for response
 	msg.PollOptions, _ = p.repos.Poll.GetOptions(ctx, msg.ID)
 
-	_ = p.repos.Chat.UpdateLastMessage(ctx, chat.ID, "📊 "+question, evt.Info.Timestamp, !isFromMe)
+	_ = p.repos.Chat.UpdateLastMessage(ctx, instance.AccountID, chat.ID, "📊 "+question, evt.Info.Timestamp, !isFromMe)
 
 	p.hub.BroadcastNewMessage(instance.AccountID, map[string]interface{}{
 		"chat_id":      chat.ID.String(),
@@ -2550,14 +2532,7 @@ func (p *DevicePool) handlePollCreation(ctx context.Context, instance *DeviceIns
 
 // handlePollUpdate processes incoming poll vote updates
 func (p *DevicePool) handlePollUpdate(ctx context.Context, instance *DeviceInstance, evt *events.Message, pollUpdate *waE2E.PollUpdateMessage) {
-	chatJID := evt.Info.Chat.ToNonAD().String()
-	if evt.Info.Chat.Server == types.HiddenUserServer {
-		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, evt.Info.Chat.ToNonAD()); err == nil && !pnJID.IsEmpty() {
-			chatJID = pnJID.User + "@s.whatsapp.net"
-		}
-	}
-
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, chatJID, "")
+	chat, identity, err := p.getOrCreateMessageChat(ctx, instance, evt.Info.MessageSource, "")
 	if err != nil {
 		log.Printf("[PollVote] Failed to get chat: %v", err)
 		return
@@ -2601,6 +2576,9 @@ func (p *DevicePool) handlePollUpdate(ctx context.Context, instance *DeviceInsta
 	}
 
 	voterJID := evt.Info.Sender.ToNonAD().String()
+	if !evt.Info.IsFromMe && !identity.JID.IsEmpty() {
+		voterJID = identity.JID.ToNonAD().String()
+	}
 	vote := &domain.PollVote{
 		MessageID:     pollMsg.ID,
 		VoterJID:      voterJID,
@@ -2661,12 +2639,16 @@ func (p *DevicePool) syncContacts(ctx context.Context, instance *DeviceInstance)
 
 		normalizedJID := jid.ToNonAD().String()
 		phone := jid.User
+		lidJID := ""
 
 		// Resolve LID to phone JID if possible
 		if jid.Server == types.HiddenUserServer {
+			lidJID = jid.ToNonAD().String()
 			if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, jid.ToNonAD()); err == nil && !pnJID.IsEmpty() {
 				normalizedJID = pnJID.User + "@s.whatsapp.net"
 				phone = pnJID.User
+			} else {
+				continue
 			}
 		}
 
@@ -2686,6 +2668,7 @@ func (p *DevicePool) syncContacts(ctx context.Context, instance *DeviceInstance)
 			log.Printf("[ContactSync] Failed to upsert contact %s: %v", normalizedJID, err)
 			continue
 		}
+		contact = p.reconcileMappedLIDContact(ctx, instance.AccountID, lidJID, contact)
 
 		// Upsert the per-device name
 		cdn := &domain.ContactDeviceName{
@@ -2979,7 +2962,7 @@ func (p *DevicePool) SendMessage(ctx context.Context, deviceID uuid.UUID, to, bo
 	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
 	// Update chat
-	_ = p.repos.Chat.UpdateLastMessage(ctx, chat.ID, body, resp.Timestamp, false)
+	_ = p.repos.Chat.UpdateLastMessage(ctx, instance.AccountID, chat.ID, body, resp.Timestamp, false)
 
 	// Broadcast to frontend
 	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageSent, map[string]interface{}{
@@ -3140,7 +3123,7 @@ func (p *DevicePool) SendReplyMessage(ctx context.Context, deviceID uuid.UUID, t
 	p.invalidateChatCaches(instance.AccountID, chat.ID)
 
 	// Update chat
-	_ = p.repos.Chat.UpdateLastMessage(ctx, chat.ID, body, resp.Timestamp, false)
+	_ = p.repos.Chat.UpdateLastMessage(ctx, instance.AccountID, chat.ID, body, resp.Timestamp, false)
 
 	// Broadcast to frontend
 	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageSent, map[string]interface{}{
@@ -3174,13 +3157,13 @@ func (p *DevicePool) ForwardMessage(ctx context.Context, deviceID uuid.UUID, to 
 }
 
 // SendReaction sends a reaction emoji to a message
-func (p *DevicePool) SendReaction(ctx context.Context, deviceID uuid.UUID, to, targetMessageID, targetSenderJID, emoji string, targetFromMe bool) error {
+func (p *DevicePool) SendReaction(ctx context.Context, deviceID, chatID uuid.UUID, to, targetMessageID, targetSenderJID, emoji string, targetFromMe bool, operationID string) (*domain.MessageReactionMutation, error) {
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
 
 	if !exists || instance.Client == nil {
-		return fmt.Errorf("device not connected: %s", deviceID)
+		return nil, fmt.Errorf("device not connected: %s", deviceID)
 	}
 
 	var jid types.JID
@@ -3188,18 +3171,18 @@ func (p *DevicePool) SendReaction(ctx context.Context, deviceID uuid.UUID, to, t
 		var err error
 		jid, err = types.ParseJID(to)
 		if err != nil {
-			return fmt.Errorf("invalid JID: %s", to)
+			return nil, fmt.Errorf("invalid JID: %s", to)
 		}
 	} else {
 		jid = types.NewJID(to, types.DefaultUserServer)
 	}
 	if err := p.ensureOutboundAllowed(ctx, instance, jid); err != nil {
-		return err
+		return nil, err
 	}
 
 	targetSender, err := reactionTargetSenderJID(jid, targetSenderJID, targetFromMe)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	msg := instance.Client.BuildReaction(
 		jid,
@@ -3210,60 +3193,52 @@ func (p *DevicePool) SendReaction(ctx context.Context, deviceID uuid.UUID, to, t
 
 	sendResp, err := instance.Client.SendMessage(ctx, jid, msg)
 	if err != nil {
-		return fmt.Errorf("failed to send reaction: %w", err)
-	}
-
-	// Get chat for storing reaction
-	normalizedJID := jid.ToNonAD().String()
-	if jid.Server == types.HiddenUserServer {
-		if pnJID, err := p.store.LIDMap.GetPNForLID(ctx, jid.ToNonAD()); err == nil && !pnJID.IsEmpty() {
-			normalizedJID = pnJID.User + "@s.whatsapp.net"
-		}
-	}
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
-	if err != nil {
-		return err
+		return nil, fmt.Errorf("failed to send reaction: %w", err)
 	}
 
 	senderJID := ownReactionSenderJID(instance)
 	eventTimestamp := reactionEventTimestamp(sendResp.Timestamp, msg.GetReactionMessage().GetSenderTimestampMS())
+	reaction := &domain.MessageReaction{
+		AccountID:       instance.AccountID,
+		ChatID:          chatID,
+		TargetMessageID: targetMessageID,
+		SenderJID:       senderJID,
+		SenderName:      strPtr("Me"),
+		Emoji:           emoji,
+		IsFromMe:        true,
+		Timestamp:       eventTimestamp,
+	}
+	mutation := &domain.MessageReactionMutation{
+		Reaction:    reaction,
+		Removed:     emoji == "",
+		Timestamp:   eventTimestamp,
+		Provider:    domain.DeviceProviderWhatsAppWeb,
+		OperationID: operationID,
+	}
 	changed := false
 	if emoji == "" {
-		changed, err = p.repos.Reaction.Delete(ctx, instance.AccountID, chat.ID, targetMessageID, senderJID, eventTimestamp)
+		changed, err = p.repos.Reaction.Delete(ctx, instance.AccountID, chatID, targetMessageID, senderJID, eventTimestamp)
 	} else {
-		reaction := &domain.MessageReaction{
-			AccountID:       instance.AccountID,
-			ChatID:          chat.ID,
-			TargetMessageID: targetMessageID,
-			SenderJID:       senderJID,
-			SenderName:      strPtr("Me"),
-			Emoji:           emoji,
-			IsFromMe:        true,
-			Timestamp:       eventTimestamp,
-		}
 		changed, err = p.repos.Reaction.Upsert(ctx, reaction)
 	}
 	if err != nil {
-		return fmt.Errorf("reaction sent but failed to persist: %w", err)
+		return mutation, fmt.Errorf("reaction sent but failed to persist: %w", err)
 	}
 	if !changed {
-		return nil
+		return mutation, nil
 	}
-	p.invalidateChatCaches(instance.AccountID, chat.ID)
+	p.invalidateChatCaches(instance.AccountID, chatID)
 
 	// Broadcast
-	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageReaction, map[string]interface{}{
-		"chat_id":           chat.ID.String(),
-		"target_message_id": targetMessageID,
-		"sender_jid":        senderJID,
-		"sender_name":       "Me",
-		"emoji":             emoji,
-		"is_from_me":        true,
-		"removed":           emoji == "",
-	})
+	p.hub.BroadcastToAccountWithPermission(
+		instance.AccountID,
+		domain.PermChats,
+		ws.EventMessageReaction,
+		reactionEventPayload(chatID, targetMessageID, senderJID, "Me", emoji, true, eventTimestamp, domain.DeviceProviderWhatsAppWeb, operationID),
+	)
 
 	log.Printf("[Reaction] Sent %s to %s on %s", emoji, targetMessageID, to)
-	return nil
+	return mutation, nil
 }
 
 // SendPoll sends a poll creation message
@@ -3356,7 +3331,7 @@ func (p *DevicePool) SendPoll(ctx context.Context, deviceID uuid.UUID, to, quest
 	// Load options for response
 	message.PollOptions, _ = p.repos.Poll.GetOptions(ctx, message.ID)
 
-	_ = p.repos.Chat.UpdateLastMessage(ctx, chat.ID, "📊 "+question, resp.Timestamp, false)
+	_ = p.repos.Chat.UpdateLastMessage(ctx, instance.AccountID, chat.ID, "📊 "+question, resp.Timestamp, false)
 
 	// Broadcast
 	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageSent, map[string]interface{}{
@@ -3876,7 +3851,7 @@ func (p *DevicePool) sendPreUploadedMediaMessage(ctx context.Context, deviceID u
 	if lastMsg == "" {
 		lastMsg = fmt.Sprintf("[%s]", media.MediaType)
 	}
-	_ = p.repos.Chat.UpdateLastMessage(ctx, chat.ID, lastMsg, sendResp.Timestamp, false)
+	_ = p.repos.Chat.UpdateLastMessage(ctx, instance.AccountID, chat.ID, lastMsg, sendResp.Timestamp, false)
 
 	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageSent, map[string]interface{}{
 		"chat_id": chat.ID.String(),

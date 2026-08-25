@@ -16,8 +16,8 @@ export function crmDetailWorkspaceLayout(width: number, chatOpen: boolean) {
   return width >= 980 ? 'split' as const : 'chat' as const
 }
 
-export function shouldCloseCrmChatOnEscape(chatOpen: boolean, key: string, defaultPrevented: boolean) {
-  return chatOpen && key === 'Escape' && !defaultPrevented
+export function shouldCloseCrmChatOnEscape(chatOpen: boolean, key: string, defaultPrevented: boolean, overlayOpen = false) {
+  return chatOpen && key === 'Escape' && !defaultPrevented && !overlayOpen
 }
 
 export default function CrmDetailWorkspace({ detail, chat, chatOpen = false, onBackToDetail }: Props) {
@@ -28,13 +28,18 @@ export default function CrmDetailWorkspace({ detail, chat, chatOpen = false, onB
   useEffect(() => {
     if (!chatOpen) return
     const closeChat = (event: KeyboardEvent) => {
-      if (!shouldCloseCrmChatOnEscape(chatOpen, event.key, event.defaultPrevented)) return
+      // Portaled chat pickers/dialogs own Escape first. Their listeners may
+      // live outside this workspace, so defer the navigation decision until
+      // the current event has reached them and only close when no overlay was
+      // open for this key press.
+      const overlayWasOpen = Boolean(document.querySelector('[data-chat-overlay], [data-operational-picker-backdrop], [data-operational-confirmation]'))
+      if (!shouldCloseCrmChatOnEscape(chatOpen, event.key, event.defaultPrevented, overlayWasOpen)) return
       event.preventDefault()
       event.stopPropagation()
       onBackToDetail?.()
     }
-    document.addEventListener('keydown', closeChat, true)
-    return () => document.removeEventListener('keydown', closeChat, true)
+    document.addEventListener('keydown', closeChat)
+    return () => document.removeEventListener('keydown', closeChat)
   }, [chatOpen, onBackToDetail])
 
   return (

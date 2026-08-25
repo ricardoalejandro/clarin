@@ -36,7 +36,6 @@ import {
   CalendarDays,
   Check,
   ChevronLeft,
-  Flag,
   GripVertical,
   ListChecks,
   Loader2,
@@ -82,6 +81,8 @@ import TaskDateTimePicker from './TaskDateTimePicker'
 import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 import { allTasksCanBeAdministered, canAdministerTask, canEditTask } from './taskPermissionActions'
 import { resolveTaskIdentityColor, taskIdentityTint } from './taskIdentityColor'
+import { TaskPriorityIndicator } from './TaskSemanticIndicators'
+import TaskCompletionButton from './TaskCompletionButton'
 
 export interface TaskInlineDraft {
   title: string
@@ -115,9 +116,10 @@ interface Props {
   onOperation: (operationId: string, active: boolean) => void
   onTaskCreated: (task: Task, operationId: string, hierarchyCounts?: TaskHierarchyCounts) => void
   recentlyCreatedTaskId?: string
+  activeTaskId?: string
   onDragStateChange: (active: boolean) => void
   onExternalDropTargetChange?: (target: TaskExternalDropTarget | null) => void
-  onOpen: (task: Task) => void
+  onOpen: (task: Task, trigger?: HTMLElement | null) => void
   onEdit: (task: Task) => void
   onCreateSubtask: (task: Task) => void
   onCreateFull: (statusId?: string, draft?: TaskInlineDraft) => void
@@ -310,7 +312,9 @@ function TaskBoardCard({
   onCreateSubtask,
   onStar,
   onComplete,
+  statuses,
   highlighted,
+  active,
   selected,
   selectionMode,
   onSelect,
@@ -319,12 +323,14 @@ function TaskBoardCard({
   columnId: string
   showListName?: boolean
   suppressOpen: () => boolean
-  onOpen: () => void
+  onOpen: (trigger?: HTMLElement | null) => void
   onEdit: () => void
   onCreateSubtask: () => void
   onStar: () => void
-  onComplete?: () => void
+  onComplete?: (status: TaskWorkflowStatus) => void
+  statuses: TaskWorkflowStatus[]
   highlighted?: boolean
+  active?: boolean
   selected?: boolean
   selectionMode: boolean
   onSelect: (shift: boolean) => void
@@ -342,7 +348,6 @@ function TaskBoardCard({
   })
   const overdue = Boolean(task.due_at && new Date(task.due_at) < new Date() && !['done', 'cancelled'].includes(task.status_detail?.category || ''))
   const done = task.status_detail?.category === 'done'
-  const priority = TASK_PRIORITY_CONFIG[task.priority]
 	const identityColor = task.resolved_color || resolveTaskIdentityColor(task.color).color
   const cancelTouchHold = () => {
     if (touchHoldTimerRef.current) clearTimeout(touchHoldTimerRef.current)
@@ -354,7 +359,10 @@ function TaskBoardCard({
   return <article
     ref={setNodeRef}
     data-task-id={task.id}
+    data-task-board-card={task.id}
     data-task-column-id={columnId}
+    data-task-active={active || undefined}
+    aria-current={active ? 'true' : undefined}
     onTouchStartCapture={event => {
       const touch = event.touches[0]
       if (!editable || !touch || selected) return
@@ -384,31 +392,33 @@ function TaskBoardCard({
         onSelect(event.shiftKey)
         return
       }
-      if (!suppressOpen()) onOpen()
+      if (!suppressOpen()) onOpen(event.currentTarget.querySelector<HTMLElement>('[data-task-board-title]'))
     }}
 		className={`group relative cursor-pointer touch-manipulation select-none overflow-hidden rounded-xl border p-3 text-left shadow-sm outline-none transition focus-visible:ring-2 focus-visible:ring-emerald-500 ${isDragging ? 'opacity-20' : 'hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md'} ${selected ? 'border-emerald-400 ring-2 ring-emerald-100' : highlighted ? 'animate-[task-created-pulse_1.6s_ease-out] border-emerald-400 ring-4 ring-emerald-100' : overdue ? 'border-rose-200' : 'border-slate-200'}`}
 		style={{ transform: CSS.Transform.toString(transform), transition, backgroundColor: selected ? taskIdentityTint(identityColor, .12) : taskIdentityTint(identityColor, .045) }}
   >
 		<span className="absolute inset-y-0 left-0 w-1" style={{ backgroundColor: identityColor }} aria-hidden />
+    {active && <span data-task-active-indicator aria-hidden="true" className="absolute inset-y-3 right-0 w-1 rounded-l-full bg-slate-500" />}
     <div className="flex items-start gap-2">
-      <button
-        type="button"
+      <TaskCompletionButton
+        compact
+        task={task}
+        statuses={statuses}
         disabled={!editable || !onComplete}
-        onPointerDown={stopControlStart}
-        onMouseDown={stopControlStart}
-        onTouchStart={stopControlStart}
-        onClick={event => { event.stopPropagation(); onComplete?.() }}
-        title={done ? onComplete ? 'Marcar como pendiente' : 'Tarea completada' : onComplete ? 'Marcar como completada' : 'Este flujo no tiene estado completado'}
-        className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border transition disabled:cursor-not-allowed disabled:opacity-50 ${done ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-slate-300 bg-white hover:border-emerald-500 hover:bg-emerald-50'}`}
-      >{done && <Check className="h-3 w-3" />}</button>
-      <h4 className={`min-w-0 flex-1 text-sm font-semibold leading-5 ${done ? 'text-slate-400 line-through' : 'text-slate-800'}`}>{task.title}</h4>
+        onChange={statusID => {
+          const target = statuses.find(item => item.id === statusID)
+          if (target) onComplete?.(target)
+        }}
+        className="mt-0.5"
+      />
+      <h4 className={`min-w-0 flex-1 text-sm font-semibold leading-5 ${done ? 'text-slate-400 line-through' : 'text-slate-800'}`}><button type="button" data-task-board-title onPointerDown={stopControlStart} onMouseDown={stopControlStart} onTouchStart={stopControlStart} onClick={event => { event.stopPropagation(); if (!suppressOpen()) onOpen(event.currentTarget) }} aria-label={`Abrir tarea ${task.title}`} className="w-full rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">{task.title}</button></h4>
       <button ref={setActivatorNodeRef} type="button" {...attributes} {...listeners} disabled={!editable} onClick={event => event.stopPropagation()} aria-label={editable ? `Arrastrar ${task.title}` : `${task.title}: solo lectura`} title={editable ? 'Arrastrar tarea' : 'No tienes permiso para mover esta tarea'} className="mt-[-3px] flex h-7 w-6 shrink-0 cursor-grab items-center justify-center rounded-lg text-slate-300 outline-none transition hover:bg-slate-100 hover:text-slate-600 focus:ring-2 focus:ring-emerald-400 active:cursor-grabbing disabled:cursor-default disabled:opacity-25"><GripVertical className="h-4 w-4" /></button>
     </div>
 
     {showListName && <p className="ml-7 mt-1 truncate text-[10px] font-medium text-slate-400">{taskLocationLabel(task)}</p>}
 
     <div className="ml-7 mt-2.5 flex min-w-0 flex-wrap items-center gap-1.5 text-[10px]">
-      {(task.priority === 'high' || task.priority === 'urgent') && <span className={`inline-flex items-center gap-1 rounded-md px-1.5 py-1 font-semibold ${priority.bg} ${priority.color}`}><Flag className="h-3 w-3" />{priority.label}</span>}
+      <TaskPriorityIndicator priority={task.priority} />
       {task.due_at && <span className={`inline-flex items-center gap-1 rounded-md bg-slate-50 px-1.5 py-1 font-medium ${overdue ? 'bg-rose-50 text-rose-600' : 'text-slate-500'}`}><CalendarDays className="h-3 w-3" />{dueFormatter.format(new Date(task.due_at))}</span>}
       {Boolean(task.subtask_count) && <span className={`inline-flex items-center gap-1 rounded-md bg-slate-50 px-1.5 py-1 ${task.subtask_done === task.subtask_count ? 'text-emerald-600' : 'text-slate-400'}`}><ListChecks className="h-3 w-3" />{task.subtask_done}/{task.subtask_count}</span>}
       {Boolean(task.comment_count) && <span className="inline-flex items-center gap-1 text-slate-400"><MessageCircle className="h-3 w-3" />{task.comment_count}</span>}
@@ -515,7 +525,7 @@ function InlineCreate({
       <TaskUserCombobox users={users} value={ownerId} onChange={setOwnerId} className="min-h-9 !rounded-lg !px-2 !py-1 text-xs" />
       <TaskDateTimePicker label="Entrega" allDay value={dueDate ? `${dueDate}T17:00` : ''} onChange={value => setDueDate(value ? value.slice(0, 10) : '')} className="!min-h-9 !rounded-lg !px-2" />
       <select value={priority} onChange={event => setPriority(event.target.value as TaskPriority)} aria-label="Prioridad" className="rounded-lg border border-slate-200 px-2 py-2 text-[11px] font-medium text-slate-600 outline-none focus:border-emerald-400">{(Object.keys(TASK_PRIORITY_CONFIG) as TaskPriority[]).map(value => <option key={value} value={value}>{TASK_PRIORITY_CONFIG[value].label}</option>)}</select>
-      <button type="button" onClick={() => { const snapshot = draft(); const selectedStatusId = targetStatus?.id; close(); onMore(selectedStatusId, snapshot) }} className="rounded-lg border border-slate-200 px-2 py-2 text-[11px] font-semibold text-slate-500 hover:bg-slate-50">Más opciones</button>
+      <button type="button" onClick={() => { const snapshot = draft(); const selectedStatusId = targetStatus?.id; close(); onMore(selectedStatusId, snapshot) }} className="rounded-lg border border-slate-200 px-2 py-2 text-[11px] font-semibold text-slate-500 hover:bg-slate-50">Abrir formulario completo</button>
     </div>
     {error && <p className="mt-2 text-[10px] font-medium text-rose-600">{error}</p>}
     <div className="mt-2 flex items-center justify-between"><span className="text-[9px] text-slate-400">Enter para guardar · Esc para cancelar</span><div className="flex gap-1"><button type="button" onClick={close} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100" aria-label="Cancelar"><X className="h-3.5 w-3.5" /></button><button type="button" disabled={!title.trim() || !ownerId || !list || !targetStatus || saving} onClick={() => void create()} className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-[11px] font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">{saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}Crear</button></div></div>
@@ -547,6 +557,7 @@ function BoardColumn({
   onComplete,
   onOperation,
   recentlyCreatedTaskId,
+  activeTaskId,
   selectedTaskIds,
   onSelectTask,
   canCreate,
@@ -569,13 +580,14 @@ function BoardColumn({
   onConfigureStatuses: () => void
   onTaskCreated: (task: Task, operationId: string, hierarchyCounts?: TaskHierarchyCounts) => void
   onCreateFull: (statusId?: string, draft?: TaskInlineDraft) => void
-  onOpen: (task: Task) => void
+  onOpen: (task: Task, trigger?: HTMLElement | null) => void
   onEdit: (task: Task) => void
   onCreateSubtask: (task: Task) => void
   onStar: (task: Task) => void
   onComplete: (task: Task, status: TaskWorkflowStatus) => void
   onOperation: (operationId: string, active: boolean) => void
   recentlyCreatedTaskId?: string
+  activeTaskId?: string
   selectedTaskIds: Set<string>
   onSelectTask: (taskID: string, shift: boolean, orderedIDs: string[]) => void
   canCreate: boolean
@@ -666,8 +678,8 @@ function BoardColumn({
           {taskIds.map(taskId => {
             const task = tasksById.get(taskId)
             if (!task) return null
-            const toggleStatus = allStatuses.find(item => item.workflow_id === task.status_detail?.workflow_id && item.category === (task.status_detail?.category === 'done' ? 'not_started' : 'done'))
-            return <TaskBoardCard key={task.id} task={task} columnId={status.id} showListName={showListName} suppressOpen={suppressOpen} onOpen={() => onOpen(task)} onEdit={() => onEdit(task)} onCreateSubtask={() => onCreateSubtask(task)} onStar={() => onStar(task)} onComplete={canEditTask(task) && toggleStatus ? () => onComplete(task, toggleStatus) : undefined} highlighted={recentlyCreatedTaskId === task.id} selected={selectedTaskIds.has(task.id)} selectionMode={selectedTaskIds.size > 0} onSelect={shift => onSelectTask(task.id, shift, taskIds)} />
+            const workflowStatuses = allStatuses.filter(item => item.workflow_id === task.status_detail?.workflow_id)
+            return <TaskBoardCard key={task.id} task={task} statuses={workflowStatuses} columnId={status.id} showListName={showListName} suppressOpen={suppressOpen} onOpen={trigger => onOpen(task, trigger)} onEdit={() => onEdit(task)} onCreateSubtask={() => onCreateSubtask(task)} onStar={() => onStar(task)} onComplete={canEditTask(task) ? nextStatus => onComplete(task, nextStatus) : undefined} highlighted={recentlyCreatedTaskId === task.id} active={activeTaskId === task.id} selected={selectedTaskIds.has(task.id)} selectionMode={selectedTaskIds.size > 0} onSelect={shift => onSelectTask(task.id, shift, taskIds)} />
           })}
           {!taskIds.length && isOver && <div className="flex h-12 items-center justify-center rounded-xl border border-dashed border-emerald-400 bg-white text-xs font-semibold text-emerald-700">Suelta aquí</div>}
         </div>
@@ -703,6 +715,7 @@ export default function TaskBoard({
   onOperation,
   onTaskCreated,
   recentlyCreatedTaskId,
+  activeTaskId,
   onDragStateChange,
   onExternalDropTargetChange,
   onOpen,
@@ -1214,6 +1227,7 @@ export default function TaskBoard({
           onTaskCreated={onTaskCreated}
           onOperation={onOperation}
           recentlyCreatedTaskId={recentlyCreatedTaskId}
+          activeTaskId={activeTaskId}
           selectedTaskIds={selectedTaskIDSet}
           onSelectTask={selectTask}
           canCreate={canCreate}

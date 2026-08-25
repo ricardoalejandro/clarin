@@ -11,6 +11,10 @@ import (
 )
 
 func (s *Server) broadcastWhiteboardMessage(accountID, boardID uuid.UUID, message whiteboardcore.OutgoingMessage, exceptClient uuid.UUID) {
+	if message.Event == whiteboardcore.EventCommentChanged {
+		s.broadcastWhiteboardMemberMessage(accountID, boardID, message, exceptClient)
+		return
+	}
 	if s.whiteboardRooms == nil {
 		return
 	}
@@ -41,6 +45,33 @@ func (s *Server) broadcastWhiteboardMessage(accountID, boardID uuid.UUID, messag
 	}
 }
 
+func (s *Server) broadcastWhiteboardMemberMessage(accountID, boardID uuid.UUID, message whiteboardcore.OutgoingMessage, exceptClient uuid.UUID) {
+	if s.whiteboardRooms == nil || message.Event != whiteboardcore.EventCommentChanged {
+		return
+	}
+	message = whiteboardRealtimeBroadcastMessage(message)
+	slowClients := s.whiteboardRooms.BroadcastMembers(accountID, boardID, message, exceptClient)
+	if len(slowClients) > 0 {
+		s.whiteboardRooms.Disconnect(accountID, boardID, slowClients, nil)
+	}
+	if s.cache == nil || s.whiteboardInstanceID == uuid.Nil {
+		return
+	}
+	payload, err := (whiteboardcore.FanoutEnvelope{
+		InstanceID: s.whiteboardInstanceID, AccountID: accountID, BoardID: boardID,
+		MembersOnly: true, Message: message,
+	}).Encode()
+	if err != nil {
+		log.Printf("[WHITEBOARD WS] member fanout encode failed: %v", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.cache.Publish(ctx, whiteboardcore.RedisFanoutChannel, payload); err != nil {
+		log.Printf("[WHITEBOARD WS] member fanout publish failed: %v", err)
+	}
+}
+
 // whiteboardRealtimeBroadcastMessage ensures that durable writes whose scene
 // or patch is larger than the realtime transport budget still notify every
 // instance. Receivers fetch the canonical account-scoped scene over REST; the
@@ -52,6 +83,10 @@ func whiteboardRealtimeBroadcastMessage(message whiteboardcore.OutgoingMessage) 
 	}
 	if message.Event == whiteboardcore.EventSceneSnapshot || message.Event == whiteboardcore.EventScenePatch {
 		return whiteboardSceneSyncRequiredMessage(message.Sequence, "realtime_payload_too_large")
+	}
+	if message.Event == whiteboardcore.EventCommentChanged {
+		return whiteboardcore.OutgoingMessage{Event: whiteboardcore.EventCommentChanged,
+			Data: map[string]any{"action": "refresh", "reason": "realtime_payload_too_large"}}
 	}
 	return whiteboardcore.OutgoingMessage{
 		Event: whiteboardcore.EventError,
@@ -109,7 +144,12 @@ func (s *Server) startWhiteboardFanout() {
 							}
 							continue
 						}
-						slowClients := s.whiteboardRooms.Broadcast(envelope.AccountID, envelope.BoardID, envelope.Message, uuid.Nil)
+						var slowClients []uuid.UUID
+						if envelope.MembersOnly {
+							slowClients = s.whiteboardRooms.BroadcastMembers(envelope.AccountID, envelope.BoardID, envelope.Message, uuid.Nil)
+						} else {
+							slowClients = s.whiteboardRooms.Broadcast(envelope.AccountID, envelope.BoardID, envelope.Message, uuid.Nil)
+						}
 						if len(slowClients) > 0 {
 							s.whiteboardRooms.Disconnect(envelope.AccountID, envelope.BoardID, slowClients, nil)
 						}

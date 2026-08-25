@@ -96,6 +96,38 @@ func TestTaskCreateResponseCarriesCanonicalReconciliationEnvelope(t *testing.T) 
 	}
 }
 
+func TestTaskChildCreateResponseCarriesCanonicalReconciliationEnvelope(t *testing.T) {
+	parentID := uuid.New()
+	child := &domain.Task{ID: uuid.New(), AccountID: uuid.New(), ParentTaskID: &parentID, Version: 1}
+	operationID := uuid.New()
+	counts := &domain.TaskHierarchyCounts{Revision: 43, CapturedAt: time.Now().UTC(), TaskCount: 1, OpenTaskCount: 1}
+
+	response := taskChildCreateResponse(child, operationID, counts)
+	if response["success"] != true || response["task"] != child {
+		t.Fatalf("child create response lost its canonical task: %#v", response)
+	}
+	if response["operation_id"] != operationID.String() {
+		t.Fatalf("child create response lost its canonical operation id: %#v", response)
+	}
+	if response["hierarchy_counts"] != counts {
+		t.Fatalf("child create response lost its actor-scoped hierarchy snapshot: %#v", response)
+	}
+}
+
+func TestTaskChildParentRequiresCanonicalEditCapability(t *testing.T) {
+	if taskChildParentCanEdit(nil) || taskChildParentCanEdit(&domain.Task{}) {
+		t.Fatal("a parent without actor-scoped permissions was allowed to create a child")
+	}
+	viewer := &domain.Task{Permissions: &domain.TaskEffectiveAccess{CanView: true}}
+	if taskChildParentCanEdit(viewer) {
+		t.Fatal("view-only access was allowed to create a child")
+	}
+	editor := &domain.Task{Permissions: &domain.TaskEffectiveAccess{CanView: true, CanEdit: true}}
+	if !taskChildParentCanEdit(editor) {
+		t.Fatal("canonical edit access was rejected")
+	}
+}
+
 func TestGanttRequiresExplicitSchedule(t *testing.T) {
 	start := time.Date(2026, 7, 29, 9, 0, 0, 0, time.UTC)
 	due := start.Add(2 * time.Hour)

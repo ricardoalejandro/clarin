@@ -13,6 +13,7 @@ describe('CRM detail contracts', () => {
     expect(shouldCloseCrmChatOnEscape(true, 'Escape', false)).toBe(true)
     expect(shouldCloseCrmChatOnEscape(false, 'Escape', false)).toBe(false)
     expect(shouldCloseCrmChatOnEscape(true, 'Escape', true)).toBe(false)
+    expect(shouldCloseCrmChatOnEscape(true, 'Escape', false, true)).toBe(false)
     expect(shouldCloseCrmChatOnEscape(true, 'Enter', false)).toBe(false)
   })
 

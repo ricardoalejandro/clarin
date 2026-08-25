@@ -1,4 +1,12 @@
 import { restore, serializeAsJSON } from '@excalidraw/excalidraw'
+import {
+  CLARIN_PARAGRAPH_FORMAT_KEY,
+  CLARIN_TEXT_FORMAT_KEY,
+  MAX_CLARIN_TEXT_RUNS_PER_SCENE,
+  isClarinParagraphAlignment,
+  validateClarinParagraphFormat,
+  validateClarinTextFormat,
+} from '@excalidraw/excalidraw/clarin-rich-text'
 import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types'
 import type { AppState, BinaryFiles } from '@excalidraw/excalidraw/types'
 import {
@@ -13,6 +21,95 @@ function sceneRecord(value: unknown) {
   return candidate && typeof candidate === 'object' && !Array.isArray(candidate)
     ? candidate as Record<string, unknown>
     : {}
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function withoutInvalidHistoricalClarinTextFormatting(element: unknown) {
+  const record = objectRecord(element)
+  const customData = objectRecord(record?.customData)
+  if (!record || !customData) return element
+  const hasTextFormat = CLARIN_TEXT_FORMAT_KEY in customData
+  const hasParagraphFormat = CLARIN_PARAGRAPH_FORMAT_KEY in customData
+  if (!hasTextFormat && !hasParagraphFormat) return element
+  const originalText = typeof record.originalText === 'string'
+    ? record.originalText
+    : typeof record.text === 'string'
+      ? record.text
+      : null
+  const nextCustomData = { ...customData }
+  let changed = false
+  if (
+    hasTextFormat
+    && (
+      record.type !== 'text'
+      || originalText === null
+      || !validateClarinTextFormat(customData[CLARIN_TEXT_FORMAT_KEY], originalText)
+    )
+  ) {
+    delete nextCustomData[CLARIN_TEXT_FORMAT_KEY]
+    changed = true
+  }
+  if (
+    hasParagraphFormat
+    && (
+      record.type !== 'text'
+      || originalText === null
+      || !isClarinParagraphAlignment(record.textAlign)
+      || !validateClarinParagraphFormat(
+        customData[CLARIN_PARAGRAPH_FORMAT_KEY],
+        originalText,
+        record.textAlign,
+      )
+    )
+  ) {
+    delete nextCustomData[CLARIN_PARAGRAPH_FORMAT_KEY]
+    changed = true
+  }
+  if (!changed) return element
+  const next = { ...record }
+  if (Object.keys(nextCustomData).length) next.customData = nextCustomData
+  else delete next.customData
+  return next
+}
+
+export function assertValidClarinRichTextScene(elements: readonly unknown[]) {
+  let totalSegments = 0
+  for (const element of elements) {
+    const record = objectRecord(element)
+    const customData = objectRecord(record?.customData)
+    if (!customData) continue
+    const hasTextFormat = CLARIN_TEXT_FORMAT_KEY in customData
+    const hasParagraphFormat = CLARIN_PARAGRAPH_FORMAT_KEY in customData
+    if (!hasTextFormat && !hasParagraphFormat) continue
+    if (record?.type !== 'text' || typeof record.originalText !== 'string') {
+      throw new Error('Formato de texto enriquecido inválido.')
+    }
+    if (hasTextFormat) {
+      const format = customData[CLARIN_TEXT_FORMAT_KEY]
+      if (!validateClarinTextFormat(format, record.originalText)) {
+        throw new Error('Formato de texto enriquecido inválido.')
+      }
+      totalSegments += format.runs.length
+    }
+    if (hasParagraphFormat) {
+      const format = customData[CLARIN_PARAGRAPH_FORMAT_KEY]
+      if (
+        !isClarinParagraphAlignment(record.textAlign)
+        || !validateClarinParagraphFormat(format, record.originalText, record.textAlign)
+      ) {
+        throw new Error('Formato de alineación de párrafos inválido.')
+      }
+      totalSegments += format.paragraphs.length
+    }
+    if (totalSegments > MAX_CLARIN_TEXT_RUNS_PER_SCENE) {
+      throw new Error('La escena supera el límite de segmentos de formato de texto.')
+    }
+  }
 }
 
 /**
@@ -41,7 +138,7 @@ export function restoreClarinWhiteboardScene(value: unknown): WhiteboardSceneDoc
     type: 'excalidraw',
     version: 2,
     source: 'clarin',
-    elements: restored.elements,
+    elements: restored.elements.map(withoutInvalidHistoricalClarinTextFormatting),
     appState: restored.appState as unknown as Record<string, unknown>,
     files,
   }
@@ -87,6 +184,8 @@ export function buildExcalidrawWhiteboardSavePayload(input: {
   patchElements?: readonly unknown[]
   rootExtensions?: Record<string, unknown>
 }): WhiteboardSavePayload {
+  assertValidClarinRichTextScene(input.elements)
+  if (input.includePatch) assertValidClarinRichTextScene(input.patchElements || input.elements)
   const officialScene = serializeElementsForDatabase(input.elements, input.appState)
   const officialPatch = input.includePatch
     ? serializeElementsForDatabase(input.patchElements || input.elements, input.appState)

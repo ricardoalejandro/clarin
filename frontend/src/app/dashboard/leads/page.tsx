@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef, useMemo, memo } from 'react'
 import { createPortal } from 'react-dom'
-import { Search, Plus, Phone, Mail, User, UserPlus, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, MinusSquare, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, Eye, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, AlertTriangle, CheckCircle2, Archive, ShieldBan, ArchiveRestore, ShieldOff, Download, Loader2 } from 'lucide-react'
+import { Search, Plus, Phone, Mail, User, UserPlus, Tag, Calendar, MoreVertical, MoreHorizontal, MessageCircle, Trash2, Edit, ChevronDown, ChevronLeft, ChevronRight, Filter, CheckSquare, Square, MinusSquare, XCircle, Clock, FileText, X, Maximize2, Upload, Building2, Save, Edit2, Settings, Pencil, EyeOff, GripVertical, RefreshCw, Radio, LayoutGrid, List, ChevronUp, Code, AlertCircle, AlertTriangle, CheckCircle2, Archive, ShieldBan, ArchiveRestore, ShieldOff, Download, Loader2 } from 'lucide-react'
 import { formatDistanceToNow, format } from 'date-fns'
 import { useKanbanPan } from '@/lib/useKanbanPan'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
@@ -16,8 +16,8 @@ import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCamp
 import { useRouter } from 'next/navigation'
 import { api, subscribeWebSocket } from '@/lib/api'
 import { contactIdFromRealtimeEvent } from '@/lib/contactProfileEvents'
-import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher'
 import ChatPanel from '@/components/chat/ChatPanel'
+import WhatsAppDevicePicker from '@/components/WhatsAppDevicePicker'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
 import ContactDetailSurface from '@/components/contact-details/ContactDetailSurface'
 import OperationalWindowShell from '@/components/operational-window/OperationalWindowShell'
@@ -33,13 +33,13 @@ import { leadMatchesLifecycleFilter, reconcileLeadLifecycleCounts } from '@/comp
 import { leadStageSelectionMode, leadStageTargetId } from '@/components/crm-detail/leadStageSelection'
 import LeadCardActionsMenu from '@/components/crm-detail/LeadCardActionsMenu'
 import useCrmWindowStorageScope from '@/components/crm-detail/useCrmWindowStorageScope'
-import { crmMessageIsPending, crmMessageTemporaryMode, type CrmMessagePhase } from '@/components/crm-detail/crmMessageWorkflow'
+import { crmMessageTemporaryMode } from '@/components/crm-detail/crmMessageWorkflow'
+import useWhatsAppChatLauncher from '@/hooks/useWhatsAppChatLauncher'
 import ObservationHistoryModal from '@/components/ObservationHistoryModal'
 import BulkGenerateDocumentModal from '@/components/BulkGenerateDocumentModal'
 import PipelineStageManager from '@/components/pipelines/PipelineStageManager'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
-import { Chat } from '@/types/chat'
 import type { StructuredTag, PipelineStage, Pipeline, Lead, Observation } from '@/types/contact'
 import type { ContactProfileContact, ContactProfileResponse } from '@/types/contact-profile'
 import type { CustomFieldDefinition, CustomFieldValue, CustomFieldFilter } from '@/types/custom-field'
@@ -51,10 +51,6 @@ interface Device {
   jid?: string | null
   status: string
   normalized_phone?: string
-  historical_relation?: WhatsAppDeviceOption['historical_relation']
-  matches_historical?: boolean
-  has_different_number?: boolean
-  history_unknown?: boolean
 }
 
 interface StageData {
@@ -519,28 +515,19 @@ export default function LeadsPage() {
 
   // Click outside to close dropdown
 
-  // Device selector for WhatsApp
-  const [showDeviceSelector, setShowDeviceSelector] = useState(false)
-  const [messagePhase, setMessagePhase] = useState<CrmMessagePhase>('idle')
+  // Device filter for leads
   const [devices, setDevices] = useState<Device[]>([])
-  const [whatsappPhone, setWhatsappPhone] = useState('')
-
-  // Inline chat panel
-  const [showInlineChat, setShowInlineChat] = useState(false)
-  const [inlineChatId, setInlineChatId] = useState('')
-  const [inlineChat, setInlineChat] = useState<Chat | null>(null)
-  const [inlineChatDeviceId, setInlineChatDeviceId] = useState('')
-  const [inlineChatReadOnly, setInlineChatReadOnly] = useState(false)
-  const [existingChatForWA, setExistingChatForWA] = useState<any>(null)
-  const [allDevicesForModal, setAllDevicesForModal] = useState<Device[]>([])
-  const [whatsappHistoricalPhone, setWhatsappHistoricalPhone] = useState('')
-  const whatsappRequestRef = useRef(0)
-  const crmMessageTriggerRef = useRef<HTMLElement | null>(null)
-  const deviceSelectorDialogRef = useRef<HTMLDivElement>(null)
-  const deviceSelectorCancelRef = useRef<HTMLButtonElement>(null)
-  const activeLeadIdRef = useRef<string | null>(null)
   const loadedLeadContextByContactRef = useRef(new Map<string, string>())
   const contactRefreshSequenceRef = useRef(new Map<string, number>())
+
+  const whatsappChat = useWhatsAppChatLauncher({
+    sessionKey: detailLead?.id || null,
+    contactId: detailLead?.contact_id || null,
+  })
+  const showInlineChat = whatsappChat.chatOpen
+  const showDeviceSelector = whatsappChat.showDeviceSelector
+  const inlineChatId = whatsappChat.chat?.id || ''
+  const inlineChatDeviceId = whatsappChat.device?.id || whatsappChat.chat?.device_id || ''
 
   const closeDuplicateConfirmation = useCallback(() => setDuplicateConfirmation(null), [])
   useAccessibleDialog(Boolean(duplicateConfirmation), duplicateDialogRef, closeDuplicateConfirmation, duplicateCancelRef)
@@ -551,37 +538,9 @@ export default function LeadsPage() {
   }, [creatingLead])
   useAccessibleDialog(showAddModal && !duplicateConfirmation, addLeadDialogRef, closeAddLeadDialog, newLeadTitleRef)
 
-  useEffect(() => {
-    activeLeadIdRef.current = detailLead?.id || null
-  }, [detailLead?.id])
+  const resetInlineChatState = whatsappChat.reset
+  const closeInlineChatAndRestoreFocus = whatsappChat.close
 
-  const resetInlineChatState = useCallback(() => {
-    whatsappRequestRef.current += 1
-    setMessagePhase('idle')
-    setShowDeviceSelector(false)
-    setWhatsappPhone('')
-    setShowInlineChat(false)
-    setInlineChatId('')
-    setInlineChat(null)
-    setInlineChatDeviceId('')
-    setInlineChatReadOnly(false)
-    setExistingChatForWA(null)
-    setAllDevicesForModal([])
-    setWhatsappHistoricalPhone('')
-  }, [])
-
-  const closeInlineChatAndRestoreFocus = useCallback(() => {
-    resetInlineChatState()
-    requestAnimationFrame(() => crmMessageTriggerRef.current?.focus({ preventScroll: true }))
-  }, [resetInlineChatState])
-
-  useAccessibleDialog(showDeviceSelector, deviceSelectorDialogRef, closeInlineChatAndRestoreFocus, deviceSelectorCancelRef)
-
-  const isCurrentWhatsAppRequest = useCallback((requestId: number, leadId: string | null) => {
-    return whatsappRequestRef.current === requestId && activeLeadIdRef.current === leadId
-  }, [])
-
-  // Device filter for leads
   const [filterDeviceIds, setFilterDeviceIds] = useState<Set<string>>(new Set())
   const [showDeviceFilter, setShowDeviceFilter] = useState(false)
 
@@ -2357,93 +2316,7 @@ export default function LeadsPage() {
   }
 
   // WhatsApp internal chat — smart device selection
-  const handleSendWhatsApp = async (phone: string) => {
-    crmMessageTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const leadId = activeLeadIdRef.current
-    resetInlineChatState()
-    const requestId = whatsappRequestRef.current
-    setMessagePhase('resolving')
-    setWhatsappPhone(phone)
-    try {
-      const resolution = await resolveWhatsAppChat(phone)
-      if (!isCurrentWhatsAppRequest(requestId, leadId)) return
-      if (!resolution.success) {
-        alert(resolution.error || 'Error al resolver conversación')
-        closeInlineChatAndRestoreFocus()
-        return
-      }
-      setExistingChatForWA(resolution.chat || null)
-      setWhatsappHistoricalPhone(resolution.historical_phone || '')
-
-      if (resolution.mode === 'read_only' && resolution.chat) {
-        setInlineChatId(resolution.chat.id)
-        setInlineChat(resolution.chat)
-        setInlineChatDeviceId(resolution.chat.device_id || '')
-        setInlineChatReadOnly(true)
-        setShowInlineChat(true)
-        setMessagePhase('chat')
-        return
-      }
-      if (resolution.mode === 'open_direct' && resolution.devices[0]) {
-        await handleDeviceSelected(resolution.devices[0] as Device, phone, requestId, leadId)
-        return
-      }
-      if (resolution.mode === 'choose_device') {
-        setAllDevicesForModal(resolution.devices as Device[])
-        setShowDeviceSelector(true)
-        setMessagePhase('choosing_device')
-        return
-      }
-      alert('No hay dispositivos conectados para enviar')
-      closeInlineChatAndRestoreFocus()
-    } catch {
-      if (!isCurrentWhatsAppRequest(requestId, leadId)) return
-      alert('Error de conexión')
-      closeInlineChatAndRestoreFocus()
-    }
-  }
-
-  const handleDeviceSelected = async (
-    device: Device,
-    phoneOverride?: string,
-    requestId: number = whatsappRequestRef.current,
-    leadId: string | null = activeLeadIdRef.current
-  ) => {
-    setShowDeviceSelector(false)
-    setInlineChatReadOnly(false)
-    setMessagePhase('opening_chat')
-    try {
-      const data = await createWhatsAppChat(device.id, phoneOverride || whatsappPhone)
-      if (!isCurrentWhatsAppRequest(requestId, leadId)) return
-      if (data.success && data.chat) {
-        // Open inline chat instead of navigating away
-        setInlineChatId(data.chat.id)
-        setInlineChat(data.chat)
-        setInlineChatDeviceId(device.id)
-        setShowInlineChat(true)
-        setMessagePhase('chat')
-      } else {
-        alert(data.error || 'Error al crear conversación')
-        closeInlineChatAndRestoreFocus()
-      }
-    } catch {
-      if (!isCurrentWhatsAppRequest(requestId, leadId)) return
-      alert('Error de conexión')
-      closeInlineChatAndRestoreFocus()
-    }
-  }
-
-  const handlePreviousDeviceSelected = () => {
-    setShowDeviceSelector(false)
-    if (existingChatForWA) {
-      setInlineChatId(existingChatForWA.id)
-      setInlineChat(existingChatForWA)
-      setInlineChatDeviceId(existingChatForWA.device_id || '')
-      setInlineChatReadOnly(true)
-      setShowInlineChat(true)
-      setMessagePhase('chat')
-    }
-  }
+  const handleSendWhatsApp = (phone: string) => { void whatsappChat.open(phone) }
 
   // Escape key closes modals/panels (topmost first)
   useEffect(() => {
@@ -4307,7 +4180,7 @@ export default function LeadsPage() {
           minWidth={560}
           minHeight={520}
           dockedWidth={760}
-          temporaryMode={crmMessageTemporaryMode(messagePhase)}
+          temporaryMode={crmMessageTemporaryMode(whatsappChat.crmPhase)}
           motionProfile="smooth"
           align="right"
           overlayZIndex={110}
@@ -4323,8 +4196,10 @@ export default function LeadsPage() {
                 key={inlineChatId}
                 chatId={inlineChatId}
                 deviceId={inlineChatDeviceId}
-                initialChat={inlineChat || undefined}
-                readOnly={inlineChatReadOnly}
+                device={whatsappChat.device || undefined}
+                initialChat={whatsappChat.chat || undefined}
+                readOnly={whatsappChat.readOnly}
+                readOnlyReason={whatsappChat.readOnlyReason}
                 onClose={closeInlineChatAndRestoreFocus}
                 className="h-full"
               />
@@ -4453,7 +4328,9 @@ export default function LeadsPage() {
                     subtitle="Contacto y oportunidad"
                     onClose={() => { setShowDetailPanel(false); resetInlineChatState(); setScrollToTasks(false) }}
                     onSendMessage={(phone: string) => handleSendWhatsApp(phone)}
-                    sendingMessage={crmMessageIsPending(messagePhase)}
+                    sendingMessage={whatsappChat.pending}
+                    messageError={whatsappChat.error}
+                    onRetryMessage={whatsappChat.canRetry ? whatsappChat.retry : undefined}
                     onContactChange={reconcileContactProfile}
                     onObservationChange={() => {
                       if (viewMode === 'list') {
@@ -4474,76 +4351,18 @@ export default function LeadsPage() {
         </OperationalWindowShell>
       )}
 
-      {/* Device Selector Modal for WhatsApp */}
-      {showDeviceSelector && (
-        <div data-operational-picker-backdrop className="app-viewport fixed inset-0 z-[170] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
-          <div ref={deviceSelectorDialogRef} role="dialog" aria-modal="true" aria-labelledby="lead-device-selector-title" className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-slate-100">
-	            <h2 id="lead-device-selector-title" className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
-	            <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para enviar el mensaje a {whatsappPhone}</p>
-	            {existingChatForWA && (
-	              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-3">
-	                Ya existe historial{whatsappHistoricalPhone ? ` con el numero ${whatsappHistoricalPhone}` : ' con numero historico desconocido'}.
-	              </p>
-	            )}
-            {allDevicesForModal.length === 0 ? (
-              <p className="text-xs text-slate-400 text-center py-4">No hay dispositivos conectados</p>
-            ) : (
-              <div className="space-y-2">
-                {/* Connected devices — sort chat owner first */}
-                {[...allDevicesForModal].sort((a, b) => {
-                  if (existingChatForWA?.device_id === a.id) return -1
-                  if (existingChatForWA?.device_id === b.id) return 1
-                  return 0
-	                }).map((device) => {
-	                  const isChatOwner = device.matches_historical || existingChatForWA?.device_id === device.id
-	                  return (
-                    <button
-                      key={device.id}
-                      onClick={() => handleDeviceSelected(device)}
-                      className={`w-full flex items-center gap-3 p-3 border rounded-xl transition text-left ${isChatOwner ? 'border-emerald-200 bg-emerald-50/50 hover:bg-emerald-50' : 'border-slate-100 hover:bg-emerald-50 hover:border-emerald-200'}`}
-                    >
-                      <div className={`w-9 h-9 rounded-full flex items-center justify-center ${isChatOwner ? 'bg-emerald-100' : 'bg-emerald-50'}`}>
-                        <Phone className="w-4 h-4 text-emerald-600" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
-	                          {isChatOwner && (
-	                            <span className="text-[10px] font-medium bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full">Chat activo</span>
-	                          )}
-	                          <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${relationClassName(device)}`}>{relationLabel(device)}</span>
-	                        </div>
-	                        <p className="text-xs text-slate-500">{deviceDisplayPhone(device)}</p>
-	                      </div>
-                    </button>
-                  )
-                })}
-
-                {/* Previous device option (disconnected) — read-only mode */}
-                {existingChatForWA && existingChatForWA.device_id && !allDevicesForModal.find(d => d.id === existingChatForWA.device_id) && (
-                  <div className="pt-2 mt-2 border-t border-slate-100">
-                    <button
-                      onClick={handlePreviousDeviceSelected}
-                      className="w-full flex items-center gap-3 p-3 border border-amber-200 bg-amber-50/50 rounded-xl hover:bg-amber-50 transition text-left"
-                    >
-                      <div className="w-9 h-9 bg-amber-100 rounded-full flex items-center justify-center">
-                        <Eye className="w-4 h-4 text-amber-600" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-amber-800">Dispositivo anterior</p>
-                        <p className="text-xs text-amber-600">Solo lectura · {existingChatForWA.device_name || 'Desconectado'}</p>
-                      </div>
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-            <button ref={deviceSelectorCancelRef} onClick={closeInlineChatAndRestoreFocus} className="w-full min-h-11 mt-4 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">
-              Cancelar
-            </button>
-          </div>
-        </div>
-      )}
+      <WhatsAppDevicePicker
+        open={showDeviceSelector}
+        idPrefix="lead"
+        phone={whatsappChat.phone}
+        devices={whatsappChat.devices}
+        existingChat={whatsappChat.chat}
+        historicalPhone={whatsappChat.historicalPhone}
+        busy={whatsappChat.pending}
+        onSelect={whatsappChat.selectDevice}
+        onOpenHistorical={whatsappChat.chat ? whatsappChat.openHistorical : undefined}
+        onCancel={closeInlineChatAndRestoreFocus}
+      />
 
 
 

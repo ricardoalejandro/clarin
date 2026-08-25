@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -32,11 +33,9 @@ func (s *Server) issueWhiteboardCollabTicket(c *fiber.Ctx, principal *whiteboard
 	if err != nil {
 		return whiteboardError(c, err)
 	}
-	expiresAt := time.Now().UTC().Add(whiteboardCollabTicketTTL)
-	if !principal.ExpiresAt.IsZero() && principal.ExpiresAt.Before(expiresAt) {
-		expiresAt = principal.ExpiresAt
-	}
-	if !expiresAt.After(time.Now().UTC()) {
+	now := time.Now().UTC()
+	expiresAt := whiteboardCollabTicketExpiresAt(now, principal)
+	if !expiresAt.After(now) {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"success": false, "error": "La sesión finalizó"})
 	}
 	payload, err := json.Marshal(whiteboardCollabTicket{Principal: principal, ExpiresAt: expiresAt})
@@ -49,33 +48,102 @@ func (s *Server) issueWhiteboardCollabTicket(c *fiber.Ctx, principal *whiteboard
 	return c.JSON(fiber.Map{"success": true, "ticket": plain, "expires_at": expiresAt})
 }
 
+func whiteboardCollabTicketExpiresAt(now time.Time, principal *whiteboardRealtimePrincipal) time.Time {
+	expiresAt := now.Add(whiteboardCollabTicketTTL)
+	if principal != nil && principal.GuestSession != nil && principal.GuestExpiresAt != nil && principal.GuestExpiresAt.Before(expiresAt) {
+		return principal.GuestExpiresAt.UTC()
+	}
+	return expiresAt
+}
+
+func whiteboardCollabAuthorizationUnavailable(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+		"success": false, "error": "No se pudo verificar el acceso temporalmente", "code": "authorization_unavailable",
+	})
+}
+
+func whiteboardGuestTicketResolutionError(guest *domain.WhiteboardGuestContext, expectedLinkID uuid.UUID, err error) error {
+	if err != nil {
+		if errors.Is(err, repository.ErrWhiteboardSessionUnavailable) {
+			return repository.ErrWhiteboardSessionUnavailable
+		}
+		return service.ErrAuthSessionUnavailable
+	}
+	if guest == nil || guest.Session == nil || guest.Session.ShareLinkID != expectedLinkID {
+		return repository.ErrWhiteboardSessionUnavailable
+	}
+	return nil
+}
+
+func whiteboardCollabTicketAccountID(body []byte, fallback uuid.UUID) (uuid.UUID, error) {
+	if fallback == uuid.Nil {
+		return uuid.Nil, repository.ErrWhiteboardInvalid
+	}
+	trimmedBody := strings.TrimSpace(string(body))
+	if trimmedBody == "" {
+		return fallback, nil
+	}
+	if !strings.HasPrefix(trimmedBody, "{") {
+		return uuid.Nil, repository.ErrWhiteboardInvalid
+	}
+	var request struct {
+		AccountID json.RawMessage `json:"account_id"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return uuid.Nil, repository.ErrWhiteboardInvalid
+	}
+	if len(request.AccountID) == 0 {
+		return fallback, nil
+	}
+	var value string
+	if err := json.Unmarshal(request.AccountID, &value); err != nil {
+		return uuid.Nil, repository.ErrWhiteboardInvalid
+	}
+	canonical := strings.ToLower(value)
+	accountID, err := uuid.Parse(canonical)
+	if err != nil || accountID == uuid.Nil || accountID.String() != canonical {
+		return uuid.Nil, repository.ErrWhiteboardInvalid
+	}
+	return accountID, nil
+}
+
 func (s *Server) handleCreateWhiteboardCollabTicket(c *fiber.Ctx) error {
-	accountID, userID, err := whiteboardActor(c)
+	fallbackAccountID, userID, err := whiteboardActor(c)
 	if err != nil {
 		return err
+	}
+	claims, ok := c.Locals("claims").(*service.JWTClaims)
+	if !ok || claims == nil || strings.TrimSpace(claims.SessionID) == "" {
+		return fiber.ErrUnauthorized
+	}
+	accountID, err := whiteboardCollabTicketAccountID(c.Body(), fallbackAccountID)
+	if err != nil {
+		return whiteboardError(c, err)
+	}
+	moduleAllowed, err := s.whiteboardModuleAllowed(c.Context(), userID, accountID)
+	if err != nil {
+		return whiteboardCollabAuthorizationUnavailable(c)
+	}
+	if !moduleAllowed {
+		return whiteboardError(c, repository.ErrWhiteboardForbidden)
 	}
 	boardID, err := whiteboardPathID(c, "id")
 	if err != nil {
 		return whiteboardError(c, err)
 	}
-	access, err := s.repos.Whiteboard.RequireAccess(c.Context(), accountID, userID, boardID, domain.WhiteboardAccessView)
+	access, err := s.repos.Whiteboard.RequireActiveAccess(c.Context(), accountID, userID, boardID, domain.WhiteboardAccessView)
 	if err != nil {
+		if !errors.Is(err, repository.ErrWhiteboardNotFound) && !errors.Is(err, repository.ErrWhiteboardForbidden) {
+			return whiteboardCollabAuthorizationUnavailable(c)
+		}
 		return whiteboardError(c, err)
-	}
-	claims, ok := c.Locals("claims").(*service.JWTClaims)
-	if !ok || claims == nil {
-		return fiber.ErrUnauthorized
 	}
 	displayName := "Usuario de Clarin"
 	if user, userErr := s.repos.User.GetByID(c.Context(), userID); userErr == nil && user != nil && strings.TrimSpace(user.DisplayName) != "" {
 		displayName = strings.TrimSpace(user.DisplayName)
 	}
-	expiresAt := time.Time{}
-	if claims.ExpiresAt != nil {
-		expiresAt = claims.ExpiresAt.Time
-	}
 	return s.issueWhiteboardCollabTicket(c, &whiteboardRealtimePrincipal{
-		AccountID: accountID, BoardID: boardID, UserID: &userID, Claims: claims, ExpiresAt: expiresAt,
+		AccountID: accountID, BoardID: boardID, UserID: &userID, SessionID: claims.SessionID,
 		Actor: whiteboardcore.RealtimeActor{
 			Kind: "user", ID: uuid.New(), UserID: &userID, DisplayName: displayName, Access: access.Level,
 		},
@@ -93,13 +161,17 @@ func (s *Server) handleCreateWhiteboardGuestCollabTicket(c *fiber.Ctx) error {
 	}
 	tokenHash := service.HashWhiteboardSecret(secret)
 	guest, err := s.repos.Whiteboard.ResolveGuestSession(c.Context(), tokenHash, domain.WhiteboardAccessView, time.Now().UTC())
-	if err != nil || guest.Session.ShareLinkID != linkID {
-		return whiteboardError(c, repository.ErrWhiteboardSessionUnavailable)
+	if resolutionErr := whiteboardGuestTicketResolutionError(guest, linkID, err); resolutionErr != nil {
+		if errors.Is(resolutionErr, service.ErrAuthSessionUnavailable) {
+			return whiteboardCollabAuthorizationUnavailable(c)
+		}
+		return whiteboardError(c, resolutionErr)
 	}
 	guestID := guest.Session.ID
+	guestExpiresAt := guest.Session.ExpiresAt
 	return s.issueWhiteboardCollabTicket(c, &whiteboardRealtimePrincipal{
 		AccountID: guest.Session.AccountID, BoardID: guest.Session.BoardID,
-		GuestSession: &guestID, GuestTokenHash: tokenHash, ExpiresAt: guest.Session.ExpiresAt,
+		GuestSession: &guestID, GuestTokenHash: tokenHash, GuestExpiresAt: &guestExpiresAt,
 		Actor: whiteboardcore.RealtimeActor{
 			Kind: "guest", ID: uuid.New(), GuestID: &guestID,
 			DisplayName: guest.Session.DisplayName, Access: guest.Session.AccessLevel,
@@ -109,14 +181,17 @@ func (s *Server) handleCreateWhiteboardGuestCollabTicket(c *fiber.Ctx) error {
 
 func (s *Server) consumeWhiteboardCollabTicket(c *fiber.Ctx, boardID uuid.UUID) (*whiteboardRealtimePrincipal, error) {
 	if s.cache == nil {
-		return nil, repository.ErrWhiteboardSessionUnavailable
+		return nil, service.ErrAuthSessionUnavailable
 	}
 	plain := strings.TrimSpace(c.Query("ticket"))
 	if plain == "" || len(plain) > 256 {
 		return nil, repository.ErrWhiteboardSessionUnavailable
 	}
 	payload, err := s.cache.Take(c.Context(), whiteboardCollabTicketKey(service.HashWhiteboardSecret(plain)))
-	if err != nil || len(payload) == 0 {
+	if err != nil {
+		return nil, service.ErrAuthSessionUnavailable
+	}
+	if len(payload) == 0 {
 		return nil, repository.ErrWhiteboardSessionUnavailable
 	}
 	var ticket whiteboardCollabTicket
@@ -124,7 +199,9 @@ func (s *Server) consumeWhiteboardCollabTicket(c *fiber.Ctx, boardID uuid.UUID) 
 		return nil, repository.ErrWhiteboardSessionUnavailable
 	}
 	principal := ticket.Principal
-	if principal.BoardID != boardID || principal.AccountID == uuid.Nil || (principal.UserID == nil && principal.GuestSession == nil) {
+	member := principal.UserID != nil && principal.GuestSession == nil && strings.TrimSpace(principal.SessionID) != ""
+	guest := principal.GuestSession != nil && principal.UserID == nil && strings.TrimSpace(principal.GuestTokenHash) != ""
+	if principal.BoardID != boardID || principal.AccountID == uuid.Nil || (!member && !guest) {
 		return nil, repository.ErrWhiteboardSessionUnavailable
 	}
 	if principal.UserID != nil {

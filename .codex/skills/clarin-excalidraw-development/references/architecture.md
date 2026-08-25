@@ -10,7 +10,7 @@ client reconciliation functions.
 
 The editor is client-only in Next.js and is loaded with SSR disabled. Clarin
 hosts every required font and runtime asset under the versioned
-`/vendor/whiteboards-editor/0.18.1/` path. Product menus, persistence, sharing,
+`/vendor/whiteboards-editor/0.18.1-clarin.4/` path. Product menus, persistence, sharing,
 history and libraries are Clarin controls. The complete `excalidraw-app`,
 Firebase integrations and Excalidraw-hosted collaboration are not part of the
 runtime.
@@ -25,8 +25,9 @@ schema source of truth:
 - `whiteboards`: account-scoped identity, optional folder, canonical bounded
   `scene_json`, editor/schema versions, monotonic `scene_sequence`, lifecycle,
   thumbnail and access revision;
-- `whiteboard_grants`: direct user grants with cumulative `view`, `edit` and
-  `manage` levels; `manage` is the only level with access governance;
+- `whiteboard_grants`: direct user grants with cumulative `view`, `comment`,
+  `edit` and `manage` levels; `manage` is the only level with access
+  governance;
 - `whiteboard_operations`: immutable idempotency and replay log keyed by board,
   operation ID and canonical sequence;
 - `whiteboard_revisions`: immutable compressed snapshots, integrity, format,
@@ -37,6 +38,11 @@ schema source of truth:
 - `whiteboard_assets`: current board or library file-ID mapping to
   `media_assets`, with draft/commit lifecycle;
 - `whiteboard_libraries`: private personal or account-visible library JSON;
+- `whiteboard_comment_threads`, `whiteboard_comments` and their operation
+  records: account/board-scoped conversations stored outside the scene, with
+  element or free-point anchors, optimistic versions and idempotent writes;
+- `whiteboard_library_import_sessions`: short-lived, actor-bound public-catalog import
+  sessions whose validated payload is cleared after acknowledgement or expiry;
 - `whiteboard_activity` and `whiteboard_access_audit`: account/board-scoped
   operational and authorization history;
 - `whiteboard_media_gc_jobs` and `whiteboard_snapshot_gc_jobs`: durable,
@@ -66,7 +72,7 @@ referenced by file ID and resolved through private Clarin asset manifests.
 The normal save path is:
 
 1. Load authorized metadata, scene and only the scene's referenced assets.
-2. Restore through the exact `@excalidraw/excalidraw@0.18.1` public APIs.
+2. Restore through the exact `@excalidraw/excalidraw@0.18.1-clarin.4` public APIs, based on upstream `v0.18.1`.
 3. Upload new image bytes to the board-scoped private asset path before
    committing a live scene reference.
 4. Send an `operation_id`, `base_sequence`, changed elements and allowed
@@ -121,8 +127,15 @@ bounded download concurrency.
 Library list responses are summaries only. The editor fetches bounded detail
 records separately; a private personal library is writable only by its owner,
 while account libraries are visible read-only to other account members.
-`.excalidrawlib` import/export stays inside Clarin and never opens the public
-library marketplace.
+Local `.excalidrawlib` import/export stays inside Clarin. A member may also
+explicitly open the official public directory through a same-origin Clarin
+start route. The directory receives only an opaque, short-lived callback token;
+the editor never fetches the selected third-party file. Clarin's backend accepts
+only the exact official library path, resolves and pins a public address,
+downloads without redirects under strict time/size bounds, validates and
+sanitizes the document, and then exposes it once to the originating actor for
+merge into that actor's personal library. The callback is a generic Clarin
+page and never reveals a board, account, user or library identifier.
 
 ## Sharing
 
@@ -157,10 +170,19 @@ is omission, not redaction. Before enabling ingress access logs, configure them
 to exclude query strings (or move ticket transport off the URL), and verify that
 the raw ticket is absent. Tickets are never persisted as product data.
 
-Client events are `scene.patch`, `sync.request`, `cursor.update` and
-`presence.update`. Server events are `scene.patch`, `scene.snapshot`,
-`sync.required`, `ack`, `presence.snapshot`, `presence.update`,
-`cursor.update`, `access.revoked` and `error`.
+Client events are `scene.patch`, `sync.request`, `cursor.update`,
+`presence.update`, `presentation.start`, `presentation.stop`, `follow.change`
+and `viewport.update`. Server events are `scene.patch`, `scene.snapshot`,
+`sync.required`, `ack`, `room.ready`, `presence.snapshot`, `presence.update`,
+`cursor.update`, `presentation.snapshot`, `presentation.changed`, relayed
+`follow.change`/`viewport.update`, member-only `comment.changed`,
+`access.revoked` and `error`.
+
+Presentation ownership is an account-and-board-scoped Redis lease with one
+presenter, a 45-second TTL and server-side renewal every 15 seconds. It is
+never persisted in a scene or revision. Editors may acquire it; viewers may
+follow only after individual consent. Viewport bounds are bounded, coalesced,
+ephemeral and applied with non-capturing editor updates.
 
 Durable patches are at most 1 MiB on the wire, 2,000 changed elements and a
 small allow-listed app-state delta. Presence and cursors have independent,
@@ -180,10 +202,12 @@ commit.
 
 The whiteboard route CSP limits scripts, connections, frames, images, fonts and
 workers to the Clarin origin plus `data:`/`blob:` only where required. Embeds,
-remote images, AI, Mermaid network helpers, telemetry, marketplace, public
-library publication and upstream help/product routes are removed, blocked or
-replaced. Normal `http`, `https` and `mailto` element links are sanitized and
-open only after an explicit user action.
+remote images, AI, Mermaid network helpers, telemetry, public library
+publication and upstream help/product routes are removed, blocked or replaced.
+The only catalog exception is the explicit top-level navigation and validated
+backend retrieval described above and recorded in `egress-policy.md`; it does
+not broaden browser `connect-src`. Normal `http`, `https` and `mailto` element
+links are sanitized and open only after an explicit user action.
 
 The security model is TLS, Clarin ACL and infrastructure encryption, not E2EE.
 That deliberate boundary permits server reconciliation, revisions, recovery,

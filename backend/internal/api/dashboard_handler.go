@@ -92,11 +92,12 @@ type dashboardChatSummary struct {
 }
 
 type dashboardTaskItem struct {
-	ID     uuid.UUID  `json:"id"`
-	Title  string     `json:"title"`
-	DueAt  *time.Time `json:"due_at"`
-	Status string     `json:"status"`
-	Type   string     `json:"type"`
+	ID            uuid.UUID  `json:"id"`
+	EnvironmentID *uuid.UUID `json:"environment_id,omitempty"`
+	Title         string     `json:"title"`
+	DueAt         *time.Time `json:"due_at"`
+	Status        string     `json:"status"`
+	Type          string     `json:"type"`
 }
 
 type dashboardTaskSummary struct {
@@ -484,7 +485,7 @@ func (s *Server) getDashboardChatSummary(c *fiber.Ctx, accountID uuid.UUID) (*da
 			LEFT JOIN message_activity ON message_activity.chat_id=ch.id
 			WHERE ch.account_id=$1 AND ch.is_archived=FALSE
 				AND ch.jid NOT LIKE '%@g.us' AND ch.jid NOT LIKE '%@newsletter'
-				AND ch.jid NOT LIKE '%@broadcast' AND ch.jid NOT LIKE '%@lid'
+				AND ch.jid NOT LIKE '%@broadcast'
 		), totals AS (
 			SELECT COUNT(*)::int AS total, COALESCE(SUM(unread_count),0)::int AS unread_total,
 			COUNT(*) FILTER (WHERE effective_last_inbound_at IS NOT NULL AND (effective_last_outbound_at IS NULL OR effective_last_inbound_at > effective_last_outbound_at))::int
@@ -553,7 +554,7 @@ func (s *Server) getDashboardTaskSummary(c *fiber.Ctx, accountID, userID uuid.UU
 		return nil, err
 	}
 	for _, task := range tasks {
-		summary.Items = append(summary.Items, dashboardTaskItem{ID: task.ID, Title: task.Title, DueAt: task.DueAt, Status: task.Status, Type: task.Type})
+		summary.Items = append(summary.Items, dashboardTaskItem{ID: task.ID, EnvironmentID: task.EnvironmentID, Title: task.Title, DueAt: task.DueAt, Status: task.Status, Type: task.Type})
 	}
 	return summary, nil
 }

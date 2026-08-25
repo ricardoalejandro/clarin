@@ -40,6 +40,9 @@ var allowedWhiteboardActivityActions = map[string]struct{}{
 	WhiteboardActivityShareCreated: {}, WhiteboardActivityShareRevoked: {},
 	WhiteboardActivityGuestJoined: {}, WhiteboardActivityGuestRevoked: {}, WhiteboardActivityAssetUploaded: {},
 	WhiteboardActivityAssetDeleted: {}, WhiteboardActivityThumbnailUpdated: {},
+	whiteboardCommentActionThreadCreated: {}, whiteboardCommentActionReplied: {},
+	whiteboardCommentActionEdited: {}, whiteboardCommentActionDeleted: {},
+	whiteboardCommentActionResolved: {}, whiteboardCommentActionReopened: {},
 }
 
 type WhiteboardActivityInput struct {

@@ -18,6 +18,7 @@ const (
 	whiteboardGCDrainLimit              = 50
 	whiteboardTechnicalHistoryRetention = 30 * 24 * time.Hour
 	whiteboardTechnicalHistoryBatch     = 500
+	whiteboardLibraryImportExpiryBatch  = 500
 )
 
 func validWhiteboardGCObjectKey(accountID uuid.UUID, objectKey string) bool {
@@ -108,37 +109,54 @@ func (s *Server) runWhiteboardMediaGC(ctx context.Context) {
 	}
 }
 
+func runWhiteboardRetentionPhases(storageAvailable bool, databaseSweep, storageSweep func()) {
+	if databaseSweep != nil {
+		databaseSweep()
+	}
+	if storageAvailable && storageSweep != nil {
+		storageSweep()
+	}
+}
+
 func (s *Server) runWhiteboardRetentionGC(ctx context.Context) {
-	if s.storage == nil || s.repos == nil || s.repos.Whiteboard == nil {
+	if s.repos == nil || s.repos.Whiteboard == nil {
 		return
 	}
-	if count, err := s.repos.Whiteboard.EnqueueExpiredWhiteboardRevisions(ctx, 100); err != nil {
-		log.Printf("[WhiteboardGC] revision retention sweep failed: %v", err)
-		return
-	} else if count > 0 {
-		log.Printf("[WhiteboardGC] enqueued %d expired automatic revisions", count)
-	}
-	if operations, activities, err := s.repos.Whiteboard.PruneWhiteboardTechnicalHistory(
-		ctx,
-		time.Now().UTC().Add(-whiteboardTechnicalHistoryRetention),
-		whiteboardTechnicalHistoryBatch,
-	); err != nil {
-		log.Printf("[WhiteboardGC] technical history compaction failed: %v", err)
-	} else if operations > 0 || activities > 0 {
-		log.Printf("[WhiteboardGC] compacted %d technical operations and %d noisy activity rows", operations, activities)
-	}
-	if count, err := s.repos.Whiteboard.EnqueueUnreferencedWhiteboardAssetLinks(ctx, 100); err != nil {
-		log.Printf("[WhiteboardGC] abandoned asset-link sweep failed: %v", err)
-		return
-	} else if count > 0 {
-		log.Printf("[WhiteboardGC] released %d abandoned asset links", count)
-	}
-	s.runWhiteboardSnapshotGC(ctx)
-	s.runWhiteboardMediaGC(ctx)
+	runWhiteboardRetentionPhases(s.storage != nil, func() {
+		if count, err := s.repos.Whiteboard.ExpireWhiteboardLibraryImports(ctx, time.Now().UTC(), whiteboardLibraryImportExpiryBatch); err != nil {
+			log.Printf("[WhiteboardGC] public library import expiry sweep failed: %v", err)
+		} else if count > 0 {
+			log.Printf("[WhiteboardGC] cleared %d expired public library import payloads", count)
+		}
+	}, func() {
+		if count, err := s.repos.Whiteboard.EnqueueExpiredWhiteboardRevisions(ctx, 100); err != nil {
+			log.Printf("[WhiteboardGC] revision retention sweep failed: %v", err)
+			return
+		} else if count > 0 {
+			log.Printf("[WhiteboardGC] enqueued %d expired automatic revisions", count)
+		}
+		if operations, activities, err := s.repos.Whiteboard.PruneWhiteboardTechnicalHistory(
+			ctx,
+			time.Now().UTC().Add(-whiteboardTechnicalHistoryRetention),
+			whiteboardTechnicalHistoryBatch,
+		); err != nil {
+			log.Printf("[WhiteboardGC] technical history compaction failed: %v", err)
+		} else if operations > 0 || activities > 0 {
+			log.Printf("[WhiteboardGC] compacted %d technical operations and %d noisy activity rows", operations, activities)
+		}
+		if count, err := s.repos.Whiteboard.EnqueueUnreferencedWhiteboardAssetLinks(ctx, 100); err != nil {
+			log.Printf("[WhiteboardGC] abandoned asset-link sweep failed: %v", err)
+			return
+		} else if count > 0 {
+			log.Printf("[WhiteboardGC] released %d abandoned asset links", count)
+		}
+		s.runWhiteboardSnapshotGC(ctx)
+		s.runWhiteboardMediaGC(ctx)
+	})
 }
 
 func (s *Server) startWhiteboardRetentionGCWorker() {
-	if s.storage == nil || s.repos == nil || s.repos.Whiteboard == nil {
+	if s.repos == nil || s.repos.Whiteboard == nil {
 		return
 	}
 	go func() {

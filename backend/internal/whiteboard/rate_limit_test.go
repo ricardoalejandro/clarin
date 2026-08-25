@@ -19,6 +19,14 @@ func TestEventRateLimiterUsesIndependentOneSecondWindows(t *testing.T) {
 	if !limiter.Allow(EventCursorUpdate, now) {
 		t.Fatal("one event kind must not consume another kind's window")
 	}
+	for index := 0; index < 24; index++ {
+		if !limiter.Allow(EventViewportUpdate, now) {
+			t.Fatalf("viewport update %d unexpectedly rejected", index)
+		}
+	}
+	if limiter.Allow(EventViewportUpdate, now) {
+		t.Fatal("viewport flood was not rejected independently")
+	}
 	if !limiter.Allow(EventScenePatch, now.Add(time.Second)) {
 		t.Fatal("new one-second window did not reset")
 	}

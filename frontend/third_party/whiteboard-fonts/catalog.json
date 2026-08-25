@@ -1,0 +1,1229 @@
+{
+  "schemaVersion": 1,
+  "engineVersion": "0.18.1-clarin.4",
+  "officialSelectableFonts": 7,
+  "customSelectableFonts": 25,
+  "totalSelectableFonts": 32,
+  "reservedIDRange": {
+    "start": 10001,
+    "end": 10025,
+    "recyclable": false
+  },
+  "sourceCommit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+  "entries": [
+    {
+      "id": 10001,
+      "family": "Caveat",
+      "category": "handwriting",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 900,
+        "descender": -300,
+        "lineHeight": 1.3
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10001-caveat-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 18600,
+          "sha256": "b887f256176087e22d2374d634ba7d1e9def523bc02babe2eca3efa25b32ecd7",
+          "sourceURL": "https://fonts.gstatic.com/s/caveat/v23/WnznHAc5bAfYB2QRah7pcpNvOx-pjfJ9eIupYSxP.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10001-caveat-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 48836,
+          "sha256": "d0b7b931b8980049327e8f8f9ac264617c8200b8422d62e886473d3d9527bad3",
+          "sourceURL": "https://fonts.gstatic.com/s/caveat/v23/WnznHAc5bAfYB2QRah7pcpNvOx-pjfJ9eIWpYQ.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10001-caveat-OFL-1.1.txt",
+        "sha256": "1f9d81d094273d82f3898a1ee8b598a717d050ecbf5ff7bede105b704880157b"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/caveat",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Caveat:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10002,
+      "family": "Kalam",
+      "category": "handwriting",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 900,
+        "descender": -300,
+        "lineHeight": 1.3
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10002-kalam-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 12140,
+          "sha256": "1099e56781c48f97dc66c8df2039a640ded07742acd4c6f2c9dc6350c3e3f324",
+          "sourceURL": "https://fonts.gstatic.com/s/kalam/v18/YA9dr0Wd4kDdMthfOCfzsw.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10002-kalam-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 22336,
+          "sha256": "954410601a823f37e219f7930b7446f86afa15621326a7078d56fb9c910135cb",
+          "sourceURL": "https://fonts.gstatic.com/s/kalam/v18/YA9dr0Wd4kDdMthROCc.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10002-kalam-OFL-1.1.txt",
+        "sha256": "f62ef357d3a1c3d27edd35a6e1ba350e8a8d13499797964eeadefbf0b3b15d1f"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/kalam",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Kalam:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10003,
+      "family": "Patrick Hand",
+      "category": "handwriting",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 900,
+        "descender": -300,
+        "lineHeight": 1.3
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10003-patrick-hand-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 20112,
+          "sha256": "c16846bad9501534b8402172c18f87e927146c4e63af2942f1fa8ad8ba7e6e70",
+          "sourceURL": "https://fonts.gstatic.com/s/patrickhand/v25/LDI1apSQOAYtSuYWp8ZhfYe8UMLLq7s.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10003-patrick-hand-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 23944,
+          "sha256": "ac5bc9033b2572bf84d39f7150c1634e37ed16e8dbee632d6d0bceac0bbf0199",
+          "sourceURL": "https://fonts.gstatic.com/s/patrickhand/v25/LDI1apSQOAYtSuYWp8ZhfYe8XsLL.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10003-patrick-hand-OFL-1.1.txt",
+        "sha256": "377f4f9c19e935228552478eb68cc2ed82910988a60ba60e2ac73b09f32d02d1"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/patrickhand",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Patrick%20Hand:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10004,
+      "family": "Architects Daughter",
+      "category": "handwriting",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 900,
+        "descender": -300,
+        "lineHeight": 1.3
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10004-architects-daughter-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 7028,
+          "sha256": "4b7ce4464e714bba13a4b67e00995d85a715d35d3d9a409067f910b77824f31d",
+          "sourceURL": "https://fonts.gstatic.com/s/architectsdaughter/v20/KtkxAKiDZI_td1Lkx62xHZHDtgO_Y-bvTYdg4_zg.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10004-architects-daughter-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 13156,
+          "sha256": "284a3c1856b253a681c180bf5328cae3b94d4aaab702f6385490ec4e1b449df3",
+          "sourceURL": "https://fonts.gstatic.com/s/architectsdaughter/v20/KtkxAKiDZI_td1Lkx62xHZHDtgO_Y-bvTYlg4w.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10004-architects-daughter-OFL-1.1.txt",
+        "sha256": "0e441ae9f18ad0c294cc5b6ae3974c2db1614cab220598578b1b58c4cc334485"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/architectsdaughter",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Architects%20Daughter:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10005,
+      "family": "Permanent Marker",
+      "category": "handwriting",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 900,
+        "descender": -300,
+        "lineHeight": 1.3
+      },
+      "coverage": [
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10005-permanent-marker-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 29564,
+          "sha256": "4884fec2c73aa52a2461073c1b87d1ceb80f400520391b43f97ca7d3c39eeb24",
+          "sourceURL": "https://fonts.gstatic.com/s/permanentmarker/v16/Fh4uPib9Iyv2ucM6pGQMWimMp004La2Cfw.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "Apache-2.0",
+        "file": "licenses/10005-permanent-marker-Apache-2.0.txt",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "apache/permanentmarker",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Permanent%20Marker:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10006,
+      "family": "Shadows Into Light",
+      "category": "handwriting",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 900,
+        "descender": -300,
+        "lineHeight": 1.3
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10006-shadows-into-light-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 9388,
+          "sha256": "592d879c8e58cdc44b7f9c484d45ba5d238ce6c80d650fb51243b2362b546ed4",
+          "sourceURL": "https://fonts.gstatic.com/s/shadowsintolight/v22/UqyNK9UOIntux_czAvDQx_ZcHqZXBNQze8D59zQ.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10006-shadows-into-light-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 16296,
+          "sha256": "2498c027559c4ae9a920e18e30031193148983e7ea195416d62c5d0ea2eaa3ac",
+          "sourceURL": "https://fonts.gstatic.com/s/shadowsintolight/v22/UqyNK9UOIntux_czAvDQx_ZcHqZXBNQzdcD5.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10006-shadows-into-light-OFL-1.1.txt",
+        "sha256": "0e441ae9f18ad0c294cc5b6ae3974c2db1614cab220598578b1b58c4cc334485"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/shadowsintolight",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Shadows%20Into%20Light:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10007,
+      "family": "Gloria Hallelujah",
+      "category": "handwriting",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 900,
+        "descender": -300,
+        "lineHeight": 1.3
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10007-gloria-hallelujah-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 11076,
+          "sha256": "a9147c3d1fe79b84ce1a9148ca0ac42933aa0f7fff0096ebb835a73a278342df",
+          "sourceURL": "https://fonts.gstatic.com/s/gloriahallelujah/v24/LYjYdHv3kUk9BMV96EIswT9DIbW-MIS71zO0vg.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10007-gloria-hallelujah-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 18596,
+          "sha256": "90b0ef8d2ed6d4b46b4e010e7b335b182c45c330a15bac3ca76497dbae544700",
+          "sourceURL": "https://fonts.gstatic.com/s/gloriahallelujah/v24/LYjYdHv3kUk9BMV96EIswT9DIbW-MIS11zM.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10007-gloria-hallelujah-OFL-1.1.txt",
+        "sha256": "0e441ae9f18ad0c294cc5b6ae3974c2db1614cab220598578b1b58c4cc334485"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/gloriahallelujah",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Gloria%20Hallelujah:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10008,
+      "family": "Bangers",
+      "category": "display",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 900,
+        "descender": -250,
+        "lineHeight": 1.2
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10008-bangers-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 17196,
+          "sha256": "2c9576bb1d612cf8750bf749689b5916287940fc99e1be5451b83d9fb6c4c5d9",
+          "sourceURL": "https://fonts.gstatic.com/s/bangers/v25/FeVQS0BTqb0h60ACH5BQ2Ixi.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10008-bangers-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 23528,
+          "sha256": "04f54ff42ea2b8fc50b4259c29c60b1e05e606b769c2fb541c98624346c9767c",
+          "sourceURL": "https://fonts.gstatic.com/s/bangers/v25/FeVQS0BTqb0h60ACH55Q2A.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10008-bangers-OFL-1.1.txt",
+        "sha256": "630dd5a307c0657b094d324e069b390edf90182fe5003639e06c02a0e5769af7"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/bangers",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Bangers:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10009,
+      "family": "Bebas Neue",
+      "category": "display",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 900,
+        "descender": -250,
+        "lineHeight": 1.2
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10009-bebas-neue-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 8928,
+          "sha256": "16c95ce45a2922f52551d38d565d14c92cf257b8f219c89613407d81fdd21a39",
+          "sourceURL": "https://fonts.gstatic.com/s/bebasneue/v16/JTUSjIg69CK48gW7PXoo9Wdhyzbi.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10009-bebas-neue-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 13768,
+          "sha256": "a7c90c89240c134f7fdd33d40c000ec90b79d675ea53e8cc5a6d423c073de412",
+          "sourceURL": "https://fonts.gstatic.com/s/bebasneue/v16/JTUSjIg69CK48gW7PXoo9Wlhyw.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10009-bebas-neue-OFL-1.1.txt",
+        "sha256": "72082f6cb4d04be2ecf7cc7d9e1e7d73787f0af8a5a278a47cade70c16b78341"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/bebasneue",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Bebas%20Neue:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10010,
+      "family": "Fredoka",
+      "category": "display",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 900,
+        "descender": -250,
+        "lineHeight": 1.2
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10010-fredoka-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 2628,
+          "sha256": "fe97fe966d090d46c2bf2fe89faee6ac64d6f4b0a3a9cc3b74df38e3266b3399",
+          "sourceURL": "https://fonts.gstatic.com/s/fredoka/v17/X7nP4b87HvSqjb_WIi2yDCRwoQ_k7367_B-i2yQag0-mac3O8SL8H-mKpNk.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10010-fredoka-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 16076,
+          "sha256": "9cf74f703532ef61311d6c6dd32a582b6e410727f5fce1dbf5570cbe6b023c2f",
+          "sourceURL": "https://fonts.gstatic.com/s/fredoka/v17/X7nP4b87HvSqjb_WIi2yDCRwoQ_k7367_B-i2yQag0-mac3O8SL8EemK.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10010-fredoka-OFL-1.1.txt",
+        "sha256": "5c9e7eee5c6b25f4b05b8d53b2e470ea4962f9ced742d044a98f7d95d1375bab"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/fredoka",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Fredoka:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10011,
+      "family": "Lobster",
+      "category": "display",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 900,
+        "descender": -250,
+        "lineHeight": 1.2
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10011-lobster-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 27912,
+          "sha256": "51a1f5b28cbdc742ecaeeabf5fed74d0446b0b1cebdd6bbf6cd93ecc36b16629",
+          "sourceURL": "https://fonts.gstatic.com/s/lobster/v32/neILzCirqoswsqX9zoymM5Ez.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10011-lobster-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 33844,
+          "sha256": "aed68c73817364906ff95d97be87246d106bd38d5e4397e4866ec831ee22f7ba",
+          "sourceURL": "https://fonts.gstatic.com/s/lobster/v32/neILzCirqoswsqX9zoKmMw.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10011-lobster-OFL-1.1.txt",
+        "sha256": "88aece7d90f2bb7049719f11619a560af22af3451af141f12aa4f46bb157a99b"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/lobster",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Lobster:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10012,
+      "family": "Alfa Slab One",
+      "category": "display",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 900,
+        "descender": -250,
+        "lineHeight": 1.2
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10012-alfa-slab-one-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 19492,
+          "sha256": "7b891f87cdd8387776924bc9c30cdc8e7cfe5e97161f54e89a6a710961ca6110",
+          "sourceURL": "https://fonts.gstatic.com/s/alfaslabone/v21/6NUQ8FmMKwSEKjnm5-4v-4Jh2dxhe-Wv.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10012-alfa-slab-one-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 19052,
+          "sha256": "48a110c7fda81f9921a6437e1a813dcea56df5a9f52f778c7b2f2151e36e4f2c",
+          "sourceURL": "https://fonts.gstatic.com/s/alfaslabone/v21/6NUQ8FmMKwSEKjnm5-4v-4Jh2dJhew.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10012-alfa-slab-one-OFL-1.1.txt",
+        "sha256": "e315abc82a78710c7242e2f2e6529651fd631d4d50e6ad98ea194f9b54c3d701"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/alfaslabone",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Alfa%20Slab%20One:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10013,
+      "family": "Abril Fatface",
+      "category": "display",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 900,
+        "descender": -250,
+        "lineHeight": 1.2
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10013-abril-fatface-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 7716,
+          "sha256": "c7cc6ab22643e87e9693f54ad411dde5012b5d4f96f53408f52c541144be9b6a",
+          "sourceURL": "https://fonts.gstatic.com/s/abrilfatface/v25/zOL64pLDlL1D99S8g8PtiKchq-lmjdLh.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10013-abril-fatface-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 13156,
+          "sha256": "edf7a1f3bc22e815ea426b102fa0493d20af482b242066e689a1263ebb2eeb68",
+          "sourceURL": "https://fonts.gstatic.com/s/abrilfatface/v25/zOL64pLDlL1D99S8g8PtiKchq-dmjQ.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10013-abril-fatface-OFL-1.1.txt",
+        "sha256": "aba8997e16b1e3888c6e855ba883c70d96bd4375bff8cb9c7ce0f097200f74b8"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/abrilfatface",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Abril%20Fatface:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10014,
+      "family": "Inter",
+      "category": "sans",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 950,
+        "descender": -250,
+        "lineHeight": 1.25
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10014-inter-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 35000,
+          "sha256": "6744a7f509ebc6ab220a6cd4ea77e898adf014f03d88dcda5d45d8a9feefb4e9",
+          "sourceURL": "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZFhiI2B.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10014-inter-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 23664,
+          "sha256": "8909904ab6c872eb994093482a88a28eca2cd95912d7b6fecd72103b0dc07edc",
+          "sourceURL": "https://fonts.gstatic.com/s/inter/v20/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10014-inter-OFL-1.1.txt",
+        "sha256": "5b9321a4298cfeb6b34354164a1c3afc3db114569984c502b9b35d988fd58c57"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/inter",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Inter:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10015,
+      "family": "Montserrat",
+      "category": "sans",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 950,
+        "descender": -250,
+        "lineHeight": 1.25
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10015-montserrat-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 32272,
+          "sha256": "30f166cea0894715f7b1342798306dd4206bc1d0331440d543f6e7f7fff04539",
+          "sourceURL": "https://fonts.gstatic.com/s/montserrat/v31/JTUHjIg1_i6t8kCHKm4532VJOt5-QNFgpCtr6Hw3aXpsog.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10015-montserrat-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 18780,
+          "sha256": "e66bcd2761ab6924b25ce70dafe10e57a39193c4fea1516730bd9cb5240af6c8",
+          "sourceURL": "https://fonts.gstatic.com/s/montserrat/v31/JTUHjIg1_i6t8kCHKm4532VJOt5-QNFgpCtr6Hw5aXo.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10015-montserrat-OFL-1.1.txt",
+        "sha256": "8b7141c03fa4f8d44e6345d5d4931709290f0f67875e452e95ac1fd3a027802e"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/montserrat",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Montserrat:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10016,
+      "family": "Poppins",
+      "category": "sans",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 950,
+        "descender": -250,
+        "lineHeight": 1.25
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10016-poppins-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 5644,
+          "sha256": "0b1fcab42c18b69bcfe9ce4799fcbff5af1621c53ffcfdc4723c6f5ec4ee3ffb",
+          "sourceURL": "https://fonts.gstatic.com/s/poppins/v24/pxiEyp8kv8JHgFVrJJnecmNE.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10016-poppins-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 7884,
+          "sha256": "7d93459d86585bfcdbb7e0376056226adb25821ee54b96236fe2123e9560929f",
+          "sourceURL": "https://fonts.gstatic.com/s/poppins/v24/pxiEyp8kv8JHgFVrJJfecg.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10016-poppins-OFL-1.1.txt",
+        "sha256": "6be04893d770899a015649c7aa3b582f871b272f8747a92b78b17c3e5c8b2573"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/poppins",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Poppins:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10017,
+      "family": "Raleway",
+      "category": "sans",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 950,
+        "descender": -250,
+        "lineHeight": 1.25
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10017-raleway-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 17012,
+          "sha256": "e8ab3804b770bc1f6ee998bdcaa28e05d02346654356869ae726469e5148dd0d",
+          "sourceURL": "https://fonts.gstatic.com/s/raleway/v37/1Ptxg8zYS_SKggPN4iEgvnHyvveLxVvaorCGPrEHJA.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10017-raleway-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 22408,
+          "sha256": "2318962e7930f55b45907ee85a6b6165ca3bba437b05ca17068a5c876d3de18b",
+          "sourceURL": "https://fonts.gstatic.com/s/raleway/v37/1Ptxg8zYS_SKggPN4iEgvnHyvveLxVvaorCIPrE.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10017-raleway-OFL-1.1.txt",
+        "sha256": "7e946cf1171784d1015279e7dc35f827957a6b5d1f1f659ae0c98e5f5e37ed9b"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/raleway",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Raleway:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10018,
+      "family": "Quicksand",
+      "category": "sans",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 950,
+        "descender": -250,
+        "lineHeight": 1.25
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10018-quicksand-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 15288,
+          "sha256": "db0347bb53f618c0d932a128ee262d847a6e7243110e31f869611d1b63450505",
+          "sourceURL": "https://fonts.gstatic.com/s/quicksand/v37/6xK-dSZaM9iE8KbpRA_LJ3z8mH9BOJvgkP8o58i-wi40.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10018-quicksand-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 15776,
+          "sha256": "fee25690fddfdf52d7c88f8460260998c523b762e1a53fc91561b179835e3316",
+          "sourceURL": "https://fonts.gstatic.com/s/quicksand/v37/6xK-dSZaM9iE8KbpRA_LJ3z8mH9BOJvgkP8o58a-wg.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10018-quicksand-OFL-1.1.txt",
+        "sha256": "14d28541780d90f6577bb7abcc6f005bf6969614294e75c82abb8758a696ad46"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/quicksand",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Quicksand:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10019,
+      "family": "Lora",
+      "category": "serif",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 950,
+        "descender": -300,
+        "lineHeight": 1.3
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10019-lora-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 12016,
+          "sha256": "525551030c504c0eb42d71b48ce10027e4431bd405d6cd04c468a535ce8d961b",
+          "sourceURL": "https://fonts.gstatic.com/s/lora/v37/0QI6MX1D_JOuGQbT0gvTJPa787weuxJPkq1umA.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10019-lora-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 21148,
+          "sha256": "ac079950fd9885261c0f73d9e87233f31b5427333ce0eb20e26c119458493c40",
+          "sourceURL": "https://fonts.gstatic.com/s/lora/v37/0QI6MX1D_JOuGQbT0gvTJPa787weuxJBkq0.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10019-lora-OFL-1.1.txt",
+        "sha256": "1d9a970809ac804b582a6ce7f0ebc4e7fefcbfd7ff6299cad35ee656a21be716"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/lora",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Lora:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10020,
+      "family": "Merriweather",
+      "category": "serif",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 950,
+        "descender": -300,
+        "lineHeight": 1.3
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10020-merriweather-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 42952,
+          "sha256": "be42f8d64ab6410fd300c4d352d9a0943cc1c3b4eb74016b73bcf6b252d74ac5",
+          "sourceURL": "https://fonts.gstatic.com/s/merriweather/v33/u-4D0qyriQwlOrhSvowK_l5UcA6zuSYEqOzpPe3HOZJ5eX1WtLaQwmYiScCmDxhtNOKl8yDr3icaGl31GvU.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10020-merriweather-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 49168,
+          "sha256": "66f5bd22d738a801a9e58d71920559743b0baaced04be299e3c4feca3dce3556",
+          "sourceURL": "https://fonts.gstatic.com/s/merriweather/v33/u-4D0qyriQwlOrhSvowK_l5UcA6zuSYEqOzpPe3HOZJ5eX1WtLaQwmYiScCmDxhtNOKl8yDr3icaFF31.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10020-merriweather-OFL-1.1.txt",
+        "sha256": "715bd349bfa6116f99e351e1548321dcfa25b91df65502d22ca8d624557697d2"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/merriweather",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Merriweather:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10021,
+      "family": "Playfair Display",
+      "category": "serif",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 950,
+        "descender": -300,
+        "lineHeight": 1.3
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10021-playfair-display-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 12336,
+          "sha256": "b13dce34203d893eb00980383bc5abf8b75c9eb1f59c3a630e9fc8baf2e9984f",
+          "sourceURL": "https://fonts.gstatic.com/s/playfairdisplay/v40/nuFvD-vYSZviVYUb_rj3ij__anPXJzDwcbmjWBN2PKdFvXDZbtPY_Q.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10021-playfair-display-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 21856,
+          "sha256": "1fe9ad5d8b2ebd8ecb8fbd05bed1e3fdfa52dae3f1a04e1c219918442fe9394d",
+          "sourceURL": "https://fonts.gstatic.com/s/playfairdisplay/v40/nuFvD-vYSZviVYUb_rj3ij__anPXJzDwcbmjWBN2PKdFvXDXbtM.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10021-playfair-display-OFL-1.1.txt",
+        "sha256": "566be814f8e96e93dfa16101331557eb6b5467e9e03f627c0910fe93ca12300e"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/playfairdisplay",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Playfair%20Display:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10022,
+      "family": "Libre Baskerville",
+      "category": "serif",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 950,
+        "descender": -300,
+        "lineHeight": 1.3
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10022-libre-baskerville-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 21272,
+          "sha256": "3fc071cd0f715bfcf79df9aa61fe6112278ac62f859b486d3956fe19b64a02fb",
+          "sourceURL": "https://fonts.gstatic.com/s/librebaskerville/v24/kmKUZrc3Hgbbcjq75U4uslyuy4kn0olVQ-LglH6T17uj8Q4iAANPjuM.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10022-libre-baskerville-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 20108,
+          "sha256": "3eb80fbca70498126925ce16ff5c20b2fa35e67ae7123ddb46302d2778dfbf0e",
+          "sourceURL": "https://fonts.gstatic.com/s/librebaskerville/v24/kmKUZrc3Hgbbcjq75U4uslyuy4kn0olVQ-LglH6T17uj8Q4iDgNP.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10022-libre-baskerville-OFL-1.1.txt",
+        "sha256": "3624eddd4c8f8a908130a417ae7cd089c9da69899c4e0ca1a5217d0a6fae16fd"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/librebaskerville",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Libre%20Baskerville:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10023,
+      "family": "JetBrains Mono",
+      "category": "mono",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 950,
+        "descender": -250,
+        "lineHeight": 1.25
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10023-jetbrains-mono-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 7336,
+          "sha256": "505dfba8ecbe77e82765f36d317ed7ef4ac42719dc5f4ae68d1c483fd22d0d14",
+          "sourceURL": "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKxTNFOVgaY.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10023-jetbrains-mono-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 21168,
+          "sha256": "14425ba9c695763c1547f48a206b7aa60350a33ae23de09f0407877f3fcd89eb",
+          "sourceURL": "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbY2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKxTOlOV.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10023-jetbrains-mono-OFL-1.1.txt",
+        "sha256": "b2fe5e8987594e9ffd1d2ca52a2f5d73eb8335243893c5d6254b5ad69269591d"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/jetbrainsmono",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=JetBrains%20Mono:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10024,
+      "family": "Space Mono",
+      "category": "mono",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 950,
+        "descender": -250,
+        "lineHeight": 1.25
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10024-space-mono-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 15832,
+          "sha256": "44ad50c760fa8f5b62da3d489edb40adebabaf97988b9b0adbbc3f0be859050a",
+          "sourceURL": "https://fonts.gstatic.com/s/spacemono/v17/i7dPIFZifjKcF5UAWdDRYE98RWq7.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10024-space-mono-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 16520,
+          "sha256": "fb4a81a2d0a893e5c38c394a7e716a1cef0b24610a0af49c96f6d529bd66bf2b",
+          "sourceURL": "https://fonts.gstatic.com/s/spacemono/v17/i7dPIFZifjKcF5UAWdDRYEF8RQ.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10024-space-mono-OFL-1.1.txt",
+        "sha256": "8e4ee42b2553e1e01504e61cb0d46d148cd8c9e5eacaa3622a7df2d4f2955b9f"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/spacemono",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=Space%20Mono:wght@400&display=swap"
+      }
+    },
+    {
+      "id": 10025,
+      "family": "IBM Plex Mono",
+      "category": "mono",
+      "metrics": {
+        "unitsPerEm": 1000,
+        "ascender": 950,
+        "descender": -250,
+        "lineHeight": 1.25
+      },
+      "coverage": [
+        "latin-ext",
+        "latin"
+      ],
+      "fontFaces": [
+        {
+          "subset": "latin-ext",
+          "file": "fonts/Clarin/10025-ibm-plex-mono-latin-ext-400.woff2",
+          "unicodeRange": "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 13348,
+          "sha256": "6bc0f226a5b7884a8170e3f62c63d7675609d4631bdc5931b5cdab81821f00eb",
+          "sourceURL": "https://fonts.gstatic.com/s/ibmplexmono/v20/-F63fjptAgt5VM-kVkqdyU8n1iEq129k.woff2"
+        },
+        {
+          "subset": "latin",
+          "file": "fonts/Clarin/10025-ibm-plex-mono-latin-400.woff2",
+          "unicodeRange": "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD",
+          "weight": "400",
+          "style": "normal",
+          "bytes": 14708,
+          "sha256": "08949f728dc52d528e69b1667d15c89a5686a4ee9a296ff90983985f99c380f7",
+          "sourceURL": "https://fonts.gstatic.com/s/ibmplexmono/v20/-F63fjptAgt5VM-kVkqdyU8n1i8q1w.woff2"
+        }
+      ],
+      "license": {
+        "spdx": "OFL-1.1",
+        "file": "licenses/10025-ibm-plex-mono-OFL-1.1.txt",
+        "sha256": "7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da"
+      },
+      "origin": {
+        "provider": "Google Fonts",
+        "repository": "google/fonts",
+        "repositoryPath": "ofl/ibmplexmono",
+        "commit": "008f47aa68a60f07e4f6adc926ab78e19a88d92f",
+        "stylesheet": "https://fonts.googleapis.com/css2?family=IBM%20Plex%20Mono:wght@400&display=swap"
+      }
+    }
+  ]
+}

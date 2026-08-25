@@ -1,7 +1,7 @@
 'use client'
 
-import type { ComponentType, ReactElement, ReactNode } from 'react'
-import { cloneElement, isValidElement, useEffect, useMemo, useRef, useState } from 'react'
+import type { ComponentType, ForwardedRef, ReactElement, ReactNode } from 'react'
+import { cloneElement, forwardRef, isValidElement, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
   Briefcase,
@@ -65,6 +65,8 @@ interface ContactDetailSurfaceProps {
   onObservationChange?: () => void
   onSendMessage?: (phone: string) => void
   sendingMessage?: boolean
+  messageError?: string
+  onRetryMessage?: () => void
   onDeleteContact?: (contact: ContactProfileContact) => void
   /** Context-specific content follows the shared CRM accordion stack in every module. */
   contextContent?: ReactNode
@@ -84,6 +86,11 @@ interface ContactDetailSurfaceProps {
   /** Disables module-context mutations while keeping canonical Contact editing independent. */
   contextActionsDisabled?: boolean
   className?: string
+}
+
+export interface ContactDetailSurfaceHandle {
+  /** Runs the same dirty-draft protection used by the surface close controls. */
+  requestClose: () => boolean
 }
 
 interface ProfileField {
@@ -241,7 +248,7 @@ function observationDate(value: string) {
   return date.toLocaleString('es-PE', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
-export default function ContactDetailSurface({
+function ContactDetailSurfaceImpl({
   contactId,
   context,
   initialContact,
@@ -252,6 +259,8 @@ export default function ContactDetailSurface({
   onObservationChange,
   onSendMessage,
   sendingMessage = false,
+  messageError,
+  onRetryMessage,
   onDeleteContact,
   contextContent,
   contextSummary,
@@ -264,7 +273,7 @@ export default function ContactDetailSurface({
   readOnly = false,
   contextActionsDisabled = false,
   className = '',
-}: ContactDetailSurfaceProps) {
+}: ContactDetailSurfaceProps, forwardedRef: ForwardedRef<ContactDetailSurfaceHandle>) {
   const profile = useContactProfile({ contactId, context, initialContact, onContactChange })
   const googleSync = useGoogleContactSync({
     contactId,
@@ -382,10 +391,13 @@ export default function ContactDetailSurface({
     setCollectionError('')
   }
 
-  const requestClose = () => {
-    if (editMode && editDirty && !window.confirm('Hay cambios del contacto sin guardar. ¿Deseas cerrar y descartarlos?')) return
+  const requestClose = useCallback(() => {
+    if (editMode && editDirty && !window.confirm('Hay cambios del contacto sin guardar. ¿Deseas cerrar y descartarlos?')) return false
     onClose()
-  }
+    return true
+  }, [editDirty, editMode, onClose])
+
+  useImperativeHandle(forwardedRef, () => ({ requestClose }), [requestClose])
 
   const updateEditDraft = (field: ContactProfileEditableField, value: string) => {
     setEditDraft(current => current ? { ...current, [field]: value } : current)
@@ -684,6 +696,7 @@ export default function ContactDetailSurface({
                       <button data-crm-message-action type="button" onClick={() => profile.contact?.phone && onSendMessage?.(profile.contact.phone)} disabled={!onSendMessage || !profile.contact.phone || sendingMessage} aria-label={`Enviar mensaje a ${displayName(profile.contact)}`} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-2 text-xs font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45">{sendingMessage ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}{sendingMessage ? 'Abriendo…' : 'Mensaje'}</button>
                       <button type="button" onClick={enterEditMode} disabled={!canEdit} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2 text-xs font-bold text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"><Edit2 className="h-4 w-4" />Editar</button>
                     </div>
+                    {messageError && <div role="alert" className="mt-2 flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"><AlertCircle className="h-4 w-4 shrink-0" /><span className="min-w-0 flex-1">{messageError}</span>{onRetryMessage && <button type="button" onClick={onRetryMessage} className="min-h-9 shrink-0 rounded-lg px-2 font-bold hover:bg-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500">Reintentar</button>}</div>}
                     {quickActions && <div className="mt-2">{quickActions}</div>}
                   </section>
 
@@ -731,7 +744,13 @@ export default function ContactDetailSurface({
                     {relatedTasks && <CrmDetailAccordion id="crm-related-tasks" title="Tareas relacionadas" summary={`${relatedTaskCount} abierta${relatedTaskCount === 1 ? '' : 's'} en Clarin Work`} icon={ListTodo} tone="blue" open={accordionOpen.tasks} onToggle={() => setSectionOpen('tasks', !accordionOpen.tasks)}>{embeddedRelatedTasks}</CrmDetailAccordion>}
 
                     <CrmDetailAccordion id="crm-integrations" title="Integraciones" summary={googleSync.synced ? 'Google Contacts sincronizado' : googleSync.connected ? 'Google Contacts disponible' : 'Sin integraciones activas'} icon={Cloud} tone="sky" open={accordionOpen.integrations} onToggle={() => setSectionOpen('integrations', !accordionOpen.integrations)}>
-                      {googleSync.statusLoading ? <div className="flex min-h-16 items-center justify-center gap-2 text-xs font-semibold text-slate-500"><Loader2 className="h-4 w-4 animate-spin text-sky-600" />Consultando Google Contacts…</div> : googleSync.statusError && !googleSync.permissionDenied ? <div role="alert" className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800"><AlertCircle className="h-4 w-4" /><span className="flex-1">{googleSync.statusError}</span><button type="button" onClick={() => void googleSync.retryStatus()} className="min-h-10 px-2 font-bold">Reintentar</button></div> : googleSync.connected ? <div className="rounded-xl border border-sky-100 bg-sky-50/50 p-3"><div className="flex items-center gap-2"><div className="flex h-9 w-9 items-center justify-center rounded-xl bg-white text-sky-700">{googleSync.synced ? <Cloud className="h-4 w-4" /> : <CloudOff className="h-4 w-4" />}</div><div><p className="text-xs font-bold text-slate-800">{googleSync.synced ? 'Sincronizado con Google' : 'Google Contacts'}</p><p className="text-[10px] text-slate-500">{googleSync.synced ? 'Los cambios se reflejan en Google.' : 'Guarda este contacto también en Google.'}</p></div></div><div className={`mt-3 grid gap-2 ${googleSync.synced ? 'grid-cols-2' : 'grid-cols-1'}`}><button type="button" onClick={() => void googleSync.sync()} disabled={googleSync.mutation !== null} className="min-h-11 rounded-xl bg-sky-600 px-3 text-xs font-bold text-white disabled:opacity-50">{googleSync.mutation === 'sync' ? 'Sincronizando…' : googleSync.synced ? 'Actualizar' : 'Sincronizar'}</button>{googleSync.synced && <button type="button" onClick={requestGoogleDesync} disabled={googleSync.mutation !== null} className="min-h-11 rounded-xl border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600">{googleSync.mutation === 'desync' ? 'Quitando…' : 'Quitar'}</button>}</div>{(googleSync.actionError || profile.contact.google_sync_error) && <p role="alert" className="mt-2 text-xs text-red-700">{googleSync.actionError || profile.contact.google_sync_error}</p>}{googleSync.feedback && <p role="status" className="mt-2 text-xs text-sky-800">{googleSync.feedback}</p>}</div> : <p className="text-xs text-slate-400">No hay una integración disponible para este contacto.</p>}
+                      {googleSync.statusLoading ? (
+                        <div role="status" aria-label="Consultando Google Contacts" className="flex min-h-16 items-center justify-center gap-2 text-xs font-semibold text-slate-500"><Loader2 className="h-4 w-4 animate-spin text-sky-600" />Consultando Google Contacts…</div>
+                      ) : googleSync.statusError && !googleSync.permissionDenied ? (
+                        <div role="alert" className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800"><AlertCircle className="h-4 w-4" /><span className="flex-1">{googleSync.statusError}</span><button type="button" aria-label="Reintentar Google Contacts" onClick={() => void googleSync.retryStatus()} className="min-h-10 px-2 font-bold">Reintentar</button></div>
+                      ) : googleSync.connected ? (
+                        <div role="region" aria-label="Google Contacts" className="rounded-xl border border-sky-100 bg-sky-50/50 p-3"><div className="flex items-center gap-2"><div className="flex h-9 w-9 items-center justify-center rounded-xl bg-white text-sky-700">{googleSync.synced ? <Cloud className="h-4 w-4" /> : <CloudOff className="h-4 w-4" />}</div><div><p className="text-xs font-bold text-slate-800">{googleSync.synced ? 'Sincronizado con Google' : 'Google Contacts'}</p><p className="text-[10px] text-slate-500">{googleSync.synced ? 'Los cambios se reflejan en Google.' : 'Guarda este contacto también en Google.'}</p></div></div><div className={`mt-3 grid gap-2 ${googleSync.synced ? 'grid-cols-2' : 'grid-cols-1'}`}><button type="button" aria-label={googleSync.synced ? 'Actualizar contacto en Google Contacts' : 'Sincronizar contacto con Google Contacts'} onClick={() => void googleSync.sync()} disabled={googleSync.mutation !== null} className="min-h-11 rounded-xl bg-sky-600 px-3 text-xs font-bold text-white disabled:opacity-50">{googleSync.mutation === 'sync' ? 'Sincronizando…' : googleSync.synced ? 'Actualizar' : 'Sincronizar'}</button>{googleSync.synced && <button type="button" aria-label="Quitar contacto de Google Contacts" onClick={requestGoogleDesync} disabled={googleSync.mutation !== null} className="min-h-11 rounded-xl border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600">{googleSync.mutation === 'desync' ? 'Quitando…' : 'Quitar'}</button>}</div>{(googleSync.actionError || profile.contact.google_sync_error) && <p role="alert" className="mt-2 text-xs text-red-700">{googleSync.actionError || profile.contact.google_sync_error}</p>}{googleSync.feedback && <p role="status" className="mt-2 text-xs text-sky-800">{googleSync.feedback}</p>}</div>
+                      ) : <p className="text-xs text-slate-400">No hay una integración disponible para este contacto.</p>}
                     </CrmDetailAccordion>
 
                     {contextContent}
@@ -747,5 +766,10 @@ export default function ContactDetailSurface({
     </div>
   )
 }
+
+const ContactDetailSurface = forwardRef<ContactDetailSurfaceHandle, ContactDetailSurfaceProps>(ContactDetailSurfaceImpl)
+ContactDetailSurface.displayName = 'ContactDetailSurface'
+
+export default ContactDetailSurface
 
 export type { ContactDetailSurfaceProps }

@@ -327,6 +327,7 @@ func (s *Server) setupRoutes() {
 	auth := api.Group("/auth")
 	auth.Post("/login", s.handleLogin)
 	auth.Post("/refresh", s.handleRefreshToken)
+	auth.Post("/whiteboard-session", s.handleBootstrapWhiteboardSession)
 	auth.Post("/logout", s.handleLogout)
 	auth.Post("/register", s.handleRegisterDisabled)
 
@@ -338,6 +339,12 @@ func (s *Server) setupRoutes() {
 	// WhatsApp Cloud API webhook (public — verification token in env, device resolved by phone_number_id)
 	api.Get("/whatsapp/cloud/webhook", s.handleWhatsAppCloudVerify)
 	api.Post("/whatsapp/cloud/webhook", s.handleWhatsAppCloudWebhook)
+
+	// Reconnect credentials must not manufacture account activity or extend the
+	// login idle timeout. This exact route accepts a current strict JWT or the
+	// path-limited whiteboard session cookie through read-only validation; all
+	// other authenticated routes keep the normal touching middleware.
+	api.Post("/whiteboards/:id/collab-ticket", s.whiteboardCollabAuthMiddleware, s.handleCreateWhiteboardCollabTicket)
 
 	// Protected routes
 	protected := api.Group("", s.authMiddleware)
@@ -888,11 +895,24 @@ func (s *Server) setupRoutes() {
 	whiteboards.Post("/", s.handleCreateWhiteboard)
 	whiteboards.Get("/trash-policy", s.handleGetWhiteboardTrashPolicy)
 	whiteboards.Put("/trash-policy", s.handlePutWhiteboardTrashPolicy)
+	whiteboards.Post("/public-library-import/callback", s.guardWhiteboardLibraryImportMutation, s.handleWhiteboardPublicLibraryCallback)
+	whiteboards.Post("/:id/public-library-import/start", s.guardWhiteboardLibraryImportMutation, s.guardWhiteboardPublicLibraryStart, s.handleStartWhiteboardPublicLibraryImport)
+	whiteboards.Get("/:id/public-library-imports/:importId/navigate", s.guardWhiteboardPublicLibraryNavigation, s.handleNavigateWhiteboardPublicLibraryImport)
+	whiteboards.Get("/:id/public-library-imports/:importId", s.handleGetWhiteboardPublicLibraryImport)
+	whiteboards.Post("/:id/public-library-imports/:importId/complete", s.guardWhiteboardLibraryImportMutation, s.handleCompleteWhiteboardPublicLibraryImport)
+	whiteboards.Get("/:id/comment-markers", s.handleListWhiteboardCommentMarkers)
+	whiteboards.Get("/:id/comment-threads", s.handleListWhiteboardCommentThreads)
+	whiteboards.Get("/:id/comment-threads/:threadId", s.handleGetWhiteboardCommentThread)
+	whiteboards.Get("/:id/comment-threads/:threadId/comments", s.handleListWhiteboardThreadComments)
+	whiteboards.Post("/:id/comment-threads", s.guardWhiteboardCommentMutation, s.handleCreateWhiteboardCommentThread)
+	whiteboards.Post("/:id/comment-threads/:threadId/replies", s.guardWhiteboardCommentMutation, s.handleReplyWhiteboardCommentThread)
+	whiteboards.Patch("/:id/comment-threads/:threadId/comments/:commentId", s.guardWhiteboardCommentMutation, s.handleEditWhiteboardComment)
+	whiteboards.Delete("/:id/comment-threads/:threadId/comments/:commentId", s.guardWhiteboardCommentMutation, s.handleDeleteWhiteboardComment)
+	whiteboards.Patch("/:id/comment-threads/:threadId/status", s.guardWhiteboardCommentMutation, s.handleUpdateWhiteboardCommentThreadStatus)
 	whiteboards.Get("/:id/scene", s.handleGetWhiteboardScene)
 	whiteboards.Get("/:id/activity", s.handleListWhiteboardActivity)
 	whiteboards.Put("/:id/scene", s.handlePutWhiteboardScene)
 	whiteboards.Patch("/:id/scene", s.handlePatchWhiteboardScene)
-	whiteboards.Post("/:id/collab-ticket", s.handleCreateWhiteboardCollabTicket)
 	whiteboards.Get("/:id/operations", s.handleListWhiteboardOperations)
 	whiteboards.Get("/:id/revisions", s.handleListWhiteboardRevisions)
 	whiteboards.Post("/:id/revisions", s.handleCreateWhiteboardRevision)
@@ -1199,7 +1219,20 @@ func (s *Server) setupRoutes() {
 }
 
 // Auth middleware
-func (s *Server) authMiddleware(c *fiber.Ctx) error {
+type authFailureDisposition struct {
+	Status       int
+	Code         string
+	ClearCookies bool
+}
+
+func classifyAuthFailure(err error) authFailureDisposition {
+	if errors.Is(err, service.ErrAuthSessionUnavailable) {
+		return authFailureDisposition{Status: fiber.StatusServiceUnavailable, Code: "authorization_unavailable"}
+	}
+	return authFailureDisposition{Status: fiber.StatusUnauthorized, ClearCookies: true}
+}
+
+func authTokenFromRequest(c *fiber.Ctx) string {
 	token := strings.TrimSpace(c.Cookies("auth-token"))
 	if token == "" {
 		authHeader := strings.TrimSpace(c.Get("Authorization"))
@@ -1211,6 +1244,30 @@ func (s *Server) authMiddleware(c *fiber.Ctx) error {
 		// Try query param (for file downloads)
 		token = c.Query("token")
 	}
+	return token
+}
+
+func writeAuthValidationFailure(c *fiber.Ctx, err error) error {
+	disposition := classifyAuthFailure(err)
+	if disposition.Code != "" {
+		return c.Status(disposition.Status).JSON(fiber.Map{
+			"success": false,
+			"error":   "Authentication is temporarily unavailable",
+			"code":    disposition.Code,
+		})
+	}
+	return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+		"success": false,
+		"error":   "Invalid token",
+	})
+}
+
+func shouldFallbackToWhiteboardSessionCredential(err error) bool {
+	return err != nil && !errors.Is(err, service.ErrAuthSessionUnavailable)
+}
+
+func (s *Server) authMiddleware(c *fiber.Ctx) error {
+	token := authTokenFromRequest(c)
 	if token == "" {
 		return c.Status(401).JSON(fiber.Map{
 			"success": false,
@@ -1220,10 +1277,7 @@ func (s *Server) authMiddleware(c *fiber.Ctx) error {
 
 	claims, err := s.services.Auth.ValidateToken(token, s.cfg.JWTSecret)
 	if err != nil {
-		return c.Status(401).JSON(fiber.Map{
-			"success": false,
-			"error":   "Invalid token",
-		})
+		return writeAuthValidationFailure(c, err)
 	}
 
 	// Check if user sessions were invalidated (admin toggled/deleted the user)
@@ -1234,6 +1288,32 @@ func (s *Server) authMiddleware(c *fiber.Ctx) error {
 		})
 	}
 
+	c.Locals("claims", claims)
+	c.Locals("user_id", claims.UserID)
+	c.Locals("account_id", claims.AccountID)
+	return c.Next()
+}
+
+func (s *Server) whiteboardCollabAuthMiddleware(c *fiber.Ctx) error {
+	token := authTokenFromRequest(c)
+	var claims *service.JWTClaims
+	if token != "" {
+		validatedClaims, err := s.services.Auth.ValidateTokenReadOnly(c.Context(), token, s.cfg.JWTSecret)
+		if err == nil {
+			claims = validatedClaims
+		} else if !shouldFallbackToWhiteboardSessionCredential(err) {
+			return writeAuthValidationFailure(c, err)
+		}
+	}
+	if claims == nil {
+		identity, err := s.services.Auth.ValidateRefreshTokenReadOnly(c.Context(), c.Cookies(whiteboardSessionCookieName))
+		if err != nil {
+			return writeAuthValidationFailure(c, err)
+		}
+		claims = &service.JWTClaims{
+			UserID: identity.UserID, AccountID: identity.AccountID, SessionID: identity.SessionID, Username: identity.Username,
+		}
+	}
 	c.Locals("claims", claims)
 	c.Locals("user_id", claims.UserID)
 	c.Locals("account_id", claims.AccountID)
@@ -1364,6 +1444,11 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 
 	token, refreshToken, user, accountCount, err := s.services.Auth.Login(c.Context(), username, req.Password, s.cfg.JWTSecret)
 	if err != nil {
+		if errors.Is(err, service.ErrAuthSessionUnavailable) {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"success": false, "error": "Authentication is temporarily unavailable", "code": "authorization_unavailable",
+			})
+		}
 		eventType := "login_failure"
 		if strings.Contains(strings.ToLower(err.Error()), "bloqueada") || strings.Contains(strings.ToLower(err.Error()), "bloqueado") {
 			eventType = "login_lockout"
@@ -1405,24 +1490,27 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 }
 
 func (s *Server) clearAuthCookies(c *fiber.Ctx) {
+	now := time.Now()
+	secure := s.cfg.IsProduction()
 	c.Cookie(&fiber.Cookie{
 		Name:     "auth-token",
 		Value:    "",
-		Expires:  time.Now().Add(-time.Hour),
+		Expires:  now.Add(-time.Hour),
 		HTTPOnly: true,
-		Secure:   s.cfg.IsProduction(),
+		Secure:   secure,
 		SameSite: "Lax",
 		Path:     "/",
 	})
 	c.Cookie(&fiber.Cookie{
 		Name:     "refresh-token",
 		Value:    "",
-		Expires:  time.Now().Add(-time.Hour),
+		Expires:  now.Add(-time.Hour),
 		HTTPOnly: true,
-		Secure:   s.cfg.IsProduction(),
+		Secure:   secure,
 		SameSite: "Strict",
 		Path:     "/api/auth",
 	})
+	c.Cookie(clearWhiteboardSessionCookie(now, secure))
 }
 
 func (s *Server) handleLogout(c *fiber.Ctx) error {
@@ -1469,41 +1557,31 @@ func (s *Server) handleRefreshToken(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"success": false, "error": "No refresh token"})
 	}
 
-	// Blacklist the old JWT before issuing a new one
+	newToken, newRefreshToken, err := s.services.Auth.RefreshToken(c.Context(), refreshToken, s.cfg.JWTSecret)
+	if err != nil {
+		disposition := classifyAuthFailure(err)
+		if !disposition.ClearCookies {
+			return c.Status(disposition.Status).JSON(fiber.Map{
+				"success": false,
+				"error":   "Authentication is temporarily unavailable",
+				"code":    disposition.Code,
+			})
+		}
+		s.clearAuthCookies(c)
+		return c.Status(disposition.Status).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	// Revoke the previous access JWT only after refresh has succeeded. A
+	// transient Redis/PostgreSQL outage must leave the existing cookies and JWT
+	// usable for retry instead of turning a 503 into a logout.
 	oldToken := c.Cookies("auth-token")
 	if oldToken != "" {
-		if oldClaims, err := s.services.Auth.ValidateToken(oldToken, s.cfg.JWTSecret); err == nil && oldClaims != nil {
+		if oldClaims, validateErr := s.services.Auth.ValidateToken(oldToken, s.cfg.JWTSecret); validateErr == nil && oldClaims != nil {
 			s.services.Auth.BlacklistJTI(oldClaims)
 		}
 	}
 
-	newToken, newRefreshToken, err := s.services.Auth.RefreshToken(c.Context(), refreshToken, s.cfg.JWTSecret)
-	if err != nil {
-		s.clearAuthCookies(c)
-		return c.Status(401).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-
-	// Set new access token cookie
-	c.Cookie(&fiber.Cookie{
-		Name:     "auth-token",
-		Value:    newToken,
-		Expires:  time.Now().Add(1 * time.Hour),
-		HTTPOnly: true,
-		Secure:   s.cfg.IsProduction(),
-		SameSite: "Lax",
-		Path:     "/",
-	})
-
-	// Set rotated refresh token cookie
-	c.Cookie(&fiber.Cookie{
-		Name:     "refresh-token",
-		Value:    newRefreshToken,
-		Expires:  time.Now().Add(7 * 24 * time.Hour),
-		HTTPOnly: true,
-		Secure:   s.cfg.IsProduction(),
-		SameSite: "Strict",
-		Path:     "/api/auth",
-	})
+	s.setAuthCookies(c, newToken, newRefreshToken)
 
 	return c.JSON(fiber.Map{"success": true})
 }
@@ -1841,6 +1919,7 @@ func (s *Server) applyDeviceRuntimePolicy(device *domain.Device) {
 	manualWeb := connected && getDeviceProvider(device) == domain.DeviceProviderWhatsAppWeb
 	device.RuntimeCapabilities.CanStartChat = manualWeb
 	device.RuntimeCapabilities.CanCheckWhatsApp = manualWeb
+	device.RuntimeCapabilities.CanSendReaction = manualWeb
 	device.RuntimeCapabilities.CanSendSticker = manualWeb
 	device.RuntimeCapabilities.CanSendAnimatedSticker = false
 	statusEnabled := s.cfg != nil && s.cfg.WhatsAppStatusEnabled && manualWeb
@@ -2645,6 +2724,100 @@ func messageBelongsToChatAccount(message *domain.Message, chatID, accountID uuid
 	return message != nil && message.ChatID == chatID && message.AccountID == accountID
 }
 
+func resolveContactLinkIssue(contact *domain.Contact, chat *domain.Chat, accountID uuid.UUID) string {
+	if contact == nil || contact.AccountID != accountID || contact.IsGroup {
+		return "contact_not_found"
+	}
+	if chat != nil && chat.ContactID != nil && *chat.ContactID != contact.ID {
+		return "chat_contact_conflict"
+	}
+	return ""
+}
+
+func whatsAppChatResolutionMode(hasChat bool, usableDeviceCount int) string {
+	if usableDeviceCount <= 0 {
+		if hasChat {
+			return "read_only"
+		}
+		return "no_device"
+	}
+	if usableDeviceCount == 1 {
+		return "open_direct"
+	}
+	return "choose_device"
+}
+
+func classifyWhatsAppChatCreationError(err error) (int, string, string) {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return fiber.StatusNotFound, "chat_context_not_found", "El contacto o dispositivo ya no está disponible"
+	case errors.Is(err, repository.ErrChatContactConflict):
+		return fiber.StatusConflict, "chat_contact_conflict", "La conversación existente está vinculada a otro contacto. Ábrela para revisar el vínculo."
+	case errors.Is(err, repository.ErrContactIdentityConflict):
+		return fiber.StatusConflict, "contact_identity_conflict", "La identidad de WhatsApp ya pertenece a otro contacto."
+	default:
+		return fiber.StatusInternalServerError, "chat_creation_failed", "No se pudo abrir la conversación"
+	}
+}
+
+func normalizeReactionOperationID(value string) (string, bool) {
+	operationID := strings.TrimSpace(value)
+	if len(operationID) > 128 {
+		return "", false
+	}
+	if operationID == "" {
+		operationID = uuid.NewString()
+	}
+	return operationID, true
+}
+
+func reactionDeviceIssue(device *domain.Device, accountID uuid.UUID) string {
+	if !deviceBelongsToAccount(device, accountID) {
+		return "device_not_found"
+	}
+	if device.Status == nil || *device.Status != domain.DeviceStatusConnected {
+		return "device_disconnected"
+	}
+	if getDeviceProvider(device) != domain.DeviceProviderWhatsAppWeb {
+		return "reaction_provider_unsupported"
+	}
+	if device.RuntimeCapabilities == nil || !device.RuntimeCapabilities.CanSendReaction {
+		return "reaction_unsupported"
+	}
+	return ""
+}
+
+func reactionTargetIssue(message *domain.Message, accountID, chatID, deviceID uuid.UUID) string {
+	if !messageBelongsToChatAccount(message, chatID, accountID) {
+		return "message_not_found"
+	}
+	if message.DeviceID == nil || *message.DeviceID != deviceID {
+		return "reaction_target_device_mismatch"
+	}
+	if message.IsRevoked {
+		return "reaction_target_revoked"
+	}
+	if strings.EqualFold(stringValueOrEmpty(message.MessageType), domain.MessageTypeReaction) {
+		return "reaction_target_type"
+	}
+	if strings.TrimSpace(message.MessageID) == "" {
+		return "reaction_target_unpersisted"
+	}
+	return ""
+}
+
+func reactionMutationResponse(mutation *domain.MessageReactionMutation, state string) fiber.Map {
+	return fiber.Map{
+		"success":      true,
+		"state":        state,
+		"removed":      mutation.Removed,
+		"reaction":     mutation.Reaction,
+		"timestamp":    mutation.Timestamp,
+		"provider":     mutation.Provider,
+		"operation_id": mutation.OperationID,
+	}
+}
+
 func (s *Server) requireDeviceForAccount(ctx context.Context, accountID, deviceID uuid.UUID) (*domain.Device, error) {
 	device, err := s.services.Device.GetByID(ctx, deviceID)
 	if err != nil {
@@ -2704,14 +2877,50 @@ func (s *Server) handleResolveWhatsAppChat(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	phone := c.Params("phone")
 	normalized := normalizeWhatsAppPhone(phone)
-	if normalized == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Phone is required"})
+	if !validWhatsAppPhone(normalized) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "El número debe incluir código de país y tener entre 7 y 15 dígitos", "code": "invalid_phone"})
 	}
 
 	jid := normalized + "@s.whatsapp.net"
 	chat, err := s.services.Chat.FindByJID(c.Context(), accountID, jid)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+
+	var selectedContact *domain.Contact
+	contactIDRaw := strings.TrimSpace(c.Query("contact_id"))
+	if contactIDRaw != "" {
+		contactID, parseErr := uuid.Parse(contactIDRaw)
+		if parseErr != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Contacto inválido", "code": "invalid_contact_id"})
+		}
+		contact, contactErr := s.services.Contact.GetByIDForAccount(c.Context(), accountID, contactID)
+		if contactErr != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo validar el contacto", "code": "contact_validation_failed"})
+		}
+		switch resolveContactLinkIssue(contact, chat, accountID) {
+		case "contact_not_found":
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Contacto no encontrado", "code": "contact_not_found"})
+		case "chat_contact_conflict":
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"success": false,
+				"error":   "La conversación existente está vinculada a otro contacto. Ábrela para revisar el vínculo.",
+				"code":    "chat_contact_conflict",
+				"chat":    chat,
+			})
+		}
+		matches, matchErr := s.contactMatchesWhatsAppIdentity(c.Context(), accountID, contact.ID, []string{normalized}, jid)
+		if matchErr != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo validar el número del contacto", "code": "contact_validation_failed"})
+		}
+		if !matches {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"success": false,
+				"error":   "El número ya no pertenece al contacto seleccionado. Vuelve a seleccionarlo.",
+				"code":    "contact_phone_mismatch",
+			})
+		}
+		selectedContact = contact
 	}
 	devices, err := s.services.Device.GetByAccountID(c.Context(), accountID)
 	if err != nil {
@@ -2721,7 +2930,8 @@ func (s *Server) handleResolveWhatsAppChat(c *fiber.Ctx) error {
 	historicalPhone := s.chatHistoricalPhone(c.Context(), chat)
 	usableDevices := make([]fiber.Map, 0)
 	for _, device := range devices {
-		if !deviceCanSendManual(device) {
+		s.applyDeviceRuntimePolicy(device)
+		if !deviceCanSendManual(device) || device.RuntimeCapabilities == nil || !device.RuntimeCapabilities.CanStartChat || !device.RuntimeCapabilities.CanCheckWhatsApp {
 			continue
 		}
 		devicePhone := normalizeDevicePhone(device)
@@ -2743,6 +2953,7 @@ func (s *Server) handleResolveWhatsAppChat(c *fiber.Ctx) error {
 			"jid":                  device.JID,
 			"status":               device.Status,
 			"provider":             getDeviceProvider(device),
+			"runtime_capabilities": device.RuntimeCapabilities,
 			"normalized_phone":     devicePhone,
 			"historical_relation":  relation,
 			"matches_historical":   historicalPhone != "" && devicePhone == historicalPhone,
@@ -2751,13 +2962,10 @@ func (s *Server) handleResolveWhatsAppChat(c *fiber.Ctx) error {
 		})
 	}
 
-	mode := "no_device"
-	if chat != nil && len(usableDevices) == 0 {
-		mode = "read_only"
-	} else if len(usableDevices) == 1 {
-		mode = "open_direct"
-	} else if len(usableDevices) > 1 {
-		mode = "choose_device"
+	mode := whatsAppChatResolutionMode(chat != nil, len(usableDevices))
+	var resolvedContactID *uuid.UUID
+	if selectedContact != nil {
+		resolvedContactID = &selectedContact.ID
 	}
 
 	return c.JSON(fiber.Map{
@@ -2766,6 +2974,7 @@ func (s *Server) handleResolveWhatsAppChat(c *fiber.Ctx) error {
 		"phone":            normalized,
 		"jid":              jid,
 		"historical_phone": historicalPhone,
+		"contact_id":       resolvedContactID,
 		"devices":          usableDevices,
 		"mode":             mode,
 	})
@@ -2835,7 +3044,7 @@ func (s *Server) handleCreateNewChat(c *fiber.Ctx) error {
 		if parseErr != nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid contact ID"})
 		}
-		contact, contactErr := s.services.Contact.GetByID(c.Context(), contactID)
+		contact, contactErr := s.services.Contact.GetByIDForAccount(c.Context(), accountID, contactID)
 		if contactErr != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": contactErr.Error()})
 		}
@@ -2869,7 +3078,7 @@ func (s *Server) handleCreateNewChat(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	created := existingChat == nil
-	if existingChat != nil && selectedContact != nil && (existingChat.ContactID == nil || *existingChat.ContactID != selectedContact.ID) {
+	if existingChat != nil && selectedContact != nil && resolveContactLinkIssue(selectedContact, existingChat, accountID) == "chat_contact_conflict" {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 			"success": false,
 			"error":   "La conversación existente está vinculada a otro contacto. Ábrela para revisar el vínculo.",
@@ -2886,7 +3095,8 @@ func (s *Server) handleCreateNewChat(c *fiber.Ctx) error {
 		chat, err = s.services.Chat.CreateNewChat(c.Context(), accountID, deviceID, canonicalJID)
 	}
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		status, code, message := classifyWhatsAppChatCreationError(err)
+		return c.Status(status).JSON(fiber.Map{"success": false, "error": message, "code": code})
 	}
 
 	// Send initial message if provided
@@ -2954,18 +3164,12 @@ func (s *Server) handleGetMessages(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	// Load reactions for this chat
-	reactions, _ := s.services.Chat.GetReactions(c.Context(), chatID)
-	reactionsByMsg := make(map[string][]*domain.MessageReaction)
-	for _, r := range reactions {
-		reactionsByMsg[r.TargetMessageID] = append(reactionsByMsg[r.TargetMessageID], r)
+	if err := s.services.Chat.AttachReactions(c.Context(), accountID, chatID, messages); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudieron cargar las reacciones"})
 	}
 
-	// Attach reactions and poll data to messages
+	// Attach poll data after the shared reaction hydration.
 	for _, msg := range messages {
-		if rxns, ok := reactionsByMsg[msg.MessageID]; ok {
-			msg.Reactions = rxns
-		}
 		if msg.MessageType != nil && *msg.MessageType == domain.MessageTypePoll {
 			options, votes, _ := s.services.Chat.GetPollData(c.Context(), msg.ID)
 			msg.PollOptions = options
@@ -3012,6 +3216,9 @@ func (s *Server) handleSearchMessages(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	if err := s.services.Chat.AttachReactions(c.Context(), accountID, chatID, messages); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudieron cargar las reacciones"})
+	}
 	historyOffset := -1
 	if len(messages) == 1 {
 		if value, offsetErr := s.services.Chat.GetMessageHistoryOffset(c.Context(), accountID, chatID, messages[0].ID); offsetErr == nil {
@@ -3031,20 +3238,27 @@ func (s *Server) handleMarkAsRead(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid chat ID"})
 	}
 
-	chat, err := s.services.Chat.GetByID(c.Context(), chatID)
+	var body struct {
+		ThroughMessageID string `json:"through_message_id"`
+	}
+	if len(c.Body()) > 0 {
+		if err := c.BodyParser(&body); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request body"})
+		}
+	}
+	unreadCount, readThrough, err := s.services.Chat.MarkAsRead(c.Context(), accountID, chatID, body.ThroughMessageID)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-	if !chatBelongsToAccount(chat, accountID) {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
-	}
-
-	if err := s.services.Chat.MarkAsRead(c.Context(), chatID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
 	s.invalidateChatCaches(accountID, &chatID)
-	return c.JSON(fiber.Map{"success": true})
+	if s.hub != nil {
+		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventChatUpdate, fiber.Map{"chat_id": chatID.String(), "unread_count": unreadCount, "read_through": readThrough})
+	}
+	return c.JSON(fiber.Map{"success": true, "chat_id": chatID.String(), "unread_count": unreadCount, "read_through": readThrough})
 }
 
 func (s *Server) handleDeleteChat(c *fiber.Ctx) error {
@@ -3489,6 +3703,7 @@ func (s *Server) handleSendReaction(c *fiber.Ctx) error {
 		ChatID          string `json:"chat_id"`
 		TargetMessageID string `json:"target_message_id"`
 		Emoji           string `json:"emoji"` // empty to remove
+		OperationID     string `json:"operation_id,omitempty"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida", "code": "invalid_request"})
@@ -3505,11 +3720,19 @@ func (s *Server) handleSendReaction(c *fiber.Ctx) error {
 		return c.Status(409).JSON(fiber.Map{"success": false, "error": "El chat no tiene un dispositivo disponible", "code": "chat_device_missing"})
 	}
 	deviceID := *chat.DeviceID
-	if _, err := s.requireManualDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
+	device, err := s.requireDeviceForAccount(c.Context(), accountID, deviceID)
+	if err != nil {
 		if apiErr, ok := err.(*fiber.Error); ok {
 			return c.Status(apiErr.Code).JSON(fiber.Map{"success": false, "error": apiErr.Message, "code": "device_unavailable"})
 		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo validar el dispositivo", "code": "device_validation_failed"})
+	}
+	if issue := reactionDeviceIssue(device, accountID); issue != "" {
+		status := fiber.StatusConflict
+		if issue == "device_not_found" {
+			status = fiber.StatusNotFound
+		}
+		return c.Status(status).JSON(fiber.Map{"success": false, "error": "Este dispositivo no admite reacciones", "code": issue})
 	}
 	if strings.TrimSpace(req.TargetMessageID) == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Mensaje inválido", "code": "invalid_message_id"})
@@ -3518,24 +3741,37 @@ func (s *Server) handleSendReaction(c *fiber.Ctx) error {
 	if err != nil || !messageBelongsToChatAccount(message, chat.ID, accountID) {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Mensaje no encontrado", "code": "message_not_found"})
 	}
-	if message.DeviceID == nil || *message.DeviceID != deviceID || message.IsRevoked || strings.EqualFold(stringValueOrEmpty(message.MessageType), domain.MessageTypeReaction) {
-		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Este mensaje no admite reacciones", "code": "reaction_target_invalid"})
+	if issue := reactionTargetIssue(message, accountID, chat.ID, deviceID); issue != "" {
+		status := fiber.StatusConflict
+		if issue == "message_not_found" {
+			status = fiber.StatusNotFound
+		}
+		return c.Status(status).JSON(fiber.Map{"success": false, "error": "Este mensaje no admite reacciones", "code": issue})
 	}
 	emoji, valid := normalizeReactionEmoji(req.Emoji)
 	if !valid {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Selecciona un solo emoji", "code": "invalid_reaction_emoji"})
 	}
+	operationID, valid := normalizeReactionOperationID(req.OperationID)
+	if !valid {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Operación inválida", "code": "invalid_operation_id"})
+	}
 	targetSenderJID := ""
 	if message.FromJID != nil {
 		targetSenderJID = *message.FromJID
 	}
-	if err := s.services.Chat.SendReaction(c.Context(), deviceID, chat.JID, message.MessageID, targetSenderJID, emoji, message.IsFromMe); err != nil {
+	mutation, err := s.services.Chat.SendReaction(c.Context(), deviceID, chat.ID, chat.JID, message.MessageID, targetSenderJID, emoji, message.IsFromMe, operationID)
+	if err != nil {
 		log.Printf("[MessageAction] reaction failed account=%s device=%s chat=%s message=%s: %v", accountID, deviceID, chat.ID, message.ID, err)
+		if mutation != nil {
+			s.invalidateMessagesCache(accountID, &chat.ID)
+			return c.Status(fiber.StatusAccepted).JSON(reactionMutationResponse(mutation, "provider_applied_local_pending"))
+		}
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"success": false, "error": "WhatsApp no pudo actualizar la reacción", "code": "provider_reaction_failed"})
 	}
 	s.invalidateMessagesCache(accountID, &chat.ID)
 
-	return c.JSON(fiber.Map{"success": true})
+	return c.JSON(reactionMutationResponse(mutation, "applied"))
 }
 
 func (s *Server) handleSendPoll(c *fiber.Ctx) error {
@@ -4987,6 +5223,11 @@ func (s *Server) handleMediaProxy(c *fiber.Ctx) error {
 	return s.serveStorageObject(c, objectKey, "public, max-age=31536000")
 }
 
+func storageResponseNotModified(cacheControl, rangeHeader, ifNoneMatch, etag string) bool {
+	return !strings.Contains(cacheControl, "no-store") && rangeHeader == "" &&
+		(ifNoneMatch == etag || strings.Contains(ifNoneMatch, etag))
+}
+
 func (s *Server) serveStorageObject(c *fiber.Ctx, objectKey, cacheControl string) error {
 	if s.storage == nil {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Storage not configured"})
@@ -5057,7 +5298,7 @@ func (s *Server) serveStorageObject(c *fiber.Ctx, objectKey, cacheControl string
 	}
 
 	ifNoneMatch := c.Get("If-None-Match")
-	if !strings.Contains(cacheControl, "no-store") && c.Get("Range") == "" && (ifNoneMatch == etag || strings.Contains(ifNoneMatch, etag)) {
+	if storageResponseNotModified(cacheControl, c.Get("Range"), ifNoneMatch, etag) {
 		setMediaCacheHeaders()
 		return c.SendStatus(fiber.StatusNotModified)
 	}
@@ -16878,32 +17119,19 @@ func (s *Server) handleSwitchAccount(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid account_id"})
 	}
 
-	token, refreshToken, user, err := s.services.Auth.SwitchAccount(c.Context(), userID, targetAccountID, claims.SessionID, s.cfg.JWTSecret)
+	token, refreshToken, user, err := s.services.Auth.SwitchAccount(
+		c.Context(), userID, targetAccountID, claims.SessionID, c.Cookies("refresh-token"), s.cfg.JWTSecret,
+	)
 	if err != nil {
+		if errors.Is(err, service.ErrAuthSessionUnavailable) {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"success": false, "error": "Authentication is temporarily unavailable", "code": "authorization_unavailable",
+			})
+		}
 		return c.Status(403).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	// Set access token cookie
-	c.Cookie(&fiber.Cookie{
-		Name:     "auth-token",
-		Value:    token,
-		Expires:  time.Now().Add(1 * time.Hour),
-		HTTPOnly: true,
-		Secure:   s.cfg.IsProduction(),
-		SameSite: "Lax",
-		Path:     "/",
-	})
-
-	// Set refresh token cookie
-	c.Cookie(&fiber.Cookie{
-		Name:     "refresh-token",
-		Value:    refreshToken,
-		Expires:  time.Now().Add(7 * 24 * time.Hour),
-		HTTPOnly: true,
-		Secure:   s.cfg.IsProduction(),
-		SameSite: "Strict",
-		Path:     "/api/auth",
-	})
+	s.setAuthCookies(c, token, refreshToken)
 
 	// Compute permissions for response — per-account admin gets full access
 	isAdmin := user.IsAdmin || user.IsSuperAdmin || user.Role == domain.RoleAdmin || user.Role == domain.RoleSuperAdmin

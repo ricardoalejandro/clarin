@@ -1,18 +1,21 @@
+export interface DeviceRuntimeCapabilities {
+  can_start_chat: boolean
+  can_check_whatsapp: boolean
+  can_send_sticker: boolean
+  can_send_animated_sticker: boolean
+  can_send_reaction: boolean
+  can_publish_status: boolean
+  can_publish_status_link?: boolean
+  can_sync_own_status: boolean
+}
+
 export interface Device {
   id: string
   name: string
   phone?: string
   status: string
   provider?: 'whatsapp_web' | 'whatsapp_cloud_api'
-  runtime_capabilities?: {
-    can_start_chat: boolean
-    can_check_whatsapp: boolean
-    can_send_sticker: boolean
-    can_send_animated_sticker: boolean
-    can_publish_status: boolean
-    can_publish_status_link?: boolean
-    can_sync_own_status: boolean
-  }
+  runtime_capabilities?: DeviceRuntimeCapabilities
 }
 
 export interface Reaction {
@@ -22,6 +25,9 @@ export interface Reaction {
   sender_name?: string
   emoji: string
   is_from_me: boolean
+  timestamp?: string
+  operation_id?: string
+  provider?: Device['provider']
 }
 
 export interface PollOption {
@@ -85,6 +91,8 @@ export interface Chat {
   last_message: string
   last_message_at: string
   unread_count: number
+  is_archived?: boolean
+  is_pinned?: boolean
   device_name?: string
   device_phone?: string
   contact_phone?: string
@@ -92,4 +100,5 @@ export interface Chat {
   contact_custom_name?: string
   contact_name?: string
   lead_is_blocked?: boolean
+  identity_pending?: boolean
 }

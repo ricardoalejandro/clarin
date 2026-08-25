@@ -51,7 +51,9 @@
 
 @media (hover: hover) and (pointer: fine) {
   .messageActions {
-    opacity: 0;
+    /* Keep the action chevron quietly discoverable without competing with
+       the message; hover/focus still promotes the complete control. */
+    opacity: 0.42;
   }
 
   .messageContainer:hover .messageActions,

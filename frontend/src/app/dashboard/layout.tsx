@@ -9,7 +9,7 @@ import ErosAssistant from '@/components/ErosAssistant'
 import TaskBadge from '@/components/TaskBadge'
 import AccountSwitcher from '@/components/AccountSwitcher'
 import ClarinBrandMark from '@/components/branding/ClarinBrandMark'
-import { ChatMobileChromeProvider } from '@/components/chat/ChatMobileChromeContext'
+import { CHAT_CONVERSATION_ACTIVE_EVENT, ChatMobileChromeProvider } from '@/components/chat/ChatMobileChromeContext'
 import {
   MobileAppBottomNavigation,
   MobileAppHeader,
@@ -17,7 +17,7 @@ import {
   MobileUnavailableSurface,
 } from '@/components/mobile-app/MobileAppChrome'
 import { PwaInstallExperience, PwaInstallMenuAction, PwaRuntimeProvider, usePwaRuntime } from '@/components/mobile-app/PwaRuntime'
-import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshToken, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthSession } from '@/lib/api'
+import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshTokenOutcome, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthSessionDetected, markAuthTokenRefreshed } from '@/lib/api'
 import { dashboardSidebarHeaderState } from '@/lib/dashboardSidebarState'
 import {
   availableMobileAppModules,
@@ -132,17 +132,29 @@ function DashboardLayoutContent({
   const [isErosOpen, setIsErosOpen] = useState(false)
   const [chatComposerKeyboardOpen, setChatComposerKeyboardOpen] = useState(false)
   const [chatComposerAccessoryOpen, setChatComposerAccessoryOpen] = useState(false)
+  const [chatConversationActive, setChatConversationActive] = useState(false)
   const chatMobileChromeContextValue = useMemo(() => ({
     setComposerAccessoryOpen: setChatComposerAccessoryOpen,
+    setConversationActive: setChatConversationActive,
   }), [])
   const chatKeyboardSessionRef = useRef(false)
   const clientVersion = process.env.NEXT_PUBLIC_BUILD_VERSION || 'dev'
+
+  useEffect(() => {
+    const handleConversationActive = (event: Event) => {
+      const detail = (event as CustomEvent<{ active?: boolean }>).detail
+      setChatConversationActive(Boolean(detail?.active))
+    }
+    window.addEventListener(CHAT_CONVERSATION_ACTIVE_EVENT, handleConversationActive)
+    return () => window.removeEventListener(CHAT_CONVERSATION_ACTIVE_EVENT, handleConversationActive)
+  }, [])
 
   useEffect(() => {
     if (pathname !== '/dashboard/chats') {
       chatKeyboardSessionRef.current = false
       setChatComposerKeyboardOpen(false)
       setChatComposerAccessoryOpen(false)
+      setChatConversationActive(false)
       return
     }
 
@@ -243,7 +255,32 @@ function DashboardLayoutContent({
   }
 
   useEffect(() => {
+    let disposed = false
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+
+    const scheduleRetry = () => {
+      if (disposed || retryTimer) return
+      retryTimer = setTimeout(() => {
+        retryTimer = null
+        void checkAuth()
+      }, 2_000)
+    }
+
+    const acceptSession = (data: any) => {
+      if (disposed) return
+      setUser(data.user)
+      setAccountCount(Math.max(1, Number(data.account_count) || 1))
+      localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
+      markAuthSessionDetected()
+      initIdleTimeout()
+    }
+
     const checkAuth = async () => {
+      let keepLoadingForRetry = false
+      const retryUnavailable = () => {
+        keepLoadingForRetry = true
+        scheduleRetry()
+      }
       try {
         if (isAuthIdleExpired()) {
           await logoutFromBrowser('idle')
@@ -253,8 +290,12 @@ function DashboardLayoutContent({
         const token = localStorage.getItem('token')
         if (!token) {
           // Try refresh — maybe the JWT expired but refresh token cookie is valid
-          const refreshed = await tryRefreshToken()
-          if (!refreshed) {
+          const refreshOutcome = await tryRefreshTokenOutcome()
+          if (refreshOutcome === 'unavailable') {
+            retryUnavailable()
+            return
+          }
+          if (refreshOutcome === 'expired') {
             clearAuthState()
             router.push('/login')
             return
@@ -266,20 +307,28 @@ function DashboardLayoutContent({
         })
 
         if (!res.ok) {
+          if (res.status >= 500 || res.status === 408 || res.status === 429) {
+            retryUnavailable()
+            return
+          }
           // Try refreshing the token
-          const refreshed = await tryRefreshToken()
-          if (refreshed) {
+          const refreshOutcome = await tryRefreshTokenOutcome()
+          if (refreshOutcome === 'unavailable') {
+            retryUnavailable()
+            return
+          }
+          if (refreshOutcome === 'refreshed') {
             const retryRes = await fetch('/api/me', {
               credentials: 'include',
             })
+            if (retryRes.status >= 500 || retryRes.status === 408 || retryRes.status === 429) {
+              retryUnavailable()
+              return
+            }
             if (retryRes.ok) {
               const retryData = await retryRes.json()
               if (retryData.success) {
-                setUser(retryData.user)
-                setAccountCount(Math.max(1, Number(retryData.account_count) || 1))
-                localStorage.setItem('kommo_enabled', String(retryData.user.kommo_enabled || false))
-                markAuthSession()
-                initIdleTimeout()
+                acceptSession(retryData)
                 return
               }
             }
@@ -291,25 +340,24 @@ function DashboardLayoutContent({
 
         const data = await res.json()
         if (data.success) {
-          setUser(data.user)
-          setAccountCount(Math.max(1, Number(data.account_count) || 1))
-          localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
-          markAuthSession()
-          initIdleTimeout() // Start idle timeout detector
+          acceptSession(data)
         } else {
           clearAuthState()
           router.push('/login')
         }
       } catch {
-        clearAuthState()
-        router.push('/login')
+        retryUnavailable()
       } finally {
-        setLoading(false)
+        if (!keepLoadingForRetry && !disposed) setLoading(false)
       }
     }
 
-    checkAuth()
-    return () => clearIdleTimeout()
+    void checkAuth()
+    return () => {
+      disposed = true
+      if (retryTimer) clearTimeout(retryTimer)
+      clearIdleTimeout()
+    }
   }, [router])
 
   // Version detection — WebSocket + header interception + polling fallback
@@ -397,7 +445,7 @@ function DashboardLayoutContent({
       })
       const data = await res.json()
       if (data.success) {
-        markAuthSession()
+        markAuthTokenRefreshed()
         localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
         setUser(data.user)
         window.location.href = '/dashboard'
@@ -743,7 +791,7 @@ function DashboardLayoutContent({
             accountCount={accountCount}
             activeLabel={mobileModule?.label || (subscriptionRecoveryPath ? 'Configuración' : 'Clarin móvil')}
             version={clientVersion}
-            hidden={chatComposerKeyboardOpen || chatComposerAccessoryOpen}
+            hidden={chatConversationActive || chatComposerKeyboardOpen || chatComposerAccessoryOpen}
             onSwitchAccount={handleSwitchAccount}
             onLogout={handleLogout}
           />
@@ -789,7 +837,7 @@ function DashboardLayoutContent({
           <MobileAppBottomNavigation
             modules={mobileModules}
             pathname={pathname}
-            hidden={chatComposerKeyboardOpen || chatComposerAccessoryOpen || subscriptionRecoveryPath}
+            hidden={chatConversationActive || chatComposerKeyboardOpen || chatComposerAccessoryOpen || subscriptionRecoveryPath}
           />
         )}
       </div>

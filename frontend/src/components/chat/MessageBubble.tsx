@@ -59,6 +59,7 @@ interface MessageBubbleProps {
   onSelect?: (message: Message) => void
   onToggleStickerFavorite?: (mediaUrl: string) => void | Promise<void>
   onReact?: (message: Message, emoji: string) => void
+  reactionUnavailableReason?: string
   savedStickerUrls?: Set<string>
   savingStickerUrls?: Set<string>
 }
@@ -78,7 +79,7 @@ const formatQuotedSender = (sender?: string, isFromMe?: boolean): string => {
   return sender.replace(/@s\.whatsapp\.net$/, '').replace(/@lid$/, '')
 }
 
-function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, onQuotedMessageClick, onForward, onDelete, onEdit, onInfo, onCopy, compactSelection = false, selected = false, onSelect, onToggleStickerFavorite, onReact, savedStickerUrls, savingStickerUrls }: MessageBubbleProps) {
+function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, onQuotedMessageClick, onForward, onDelete, onEdit, onInfo, onCopy, compactSelection = false, selected = false, onSelect, onToggleStickerFavorite, onReact, reactionUnavailableReason, savedStickerUrls, savingStickerUrls }: MessageBubbleProps) {
   const [imageLoaded, setImageLoaded] = useState(false)
   const [imageError, setImageError] = useState(false)
   const [stickerLoadError, setStickerLoadError] = useState(false)
@@ -92,7 +93,9 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
   const reactionBtnRef = useRef<HTMLButtonElement>(null)
   const plusBtnRef = useRef<HTMLButtonElement>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
+  const contextMenuPointRef = useRef<{ x: number; y: number } | null>(null)
   const chevronBtnRef = useRef<HTMLButtonElement>(null)
+  const lastActionTriggerRef = useRef<HTMLButtonElement | null>(null)
   const longPressTimerRef = useRef<number | null>(null)
   const longPressOriginRef = useRef({ x: 0, y: 0 })
   const suppressClickRef = useRef(false)
@@ -153,8 +156,9 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
 
   const positionContextMenu = useCallback(() => {
     const anchor = chevronBtnRef.current
-    if (!anchor) return
-    const anchorRect = anchor.getBoundingClientRect()
+    const point = contextMenuPointRef.current
+    if (!anchor && !point) return
+    const anchorRect = anchor?.getBoundingClientRect()
     const viewport = visualViewportBounds()
     const margin = 8
     const menuWidth = contextMenuRef.current?.offsetWidth || 190
@@ -162,9 +166,15 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
     const menuHeight = Math.min(contextMenuRef.current?.offsetHeight || 240, maxHeight)
     const viewportRight = viewport.left + viewport.width
     const viewportBottom = viewport.top + viewport.height
-    let left = message.is_from_me ? anchorRect.right - menuWidth : anchorRect.left
-    let top = anchorRect.bottom + 4
-    if (top + menuHeight > viewportBottom - margin) top = anchorRect.top - menuHeight - 4
+    let left = point
+      ? point.x
+      : message.is_from_me
+        ? (anchorRect?.right || 0) - menuWidth
+        : anchorRect?.left || 0
+    let top = point ? point.y : (anchorRect?.bottom || 0) + 4
+    if (top + menuHeight > viewportBottom - margin) {
+      top = point ? point.y - menuHeight : (anchorRect?.top || 0) - menuHeight - 4
+    }
     left = Math.max(viewport.left + margin, Math.min(left, viewportRight - menuWidth - margin))
     top = Math.max(viewport.top + margin, Math.min(top, viewportBottom - menuHeight - margin))
     setMenuPos({ top, left, maxHeight })
@@ -190,10 +200,12 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
     setQuickReactionPos({ top, left, maxWidth })
   }, [message.is_from_me, visualViewportBounds])
 
-  const closeAllPickers = () => {
+  const closeAllPickers = (restoreFocus = false) => {
     setShowEmojiPicker(false)
     setShowFullPicker(false)
     setShowContextMenu(false)
+    contextMenuPointRef.current = null
+    if (restoreFocus) requestAnimationFrame(() => lastActionTriggerRef.current?.focus())
   }
 
   const handleOpenFullPicker = () => {
@@ -233,13 +245,15 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
       if (e.key !== 'Escape') return
       e.preventDefault()
       e.stopPropagation()
-      closeAllPickers()
+      closeAllPickers(true)
     }
     document.addEventListener('mousedown', handleClick)
-    document.addEventListener('keydown', handleKey)
+    // Consume Escape during capture so parent chat/workspace handlers cannot
+    // interpret the same keystroke as a request to close the conversation.
+    document.addEventListener('keydown', handleKey, true)
     return () => {
       document.removeEventListener('mousedown', handleClick)
-      document.removeEventListener('keydown', handleKey)
+      document.removeEventListener('keydown', handleKey, true)
     }
   }, [showEmojiPicker, showFullPicker, showContextMenu])
 
@@ -633,9 +647,11 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
             key={g.emoji}
             type="button"
             onClick={() => onReact?.(message, g.emoji)}
-            disabled={!onReact}
-            aria-label={`${g.hasOwn ? 'Quitar' : 'Reaccionar con'} ${g.emoji}${g.count > 1 ? `, ${g.count} reacciones` : ''}`}
-            title={onReact ? undefined : 'Reacciones no disponibles en modo de solo lectura'}
+            aria-disabled={!onReact}
+            aria-label={onReact
+              ? `${g.hasOwn ? 'Quitar' : 'Reaccionar con'} ${g.emoji}${g.count > 1 ? `, ${g.count} reacciones` : ''}`
+              : `Reacciones no disponibles: ${reactionUnavailableReason || 'Esta conversación es solo lectura.'}`}
+            title={onReact ? undefined : reactionUnavailableReason || 'Esta conversación es solo lectura.'}
             className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-xs border transition-colors ${
               g.hasOwn
                 ? 'bg-green-100 border-green-300 hover:bg-green-200'
@@ -675,7 +691,7 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
   const hasVisualMedia = !!message.media_url && ['image', 'video', 'gif'].includes(message.message_type || '') && !message.is_view_once
   const isOptimistic = (message.id || '').startsWith('optimistic-')
   const hasMessageActions = Boolean(
-    onReact || onReply || onForward
+    onReact || reactionUnavailableReason || onReply || onForward
     || (onCopy && (message.body || message.media_filename))
     || (onInfo && message.is_from_me)
     || (onEdit && message.is_from_me && message.message_type === 'text')
@@ -700,7 +716,7 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
     const textSegments = segments.filter(s => s.type === 'text' && s.value.trim().length > 0)
     return emojiSegments.length >= 2 && emojiSegments.length <= 3 && textSegments.length === 0
   })()
-  const hasPersistentTouchAction = !compactSelection && !isOptimistic && message.message_type !== 'sticker' && !isEmojiOnly
+  const hasPersistentTouchAction = !compactSelection && !isOptimistic && hasMessageActions
 
   // Revoked message — show "deleted" placeholder
   if (message.is_revoked) {
@@ -731,10 +747,19 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
       onPointerUp={finishLongPress}
       onPointerCancel={finishLongPress}
       onContextMenu={event => {
-        if (!compactSelection || !onSelect) return
+        if (compactSelection && onSelect) {
+          event.preventDefault()
+          cancelLongPress()
+          onSelect(message)
+          return
+        }
+        if (!hasMessageActions) return
         event.preventDefault()
         cancelLongPress()
-        onSelect(message)
+        contextMenuPointRef.current = { x: event.clientX, y: event.clientY }
+        lastActionTriggerRef.current = chevronBtnRef.current
+        setShowEmojiPicker(false)
+        setShowContextMenu(true)
       }}
       onClickCapture={event => {
         if (!suppressClickRef.current) return
@@ -860,15 +885,24 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
       </div>
 
       {/* WhatsApp Web-style hover trigger bar — emoji + chevron at top-right of bubble */}
-      {!compactSelection && !isOptimistic && hasMessageActions && message.message_type !== 'sticker' && !isEmojiOnly && (
+      {!compactSelection && !isOptimistic && hasMessageActions && (
         <div data-open={showContextMenu || showEmojiPicker} className={`${styles.messageActions} ${message.is_from_me ? styles.messageActionsFromMe : styles.messageActionsIncoming} absolute right-1 top-1 z-10 flex items-center rounded-md transition-opacity duration-150 ${message.is_from_me ? 'bg-[#d9fdd3]/90' : 'bg-white/90'}`}>
-          {onReact && <button
+          {(onReact || reactionUnavailableReason) && <button
             ref={reactionBtnRef}
             type="button"
-            onClick={(e) => { e.stopPropagation(); setShowEmojiPicker(!showEmojiPicker); setShowContextMenu(false) }}
-            className={`${styles.messageActionButton} ${styles.reactionTrigger} rounded-md text-slate-500 transition-colors hover:bg-black/5 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500`}
-            title="Reaccionar"
-            aria-label="Reaccionar al mensaje"
+            onClick={(e) => {
+              e.stopPropagation()
+              if (!onReact) return
+              lastActionTriggerRef.current = e.currentTarget
+              setShowEmojiPicker(!showEmojiPicker)
+              setShowContextMenu(false)
+            }}
+            aria-disabled={!onReact}
+            className={`${styles.messageActionButton} ${styles.reactionTrigger} rounded-md text-slate-500 transition-colors hover:bg-black/5 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 aria-disabled:cursor-not-allowed aria-disabled:text-slate-300`}
+            title={reactionUnavailableReason || 'Reaccionar'}
+            aria-label={reactionUnavailableReason ? `Reacciones no disponibles: ${reactionUnavailableReason}` : 'Reaccionar al mensaje'}
+            aria-haspopup={onReact ? 'dialog' : undefined}
+            aria-expanded={onReact ? showEmojiPicker : undefined}
           >
             <SmilePlus className="w-4 h-4" />
           </button>}
@@ -877,6 +911,8 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
             type="button"
             onClick={(e) => {
               e.stopPropagation()
+              lastActionTriggerRef.current = e.currentTarget
+              contextMenuPointRef.current = null
               setShowContextMenu(!showContextMenu)
               setShowEmojiPicker(false)
             }}
@@ -900,11 +936,13 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
           className="pointer-events-auto fixed min-w-[190px] overflow-y-auto rounded-lg border border-slate-200 bg-white py-1 shadow-xl"
           style={{ ...menuPos, zIndex: OPERATIONAL_OVERLAY_LAYERS.menu }}
         >
-          {onReact && <button
+          {(onReact || reactionUnavailableReason) && <button
             type="button"
             role="menuitem"
-            onClick={() => { setShowEmojiPicker(true); setShowContextMenu(false) }}
-            className="flex min-h-11 w-full items-center gap-3 px-3 text-sm text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500"
+            onClick={() => { if (onReact) { setShowEmojiPicker(true); setShowContextMenu(false) } }}
+            aria-disabled={!onReact}
+            title={reactionUnavailableReason}
+            className="flex min-h-11 w-full items-center gap-3 px-3 text-sm text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 aria-disabled:cursor-not-allowed aria-disabled:text-slate-400 aria-disabled:hover:bg-white"
           >
             <SmilePlus className="h-4 w-4 text-slate-400" />
             Reaccionar
@@ -983,6 +1021,8 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
         <div
           ref={emojiPickerRef}
           data-chat-overlay="quick-reactions"
+          role="toolbar"
+          aria-label="Reacciones rápidas"
           className="pointer-events-auto fixed flex items-center gap-0.5 overflow-x-auto rounded-full border border-gray-100 bg-white px-2 py-1.5 shadow-xl"
           style={{ top: quickReactionPos.top, left: quickReactionPos.left, maxWidth: quickReactionPos.maxWidth, zIndex: OPERATIONAL_OVERLAY_LAYERS.picker }}
         >
@@ -990,8 +1030,9 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
             <button
               type="button"
               key={e}
-              onClick={() => { onReact?.(message, e); closeAllPickers() }}
+              onClick={() => { onReact?.(message, e); closeAllPickers(true) }}
               className={`${styles.reactionOption} rounded-full transition-all hover:scale-110 hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500`}
+              aria-label={`Reaccionar con ${e}`}
             >
               <span aria-hidden className="text-2xl leading-none">{e}</span>
             </button>
@@ -1003,6 +1044,7 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
             onClick={handleOpenFullPicker}
             className={`${styles.reactionOption} rounded-full transition-all hover:bg-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500`}
             title="Más reacciones"
+            aria-label="Abrir selector completo de reacciones"
           >
             <Plus className="w-5 h-5 text-gray-400" />
           </button>
@@ -1013,18 +1055,20 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
       {/* Full emoji picker for reactions - rendered via portal */}
       {showFullPicker && typeof document !== 'undefined' && createPortal(
         <>
-          <div data-chat-overlay="reaction-backdrop" className="app-viewport pointer-events-auto fixed inset-0" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.sheet }} onClick={closeAllPickers} />
+          <div data-chat-overlay="reaction-backdrop" className="app-viewport pointer-events-auto fixed inset-0" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.sheet }} onClick={() => closeAllPickers(true)} />
           <div
             data-chat-overlay="reaction-picker"
+            data-skin-tones-enabled="true"
+            role="dialog"
+            aria-label="Selector completo de reacciones"
             className="pointer-events-auto fixed rounded-xl overflow-hidden shadow-2xl"
             style={{ top: pickerPos.top, left: pickerPos.left, width: pickerPos.width, height: pickerPos.height, zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog }}
           >
             <EmojiPickerReact
-              onEmojiClick={(emojiData: any) => { onReact?.(message, emojiData.emoji); closeAllPickers() }}
+              onEmojiClick={(emojiData: any) => { onReact?.(message, emojiData.emoji); closeAllPickers(true) }}
               searchPlaceHolder="Buscar una reacción..."
               width={pickerPos.width}
               height={pickerPos.height}
-              skinTonesDisabled
               previewConfig={{ showPreview: false }}
               lazyLoadEmojis
             />

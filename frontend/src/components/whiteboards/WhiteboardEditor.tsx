@@ -1,33 +1,29 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import { createPortal } from 'react-dom'
 import {
   ArrowLeft,
-  Check,
-  Clock3,
-  CloudOff,
-  Download,
   FileImage,
   FileJson,
   FileUp,
   History,
   LibraryBig,
   Loader2,
-  MoreHorizontal,
   RefreshCw,
   Save,
   Share2,
   ShieldAlert,
-  WifiOff,
 } from 'lucide-react'
 import {
   CaptureUpdateAction,
+  DefaultSidebar,
   Excalidraw,
   MainMenu,
+  Sidebar,
   exportToBlob,
-  exportToSvg,
+  getVisibleSceneBounds,
   getLibraryItemsHash,
   loadFromBlob,
   loadLibraryFromBlob,
@@ -52,6 +48,7 @@ import {
   planWhiteboardAssetPersistence,
   personalWhiteboardLibraryItems,
   reconcileWhiteboardCollaborators,
+  reconcileWhiteboardConnectionOpen,
   reconcileWhiteboardCanonicalAck,
   reconcileWhiteboardLibraryConflict,
   retainWhiteboardPendingSave,
@@ -64,10 +61,19 @@ import {
   shouldApplyWhiteboardRealtimeEvent,
   isWhiteboardSceneSequence,
   WHITEBOARD_AUTOSAVE_DELAY_MS,
+  WHITEBOARD_COMMENTS_UI_ENABLED,
+  WHITEBOARD_SHOW_DEPRECATED_OFFICIAL_FONTS,
+  whiteboardEditorCanvasActions,
   whiteboardEditorLayout,
+  whiteboardEditorAccess,
+  whiteboardImageExportDialogAppState,
+  whiteboardMoreMenuPosition,
   whiteboardSaveFailureAction,
+  whiteboardSaveRetryStateAfterReconnect,
   whiteboardSaveRetryDelay,
   whiteboardThumbnailDelay,
+  whiteboardToolbarShowsShare,
+  whiteboardToolbarStacksBelowTools,
   whiteboardFileName,
   whiteboardNavigationAction,
   whiteboardNavigationWritesCovered,
@@ -78,6 +84,7 @@ import {
   type WhiteboardLibraryRecord,
   type WhiteboardRealtimeEvent,
   type WhiteboardSavePayload,
+  type WhiteboardSaveRetryBlockReason,
   type WhiteboardSceneDocument,
   type WhiteboardScenePatch,
   type WhiteboardSceneRecord,
@@ -107,7 +114,17 @@ import {
   uploadWhiteboardAsset,
   uploadWhiteboardThumbnail,
   type WhiteboardRealtimeRoom,
+  type WhiteboardRoomConnectionState,
 } from '@/lib/whiteboardsApi'
+import { logoutFromBrowser } from '@/lib/api'
+import {
+  classifyWhiteboardCollabTicketFailure,
+  whiteboardEffectiveAccessAtLevel,
+  whiteboardPermissionChangeFeedback,
+  whiteboardRealtimeAccessLevel,
+  whiteboardRealtimeConnectionNotice,
+  type WhiteboardRealtimeIssue,
+} from '@/lib/whiteboardRealtimeConnection'
 import {
   blobToDataURL,
   dataURLToBlob,
@@ -115,7 +132,11 @@ import {
   referencedWhiteboardFileIDs,
   type WhiteboardBinaryFile,
 } from '@/lib/whiteboardMedia'
-import { mapWhiteboardConcurrently, whiteboardAbortError } from '@/lib/whiteboardAsync'
+import {
+  mapWhiteboardConcurrently,
+  whiteboardAbortError,
+  whiteboardAsyncResultIsStale,
+} from '@/lib/whiteboardAsync'
 import { whiteboardEditorAssetBase } from '@/lib/whiteboardEditorAssets'
 import { excalidrawWhiteboardCollaborators } from '@/lib/whiteboardPresence'
 import { renderBlockedWhiteboardEmbeddable } from '@/lib/whiteboardEmbeds'
@@ -138,14 +159,51 @@ import WhiteboardLibraryDialog, {
   type WhiteboardLibrarySaveState,
 } from './WhiteboardLibraryDialog'
 import WhiteboardShareDialog from './WhiteboardShareDialog'
+import {
+  WhiteboardEditorActionBar,
+  type WhiteboardSaveState,
+} from './WhiteboardEditorActionBar'
+import { WhiteboardPresentationOverlay } from './WhiteboardPresentationControls'
+import { useWhiteboardPresentation } from '@/hooks/useWhiteboardPresentation'
+import {
+  useWhiteboardAssetHydration,
+  whiteboardAssetHydrationMessage,
+} from '@/hooks/useWhiteboardAssetHydration'
+import {
+  useWhiteboardFontPreload,
+  whiteboardFontPreloadFirstPassComplete,
+  whiteboardFontPreloadMessage,
+} from '@/hooks/useWhiteboardFontPreload'
+import {
+  WhiteboardCommentPins,
+  WhiteboardCommentsProvider,
+  WhiteboardCommentsSidebar,
+  type WhiteboardCommentFocusTarget,
+  type WhiteboardCommentsProviderHandle,
+} from './WhiteboardComments'
+import type { WhiteboardCommentChangedEvent } from '@/lib/whiteboardComments'
+import { consumeWhiteboardViewModeCommentPointer } from '@/lib/whiteboardCommentPlacement'
+import {
+  acknowledgeWhiteboardPublicLibraryImportAfterConflict,
+  consumeWhiteboardPublicLibraryImport,
+  installWhiteboardPublicLibraryStartPath,
+  isWhiteboardPublicLibraryStartPath,
+  readWhiteboardPublicLibraryImportID,
+  stripWhiteboardPublicLibraryImportFromPath,
+  validateWhiteboardPublicLibraryNavigationPath,
+} from '@/lib/whiteboardPublicLibraries'
+import {
+  completeWhiteboardPublicLibraryImport,
+  getWhiteboardPublicLibraryImport,
+  startWhiteboardPublicLibraryImport,
+} from '@/lib/whiteboardPublicLibrariesApi'
 
 declare global {
   interface Window {
-    EXCALIDRAW_ASSET_PATH?: string | string[]
+    EXCALIDRAW_ASSET_PATH: string | string[] | undefined
   }
 }
 
-type SaveState = 'saved' | 'pending' | 'preparing-assets' | 'uploading-assets' | 'saving' | 'offline' | 'error' | 'conflict'
 type EditorPhase = 'loading' | 'ready' | 'error'
 
 interface LatestScene {
@@ -162,7 +220,7 @@ interface PendingWhiteboardSave {
   capturedElements: readonly unknown[]
   capturedAppState: Record<string, unknown>
   automaticFailures: number
-  automaticRetryBlocked: boolean
+  automaticRetryBlockReason: WhiteboardSaveRetryBlockReason
   notFoundDiagnosed: boolean
 }
 
@@ -171,10 +229,24 @@ interface LoadedWhiteboardLibraries {
   personalItems: LibraryItems
   catalogItems: LibraryItems[]
   catalogSummaries: WhiteboardLibraryCatalogSummary[]
-  combinedItems: LibraryItems
   readOnlyItemIDs: Set<string>
-  files: BinaryFiles
+  assetEntries: Array<{ libraryID: string; items: LibraryItems }>
   warning: string | null
+}
+
+interface WhiteboardCurrentActor {
+  id: string
+  isAdmin: boolean
+}
+
+class PublicLibraryImportError extends Error {
+  readonly retryable: boolean
+
+  constructor(message: string, retryable = true) {
+    super(message)
+    this.name = 'PublicLibraryImportError'
+    this.retryable = retryable
+  }
 }
 
 function errorMessage(status?: number, fallback?: string) {
@@ -258,32 +330,68 @@ function downloadBlob(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
-function SaveIndicator({ state, showLabel = true }: { state: SaveState; showLabel?: boolean }) {
-  const presentation = {
-    saved: { label: 'Guardado en Clarin', icon: Check, tone: 'text-emerald-700 bg-emerald-50 border-emerald-100' },
-    pending: { label: 'Cambios pendientes', icon: Clock3, tone: 'text-amber-700 bg-amber-50 border-amber-100' },
-    'preparing-assets': { label: 'Preparando imágenes', icon: Loader2, tone: 'text-sky-700 bg-sky-50 border-sky-100' },
-    'uploading-assets': { label: 'Subiendo imágenes', icon: Loader2, tone: 'text-sky-700 bg-sky-50 border-sky-100' },
-    saving: { label: 'Guardando en Clarin', icon: Loader2, tone: 'text-sky-700 bg-sky-50 border-sky-100' },
-    offline: { label: 'No guardado · Reintentar', icon: WifiOff, tone: 'text-slate-600 bg-slate-100 border-slate-200' },
-    error: { label: 'No guardado · Reintentar', icon: CloudOff, tone: 'text-rose-700 bg-rose-50 border-rose-100' },
-    conflict: { label: 'No guardado · Reintentar', icon: ShieldAlert, tone: 'text-rose-700 bg-rose-50 border-rose-100' },
-  }[state]
-  const busy = state === 'preparing-assets' || state === 'uploading-assets' || state === 'saving'
-  return <span title={presentation.label} aria-label={presentation.label} className={`inline-flex h-9 items-center gap-2 rounded-xl border px-2.5 text-xs font-bold ${presentation.tone}`}><presentation.icon className={`h-3.5 w-3.5 ${busy ? 'animate-spin' : ''}`} />{showLabel ? <span className="hidden sm:inline">{presentation.label}</span> : null}<span className={showLabel ? 'sr-only sm:hidden' : 'sr-only'}>{presentation.label}</span></span>
+function whiteboardSaveIsBusy(state: WhiteboardSaveState) {
+  return state === 'preparing-assets' || state === 'uploading-assets' || state === 'saving'
 }
 
-function whiteboardSaveIsBusy(state: SaveState) {
-  return state === 'preparing-assets' || state === 'uploading-assets' || state === 'saving'
+function WhiteboardLibrarySidebar() {
+  return <DefaultSidebar className="clarin-whiteboard-library-sidebar">
+    <DefaultSidebar.TabTriggers>
+      <Sidebar.TabTrigger tab="library" data-whiteboard-sidebar-internal="library" aria-label="Biblioteca" title="Biblioteca">
+        <LibraryBig className="h-5 w-5" />
+        <span className="sr-only">Biblioteca</span>
+      </Sidebar.TabTrigger>
+    </DefaultSidebar.TabTriggers>
+  </DefaultSidebar>
+}
+
+function WhiteboardCommentsCapability({
+  enabled,
+  commentsRef,
+  boardID,
+  currentUserID,
+  canComment,
+  disabledReason,
+  editorAPI,
+  onFocusAnchor,
+  children,
+}: {
+  enabled: boolean
+  commentsRef: MutableRefObject<WhiteboardCommentsProviderHandle | null>
+  boardID: string
+  currentUserID: string | null
+  canComment: boolean
+  disabledReason: string
+  editorAPI: ExcalidrawImperativeAPI | null
+  onFocusAnchor: (target: WhiteboardCommentFocusTarget) => void
+  children: ReactNode
+}) {
+  if (!enabled) return <>{children}</>
+  return <WhiteboardCommentsProvider
+    ref={handle => { commentsRef.current = handle }}
+    boardID={boardID}
+    currentUserID={currentUserID}
+    canComment={canComment}
+    disabledReason={disabledReason}
+    editorAPI={editorAPI}
+    onFocusAnchor={onFocusAnchor}
+  >{children}</WhiteboardCommentsProvider>
 }
 
 export default function WhiteboardEditor({ boardID }: { boardID: string }) {
   const router = useRouter()
   const editorShellRef = useRef<HTMLDivElement>(null)
+  const canvasHostRef = useRef<HTMLDivElement>(null)
   const moreButtonRef = useRef<HTMLButtonElement>(null)
   const importInputRef = useRef<HTMLInputElement>(null)
   const libraryImportInputRef = useRef<HTMLInputElement>(null)
   const editorAPIRef = useRef<ExcalidrawImperativeAPI | null>(null)
+  const commentsRef = useRef<WhiteboardCommentsProviderHandle | null>(null)
+  const currentActorRef = useRef<WhiteboardCurrentActor | null>(null)
+  const publicLibraryStartCleanupRef = useRef<(() => void) | null>(null)
+  const publicLibraryImportProcessingRef = useRef<string | null>(null)
+  const publicLibraryImportActiveRef = useRef(false)
+  const publicLibraryImportControllerRef = useRef<AbortController | null>(null)
   const latestSceneRef = useRef<LatestScene | null>(null)
   const sequenceRef = useRef(0)
   const lastOperationIDRef = useRef<string | null>(null)
@@ -296,11 +404,11 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
   const canonicalSyncGenerationRef = useRef(0)
   const canonicalSyncAppliedSequenceRef = useRef(-1)
   const canonicalSyncLoadingSequenceRef = useRef(-1)
-  const uploadedFileIDsRef = useRef(new Set<string>())
+  const permissionRefreshControllerRef = useRef<AbortController | null>(null)
+  const permissionRefreshGenerationRef = useRef(0)
+  const persistedFileIDsRef = useRef(new Set<string>())
   const assetUploadControllerRef = useRef<AbortController | null>(null)
   const assetSavingRef = useRef(false)
-  const assetHydrationControllerRef = useRef<AbortController | null>(null)
-  const assetHydrationGenerationRef = useRef(0)
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const thumbnailTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const thumbnailSavingRef = useRef(false)
@@ -316,6 +424,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
   const suppressChangesRef = useRef(true)
   const transientSceneSuppressionRef = useRef(0)
   const navigationInProgressRef = useRef(false)
+  const sessionLogoutStartedRef = useRef(false)
   const mountedRef = useRef(true)
   const collaboratorsRef = useRef(new Map<string, WhiteboardCollaboratorState>())
   const personalLibraryRef = useRef<WhiteboardLibraryRecord | null>(null)
@@ -332,13 +441,22 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
   const libraryDirtyRef = useRef(false)
   const libraryLoadControllerRef = useRef<AbortController | null>(null)
   const libraryLoadGenerationRef = useRef(0)
+  const libraryAssetEntriesRef = useRef<Array<{ libraryID: string; items: LibraryItems }>>([])
+  const libraryAssetsLoadedRef = useRef(false)
+  const libraryAssetsPromiseRef = useRef<Promise<void> | null>(null)
+  const libraryAssetsControllerRef = useRef<AbortController | null>(null)
 
   const [phase, setPhase] = useState<EditorPhase>('loading')
   const [board, setBoard] = useState<WhiteboardSummary | null>(null)
+  const [editorAPI, setEditorAPI] = useState<ExcalidrawImperativeAPI | null>(null)
+  const [currentUserID, setCurrentUserID] = useState<string | null>(null)
   const [initialData, setInitialData] = useState<{ elements: readonly ExcalidrawElement[]; appState: Partial<AppState>; files: BinaryFiles; libraryItems: LibraryItems } | null>(null)
-  const [saveState, setSaveState] = useState<SaveState>('saved')
+  const [saveState, setSaveState] = useState<WhiteboardSaveState>('saved')
   const [error, setError] = useState<string | null>(null)
-  const [assetWarning, setAssetWarning] = useState<string | null>(null)
+  const [permissionNotice, setPermissionNotice] = useState<string | null>(null)
+  const [realtimeConnection, setRealtimeConnection] = useState<WhiteboardRoomConnectionState>('connecting')
+  const [realtimeHasOpened, setRealtimeHasOpened] = useState(false)
+  const [realtimeIssue, setRealtimeIssue] = useState<WhiteboardRealtimeIssue | null>(null)
   const [thumbnailWarning, setThumbnailWarning] = useState<string | null>(null)
   const [titleDraft, setTitleDraft] = useState('')
   const [titleSaving, setTitleSaving] = useState(false)
@@ -351,14 +469,23 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
   const [libraryCatalogs, setLibraryCatalogs] = useState<WhiteboardLibraryCatalogSummary[]>([])
   const [libraryCatalogBusy, setLibraryCatalogBusy] = useState<WhiteboardLibraryCatalogBusyState | null>(null)
   const [libraryCatalogError, setLibraryCatalogError] = useState<string | null>(null)
+  const [libraryMetadataReady, setLibraryMetadataReady] = useState(false)
+  const [libraryAssetsLoading, setLibraryAssetsLoading] = useState(false)
   const [editorLayout, setEditorLayout] = useState<WhiteboardEditorLayout>('compact')
   const [editorAvailableWidth, setEditorAvailableWidth] = useState(0)
   const [moreOpen, setMoreOpen] = useState(false)
   const [moreMenuPosition, setMoreMenuPosition] = useState({ top: 60, right: 12 })
+  const [publicLibraryImporting, setPublicLibraryImporting] = useState(false)
+  const [publicLibraryImportError, setPublicLibraryImportError] = useState<string | null>(null)
+  const [publicLibraryImportRetryable, setPublicLibraryImportRetryable] = useState(true)
+  const [publicLibraryImportRetryKey, setPublicLibraryImportRetryKey] = useState(0)
 
-  const canEdit = Boolean(board?.effective_access?.can_edit) && !board?.archived_at
+  const editorAccess = whiteboardEditorAccess(board?.effective_access, board?.archived_at)
+  const { canEdit, canComment } = editorAccess
   const canManageAccess = Boolean(board?.effective_access?.can_manage_access) && !board?.archived_at
   const showIntegratedTitle = editorLayout === 'wide' || (editorLayout === 'compact' && editorAvailableWidth >= 1_100)
+  const showShareInToolbar = whiteboardToolbarShowsShare(editorAvailableWidth, canManageAccess)
+  const stackToolbarBelowTools = whiteboardToolbarStacksBelowTools(editorAvailableWidth)
 
   useEffect(() => {
     if (phase !== 'ready') return
@@ -405,10 +532,10 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       if (current) return false
       const rect = moreButtonRef.current?.getBoundingClientRect()
       if (rect) {
-        setMoreMenuPosition({
-          top: Math.min(rect.bottom + 8, Math.max(12, window.innerHeight - 520)),
-          right: Math.max(12, window.innerWidth - rect.right),
-        })
+        setMoreMenuPosition(whiteboardMoreMenuPosition(
+          rect,
+          { width: window.innerWidth, height: window.innerHeight },
+        ))
       }
       return true
     })
@@ -425,14 +552,19 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     }
   }, [])
 
-  const fetchLibraries = useCallback(async (signal?: AbortSignal): Promise<LoadedWhiteboardLibraries> => {
-    const [actorResponse, listResponse] = await Promise.all([
-      getWhiteboardCurrentActor(signal),
-      collectWhiteboardLibraryPages(cursor => listWhiteboardLibraries(signal, '', cursor)),
-    ])
-    const actorID = actorResponse.data?.user?.id
-    const actorIsAdmin = Boolean(actorResponse.data?.user?.is_admin)
-    if (!actorResponse.success || !actorID) throw new Error(actorResponse.error || 'No se pudo identificar tu biblioteca privada.')
+  const presentation = useWhiteboardPresentation({
+    editorAPI,
+    roomRef,
+    canPresent: canEdit,
+    runWithTransientSceneSuppressed,
+  })
+
+  const fetchLibraries = useCallback(async (
+    actorID: string,
+    actorIsAdmin: boolean,
+    signal?: AbortSignal,
+  ): Promise<LoadedWhiteboardLibraries> => {
+    const listResponse = await collectWhiteboardLibraryPages(cursor => listWhiteboardLibraries(signal, '', cursor))
     if (!listResponse.success) throw new Error(listResponse.error || 'No se pudieron cargar las bibliotecas de Pizarras.')
     let libraries = listResponse.data?.libraries || []
     let personal = selectWhiteboardPersonalLibrary(libraries, actorID)
@@ -485,12 +617,6 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     const failedCatalogs = details.filter(item => item.summary.visibility === 'account' && !item.library)
     const personalItems = restoredWhiteboardLibraryItems(personalDetail.library_json)
     const catalogItems = accountDetails.map(library => restoredWhiteboardLibraryItems(library.library_json))
-    const libraryFileResults = await mapWhiteboardConcurrently([
-      { library: personalDetail, items: personalItems },
-      ...accountDetails.map((library, index) => ({ library, items: catalogItems[index] })),
-    ], 4, entry => hydrateWhiteboardLibraryFiles(entry.library.id, entry.items, signal), signal)
-    const libraryFiles = Object.assign({}, ...libraryFileResults.map(result => result.files)) as BinaryFiles
-    const libraryFileFailures = libraryFileResults.reduce((total, result) => total + result.failures, 0)
     const composition = combineWhiteboardLibraryItems(personalItems, catalogItems)
     return {
       personal: personalDetail,
@@ -508,13 +634,14 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
           canManage: actorIsAdmin || library.created_by === actorID,
         }
       }),
-      combinedItems: composition.combined,
       readOnlyItemIDs: composition.readOnlyItemIDs,
-      files: libraryFiles,
-      warning: [
-        failedCatalogs.length ? `${failedCatalogs.length} bibliotecas compartidas no pudieron cargarse.` : '',
-        libraryFileFailures ? `${libraryFileFailures} recursos de biblioteca no están disponibles.` : '',
-      ].filter(Boolean).join(' ') || null,
+      assetEntries: [
+        { libraryID: personalDetail.id, items: personalItems },
+        ...accountDetails.map((library, index) => ({ libraryID: library.id, items: catalogItems[index] })),
+      ],
+      warning: failedCatalogs.length
+        ? `${failedCatalogs.length} bibliotecas compartidas no pudieron cargarse.`
+        : null,
     }
   }, [])
 
@@ -536,9 +663,53 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     return composition.combined
   }, [])
 
+  const loadLibraryAssets = useCallback(() => {
+    if (libraryAssetsLoadedRef.current) return Promise.resolve()
+    if (libraryAssetsPromiseRef.current) return libraryAssetsPromiseRef.current
+    const entries = [...libraryAssetEntriesRef.current]
+    if (entries.length === 0) return Promise.resolve()
+    const controller = new AbortController()
+    libraryAssetsControllerRef.current?.abort()
+    libraryAssetsControllerRef.current = controller
+    setLibraryAssetsLoading(true)
+    const operation = (async () => {
+      let failures = 0
+      for (const entry of entries) {
+        const result = await hydrateWhiteboardLibraryFiles(entry.libraryID, entry.items, controller.signal)
+        if (controller.signal.aborted) throw whiteboardAbortError()
+        failures += result.failures
+        if (Object.keys(result.files).length > 0) {
+          runWithTransientSceneSuppressed(() => {
+            editorAPIRef.current?.addFiles(Object.values(result.files) as BinaryFileData[])
+          })
+          if (latestSceneRef.current) latestSceneRef.current = {
+            ...latestSceneRef.current,
+            files: { ...latestSceneRef.current.files, ...result.files },
+          }
+        }
+      }
+      libraryAssetsLoadedRef.current = failures === 0
+      if (failures > 0) {
+        setLibrarySaveState('error')
+        setLibraryError(`${failures} recursos de biblioteca no están disponibles. Vuelve a abrirla para reintentar.`)
+      }
+    })().catch(loadError => {
+      if (controller.signal.aborted) return
+      setLibrarySaveState('error')
+      setLibraryError(loadError instanceof Error ? loadError.message : 'No se pudieron cargar los recursos de las bibliotecas.')
+    }).finally(() => {
+      if (libraryAssetsControllerRef.current === controller) libraryAssetsControllerRef.current = null
+      if (libraryAssetsPromiseRef.current === operation) libraryAssetsPromiseRef.current = null
+      if (!controller.signal.aborted && mountedRef.current) setLibraryAssetsLoading(false)
+    })
+    libraryAssetsPromiseRef.current = operation
+    return operation
+  }, [runWithTransientSceneSuppressed])
+
   const openElementLibrary = useCallback(() => {
     const api = editorAPIRef.current
     if (!api) return
+    void loadLibraryAssets()
     const composition = combineWhiteboardLibraryItems(personalLibraryItemsRef.current, catalogLibraryItemsRef.current)
     void api.updateLibrary({
       libraryItems: composition.combined,
@@ -546,87 +717,148 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       defaultStatus: 'unpublished',
       openLibraryMenu: true,
     })
+  }, [loadLibraryAssets])
+
+  useEffect(() => {
+    if (libraryOpen && libraryMetadataReady) void loadLibraryAssets()
+  }, [libraryMetadataReady, libraryOpen, loadLibraryAssets])
+
+  useEffect(() => {
+    if (phase !== 'ready' || !editorAPI || !libraryMetadataReady || !personalLibraryRef.current) return
+    void applyLibraryComposition(personalLibraryItemsRef.current, catalogLibraryItemsRef.current)
+  }, [applyLibraryComposition, editorAPI, libraryMetadataReady, phase])
+
+  const discardPublicLibraryImport = useCallback(() => {
+    if (typeof window !== 'undefined') {
+      const cleanPath = stripWhiteboardPublicLibraryImportFromPath(
+        window.location.pathname,
+        window.location.search,
+        window.location.hash,
+      )
+      window.history.replaceState(window.history.state, '', cleanPath)
+    }
+    setPublicLibraryImportError(null)
+    setPublicLibraryImportRetryable(true)
   }, [])
 
-  const hydrateAssets = useCallback(async (elements: readonly unknown[], signal?: AbortSignal) => {
-    assetHydrationControllerRef.current?.abort()
-    const controller = new AbortController()
-    assetHydrationControllerRef.current = controller
-    const generation = ++assetHydrationGenerationRef.current
-    const abort = () => controller.abort()
-    signal?.addEventListener('abort', abort, { once: true })
-    const fileIDs = referencedWhiteboardFileIDs(elements)
-      .filter(fileID => !uploadedFileIDsRef.current.has(fileID))
-    try {
-      if (!fileIDs.length) return { files: {} as BinaryFiles, warning: null as string | null }
-      const response = await listWhiteboardAssets(boardID, fileIDs, controller.signal)
-      if (controller.signal.aborted || generation !== assetHydrationGenerationRef.current) {
-        return { files: {} as BinaryFiles, warning: null as string | null }
+  const focusCommentAnchor = useCallback((target: WhiteboardCommentFocusTarget) => {
+    window.requestAnimationFrame(() => {
+      const api = editorAPIRef.current
+      if (!api) return
+      const element = target.elementID
+        ? api.getSceneElements().find(candidate => candidate.id === target.elementID)
+        : null
+      if (element) {
+        api.scrollToContent(element, { animate: true, duration: 200, fitToContent: true })
+        return
       }
-      if (!response.success) {
-        return { files: {} as BinaryFiles, warning: response.error || 'No se pudieron cargar los recursos referenciados.' }
-      }
-      const manifest = (response.data?.assets || []).filter(asset => asset.kind === 'asset')
-      const outcomes = await mapWhiteboardConcurrently(manifest, 4, async asset => {
-        const download = await downloadWhiteboardAsset(boardID, asset.id, controller.signal)
-        if (controller.signal.aborted) throw whiteboardAbortError()
-        if (!download.success || !download.blob) return { asset, file: null }
-        try {
-          const file: WhiteboardBinaryFile = {
-            id: asset.file_id,
-            dataURL: await blobToDataURL(download.blob, controller.signal),
-            mimeType: asset.content_type,
-            created: Date.parse(asset.created_at) || Date.now(),
-          }
-          return { asset, file }
-        } catch (downloadError) {
-          if (controller.signal.aborted) throw downloadError
-          return { asset, file: null }
-        }
-      }, controller.signal)
-      if (controller.signal.aborted || generation !== assetHydrationGenerationRef.current) {
-        return { files: {} as BinaryFiles, warning: null as string | null }
-      }
-      const files: Record<string, WhiteboardBinaryFile> = {}
-      let failures = fileIDs.length - new Set(manifest.map(asset => asset.file_id)).size
-      for (const outcome of outcomes) {
-        if (!outcome.file) {
-          failures += 1
-          continue
-        }
-        files[outcome.asset.file_id] = outcome.file
-        uploadedFileIDsRef.current.add(outcome.asset.file_id)
-      }
-      return {
-        files: files as unknown as BinaryFiles,
-        warning: failures > 0
-          ? `${failures} recursos referenciados no están disponibles. La pizarra seguirá disponible sin ellos.`
-          : null,
-      }
-    } catch (loadError) {
-      if (controller.signal.aborted) return { files: {} as BinaryFiles, warning: null as string | null }
-      return {
-        files: {} as BinaryFiles,
-        warning: loadError instanceof Error ? loadError.message : 'No se pudieron cargar los recursos referenciados.',
-      }
-    } finally {
-      signal?.removeEventListener('abort', abort)
-      if (assetHydrationControllerRef.current === controller) assetHydrationControllerRef.current = null
+      const appState = api.getAppState()
+      const zoom = Math.max(0.01, appState.zoom.value)
+      const bounds = canvasHostRef.current?.getBoundingClientRect()
+      const centerX = (bounds?.left ?? appState.offsetLeft) + (bounds?.width ?? appState.width) / 2
+      const centerY = (bounds?.top ?? appState.offsetTop) + (bounds?.height ?? appState.height) / 2
+      runWithTransientSceneSuppressed(() => {
+        api.updateScene({
+          appState: {
+            scrollX: (centerX - appState.offsetLeft) / zoom - target.sceneX,
+            scrollY: (centerY - appState.offsetTop) / zoom - target.sceneY,
+          },
+          captureUpdate: CaptureUpdateAction.NEVER,
+        })
+      })
+    })
+  }, [runWithTransientSceneSuppressed])
+
+  const onHydratedBoardFile = useCallback((file: BinaryFileData) => {
+    runWithTransientSceneSuppressed(() => {
+      editorAPIRef.current?.addFiles([file])
+    })
+    if (latestSceneRef.current) latestSceneRef.current = {
+      ...latestSceneRef.current,
+      files: { ...latestSceneRef.current.files, [file.id]: file } as BinaryFiles,
     }
-  }, [boardID])
+  }, [runWithTransientSceneSuppressed])
+
+  const {
+    progress: fontPreloadProgress,
+    retry: retryFontPreload,
+  } = useWhiteboardFontPreload(
+    `member:${boardID}:${currentUserID || 'pending'}`,
+    editorAPI,
+  )
+  const fontPreloadFirstPassComplete = whiteboardFontPreloadFirstPassComplete(fontPreloadProgress)
+  const fontPreloadMessage = whiteboardFontPreloadMessage(fontPreloadProgress)
+
+  const {
+    progress: assetHydrationProgress,
+    request: requestAssetHydration,
+    retry: retryAssetHydration,
+  } = useWhiteboardAssetHydration({
+    ownerKey: `member:${boardID}:${currentUserID || 'pending'}`,
+    enabled: phase === 'ready' && Boolean(editorAPI) && fontPreloadFirstPassComplete,
+    listAssets: async (fileIDs, signal) => {
+      const response = await listWhiteboardAssets(boardID, fileIDs, signal)
+      return {
+        assets: response.success ? response.data?.assets || [] : [],
+        error: response.success ? undefined : response.error || 'No se pudieron cargar las imágenes de la pizarra.',
+      }
+    },
+    downloadAsset: async (asset, signal) => {
+      const response = await downloadWhiteboardAsset(boardID, asset.id, signal)
+      return {
+        blob: response.success ? response.blob : undefined,
+        error: response.success ? undefined : response.error || 'No se pudo descargar una imagen de la pizarra.',
+      }
+    },
+    onFile: onHydratedBoardFile,
+    onPersistedFileIDs: fileIDs => {
+      for (const fileID of fileIDs) persistedFileIDsRef.current.add(fileID)
+    },
+  })
+
+  const assetHydrationMessage = whiteboardAssetHydrationMessage(assetHydrationProgress)
 
   const load = useCallback(async (signal?: AbortSignal) => {
     setPhase('loading')
     setError(null)
-    setAssetWarning(null)
-    uploadedFileIDsRef.current = new Set()
+    setPermissionNotice(null)
+    setRealtimeIssue(null)
+    setRealtimeConnection('connecting')
+    setRealtimeHasOpened(false)
+    sessionLogoutStartedRef.current = false
+    setCurrentUserID(null)
+    currentActorRef.current = null
+    setEditorAPI(null)
+    editorAPIRef.current = null
+    publicLibraryImportControllerRef.current?.abort()
+    publicLibraryImportControllerRef.current = null
+    publicLibraryImportActiveRef.current = false
+    publicLibraryImportProcessingRef.current = null
+    setPublicLibraryImporting(false)
+    setPublicLibraryImportError(null)
+    setPublicLibraryImportRetryable(true)
+    publicLibraryStartCleanupRef.current?.()
+    publicLibraryStartCleanupRef.current = null
+    persistedFileIDsRef.current = new Set()
+    libraryAssetsControllerRef.current?.abort()
+    libraryAssetsControllerRef.current = null
+    libraryAssetsPromiseRef.current = null
+    libraryAssetsLoadedRef.current = false
+    libraryAssetEntriesRef.current = []
+    setLibraryMetadataReady(false)
+    setLibraryAssetsLoading(false)
     canonicalSyncControllerRef.current?.abort()
     canonicalSyncAppliedSequenceRef.current = -1
     canonicalSyncLoadingSequenceRef.current = -1
-    const [metadataResponse, sceneResponse] = await Promise.all([
+    const [metadataResponse, sceneResponse, actorResponse] = await Promise.all([
       loadWhiteboardMetadata(boardID, signal),
       loadWhiteboardScene(boardID, signal),
+      getWhiteboardCurrentActor(signal),
     ])
+    // React development remounts abort the first load before starting the
+    // canonical one. An aborted response must never overwrite that newer load
+    // with a user-facing "Solicitud cancelada" error.
+    if (whiteboardAsyncResultIsStale({ signal, mounted: mountedRef.current })) return
     if (!metadataResponse.success || !metadataResponse.data?.whiteboard) {
       setError(errorMessage(metadataResponse.status, metadataResponse.error))
       setPhase('error')
@@ -639,25 +871,19 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     }
     const metadata = metadataResponse.data.whiteboard
     const record = sceneResponse.data.scene
+    const actorID = actorResponse.success ? actorResponse.data?.user?.id : null
+    const actor = actorID ? {
+      id: actorID,
+      isAdmin: Boolean(actorResponse.data?.user?.is_admin),
+    } : null
+    currentActorRef.current = actor
+    setCurrentUserID(actor?.id || null)
     const scene = restoreClarinWhiteboardScene(record.scene)
     sceneRootExtensionsRef.current = whiteboardSceneRootExtensions(scene)
     sceneFileMetadataRef.current = sanitizeWhiteboardFilesForPersistence(scene.files)
-    const [assets, libraryResult] = await Promise.all([
-      hydrateAssets(scene.elements, signal),
-      fetchLibraries(signal).then(value => ({ value, error: null as string | null })).catch(loadError => ({
-        value: null,
-        error: loadError instanceof Error ? loadError.message : 'No se pudieron cargar las bibliotecas de Pizarras.',
-      })),
-    ])
-    const hydratedFileIDs = new Set(Object.keys(assets.files))
-    for (const fileID of Object.keys(libraryResult.value?.files || {})) hydratedFileIDs.add(fileID)
-    const files = Object.fromEntries(Object.entries(mergeWhiteboardFileRecords(
-      mergeWhiteboardFileRecords(scene.files, assets.files),
-      libraryResult.value?.files as unknown as Record<string, unknown> | undefined,
-    ))
-      .filter(([fileID]) => hydratedFileIDs.has(fileID))) as unknown as BinaryFiles
+    persistedFileIDsRef.current = new Set(referencedWhiteboardFileIDs(scene.elements))
+    const files = {} as BinaryFiles
     if (signal?.aborted) return
-    uploadedFileIDsRef.current = new Set(Object.keys(assets.files))
     sequenceRef.current = record.sequence
     acknowledgedElementsRef.current = [...scene.elements]
     acknowledgedAppStateRef.current = sanitizeWhiteboardAppState(scene.appState)
@@ -671,44 +897,57 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     lastSavedChangeVersionRef.current = 0
     suppressChangesRef.current = true
     suppressLibraryChangesRef.current = true
-    if (libraryResult.value) {
-      personalLibraryRef.current = libraryResult.value.personal
-      personalLibraryItemsRef.current = libraryResult.value.personalItems
-      catalogLibraryItemsRef.current = libraryResult.value.catalogItems
-      readOnlyLibraryItemIDsRef.current = libraryResult.value.readOnlyItemIDs
-      libraryConflictRef.current = false
-      libraryDirtyRef.current = false
-      libraryChangeVersionRef.current = 0
-      lastSavedLibraryChangeVersionRef.current = 0
-      setPersonalLibraryItemCount(libraryResult.value.personalItems.length)
-      setLibraryCatalogs(libraryResult.value.catalogSummaries)
-      setLibrarySaveState(libraryResult.value.warning ? 'error' : 'saved')
-      setLibraryError(libraryResult.value.warning)
-    } else {
-      personalLibraryRef.current = null
-      libraryDirtyRef.current = false
-      libraryChangeVersionRef.current = 0
-      lastSavedLibraryChangeVersionRef.current = 0
-      personalLibraryItemsRef.current = []
-      catalogLibraryItemsRef.current = []
-      readOnlyLibraryItemIDsRef.current = new Set()
-      setPersonalLibraryItemCount(0)
-      setLibraryCatalogs([])
-      setLibrarySaveState('error')
-      setLibraryError(libraryResult.error)
-    }
+    personalLibraryRef.current = null
+    libraryDirtyRef.current = false
+    libraryChangeVersionRef.current = 0
+    lastSavedLibraryChangeVersionRef.current = 0
+    personalLibraryItemsRef.current = []
+    catalogLibraryItemsRef.current = []
+    readOnlyLibraryItemIDsRef.current = new Set()
+    setPersonalLibraryItemCount(0)
+    setLibraryCatalogs([])
+    setLibrarySaveState(actor ? 'saving' : 'error')
+    setLibraryError(actor ? null : actorResponse.error || 'No se pudo identificar tu biblioteca privada.')
     setBoard(metadata)
     setTitleDraft(metadata.name)
     setInitialData({
       elements: scene.elements as readonly ExcalidrawElement[],
       appState: scene.appState as Partial<AppState>,
       files,
-      libraryItems: libraryResult.value?.combinedItems || [],
+      libraryItems: [],
     })
-    setAssetWarning(assets.warning)
     setSaveState('saved')
     setPhase('ready')
-  }, [boardID, fetchLibraries, hydrateAssets])
+
+    if (actor) {
+      void fetchLibraries(actor.id, actor.isAdmin, signal).then(async loaded => {
+        if (whiteboardAsyncResultIsStale({ signal, mounted: mountedRef.current })) return
+        personalLibraryRef.current = loaded.personal
+        personalLibraryItemsRef.current = loaded.personalItems
+        catalogLibraryItemsRef.current = loaded.catalogItems
+        readOnlyLibraryItemIDsRef.current = loaded.readOnlyItemIDs
+        libraryAssetEntriesRef.current = loaded.assetEntries
+        libraryAssetsLoadedRef.current = loaded.assetEntries.every(entry => referencedWhiteboardFileIDs(whiteboardLibraryElements(entry.items)).length === 0)
+        libraryConflictRef.current = false
+        libraryDirtyRef.current = false
+        libraryChangeVersionRef.current = 0
+        lastSavedLibraryChangeVersionRef.current = 0
+        setPersonalLibraryItemCount(loaded.personalItems.length)
+        setLibraryCatalogs(loaded.catalogSummaries)
+        setLibraryMetadataReady(true)
+        setLibrarySaveState(loaded.warning ? 'error' : 'saved')
+        setLibraryError(loaded.warning)
+        if (!metadata.archived_at) {
+          publicLibraryStartCleanupRef.current = installWhiteboardPublicLibraryStartPath(boardID, loaded.personal.id)
+        }
+        await applyLibraryComposition(loaded.personalItems, loaded.catalogItems)
+      }).catch(loadError => {
+        if (whiteboardAsyncResultIsStale({ signal, mounted: mountedRef.current })) return
+        setLibrarySaveState('error')
+        setLibraryError(loadError instanceof Error ? loadError.message : 'No se pudieron cargar las bibliotecas de Pizarras.')
+      })
+    }
+  }, [applyLibraryComposition, boardID, fetchLibraries])
 
   useEffect(() => {
     window.EXCALIDRAW_ASSET_PATH = whiteboardEditorAssetBase(window.location.origin)
@@ -719,15 +958,20 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       mountedRef.current = false
       controller.abort()
       assetUploadControllerRef.current?.abort()
-      assetHydrationControllerRef.current?.abort()
-      assetHydrationGenerationRef.current += 1
       canonicalSyncControllerRef.current?.abort()
       canonicalSyncGenerationRef.current += 1
+      permissionRefreshControllerRef.current?.abort()
+      permissionRefreshGenerationRef.current += 1
       libraryLoadControllerRef.current?.abort()
       libraryLoadGenerationRef.current += 1
+      libraryAssetsControllerRef.current?.abort()
+      libraryAssetsControllerRef.current = null
+      libraryAssetsPromiseRef.current = null
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
       if (thumbnailTimerRef.current) clearTimeout(thumbnailTimerRef.current)
       if (librarySaveTimerRef.current) clearTimeout(librarySaveTimerRef.current)
+      publicLibraryStartCleanupRef.current?.()
+      publicLibraryStartCleanupRef.current = null
     }
   }, [load])
 
@@ -746,7 +990,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     }
     const onOffline = () => setSaveState('offline')
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (!dirtyRef.current && !savingRef.current && !assetSavingRef.current && !libraryDirtyRef.current && !librarySavingRef.current) return
+      if (!dirtyRef.current && !savingRef.current && !assetSavingRef.current && !libraryDirtyRef.current && !librarySavingRef.current && !commentsRef.current?.hasUnsavedWork()) return
       event.preventDefault()
       event.returnValue = ''
     }
@@ -763,10 +1007,12 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
   const persistPersonalLibrary = useCallback(async (manual = false) => {
     if (librarySavingRef.current) {
       libraryQueuedSaveRef.current = true
-      return
+      return null
     }
     const library = personalLibraryRef.current
-    if (!library || !libraryDirtyRef.current || (libraryConflictRef.current && !manual)) return
+    if (!library) return null
+    if (!libraryDirtyRef.current) return library.version
+    if (libraryConflictRef.current && !manual) return null
     librarySavingRef.current = true
     libraryQueuedSaveRef.current = false
     const capturedVersion = libraryChangeVersionRef.current
@@ -826,7 +1072,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
           await applyLibraryComposition(reconciled)
           setLibrarySaveState('conflict')
           setLibraryError('Mi biblioteca cambió en otra sesión. Clarin conservó la versión canónica y añadió sólo tus elementos nuevos; revisa y pulsa “Guardar conciliación”.')
-          return
+          return null
         }
         throw new Error(response.error || 'No se pudo guardar Mi biblioteca.')
       }
@@ -836,11 +1082,13 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       const unchanged = capturedVersion === libraryChangeVersionRef.current
       libraryDirtyRef.current = !unchanged
       setLibrarySaveState(unchanged ? 'saved' : 'pending')
+      return response.data.library.version
     } catch (saveError) {
-      if (!mountedRef.current) return
+      if (!mountedRef.current) return null
       libraryDirtyRef.current = true
       setLibrarySaveState('error')
       setLibraryError(saveError instanceof Error ? saveError.message : 'No se pudo guardar Mi biblioteca.')
+      return null
     } finally {
       librarySavingRef.current = false
       if (!libraryConflictRef.current && (libraryQueuedSaveRef.current || capturedVersion !== libraryChangeVersionRef.current)) {
@@ -850,6 +1098,201 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       }
     }
   }, [applyLibraryComposition])
+
+  useEffect(() => {
+    if (phase !== 'ready' || !editorAPI || !libraryMetadataReady || typeof window === 'undefined') return
+    const importID = readWhiteboardPublicLibraryImportID(window.location.search)
+    const personalLibrary = personalLibraryRef.current
+    if (!importID || !personalLibrary) return
+    const processingKey = `${boardID}:${importID}:${publicLibraryImportRetryKey}`
+    if (publicLibraryImportProcessingRef.current === processingKey) return
+
+    const controller = new AbortController()
+    publicLibraryImportControllerRef.current?.abort()
+    publicLibraryImportControllerRef.current = controller
+    publicLibraryImportProcessingRef.current = processingKey
+    publicLibraryImportActiveRef.current = true
+    libraryLoadControllerRef.current?.abort()
+    libraryLoadGenerationRef.current += 1
+    if (librarySaveTimerRef.current) {
+      clearTimeout(librarySaveTimerRef.current)
+      librarySaveTimerRef.current = null
+    }
+    setPublicLibraryImporting(true)
+    setPublicLibraryImportError(null)
+    setPublicLibraryImportRetryable(true)
+
+    void (async () => {
+      try {
+        await consumeWhiteboardPublicLibraryImport({
+          boardID,
+          importID,
+          libraryID: personalLibrary.id,
+          load: async () => {
+            const response = await getWhiteboardPublicLibraryImport(boardID, importID, controller.signal)
+            if (!response.success || !response.data?.import) {
+              const retryable = !response.status || ![401, 403, 404, 410, 422].includes(response.status)
+              throw new PublicLibraryImportError(
+                response.error || 'No se pudo recuperar la biblioteca validada por Clarin.',
+                retryable,
+              )
+            }
+            if (response.data.import.status === 'failed' || response.data.import.status === 'expired') {
+              throw new PublicLibraryImportError(
+                response.data.import.status === 'expired'
+                  ? 'La solicitud de importación venció. Vuelve a explorar el catálogo desde la pizarra.'
+                  : 'Clarin rechazó esta importación. Vuelve a explorar el catálogo y elige otra biblioteca.',
+                false,
+              )
+            }
+            return response.data.import
+          },
+          mergeAndPersist: async libraryJSON => {
+            if (controller.signal.aborted) throw whiteboardAbortError()
+            const source = new Blob([JSON.stringify(libraryJSON)], { type: 'application/json' })
+            const importedItems = await loadLibraryFromBlob(source, 'unpublished')
+            if (controller.signal.aborted) throw whiteboardAbortError()
+            const merged = mergeLibraryItems(personalLibraryItemsRef.current, importedItems) as LibraryItems
+            if (getLibraryItemsHash(merged) !== getLibraryItemsHash(personalLibraryItemsRef.current)) {
+              personalLibraryItemsRef.current = merged
+              libraryChangeVersionRef.current += 1
+              libraryDirtyRef.current = true
+              libraryConflictRef.current = false
+              await applyLibraryComposition(merged)
+              setLibrarySaveState('pending')
+            }
+
+            const deadline = Date.now() + 20_000
+            while (librarySavingRef.current && Date.now() < deadline && !controller.signal.aborted) {
+              await new Promise(resolve => window.setTimeout(resolve, 50))
+            }
+            if (controller.signal.aborted) throw whiteboardAbortError()
+            if (librarySavingRef.current) throw new Error('Mi biblioteca sigue ocupada. Espera un momento y vuelve a intentar la importación.')
+            const libraryVersion = await persistPersonalLibrary(true)
+            if (libraryVersion === null) {
+              throw new Error('Clarin no pudo confirmar el guardado de la biblioteca importada. Revisa el aviso y vuelve a intentarlo.')
+            }
+            return { libraryVersion }
+          },
+          complete: async input => {
+            const acknowledged = await acknowledgeWhiteboardPublicLibraryImportAfterConflict<{
+              success: boolean
+              status?: number
+              error?: string
+              data?: { import?: unknown }
+            }>({
+              operationID: input.operationID,
+              libraryVersion: input.libraryVersion,
+              complete: value => completeWhiteboardPublicLibraryImport(
+                boardID,
+                importID,
+                value,
+                controller.signal,
+              ),
+              reconcileLibraryVersion: async () => {
+                if (controller.signal.aborted) throw whiteboardAbortError()
+                const canonicalResponse = await getWhiteboardLibrary(personalLibrary.id, controller.signal)
+                if (!canonicalResponse.success || !canonicalResponse.data?.library) {
+                  throw new PublicLibraryImportError(
+                    canonicalResponse.error || 'Mi biblioteca cambió y no se pudo recuperar su versión actual.',
+                    true,
+                  )
+                }
+                if (controller.signal.aborted) throw whiteboardAbortError()
+
+                const canonical = canonicalResponse.data.library
+                const canonicalItems = restoredWhiteboardLibraryItems(canonical.library_json)
+                const reconciled = reconcileWhiteboardLibraryConflict(
+                  canonicalItems,
+                  personalLibraryItemsRef.current,
+                ) as LibraryItems
+                const needsPersistence = getLibraryItemsHash(reconciled) !== getLibraryItemsHash(canonicalItems)
+
+                personalLibraryRef.current = canonical
+                personalLibraryItemsRef.current = reconciled
+                libraryConflictRef.current = false
+                await applyLibraryComposition(reconciled)
+                if (!needsPersistence) {
+                  libraryDirtyRef.current = false
+                  setLibrarySaveState('saved')
+                  setLibraryError(null)
+                  return canonical.version
+                }
+
+                libraryChangeVersionRef.current += 1
+                libraryDirtyRef.current = true
+                setLibrarySaveState('pending')
+                const reconciledVersion = await persistPersonalLibrary(true)
+                if (reconciledVersion === null) {
+                  throw new PublicLibraryImportError(
+                    'Mi biblioteca volvió a cambiar durante la conciliación. Clarin conservó los elementos importados para que puedas reintentar.',
+                    true,
+                  )
+                }
+                return reconciledVersion
+              },
+            })
+            const response = acknowledged.response
+            if (!response.success || !response.data?.import) {
+              const retryable = !response.status || ![401, 403, 404, 410, 422].includes(response.status)
+              throw new PublicLibraryImportError(
+                response.error || 'La biblioteca se guardó, pero no se pudo confirmar la importación.',
+                retryable,
+              )
+            }
+          },
+        })
+        if (controller.signal.aborted || !mountedRef.current) return
+        const cleanPath = stripWhiteboardPublicLibraryImportFromPath(
+          window.location.pathname,
+          window.location.search,
+          window.location.hash,
+        )
+        window.history.replaceState(window.history.state, '', cleanPath)
+        setPublicLibraryImportError(null)
+        openElementLibrary()
+      } catch (importError) {
+        if (controller.signal.aborted || !mountedRef.current) return
+        setPublicLibraryImportError(importError instanceof Error
+          ? importError.message
+          : 'No se pudo incorporar la biblioteca pública.')
+        setPublicLibraryImportRetryable(
+          !(importError instanceof PublicLibraryImportError) || importError.retryable,
+        )
+      } finally {
+        const ownsImport = publicLibraryImportControllerRef.current === controller
+        if (publicLibraryImportProcessingRef.current === processingKey) {
+          publicLibraryImportProcessingRef.current = null
+        }
+        if (ownsImport) {
+          publicLibraryImportControllerRef.current = null
+          publicLibraryImportActiveRef.current = false
+        }
+        if (ownsImport && !controller.signal.aborted && mountedRef.current) setPublicLibraryImporting(false)
+      }
+    })()
+
+    return () => {
+      controller.abort()
+      if (publicLibraryImportProcessingRef.current === processingKey) {
+        publicLibraryImportProcessingRef.current = null
+      }
+      if (publicLibraryImportControllerRef.current === controller) {
+        publicLibraryImportControllerRef.current = null
+        publicLibraryImportActiveRef.current = false
+        if (mountedRef.current) setPublicLibraryImporting(false)
+      }
+    }
+  }, [
+    applyLibraryComposition,
+    boardID,
+    editorAPI,
+    libraryMetadataReady,
+    openElementLibrary,
+    persistPersonalLibrary,
+    phase,
+    publicLibraryImportRetryKey,
+  ])
 
   const onLibraryChange = useCallback(async (items: LibraryItems) => {
     if (suppressLibraryChangesRef.current || !personalLibraryRef.current) return
@@ -871,13 +1314,33 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
   }, [applyLibraryComposition, persistPersonalLibrary])
 
   const reloadLibraries = useCallback(async () => {
+    if (publicLibraryImportActiveRef.current) {
+      setLibraryError('Espera a que termine la importación pública antes de recargar las bibliotecas.')
+      return
+    }
     libraryLoadControllerRef.current?.abort()
+    libraryAssetsControllerRef.current?.abort()
+    libraryAssetsControllerRef.current = null
+    libraryAssetsPromiseRef.current = null
+    libraryAssetsLoadedRef.current = false
+    setLibraryMetadataReady(false)
     const controller = new AbortController()
     libraryLoadControllerRef.current = controller
     const generation = ++libraryLoadGenerationRef.current
     setLibraryError(null)
     try {
-      const loaded = await fetchLibraries(controller.signal)
+      let actor = currentActorRef.current
+      if (!actor) {
+        const actorResponse = await getWhiteboardCurrentActor(controller.signal)
+        const actorID = actorResponse.data?.user?.id
+        if (!actorResponse.success || !actorID) {
+          throw new Error(actorResponse.error || 'No se pudo identificar tu biblioteca privada.')
+        }
+        actor = { id: actorID, isAdmin: Boolean(actorResponse.data?.user?.is_admin) }
+        currentActorRef.current = actor
+        setCurrentUserID(actor.id)
+      }
+      const loaded = await fetchLibraries(actor.id, actor.isAdmin, controller.signal)
       if (controller.signal.aborted || generation !== libraryLoadGenerationRef.current || !mountedRef.current) return
       const hadLocalChanges = libraryDirtyRef.current
       const personalItems = hadLocalChanges
@@ -885,15 +1348,15 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
         : loaded.personalItems
       personalLibraryRef.current = loaded.personal
       catalogLibraryItemsRef.current = loaded.catalogItems
+      libraryAssetEntriesRef.current = loaded.assetEntries
+      libraryAssetsLoadedRef.current = loaded.assetEntries.every(entry => referencedWhiteboardFileIDs(whiteboardLibraryElements(entry.items)).length === 0)
       setLibraryCatalogs(loaded.catalogSummaries)
-      if (Object.keys(loaded.files).length > 0) {
-        editorAPIRef.current?.addFiles(Object.values(loaded.files) as BinaryFileData[])
-        if (latestSceneRef.current) latestSceneRef.current = {
-          ...latestSceneRef.current,
-          files: { ...latestSceneRef.current.files, ...loaded.files },
-        }
-      }
+      setLibraryMetadataReady(true)
       await applyLibraryComposition(personalItems, loaded.catalogItems)
+      publicLibraryStartCleanupRef.current?.()
+      publicLibraryStartCleanupRef.current = board?.archived_at
+        ? null
+        : installWhiteboardPublicLibraryStartPath(boardID, loaded.personal.id)
       if (hadLocalChanges) {
         libraryConflictRef.current = true
         libraryDirtyRef.current = true
@@ -906,6 +1369,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
         setLibrarySaveState(loaded.warning ? 'error' : 'saved')
         setLibraryError(loaded.warning)
       }
+      if (libraryOpen) void loadLibraryAssets()
     } catch (loadError) {
       if (controller.signal.aborted || generation !== libraryLoadGenerationRef.current || !mountedRef.current) return
       setLibrarySaveState('error')
@@ -913,7 +1377,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     } finally {
       if (libraryLoadControllerRef.current === controller) libraryLoadControllerRef.current = null
     }
-  }, [applyLibraryComposition, fetchLibraries])
+  }, [applyLibraryComposition, board?.archived_at, boardID, fetchLibraries, libraryOpen, loadLibraryAssets])
 
   const importLibrary = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -1154,7 +1618,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       const initialPlan = planWhiteboardAssetPersistence(
         elements,
         files as unknown as Record<string, unknown>,
-        uploadedFileIDsRef.current,
+        persistedFileIDsRef.current,
       )
       const referencedFileIDs = new Set(initialPlan.referencedFileIDs)
       const referencedFiles = Object.fromEntries(Object.entries(files).filter(([fileID]) => referencedFileIDs.has(fileID)))
@@ -1163,7 +1627,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       const plan = planWhiteboardAssetPersistence(
         elements,
         safeFiles as unknown as Record<string, unknown>,
-        uploadedFileIDsRef.current,
+        persistedFileIDsRef.current,
       )
       if (plan.missingFileIDs.length > 0) {
         throw new Error('Una imagen todavía no terminó de prepararse. Tus cambios siguen en el lienzo; reintenta el guardado.')
@@ -1184,7 +1648,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
           if (!response.success || !response.data?.asset) {
             throw new Error(response.error || 'No se pudo guardar una imagen de la pizarra.')
           }
-          uploadedFileIDsRef.current.add(fileID)
+          persistedFileIDsRef.current.add(fileID)
         }, controller.signal)
       }
       if (Object.keys(safeFiles).length > 0) editorAPIRef.current?.addFiles(Object.values(safeFiles) as BinaryFileData[])
@@ -1195,15 +1659,16 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     }
   }, [boardID])
 
-  const hydrateReferencedAssets = useCallback(async (elements: readonly unknown[]) => {
-    const assets = await hydrateAssets(elements)
-    if (!mountedRef.current) return
-    if (Object.keys(assets.files).length > 0) {
-      editorAPIRef.current?.addFiles(Object.values(assets.files) as BinaryFileData[])
-      if (latestSceneRef.current) latestSceneRef.current = { ...latestSceneRef.current, files: { ...latestSceneRef.current.files, ...assets.files } }
-    }
-    setAssetWarning(assets.warning)
-  }, [hydrateAssets])
+  const hydrateReferencedAssets = useCallback((elements: readonly unknown[]) => {
+    for (const fileID of referencedWhiteboardFileIDs(elements)) persistedFileIDsRef.current.add(fileID)
+    const api = editorAPIRef.current
+    requestAssetHydration(elements, api ? getVisibleSceneBounds(api.getAppState()) : null)
+  }, [requestAssetHydration])
+
+  useEffect(() => {
+    if (phase !== 'ready' || !editorAPI || !initialData) return
+    hydrateReferencedAssets(initialData.elements)
+  }, [editorAPI, hydrateReferencedAssets, initialData, phase])
 
   const generateThumbnail = useCallback(async (confirmedSequence: number) => {
     if (!canEdit || thumbnailSavingRef.current || !mountedRef.current || !navigator.onLine) return
@@ -1355,10 +1820,10 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
 
   const flushSave = useCallback(async (reason: 'autosave' | 'manual' | 'import' = 'autosave') => {
     if (!canEdit || !dirtyRef.current) return
-    if (reason === 'autosave' && pendingSaveRef.current?.automaticRetryBlocked) return
+    if (reason === 'autosave' && pendingSaveRef.current?.automaticRetryBlockReason) return
     if (reason !== 'autosave' && pendingSaveRef.current) {
       pendingSaveRef.current.automaticFailures = 0
-      pendingSaveRef.current.automaticRetryBlocked = false
+      pendingSaveRef.current.automaticRetryBlockReason = null
     }
     if (!navigator.onLine) {
       setSaveState('offline')
@@ -1417,7 +1882,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
           capturedElements: [],
           capturedAppState: {},
           automaticFailures: 0,
-          automaticRetryBlocked: false,
+          automaticRetryBlockReason: null,
           notFoundDiagnosed: false,
         }))
         pending.capturedElements = [...pending.payload.scene.elements]
@@ -1460,7 +1925,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
           pending.automaticFailures += 1
           const failureAction = whiteboardSaveFailureAction(response.status, pending.automaticFailures)
           if (failureAction === 'conflict') {
-            pending.automaticRetryBlocked = true
+            pending.automaticRetryBlockReason = 'conflict'
             if (await reconcileWhiteboardWriteConflict()) {
               pendingSaveRef.current = null
               queuedSaveRef.current = true
@@ -1472,7 +1937,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
             }
             return
           }
-          pending.automaticRetryBlocked = failureAction === 'block'
+          pending.automaticRetryBlockReason = failureAction === 'retry' ? null : failureAction
           let message = errorMessage(response.status, response.error)
           if (response.status === 400) {
             message = 'Clarin rechazó el formato de esta escena. Tus cambios siguen en pantalla; no se volverán a enviar automáticamente.'
@@ -1515,7 +1980,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       savingRef.current = false
       const retryUnacknowledged = Boolean(
         pendingSaveRef.current
-        && !pendingSaveRef.current.automaticRetryBlocked
+        && !pendingSaveRef.current.automaticRetryBlockReason
         && dirtyRef.current
         && navigator.onLine,
       )
@@ -1531,6 +1996,8 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
   }, [applyCanonicalWriteConfirmation, boardID, canEdit, diagnoseWhiteboardWriteNotFound, reconcileWhiteboardWriteConflict, scheduleThumbnail, uploadPendingFiles])
 
   const onChange = useCallback((elements: readonly ExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
+    const openSidebar = appState.openSidebar as { name?: string } | null
+    if (openSidebar?.name === 'library') void loadLibraryAssets()
     const previous = latestSceneRef.current
     const snapshottedElements = elements.map(element => ({ ...element })) as readonly ExcalidrawElement[]
     const snapshottedFiles = snapshotWhiteboardFiles(files as unknown as Record<string, unknown>) as unknown as BinaryFiles
@@ -1546,15 +2013,16 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     })) return
     changeVersionRef.current += 1
     dirtyRef.current = true
-    const retryBlocked = Boolean(pendingSaveRef.current?.automaticRetryBlocked)
+    const retryBlocked = Boolean(pendingSaveRef.current?.automaticRetryBlockReason)
     setSaveState(!navigator.onLine ? 'offline' : retryBlocked ? 'error' : 'pending')
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
     if (!retryBlocked) autosaveTimerRef.current = setTimeout(() => { void flushSave('autosave') }, WHITEBOARD_AUTOSAVE_DELAY_MS)
-  }, [canEdit, flushSave])
+  }, [canEdit, flushSave, loadLibraryAssets])
 
   const applySceneRecord = useCallback((record: WhiteboardSceneRecord, preserveLocalChanges = false) => {
     const api = editorAPIRef.current
     const scene = restoreClarinWhiteboardScene(record.scene)
+    for (const fileID of referencedWhiteboardFileIDs(scene.elements)) persistedFileIDsRef.current.add(fileID)
     sceneRootExtensionsRef.current = whiteboardSceneRootExtensions(scene)
     sceneFileMetadataRef.current = sanitizeWhiteboardFilesForPersistence(scene.files)
     const existingFiles = mergeWhiteboardFileRecords(
@@ -1627,7 +2095,9 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       )
       canonicalSyncAppliedSequenceRef.current = Math.max(requestedSequence, response.data.scene.sequence)
       if (preserveLocalChanges && canEdit) {
-        if (!savingRef.current) pendingSaveRef.current = null
+        // Keep an immutable pending write across reconnect sync. Reusing its
+        // operation_id lets the backend return the canonical idempotent result
+        // when the prior acknowledgement was the only thing that was lost.
         dirtyRef.current = true
         setSaveState('pending')
         if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
@@ -1671,29 +2141,113 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     if (!api) return
     runWithTransientSceneSuppressed(() => {
       api.updateScene({
-        collaborators: excalidrawWhiteboardCollaborators(next),
+        collaborators: excalidrawWhiteboardCollaborators(next, presentation.getSelfActorID()),
         captureUpdate: CaptureUpdateAction.NEVER,
       })
     })
-  }, [runWithTransientSceneSuppressed])
+  }, [presentation.getSelfActorID, runWithTransientSceneSuppressed])
+
+  const handleRealtimeIssue = useCallback((issue: WhiteboardRealtimeIssue | null) => {
+    setRealtimeIssue(issue)
+    if (!issue || issue.kind === 'authorization_unavailable') return
+    if (issue.kind === 'access_revoked') {
+      setError('Tu acceso a esta pizarra fue revocado.')
+      setPhase('error')
+      return
+    }
+    setPermissionNotice(issue.message)
+    if (sessionLogoutStartedRef.current) return
+    sessionLogoutStartedRef.current = true
+    void logoutFromBrowser('expired')
+  }, [])
+
+  const refreshMetadataForPermissionChange = useCallback(async () => {
+    permissionRefreshControllerRef.current?.abort()
+    const controller = new AbortController()
+    permissionRefreshControllerRef.current = controller
+    const generation = ++permissionRefreshGenerationRef.current
+    const response = await loadWhiteboardMetadata(boardID, controller.signal)
+    if (controller.signal.aborted || generation !== permissionRefreshGenerationRef.current || !mountedRef.current) return
+    if (!response.success || !response.data?.whiteboard) {
+      handleRealtimeIssue(classifyWhiteboardCollabTicketFailure({
+        audience: 'member',
+        status: response.status,
+        message: response.error || 'No se pudieron actualizar temporalmente los permisos de la pizarra.',
+      }))
+      return
+    }
+    const metadata = response.data.whiteboard
+    const nextAccess = whiteboardEditorAccess(metadata.effective_access, metadata.archived_at)
+    const feedback = whiteboardPermissionChangeFeedback({
+      canEdit: nextAccess.canEdit,
+      hasPendingChanges: dirtyRef.current || Boolean(pendingSaveRef.current),
+      online: navigator.onLine,
+    })
+    setBoard(metadata)
+    setPermissionNotice(feedback.notice)
+    if (feedback.saveState) setSaveState(feedback.saveState)
+    setRealtimeIssue(null)
+  }, [boardID, handleRealtimeIssue])
 
   useEffect(() => {
     if (phase !== 'ready') return
+    let hasOpened = false
     const room = connectWhiteboardRoom({
       whiteboardID: boardID,
+      audience: 'member',
       getSequence: () => sequenceRef.current,
-      getTicket: () => requestWhiteboardCollabTicket(boardID),
+      getTicket: () => requestWhiteboardCollabTicket(boardID, board?.account_id),
+      onIssue: handleRealtimeIssue,
       onEvent: event => {
+        const handledByPresentation = presentation.handleRealtimeEvent(event)
+        if (event.event === 'room.ready') {
+          // room.ready establishes the canonical self actor synchronously.
+          // Reproject any presence snapshot that arrived first so Excalidraw
+          // can mark the own avatar without waiting for another presence event.
+          applyCollaboratorEvent(event)
+          return
+        }
+			if (handledByPresentation) return
         if (event.event === 'presence.snapshot' || event.event === 'presence.update' || event.event === 'cursor.update') {
           applyCollaboratorEvent(event)
           return
         }
+        if (event.event === 'comment.changed') {
+          if (WHITEBOARD_COMMENTS_UI_ENABLED && event.data && typeof event.data === 'object' && !Array.isArray(event.data)) {
+            commentsRef.current?.applyRealtimeEvent(event.data as WhiteboardCommentChangedEvent)
+          } else if (WHITEBOARD_COMMENTS_UI_ENABLED) {
+            void commentsRef.current?.reload()
+          }
+          return
+        }
         if (event.event === 'access.revoked') {
-          setError('Tu acceso a esta pizarra fue revocado.')
-          setPhase('error')
+          handleRealtimeIssue({
+            kind: 'access_revoked',
+            message: 'Tu acceso a esta pizarra fue revocado.',
+            retryable: false,
+          })
           return
         }
         if (event.event === 'error') {
+          if (event.code === 'permission_changed') {
+            const immediateLevel = whiteboardRealtimeAccessLevel(event.data)
+            if (immediateLevel) {
+              setBoard(current => current ? {
+                ...current,
+                effective_access: whiteboardEffectiveAccessAtLevel(current.effective_access, immediateLevel),
+              } : current)
+              const feedback = whiteboardPermissionChangeFeedback({
+                canEdit: immediateLevel === 'edit' || immediateLevel === 'manage',
+                hasPendingChanges: dirtyRef.current || Boolean(pendingSaveRef.current),
+                online: navigator.onLine,
+              })
+              setPermissionNotice(feedback.notice)
+              if (feedback.saveState) setSaveState(feedback.saveState)
+            }
+            void refreshMetadataForPermissionChange()
+            return
+          }
+          if (event.code === 'session_expired' || event.code === 'authorization_unavailable' || event.code === 'presence_unavailable') return
           // Correlated operation errors reject sendPatch() and are recovered by
           // the idempotent REST fallback before any user-facing failure state.
           if (!event.operation_id) setError(event.error || 'La colaboración en tiempo real encontró un error.')
@@ -1730,7 +2284,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
             scene: event.scene,
             sequence: remoteSequence,
             scene_schema_version: 'excalidraw',
-            editor_version: '0.18.1',
+            editor_version: '0.18.1-clarin.4',
             updated_at: new Date().toISOString(),
           }, preserveLocalChanges)
           void hydrateReferencedAssets(event.scene.elements)
@@ -1759,7 +2313,26 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
         }
       },
       onConnectionChange: state => {
+			presentation.handleConnectionChange(state)
+        setRealtimeConnection(state)
         if (state === 'open') {
+          setRealtimeHasOpened(true)
+          const connection = reconcileWhiteboardConnectionOpen(hasOpened)
+          if (WHITEBOARD_COMMENTS_UI_ENABLED && connection.reloadComments) void commentsRef.current?.reload()
+          const pending = pendingSaveRef.current
+          if (pending) {
+            const retryState = whiteboardSaveRetryStateAfterReconnect({
+              previouslyOpened: connection.reloadComments,
+              automaticFailures: pending.automaticFailures,
+              automaticRetryBlockReason: pending.automaticRetryBlockReason,
+            })
+            if (retryState.shouldRetry) {
+              pending.automaticFailures = retryState.automaticFailures
+              pending.automaticRetryBlockReason = retryState.automaticRetryBlockReason
+              setSaveState('pending')
+            }
+          }
+          hasOpened = connection.hasOpened
           if (shouldRetryWhiteboardDirtySave({ dirty: dirtyRef.current, saving: savingRef.current, online: navigator.onLine, canEdit })) {
             if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
             autosaveTimerRef.current = setTimeout(() => { void flushSave('autosave') }, 250)
@@ -1781,7 +2354,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       if (roomRef.current === room) roomRef.current = null
       room.close()
     }
-  }, [applyCollaboratorEvent, applySceneRecord, boardID, flushSave, hydrateReferencedAssets, phase, reloadCanonicalForRealtime, runWithTransientSceneSuppressed])
+  }, [applyCollaboratorEvent, applySceneRecord, board?.account_id, boardID, flushSave, handleRealtimeIssue, hydrateReferencedAssets, phase, presentation.handleConnectionChange, presentation.handleRealtimeEvent, refreshMetadataForPermissionChange, reloadCanonicalForRealtime, runWithTransientSceneSuppressed])
 
   const reloadCanonical = async () => {
     const response = await loadWhiteboardScene(boardID)
@@ -1834,27 +2407,14 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     downloadBlob(new Blob([source], { type: 'application/json' }), whiteboardFileName(board.name, 'excalidraw'))
   }
 
-  const exportPNG = async () => {
-    const scene = latestSceneRef.current
-    if (!scene || !board) return
-    try {
-      const blob = await exportToBlob({ elements: scene.elements.filter(element => !element.isDeleted) as never, appState: { ...scene.appState, exportBackground: true }, files: scene.files, mimeType: 'image/png' })
-      downloadBlob(blob, whiteboardFileName(board.name, 'png'))
-    } catch {
-      setError('No se pudo exportar la imagen PNG.')
-    }
-  }
-
-  const exportSVG = async () => {
-    const scene = latestSceneRef.current
-    if (!scene || !board) return
-    try {
-      const svg = await exportToSvg({ elements: scene.elements.filter(element => !element.isDeleted) as never, appState: scene.appState, files: scene.files, renderEmbeddables: false, skipInliningFonts: true })
-      downloadBlob(new Blob([new XMLSerializer().serializeToString(svg)], { type: 'image/svg+xml' }), whiteboardFileName(board.name, 'svg'))
-    } catch {
-      setError('No se pudo exportar la imagen SVG.')
-    }
-  }
+  const openImageExport = useCallback(() => {
+    const api = editorAPIRef.current
+    if (!api) return
+    api.updateScene({
+      appState: whiteboardImageExportDialogAppState(),
+      captureUpdate: CaptureUpdateAction.NEVER,
+    })
+  }, [])
 
   const importScene = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -1880,6 +2440,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
           ? importedSceneRecord.files as Record<string, unknown>
           : restored.files as unknown as Record<string, unknown>,
       )
+      persistedFileIDsRef.current = new Set()
       suppressChangesRef.current = true
       api.updateScene({ elements: restored.elements || [], appState: restored.appState || {}, captureUpdate: CaptureUpdateAction.IMMEDIATELY })
       api.addFiles(Object.values(files) as BinaryFileData[])
@@ -1895,7 +2456,10 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     }
   }
 
-  const navigateFromWhiteboard = useCallback(async (href: string) => {
+  const navigateFromWhiteboard = useCallback(async (
+    href: string,
+    publicLibraryID: string | null = null,
+  ) => {
     if (navigationInProgressRef.current) return
     navigationInProgressRef.current = true
     const requiredSceneVersion = dirtyRef.current || pendingSaveRef.current || savingRef.current
@@ -1912,11 +2476,13 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       assetSaving: assetSavingRef.current,
       libraryDirty: libraryDirtyRef.current,
       librarySaving: librarySavingRef.current,
+      commentSaving: commentsRef.current?.hasPendingMutations() || false,
+      commentDirty: commentsRef.current?.hasUnsavedDrafts() || false,
       flushAttempted,
     })
     const waitForActiveWrites = async () => {
       const deadline = Date.now() + 15_000
-      while ((savingRef.current || assetSavingRef.current || librarySavingRef.current) && Date.now() < deadline) {
+      while ((savingRef.current || assetSavingRef.current || librarySavingRef.current || commentsRef.current?.hasPendingMutations()) && Date.now() < deadline) {
         await new Promise(resolve => window.setTimeout(resolve, 50))
       }
     }
@@ -1937,17 +2503,31 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
         savedSceneVersion: lastSavedChangeVersionRef.current,
         requiredLibraryVersion,
         savedLibraryVersion: lastSavedLibraryChangeVersionRef.current,
+        commentsPending: commentsRef.current?.hasPendingMutations() || false,
+        commentsDirty: commentsRef.current?.hasUnsavedDrafts() || false,
       })
       const action = durableWritesCoverClick ? 'leave' : whiteboardNavigationAction(state())
       if (action !== 'leave') {
         const discard = window.confirm('Clarin no pudo confirmar todos los cambios. ¿Salir y descartar únicamente lo que siga pendiente?')
         if (!discard) return
       }
-      router.push(href)
+      if (publicLibraryID) {
+        const response = await startWhiteboardPublicLibraryImport(boardID, publicLibraryID)
+        const navigation = response.success && response.data?.success !== false
+          ? validateWhiteboardPublicLibraryNavigationPath(response.data?.navigation_path, boardID)
+          : null
+        if (!navigation) {
+          setLibraryError(response.error || 'Clarin no pudo autorizar la exploración de bibliotecas. Inténtalo de nuevo.')
+          return
+        }
+        window.location.assign(navigation.path)
+      } else {
+        router.push(href)
+      }
     } finally {
       navigationInProgressRef.current = false
     }
-  }, [flushSave, persistPersonalLibrary, router])
+  }, [boardID, flushSave, persistPersonalLibrary, router])
 
   useEffect(() => {
     if (phase !== 'ready') return
@@ -1960,11 +2540,20 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       if (destination.origin !== window.location.origin || destination.href === window.location.href) return
       event.preventDefault()
       event.stopPropagation()
-      void navigateFromWhiteboard(`${destination.pathname}${destination.search}${destination.hash}`)
+      const href = `${destination.pathname}${destination.search}${destination.hash}`
+      const publicLibraryAnchor = anchor.classList.contains('library-menu-browse-button')
+      const publicLibraryID = publicLibraryAnchor && !board?.archived_at
+        ? personalLibraryRef.current?.id || null
+        : null
+      if (publicLibraryAnchor && !isWhiteboardPublicLibraryStartPath(href, boardID, publicLibraryID)) {
+        setLibraryError('No se pudo iniciar la exploración de bibliotecas. Recarga las bibliotecas e inténtalo de nuevo.')
+        return
+      }
+      void navigateFromWhiteboard(href, publicLibraryID)
     }
     document.addEventListener('click', guardInternalNavigation, true)
     return () => document.removeEventListener('click', guardInternalNavigation, true)
-  }, [navigateFromWhiteboard, phase])
+  }, [board?.archived_at, boardID, navigateFromWhiteboard, phase])
 
   const editorMenu = useMemo(() => <MainMenu>
     <MainMenu.Group title="Pizarra Clarin">
@@ -1975,8 +2564,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     <MainMenu.Separator />
     <MainMenu.Group title="Exportar copia">
       <MainMenu.Item icon={<FileJson className="h-4 w-4" />} onSelect={exportJSON}>Archivo editable</MainMenu.Item>
-      <MainMenu.Item icon={<FileImage className="h-4 w-4" />} onSelect={() => void exportPNG()}>Imagen PNG</MainMenu.Item>
-      <MainMenu.Item icon={<Download className="h-4 w-4" />} onSelect={() => void exportSVG()}>Imagen SVG</MainMenu.Item>
+      <MainMenu.DefaultItems.SaveAsImage />
     </MainMenu.Group>
     <MainMenu.Separator />
     <MainMenu.Group title="Bibliotecas internas">
@@ -2007,19 +2595,105 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     return () => document.removeEventListener('keydown', onKeyDown, true)
   }, [flushSave])
 
+  useEffect(() => {
+    if (!WHITEBOARD_COMMENTS_UI_ENABLED || phase !== 'ready' || !canComment || !editorAccess.viewModeEnabled) return
+    const host = canvasHostRef.current
+    if (!host) return
+    const captureCommentPlacement = (event: PointerEvent) => {
+      consumeWhiteboardViewModeCommentPointer(
+        event,
+        (clientX, clientY) => commentsRef.current?.captureViewModePlacement(clientX, clientY) || false,
+      )
+    }
+    host.addEventListener('pointerdown', captureCommentPlacement, true)
+    return () => host.removeEventListener('pointerdown', captureCommentPlacement, true)
+  }, [canComment, editorAccess.viewModeEnabled, phase])
+
   if (phase === 'loading') return <div className="flex h-full min-h-0 items-center justify-center bg-slate-50"><div className="flex flex-col items-center gap-3 text-sm font-bold text-slate-500"><Loader2 className="h-7 w-7 animate-spin text-emerald-600" />Abriendo pizarra…</div></div>
 
   if (phase === 'error' || !board || !initialData) return <div className="flex h-full min-h-0 items-center justify-center bg-slate-50 p-5"><div className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 text-center shadow-sm"><ShieldAlert className="mx-auto h-9 w-9 text-rose-500" /><h1 className="mt-4 text-xl font-black text-slate-900">No se pudo abrir la pizarra</h1><p className="mt-2 text-sm leading-6 text-slate-500">{error}</p><div className="mt-5 flex flex-wrap justify-center gap-2"><button type="button" onClick={() => router.push('/dashboard/whiteboards')} className="min-h-11 rounded-xl border border-slate-200 px-4 text-sm font-bold text-slate-600">Volver</button><button type="button" onClick={() => void load()} className="flex min-h-11 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-bold text-white"><RefreshCw className="h-4 w-4" />Reintentar</button></div></div></div>
+
+  const realtimeNotice = whiteboardRealtimeConnectionNotice({
+    connection: realtimeConnection,
+    hasOpened: realtimeHasOpened,
+    issue: realtimeIssue,
+  })
+  const canvasNoticeSource = error
+    ? 'error'
+    : publicLibraryImportError
+      ? 'public-error'
+      : publicLibraryImporting
+        ? 'public-loading'
+          : libraryError
+          ? 'library-error'
+          : permissionNotice
+            ? 'permission'
+            : realtimeNotice
+              ? 'realtime'
+          : board.archived_at
+            ? 'archived'
+            : libraryAssetsLoading
+              ? 'library-loading'
+              : fontPreloadMessage
+                ? 'fonts'
+              : assetHydrationMessage
+                ? 'assets'
+                : null
+  const canvasNoticeMessage = canvasNoticeSource === 'public-loading'
+    ? 'Clarin está validando y guardando la biblioteca seleccionada…'
+    : canvasNoticeSource === 'archived'
+      ? 'Esta pizarra está en la Papelera y se abre en modo lectura.'
+      : canvasNoticeSource === 'library-loading'
+        ? 'Cargando imágenes de la biblioteca…'
+        : canvasNoticeSource === 'permission'
+          ? permissionNotice
+          : canvasNoticeSource === 'realtime'
+            ? realtimeNotice?.message || null
+        : canvasNoticeSource === 'fonts'
+          ? fontPreloadMessage
+        : canvasNoticeSource === 'assets'
+          ? assetHydrationMessage
+          : error || publicLibraryImportError || libraryError
+  const canvasNoticeIsError = canvasNoticeSource === 'error'
+    || canvasNoticeSource === 'public-error'
+    || canvasNoticeSource === 'library-error'
+    || (canvasNoticeSource === 'fonts' && fontPreloadProgress.phase === 'error')
+    || (canvasNoticeSource === 'assets' && assetHydrationProgress.phase === 'error')
+  const canvasNoticeIsWarning = canvasNoticeSource === 'permission'
+    || (canvasNoticeSource === 'realtime' && Boolean(realtimeNotice?.warning))
+    || canvasNoticeSource === 'archived'
+    || librarySaveState === 'conflict'
+  const canvasNoticeIsLoading = canvasNoticeSource === 'public-loading'
+    || canvasNoticeSource === 'library-loading'
+    || (canvasNoticeSource === 'fonts' && (fontPreloadProgress.phase === 'idle' || fontPreloadProgress.phase === 'loading' || fontPreloadProgress.phase === 'offline'))
+    || (canvasNoticeSource === 'assets' && assetHydrationProgress.phase === 'loading')
+    || (canvasNoticeSource === 'realtime' && Boolean(realtimeNotice?.busy))
 
   return <div ref={editorShellRef} data-whiteboard-layout={editorLayout} className="whiteboard-editor-shell flex h-full min-h-0 flex-col overflow-hidden bg-slate-100">
     <input ref={importInputRef} type="file" accept=".excalidraw,.json,application/json" className="hidden" onChange={importScene} />
     <input ref={libraryImportInputRef} type="file" accept=".excalidrawlib,application/json" className="hidden" onChange={importLibrary} />
 
-    <div className="relative min-h-0 flex-1 bg-white">
-      <Excalidraw
+    <div
+      ref={canvasHostRef}
+      className="relative min-h-0 flex-1 bg-white"
+    >
+      <WhiteboardCommentsCapability
+        enabled={WHITEBOARD_COMMENTS_UI_ENABLED}
+        commentsRef={commentsRef}
+        boardID={boardID}
+        currentUserID={currentUserID}
+        canComment={canComment}
+        disabledReason={board.archived_at
+          ? 'Esta pizarra está en la Papelera; sus comentarios son de solo lectura.'
+          : 'Puedes leer los comentarios, pero necesitas permiso de comentario para participar.'}
+        editorAPI={editorAPI}
+        onFocusAnchor={focusCommentAnchor}
+      >
+        <Excalidraw
         initialData={initialData}
         excalidrawAPI={api => {
           editorAPIRef.current = api
+          setEditorAPI(current => current === api ? current : api)
           requestAnimationFrame(() => {
             if (!mountedRef.current || editorAPIRef.current !== api) return
             suppressChangesRef.current = false
@@ -2032,16 +2706,28 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
         langCode="es-ES"
         name={board.name}
         isCollaborating
-        viewModeEnabled={!canEdit}
+        viewModeEnabled={editorAccess.viewModeEnabled}
         autoFocus
-        renderTopRightUI={() => editorLayout !== 'wide' ? null : <div className="whiteboard-integrated-actions flex items-center gap-2">
-          <SaveIndicator state={saveState} showLabel={false} />
-          <>
-            <button type="button" onClick={() => setLibraryOpen(true)} title="Administrar bibliotecas de Clarin" aria-label="Administrar bibliotecas de Clarin" className="whiteboard-integrated-action"><LibraryBig className="h-4 w-4" /></button>
-            {canManageAccess && <button type="button" onClick={() => setShareOpen(true)} title="Compartir desde Clarin" aria-label="Compartir desde Clarin" className="whiteboard-integrated-action"><Share2 className="h-4 w-4" /></button>}
-            <button type="button" onClick={() => setHistoryOpen(true)} title="Abrir historial de Clarin" aria-label="Abrir historial de Clarin" className="whiteboard-integrated-action"><History className="h-4 w-4" /></button>
-            {canEdit && <button type="button" onClick={() => void flushSave('manual')} disabled={whiteboardSaveIsBusy(saveState) || saveState === 'saved'} title="Guardar ahora en Clarin" aria-label="Guardar ahora en Clarin" className="whiteboard-integrated-action whiteboard-integrated-action--primary">{whiteboardSaveIsBusy(saveState) ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}</button>}
-          </>
+        renderTopRightUI={(_isMobile, appState) => editorLayout !== 'wide' ? null : <div className="whiteboard-integrated-actions flex items-center gap-2">
+          <WhiteboardEditorActionBar
+            ref={moreButtonRef}
+            editorAPI={editorAPI}
+            openSidebar={appState.openSidebar}
+            showShare={showShareInToolbar}
+            canManageAccess={canManageAccess}
+            canEdit={canEdit}
+            saveState={saveState}
+            moreOpen={moreOpen}
+            onShare={() => setShareOpen(true)}
+            onRetrySave={() => saveState === 'conflict' ? void reloadCanonical() : void flushSave('manual')}
+            onToggleMore={toggleMoreMenu}
+			presentation={{
+			  controlState: presentation.controlState,
+			  state: presentation.state,
+			  onStart: () => { void presentation.start() },
+			  onStop: () => { void presentation.stop() },
+			}}
+          />
         </div>}
         aiEnabled={false}
         validateEmbeddable={false}
@@ -2051,30 +2737,69 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
           const link = sanitizeWhiteboardExternalLink(element.link)
           if (link) window.open(link, '_blank', 'noopener,noreferrer')
         }}
+        showDeprecatedFonts={WHITEBOARD_SHOW_DEPRECATED_OFFICIAL_FONTS}
+        enableRichText
         UIOptions={{
-          canvasActions: {
-            loadScene: false,
-            saveToActiveFile: false,
-            saveAsImage: false,
-            export: false,
-            toggleTheme: false,
-          },
+          canvasActions: whiteboardEditorCanvasActions(true),
           tools: { image: canEdit },
         }}
       >
         {editorMenu}
-      </Excalidraw>
+        {WHITEBOARD_COMMENTS_UI_ENABLED ? <WhiteboardCommentsSidebar /> : <WhiteboardLibrarySidebar />}
+        <DefaultSidebar.Trigger
+          style={{ display: 'none' }}
+          tab="library"
+          title="Biblioteca"
+          icon={<LibraryBig className="h-5 w-5" />}
+        >Biblioteca</DefaultSidebar.Trigger>
+        </Excalidraw>
+        {WHITEBOARD_COMMENTS_UI_ENABLED && <WhiteboardCommentPins containerRef={canvasHostRef} />}
+        {editorLayout !== 'wide' && <div className={`whiteboard-mobile-actions absolute right-2 top-2 z-30${stackToolbarBelowTools ? ' whiteboard-mobile-actions--stacked' : ''}`}>
+          <WhiteboardEditorActionBar
+            ref={moreButtonRef}
+            editorAPI={editorAPI}
+            showShare={showShareInToolbar}
+            canManageAccess={canManageAccess}
+            canEdit={canEdit}
+            saveState={saveState}
+            moreOpen={moreOpen}
+            onShare={() => setShareOpen(true)}
+            onRetrySave={() => saveState === 'conflict' ? void reloadCanonical() : void flushSave('manual')}
+            onToggleMore={toggleMoreMenu}
+			presentation={{
+			  controlState: presentation.controlState,
+			  state: presentation.state,
+			  onStart: () => { void presentation.start() },
+			  onStop: () => { void presentation.stop() },
+			}}
+          />
+        </div>}
+      </WhiteboardCommentsCapability>
+	  <WhiteboardPresentationOverlay
+		state={presentation.state}
+		showInvitation={presentation.showInvitation}
+		onAccept={presentation.acceptInvitation}
+		onDecline={presentation.declineInvitation}
+		onLeave={presentation.leaveFollow}
+	  />
       {showIntegratedTitle && <div className="whiteboard-integrated-title absolute left-16 top-2 z-30 flex h-11 min-w-0 items-center gap-1">
         <button type="button" onClick={() => void navigateFromWhiteboard('/dashboard/whiteboards')} aria-label="Volver a Pizarras" title="Volver a Pizarras" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><ArrowLeft className="h-5 w-5" /></button>
         <span className="mx-1 h-8 w-px shrink-0 bg-slate-200" />
         <label className="min-w-0"><span className="sr-only">Nombre de la pizarra</span><span className="block text-[9px] font-black uppercase tracking-[.14em] text-emerald-600">Pizarras Clarin</span><span className="flex items-center gap-1"><input value={titleDraft} onChange={event => setTitleDraft(event.target.value)} onBlur={() => void saveTitle()} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setTitleDraft(board.name); event.currentTarget.blur() } }} readOnly={!canEdit} maxLength={200} aria-label="Nombre de la pizarra" className="h-6 min-w-0 w-full truncate border-0 bg-transparent p-0 text-sm font-black text-slate-900 outline-none read-only:cursor-default" />{titleSaving && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-slate-400" />}</span></label>
       </div>}
-      {editorLayout !== 'wide' && <div className="whiteboard-mobile-actions absolute right-2 top-2 z-30 flex items-center gap-2">
-        <SaveIndicator state={saveState} showLabel={false} />
-        <button ref={moreButtonRef} type="button" onClick={toggleMoreMenu} aria-haspopup="menu" aria-expanded={moreOpen} title="Más acciones de Pizarras" aria-label="Más acciones de Pizarras" className="whiteboard-integrated-action"><MoreHorizontal className="h-5 w-5" /></button>
-      </div>}
-      {(error || libraryError || assetWarning || board.archived_at) && <div className={`whiteboard-canvas-notice absolute left-1/2 top-[4.25rem] z-40 flex w-[min(92%,52rem)] -translate-x-1/2 flex-wrap items-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold shadow-lg ${error || librarySaveState === 'error' ? 'border-rose-200 bg-rose-50 text-rose-800' : board.archived_at || librarySaveState === 'conflict' ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-sky-200 bg-sky-50 text-sky-800'}`} role={error ? 'alert' : 'status'}><span className="min-w-0 flex-1">{error || libraryError || (board.archived_at ? 'Esta pizarra está en la Papelera y se abre en modo lectura.' : assetWarning)}</span>{saveState === 'error' && canEdit && <button type="button" onClick={() => void flushSave('manual')} className="min-h-9 rounded-lg bg-white px-3 font-black shadow-sm">Reintentar guardado</button>}{saveState === 'conflict' && <button type="button" onClick={() => void reloadCanonical()} className="min-h-9 rounded-lg bg-white px-3 font-black shadow-sm">Recargar y conservar mis cambios</button>}{libraryError && <button type="button" onClick={() => setLibraryOpen(true)} className="min-h-9 rounded-lg bg-white px-3 font-black shadow-sm">Revisar biblioteca</button>}</div>}
-      {!canEdit && <div className="pointer-events-none absolute bottom-3 left-1/2 z-20 -translate-x-1/2 rounded-full border border-slate-200 bg-white/95 px-3 py-1.5 text-xs font-bold text-slate-600 shadow-lg">Solo lectura</div>}
+      {canvasNoticeSource && (
+        <div data-whiteboard-realtime-status={canvasNoticeSource === 'realtime' ? realtimeConnection : undefined} className={`whiteboard-canvas-notice absolute left-1/2 top-[4.25rem] z-40 flex w-[min(92%,52rem)] -translate-x-1/2 flex-wrap items-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold shadow-lg ${canvasNoticeIsError ? 'border-rose-200 bg-rose-50 text-rose-800' : canvasNoticeIsWarning ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-sky-200 bg-sky-50 text-sky-800'}`} role={canvasNoticeIsError ? 'alert' : 'status'} aria-live="polite">
+          <span className="min-w-0 flex-1">{canvasNoticeMessage}</span>
+          {canvasNoticeIsLoading && <Loader2 className="h-4 w-4 shrink-0 animate-spin" />}
+          {canvasNoticeSource === 'public-error' && publicLibraryImportRetryable && <button type="button" onClick={() => setPublicLibraryImportRetryKey(current => current + 1)} className="min-h-9 rounded-lg bg-white px-3 font-black shadow-sm">Reintentar importación</button>}
+          {canvasNoticeSource === 'public-error' && <button type="button" onClick={discardPublicLibraryImport} className="min-h-9 rounded-lg border border-current/20 bg-transparent px-3 font-black">{publicLibraryImportRetryable ? 'Cancelar' : 'Descartar solicitud'}</button>}
+          {canvasNoticeSource === 'library-error' && <button type="button" onClick={() => setLibraryOpen(true)} className="min-h-9 rounded-lg bg-white px-3 font-black shadow-sm">Revisar biblioteca</button>}
+          {canvasNoticeSource === 'fonts' && fontPreloadProgress.phase === 'error' && <button type="button" onClick={retryFontPreload} className="min-h-9 rounded-lg bg-white px-3 font-black shadow-sm">Reintentar fuentes</button>}
+          {canvasNoticeSource === 'assets' && assetHydrationProgress.phase === 'error' && <button type="button" onClick={retryAssetHydration} className="min-h-9 rounded-lg bg-white px-3 font-black shadow-sm">Reintentar imágenes</button>}
+          {canvasNoticeSource === 'realtime' && <button type="button" onClick={() => roomRef.current?.retryNow()} className="min-h-9 rounded-lg bg-white px-3 font-black shadow-sm">Reintentar ahora</button>}
+        </div>
+      )}
+      {!canEdit && <div className="pointer-events-none absolute bottom-3 left-1/2 z-20 -translate-x-1/2 rounded-full border border-slate-200 bg-white/95 px-3 py-1.5 text-xs font-bold text-slate-600 shadow-lg">{WHITEBOARD_COMMENTS_UI_ENABLED && canComment ? 'Lectura y comentarios' : 'Solo lectura'}</div>}
     </div>
 
     {moreOpen && typeof document !== 'undefined' && createPortal(<div id="whiteboard-more-menu" role="menu" aria-label="Más acciones de Pizarras" style={{ top: moreMenuPosition.top, right: moreMenuPosition.right }} className="whiteboard-more-menu fixed z-[120] w-[min(21rem,calc(100vw-1.5rem))] overflow-hidden rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl">
@@ -2085,17 +2810,15 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       </div>
       <div className="grid gap-1 py-1">
         {!showIntegratedTitle && <button autoFocus type="button" role="menuitem" onClick={() => { setMoreOpen(false); void navigateFromWhiteboard('/dashboard/whiteboards') }} className="whiteboard-more-item"><ArrowLeft className="h-4 w-4" />Volver a Pizarras</button>}
-        <button autoFocus={showIntegratedTitle} type="button" role="menuitem" onClick={() => { setMoreOpen(false); openElementLibrary() }} className="whiteboard-more-item"><LibraryBig className="h-4 w-4" />Biblioteca</button>
-        <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); setLibraryOpen(true) }} className="whiteboard-more-item"><LibraryBig className="h-4 w-4" />Administrar bibliotecas</button>
-        {canManageAccess && <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); setShareOpen(true) }} className="whiteboard-more-item"><Share2 className="h-4 w-4" />Compartir</button>}
+        <button autoFocus={showIntegratedTitle} type="button" role="menuitem" onClick={() => { setMoreOpen(false); setLibraryOpen(true) }} className="whiteboard-more-item"><LibraryBig className="h-4 w-4" />Administrar bibliotecas</button>
+        {canManageAccess && !showShareInToolbar && <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); setShareOpen(true) }} className="whiteboard-more-item"><Share2 className="h-4 w-4" />Compartir</button>}
         <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); setHistoryOpen(true) }} className="whiteboard-more-item"><History className="h-4 w-4" />Historial</button>
         {canEdit && <button type="button" role="menuitem" disabled={whiteboardSaveIsBusy(saveState) || saveState === 'saved'} onClick={() => { setMoreOpen(false); void flushSave('manual') }} className="whiteboard-more-item disabled:opacity-40"><Save className="h-4 w-4" />Guardar ahora</button>}
       </div>
       <div className="grid gap-1 border-t border-slate-100 pt-1">
         {canEdit && <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); importInputRef.current?.click() }} className="whiteboard-more-item"><FileUp className="h-4 w-4" />Importar archivo</button>}
         <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); exportJSON() }} className="whiteboard-more-item"><FileJson className="h-4 w-4" />Exportar editable</button>
-        <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); void exportPNG() }} className="whiteboard-more-item"><FileImage className="h-4 w-4" />Exportar PNG</button>
-        <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); void exportSVG() }} className="whiteboard-more-item"><Download className="h-4 w-4" />Exportar SVG</button>
+        <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); openImageExport() }} className="whiteboard-more-item"><FileImage className="h-4 w-4" />Exportar imagen…</button>
       </div>
     </div>, document.body)}
 

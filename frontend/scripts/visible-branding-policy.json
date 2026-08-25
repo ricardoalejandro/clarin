@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyId": "clarin-whiteboards-visible-branding-v1",
-  "description": "Copia de compilación de la política canónica de la skill; permite verificar el artefacto dentro del contexto Docker aislado del frontend.",
+  "description": "Copia de compilación de la política canónica de la skill; permite el catálogo público sólo mediante la importación validada de Clarin y verifica el artefacto dentro del contexto Docker aislado del frontend.",
   "legalArtifactBasenames": [
     "LICENSE",
     "LICENSE.md",
@@ -21,12 +21,6 @@
       "pattern": "(?<![.a-z0-9_-])excalidraw(?:\\s*plus|\\+)?(?![a-z0-9_-])",
       "flags": "iu",
       "reason": "La marca upstream no forma parte de la interfaz de Pizarras; los tokens de formato .excalidraw y application/vnd.excalidraw se mantienen compatibles."
-    },
-    {
-      "id": "upstream-public-library-browser",
-      "pattern": "(?:explorar|browse)(?:\\s+(?:las|the))?\\s+(?:bibliotecas|libraries)",
-      "flags": "iu",
-      "reason": "El catálogo público upstream está sustituido por bibliotecas internas de la cuenta."
     },
     {
       "id": "upstream-library-publishing",

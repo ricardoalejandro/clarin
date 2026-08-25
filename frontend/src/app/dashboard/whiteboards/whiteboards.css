@@ -10,10 +10,103 @@
 .whiteboard-editor-shell .excalidraw [data-testid="lib-dropdown--remove"],
 .whiteboard-editor-shell .excalidraw .help-icon,
 .whiteboard-editor-shell .excalidraw .HelpDialog,
-.whiteboard-editor-shell .excalidraw .library-menu-browse-button,
 .whiteboard-editor-shell .excalidraw .publish-library,
 .whiteboard-editor-shell .excalidraw a[href^="about:blank"] {
   display: none !important;
+}
+
+.whiteboard-editor-shell .excalidraw [data-testid="toolbar-highlighter"] svg {
+  color: #ca8a04;
+}
+
+.whiteboard-editor-shell .excalidraw [data-testid="toolbar-highlighter"][aria-checked="true"],
+.whiteboard-editor-shell .excalidraw [data-testid="toolbar-highlighter"][data-state="checked"] {
+  background: #fef9c3;
+  color: #854d0e;
+}
+
+/* The fourth stroke option is injected into Excalidraw's own property action.
+   Reusing its native icon keeps geometry and theming stable; only the sample
+   line grows to communicate the new 8 px value. */
+.whiteboard-editor-shell .excalidraw [data-testid="strokeWidth-ultraBold"] svg path {
+  stroke-width: 5 !important;
+}
+
+/* The extended catalog stays inside Excalidraw's own picker. Search and the
+   category strip reuse its tokens, radii and interaction language. */
+.whiteboard-editor-shell .excalidraw .FontPicker__container .QuickSearch__wrapper {
+  display: flex;
+}
+
+.whiteboard-editor-shell .excalidraw .FontPicker__container .clarin-font-category-filters {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 0.25rem;
+  max-width: 100%;
+  padding: 0.25rem 0.5rem 0.5rem;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.whiteboard-editor-shell .excalidraw .clarin-font-category-filter {
+  min-height: 2rem;
+  flex: 0 0 auto;
+  border: 1px solid var(--button-border, var(--color-gray-30));
+  border-radius: var(--border-radius-lg);
+  background: var(--button-bg, var(--color-surface-low));
+  padding: 0 0.625rem;
+  color: var(--button-color, var(--color-on-surface));
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.whiteboard-editor-shell .excalidraw .clarin-font-category-filter:hover {
+  border-color: var(--button-hover-border, var(--color-primary));
+  background: var(--button-hover-bg, var(--color-primary-light));
+}
+
+.whiteboard-editor-shell .excalidraw .clarin-font-category-filter[aria-pressed="true"] {
+  border-color: var(--button-selected-border, var(--color-primary));
+  background: var(--button-selected-bg, var(--color-primary-light));
+  color: var(--color-primary);
+}
+
+.whiteboard-editor-shell .excalidraw .clarin-font-category-filter:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+/* The catalog is rendered only after the preload pass, so every row can use
+   its real family immediately without a hover/scroll loading state. */
+.whiteboard-editor-shell .excalidraw .dropdown-menu.fonts button.dropdown-menu-item .dropdown-menu-item__text {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  font-weight: 400;
+  line-height: 1.25rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.whiteboard-editor-shell .excalidraw [data-testid="font-family-show-fonts"] {
+  position: relative;
+}
+
+.whiteboard-editor-shell .excalidraw [data-testid="font-family-show-fonts"]::after {
+  content: "32";
+  position: absolute;
+  top: 0.12rem;
+  right: 0.12rem;
+  min-width: 0.875rem;
+  border-radius: var(--border-radius-md);
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+  font-size: 0.5rem;
+  font-weight: 800;
+  text-align: center;
+  line-height: 1;
 }
 
 .whiteboard-editor-shell .excalidraw .App-menu_top {
@@ -35,6 +128,68 @@
 
 .whiteboard-editor-shell .whiteboard-integrated-actions {
   pointer-events: auto;
+}
+
+/* The compact action cluster occupies the same top-right corner as an open
+   Excalidraw sidebar. Hide the cluster while either Biblioteca or Comentarios
+   owns that corner so its close control remains the only gesture target. */
+.whiteboard-editor-shell:has(.excalidraw .sidebar) .whiteboard-mobile-actions {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* When the measured editor surface cannot fit Excalidraw's native toolbar and
+   Clarin's action island on one row, keep both rows distinct. The right inset
+   also clears Excalidraw's vertical lock/hand controls on phone layouts. */
+.whiteboard-editor-shell .whiteboard-mobile-actions--stacked {
+  top: 4.5rem !important;
+  right: 4rem !important;
+}
+
+/* Once DefaultSidebar is open its header owns tab navigation. The external
+   launchers yield that role, avoiding two simultaneous Biblioteca/Comentarios
+   controls while keeping one-click switching inside the panel. */
+.whiteboard-editor-shell:has(.excalidraw .sidebar) .whiteboard-sidebar-actions {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Excalidraw 0.18.1 always injects Search then Library before host tabs.
+   Replace only its unlabeled Library tab with Clarin's accessible 44 px tab. */
+.whiteboard-editor-shell :is(.clarin-whiteboard-comments-sidebar, .clarin-whiteboard-library-sidebar) .sidebar-triggers > .sidebar-tab-trigger:nth-child(2):not([data-whiteboard-sidebar-internal]) {
+  display: none;
+}
+
+.whiteboard-editor-shell :is(.clarin-whiteboard-comments-sidebar, .clarin-whiteboard-library-sidebar) .sidebar-triggers .sidebar-tab-trigger {
+  width: 2.75rem;
+  height: 2.75rem;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+}
+
+/* Suppress the explicit host trigger that replaces Excalidraw's fallback.
+   DefaultSidebar.Trigger intentionally owns the official tunnel but 0.18.1
+   applies `style` to its visual child, not to the wrapping checkbox label. */
+.whiteboard-editor-shell .excalidraw .sidebar-trigger__label-element:has(> .default-sidebar-trigger[style*="display: none"]) {
+  display: none !important;
+}
+
+.whiteboard-editor-shell .excalidraw .library-menu-control-buttons:has(.library-menu-browse-button) {
+  flex-wrap: wrap;
+}
+
+.whiteboard-editor-shell .excalidraw .library-menu-control-buttons:has(.library-menu-browse-button)::after {
+  content: "Abre el sitio oficial, que puede usar analítica externa. Clarin validará el archivo antes de guardarlo.";
+  flex: 1 0 100%;
+  color: #64748b;
+  font-size: 0.6875rem;
+  font-weight: 550;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.whiteboard-editor-shell .excalidraw .library-menu-browse-button {
+  min-height: 2.75rem;
 }
 
 .whiteboard-editor-shell .whiteboard-integrated-action {
@@ -66,6 +221,19 @@
   opacity: 0.35;
 }
 
+.whiteboard-editor-shell .whiteboard-sidebar-action[aria-pressed="true"] {
+  border-color: #a7f3d0;
+  background: #ecfdf5;
+  color: #047857;
+  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.12);
+}
+
+.whiteboard-editor-shell .whiteboard-sidebar-action[aria-pressed="true"]:hover:not(:disabled) {
+  border-color: #6ee7b7;
+  background: #d1fae5;
+  color: #065f46;
+}
+
 .whiteboard-editor-shell .whiteboard-integrated-action--primary {
   border-color: #0f172a;
   background: #0f172a;
@@ -77,13 +245,181 @@
   color: #fff;
 }
 
-.whiteboard-editor-shell[data-whiteboard-layout="wide"] .excalidraw .default-sidebar-trigger .sidebar-trigger__label {
+.whiteboard-editor-shell .whiteboard-action-bar {
+  display: inline-flex;
+  min-height: 3.125rem;
+  align-items: center;
+  gap: 0.125rem;
+  padding: 0.1875rem;
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  border-radius: 0.9375rem;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08), 0 1px 2px rgba(15, 23, 42, 0.05);
+  backdrop-filter: blur(10px);
+}
+
+.whiteboard-editor-shell .whiteboard-action-bar__control {
+  display: inline-flex;
+  width: 2.75rem;
+  height: 2.75rem;
+  min-width: 2.75rem;
+  flex: 0 0 2.75rem;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 0.75rem;
+  background: transparent;
+  color: #64748b;
+  transition: color 160ms ease-out, background-color 160ms ease-out, box-shadow 160ms ease-out;
+}
+
+.whiteboard-editor-shell button.whiteboard-action-bar__control:hover:not(:disabled) {
+  background: #f1f5f9;
+  color: #334155;
+}
+
+.whiteboard-editor-shell button.whiteboard-action-bar__control:focus-visible {
+  outline: 2px solid #10b981;
+  outline-offset: -2px;
+}
+
+.whiteboard-editor-shell button.whiteboard-action-bar__control:disabled {
+  cursor: default;
+  opacity: 0.36;
+}
+
+.whiteboard-editor-shell .whiteboard-library-action[aria-pressed="true"] {
+  background: #ecfdf5;
+  color: #047857;
+  box-shadow: inset 0 0 0 1px #a7f3d0;
+}
+
+.whiteboard-editor-shell .whiteboard-save-status--saved {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.whiteboard-editor-shell .whiteboard-save-status--pending {
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.whiteboard-editor-shell :is(.whiteboard-save-status--preparing-assets, .whiteboard-save-status--uploading-assets, .whiteboard-save-status--saving) {
+  background: #f0f9ff;
+  color: #0369a1;
+}
+
+.whiteboard-editor-shell .whiteboard-save-status--offline {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.whiteboard-editor-shell :is(.whiteboard-save-status--error, .whiteboard-save-status--conflict) {
+  background: #fff1f2;
+  color: #be123c;
+}
+
+.whiteboard-editor-shell .whiteboard-presentation-action {
+  position: relative;
+}
+
+.whiteboard-editor-shell .whiteboard-presentation-action--active {
+  background: #ecfdf5;
+  color: #047857;
+  box-shadow: inset 0 0 0 1px #a7f3d0;
+}
+
+.whiteboard-editor-shell .whiteboard-presentation-action__count {
+  position: absolute;
+  right: 0.2rem;
+  bottom: 0.2rem;
+  display: inline-flex;
+  min-width: 1rem;
+  height: 1rem;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #fff;
+  border-radius: 999px;
+  background: #047857;
+  color: #fff;
+  font-size: 0.5625rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+/* Clarin renders the consent-aware localized follow status. The 0.18.1
+   engine badge is hidden to avoid a duplicate English control. */
+.whiteboard-editor-shell .excalidraw .follow-mode {
   display: none;
 }
 
-.whiteboard-editor-shell[data-whiteboard-layout="compact"] .excalidraw .default-sidebar-trigger,
-.whiteboard-editor-shell[data-whiteboard-layout="mobile"] .excalidraw .default-sidebar-trigger {
-  display: none !important;
+.whiteboard-editor-shell .whiteboard-presentation-invitation {
+  position: absolute;
+  z-index: 70;
+  top: 4.25rem;
+  left: 50%;
+  display: flex;
+  width: min(44rem, calc(100% - 1.5rem));
+  min-height: 4.5rem;
+  translate: -50% 0;
+  align-items: center;
+  gap: 0.75rem;
+  border: 1px solid #a7f3d0;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.98);
+  padding: 0.65rem;
+  box-shadow: 0 14px 35px rgba(15, 23, 42, 0.16);
+  pointer-events: auto;
+}
+
+.whiteboard-editor-shell .whiteboard-presentation-invitation__icon {
+  display: inline-flex;
+  width: 2.75rem;
+  height: 2.75rem;
+  flex: 0 0 2.75rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.75rem;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.whiteboard-editor-shell .whiteboard-presentation-following {
+  position: absolute;
+  z-index: 70;
+  bottom: 0.75rem;
+  left: 50%;
+  display: flex;
+  max-width: min(26rem, calc(100% - 1.5rem));
+  min-height: 2.75rem;
+  translate: -50% 0;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid #a7f3d0;
+  border-radius: 0.875rem;
+  background: rgba(255, 255, 255, 0.97);
+  padding: 0.2rem 0.25rem 0.2rem 0.75rem;
+  color: #334155;
+  font-size: 0.75rem;
+  font-weight: 650;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14);
+  pointer-events: auto;
+}
+
+.whiteboard-editor-shell:has(.whiteboard-presentation-invitation) .whiteboard-canvas-notice {
+  top: 9.25rem;
+}
+
+/* Once a sidebar owns the right edge, its internal Biblioteca tab and close
+   button replace the external launcher. The remaining wide actions stay put. */
+.whiteboard-editor-shell:has(.excalidraw .sidebar) .whiteboard-integrated-actions [data-whiteboard-action="library"] {
+  display: none;
+}
+
+.whiteboard-editor-shell .excalidraw .default-sidebar-trigger,
+.whiteboard-editor-shell .excalidraw .sidebar-trigger__label-element:has(.default-sidebar-trigger) {
+  min-width: 2.75rem;
+  min-height: 2.75rem;
 }
 
 .whiteboard-editor-shell .whiteboard-canvas-notice {
@@ -122,6 +458,21 @@
 @media (max-width: 639px) {
   .whiteboard-editor-shell .whiteboard-canvas-notice {
     top: 3.75rem;
+  }
+
+  .whiteboard-editor-shell .whiteboard-presentation-invitation {
+    top: 3.75rem;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .whiteboard-editor-shell .whiteboard-presentation-invitation > div:last-child {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .whiteboard-editor-shell:has(.whiteboard-presentation-invitation) .whiteboard-canvas-notice {
+    top: 11.5rem;
   }
 }
 

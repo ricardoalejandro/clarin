@@ -472,6 +472,27 @@ func Migrate(db *pgxpool.Pool) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_programs_account ON programs(account_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_programs_status ON programs(status)`,
+		`ALTER TABLE programs ADD COLUMN IF NOT EXISTS health_view_columns TEXT[] NOT NULL DEFAULT ARRAY['health','attendance','signals']::TEXT[]`,
+		`ALTER TABLE programs ALTER COLUMN health_view_columns SET DEFAULT ARRAY['health','attendance','signals']::TEXT[]`,
+		`UPDATE programs
+			 SET health_view_columns = ARRAY['health','attendance','signals']::TEXT[]
+			 WHERE health_view_columns IS NULL
+			    OR NOT (health_view_columns <@ ARRAY['health','attendance','signals','enrolled_at','tenure']::TEXT[])`,
+		`ALTER TABLE programs ALTER COLUMN health_view_columns SET NOT NULL`,
+		`DO $program_health_view_columns$
+			BEGIN
+				IF NOT EXISTS (
+					SELECT 1
+					FROM pg_constraint
+					WHERE conname = 'programs_health_view_columns_valid'
+					  AND conrelid = 'programs'::regclass
+				) THEN
+					ALTER TABLE programs
+						ADD CONSTRAINT programs_health_view_columns_valid
+						CHECK (health_view_columns <@ ARRAY['health','attendance','signals','enrolled_at','tenure']::TEXT[]);
+				END IF;
+			END
+			$program_health_view_columns$`,
 
 		// Program Participants
 		`CREATE TABLE IF NOT EXISTS program_participants (
@@ -821,6 +842,7 @@ func Migrate(db *pgxpool.Pool) error {
 
 		// Performance indexes for chat listing
 		`CREATE INDEX IF NOT EXISTS idx_chats_account_lastmsg ON chats(account_id, last_message_at DESC NULLS LAST) WHERE jid NOT LIKE '%@g.us' AND jid NOT LIKE '%@newsletter' AND jid NOT LIKE '%@broadcast' AND jid NOT LIKE '%@lid'`,
+		`CREATE INDEX IF NOT EXISTS idx_chats_account_lastmsg_direct ON chats(account_id, last_message_at DESC NULLS LAST) WHERE jid NOT LIKE '%@g.us' AND jid NOT LIKE '%@newsletter' AND jid NOT LIKE '%@broadcast'`,
 		`CREATE INDEX IF NOT EXISTS idx_chats_device_id ON chats(device_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_chats_account_contact ON chats(account_id, contact_id) WHERE contact_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_chat_timestamp ON messages(chat_id, timestamp DESC, id DESC)`,

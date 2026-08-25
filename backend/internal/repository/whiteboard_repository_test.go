@@ -14,28 +14,46 @@ import (
 func TestWhiteboardAccessLevelsAreCumulative(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		level                         string
-		manage                        bool
-		view, edit, remove, manageACL bool
+		level                                  string
+		manage                                 bool
+		view, comment, edit, remove, manageACL bool
 	}{
 		{level: domain.WhiteboardAccessNone},
 		{level: domain.WhiteboardAccessView, view: true},
-		{level: domain.WhiteboardAccessEdit, view: true, edit: true},
-		{level: domain.WhiteboardAccessManage, manage: true, view: true, edit: true, remove: true, manageACL: true},
+		{level: domain.WhiteboardAccessComment, view: true, comment: true},
+		{level: domain.WhiteboardAccessEdit, view: true, comment: true, edit: true},
+		{level: domain.WhiteboardAccessManage, manage: true, view: true, comment: true, edit: true, remove: true, manageACL: true},
 	}
 	for _, test := range tests {
 		access := BuildWhiteboardEffectiveAccess(test.level, test.manage, "test")
-		if access.CanView != test.view || access.CanEdit != test.edit || access.CanDelete != test.remove || access.CanManageAccess != test.manageACL {
+		if access.CanView != test.view || access.CanComment != test.comment || access.CanEdit != test.edit || access.CanDelete != test.remove || access.CanManageAccess != test.manageACL {
 			t.Fatalf("unexpected capabilities for %s: %#v", test.level, access)
 		}
 	}
 	edit := BuildWhiteboardEffectiveAccess(domain.WhiteboardAccessEdit, false, "test")
-	if !WhiteboardAccessAllows(edit, domain.WhiteboardAccessView) || !WhiteboardAccessAllows(edit, domain.WhiteboardAccessEdit) || WhiteboardAccessAllows(edit, domain.WhiteboardAccessManage) {
+	if !WhiteboardAccessAllows(edit, domain.WhiteboardAccessView) || !WhiteboardAccessAllows(edit, domain.WhiteboardAccessComment) || !WhiteboardAccessAllows(edit, domain.WhiteboardAccessEdit) || WhiteboardAccessAllows(edit, domain.WhiteboardAccessManage) {
 		t.Fatalf("unexpected edit ordering: %#v", edit)
+	}
+	comment := BuildWhiteboardEffectiveAccess(domain.WhiteboardAccessComment, false, "test")
+	if !WhiteboardAccessAllows(comment, domain.WhiteboardAccessView) || !comment.CanComment || comment.CanEdit || WhiteboardAccessAllows(comment, domain.WhiteboardAccessEdit) {
+		t.Fatalf("unexpected comment ordering: %#v", comment)
 	}
 	invalid := BuildWhiteboardEffectiveAccess("full", true, "legacy")
 	if invalid.Level != domain.WhiteboardAccessNone || invalid.CanView {
 		t.Fatalf("legacy task access leaked into whiteboards: %#v", invalid)
+	}
+}
+
+func TestWhiteboardActiveAccessExcludesArchivedWithoutChangingHistoricalGate(t *testing.T) {
+	t.Parallel()
+	historical := strings.Join(strings.Fields(strings.ToLower(whiteboardEffectiveAccessQuery)), " ")
+	active := strings.Join(strings.Fields(strings.ToLower(whiteboardActiveEffectiveAccessQuery)), " ")
+	if strings.Contains(historical, "board.archived_at is null") {
+		t.Fatalf("historical RequireAccess query unexpectedly excludes archived boards: %q", historical)
+	}
+	if !strings.Contains(active, "board.account_id=$1") || !strings.Contains(active, "board.id=$3") ||
+		!strings.Contains(active, "board.archived_at is null") {
+		t.Fatalf("active access query lost account/board/archive scope: %q", active)
 	}
 }
 

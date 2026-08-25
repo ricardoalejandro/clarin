@@ -31,6 +31,7 @@ type reactionDBStub struct {
 	row       pgx.Row
 	execTag   pgconn.CommandTag
 	execErr   error
+	queryErr  error
 	querySQL  string
 	queryArgs []any
 	execSQL   string
@@ -43,8 +44,10 @@ func (db *reactionDBStub) QueryRow(_ context.Context, sql string, args ...any) p
 	return db.row
 }
 
-func (db *reactionDBStub) Query(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
-	return nil, nil
+func (db *reactionDBStub) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+	db.querySQL = sql
+	db.queryArgs = args
+	return nil, db.queryErr
 }
 
 func (db *reactionDBStub) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
@@ -135,6 +138,49 @@ func TestReactionRepositoryDeleteReportsSemanticNoop(t *testing.T) {
 	}
 	if changed {
 		t.Fatal("Delete() changed = true when no row was removed")
+	}
+}
+
+func TestReactionRepositoryGetByChatIDIsAccountScoped(t *testing.T) {
+	t.Parallel()
+
+	wantErr := context.Canceled
+	db := &reactionDBStub{queryErr: wantErr}
+	repo := &ReactionRepository{db: db}
+	accountID := uuid.New()
+	chatID := uuid.New()
+
+	_, err := repo.GetByChatID(context.Background(), accountID, chatID)
+	if err != wantErr {
+		t.Fatalf("GetByChatID() error = %v, want %v", err, wantErr)
+	}
+	if !strings.Contains(db.querySQL, "WHERE account_id = $1 AND chat_id = $2") {
+		t.Fatalf("GetByChatID() query is not account scoped: %s", db.querySQL)
+	}
+	if len(db.queryArgs) != 2 || db.queryArgs[0] != accountID || db.queryArgs[1] != chatID {
+		t.Fatalf("GetByChatID() args = %#v, want accountID/chatID", db.queryArgs)
+	}
+}
+
+func TestReactionRepositoryGetByChatMessageIDsIsBoundedAndAccountScoped(t *testing.T) {
+	t.Parallel()
+
+	wantErr := context.Canceled
+	db := &reactionDBStub{queryErr: wantErr}
+	repo := &ReactionRepository{db: db}
+	accountID := uuid.New()
+	chatID := uuid.New()
+	messageIDs := []string{"message-1", "message-2"}
+
+	_, err := repo.GetByChatMessageIDs(context.Background(), accountID, chatID, messageIDs)
+	if err != wantErr {
+		t.Fatalf("GetByChatMessageIDs() error = %v, want %v", err, wantErr)
+	}
+	if !strings.Contains(db.querySQL, "account_id = $1 AND chat_id = $2 AND target_message_id = ANY($3)") {
+		t.Fatalf("GetByChatMessageIDs() query is not bounded/account scoped: %s", db.querySQL)
+	}
+	if len(db.queryArgs) != 3 || db.queryArgs[0] != accountID || db.queryArgs[1] != chatID {
+		t.Fatalf("GetByChatMessageIDs() args = %#v, want accountID/chatID/messageIDs", db.queryArgs)
 	}
 }
 

@@ -18,7 +18,7 @@ interface Props {
   done: boolean
   editable: boolean
   selectionMode: boolean
-  onOpen: () => void
+  onOpen: (trigger: HTMLButtonElement) => void
   onSelect: (shift: boolean) => void
 }
 
@@ -31,7 +31,7 @@ export default function TaskListTitleButton({ title, metadata, done, editable, s
       onSelect(event.shiftKey)
       return
     }
-    onOpen()
+    onOpen(event.currentTarget)
   }
 
   return <button

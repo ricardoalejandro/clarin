@@ -14,7 +14,8 @@ import ContactPanel from '@/components/chat/ContactPanel'
 import OwnStatusesCenter from '@/components/chat/OwnStatusesCenter'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { Chat, Device, Message } from '@/types/chat'
-import { getChatDisplayName, formatPhone } from '@/utils/chat'
+import { getChatDisplayName, formatPhone, isPendingChatIdentity, reconcileChatIdentity, type ChatIdentityReconciliation } from '@/utils/chat'
+import { announceChatConversationActive, useChatMobileChrome } from '@/components/chat/ChatMobileChromeContext'
 
 const LEFT_PANEL_DEFAULT = 360
 const LEFT_PANEL_MIN = 320
@@ -84,6 +85,7 @@ const messageTimestampValue = (value?: string) => {
 }
 
 export default function ChatsPage() {
+  const { setConversationActive } = useChatMobileChrome()
   const pageRef = useRef<HTMLDivElement>(null)
   const [chats, setChats] = useState<Chat[]>([])
   const [devices, setDevices] = useState<Device[]>([])
@@ -165,6 +167,16 @@ export default function ChatsPage() {
 
   const inlineDetailsWidth = leftPanelWidth + CHAT_PANEL_MIN + rightPanelWidth + WIDE_PANEL_SEPARATORS_WIDTH
   const layoutMode: LayoutMode = containerWidth < COMPACT_WORKSPACE_MAX ? 'compact' : containerWidth >= inlineDetailsWidth ? 'wide' : 'medium'
+
+  useEffect(() => {
+    const active = Boolean(selectedChat) && compactSurface !== 'list'
+    setConversationActive(active)
+    announceChatConversationActive(active)
+    return () => {
+      setConversationActive(false)
+      announceChatConversationActive(false)
+    }
+  }, [compactSurface, selectedChat, setConversationActive])
   const chatListWidth = layoutMode === 'compact' ? containerWidth : leftPanelWidth
   const showExpandedToolbar = chatListWidth >= 400
   const activeMobileFilterCount = Number(filterUnread) + Number(filterHasReaction)
@@ -602,6 +614,14 @@ export default function ChatsPage() {
     }
   }, [chats, fetchChats])
 
+  const reconcileChatUnread = useCallback((chatId: string, unreadCount: number) => {
+    setChats(current => {
+      const patched = current.map(chat => chat.id === chatId ? { ...chat, unread_count: unreadCount } : chat)
+      return filterUnread && unreadCount === 0 ? patched.filter(chat => chat.id !== chatId) : patched
+    })
+    setSelectedChat(current => current?.id === chatId ? { ...current, unread_count: unreadCount } : current)
+  }, [filterUnread])
+
   const applyMessageToChatList = useCallback((rawPayload: unknown) => {
     const payload = (rawPayload || {}) as {
       chat_id?: string
@@ -669,14 +689,38 @@ export default function ChatsPage() {
       if (eventType === 'new_message' || eventType === 'message_sent') {
         applyMessageToChatList(msg.data || msg.message)
         scheduleChatReconciliation()
-      } else if (eventType === 'chat_update' || eventType === 'contact_update') {
+      } else if (eventType === 'chat_identity_reconciled') {
+        const reconciliation = msg.data as ChatIdentityReconciliation
+        if (reconciliation?.source_chat_id && reconciliation?.canonical_chat?.id) {
+          setChats(current => reconcileChatIdentity(current, reconciliation))
+          setSelectedChat(current => {
+            if (!current) return current
+            if (current.id === reconciliation.source_chat_id || current.id === reconciliation.canonical_chat.id) {
+              return reconciliation.canonical_chat
+            }
+            return current
+          })
+          setSelectedChats(current => {
+            if (!current.has(reconciliation.source_chat_id)) return current
+            const next = new Set(current)
+            next.delete(reconciliation.source_chat_id)
+            next.add(reconciliation.canonical_chat.id)
+            return next
+          })
+          scheduleChatReconciliation()
+        }
+      } else if (eventType === 'chat_update') {
+        const payload = (msg.data || {}) as { chat_id?: string; unread_count?: number }
+        if (payload.chat_id && typeof payload.unread_count === 'number') reconcileChatUnread(payload.chat_id, payload.unread_count)
+        scheduleChatReconciliation()
+      } else if (eventType === 'contact_update') {
         scheduleChatReconciliation()
       } else if (eventType === 'device_status') {
         fetchDevices()
       }
     })
     return () => unsubscribe()
-  }, [applyMessageToChatList, fetchDevices, scheduleChatReconciliation])
+  }, [applyMessageToChatList, fetchDevices, reconcileChatUnread, scheduleChatReconciliation])
 
   const panelBounds = useCallback((panel: ResizePanel) => {
     const width = pageRef.current?.getBoundingClientRect().width || containerWidth
@@ -1246,6 +1290,12 @@ export default function ChatsPage() {
                                         Bloqueado
                                     </span>
                                  )}
+                                 {isPendingChatIdentity(chat) && (
+                                    <span title="WhatsApp aún no informó el número de este contacto. La conversación sigue disponible." className="inline-flex items-center gap-0.5 rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                                        <AlertTriangle className="h-3 w-3" aria-hidden />
+                                        Identidad pendiente
+                                    </span>
+                                 )}
                             </div>
                         </div>
 
@@ -1341,6 +1391,7 @@ export default function ChatsPage() {
 	                contactInfoOpen={showContactInfo}
 	                onRequestDelete={() => requestSingleChatDeletion(selectedChat)}
 	                isActive={layoutMode !== 'compact' || compactSurface === 'conversation'}
+	                onRead={reconcileChatUnread}
 	            />
         ) : (
             <div className="flex flex-1 flex-col items-center justify-center bg-[radial-gradient(circle_at_center,rgba(16,185,129,0.08)_1px,transparent_1px)] bg-[length:22px_22px] p-8 text-center text-slate-400">

@@ -1,3 +1,5 @@
+export type ProgramHealthViewColumn = 'health' | 'attendance' | 'signals' | 'enrolled_at' | 'tenure';
+
 export interface Program {
   id: string;
   account_id: string;
@@ -9,6 +11,7 @@ export interface Program {
   created_by: string;
   created_at: string;
   updated_at: string;
+  health_view_columns?: ProgramHealthViewColumn[];
   participant_count?: number;
   session_count?: number;
   // Schedule fields
@@ -269,6 +272,7 @@ export interface ProgramHealthParticipant {
   avatar_url?: string | null;
   avatar_revision?: number;
   status: 'active' | 'dropped' | 'completed';
+  enrolled_at?: string;
   health: 'healthy' | 'watch' | 'critical';
   attendance_rate: number;
   present: number;
@@ -318,6 +322,7 @@ export interface ProgramAttendanceStatsResponse {
 
 export interface ProgramHealthSummary {
   program_id: string;
+  as_of_date?: string;
   attendance_goal_percent: number;
   transfer_goal_percent: number;
   participant_count: number;

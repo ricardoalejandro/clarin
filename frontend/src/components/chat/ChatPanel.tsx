@@ -28,7 +28,23 @@ import MobileComposerAccessory, { MobileComposerAccessoryTab } from './MobileCom
 import { useChatMobileChrome } from './ChatMobileChromeContext'
 import ContactSelector, { SelectedPerson } from '../ContactSelector'
 import { compressImageStandard } from '@/utils/imageCompression'
-import { applyReactionMutation, dedupeReactions, hasOwnReaction, SELF_REACTION_ACTOR } from '@/utils/chatReactions'
+import {
+  applyReactionMutation,
+  applyReactionToPendingBaseline,
+  enqueueReactionIntent,
+  hasOwnReaction,
+  markReactionRealtimeConfirmation,
+  mergeCanonicalReactionSnapshot,
+  normalizeAuthoritativeMessageReactions,
+  reconcilePendingReactionBaseline,
+  settleReactionIntent,
+  shouldApplyReactionEvent,
+  updateMessageReactionProjection,
+  type PendingReactionOperation,
+  type ReactionIntentQueue,
+  type ReactionMutation,
+} from '@/utils/chatReactions'
+import { getMessageReactionAvailability } from '@/utils/chatCapabilities'
 import { ChatMediaType, validateChatAttachment } from '@/utils/chatAttachments'
 import { chatMediaIdentity } from '@/utils/chatMediaUrl'
 import { useContainerWidth } from '../responsive/useContainerWidth'
@@ -109,6 +125,10 @@ function findCompatibleOptimisticIndex(messages: Message[], actualMessage: Messa
   }).index
 }
 
+function reactionQueueKey(chatId: string, messageId: string): string {
+  return `${chatId}:${messageId}`
+}
+
 function reconcileOptimisticMessage(messages: Message[], tempId: string, realMessage: Message): Message[] {
   const optimisticMessage = messages.find(message => message.id === tempId)
   const normalizedMessage: Message = {
@@ -135,14 +155,27 @@ function reconcileOptimisticMessage(messages: Message[], tempId: string, realMes
   return [...messages, normalizedMessage]
 }
 
-function mergeFetchedMessages(current: Message[], fetched: Message[]): Message[] {
+function mergeFetchedMessages(
+  current: Message[],
+  fetched: Message[],
+  hasPendingOwnReaction: (messageId: string) => boolean = () => false,
+): Message[] {
   const merged = [...fetched]
   for (const message of current) {
     const index = merged.findIndex(candidate => hasSameMessageIdentity(candidate, message))
     if (index >= 0) {
       // Preserve live-only state (optimistic status, reactions, local media
       // preview) while accepting any fields newly returned by the server.
-      merged[index] = { ...merged[index], ...message }
+      const canonical = merged[index]
+      merged[index] = {
+        ...canonical,
+        ...message,
+        reactions: mergeCanonicalReactionSnapshot(
+          message.reactions,
+          canonical.reactions,
+          hasPendingOwnReaction(message.message_id),
+        ),
+      }
     } else {
       merged.push(message)
     }
@@ -167,30 +200,47 @@ interface ChatPanelProps {
   onClose?: () => void
   className?: string
   readOnly?: boolean
+  readOnlyReason?: string
   onContactInfoToggle?: (show: boolean) => void
   contactInfoOpen?: boolean
   onRequestDelete?: () => void
   isActive?: boolean
+  onRead?: (chatId: string, unreadCount: number) => void
 }
 
-export default function ChatPanel({ chatId, deviceId, device, initialChat, onClose, className = '', readOnly = false, onContactInfoToggle, contactInfoOpen, onRequestDelete, isActive = true }: ChatPanelProps) {
+type DeviceValidationState = 'validating' | 'ready' | 'error'
+
+export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, initialChat, onClose, className = '', readOnly = false, readOnlyReason: explicitReadOnlyReason, onContactInfoToggle, contactInfoOpen, onRequestDelete, isActive = true, onRead }: ChatPanelProps) {
   const { ref: panelRef, width: panelWidth } = useContainerWidth<HTMLDivElement>()
   const { setComposerAccessoryOpen } = useChatMobileChrome()
   const compactActions = panelWidth > 0 && panelWidth < 640
   const operationalPortal = useOperationalOverlayPortal()
-  const deviceProvider = device?.provider || 'whatsapp_web'
-  const deviceUnavailable = Boolean(device && (device.status !== 'connected' || deviceProvider !== 'whatsapp_web'))
-  const effectiveReadOnly = readOnly || !deviceId || deviceUnavailable
+  const [canonicalDevice, setCanonicalDevice] = useState<Device | null>(device || null)
+  const [deviceValidationState, setDeviceValidationState] = useState<DeviceValidationState>(chatId ? 'validating' : 'ready')
+  const [validatedDeviceChatId, setValidatedDeviceChatId] = useState<string | null>(null)
+  const activeDeviceValidationState: DeviceValidationState = chatId && validatedDeviceChatId !== chatId
+    ? 'validating'
+    : deviceValidationState
+  const deviceId = activeDeviceValidationState === 'ready' ? canonicalDevice?.id : undefined
+  const deviceProvider = canonicalDevice?.provider || 'whatsapp_web'
+  const deviceUnavailable = Boolean(canonicalDevice && (canonicalDevice.status !== 'connected' || deviceProvider !== 'whatsapp_web'))
+  const effectiveReadOnly = readOnly || activeDeviceValidationState !== 'ready' || !deviceId || deviceUnavailable
   const canSendStickers = !effectiveReadOnly && (
-    device ? device.runtime_capabilities?.can_send_sticker === true : true
+    canonicalDevice?.runtime_capabilities?.can_send_sticker === true
   )
-  const readOnlyReason = !deviceId
-    ? 'Esta conversación no tiene un dispositivo asociado.'
-    : deviceProvider === 'whatsapp_cloud_api'
-      ? 'Este chat usa Cloud API y no admite acciones manuales desde esta vista.'
-      : device && device.status !== 'connected'
-        ? 'El dispositivo de WhatsApp no está conectado.'
-        : 'El dispositivo no está disponible para enviar mensajes.'
+  const readOnlyReason = readOnly
+    ? explicitReadOnlyReason || 'Esta conversación está disponible en modo de solo lectura.'
+    : activeDeviceValidationState === 'validating'
+      ? 'Validando canal de WhatsApp…'
+      : activeDeviceValidationState === 'error'
+        ? 'No se pudo validar el canal de WhatsApp. Vuelve a abrir el chat para reintentar.'
+        : !deviceId
+          ? 'Esta conversación no tiene un dispositivo asociado.'
+          : deviceProvider === 'whatsapp_cloud_api'
+            ? 'Este chat usa Cloud API y no admite acciones manuales desde esta vista.'
+            : canonicalDevice && canonicalDevice.status !== 'connected'
+              ? 'El dispositivo de WhatsApp no está conectado.'
+              : 'El dispositivo no está disponible para enviar mensajes.'
   const [chat, setChat] = useState<Chat | null>(initialChat || null)
   const [messages, setMessages] = useState<Message[]>([])
   const messagesCacheRef = useRef<Map<string, CachedChatMessages>>(new Map())
@@ -254,12 +304,14 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
   const [quoteNavigationLoading, setQuoteNavigationLoading] = useState(false)
   const [showHeaderMenu, setShowHeaderMenu] = useState(false)
   const headerMenuTriggerRef = useRef<HTMLButtonElement>(null)
+  useOperationalOverlayRegistration(showHeaderMenu, 'chat-header-menu')
 
   // Compact message selection
   const [selectedMessage, setSelectedMessage] = useState<Message | null>(null)
   const selectedMessageRef = useRef<Message | null>(null)
   const selectionHistoryActiveRef = useRef(false)
   const [showSelectionMenu, setShowSelectionMenu] = useState(false)
+  const selectionMenuTriggerRef = useRef<HTMLButtonElement>(null)
   useOperationalOverlayRegistration(showSelectionMenu, 'chat-selection-menu')
   const [messageActionPending, setMessageActionPending] = useState<'delete' | null>(null)
   const [infoMessage, setInfoMessage] = useState<Message | null>(null)
@@ -307,6 +359,8 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
   const quoteContextRequestRef = useRef<AbortController | null>(null)
   const chatDetailsRequestRef = useRef<AbortController | null>(null)
   const chatDetailsRequestSequenceRef = useRef(0)
+  const deviceRefreshRequestRef = useRef<AbortController | null>(null)
+  const deviceRefreshRequestSequenceRef = useRef(0)
   const searchSessionRef = useRef(0)
   const searchRequestSequenceRef = useRef(0)
   const searchOpenRef = useRef(false)
@@ -318,11 +372,85 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
   const attachmentDraftRef = useRef<AttachmentDraft | null>(attachmentDraft)
   const attachmentSendingRef = useRef(false)
   const mediaRetryRef = useRef<Map<string, RetryableMedia>>(new Map())
-  const reactionRequestSeqRef = useRef<Map<string, number>>(new Map())
+  const reactionOperationSequenceRef = useRef(0)
+  const reactionQueuesRef = useRef<Map<string, ReactionIntentQueue>>(new Map())
+  const reactionEventTimestampsRef = useRef<Map<string, string>>(new Map())
   const savedStickersRef = useRef<string[]>([])
   const savedStickersRequestRef = useRef<AbortController | null>(null)
   const savingStickerUrlsRef = useRef<Set<string>>(new Set())
   const historySyncTimeoutRef = useRef<number | null>(null)
+  const isActiveRef = useRef(isActive)
+  const onReadRef = useRef(onRead)
+  const readThroughRef = useRef(new Map<string, string>())
+  const readInFlightRef = useRef(new Map<string, string>())
+  isActiveRef.current = isActive
+  onReadRef.current = onRead
+
+  const markDisplayedIncomingRead = useCallback(async (targetChatId: string, displayedMessages: Message[]) => {
+    if (!isActiveRef.current || document.visibilityState === 'hidden') return
+    const incoming = displayedMessages.filter(message => !message.is_from_me && !message.is_revoked && !message.id.startsWith('optimistic-'))
+    const latest = incoming.at(-1)
+    if (!latest) return
+    const through = latest.id || latest.message_id
+    if (!through || readThroughRef.current.get(targetChatId) === through || readInFlightRef.current.get(targetChatId) === through) return
+    readInFlightRef.current.set(targetChatId, through)
+    try {
+      const token = localStorage.getItem('token')
+      const response = await fetch(`/api/chats/${targetChatId}/read`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ through_message_id: through }),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok || !data.success || activeChatIdRef.current !== targetChatId) return
+      readThroughRef.current.set(targetChatId, through)
+      const unreadCount = typeof data.unread_count === 'number' ? data.unread_count : 0
+      setChat(current => current?.id === targetChatId ? { ...current, unread_count: unreadCount } : current)
+      updateMessages(current => current.map(message => {
+        if (message.is_from_me || message.is_revoked) return message
+        const isBeforeWatermark = new Date(message.timestamp).getTime() < new Date(latest.timestamp).getTime()
+          || (message.timestamp === latest.timestamp && message.id <= latest.id)
+        return isBeforeWatermark ? { ...message, is_read: true } : message
+      }), targetChatId)
+      onReadRef.current?.(targetChatId, unreadCount)
+    } finally {
+      if (readInFlightRef.current.get(targetChatId) === through) readInFlightRef.current.delete(targetChatId)
+    }
+  }, [updateMessages])
+
+  const reconcileReactionSnapshotBaseline = useCallback((
+    targetChatId: string,
+    targetMessageId: string,
+    canonicalReactions: Message['reactions'],
+  ) => {
+    const queueKey = reactionQueueKey(targetChatId, targetMessageId)
+    const current = reactionQueuesRef.current.get(queueKey)
+    if (!current?.inFlight || canonicalReactions === undefined) return
+    reactionQueuesRef.current.set(
+      queueKey,
+      reconcilePendingReactionBaseline(current, canonicalReactions),
+    )
+  }, [])
+
+  const reconcileAuthoritativeMessages = useCallback((
+    targetChatId: string,
+    incoming: Message[],
+    localProjection: Message[] = [],
+  ): Message[] => {
+    const cached = messagesCacheRef.current.get(targetChatId)?.messages || []
+    return incoming.map(normalizeAuthoritativeMessageReactions).map(canonical => {
+      reconcileReactionSnapshotBaseline(targetChatId, canonical.message_id, canonical.reactions)
+      const queue = reactionQueuesRef.current.get(reactionQueueKey(targetChatId, canonical.message_id))
+      if (!queue?.inFlight) return canonical
+      const local = localProjection.find(message => hasSameMessageIdentity(message, canonical))
+        || cached.find(message => hasSameMessageIdentity(message, canonical))
+      if (!local) return canonical
+      return {
+        ...canonical,
+        reactions: mergeCanonicalReactionSnapshot(local.reactions, canonical.reactions, true),
+      }
+    })
+  }, [reconcileReactionSnapshotBaseline])
 
   const removeAccessoryHistoryMarker = useCallback((consumeHistory: boolean) => {
     if (typeof window === 'undefined' || !accessoryHistoryActiveRef.current) return
@@ -578,6 +706,17 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
     setInfoMessage(null)
   }, [clearMessageSelection, closeSearch, isActive])
 
+  useEffect(() => {
+    const reconcileVisibleConversation = () => {
+      const targetChatId = activeChatIdRef.current
+      if (!targetChatId || document.visibilityState === 'hidden') return
+      void markDisplayedIncomingRead(targetChatId, messagesCacheRef.current.get(targetChatId)?.messages || [])
+    }
+    document.addEventListener('visibilitychange', reconcileVisibleConversation)
+    if (isActive) reconcileVisibleConversation()
+    return () => document.removeEventListener('visibilitychange', reconcileVisibleConversation)
+  }, [isActive, markDisplayedIncomingRead])
+
   const scrollMessageIntoView = useCallback((messageIdentity: string) => {
     requestAnimationFrame(() => requestAnimationFrame(() => {
       const container = messagesContainerRef.current
@@ -586,11 +725,15 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
             item.dataset.chatMessageId === messageIdentity || item.dataset.whatsappMessageId === messageIdentity
           ))
         : undefined
-      element?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      if (element && typeof element.scrollIntoView === 'function') {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }
     }))
   }, [])
 
   const revealSearchMessage = useCallback(async (message: Message, historyOffset: number, controller: AbortController, session: number, requestSequence: number) => {
+    if (!chatId) return
+    const targetChatId = chatId
     const isCurrentSearch = () => (
       searchOpenRef.current
       && searchSessionRef.current === session
@@ -606,29 +749,34 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
     )
     if (!isCurrentSearch()) return
     setActiveSearchMessageId(message.id)
-    const canonicalMessages = chatId ? messagesCacheRef.current.get(chatId)?.messages || [] : []
-    if (canonicalMessages.some(item => item.id === message.id)) {
+    const canonicalMessages = messagesCacheRef.current.get(targetChatId)?.messages || []
+    if (canonicalMessages.some(item => hasSameMessageIdentity(item, message))) {
+      updateMessages(previous => {
+        const [reconciled] = reconcileAuthoritativeMessages(targetChatId, [message], previous)
+        return previous.map(item => hasSameMessageIdentity(item, message) ? reconciled : item)
+      }, targetChatId)
       setSearchWindowMessages(null)
-    } else if (chatId && historyOffset >= 0) {
+    } else if (historyOffset >= 0) {
       const token = localStorage.getItem('token')
       const windowOffset = Math.max(0, historyOffset - 25)
-      const response = await fetch(`/api/chats/${chatId}/messages?limit=50&offset=${windowOffset}`, {
+      const response = await fetch(`/api/chats/${targetChatId}/messages?limit=50&offset=${windowOffset}`, {
         headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal,
       })
       const data = await response.json().catch(() => ({}))
       if (!isCurrentSearch()) return
       if (!response.ok || !data.success || !Array.isArray(data.messages)) throw new Error(data.error || 'No se pudo abrir el mensaje encontrado')
-      setSearchWindowMessages(data.messages)
+      const rawMessages = data.messages as Message[]
+      setSearchWindowMessages(previous => reconcileAuthoritativeMessages(targetChatId, rawMessages, previous || []))
     } else {
       // A safe fallback still exposes the matching message without contaminating
       // the paginated conversation cache or its next offset.
-      setSearchWindowMessages([message])
+      setSearchWindowMessages(previous => reconcileAuthoritativeMessages(targetChatId, [message], previous || []))
     }
     requestAnimationFrame(() => {
       if (canScrollToResult()) scrollMessageIntoView(message.id)
     })
-  }, [chatId, scrollMessageIntoView])
+  }, [chatId, reconcileAuthoritativeMessages, scrollMessageIntoView, updateMessages])
 
   const revealQuotedMessage = useCallback(async (quotedMessageId: string) => {
     if (!chatId || !quotedMessageId) return
@@ -661,17 +809,17 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
       const data = await response.json().catch(() => ({}))
       if (controller.signal.aborted || activeChatIdRef.current !== targetChatId) return
       if (!response.ok || !data.success) throw new Error(data.error || 'No se pudo abrir el mensaje respondido.')
-      const contextMessages = Array.isArray(data.messages)
+      const rawContextMessages = Array.isArray(data.messages)
         ? data.messages as Message[]
         : Array.isArray(data.context?.messages)
           ? data.context.messages as Message[]
           : data.message
             ? [data.message as Message]
             : []
-      const targetMessage = contextMessages.find(item => item.id === quotedMessageId || item.message_id === quotedMessageId)
+      const targetMessage = rawContextMessages.find(item => item.id === quotedMessageId || item.message_id === quotedMessageId)
         || (data.message as Message | undefined)
-      if (contextMessages.length === 0 || !targetMessage) throw new Error('WhatsApp no devolvió el mensaje original.')
-      setSearchWindowMessages(contextMessages)
+      if (rawContextMessages.length === 0 || !targetMessage) throw new Error('WhatsApp no devolvió el mensaje original.')
+      setSearchWindowMessages(previous => reconcileAuthoritativeMessages(targetChatId, rawContextMessages, previous || []))
       setQuotedContextActive(true)
       setActiveSearchMessageId(targetMessage.id)
       scrollMessageIntoView(targetMessage.id)
@@ -683,7 +831,7 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
       if (quoteContextRequestRef.current === controller) quoteContextRequestRef.current = null
       if (!controller.signal.aborted && activeChatIdRef.current === targetChatId) setQuoteNavigationLoading(false)
     }
-  }, [chatId, scrollMessageIntoView])
+  }, [chatId, reconcileAuthoritativeMessages, scrollMessageIntoView])
 
   const fetchSearchResult = useCallback(async (query: string, index: number) => {
     if (!chatId || query.length < 2 || !searchOpenRef.current) return
@@ -712,10 +860,14 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
       if (!isCurrentSearch()) return
       if (!response.ok || !data.success) throw new Error(data.error || 'No se pudo buscar en la conversación')
       const total = Number(data.total) || 0
-      const result = Array.isArray(data.messages) ? data.messages[0] as Message | undefined : undefined
+      const result = Array.isArray(data.messages) && data.messages[0]
+        ? data.messages[0] as Message
+        : undefined
       setSearchTotal(total)
       setSearchResultIndex(total > 0 ? Math.min(index, total - 1) : 0)
-      setSearchResult(result || null)
+      setSearchResult(previous => result
+        ? reconcileAuthoritativeMessages(chatId, [result], previous ? [previous] : [])[0]
+        : null)
       if (result) await revealSearchMessage(result, Number(data.history_offset), controller, session, requestSequence)
       else setActiveSearchMessageId('')
     } catch (error) {
@@ -731,7 +883,7 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
         if (searchOpenRef.current && searchSessionRef.current === session) setSearchLoading(false)
       }
     }
-  }, [chatId, revealSearchMessage])
+  }, [chatId, reconcileAuthoritativeMessages, revealSearchMessage])
 
   useEffect(() => {
     if (!showSearch) return
@@ -776,25 +928,40 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
   useEffect(() => () => {
     searchRequestRef.current?.abort()
     quoteContextRequestRef.current?.abort()
+    chatDetailsRequestRef.current?.abort()
+    deviceRefreshRequestRef.current?.abort()
     if (historySyncTimeoutRef.current) window.clearTimeout(historySyncTimeoutRef.current)
   }, [])
 
   useEffect(() => {
-    if (!showHeaderMenu) return
-    const close = () => setShowHeaderMenu(false)
+    if (!showHeaderMenu && !showSelectionMenu) return
+    const closeHeaderMenu = () => setShowHeaderMenu(false)
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        close()
-        requestAnimationFrame(() => headerMenuTriggerRef.current?.focus())
+      if (event.key !== 'Escape') return
+      const ownOverlays = showSelectionMenu
+        ? new Set(['selection-backdrop', 'selection-menu'])
+        : new Set(['conversation-menu'])
+      const nestedOverlayOpen = Array.from(document.querySelectorAll<HTMLElement>('[data-chat-overlay]'))
+        .some(element => !ownOverlays.has(element.dataset.chatOverlay || ''))
+      if (nestedOverlayOpen) return
+      event.preventDefault()
+      event.stopPropagation()
+      event.stopImmediatePropagation()
+      if (showSelectionMenu) {
+        setShowSelectionMenu(false)
+        requestAnimationFrame(() => selectionMenuTriggerRef.current?.focus())
+        return
       }
+      closeHeaderMenu()
+      requestAnimationFrame(() => headerMenuTriggerRef.current?.focus())
     }
-    document.addEventListener('pointerdown', close)
-    document.addEventListener('keydown', handleKeyDown)
+    if (showHeaderMenu) document.addEventListener('pointerdown', closeHeaderMenu)
+    document.addEventListener('keydown', handleKeyDown, true)
     return () => {
-      document.removeEventListener('pointerdown', close)
-      document.removeEventListener('keydown', handleKeyDown)
+      if (showHeaderMenu) document.removeEventListener('pointerdown', closeHeaderMenu)
+      document.removeEventListener('keydown', handleKeyDown, true)
     }
-  }, [showHeaderMenu])
+  }, [showHeaderMenu, showSelectionMenu])
 
   const releaseRetryableMedia = useCallback((tempId: string) => {
     const media = mediaRetryRef.current.get(tempId)
@@ -815,6 +982,24 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
       messages: updater(cached.messages),
     })
   }, [updateMessages])
+
+  const updateReactionProjectionsForChat = useCallback((
+    targetChatId: string,
+    targetMessageId: string,
+    updater: NonNullable<Message['reactions']> | ((reactions: Message['reactions']) => NonNullable<Message['reactions']>),
+  ) => {
+    const updateProjection = (projection: Message[]) => updateMessageReactionProjection(
+      projection,
+      targetMessageId,
+      updater,
+    )
+    updateMessagesForChat(targetChatId, updateProjection)
+    if (activeChatIdRef.current !== targetChatId) return
+    setSearchWindowMessages(previous => previous ? updateProjection(previous) : previous)
+    setSearchResult(previous => previous
+      ? updateProjection([previous])[0]
+      : previous)
+  }, [updateMessagesForChat])
 
   const loadSavedStickers = useCallback(async () => {
     if (savingStickerUrlsRef.current.size > 0) return
@@ -1037,6 +1222,11 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
     activeChatIdRef.current = chatId
     chatDetailsRequestRef.current?.abort()
     chatDetailsRequestSequenceRef.current += 1
+    deviceRefreshRequestRef.current?.abort()
+    deviceRefreshRequestSequenceRef.current += 1
+    setCanonicalDevice(device && (!initialDeviceId || device.id === initialDeviceId) ? device : null)
+    setValidatedDeviceChatId(null)
+    setDeviceValidationState(chatId ? 'validating' : 'ready')
     if (historySyncTimeoutRef.current) {
       window.clearTimeout(historySyncTimeoutRef.current)
       historySyncTimeoutRef.current = null
@@ -1059,14 +1249,48 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
         setMessages([])
         setHasMoreMessages(true)
       }
-      fetchChatDetails(chatId, deviceId)
+      fetchChatDetails(chatId)
     } else {
         setChat(null)
         setMessages([])
         setHasMoreMessages(true)
     }
 	return () => chatDetailsRequestRef.current?.abort()
-  }, [chatId, deviceId, initialChat])
+  }, [chatId, initialChat])
+
+  async function refreshCanonicalDevice(targetChatId: string) {
+    deviceRefreshRequestRef.current?.abort()
+    const controller = new AbortController()
+    deviceRefreshRequestRef.current = controller
+    const requestSequence = ++deviceRefreshRequestSequenceRef.current
+    setDeviceValidationState('validating')
+    try {
+      const token = localStorage.getItem('token')
+      const response = await fetch(`/api/chats/${targetChatId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      })
+      const data = await response.json().catch(() => ({}))
+      if (
+        controller.signal.aborted
+        || requestSequence !== deviceRefreshRequestSequenceRef.current
+        || activeChatIdRef.current !== targetChatId
+      ) return
+      if (!response.ok || !data.success) throw new Error('No se pudo validar el canal')
+      setChat(data.chat)
+      setCanonicalDevice(data.device || null)
+      setValidatedDeviceChatId(targetChatId)
+      setDeviceValidationState('ready')
+    } catch (error) {
+      if (controller.signal.aborted || activeChatIdRef.current !== targetChatId) return
+      console.error('Failed to refresh chat device', error)
+      setCanonicalDevice(null)
+      setValidatedDeviceChatId(targetChatId)
+      setDeviceValidationState('error')
+    } finally {
+      if (deviceRefreshRequestRef.current === controller) deviceRefreshRequestRef.current = null
+    }
+  }
 
   useEffect(() => {
     if (!chatId || !deviceId) return
@@ -1078,7 +1302,31 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
         const eventType = msg.type || msg.event
         const payload = msg.data || msg.message
 
-        if ((eventType === 'new_message' || eventType === 'message_sent') && payload) {
+        if (eventType === 'device_status' && payload?.device_id === deviceId) {
+          const nextStatus = typeof payload.status === 'string' ? payload.status : 'disconnected'
+          if (nextStatus !== 'connected') {
+            setCanonicalDevice(previous => previous ? {
+              ...previous,
+              status: nextStatus,
+              runtime_capabilities: previous.runtime_capabilities ? {
+                ...previous.runtime_capabilities,
+                can_start_chat: false,
+                can_check_whatsapp: false,
+                can_send_reaction: false,
+                can_send_sticker: false,
+                can_send_animated_sticker: false,
+                can_publish_status: false,
+                can_publish_status_link: false,
+                can_sync_own_status: false,
+              } : previous.runtime_capabilities,
+            } : previous)
+            setValidatedDeviceChatId(chatId)
+            setDeviceValidationState('ready')
+          } else {
+            setDeviceValidationState('validating')
+            void refreshCanonicalDevice(chatId)
+          }
+        } else if ((eventType === 'new_message' || eventType === 'message_sent') && payload) {
           // The actual message object is nested inside payload.message
           const actualMsg = payload.message || payload
           const matchChatId = payload.chat_id || actualMsg.chat_id
@@ -1086,6 +1334,7 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
               (chat && actualMsg.from_jid === chat?.jid) ||
               (chat && actualMsg.to === chat?.jid)) {
             const actualMessage = actualMsg as Message
+            reconcileReactionSnapshotBaseline(chatId, actualMessage.message_id, actualMessage.reactions)
             const shouldFollowMessage = isNearBottomRef.current
             const alreadyKnown = (messagesCacheRef.current.get(chatId)?.messages || []).some(message => hasSameMessageIdentity(message, actualMessage))
             updateMessages(prev => {
@@ -1099,24 +1348,48 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
                   return reconcileOptimisticMessage(prev, tempId, actualMessage)
                 }
                 if (realAlreadyExists) {
-                  return prev.map(message => hasSameMessageIdentity(message, actualMessage) ? actualMessage : message)
+                  return prev.map(message => {
+                    if (!hasSameMessageIdentity(message, actualMessage)) return message
+                    const pending = Boolean(reactionQueuesRef.current.get(reactionQueueKey(chatId, message.message_id))?.inFlight)
+                    return {
+                      ...actualMessage,
+                      reactions: mergeCanonicalReactionSnapshot(message.reactions, actualMessage.reactions, pending),
+                    }
+                  })
                 }
                 // No optimistic message pending → safe to add (e.g. sent from another device)
                 return [...prev, actualMessage]
               }
 
               if (realAlreadyExists) {
-                return prev.map(message => hasSameMessageIdentity(message, actualMessage) ? actualMessage : message)
+                return prev.map(message => {
+                  if (!hasSameMessageIdentity(message, actualMessage)) return message
+                  const pending = Boolean(reactionQueuesRef.current.get(reactionQueueKey(chatId, message.message_id))?.inFlight)
+                  return {
+                    ...actualMessage,
+                    reactions: mergeCanonicalReactionSnapshot(message.reactions, actualMessage.reactions, pending),
+                  }
+                })
               }
               // Incoming message → always add
               return [...prev, actualMessage]
             })
+            if (!actualMessage.is_from_me) void markDisplayedIncomingRead(chatId, [actualMessage])
             if (shouldFollowMessage) scrollToBottom()
             else if (!alreadyKnown) setPendingLatestMessages(current => current + 1)
           }
         } else if ((eventType === 'message_update') && payload) {
           const actualMsg = payload.message || payload
-          updateMessages(prev => prev.map(m => m.id === actualMsg.id ? (actualMsg as Message) : m))
+          const canonicalMessage = actualMsg as Message
+          reconcileReactionSnapshotBaseline(chatId, canonicalMessage.message_id, canonicalMessage.reactions)
+          updateMessages(prev => prev.map(m => {
+            if (m.id !== actualMsg.id) return m
+            const pending = Boolean(reactionQueuesRef.current.get(reactionQueueKey(chatId, m.message_id))?.inFlight)
+            return {
+              ...canonicalMessage,
+              reactions: mergeCanonicalReactionSnapshot(m.reactions, canonicalMessage.reactions, pending),
+            }
+          }))
         } else if (eventType === 'message_status' && payload) {
           // Update message delivery/read status (only upgrade, never downgrade)
           const msgIds: string[] = payload.message_ids || []
@@ -1202,19 +1475,39 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
             const senderName: string = payload.sender_name || ''
             const isFromMe: boolean = !!payload.is_from_me
             const removed: boolean = !!payload.removed
+            const timestamp = typeof payload.timestamp === 'string' ? payload.timestamp : undefined
+            const operationId = typeof payload.operation_id === 'string' ? payload.operation_id : undefined
+            const provider = payload.provider === 'whatsapp_cloud_api' ? 'whatsapp_cloud_api' : 'whatsapp_web'
+            const queueKey = reactionQueueKey(chat.id, targetMsgId)
+            const actorKey = `${queueKey}:${isFromMe ? 'self' : senderJid || senderName || 'unknown'}`
+            const lastTimestamp = reactionEventTimestampsRef.current.get(actorKey)
+            if (!shouldApplyReactionEvent(lastTimestamp, timestamp)) return
+            if (timestamp) reactionEventTimestampsRef.current.set(actorKey, timestamp)
 
-            updateMessages(prev => prev.map(m => {
-              if (m.message_id !== targetMsgId) return m
-              const reactions = applyReactionMutation(m.reactions, {
-                targetMessageId: targetMsgId,
-                senderJid,
-                senderName,
-                emoji,
-                isFromMe,
-                removed,
-              })
-              return { ...m, reactions }
-            }))
+            const mutation: ReactionMutation = {
+              targetMessageId: targetMsgId,
+              senderJid,
+              senderName,
+              emoji,
+              isFromMe,
+              removed,
+              timestamp,
+              operationId,
+              provider,
+            }
+            let queue = reactionQueuesRef.current.get(queueKey)
+            queue = applyReactionToPendingBaseline(queue, mutation)
+            if (isFromMe) queue = markReactionRealtimeConfirmation(queue, operationId)
+            if (queue.inFlight || queue.queued) reactionQueuesRef.current.set(queueKey, queue)
+            else reactionQueuesRef.current.delete(queueKey)
+
+            updateReactionProjectionsForChat(chat.id, targetMsgId, reactions => {
+              // A self echo may acknowledge an older in-flight intent while a
+              // newer queued choice is already visible. Never paint it over
+              // the user's latest intent; settlement will reconcile its base.
+              if (isFromMe && Boolean(queue.inFlight)) return reactions || []
+              return applyReactionMutation(reactions, mutation)
+            })
           }
         }
       },
@@ -1229,9 +1522,9 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
     return () => {
       unsubscribe()
     }
-  }, [chatId, deviceId, chat])
+  }, [chatId, deviceId, chat, markDisplayedIncomingRead, reconcileReactionSnapshotBaseline, updateReactionProjectionsForChat])
 
-  const fetchChatDetails = async (targetChatId: string | null = chatId, targetDeviceId: string | undefined = deviceId) => {
+  const fetchChatDetails = async (targetChatId: string | null = chatId) => {
     if (!targetChatId) return
 	chatDetailsRequestRef.current?.abort()
 	const controller = new AbortController()
@@ -1240,15 +1533,24 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
     const hasCachedMessages = messagesCacheRef.current.has(targetChatId)
     setLoading(!hasCachedMessages)
     const token = localStorage.getItem('token')
+    let deviceWasValidated = false
     try {
       const res = await fetch(`/api/chats/${targetChatId}`, {
         headers: { Authorization: `Bearer ${token}` },
 		signal: controller.signal,
       })
-      const data = await res.json()
+      const data = await res.json().catch(() => ({}))
 	  if (controller.signal.aborted || requestSequence !== chatDetailsRequestSequenceRef.current || activeChatIdRef.current !== targetChatId) return
-      if (data.success) {
+      if (res.ok && data.success) {
         setChat(data.chat)
+        setCanonicalDevice(data.device || null)
+        setValidatedDeviceChatId(targetChatId)
+        setDeviceValidationState('ready')
+        deviceWasValidated = true
+      } else {
+        setCanonicalDevice(null)
+        setValidatedDeviceChatId(targetChatId)
+        setDeviceValidationState('error')
       }
 
       // Fetch messages from dedicated endpoint
@@ -1259,18 +1561,25 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
       const msgData = await msgRes.json()
 	  if (controller.signal.aborted || requestSequence !== chatDetailsRequestSequenceRef.current || activeChatIdRef.current !== targetChatId) return
       if (msgData.success && msgData.messages) {
-        const nextHasMore = msgData.messages.length >= 50
+        const authoritativeMessages = reconcileAuthoritativeMessages(targetChatId, msgData.messages as Message[])
+        const nextHasMore = authoritativeMessages.length >= 50
 		setMessages(previous => {
-		  const merged = mergeFetchedMessages(previous, msgData.messages as Message[])
+		  const merged = mergeFetchedMessages(
+          previous,
+          authoritativeMessages,
+          messageId => Boolean(reactionQueuesRef.current.get(reactionQueueKey(targetChatId, messageId))?.inFlight),
+        )
 		  cacheMessages(targetChatId, merged, nextHasMore)
 		  return merged
 		})
         setHasMoreMessages(nextHasMore)
         if (isNearBottomRef.current) scrollToBottom()
+		void markDisplayedIncomingRead(targetChatId, authoritativeMessages)
 
         // Send read receipts for unread incoming messages
-        if (targetDeviceId && data.chat?.jid) {
-          const unreadIncoming = (msgData.messages as Message[]).filter(
+        const fetchedDeviceId = typeof data.device?.id === 'string' ? data.device.id : undefined
+        if (fetchedDeviceId && data.chat?.jid) {
+          const unreadIncoming = authoritativeMessages.filter(
             (m: Message) => !m.is_from_me && !m.is_read
           )
           if (unreadIncoming.length > 0) {
@@ -1279,7 +1588,7 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
               method: 'POST',
               headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
               body: JSON.stringify({
-                device_id: targetDeviceId,
+                device_id: fetchedDeviceId,
                 chat_jid: data.chat.jid,
                 sender_jid: lastMsg.from_jid || '',
                 message_ids: unreadIncoming.map((m: Message) => m.message_id)
@@ -1289,7 +1598,14 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
         }
       }
     } catch (error) {
-	  if (!controller.signal.aborted) console.error('Failed to fetch chat', error)
+	  if (!controller.signal.aborted) {
+        console.error('Failed to fetch chat', error)
+        if (!deviceWasValidated && activeChatIdRef.current === targetChatId) {
+          setCanonicalDevice(null)
+          setValidatedDeviceChatId(targetChatId)
+          setDeviceValidationState('error')
+        }
+      }
     } finally {
 	  if (chatDetailsRequestRef.current === controller) chatDetailsRequestRef.current = null
 	  if (!controller.signal.aborted && requestSequence === chatDetailsRequestSequenceRef.current && activeChatIdRef.current === targetChatId) {
@@ -1325,16 +1641,17 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
       const data = await res.json()
       if (activeChatIdRef.current !== targetChatId) return
       if (data.success && data.messages) {
-        if (data.messages.length === 0) {
+        const authoritativeMessages = reconcileAuthoritativeMessages(targetChatId, data.messages as Message[])
+        if (authoritativeMessages.length === 0) {
           setHasMoreMessages(false)
         } else {
           // Preserve scroll position
           const container = messagesContainerRef.current
           const prevHeight = container?.scrollHeight || 0
-          const nextHasMore = data.messages.length >= 50
+          const nextHasMore = authoritativeMessages.length >= 50
           updateMessages(prev => {
             const existingKeys = new Set(prev.flatMap(message => [message.id, message.message_id].filter(Boolean)))
-            const olderMessages = (data.messages as Message[]).filter(message =>
+            const olderMessages = authoritativeMessages.filter(message =>
               !existingKeys.has(message.id) && !existingKeys.has(message.message_id)
             )
             const nextMessages = [...olderMessages, ...prev]
@@ -2163,53 +2480,135 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
     }
   }
 
-  const handleReactMessage = async (message: Message, emoji: string) => {
-    if (!deviceId || !chat || effectiveReadOnly || !isCanonicalMessage(message)) return
-    const token = localStorage.getItem('token')
-    const targetChatId = chat.id
-    const requestedEmoji = hasOwnReaction(message.reactions, emoji) ? '' : emoji
-    const previousReactions = dedupeReactions(message.reactions)
-    const requestSeq = (reactionRequestSeqRef.current.get(message.message_id) || 0) + 1
-    reactionRequestSeqRef.current.set(message.message_id, requestSeq)
+  const transmitReactionOperation = async (
+    targetChatId: string,
+    operation: PendingReactionOperation,
+  ): Promise<void> => {
+    const queueKey = reactionQueueKey(targetChatId, operation.targetMessageId)
+    let succeeded = false
+    let errorMessage = 'No se pudo actualizar la reacción.'
+    let canonicalMutation: ReactionMutation | undefined
+    let preservePendingBaseline = false
+    let providerAppliedLocalPending = false
 
-    const rollback = (messageText = 'No se pudo actualizar la reacción.') => {
-      if (reactionRequestSeqRef.current.get(message.message_id) !== requestSeq) return
-      updateMessagesForChat(targetChatId, previous => previous.map(item => (
-        item.message_id === message.message_id ? { ...item, reactions: previousReactions } : item
-      )))
-      if (activeChatIdRef.current === targetChatId) setComposerFeedback({ kind: 'error', message: messageText })
-    }
-
-    updateMessagesForChat(targetChatId, previous => previous.map(item => {
-      if (item.message_id !== message.message_id) return item
-      return {
-        ...item,
-        reactions: applyReactionMutation(item.reactions, {
-          targetMessageId: message.message_id,
-          senderJid: SELF_REACTION_ACTOR,
-          senderName: 'Tú',
-          emoji: requestedEmoji,
-          isFromMe: true,
-          removed: requestedEmoji === '',
-        }),
-      }
-    }))
     try {
+      const token = localStorage.getItem('token')
       const response = await fetch('/api/messages/react', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
-          chat_id: chat.id,
-          target_message_id: message.message_id,
-          emoji: requestedEmoji,
+          chat_id: targetChatId,
+          target_message_id: operation.targetMessageId,
+          emoji: operation.desiredEmoji,
+          operation_id: operation.operationId,
         }),
       })
       const data = await response.json().catch(() => ({}))
-      if (!response.ok || !data.success) rollback(data.error || 'No se pudo actualizar la reacción.')
-      else clearMessageSelection()
+      succeeded = response.ok && data.success === true
+      providerAppliedLocalPending = succeeded && (
+        data.state === 'provider_applied_local_pending'
+        || (response.status === 202 && Boolean(data.reaction))
+      )
+      errorMessage = typeof data.error === 'string' && data.error.trim()
+        ? data.error
+        : errorMessage
+      if (succeeded) {
+        const canonicalReaction = data.reaction && typeof data.reaction === 'object' ? data.reaction : {}
+        canonicalMutation = {
+          targetMessageId: operation.targetMessageId,
+          senderJid: canonicalReaction.sender_jid || '__clarin_self__',
+          senderName: canonicalReaction.sender_name || 'Tú',
+          emoji: data.removed ? '' : (canonicalReaction.emoji ?? operation.desiredEmoji),
+          isFromMe: true,
+          removed: Boolean(data.removed),
+          id: canonicalReaction.id || '',
+          timestamp: typeof data.timestamp === 'string' ? data.timestamp : canonicalReaction.timestamp,
+          operationId: typeof data.operation_id === 'string' ? data.operation_id : operation.operationId,
+          provider: data.provider === 'whatsapp_cloud_api' ? 'whatsapp_cloud_api' : 'whatsapp_web',
+        }
+        if (canonicalMutation.timestamp) {
+          const actorKey = `${queueKey}:self`
+          const lastTimestamp = reactionEventTimestampsRef.current.get(actorKey)
+          preservePendingBaseline = !shouldApplyReactionEvent(lastTimestamp, canonicalMutation.timestamp)
+          if (!preservePendingBaseline) {
+            reactionEventTimestampsRef.current.set(actorKey, canonicalMutation.timestamp)
+          }
+        }
+      }
     } catch {
-      rollback()
+      // Settlement below performs an exact rollback, unless the matching
+      // realtime echo already proved that WhatsApp applied the operation.
     }
+
+    const settled = settleReactionIntent(
+      reactionQueuesRef.current.get(queueKey),
+      operation.operationId,
+      succeeded,
+      canonicalMutation,
+      preservePendingBaseline,
+    )
+    if (settled.ignored) return
+
+    if (settled.queue.inFlight || settled.queue.queued) reactionQueuesRef.current.set(queueKey, settled.queue)
+    else reactionQueuesRef.current.delete(queueKey)
+
+    if (settled.reactions) {
+      updateReactionProjectionsForChat(targetChatId, operation.targetMessageId, settled.reactions)
+    }
+
+    if (settled.rolledBack && !settled.nextRequest && activeChatIdRef.current === targetChatId) {
+      setComposerFeedback({ kind: 'error', message: errorMessage })
+    } else if (providerAppliedLocalPending && activeChatIdRef.current === targetChatId) {
+      setComposerFeedback({
+        kind: 'info',
+        message: 'WhatsApp aplicó la reacción; Clarin aún está conciliando el historial.',
+      })
+    }
+    if (settled.nextRequest) {
+      void transmitReactionOperation(targetChatId, settled.nextRequest)
+    }
+  }
+
+  const handleReactMessage = (message: Message, emoji: string) => {
+    if (!chat) return
+    const targetChatId = chat.id
+    const latestMessage = (messagesCacheRef.current.get(targetChatId)?.messages || messages)
+      .find(item => item.message_id === message.message_id) || message
+    const availability = getMessageReactionAvailability({
+      message: latestMessage,
+      device: canonicalDevice,
+      deviceValidated: activeDeviceValidationState === 'ready',
+      chatReadOnly: readOnly,
+    })
+    if (!availability.allowed) {
+      if (availability.reason) setComposerFeedback({ kind: 'info', message: availability.reason })
+      return
+    }
+
+    const queueKey = reactionQueueKey(targetChatId, latestMessage.message_id)
+    const previousQueue = reactionQueuesRef.current.get(queueKey)
+    const visibleOwnEmoji = previousQueue?.queued?.desiredEmoji
+      ?? previousQueue?.inFlight?.desiredEmoji
+      ?? (hasOwnReaction(latestMessage.reactions, emoji) ? emoji : '')
+    const desiredEmoji = visibleOwnEmoji === emoji ? '' : emoji
+    const sequence = ++reactionOperationSequenceRef.current
+    const operationId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `reaction-${Date.now()}-${sequence}`
+    const input = {
+      operationId,
+      sequence,
+      desiredEmoji,
+      targetMessageId: latestMessage.message_id,
+      startedAt: new Date().toISOString(),
+    }
+    const enqueued = enqueueReactionIntent(latestMessage.reactions, previousQueue, input)
+    reactionQueuesRef.current.set(queueKey, enqueued.queue)
+    updateReactionProjectionsForChat(targetChatId, latestMessage.message_id, reactions => (
+      enqueueReactionIntent(reactions, previousQueue, input).reactions
+    ))
+    clearMessageSelection()
+    if (enqueued.request) void transmitReactionOperation(targetChatId, enqueued.request)
   }
 
   const savedStickerUrls = useMemo(() => new Set(savedStickers), [savedStickers])
@@ -2249,6 +2648,14 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
   }
 
   const visibleMessages = searchWindowMessages || messages
+  const selectedReactionAvailability = selectedMessage
+    ? getMessageReactionAvailability({
+        message: selectedMessage,
+        device: canonicalDevice,
+        deviceValidated: activeDeviceValidationState === 'ready',
+        chatReadOnly: readOnly,
+      })
+    : null
 
   return (
     <div ref={panelRef} className={`relative flex-1 flex flex-col min-h-0 overflow-hidden h-full ${className}`}>
@@ -2265,7 +2672,7 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
                {canDeleteMessage(selectedMessage) && (
                  <button type="button" onClick={() => void handleDeleteChatMessage(selectedMessage)} disabled={messageActionPending === 'delete'} className="flex h-11 w-11 items-center justify-center rounded-xl text-red-600 hover:bg-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-wait disabled:opacity-50" aria-label="Eliminar mensaje para todos">{messageActionPending === 'delete' ? <RefreshCw className="h-5 w-5 animate-spin" /> : <Trash2 className="h-5 w-5" />}</button>
                )}
-               <button type="button" onClick={() => setShowSelectionMenu(value => !value)} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Más acciones del mensaje" aria-haspopup="menu" aria-expanded={showSelectionMenu}><MoreVertical className="h-5 w-5" /></button>
+               <button ref={selectionMenuTriggerRef} type="button" onClick={() => setShowSelectionMenu(value => !value)} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Más acciones del mensaje" aria-haspopup="menu" aria-expanded={showSelectionMenu}><MoreVertical className="h-5 w-5" /></button>
              </div>
            </div>
          ) : (
@@ -2317,6 +2724,8 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
                               </span>
                             )}
                           </p>
+                        ) : chat.identity_pending ? (
+                          <p className="truncate text-xs font-medium text-amber-700" title="WhatsApp aún no informó el número; puedes responder en esta conversación.">Identidad pendiente · puedes responder</p>
                         ) : (
                           <p className="text-xs text-slate-500">Ver detalles</p>
                         )}
@@ -2333,7 +2742,7 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
                          <MoreVertical className="w-5 h-5" />
                      </button>
 	                     {showHeaderMenu && (
-	                       <div role="menu" onPointerDown={event => event.stopPropagation()} className="fixed inset-x-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] z-[90] max-h-[min(70dvh,24rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl shadow-slate-900/15 sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:top-12 sm:z-50 sm:w-56">
+	                       <div data-chat-overlay="conversation-menu" role="menu" onPointerDown={event => event.stopPropagation()} className="fixed inset-x-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] z-[90] max-h-[min(70dvh,24rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl shadow-slate-900/15 sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:top-12 sm:z-50 sm:w-56">
 	                         <button type="button" role="menuitem" onClick={() => { setShowContactInfo(true); setShowHeaderMenu(false) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><PanelRight className="h-4 w-4 text-slate-400" /> Ver detalles</button>
 	                         <button type="button" role="menuitem" onClick={() => { void handleRequestHistorySync(); setShowHeaderMenu(false) }} disabled={syncingHistory || effectiveReadOnly} title={effectiveReadOnly ? readOnlyReason : undefined} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-45"><RefreshCw className={`h-4 w-4 text-slate-400 ${syncingHistory ? 'animate-spin' : ''}`} /> {syncingHistory ? 'Recuperando historial…' : 'Recuperar mensajes anteriores'}</button>
 	                         {onRequestDelete && <><div className="my-1 border-t border-slate-100" /><button type="button" role="menuitem" onClick={() => { setShowHeaderMenu(false); onRequestDelete() }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"><Trash2 className="h-4 w-4" /> Eliminar del CRM</button></>}
@@ -2348,10 +2757,35 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
            <>
              <button type="button" data-chat-overlay="selection-backdrop" className="app-viewport pointer-events-auto fixed inset-0 bg-slate-950/20" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.sheet }} onClick={() => setShowSelectionMenu(false)} aria-label="Cerrar acciones del mensaje" />
              <div data-chat-overlay="selection-menu" role="menu" aria-label="Acciones del mensaje seleccionado" className="pointer-events-auto fixed inset-x-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] max-h-[min(72dvh,28rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog }}>
-               {!effectiveReadOnly && <><p className="px-3 pb-2 pt-1 text-[11px] font-bold uppercase tracking-wide text-slate-400">Reaccionar</p>
-               <div className="grid grid-cols-6 gap-1 px-1 pb-2" role="group" aria-label="Reacciones rápidas">
-                 {['👍', '❤️', '😂', '😮', '😢', '🙏'].map(emoji => <button key={emoji} type="button" onClick={() => { setShowSelectionMenu(false); void handleReactMessage(selectedMessage, emoji) }} className="flex h-11 items-center justify-center rounded-xl text-2xl hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label={`Reaccionar con ${emoji}`}>{emoji}</button>)}
-               </div></>}
+               {selectedReactionAvailability && <>
+                 <p className="px-3 pb-2 pt-1 text-[11px] font-bold uppercase tracking-wide text-slate-400">Reaccionar</p>
+                 <div className="grid grid-cols-6 gap-1 px-1 pb-2" role="group" aria-label="Reacciones rápidas">
+                   {['👍', '❤️', '😂', '😮', '😢', '🙏'].map(emoji => (
+                     <button
+                       key={emoji}
+                       type="button"
+                       onClick={() => {
+                         if (!selectedReactionAvailability.allowed) return
+                         setShowSelectionMenu(false)
+                         void handleReactMessage(selectedMessage, emoji)
+                       }}
+                       disabled={!selectedReactionAvailability.allowed}
+                       title={selectedReactionAvailability.reason}
+                       className="flex h-11 items-center justify-center rounded-xl text-2xl hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"
+                       aria-label={selectedReactionAvailability.allowed
+                         ? `Reaccionar con ${emoji}`
+                         : `No se puede reaccionar con ${emoji}: ${selectedReactionAvailability.reason}`}
+                     >
+                       {emoji}
+                     </button>
+                   ))}
+                 </div>
+                 {!selectedReactionAvailability.allowed && selectedReactionAvailability.reason && (
+                   <p className="mx-1 mb-2 rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800" role="status">
+                     {selectedReactionAvailability.reason}
+                   </p>
+                 )}
+               </>}
                <div className="border-t border-slate-100 pt-1">
                  {(selectedMessage.body || selectedMessage.media_filename) && <button type="button" role="menuitem" onClick={() => { setShowSelectionMenu(false); void handleCopyMessage(selectedMessage) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Copy className="h-4 w-4 text-slate-400" /> Copiar</button>}
                  {selectedMessage.is_from_me && isCanonicalMessage(selectedMessage) && <button type="button" role="menuitem" onClick={() => { setShowSelectionMenu(false); handleOpenMessageInfo(selectedMessage) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Info className="h-4 w-4 text-slate-400" /> Información del mensaje</button>}
@@ -2467,7 +2901,13 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
                         }
                       }
 
-                      const contactName = chat ? getChatDisplayName(chat) : undefined
+	                      const contactName = chat ? getChatDisplayName(chat) : undefined
+                        const reactionAvailability = getMessageReactionAvailability({
+                          message: msg,
+                          device: canonicalDevice,
+                          deviceValidated: activeDeviceValidationState === 'ready',
+                          chatReadOnly: readOnly,
+                        })
 
                       return (
 	                          <div key={msg.id} data-chat-message-id={msg.id} data-whatsapp-message-id={msg.message_id} className={`rounded-xl transition-[background-color,box-shadow] duration-500 ${activeSearchMessageId === msg.id || activeSearchMessageId === msg.message_id ? 'bg-amber-100/80 shadow-[0_0_0_4px_rgba(251,191,36,0.18)]' : ''}`}>
@@ -2496,7 +2936,8 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
 	                                onToggleStickerFavorite={toggleSavedStickerStable}
                                 savedStickerUrls={savedStickerUrls}
                                 savingStickerUrls={savingStickerUrls}
-	                                onReact={effectiveReadOnly ? undefined : reactToMessageStable}
+	                                onReact={reactionAvailability.allowed ? reactToMessageStable : undefined}
+                                  reactionUnavailableReason={reactionAvailability.allowed ? undefined : reactionAvailability.reason}
                               />
                           </div>
                       )
@@ -2610,8 +3051,12 @@ export default function ChatPanel({ chatId, deviceId, device, initialChat, onClo
          {/* Footer / Input */}
          {effectiveReadOnly ? (
            <div className="flex shrink-0 items-center justify-center gap-2 border-t border-amber-200 bg-amber-50 px-4 py-3 text-center" role="status">
-             <EyeOff className="w-4 h-4 text-amber-600" />
-             <span className="text-sm font-medium text-amber-700">Solo lectura — {readOnlyReason}</span>
+             {activeDeviceValidationState === 'validating'
+               ? <RefreshCw className="h-4 w-4 animate-spin text-amber-600" aria-hidden />
+               : <EyeOff className="h-4 w-4 text-amber-600" aria-hidden />}
+             <span className="text-sm font-medium text-amber-700">
+               {activeDeviceValidationState === 'validating' ? readOnlyReason : `Solo lectura — ${readOnlyReason}`}
+             </span>
            </div>
          ) : (
          <div className="relative z-30 flex shrink-0 items-end gap-1 border-t border-slate-200 bg-slate-50 px-2 pt-2 sm:gap-2 sm:px-3" style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' }}>

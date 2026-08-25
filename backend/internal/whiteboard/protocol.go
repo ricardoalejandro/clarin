@@ -13,16 +13,24 @@ import (
 )
 
 const (
-	EventScenePatch       = "scene.patch"
-	EventSyncRequest      = "sync.request"
-	EventSyncRequired     = "sync.required"
-	EventCursorUpdate     = "cursor.update"
-	EventPresenceUpdate   = "presence.update"
-	EventSceneSnapshot    = "scene.snapshot"
-	EventAck              = "ack"
-	EventPresenceSnapshot = "presence.snapshot"
-	EventAccessRevoked    = "access.revoked"
-	EventError            = "error"
+	EventScenePatch           = "scene.patch"
+	EventSyncRequest          = "sync.request"
+	EventSyncRequired         = "sync.required"
+	EventCursorUpdate         = "cursor.update"
+	EventPresenceUpdate       = "presence.update"
+	EventSceneSnapshot        = "scene.snapshot"
+	EventAck                  = "ack"
+	EventPresenceSnapshot     = "presence.snapshot"
+	EventRoomReady            = "room.ready"
+	EventPresentationStart    = "presentation.start"
+	EventPresentationStop     = "presentation.stop"
+	EventPresentationSnapshot = "presentation.snapshot"
+	EventPresentationChanged  = "presentation.changed"
+	EventFollowChange         = "follow.change"
+	EventViewportUpdate       = "viewport.update"
+	EventAccessRevoked        = "access.revoked"
+	EventCommentChanged       = "comment.changed"
+	EventError                = "error"
 
 	MaxRealtimeMessageBytes = 1 << 20
 	// Leave room for the Redis fanout envelope, account/board UUIDs and event
@@ -32,6 +40,10 @@ const (
 	MaxElementsPerPatch             = 2000
 	MaxCursorPayloadBytes           = 4 << 10
 	MaxPresencePayloadBytes         = 4 << 10
+	MaxPresentationPayloadBytes     = 4 << 10
+	MaxFollowPayloadBytes           = 4 << 10
+	MaxViewportPayloadBytes         = 4 << 10
+	MaxViewportCoordinate           = 1_000_000
 	MaxAppStatePatchBytes           = 64 << 10
 )
 
@@ -54,6 +66,19 @@ type OutgoingMessage struct {
 	Data        interface{} `json:"data,omitempty"`
 	Code        string      `json:"code,omitempty"`
 	Error       string      `json:"error,omitempty"`
+}
+
+type PresentationStopData struct {
+	PresentationID uuid.UUID `json:"presentation_id"`
+}
+
+type FollowChangeData struct {
+	TargetActorID uuid.UUID `json:"target_actor_id"`
+	Action        string    `json:"action"`
+}
+
+type ViewportUpdateData struct {
+	Bounds [4]float64 `json:"bounds"`
 }
 
 // DecodeIncoming validates the stable wire envelope before a handler performs
@@ -101,10 +126,56 @@ func DecodeIncoming(payload []byte) (IncomingMessage, error) {
 		if len(message.Data) == 0 || len(message.Data) > MaxPresencePayloadBytes || !json.Valid(message.Data) {
 			return IncomingMessage{}, fmt.Errorf("%w: invalid presence payload", ErrInvalidRealtimeMessage)
 		}
+	case EventPresentationStart:
+		if message.OperationID == nil || len(message.Data) > MaxPresentationPayloadBytes || (len(message.Data) > 0 && !isEmptyJSONObject(message.Data)) {
+			return IncomingMessage{}, fmt.Errorf("%w: invalid presentation start", ErrInvalidRealtimeMessage)
+		}
+	case EventPresentationStop:
+		var data PresentationStopData
+		if message.OperationID == nil || len(message.Data) == 0 || len(message.Data) > MaxPresentationPayloadBytes || decodeStrictData(message.Data, &data) != nil || data.PresentationID == uuid.Nil {
+			return IncomingMessage{}, fmt.Errorf("%w: invalid presentation stop", ErrInvalidRealtimeMessage)
+		}
+	case EventFollowChange:
+		var data FollowChangeData
+		if len(message.Data) == 0 || len(message.Data) > MaxFollowPayloadBytes || decodeStrictData(message.Data, &data) != nil || data.TargetActorID == uuid.Nil || (data.Action != "FOLLOW" && data.Action != "UNFOLLOW") {
+			return IncomingMessage{}, fmt.Errorf("%w: invalid follow change", ErrInvalidRealtimeMessage)
+		}
+	case EventViewportUpdate:
+		var data ViewportUpdateData
+		if len(message.Data) == 0 || len(message.Data) > MaxViewportPayloadBytes || decodeStrictData(message.Data, &data) != nil || !validViewportBounds(data.Bounds) {
+			return IncomingMessage{}, fmt.Errorf("%w: invalid viewport update", ErrInvalidRealtimeMessage)
+		}
 	default:
 		return IncomingMessage{}, fmt.Errorf("%w: unsupported event", ErrInvalidRealtimeMessage)
 	}
 	return message, nil
+}
+
+func decodeStrictData(raw json.RawMessage, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return ErrInvalidRealtimeMessage
+	}
+	return nil
+}
+
+func isEmptyJSONObject(raw json.RawMessage) bool {
+	var value map[string]json.RawMessage
+	return decodeStrictData(raw, &value) == nil && len(value) == 0
+}
+
+func validViewportBounds(bounds [4]float64) bool {
+	for _, value := range bounds {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < -MaxViewportCoordinate || value > MaxViewportCoordinate {
+			return false
+		}
+	}
+	return bounds[2] > bounds[0] && bounds[3] > bounds[1]
 }
 
 var persistedAppStateFields = map[string]struct{}{

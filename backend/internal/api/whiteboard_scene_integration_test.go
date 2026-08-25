@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -28,6 +30,7 @@ import (
 	"github.com/naperu/clarin/internal/storage"
 	whiteboardcore "github.com/naperu/clarin/internal/whiteboard"
 	"github.com/naperu/clarin/pkg/cache"
+	"github.com/naperu/clarin/pkg/config"
 	"github.com/naperu/clarin/pkg/database"
 )
 
@@ -75,20 +78,35 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 	}
 
 	accountID, actorID, boardID, operationID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	personalLibraryID := uuid.New()
+	commenterID, viewerID := uuid.New(), uuid.New()
+	foreignAccountID, foreignActorID := uuid.New(), uuid.New()
 	// Fixture insertion deliberately bypasses unrelated account bootstrap
 	// triggers. The test exercises the real whiteboard schema/repositories and
 	// keeps task/default-environment seed behavior outside this focused path.
 	if _, err := db.Exec(ctx, `SET session_replication_role='replica'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(ctx, `INSERT INTO accounts(id,name) VALUES($1,'Whiteboard API test')`, accountID); err != nil {
+	if _, err := db.Exec(ctx, `INSERT INTO accounts(id,name) VALUES
+		($1,'Whiteboard API test'),($2,'Whiteboard API foreign test')`, accountID, foreignAccountID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO users(id,account_id,username,email,password_hash,display_name,is_admin)
-		VALUES($1,$2,$3,$4,'test','Whiteboard API actor',TRUE)`, actorID, accountID, "wb-api-"+actorID.String(), actorID.String()+"@test.invalid"); err != nil {
+		VALUES
+		($1,$5,$6,$7,'test','Whiteboard API actor',TRUE),
+		($2,$5,$8,$9,'test','Whiteboard API commenter',FALSE),
+		($3,$5,$10,$11,'test','Whiteboard API viewer',FALSE),
+		($4,$12,$13,$14,'test','Whiteboard API foreign actor',FALSE)`,
+		actorID, commenterID, viewerID, foreignActorID, accountID,
+		"wb-api-"+actorID.String(), actorID.String()+"@test.invalid",
+		"wb-api-"+commenterID.String(), commenterID.String()+"@test.invalid",
+		"wb-api-"+viewerID.String(), viewerID.String()+"@test.invalid",
+		foreignAccountID, "wb-api-"+foreignActorID.String(), foreignActorID.String()+"@test.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,role,is_default) VALUES($1,$2,'admin',TRUE)`, actorID, accountID); err != nil {
+	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,role,is_default) VALUES
+		($1,$5,'admin',TRUE),($2,$5,'agent',FALSE),($3,$5,'agent',FALSE),($4,$6,'agent',TRUE)`,
+		actorID, commenterID, viewerID, foreignActorID, accountID, foreignAccountID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO whiteboards(
@@ -99,7 +117,16 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO whiteboard_grants(
 		account_id,board_id,user_id,access_level,can_manage_access,created_by
-	) VALUES($1,$2,$3,'manage',TRUE,$3)`, accountID, boardID, actorID); err != nil {
+	) VALUES
+		($1,$2,$3,'manage',TRUE,$3),
+		($1,$2,$4,'comment',FALSE,$3),
+		($1,$2,$5,'view',FALSE,$3)`, accountID, boardID, actorID, commenterID, viewerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO whiteboard_libraries(
+		id,account_id,name,library_json,visibility,created_by,updated_by
+	) VALUES($1,$2,$3,'{"type":"excalidrawlib","version":2,"libraryItems":[]}'::jsonb,'private',$4,$4)`,
+		personalLibraryID, accountID, "Personal integration "+personalLibraryID.String(), actorID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(ctx, `SET session_replication_role='origin'`); err != nil {
@@ -120,20 +147,173 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 	requestBody := map[string]any{
 		"expected_sequence": 0, "operation_id": operationID, "scene": scene,
 		"patch":                map[string]any{"base_sequence": 0, "elements": elements, "app_state": scene["appState"]},
-		"scene_schema_version": "excalidraw", "editor_version": "0.18.1",
+		"scene_schema_version": "excalidraw", "editor_version": "0.18.1-clarin.4",
 	}
 
 	repos := repository.NewRepositories(db)
-	server := &Server{repos: repos, whiteboardCheckpoints: make(map[string]*whiteboardCheckpointEntry)}
+	server := &Server{
+		cfg:   &config.Config{PublicURL: "https://clarin.example", Env: "production"},
+		repos: repos, abuseLimiter: newInMemoryAbuseLimiter(),
+		whiteboardCheckpoints: make(map[string]*whiteboardCheckpointEntry),
+	}
 	defer server.stopWhiteboardCheckpoints()
 	app := fiber.New()
 	app.Use(func(c *fiber.Ctx) error {
-		c.Locals("account_id", accountID)
-		c.Locals("user_id", actorID)
+		requestAccountID := accountID
+		requestActorID := actorID
+		if value := c.Get("X-Test-Account-ID"); value != "" {
+			parsed, parseErr := uuid.Parse(value)
+			if parseErr != nil {
+				return parseErr
+			}
+			requestAccountID = parsed
+		}
+		if value := c.Get("X-Test-Actor-ID"); value != "" {
+			parsed, parseErr := uuid.Parse(value)
+			if parseErr != nil {
+				return parseErr
+			}
+			requestActorID = parsed
+		}
+		c.Locals("account_id", requestAccountID)
+		c.Locals("user_id", requestActorID)
 		return c.Next()
 	})
 	app.Patch("/api/whiteboards/:id/scene", server.handlePatchWhiteboardScene)
 	app.Get("/api/whiteboards/:id/scene", server.handleGetWhiteboardScene)
+	app.Get("/api/whiteboards/:id/comment-markers", server.handleListWhiteboardCommentMarkers)
+	app.Get("/api/whiteboards/:id/comment-threads", server.handleListWhiteboardCommentThreads)
+	app.Get("/api/whiteboards/:id/comment-threads/:threadId", server.handleGetWhiteboardCommentThread)
+	app.Post("/api/whiteboards/:id/comment-threads", server.handleCreateWhiteboardCommentThread)
+	app.Post("/api/whiteboards/:id/comment-threads/:threadId/replies", server.handleReplyWhiteboardCommentThread)
+	app.Patch("/api/whiteboards/:id/comment-threads/:threadId/comments/:commentId", server.handleEditWhiteboardComment)
+	app.Delete("/api/whiteboards/:id/comment-threads/:threadId/comments/:commentId", server.handleDeleteWhiteboardComment)
+	app.Patch("/api/whiteboards/:id/comment-threads/:threadId/status", server.handleUpdateWhiteboardCommentThreadStatus)
+	app.Post("/api/whiteboards/:id/public-library-import/start", server.guardWhiteboardLibraryImportMutation, server.guardWhiteboardPublicLibraryStart, server.handleStartWhiteboardPublicLibraryImport)
+	app.Get("/api/whiteboards/:id/public-library-imports/:importId/navigate", server.guardWhiteboardPublicLibraryNavigation, server.handleNavigateWhiteboardPublicLibraryImport)
+
+	startPath := "https://clarin.example/api/whiteboards/" + boardID.String() + "/public-library-import/start?library_id=" + personalLibraryID.String()
+	startRequest := httptest.NewRequest(http.MethodPost, startPath, strings.NewReader(`{}`))
+	startRequest.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	startRequest.Header.Set(fiber.HeaderOrigin, "https://clarin.example")
+	startRequest.Header.Set(whiteboardLibraryStartHeader, "1")
+	startResponse, err := app.Test(startRequest, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startBody, err := io.ReadAll(startResponse.Body)
+	startResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var startResult struct {
+		Success        bool   `json:"success"`
+		NavigationPath string `json:"navigation_path"`
+	}
+	if startResponse.StatusCode != http.StatusOK || json.Unmarshal(startBody, &startResult) != nil || !startResult.Success {
+		t.Fatalf("public library start failed: status=%d body=%s", startResponse.StatusCode, startBody)
+	}
+	parsedNavigation, err := url.Parse(startResult.NavigationPath)
+	if err != nil || parsedNavigation.IsAbs() || parsedNavigation.RawQuery != "" || parsedNavigation.Fragment != "" {
+		t.Fatalf("public library start returned unsafe navigation: %q err=%v", startResult.NavigationPath, err)
+	}
+	var handoffCookie *http.Cookie
+	for _, cookie := range startResponse.Cookies() {
+		if cookie.Name == whiteboardLibraryHandoffCookieName {
+			handoffCookie = cookie
+			break
+		}
+	}
+	if handoffCookie == nil || handoffCookie.Value == "" || handoffCookie.Path != startResult.NavigationPath ||
+		handoffCookie.Domain != "" || !handoffCookie.HttpOnly || !handoffCookie.Secure ||
+		handoffCookie.SameSite != http.SameSiteStrictMode || handoffCookie.MaxAge <= 0 || handoffCookie.MaxAge > 120 {
+		t.Fatalf("public library start did not issue the bounded host-only handoff cookie")
+	}
+	if bytes.Contains(startBody, []byte(handoffCookie.Value)) {
+		t.Fatal("public library start exposed its HttpOnly handoff secret in JSON")
+	}
+	var importExpiresAt time.Time
+	var storedNavigationHash string
+	if err := db.QueryRow(ctx, `SELECT expires_at,token_hash FROM whiteboard_library_import_sessions
+		WHERE account_id=$1 AND actor_id=$2 AND board_id=$3`, accountID, actorID, boardID).Scan(&importExpiresAt, &storedNavigationHash); err != nil {
+		t.Fatal(err)
+	}
+	if handoffCookie.Expires.After(importExpiresAt) || storedNavigationHash != service.HashWhiteboardLibraryNavigationSecret(handoffCookie.Value) {
+		t.Fatal("public library handoff cookie exceeded import expiry or used an unbound token hash")
+	}
+	if _, _, err := repos.Whiteboard.ClaimWhiteboardLibraryImport(ctx, accountID, actorID,
+		service.HashWhiteboardLibraryCallbackSecret(handoffCookie.Value), time.Now().UTC()); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("pre-navigation cookie secret was accepted as a callback: %v", err)
+	}
+
+	type navigationResponse struct {
+		Status   int
+		Location string
+		Cookies  []*http.Cookie
+	}
+	performNavigation := func(actor uuid.UUID, cookieValue string, metadata bool) navigationResponse {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "https://clarin.example"+startResult.NavigationPath, nil)
+		request.Header.Set("X-Test-Actor-ID", actor.String())
+		request.AddCookie(&http.Cookie{Name: whiteboardLibraryHandoffCookieName, Value: cookieValue, Path: startResult.NavigationPath})
+		if metadata {
+			request.Header.Set("Sec-Fetch-Site", "same-origin")
+			request.Header.Set("Sec-Fetch-Mode", "navigate")
+			request.Header.Set("Sec-Fetch-Dest", "document")
+		}
+		response, requestErr := app.Test(request, -1)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		defer response.Body.Close()
+		return navigationResponse{Status: response.StatusCode, Location: response.Header.Get(fiber.HeaderLocation), Cookies: response.Cookies()}
+	}
+	if response := performNavigation(actorID, strings.Repeat("z", 43), false); response.Status != http.StatusNotFound {
+		t.Fatalf("public library navigation accepted wrong cookie: status=%d", response.Status)
+	}
+	if response := performNavigation(commenterID, handoffCookie.Value, false); response.Status != http.StatusNotFound {
+		t.Fatalf("public library navigation crossed actor ownership: status=%d", response.Status)
+	}
+	navigated := performNavigation(actorID, handoffCookie.Value, false)
+	redirect, parseErr := url.Parse(navigated.Location)
+	callbackToken := ""
+	if parseErr == nil {
+		callbackToken = redirect.Query().Get("token")
+	}
+	if navigated.Status != http.StatusFound || parseErr != nil || redirect.Scheme != "https" || redirect.Host != "libraries.excalidraw.com" ||
+		callbackToken == "" || callbackToken == handoffCookie.Value || redirect.Query().Has("handoff") {
+		t.Fatalf("public library cookie navigation failed without Fetch Metadata: status=%d err=%v", navigated.Status, parseErr)
+	}
+	cleared := false
+	cookieDiagnostics := make([]string, 0, len(navigated.Cookies))
+	for _, cookie := range navigated.Cookies {
+		cookieDiagnostics = append(cookieDiagnostics, fmt.Sprintf(
+			"name=%q path=%q max_age=%d expires=%s secure=%t http_only=%t same_site=%d value_empty=%t",
+			cookie.Name, cookie.Path, cookie.MaxAge, cookie.Expires.UTC().Format(time.RFC3339), cookie.Secure,
+			cookie.HttpOnly, cookie.SameSite, cookie.Value == "",
+		))
+		if cookie.Name == whiteboardLibraryHandoffCookieName && cookie.Path == startResult.NavigationPath &&
+			cookie.Value == "" && cookie.MaxAge <= 0 && cookie.Expires.Before(time.Now()) &&
+			cookie.HttpOnly && cookie.Secure && cookie.SameSite == http.SameSiteStrictMode {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatalf("public library navigation did not clear its path-bound cookie: %v", cookieDiagnostics)
+	}
+	if replay := performNavigation(actorID, handoffCookie.Value, true); replay.Status != http.StatusNotFound {
+		t.Fatalf("public library navigation cookie replay status=%d, want 404", replay.Status)
+	}
+	var importStatus string
+	var consumedAt *time.Time
+	if err := db.QueryRow(ctx, `SELECT status,consumed_at FROM whiteboard_library_import_sessions
+		WHERE account_id=$1 AND actor_id=$2 AND board_id=$3 AND token_hash=$4`,
+		accountID, actorID, boardID, service.HashWhiteboardLibraryCallbackSecret(callbackToken)).Scan(&importStatus, &consumedAt); err != nil {
+		t.Fatal(err)
+	}
+	if importStatus != domain.WhiteboardLibraryImportPending || consumedAt != nil {
+		t.Fatalf("navigation token rotation mutated import lifecycle: status=%s consumed_at=%v", importStatus, consumedAt)
+	}
 
 	first := performWhiteboardSceneRequest(t, app, http.MethodPatch, "/api/whiteboards/"+boardID.String()+"/scene", requestBody)
 	if first.StatusCode != http.StatusOK {
@@ -166,7 +346,7 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 			"elements":      []map[string]any{rebasedElements[len(rebasedElements)-1]},
 			"app_state":     scene["appState"],
 		},
-		"scene_schema_version": "excalidraw", "editor_version": "0.18.1",
+		"scene_schema_version": "excalidraw", "editor_version": "0.18.1-clarin.4",
 	}
 	rebased := performWhiteboardSceneRequest(t, app, http.MethodPatch, "/api/whiteboards/"+boardID.String()+"/scene", rebasedRequest)
 	if rebased.StatusCode != http.StatusOK || rebased.Result == nil || rebased.Result.Scene == nil || rebased.Result.Scene.Sequence != 2 || !rebased.Rebased {
@@ -179,7 +359,7 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 	futureRequest := map[string]any{
 		"expected_sequence": 99, "operation_id": uuid.New(), "scene": rebasedScene,
 		"patch":                map[string]any{"base_sequence": 99, "elements": []map[string]any{}, "app_state": scene["appState"]},
-		"scene_schema_version": "excalidraw", "editor_version": "0.18.1",
+		"scene_schema_version": "excalidraw", "editor_version": "0.18.1-clarin.4",
 	}
 	future := performWhiteboardSceneRequest(t, app, http.MethodPatch, "/api/whiteboards/"+boardID.String()+"/scene", futureRequest)
 	if future.StatusCode != http.StatusConflict {
@@ -220,7 +400,7 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 	}
 	checkpoint, err := repos.Whiteboard.UpdateScene(ctx, accountID, actorID, boardID, repository.WhiteboardSceneWriteInput{
 		ExpectedSequence: 2, OperationID: checkpointOperationID, Scene: rebasedSceneJSON,
-		SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1", WriteKind: "snapshot", RevisionKind: "automatic",
+		SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1-clarin.4", WriteKind: "snapshot", RevisionKind: "automatic",
 		RequestPayloadHash: prepared.SceneHash, ResultSceneHash: prepared.SceneHash,
 		SnapshotObjectKey: prepared.ObjectKey, SnapshotContentHash: prepared.ContentHash, SnapshotSizeBytes: prepared.SizeBytes,
 	})
@@ -267,6 +447,209 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 	}
 	if sequence != 3 || operationCount != 3 || thumbnailCount != 1 || automaticRevisionCount != 1 || activeSnapshotCount != 1 {
 		t.Fatalf("database durability mismatch: sequence=%d operations=%d", sequence, operationCount)
+	}
+
+	openThread, err := repos.Whiteboard.CreateWhiteboardCommentThread(ctx, accountID, actorID, boardID,
+		repository.WhiteboardCommentThreadCreateInput{OperationID: uuid.New(), AnchorX: 15, AnchorY: 20, Body: "Visible en marcador"})
+	if err != nil {
+		t.Fatalf("create API comment fixture: %v", err)
+	}
+	resolvedThread, err := repos.Whiteboard.CreateWhiteboardCommentThread(ctx, accountID, actorID, boardID,
+		repository.WhiteboardCommentThreadCreateInput{OperationID: uuid.New(), AnchorX: 25, AnchorY: 30, Body: "Resuelto"})
+	if err != nil {
+		t.Fatalf("create resolved API comment fixture: %v", err)
+	}
+	resolvedThread, err = repos.Whiteboard.UpdateWhiteboardCommentThreadStatus(ctx, accountID, actorID, boardID, resolvedThread.ID,
+		repository.WhiteboardCommentStatusInput{OperationID: uuid.New(), ExpectedVersion: resolvedThread.Version, Status: domain.WhiteboardCommentResolved})
+	if err != nil {
+		t.Fatalf("resolve API comment fixture: %v", err)
+	}
+	commentListResponse, err := app.Test(httptest.NewRequest(http.MethodGet,
+		"/api/whiteboards/"+boardID.String()+"/comment-threads?status=resolved&limit=10", nil), -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer commentListResponse.Body.Close()
+	var commentListPayload struct {
+		Threads []*domain.WhiteboardCommentThread    `json:"threads"`
+		Counts  domain.WhiteboardCommentThreadCounts `json:"counts"`
+	}
+	if err := json.NewDecoder(commentListResponse.Body).Decode(&commentListPayload); err != nil {
+		t.Fatal(err)
+	}
+	if commentListResponse.StatusCode != http.StatusOK || len(commentListPayload.Threads) != 1 ||
+		commentListPayload.Threads[0].ID != resolvedThread.ID || commentListPayload.Threads[0].Status != domain.WhiteboardCommentResolved ||
+		commentListPayload.Counts.Open != 1 || commentListPayload.Counts.Resolved != 1 || commentListPayload.Counts.All != 2 {
+		t.Fatalf("comment list API lost filter/counts: status=%d payload=%#v", commentListResponse.StatusCode, commentListPayload)
+	}
+	markerResponse, err := app.Test(httptest.NewRequest(http.MethodGet,
+		"/api/whiteboards/"+boardID.String()+"/comment-markers?limit=1", nil), -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer markerResponse.Body.Close()
+	markerBody, err := io.ReadAll(markerResponse.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var markerPayload struct {
+		Markers []*domain.WhiteboardCommentMarker `json:"markers"`
+	}
+	if err := json.Unmarshal(markerBody, &markerPayload); err != nil {
+		t.Fatal(err)
+	}
+	if markerResponse.StatusCode != http.StatusOK || len(markerPayload.Markers) != 1 || markerPayload.Markers[0].ID != openThread.ID ||
+		bytes.Contains(markerBody, []byte(`"body"`)) || bytes.Contains(markerBody, []byte(`"comments"`)) {
+		t.Fatalf("open marker API leaked content or wrong status: status=%d body=%s", markerResponse.StatusCode, markerBody)
+	}
+	detailResponse, err := app.Test(httptest.NewRequest(http.MethodGet,
+		"/api/whiteboards/"+boardID.String()+"/comment-threads/"+openThread.ID.String(), nil), -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer detailResponse.Body.Close()
+	var detailPayload struct {
+		Thread *domain.WhiteboardCommentThread `json:"thread"`
+	}
+	if err := json.NewDecoder(detailResponse.Body).Decode(&detailPayload); err != nil {
+		t.Fatal(err)
+	}
+	if detailResponse.StatusCode != http.StatusOK || detailPayload.Thread == nil || detailPayload.Thread.ID != openThread.ID ||
+		len(detailPayload.Thread.Comments) != 1 || detailPayload.Thread.Comments[0].Body != "Visible en marcador" {
+		t.Fatalf("comment detail API failed: status=%d payload=%#v", detailResponse.StatusCode, detailPayload)
+	}
+
+	performCommentRequest := func(method, path string, requestAccountID, requestActorID uuid.UUID, payload any) (int, []byte) {
+		t.Helper()
+		var body io.Reader
+		if payload != nil {
+			encoded, encodeErr := json.Marshal(payload)
+			if encodeErr != nil {
+				t.Fatal(encodeErr)
+			}
+			body = bytes.NewReader(encoded)
+		}
+		request := httptest.NewRequest(method, path, body)
+		request.Header.Set("X-Test-Account-ID", requestAccountID.String())
+		request.Header.Set("X-Test-Actor-ID", requestActorID.String())
+		if payload != nil {
+			request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+		}
+		response, requestErr := app.Test(request, -1)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		defer response.Body.Close()
+		responseBody, readErr := io.ReadAll(response.Body)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return response.StatusCode, responseBody
+	}
+	decodeCommentThread := func(body []byte) *domain.WhiteboardCommentThread {
+		t.Helper()
+		var payload struct {
+			Thread *domain.WhiteboardCommentThread `json:"thread"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode comment response: %v body=%s", err, body)
+		}
+		return payload.Thread
+	}
+
+	commentBasePath := "/api/whiteboards/" + boardID.String() + "/comment-threads"
+	createOperationID := uuid.New()
+	status, responseBody := performCommentRequest(http.MethodPost, commentBasePath, accountID, commenterID, map[string]any{
+		"operation_id": createOperationID,
+		"anchor_x":     70,
+		"anchor_y":     80,
+		"body":         "CRUD Fiber",
+	})
+	createdThread := decodeCommentThread(responseBody)
+	if status != http.StatusCreated || createdThread == nil || len(createdThread.Comments) != 1 || createdThread.Comments[0].Body != "CRUD Fiber" {
+		t.Fatalf("comment create API failed: status=%d body=%s", status, responseBody)
+	}
+	status, responseBody = performCommentRequest(http.MethodPost, commentBasePath, accountID, commenterID, map[string]any{
+		"operation_id": createOperationID,
+		"anchor_x":     70,
+		"anchor_y":     80,
+		"body":         "CRUD Fiber",
+	})
+	replayedCreatedThread := decodeCommentThread(responseBody)
+	if status != http.StatusCreated || replayedCreatedThread == nil || replayedCreatedThread.ID != createdThread.ID || len(replayedCreatedThread.Comments) != 1 {
+		t.Fatalf("comment create API was not idempotent: status=%d body=%s", status, responseBody)
+	}
+	status, responseBody = performCommentRequest(http.MethodPost, commentBasePath, accountID, viewerID, map[string]any{
+		"operation_id": uuid.New(),
+		"anchor_x":     1,
+		"anchor_y":     1,
+		"body":         "No autorizado",
+	})
+	if status != http.StatusForbidden {
+		t.Fatalf("view-only comment create did not return 403: status=%d body=%s", status, responseBody)
+	}
+
+	threadPath := commentBasePath + "/" + createdThread.ID.String()
+	status, responseBody = performCommentRequest(http.MethodPost, threadPath+"/replies", accountID, commenterID, map[string]any{
+		"operation_id": uuid.New(),
+		"body":         "Respuesta Fiber",
+	})
+	repliedAPThread := decodeCommentThread(responseBody)
+	if status != http.StatusOK || repliedAPThread == nil || len(repliedAPThread.Comments) != 2 {
+		t.Fatalf("comment reply API failed: status=%d body=%s", status, responseBody)
+	}
+
+	ownedAPIComment := repliedAPThread.Comments[0]
+	commentPath := threadPath + "/comments/" + ownedAPIComment.ID.String()
+	status, responseBody = performCommentRequest(http.MethodPatch, commentPath, accountID, actorID, map[string]any{
+		"operation_id":     uuid.New(),
+		"expected_version": ownedAPIComment.Version,
+		"body":             "Edición ajena",
+	})
+	if status != http.StatusForbidden {
+		t.Fatalf("non-owner comment edit did not return 403: status=%d body=%s", status, responseBody)
+	}
+	status, responseBody = performCommentRequest(http.MethodPatch, commentPath, accountID, commenterID, map[string]any{
+		"operation_id":     uuid.New(),
+		"expected_version": ownedAPIComment.Version + 1,
+		"body":             "Versión obsoleta",
+	})
+	if status != http.StatusConflict {
+		t.Fatalf("stale comment edit did not return 409: status=%d body=%s", status, responseBody)
+	}
+	status, responseBody = performCommentRequest(http.MethodPatch, commentPath, accountID, commenterID, map[string]any{
+		"operation_id":     uuid.New(),
+		"expected_version": ownedAPIComment.Version,
+		"body":             "Edición Fiber canónica",
+	})
+	editedAPIThread := decodeCommentThread(responseBody)
+	if status != http.StatusOK || editedAPIThread == nil || editedAPIThread.Comments[0].Body != "Edición Fiber canónica" || editedAPIThread.Comments[0].Version != ownedAPIComment.Version+1 {
+		t.Fatalf("owned comment edit API failed: status=%d body=%s", status, responseBody)
+	}
+
+	status, responseBody = performCommentRequest(http.MethodDelete, commentPath, accountID, commenterID, map[string]any{
+		"operation_id":     uuid.New(),
+		"expected_version": ownedAPIComment.Version,
+	})
+	if status != http.StatusConflict {
+		t.Fatalf("stale comment delete did not return 409: status=%d body=%s", status, responseBody)
+	}
+	status, responseBody = performCommentRequest(http.MethodDelete, commentPath, accountID, commenterID, map[string]any{
+		"operation_id":     uuid.New(),
+		"expected_version": editedAPIThread.Comments[0].Version,
+	})
+	deletedAPIThread := decodeCommentThread(responseBody)
+	if status != http.StatusOK || deletedAPIThread == nil || deletedAPIThread.Comments[0].DeletedAt == nil || deletedAPIThread.Comments[0].Body != "" {
+		t.Fatalf("owned comment delete API failed: status=%d body=%s", status, responseBody)
+	}
+
+	status, responseBody = performCommentRequest(http.MethodGet, commentBasePath+"/"+uuid.NewString(), accountID, commenterID, nil)
+	if status != http.StatusNotFound {
+		t.Fatalf("missing comment detail did not return 404: status=%d body=%s", status, responseBody)
+	}
+	status, responseBody = performCommentRequest(http.MethodGet, threadPath, foreignAccountID, foreignActorID, nil)
+	if status != http.StatusNotFound {
+		t.Fatalf("cross-account comment detail did not return 404: status=%d body=%s", status, responseBody)
 	}
 }
 
@@ -347,7 +730,7 @@ func TestWhiteboardDeployedRuntimePersistsControlledScene(t *testing.T) {
 	createOperationID := uuid.New()
 	created := performWhiteboardRuntimeRequest(t, http.MethodPost, baseURL+"/api/whiteboards", token, map[string]any{
 		"name": "QA temporal · guardado desplegado", "operation_id": createOperationID,
-		"scene": json.RawMessage(emptyWhiteboardScene), "scene_schema_version": "excalidraw", "editor_version": "0.18.1",
+		"scene": json.RawMessage(emptyWhiteboardScene), "scene_schema_version": "excalidraw", "editor_version": "0.18.1-clarin.4",
 	})
 	if created.StatusCode != http.StatusCreated {
 		t.Fatalf("runtime create status=%d body=%s", created.StatusCode, created.Body)
@@ -410,7 +793,7 @@ func TestWhiteboardDeployedRuntimePersistsControlledScene(t *testing.T) {
 	payload := map[string]any{
 		"expected_sequence": 0, "operation_id": writeOperationID, "scene": scene,
 		"patch":                map[string]any{"base_sequence": 0, "elements": elements, "app_state": scene["appState"]},
-		"scene_schema_version": "excalidraw", "editor_version": "0.18.1",
+		"scene_schema_version": "excalidraw", "editor_version": "0.18.1-clarin.4",
 	}
 	written := performWhiteboardRuntimeRequest(t, http.MethodPatch, baseURL+"/api/whiteboards/"+boardID.String()+"/scene", token, payload)
 	if written.StatusCode != http.StatusOK {

@@ -17,6 +17,17 @@ export function taskQueryFiltersForView(filters: TaskFilters, view: TaskViewMode
   return view === 'summary' ? { ...filters, include_closed: true } : filters
 }
 
+export function taskQueryFiltersForLifecycle(
+  filters: TaskFilters,
+  view: TaskViewMode,
+  lifecycle: 'active' | 'archive' | 'trash',
+): TaskFilters {
+  const visibleFilters = taskQueryFiltersForView(filters, view)
+  return lifecycle === 'active' || visibleFilters.include_closed
+    ? visibleFilters
+    : { ...visibleFilters, include_closed: true }
+}
+
 /** Preserve a local task omitted by an older response only when it changed
  * after that request and still belongs to the visible population. */
 export function shouldPreserveConcurrentTask(

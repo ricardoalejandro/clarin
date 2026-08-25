@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Task, TaskFilters } from '@/types/task'
-import { shouldPreserveConcurrentTask, taskMatchesClosedVisibility, taskQueryFiltersForView } from './taskClosedVisibility'
+import { shouldPreserveConcurrentTask, taskMatchesClosedVisibility, taskQueryFiltersForLifecycle, taskQueryFiltersForView } from './taskClosedVisibility'
 
 const filters = (overrides: Partial<TaskFilters> = {}): TaskFilters => ({
   include_closed: false, status_ids: [], assigned_to_ids: [], collaborator_ids: [], priorities: [], types: [], creator_ids: [],
@@ -22,6 +22,13 @@ describe('closed task visibility', () => {
     expect(taskMatchesClosedVisibility(task('done', 'done'), filters(), 'summary')).toBe(true)
     expect(taskMatchesClosedVisibility(task('done', 'done'), filters({ include_closed: true }), 'gantt')).toBe(true)
     expect(taskQueryFiltersForView(filters(), 'summary').include_closed).toBe(true)
+  })
+
+  it('keeps closed tasks visible in Archive and Trash without changing active views', () => {
+    const activeFilters = filters()
+    expect(taskQueryFiltersForLifecycle(filters(), 'list', 'archive').include_closed).toBe(true)
+    expect(taskQueryFiltersForLifecycle(filters(), 'board', 'trash').include_closed).toBe(true)
+    expect(taskQueryFiltersForLifecycle(activeFilters, 'list', 'active')).toBe(activeFilters)
   })
 
   it('gives an explicit status selection precedence over include_closed=false', () => {

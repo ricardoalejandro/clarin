@@ -240,6 +240,8 @@ func (s *Server) handleUpdateProgram(c *fiber.Ctx) error {
 		EventDate         *string    `json:"event_date"`
 		EventEnd          *string    `json:"event_end"`
 		Location          *string    `json:"location"`
+		HealthViewColumns *[]string  `json:"health_view_columns"`
+		ExpectedUpdatedAt *time.Time `json:"expected_updated_at"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
@@ -268,6 +270,7 @@ func (s *Server) handleUpdateProgram(c *fiber.Ctx) error {
 		})
 	}
 
+	healthViewColumns := resolveProgramHealthViewColumns(existing.HealthViewColumns, req.HealthViewColumns)
 	program := &domain.Program{
 		ID:                id,
 		AccountID:         accountID,
@@ -277,14 +280,27 @@ func (s *Server) handleUpdateProgram(c *fiber.Ctx) error {
 		Description:       &req.Description,
 		Status:            req.Status,
 		Color:             req.Color,
-		ScheduleDays:      req.ScheduleDays,
-		ScheduleStartTime: req.ScheduleStartTime,
-		ScheduleEndTime:   req.ScheduleEndTime,
+		ScheduleStartDate: existing.ScheduleStartDate,
+		ScheduleEndDate:   existing.ScheduleEndDate,
+		ScheduleDays:      append([]int(nil), existing.ScheduleDays...),
+		ScheduleStartTime: existing.ScheduleStartTime,
+		ScheduleEndTime:   existing.ScheduleEndTime,
 		PipelineID:        req.PipelineID,
 		TagFormula:        req.TagFormula,
 		TagFormulaMode:    req.TagFormulaMode,
 		TagFormulaType:    req.TagFormulaType,
 		Location:          req.Location,
+		HealthViewColumns: healthViewColumns,
+		ExpectedUpdatedAt: req.ExpectedUpdatedAt,
+	}
+	if req.ScheduleDays != nil {
+		program.ScheduleDays = append([]int(nil), req.ScheduleDays...)
+	}
+	if req.ScheduleStartTime != nil {
+		program.ScheduleStartTime = req.ScheduleStartTime
+	}
+	if req.ScheduleEndTime != nil {
+		program.ScheduleEndTime = req.ScheduleEndTime
 	}
 	if program.Type == "event" {
 		if program.PipelineID == nil {
@@ -299,12 +315,22 @@ func (s *Server) handleUpdateProgram(c *fiber.Ctx) error {
 	}
 
 	if req.ScheduleStartDate != nil {
-		if t, err := time.Parse("2006-01-02", *req.ScheduleStartDate); err == nil {
+		program.ScheduleStartDate = nil
+		if strings.TrimSpace(*req.ScheduleStartDate) != "" {
+			t, parseErr := time.Parse("2006-01-02", *req.ScheduleStartDate)
+			if parseErr != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "schedule_start_date must use YYYY-MM-DD"})
+			}
 			program.ScheduleStartDate = &t
 		}
 	}
 	if req.ScheduleEndDate != nil {
-		if t, err := time.Parse("2006-01-02", *req.ScheduleEndDate); err == nil {
+		program.ScheduleEndDate = nil
+		if strings.TrimSpace(*req.ScheduleEndDate) != "" {
+			t, parseErr := time.Parse("2006-01-02", *req.ScheduleEndDate)
+			if parseErr != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "schedule_end_date must use YYYY-MM-DD"})
+			}
 			program.ScheduleEndDate = &t
 		}
 	}
@@ -324,11 +350,43 @@ func (s *Server) handleUpdateProgram(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Program.UpdateProgram(c.Context(), program); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		switch {
+		case errors.Is(err, repository.ErrProgramConflict):
+			current, loadErr := s.services.Program.GetProgram(c.Context(), accountID, id)
+			if loadErr != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "No se pudo recargar la configuración actual del programa."})
+			}
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"code":    "PROGRAM_UPDATE_CONFLICT",
+				"error":   "El programa cambió mientras lo editabas. Recarga sus datos antes de volver a guardar.",
+				"program": current,
+			})
+		case errors.Is(err, repository.ErrProgramNotFound):
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
+		case errors.Is(err, service.ErrProgramInput):
+			message := strings.TrimPrefix(err.Error(), service.ErrProgramInput.Error()+": ")
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": message})
+		default:
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "No se pudo actualizar el programa."})
+		}
 	}
 
 	s.invalidateProgramsCache(accountID)
-	return c.JSON(program)
+	updated, err := s.services.Program.GetProgram(c.Context(), accountID, id)
+	if err != nil || updated == nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "El programa se guardó, pero no se pudo recargar su versión canónica."})
+	}
+	return c.JSON(updated)
+}
+
+func resolveProgramHealthViewColumns(existing []string, requested *[]string) []string {
+	columns := existing
+	if requested != nil {
+		columns = *requested
+	}
+	resolved := make([]string, len(columns))
+	copy(resolved, columns)
+	return resolved
 }
 
 func resolveProgramTypeForUpdate(existingType, requestedType string) (string, error) {

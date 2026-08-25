@@ -120,7 +120,7 @@ func whiteboardMigrations() []string {
 			created_by UUID,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			CONSTRAINT whiteboard_grants_level_check CHECK (access_level IN ('view','edit','manage')),
+			CONSTRAINT whiteboard_grants_level_check CHECK (access_level IN ('view','comment','edit','manage')),
 			CONSTRAINT whiteboard_grants_manage_check CHECK (can_manage_access=(access_level='manage')),
 			FOREIGN KEY(account_id,user_id) REFERENCES user_accounts(account_id,user_id) ON DELETE CASCADE,
 			FOREIGN KEY(account_id,board_id) REFERENCES whiteboards(account_id,id) ON DELETE CASCADE,
@@ -130,6 +130,21 @@ func whiteboardMigrations() []string {
 			ON whiteboard_grants(account_id,user_id,board_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_whiteboard_grants_board
 			ON whiteboard_grants(account_id,board_id,user_id)`,
+		// Upgrade the cumulative board ACL without granting comments to account
+		// visibility or guest links. Replacing the check only when needed keeps
+		// startup migrations idempotent and avoids an unnecessary table lock.
+		`DO $$ BEGIN
+			IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='whiteboard_grants_level_check'
+				AND conrelid='whiteboard_grants'::regclass
+				AND pg_get_constraintdef(oid) NOT LIKE '%comment%') THEN
+				ALTER TABLE whiteboard_grants DROP CONSTRAINT whiteboard_grants_level_check;
+			END IF;
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='whiteboard_grants_level_check'
+				AND conrelid='whiteboard_grants'::regclass) THEN
+				ALTER TABLE whiteboard_grants ADD CONSTRAINT whiteboard_grants_level_check
+					CHECK (access_level IN ('view','comment','edit','manage'));
+			END IF;
+		 END $$`,
 		`CREATE TABLE IF NOT EXISTS whiteboard_access_audit (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -170,6 +185,145 @@ func whiteboardMigrations() []string {
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_whiteboard_activity_operation
 			ON whiteboard_activity(account_id,board_id,action,operation_id)
 			WHERE operation_id IS NOT NULL`,
+
+		`CREATE TABLE IF NOT EXISTS whiteboard_comment_threads (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			board_id UUID NOT NULL,
+			element_id VARCHAR(255),
+			anchor_x DOUBLE PRECISION NOT NULL,
+			anchor_y DOUBLE PRECISION NOT NULL,
+			anchor_ratio_x DOUBLE PRECISION,
+			anchor_ratio_y DOUBLE PRECISION,
+			status VARCHAR(16) NOT NULL DEFAULT 'open',
+			version BIGINT NOT NULL DEFAULT 1,
+			created_by UUID,
+			resolved_by UUID,
+			resolved_at TIMESTAMPTZ,
+			operation_id UUID NOT NULL,
+			request_payload_hash CHAR(64) NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT whiteboard_comment_threads_status_check CHECK (status IN ('open','resolved')),
+			CONSTRAINT whiteboard_comment_threads_anchor_check CHECK (
+				(anchor_ratio_x IS NULL AND anchor_ratio_y IS NULL) OR
+				(element_id IS NOT NULL AND anchor_ratio_x BETWEEN 0 AND 1 AND anchor_ratio_y BETWEEN 0 AND 1)
+			),
+			CONSTRAINT whiteboard_comment_threads_resolution_check CHECK (
+				(status='open' AND resolved_by IS NULL AND resolved_at IS NULL) OR
+				(status='resolved' AND resolved_at IS NOT NULL)
+			),
+			FOREIGN KEY(account_id,board_id) REFERENCES whiteboards(account_id,id) ON DELETE CASCADE,
+			FOREIGN KEY(account_id,created_by) REFERENCES user_accounts(account_id,user_id) ON DELETE SET NULL (created_by),
+			FOREIGN KEY(account_id,resolved_by) REFERENCES user_accounts(account_id,user_id) ON DELETE SET NULL (resolved_by),
+			UNIQUE(account_id,board_id,id),
+			UNIQUE(account_id,board_id,operation_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_whiteboard_comment_threads_board_status
+			ON whiteboard_comment_threads(account_id,board_id,status,updated_at DESC,id DESC)`,
+		`CREATE TABLE IF NOT EXISTS whiteboard_comments (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			board_id UUID NOT NULL,
+			thread_id UUID NOT NULL,
+			author_id UUID,
+			body TEXT NOT NULL,
+			version BIGINT NOT NULL DEFAULT 1,
+			deleted_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT whiteboard_comments_body_check CHECK (
+				(deleted_at IS NOT NULL AND body='') OR
+				(deleted_at IS NULL AND char_length(body)>0 AND char_length(body)<=4000)
+			),
+			FOREIGN KEY(account_id,board_id,thread_id)
+				REFERENCES whiteboard_comment_threads(account_id,board_id,id) ON DELETE CASCADE,
+			FOREIGN KEY(account_id,author_id) REFERENCES user_accounts(account_id,user_id) ON DELETE SET NULL (author_id),
+			UNIQUE(account_id,board_id,id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_whiteboard_comments_thread_order
+			ON whiteboard_comments(account_id,board_id,thread_id,created_at,id)`,
+		`DO $$ BEGIN ALTER TABLE whiteboard_comments ADD CONSTRAINT whiteboard_comments_body_length_check
+			CHECK (char_length(body)<=4000) NOT VALID;
+		 EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE whiteboard_comments VALIDATE CONSTRAINT whiteboard_comments_body_length_check`,
+		`CREATE TABLE IF NOT EXISTS whiteboard_comment_operations (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			board_id UUID NOT NULL,
+			operation_id UUID NOT NULL,
+			actor_id UUID,
+			action VARCHAR(40) NOT NULL,
+			entity_id UUID NOT NULL,
+			request_payload_hash CHAR(64) NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			FOREIGN KEY(account_id,board_id) REFERENCES whiteboards(account_id,id) ON DELETE CASCADE,
+			FOREIGN KEY(account_id,actor_id) REFERENCES user_accounts(account_id,user_id) ON DELETE SET NULL (actor_id),
+			UNIQUE(account_id,board_id,operation_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_whiteboard_comment_operations_retention
+			ON whiteboard_comment_operations(account_id,board_id,created_at DESC,id DESC)`,
+
+		`CREATE TABLE IF NOT EXISTS whiteboard_library_import_sessions (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			board_id UUID NOT NULL,
+			library_id UUID NOT NULL,
+			actor_id UUID NOT NULL,
+			token_hash CHAR(64) NOT NULL,
+			status VARCHAR(16) NOT NULL DEFAULT 'pending',
+			source_url TEXT,
+			library_json JSONB,
+			failure_code VARCHAR(80),
+			completion_operation_id UUID,
+			completed_library_version BIGINT,
+			expires_at TIMESTAMPTZ NOT NULL,
+			consumed_at TIMESTAMPTZ,
+			completed_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT whiteboard_library_import_status_check
+				CHECK (status IN ('pending','fetching','ready','completed','failed')),
+			CONSTRAINT whiteboard_library_import_payload_check CHECK (
+				(status='ready' AND library_json IS NOT NULL AND source_url IS NOT NULL) OR
+				(status<>'ready')
+			),
+			CONSTRAINT whiteboard_library_import_completion_check CHECK (
+				(status='completed' AND completed_at IS NOT NULL AND completion_operation_id IS NOT NULL
+					AND completed_library_version IS NOT NULL AND completed_library_version>0) OR
+				(status<>'completed' AND completed_at IS NULL)
+			),
+			FOREIGN KEY(account_id,board_id) REFERENCES whiteboards(account_id,id) ON DELETE CASCADE,
+			FOREIGN KEY(account_id,library_id) REFERENCES whiteboard_libraries(account_id,id) ON DELETE CASCADE,
+			FOREIGN KEY(account_id,actor_id) REFERENCES user_accounts(account_id,user_id) ON DELETE CASCADE,
+			UNIQUE(token_hash),
+			UNIQUE(account_id,board_id,id)
+		)`,
+		// Earlier releases could acknowledge an import without recording the
+		// canonical personal-library version. Such a row cannot be proven or
+		// replayed safely, so retain it as a consumed-token failure tombstone
+		// before validating the stricter lifecycle constraint.
+		`UPDATE whiteboard_library_import_sessions SET
+			status='failed',source_url=NULL,library_json=NULL,
+			failure_code=COALESCE(failure_code,'unconfirmed_library_version'),
+			completion_operation_id=NULL,completed_library_version=NULL,completed_at=NULL,updated_at=NOW()
+			WHERE status='completed' AND (completed_library_version IS NULL OR completed_library_version<=0)`,
+		`DO $$ BEGIN ALTER TABLE whiteboard_library_import_sessions
+			ADD CONSTRAINT whiteboard_library_import_completed_version_check CHECK (
+				(status='completed' AND completed_library_version IS NOT NULL AND completed_library_version>0
+					AND library_json IS NULL) OR
+				(status<>'completed' AND completed_library_version IS NULL)) NOT VALID;
+		 EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE whiteboard_library_import_sessions
+			VALIDATE CONSTRAINT whiteboard_library_import_completed_version_check`,
+		`CREATE INDEX IF NOT EXISTS idx_whiteboard_library_import_actor
+			ON whiteboard_library_import_sessions(account_id,actor_id,board_id,expires_at DESC,id DESC)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_whiteboard_library_import_completion
+			ON whiteboard_library_import_sessions(account_id,board_id,completion_operation_id)
+			WHERE completion_operation_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_whiteboard_library_import_expiry
+			ON whiteboard_library_import_sessions(expires_at,id)
+			WHERE status IN ('pending','fetching','ready')`,
 
 		`CREATE TABLE IF NOT EXISTS whiteboard_share_links (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

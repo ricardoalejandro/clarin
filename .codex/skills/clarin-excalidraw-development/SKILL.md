@@ -96,7 +96,7 @@ npm --prefix frontend run test:whiteboards:compat
 npm run test:whiteboards:egress
 
 node .codex/skills/clarin-excalidraw-development/scripts/scan-visible-branding.mjs \
-  --root frontend/public/vendor/whiteboards-editor/0.18.1 \
+  --root frontend/public/vendor/whiteboards-editor/0.18.1-clarin.4 \
   --snapshot /tmp/clarin-whiteboard-visible-branding.json \
   --policy .codex/skills/clarin-excalidraw-development/references/visible-branding-policy.json
 ```

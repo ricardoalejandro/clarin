@@ -18,7 +18,7 @@ import {
   TrendingUp,
   WifiOff,
 } from 'lucide-react'
-import { api } from '@/lib/api'
+import { api, subscribeWebSocket } from '@/lib/api'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 
 type PeriodPreset = '7d' | '30d' | '90d'
@@ -91,6 +91,7 @@ interface DashboardTasks {
   due_today: number
   items: Array<{
     id: string
+    environment_id: string | null
     title: string
     due_at: string | null
     status: string
@@ -377,6 +378,7 @@ export default function DashboardPage() {
   const [error, setError] = useState('')
   const requestIdRef = useRef(0)
   const controllerRef = useRef<AbortController | null>(null)
+  const realtimeRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const loadDashboard = useCallback(async (showSkeleton: boolean) => {
     const requestId = ++requestIdRef.current
@@ -409,6 +411,20 @@ export default function DashboardPage() {
       controllerRef.current?.abort()
     }
   }, [loadDashboard])
+
+  useEffect(() => subscribeWebSocket(raw => {
+    const message = raw as { event?: string }
+    if (!['chat_update', 'new_message', 'task_update', 'task_overdue'].includes(message.event || '')) return
+    if (realtimeRefreshRef.current) clearTimeout(realtimeRefreshRef.current)
+    realtimeRefreshRef.current = setTimeout(() => {
+      realtimeRefreshRef.current = null
+      if (document.visibilityState === 'visible') void loadDashboard(false)
+    }, 180)
+  }), [loadDashboard])
+
+  useEffect(() => () => {
+    if (realtimeRefreshRef.current) clearTimeout(realtimeRefreshRef.current)
+  }, [])
 
   const handlePeriodChange = (nextPeriod: PeriodPreset) => {
     if (nextPeriod === period) return
@@ -528,7 +544,7 @@ export default function DashboardPage() {
               <AttentionCard label="chats por responder" value={chats.awaiting_reply} detail={`${formatNumber(chats.unread_total)} mensajes no leídos en total`} href="/dashboard/chats" icon={MessageSquare} urgent />
             )}
             {sections.tasks && tasks && (
-              <AttentionCard label="mis tareas vencidas" value={tasks.overdue} detail={`${formatNumber(tasks.due_today)} adicionales para hoy`} href="/dashboard/tasks" icon={ListChecks} urgent />
+              <AttentionCard label="mis tareas vencidas" value={tasks.overdue} detail={`${formatNumber(tasks.due_today)} adicionales para hoy`} href="/dashboard/tasks?attention=overdue" icon={ListChecks} urgent />
             )}
             {sections.events && events && (
               <AttentionCard label="seguimientos vencidos" value={events.overdue_followups} detail={`${formatNumber(events.due_next_7_days)} próximos en 7 días`} href="/dashboard/events" icon={CalendarClock} urgent />
@@ -619,7 +635,7 @@ export default function DashboardPage() {
               <div className="border-b border-slate-100 px-4 py-3"><h2 className="text-sm font-black text-slate-800">Agenda operativa</h2><p className="mt-0.5 text-[11px] text-slate-400">Tareas personales y próximos seguimientos.</p></div>
               <div className="divide-y divide-slate-100">
                 {sections.tasks && tasks && tasks.items.slice(0, 3).map(task => (
-                  <Link key={`task-${task.id}`} href="/dashboard/tasks" className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 hover:bg-slate-50/70 sm:flex-nowrap">
+                  <Link key={`task-${task.id}`} href={task.due_at && new Date(task.due_at).getTime() < Date.now() ? `/dashboard/tasks?attention=overdue&task=${task.id}` : `/dashboard/tasks?${task.environment_id ? `environment=${task.environment_id}&` : ''}task=${task.id}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 hover:bg-slate-50/70 sm:flex-nowrap">
                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600"><ListChecks className="h-4 w-4" /></div>
                     <div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-slate-700">{task.title}</p><p className="mt-0.5 text-[11px] text-slate-400">Mi tarea · {formatDateTime(task.due_at, dashboard.timezone)}</p></div>
                     {task.due_at && new Date(task.due_at).getTime() < Date.now() && <span className="ml-11 w-full text-[10px] font-bold text-rose-600 sm:ml-0 sm:w-auto">Vencida</span>}

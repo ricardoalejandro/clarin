@@ -5,7 +5,8 @@ import { useRouter } from 'next/navigation'
 import Script from 'next/script'
 import { ArrowRight, Eye, EyeOff, Lock, User } from 'lucide-react'
 import ClarinBrandMark from '@/components/branding/ClarinBrandMark'
-import { getLoginNoticeForLogoutReason, markAuthSession } from '@/lib/api'
+import { getLoginNoticeForLogoutReason, markAuthTokenRefreshed } from '@/lib/api'
+import { WHITEBOARD_PUBLIC_LIBRARY_CALLBACK_PATH } from '@/lib/whiteboardPublicLibraries'
 
 type TurnstileWidgetID = string | number
 
@@ -138,9 +139,13 @@ export default function LoginScreen() {
         resetTurnstile()
         return
       }
-      markAuthSession()
+      markAuthTokenRefreshed()
       const next = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('next') : ''
-      const safeNext = next && (next.startsWith('/oauth/authorize') || next.startsWith('https://clarin.naperu.cloud/oauth/authorize')) ? next : '/dashboard'
+      const safeNext = next && (
+        next === WHITEBOARD_PUBLIC_LIBRARY_CALLBACK_PATH
+        || next.startsWith('/oauth/authorize')
+        || next.startsWith('https://clarin.naperu.cloud/oauth/authorize')
+      ) ? next : '/dashboard'
       if (safeNext.startsWith('/oauth/authorize') || safeNext.startsWith('https://clarin.naperu.cloud/oauth/authorize')) {
         window.location.assign(safeNext)
         return

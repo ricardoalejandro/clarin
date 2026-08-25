@@ -32,7 +32,7 @@ test("permite la UI Clarin y los tokens de compatibilidad .excalidraw", () => {
   assert.deepEqual(result.violations, []);
 });
 
-test("bloquea marca, catálogo público y acciones upstream realmente visibles", () => {
+test("bloquea marca, publicación y acciones upstream realmente visibles", () => {
   const result = scanBrandingSnapshot(
     fixture("branding-upstream-visible-snapshot.json"),
     policy,
@@ -40,11 +40,42 @@ test("bloquea marca, catálogo público y acciones upstream realmente visibles",
   );
   const rules = new Set(result.violations.map((item) => item.rule));
   assert.ok(rules.has("upstream-product-name"));
-  assert.ok(rules.has("upstream-public-library-browser"));
   assert.ok(rules.has("upstream-library-publishing"));
   assert.ok(rules.has("forbidden-action-testid"));
   assert.ok(rules.has("forbidden-action-class"));
   assert.ok(rules.has("forbidden-action-href"));
+});
+
+test("permite explorar por la ruta Clarin pero bloquea el enlace directo al host upstream", () => {
+  const controlled = scanBrandingSnapshot({
+    schemaVersion: 1,
+    surfaces: [{
+      name: "controlled-library-browser",
+      visibleText: ["Explorar bibliotecas"],
+      visibleActions: [{
+        tag: "a",
+        accessibleName: "Explorar bibliotecas",
+        classNames: ["library-menu-browse-button"],
+        href: "/api/whiteboards/11111111-1111-4111-8111-111111111111/public-library-import/start?library_id=22222222-2222-4222-8222-222222222222",
+      }],
+    }],
+  }, policy, "controlled-library-browser");
+  assert.deepEqual(controlled.violations, []);
+
+  const direct = scanBrandingSnapshot({
+    schemaVersion: 1,
+    surfaces: [{
+      name: "direct-library-browser",
+      visibleText: ["Explorar bibliotecas"],
+      visibleActions: [{
+        tag: "a",
+        accessibleName: "Explorar bibliotecas",
+        classNames: ["library-menu-browse-button"],
+        href: "https://libraries.excalidraw.com/",
+      }],
+    }],
+  }, policy, "direct-library-browser");
+  assert.ok(direct.violations.some((item) => item.rule === "forbidden-action-href"));
 });
 
 test("permite enlaces http explícitos ajenos al proyecto upstream", () => {

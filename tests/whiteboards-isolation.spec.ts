@@ -1,16 +1,78 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { expect, test, type BrowserContext, type Page, type Route, type WebSocketRoute } from '@playwright/test'
+import { expect, test, type BrowserContext, type Locator, type Page, type Request, type Route, type TestInfo, type WebSocketRoute } from '@playwright/test'
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:3011'
-const boardID = 'whiteboard-compatibility-qa'
+const boardID = '10000000-0000-4000-8000-000000000001'
 const now = '2026-08-09T06:00:00.000Z'
 const explicitLinkOrigin = 'http://whiteboard-link.invalid'
 const fixtureRoot = resolve(process.cwd(), '.codex/skills/clarin-excalidraw-development/assets/compat-fixtures/v0.18.1')
 const sceneFixture = JSON.parse(readFileSync(resolve(fixtureRoot, 'complex-scene.excalidraw'), 'utf8')) as Record<string, any>
+const imageImportFixture = JSON.parse(readFileSync(resolve(fixtureRoot, 'image-import.excalidraw'), 'utf8')) as Record<string, any>
 const libraryFixture = JSON.parse(readFileSync(resolve(fixtureRoot, 'internal-library.excalidrawlib'), 'utf8')) as { libraryItems: Array<Record<string, any>> }
+const imageElementFixture = imageImportFixture.elements[0] as Record<string, any>
+const imageFixtureDataURL = String(imageImportFixture.files[imageElementFixture.fileId].dataURL)
+const imageFixtureBytes = Buffer.from(imageFixtureDataURL.slice(imageFixtureDataURL.indexOf(',') + 1), 'base64')
+
+function recordWhiteboardRequestFailure(
+  failures: Array<{ url: string; error: string }>,
+  request: Request,
+) {
+  const error = request.failure()?.errorText || 'unknown'
+  const url = new URL(request.url())
+  const path = url.pathname
+  const expectedDevelopmentReloadAbort = process.env.PLAYWRIGHT_LOCAL_SERVER === '1'
+    && error === 'net::ERR_ABORTED'
+    && path.startsWith('/_next/static/webpack/')
+    && (path.endsWith('.hot-update.js') || path.endsWith('.hot-update.json'))
+  const expectedNextPrefetchAbort = error === 'net::ERR_ABORTED'
+    && url.origin === new URL(baseURL).origin
+    && url.searchParams.has('_rsc')
+    && path.startsWith('/dashboard')
+  if (!expectedDevelopmentReloadAbort && !expectedNextPrefetchAbort) failures.push({ url: request.url(), error })
+}
 
 test.describe.configure({ mode: 'serial' })
+test.use({ serviceWorkers: 'block' })
+
+test('el acceso compartido mantiene nombre, contraseña y cursor legibles', async ({ page }) => {
+  test.setTimeout(90_000)
+  await page.route('**/*', async route => {
+    const request = route.request()
+    if (request.resourceType() !== 'document') {
+      await route.continue()
+      return
+    }
+    const response = await route.fetch()
+    const headers = response.headers()
+    const csp = headers['content-security-policy']
+    if (csp) headers['content-security-policy'] = csp.replace("script-src 'self' 'unsafe-inline'", "script-src 'self' 'unsafe-inline' 'unsafe-eval'")
+    await route.fulfill({ response, headers })
+  })
+  await page.goto(`${baseURL}/shared/whiteboards/contrast-qa#secret`, { waitUntil: 'domcontentloaded' })
+
+  const name = page.getByRole('textbox', { name: 'Tu nombre' })
+  const password = page.getByLabel('Contraseña, si fue configurada')
+  await expect(name).toBeVisible({ timeout: 30_000 })
+  await name.fill('Marta')
+  await password.fill('secreto')
+  await expect(name).toHaveValue('Marta')
+  await expect(password).toHaveValue('secreto')
+
+  for (const input of [name, password]) {
+    const colors = await input.evaluate(element => {
+      const style = getComputedStyle(element)
+      return {
+        text: style.color,
+        caret: style.caretColor,
+        background: style.backgroundColor,
+      }
+    })
+    expect(colors.text).toBe('rgb(241, 245, 249)')
+    expect(colors.caret).toBe('rgb(241, 245, 249)')
+    expect(colors.background).toBe('rgb(2, 6, 23)')
+  }
+})
 
 interface VisibleBrandingSurface {
   name: string
@@ -31,8 +93,27 @@ const access = {
   level: 'manage',
   inherited_from: 'creator',
   can_view: true,
+  can_comment: true,
   can_edit: true,
   can_manage_access: true,
+}
+
+function actorIDFor(userID: string) {
+  return userID === 'Luis QA'
+    ? '10000000-0000-4000-8000-000000000012'
+	: userID === 'Marta QA'
+	  ? '10000000-0000-4000-8000-000000000013'
+	  : userID === 'Marta Invitada'
+		? '10000000-0000-4000-8000-000000000014'
+    : '10000000-0000-4000-8000-000000000011'
+}
+
+function personalLibraryIDFor(userID: string) {
+  return userID === 'Luis QA'
+    ? '20000000-0000-4000-8000-000000000012'
+	: userID === 'Marta QA'
+	  ? '20000000-0000-4000-8000-000000000013'
+    : '20000000-0000-4000-8000-000000000011'
 }
 
 function clone<T>(value: T): T {
@@ -60,13 +141,19 @@ async function json(route: Route, body: unknown, status = 200) {
 
 class WhiteboardRealtimeHarness {
   sequence = 0
+  effectiveAccess = { ...access }
   elements: Array<Record<string, unknown>> = [clone(loadedTextFixture)]
+  appState: Record<string, unknown> = { viewBackgroundColor: '#ffffff', gridModeEnabled: false, gridStep: 5 }
   readonly patchAttempts: Array<{ userID: string; operationID: string; baseSequence: number; acceptedSequence: number }> = []
   readonly deliveries: Array<{ recipient: string; operationID: string }> = []
   readonly httpSceneWrites: Array<{ method: string; operationID: string }> = []
   readonly ticketReads = new Map<string, number>()
   readonly createdBoardNames: string[] = []
   readonly createdFolders: Array<{ id: string; name: string; parentID: string | null }> = []
+  readonly boardMoves: Array<{ folderID: string | null; expectedVersion: number }> = []
+  readonly folderMoves: Array<{ folderID: string; parentID: string | null; beforeFolderID: string | null; expectedVersion: number }> = []
+  boardFolderID: string | null = null
+  boardVersion = 1
   private readonly sockets = new Map<WebSocketRoute, string>()
   private readonly operationSequences = new Map<string, number>()
   private delayedRule: { sender: string; recipient: string } | null = null
@@ -74,6 +161,20 @@ class WhiteboardRealtimeHarness {
   private loseAckUserID: string | null = null
   private rejectPatchUserID: string | null = null
   private readonly failingTicketUsers = new Set<string>()
+  private nextBoardMoveFailure: number | null = null
+	private activePresentation: { presentation_id: string; actor: Record<string, string>; started_at: string } | null = null
+	readonly viewportDeliveries: Array<{ sender: string; bounds: number[] }> = []
+	readonly followChanges: Array<{ sender: string; target: string; action: string }> = []
+
+  failNextBoardMove(status: number) {
+    this.nextBoardMoveFailure = status
+  }
+
+  consumeBoardMoveFailure() {
+    const status = this.nextBoardMoveFailure
+    this.nextBoardMoveFailure = null
+    return status
+  }
 
   loseNextAckFor(userID: string) {
     this.loseAckUserID = userID
@@ -124,6 +225,18 @@ class WhiteboardRealtimeHarness {
     }
   }
 
+  interruptAuthorization(userID: string) {
+    for (const [socket, owner] of this.sockets) {
+      if (owner !== userID) continue
+      socket.send(JSON.stringify({
+        event: 'error',
+        code: 'authorization_unavailable',
+        error: 'No se pudo comprobar temporalmente el acceso.',
+      }))
+      setTimeout(() => { void socket.close({ code: 1013, reason: 'authorization_unavailable' }) }, 20)
+    }
+  }
+
   broadcastAutomaticSnapshot() {
     this.sequence += 1
     const record = this.sceneRecord()
@@ -148,6 +261,15 @@ class WhiteboardRealtimeHarness {
         return
       }
       this.sockets.set(socket, userID)
+	  socket.onClose(() => {
+		this.sockets.delete(socket)
+		if (this.activePresentation?.actor.id === actorIDFor(userID)) {
+		  const presentationID = this.activePresentation.presentation_id
+		  this.activePresentation = null
+		  const stopped = JSON.stringify({ event: 'presentation.changed', data: { presentation_id: presentationID, status: 'stopped', reason: 'presenter_left' } })
+		  for (const peer of this.sockets.keys()) peer.send(stopped)
+		}
+	  })
       socket.onMessage(raw => {
         let message: Record<string, any>
         try {
@@ -157,18 +279,70 @@ class WhiteboardRealtimeHarness {
         }
         if (message.event === 'sync.request') {
           socket.send(JSON.stringify({ event: 'ack', sequence: this.sequence }))
-          socket.send(JSON.stringify({
-            event: 'presence.snapshot',
-            data: [...this.sockets.values()].map(id => ({ kind: 'user', id, display_name: id, access: 'edit' })),
-          }))
+		  socket.send(JSON.stringify({
+			event: 'room.ready',
+			actor: { kind: 'user', id: actorIDFor(userID), display_name: userID, access: 'edit' },
+			data: { actor_id: actorIDFor(userID) },
+		  }))
+		  const presenceSnapshot = JSON.stringify({
+			event: 'presence.snapshot',
+			data: [...this.sockets.values()].map(id => ({ kind: 'user', id: actorIDFor(id), display_name: id, access: 'edit' })),
+		  })
+		  for (const peer of this.sockets.keys()) peer.send(presenceSnapshot)
+		  socket.send(JSON.stringify({ event: 'presentation.snapshot', data: { presentation: this.activePresentation } }))
           return
         }
         if (message.event === 'cursor.update') {
           for (const [peer, owner] of this.sockets) {
-            if (peer !== socket) peer.send(JSON.stringify({ ...message, actor: { kind: 'user', id: userID, display_name: userID, access: 'edit' } }))
+			if (peer !== socket) peer.send(JSON.stringify({ ...message, actor: { kind: 'user', id: actorIDFor(userID), display_name: userID, access: 'edit' } }))
           }
           return
         }
+		if (message.event === 'presentation.start' && typeof message.operation_id === 'string') {
+		  if (this.activePresentation && this.activePresentation.actor.id !== actorIDFor(userID)) {
+			socket.send(JSON.stringify({ event: 'error', operation_id: message.operation_id, code: 'presentation_occupied', error: 'Otra persona ya está presentando' }))
+			return
+		  }
+		  this.activePresentation = this.activePresentation || {
+			presentation_id: message.operation_id,
+			actor: { kind: 'user', id: actorIDFor(userID), display_name: userID, access: 'edit' },
+			started_at: new Date().toISOString(),
+		  }
+		  socket.send(JSON.stringify({ event: 'ack', operation_id: message.operation_id, data: { presentation: this.activePresentation } }))
+		  const changed = JSON.stringify({ event: 'presentation.changed', actor: this.activePresentation.actor, data: { presentation: this.activePresentation, status: 'started' } })
+		  for (const peer of this.sockets.keys()) peer.send(changed)
+		  return
+		}
+		if (message.event === 'presentation.stop' && typeof message.operation_id === 'string') {
+		  const presentationID = String(message.data?.presentation_id || '')
+		  if (!this.activePresentation || this.activePresentation.presentation_id !== presentationID || this.activePresentation.actor.id !== actorIDFor(userID)) {
+			socket.send(JSON.stringify({ event: 'error', operation_id: message.operation_id, code: 'presentation_not_owned', error: 'La presentación activa pertenece a otra persona' }))
+			return
+		  }
+		  this.activePresentation = null
+		  const stopped = JSON.stringify({ event: 'presentation.changed', actor: { kind: 'user', id: actorIDFor(userID), display_name: userID, access: 'edit' }, data: { presentation_id: presentationID, status: 'stopped', reason: 'presenter_stopped' } })
+		  for (const peer of this.sockets.keys()) peer.send(stopped)
+		  socket.send(JSON.stringify({ event: 'ack', operation_id: message.operation_id, data: { presentation_id: presentationID, stopped: true } }))
+		  return
+		}
+		if (message.event === 'follow.change') {
+		  const target = String(message.data?.target_actor_id || '')
+		  const action = String(message.data?.action || '')
+		  this.followChanges.push({ sender: userID, target, action })
+		  if (target === actorIDFor(userID)) {
+			socket.send(JSON.stringify({ event: 'error', code: 'invalid_whiteboard_payload', error: 'No se pudo aplicar el cambio en tiempo real' }))
+			return
+		  }
+		  const outbound = JSON.stringify({ ...message, actor: { kind: 'user', id: actorIDFor(userID), display_name: userID, access: 'edit' } })
+		  for (const peer of this.sockets.keys()) if (peer !== socket) peer.send(outbound)
+		  return
+		}
+		if (message.event === 'viewport.update' && Array.isArray(message.data?.bounds)) {
+		  this.viewportDeliveries.push({ sender: userID, bounds: message.data.bounds.map(Number) })
+		  const outbound = JSON.stringify({ ...message, actor: { kind: 'user', id: actorIDFor(userID), display_name: userID, access: 'edit' } })
+		  for (const peer of this.sockets.keys()) if (peer !== socket) peer.send(outbound)
+		  return
+		}
         if (message.event !== 'scene.patch' || typeof message.operation_id !== 'string') return
         const operationID = message.operation_id
         if (this.rejectPatchUserID === userID) {
@@ -239,25 +413,31 @@ class WhiteboardRealtimeHarness {
       board_id: boardID,
       scene: {
         type: 'excalidraw', version: 2, source: 'clarin', elements: clone(this.elements),
-        appState: { viewBackgroundColor: '#ffffff', gridModeEnabled: false, gridStep: 5 }, files: {},
+        appState: clone(this.appState), files: {},
       },
-      scene_schema_version: 'excalidraw', editor_version: '0.18.1', sequence: this.sequence, updated_at: now,
+      scene_schema_version: 'excalidraw', editor_version: '0.18.1-clarin.4', sequence: this.sequence, updated_at: now,
     }
   }
 }
 
 function board(harness: WhiteboardRealtimeHarness) {
+  const folder = harness.createdFolders.find(item => item.id === harness.boardFolderID)
   return {
     id: boardID,
     name: 'Pizarra QA autónoma',
-    folder_id: null,
+    description: '',
+    folder_id: harness.boardFolderID,
+    folder_name: folder?.name || null,
+    owner_name: 'Ana QA',
+    updated_by_name: 'Ana QA',
+    shared: false,
     created_at: now,
     updated_at: now,
     access_mode: 'private',
     access_revision: 1,
-    version: 1,
+    version: harness.boardVersion,
     scene_sequence: harness.sequence,
-    effective_access: access,
+    effective_access: harness.effectiveAccess,
   }
 }
 
@@ -269,6 +449,8 @@ async function installWhiteboardHTTP(
   blocked: string[],
   explicitNavigations: Set<string>,
 ) {
+  const actorID = actorIDFor(userID)
+  const personalLibraryID = personalLibraryIDFor(userID)
   await context.addCookies([{ name: 'auth-token', value: `whiteboard-${userID}`, url: baseURL, httpOnly: true, sameSite: 'Lax' }])
   await context.addInitScript(({ id }) => {
     localStorage.setItem('token', `whiteboard-${id}`)
@@ -309,7 +491,7 @@ async function installWhiteboardHTTP(
       await json(route, {
         success: true,
         user: {
-          id: userID, username: userID, display_name: userID, role: 'admin', is_admin: true, is_super_admin: false,
+          id: actorID, username: userID, display_name: userID, role: 'admin', is_admin: true, is_super_admin: false,
           account_id: 'account-whiteboard-qa', account_name: 'Cuenta QA', permissions: ['whiteboards'],
         },
         accounts: [{ account_id: 'account-whiteboard-qa', account_name: 'Cuenta QA', role: 'admin', is_default: true }],
@@ -317,9 +499,11 @@ async function installWhiteboardHTTP(
       return
     }
     if (url.pathname === '/api/whiteboards' && request.method() === 'GET') {
+      const requestedFolderID = url.searchParams.get('folder_id')
+      const boards = requestedFolderID && requestedFolderID !== harness.boardFolderID ? [] : [board(harness)]
       await json(route, {
         success: true,
-        whiteboards: [board(harness)],
+        whiteboards: boards,
         next_cursor: null,
         permissions: { can_create: true, can_create_folder: true },
         counts: { all: 1, mine: 1, shared: 0, recent: 1, trash: 0 },
@@ -337,7 +521,7 @@ async function installWhiteboardHTTP(
         success: true,
         folders: harness.createdFolders.map(folder => ({
           id: folder.id, name: folder.name, parent_id: folder.parentID, version: 1,
-          created_at: now, updated_at: now, whiteboard_count: 0, effective_access: access,
+          created_at: now, updated_at: now, whiteboard_count: harness.boardFolderID === folder.id ? 1 : 0, effective_access: access,
         })),
         next_cursor: null,
       })
@@ -360,8 +544,76 @@ async function installWhiteboardHTTP(
       }, 201)
       return
     }
+    const folderUpdateMatch = url.pathname.match(/^\/api\/whiteboard-folders\/([^/]+)$/u)
+    if (folderUpdateMatch && request.method() === 'PUT') {
+      const folderID = folderUpdateMatch[1]
+      const folder = harness.createdFolders.find(item => item.id === folderID)
+      if (!folder) {
+        await json(route, { success: false, error: 'Carpeta no encontrada.' }, 404)
+        return
+      }
+      const payload = request.postDataJSON() as Record<string, any>
+      const placement = payload.placement as Record<string, unknown> | undefined
+      const expectedVersion = 1 + harness.folderMoves.filter(move => move.folderID === folderID).length
+      if (Number(payload.expected_version) !== expectedVersion) {
+        await json(route, { success: false, error: 'La carpeta cambió en otra sesión.' }, 409)
+        return
+      }
+      const parentID = typeof placement?.parent_id === 'string' && placement.parent_id ? placement.parent_id : null
+      const beforeFolderID = typeof placement?.before_folder_id === 'string' && placement.before_folder_id ? placement.before_folder_id : null
+      harness.folderMoves.push({ folderID, parentID, beforeFolderID, expectedVersion })
+      folder.parentID = parentID
+      if (typeof payload.name === 'string' && payload.name.trim()) folder.name = payload.name.trim()
+      const canonical = {
+        id: folder.id,
+        name: folder.name,
+        description: String(payload.description || ''),
+        parent_id: folder.parentID,
+        sort_order: 1024 * (harness.createdFolders.findIndex(item => item.id === folder.id) + 1),
+        version: expectedVersion + 1,
+        created_at: now,
+        updated_at: now,
+        whiteboard_count: harness.boardFolderID === folder.id ? 1 : 0,
+        effective_access: access,
+      }
+      await json(route, { success: true, folder: canonical, affected_folders: [canonical] })
+      return
+    }
     if (url.pathname === `/api/whiteboards/${boardID}` && request.method() === 'GET') {
       await json(route, { success: true, whiteboard: board(harness) })
+      return
+    }
+    if (url.pathname === `/api/whiteboards/${boardID}` && request.method() === 'PUT') {
+      const payload = request.postDataJSON() as Record<string, any>
+      const destinationFolderID = typeof payload.folder_id === 'string' && payload.folder_id ? payload.folder_id : null
+      harness.boardMoves.push({ folderID: destinationFolderID, expectedVersion: Number(payload.expected_version) })
+      const failure = harness.consumeBoardMoveFailure()
+      if (failure) {
+        await json(route, { success: false, error: failure === 409 ? 'La pizarra cambió en otra sesión.' : 'Fallo simulado al mover la pizarra.' }, failure)
+        return
+      }
+      if (Number(payload.expected_version) !== harness.boardVersion) {
+        await json(route, { success: false, error: 'La pizarra cambió en otra sesión.' }, 409)
+        return
+      }
+      harness.boardFolderID = destinationFolderID
+      harness.boardVersion += 1
+      const canonical = board(harness)
+      await json(route, {
+        success: true,
+        whiteboard: {
+          id: canonical.id,
+          name: canonical.name,
+          description: canonical.description || '',
+          folder_id: canonical.folder_id,
+          created_at: canonical.created_at,
+          updated_at: canonical.updated_at,
+          version: canonical.version,
+          scene_sequence: canonical.scene_sequence,
+          effective_access: canonical.effective_access,
+          shared: false,
+        },
+      })
       return
     }
     if (url.pathname === `/api/whiteboards/${boardID}/scene` && request.method() === 'GET') {
@@ -396,13 +648,26 @@ async function installWhiteboardHTTP(
       await json(route, { success: true, ticket: `ticket-${userID}-${harness.ticketReads.get(userID)}` }, 201)
       return
     }
+    if (url.pathname === `/api/whiteboards/${boardID}/comment-markers` && request.method() === 'GET') {
+      await json(route, { success: true, markers: [], next_cursor: null })
+      return
+    }
+    if (url.pathname === `/api/whiteboards/${boardID}/comment-threads` && request.method() === 'GET') {
+      await json(route, {
+        success: true,
+        threads: [],
+        next_cursor: null,
+        counts: { open: 0, resolved: 0, all: 0 },
+      })
+      return
+    }
     if (url.pathname === '/api/whiteboard-libraries' && request.method() === 'GET') {
       await json(route, {
         success: true,
         libraries: [
           {
-            id: `library-${userID}`, name: `Mi biblioteca · ${userID}`, description: '', library_json: { libraryItems: [] },
-            visibility: 'private', version: 1, created_by: userID, updated_by: userID, created_at: now, updated_at: now,
+            id: personalLibraryID, name: `Mi biblioteca · ${actorID}`, description: '', library_json: { libraryItems: [] },
+            visibility: 'private', version: 1, created_by: actorID, updated_by: actorID, created_at: now, updated_at: now,
           },
           {
             id: 'library-account-qa', name: 'Catálogo QA interno', description: 'Solo dentro de Clarin',
@@ -414,19 +679,19 @@ async function installWhiteboardHTTP(
       })
       return
     }
-    if (decodeURIComponent(url.pathname) === `/api/whiteboard-libraries/library-${userID}` && request.method() === 'PUT') {
+    if (decodeURIComponent(url.pathname) === `/api/whiteboard-libraries/${personalLibraryID}` && request.method() === 'PUT') {
       const payload = request.postDataJSON() as Record<string, any>
       await json(route, {
         success: true,
         library: {
-          id: `library-${userID}`,
+          id: personalLibraryID,
           name: payload.name,
           description: payload.description || '',
           library_json: payload.library_json,
           visibility: 'private',
           version: Number(payload.expected_version || 1) + 1,
-          created_by: userID,
-          updated_by: userID,
+          created_by: actorID,
+          updated_by: actorID,
           created_at: now,
           updated_at: now,
         },
@@ -449,6 +714,61 @@ async function installWhiteboardHTTP(
   })
 }
 
+async function installGuestWhiteboardHTTP(
+  context: BrowserContext,
+  harness: WhiteboardRealtimeHarness,
+  trace: Set<string>,
+  blocked: string[],
+) {
+  const shareLinkID = 'whiteboard-guest-link-qa'
+  await context.route('**/*', async route => {
+    const request = route.request()
+    const url = new URL(request.url())
+    trace.add(url.href)
+    if (url.origin !== new URL(baseURL).origin) {
+      blocked.push(url.href)
+      await route.abort('blockedbyclient')
+      return
+    }
+    if (!url.pathname.startsWith('/api/')) {
+      if (request.resourceType() === 'document' && process.env.PLAYWRIGHT_LOCAL_SERVER === '1') {
+        const response = await route.fetch()
+        const headers = response.headers()
+        const csp = headers['content-security-policy']
+        if (csp) headers['content-security-policy'] = csp.replace("script-src 'self' 'unsafe-inline'", "script-src 'self' 'unsafe-inline' 'unsafe-eval'")
+        await route.fulfill({ response, headers })
+        return
+      }
+      await route.continue()
+      return
+    }
+    if (url.pathname === '/api/whiteboard-guest/scene' && url.searchParams.get('link_id') === shareLinkID) {
+      await json(route, {
+        success: true,
+        session: {
+          id: 'guest-session-marta',
+          display_name: 'Marta Invitada',
+          access_level: 'edit',
+          expires_at: '2026-08-19T00:00:00Z',
+        },
+        scene: harness.sceneRecord(),
+        allow_export: false,
+      })
+      return
+    }
+    if (url.pathname === '/api/whiteboard-guest/assets' && request.method() === 'GET') {
+      await json(route, { success: true, assets: [], next_cursor: null })
+      return
+    }
+    if (url.pathname === '/api/whiteboard-guest/collab-ticket' && request.method() === 'POST') {
+      await json(route, { success: true, ticket: 'ticket-guest-marta' }, 201)
+      return
+    }
+    await json(route, { success: true })
+  })
+  return shareLinkID
+}
+
 async function openEditor(page: Page) {
   const browserErrors: string[] = []
   page.on('pageerror', error => browserErrors.push(error.message))
@@ -460,6 +780,13 @@ async function openEditor(page: Page) {
     const body = (await page.locator('body').innerText().catch(() => '')).slice(0, 2_000)
     throw new Error(`El editor no llegó a ready en ${page.url()}. UI: ${JSON.stringify(body)}. Errores: ${JSON.stringify(browserErrors)}`, { cause })
   }
+  await expect(page.locator('canvas.interactive')).toBeVisible({ timeout: 30_000 })
+}
+
+async function openGuestEditor(page: Page, shareLinkID: string) {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(`${baseURL}/shared/whiteboards/${shareLinkID}`, { waitUntil: 'domcontentloaded' })
+  await expect(page.getByText('Marta Invitada · Puede editar')).toBeVisible({ timeout: 30_000 })
   await expect(page.locator('canvas.interactive')).toBeVisible({ timeout: 30_000 })
 }
 
@@ -485,7 +812,7 @@ async function drawStandaloneText(page: Page, text: string, offset: number) {
   await page.getByTestId('toolbar-text').check({ force: true })
   await expect(page.getByTestId('toolbar-text')).toBeChecked()
   await page.mouse.click(box!.x + box!.width * 0.58 + offset, box!.y + box!.height * 0.32 + offset)
-  await page.keyboard.type(text)
+  await page.keyboard.insertText(text)
   await page.keyboard.press('Control+Enter')
 }
 
@@ -507,7 +834,7 @@ async function drawDiamondWithBoundText(page: Page, text: string, offset: number
 }
 
 async function exportEditableScene(page: Page) {
-  await page.getByTestId('main-menu-trigger').click()
+  await page.getByTestId('main-menu-trigger').click({ timeout: 10_000 })
   const downloadPromise = page.waitForEvent('download')
   await page.getByText('Archivo editable', { exact: true }).click()
   const download = await downloadPromise
@@ -516,20 +843,196 @@ async function exportEditableScene(page: Page) {
   return JSON.parse(readFileSync(path!, 'utf8')) as { elements: Array<Record<string, any>> }
 }
 
+async function exerciseNativeStyleAndImageExportEnhancements(
+  page: Page,
+  testInfo: TestInfo,
+  requests: Set<string>,
+  verifyDownloads: boolean,
+) {
+  await drawRectangle(page, 44)
+  const ultraBoldStroke = page.getByTestId('strokeWidth-ultraBold')
+  await expect(ultraBoldStroke).toBeVisible()
+  await ultraBoldStroke.check({ force: true })
+  await expect(ultraBoldStroke).toBeChecked()
+
+  await page.getByTestId('main-menu-trigger').click()
+  await page.getByText('Exportar imagen...', { exact: true }).click()
+  const exportDialog = page.locator('.ImageExportModal')
+  await expect(exportDialog).toBeVisible()
+  await expect(exportDialog.locator('.ImageExportModal__preview canvas')).toBeVisible()
+  if (!verifyDownloads) await expect(exportDialog.locator('input[name="exportOnlySelected"]')).toBeChecked()
+  await expect(exportDialog.getByRole('button', { name: 'Exportar a PNG' })).toBeVisible()
+  await expect(exportDialog.getByRole('button', { name: 'Exportar a SVG' })).toBeVisible()
+  await testInfo.attach('pizarra-exportacion-seleccionada', {
+    body: await page.screenshot({ animations: 'disabled' }),
+    contentType: 'image/png',
+  })
+  await page.keyboard.press('Escape')
+  await expect(exportDialog).toBeHidden()
+  await expect(page.locator('.Modal__background')).toHaveCount(0)
+
+  await page.getByTestId('toolbar-text').check({ force: true })
+  const showFonts = page.getByTestId('font-family-show-fonts')
+  await expect(showFonts).toBeVisible({ timeout: 5_000 })
+  await expect(showFonts).toHaveAttribute('aria-label', 'Más fuentes · 32', { timeout: 5_000 })
+  await expect.poll(async () => showFonts.evaluate(element => {
+    const rect = element.getBoundingClientRect()
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+    return hit === element || element.contains(hit)
+  }), { timeout: 5_000 }).toBe(true)
+  await expect(showFonts).toBeEnabled({ timeout: 30_000 })
+  const fontRequestsBeforeOpening = Array.from(requests).filter(url => new URL(url).pathname.includes('/fonts/Clarin/'))
+  expect(fontRequestsBeforeOpening.length).toBeGreaterThan(0)
+  const preloadRequests = new Set(fontRequestsBeforeOpening)
+  const fontPickerErrors: string[] = []
+  page.on('pageerror', error => fontPickerErrors.push(error.message))
+  await showFonts.click({ timeout: 5_000 })
+  const fontList = page.locator('.dropdown-menu.fonts')
+  try {
+    await expect(fontList).toBeVisible()
+  } catch (cause) {
+    const pickerState = await page.locator('.FontPicker__container').evaluateAll(elements => elements.map(element => element.outerHTML.slice(0, 2_000)))
+    const triggerState = await showFonts.evaluate(element => element.parentElement?.outerHTML.slice(0, 2_000))
+    throw new Error(`El catálogo de fuentes no abrió. Disparador: ${JSON.stringify(triggerState)}. Estado: ${JSON.stringify(pickerState)}. Errores: ${JSON.stringify(fontPickerErrors)}`, { cause })
+  }
+  const fontOptions = fontList.locator('button.dropdown-menu-item')
+  await expect(fontOptions).toHaveCount(32)
+  const fontFamilies = await fontOptions.evaluateAll(options => options.map(option => {
+    const label = option.querySelector('.dropdown-menu-item__text')
+    return Array.from(label?.childNodes || [])
+      .find(node => node.nodeType === Node.TEXT_NODE)?.textContent?.trim()
+  })).then(families => families.map(family => family?.replace(/^"|"$/gu, '')).sort())
+  expect(fontFamilies).toEqual([
+    'Abril Fatface', 'Alfa Slab One', 'Architects Daughter', 'Bangers', 'Bebas Neue', 'Cascadia', 'Caveat',
+    'Comic Shanns', 'Excalifont', 'Fredoka', 'Gloria Hallelujah', 'Helvetica', 'IBM Plex Mono', 'Inter',
+    'JetBrains Mono', 'Kalam', 'Libre Baskerville', 'Lilita One', 'Lobster', 'Lora', 'Merriweather',
+    'Montserrat', 'Nunito', 'Patrick Hand', 'Permanent Marker', 'Playfair Display', 'Poppins', 'Quicksand',
+    'Raleway', 'Shadows Into Light', 'Space Mono', 'Virgil',
+  ])
+  const spaceMonoOption = fontOptions.filter({ hasText: 'Space Mono' })
+  await spaceMonoOption.scrollIntoViewIfNeeded()
+  await expect.poll(async () => spaceMonoOption.locator('.dropdown-menu-item__text').evaluate(element => getComputedStyle(element).fontFamily)).toContain('Clarin Space Mono')
+  expect(await page.evaluate(() => Array.from(document.fonts)
+    .filter(face => face.family.includes('Clarin Space Mono'))
+    .every(face => face.status === 'loaded'))).toBe(true)
+
+  const categoryGroup = page.getByRole('group', { name: 'Filtrar fuentes' })
+  await expect(categoryGroup).toBeVisible()
+  await categoryGroup.getByRole('button', { name: 'Mono', exact: true }).click()
+  await expect(fontOptions).toHaveCount(3)
+  await categoryGroup.getByRole('button', { name: 'Todas', exact: true }).click({ timeout: 5_000 })
+  await expect(fontList).toBeVisible({ timeout: 5_000 })
+  const fontSearch = page.locator('.properties-content .QuickSearch__input')
+  await expect(fontSearch).toBeVisible({ timeout: 5_000 })
+  await fontSearch.fill('merri', { timeout: 5_000 })
+  await expect(fontOptions).toHaveCount(1, { timeout: 2_000 })
+  await expect(fontOptions.first()).toContainText('Merriweather')
+  await expect.poll(async () => fontOptions.first().locator('.dropdown-menu-item__text').evaluate(element => getComputedStyle(element).fontFamily)).toContain('Clarin Merriweather')
+  await fontSearch.fill('')
+  await expect(fontOptions).toHaveCount(32, { timeout: 2_000 })
+  const caveatOption = fontOptions.filter({ hasText: 'Caveat' })
+  await caveatOption.scrollIntoViewIfNeeded()
+  await expect.poll(() => page.evaluate(() => Array.from(document.fonts)
+    .filter(face => face.family.includes('Clarin Caveat'))
+    .some(face => face.status === 'loaded'))).toBe(true)
+  await caveatOption.hover()
+  await caveatOption.focus()
+  await caveatOption.click()
+  await expect(fontList).toBeHidden()
+  const fontRequestsAfterCatalogInteractions = Array.from(requests)
+    .filter(url => new URL(url).pathname.includes('/fonts/Clarin/'))
+  expect(new Set(fontRequestsAfterCatalogInteractions)).toEqual(preloadRequests)
+  const fontResourceEntries = await page.evaluate(() => performance.getEntriesByType('resource')
+    .map(entry => entry.name)
+    .filter(name => new URL(name).pathname.includes('/fonts/Clarin/')))
+  expect(fontResourceEntries.length).toBe(new Set(fontResourceEntries).size)
+  expect(fontResourceEntries.length).toBeGreaterThan(0)
+  await testInfo.attach('pizarra-selector-fuentes-visibles', {
+    body: await page.screenshot({ animations: 'disabled' }),
+    contentType: 'image/png',
+  })
+
+  const eyeDropperBackdrop = page.locator('.excalidraw-eye-dropper-backdrop')
+  if (await eyeDropperBackdrop.isVisible()) {
+    await page.keyboard.press('Escape')
+    await expect(eyeDropperBackdrop).toBeHidden()
+  }
+
+  await drawStandaloneText(page, 'Árbol, pingüino y acción', 96)
+  if (!verifyDownloads) return
+
+  if (await eyeDropperBackdrop.isVisible()) {
+    await page.keyboard.press('Escape')
+    await expect(eyeDropperBackdrop).toBeHidden()
+  }
+
+  const editable = await exportEditableScene(page)
+  const customText = editable.elements.find(element => element.type === 'text' && element.fontFamily === 10001)
+  if (!customText) {
+    throw new Error(`La escena exportada no conservó Caveat: ${JSON.stringify(editable.elements.map(element => ({ type: element.type, fontFamily: element.fontFamily, text: element.originalText })))}`)
+  }
+  expect(customText?.originalText).toBe('Árbol, pingüino y acción')
+
+  await page.getByTestId('main-menu-trigger').click()
+  await page.getByText('Exportar imagen...', { exact: true }).click()
+  const svgDownloadPromise = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Exportar a SVG' }).click()
+  const svgDownload = await Promise.race([
+    svgDownloadPromise,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('La exportación SVG con fuente privada superó 30 segundos.')), 30_000)),
+  ])
+  const svgPath = await svgDownload.path()
+  expect(svgPath).not.toBeNull()
+  const svg = readFileSync(svgPath!, 'utf8')
+  expect(svg).toContain('Caveat')
+  expect(svg).toMatch(/data:font\/woff2;base64,/u)
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.ImageExportModal')).toBeHidden()
+
+  await page.getByTestId('main-menu-trigger').click()
+  await page.getByText('Exportar imagen...', { exact: true }).click()
+  const pngDownloadPromise = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Exportar a PNG' }).click()
+  const pngDownload = await pngDownloadPromise
+  const pngPath = await pngDownload.path()
+  expect(pngPath).not.toBeNull()
+  expect(readFileSync(pngPath!).subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a')
+}
+
 async function expectEditorSaved(page: Page) {
   await expect(page.getByLabel('Guardado en Clarin')).toBeVisible({ timeout: 20_000 })
 }
 
-async function expectInsideViewport(page: Page, locator: ReturnType<Page['locator']>, label: string) {
+async function expectInsideViewport(page: Page, locator: Locator, label: string) {
   await expect(locator, `${label} debe seguir visible`).toBeVisible()
-  const box = await locator.boundingBox()
-  const viewport = page.viewportSize()
-  expect(box, `${label} debe tener geometría medible`).not.toBeNull()
-  expect(viewport, 'Playwright debe conocer el viewport').not.toBeNull()
-  expect(box!.x, `${label} desborda por la izquierda`).toBeGreaterThanOrEqual(-1)
-  expect(box!.y, `${label} desborda por arriba`).toBeGreaterThanOrEqual(-1)
-  expect(box!.x + box!.width, `${label} desborda por la derecha`).toBeLessThanOrEqual(viewport!.width + 1)
-  expect(box!.y + box!.height, `${label} desborda por abajo`).toBeLessThanOrEqual(viewport!.height + 1)
+  await expect.poll(async () => {
+    const box = await locator.boundingBox()
+    const viewport = page.viewportSize()
+    if (!box || !viewport) return JSON.stringify({ box, viewport })
+    const inside = box.x >= -1
+      && box.y >= -1
+      && box.x + box.width <= viewport.width + 1
+      && box.y + box.height <= viewport.height + 1
+    if (inside) return 'inside'
+    const layout = await locator.evaluate(element => {
+      const describe = (node: Element | null) => {
+        if (!node) return null
+        const rect = node.getBoundingClientRect()
+        return { className: node.className, rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }
+      }
+      return {
+        document: { clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth },
+        shell: describe(element.closest('.whiteboard-editor-shell')),
+        excalidraw: describe(element.closest('.excalidraw')),
+        topRight: describe(element.closest('.layer-ui__wrapper__top-right, .mobile-misc-tools-container')),
+        parent: describe(element.parentElement),
+      }
+    })
+    return JSON.stringify({ box, viewport, layout })
+  }, {
+    message: `${label} debe quedar íntegramente dentro del viewport después del reflow`,
+    timeout: 5_000,
+  }).toBe('inside')
 }
 
 async function expectNoDocumentHorizontalOverflow(page: Page, label: string) {
@@ -540,12 +1043,89 @@ async function expectNoDocumentHorizontalOverflow(page: Page, label: string) {
   expect(dimensions.scrollWidth, `${label} no debe crear scroll horizontal global`).toBeLessThanOrEqual(dimensions.clientWidth + 1)
 }
 
+function visibleWhiteboardLibraryActions(page: Page) {
+  return page.locator('.whiteboard-editor-shell [aria-label="Biblioteca"]').filter({ visible: true })
+}
+
+function visibleWhiteboardCommentActions(page: Page) {
+  return page.locator('.whiteboard-editor-shell [aria-label^="Comentarios"]').filter({ visible: true })
+}
+
+function whiteboardActionHitTarget(action: Locator) {
+  return action
+}
+
+async function expectMinimumTouchTarget(locator: Locator, label: string) {
+  await expect(locator, `${label} debe estar visible`).toBeVisible()
+  const box = await locator.evaluate(element => {
+    const hitTarget = element.closest('.whiteboard-action-bar__control, .whiteboard-sidebar-action, .sidebar-trigger__label-element, label') || element
+    const rect = hitTarget.getBoundingClientRect()
+    return { width: rect.width, height: rect.height }
+  })
+  expect(box.width, `${label} debe medir al menos 44 px de ancho`).toBeGreaterThanOrEqual(44)
+  expect(box.height, `${label} debe medir al menos 44 px de alto`).toBeGreaterThanOrEqual(44)
+}
+
+async function expectWhiteboardChromeOwnership(page: Page, label: string) {
+  const library = visibleWhiteboardLibraryActions(page)
+  const comments = visibleWhiteboardCommentActions(page)
+  const libraryOwners = await library.evaluateAll(elements => elements.map(element => ({
+    tag: element.tagName,
+    className: element.getAttribute('class'),
+    role: element.getAttribute('role'),
+    dataAction: element.getAttribute('data-whiteboard-action'),
+    dataInternal: element.getAttribute('data-whiteboard-sidebar-internal'),
+    parentClassName: element.parentElement?.getAttribute('class') || null,
+  })))
+  expect(libraryOwners, `${label}: debe existir un solo control visible de Biblioteca; dueños=${JSON.stringify(libraryOwners)}`).toHaveLength(1)
+  await expect(comments, `${label}: Comentarios debe permanecer oculto`).toHaveCount(0)
+  await expect(page.getByLabel('Comentarios de la pizarra'), `${label}: no debe montarse el panel de Comentarios`).toHaveCount(0)
+  await expect(page.getByLabel('Pines de comentarios'), `${label}: no deben montarse pines de Comentarios`).toHaveCount(0)
+  await expect(page.locator('.whiteboard-action-bar').filter({ visible: true }), `${label}: debe existir una sola barra de acciones`).toHaveCount(1)
+  await expect(page.locator('[data-whiteboard-save-status]').filter({ visible: true }), `${label}: debe existir un solo estado de guardado`).toHaveCount(1)
+  await expect(page.locator('input.ToolIcon_type_checkbox[aria-label="Biblioteca"]').filter({ visible: true }), `${label}: el trigger oficial sustituido debe quedar fuera de la interfaz`).toHaveCount(0)
+  const geometry = await page.locator('.whiteboard-action-bar').filter({ visible: true }).evaluate(element => ({
+    bar: element.getBoundingClientRect().toJSON(),
+    nativeToolbar: document.querySelector<HTMLElement>('.whiteboard-editor-shell .App-toolbar')?.getBoundingClientRect().toJSON() || null,
+    controls: Array.from(element.querySelectorAll<HTMLElement>('.whiteboard-action-bar__control')).map(control => ({
+      label: control.getAttribute('aria-label'),
+      rect: control.getBoundingClientRect().toJSON(),
+    })),
+  }))
+  expect(geometry.controls.every(control => control.rect.width >= 44 && control.rect.height >= 44), `${label}: todos los controles deben conservar 44 px`).toBe(true)
+  expect(geometry.controls.every((control, index) => index === 0 || control.rect.x >= geometry.controls[index - 1].rect.x + geometry.controls[index - 1].rect.width - 0.5), `${label}: los controles no deben solaparse`).toBe(true)
+  expect(geometry.bar.width, `${label}: la isla debe envolver sus controles sin desborde`).toBeGreaterThanOrEqual(geometry.controls.reduce((total, control) => total + control.rect.width, 0))
+  if (geometry.nativeToolbar) {
+    const overlapsNativeToolbar = geometry.bar.x < geometry.nativeToolbar.x + geometry.nativeToolbar.width
+      && geometry.bar.x + geometry.bar.width > geometry.nativeToolbar.x
+      && geometry.bar.y < geometry.nativeToolbar.y + geometry.nativeToolbar.height
+      && geometry.bar.y + geometry.bar.height > geometry.nativeToolbar.y
+    expect(overlapsNativeToolbar, `${label}: la barra de Clarin no debe cubrir herramientas de Excalidraw`).toBe(false)
+  }
+  await expectMinimumTouchTarget(library, `${label}: Biblioteca`)
+  await expectMinimumTouchTarget(page.locator('[data-whiteboard-save-status]').filter({ visible: true }), `${label}: estado de guardado`)
+  await expectMinimumTouchTarget(page.getByRole('button', { name: 'Más acciones de Pizarras' }), `${label}: Más`)
+  return { library }
+}
+
+async function expectPublicLibraryDisclosure(page: Page, label: string) {
+  const browse = page.locator('.library-menu-browse-button')
+  await expect(browse).toBeVisible()
+  await expectMinimumTouchTarget(browse, `${label}: Explorar bibliotecas`)
+  await expect(browse).toHaveAccessibleName(/sitio oficial.*analítica externa.*Clarin validará/u)
+  const disclosureContent = await page.locator('.library-menu-control-buttons').filter({ has: browse }).evaluate(element => (
+    getComputedStyle(element, '::after').content.replace(/^['"]|['"]$/gu, '')
+  ))
+  expect(disclosureContent, `${label}: el aviso inline debe mencionar analítica externa`).toContain('analítica externa')
+  expect(disclosureContent, `${label}: el aviso inline debe explicar la validación de Clarin`).toContain('Clarin validará el archivo')
+}
+
 async function exerciseResponsiveEditor(page: Page) {
   for (const viewport of [
-    { width: 390, height: 844 },
-    { width: 760, height: 800 },
+    { width: 320, height: 720 },
+    { width: 375, height: 812 },
+    { width: 768, height: 800 },
     { width: 1024, height: 768 },
-    { width: 1220, height: 800 },
     { width: 1280, height: 800 },
     { width: 1440, height: 900 },
   ]) {
@@ -554,11 +1134,19 @@ async function exerciseResponsiveEditor(page: Page) {
     await expectInsideViewport(page, page.locator('.whiteboard-editor-shell'), suffix)
     await expect(page.locator('.whiteboard-editor-shell > header')).toHaveCount(0)
     await expectInsideViewport(page, page.getByTestId('toolbar-rectangle'), `${suffix}: herramientas prioritarias`)
+    await expectWhiteboardChromeOwnership(page, suffix)
     await expectInsideViewport(page, page.getByLabel('Más acciones de Pizarras'), `${suffix}: más acciones`)
     await page.getByLabel('Más acciones de Pizarras').click()
     await expectInsideViewport(page, page.getByRole('menu', { name: 'Más acciones de Pizarras' }), `${suffix}: menú Más`)
     await expect(page.getByRole('menu', { name: 'Más acciones de Pizarras' })).toContainText('Pizarra QA autónoma')
-    await expect(page.getByRole('menuitem', { name: 'Biblioteca', exact: true })).toBeVisible()
+    await expect(page.getByRole('menuitem', { name: 'Administrar bibliotecas', exact: true })).toBeVisible()
+    await expect(page.getByRole('menuitem', { name: 'Historial', exact: true })).toHaveCount(1)
+    await expect(page.getByRole('menuitem', { name: 'Guardar ahora', exact: true })).toHaveCount(1)
+    await expect(page.getByRole('menuitem', { name: 'Biblioteca', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('menuitem', { name: /^Comentarios/u })).toHaveCount(0)
+    const toolbarShare = page.locator('[data-whiteboard-action="share"]').filter({ visible: true })
+    const menuShare = page.getByRole('menuitem', { name: 'Compartir', exact: true })
+    expect((await toolbarShare.count()) + (await menuShare.count()), `${suffix}: Compartir debe tener un solo dueño`).toBe(1)
     if (viewport.width < 1_100) await expect(page.getByRole('menuitem', { name: 'Volver a Pizarras' })).toBeVisible()
     await page.keyboard.press('Escape')
     await expectInsideViewport(page, page.getByTestId('main-menu-trigger'), `${suffix}: menú`)
@@ -615,7 +1203,7 @@ async function exerciseManagerCreateDialogFocus(page: Page, harness: WhiteboardR
   await expect(folderDialog).toBeHidden()
   expect(harness.createdFolders.at(-1)).toMatchObject({ name: 'Carpeta completa', parentID: null })
 
-  await page.getByRole('button', { name: 'Carpeta completa' }).click()
+  await page.getByRole('button', { name: 'Carpeta completa 0', exact: true }).click()
   await page.getByRole('button', { name: 'Crear subcarpeta' }).click()
   const subfolderDialog = page.getByRole('dialog', { name: 'Nueva subcarpeta' })
   const subfolderInput = subfolderDialog.getByPlaceholder('Ej. Operaciones')
@@ -636,9 +1224,186 @@ async function exerciseManagerCreateDialogFocus(page: Page, harness: WhiteboardR
   await expect(boardInput).toBeFocused()
   await boardInput.press('Enter')
   await expect.poll(() => harness.createdBoardNames.at(-1)).toBe('Pizarra completa')
-  await expect(page).toHaveURL(`${baseURL}/dashboard/whiteboards/${boardID}`)
+  await expect(page).toHaveURL(`${baseURL}/dashboard/whiteboards/${boardID}`, {
+    timeout: 30_000,
+  })
   await page.goto(`${baseURL}/dashboard/whiteboards`, { waitUntil: 'domcontentloaded' })
   await expect(page.getByRole('heading', { name: 'Mis pizarras' })).toBeVisible({ timeout: 20_000 })
+}
+
+async function dragWhiteboardTo(page: Page, target: ReturnType<Page['locator']>) {
+  const handle = page.getByRole('button', { name: 'Arrastrar Pizarra QA autónoma a una carpeta' })
+  await expect(handle).toBeEnabled()
+  const sourceBox = await handle.boundingBox()
+  const targetBox = await target.boundingBox()
+  expect(sourceBox).not.toBeNull()
+  expect(targetBox).not.toBeNull()
+  await page.mouse.move(sourceBox!.x + sourceBox!.width / 2, sourceBox!.y + sourceBox!.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(sourceBox!.x + sourceBox!.width / 2 + 12, sourceBox!.y + sourceBox!.height / 2, { steps: 3 })
+  await expect(page.locator('[data-operational-drag-overlay]')).toBeVisible()
+  await page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + targetBox!.height / 2, { steps: 12 })
+  await expect(target).toContainText('Mover a')
+  await page.mouse.up()
+  await expect(page.locator('[data-operational-drag-overlay]')).toBeHidden()
+}
+
+async function dragWhiteboardToRoot(page: Page) {
+  const handle = page.getByRole('button', { name: 'Arrastrar Pizarra QA autónoma a una carpeta' })
+  await expect(handle).toBeEnabled()
+  const sourceBox = await handle.boundingBox()
+  expect(sourceBox).not.toBeNull()
+  await page.mouse.move(sourceBox!.x + sourceBox!.width / 2, sourceBox!.y + sourceBox!.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(sourceBox!.x + sourceBox!.width / 2 + 12, sourceBox!.y + sourceBox!.height / 2, { steps: 3 })
+  const target = page.locator('[data-whiteboard-root-drop]')
+  await expect(target).toBeVisible()
+  const targetBox = await target.boundingBox()
+  expect(targetBox).not.toBeNull()
+  await page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + targetBox!.height / 2, { steps: 12 })
+  await expect(target).toContainText('Soltar en Sin carpeta')
+  await page.mouse.up()
+  await expect(page.locator('[data-operational-drag-overlay]')).toBeHidden()
+}
+
+async function dragFolderToRoot(page: Page, folderName: string) {
+  const handle = page.getByRole('button', { name: `Mover carpeta ${folderName}` })
+  const target = page.locator('[data-whiteboard-root-drop]')
+  const sourceBox = await handle.boundingBox()
+  const targetBox = await target.boundingBox()
+  expect(sourceBox).not.toBeNull()
+  expect(targetBox).not.toBeNull()
+  await page.mouse.move(sourceBox!.x + sourceBox!.width / 2, sourceBox!.y + sourceBox!.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(sourceBox!.x + sourceBox!.width / 2 + 12, sourceBox!.y + sourceBox!.height / 2, { steps: 3 })
+  await expect(page.locator('[data-operational-drag-overlay]')).toBeVisible()
+  await page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + targetBox!.height / 2, { steps: 12 })
+  await expect(target).toContainText('Mover al nivel principal')
+  await page.mouse.up()
+  await expect(page.locator('[data-operational-drag-overlay]')).toBeHidden()
+}
+
+async function exerciseManagerViewsAndFolderMoves(page: Page, harness: WhiteboardRealtimeHarness) {
+  await page.setViewportSize({ width: 390, height: 844 })
+  const movesBeforeNarrowKeyboardCancel = harness.boardMoves.length
+  const narrowHandle = page.getByRole('button', { name: 'Arrastrar Pizarra QA autónoma a una carpeta' })
+  await narrowHandle.focus()
+  await page.keyboard.press('Space')
+  await expect(page.locator('[data-operational-drag-overlay]')).toBeVisible()
+  await page.waitForTimeout(100)
+  await page.keyboard.press('Space')
+  await expect(page.locator('[data-operational-drag-overlay]')).toBeHidden()
+  await expect.poll(() => harness.boardMoves.length).toBe(movesBeforeNarrowKeyboardCancel)
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await expect(page.getByRole('button', { name: 'Vista compacta' })).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByRole('button', { name: 'Cambiar carpeta de Pizarra QA autónoma. Carpeta actual: Sin carpeta' })).toBeVisible()
+
+  await page.getByRole('button', { name: 'Vista de cuadrícula' }).click()
+  await expect(page.getByRole('button', { name: 'Vista de cuadrícula' })).toHaveAttribute('aria-pressed', 'true')
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('clarin.whiteboards.view.v1'))).toBe('grid')
+  await page.getByRole('button', { name: 'Vista compacta' }).click()
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('clarin.whiteboards.view.v1'))).toBe('compact')
+
+  const movesBeforePicker = harness.boardMoves.length
+  await page.getByRole('button', { name: 'Cambiar carpeta de Pizarra QA autónoma. Carpeta actual: Sin carpeta' }).click()
+  const moveDialog = page.getByRole('dialog', { name: 'Mover pizarra' })
+  const folderSearch = moveDialog.getByPlaceholder('Buscar carpeta…')
+  await expect(folderSearch).toBeFocused()
+  await folderSearch.fill('Subcarpeta')
+  await expect(moveDialog.locator('input[name="whiteboard-folder-destination"][value="folder-1"]')).toBeHidden()
+  await expect(moveDialog.locator('input[name="whiteboard-folder-destination"][value="folder-2"]')).toBeVisible()
+  await folderSearch.fill('')
+  await expect(moveDialog.locator('input[name="whiteboard-folder-destination"][value="folder-1"]')).toBeVisible()
+  await moveDialog.locator('input[name="whiteboard-folder-destination"][value="folder-1"]').check()
+  await moveDialog.getByRole('button', { name: 'Mover', exact: true }).click()
+  await expect.poll(() => harness.boardMoves.length).toBe(movesBeforePicker + 1)
+  expect(harness.boardMoves.at(-1)).toEqual({ folderID: 'folder-1', expectedVersion: 1 })
+  const firstFolderButton = page.getByRole('button', { name: 'Cambiar carpeta de Pizarra QA autónoma. Carpeta actual: Carpeta completa' })
+  await expect(firstFolderButton).toBeVisible()
+  await expect(firstFolderButton).toBeEnabled()
+  await expect(page.locator(`[data-whiteboard-id="${boardID}"]`).getByText(/Ana QA/)).toBeVisible()
+
+  const movesBeforeFolderDrop = harness.boardMoves.length
+  const subfolderDrop = page.locator('[data-whiteboard-folder-drop="folder-2"]')
+  await dragWhiteboardTo(page, subfolderDrop)
+  await expect.poll(() => harness.boardMoves.length).toBe(movesBeforeFolderDrop + 1)
+  expect(harness.boardMoves.at(-1)).toEqual({ folderID: 'folder-2', expectedVersion: 2 })
+  const subfolderButton = page.getByRole('button', { name: 'Cambiar carpeta de Pizarra QA autónoma. Carpeta actual: Subcarpeta completa' })
+  await expect(subfolderButton).toBeVisible()
+  await expect(subfolderButton).toBeEnabled()
+
+  await page.locator('[data-whiteboard-folder-drop="folder-2"]').click()
+  await expect(page.getByRole('heading', { name: 'Subcarpeta completa' })).toBeVisible()
+  await expect(page.getByText('Pizarra QA autónoma', { exact: true })).toBeVisible()
+  const movesBeforeRootDrop = harness.boardMoves.length
+  await dragWhiteboardToRoot(page)
+  await expect.poll(() => harness.boardMoves.length).toBe(movesBeforeRootDrop + 1)
+  expect(harness.boardMoves.at(-1)).toEqual({ folderID: null, expectedVersion: 3 })
+  await expect(page.locator(`[data-whiteboard-id="${boardID}"]`)).toBeHidden()
+
+  await page.locator('nav').getByRole('button', { name: /^Mis pizarras/ }).click()
+  await expect(page.locator(`[data-whiteboard-id="${boardID}"]`)).toBeVisible()
+  const movesBeforeOutsideDrop = harness.boardMoves.length
+  const handle = page.getByRole('button', { name: 'Arrastrar Pizarra QA autónoma a una carpeta' })
+  const handleBox = await handle.boundingBox()
+  const searchBox = await page.getByPlaceholder('Buscar por nombre, carpeta o propietario…').boundingBox()
+  expect(handleBox).not.toBeNull()
+  expect(searchBox).not.toBeNull()
+  await page.mouse.move(handleBox!.x + handleBox!.width / 2, handleBox!.y + handleBox!.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(handleBox!.x + handleBox!.width / 2 + 12, handleBox!.y + handleBox!.height / 2, { steps: 3 })
+  await page.mouse.move(searchBox!.x + searchBox!.width / 2, searchBox!.y + searchBox!.height / 2, { steps: 10 })
+  await page.mouse.up()
+  await expect(page.locator('[data-operational-drag-overlay]')).toBeHidden()
+  await expect.poll(() => harness.boardMoves.length).toBe(movesBeforeOutsideDrop)
+  await expect(page.locator(`[data-whiteboard-id="${boardID}"]`)).toBeVisible()
+
+  harness.failNextBoardMove(409)
+  const movesBeforeConflict = harness.boardMoves.length
+  await page.getByRole('button', { name: 'Cambiar carpeta de Pizarra QA autónoma. Carpeta actual: Sin carpeta' }).click()
+  const conflictDialog = page.getByRole('dialog', { name: 'Mover pizarra' })
+  await conflictDialog.locator('input[name="whiteboard-folder-destination"][value="folder-1"]').check()
+  await conflictDialog.getByRole('button', { name: 'Mover', exact: true }).click()
+  await expect.poll(() => harness.boardMoves.length).toBe(movesBeforeConflict + 1)
+  await expect(page.getByText('La pizarra cambió en otra sesión.', { exact: true })).toBeVisible()
+  expect(harness.boardFolderID).toBeNull()
+  await expect(page.getByRole('button', { name: 'Cambiar carpeta de Pizarra QA autónoma. Carpeta actual: Sin carpeta' })).toBeVisible()
+
+  const movesBeforeKeyboard = harness.boardMoves.length
+  const keyboardHandle = page.getByRole('button', { name: 'Arrastrar Pizarra QA autónoma a una carpeta' })
+  await keyboardHandle.focus()
+  await page.keyboard.press('Space')
+  await expect(page.locator('[data-operational-drag-overlay]')).toBeVisible()
+  await page.waitForTimeout(100)
+  await page.keyboard.press('Space')
+  await expect(page.locator('[data-operational-drag-overlay]')).toBeHidden()
+  await expect.poll(() => harness.boardMoves.length).toBe(movesBeforeKeyboard)
+  await keyboardHandle.focus()
+  await page.keyboard.press('Space')
+  await expect(page.locator('[data-operational-drag-overlay]')).toBeVisible()
+  await page.waitForTimeout(100)
+  await page.keyboard.press('ArrowDown')
+  await expect(page.locator('[data-whiteboard-folder-drop="folder-1"]')).toContainText('Mover a Carpeta completa')
+  await page.keyboard.press('Space')
+  await expect(page.locator('[data-operational-drag-overlay]')).toBeHidden()
+  await expect.poll(() => harness.boardMoves.length).toBe(movesBeforeKeyboard + 1)
+  await expect.poll(() => harness.boardFolderID).toBe('folder-1')
+  expect(harness.boardMoves.at(-1)).toEqual({ folderID: 'folder-1', expectedVersion: 4 })
+
+  const folderMovesBeforeRoot = harness.folderMoves.length
+  await dragFolderToRoot(page, 'Subcarpeta completa')
+  await expect.poll(() => harness.folderMoves.length).toBe(folderMovesBeforeRoot + 1)
+  expect(harness.folderMoves.at(-1)).toEqual({ folderID: 'folder-2', parentID: null, beforeFolderID: null, expectedVersion: 1 })
+  expect(harness.createdFolders.find(folder => folder.id === 'folder-2')?.parentID).toBeNull()
+
+  await page.getByLabel('Configurar carpeta Subcarpeta completa').first().click()
+  const settings = page.getByRole('complementary', { name: 'Configuración de Subcarpeta completa' })
+  await expect(settings).toBeVisible()
+  await settings.getByLabel('Descripción').fill('Carpeta operativa fuera del padre')
+  await settings.getByRole('button', { name: 'Guardar' }).click()
+  await expect(settings).toBeHidden()
+  expect(harness.folderMoves.at(-1)).toEqual({ folderID: 'folder-2', parentID: null, beforeFolderID: null, expectedVersion: 2 })
 }
 
 async function captureVisibleBrandingSurface(page: Page, name: string): Promise<VisibleBrandingSurface> {
@@ -678,11 +1443,13 @@ async function exerciseHelpAndInternalLibraries(page: Page) {
   await expect(page.locator('.HelpDialog')).toBeHidden()
 
   const directLibraryAdmin = page.getByLabel('Administrar bibliotecas de Clarin')
-  if (await directLibraryAdmin.isVisible()) {
-    await directLibraryAdmin.click()
-  } else {
+  await expect(directLibraryAdmin).toBeHidden()
+  if (await page.getByLabel('Más acciones de Pizarras').isVisible()) {
     await page.getByLabel('Más acciones de Pizarras').click()
     await page.getByRole('menuitem', { name: 'Administrar bibliotecas' }).click()
+  } else {
+    await page.getByTestId('main-menu-trigger').click()
+    await page.getByText('Administrar Mi biblioteca', { exact: true }).click()
   }
   const dialog = page.getByRole('dialog', { name: 'Bibliotecas de Pizarras' })
   await expect(dialog).toBeVisible()
@@ -692,20 +1459,26 @@ async function exerciseHelpAndInternalLibraries(page: Page) {
   await expect(accountCatalog).toContainText('2 elementos')
   await dialog.getByLabel('Cerrar').click()
 
-  const nativeLibraryToggle = page.getByRole('checkbox', { name: 'Biblioteca' })
-  const moreActions = page.getByLabel('Más acciones de Pizarras')
-  if (await moreActions.isVisible()) {
-    await moreActions.click()
-    await page.getByRole('menuitem', { name: 'Biblioteca', exact: true }).click()
-  } else {
-    await nativeLibraryToggle.click()
-  }
+  const { library: nativeLibraryToggle } = await expectWhiteboardChromeOwnership(page, 'aislamiento de bibliotecas')
+  await whiteboardActionHitTarget(nativeLibraryToggle).click()
   await expect(page.locator('.library-menu-items-container')).toBeVisible()
-  await expect(page.locator('.library-menu-browse-button')).toBeHidden()
+  const publicLibraryButton = page.locator('.library-menu-browse-button')
+  await expect(publicLibraryButton).toBeVisible()
+  await expect(publicLibraryButton).toHaveText('Explorar bibliotecas')
+  await expectPublicLibraryDisclosure(page, 'aislamiento de bibliotecas')
+  await expect(publicLibraryButton).toHaveAttribute(
+    'href',
+    `/api/whiteboards/${boardID}/public-library-import/start?library_id=${personalLibraryIDFor('Ana QA')}`,
+  )
+  await expect(publicLibraryButton).toHaveAttribute('target', '_self')
+  await expect(publicLibraryButton).toHaveAttribute('rel', /noreferrer/u)
+  await expect(publicLibraryButton).toHaveAttribute('referrerpolicy', 'no-referrer')
   await expect(page.getByTestId('lib-dropdown--remove')).toBeHidden()
   await expect(page.getByText('Publica tu propia biblioteca', { exact: true })).toBeHidden()
   await expect(page.getByTestId('toolbar-embeddable')).toBeHidden()
   await expect(page.getByTestId('toolbar-magicframe')).toBeHidden()
+  await page.locator('.sidebar__close').filter({ visible: true }).click()
+  await expect(page.locator('.library-menu-items-container')).toBeHidden()
 }
 
 async function exerciseExplicitHTTPLink(page: Page, context: BrowserContext) {
@@ -757,14 +1530,657 @@ async function importLocalSceneWithBlockedEmbed(page: Page, harness: WhiteboardR
   expect(exported.elements.map(element => element.id)).toContain('frame-operaciones')
 }
 
-test('el checkpoint automático conserva zoom y herramienta de la sesión activa', async ({ browser, browserName }) => {
+test('integración simulada · la barra tiene un único dueño y Comentarios permanece oculto en la matriz de navegadores', async ({ browser, browserName }, testInfo) => {
+  test.setTimeout(210_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  const context = await browser.newContext({ hasTouch: true, serviceWorkers: 'block' })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
+  const page = await context.newPage()
+  const pageErrors: string[] = []
+  const requestFailures: Array<{ url: string; error: string }> = []
+  page.on('pageerror', error => {
+    const detail = error.stack || error.message
+    pageErrors.push(detail)
+  })
+  page.on('requestfailed', request => recordWhiteboardRequestFailure(requestFailures, request))
+
+  try {
+    await openEditor(page)
+    for (const viewport of [
+      { width: 320, height: 720 },
+      { width: 375, height: 812 },
+      { width: 768, height: 800 },
+      { width: 1024, height: 768 },
+      { width: 1280, height: 800 },
+      { width: 1440, height: 900 },
+    ]) {
+      await page.setViewportSize(viewport)
+      const label = `${browserName} ${viewport.width}x${viewport.height}`
+      const { library } = await expectWhiteboardChromeOwnership(page, label)
+      const libraryHitTarget = whiteboardActionHitTarget(library)
+      await expectInsideViewport(page, libraryHitTarget, `${label}: Biblioteca`)
+      await expectNoDocumentHorizontalOverflow(page, label)
+      if (browserName === 'chromium') {
+        await testInfo.attach(`pizarra-${viewport.width}px`, {
+          body: await page.screenshot({ animations: 'disabled' }),
+          contentType: 'image/png',
+        })
+      }
+
+      if (viewport.width === 320 || viewport.width === 375) {
+        await libraryHitTarget.tap()
+        await expect(page.locator('.library-menu-items-container')).toBeVisible()
+        await expect(page.locator('[data-whiteboard-action]').filter({ visible: true })).toHaveCount(0)
+        const internalLibrary = page.locator('[data-whiteboard-sidebar-internal="library"]').filter({ visible: true })
+        const internalComments = page.locator('[data-whiteboard-sidebar-internal="comments"]').filter({ visible: true })
+        await expect(internalLibrary).toHaveCount(1)
+        await expect(internalComments).toHaveCount(0)
+        await expectMinimumTouchTarget(internalLibrary, `${label}: tab interno Biblioteca`)
+        await expect(page.locator('.sidebar-triggers .sidebar-tab-trigger[data-state="active"]').filter({ visible: true })).toHaveCount(1)
+        await expect(page.getByRole('button', { name: 'Más acciones de Pizarras' })).toBeHidden()
+        await expectPublicLibraryDisclosure(page, label)
+        await page.locator('.sidebar__close').filter({ visible: true }).click()
+        await expect(page.locator('.library-menu-items-container')).toBeHidden()
+      }
+
+      if (viewport.width === 768) {
+        await library.focus()
+        await page.keyboard.press('Space')
+        await expect(page.locator('.library-menu-items-container')).toBeVisible()
+        await page.locator('.sidebar__close').filter({ visible: true }).click()
+        await expect(page.locator('.library-menu-items-container')).toBeHidden()
+      }
+    }
+    if (browserName === 'chromium') {
+      await page.setViewportSize({ width: 1440, height: 900 })
+      await exerciseNativeStyleAndImageExportEnhancements(page, testInfo, requests, false)
+      const extraTools = page.getByTitle(/Más herramientas|More tools/u)
+      await extraTools.click()
+      const extraToolsMenu = page.locator('.App-toolbar__extra-tools-dropdown')
+      await expect(extraToolsMenu).toBeVisible()
+      await expect(extraToolsMenu.getByTestId('toolbar-highlighter')).toHaveText('Resaltador')
+      await expect(extraToolsMenu.getByText('Generate', { exact: true })).toHaveCount(0)
+      await extraToolsMenu.getByTestId('toolbar-highlighter').click()
+      await expect(extraTools).toHaveClass(/App-toolbar__extra-tools-trigger--selected/u)
+    }
+    expect(Array.from(requests).filter(url => /\/comment-(?:threads|markers)/u.test(new URL(url).pathname))).toEqual([])
+    expect(blocked).toEqual([])
+  } catch (cause) {
+    throw new Error(
+      `Pizarras produjo errores de página: ${JSON.stringify(pageErrors)}. `
+      + `Solicitudes fallidas: ${JSON.stringify(requestFailures)}. `
+      + `Bloqueadas: ${JSON.stringify(blocked)}. `
+      + `API: ${JSON.stringify(Array.from(requests).filter(url => new URL(url).pathname.startsWith('/api/')))}. `
+      + `Editor: ${JSON.stringify(Array.from(requests).filter(url => new URL(url).pathname.includes('/vendor/whiteboards-editor/')))}. `
+      + `Pizarras: ${JSON.stringify(Array.from(requests).filter(url => new URL(url).pathname.includes('/whiteboards')))}. `
+      + `Solicitudes recientes: ${JSON.stringify(Array.from(requests).slice(-20))}`,
+      { cause },
+    )
+  } finally {
+    await context.close()
+  }
+})
+
+test('exportación de fuentes locales · conserva escena, SVG incrustado y PNG en un contexto de escritorio', async ({ browser, browserName }, testInfo) => {
+  test.skip(browserName !== 'firefox', 'Firefox usa la ruta de descarga HTML observable por Playwright.')
+  test.setTimeout(210_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
+  const page = await context.newPage()
+  try {
+    await openEditor(page)
+    await exerciseNativeStyleAndImageExportEnhancements(page, testInfo, requests, true)
+    expect(blocked).toEqual([])
+  } finally {
+    await context.close()
+  }
+})
+
+test('precarga de fuentes · informa el fallo, bloquea la familia y reintenta explícitamente', async ({ browser }) => {
+  test.setTimeout(120_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
+  const page = await context.newPage()
+  let rejectBangersPreview = true
+  let bangersRequests = 0
+  await page.route('**/10008-bangers-latin-400.woff2*', async route => {
+    bangersRequests += 1
+    if (rejectBangersPreview) {
+      await route.abort('failed')
+      return
+    }
+    await route.continue()
+  })
+
+  try {
+    await openEditor(page)
+    await expect(page.getByText('1 fuente no pudo prepararse. Las fuentes disponibles ya pueden usarse.')).toBeVisible({ timeout: 30_000 })
+    await page.getByTestId('toolbar-text').check({ force: true })
+    await page.getByTestId('font-family-show-fonts').click()
+    const fontList = page.locator('.dropdown-menu.fonts')
+    await expect(fontList).toBeVisible()
+    let bangersOption = fontList.locator('button.dropdown-menu-item').filter({ hasText: 'Bangers' })
+    await expect(bangersOption).toBeDisabled()
+    await expect(bangersOption).toHaveAttribute('aria-label', 'Bangers. Fuente no disponible')
+    const failedAttemptCount = bangersRequests
+    expect(failedAttemptCount).toBeGreaterThan(0)
+    await bangersOption.hover({ force: true })
+    await bangersOption.scrollIntoViewIfNeeded()
+    expect(bangersRequests).toBe(failedAttemptCount)
+
+    rejectBangersPreview = false
+    await page.keyboard.press('Escape')
+    await page.getByRole('button', { name: 'Reintentar fuentes' }).click()
+    await expect.poll(() => bangersRequests, { timeout: 10_000 }).toBeGreaterThan(failedAttemptCount)
+    await expect(page.getByText('1 fuente no pudo prepararse. Las fuentes disponibles ya pueden usarse.')).toBeHidden({ timeout: 30_000 })
+    await page.getByTestId('font-family-show-fonts').click()
+    await expect(fontList).toBeVisible()
+    bangersOption = fontList.locator('button.dropdown-menu-item').filter({ hasText: 'Bangers' })
+    await expect(bangersOption).toBeEnabled()
+    await expect(bangersOption).not.toHaveAttribute('aria-label', 'Bangers. Fuente no disponible')
+    await expect.poll(async () => bangersOption.locator('.dropdown-menu-item__text').evaluate(element => getComputedStyle(element).fontFamily)).toContain('Clarin Bangers')
+    expect(blocked).toEqual([])
+  } finally {
+    await context.close()
+  }
+})
+
+test('catálogo precargado de fuentes · conserva la apariencia nativa en tema oscuro', async ({ browser, browserName }, testInfo) => {
+  test.skip(browserName !== 'chromium', 'La captura visual de referencia se genera una vez en Chromium.')
+  test.setTimeout(120_000)
+  const harness = new WhiteboardRealtimeHarness()
+  harness.appState.theme = 'dark'
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
+  const page = await context.newPage()
+
+  try {
+    await openEditor(page)
+    const editorRoot = page.locator('.whiteboard-editor-shell .excalidraw')
+    await expect(editorRoot).toHaveClass(/theme--dark/u)
+    await page.getByTestId('toolbar-text').check({ force: true })
+    const showFonts = page.getByTestId('font-family-show-fonts')
+    await expect(showFonts).toBeEnabled({ timeout: 30_000 })
+    await showFonts.click()
+    const fontList = page.locator('.dropdown-menu.fonts')
+    await expect(fontList).toBeVisible()
+    const bangersOption = fontList.locator('button.dropdown-menu-item').filter({ hasText: 'Bangers' })
+    await bangersOption.scrollIntoViewIfNeeded()
+    await expect.poll(async () => bangersOption.locator('.dropdown-menu-item__text').evaluate(element => getComputedStyle(element).fontFamily)).toContain('Clarin Bangers')
+    await expect(editorRoot).toHaveClass(/theme--dark/u)
+    await testInfo.attach('pizarra-selector-fuentes-visibles-oscuro', {
+      body: await page.screenshot({ animations: 'disabled' }),
+      contentType: 'image/png',
+    })
+    expect(blocked).toEqual([])
+  } finally {
+    await context.close()
+  }
+})
+
+test('texto enriquecido · Ctrl+C conserva el texto seleccionado y no lo reemplaza por el sobre del lienzo', async ({ browser, browserName }) => {
+  test.skip(browserName !== 'chromium', 'La escritura asíncrona del portapapeles del sistema se valida en Chromium.')
+  test.setTimeout(120_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  const context = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    serviceWorkers: 'block',
+    permissions: ['clipboard-read', 'clipboard-write'],
+  })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
+  const page = await context.newPage()
+
+  try {
+    await openEditor(page)
+    await page.getByTestId('toolbar-text').check({ force: true })
+    await expect(page.getByTestId('font-family-show-fonts')).toBeEnabled({ timeout: 30_000 })
+    const surface = page.locator('.whiteboard-editor-shell .excalidraw').first()
+    const box = await surface.boundingBox()
+    expect(box).not.toBeNull()
+    const firstPoint = {
+      x: box!.x + box!.width * 0.58,
+      y: box!.y + box!.height * 0.38,
+    }
+    await page.mouse.click(firstPoint.x, firstPoint.y)
+    const editable = page.locator('[contenteditable="true"][data-type="wysiwyg"]')
+    await expect(editable).toBeVisible()
+    await page.keyboard.insertText('sdfsdf')
+    await page.keyboard.press('Control+a')
+
+    await page.evaluate(() => {
+      const state = window as typeof window & { __clarinClipboardEvidence?: Array<Record<string, unknown>> }
+      state.__clarinClipboardEvidence = []
+      document.addEventListener('copy', event => {
+        const target = event.target
+        state.__clarinClipboardEvidence?.push({
+          targetTag: target instanceof Element ? target.tagName : null,
+          closestWysiwyg: target instanceof Element
+            ? Boolean(target.closest('[data-type="wysiwyg"]'))
+            : target instanceof Node
+              ? Boolean(target.parentElement?.closest('[data-type="wysiwyg"]'))
+              : false,
+          defaultPrevented: event.defaultPrevented,
+          text: event.clipboardData?.getData('text/plain') || '',
+          richText: event.clipboardData?.getData('application/x-clarin-rich-text+json') || '',
+        })
+      })
+    })
+
+    // Newly-created text used to be overwritten by a scene envelope containing
+    // the whole text element. The system clipboard must remain plain text even
+    // after the global async Clipboard API has had time to run.
+    await page.keyboard.press('Control+c')
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('sdfsdf')
+
+    await page.getByTestId('clarin-text-mark-negrita').click()
+    await expect.poll(async () => editable.locator('span').first().evaluate(element => getComputedStyle(element).fontWeight))
+      .toBe('700')
+    await page.keyboard.press('Control+c')
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('sdfsdf')
+    const evidence = await page.evaluate(() => {
+      const state = window as typeof window & { __clarinClipboardEvidence?: Array<Record<string, unknown>> }
+      return state.__clarinClipboardEvidence || []
+    })
+    const latestCopy = evidence.at(-1) as { closestWysiwyg?: boolean; defaultPrevented?: boolean; text?: string; richText?: string }
+    expect(latestCopy).toMatchObject({ closestWysiwyg: true, defaultPrevented: true, text: 'sdfsdf' })
+    expect(JSON.parse(latestCopy.richText || '{}')).toMatchObject({
+      version: 1,
+      text: 'sdfsdf',
+      format: { runs: [{ from: 0, to: 6, marks: 1 }] },
+    })
+
+    // Reopening an existing text reproduced the reported empty envelope
+    // {elements: []}. It must now retain the selected characters instead.
+    await page.keyboard.press('Control+Enter')
+    await expect(editable).toBeHidden()
+    await page.getByTestId('toolbar-selection').check({ force: true })
+    await page.mouse.dblclick(firstPoint.x + 18, firstPoint.y + 12)
+    await expect(editable).toBeVisible()
+    await page.keyboard.press('Control+a')
+    await page.keyboard.press('Control+c')
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('sdfsdf')
+
+    // Paste in a second row of the same element and preserve the private rich
+    // text range alongside the plain-text representation.
+    await page.keyboard.press('Control+End')
+    await page.keyboard.press('Enter')
+    await page.keyboard.press('Control+v')
+    await expect.poll(() => editable.evaluate(element => element.textContent)).toBe('sdfsdf\nsdfsdf')
+    await expect.poll(async () => editable.locator('span').evaluateAll(elements =>
+      elements
+        .filter(element => Boolean(element.textContent?.trim()))
+        .map(element => getComputedStyle(element).fontWeight),
+    )).toEqual(['700', '700'])
+    await page.keyboard.press('Control+Enter')
+
+    // Pasting outside Excalidraw must receive the same selected text, proving
+    // the system clipboard itself was not corrupted by the canvas handler.
+    await page.evaluate(() => {
+      const textarea = document.createElement('textarea')
+      textarea.id = 'clarin-external-clipboard-target'
+      document.body.append(textarea)
+    })
+    const externalTarget = page.locator('#clarin-external-clipboard-target')
+    await externalTarget.focus()
+    await page.keyboard.press('Control+v')
+    await expect(externalTarget).toHaveValue('sdfsdf')
+    await externalTarget.evaluate(element => element.remove())
+
+    // Paste into a distinct Excalidraw text element and retain the formatting.
+    await page.getByTestId('toolbar-text').check({ force: true })
+    await page.mouse.click(firstPoint.x, firstPoint.y + 130)
+    await expect(editable).toBeVisible()
+    await page.keyboard.press('Control+v')
+    await expect.poll(() => editable.evaluate(element => element.textContent)).toBe('sdfsdf')
+    await expect.poll(async () => editable.locator('span').first().evaluate(element => getComputedStyle(element).fontWeight))
+      .toBe('700')
+    await page.keyboard.press('Control+Enter')
+    await expectEditorSaved(page)
+    await expect.poll(() => harness.elements.filter(element => element.type === 'text' && String(element.originalText).startsWith('sdfsdf')).length)
+      .toBe(2)
+
+    // Outside text editing, canvas copy must continue using the Excalidraw
+    // scene envelope and include the selected element.
+    await page.keyboard.press('Control+c')
+    await expect.poll(async () => {
+      const value = await page.evaluate(() => navigator.clipboard.readText())
+      try {
+        const parsed = JSON.parse(value) as { type?: string; elements?: unknown[] }
+        return { type: parsed.type, elements: parsed.elements?.length || 0 }
+      } catch {
+        return { type: '', elements: 0 }
+      }
+    }).toEqual({ type: 'excalidraw/clipboard', elements: 1 })
+    expect(blocked).toEqual([])
+  } finally {
+    await context.close()
+  }
+})
+
+test('texto enriquecido · cursiva se activa y desactiva sin depender de negrita', async ({ browser }) => {
+  test.setTimeout(120_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
+  const page = await context.newPage()
+
+  try {
+    await openEditor(page)
+    await page.getByTestId('toolbar-text').check({ force: true })
+    await expect(page.getByTestId('font-family-show-fonts')).toBeEnabled({ timeout: 30_000 })
+    const surface = page.locator('.whiteboard-editor-shell .excalidraw').first()
+    const box = await surface.boundingBox()
+    expect(box).not.toBeNull()
+    await page.mouse.click(box!.x + box!.width * 0.58, box!.y + box!.height * 0.38)
+    const editable = page.locator('[contenteditable="true"][data-type="wysiwyg"]')
+    await expect(editable).toBeVisible()
+    await page.keyboard.type('Solo cursiva')
+    await page.keyboard.press('Control+a')
+
+    const selectionSnapshot = () => editable.evaluate(element => {
+      const selection = window.getSelection()
+      const richEditable = element as HTMLElement & { selectionStart: number; selectionEnd: number }
+      return {
+        start: richEditable.selectionStart,
+        end: richEditable.selectionEnd,
+        text: selection?.toString() ?? '',
+        anchorInside: Boolean(selection?.anchorNode && element.contains(selection.anchorNode)),
+        focusInside: Boolean(selection?.focusNode && element.contains(selection.focusNode)),
+      }
+    })
+    const selected = { start: 0, end: 12, text: 'Solo cursiva', anchorInside: true, focusInside: true }
+    await expect.poll(selectionSnapshot).toEqual(selected)
+
+    const italic = page.getByTestId('clarin-text-mark-cursiva')
+    const bold = page.getByTestId('clarin-text-mark-negrita')
+    await expect(italic).toHaveAttribute('aria-pressed', 'false')
+    await expect(bold).toHaveAttribute('aria-pressed', 'false')
+
+    await italic.click()
+    await expect(italic).toHaveAttribute('aria-pressed', 'true')
+    await expect(bold).toHaveAttribute('aria-pressed', 'false')
+    await expect.poll(selectionSnapshot).toEqual(selected)
+    await expect.poll(async () => editable.locator('[data-clarin-paragraph-start="0"] span').evaluateAll(elements =>
+      elements.map(element => getComputedStyle(element).fontStyle),
+    )).toEqual(['italic'])
+
+    await italic.click({ position: { x: 4, y: 4 } })
+    await expect(italic).toHaveAttribute('aria-pressed', 'false')
+    await expect(bold).toHaveAttribute('aria-pressed', 'false')
+    await expect.poll(selectionSnapshot).toEqual(selected)
+    await expect.poll(async () => editable.locator('[data-clarin-paragraph-start="0"] span').evaluateAll(elements =>
+      elements.map(element => getComputedStyle(element).fontStyle),
+    )).toEqual(['normal'])
+
+    // Reproduce the real browser race: pointerdown captures the range, but a
+    // focus/selectionchange collapses the live DOM selection before click.
+    // The command must still consume the immutable captured range.
+    await italic.click()
+    await expect(italic).toHaveAttribute('aria-pressed', 'true')
+    await italic.dispatchEvent('pointerdown', { pointerType: 'mouse', button: 0 })
+    await editable.evaluate(element => {
+      const text = element.querySelector('[data-clarin-paragraph-start="0"] span')?.firstChild
+      if (!text) throw new Error('No se encontró el nodo de texto cursivo')
+      const selection = window.getSelection()
+      const range = document.createRange()
+      range.setStart(text, text.textContent?.length ?? 0)
+      range.collapse(true)
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+    })
+    await expect.poll(selectionSnapshot).toEqual({
+      start: 12,
+      end: 12,
+      text: '',
+      anchorInside: true,
+      focusInside: true,
+    })
+    await italic.dispatchEvent('pointerup', { pointerType: 'mouse', button: 0 })
+    await italic.dispatchEvent('click', { button: 0 })
+    await expect(italic).toHaveAttribute('aria-pressed', 'false')
+    await expect.poll(selectionSnapshot).toEqual(selected)
+    await expect.poll(async () => editable.locator('[data-clarin-paragraph-start="0"] span').evaluateAll(elements =>
+      elements.map(element => getComputedStyle(element).fontStyle),
+    )).toEqual(['normal'])
+
+    await page.keyboard.press('Control+Enter')
+    await expect(editable).toBeHidden()
+    await expect.poll(() => Boolean(harness.elements.find(element => element.type === 'text' && element.originalText === 'Solo cursiva')))
+      .toBe(true)
+    await expect.poll(() => harness.elements.find(element => element.type === 'text' && element.originalText === 'Solo cursiva')?.customData?.clarinTextFormat ?? null)
+      .toBeNull()
+    await expectEditorSaved(page)
+    const exported = await exportEditableScene(page)
+    const formatted = exported.elements.find(element => element.type === 'text' && element.originalText === 'Solo cursiva')
+    expect(formatted?.customData ?? {}).not.toHaveProperty('clarinTextFormat')
+
+    // The same final-field removal must work when the element is selected but
+    // no contenteditable is active (ActionManager/newElementWith path).
+    await italic.click()
+    await expect.poll(() => harness.elements.find(element => element.type === 'text' && element.originalText === 'Solo cursiva')?.customData?.clarinTextFormat?.runs ?? null)
+      .toEqual([{ from: 0, to: 12, marks: 2 }])
+    await italic.click()
+    await expect.poll(() => harness.elements.find(element => element.type === 'text' && element.originalText === 'Solo cursiva')?.customData?.clarinTextFormat ?? null)
+      .toBeNull()
+    await expectEditorSaved(page)
+    const exportedAfterWholeElementToggle = await exportEditableScene(page)
+    const unformatted = exportedAfterWholeElementToggle.elements.find(element => element.type === 'text' && element.originalText === 'Solo cursiva')
+    expect(unformatted?.customData ?? {}).not.toHaveProperty('clarinTextFormat')
+    expect(blocked).toEqual([])
+  } finally {
+    await context.close()
+  }
+})
+
+test('texto enriquecido · aplica marcas combinadas sólo a la selección, deshace y persiste', async ({ browser }) => {
+  test.setTimeout(120_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
+  const page = await context.newPage()
+
+  try {
+    await openEditor(page)
+    await page.getByTestId('toolbar-text').check({ force: true })
+    await expect(page.getByTestId('font-family-show-fonts')).toBeEnabled({ timeout: 30_000 })
+    const surface = page.locator('.whiteboard-editor-shell .excalidraw').first()
+    const box = await surface.boundingBox()
+    expect(box).not.toBeNull()
+    await page.mouse.click(box!.x + box!.width * 0.58, box!.y + box!.height * 0.38)
+    const editable = page.locator('[contenteditable="true"][data-type="wysiwyg"]')
+    await expect(editable).toBeVisible()
+    await page.keyboard.type('Título')
+    await page.keyboard.press('Enter')
+    await page.keyboard.type('Cuerpo')
+    expect(await editable.evaluate(element => element.textContent)).toBe('Título\nCuerpo')
+    await page.keyboard.press('Control+Home')
+    for (let index = 0; index < 'Título'.length; index += 1) {
+      await page.keyboard.press('Shift+ArrowRight')
+    }
+    await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe('Título')
+
+    await page.getByTestId('clarin-text-mark-negrita').click()
+    await page.keyboard.press('Control+i')
+    await page.getByTestId('clarin-text-mark-subrayado').click()
+    await page.keyboard.press('Control+Shift+x')
+    await expect.poll(async () => editable.locator('span').first().evaluate(element => ({
+      weight: getComputedStyle(element).fontWeight,
+      style: getComputedStyle(element).fontStyle,
+      decoration: getComputedStyle(element).textDecorationLine.split(' ').sort(),
+    }))).toEqual({ weight: '700', style: 'italic', decoration: ['line-through', 'underline'] })
+
+    await page.keyboard.press('Control+z')
+    await expect.poll(async () => editable.locator('span').first().evaluate(element => getComputedStyle(element).textDecorationLine))
+      .toBe('underline')
+    await page.keyboard.press('Control+Shift+z')
+    await expect.poll(async () => editable.locator('span').first().evaluate(element => getComputedStyle(element).textDecorationLine.split(' ').sort()))
+      .toEqual(['line-through', 'underline'])
+
+    // Regression: clicking the glyph or its surrounding button must retain the
+    // same selection and allow bold to be removed and reapplied repeatedly.
+    await page.getByTestId('clarin-text-mark-negrita').click()
+    await expect.poll(async () => editable.locator('span').first().evaluate(element => getComputedStyle(element).fontWeight))
+      .toBe('400')
+    await page.getByTestId('clarin-text-mark-negrita').click({ position: { x: 4, y: 4 } })
+    await expect.poll(async () => editable.locator('span').first().evaluate(element => getComputedStyle(element).fontWeight))
+      .toBe('700')
+
+    // Alignment follows the same selection contract, but expands it to every
+    // logical paragraph touched by the selected characters.
+    await page.getByTestId('align-horizontal-center').click({ force: true })
+    await expect.poll(async () => editable.locator('[data-clarin-paragraph-start="0"]').evaluate(element => getComputedStyle(element).textAlign))
+      .toBe('center')
+    await expect.poll(async () => editable.locator('[data-clarin-paragraph-start="7"]').evaluate(element => getComputedStyle(element).textAlign))
+      .toBe('left')
+
+    // A selection spanning both paragraphs promotes a uniform result to the
+    // element alignment. Undo must restore the exact mixed paragraph state.
+    await editable.focus()
+    await page.keyboard.press('Control+a')
+    await page.getByTestId('align-right').click({ force: true })
+    await expect.poll(async () => editable.locator('[data-clarin-paragraph-start="0"]').evaluate(element => getComputedStyle(element).textAlign))
+      .toBe('right')
+    await expect.poll(async () => editable.locator('[data-clarin-paragraph-start="7"]').evaluate(element => getComputedStyle(element).textAlign))
+      .toBe('right')
+    await page.keyboard.press('Control+z')
+    await expect.poll(async () => editable.locator('[data-clarin-paragraph-start="0"]').evaluate(element => getComputedStyle(element).textAlign))
+      .toBe('center')
+    await expect.poll(async () => editable.locator('[data-clarin-paragraph-start="7"]').evaluate(element => getComputedStyle(element).textAlign))
+      .toBe('left')
+    await page.keyboard.press('Control+Enter')
+    await expect(editable).toBeHidden()
+
+    await expect.poll(() => harness.elements.find(element => element.type === 'text' && element.originalText === 'Título\nCuerpo'))
+      .toMatchObject({
+        textAlign: 'left',
+        customData: {
+          clarinParagraphFormat: {
+            version: 1,
+            textLength: 13,
+            paragraphs: [{ start: 0, align: 'center' }],
+          },
+        },
+      })
+
+    // Outside editing, a mixed whole-element underline state applies the mark
+    // to the complete text while preserving the title's other marks.
+    await page.getByTestId('clarin-text-mark-subrayado').click()
+    await expect.poll(() => harness.elements.find(element => element.type === 'text' && element.originalText === 'Título\nCuerpo')?.customData)
+      .toMatchObject({
+        clarinTextFormat: {
+          version: 1,
+          textLength: 13,
+          runs: [
+            { from: 0, to: 6, marks: 15 },
+            { from: 6, to: 13, marks: 4 },
+          ],
+        },
+      })
+    await expectEditorSaved(page)
+    const exported = await exportEditableScene(page)
+    const formatted = exported.elements.find(element => element.type === 'text' && element.originalText === 'Título\nCuerpo')
+    expect(formatted?.text).toBe('Título\nCuerpo')
+    expect(formatted?.customData?.clarinTextFormat?.runs).toEqual([
+      { from: 0, to: 6, marks: 15 },
+      { from: 6, to: 13, marks: 4 },
+    ])
+    expect(formatted?.textAlign).toBe('left')
+    expect(formatted?.customData?.clarinParagraphFormat?.paragraphs).toEqual([
+      { start: 0, align: 'center' },
+    ])
+
+    // Outside editing, alignment applies to the complete element and removes
+    // obsolete paragraph overrides atomically.
+    await page.getByTestId('align-right').click({ force: true })
+    await expect.poll(() => harness.elements.find(element => element.type === 'text' && element.originalText === 'Título\nCuerpo'))
+      .toMatchObject({ textAlign: 'right' })
+    expect(harness.elements.find(element => element.type === 'text' && element.originalText === 'Título\nCuerpo')?.customData)
+      .not.toHaveProperty('clarinParagraphFormat')
+    expect(blocked).toEqual([])
+  } finally {
+    await context.close()
+  }
+})
+
+test('integración simulada · permiso Comentar conserva el backend pero no monta ni intercepta la UI oculta', async ({ browser, browserName }) => {
+  test.setTimeout(150_000)
+  const harness = new WhiteboardRealtimeHarness()
+  harness.effectiveAccess = {
+    level: 'comment',
+    inherited_from: 'grant',
+    can_view: true,
+    can_comment: true,
+    can_edit: false,
+    can_manage_access: false,
+  }
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  const context = await browser.newContext({ hasTouch: browserName === 'firefox', serviceWorkers: 'block' })
+
+  try {
+    await harness.install(context, 'Ana QA')
+    await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
+
+    const page = await context.newPage()
+    await openEditor(page)
+    await expect(page.getByText('Solo lectura', { exact: true })).toBeVisible()
+    await expectWhiteboardChromeOwnership(page, `${browserName} comment-only`)
+    const canvas = page.locator('.whiteboard-editor-shell canvas.interactive').first()
+    const box = await canvas.boundingBox()
+    expect(box).not.toBeNull()
+    const clickX = box!.x + Math.min(480, box!.width - 80)
+    const clickY = box!.y + Math.min(420, box!.height - 80)
+    if (browserName === 'firefox') await page.touchscreen.tap(clickX, clickY)
+    else await page.mouse.click(clickX, clickY)
+    await expect(page.getByLabel('Comentarios de la pizarra')).toHaveCount(0)
+    await expect(page.getByLabel('Pines de comentarios')).toHaveCount(0)
+    expect(Array.from(requests).filter(url => /\/comment-(?:threads|markers)/u.test(new URL(url).pathname))).toEqual([])
+    expect(harness.httpSceneWrites).toEqual([])
+    expect(blocked).toEqual([])
+  } finally {
+    await context.close()
+  }
+})
+
+test('integración simulada · el checkpoint automático conserva zoom y herramienta de la sesión activa', async ({ browser, browserName }) => {
   test.skip(browserName !== 'chromium', 'La regresión determinista del editor usa Chromium.')
   test.setTimeout(180_000)
   const harness = new WhiteboardRealtimeHarness()
   const requests = new Set<string>()
   const blocked: string[] = []
   const explicitNavigations = new Set<string>()
-  const context = await browser.newContext()
+  const context = await browser.newContext({ serviceWorkers: 'block' })
   await harness.install(context, 'Ana QA')
   await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
   const page = await context.newPage()
@@ -790,7 +2206,476 @@ test('el checkpoint automático conserva zoom y herramienta de la sesión activa
   }
 })
 
-test('Pizarras stays same-origin and survives two-user lost-ACK reconnect plus revocation', async ({ browser, browserName }, testInfo) => {
+test('integración simulada · el gestor usa compacta por defecto y mueve pizarras con selector, drag y rollback', async ({ browser, browserName }) => {
+  test.skip(browserName !== 'chromium', 'La interacción de puntero determinista usa Chromium.')
+  test.setTimeout(120_000)
+  const harness = new WhiteboardRealtimeHarness()
+  harness.createdFolders.push(
+    { id: 'folder-1', name: 'Carpeta completa', parentID: null },
+    { id: 'folder-2', name: 'Subcarpeta completa', parentID: 'folder-1' },
+  )
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  const context = await browser.newContext({ serviceWorkers: 'block' })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
+  const page = await context.newPage()
+
+  try {
+    await page.goto(`${baseURL}/dashboard/whiteboards`, { waitUntil: 'domcontentloaded' })
+    await expect(page.getByRole('heading', { name: 'Mis pizarras' })).toBeVisible({ timeout: 20_000 })
+    await exerciseManagerViewsAndFolderMoves(page, harness)
+    expect(blocked).toEqual([])
+  } finally {
+    await context.close()
+  }
+})
+
+test('integración simulada · Comentarios permanece inactivo y el catálogo público completa el flujo dentro de Pizarras', async ({ browser, browserName }) => {
+  test.setTimeout(240_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  // Next.js development bundles use eval. A redirect fulfilled by Playwright
+  // skips document route interception, so bypass CSP only in this local flow;
+  // production CSP remains covered by the hardening checks.
+  const context = await browser.newContext({ bypassCSP: process.env.PLAYWRIGHT_LOCAL_SERVER === '1', serviceWorkers: 'block' })
+  try {
+    await harness.install(context, 'Ana QA')
+    await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
+
+  const actorID = actorIDFor('Ana QA')
+  const personalLibraryID = personalLibraryIDFor('Ana QA')
+  const importID = '30000000-0000-4000-8000-000000000011'
+  const callbackToken = 'whiteboard_public_library_callback_qa_123456'
+  const navigationPath = `/api/whiteboards/${boardID}/public-library-imports/${importID}/navigate`
+  const publicLibraryURL = 'https://libraries.excalidraw.com/libraries/qa/architecture.excalidrawlib'
+  const publicItem = clone(libraryFixture.libraryItems[1])
+  publicItem.id = 'public-architecture-item'
+  publicItem.name = 'Arquitectura pública QA'
+  publicItem.status = 'unpublished'
+  publicItem.elements[0].id = 'public-architecture-arrow'
+  const validatedPublicLibrary = {
+    type: 'excalidrawlib',
+    version: 2,
+    source: 'clarin',
+    libraryItems: [publicItem],
+  }
+  let personalLibraryJSON: Record<string, any> = { type: 'excalidrawlib', version: 2, source: 'clarin', libraryItems: [] }
+  let personalLibraryVersion = 1
+  const callbackWrites: Array<Record<string, any>> = []
+  const importOrder: string[] = []
+  let importReads = 0
+  let libraryWrites = 0
+  let importCompletions = 0
+
+  await context.route(`**/api/whiteboards/${boardID}/public-library-import/start?*`, async route => {
+    expect(route.request().method()).toBe('POST')
+    const headers = await route.request().allHeaders()
+    expect(headers.origin).toBe(baseURL)
+    expect(headers['x-clarin-whiteboard-library-start']).toBe('1')
+    await json(route, { success: true, navigation_path: navigationPath })
+  })
+  await context.route(`**${navigationPath}`, async route => {
+    expect(route.request().method()).toBe('GET')
+    const callback = `${baseURL}/whiteboards/library-import#addLibrary=${encodeURIComponent(publicLibraryURL)}&token=${callbackToken}`
+    if (browserName === 'webkit') {
+      // Playwright's WebKit route shim cannot synthesize redirect statuses.
+      // The backend integration covers the real 302; this keeps the browser
+      // matrix on the same top-level callback and persistence path.
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        headers: { 'cache-control': 'no-store' },
+        body: `<script>window.location.replace(${JSON.stringify(callback)})</script>`,
+      })
+      return
+    }
+    await route.fulfill({ status: 302, headers: { location: callback, 'cache-control': 'no-store' }, body: '' })
+  })
+  await context.route('**/api/whiteboards/public-library-import/callback', async route => {
+    const payload = route.request().postDataJSON() as Record<string, any>
+    callbackWrites.push(payload)
+    await json(route, { success: true, board_id: boardID, import_id: importID })
+  })
+  await context.route(`**/api/whiteboards/${boardID}/public-library-imports/${importID}`, async route => {
+    importReads += 1
+    await json(route, {
+      success: true,
+      import: {
+        id: importID,
+        board_id: boardID,
+        library_id: personalLibraryID,
+        status: 'ready',
+        source_url: publicLibraryURL,
+        library_json: validatedPublicLibrary,
+        expires_at: '2026-08-14T21:00:00Z',
+      },
+    })
+  })
+  await context.route(`**/api/whiteboards/${boardID}/public-library-imports/${importID}/complete`, async route => {
+    importCompletions += 1
+    importOrder.push('complete')
+    const payload = route.request().postDataJSON() as Record<string, any>
+    expect(payload.operation_id).toBe(importID)
+    expect(payload.library_version).toBe(personalLibraryVersion)
+    await json(route, {
+      success: true,
+      import: {
+        id: importID,
+        board_id: boardID,
+        library_id: personalLibraryID,
+        status: 'completed',
+        expires_at: '2026-08-14T21:00:00Z',
+      },
+    })
+  })
+  await context.route('**/api/whiteboard-libraries', async route => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback()
+      return
+    }
+    await json(route, {
+      success: true,
+      libraries: [
+        {
+          id: personalLibraryID, name: `Mi biblioteca · ${actorID}`, description: '', library_json: personalLibraryJSON,
+          visibility: 'private', version: personalLibraryVersion, created_by: actorID, updated_by: actorID, created_at: now, updated_at: now,
+        },
+        {
+          id: 'library-account-qa', name: 'Catálogo QA interno', description: 'Solo dentro de Clarin',
+          library_json: { libraryItems: clone(libraryFixture.libraryItems) }, visibility: 'account', version: 1,
+          created_by: 'account-admin', updated_by: 'account-admin', created_at: now, updated_at: now,
+        },
+      ],
+      next_cursor: null,
+    })
+  })
+  await context.route(`**/api/whiteboard-libraries/${personalLibraryID}`, async route => {
+    if (route.request().method() !== 'PUT') {
+      await route.fallback()
+      return
+    }
+    const payload = route.request().postDataJSON() as Record<string, any>
+    libraryWrites += 1
+    importOrder.push('put')
+    personalLibraryJSON = payload.library_json
+    personalLibraryVersion += 1
+    await json(route, {
+      success: true,
+      library: {
+        id: personalLibraryID,
+        name: payload.name,
+        description: payload.description || '',
+        library_json: personalLibraryJSON,
+        visibility: 'private',
+        version: personalLibraryVersion,
+        created_by: actorID,
+        updated_by: actorID,
+        created_at: now,
+        updated_at: now,
+      },
+    })
+  })
+
+  const page = await context.newPage()
+  const requestFailures: Array<{ url: string; error: string }> = []
+  const pageErrors: string[] = []
+  const callbackDocumentPaths: string[] = []
+  page.on('request', request => {
+    const url = new URL(request.url())
+    if (request.resourceType() === 'document' && url.pathname === '/whiteboards/library-import') {
+      callbackDocumentPaths.push(url.pathname)
+    }
+  })
+  page.on('requestfailed', request => recordWhiteboardRequestFailure(requestFailures, request))
+  page.on('pageerror', error => pageErrors.push(error.message))
+
+    await test.step('abre el editor y deja listas las bibliotecas internas', async () => {
+      await openEditor(page)
+      await expect(page.getByLabel('Guardado en Clarin')).toBeVisible({ timeout: 30_000 })
+      expect(requestFailures).toEqual([])
+      await expect(page.getByText('Solicitud cancelada', { exact: true })).toHaveCount(0)
+    })
+
+    await test.step('mantiene Comentarios totalmente fuera de la interfaz y de la carga inicial', async () => {
+      await expectWhiteboardChromeOwnership(page, 'flujo simulado sin comentarios')
+      expect(Array.from(requests).filter(url => /\/comment-(?:threads|markers)/u.test(new URL(url).pathname))).toEqual([])
+    })
+
+    await test.step('abre el catálogo y completa el callback seguro', async () => {
+    const { library: libraryToggle } = await expectWhiteboardChromeOwnership(page, 'flujo simulado de biblioteca')
+    await whiteboardActionHitTarget(libraryToggle).click()
+    const browse = page.locator('.library-menu-browse-button')
+    await expect(browse).toBeVisible()
+    await expectPublicLibraryDisclosure(page, 'flujo simulado de biblioteca')
+    // The native link may remain rendered while an ownership cleanup replaces
+    // the global used to create it. The click must still be a real document
+    // navigation, never a Next.js/RSC fetch rejected by the backend guard.
+    await page.evaluate(() => { delete (globalThis as any).__CLARIN_WHITEBOARD_LIBRARY_START_URL__ })
+    await browse.click()
+
+    await expect.poll(() => callbackWrites.length, {
+      timeout: 30_000,
+      message: `callback pendiente; URL=${page.url()}`,
+    }).toBe(1)
+    expect(callbackWrites[0]).toEqual({ token: callbackToken, library_url: publicLibraryURL })
+    expect(callbackDocumentPaths).toContain('/whiteboards/library-import')
+    })
+
+    await test.step('recupera la importación validada al volver al editor', async () => {
+      await expect.poll(() => importReads, {
+        timeout: 30_000,
+        message: `GET import pendiente; URL=${page.url()}; callback=${callbackWrites.length}`,
+      }).toBeGreaterThan(0)
+    })
+
+    await test.step('persiste la biblioteca pública en Mi biblioteca', async () => {
+      await expect.poll(() => libraryWrites, {
+        timeout: 30_000,
+        message: `PUT library pendiente; URL=${page.url()}; GET=${importReads}; orden=${importOrder.join(',')}`,
+      }).toBe(1)
+    expect(personalLibraryJSON.libraryItems.some((item: Record<string, any>) => item.id === 'public-architecture-item')).toBe(true)
+    })
+
+    await test.step('confirma la importación y limpia la URL', async () => {
+      await expect.poll(() => importCompletions, {
+        timeout: 30_000,
+        message: `complete pendiente; URL=${page.url()}; GET=${importReads}; PUT=${libraryWrites}; orden=${importOrder.join(',')}`,
+      }).toBe(1)
+      expect(importOrder).toEqual(['put', 'complete'])
+      await expect(page).toHaveURL(`${baseURL}/dashboard/whiteboards/${boardID}`, { timeout: 30_000 })
+      await expect(page.locator('.library-menu-items-container')).toBeVisible({ timeout: 30_000 })
+      expect(requestFailures).toEqual([])
+      expect(pageErrors).toEqual([])
+      expect(blocked).toEqual([])
+    })
+  } finally {
+    await context.close().catch(() => undefined)
+  }
+})
+
+test('integración simulada · abre antes de las imágenes, hidrata progresivamente y permite guardar', async ({ browser, browserName }) => {
+  test.skip(browserName !== 'chromium', 'La cola progresiva se valida una vez en Chromium.')
+  test.setTimeout(120_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  const fileIDs = Array.from({ length: 12 }, (_, index) => String(index + 1).padStart(40, '0'))
+  harness.elements = [
+    clone(loadedTextFixture),
+    ...fileIDs.map((fileID, index) => ({
+      ...clone(imageElementFixture),
+      id: `progressive-image-${index + 1}`,
+      fileId: fileID,
+      index: `b${String(index + 1).padStart(2, '0')}`,
+      x: index < 2 ? 120 + index * 180 : 3_000 + index * 180,
+      y: index < 2 ? 180 : 2_000,
+      link: null,
+    })),
+  ]
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  const releases = new Map<string, () => void>()
+  let activeDownloads = 0
+  let peakDownloads = 0
+  try {
+    await harness.install(context, 'Ana QA')
+    await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
+    await context.route(`**/api/whiteboards/${boardID}/assets**`, async route => {
+      const url = new URL(route.request().url())
+      if (url.pathname === `/api/whiteboards/${boardID}/assets` && route.request().method() === 'GET') {
+        await json(route, {
+          success: true,
+          assets: fileIDs.map((fileID, index) => ({
+            id: `30000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+            board_id: boardID,
+            file_id: fileID,
+            kind: 'asset',
+            filename: `${fileID}.png`,
+            content_type: 'image/png',
+            size_bytes: imageFixtureBytes.length,
+            created_at: now,
+          })),
+          next_cursor: null,
+        })
+        return
+      }
+      if (!url.pathname.startsWith(`/api/whiteboards/${boardID}/assets/`) || route.request().method() !== 'GET') {
+        await route.fallback()
+        return
+      }
+      const assetID = url.pathname.split('/').at(-1) || ''
+      activeDownloads += 1
+      peakDownloads = Math.max(peakDownloads, activeDownloads)
+      await new Promise<void>(resolve => { releases.set(assetID, resolve) })
+      activeDownloads -= 1
+      await route.fulfill({ status: 200, contentType: 'image/png', body: imageFixtureBytes })
+    })
+
+    const page = await context.newPage()
+    await openEditor(page)
+    await expect(page.getByText('Cargando imágenes 0 de 12…')).toBeVisible({ timeout: 30_000 })
+    await expect.poll(() => releases.size).toBe(4)
+    expect(peakDownloads).toBe(4)
+
+    const writesBeforeEdit = harness.patchAttempts.length + harness.httpSceneWrites.length
+    await drawRectangle(page, 12)
+    await expect.poll(() => harness.patchAttempts.length + harness.httpSceneWrites.length).toBeGreaterThan(writesBeforeEdit)
+    await expectEditorSaved(page)
+    const writesAfterEdit = harness.patchAttempts.length + harness.httpSceneWrites.length
+    await expect(page.getByText('Una imagen todavía no terminó de prepararse.')).toHaveCount(0)
+
+    const released = new Set<string>()
+    while (released.size < fileIDs.length) {
+      await expect.poll(() => releases.size, { timeout: 30_000 }).toBeGreaterThan(released.size)
+      for (const [assetID, release] of releases) {
+        if (released.has(assetID)) continue
+        released.add(assetID)
+        release()
+      }
+    }
+    await expect(page.getByText(/Cargando imágenes/)).toHaveCount(0, { timeout: 30_000 })
+    await expect(page.getByText(/imágenes no pudieron cargarse/)).toHaveCount(0)
+    await page.waitForTimeout(750)
+    expect(harness.patchAttempts.length + harness.httpSceneWrites.length).toBe(writesAfterEdit)
+    expect(peakDownloads).toBe(4)
+    expect(blocked).toEqual([])
+  } finally {
+    for (const release of releases.values()) release()
+    await context.close().catch(() => undefined)
+  }
+})
+
+test('integración simulada · invitado abre el lienzo antes de descargar la imagen', async ({ browser, browserName }) => {
+  test.skip(browserName !== 'chromium', 'La ruta compartida progresiva se valida una vez en Chromium.')
+  test.setTimeout(90_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const fileID = '9999999999999999999999999999999999999999'
+  harness.elements = [{ ...clone(imageElementFixture), id: 'guest-progressive-image', fileId: fileID, link: null }]
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, serviceWorkers: 'block' })
+  let releaseDownload: (() => void) | null = null
+  try {
+    await harness.install(context, 'Marta Invitada')
+    const shareLinkID = await installGuestWhiteboardHTTP(context, harness, requests, blocked)
+    await context.route('**/api/whiteboard-guest/assets**', async route => {
+      const url = new URL(route.request().url())
+      if (url.pathname === '/api/whiteboard-guest/assets') {
+        await json(route, {
+          success: true,
+          assets: [{
+            id: '40000000-0000-4000-8000-000000000001',
+            file_id: fileID,
+            kind: 'asset',
+            filename: `${fileID}.png`,
+            content_type: 'image/png',
+            size_bytes: imageFixtureBytes.length,
+            created_at: now,
+          }],
+          next_cursor: null,
+        })
+        return
+      }
+      if (!url.pathname.startsWith('/api/whiteboard-guest/assets/')) {
+        await route.fallback()
+        return
+      }
+      await new Promise<void>(resolve => { releaseDownload = resolve })
+      await route.fulfill({ status: 200, contentType: 'image/png', body: imageFixtureBytes })
+    })
+    const page = await context.newPage()
+    await openGuestEditor(page, shareLinkID)
+    await expect(page.getByText('Cargando imágenes 0 de 1…')).toBeVisible({ timeout: 30_000 })
+    await expect.poll(() => Boolean(releaseDownload)).toBe(true)
+    releaseDownload?.()
+    await expect(page.getByText(/Cargando imágenes/)).toHaveCount(0, { timeout: 30_000 })
+    expect(blocked).toEqual([])
+  } finally {
+    releaseDownload?.()
+    await context.close().catch(() => undefined)
+  }
+})
+
+test('integración simulada · presentación pide consentimiento, sigue el viewport y recibe incorporaciones tardías', async ({ browser, browserName }) => {
+  test.skip(browserName !== 'chromium', 'El flujo multi-sesión se valida una vez en Chromium.')
+  test.setTimeout(120_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  const contexts = await Promise.all([
+    browser.newContext({ viewport: { width: 1280, height: 800 }, serviceWorkers: 'block' }),
+    browser.newContext({ viewport: { width: 1280, height: 800 }, serviceWorkers: 'block' }),
+    browser.newContext({ viewport: { width: 1280, height: 800 }, serviceWorkers: 'block' }),
+  ])
+  const users = ['Ana QA', 'Luis QA']
+  for (let index = 0; index < users.length; index += 1) {
+    await harness.install(contexts[index], users[index])
+    await installWhiteboardHTTP(contexts[index], harness, users[index], requests, blocked, explicitNavigations)
+  }
+  await harness.install(contexts[2], 'Marta Invitada')
+  const guestShareLinkID = await installGuestWhiteboardHTTP(contexts[2], harness, requests, blocked)
+  const [presenter, viewer, lateViewer] = await Promise.all(contexts.map(context => context.newPage()))
+
+  try {
+    await Promise.all([openEditor(presenter), openEditor(viewer)])
+	await expect.poll(() => harness.socketCount(), { timeout: 30_000 }).toBe(2)
+
+	await test.step('el avatar propio no sigue su misma sesión y deja de seguir a la remota una sola vez', async () => {
+	  const selfAvatar = viewer.locator('.whiteboard-editor-shell .excalidraw .Avatar.is-current-user')
+	  const remoteAvatar = viewer.locator('.whiteboard-editor-shell .excalidraw .Avatar:not(.is-current-user)').first()
+	  await expect(selfAvatar).toHaveCount(1, { timeout: 30_000 })
+	  await expect(selfAvatar).toBeVisible({ timeout: 30_000 })
+	  await expect(remoteAvatar).toBeVisible({ timeout: 30_000 })
+
+	  await selfAvatar.dispatchEvent('click')
+	  await expect(viewer.getByText('No se pudo aplicar el cambio en tiempo real')).toHaveCount(0)
+	  expect(harness.followChanges.filter(change => change.sender === 'Luis QA')).toEqual([])
+
+	  await remoteAvatar.dispatchEvent('click')
+	  await expect.poll(() => harness.followChanges.filter(change => change.sender === 'Luis QA')).toEqual([
+		{ sender: 'Luis QA', target: actorIDFor('Ana QA'), action: 'FOLLOW' },
+	  ])
+	  await selfAvatar.dispatchEvent('click')
+	  await expect.poll(() => harness.followChanges.filter(change => change.sender === 'Luis QA')).toEqual([
+		{ sender: 'Luis QA', target: actorIDFor('Ana QA'), action: 'FOLLOW' },
+		{ sender: 'Luis QA', target: actorIDFor('Ana QA'), action: 'UNFOLLOW' },
+	  ])
+	  await expect(viewer.getByText('No se pudo aplicar el cambio en tiempo real')).toHaveCount(0)
+	  await expectEditorSaved(viewer)
+	})
+
+    await presenter.getByRole('button', { name: 'Invitar a seguirme' }).click()
+    await expect(viewer.getByText('Ana QA te invita a seguir su presentación')).toBeVisible()
+    await expect(viewer.getByRole('button', { name: 'Ana QA está presentando' })).toBeDisabled()
+
+    await viewer.getByRole('button', { name: 'Ahora no' }).click()
+    await expect(viewer.getByText('Ana QA te invita a seguir su presentación')).toBeHidden()
+    await presenter.getByRole('button', { name: /Finalizar presentación/ }).click()
+    await presenter.getByRole('button', { name: 'Invitar a seguirme' }).click()
+
+    await viewer.getByRole('button', { name: 'Seguir' }).click()
+    await expect(viewer.getByText(/Siguiendo a/)).toBeVisible()
+    await expect.poll(() => harness.viewportDeliveries.filter(item => item.sender === 'Ana QA').length).toBeGreaterThan(0)
+    await expectEditorSaved(viewer)
+
+    await openGuestEditor(lateViewer, guestShareLinkID)
+    await expect(lateViewer.getByText('Ana QA te invita a seguir su presentación')).toBeVisible()
+
+    await contexts[0].close()
+    await expect(viewer.getByText(/Siguiendo a/)).toBeHidden()
+    await expect(lateViewer.getByText('Ana QA te invita a seguir su presentación')).toBeHidden()
+    expect(blocked).toEqual([])
+  } finally {
+    await Promise.all(contexts.slice(1).map(context => context.close().catch(() => undefined)))
+  }
+})
+
+test('integración simulada · Pizarras permanece same-origin y reconcilia ACK perdido, reconexión y revocación', async ({ browser, browserName }, testInfo) => {
   test.skip(browserName !== 'chromium', 'El gate determinista usa dos contextos Chromium; la matriz visual cubre los demás motores.')
   test.setTimeout(150_000)
   const harness = new WhiteboardRealtimeHarness()
@@ -805,8 +2690,8 @@ test('Pizarras stays same-origin and survives two-user lost-ACK reconnect plus r
   const cspViolations: string[] = []
   const visibleBrandingSurfaces: VisibleBrandingSurface[] = []
   const unexpectedDialogs: string[] = []
-  const firstContext = await browser.newContext()
-  const secondContext = await browser.newContext()
+  const firstContext = await browser.newContext({ serviceWorkers: 'block' })
+  const secondContext = await browser.newContext({ serviceWorkers: 'block' })
   await harness.install(firstContext, 'Ana QA')
   await harness.install(secondContext, 'Luis QA')
   await installWhiteboardHTTP(firstContext, harness, 'Ana QA', requests, blocked, explicitNavigations)
@@ -815,10 +2700,10 @@ test('Pizarras stays same-origin and survives two-user lost-ACK reconnect plus r
   const second = await secondContext.newPage()
   for (const page of [first, second]) {
     page.on('request', request => requests.add(request.url()))
-    page.on('requestfailed', request => requestFailures.push({ url: request.url(), error: request.failure()?.errorText || 'unknown' }))
+    page.on('requestfailed', request => recordWhiteboardRequestFailure(requestFailures, request))
     page.on('response', response => {
       const path = new URL(response.url()).pathname
-      if (path.startsWith('/vendor/whiteboards-editor/0.18.1/fonts/')) {
+      if (path.startsWith('/vendor/whiteboards-editor/0.18.1-clarin.4/fonts/')) {
         fontResponses.push({ url: response.url(), status: response.status() })
       }
       if (response.status() === 409 && /\/api\/whiteboards\/[^/]+\/scene$/.test(path)) sceneConflicts.push(response.url())
@@ -924,7 +2809,37 @@ test('Pizarras stays same-origin and survives two-user lost-ACK reconnect plus r
       await expect.poll(() => harness.socketCount(), { timeout: 30_000 }).toBe(2)
     })
 
-    await test.step('oculta ayuda nativa y publicación; abre sólo bibliotecas internas', async () => {
+    await test.step('mantiene Excalidraw montado y reconecta inmediatamente tras una autorización temporalmente indisponible', async () => {
+      const ticketsBeforeInterruption = harness.ticketReads.get('Luis QA') || 0
+      await second.evaluate(() => {
+        ;(window as typeof window & { __whiteboardEditorNode?: Element | null }).__whiteboardEditorNode = document.querySelector('.whiteboard-editor-shell .excalidraw')
+      })
+      harness.failTicketsFor('Luis QA')
+      harness.interruptAuthorization('Luis QA')
+
+      await expect(second.locator('[data-whiteboard-realtime-status]').first()).toBeVisible({ timeout: 10_000 })
+      await expect(second.getByRole('heading', { name: 'No se pudo abrir la pizarra' })).toHaveCount(0)
+      expect(await second.evaluate(() => {
+        const candidate = (window as typeof window & { __whiteboardEditorNode?: Element | null }).__whiteboardEditorNode
+        return Boolean(candidate && candidate === document.querySelector('.whiteboard-editor-shell .excalidraw'))
+      })).toBe(true)
+      await expect.poll(() => harness.ticketReads.get('Luis QA') || 0, { timeout: 10_000 }).toBeGreaterThan(ticketsBeforeInterruption)
+
+      harness.restoreTicketsFor('Luis QA')
+      await second.evaluate(() => {
+        window.dispatchEvent(new Event('online'))
+        document.dispatchEvent(new Event('visibilitychange'))
+        window.dispatchEvent(new PageTransitionEvent('pageshow'))
+      })
+      await expect.poll(() => harness.socketCount(), { timeout: 10_000 }).toBe(2)
+      await expect(second.locator('[data-whiteboard-realtime-status]')).toHaveCount(0)
+      expect(await second.evaluate(() => {
+        const candidate = (window as typeof window & { __whiteboardEditorNode?: Element | null }).__whiteboardEditorNode
+        return Boolean(candidate && candidate === document.querySelector('.whiteboard-editor-shell .excalidraw'))
+      })).toBe(true)
+    })
+
+    await test.step('oculta ayuda y publicación; expone el catálogo público sólo por la ruta validada de Clarin', async () => {
       await exerciseHelpAndInternalLibraries(first)
     })
 

@@ -7,7 +7,9 @@ const SESSION_MARKER = 'cookie-session'
 // Transparently refreshes the JWT when it expires (401), using the httpOnly
 // refresh-token cookie. Only one refresh request runs at a time.
 
-let _refreshPromise: Promise<boolean> | null = null
+export type AuthRefreshOutcome = 'refreshed' | 'expired' | 'unavailable'
+
+let _refreshPromise: Promise<AuthRefreshOutcome> | null = null
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000 // 30 minutes
 const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000
@@ -50,11 +52,18 @@ export function markAuthActivity(force = false) {
   localStorage.setItem(LAST_ACTIVITY_KEY, String(now))
 }
 
-export function markAuthSession() {
+/** Record a valid cookie session without claiming that the access JWT changed. */
+export function markAuthSessionDetected() {
   if (typeof window === 'undefined') return
   localStorage.setItem('token', SESSION_MARKER)
-  localStorage.setItem(AUTH_REFRESHED_KEY, String(Date.now()))
   markAuthActivity(true)
+}
+
+/** Record an endpoint response that issued a fresh access JWT. */
+export function markAuthTokenRefreshed() {
+  if (typeof window === 'undefined') return
+  markAuthSessionDetected()
+  localStorage.setItem(AUTH_REFRESHED_KEY, String(Date.now()))
 }
 
 export function isAuthIdleExpired() {
@@ -63,7 +72,10 @@ export function isAuthIdleExpired() {
   return lastActivity > 0 && Date.now() - lastActivity >= IDLE_TIMEOUT_MS
 }
 
-export async function logoutFromBrowser(reason: LogoutReason = 'manual') {
+export async function logoutFromBrowser(
+  reason: LogoutReason = 'manual',
+  options: { redirect?: boolean } = {},
+) {
   if (typeof window === 'undefined') return
   clearIdleTimeout()
   try {
@@ -76,13 +88,18 @@ export async function logoutFromBrowser(reason: LogoutReason = 'manual') {
   }
   clearAuthState()
   localStorage.setItem(LOGOUT_EVENT_KEY, `${Date.now()}:${reason}`)
-  window.location.href = getLoginRedirectForLogout(reason)
+  if (options.redirect !== false) window.location.href = getLoginRedirectForLogout(reason)
 }
 
-export async function tryRefreshToken(): Promise<boolean> {
+export async function tryRefreshTokenOutcome(
+  options: { redirectOnIdle?: boolean } = {},
+): Promise<AuthRefreshOutcome> {
   if (isAuthIdleExpired()) {
-    await logoutFromBrowser('idle')
-    return false
+    // Some credential-preserving callbacks own their allow-listed return path.
+    // They still revoke the idle session and clear local auth state, but must
+    // navigate only after their bounded sessionStorage state is ready.
+    await logoutFromBrowser('idle', { redirect: options.redirectOnIdle !== false })
+    return 'expired'
   }
   // Deduplicate concurrent refresh attempts
   if (_refreshPromise) return _refreshPromise
@@ -94,18 +111,22 @@ export async function tryRefreshToken(): Promise<boolean> {
         credentials: 'include', // sends httpOnly refresh-token cookie
       })
       if (!res.ok) {
-        clearAuthState()
-        return false
+        if (res.status === 401 || res.status === 403) {
+          clearAuthState()
+          return 'expired'
+        }
+        return 'unavailable'
       }
-      const data = await res.json()
-      if (data.success) {
-        markAuthSession()
-        return true
+      const data = await res.json().catch(() => undefined) as { success?: boolean } | undefined
+      if (data?.success) {
+        markAuthTokenRefreshed()
+        return 'refreshed'
       }
-      clearAuthState()
-      return false
+      // A malformed or ambiguous successful response is not proof that the
+      // session ended. Preserve it and let a later attempt recover.
+      return 'unavailable'
     } catch {
-      return false
+      return 'unavailable'
     } finally {
       _refreshPromise = null
     }
@@ -114,12 +135,19 @@ export async function tryRefreshToken(): Promise<boolean> {
   return _refreshPromise
 }
 
-async function refreshAccessTokenIfStale(): Promise<boolean> {
-  if (typeof window === 'undefined') return true
-  if (!localStorage.getItem('token')) return true
+/** Compatibility wrapper for callers that only need to know if refresh succeeded. */
+export async function tryRefreshToken(
+  options: { redirectOnIdle?: boolean } = {},
+): Promise<boolean> {
+  return (await tryRefreshTokenOutcome(options)) === 'refreshed'
+}
+
+async function refreshAccessTokenIfStale(): Promise<AuthRefreshOutcome> {
+  if (typeof window === 'undefined') return 'refreshed'
+  if (!localStorage.getItem('token')) return 'refreshed'
   const refreshedAt = Number(localStorage.getItem(AUTH_REFRESHED_KEY) || '0')
-  if (refreshedAt && Date.now() - refreshedAt < ACCESS_TOKEN_REFRESH_MS) return true
-  return tryRefreshToken()
+  if (refreshedAt && Date.now() - refreshedAt < ACCESS_TOKEN_REFRESH_MS) return 'refreshed'
+  return tryRefreshTokenOutcome()
 }
 
 let _idleTimer: ReturnType<typeof setTimeout> | null = null
@@ -158,19 +186,20 @@ async function sendActivityHeartbeat() {
     await logoutFromBrowser('idle')
     return
   }
-  const refreshed = await refreshAccessTokenIfStale()
-  if (!refreshed) {
+  const refreshOutcome = await refreshAccessTokenIfStale()
+  if (refreshOutcome === 'expired') {
     await logoutFromBrowser('expired')
     return
   }
+  if (refreshOutcome === 'unavailable') return
   try {
     const res = await fetch(`${API_BASE}/api/auth/activity`, {
       method: 'POST',
       credentials: 'include',
     })
     if (res.status === 401) {
-      const refreshed = await tryRefreshToken()
-      if (!refreshed) await logoutFromBrowser('expired')
+      const outcome = await tryRefreshTokenOutcome()
+      if (outcome === 'expired') await logoutFromBrowser('expired')
     }
   } catch {
     // Avoid logging out on transient network hiccups; the next API call will validate.
@@ -242,24 +271,34 @@ function checkVersionHeader(res: Response) {
 
 interface FetchOptions extends RequestInit {
   skipAuth?: boolean
+  /**
+   * Sends the existing cookie credentials without refreshing them or recording
+   * activity. Reserved for background authorization probes such as a
+   * whiteboard collaboration-ticket retry.
+   */
+  authMode?: 'active' | 'passive'
 }
 
 export async function api<T>(
   endpoint: string,
   options: FetchOptions = {}
 ): Promise<{ success: boolean; data?: T; error?: string; status?: number }> {
-  const { skipAuth = false, ...fetchOptions } = options
+  const { skipAuth = false, authMode = 'active', ...fetchOptions } = options
+  const activeAuth = !skipAuth && authMode === 'active'
 
-  if (!skipAuth && isAuthIdleExpired()) {
+  if (activeAuth && isAuthIdleExpired()) {
     await logoutFromBrowser('idle')
-    return { success: false, error: 'Sesión expirada por inactividad' }
+    return { success: false, error: 'Sesión expirada por inactividad', status: 401 }
   }
 
-  if (!skipAuth) {
-    const refreshed = await refreshAccessTokenIfStale()
-    if (!refreshed) {
+  if (activeAuth) {
+    const refreshOutcome = await refreshAccessTokenIfStale()
+    if (refreshOutcome === 'expired') {
       await logoutFromBrowser('expired')
-      return { success: false, error: 'Sesión expirada' }
+      return { success: false, error: 'Sesión expirada', status: 401 }
+    }
+    if (refreshOutcome === 'unavailable') {
+      return { success: false, error: 'No se pudo verificar la sesión temporalmente', status: 503 }
     }
   }
 
@@ -294,28 +333,43 @@ export async function api<T>(
 
     if (!res.ok) {
       // Handle 401 - try to refresh token before giving up
-      if (res.status === 401 && typeof window !== 'undefined' && !skipAuth) {
-        const refreshed = await tryRefreshToken()
-        if (refreshed) {
+      if (res.status === 401 && typeof window !== 'undefined' && activeAuth) {
+        const refreshOutcome = await tryRefreshTokenOutcome()
+        if (refreshOutcome === 'refreshed') {
           const retryRes = await fetch(`${API_BASE}${endpoint}`, {
             ...fetchOptions,
             headers,
             credentials: fetchOptions.credentials ?? 'include',
           })
+          checkVersionHeader(retryRes)
+          if (retryRes.status === 204 || retryRes.headers.get('content-length') === '0') {
+            markAuthActivity()
+            return { success: true, data: undefined as unknown as T, status: retryRes.status }
+          }
+          const retryData = await retryRes.json().catch(() => undefined) as T & { error?: string } | undefined
           if (retryRes.ok) {
-            const retryData = await retryRes.json().catch(() => undefined)
             markAuthActivity()
             return { success: true, data: retryData as T, status: retryRes.status }
           }
+          if (retryRes.status !== 401) {
+            return {
+              success: false,
+              data: retryData as T,
+              error: retryData?.error || `Error ${retryRes.status}`,
+              status: retryRes.status,
+            }
+          }
+        } else if (refreshOutcome === 'unavailable') {
+          return { success: false, error: 'No se pudo verificar la sesión temporalmente', status: 503 }
         }
-        // Refresh failed — session truly expired
+        // Refresh was rejected, or the freshly issued credential was rejected.
         await logoutFromBrowser('expired')
         return { success: false, error: 'Sesión expirada', status: res.status }
       }
       return { success: false, data: data as T, error: data?.error || `Error ${res.status}`, status: res.status }
     }
 
-    if (!skipAuth) markAuthActivity()
+    if (activeAuth) markAuthActivity()
     return { success: true, data: data as T, status: res.status }
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
@@ -359,7 +413,21 @@ export async function apiBlob(endpoint: string, options: { signal?: AbortSignal;
   })
   try {
     let response = await request()
-    if (response.status === 401 && !options.signal?.aborted && await tryRefreshToken()) response = await request()
+    if (response.status === 401 && !options.signal?.aborted) {
+      const refreshOutcome = await tryRefreshTokenOutcome()
+      if (refreshOutcome === 'unavailable') {
+        return { success: false, error: 'No se pudo verificar la sesión temporalmente', status: 503 }
+      }
+      if (refreshOutcome === 'expired') {
+        await logoutFromBrowser('expired')
+        return { success: false, error: 'Sesión expirada', status: 401 }
+      }
+      response = await request()
+      if (response.status === 401) {
+        await logoutFromBrowser('expired')
+        return { success: false, error: 'Sesión expirada', status: 401 }
+      }
+    }
     if (!response.ok) {
       const payload = await response.json().catch(() => undefined) as { error?: string } | undefined
       return { success: false, error: payload?.error || `No se pudo abrir el archivo (${response.status})`, status: response.status }
@@ -376,7 +444,7 @@ export async function apiBlob(endpoint: string, options: { signal?: AbortSignal;
   }
 }
 
-export async function apiUpload<T = any>(endpoint: string, formData: FormData, options: { signal?: AbortSignal } = {}): Promise<{ success: boolean; data?: T; error?: string }> {
+export async function apiUpload<T = any>(endpoint: string, formData: FormData, options: { signal?: AbortSignal } = {}): Promise<{ success: boolean; data?: T; error?: string; status?: number }> {
   if (isAuthIdleExpired()) {
     await logoutFromBrowser('idle')
     return { success: false, error: 'Sesión expirada por inactividad' }
@@ -394,18 +462,24 @@ export async function apiUpload<T = any>(endpoint: string, formData: FormData, o
   try {
     let res = await doFetch()
     if (res.status === 401 && typeof window !== 'undefined') {
-      const refreshed = await tryRefreshToken()
-      if (refreshed) {
+      const refreshOutcome = await tryRefreshTokenOutcome()
+      if (refreshOutcome === 'refreshed') {
         res = await doFetch()
-      } else {
+        if (res.status === 401) {
+          await logoutFromBrowser('expired')
+          return { success: false, error: 'Sesión expirada', status: 401 }
+        }
+      } else if (refreshOutcome === 'expired') {
         await logoutFromBrowser('expired')
-        return { success: false, error: 'Sesión expirada' }
+        return { success: false, error: 'Sesión expirada', status: 401 }
+      } else {
+        return { success: false, error: 'No se pudo verificar la sesión temporalmente', status: 503 }
       }
     }
     const data = await res.json().catch(() => undefined)
-    if (!res.ok) return { success: false, error: (data as any)?.error || `Error ${res.status}` }
+    if (!res.ok) return { success: false, error: (data as any)?.error || `Error ${res.status}`, status: res.status }
     markAuthActivity()
-    return { success: true, data: data as T }
+    return { success: true, data: data as T, status: res.status }
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       return { success: false, error: 'Solicitud cancelada' }

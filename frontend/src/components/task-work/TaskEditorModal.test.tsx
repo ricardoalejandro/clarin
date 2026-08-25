@@ -64,6 +64,48 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('TaskEditorModal', () => {
+  it('uses the shared numeric progress control and preserves automatic mode when editing', async () => {
+    const automaticTask = {
+      ...savedTask,
+      progress: 50,
+      progress_mode: 'automatic' as const,
+      manual_progress: 35,
+      subtask_count: 2,
+      subtask_done: 1,
+      permissions: { level: 'edit' as const, can_view: true, can_comment: true, can_edit: true, can_delete: false, can_manage_access: false },
+    }
+    vi.mocked(apiPut).mockResolvedValue({ success: true, data: { task: automaticTask } })
+    renderEditor({ task: automaticTask })
+
+    expect(document.querySelector('input[type="range"]')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Automático' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByText('50% calculado')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }))
+
+    await waitFor(() => expect(apiPut).toHaveBeenCalledWith('/api/tasks/task-1', expect.objectContaining({
+      progress: 50,
+      progress_mode: 'automatic',
+      manual_progress: 35,
+    })))
+  })
+
+  it('restores manual progress on Escape without closing the editor', () => {
+    const manualTask = {
+      ...savedTask,
+      progress: 35,
+      progress_mode: 'manual' as const,
+      manual_progress: 35,
+      permissions: { level: 'edit' as const, can_view: true, can_comment: true, can_edit: true, can_delete: false, can_manage_access: false },
+    }
+    const { props } = renderEditor({ task: manualTask })
+    const input = screen.getByRole('spinbutton', { name: 'Porcentaje manual' })
+    fireEvent.change(input, { target: { value: '72' } })
+    fireEvent.keyDown(input, { key: 'Escape' })
+
+    expect(input).toHaveValue(35)
+    expect(props.onClose).not.toHaveBeenCalled()
+  })
+
   it('creates a real Clarin Work task with the supplied CRM links', async () => {
     vi.mocked(apiPost).mockResolvedValue({ success: true, data: { task: savedTask, operation_id: 'operation-crm' } })
     renderEditor({ relatedScope: { contactId: 'contact-1', leadId: 'lead-1', eventId: 'event-1' } })
@@ -76,6 +118,34 @@ describe('TaskEditorModal', () => {
       lead_id: 'lead-1',
       event_id: 'event-1',
     }))
+  })
+
+  it('creates a one-level child through the canonical children endpoint', async () => {
+    const child = { ...savedTask, id: 'child-1', parent_task_id: 'parent-1' }
+    vi.mocked(apiPost).mockResolvedValue({ success: true, data: { task: child, operation_id: 'operation-child' } })
+    const { props } = renderEditor({ parentTaskId: 'parent-1', parentTaskTitle: 'Tarea principal' })
+
+    expect(screen.getByRole('dialog', { name: 'Crear subtarea' })).toBeInTheDocument()
+    expect(screen.queryByText('Tipo')).not.toBeInTheDocument()
+    expect(screen.queryByRole('spinbutton', { name: 'Porcentaje manual' })).not.toBeInTheDocument()
+    expect(document.querySelectorAll('[data-task-date-range-trigger]')).toHaveLength(1)
+    fireEvent.change(screen.getByPlaceholderText('¿Qué hay que lograr?'), { target: { value: 'Paso verificable' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Crear subtarea' }))
+
+    await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/parent-1/children', expect.objectContaining({
+      title: 'Paso verificable',
+      assigned_to: 'user-1',
+      status_id: 'status-1',
+      priority: 'medium',
+      operation_id: expect.any(String),
+      confirm_grants: false,
+    }))
+    const submitted = vi.mocked(apiPost).mock.calls[0]?.[1] as Record<string, unknown>
+    expect(submitted).not.toHaveProperty('parent_task_id')
+    expect(submitted).not.toHaveProperty('collaborator_ids')
+    expect(submitted).not.toHaveProperty('progress_mode')
+    await waitFor(() => expect(props.onSaved).toHaveBeenCalledWith(child, 'operation-child', undefined))
   })
 
   it('creates once with Ctrl/Command+Enter from the form', async () => {
@@ -139,6 +209,23 @@ describe('TaskEditorModal', () => {
     fireEvent.keyDown(title, { key: 'Enter', metaKey: true })
     expect(apiPost).not.toHaveBeenCalled()
     pickerBackdrop.remove()
+  })
+
+  it('lets the date-range picker own Escape and submit shortcuts', async () => {
+    vi.mocked(apiPost).mockResolvedValue({ success: true, data: { task: savedTask } })
+    const { props } = renderEditor()
+    fireEvent.change(screen.getByPlaceholderText('¿Qué hay que lograr?'), { target: { value: 'Programar sin cerrar' } })
+    const dateTrigger = screen.getByRole('button', { name: /Fechas de la tarea:/ })
+
+    fireEvent.click(dateTrigger)
+    const picker = screen.getByRole('dialog', { name: 'Editar Fechas de la tarea' })
+    fireEvent.keyDown(picker, { key: 'Enter', ctrlKey: true })
+    expect(apiPost).not.toHaveBeenCalled()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Editar Fechas de la tarea' })).not.toBeInTheDocument())
+    expect(screen.getByRole('dialog', { name: 'Crear una tarea' })).toBeInTheDocument()
+    expect(props.onClose).not.toHaveBeenCalled()
   })
 
   it('retries only a failed pasted image after the task already exists', async () => {

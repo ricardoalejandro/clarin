@@ -33,6 +33,7 @@ var (
 	ErrProgramParticipantNotEnded            = errors.New("program participant has no editable outcome date")
 	ErrProgramParticipantEndBeforeEnrollment = errors.New("program participant end date is before enrollment")
 	ErrProgramParticipantStageInvalid        = errors.New("program participant stage does not belong to the program pipeline and account")
+	ErrProgramConflict                       = errors.New("program was modified by another user")
 	ErrProgramSessionObservationNotFound     = errors.New("program session observation not found")
 	ErrProgramSessionObservationForbidden    = errors.New("program session observation forbidden")
 	ErrProgramSessionObservationConflict     = errors.New("program session observation changed")
@@ -55,14 +56,14 @@ func (r *ProgramRepository) Create(ctx context.Context, p *domain.Program) error
 		clearProgramEventFields(p)
 	}
 	err := r.db.QueryRow(ctx, `
-INSERT INTO programs (account_id, type, name, description, status, color, created_by, folder_id,
-schedule_start_date, schedule_end_date, schedule_days, schedule_start_time, schedule_end_time,
-pipeline_id, tag_formula, tag_formula_mode, tag_formula_type, event_date, event_end, location)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
-RETURNING id, created_at, updated_at
+	INSERT INTO programs (account_id, type, name, description, status, color, created_by, folder_id,
+	schedule_start_date, schedule_end_date, schedule_days, schedule_start_time, schedule_end_time,
+	pipeline_id, tag_formula, tag_formula_mode, tag_formula_type, event_date, event_end, location, health_view_columns)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+	RETURNING id, created_at, updated_at
 `, p.AccountID, p.Type, p.Name, p.Description, p.Status, p.Color, p.CreatedBy, p.FolderID,
 		p.ScheduleStartDate, p.ScheduleEndDate, p.ScheduleDays, p.ScheduleStartTime, p.ScheduleEndTime,
-		p.PipelineID, p.TagFormula, p.TagFormulaMode, p.TagFormulaType, p.EventDate, p.EventEnd, p.Location,
+		p.PipelineID, p.TagFormula, p.TagFormulaMode, p.TagFormulaType, p.EventDate, p.EventEnd, p.Location, p.HealthViewColumns,
 	).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
 	return err
 }
@@ -80,7 +81,7 @@ func clearProgramEventFields(p *domain.Program) {
 func (r *ProgramRepository) GetByID(ctx context.Context, accountID, id uuid.UUID) (*domain.Program, error) {
 	p := &domain.Program{}
 	err := r.db.QueryRow(ctx, `
-SELECT p.id, p.account_id, p.type, p.name, p.description, p.status, p.color, p.created_by, p.folder_id, p.created_at, p.updated_at,
+	SELECT p.id, p.account_id, p.type, p.name, p.description, p.status, p.color, p.created_by, p.folder_id, p.created_at, p.updated_at, p.health_view_columns,
 p.schedule_start_date, p.schedule_end_date, p.schedule_days, p.schedule_start_time, p.schedule_end_time,
 p.pipeline_id, COALESCE(p.tag_formula, ''), COALESCE(p.tag_formula_mode, 'OR'), COALESCE(p.tag_formula_type, 'simple'),
 p.event_date, p.event_end, p.location, ep.name as pipeline_name,
@@ -92,7 +93,7 @@ LEFT JOIN event_pipelines ep ON ep.id = p.pipeline_id AND ep.account_id = p.acco
 LEFT JOIN program_event_retirements retirement ON retirement.account_id = p.account_id AND retirement.program_id = p.id
 WHERE p.id = $1 AND p.account_id = $2
 `, id, accountID).Scan(
-		&p.ID, &p.AccountID, &p.Type, &p.Name, &p.Description, &p.Status, &p.Color, &p.CreatedBy, &p.FolderID, &p.CreatedAt, &p.UpdatedAt,
+		&p.ID, &p.AccountID, &p.Type, &p.Name, &p.Description, &p.Status, &p.Color, &p.CreatedBy, &p.FolderID, &p.CreatedAt, &p.UpdatedAt, &p.HealthViewColumns,
 		&p.ScheduleStartDate, &p.ScheduleEndDate, &p.ScheduleDays, &p.ScheduleStartTime, &p.ScheduleEndTime,
 		&p.PipelineID, &p.TagFormula, &p.TagFormulaMode, &p.TagFormulaType,
 		&p.EventDate, &p.EventEnd, &p.Location, &p.PipelineName,
@@ -142,7 +143,7 @@ func (r *ProgramRepository) LegacyEventPipelineBelongsToAccount(ctx context.Cont
 
 func (r *ProgramRepository) List(ctx context.Context, accountID uuid.UUID, status string) ([]*domain.Program, error) {
 	query := `
-SELECT p.id, p.account_id, p.type, p.name, p.description, p.status, p.color, p.created_by, p.folder_id, p.created_at, p.updated_at,
+	SELECT p.id, p.account_id, p.type, p.name, p.description, p.status, p.color, p.created_by, p.folder_id, p.created_at, p.updated_at, p.health_view_columns,
 p.schedule_start_date, p.schedule_end_date, p.schedule_days, p.schedule_start_time, p.schedule_end_time,
 p.pipeline_id, COALESCE(p.tag_formula, ''), COALESCE(p.tag_formula_mode, 'OR'), COALESCE(p.tag_formula_type, 'simple'),
 p.event_date, p.event_end, p.location, ep.name as pipeline_name,
@@ -169,7 +170,7 @@ WHERE p.account_id = $1`
 	for rows.Next() {
 		p := &domain.Program{}
 		err := rows.Scan(
-			&p.ID, &p.AccountID, &p.Type, &p.Name, &p.Description, &p.Status, &p.Color, &p.CreatedBy, &p.FolderID, &p.CreatedAt, &p.UpdatedAt,
+			&p.ID, &p.AccountID, &p.Type, &p.Name, &p.Description, &p.Status, &p.Color, &p.CreatedBy, &p.FolderID, &p.CreatedAt, &p.UpdatedAt, &p.HealthViewColumns,
 			&p.ScheduleStartDate, &p.ScheduleEndDate, &p.ScheduleDays, &p.ScheduleStartTime, &p.ScheduleEndTime,
 			&p.PipelineID, &p.TagFormula, &p.TagFormulaMode, &p.TagFormulaType,
 			&p.EventDate, &p.EventEnd, &p.Location, &p.PipelineName,
@@ -184,23 +185,33 @@ WHERE p.account_id = $1`
 	return programs, nil
 }
 
+const updateProgramQuery = `
+	UPDATE programs
+	SET name = $1, description = $2, status = $3, color = $4, folder_id = $5,
+	schedule_start_date = $6, schedule_end_date = $7, schedule_days = $8, schedule_start_time = $9, schedule_end_time = $10,
+	pipeline_id = $11, tag_formula = $12, tag_formula_mode = $13, tag_formula_type = $14,
+	event_date = $15, event_end = $16, location = $17, health_view_columns = $18,
+	updated_at = NOW()
+	WHERE id = $19 AND account_id = $20
+	  AND ($21::timestamptz IS NULL OR updated_at = $21::timestamptz)
+	RETURNING updated_at
+`
+
 func (r *ProgramRepository) Update(ctx context.Context, p *domain.Program) error {
 	if p.Type != "event" {
 		clearProgramEventFields(p)
 	}
-	_, err := r.db.Exec(ctx, `
-UPDATE programs
-SET name = $1, description = $2, status = $3, color = $4, folder_id = $5,
-schedule_start_date = $6, schedule_end_date = $7, schedule_days = $8, schedule_start_time = $9, schedule_end_time = $10,
-pipeline_id = $11, tag_formula = $12, tag_formula_mode = $13, tag_formula_type = $14,
-event_date = $15, event_end = $16, location = $17,
-updated_at = NOW()
-WHERE id = $18 AND account_id = $19
-`, p.Name, p.Description, p.Status, p.Color, p.FolderID,
+	err := r.db.QueryRow(ctx, updateProgramQuery, p.Name, p.Description, p.Status, p.Color, p.FolderID,
 		p.ScheduleStartDate, p.ScheduleEndDate, p.ScheduleDays, p.ScheduleStartTime, p.ScheduleEndTime,
 		p.PipelineID, p.TagFormula, p.TagFormulaMode, p.TagFormulaType,
-		p.EventDate, p.EventEnd, p.Location,
-		p.ID, p.AccountID)
+		p.EventDate, p.EventEnd, p.Location, p.HealthViewColumns,
+		p.ID, p.AccountID, p.ExpectedUpdatedAt).Scan(&p.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if p.ExpectedUpdatedAt != nil {
+			return ErrProgramConflict
+		}
+		return ErrProgramNotFound
+	}
 	return err
 }
 
@@ -2268,11 +2279,13 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 		return nil, err
 	}
 	var sessionCount, recoverySessionCount int
+	var asOfDate string
 	if err := r.db.QueryRow(ctx, `
-		SELECT COUNT(*), COUNT(*) FILTER (WHERE session_type = 'recovery')
+		SELECT COUNT(*), COUNT(*) FILTER (WHERE session_type = 'recovery'),
+		       ((CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date)::text
 		FROM program_sessions
 		WHERE account_id = $1 AND program_id = $2 AND date <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Lima')::date
-	`, accountID, programID).Scan(&sessionCount, &recoverySessionCount); err != nil {
+	`, accountID, programID).Scan(&sessionCount, &recoverySessionCount, &asOfDate); err != nil {
 		return nil, err
 	}
 	var activeCount, completedCount, droppedCount, transferredCount int
@@ -2291,7 +2304,7 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 	rows, err := r.db.Query(ctx, `
 		SELECT pp.id, pp.contact_id, COALESCE(c.custom_name, c.name, c.push_name, c.phone, '') AS name, c.phone,
 		       c.avatar_url, COALESCE(c.avatar_revision, 0),
-		       pp.status, COALESCE(pp.transferred_to_level, ''),
+		       pp.status, pp.enrolled_at::text, COALESCE(pp.transferred_to_level, ''),
 		       COUNT(*) FILTER (WHERE pa.status = 'present')::int,
 		       COUNT(*) FILTER (WHERE pa.status = 'late')::int,
 		       COUNT(*) FILTER (WHERE pa.status = 'absent')::int,
@@ -2329,6 +2342,7 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 		WHERE pp.program_id = $2 AND pp.status = 'active'
 		GROUP BY pp.id, pp.contact_id, c.custom_name, c.name, c.push_name, c.phone,
 		         c.avatar_url, c.avatar_revision, pp.status, pp.transferred_to_level,
+		         pp.enrolled_at,
 		         notes.notes_count, notes.last_note_at
 		ORDER BY COALESCE(c.custom_name, c.name, c.push_name, c.phone) ASC
 	`, accountID, programID)
@@ -2339,6 +2353,7 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 
 	summary := &domain.ProgramHealthSummary{
 		ProgramID:             programID,
+		AsOfDate:              asOfDate,
 		AttendanceGoalPercent: goal.AttendanceGoalPercent,
 		TransferGoalPercent:   goal.TransferGoalPercent,
 		SessionCount:          sessionCount,
@@ -2353,7 +2368,7 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 	var presentTotal, lateTotal, absentTotal int
 	for rows.Next() {
 		p := &domain.ProgramHealthParticipant{}
-		if err := rows.Scan(&p.ParticipantID, &p.ContactID, &p.Name, &p.Phone, &p.AvatarURL, &p.AvatarRevision, &p.Status, &p.TransferredToLevel, &p.Present, &p.Late, &p.Absent, &p.Excused, &p.EligibleSessions, &p.MarkedSessions, &p.RecoverySessions, &p.NotesCount, &p.LastNoteAt); err != nil {
+		if err := rows.Scan(&p.ParticipantID, &p.ContactID, &p.Name, &p.Phone, &p.AvatarURL, &p.AvatarRevision, &p.Status, &p.EnrolledAt, &p.TransferredToLevel, &p.Present, &p.Late, &p.Absent, &p.Excused, &p.EligibleSessions, &p.MarkedSessions, &p.RecoverySessions, &p.NotesCount, &p.LastNoteAt); err != nil {
 			return nil, err
 		}
 		p.Pending = p.EligibleSessions - p.MarkedSessions

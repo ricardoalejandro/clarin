@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from '@playwright/test'
+import { expect, test, type Locator, type Page, type WebSocketRoute } from '@playwright/test'
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:3001'
 const username = process.env.CLARIN_E2E_USERNAME
@@ -33,6 +33,16 @@ const priorityMatrix = [
 ] as const
 
 const mockNow = '2026-07-17T12:00:00.000Z'
+const mockWhatsAppRuntimeCapabilities = {
+  can_start_chat: true,
+  can_check_whatsapp: true,
+  can_send_sticker: true,
+  can_send_animated_sticker: true,
+  can_send_reaction: true,
+  can_publish_status: true,
+  can_publish_status_link: false,
+  can_sync_own_status: true,
+}
 const mockCanonicalContact = {
   id: 'contact-1',
   account_id: 'account-responsive',
@@ -277,6 +287,9 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
     return mockAcademicConfig()
   }
   if (path === '/api/programs/program-1/courses' || path === '/api/programs/program-1/instructors') return mockAcademicConfig()
+  if (path === '/api/survey-templates/survey-template-1/instance-name') {
+    return { available: true, suggested_name: 'Satisfacción del programa · Programa sin sesiones' }
+  }
   if (path === '/api/survey-templates') {
     return [{
       id: 'survey-template-1', account_id: 'account-responsive', name: 'Satisfacción del programa',
@@ -384,11 +397,11 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
   }
   if (path === '/api/programs/program-1/sessions/generate') return { success: true, sessions: [], count: 0, assigned_topic_count: 0, fallback_count: 0 }
   if (path === '/api/programs/program-1/health') {
-    return { success: true, health: { program_id: 'program-1', attendance_goal_percent: 80, transfer_goal_percent: 70, participant_count: 6, active_count: 6, completed_count: 0, dropped_count: 0, transferred_count: 0, session_count: 0, recovery_session_count: 0, attendance_rate: 72, transfer_rate: 0, health: 'watch', reasons: ['asistencia bajo meta'], participants: mockProgramParticipants.map((participant, index) => ({ participant_id: participant.id, contact_id: participant.contact_id, name: participant.contact_name, phone: participant.contact_phone, avatar_url: null, status: participant.status, health: index === 0 ? 'watch' : 'healthy', attendance_rate: 70 + index, present: 2, late: 0, absent: 1, excused: 0, recovery_sessions: 0, notes_count: index === 0 ? 1 : 0, reasons: index === 0 ? ['asistencia bajo meta'] : [] })) } }
+    return { success: true, health: { program_id: 'program-1', as_of_date: '2026-07-17', attendance_goal_percent: 80, transfer_goal_percent: 70, participant_count: 6, active_count: 6, completed_count: 0, dropped_count: 0, transferred_count: 0, session_count: 0, recovery_session_count: 0, attendance_rate: 72, transfer_rate: 0, health: 'watch', reasons: ['asistencia bajo meta'], participants: mockProgramParticipants.map((participant, index) => ({ participant_id: participant.id, contact_id: participant.contact_id, name: participant.contact_name, phone: participant.contact_phone, avatar_url: null, status: participant.status, enrolled_at: `2026-07-${String(10 + index).padStart(2, '0')}`, health: index === 0 ? 'watch' : 'healthy', attendance_rate: 70 + index, present: 2, late: 0, absent: 1, excused: 0, recovery_sessions: 0, notes_count: index === 0 ? 1 : 0, reasons: index === 0 ? ['asistencia bajo meta'] : [] })) } }
   }
   if (path === '/api/programs/program-1/goals') return { success: true, goals: { attendance_goal_percent: 80, transfer_goal_percent: 70 } }
   if (path === '/api/programs/program-1') {
-    return { id: 'program-1', account_id: 'account-responsive', name: 'Programa sin sesiones', description: '', status: 'active', color: '#10b981', created_by: 'user-responsive', created_at: mockNow, updated_at: mockNow, participant_count: 6, session_count: 0, type: 'course' }
+    return { id: 'program-1', account_id: 'account-responsive', name: 'Programa sin sesiones', description: '', status: 'active', color: '#10b981', created_by: 'user-responsive', created_at: mockNow, updated_at: mockNow, participant_count: 6, session_count: 0, type: 'course', health_view_columns: ['health', 'attendance', 'signals'], ...(method === 'PUT' ? requestBody : {}) }
   }
   if (path === '/api/programs') {
     return [{ id: 'program-1', account_id: 'account-responsive', name: 'Programa móvil QA', description: 'Programa visible en tarjetas responsivas', status: 'active', color: '#10b981', created_by: 'user-responsive', created_at: mockNow, updated_at: mockNow, participant_count: 8, session_count: 3, type: 'course' }]
@@ -399,7 +412,7 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
       success: true,
       chat: { id: 'chat-1', jid: '51999999999@s.whatsapp.net', name: 'Contacto móvil', device_id: 'device-1', device_name: 'Canal QA', contact_phone: '51999999999', last_message: 'Mensaje de prueba responsiva', last_message_at: mockNow, unread_count: 2 },
       contact: { ...mockCanonicalContact, is_group: false },
-      device: { id: 'device-1', name: 'Canal QA', phone: '51999999999', status: 'connected', provider: 'whatsapp_web' },
+      device: { id: 'device-1', name: 'Canal QA', phone: '51999999999', status: 'connected', provider: 'whatsapp_web', runtime_capabilities: mockWhatsAppRuntimeCapabilities },
       opportunities: [mockLeadSnapshot],
       lead: mockLeadSnapshot,
       active_opportunity_id: mockLeadSnapshot.id,
@@ -408,11 +421,16 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
   if (path === '/api/chats/chat-1/messages') return { success: true, messages: [
     { id: 'message-in-1', account_id: 'account-responsive', device_id: 'device-1', chat_id: 'chat-1', message_id: 'wa-in-1', from_jid: '51999999999@s.whatsapp.net', from_name: 'Contacto móvil', body: 'Mensaje recibido para seleccionar', message_type: 'text', is_from_me: false, is_read: true, status: 'read', timestamp: new Date(Date.now() - 120_000).toISOString(), created_at: new Date(Date.now() - 120_000).toISOString() },
     { id: 'message-out-1', account_id: 'account-responsive', device_id: 'device-1', chat_id: 'chat-1', message_id: 'wa-out-1', from_jid: '51911111111@s.whatsapp.net', from_name: 'Me', body: 'Mensaje enviado para acciones', message_type: 'text', is_from_me: true, is_read: true, status: 'read', delivered_at: new Date(Date.now() - 45_000).toISOString(), read_at: new Date(Date.now() - 20_000).toISOString(), timestamp: new Date(Date.now() - 60_000).toISOString(), created_at: new Date(Date.now() - 60_000).toISOString() },
-    { id: 'message-image-1', account_id: 'account-responsive', device_id: 'device-1', chat_id: 'chat-1', message_id: 'wa-image-1', from_jid: '51999999999@s.whatsapp.net', from_name: 'Contacto móvil', body: '', message_type: 'image', media_url: '/api/media/test-image', media_mimetype: 'image/png', is_from_me: false, is_read: true, status: 'read', timestamp: new Date(Date.now() - 30_000).toISOString(), created_at: new Date(Date.now() - 30_000).toISOString() },
+    { id: 'message-image-1', account_id: 'account-responsive', device_id: 'device-1', chat_id: 'chat-1', message_id: 'wa-image-1', from_jid: '51999999999@s.whatsapp.net', from_name: 'Contacto móvil', body: '', message_type: 'image', media_url: '/api/media/test-image', media_mimetype: 'image/png', is_from_me: false, is_read: true, status: 'read', timestamp: new Date(Date.now() - 30_000).toISOString(), created_at: new Date(Date.now() - 30_000).toISOString(), reactions: [{ id: 'reaction-contact-image', target_message_id: 'wa-image-1', sender_jid: '51999999999@s.whatsapp.net', sender_name: 'Contacto móvil', emoji: '🙏', is_from_me: false, timestamp: new Date(Date.now() - 20_000).toISOString(), provider: 'whatsapp_web' }] },
+    { id: 'message-sticker-1', account_id: 'account-responsive', device_id: 'device-1', chat_id: 'chat-1', message_id: 'wa-sticker-1', from_jid: '51999999999@s.whatsapp.net', from_name: 'Contacto móvil', body: '', message_type: 'sticker', media_url: '/api/media/test-image', media_mimetype: 'image/webp', is_from_me: false, is_read: true, status: 'read', timestamp: new Date(Date.now() - 20_000).toISOString(), created_at: new Date(Date.now() - 20_000).toISOString() },
+    { id: 'message-emoji-1', account_id: 'account-responsive', device_id: 'device-1', chat_id: 'chat-1', message_id: 'wa-emoji-1', from_jid: '51999999999@s.whatsapp.net', from_name: 'Contacto móvil', body: '👨‍👩‍👧‍👦', message_type: 'text', is_from_me: false, is_read: true, status: 'read', timestamp: new Date(Date.now() - 10_000).toISOString(), created_at: new Date(Date.now() - 10_000).toISOString() },
   ] }
+  if (path === '/api/chats/chat-1/read' && method === 'POST') {
+    return { success: true, chat_id: 'chat-1', unread_count: 0, read_through: requestBody?.through_message_id || '' }
+  }
   if (path.startsWith('/api/chats/resolve-whatsapp/')) {
     const phone = path.split('/').pop() || '5192300100'
-    return { success: true, phone, jid: `${phone}@s.whatsapp.net`, chat: null, historical_phone: '', devices: [{ id: 'device-1', name: 'Canal QA', phone: '51999999999', status: 'connected', provider: 'whatsapp_web', historical_relation: 'new_chat' }], mode: 'open_direct' }
+    return { success: true, phone, jid: `${phone}@s.whatsapp.net`, chat: null, historical_phone: '', devices: [{ id: 'device-1', name: 'Canal QA', phone: '51999999999', status: 'connected', provider: 'whatsapp_web', runtime_capabilities: mockWhatsAppRuntimeCapabilities, historical_relation: 'new_chat' }], mode: 'open_direct' }
   }
   if (path === '/api/chats/new') {
     return { success: true, chat: { id: 'chat-1', jid: '51999999999@s.whatsapp.net', name: 'Contacto móvil', device_id: 'device-1', device_name: 'Canal QA', contact_phone: '51999999999', last_message: 'Mensaje de prueba responsiva', last_message_at: mockNow, unread_count: 0 } }
@@ -430,11 +448,12 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
     return { success: true, interaction: { id: 'interaction-created', ...requestBody, created_by_name: 'Responsive QA', created_at: mockNow } }
   }
   if (path === '/api/tasks') return { success: true, tasks: [], total: 0, next_cursor: '' }
+  if (path === '/api/survey-templates') return { success: true, data: [] }
   if (path === '/api/chats') {
     return { success: true, total: 1, chats: [{ id: 'chat-1', jid: '51999999999@s.whatsapp.net', name: 'Contacto móvil', device_id: 'device-1', device_name: 'Canal QA', contact_phone: '51999999999', last_message: 'Mensaje de prueba responsiva', last_message_at: mockNow, unread_count: 2 }] }
   }
   if (path === '/api/devices') {
-    return { success: true, devices: [{ id: 'device-1', name: 'Canal QA', phone: '51999999999', status: 'connected', provider: 'whatsapp_web', receive_messages: true, runtime_capabilities: { can_start_chat: true, can_check_whatsapp: true, can_send_sticker: true, can_send_animated_sticker: true, can_publish_status: true, can_sync_own_status: true } }] }
+    return { success: true, devices: [{ id: 'device-1', name: 'Canal QA', phone: '51999999999', status: 'connected', provider: 'whatsapp_web', receive_messages: true, runtime_capabilities: mockWhatsAppRuntimeCapabilities }] }
   }
   if (path === '/api/contacts') {
     return { success: true, total: 1, contacts: [{ id: 'contact-1', jid: '51999999999@s.whatsapp.net', phone: '51999999999', name: 'Contacto móvil', custom_name: 'Contacto móvil', email: 'movil@example.test', tags: [], structured_tags: [], created_at: mockNow, updated_at: mockNow }] }
@@ -621,9 +640,17 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
   return { success: true }
 }
 
-async function installMockSession(page: Page) {
+type MockWebSocketControl = {
+  clientMessages: string[]
+  send: (payload: unknown) => void
+}
+
+async function installMockSession(page: Page): Promise<MockWebSocketControl> {
+  let activeSocket: WebSocketRoute | null = null
+  const clientMessages: string[] = []
   await page.routeWebSocket('**/ws**', socket => {
-    socket.onMessage(() => undefined)
+    activeSocket = socket
+    socket.onMessage(message => clientMessages.push(message.toString()))
   })
   await page.route('**/api/**', async route => {
     if (new URL(route.request().url()).pathname === '/api/media/test-image') {
@@ -651,6 +678,36 @@ async function installMockSession(page: Page) {
   await page.addInitScript(() => {
     localStorage.setItem('token', 'responsive-ui-session')
     localStorage.setItem('clarin:last_activity_at', String(Date.now()))
+    localStorage.setItem('clarin:pwa-install-dismissed-until', String(Date.now() + 24 * 60 * 60 * 1000))
+  })
+  return {
+    clientMessages,
+    send(payload: unknown) {
+      if (!activeSocket) throw new Error('El WebSocket simulado todavía no está conectado')
+      activeSocket.send(JSON.stringify(payload))
+    },
+  }
+}
+
+async function emulateInstalledMobileApp(page: Page) {
+  await page.addInitScript(() => {
+    const nativeMatchMedia = window.matchMedia.bind(window)
+    window.matchMedia = (query: string) => {
+      if (query !== '(display-mode: standalone)') return nativeMatchMedia(query)
+      return {
+        matches: true,
+        media: query,
+        onchange: null,
+        addListener: () => undefined,
+        removeListener: () => undefined,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        dispatchEvent: () => true,
+      } as MediaQueryList
+    }
+    Object.defineProperty(navigator, 'userAgent', { configurable: true, value: 'Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 Chrome/130 Safari/537.36' })
+    Object.defineProperty(navigator, 'platform', { configurable: true, value: 'Linux armv8l' })
+    Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 5 })
   })
 }
 
@@ -702,16 +759,19 @@ async function installGoogleContactSyncMock(page: Page) {
   }
 }
 
-async function authenticate(page: Page) {
+async function authenticate(page: Page): Promise<MockWebSocketControl | null> {
   if (useMockSession) {
-    await installMockSession(page)
+    const webSocket = await installMockSession(page)
+    const sessionRequest = page.waitForResponse(response => new URL(response.url()).pathname === '/api/me' && response.ok())
     await page.goto(`${baseURL}/dashboard`, { waitUntil: 'domcontentloaded' })
     await page.waitForURL(/\/dashboard/, { timeout: 20_000 })
     // Wait until DashboardLayout finishes /api/me. Navigating away while that
     // request is still pending can make its unmount/abort path race with the
     // next page.goto and spuriously redirect the test to /login.
+    await sessionRequest
     await page.locator('main').waitFor({ state: 'visible', timeout: 20_000 })
-    return
+    await page.getByText('Cuenta Responsive', { exact: true }).or(page.getByTestId('mobile-app-header')).first().waitFor({ state: 'visible', timeout: 20_000 })
+    return webSocket
   }
   await page.goto(`${baseURL}/login`, { waitUntil: 'domcontentloaded' })
   await page.locator('input[name="username"], input[type="text"]').first().fill(username || '')
@@ -726,6 +786,7 @@ async function authenticate(page: Page) {
       await page.waitForURL(/\/dashboard/, { timeout: 10_000 })
     }
   }
+  return null
 }
 
 async function expectRouteToFit(page: Page, route: string) {
@@ -770,6 +831,7 @@ async function expectInsideVisualViewport(page: Page, locator: Locator) {
   expect(box!.y).toBeGreaterThanOrEqual(viewport.top - 1)
   expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.left + viewport.width + 1)
   expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.top + viewport.height + 1)
+  return box!
 }
 
 function waitForCanonicalProfileRequest(page: Page, contextType: string, contextId: string) {
@@ -796,6 +858,13 @@ async function expectCanonicalContactDetails(page: Page) {
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
 }
 
+async function openGoogleContactsIntegration(page: Page) {
+  const integrations = page.getByRole('button', { name: /^Integraciones\b/ }).last()
+  await expect(integrations).toBeVisible()
+  if (await integrations.getAttribute('aria-expanded') !== 'true') await integrations.click()
+  await expect(integrations).toHaveAttribute('aria-expanded', 'true')
+}
+
 async function setMockKeyboardInset(page: Page, inset: number) {
   await page.evaluate((nextInset) => {
     const viewport = window.visualViewport
@@ -811,7 +880,8 @@ async function setMockKeyboardInset(page: Page, inset: number) {
 async function selectAllEditableText(locator: Locator, text: string) {
   await locator.fill(text)
   await expect(locator).toHaveText(text)
-  await locator.evaluate(element => {
+  await locator.evaluate(async element => {
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
     const selection = window.getSelection()
     if (!selection) throw new Error('No se pudo crear una selección de texto')
     const range = document.createRange()
@@ -823,17 +893,218 @@ async function selectAllEditableText(locator: Locator, text: string) {
 }
 
 async function expectToolbarOutsideEditor(page: Page, toolbar: Locator, editor: Locator) {
-  await expectInsideVisualViewport(page, toolbar)
-  const toolbarBox = await toolbar.boundingBox()
-  const editorBox = await editor.boundingBox()
-  expect(toolbarBox).not.toBeNull()
-  expect(editorBox).not.toBeNull()
+  type Box = { x: number; y: number; width: number; height: number }
+  let toolbarBox: Box | null = null
+  let editorBox: Box | null = null
+  await expect.poll(async () => {
+    [toolbarBox, editorBox] = await Promise.all([
+      toolbar.boundingBox({ timeout: 500 }).catch(() => null),
+      editor.boundingBox({ timeout: 500 }).catch(() => null),
+    ])
+    return Boolean(toolbarBox && editorBox)
+  }, { timeout: 10_000 }).toBe(true)
+  const viewport = await page.evaluate(() => ({
+    left: window.visualViewport?.offsetLeft || 0,
+    top: window.visualViewport?.offsetTop || 0,
+    width: window.visualViewport?.width || window.innerWidth,
+    height: window.visualViewport?.height || window.innerHeight,
+  }))
+  expect(toolbarBox!.x).toBeGreaterThanOrEqual(viewport.left - 1)
+  expect(toolbarBox!.y).toBeGreaterThanOrEqual(viewport.top - 1)
+  expect(toolbarBox!.x + toolbarBox!.width).toBeLessThanOrEqual(viewport.left + viewport.width + 1)
+  expect(toolbarBox!.y + toolbarBox!.height).toBeLessThanOrEqual(viewport.top + viewport.height + 1)
   const horizontalOverlap = toolbarBox!.x < editorBox!.x + editorBox!.width
     && toolbarBox!.x + toolbarBox!.width > editorBox!.x
   const verticalOverlap = toolbarBox!.y < editorBox!.y + editorBox!.height
     && toolbarBox!.y + toolbarBox!.height > editorBox!.y
   expect(horizontalOverlap && verticalOverlap).toBe(false)
   expect(toolbarBox!.y + toolbarBox!.height).toBeLessThanOrEqual(editorBox!.y - 4)
+}
+
+type WhatsAppParitySurface = {
+  name: string
+  route: string
+  contactId?: string
+  openEntry: (page: Page) => Promise<void>
+}
+
+const whatsappParitySurfaces: WhatsAppParitySurface[] = [
+  {
+    name: 'Chats',
+    route: '/dashboard/chats',
+    openEntry: async page => {
+      await page.getByRole('button', { name: 'Conversación con Contacto móvil' }).click()
+    },
+  },
+  {
+    name: 'Contactos',
+    route: '/dashboard/contacts',
+    contactId: 'contact-1',
+    openEntry: async page => {
+      await page.getByText('Contacto móvil', { exact: true }).first().click()
+      await page.getByRole('button', { name: 'Enviar mensaje a Contacto móvil' }).click()
+    },
+  },
+  {
+    name: 'Programas > participantes',
+    route: '/dashboard/programs/program-1',
+    contactId: 'program-contact-1',
+    openEntry: async page => {
+      await page.getByRole('button', { name: /Álexis Tarillo Mejio.*5192300100.*Activo/ }).click()
+      await page.getByRole('button', { name: 'Enviar mensaje a Álexis Tarillo Mejio' }).click()
+    },
+  },
+  {
+    name: 'Leads',
+    route: '/dashboard/leads',
+    contactId: 'contact-1',
+    openEntry: async page => {
+      await page.getByText('Snapshot de lead desactualizado', { exact: true }).first().click()
+      await page.getByRole('button', { name: 'Enviar mensaje a Contacto móvil' }).click()
+    },
+  },
+  {
+    name: 'Eventos > participantes',
+    route: '/dashboard/events/event-1',
+    contactId: 'contact-1',
+    openEntry: async page => {
+      await page.getByText('Snapshot de evento desactualizado', { exact: true }).first().click()
+      await page.getByRole('button', { name: 'Enviar mensaje a Contacto móvil' }).click()
+    },
+  },
+]
+
+async function openWhatsAppParitySurface(page: Page, surface: WhatsAppParitySurface) {
+  await page.goto(`${baseURL}${surface.route}`, { waitUntil: 'domcontentloaded' })
+  if (!surface.contactId) {
+    await surface.openEntry(page)
+  } else {
+    const resolveRequest = page.waitForRequest(request => request.method() === 'GET' && new URL(request.url()).pathname.startsWith('/api/chats/resolve-whatsapp/'))
+    const createRequest = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === '/api/chats/new')
+    await surface.openEntry(page)
+    const resolved = await resolveRequest
+    expect(new URL(resolved.url()).searchParams.get('contact_id')).toBe(surface.contactId)
+    expect((await createRequest).postDataJSON()).toMatchObject({ contact_id: surface.contactId, device_id: 'device-1' })
+  }
+  await expect(page.getByRole('textbox', { name: 'Escribe un mensaje…' })).toBeVisible({ timeout: 30_000 })
+}
+
+async function insertComposerEmoji(page: Page) {
+  const composer = page.getByRole('textbox', { name: 'Escribe un mensaje…' })
+  const trigger = page.getByRole('button', { name: 'Abrir selector de emojis' })
+  await trigger.click()
+  const picker = page.getByRole('dialog', { name: 'Selector de emojis' })
+  await expectInsideVisualViewport(page, picker)
+  const emoji = picker.locator('button[data-unified="1f600"]').first()
+  await expect(emoji).toBeVisible({ timeout: 15_000 })
+  await emoji.focus()
+  await page.keyboard.press('Enter')
+  await expect(composer).toHaveText('😀')
+  await trigger.click()
+  await expect(picker).toBeHidden()
+  await expect(trigger).toBeFocused()
+  return '😀'
+}
+
+type MockReactionRequest = {
+  chat_id: string
+  target_message_id: string
+  emoji: string
+  operation_id: string
+}
+
+type MockReactionOutcome = {
+  ok: boolean
+  error?: string
+  gate?: Promise<void>
+}
+
+async function installReactionMutationMock(page: Page) {
+  const requests: MockReactionRequest[] = []
+  const outcomes: MockReactionOutcome[] = []
+
+  await page.route('**/api/messages/react', async route => {
+    const body = route.request().postDataJSON() as MockReactionRequest
+    requests.push(body)
+    const outcome = outcomes.shift() || { ok: true }
+    if (outcome.gate) await outcome.gate
+    if (!outcome.ok) {
+      await route.fulfill({
+        status: 502,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: false, error: outcome.error || 'Fallo controlado al reaccionar' }),
+      })
+      return
+    }
+    const timestamp = new Date(Date.now() + requests.length).toISOString()
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        state: 'applied',
+        removed: body.emoji === '',
+        reaction: body.emoji === '' ? null : {
+          id: `reaction-self-${requests.length}`,
+          target_message_id: body.target_message_id,
+          sender_jid: '__clarin_self__',
+          sender_name: 'Tú',
+          emoji: body.emoji,
+          is_from_me: true,
+          timestamp,
+          operation_id: body.operation_id,
+          provider: 'whatsapp_web',
+        },
+        timestamp,
+        operation_id: body.operation_id,
+        provider: 'whatsapp_web',
+      }),
+    })
+  })
+
+  const defer = (ok: boolean, error?: string) => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    outcomes.push({ ok, error, gate })
+    return release
+  }
+
+  return {
+    requests,
+    deferSuccess: () => defer(true),
+    deferFailure: (error = 'Fallo controlado al reaccionar') => defer(false, error),
+  }
+}
+
+async function openQuickReactions(page: Page, messageId: string, keyboard = false) {
+  const message = page.locator(`[data-whatsapp-message-id="${messageId}"]`)
+  await message.scrollIntoViewIfNeeded()
+  await message.hover()
+  const moreActions = message.getByRole('button', { name: 'Más acciones del mensaje' })
+  if (keyboard) {
+    await moreActions.focus()
+    await page.keyboard.press('Enter')
+  } else {
+    await moreActions.click()
+  }
+  const menu = page.locator('[data-chat-overlay="message-menu"]')
+  await expectInsideVisualViewport(page, menu)
+  const react = menu.getByRole('menuitem', { name: 'Reaccionar' })
+  if (keyboard) {
+    await react.focus()
+    await page.keyboard.press('Enter')
+  } else {
+    await react.click()
+  }
+  const toolbar = page.getByRole('toolbar', { name: 'Reacciones rápidas' })
+  await expectInsideVisualViewport(page, toolbar)
+  return { message, moreActions, toolbar }
+}
+
+async function reactWithQuickEmoji(page: Page, messageId: string, emoji: string) {
+  const controls = await openQuickReactions(page, messageId)
+  await controls.toolbar.getByRole('button', { name: `Reaccionar con ${emoji}` }).click()
+  return controls.message
 }
 
 test.describe('Clarin responsive authenticated matrix', () => {
@@ -862,15 +1133,110 @@ test.describe('Clarin responsive authenticated matrix', () => {
     for (const route of secondaryRoutes) await expectRouteToFit(page, route)
   })
 
-  test('Eventos mide el contenedor que aparece después de cargar y activa sus tarjetas móviles', async ({ page }) => {
+  test('Dashboard enlaza el contador y las filas vencidas con la bandeja global', async ({ page }) => {
+    await authenticate(page)
+    await expect(page.getByRole('link', { name: /1 mis tareas vencidas/i })).toHaveAttribute('href', '/dashboard/tasks?attention=overdue')
+    await expect(page.getByRole('link', { name: /Seguimiento desde móvil/ })).toHaveAttribute('href', '/dashboard/tasks?attention=overdue&task=task-1')
+  })
+
+  test('Chats registra la lectura local hasta el último mensaje realmente mostrado', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 })
+    await authenticate(page)
+    await page.goto(`${baseURL}/dashboard/chats`, { waitUntil: 'domcontentloaded' })
+    const readRequest = page.waitForRequest(request => new URL(request.url()).pathname === '/api/chats/chat-1/read' && request.method() === 'POST')
+
+    await page.getByRole('button', { name: 'Conversación con Contacto móvil' }).click()
+
+    expect((await readRequest).postDataJSON()).toEqual({ through_message_id: 'message-emoji-1' })
+    await page.goBack()
+    await expect(page.getByRole('button', { name: 'Conversación con Contacto móvil' }).getByText('2', { exact: true })).toHaveCount(0)
+  })
+
+  test('los cinco módulos de la PWA caben en 320, 375, horizontal y 768 px', async ({ page }) => {
+    test.setTimeout(180_000)
+    await authenticate(page)
+    for (const viewport of [
+      { width: 320, height: 568 },
+      { width: 375, height: 812 },
+      { width: 568, height: 320 },
+      { width: 768, height: 1024 },
+    ]) {
+      await page.setViewportSize(viewport)
+      for (const route of ['/dashboard/chats', '/dashboard/contacts', '/dashboard/programs', '/dashboard/surveys', '/dashboard/tasks']) {
+        await expectRouteToFit(page, route)
+      }
+    }
+  })
+
+  test('la PWA entrega su chrome a la conversación y lo restaura al volver a la lista', async ({ page }) => {
+    test.setTimeout(60_000)
+    await page.setViewportSize({ width: 375, height: 812 })
+    await emulateInstalledMobileApp(page)
+    await authenticate(page)
+    await page.goto(`${baseURL}/dashboard/chats`, { waitUntil: 'domcontentloaded' })
+
+    await expect(page.getByTestId('mobile-app-header')).toBeVisible()
+    await expect(page.getByTestId('mobile-app-bottom-navigation')).toBeVisible()
+    await page.getByRole('button', { name: 'Conversación con Contacto móvil' }).click()
+    await expect(page.getByRole('button', { name: 'Ver detalles de la conversación' })).toBeVisible()
+    await expect(page.getByTestId('mobile-app-header')).toHaveCount(0)
+    await expect(page.getByTestId('mobile-app-bottom-navigation')).toHaveCount(0)
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
+
+    await page.goBack()
+    await expect(page.getByRole('button', { name: 'Conversación con Contacto móvil' })).toBeVisible()
+    await expect(page.getByTestId('mobile-app-header')).toBeVisible()
+    await expect(page.getByTestId('mobile-app-bottom-navigation')).toBeVisible()
+  })
+
+  test('Eventos conserva la vista elegida al reducir y ampliar el espacio disponible', async ({ page }) => {
     test.setTimeout(90_000)
     await page.setViewportSize({ width: 375, height: 812 })
     await authenticate(page)
     await page.goto(`${baseURL}/dashboard/events`, { waitUntil: 'domcontentloaded' })
 
+    const eventsSurface = page.locator('[data-events-view]')
+    const gridView = page.locator('[data-events-view-option="grid"]')
+    const compactView = page.locator('[data-events-view-option="compact"]')
+    const listView = page.locator('[data-events-view-option="list"]')
+
     await expect(page.getByText('Evento móvil QA')).toBeVisible()
+    await expect(eventsSurface).toHaveAttribute('data-events-view', 'list')
+    await expect(eventsSurface).toHaveAttribute('data-events-list-presentation', 'stacked')
+    await expect(listView).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('[data-events-stacked-list]')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Acciones de Evento móvil QA' })).toBeVisible()
     await expect(page.locator('table')).toHaveCount(0)
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await expect(eventsSurface).toHaveAttribute('data-events-view', 'list')
+    await expect(eventsSurface).toHaveAttribute('data-events-list-presentation', 'table')
+    await expect(page.locator('[data-events-table-list] table')).toBeVisible()
+    await expect(listView).toHaveAttribute('aria-pressed', 'true')
+
+    await gridView.click()
+    await expect(eventsSurface).toHaveAttribute('data-events-view', 'grid')
+    await page.setViewportSize({ width: 375, height: 812 })
+    await expect(eventsSurface).toHaveAttribute('data-events-view', 'grid')
+    await expect(gridView).toHaveAttribute('aria-pressed', 'true')
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await expect(eventsSurface).toHaveAttribute('data-events-view', 'grid')
+
+    await compactView.click()
+    await expect(eventsSurface).toHaveAttribute('data-events-view', 'compact')
+    await page.setViewportSize({ width: 375, height: 812 })
+    await expect(eventsSurface).toHaveAttribute('data-events-view', 'compact')
+    await expect(compactView).toHaveAttribute('aria-pressed', 'true')
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await expect(eventsSurface).toHaveAttribute('data-events-view', 'compact')
+
+    await listView.click()
+    await page.setViewportSize({ width: 375, height: 812 })
+    await expect(eventsSurface).toHaveAttribute('data-events-view', 'list')
+    await expect(eventsSurface).toHaveAttribute('data-events-list-presentation', 'stacked')
+    await expect(page.locator('[data-events-stacked-list]')).toBeVisible()
+    await expect(page.locator('[data-events-table-list]')).toHaveCount(0)
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
   })
 
   test('Dispositivos conserva la vinculación por QR en una laptop táctil amplia', async ({ page }) => {
@@ -1056,7 +1422,10 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await selectedMessage.dispatchEvent('pointerup', { pointerType: 'touch', clientX: 180, clientY: 420, button: 0 })
     await expect(page.getByTestId('message-selection-header')).toBeVisible()
 
-    await page.getByRole('button', { name: 'Más acciones del mensaje' }).click()
+    await page
+      .getByTestId('message-selection-header')
+      .getByRole('button', { name: 'Más acciones del mensaje' })
+      .click()
     await page.getByRole('menuitem', { name: 'Información del mensaje' }).click()
     const infoDialog = page.getByRole('dialog', { name: 'Información del mensaje' })
     await expectInsideVisualViewport(page, infoDialog)
@@ -1090,15 +1459,226 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await page.getByRole('button', { name: 'Conversación con Contacto móvil' }).click()
 
     await expect(page.getByText('Mensaje enviado para acciones', { exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Más acciones del mensaje' })).toHaveCount(3)
+    await expect(page.getByRole('button', { name: 'Más acciones del mensaje' })).toHaveCount(5)
     await expect(page.getByRole('button', { name: 'Adjuntar archivo' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Abrir selector de emojis' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Tomar una foto' })).toHaveCount(0)
     await expect(page.getByTestId('message-selection-header')).toHaveCount(0)
   })
 
-  test('Chats muestra el formato fuera del texto en mensaje y pie de adjunto', async ({ page }) => {
+  test('WhatsApp conserva emoji y payload en Chats, Contactos, Programas, Leads y Eventos', async ({ page }) => {
+    test.skip(!useMockSession, 'Esta matriz usa API y WebSocket simulados')
+    test.setTimeout(360_000)
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await authenticate(page)
+
+    for (const surface of whatsappParitySurfaces) {
+      await test.step(surface.name, async () => {
+        const reactions = await installReactionMutationMock(page)
+        await openWhatsAppParitySurface(page, surface)
+        const insertedEmoji = await insertComposerEmoji(page)
+        const sendRequest = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === '/api/messages/send')
+        await page.getByRole('button', { name: 'Enviar mensaje', exact: true }).click()
+        expect((await sendRequest).postDataJSON()).toMatchObject({
+          chat_id: 'chat-1',
+          device_id: 'device-1',
+          to: '51999999999@s.whatsapp.net',
+          body: insertedEmoji,
+        })
+
+        const textMessage = await reactWithQuickEmoji(page, 'wa-in-1', '👍')
+        await expect.poll(() => reactions.requests.length).toBe(1)
+        expect(reactions.requests[0]).toMatchObject({
+          chat_id: 'chat-1',
+          target_message_id: 'wa-in-1',
+          emoji: '👍',
+          operation_id: expect.any(String),
+        })
+        await expect(textMessage.getByRole('button', { name: 'Quitar 👍' })).toHaveCount(1)
+      })
+    }
+  })
+
+  test('WhatsApp reconcilia reacciones de texto, media, sticker y emoji sin duplicar ni perder rollback', async ({ page }) => {
+    test.skip(!useMockSession, 'Esta matriz usa API y WebSocket simulados')
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width: 1440, height: 900 })
+    const webSocket = await authenticate(page)
+    const reactions = await installReactionMutationMock(page)
+    await page.goto(`${baseURL}/dashboard/chats`, { waitUntil: 'domcontentloaded' })
+    await page.getByRole('button', { name: 'Conversación con Contacto móvil' }).click()
+    await expect(page.locator('[data-whatsapp-message-id="wa-emoji-1"]')).toBeVisible({ timeout: 30_000 })
+
+    const rightClickMessage = page.locator('[data-whatsapp-message-id="wa-in-1"]')
+    await rightClickMessage.scrollIntoViewIfNeeded()
+    const rightClickTarget = rightClickMessage.getByText('Mensaje recibido para seleccionar', { exact: true })
+    const rightClickBox = await rightClickTarget.boundingBox()
+    expect(rightClickBox).not.toBeNull()
+    const rightClickPosition = { x: Math.min(36, rightClickBox!.width / 2), y: Math.min(28, rightClickBox!.height / 2) }
+    const rightClickPoint = { x: rightClickBox!.x + rightClickPosition.x, y: rightClickBox!.y + rightClickPosition.y }
+    await rightClickTarget.click({ button: 'right', position: rightClickPosition })
+    const pointerMenu = page.locator('[data-chat-overlay="message-menu"]')
+    await expectInsideVisualViewport(page, pointerMenu)
+    const pointerMenuBox = await pointerMenu.boundingBox()
+    expect(pointerMenuBox).not.toBeNull()
+    expect(Math.abs(pointerMenuBox!.x - rightClickPoint.x)).toBeLessThanOrEqual(2)
+    expect(Math.min(
+      Math.abs(pointerMenuBox!.y - rightClickPoint.y),
+      Math.abs(pointerMenuBox!.y + pointerMenuBox!.height - rightClickPoint.y),
+    )).toBeLessThanOrEqual(2)
+    await page.keyboard.press('Escape')
+    await expect(pointerMenu).toBeHidden()
+    await expect(rightClickMessage.getByRole('button', { name: 'Más acciones del mensaje' })).toBeFocused()
+
+    const keyboardControls = await openQuickReactions(page, 'wa-in-1', true)
+    await page.keyboard.press('Escape')
+    await expect(keyboardControls.toolbar).toBeHidden()
+    await expect(keyboardControls.moreActions).toBeFocused()
+
+    const matrix = [
+      { messageId: 'wa-in-1', emoji: '👍' },
+      { messageId: 'wa-image-1', emoji: '❤️' },
+      { messageId: 'wa-sticker-1', emoji: '😂' },
+      { messageId: 'wa-emoji-1', emoji: '😮' },
+    ]
+    for (const item of matrix) {
+      const before = reactions.requests.length
+      const message = await reactWithQuickEmoji(page, item.messageId, item.emoji)
+      await expect.poll(() => reactions.requests.length).toBe(before + 1)
+      expect(reactions.requests.at(-1)).toMatchObject({
+        chat_id: 'chat-1',
+        target_message_id: item.messageId,
+        emoji: item.emoji,
+        operation_id: expect.any(String),
+      })
+      await expect(message.getByRole('button', { name: `Quitar ${item.emoji}` })).toHaveCount(1)
+    }
+
+    await expect.poll(() => webSocket?.clientMessages.some(message => message.includes('subscribe_chat')) || false).toBe(true)
+    const textRequest = reactions.requests.find(request => request.target_message_id === 'wa-in-1')!
+    const echo = {
+      type: 'message_reaction',
+      data: {
+        chat_id: 'chat-1',
+        target_message_id: 'wa-in-1',
+        sender_jid: '__clarin_self__',
+        sender_name: 'Tú',
+        emoji: '👍',
+        is_from_me: true,
+        removed: false,
+        timestamp: new Date().toISOString(),
+        operation_id: textRequest.operation_id,
+        provider: 'whatsapp_web',
+      },
+    }
+    webSocket!.send(echo)
+    webSocket!.send(echo)
+    const textMessage = page.locator('[data-whatsapp-message-id="wa-in-1"]')
+    await expect(textMessage.getByRole('button', { name: 'Quitar 👍' })).toHaveCount(1)
+
+    const beforeChange = reactions.requests.length
+    await reactWithQuickEmoji(page, 'wa-in-1', '❤️')
+    await expect.poll(() => reactions.requests.length).toBe(beforeChange + 1)
+    await expect(textMessage.getByRole('button', { name: 'Quitar ❤️' })).toHaveCount(1)
+    await expect(textMessage.getByRole('button', { name: 'Quitar 👍' })).toHaveCount(0)
+
+    const beforeRemoval = reactions.requests.length
+    await textMessage.getByRole('button', { name: 'Quitar ❤️' }).click()
+    await expect.poll(() => reactions.requests.length).toBe(beforeRemoval + 1)
+    expect(reactions.requests.at(-1)).toMatchObject({ target_message_id: 'wa-in-1', emoji: '' })
+    await expect(textMessage.getByRole('button', { name: 'Quitar ❤️' })).toHaveCount(0)
+
+    const imageMessage = page.locator('[data-whatsapp-message-id="wa-image-1"]')
+    const releaseFailure = reactions.deferFailure('WhatsApp rechazó la reacción simulada')
+    const beforeFailure = reactions.requests.length
+    await reactWithQuickEmoji(page, 'wa-image-1', '😂')
+    await expect.poll(() => reactions.requests.length).toBe(beforeFailure + 1)
+    await expect(imageMessage.getByRole('button', { name: 'Quitar 😂' })).toHaveCount(1)
+    await expect(imageMessage.getByRole('button', { name: 'Reaccionar con 🙏' })).toHaveCount(1)
+    releaseFailure()
+    await expect(page.getByText('WhatsApp rechazó la reacción simulada', { exact: true })).toBeVisible()
+    await expect(imageMessage.getByRole('button', { name: 'Quitar ❤️' })).toHaveCount(1)
+    await expect(imageMessage.getByRole('button', { name: 'Quitar 😂' })).toHaveCount(0)
+    await expect(imageMessage.getByRole('button', { name: 'Reaccionar con 🙏' })).toHaveCount(1)
+
+    const emojiMessage = page.locator('[data-whatsapp-message-id="wa-emoji-1"]')
+    const releaseFirstIntent = reactions.deferSuccess()
+    const beforeRapidChange = reactions.requests.length
+    await reactWithQuickEmoji(page, 'wa-emoji-1', '👍')
+    await expect.poll(() => reactions.requests.length).toBe(beforeRapidChange + 1)
+    await reactWithQuickEmoji(page, 'wa-emoji-1', '😂')
+    expect(reactions.requests).toHaveLength(beforeRapidChange + 1)
+    await expect(emojiMessage.getByRole('button', { name: 'Quitar 😂' })).toHaveCount(1)
+    releaseFirstIntent()
+    await expect.poll(() => reactions.requests.length).toBe(beforeRapidChange + 2)
+    expect(reactions.requests.at(-1)).toMatchObject({ target_message_id: 'wa-emoji-1', emoji: '😂' })
+    await expect(emojiMessage.getByRole('button', { name: 'Quitar 😂' })).toHaveCount(1)
+  })
+
+  test('WhatsApp móvil mantiene acciones táctiles y permite reaccionar por pulsación larga', async ({ page }) => {
+    test.skip(!useMockSession, 'Esta prueba usa API simulada')
     test.setTimeout(60_000)
+    await page.setViewportSize({ width: 375, height: 812 })
+    await authenticate(page)
+    const reactions = await installReactionMutationMock(page)
+    await page.goto(`${baseURL}/dashboard/chats`, { waitUntil: 'domcontentloaded' })
+    await page.getByRole('button', { name: 'Conversación con Contacto móvil' }).click()
+
+    const stickerMessage = page.locator('[data-whatsapp-message-id="wa-sticker-1"]')
+    await expect(stickerMessage.getByRole('button', { name: 'Más acciones del mensaje' })).toBeVisible()
+    const touchSurface = stickerMessage.locator('[role="group"]').first()
+    await touchSurface.dispatchEvent('pointerdown', { pointerType: 'touch', clientX: 190, clientY: 430, button: 0 })
+    await page.waitForTimeout(550)
+    await touchSurface.dispatchEvent('pointerup', { pointerType: 'touch', clientX: 190, clientY: 430, button: 0 })
+    const selection = page.getByTestId('message-selection-header')
+    await expect(selection).toBeVisible()
+    await selection.getByRole('button', { name: 'Más acciones del mensaje' }).click()
+    const menu = page.getByRole('menu', { name: 'Acciones del mensaje seleccionado' })
+    await expectInsideVisualViewport(page, menu)
+    await menu.getByRole('button', { name: 'Reaccionar con 👍' }).click()
+    await expect.poll(() => reactions.requests.length).toBe(1)
+    expect(reactions.requests[0]).toMatchObject({ target_message_id: 'wa-sticker-1', emoji: '👍' })
+    await expect(stickerMessage.getByRole('button', { name: 'Quitar 👍' })).toHaveCount(1)
+  })
+
+  test('Contactos conserva el corte medido 979/980 y reserva 480 px para la conversación', async ({ page }) => {
+    test.skip(!useMockSession, 'Esta prueba usa API simulada')
+    test.setTimeout(90_000)
+    await page.setViewportSize({ width: 979, height: 818 })
+    await authenticate(page)
+    const contactsSurface = whatsappParitySurfaces.find(surface => surface.name === 'Contactos')!
+    await openWhatsAppParitySurface(page, contactsSurface)
+    await expect(page.getByRole('button', { name: 'Volver al detalle' })).toBeVisible()
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
+    await page.getByRole('button', { name: 'Volver al detalle' }).click()
+
+    await page.setViewportSize({ width: 980, height: 818 })
+    const resolveRequest = page.waitForRequest(request => request.method() === 'GET' && new URL(request.url()).pathname.startsWith('/api/chats/resolve-whatsapp/'))
+    await page.getByRole('button', { name: 'Enviar mensaje a Contacto móvil' }).click()
+    await resolveRequest
+    await expect(page.getByRole('textbox', { name: 'Escribe un mensaje…' })).toBeVisible({ timeout: 30_000 })
+    const conversation = page.getByRole('region', { name: 'Conversación' })
+    await expect(conversation).toBeVisible()
+    const measuredAt980 = await conversation.evaluate(element => element.parentElement?.getBoundingClientRect().width || 0)
+    expect(measuredAt980).toBeLessThan(980)
+    await expect(page.getByRole('button', { name: 'Volver al detalle' })).toBeVisible()
+
+    // The operational shell owns a quiet border, so a 980 px viewport leaves
+    // slightly less than 980 px of measured workspace. Grow only that delta
+    // and assert the real container threshold, rather than inferring it from
+    // window.innerWidth.
+    const viewportForMeasured980 = 980 + Math.ceil(980 - measuredAt980)
+    await page.setViewportSize({ width: viewportForMeasured980, height: 818 })
+    await expect.poll(() => conversation.evaluate(element => element.parentElement?.getBoundingClientRect().width || 0)).toBeGreaterThanOrEqual(980)
+    await expect(page.getByRole('button', { name: 'Volver al detalle' })).toHaveCount(0)
+    await expect(page.getByRole('region', { name: 'Detalle CRM' })).toBeVisible()
+    const conversationBox = await conversation.boundingBox()
+    expect(conversationBox?.width).toBeGreaterThanOrEqual(480)
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
+  })
+
+  test('Chats muestra el formato fuera del texto en mensaje y pie de adjunto', async ({ page }) => {
+    test.setTimeout(120_000)
     await page.setViewportSize({ width: 320, height: 568 })
     await authenticate(page)
     await page.goto(`${baseURL}/dashboard/chats`, { waitUntil: 'domcontentloaded' })
@@ -1198,17 +1778,22 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await page.goto(`${baseURL}/dashboard/contacts`, { waitUntil: 'domcontentloaded' })
 
     await page.getByText('Contacto móvil', { exact: true }).first().click()
-    await expect(page.getByRole('heading', { name: 'Detalles' })).toBeVisible()
+    const contactDetail = page.getByRole('dialog', { name: 'Ficha de contacto' })
+    await expect(contactDetail).toBeVisible()
     await expect(page.getByText('movil@example.test', { exact: true })).toBeVisible()
+    await contactDetail.getByRole('button', { name: 'Ver todos los datos' }).click()
     await expect(page.getByText('Iquitos', { exact: true })).toBeVisible()
     await expect(page.getByText('Ficha canónica compartida', { exact: true })).toBeVisible()
     await expect(page.getByText('Observación canónica visible', { exact: true })).toHaveCount(0)
-    await expect(page.getByText('1 registro', { exact: true })).toBeVisible()
-    await page.getByRole('button', { name: 'Ver historial' }).click()
+    const contactHistory = contactDetail.getByRole('button', {
+      name: 'Historial general del contacto 1 registro transversal',
+    })
+    await expect(contactHistory).toBeVisible()
+    await contactHistory.click()
     await expect(page.getByText('Observación canónica visible', { exact: true })).toBeVisible()
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
 
-    await page.getByRole('button', { name: 'Editar contacto' }).first().click()
+    await contactDetail.getByRole('button', { name: 'Editar', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Editar contacto' }).first()).toBeVisible()
     await page.getByLabel('Correo').fill('canonica@example.test')
     await page.getByRole('button', { name: 'Añadir teléfono' }).click()
@@ -1242,14 +1827,14 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expect(page.getByText('canonica@example.test', { exact: true })).toBeVisible()
     await expect(page.getByText('Prioridad', { exact: true }).last()).toBeVisible()
 
-    await page.getByRole('button', { name: 'Editar contacto' }).first().click()
+    await contactDetail.getByRole('button', { name: 'Editar', exact: true }).click()
     await page.getByLabel('Nombre visible').fill('Cambio sin guardar')
     page.once('dialog', async dialog => {
       expect(dialog.message()).toContain('cambios del contacto sin guardar')
       await dialog.accept()
     })
     await page.getByRole('button', { name: 'Cerrar detalles' }).click()
-    await expect(page.getByRole('heading', { name: 'Detalles' })).toHaveCount(0)
+    await expect(contactDetail).toHaveCount(0)
   })
 
   test('Leads móvil abre la ficha canónica y mantiene separado el contexto comercial', async ({ page }) => {
@@ -1306,9 +1891,10 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expectInsideVisualViewport(page, detail)
     await expectCanonicalContactDetails(page)
     await detail.getByRole('button', { name: /Contexto del evento/ }).click()
-    await expect(detail.getByText('Participación en el evento', { exact: true })).toBeVisible()
-    await expect(detail.getByText('Participación activa', { exact: true })).toBeVisible()
-    await expect(detail.getByText('Oportunidades relacionadas', { exact: true })).toBeVisible()
+    const eventContext = detail.getByRole('region', { name: 'Evento móvil QA' })
+    await expect(eventContext.getByText('Participación en evento', { exact: true })).toBeVisible()
+    await expect(eventContext.getByText('Participación activa', { exact: true })).toBeVisible()
+    await expect(eventContext.getByText('Oportunidades relacionadas', { exact: true })).toBeVisible()
     await expect(detail.getByText('snapshot-evento@example.test', { exact: true })).toHaveCount(0)
     await expect.poll(() => detail.evaluate(element => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
   })
@@ -1403,9 +1989,9 @@ test.describe('Clarin responsive authenticated matrix', () => {
       'crm-contact-information',
       'crm-contact-tags',
       'crm-context-activity',
+      'crm-contact-history',
       'crm-context',
       'crm-related-tasks',
-      'crm-contact-history',
       'crm-integrations',
     ])
 
@@ -1466,7 +2052,8 @@ test.describe('Clarin responsive authenticated matrix', () => {
       const overlay = page.locator('[data-operational-drag-overlay]')
       await expect(overlay).toBeVisible()
       await expect(overlay).toContainText(`Mover a ${destination}`)
-      await expect(target.getByText(`Suelta en ${destination}`, { exact: true })).toBeVisible()
+      await expect(target).toHaveClass(/ring-2/)
+      await expect(page.getByRole('status')).toContainText('Destino crm-stage:')
       const sourceCard = handle.locator('xpath=ancestor::*[@data-crm-pipeline-card][1]')
       expect(Number.parseFloat(await sourceCard.evaluate(element => getComputedStyle(element).opacity))).toBeLessThanOrEqual(0.25)
       await page.mouse.up()
@@ -1503,7 +2090,7 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await installGoogleContactSyncMock(page)
 
     const expectSyncAction = async () => {
-      await expect(page.getByRole('region', { name: 'Google Contacts' })).toBeVisible()
+      await openGoogleContactsIntegration(page)
       await expect(page.getByRole('button', { name: 'Sincronizar contacto con Google Contacts' })).toBeVisible()
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
     }
@@ -1538,12 +2125,13 @@ test.describe('Clarin responsive authenticated matrix', () => {
   })
 
   test('Google Sync ejecuta POST y DELETE, recupera errores y respeta un 403 sin alertas', async ({ page }) => {
-    test.setTimeout(90_000)
+    test.setTimeout(120_000)
     await page.setViewportSize({ width: 320, height: 568 })
     await authenticate(page)
     const google = await installGoogleContactSyncMock(page)
     await page.goto(`${baseURL}/dashboard/contacts`, { waitUntil: 'domcontentloaded' })
     await page.getByText('Contacto móvil', { exact: true }).first().click()
+    await openGoogleContactsIntegration(page)
 
     const postRequest = page.waitForRequest(request => request.url().endsWith('/api/google/contacts/contact-1/sync') && request.method() === 'POST')
     await page.getByRole('button', { name: 'Sincronizar contacto con Google Contacts' }).click()
@@ -1567,15 +2155,16 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await page.getByRole('button', { name: 'Sincronizar contacto con Google Contacts' }).click()
     await expect(page.getByRole('button', { name: 'Actualizar contacto en Google Contacts' })).toBeVisible()
 
-    await page.getByRole('button', { name: 'Cerrar detalles' }).click()
+    await page.getByRole('button', { name: 'Cerrar Ficha de contacto' }).click()
     google.setStatusMode('error')
     await page.getByText('Contacto móvil', { exact: true }).first().click()
+    await openGoogleContactsIntegration(page)
     await expect(page.getByText('Google Contacts no está disponible temporalmente', { exact: true })).toBeVisible()
     google.setStatusMode('connected')
     await page.getByRole('button', { name: 'Reintentar Google Contacts' }).click()
     await expect(page.getByRole('region', { name: 'Google Contacts' })).toBeVisible()
 
-    await page.getByRole('button', { name: 'Cerrar detalles' }).click()
+    await page.getByRole('button', { name: 'Cerrar Ficha de contacto' }).click()
     google.setStatusMode('forbidden')
     const forbiddenResponse = page.waitForResponse(response => response.url().endsWith('/api/google/status') && response.status() === 403)
     await page.getByText('Contacto móvil', { exact: true }).first().click()
@@ -1591,21 +2180,23 @@ test.describe('Clarin responsive authenticated matrix', () => {
   })
 
   test('Google Sync descarta una respuesta tardía al cambiar rápidamente de participante', async ({ page }) => {
-    test.setTimeout(60_000)
+    test.setTimeout(90_000)
     await page.setViewportSize({ width: 375, height: 812 })
     await authenticate(page)
     const google = await installGoogleContactSyncMock(page)
     await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
 
-    google.queueStatus('error', 350)
+    google.queueStatus('error', 2_000)
     google.queueStatus('connected')
     await page.getByRole('button', { name: /Álexis Tarillo Mejio.*5192300100.*Activo/ }).click()
+    await openGoogleContactsIntegration(page)
     await expect(page.getByRole('status', { name: 'Consultando Google Contacts' })).toBeVisible()
     await page.getByRole('button', { name: 'Cerrar detalles' }).click()
     await page.getByRole('button', { name: /Participante Móvil 2.*Activo/ }).click()
-    await expect(page.locator('#canonical-contact-name')).toHaveText('Participante Móvil 2')
-    await expect(page.getByRole('region', { name: 'Google Contacts' })).toBeVisible()
-    await page.waitForTimeout(450)
+    const secondParticipant = page.getByRole('region', { name: 'Participante Móvil 2' })
+    await expect(secondParticipant.getByRole('heading', { name: 'Participante Móvil 2' })).toBeVisible()
+    await openGoogleContactsIntegration(page)
+    await page.waitForTimeout(2_200)
     await expect(page.getByText('Google Contacts no está disponible temporalmente', { exact: true })).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Sincronizar contacto con Google Contacts' })).toBeVisible()
   })
@@ -1717,20 +2308,25 @@ test.describe('Clarin responsive authenticated matrix', () => {
       contentType: 'application/json',
       body: JSON.stringify([mockPreviousSession]),
     }))
-    await page.route('**/api/programs/program-1/sessions/session-previous/attendance', route => route.fulfill({
+    await page.route('**/api/programs/program-1/sessions/session-previous/roster', route => route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify([{
-        id: 'attendance-1',
-        session_id: 'session-previous',
+      body: JSON.stringify({ success: true, roster: [{
         participant_id: 'program-participant-1',
-        status: 'absent',
-        notes: 'Primera observación',
+        contact_id: 'program-contact-1',
+        contact_name: 'Álexis Tarillo Mejio',
+        contact_phone: '5192300100',
+        participation_status: 'active',
+        enrolled_at: mockNow,
+        attendance_status: 'absent',
         observation_count: 2,
         observation_preview: [{ id: 'attendance-observation-2', notes: 'Llegó con una incidencia informada', created_by_name: 'Responsive QA', created_at: mockNow, source_label: 'Programa sin sesiones · Sesión de apertura · 20/07/2026' }],
-        created_at: mockNow,
-        updated_at: mockNow,
-      }]),
+      }] }),
+    }))
+    await page.route('**/api/programs/program-1/sessions/session-previous/observations', route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true, observations: [] }),
     }))
     await page.route('**/api/programs/program-1/sessions/session-previous/participants/program-participant-1/attendance-observations', async route => {
       if (route.request().method() === 'POST') {
@@ -1803,12 +2399,27 @@ test.describe('Clarin responsive authenticated matrix', () => {
       contentType: 'application/json',
       body: JSON.stringify([mockPreviousSession]),
     }))
-    await page.route('**/api/programs/program-1/sessions/session-previous/attendance', async route => {
+    await page.route('**/api/programs/program-1/sessions/session-previous/roster', async route => {
       attendanceLoadAttempts += 1
       await route.fulfill(attendanceLoadAttempts === 1
         ? { status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'No se pudo consultar la asistencia' }) }
-        : { status: 200, contentType: 'application/json', body: '[]' })
+        : { status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, roster: [{
+          participant_id: 'program-participant-1',
+          contact_id: 'program-contact-1',
+          contact_name: 'Álexis Tarillo Mejio',
+          contact_phone: '5192300100',
+          participation_status: 'active',
+          enrolled_at: mockNow,
+          attendance_status: '',
+          observation_count: 0,
+          observation_preview: [],
+        }] }) })
     })
+    await page.route('**/api/programs/program-1/sessions/session-previous/observations', route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true, observations: [] }),
+    }))
     await page.route('**/api/programs/program-1/sessions/session-previous/attendance/batch', async route => {
       failedAttendanceBodies.push(route.request().postDataJSON())
       await route.fulfill({
@@ -1850,6 +2461,77 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expect(saveButton).toBeEnabled()
   })
 
+  test('Programas configura, persiste y ordena las columnas de Salud con ratón y teclado', async ({ page }) => {
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await authenticate(page)
+
+    let canonicalProgram = {
+      id: 'program-1', account_id: 'account-responsive', name: 'Programa sin sesiones', description: '',
+      status: 'active', color: '#10b981', created_by: 'user-responsive', created_at: mockNow, updated_at: mockNow,
+      participant_count: 6, session_count: 0, type: 'course',
+      health_view_columns: ['health', 'attendance', 'signals'],
+    }
+    await page.route('**/api/programs/program-1', async route => {
+      if (route.request().method() === 'PUT') {
+        const body = route.request().postDataJSON()
+        canonicalProgram = { ...canonicalProgram, ...body, updated_at: '2026-07-17T13:00:00.000Z' }
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(canonicalProgram) })
+    })
+    await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
+
+    const table = page.getByRole('table').first()
+    await expect(table.getByRole('button', { name: /Ordenar por Participante/ })).toBeVisible({ timeout: 30_000 })
+    await expect(table.getByRole('button', { name: /Ordenar por Salud/ })).toBeVisible()
+    await expect(table.getByRole('button', { name: /Ordenar por Asistencia/ })).toBeVisible()
+    await expect(table.getByRole('button', { name: /Ordenar por Señales/ })).toBeVisible()
+    await expect(table.getByRole('button', { name: /Ordenar por Ingreso/ })).toHaveCount(0)
+    await expect(table.getByRole('button', { name: /Ordenar por Antigüedad/ })).toHaveCount(0)
+
+    await page.getByRole('button', { name: 'Editar programa' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Editar programa' })
+    await expect(dialog.getByRole('checkbox', { name: 'Participante siempre visible' })).toBeDisabled()
+    await expect(dialog.getByRole('checkbox', { name: 'Acciones siempre visible' })).toBeDisabled()
+    await dialog.getByRole('checkbox', { name: 'Fecha de incorporación' }).check()
+    await dialog.getByRole('checkbox', { name: 'Antigüedad' }).check()
+    const saveRequest = page.waitForRequest(request => request.url().endsWith('/api/programs/program-1') && request.method() === 'PUT')
+    await dialog.getByRole('button', { name: 'Guardar cambios' }).click()
+    expect((await saveRequest).postDataJSON()).toMatchObject({
+      health_view_columns: ['health', 'attendance', 'signals', 'enrolled_at', 'tenure'],
+      expected_updated_at: mockNow,
+    })
+
+    await expect(table.getByRole('button', { name: /Ordenar por Ingreso/ })).toBeVisible()
+    await expect(table.getByRole('button', { name: /Ordenar por Antigüedad/ })).toBeVisible()
+    await expect(table.getByText('10 jul 2026', { exact: true })).toBeVisible()
+    await expect(table.getByLabel(/Antigüedad: 0 años, 0 meses y 7 días/)).toBeVisible()
+
+    const participantSort = table.getByRole('button', { name: /Ordenar por Participante/ })
+    await participantSort.click()
+    await participantSort.click()
+    await expect(table.getByRole('columnheader', { name: /Ordenar por Participante/ })).toHaveAttribute('aria-sort', 'descending')
+    await expect(table.locator('tbody tr').first()).toContainText('Participante Móvil 6')
+
+    const enrollmentSort = table.getByRole('button', { name: /Ordenar por Ingreso/ })
+    await enrollmentSort.focus()
+    await page.keyboard.press('Enter')
+    await expect(table.getByRole('columnheader', { name: /Ordenar por Ingreso/ })).toHaveAttribute('aria-sort', 'ascending')
+    await expect(table.locator('tbody tr').first()).toContainText('Álexis Tarillo Mejio')
+
+    await participantSort.click()
+    await participantSort.click()
+    await page.getByRole('textbox', { name: 'Buscar participante por nombre o teléfono' }).fill('participante móvil')
+    await expect(table.locator('tbody tr')).toHaveCount(5)
+    await expect(table.locator('tbody tr').first()).toContainText('Participante Móvil 6')
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
+
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    const reloadedTable = page.getByRole('table').first()
+    await expect(reloadedTable.getByRole('button', { name: /Ordenar por Ingreso/ })).toBeVisible({ timeout: 30_000 })
+    await expect(reloadedTable.getByRole('button', { name: /Ordenar por Antigüedad/ })).toBeVisible()
+  })
+
   test('Programas móvil separa el padrón activo del historial sin perder las participaciones', async ({ page }) => {
     test.setTimeout(90_000)
     await page.setViewportSize({ width: 320, height: 568 })
@@ -1879,7 +2561,7 @@ test.describe('Clarin responsive authenticated matrix', () => {
   })
 
   test('Programas móvil prioriza búsqueda, filas densas y detalle enfocado sin alterar escritorio', async ({ page }) => {
-    test.setTimeout(90_000)
+    test.setTimeout(180_000)
     await page.setViewportSize({ width: 375, height: 812 })
     await authenticate(page)
     await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
@@ -1923,10 +2605,11 @@ test.describe('Clarin responsive authenticated matrix', () => {
     expect(participantsDownload.suggestedFilename()).toBe('Programa_sin_sesiones_participantes.xlsx')
     await page.getByRole('button', { name: /Álexis Tarillo Mejio.*5192300100.*Activo/ }).click()
 
-    await expect(page.getByRole('heading', { name: 'Detalle del participante' })).toBeVisible()
+    const participantDetail = page.getByRole('dialog', { name: 'Detalle del participante' })
+    await expect(participantDetail.getByRole('heading', { name: 'Detalle del participante' })).toBeVisible()
     await expect(page.getByText('participante1@example.test')).toBeVisible()
     await expect(page.getByText('Observación móvil existente')).toHaveCount(0)
-    await page.getByRole('button', { name: 'Ver historial' }).click()
+    await participantDetail.getByRole('button', { name: /Historial general del contacto/ }).click()
     await expect(page.getByText('Observación móvil existente')).toBeVisible()
     await expect(page.getByText('Participación en el programa')).toBeVisible()
     const enrollmentRequest = page.waitForRequest(request => request.url().includes('/api/programs/program-1/participants/program-participant-1/enrollment') && request.method() === 'PATCH')

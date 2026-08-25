@@ -53,6 +53,34 @@ func TestRoomHubPresenceAndUnregister(t *testing.T) {
 	}
 }
 
+func TestRoomHubMemberBroadcastNeverReachesGuestSockets(t *testing.T) {
+	t.Parallel()
+	hub := NewRoomHub()
+	accountID, boardID, userID := uuid.New(), uuid.New(), uuid.New()
+	member := &RealtimeClient{ID: uuid.New(), AccountID: accountID, BoardID: boardID,
+		Actor: RealtimeActor{ID: userID, UserID: &userID}, Send: make(chan []byte, 1)}
+	guestID := uuid.New()
+	guest := &RealtimeClient{ID: uuid.New(), AccountID: accountID, BoardID: boardID,
+		Actor: RealtimeActor{ID: guestID, GuestID: &guestID}, Send: make(chan []byte, 1)}
+	if err := hub.Register(member); err != nil {
+		t.Fatal(err)
+	}
+	if err := hub.Register(guest); err != nil {
+		t.Fatal(err)
+	}
+	hub.BroadcastMembers(accountID, boardID, OutgoingMessage{Event: EventCommentChanged, Data: map[string]string{"body": "privado"}}, uuid.Nil)
+	select {
+	case <-member.Send:
+	default:
+		t.Fatal("authenticated member did not receive comment event")
+	}
+	select {
+	case payload := <-guest.Send:
+		t.Fatalf("comment data leaked to guest socket: %s", payload)
+	default:
+	}
+}
+
 func TestRoomHubDisconnectIsTenantScopedAndSendsRevocation(t *testing.T) {
 	t.Parallel()
 	hub := NewRoomHub()

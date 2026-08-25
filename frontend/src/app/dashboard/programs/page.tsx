@@ -9,6 +9,7 @@ import { es } from 'date-fns/locale';
 import { formatCalendarDate } from '@/utils/calendarDate';
 import { useContainerWidth } from '@/components/responsive/useContainerWidth';
 import { useDebouncedValue } from '@/lib/useDebouncedValue';
+import { ProgramSettingsDialog } from '@/components/programs/ProgramSettingsDialog';
 
 const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; icon: React.ReactNode }> = {
   active: { label: 'Activo', bg: 'bg-emerald-50', text: 'text-emerald-700', icon: <CheckCircle2 className="w-3 h-3" /> },
@@ -53,8 +54,6 @@ export default function ProgramsPage() {
   const [goalsOpen, setGoalsOpen] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [editingProgram, setEditingProgram] = useState<Program | null>(null);
-  const [editForm, setEditForm] = useState({ name: '', description: '', color: '#10b981', status: 'active' });
-  const [savingEdit, setSavingEdit] = useState(false);
 
   // Folder state
   const [folders, setFolders] = useState<ProgramFolder[]>([]);
@@ -107,7 +106,6 @@ export default function ProgramsPage() {
   useEffect(() => {
     if (!mobileWorkspace) return;
     setMenuID(null);
-    setEditingProgram(null);
     setShowFolderModal(false);
     setConfirmAction(null);
   }, [mobileWorkspace]);
@@ -305,37 +303,7 @@ export default function ProgramsPage() {
     e.preventDefault();
     e.stopPropagation();
     setMenuID(null);
-    setEditForm({
-      name: program.name,
-      description: program.description || '',
-      color: program.color || '#10b981',
-      status: program.status,
-    });
     setEditingProgram(program);
-  };
-
-  const handleUpdateProgram = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingProgram) return;
-    setSavingEdit(true);
-    try {
-      const res = await api(`/api/programs/${editingProgram.id}`, {
-        method: 'PUT',
-        body: JSON.stringify(editForm),
-      });
-      if (res.success) {
-        setEditingProgram(null);
-        showToast('Programa actualizado', 'success');
-        fetchPrograms();
-      } else {
-        showToast('Error al actualizar programa', 'error');
-      }
-    } catch (error) {
-      console.error('Error updating program:', error);
-      showToast('Error al actualizar programa', 'error');
-    } finally {
-      setSavingEdit(false);
-    }
   };
 
   // Folder navigation
@@ -1148,76 +1116,21 @@ export default function ProgramsPage() {
         </div>
       )}
 
-      {/* Edit Program Modal */}
-      {editingProgram && (
-        <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4" onClick={() => setEditingProgram(null)}>
-          <div role="dialog" aria-modal="true" aria-labelledby="edit-program-title" className="h-[var(--app-height)] w-full max-w-md overflow-y-auto rounded-none bg-white p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-2xl sm:p-6" onClick={(e) => e.stopPropagation()}>
-            <div className="flex justify-between items-center mb-5">
-              <h2 id="edit-program-title" className="text-xl font-bold text-slate-800">Editar Programa</h2>
-              <button onClick={() => setEditingProgram(null)} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <form onSubmit={handleUpdateProgram}>
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Nombre</label>
-                  <input
-                    type="text"
-                    required
-                    value={editForm.name}
-                    onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Descripción</label>
-                  <textarea
-                    value={editForm.description}
-                    onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
-                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all resize-none"
-                    rows={3}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-2">Color</label>
-                  <div className="flex flex-wrap gap-3">
-                    {COLORS.map(color => (
-                      <button
-                        key={color}
-                        type="button"
-                        onClick={() => setEditForm({ ...editForm, color })}
-                        className={`w-9 h-9 rounded-full transition-all ${editForm.color === color ? 'ring-2 ring-offset-2 ring-slate-400 scale-110' : 'hover:scale-105'}`}
-                        style={{ backgroundColor: color }}
-                      />
-                    ))}
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">Estado</label>
-                  <select
-                    value={editForm.status}
-                    onChange={(e) => setEditForm({ ...editForm, status: e.target.value })}
-                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                  >
-                    <option value="active">Activo</option>
-                    <option value="archived">Archivado</option>
-                    <option value="completed">Completado</option>
-                  </select>
-                </div>
-              </div>
-              <div className="sticky bottom-0 -mx-4 mt-6 flex gap-3 border-t border-slate-100 bg-white px-4 pb-[env(safe-area-inset-bottom)] pt-4 sm:static sm:mx-0 sm:justify-end sm:px-0 sm:pb-0">
-                <button type="button" onClick={() => setEditingProgram(null)} className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 sm:flex-none">
-                  Cancelar
-                </button>
-                <button type="submit" disabled={savingEdit || !editForm.name.trim()} className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 disabled:opacity-50 sm:flex-none">
-                  {savingEdit ? 'Guardando...' : 'Guardar Cambios'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <ProgramSettingsDialog
+        open={Boolean(editingProgram)}
+        program={editingProgram}
+        onClose={() => setEditingProgram(null)}
+        onCanonicalReload={canonical => {
+          setEditingProgram(canonical);
+          setPrograms(current => current.map(item => item.id === canonical.id ? canonical : item));
+        }}
+        onSaved={updated => {
+          setEditingProgram(null);
+          setPrograms(current => current.map(item => item.id === updated.id ? updated : item));
+          showToast('Programa actualizado', 'success');
+          void fetchPrograms();
+        }}
+      />
 
       {/* Folder Modal */}
       {showFolderModal && (

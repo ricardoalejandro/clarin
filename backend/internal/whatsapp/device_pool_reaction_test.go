@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/naperu/clarin/internal/domain"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
@@ -151,5 +153,34 @@ func TestReactionEventTimestampPrefersSenderMilliseconds(t *testing.T) {
 	}
 	if got := reactionEventTimestamp(fallback, 0); !got.Equal(fallback) {
 		t.Fatalf("reactionEventTimestamp() fallback = %s, want %s", got, fallback)
+	}
+}
+
+func TestReactionEventPayloadCarriesCanonicalReconciliationMetadata(t *testing.T) {
+	t.Parallel()
+
+	chatID := uuid.New()
+	timestamp := time.Date(2026, time.August, 13, 14, 0, 0, 0, time.UTC)
+	payload := reactionEventPayload(
+		chatID, "target-1", "51987654321@s.whatsapp.net", "Me", "👍", true,
+		timestamp, domain.DeviceProviderWhatsAppWeb, "operation-123",
+	)
+
+	if payload["chat_id"] != chatID.String() || payload["target_message_id"] != "target-1" {
+		t.Fatalf("reaction payload identity = %#v", payload)
+	}
+	if payload["timestamp"] != timestamp || payload["provider"] != domain.DeviceProviderWhatsAppWeb {
+		t.Fatalf("reaction payload provider/timestamp = %#v", payload)
+	}
+	if payload["operation_id"] != "operation-123" || payload["removed"] != false {
+		t.Fatalf("reaction payload operation/removal = %#v", payload)
+	}
+
+	removed := reactionEventPayload(chatID, "target-1", "sender", "Me", "", true, timestamp, domain.DeviceProviderWhatsAppWeb, "")
+	if removed["removed"] != true {
+		t.Fatalf("removed reaction payload = %#v", removed)
+	}
+	if _, exists := removed["operation_id"]; exists {
+		t.Fatalf("provider event without local operation must omit operation_id: %#v", removed)
 	}
 }

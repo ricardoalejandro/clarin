@@ -16,8 +16,17 @@ function cursorColor(id: string) {
   return CURSOR_COLORS[Math.abs(hash) % CURSOR_COLORS.length]
 }
 
-export function excalidrawWhiteboardCollaborators(states: ReadonlyMap<string, WhiteboardCollaboratorState>) {
+export function excalidrawWhiteboardCollaborators(
+  states: ReadonlyMap<string, WhiteboardCollaboratorState>,
+  selfActorID: string | null = null,
+) {
   const collaborators = new Map<SocketId, Collaborator>()
+  // Presence can arrive from another room member before this socket receives
+  // room.ready. Do not project ambiguous identities into Excalidraw: its
+  // memoized user list intentionally ignores identity-only flag changes.
+  // room.ready immediately reprojects this retained state with the canonical
+  // local actor and renders exactly one current-user avatar.
+  if (!selfActorID) return collaborators
   states.forEach((state, id) => {
     const socketID = id as SocketId
     collaborators.set(socketID, {
@@ -27,6 +36,7 @@ export function excalidrawWhiteboardCollaborators(states: ReadonlyMap<string, Wh
       pointer: state.pointer,
       button: state.button,
       color: cursorColor(id),
+      isCurrentUser: id === selfActorID,
     })
   })
   return collaborators

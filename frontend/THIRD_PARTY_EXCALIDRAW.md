@@ -1,6 +1,8 @@
 # Pizarras Clarin: avisos de terceros
 
-Pizarras Clarin integra `@excalidraw/excalidraw` **0.18.1** como motor de edición embebido. El producto, sus rutas, almacenamiento, permisos, colaboración y marca pertenecen a Clarin; no se utilizan servicios operativos de Excalidraw.
+Pizarras Clarin integra el fork auditable `@excalidraw/excalidraw` **0.18.1-clarin.4**, derivado sin saltos del tag upstream `v0.18.1` y del commit exacto `a2ec2889babf7d2295469c6d90ebe77fae57df84`. El producto, sus rutas, almacenamiento, permisos, colaboración y marca pertenecen a Clarin; no se utilizan servicios operativos de Excalidraw.
+
+El código fuente mantenido vive en `frontend/vendor/excalidraw-clarin`. La superficie propia se limita al modelo de marcas parciales de texto y alineación por párrafos, el editor `contenteditable`, medición/render de runs y párrafos, controles accesibles y precarga determinista de fuentes locales. La compilación genera la ruta inmutable `/vendor/whiteboards-editor/0.18.1-clarin.4/`; el catálogo no inicia cargas por apertura, hover, foco, desplazamiento ni selección.
 
 ## Licencia del editor
 
@@ -18,9 +20,9 @@ Las fuentes incluidas por el paquete conservan sus licencias originales, entre e
 
 El orden fraccional del editor usa `fractional-indexing@3.2.0`, publicado bajo CC0 1.0 Universal (`CC0-1.0`, sin derechos reservados). Clarin conserva esa versión exacta tanto en el lockfile como en el corpus diferencial del reconciliador; el aviso canónico y la integridad npm constan en `THIRD_PARTY_NOTICES.md`.
 
-## Riesgo de dependencias conocido (2026-08-09)
+## Riesgo de dependencias conocido (2026-08-23)
 
-`npm audit --omit=dev --json` informa 22 hallazgos en el grafo completo de producción del frontend: 7 moderados, 13 altos y 2 críticos. No todos pertenecen al motor, pero siguen siendo un gate de producción de Clarin. Para `@excalidraw/excalidraw@0.18.1`, npm agrega una vulnerabilidad directa moderada originada en estas dependencias transitivas fijadas por upstream:
+`npm audit --omit=dev --json` informa 21 hallazgos en el grafo completo de producción del frontend: 6 moderados, 13 altos y 2 críticos. No todos pertenecen al motor, pero siguen siendo un gate de producción de Clarin. Para el cierre de `@excalidraw/excalidraw@0.18.1-clarin.4`, npm agrega hallazgos originados en estas dependencias transitivas fijadas por upstream:
 
 - `nanoid@3.3.3` y `nanoid@4.0.2`: [GHSA-mwcw-c2x4-8c55](https://github.com/advisories/GHSA-mwcw-c2x4-8c55), rangos `<3.3.8` y `>=4.0.0 <5.0.9`.
 - `nanoid@3.3.3` y `nanoid@4.0.2`: [GHSA-28wg-ghj8-5hjv](https://github.com/advisories/GHSA-28wg-ghj8-5hjv), rangos `<3.3.16` y `>=4.0.0 <5.1.16`.

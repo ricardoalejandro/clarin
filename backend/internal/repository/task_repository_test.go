@@ -16,6 +16,21 @@ func TestTaskStatsSQLSeparatesActorFromAssignee(t *testing.T) {
 			t.Errorf("stats SQL missing %q: %s", fragment, query)
 		}
 	}
+	if !strings.Contains(query, "t.due_at>=NOW()") {
+		t.Fatalf("due-today must exclude tasks that are already overdue: %s", query)
+	}
+}
+
+func TestOverdueInboxAndStatsShareEffectiveCategory(t *testing.T) {
+	t.Parallel()
+	category := taskEffectiveCategorySQL("t", "ts")
+	if !strings.Contains(taskStatsSQL(), category+" NOT IN ('done','cancelled') AND t.due_at<NOW()") {
+		t.Fatalf("dashboard overdue count no longer uses the canonical category predicate")
+	}
+	source := readRepositorySource(t, "task_repository.go")
+	if strings.Count(source, `t.due_at < NOW() AND "+effectiveCategory+`) < 2 {
+		t.Fatalf("task overdue filters no longer share the canonical category predicate")
+	}
 }
 
 func TestTaskDependencyPresenceDoesNotRevealHiddenRelation(t *testing.T) {

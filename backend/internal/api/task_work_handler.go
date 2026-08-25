@@ -1447,9 +1447,12 @@ func (s *Server) handleCreateTaskChild(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Tarea inválida"})
 	}
-	parent, err := s.services.Task.GetByID(c.Context(), parentID, accountID)
+	parent, err := s.services.Task.GetByIDForActor(c.Context(), parentID, accountID, userID)
 	if err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Tarea no encontrada"})
+		return taskWorkError(c, err)
+	}
+	if !taskChildParentCanEdit(parent) {
+		return taskWorkError(c, repository.ErrTaskAccessDenied)
 	}
 	if parent.ParentTaskID != nil {
 		return c.Status(422).JSON(fiber.Map{"success": false, "error": "Sólo se permite un nivel de subtareas"})
@@ -1468,6 +1471,10 @@ func (s *Server) handleCreateTaskChild(c *fiber.Ctx) error {
 	}
 	if err := c.BodyParser(&req); err != nil || strings.TrimSpace(req.Title) == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "El título es obligatorio"})
+	}
+	operationID, operationErr := resolveTaskOperationID(req.OperationID)
+	if operationErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "operation_id inválido"})
 	}
 	assigned := parent.AssignedTo
 	if req.AssignedTo != nil && *req.AssignedTo != "" {
@@ -1492,10 +1499,6 @@ func (s *Server) handleCreateTaskChild(c *fiber.Ctx) error {
 	status, e := s.repos.TaskWork.ResolveStatus(c.Context(), accountID, parent.ListID, requestedStatus, domain.TaskStatusCategoryNotStarted)
 	if e != nil {
 		return taskWorkError(c, e)
-	}
-	operationID, operationErr := parseTaskOperationID(req.OperationID)
-	if operationErr != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "operation_id inválido"})
 	}
 	child := &domain.Task{AccountID: accountID, CreatedBy: userID, AssignedTo: assigned, Title: strings.TrimSpace(req.Title), Description: req.Description, Type: domain.TaskTypeReminder, Priority: req.Priority, Status: domain.TaskStatusPending, StatusID: &status.ID, ListID: parent.ListID, ParentTaskID: &parentID, IsAllDay: req.IsAllDay, MutationActor: &userID, MutationOperationID: operationID, ConfirmParticipantGrants: req.ConfirmGrants}
 	if child.Priority == "" {
@@ -1539,7 +1542,16 @@ func (s *Server) handleCreateTaskChild(c *fiber.Ctx) error {
 	}
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, parentID, &userID, "subtask_created", fiber.Map{"subtask_id": child.ID})
 	s.invalidateTasksCache(accountID)
-	return c.Status(201).JSON(fiber.Map{"success": true, "task": full})
+	counts := s.taskHierarchyCounts(c.Context(), accountID, userID)
+	return c.Status(fiber.StatusCreated).JSON(taskChildCreateResponse(full, *operationID, counts))
+}
+
+func taskChildCreateResponse(task *domain.Task, operationID uuid.UUID, counts *domain.TaskHierarchyCounts) fiber.Map {
+	return taskCreateResponse(task, operationID, counts)
+}
+
+func taskChildParentCanEdit(parent *domain.Task) bool {
+	return parent != nil && parent.Permissions != nil && parent.Permissions.CanEdit
 }
 
 func (s *Server) handleGetTaskComments(c *fiber.Ctx) error {

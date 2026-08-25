@@ -1016,6 +1016,7 @@ func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uu
 				&chat.IsPinned, &chat.CreatedAt, &chat.UpdatedAt,
 			)
 			if err == nil {
+				setChatIdentityState(chat)
 				if _, suppressionErr := applyDurableSuppressionToContact(ctx, r.db, accountID, *aliasContactID); suppressionErr != nil {
 					return nil, suppressionErr
 				}
@@ -1059,6 +1060,7 @@ func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uu
 		&chat.IsPinned, &chat.CreatedAt, &chat.UpdatedAt, &chat.ContactCreated,
 	)
 	if err == nil && !isGroup && chat.ContactID != nil {
+		setChatIdentityState(chat)
 		if _, suppressionErr := applyDurableSuppressionToContact(ctx, r.db, accountID, *chat.ContactID); suppressionErr != nil {
 			return nil, suppressionErr
 		}
@@ -1136,7 +1138,7 @@ func (r *ChatRepository) GetOrCreateForContact(ctx context.Context, accountID, d
 			return nil, err
 		}
 		if err == nil && ownerID != contactID {
-			return nil, fmt.Errorf("verified WhatsApp identity belongs to another contact")
+			return nil, ErrContactIdentityConflict
 		}
 		if err == pgx.ErrNoRows {
 			if _, err := tx.Exec(ctx, `
@@ -1169,8 +1171,9 @@ func (r *ChatRepository) GetOrCreateForContact(ctx context.Context, accountID, d
 		return nil, err
 	}
 	if chat.ContactID == nil || *chat.ContactID != contactID {
-		return nil, fmt.Errorf("existing WhatsApp chat belongs to another contact")
+		return nil, ErrChatContactConflict
 	}
+	setChatIdentityState(chat)
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
@@ -1413,6 +1416,9 @@ func (r *ChatRepository) CreateAndLinkContact(ctx context.Context, accountID, ch
 }
 
 func phoneFromJID(jid string) string {
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(jid)), "@lid") {
+		return ""
+	}
 	user := strings.Split(strings.TrimSpace(jid), "@")[0]
 	if idx := strings.Index(user, ":"); idx >= 0 {
 		user = user[:idx]
@@ -1424,6 +1430,13 @@ func phoneFromJID(jid string) string {
 		}
 	}
 	return b.String()
+}
+
+func setChatIdentityState(chat *domain.Chat) {
+	if chat == nil {
+		return
+	}
+	chat.IdentityPending = strings.HasSuffix(strings.ToLower(strings.TrimSpace(chat.JID)), "@lid")
 }
 
 func findContactAliasID(ctx context.Context, db *pgxpool.Pool, accountID uuid.UUID, jid, phone string) (*uuid.UUID, error) {
@@ -1525,6 +1538,7 @@ func (r *ChatRepository) FindByJID(ctx context.Context, accountID uuid.UUID, jid
 	if err != nil {
 		return nil, err
 	}
+	setChatIdentityState(chat)
 	return chat, nil
 }
 
@@ -1549,6 +1563,9 @@ func (r *ChatRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Cha
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
+	if err == nil {
+		setChatIdentityState(chat)
+	}
 	return chat, err
 }
 
@@ -1561,7 +1578,7 @@ func (r *ChatRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID
 		FROM chats c
 		LEFT JOIN devices d ON c.device_id = d.id
 		LEFT JOIN contacts ctc ON ctc.id = c.contact_id AND ctc.account_id = c.account_id
-		WHERE c.account_id = $1 AND c.jid NOT LIKE '%@g.us' AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast' AND c.jid NOT LIKE '%@lid'
+		WHERE c.account_id = $1 AND c.jid NOT LIKE '%@g.us' AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast'
 		ORDER BY c.is_pinned DESC, c.last_message_at DESC NULLS LAST
 	`, accountID)
 	if err != nil {
@@ -1581,6 +1598,7 @@ func (r *ChatRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID
 		); err != nil {
 			return nil, err
 		}
+		setChatIdentityState(chat)
 		chats = append(chats, chat)
 	}
 	return chats, nil
@@ -1593,7 +1611,7 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 		LEFT JOIN devices d ON c.device_id = d.id
 		LEFT JOIN contacts ctc ON ctc.id = c.contact_id AND ctc.account_id = c.account_id
 		LEFT JOIN leads l ON l.account_id = c.account_id AND l.jid = c.jid
-		WHERE c.account_id = $1 AND c.jid NOT LIKE '%@g.us' AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast' AND c.jid NOT LIKE '%@lid'
+		WHERE c.account_id = $1 AND c.jid NOT LIKE '%@g.us' AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast'
 	`
 	args := []interface{}{accountID}
 	argNum := 2
@@ -1714,27 +1732,85 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 		); err != nil {
 			return nil, 0, err
 		}
+		setChatIdentityState(chat)
 		chats = append(chats, chat)
 	}
 
 	return chats, total, nil
 }
 
-func (r *ChatRepository) UpdateLastMessage(ctx context.Context, chatID uuid.UUID, message string, timestamp time.Time, incrementUnread bool) error {
+func (r *ChatRepository) UpdateLastMessage(ctx context.Context, accountID, chatID uuid.UUID, message string, timestamp time.Time, incrementUnread bool) error {
 	query := `
 		UPDATE chats SET last_message = $1, last_message_at = $2, updated_at = NOW()
 	`
 	if incrementUnread {
-		query += `, unread_count = unread_count + 1`
+		query += `, unread_count = unread_count + 1, last_inbound_at = GREATEST(COALESCE(last_inbound_at, $2), $2)`
+	} else {
+		query += `, last_outbound_at = GREATEST(COALESCE(last_outbound_at, $2), $2)`
 	}
-	query += ` WHERE id = $3`
-	_, err := r.db.Exec(ctx, query, message, timestamp, chatID)
+	query += ` WHERE account_id = $3 AND id = $4`
+	_, err := r.db.Exec(ctx, query, message, timestamp, accountID, chatID)
 	return err
 }
 
-func (r *ChatRepository) MarkAsRead(ctx context.Context, chatID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `UPDATE chats SET unread_count = 0, updated_at = NOW() WHERE id = $1`, chatID)
-	return err
+func (r *ChatRepository) MarkAsRead(ctx context.Context, accountID, chatID uuid.UUID, throughMessageID string) (int, string, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return 0, "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var lockedID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM chats WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, chatID).Scan(&lockedID); err != nil {
+		return 0, "", err
+	}
+
+	var watermarkID uuid.UUID
+	var watermarkTime time.Time
+	var readThrough string
+	query := `
+		SELECT id, timestamp, message_id
+		FROM messages
+		WHERE account_id=$1 AND chat_id=$2 AND is_from_me=FALSE
+	`
+	args := []any{accountID, chatID}
+	if strings.TrimSpace(throughMessageID) != "" {
+		query += ` AND (id::text=$3 OR message_id=$3) ORDER BY CASE WHEN id::text=$3 THEN 0 ELSE 1 END LIMIT 1`
+		args = append(args, strings.TrimSpace(throughMessageID))
+	} else {
+		query += ` ORDER BY timestamp DESC, id DESC LIMIT 1`
+	}
+	watermarkErr := tx.QueryRow(ctx, query, args...).Scan(&watermarkID, &watermarkTime, &readThrough)
+	if watermarkErr != nil && !errors.Is(watermarkErr, pgx.ErrNoRows) {
+		return 0, "", watermarkErr
+	}
+	if watermarkErr == nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE messages
+			SET is_read=TRUE, read_at=COALESCE(read_at, NOW())
+			WHERE account_id=$1 AND chat_id=$2 AND is_from_me=FALSE
+			  AND (timestamp < $3 OR (timestamp = $3 AND id <= $4))
+		`, accountID, chatID, watermarkTime, watermarkID); err != nil {
+			return 0, "", err
+		}
+	}
+
+	var unreadCount int
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*)::int
+		FROM messages
+		WHERE account_id=$1 AND chat_id=$2 AND is_from_me=FALSE AND is_read=FALSE
+		  AND COALESCE(is_revoked, FALSE)=FALSE
+	`, accountID, chatID).Scan(&unreadCount); err != nil {
+		return 0, "", err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE chats SET unread_count=$3, updated_at=NOW() WHERE account_id=$1 AND id=$2`, accountID, chatID, unreadCount); err != nil {
+		return 0, "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, "", err
+	}
+	return unreadCount, readThrough, nil
 }
 
 func (r *ChatRepository) Delete(ctx context.Context, accountID, id uuid.UUID) error {
@@ -8279,12 +8355,13 @@ func (r *ReactionRepository) Delete(ctx context.Context, accountID, chatID uuid.
 	return result.RowsAffected() > 0, nil
 }
 
-func (r *ReactionRepository) GetByChatID(ctx context.Context, chatID uuid.UUID) ([]*domain.MessageReaction, error) {
+func (r *ReactionRepository) GetByChatID(ctx context.Context, accountID, chatID uuid.UUID) ([]*domain.MessageReaction, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, chat_id, target_message_id, sender_jid, sender_name, emoji, is_from_me, timestamp, created_at
-		FROM message_reactions WHERE chat_id = $1
+		FROM message_reactions
+		WHERE account_id = $1 AND chat_id = $2
 		ORDER BY timestamp ASC
-	`, chatID)
+	`, accountID, chatID)
 	if err != nil {
 		return nil, err
 	}
@@ -8298,7 +8375,35 @@ func (r *ReactionRepository) GetByChatID(ctx context.Context, chatID uuid.UUID) 
 		}
 		reactions = append(reactions, r)
 	}
-	return reactions, nil
+	return reactions, rows.Err()
+}
+
+// GetByChatMessageIDs keeps paginated history, search and quoted-context
+// hydration bounded to the messages in the current projection.
+func (r *ReactionRepository) GetByChatMessageIDs(ctx context.Context, accountID, chatID uuid.UUID, targetMessageIDs []string) ([]*domain.MessageReaction, error) {
+	if len(targetMessageIDs) == 0 {
+		return []*domain.MessageReaction{}, nil
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT id, account_id, chat_id, target_message_id, sender_jid, sender_name, emoji, is_from_me, timestamp, created_at
+		FROM message_reactions
+		WHERE account_id = $1 AND chat_id = $2 AND target_message_id = ANY($3)
+		ORDER BY timestamp ASC
+	`, accountID, chatID, targetMessageIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reactions []*domain.MessageReaction
+	for rows.Next() {
+		reaction := &domain.MessageReaction{}
+		if err := rows.Scan(&reaction.ID, &reaction.AccountID, &reaction.ChatID, &reaction.TargetMessageID, &reaction.SenderJID, &reaction.SenderName, &reaction.Emoji, &reaction.IsFromMe, &reaction.Timestamp, &reaction.CreatedAt); err != nil {
+			return nil, err
+		}
+		reactions = append(reactions, reaction)
+	}
+	return reactions, rows.Err()
 }
 
 // PollRepository handles poll data access

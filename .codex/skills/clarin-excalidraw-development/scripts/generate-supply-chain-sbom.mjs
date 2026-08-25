@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, posix, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const DEFAULT_ROOT = "@excalidraw/excalidraw";
-const GENERATOR_VERSION = "1";
+const GENERATOR_VERSION = "2";
 
 function usage() {
   console.log(`Usage:
@@ -85,6 +85,34 @@ function fileSha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+export function directorySha256(root) {
+  const hash = createHash("sha256");
+  const walk = (directory, prefix = "") => {
+    for (const name of readdirSync(directory).sort()) {
+      const relativePath = prefix ? `${prefix}/${name}` : name;
+      if (
+        name === ".git" ||
+        name === "node_modules" ||
+        /(?:^|\/)packages\/excalidraw\/dist\/(?:dev|prod)(?:\/|$)/.test(relativePath)
+      ) {
+        continue;
+      }
+      const path = resolve(directory, name);
+      const info = lstatSync(path);
+      if (info.isSymbolicLink()) throw new Error(`Vendored source contains a symbolic link: ${relativePath}`);
+      if (info.isDirectory()) walk(path, relativePath);
+      else if (info.isFile()) {
+        hash.update(`${relativePath}\0${info.mode & 0o111 ? "x" : "-"}\0`);
+        hash.update(readFileSync(path));
+        hash.update("\0");
+      }
+    }
+  };
+  if (!existsSync(root) || !lstatSync(root).isDirectory()) throw new Error(`Vendored source directory not found: ${root}`);
+  walk(root);
+  return hash.digest("hex");
+}
+
 function exactVersion(value) {
   return typeof value === "string" && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value);
 }
@@ -119,14 +147,23 @@ function purlFor(name, version) {
   return `pkg:npm/${encodedName}@${encodeURIComponent(version)}`;
 }
 
-function componentIdentity(name, entry) {
+function componentDigest(name, entry) {
+  if (entry.clarinSourceSha256) {
+    if (!/^[0-9a-f]{64}$/.test(entry.clarinSourceSha256)) throw new Error(`${name}@${entry.version} has an invalid vendored source sha256`);
+    return { alg: "SHA-256", content: entry.clarinSourceSha256.toUpperCase(), identity: `sha256-${entry.clarinSourceSha256}` };
+  }
   const integrity = parseIntegrity(entry.integrity, `${name}@${entry.version}`);
-  return `${name}\u0000${entry.version}\u0000${integrity.sri}`;
+  return { alg: "SHA-512", content: integrity.hex, identity: integrity.sri };
+}
+
+function componentIdentity(name, entry) {
+  const digest = componentDigest(name, entry);
+  return `${name}\u0000${entry.version}\u0000${digest.identity}`;
 }
 
 function componentRef(name, entry) {
-  const integrity = parseIntegrity(entry.integrity, `${name}@${entry.version}`);
-  return `npm:${name}@${entry.version}:${integrity.hex.slice(0, 16).toLowerCase()}`;
+  const digest = componentDigest(name, entry);
+  return `npm:${name}@${entry.version}:${digest.content.slice(0, 16).toLowerCase()}`;
 }
 
 function dependencyNames(entry) {
@@ -142,6 +179,20 @@ function dependencyNames(entry) {
 function validateBaseline(baseline) {
   if (!baseline || baseline.schemaVersion !== 1) throw new Error("Supply-chain baseline schemaVersion must be 1");
   if (!baseline.root || typeof baseline.root !== "object") throw new Error("Supply-chain baseline has no root identity");
+  const source = baseline.root.source;
+  if (source) {
+    if (source.type !== "vendored") throw new Error("Supply-chain baseline root source type must be vendored");
+    for (const field of ["manifestSpec", "lockPath", "treePath", "upstreamTag", "upstreamCommit"]) {
+      if (typeof source[field] !== "string" || !source[field]) throw new Error(`Vendored root source has no ${field}`);
+    }
+    if (!source.manifestSpec.startsWith("file:") || source.lockPath.startsWith("/") || source.lockPath.includes("..") || source.treePath.startsWith("/") || source.treePath.includes("..")) {
+      throw new Error("Vendored root source paths are unsafe");
+    }
+    if (!/^[0-9a-f]{40}$/.test(source.upstreamCommit)) throw new Error("Vendored root source has no exact upstream commit");
+    if (!/^[0-9a-f]{64}$/.test(source.sha256)) throw new Error("Vendored root source has no sha256 evidence");
+  } else if (typeof baseline.root.integrity !== "string") {
+    throw new Error("Supply-chain baseline root has neither npm integrity nor vendored source evidence");
+  }
   if (!Array.isArray(baseline.advisories)) throw new Error("Supply-chain baseline advisories must be an array");
   if (!Array.isArray(baseline.licenseOverrides ?? [])) throw new Error("Supply-chain baseline licenseOverrides must be an array");
   const licenseKeys = new Set();
@@ -212,24 +263,40 @@ function cyclonedxVulnerabilities(advisories, refsByNameVersion) {
 export function buildSbom({ manifest, lockfile, rootName = DEFAULT_ROOT, baseline = null }) {
   if (!lockfile || ![2, 3].includes(lockfile.lockfileVersion)) throw new Error("Only npm lockfileVersion 2 or 3 is supported");
   const rootPath = `node_modules/${rootName}`;
-  const rootEntry = lockfile.packages?.[rootPath];
-  if (!rootEntry) throw new Error(`${rootName} is absent from the lockfile packages map`);
-  if (!exactVersion(rootEntry.version)) throw new Error(`${rootName} lock entry has no exact semantic version`);
-  parseIntegrity(rootEntry.integrity, `${rootName}@${rootEntry.version}`);
-
   const manifestSpec = manifest?.dependencies?.[rootName];
-  if (!exactVersion(manifestSpec)) throw new Error(`${rootName} must be an exact production dependency in package.json`);
-  if (manifestSpec !== rootEntry.version) throw new Error(`Manifest pins ${manifestSpec} but lockfile resolves ${rootEntry.version}`);
+  const rootLockEntry = lockfile.packages?.[rootPath];
+  if (!rootLockEntry) throw new Error(`${rootName} is absent from the lockfile packages map`);
+  const linkedRoot = rootLockEntry.link === true;
+  let rootPackagePath = rootPath;
+  let rootEntry = rootLockEntry;
+  if (linkedRoot) {
+    if (!baseline) throw new Error(`${rootName} vendored link requires a curated baseline`);
+    validateBaseline(baseline);
+    const source = baseline.root.source;
+    if (!source) throw new Error(`${rootName} vendored link has no baseline source evidence`);
+    if (rootLockEntry.resolved !== source.lockPath) throw new Error("Vendored root lock path does not match the baseline");
+    if (manifestSpec !== source.manifestSpec) throw new Error("Vendored root manifest spec does not match the baseline");
+    rootPackagePath = source.lockPath;
+    const sourceEntry = lockfile.packages?.[rootPackagePath];
+    if (!sourceEntry) throw new Error(`Vendored root package is absent at ${rootPackagePath}`);
+    rootEntry = { ...sourceEntry, clarinSourceSha256: source.sha256, clarinSource: source };
+  } else {
+    if (!exactVersion(manifestSpec)) throw new Error(`${rootName} must be an exact production dependency in package.json`);
+    if (!exactVersion(rootEntry.version)) throw new Error(`${rootName} lock entry has no exact semantic version`);
+    parseIntegrity(rootEntry.integrity, `${rootName}@${rootEntry.version}`);
+    if (manifestSpec !== rootEntry.version) throw new Error(`Manifest pins ${manifestSpec} but lockfile resolves ${rootEntry.version}`);
+  }
+  if (!exactVersion(rootEntry.version)) throw new Error(`${rootName} lock entry has no exact semantic version`);
 
   if (baseline) {
     validateBaseline(baseline);
     if (baseline.root.name !== rootName) throw new Error(`Baseline root ${baseline.root.name} does not match ${rootName}`);
     if (baseline.root.version !== rootEntry.version) throw new Error(`Baseline version ${baseline.root.version} does not match ${rootEntry.version}`);
-    if (baseline.root.integrity !== rootEntry.integrity) throw new Error("Baseline npm integrity does not match the lockfile");
+    if (!linkedRoot && baseline.root.integrity !== rootEntry.integrity) throw new Error("Baseline npm integrity does not match the lockfile");
   }
 
   const packages = lockfile.packages;
-  const queued = [rootPath];
+  const queued = [rootPackagePath];
   const visited = new Set();
   const edgesByPath = new Map();
   while (queued.length > 0) {
@@ -237,10 +304,10 @@ export function buildSbom({ manifest, lockfile, rootName = DEFAULT_ROOT, baselin
     if (visited.has(lockPath)) continue;
     visited.add(lockPath);
     const entry = packages[lockPath];
-    const name = packageNameFromLockPath(lockPath);
+    const name = lockPath === rootPackagePath ? rootName : packageNameFromLockPath(lockPath);
     if (!entry || !name) throw new Error(`Invalid package lock path ${lockPath}`);
     if (!exactVersion(entry.version)) throw new Error(`${name} at ${lockPath} has no exact semantic version`);
-    parseIntegrity(entry.integrity, `${name}@${entry.version}`);
+    if (lockPath !== rootPackagePath || !linkedRoot) parseIntegrity(entry.integrity, `${name}@${entry.version}`);
     const resolvedDependencies = [];
     for (const dependency of dependencyNames(entry)) {
       const dependencyPath = resolveDependency(packages, lockPath, dependency.name);
@@ -258,12 +325,13 @@ export function buildSbom({ manifest, lockfile, rootName = DEFAULT_ROOT, baselin
   const identityByPath = new Map();
   for (const lockPath of [...visited].sort()) {
     const entry = packages[lockPath];
-    const name = packageNameFromLockPath(lockPath);
-    const identity = componentIdentity(name, entry);
+    const name = lockPath === rootPackagePath ? rootName : packageNameFromLockPath(lockPath);
+    const effectiveEntry = lockPath === rootPackagePath ? rootEntry : entry;
+    const identity = componentIdentity(name, effectiveEntry);
     identityByPath.set(lockPath, identity);
     const existing = recordsByIdentity.get(identity);
     if (existing) existing.lockPaths.push(lockPath);
-    else recordsByIdentity.set(identity, { name, entry, lockPaths: [lockPath] });
+    else recordsByIdentity.set(identity, { name, entry: effectiveEntry, lockPaths: [lockPath] });
   }
 
   const refByIdentity = new Map();
@@ -289,7 +357,7 @@ export function buildSbom({ manifest, lockfile, rootName = DEFAULT_ROOT, baselin
   };
 
   const components = [...recordsByIdentity.entries()]
-    .filter(([identity]) => identity !== identityByPath.get(rootPath))
+    .filter(([identity]) => identity !== identityByPath.get(rootPackagePath))
     .map(([identity, record]) => {
       const integrity = parseIntegrity(record.entry.integrity, `${record.name}@${record.entry.version}`);
       return {
@@ -322,8 +390,8 @@ export function buildSbom({ manifest, lockfile, rootName = DEFAULT_ROOT, baselin
     .map(([ref, children]) => ({ ref, dependsOn: [...children].sort() }))
     .sort((left, right) => left.ref.localeCompare(right.ref));
 
-  const rootIntegrity = parseIntegrity(rootEntry.integrity, `${rootName}@${rootEntry.version}`);
-  const rootIdentity = identityByPath.get(rootPath);
+  const rootDigest = componentDigest(rootName, rootEntry);
+  const rootIdentity = identityByPath.get(rootPackagePath);
   const rootLicense = licenseFor(rootName, rootEntry);
   const unusedLicenseOverrides = [...licenseOverrides.keys()].filter((key) => !usedLicenseOverrides.has(key));
   if (unusedLicenseOverrides.length > 0) {
@@ -340,13 +408,18 @@ export function buildSbom({ manifest, lockfile, rootName = DEFAULT_ROOT, baselin
         "bom-ref": refByIdentity.get(rootIdentity),
         name: rootName,
         version: rootEntry.version,
-        hashes: [{ alg: "SHA-512", content: rootIntegrity.hex }],
+        hashes: [{ alg: rootDigest.alg, content: rootDigest.content }],
         licenses: [{ expression: rootLicense }],
         purl: purlFor(rootName, rootEntry.version),
-        ...(rootEntry.resolved ? { externalReferences: [{ type: "distribution", url: rootEntry.resolved }] } : {}),
+        ...(!linkedRoot && rootEntry.resolved ? { externalReferences: [{ type: "distribution", url: rootEntry.resolved }] } : {}),
         properties: [
-          { name: "clarin:npm:integrity", value: rootIntegrity.sri },
-          { name: "clarin:npm:lock-path", value: rootPath },
+          ...(linkedRoot ? [
+            { name: "clarin:source:path", value: rootEntry.clarinSource.treePath },
+            { name: "clarin:source:sha256", value: rootEntry.clarinSourceSha256 },
+            { name: "clarin:upstream:tag", value: rootEntry.clarinSource.upstreamTag },
+            { name: "clarin:upstream:commit", value: rootEntry.clarinSource.upstreamCommit },
+          ] : [{ name: "clarin:npm:integrity", value: rootEntry.integrity }]),
+          { name: "clarin:npm:lock-path", value: rootPackagePath },
         ],
       },
       properties: [
@@ -393,6 +466,16 @@ function verifyLicenseEvidence({ baseline, lockfile, artifactRoot }) {
   }
 }
 
+function verifyVendoredSourceEvidence({ baseline, artifactRoot }) {
+  const source = baseline?.root?.source;
+  if (!source) return;
+  const sourceRoot = resolve(artifactRoot, source.treePath);
+  const actual = directorySha256(sourceRoot);
+  if (actual !== source.sha256) {
+    throw new Error(`Vendored source sha256 mismatch for ${source.treePath}: ${actual}`);
+  }
+}
+
 export function run(argv) {
   const args = parseArgs(argv);
   if (args.help) {
@@ -411,6 +494,7 @@ export function run(argv) {
   const lockfile = readJson(lockfilePath);
   const artifactRoot = resolve(args.artifactRoot ?? dirname(lockfilePath));
   verifyLicenseEvidence({ baseline, lockfile, artifactRoot });
+  verifyVendoredSourceEvidence({ baseline, artifactRoot });
   const document = buildSbom({
     manifest,
     lockfile,

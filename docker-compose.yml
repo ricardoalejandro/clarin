@@ -177,8 +177,10 @@ services:
       retries: 3
       start_period: 30s
     ports:
-      - "8080:8080"
-      - "8081:8081"
+      # Keep local diagnostics available without exposing a direct path that
+      # bypasses Traefik's route-specific request-body limits.
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"
     networks:
       - clarin-internal
       - dokploy-network
@@ -195,7 +197,7 @@ services:
       # Public whiteboard link exchange accepts only a tiny JSON credential
       # envelope. This higher-priority router rejects oversized bodies at the
       # edge, before Fiber's global 52 MiB upload parser can allocate them.
-      - "traefik.http.routers.clarin-whiteboard-guest-session.rule=Host(`clarin.naperu.cloud`) && Method(`POST`) && PathRegexp(`^/api/public/whiteboard-links/[0-9a-fA-F-]+/session$`)"
+      - "traefik.http.routers.clarin-whiteboard-guest-session.rule=Host(`clarin.naperu.cloud`) && Method(`POST`) && PathRegexp(`(?i)^/api/public/whiteboard-links/[0-9a-f-]+/session/?$`)"
       - "traefik.http.routers.clarin-whiteboard-guest-session.entrypoints=websecure"
       - "traefik.http.routers.clarin-whiteboard-guest-session.tls=true"
       - "traefik.http.routers.clarin-whiteboard-guest-session.tls.certresolver=letsencrypt"
@@ -204,6 +206,56 @@ services:
       - "traefik.http.routers.clarin-whiteboard-guest-session.middlewares=clarin-whiteboard-guest-session-limit"
       - "traefik.http.middlewares.clarin-whiteboard-guest-session-limit.buffering.maxRequestBodyBytes=16384"
       - "traefik.http.middlewares.clarin-whiteboard-guest-session-limit.buffering.memRequestBodyBytes=16384"
+      # Authenticated public-library starts, callbacks and completion ACKs carry
+      # only opaque control data. Reject large bodies before Fiber's parser.
+      - "traefik.http.routers.clarin-whiteboard-library-start.rule=Host(`clarin.naperu.cloud`) && Method(`POST`) && PathRegexp(`(?i)^/api/whiteboards/[0-9a-f-]+/public-library-import/start/?$`)"
+      - "traefik.http.routers.clarin-whiteboard-library-start.entrypoints=websecure"
+      - "traefik.http.routers.clarin-whiteboard-library-start.tls=true"
+      - "traefik.http.routers.clarin-whiteboard-library-start.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.clarin-whiteboard-library-start.service=clarin-api"
+      - "traefik.http.routers.clarin-whiteboard-library-start.priority=260"
+      - "traefik.http.routers.clarin-whiteboard-library-start.middlewares=clarin-whiteboard-library-import-limit"
+      - "traefik.http.routers.clarin-whiteboard-library-callback.rule=Host(`clarin.naperu.cloud`) && Method(`POST`) && PathRegexp(`(?i)^/api/whiteboards/public-library-import/callback/?$`)"
+      - "traefik.http.routers.clarin-whiteboard-library-callback.entrypoints=websecure"
+      - "traefik.http.routers.clarin-whiteboard-library-callback.tls=true"
+      - "traefik.http.routers.clarin-whiteboard-library-callback.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.clarin-whiteboard-library-callback.service=clarin-api"
+      - "traefik.http.routers.clarin-whiteboard-library-callback.priority=260"
+      - "traefik.http.routers.clarin-whiteboard-library-callback.middlewares=clarin-whiteboard-library-import-limit"
+      - "traefik.http.routers.clarin-whiteboard-library-complete.rule=Host(`clarin.naperu.cloud`) && Method(`POST`) && PathRegexp(`(?i)^/api/whiteboards/[0-9a-f-]+/public-library-imports/[0-9a-f-]+/complete/?$`)"
+      - "traefik.http.routers.clarin-whiteboard-library-complete.entrypoints=websecure"
+      - "traefik.http.routers.clarin-whiteboard-library-complete.tls=true"
+      - "traefik.http.routers.clarin-whiteboard-library-complete.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.clarin-whiteboard-library-complete.service=clarin-api"
+      - "traefik.http.routers.clarin-whiteboard-library-complete.priority=260"
+      - "traefik.http.routers.clarin-whiteboard-library-complete.middlewares=clarin-whiteboard-library-import-limit"
+      - "traefik.http.middlewares.clarin-whiteboard-library-import-limit.buffering.maxRequestBodyBytes=4096"
+      - "traefik.http.middlewares.clarin-whiteboard-library-import-limit.buffering.memRequestBodyBytes=4096"
+      # Comment reads stay on the ordinary API router. Only mutation methods
+      # match these higher-priority, exact-path 16 KiB routers.
+      - "traefik.http.routers.clarin-whiteboard-comment-post.rule=Host(`clarin.naperu.cloud`) && Method(`POST`) && PathRegexp(`(?i)^/api/whiteboards/[0-9a-f-]+/comment-threads(/[0-9a-f-]+/replies)?/?$`)"
+      - "traefik.http.routers.clarin-whiteboard-comment-post.entrypoints=websecure"
+      - "traefik.http.routers.clarin-whiteboard-comment-post.tls=true"
+      - "traefik.http.routers.clarin-whiteboard-comment-post.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.clarin-whiteboard-comment-post.service=clarin-api"
+      - "traefik.http.routers.clarin-whiteboard-comment-post.priority=260"
+      - "traefik.http.routers.clarin-whiteboard-comment-post.middlewares=clarin-whiteboard-comment-limit"
+      - "traefik.http.routers.clarin-whiteboard-comment-patch.rule=Host(`clarin.naperu.cloud`) && Method(`PATCH`) && PathRegexp(`(?i)^/api/whiteboards/[0-9a-f-]+/comment-threads/[0-9a-f-]+/(comments/[0-9a-f-]+|status)/?$`)"
+      - "traefik.http.routers.clarin-whiteboard-comment-patch.entrypoints=websecure"
+      - "traefik.http.routers.clarin-whiteboard-comment-patch.tls=true"
+      - "traefik.http.routers.clarin-whiteboard-comment-patch.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.clarin-whiteboard-comment-patch.service=clarin-api"
+      - "traefik.http.routers.clarin-whiteboard-comment-patch.priority=260"
+      - "traefik.http.routers.clarin-whiteboard-comment-patch.middlewares=clarin-whiteboard-comment-limit"
+      - "traefik.http.routers.clarin-whiteboard-comment-delete.rule=Host(`clarin.naperu.cloud`) && Method(`DELETE`) && PathRegexp(`(?i)^/api/whiteboards/[0-9a-f-]+/comment-threads/[0-9a-f-]+/comments/[0-9a-f-]+/?$`)"
+      - "traefik.http.routers.clarin-whiteboard-comment-delete.entrypoints=websecure"
+      - "traefik.http.routers.clarin-whiteboard-comment-delete.tls=true"
+      - "traefik.http.routers.clarin-whiteboard-comment-delete.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.clarin-whiteboard-comment-delete.service=clarin-api"
+      - "traefik.http.routers.clarin-whiteboard-comment-delete.priority=260"
+      - "traefik.http.routers.clarin-whiteboard-comment-delete.middlewares=clarin-whiteboard-comment-limit"
+      - "traefik.http.middlewares.clarin-whiteboard-comment-limit.buffering.maxRequestBodyBytes=16384"
+      - "traefik.http.middlewares.clarin-whiteboard-comment-limit.buffering.memRequestBodyBytes=16384"
       # MCP Server (Model Context Protocol) on port 8081.
       - "traefik.http.routers.clarin-mcp.rule=Host(`clarin.naperu.cloud`) && PathPrefix(`/mcp`)"
       - "traefik.http.routers.clarin-mcp.entrypoints=websecure"

@@ -6,19 +6,22 @@ import { useParams, useRouter } from 'next/navigation';
 import {
   ArrowLeft, Users, Calendar, MessageSquare, Plus, Check, X, Clock,
   AlertCircle, Trash2, GraduationCap, MapPin, CalendarDays, Send,
-  Repeat, ChevronRight, ChevronDown, CheckCircle2, XCircle, Phone, Edit2, MoreVertical, Archive, BarChart3, Columns3, LayoutGrid, HeartPulse, Target, NotebookPen, Maximize2, Minimize2, Search, FileSpreadsheet, Loader2, BookOpen, UserPlus, ClipboardList
+  Repeat, ChevronRight, ChevronDown, CheckCircle2, XCircle, Phone, Edit2, MoreVertical, Archive, BarChart3, Columns3, LayoutGrid, HeartPulse, Target, NotebookPen, Maximize2, Minimize2, Search, FileSpreadsheet, Loader2, BookOpen, UserPlus, ClipboardList,
+  ArrowUp, ArrowDown,
 } from 'lucide-react';
 import { api, subscribeWebSocket } from '@/lib/api';
 import { contactIdFromRealtimeEvent } from '@/lib/contactProfileEvents';
-import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher';
-import { Program, ProgramParticipant, ProgramSession, ProgramSessionTopic, ProgramAttendanceObservation, ProgramGoal, ProgramHealthSummary, ProgramAttendanceStatsResponse, ProgramAcademicConfig, ProgramSessionRosterEntry } from '@/types/program';
-import { Chat } from '@/types/chat';
+import { Program, ProgramParticipant, ProgramSession, ProgramSessionTopic, ProgramAttendanceObservation, ProgramGoal, ProgramHealthSummary, ProgramAttendanceStatsResponse, ProgramAcademicConfig, ProgramSessionRosterEntry, type ProgramHealthParticipant, type ProgramHealthViewColumn } from '@/types/program';
 import ContactSelector, { SelectedPerson } from '@/components/ContactSelector';
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal';
 import ChatPanel from '@/components/chat/ChatPanel';
+import WhatsAppDevicePicker from '@/components/WhatsAppDevicePicker';
 import ObservationHistoryModal, { HistoryObservation } from '@/components/ObservationHistoryModal';
 import ContactPhotoPreview from '@/components/ContactPhotoPreview';
 import ContactDetailSurface from '@/components/contact-details/ContactDetailSurface';
+import CrmDetailWorkspace from '@/components/crm-detail/CrmDetailWorkspace';
+import OperationalOverlayBoundary from '@/components/operational-window/OperationalOverlayBoundary';
+import useWhatsAppChatLauncher from '@/hooks/useWhatsAppChatLauncher';
 import ProgramParticipantAttendanceSection from '@/components/programs/ProgramParticipantAttendanceSection';
 import ProgramParticipantEnrollmentDate from '@/components/programs/ProgramParticipantEnrollmentDate';
 import ProgramParticipantOutcomeDate from '@/components/programs/ProgramParticipantOutcomeDate';
@@ -32,6 +35,16 @@ import ProgramAcademicConfigPanel from '@/components/programs/ProgramAcademicCon
 import ProgramSurveyPanel from '@/components/programs/ProgramSurveyPanel';
 import SessionTopicField, { normalizedSessionTopics, pendingActiveCourseTopics } from '@/components/programs/SessionTopicField';
 import SessionObservationPanel from '@/components/programs/SessionObservationPanel';
+import { ProgramSettingsDialog } from '@/components/programs/ProgramSettingsDialog';
+import {
+  getProgramTenure,
+  nextProgramHealthSort,
+  normalizeProgramHealthViewColumns,
+  PROGRAM_HEALTH_VIEW_COLUMN_CATALOG,
+  sortProgramHealthParticipants,
+  type ProgramHealthSortKey,
+  type ProgramHealthSortState,
+} from '@/components/programs/programHealthView';
 
 const token = () => typeof window !== 'undefined' ? localStorage.getItem('token') || '' : '';
 
@@ -42,9 +55,6 @@ interface Device {
   phone_number?: string;
   jid?: string | null;
   status: string;
-  normalized_phone?: string;
-  historical_relation?: WhatsAppDeviceOption['historical_relation'];
-  matches_historical?: boolean;
 }
 
 interface SessionFormState {
@@ -261,8 +271,6 @@ export default function ProgramDetailPage() {
 
   // Edit program state
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
-  const [editForm, setEditForm] = useState({ name: '', description: '', color: '#10b981', status: 'active' });
-  const [saving, setSaving] = useState(false);
   const [showHeaderMenu, setShowHeaderMenu] = useState(false);
 
   // Participant detail panel
@@ -338,17 +346,16 @@ export default function ProgramDetailPage() {
   };
 
   // WhatsApp inline chat
-  const [showInlineChat, setShowInlineChat] = useState(false);
-  const [inlineChatId, setInlineChatId] = useState('');
-  const [inlineChat, setInlineChat] = useState<Chat | null>(null);
-  const [inlineChatDeviceId, setInlineChatDeviceId] = useState('');
-  const [inlineChatReadOnly, setInlineChatReadOnly] = useState(false);
-  const [showDeviceSelector, setShowDeviceSelector] = useState(false);
-  const [whatsappPhone, setWhatsappPhone] = useState('');
-  const [existingChatForWA, setExistingChatForWA] = useState<Chat | null>(null);
-  const [whatsappHistoricalPhone, setWhatsappHistoricalPhone] = useState('');
-  const [whatsappLaunching, setWhatsappLaunching] = useState(false);
-  const [whatsappCreating, setWhatsappCreating] = useState(false);
+  const whatsappChat = useWhatsAppChatLauncher({
+    sessionKey: selectedParticipantID,
+    contactId: selectedContact?.id || null,
+  });
+  const showInlineChat = whatsappChat.chatOpen;
+  const showDeviceSelector = whatsappChat.showDeviceSelector;
+  const inlineChatId = whatsappChat.chat?.id || '';
+  const inlineChatDeviceId = whatsappChat.device?.id || whatsappChat.chat?.device_id || '';
+  const resetWhatsAppChat = whatsappChat.reset;
+  const closeWhatsAppChat = whatsappChat.close;
 
   // Generate sessions form
   const [genForm, setGenForm] = useState({
@@ -373,6 +380,7 @@ export default function ProgramDetailPage() {
   const [selectedMonths, setSelectedMonths] = useState<string[]>([]);
   const [health, setHealth] = useState<ProgramHealthSummary | null>(null);
   const [loadingHealth, setLoadingHealth] = useState(false);
+  const [healthSort, setHealthSort] = useState<ProgramHealthSortState | null>(null);
   const [programGoals, setProgramGoals] = useState<ProgramGoal>({ attendance_goal_percent: 80, transfer_goal_percent: 70 });
   const [savingGoals, setSavingGoals] = useState(false);
   const [observationParticipant, setObservationParticipant] = useState<ProgramParticipant | null>(null);
@@ -395,11 +403,17 @@ export default function ProgramDetailPage() {
   const activeParticipants = useMemo(() => participants.filter(participant => participant.status === 'active'), [participants]);
   const historicalParticipants = useMemo(() => participants.filter(participant => participant.status !== 'active'), [participants]);
   const lifecycleParticipants = participantLifecycleView === 'active' ? activeParticipants : historicalParticipants;
+  const visibleHealthColumns = useMemo(
+    () => normalizeProgramHealthViewColumns(program?.health_view_columns),
+    [program?.health_view_columns],
+  );
   const filteredHealthParticipants = useMemo(() => {
     const source = health?.participants || [];
-    if (!normalizedParticipantQuery) return source;
-    return source.filter(participant => normalizeParticipantSearch(`${participant.name || ''} ${participant.phone || ''}`).includes(normalizedParticipantQuery));
-  }, [health?.participants, normalizedParticipantQuery]);
+    const filtered = normalizedParticipantQuery
+      ? source.filter(participant => normalizeParticipantSearch(`${participant.name || ''} ${participant.phone || ''}`).includes(normalizedParticipantQuery))
+      : source;
+    return sortProgramHealthParticipants(filtered, healthSort, health?.as_of_date || limaDateInputValue());
+  }, [health?.as_of_date, health?.participants, healthSort, normalizedParticipantQuery]);
   const filteredProgramParticipants = useMemo(() => {
     if (!normalizedParticipantQuery) return lifecycleParticipants;
     return lifecycleParticipants.filter(participant => normalizeParticipantSearch(`${participant.contact_name || ''} ${participant.contact_phone || ''}`).includes(normalizedParticipantQuery));
@@ -472,12 +486,12 @@ export default function ProgramDetailPage() {
     setParticipantDetailOpen(false);
     setParticipantDetailError('');
     setSelectedContact(null);
-    setShowInlineChat(false);
+    resetWhatsAppChat();
     setSelectedParticipantID(null);
     const returnTarget = participantDetailReturnFocusRef.current;
     participantDetailReturnFocusRef.current = null;
     window.setTimeout(() => returnTarget?.focus(), 0);
-  }, []);
+  }, [resetWhatsAppChat]);
 
   // Toast auto-dismiss
   useEffect(() => {
@@ -520,10 +534,9 @@ export default function ProgramDetailPage() {
     setIsEditModalOpen(false);
     setShowCampaignModal(false);
     setShowColumnPicker(false);
-    setShowInlineChat(false);
-    setShowDeviceSelector(false);
+    resetWhatsAppChat();
     setMaximizedSessionDialog(null);
-  }, [mobileWorkspace]);
+  }, [mobileWorkspace, resetWhatsAppChat]);
 
   useEffect(() => {
     if (!participantDetailOpen) return;
@@ -694,8 +707,7 @@ export default function ProgramDetailPage() {
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       if (showSectionPicker) { setShowSectionPicker(false); return; }
-      if (showDeviceSelector) { setShowDeviceSelector(false); return; }
-      if (showInlineChat) { setShowInlineChat(false); return; }
+      if (showDeviceSelector || showInlineChat) { closeWhatsAppChat(); return; }
       if (attendanceObservationParticipant) { closeAttendanceObservationHistory(); return; }
       if (observationParticipant) { closeObservationHistory(); return; }
       if (outcomeParticipant) { setOutcomeParticipant(null); return; }
@@ -715,7 +727,7 @@ export default function ProgramDetailPage() {
     };
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
-  }, [showSectionPicker, showDeviceSelector, showInlineChat, attendanceObservationParticipant, observationParticipant, outcomeParticipant, isAttendanceOpen, attendanceDirty, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, participantDetailOpen, closeParticipantDetail, closeAttendanceModal, closeAttendanceObservationHistory, closeObservationHistory]);
+  }, [showSectionPicker, showDeviceSelector, showInlineChat, attendanceObservationParticipant, observationParticipant, outcomeParticipant, isAttendanceOpen, attendanceDirty, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, participantDetailOpen, closeParticipantDetail, closeAttendanceModal, closeAttendanceObservationHistory, closeObservationHistory, closeWhatsAppChat]);
 
   const fetchProgramData = async () => {
     programDataRequestRef.current?.abort();
@@ -1027,38 +1039,8 @@ export default function ProgramDetailPage() {
   // Edit program
   const openEditModal = () => {
     if (program) {
-      setEditForm({
-        name: program.name,
-        description: program.description || '',
-        color: program.color || '#10b981',
-        status: program.status,
-      });
       setIsEditModalOpen(true);
       setShowHeaderMenu(false);
-    }
-  };
-
-  const handleUpdateProgram = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!program) return;
-    setSaving(true);
-    try {
-      const res = await api(`/api/programs/${programId}`, {
-        method: 'PUT',
-        body: JSON.stringify(editForm)
-      });
-      if (res.success) {
-        setIsEditModalOpen(false);
-        showToast('Programa actualizado', 'success');
-        fetchProgramData();
-      } else {
-        showToast('Error al actualizar programa', 'error');
-      }
-    } catch (error) {
-      console.error('Error updating program:', error);
-      showToast('Error al actualizar programa', 'error');
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -1108,6 +1090,7 @@ export default function ProgramDetailPage() {
   // Participant detail — programs are contact-only by spec (001-program-contacts-only)
   const openParticipantDetail = async (participantID: string, contactID: string, returnFocus?: HTMLElement | null) => {
     participantDetailRequestRef.current?.abort();
+    resetWhatsAppChat();
     const controller = new AbortController();
     participantDetailRequestRef.current = controller;
     const requestID = ++participantDetailSequence.current;
@@ -1225,64 +1208,7 @@ export default function ProgramDetailPage() {
   }), [refreshLoadedParticipantContact]);
 
   // WhatsApp chat
-  const handleSendWhatsApp = async (phone: string) => {
-    if (!phone || whatsappLaunching) return;
-    setWhatsappLaunching(true);
-    setWhatsappPhone(phone);
-    try {
-      const resolution = await resolveWhatsAppChat(phone);
-      if (!resolution.success) {
-        showToast(resolution.error || 'No se pudo resolver la conversación', 'error');
-        return;
-      }
-      setExistingChatForWA(resolution.chat || null);
-      setWhatsappHistoricalPhone(resolution.historical_phone || '');
-      if (resolution.mode === 'read_only' && resolution.chat) {
-        setInlineChatId(resolution.chat.id);
-        setInlineChat(resolution.chat);
-        setInlineChatDeviceId(resolution.chat.device_id || '');
-        setInlineChatReadOnly(true);
-        setShowInlineChat(true);
-        return;
-      }
-      if (resolution.mode === 'open_direct' && resolution.devices[0]) {
-        await handleDeviceSelectedForChat(resolution.devices[0] as Device, phone);
-        return;
-      }
-      if (resolution.mode === 'choose_device') {
-        setDevices(resolution.devices as Device[]);
-        setShowDeviceSelector(true);
-        return;
-      }
-      showToast('No hay dispositivos conectados para enviar', 'error');
-    } catch {
-      showToast('No se pudo conectar con WhatsApp', 'error');
-    } finally {
-      setWhatsappLaunching(false);
-    }
-  };
-
-  const handleDeviceSelectedForChat = async (device: Device, phone?: string) => {
-    if (whatsappCreating) return;
-    setWhatsappCreating(true);
-    setShowDeviceSelector(false);
-    setInlineChatReadOnly(false);
-    try {
-      const data = await createWhatsAppChat(device.id, phone || whatsappPhone);
-      if (data.success && data.chat) {
-        setInlineChatId(data.chat.id);
-        setInlineChat(data.chat);
-        setInlineChatDeviceId(device.id);
-        setShowInlineChat(true);
-      } else {
-        showToast(data.error || 'No se pudo abrir la conversación', 'error');
-      }
-    } catch {
-      showToast('No se pudo conectar con WhatsApp', 'error');
-    } finally {
-      setWhatsappCreating(false);
-    }
-  };
+  const handleSendWhatsApp = (phone: string) => { void whatsappChat.open(phone); };
 
   const openCreateSession = (sessionType: 'regular' | 'recovery' = 'regular') => {
     const topics: ProgramSessionTopic[] = sessionType === 'recovery' ? [{ kind: 'free', title: 'Clase de recuperación' }] : [];
@@ -1888,6 +1814,68 @@ export default function ProgramDetailPage() {
     if (value === 'watch') return 'Observar';
     return 'Saludable';
   };
+  const renderHealthSortHeader = (key: ProgramHealthSortKey, label: string) => {
+    const active = healthSort?.key === key;
+    const ariaSort = active ? healthSort.direction : 'none';
+    return (
+      <th key={key} scope="col" aria-sort={ariaSort} className="px-2 py-1 font-medium first:pl-4">
+        <button
+          type="button"
+          onClick={() => setHealthSort(current => nextProgramHealthSort(current, key))}
+          className="group inline-flex min-h-10 w-full items-center gap-1.5 rounded-lg px-2 text-left text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+          aria-label={`Ordenar por ${label}${active ? (healthSort.direction === 'ascending' ? ', ascendente' : ', descendente') : ''}`}
+        >
+          <span>{label}</span>
+          {active ? (
+            healthSort.direction === 'ascending'
+              ? <ArrowUp className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
+              : <ArrowDown className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
+          ) : <span className="h-3.5 w-3.5 text-center text-[10px] leading-3.5 text-slate-300 group-hover:text-slate-500" aria-hidden="true">↕</span>}
+        </button>
+      </th>
+    );
+  };
+  const renderHealthColumnCell = (participant: ProgramHealthParticipant, column: ProgramHealthViewColumn) => {
+    if (column === 'health') {
+      return (
+        <td key={column} className="px-4 py-3">
+          <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-medium ${healthClass(participant.health)}`}>
+            {healthLabel(participant.health)}
+          </span>
+        </td>
+      );
+    }
+    if (column === 'attendance') {
+      return (
+        <td key={column} className="px-4 py-3 tabular-nums">
+          <div className="font-semibold text-slate-700">{formatPct(participant.attendance_rate)}</div>
+          <div className="whitespace-nowrap text-[11px] text-slate-400">{participant.present} P · {participant.absent} F · {participant.late} T</div>
+        </td>
+      );
+    }
+    if (column === 'signals') {
+      return (
+        <td key={column} className="px-4 py-3">
+          <div className="flex max-w-[20rem] flex-wrap gap-1">
+            {(participant.reasons || []).slice(0, 3).map(reason => (
+              <span key={reason} className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600">{reason}</span>
+            ))}
+          </div>
+          {participant.transferred_to_level && <div className="mt-1 text-[11px] text-emerald-600">Traspaso: {participant.transferred_to_level}</div>}
+        </td>
+      );
+    }
+    if (column === 'enrolled_at') {
+      const formatted = formatCalendarDate(participant.enrolled_at, 'dd MMM yyyy', { locale: es });
+      return <td key={column} className="whitespace-nowrap px-4 py-3 text-sm text-slate-600 tabular-nums">{formatted || '—'}</td>;
+    }
+    const tenure = getProgramTenure(participant.enrolled_at, health?.as_of_date || limaDateInputValue());
+    return (
+      <td key={column} className="whitespace-nowrap px-4 py-3 text-sm font-medium text-slate-700 tabular-nums">
+        <span aria-label={`Antigüedad: ${tenure.accessible}`} title={tenure.accessible}>{tenure.compact}</span>
+      </td>
+    );
+  };
   const renderStageSelect = (participant: ProgramParticipant) => touchWorkspace && !mobileWorkspace ? (
     <label className="mt-3 block">
       <span className="mb-1 block text-[11px] font-medium text-slate-500">Mover a etapa</span>
@@ -1935,6 +1923,9 @@ export default function ProgramDetailPage() {
           </div>
           <p className="text-slate-500 text-xs truncate">{program.description || 'Sin descripción'}</p>
         </div>
+        {mobileWorkspace && <button type="button" onClick={openEditModal} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Editar programa">
+          <Edit2 className="h-4 w-4" />
+        </button>}
         {mobileWorkspace && <button type="button" onClick={() => setShowSectionPicker(true)} className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 shadow-sm transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label={`Cambiar sección. Actual: ${activeTab === 'sessions' ? 'Sesiones' : activeTab === 'stats' ? 'Estadísticas' : activeTab === 'academic' ? 'Plan e instructores' : activeTab === 'surveys' ? 'Encuestas' : activeTab === 'kanban' ? 'Tablero' : 'Participantes'}`} aria-haspopup="dialog" aria-expanded={showSectionPicker}>
           {activeTab === 'sessions' ? <Calendar className="h-5 w-5" /> : activeTab === 'stats' ? <BarChart3 className="h-5 w-5" /> : activeTab === 'academic' ? <GraduationCap className="h-5 w-5" /> : activeTab === 'surveys' ? <ClipboardList className="h-5 w-5" /> : activeTab === 'kanban' ? <LayoutGrid className="h-5 w-5" /> : <Users className="h-5 w-5" />}
           <ChevronDown className="absolute bottom-1 right-1 h-2.5 w-2.5 text-slate-400" />
@@ -2236,17 +2227,17 @@ export default function ProgramDetailPage() {
                   <table className="w-full text-left text-sm">
                     <thead className="bg-slate-50 text-slate-600">
                       <tr>
-                        <th className="px-4 py-3 font-medium">Participante</th>
-                        <th className="px-4 py-3 font-medium">Salud</th>
-                        <th className="px-4 py-3 font-medium">Asistencia</th>
-                        <th className="px-4 py-3 font-medium">Señales</th>
-                        <th className="px-4 py-3 font-medium text-right">Acciones</th>
+                        {renderHealthSortHeader('participant', 'Participante')}
+                        {PROGRAM_HEALTH_VIEW_COLUMN_CATALOG
+                          .filter(column => visibleHealthColumns.includes(column.key))
+                          .map(column => renderHealthSortHeader(column.key, column.shortLabel))}
+                        <th scope="col" className="px-4 py-3 text-right font-medium">Acciones</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {filteredHealthParticipants.length === 0 ? (
                         <tr>
-                          <td colSpan={5} className="px-4 py-10 text-center text-sm text-slate-400">{normalizedParticipantQuery ? 'No hay participantes que coincidan con la búsqueda.' : 'Sin inscritos para evaluar'}</td>
+                          <td colSpan={visibleHealthColumns.length + 2} className="px-4 py-10 text-center text-sm text-slate-400">{normalizedParticipantQuery ? 'No hay participantes que coincidan con la búsqueda.' : 'Sin inscritos para evaluar'}</td>
                         </tr>
                       ) : (
                         filteredHealthParticipants.map(p => (
@@ -2261,23 +2252,7 @@ export default function ProgramDetailPage() {
                                 </button>
                               </div>
                             </td>
-                            <td className="px-4 py-3">
-                              <span className={`inline-flex px-2 py-0.5 rounded-full border text-xs font-medium ${healthClass(p.health)}`}>
-                                {healthLabel(p.health)}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="font-semibold text-slate-700">{formatPct(p.attendance_rate)}</div>
-                              <div className="text-[11px] text-slate-400">{p.present} P · {p.absent} F · {p.late} T</div>
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="flex flex-wrap gap-1">
-                                {(p.reasons || []).slice(0, 3).map(reason => (
-                                  <span key={reason} className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full text-[11px]">{reason}</span>
-                                ))}
-                              </div>
-                              {p.transferred_to_level && <div className="text-[11px] text-emerald-600 mt-1">Traspaso: {p.transferred_to_level}</div>}
-                            </td>
+                            {visibleHealthColumns.map(column => renderHealthColumnCell(p, column))}
                             <td className="px-4 py-3 text-right">
                               <div onClick={event => event.stopPropagation()} className="flex items-center justify-end gap-1">
                                 <button onClick={() => openObservationHistory(p.participant_id)} className="p-1.5 rounded-lg hover:bg-emerald-50 text-slate-400 hover:text-emerald-600" title="Abrir observaciones">
@@ -3766,74 +3741,18 @@ export default function ProgramDetailPage() {
         }
       />
 
-      {/* Edit Program Modal */}
-      {isEditModalOpen && !mobileWorkspace && (
-        <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 sm:items-center sm:p-4" onClick={() => setIsEditModalOpen(false)}>
-          <div role="dialog" aria-modal="true" aria-labelledby="edit-program-detail-title" className="flex h-[var(--app-height)] w-full max-w-md flex-col overflow-hidden rounded-none bg-white shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-2xl" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between p-5 border-b border-slate-100">
-              <h3 id="edit-program-detail-title" className="text-lg font-bold text-slate-800">Editar Programa</h3>
-              <button onClick={() => setIsEditModalOpen(false)} className="flex h-11 w-11 items-center justify-center rounded-xl transition-colors hover:bg-slate-100">
-                <X className="w-5 h-5 text-slate-400" />
-              </button>
-            </div>
-            <form onSubmit={handleUpdateProgram} className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] sm:p-5">
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Nombre</label>
-                <input
-                  type="text"
-                  value={editForm.name}
-                  onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-                  required
-                  className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Descripción</label>
-                <textarea
-                  value={editForm.description}
-                  onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
-                  rows={3}
-                  className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all resize-none"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Color</label>
-                <div className="flex gap-2 flex-wrap">
-                  {['#10b981', '#3b82f6', '#8b5cf6', '#6366f1', '#ec4899', '#f43f5e', '#f97316', '#f59e0b'].map(c => (
-                    <button
-                      key={c}
-                      type="button"
-                      onClick={() => setEditForm({ ...editForm, color: c })}
-                      className={`w-8 h-8 rounded-full transition-all ${editForm.color === c ? 'ring-2 ring-offset-2 ring-slate-400 scale-110' : 'hover:scale-110'}`}
-                      style={{ backgroundColor: c }}
-                    />
-                  ))}
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Estado</label>
-                <select
-                  value={editForm.status}
-                  onChange={(e) => setEditForm({ ...editForm, status: e.target.value })}
-                  className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                >
-                  <option value="active">Activo</option>
-                  <option value="archived">Archivado</option>
-                  <option value="completed">Completado</option>
-                </select>
-              </div>
-              <div className="sticky bottom-0 -mx-4 flex gap-3 border-t border-slate-100 bg-white px-4 pb-[env(safe-area-inset-bottom)] pt-4 sm:static sm:mx-0 sm:justify-end sm:border-0 sm:px-0 sm:pb-0">
-                <button type="button" onClick={() => setIsEditModalOpen(false)} className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 sm:flex-none">
-                  Cancelar
-                </button>
-                <button type="submit" disabled={saving || !editForm.name.trim()} className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 disabled:opacity-50 sm:flex-none">
-                  {saving ? 'Guardando...' : 'Guardar Cambios'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <ProgramSettingsDialog
+        open={isEditModalOpen}
+        program={program}
+        onClose={() => setIsEditModalOpen(false)}
+        onCanonicalReload={canonical => setProgram(canonical)}
+        onSaved={updated => {
+          setProgram(updated);
+          setIsEditModalOpen(false);
+          showToast('Programa actualizado', 'success');
+          void fetchProgramData();
+        }}
+      />
 
       {/* Lead/Contact Detail Side Panel with Inline Chat */}
       {participantDetailOpen && (
@@ -3842,22 +3761,25 @@ export default function ProgramDetailPage() {
             className="absolute inset-0 bg-black/30"
             onClick={closeParticipantDetail}
           />
-          <div ref={participantDetailDialogRef} role="dialog" aria-modal="true" aria-label="Detalle del participante" tabIndex={-1} className={`relative flex h-[var(--app-height,100dvh)] border-l border-slate-200 bg-white pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] shadow-2xl outline-none transition-all duration-200 motion-reduce:transition-none lg:pl-0 lg:pr-0 ${showInlineChat ? 'w-full pt-[env(safe-area-inset-top)] lg:w-[85vw] lg:max-w-6xl lg:pt-0' : 'w-full max-w-md'}`}>
-            {/* Chat Panel - Left Side */}
-            {showInlineChat && inlineChatId && (
-              <div className="flex h-full min-w-0 flex-1 flex-col bg-slate-50/50 lg:border-r lg:border-slate-200">
-                <ChatPanel
-                  chatId={inlineChatId}
-                  deviceId={inlineChatDeviceId}
-                  initialChat={inlineChat || undefined}
-                  readOnly={inlineChatReadOnly}
-                  onClose={() => setShowInlineChat(false)}
-                  className="h-full"
-                />
-              </div>
-            )}
-            {/* Detail Panel - Right Side (programs are contact-only by spec) */}
-            <div className={`${showInlineChat ? 'hidden lg:flex lg:w-[360px] lg:shrink-0' : 'flex w-full'} h-full flex-col bg-white`}>
+          <div ref={participantDetailDialogRef} role="dialog" aria-modal="true" aria-label="Detalle del participante" tabIndex={-1} className={`relative h-[var(--app-height,100dvh)] border-l border-slate-200 bg-white pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] shadow-2xl outline-none transition-[width] duration-200 motion-reduce:transition-none lg:pl-0 lg:pr-0 ${showInlineChat ? 'w-full pt-[env(safe-area-inset-top)] lg:w-[85vw] lg:max-w-6xl lg:pt-0' : 'w-full max-w-md'}`}>
+            <OperationalOverlayBoundary hostZIndex={95}>
+              <CrmDetailWorkspace
+                chatOpen={showInlineChat && Boolean(inlineChatId)}
+                onBackToDetail={closeWhatsAppChat}
+                chat={showInlineChat && inlineChatId ? (
+                  <ChatPanel
+                    chatId={inlineChatId}
+                    deviceId={inlineChatDeviceId}
+                    device={whatsappChat.device || undefined}
+                    initialChat={whatsappChat.chat || undefined}
+                    readOnly={whatsappChat.readOnly}
+                    readOnlyReason={whatsappChat.readOnlyReason}
+                    onClose={closeWhatsAppChat}
+                    className="h-full"
+                  />
+                ) : undefined}
+                detail={(
+                  <div className="flex h-full flex-col bg-white">
               {loadingLead && !selectedContact ? (
                 <div className="flex h-full flex-col">
                   <div className="flex h-16 items-center justify-between border-b border-slate-100 px-4"><div className="h-4 w-40 animate-pulse rounded bg-slate-200" /><button type="button" onClick={closeParticipantDetail} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100" aria-label="Cerrar"><X className="h-4 w-4" /></button></div>
@@ -3878,7 +3800,9 @@ export default function ProgramDetailPage() {
                   onClose={closeParticipantDetail}
                   onContactChange={handleParticipantContactChange}
                   onSendMessage={showInlineChat ? undefined : handleSendWhatsApp}
-                  sendingMessage={whatsappLaunching || whatsappCreating}
+                  sendingMessage={whatsappChat.pending}
+                  messageError={whatsappChat.error}
+                  onRetryMessage={whatsappChat.canRetry ? whatsappChat.retry : undefined}
                   contextContent={(
                     <div className="pb-[calc(1rem+env(safe-area-inset-bottom))]">
                       <section className="border-b border-slate-200 px-4 py-4" aria-labelledby="program-participation-title">
@@ -3928,46 +3852,26 @@ export default function ProgramDetailPage() {
                   )}
                 />
               ) : null}
-            </div>
+                  </div>
+                )}
+              />
+            </OperationalOverlayBoundary>
           </div>
         </div>
       )}
 
-      {/* Device Selector Modal for WhatsApp */}
-      {showDeviceSelector && (
-        <div className="app-viewport fixed inset-0 z-[80] flex items-end justify-center bg-black/40 backdrop-blur-sm sm:items-center sm:p-4" onMouseDown={event => { if (event.target === event.currentTarget) setShowDeviceSelector(false); }}>
-          <div role="dialog" aria-modal="true" aria-labelledby="program-device-selector-title" className="flex max-h-[min(86dvh,var(--app-height,100dvh))] w-full max-w-sm flex-col overflow-hidden rounded-t-3xl border border-slate-100 bg-white p-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] shadow-2xl sm:rounded-2xl sm:p-6">
-            <h2 id="program-device-selector-title" className="mb-3 text-sm font-semibold text-slate-900">Seleccionar dispositivo</h2>
-            <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para el chat con {whatsappPhone}</p>
-            {existingChatForWA && (
-              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-3">
-                Ya existe historial{whatsappHistoricalPhone ? ` con el numero ${whatsappHistoricalPhone}` : ' con numero historico desconocido'}.
-              </p>
-            )}
-            {devices.length === 0 ? (
-              <p className="text-xs text-slate-400 text-center py-4">No hay dispositivos conectados</p>
-            ) : (
-              <div className="min-h-0 space-y-2 overflow-y-auto">
-                {devices.map(device => (
-                  <button key={device.id} type="button" onClick={() => void handleDeviceSelectedForChat(device)} disabled={whatsappCreating}
-                    className="flex min-h-14 w-full items-center gap-3 rounded-xl border border-slate-100 p-3 text-left transition hover:border-emerald-200 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-wait disabled:opacity-50"
-                  >
-                    <div className="w-9 h-9 bg-emerald-50 rounded-full flex items-center justify-center"><Phone className="w-4 h-4 text-emerald-600" /></div>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
-                        <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${relationClassName(device)}`}>{relationLabel(device)}</span>
-                      </div>
-                      <p className="text-xs text-slate-500">{deviceDisplayPhone(device)}</p>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-            <button type="button" onClick={() => setShowDeviceSelector(false)} className="mt-4 min-h-11 w-full rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">Cancelar</button>
-          </div>
-        </div>
-      )}
+      <WhatsAppDevicePicker
+        open={showDeviceSelector}
+        idPrefix="program-participant"
+        phone={whatsappChat.phone}
+        devices={whatsappChat.devices}
+        existingChat={whatsappChat.chat}
+        historicalPhone={whatsappChat.historicalPhone}
+        busy={whatsappChat.pending}
+        onSelect={whatsappChat.selectDevice}
+        onOpenHistorical={whatsappChat.chat ? whatsappChat.openHistorical : undefined}
+        onCancel={closeWhatsAppChat}
+      />
 
       {/* Toast */}
       {toastMessage && (

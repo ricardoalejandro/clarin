@@ -65,10 +65,12 @@ func whiteboardAccessRank(level string) int {
 	switch level {
 	case domain.WhiteboardAccessView:
 		return 1
-	case domain.WhiteboardAccessEdit:
+	case domain.WhiteboardAccessComment:
 		return 2
-	case domain.WhiteboardAccessManage:
+	case domain.WhiteboardAccessEdit:
 		return 3
+	case domain.WhiteboardAccessManage:
+		return 4
 	default:
 		return 0
 	}
@@ -91,7 +93,7 @@ func BuildWhiteboardEffectiveAccess(level string, manage bool, source string) *d
 		Level:           level,
 		InheritedFrom:   source,
 		CanView:         rank >= whiteboardAccessRank(domain.WhiteboardAccessView),
-		CanComment:      rank >= whiteboardAccessRank(domain.WhiteboardAccessEdit),
+		CanComment:      rank >= whiteboardAccessRank(domain.WhiteboardAccessComment),
 		CanEdit:         rank >= whiteboardAccessRank(domain.WhiteboardAccessEdit),
 		CanDelete:       rank >= whiteboardAccessRank(domain.WhiteboardAccessManage),
 		CanManageAccess: manage && rank >= whiteboardAccessRank(domain.WhiteboardAccessManage),
@@ -103,10 +105,7 @@ func WhiteboardAccessAllows(access *domain.WhiteboardEffectiveAccess, required s
 		whiteboardAccessRank(access.Level) >= whiteboardAccessRank(required)
 }
 
-func resolveWhiteboardAccessWith(ctx context.Context, q whiteboardQuerier, accountID, userID, boardID uuid.UUID) (*domain.WhiteboardEffectiveAccess, error) {
-	var level, source string
-	var canManage bool
-	err := q.QueryRow(ctx, `
+const whiteboardEffectiveAccessQuery = `
 		SELECT
 			CASE
 				WHEN COALESCE(account_user.is_super_admin,FALSE) OR COALESCE(membership.role,'') IN ('admin','super_admin') THEN 'manage'
@@ -134,7 +133,16 @@ func resolveWhiteboardAccessWith(ctx context.Context, q whiteboardQuerier, accou
 			AND grant_item.board_id=board.id AND grant_item.user_id=$2
 		WHERE board.account_id=$1 AND board.id=$3
 			AND (membership.user_id IS NOT NULL OR account_user.account_id=$1)
-	`, accountID, userID, boardID).Scan(&level, &canManage, &source)
+	`
+
+const whiteboardActiveEffectiveAccessQuery = whiteboardEffectiveAccessQuery + `
+			AND board.archived_at IS NULL
+	`
+
+func resolveWhiteboardAccessWithQuery(ctx context.Context, q whiteboardQuerier, query string, accountID, userID, boardID uuid.UUID) (*domain.WhiteboardEffectiveAccess, error) {
+	var level, source string
+	var canManage bool
+	err := q.QueryRow(ctx, query, accountID, userID, boardID).Scan(&level, &canManage, &source)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrWhiteboardNotFound
 	}
@@ -144,6 +152,14 @@ func resolveWhiteboardAccessWith(ctx context.Context, q whiteboardQuerier, accou
 	return BuildWhiteboardEffectiveAccess(level, canManage, source), nil
 }
 
+func resolveWhiteboardAccessWith(ctx context.Context, q whiteboardQuerier, accountID, userID, boardID uuid.UUID) (*domain.WhiteboardEffectiveAccess, error) {
+	return resolveWhiteboardAccessWithQuery(ctx, q, whiteboardEffectiveAccessQuery, accountID, userID, boardID)
+}
+
+func resolveActiveWhiteboardAccessWith(ctx context.Context, q whiteboardQuerier, accountID, userID, boardID uuid.UUID) (*domain.WhiteboardEffectiveAccess, error) {
+	return resolveWhiteboardAccessWithQuery(ctx, q, whiteboardActiveEffectiveAccessQuery, accountID, userID, boardID)
+}
+
 // RequireAccess is the canonical actor authorization gate prepared for both
 // REST and a future board-room WebSocket gateway.
 func (r *WhiteboardRepository) RequireAccess(ctx context.Context, accountID, userID, boardID uuid.UUID, requiredLevel string) (*domain.WhiteboardEffectiveAccess, error) {
@@ -151,6 +167,26 @@ func (r *WhiteboardRepository) RequireAccess(ctx context.Context, accountID, use
 		return nil, ErrWhiteboardInvalid
 	}
 	access, err := resolveWhiteboardAccessWith(ctx, r.db, accountID, userID, boardID)
+	if err != nil {
+		return nil, err
+	}
+	if !access.CanView {
+		return nil, ErrWhiteboardNotFound
+	}
+	if !WhiteboardAccessAllows(access, requiredLevel) {
+		return nil, ErrWhiteboardForbidden
+	}
+	return access, nil
+}
+
+// RequireActiveAccess is the collaboration authorization gate. Unlike the
+// historical RequireAccess contract used by archive/restore workflows, it
+// treats archived (and therefore also purged) boards as unavailable.
+func (r *WhiteboardRepository) RequireActiveAccess(ctx context.Context, accountID, userID, boardID uuid.UUID, requiredLevel string) (*domain.WhiteboardEffectiveAccess, error) {
+	if !validWhiteboardAccessLevel(requiredLevel, false) {
+		return nil, ErrWhiteboardInvalid
+	}
+	access, err := resolveActiveWhiteboardAccessWith(ctx, r.db, accountID, userID, boardID)
 	if err != nil {
 		return nil, err
 	}

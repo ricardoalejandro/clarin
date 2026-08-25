@@ -26,12 +26,15 @@ import { environmentFolderListQuery } from './taskEnvironmentAccess'
 import useTaskWindow, { type TaskWindowResizeEdge } from './useTaskWindow'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { isTaskEditorSubmitShortcut, taskWindowVisualState } from './taskInteractionVisuals'
-import TaskDateTimePicker from './TaskDateTimePicker'
+import TaskDateRangePicker from './TaskDateRangePicker'
 import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 import TaskDescriptionEditor from './TaskDescriptionEditor'
 import TaskParticipantGrantConfirmDialog from './TaskParticipantGrantConfirmDialog'
 import { TaskColorPicker } from './TaskContainerAppearance'
 import { resolveTaskIdentityColor } from './taskIdentityColor'
+import { validateManualProgress } from './taskProgress'
+import TaskProgressControl from './TaskProgressControl'
+import { TASK_PICKER_BLOCKING_LAYER_SELECTOR } from './taskDetailEscape'
 import {
   enqueueTaskAttachmentFiles,
   markTaskAttachmentQueueItem,
@@ -105,7 +108,10 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
   const [startAt, setStartAt] = useState('')
   const [dueAt, setDueAt] = useState('')
   const [allDay, setAllDay] = useState(false)
-  const [progress, setProgress] = useState(0)
+  const [progressMode, setProgressMode] = useState<'manual' | 'automatic'>('manual')
+  const [manualProgress, setManualProgress] = useState(0)
+  const [progressInput, setProgressInput] = useState('0')
+  const [progressError, setProgressError] = useState('')
   const [milestone, setMilestone] = useState(false)
   const [recurrence, setRecurrence] = useState('')
   const [reminder, setReminder] = useState(0)
@@ -164,7 +170,11 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
     setStartAt(localDateTime(task?.start_at || defaultStartAt))
     setDueAt(localDateTime(task?.due_at || defaultDueAt))
     setAllDay(task ? Boolean(task.is_all_day) : Boolean(defaultAllDay))
-    setProgress(task?.progress || 0)
+    const canonicalManualProgress = task?.manual_progress ?? task?.progress ?? 0
+    setProgressMode(task?.progress_mode || 'manual')
+    setManualProgress(canonicalManualProgress)
+    setProgressInput(String(canonicalManualProgress))
+    setProgressError('')
     setMilestone(Boolean(task?.is_milestone))
     setRecurrence(task?.recurrence_rule || '')
     setReminder(task?.reminder_minutes || 0)
@@ -238,7 +248,7 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
     previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const handleKeyboard = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        if (savingRef.current) return
+        if (event.defaultPrevented || savingRef.current || document.querySelector(TASK_PICKER_BLOCKING_LAYER_SELECTOR)) return
         event.preventDefault()
         requestCloseRef.current()
         return
@@ -319,7 +329,10 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
     return failed
   }
 
-  const baseCanSave = Boolean(taskEditable && title.trim() && ownerId && listId && statusId && (!startAt || !dueAt || new Date(dueAt) >= new Date(startAt)))
+  const taskCompleted = statuses.find(status => status.id === statusId)?.category === 'done'
+  const manualProgressValidation = validateManualProgress(progressInput)
+  const progressValid = taskCompleted || progressMode === 'automatic' || manualProgressValidation.valid
+  const baseCanSave = Boolean(taskEditable && title.trim() && ownerId && listId && statusId && progressValid && (!startAt || !dueAt || new Date(dueAt) >= new Date(startAt)))
   const queueProgress = taskAttachmentQueueProgress(attachmentQueue)
   const saveIntent = taskCreationAttachmentSaveIntent(createdTask?.id, attachmentQueue, baseCanSave)
   const canSave = task ? baseCanSave : saveIntent !== 'none'
@@ -348,7 +361,11 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
       list_id: listId, status_id: statusId,
       start_at: startAt ? new Date(startAt).toISOString() : '',
       due_at: dueAt ? new Date(dueAt).toISOString() : '',
-      is_all_day: allDay, progress, progress_mode: 'manual', manual_progress: progress, is_milestone: milestone,
+      is_all_day: allDay,
+      progress: taskCompleted ? 100 : progressMode === 'automatic' ? (task?.progress || 0) : manualProgress,
+      progress_mode: progressMode,
+      manual_progress: manualProgress,
+      is_milestone: milestone,
       recurrence_rule: recurrence, reminder_minutes: reminder || 0,
 			color,
       ...(parentTaskId && !task ? { parent_task_id: parentTaskId } : {}),
@@ -363,7 +380,20 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
     }
     const result = task
       ? await apiPut<TaskMutationResponse>(`/api/tasks/${task.id}`, body)
-      : await apiPost<TaskMutationResponse>('/api/tasks', body)
+      : parentTaskId
+        ? await apiPost<TaskMutationResponse>(`/api/tasks/${parentTaskId}/children`, {
+            title: body.title,
+            description: body.description,
+            priority: body.priority,
+            assigned_to: body.assigned_to,
+            status_id: body.status_id,
+            start_at: body.start_at,
+            due_at: body.due_at,
+            is_all_day: body.is_all_day,
+            operation_id: body.operation_id,
+            confirm_grants: body.confirm_grants,
+          })
+        : await apiPost<TaskMutationResponse>('/api/tasks', body)
     if (!result.success || !result.data?.task) {
       if (result.status === 409 && result.data?.code === 'access_change_confirmation_required') {
         setParticipantGrantPrompt(result.data.affected_user_ids || [])
@@ -417,7 +447,7 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
   const windowVisual = taskWindowVisualState(taskWindow.effectiveMode, taskWindow.isMobile)
   return createPortal(
     <div data-task-editor-modal data-window-mode={taskWindow.effectiveMode} data-backdrop-mode={windowVisual.blocksWorkspace ? 'modal' : taskWindow.effectiveMode} style={{ ...windowVisual.backdropStyle, zIndex: TASK_OVERLAY_LAYERS.window }} className={`fixed inset-0 transition-[background-color,backdrop-filter] duration-200 ${windowVisual.blocksWorkspace ? '' : 'pointer-events-none'}`} onMouseDown={event => event.target === event.currentTarget && windowVisual.blocksWorkspace && requestClose()}>
-      <div ref={dialogRef} onPaste={pasteTaskImages} onKeyDown={event => { if (isTaskEditorSubmitShortcut(event.nativeEvent) && !document.querySelector('[data-task-picker-backdrop], [role="dialog"][aria-label^="Elegir "]')) { event.preventDefault(); void save() } }} data-window-mode={taskWindow.effectiveMode} tabIndex={-1} role="dialog" aria-modal={taskWindow.isModal} aria-labelledby="task-editor-title" aria-busy={saving} style={taskWindow.panelStyle} className={`pointer-events-auto fixed flex flex-col overflow-hidden border border-white/80 bg-white shadow-[0_28px_80px_rgba(15,23,42,0.24)] ring-1 ring-slate-900/5 outline-none ${taskWindow.effectiveMode === 'maximized' || taskWindow.isMobile ? 'rounded-none sm:rounded-2xl' : taskWindow.effectiveMode === 'docked' ? 'rounded-l-3xl' : 'rounded-3xl'}`}>
+      <div ref={dialogRef} onPaste={pasteTaskImages} onKeyDown={event => { if (!event.defaultPrevented && isTaskEditorSubmitShortcut(event.nativeEvent) && !document.querySelector(`${TASK_PICKER_BLOCKING_LAYER_SELECTOR}, [role="dialog"][aria-label^="Elegir "]`)) { event.preventDefault(); void save() } }} data-window-mode={taskWindow.effectiveMode} tabIndex={-1} role="dialog" aria-modal={taskWindow.isModal} aria-labelledby="task-editor-title" aria-busy={saving} style={taskWindow.panelStyle} className={`pointer-events-auto fixed flex flex-col overflow-hidden border border-white/80 bg-white shadow-[0_28px_80px_rgba(15,23,42,0.24)] ring-1 ring-slate-900/5 outline-none ${taskWindow.effectiveMode === 'maximized' || taskWindow.isMobile ? 'rounded-none sm:rounded-2xl' : taskWindow.effectiveMode === 'docked' ? 'rounded-l-3xl' : 'rounded-3xl'}`}>
         <div onPointerDown={taskWindow.beginDrag} onDoubleClick={taskWindow.toggleMaximized} className={`flex select-none items-center justify-between border-b border-slate-100 px-5 py-4 sm:px-7 ${taskWindow.effectiveMode === 'floating' ? 'cursor-move' : ''}`}>
           <div>
             <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-600"><Sparkles className="h-3.5 w-3.5" /> Clarin Work</div>
@@ -440,28 +470,28 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
             <section className="space-y-4 rounded-2xl border border-slate-200 p-4">
               <div className="grid grid-cols-2 gap-3">
                 <div className="text-xs font-semibold text-slate-500">Lista<div className="mt-1.5"><TaskListPicker disabled={Boolean(parentTaskId || task?.parent_task_id)} environmentId={catalogEnvironmentID} value={listId} lists={catalogLists} folders={catalogFolders} selectedLabel={task?.list_id === listId ? task.list_name : undefined} selectedDescription={task?.list_id === listId && task.folder_name ? `${task.folder_name} / ${task.list_name || 'Lista'}` : undefined} onItemsLoaded={mergeRemoteCatalog} onChange={(next, list) => { if (list) setCatalogLists(current => mergeTaskCatalogPage(current, [list])); setListId(next); markDirty() }} /></div></div>
-                <div className="text-xs font-semibold text-slate-500">Estado<div className="mt-1.5"><TaskStatusPicker value={statusId} statuses={statuses} onChange={nextID => { const nextStatus = statuses.find(status => status.id === nextID); setStatusId(nextID); if (nextStatus?.category === 'done') setProgress(100); if (nextID) setError(''); markDirty() }} /></div></div>
+                <div className="text-xs font-semibold text-slate-500">Estado<div className="mt-1.5"><TaskStatusPicker value={statusId} statuses={statuses} onChange={nextID => { setStatusId(nextID); if (nextID) setError(''); markDirty() }} /></div></div>
               </div>
-              <div>
+              {!parentTaskId && <div>
                 <div className="mb-2 text-xs font-semibold text-slate-500">Tipo</div>
                 <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">{(Object.keys(TASK_TYPE_CONFIG) as TaskType[]).map(key => <button key={key} onClick={() => { setType(key); markDirty() }} className={`rounded-xl border px-2 py-2 text-xs transition ${type === key ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-500 hover:bg-slate-50'}`}><span className="mr-1">{TASK_TYPE_CONFIG[key].icon}</span>{TASK_TYPE_CONFIG[key].label}</button>)}</div>
-              </div>
+              </div>}
               <div>
                 <div className="mb-2 text-xs font-semibold text-slate-500">Prioridad</div>
                 <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">{(Object.keys(TASK_PRIORITY_CONFIG) as TaskPriority[]).map(key => <button key={key} onClick={() => { setPriority(key); markDirty() }} className={`rounded-xl px-2 py-2 text-xs font-medium transition ${priority === key ? `${TASK_PRIORITY_CONFIG[key].bg} ${TASK_PRIORITY_CONFIG[key].color} ring-1 ring-current` : 'bg-slate-100 text-slate-500'}`}>{TASK_PRIORITY_CONFIG[key].label}</button>)}</div>
               </div>
-							<div><div className="mb-2 text-xs font-semibold text-slate-500">Color de identidad</div><button type="button" aria-label="Heredar color de la lista" onClick={() => { setColor(null); markDirty() }} className={`mb-2 flex min-h-11 w-full items-center gap-3 rounded-xl border px-3 text-left ${color === null ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200'}`}><span className="h-7 w-7 rounded-lg border-2 border-white shadow" style={{ backgroundColor: inheritedColor }} /><span className="min-w-0 flex-1"><span className="block text-xs font-bold text-slate-700">Heredar de la lista</span><span className="block truncate text-[10px] text-slate-400">{selectedList?.name || 'Color predeterminado'} · {inheritedColor}</span></span>{color === null && <Check className="h-4 w-4 text-emerald-600" />}</button><TaskColorPicker value={effectiveColor} label="Personalizar color de la tarea" onChange={value => { setColor(value); markDirty() }} /></div>
+							{!parentTaskId && <div><div className="mb-2 text-xs font-semibold text-slate-500">Color de identidad</div><button type="button" aria-label="Heredar color de la lista" onClick={() => { setColor(null); markDirty() }} className={`mb-2 flex min-h-11 w-full items-center gap-3 rounded-xl border px-3 text-left ${color === null ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200'}`}><span className="h-7 w-7 rounded-lg border-2 border-white shadow" style={{ backgroundColor: inheritedColor }} /><span className="min-w-0 flex-1"><span className="block text-xs font-bold text-slate-700">Heredar de la lista</span><span className="block truncate text-[10px] text-slate-400">{selectedList?.name || 'Color predeterminado'} · {inheritedColor}</span></span>{color === null && <Check className="h-4 w-4 text-emerald-600" />}</button><TaskColorPicker value={effectiveColor} label="Personalizar color de la tarea" onChange={value => { setColor(value); markDirty() }} /></div>}
               <label className="block text-xs font-semibold text-slate-500">Responsable<span className="mt-1.5 block"><TaskUserCombobox users={users} value={ownerId} onChange={value => { setOwnerId(value); markDirty() }} /></span></label>
-              <div><div className="mb-1 text-xs font-semibold text-slate-500">Colaboradores</div><p className="mb-2 text-[10px] leading-4 text-slate-400">Participantes adicionales; el responsable continúa siendo el propietario.</p><TaskCollaboratorPicker users={users} value={collaboratorIds} ownerID={ownerId} onChange={value => { setCollaboratorIds(value); markDirty() }} emptyLabel={ownerId ? 'Sin colaboradores adicionales.' : 'Selecciona primero un responsable.'} /></div>
+              {!parentTaskId && <div><div className="mb-1 text-xs font-semibold text-slate-500">Colaboradores</div><p className="mb-2 text-[10px] leading-4 text-slate-400">Participantes adicionales; el responsable continúa siendo el propietario.</p><TaskCollaboratorPicker users={users} value={collaboratorIds} ownerID={ownerId} onChange={value => { setCollaboratorIds(value); markDirty() }} emptyLabel={ownerId ? 'Sin colaboradores adicionales.' : 'Selecciona primero un responsable.'} /></div>}
             </section>
 
             <section className="space-y-4 rounded-2xl border border-slate-200 p-4">
               <div className="flex items-center gap-2 text-sm font-semibold text-slate-800"><CalendarRange className="h-4 w-4 text-emerald-600" /> Planificación</div>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2"><TaskDateTimePicker label="Inicio" value={startAt} onChange={value => { setStartAt(value); markDirty() }} allDay={allDay} onAllDayChange={value => { setAllDay(value); markDirty() }} /><TaskDateTimePicker label="Entrega" value={dueAt} min={startAt} onChange={value => { setDueAt(value); markDirty() }} allDay={allDay} onAllDayChange={value => { setAllDay(value); markDirty() }} /></div>
+              <TaskDateRangePicker label="Fechas de la tarea" startValue={startAt} endValue={dueAt} allDay={allDay} disabled={saving || Boolean(createdTask)} pending={saving} onApply={range => { setStartAt(range.startAt); setDueAt(range.endAt); setAllDay(range.isAllDay); markDirty() }} />
               {startAt && dueAt && new Date(dueAt) < new Date(startAt) && <p className="text-xs font-medium text-rose-600">La entrega no puede ser anterior al inicio.</p>}
-              <div className="flex flex-wrap gap-2"><button onClick={() => { setAllDay(value => !value); markDirty() }} className={`rounded-xl border px-3 py-2 text-xs font-medium ${allDay ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600'}`}>Todo el día</button><button onClick={() => { setMilestone(value => !value); markDirty() }} className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium ${milestone ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-slate-200 text-slate-600'}`}><Flag className="h-3.5 w-3.5" /> Hito</button></div>
-              <label className="block text-xs font-semibold text-slate-500">Progreso · {progress}%<input type="range" min="0" max="100" step="5" value={progress} disabled={statuses.find(status => status.id === statusId)?.category === 'done'} onChange={event => { setProgress(Number(event.target.value)); markDirty() }} className="mt-2 w-full accent-emerald-600 disabled:opacity-50" /></label>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2"><div className="text-xs font-semibold text-slate-500"><Repeat2 className="mr-1 inline h-3.5 w-3.5" />Recurrencia<div className="mt-1.5"><TaskSelectPicker value={recurrence} options={recurrenceOptions} onChange={value => { setRecurrence(value); markDirty() }} label="Seleccionar recurrencia" /></div></div><div className="text-xs font-semibold text-slate-500">Recordatorio<div className="mt-1.5"><TaskSelectPicker value={String(reminder)} options={reminderOptions} onChange={value => { setReminder(Number(value)); markDirty() }} label="Seleccionar recordatorio" /></div></div></div>
+              {!parentTaskId && <div className="flex flex-wrap gap-2"><button onClick={() => { setMilestone(value => !value); markDirty() }} className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium ${milestone ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-slate-200 text-slate-600'}`}><Flag className="h-3.5 w-3.5" /> Hito</button></div>}
+              {!parentTaskId && <TaskProgressControl id={`task-editor-progress-${task?.id || 'new'}`} mode={progressMode} inputValue={progressInput} canonicalManualValue={manualProgress} effectiveProgress={task?.progress || 0} completed={taskCompleted} disabled={saving || Boolean(createdTask)} error={progressError} subtaskDone={task?.subtask_done || 0} subtaskCount={task?.subtask_count || 0} onModeChange={nextMode => { if (nextMode === progressMode) return; setProgressMode(nextMode); setProgressError(''); setProgressInput(String(manualProgress)); markDirty() }} onInputChange={value => { setProgressInput(value); setProgressError('') }} onCommit={() => { const validation = validateManualProgress(progressInput); if (!validation.valid) { setProgressError(validation.error); return }; setProgressError(''); setManualProgress(validation.value); setProgressInput(String(validation.value)); if (validation.value !== manualProgress) markDirty() }} onReset={() => { setProgressInput(String(manualProgress)); setProgressError('') }} />}
+              {!parentTaskId && <div className="grid grid-cols-1 gap-3 sm:grid-cols-2"><div className="text-xs font-semibold text-slate-500"><Repeat2 className="mr-1 inline h-3.5 w-3.5" />Recurrencia<div className="mt-1.5"><TaskSelectPicker value={recurrence} options={recurrenceOptions} onChange={value => { setRecurrence(value); markDirty() }} label="Seleccionar recurrencia" /></div></div><div className="text-xs font-semibold text-slate-500">Recordatorio<div className="mt-1.5"><TaskSelectPicker value={String(reminder)} options={reminderOptions} onChange={value => { setReminder(Number(value)); markDirty() }} label="Seleccionar recordatorio" /></div></div></div>}
             </section>
           </div>
           {error && <div className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">{error}</div>}
@@ -469,7 +499,7 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
 
         <div className="flex items-center justify-between border-t border-slate-100 bg-slate-50 px-5 py-4 sm:px-7">
           <span className={`hidden text-xs sm:block ${createdTask ? 'font-semibold text-amber-700' : 'text-slate-400'}`}>{createdTask ? 'La tarea ya existe; sólo quedan adjuntos pendientes.' : 'Ctrl/⌘ + Enter guarda la tarea desde cualquier campo.'}</span>
-          <div className="ml-auto flex gap-2"><button disabled={saving} onClick={requestClose} className="rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40">{createdTask ? 'Cerrar' : 'Cancelar'}</button><button disabled={!canSave || saving} onClick={() => { void save() }} className="rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-300 transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">{saving ? createdTask ? 'Reintentando…' : attachmentQueue.length && !task ? 'Creando y adjuntando…' : 'Guardando…' : createdTask ? `Reintentar ${queueProgress.pending} ${queueProgress.pending === 1 ? 'adjunto' : 'adjuntos'}` : task ? 'Guardar cambios' : 'Crear tarea'}</button></div>
+          <div className="ml-auto flex gap-2"><button disabled={saving} onClick={requestClose} className="rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40">{createdTask ? 'Cerrar' : 'Cancelar'}</button><button disabled={!canSave || saving} onClick={() => { void save() }} className="rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-300 transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">{saving ? createdTask ? 'Reintentando…' : attachmentQueue.length && !task ? 'Creando y adjuntando…' : parentTaskId && !task ? 'Creando subtarea…' : 'Guardando…' : createdTask ? `Reintentar ${queueProgress.pending} ${queueProgress.pending === 1 ? 'adjunto' : 'adjuntos'}` : task ? 'Guardar cambios' : parentTaskId ? 'Crear subtarea' : 'Crear tarea'}</button></div>
         </div>
         {taskWindow.effectiveMode === 'floating' && resizeEdges.map(edge => <span key={edge} data-task-window-resize={edge} aria-hidden="true" onPointerDown={event => taskWindow.beginResize(edge, event)} className={`absolute z-10 ${edge === 'n' ? '-top-1 left-4 right-4 h-2 cursor-n-resize' : edge === 's' ? '-bottom-1 left-4 right-4 h-2 cursor-s-resize' : edge === 'e' ? '-right-1 bottom-4 top-4 w-2 cursor-e-resize' : edge === 'w' ? '-left-1 bottom-4 top-4 w-2 cursor-w-resize' : edge === 'ne' ? '-right-1 -top-1 h-4 w-4 cursor-ne-resize' : edge === 'nw' ? '-left-1 -top-1 h-4 w-4 cursor-nw-resize' : edge === 'se' ? '-bottom-1 -right-1 h-4 w-4 cursor-se-resize' : '-bottom-1 -left-1 h-4 w-4 cursor-sw-resize'}`} />)}
       </div>

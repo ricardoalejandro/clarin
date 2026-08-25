@@ -1,9 +1,28 @@
 package api
 
 import (
+	"slices"
 	"testing"
 	"time"
 )
+
+func TestResolveProgramHealthViewColumnsPreservesOmittedAndAcceptsEmpty(t *testing.T) {
+	existing := []string{"health", "attendance", "signals"}
+	preserved := resolveProgramHealthViewColumns(existing, nil)
+	if !slices.Equal(preserved, existing) {
+		t.Fatalf("omitted columns = %#v, want %#v", preserved, existing)
+	}
+	preserved[0] = "tenure"
+	if existing[0] != "health" {
+		t.Fatal("omitted columns must be copied instead of aliasing the canonical program")
+	}
+
+	empty := []string{}
+	resolvedEmpty := resolveProgramHealthViewColumns(existing, &empty)
+	if resolvedEmpty == nil || len(resolvedEmpty) != 0 {
+		t.Fatalf("explicit empty columns must stay a non-nil empty array, got %#v", resolvedEmpty)
+	}
+}
 
 func TestParseAttendanceStatsMonths(t *testing.T) {
 	months, err := parseAttendanceStatsMonths("2026-07, 2026-06,2026-07")

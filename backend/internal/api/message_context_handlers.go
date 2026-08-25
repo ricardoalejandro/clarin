@@ -8,6 +8,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/naperu/clarin/internal/domain"
 )
 
 func (s *Server) resolveOutboundQuote(ctx context.Context, accountID, deviceID uuid.UUID, chatIDRaw, reference, recipient string) (string, string, string, bool, error) {
@@ -88,6 +89,12 @@ func (s *Server) handleGetMessageContext(c *fiber.Ctx) error {
 	messages, err := s.repos.Message.GetWindowByChatID(c.Context(), accountID, chatID, 60, pageOffset)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo cargar el contexto del mensaje"})
+	}
+	messagesToHydrate := make([]*domain.Message, 0, len(messages)+1)
+	messagesToHydrate = append(messagesToHydrate, target)
+	messagesToHydrate = append(messagesToHydrate, messages...)
+	if err := s.services.Chat.AttachReactions(c.Context(), accountID, chatID, messagesToHydrate); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudieron cargar las reacciones del contexto"})
 	}
 	return c.JSON(fiber.Map{
 		"success":        true,

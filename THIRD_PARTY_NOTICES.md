@@ -4,13 +4,13 @@ This file indexes notices that must accompany third-party software distributed b
 
 ## `@excalidraw/excalidraw`
 
-- Distributed version: `0.18.1`
-- npm integrity: `sha512-6i5Gt7IDTOH//qa0Z315Ly5iVRhjWpu2whrlQFqkuwrkKUWgRsMk0P5qdE7bpyDpai7jeLeWYkyj1eVAfni1lw==`
-- Upstream source: <https://github.com/excalidraw/excalidraw/tree/v0.18.1>
+- Distributed version: `0.18.1-clarin.4`
+- Vendored source SHA-256: `e06e03a382897b421cbf59bc66b2b79a7e6d14a12e9fe8a9cca6e1ac87522874`
+- Upstream source: tag `v0.18.1`, commit `a2ec2889babf7d2295469c6d90ebe77fae57df84`
 - Editor license: MIT, Copyright (c) 2020 Excalidraw
 - Canonical component notice and current advisory record: [`frontend/THIRD_PARTY_EXCALIDRAW.md`](frontend/THIRD_PARTY_EXCALIDRAW.md)
 
-The frontend build copies 234 WOFF2 files, approximately 14 MB, without modification from the exact npm artifact into `frontend/public/vendor/whiteboards-editor/0.18.1/fonts`. It distributes these families:
+The frontend build serves the audited editor assets from `frontend/public/vendor/whiteboards-editor/0.18.1-clarin.4/`. The selector exposes 32 local families: 7 official selectable families plus 25 Clarin-catalog families represented by 49 independently hashed WOFF2 files. The upstream asset set also contains these licensed families:
 
 | Family | Recorded upstream license |
 | --- | --- |
@@ -24,13 +24,13 @@ The frontend build copies 234 WOFF2 files, approximately 14 MB, without modifica
 | Virgil | SIL Open Font License 1.1 |
 | Xiaolai | SIL Open Font License 1.1 |
 
-The `0.18.1` npm tarball packages those fonts without separate font notice files. Clarin therefore distributes the reconciled per-family copyright and Reserved Font Name notices in [`frontend/third_party/excalidraw/FONT-NOTICES.md`](frontend/third_party/excalidraw/FONT-NOTICES.md), together with the complete [`OFL-1.1.txt`](frontend/third_party/excalidraw/OFL-1.1.txt) and [`COMIC-SHANNS-MIT.txt`](frontend/third_party/excalidraw/COMIC-SHANNS-MIT.txt) license texts. The preparation step copies those files beside the versioned runtime assets. Preserve the upstream font files unmodified and keep these notices in every distributed artifact.
+The upstream `0.18.1` package does not place separate notices beside every font. Clarin therefore distributes the reconciled upstream notices in [`frontend/third_party/excalidraw/FONT-NOTICES.md`](frontend/third_party/excalidraw/FONT-NOTICES.md), together with the complete [`OFL-1.1.txt`](frontend/third_party/excalidraw/OFL-1.1.txt) and [`COMIC-SHANNS-MIT.txt`](frontend/third_party/excalidraw/COMIC-SHANNS-MIT.txt) texts. Every additional catalog family records its SPDX license, source and file hash in [`frontend/third_party/whiteboard-fonts/catalog.json`](frontend/third_party/whiteboard-fonts/catalog.json), with its exact license text under `frontend/third_party/whiteboard-fonts/licenses/`. The preparation step copies the applicable notices beside the versioned runtime assets.
 
 This notice covers the public MIT-licensed Excalidraw project only. It grants no rights to Excalidraw Plus, proprietary source or services, trademarks, or assets absent from the public license.
 
 ## Reproducible Excalidraw dependency inventory
 
-The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1` is defined by `frontend/package-lock.json` and audited through [the machine-readable supply-chain baseline](.codex/skills/clarin-excalidraw-development/references/supply-chain-baseline.json). The deterministic CycloneDX 1.6 inventory contains 251 components and has SHA-256 `ccaff4aa10097781f229b8c5f87f187a81e5198d01d20249abdeb6f60c3fc9e6`.
+The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1-clarin.4` is defined by `frontend/package-lock.json` and audited through [the machine-readable supply-chain baseline](.codex/skills/clarin-excalidraw-development/references/supply-chain-baseline.json). The deterministic CycloneDX 1.6 inventory binds the vendored tree to upstream tag `v0.18.1`/commit `a2ec2889babf7d2295469c6d90ebe77fae57df84`, contains 251 components and has SHA-256 `de60ea5a33eac6d947abb0e0f8d02140e27010404126354a2fdac453bb75c458`. The advisory snapshot was refreshed on `2026-08-23`.
 
 Generate and verify it without contacting a third-party service:
 
@@ -51,4 +51,4 @@ The npm lock omits license fields for `fuzzy@0.1.3` and `khroma@2.1.0`; the base
 - Upstream source: <https://github.com/rocicorp/fractional-indexing/tree/v3.2.0>
 - License: CC0 1.0 Universal (`CC0-1.0`; no rights reserved)
 
-Excalidraw `0.18.1` uses this exact package to generate fractional ordering keys. Clarin's backend ports the same key-generation rules for canonical scene reconciliation, and the differential golden generator imports the exact installed `3.2.0` source after verifying its SHA-256. CC0 applies to that fractional-indexing implementation; Excalidraw's surrounding reconciliation and index-grouping code remains under the Excalidraw MIT notice above.
+Excalidraw `0.18.1-clarin.4` uses this exact package to generate fractional ordering keys. Clarin's backend ports the same key-generation rules for canonical scene reconciliation, and the differential golden generator imports the exact installed `3.2.0` source after verifying its SHA-256. CC0 applies to that fractional-indexing implementation; Excalidraw's surrounding reconciliation and index-grouping code remains under the Excalidraw MIT notice above.

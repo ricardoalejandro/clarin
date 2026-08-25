@@ -3,6 +3,10 @@ import { Chat } from '@/types/chat'
 // Clean synced names that start with dots/punctuation
 export const cleanName = (name?: string | null) => name?.replace(/^[\s.\u00b7\u2022\-]+/, '').trim() || ''
 
+export const isPendingChatIdentity = (chat: Pick<Chat, 'jid' | 'identity_pending'>): boolean => (
+  chat.identity_pending === true || chat.jid.toLowerCase().endsWith('@lid')
+)
+
 // Format JID or contact phone for human-readable display
 export const formatPhone = (jid: string, contactPhone?: string): string => {
   // For @lid JIDs, check if contactPhone is the real resolved phone or the meaningless lid number
@@ -36,7 +40,25 @@ export const getChatDisplayName = (chat: Chat): string => {
   if (nm) return nm
   const pn = cleanName(chat.name)
   if (pn) return pn
-  return formatPhone(chat.jid, chat.contact_phone) || chat.jid
+  return formatPhone(chat.jid, chat.contact_phone) || (isPendingChatIdentity(chat) ? 'Contacto de WhatsApp' : chat.jid)
+}
+
+export type ChatIdentityReconciliation = {
+  source_chat_id: string
+  canonical_chat: Chat
+}
+
+export const reconcileChatIdentity = (current: Chat[], reconciliation: ChatIdentityReconciliation): Chat[] => {
+  const { source_chat_id: sourceChatId, canonical_chat: canonicalChat } = reconciliation
+  if (!sourceChatId || !canonicalChat?.id) return current
+  const next = current.filter(chat => chat.id !== sourceChatId && chat.id !== canonicalChat.id)
+  next.push(canonicalChat)
+  next.sort((a, b) => {
+    const pinned = Number(Boolean(b.is_pinned)) - Number(Boolean(a.is_pinned))
+    if (pinned !== 0) return pinned
+    return new Date(b.last_message_at || 0).getTime() - new Date(a.last_message_at || 0).getTime()
+  })
+  return next
 }
 
 // WhatsApp-style date label for message separators

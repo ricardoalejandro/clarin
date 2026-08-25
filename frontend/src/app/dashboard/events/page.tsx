@@ -7,12 +7,13 @@ import {
   Eye, LayoutGrid, List, ChevronRight, Home, FolderPlus, MoreHorizontal,
   LayoutTemplate, FolderOpen, ArrowLeft, MoveRight, Tag, X, ChevronDown, Check,
   Code, FileText, AlertCircle, CheckCircle2, Copy, GripVertical,
-  Loader2,
+  Loader2, ArrowUp, ArrowDown,
 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import FormulaEditor from '@/components/FormulaEditor'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
+import { resolveEventsResponsiveLayout, type EventsViewMode } from '@/lib/eventsResponsive'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -171,7 +172,7 @@ export default function EventsPage() {
   const searchPending = search !== debouncedSearch
   const [statusFilter, setStatusFilter] = useState('active')
   const [hideCancelled, setHideCancelled] = useState(true)
-  const [viewMode, setViewMode] = useState<'grid' | 'compact' | 'list'>('list')
+  const [viewMode, setViewMode] = useState<EventsViewMode>('list')
 
   // Sort state for list view
   const [sortField, setSortField] = useState<string | null>('name')
@@ -1300,16 +1301,25 @@ export default function EventsPage() {
     </div>
   )
 
-  const compactWorkspace = pageWidth > 0 && pageWidth < 1024
-  const effectiveViewMode = compactWorkspace ? 'grid' : viewMode
-  const folderGridColumns = pageWidth >= 1200 ? 5 : pageWidth >= 900 ? 4 : pageWidth >= 640 ? 3 : 2
-  const compactGridColumns = pageWidth >= 1000 ? 4 : pageWidth >= 680 ? 3 : 2
-  const eventGridColumns = pageWidth >= 1000 ? 3 : pageWidth >= 640 ? 2 : 1
+  const responsiveLayout = resolveEventsResponsiveLayout(viewMode, pageWidth)
+  const {
+    viewMode: effectiveViewMode,
+    listPresentation,
+    compactWorkspace,
+    folderGridColumns,
+    compactGridColumns,
+    eventGridColumns,
+  } = responsiveLayout
 
   // ─── JSX ─────────────────────────────────────────────────────────────────────
 
   return (
-    <div ref={setEventsPageRef} className="min-h-0 min-w-0 flex-1 space-y-5 overflow-x-hidden overflow-y-auto pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+    <div
+      ref={setEventsPageRef}
+      data-events-view={effectiveViewMode}
+      data-events-list-presentation={effectiveViewMode === 'list' ? listPresentation : undefined}
+      className="min-h-0 min-w-0 flex-1 space-y-5 overflow-x-hidden overflow-y-auto pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+    >
 
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
@@ -1393,17 +1403,17 @@ export default function EventsPage() {
           {hideCancelled ? <AlertCircle className="w-3.5 h-3.5" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
           {hideCancelled ? 'Cancelados ocultos' : 'Todos visibles'}
         </button>
-        <div className="hidden bg-slate-100 rounded-lg p-0.5 sm:flex">
-          <button onClick={() => setViewMode('grid')} title="Cuadrícula"
-            className={`p-2 rounded-md transition-colors ${viewMode === 'grid' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>
+        <div className="flex self-stretch rounded-xl bg-slate-100 p-0.5 sm:self-auto" role="group" aria-label="Vista de eventos">
+          <button type="button" data-events-view-option="grid" onClick={() => setViewMode('grid')} title="Cuadrícula" aria-label="Vista de cuadrícula" aria-pressed={viewMode === 'grid'}
+            className={`flex min-h-11 min-w-11 flex-1 items-center justify-center rounded-lg transition-colors sm:flex-none ${viewMode === 'grid' ? 'bg-white text-slate-900 shadow' : 'text-slate-500 hover:text-slate-700'}`}>
             <LayoutGrid className="w-4 h-4" />
           </button>
-          <button onClick={() => setViewMode('compact')} title="Compacta"
-            className={`p-2 rounded-md transition-colors ${viewMode === 'compact' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>
+          <button type="button" data-events-view-option="compact" onClick={() => setViewMode('compact')} title="Compacta" aria-label="Vista compacta" aria-pressed={viewMode === 'compact'}
+            className={`flex min-h-11 min-w-11 flex-1 items-center justify-center rounded-lg transition-colors sm:flex-none ${viewMode === 'compact' ? 'bg-white text-slate-900 shadow' : 'text-slate-500 hover:text-slate-700'}`}>
             <LayoutTemplate className="w-4 h-4" />
           </button>
-          <button onClick={() => setViewMode('list')} title="Lista"
-            className={`p-2 rounded-md transition-colors ${viewMode === 'list' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>
+          <button type="button" data-events-view-option="list" onClick={() => setViewMode('list')} title="Lista" aria-label="Vista de lista" aria-pressed={viewMode === 'list'}
+            className={`flex min-h-11 min-w-11 flex-1 items-center justify-center rounded-lg transition-colors sm:flex-none ${viewMode === 'list' ? 'bg-white text-slate-900 shadow' : 'text-slate-500 hover:text-slate-700'}`}>
             <List className="w-4 h-4" />
           </button>
         </div>
@@ -1496,8 +1506,100 @@ export default function EventsPage() {
         </div>
       ) : effectiveViewMode === 'list' ? (
         /* List View */
-        <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-          <table className="w-full">
+        <div data-events-list className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+          {listPresentation === 'stacked' ? (
+            <div className="p-2" data-events-stacked-list>
+              <div className="mb-2 flex items-center gap-2 rounded-xl bg-slate-50 p-2">
+                <label className="min-w-0 flex-1 text-[11px] font-semibold text-slate-500">
+                  <span className="sr-only">Ordenar eventos por</span>
+                  <select
+                    aria-label="Ordenar eventos por"
+                    value={sortField || 'name'}
+                    onChange={event => setSortField(event.target.value)}
+                    className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                  >
+                    <option value="name">Nombre</option>
+                    <option value="status">Estado</option>
+                    <option value="formula">Fórmula</option>
+                    <option value="participants">Participantes</option>
+                    <option value="asistentes">Asistentes</option>
+                    <option value="preinscritos">Pre inscritos</option>
+                    <option value="inscritos">Inscritos</option>
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setSortDirection(direction => direction === 'asc' ? 'desc' : 'asc')}
+                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 transition hover:border-emerald-300 hover:text-emerald-700"
+                  aria-label={sortDirection === 'asc' ? 'Orden ascendente; cambiar a descendente' : 'Orden descendente; cambiar a ascendente'}
+                  title={sortDirection === 'asc' ? 'Ascendente' : 'Descendente'}
+                >
+                  {sortDirection === 'asc' ? <ArrowUp className="h-4 w-4" /> : <ArrowDown className="h-4 w-4" />}
+                </button>
+              </div>
+              <div role="list" aria-label="Eventos en vista de lista" className="space-y-2">
+                {sortedEvents.map(ev => {
+                  const statusOpt = STATUS_OPTIONS.find(option => option.value === ev.status)
+                  const hasFormula = Boolean(ev.tag_formula || (ev.tags && ev.tags.length > 0))
+                  return (
+                    <article key={ev.id} role="listitem" className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+                      <button
+                        type="button"
+                        onClick={() => router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`)}
+                        className="w-full p-3 text-left transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500"
+                        aria-label={`Abrir evento ${ev.name}`}
+                      >
+                        <span className="flex items-start gap-2.5">
+                          <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: ev.color }} />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm font-semibold text-slate-900">{ev.name}</span>
+                            {ev.description && <span className="mt-0.5 block line-clamp-2 text-xs leading-5 text-slate-500">{ev.description}</span>}
+                          </span>
+                          {statusOpt && <span className={`${statusOpt.color} shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold`}>{statusOpt.label}</span>}
+                        </span>
+                        <span className="mt-3 grid grid-cols-2 gap-2 text-xs min-[420px]:grid-cols-3">
+                          <span className="rounded-lg bg-slate-50 px-2.5 py-2"><span className="block text-[10px] text-slate-400">Participantes</span><span className="font-semibold text-slate-700">{ev.total_participants}</span></span>
+                          <span className="rounded-lg bg-emerald-50 px-2.5 py-2"><span className="block text-[10px] text-emerald-600">Asistentes</span><span className="font-semibold text-emerald-700">{ev.stage_counts?.['Asistieron'] || 0}</span></span>
+                          <span className="rounded-lg bg-amber-50 px-2.5 py-2"><span className="block text-[10px] text-amber-600">Pre inscritos</span><span className="font-semibold text-amber-700">{ev.stage_counts?.['Pre inscritos'] || 0}</span></span>
+                          <span className="rounded-lg bg-indigo-50 px-2.5 py-2"><span className="block text-[10px] text-indigo-600">Inscritos</span><span className="font-semibold text-indigo-700">{ev.stage_counts?.['Inscrito'] || 0}</span></span>
+                          <span className="rounded-lg bg-slate-50 px-2.5 py-2"><span className="block text-[10px] text-slate-400">Fórmula</span><span className="font-semibold text-slate-700">{hasFormula ? 'Sí' : 'No'}</span></span>
+                          {ev.event_date && <span className="rounded-lg bg-slate-50 px-2.5 py-2"><span className="block text-[10px] text-slate-400">Fecha</span><span className="font-semibold text-slate-700">{format(new Date(ev.event_date), 'd MMM', { locale: es })}</span></span>}
+                        </span>
+                      </button>
+                      <div className="flex min-h-12 items-center justify-between border-t border-slate-100 px-2 pl-3">
+                        <span className="text-[11px] font-medium text-slate-400">Vista de lista</span>
+                        <button
+                          type="button"
+                          data-menu-toggle
+                          onClick={() => setMenuEventID(menuEventID === ev.id ? null : ev.id)}
+                          className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
+                          aria-label={`Acciones de ${ev.name}`}
+                          aria-expanded={menuEventID === ev.id}
+                        >
+                          <MoreHorizontal className="h-5 w-5" />
+                        </button>
+                        {menuEventID === ev.id && (
+                          <div role="menu" className="fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[70] max-h-[75vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl">
+                            <button type="button" onClick={() => { router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Eye className="h-4 w-4" />Ver detalle</button>
+                            <button type="button" onClick={() => { openEditEvent(ev); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Edit2 className="h-4 w-4" />Editar</button>
+                            <button type="button" onClick={() => { void handleDuplicateEvent(ev.id); setMenuEventID(null) }} disabled={duplicatingEventID === ev.id} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"><Copy className="h-4 w-4" />Duplicar</button>
+                            <p className="mt-1 border-t border-slate-100 px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Mover a carpeta</p>
+                            {ev.folder_id && <button type="button" onClick={() => { void moveEventToFolder(ev.id, null); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Home className="h-4 w-4" />Sin carpeta</button>}
+                            {folders.filter(folder => folder.id !== ev.folder_id).map(folder => (
+                              <button key={folder.id} type="button" onClick={() => { void moveEventToFolder(ev.id, folder.id); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><span aria-hidden="true">{folder.icon}</span>{folder.name}</button>
+                            ))}
+                            <button type="button" onClick={() => { void handleDeleteEvent(ev.id); setMenuEventID(null) }} className="mt-1 flex min-h-11 w-full items-center gap-3 rounded-xl border-t border-slate-100 px-3 text-sm text-red-700 hover:bg-red-50"><Trash2 className="h-4 w-4" />Eliminar</button>
+                          </div>
+                        )}
+                      </div>
+                    </article>
+                  )
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="overflow-x-auto" data-events-table-list>
+              <table className="w-full min-w-[980px]">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50">
                 <th onClick={() => toggleSort('name')} className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 cursor-pointer hover:text-slate-700 select-none">Evento<SortIcon field="name" /></th>
@@ -1557,33 +1659,36 @@ export default function EventsPage() {
                           onDragStart={e => { e.stopPropagation(); handleDragStart(e, ev.id) }}
                           onDragEnd={handleDragEnd}
                           onClick={e => e.stopPropagation()}
-                          className="flex h-9 w-9 cursor-grab items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 active:cursor-grabbing"
+                          className="flex h-11 w-11 cursor-grab items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 active:cursor-grabbing"
                           title="Arrastrar para mover"
                           aria-label={`Mover ${ev.name} arrastrando`}
                         >
                           <GripVertical className="h-4 w-4" />
                         </button>
                         <button onClick={e => { e.stopPropagation(); router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`) }}
-                          className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors" title="Ver detalle">
+                          className="flex h-11 w-11 items-center justify-center rounded-lg text-emerald-600 transition-colors hover:bg-emerald-50" title="Ver detalle" aria-label={`Ver detalle de ${ev.name}`}>
                           <Eye className="w-4 h-4" />
                         </button>
                         <div className="relative">
                           <button data-menu-toggle onClick={e => { e.stopPropagation(); setShowMoveMenu(showMoveMenu === ev.id ? null : ev.id) }}
-                            className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors" title="Mover">
+                            className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" title="Mover" aria-label={`Mover ${ev.name} a otra carpeta`} aria-expanded={showMoveMenu === ev.id}>
                             <MoveRight className="w-4 h-4" />
                           </button>
                           {showMoveMenu === ev.id && (
-                            <div className="absolute right-0 z-20 bg-white border border-slate-200 rounded-xl shadow-lg py-1 min-w-[160px]" onClick={e => e.stopPropagation()}>
+                            <div className={compactWorkspace
+                              ? 'fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[70] max-h-[75vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl'
+                              : 'absolute right-0 z-20 min-w-[180px] rounded-xl border border-slate-200 bg-white py-1 shadow-lg'
+                            } onClick={e => e.stopPropagation()}>
                               <p className="px-3 py-1.5 text-xs font-semibold text-slate-400 uppercase">Mover a</p>
                               {ev.folder_id && (
                                 <button onClick={() => { moveEventToFolder(ev.id, null); setShowMoveMenu(null) }}
-                                  className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50">
+                                  className="flex min-h-11 w-full items-center gap-2 rounded-lg px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50">
                                   <Home className="w-3.5 h-3.5" /> Sin carpeta
                                 </button>
                               )}
                               {folders.filter(f => f.id !== ev.folder_id).map(f => (
                                 <button key={f.id} onClick={() => { moveEventToFolder(ev.id, f.id); setShowMoveMenu(null) }}
-                                  className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50">
+                                  className="flex min-h-11 w-full items-center gap-2 rounded-lg px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50">
                                   <span className="text-base">{f.icon}</span> {f.name}
                                 </button>
                               ))}
@@ -1591,19 +1696,20 @@ export default function EventsPage() {
                           )}
                         </div>
                         <button onClick={e => { e.stopPropagation(); openEditEvent(ev) }}
-                          className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">
+                          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" aria-label={`Editar ${ev.name}`}>
                           <Edit2 className="w-4 h-4" />
                         </button>
                         <button
                           onClick={e => { e.stopPropagation(); handleDuplicateEvent(ev.id) }}
                           disabled={duplicatingEventID === ev.id}
-                          className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors disabled:opacity-50"
+                          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50"
                           title="Duplicar"
+                          aria-label={`Duplicar ${ev.name}`}
                         >
                           <Copy className="w-4 h-4" />
                         </button>
                         <button onClick={e => { e.stopPropagation(); handleDeleteEvent(ev.id) }}
-                          className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors">
+                          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600" aria-label={`Eliminar ${ev.name}`}>
                           <Trash2 className="w-4 h-4" />
                         </button>
                       </div>
@@ -1612,7 +1718,9 @@ export default function EventsPage() {
                 )
               })}
             </tbody>
-          </table>
+              </table>
+            </div>
+          )}
         </div>
       ) : effectiveViewMode === 'compact' ? (
         /* Compact View */

@@ -42,7 +42,6 @@ export function EmojiPickerContent({
       searchPlaceHolder={searchPlaceholder}
       width={width}
       height={height}
-      skinTonesDisabled
       previewConfig={{ showPreview: false }}
       lazyLoadEmojis
     />

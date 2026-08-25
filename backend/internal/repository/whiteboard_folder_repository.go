@@ -3,7 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
-	"time"
+	"math"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -13,11 +13,101 @@ import (
 const maxWhiteboardFolderDepth = 20
 
 type WhiteboardFolderInput struct {
-	ParentID        *uuid.UUID
-	Name            string
-	Description     string
-	SortOrder       *int64
-	ExpectedVersion int64
+	ParentID         *uuid.UUID
+	ParentIDProvided bool
+	Name             string
+	Description      string
+	SortOrder        *int64
+	Placement        *WhiteboardFolderPlacement
+	ExpectedVersion  int64
+}
+
+// WhiteboardFolderPlacement is a server-owned structural destination. A nil
+// ParentID means the account root and a nil BeforeFolderID means the final
+// position among the destination siblings.
+type WhiteboardFolderPlacement struct {
+	ParentID       *uuid.UUID
+	BeforeFolderID *uuid.UUID
+}
+
+type WhiteboardFolderUpdateResult struct {
+	Folder          *domain.WhiteboardFolder
+	AffectedFolders []*domain.WhiteboardFolder
+}
+
+type whiteboardFolderSiblingOrder struct {
+	ID        uuid.UUID
+	SortOrder int64
+}
+
+type whiteboardFolderPlacementPlan struct {
+	TargetSortOrder int64
+	Rebalanced      map[uuid.UUID]int64
+}
+
+func midpointWhiteboardFolderOrder(left, right int64) (int64, bool) {
+	if left >= right || left == math.MaxInt64 || left+1 >= right {
+		return 0, false
+	}
+	var middle int64
+	if left < 0 && right >= 0 {
+		middle = left/2 + right/2
+		if left%2 != 0 && right%2 != 0 {
+			middle++
+		}
+	} else {
+		middle = left + (right-left)/2
+	}
+	return middle, middle > left && middle < right
+}
+
+func planWhiteboardFolderPlacement(targetID uuid.UUID, beforeFolderID *uuid.UUID, siblings []whiteboardFolderSiblingOrder) (whiteboardFolderPlacementPlan, error) {
+	insertAt := len(siblings)
+	if beforeFolderID != nil {
+		insertAt = -1
+		for index, sibling := range siblings {
+			if sibling.ID == *beforeFolderID {
+				insertAt = index
+				break
+			}
+		}
+		if insertAt < 0 {
+			return whiteboardFolderPlacementPlan{}, ErrWhiteboardInvalid
+		}
+	}
+
+	if len(siblings) == 0 {
+		return whiteboardFolderPlacementPlan{TargetSortOrder: 1024}, nil
+	}
+	if insertAt == 0 {
+		next := siblings[0].SortOrder
+		if next >= math.MinInt64+1024 {
+			return whiteboardFolderPlacementPlan{TargetSortOrder: next - 1024}, nil
+		}
+	} else if insertAt == len(siblings) {
+		previous := siblings[len(siblings)-1].SortOrder
+		if previous <= math.MaxInt64-1024 {
+			return whiteboardFolderPlacementPlan{TargetSortOrder: previous + 1024}, nil
+		}
+	} else if middle, ok := midpointWhiteboardFolderOrder(siblings[insertAt-1].SortOrder, siblings[insertAt].SortOrder); ok {
+		return whiteboardFolderPlacementPlan{TargetSortOrder: middle}, nil
+	}
+
+	orderedIDs := make([]uuid.UUID, 0, len(siblings)+1)
+	for index, sibling := range siblings {
+		if index == insertAt {
+			orderedIDs = append(orderedIDs, targetID)
+		}
+		orderedIDs = append(orderedIDs, sibling.ID)
+	}
+	if insertAt == len(siblings) {
+		orderedIDs = append(orderedIDs, targetID)
+	}
+	rebalanced := make(map[uuid.UUID]int64, len(orderedIDs))
+	for index, id := range orderedIDs {
+		rebalanced[id] = int64(index+1) * 1024
+	}
+	return whiteboardFolderPlacementPlan{TargetSortOrder: rebalanced[targetID], Rebalanced: rebalanced}, nil
 }
 
 func scanWhiteboardFolder(scanner whiteboardRowScanner) (*domain.WhiteboardFolder, error) {
@@ -121,7 +211,7 @@ func (r *WhiteboardRepository) ListFolders(ctx context.Context, accountID uuid.U
 	return items, hasMore, nil
 }
 
-func (r *WhiteboardRepository) UpdateFolder(ctx context.Context, accountID, actorID, folderID uuid.UUID, input WhiteboardFolderInput) (*domain.WhiteboardFolder, error) {
+func (r *WhiteboardRepository) UpdateFolder(ctx context.Context, accountID, actorID, folderID uuid.UUID, input WhiteboardFolderInput) (*WhiteboardFolderUpdateResult, error) {
 	if err := requireWhiteboardExpectedVersion(input.ExpectedVersion); err != nil {
 		return nil, err
 	}
@@ -133,23 +223,28 @@ func (r *WhiteboardRepository) UpdateFolder(ctx context.Context, accountID, acto
 	if err := lockWhiteboardHierarchyTx(ctx, tx, accountID); err != nil {
 		return nil, err
 	}
-	var currentVersion int64
-	var archivedAt *time.Time
-	if err := tx.QueryRow(ctx, `SELECT version,archived_at FROM whiteboard_folders
-		WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, folderID).Scan(&currentVersion, &archivedAt); err != nil {
+	current, err := scanWhiteboardFolder(tx.QueryRow(ctx, `SELECT `+whiteboardFolderColumns+` FROM whiteboard_folders
+		WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, folderID))
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrWhiteboardNotFound
 		}
 		return nil, err
 	}
-	if archivedAt != nil {
+	if current.ArchivedAt != nil {
 		return nil, ErrWhiteboardConflict
 	}
-	if err := checkWhiteboardExpectedVersion(input.ExpectedVersion, currentVersion); err != nil {
+	if err := checkWhiteboardExpectedVersion(input.ExpectedVersion, current.Version); err != nil {
 		return nil, err
 	}
-	if input.ParentID != nil {
-		if *input.ParentID == folderID {
+	effectiveParentID := current.ParentID
+	if input.Placement != nil {
+		effectiveParentID = input.Placement.ParentID
+	} else if input.ParentIDProvided {
+		effectiveParentID = input.ParentID
+	}
+	if effectiveParentID != nil {
+		if *effectiveParentID == folderID {
 			return nil, ErrWhiteboardInvalid
 		}
 		var invalidParent bool
@@ -159,7 +254,7 @@ func (r *WhiteboardRepository) UpdateFolder(ctx context.Context, accountID, acto
 			SELECT child.id FROM whiteboard_folders child JOIN descendants parent ON child.parent_id=parent.id
 			WHERE child.account_id=$1 AND child.archived_at IS NULL
 		) SELECT NOT EXISTS(SELECT 1 FROM whiteboard_folders WHERE account_id=$1 AND id=$3 AND archived_at IS NULL)
-			OR EXISTS(SELECT 1 FROM descendants WHERE id=$3)`, accountID, folderID, *input.ParentID).Scan(&invalidParent); err != nil {
+			OR EXISTS(SELECT 1 FROM descendants WHERE id=$3)`, accountID, folderID, *effectiveParentID).Scan(&invalidParent); err != nil {
 			return nil, err
 		}
 		if invalidParent {
@@ -183,28 +278,98 @@ func (r *WhiteboardRepository) UpdateFolder(ctx context.Context, accountID, acto
 			WHERE child.account_id=$1 AND child.archived_at IS NULL AND parent.depth<$4
 		)
 		SELECT COALESCE((SELECT MAX(depth) FROM ancestors),0)+COALESCE((SELECT MAX(depth) FROM subtree),1)`,
-		accountID, folderID, input.ParentID, maxWhiteboardFolderDepth+1).Scan(&resultingDepth); err != nil {
+		accountID, folderID, effectiveParentID, maxWhiteboardFolderDepth+1).Scan(&resultingDepth); err != nil {
 		return nil, err
 	}
 	if resultingDepth > maxWhiteboardFolderDepth {
 		return nil, ErrWhiteboardInvalid
 	}
-	var sortOrder any
-	if input.SortOrder != nil {
+	var sortOrder any = current.SortOrder
+	placementPlan := whiteboardFolderPlacementPlan{TargetSortOrder: current.SortOrder}
+	if input.Placement != nil {
+		if input.Placement.BeforeFolderID != nil && *input.Placement.BeforeFolderID == folderID {
+			return nil, ErrWhiteboardInvalid
+		}
+		rows, queryErr := tx.Query(ctx, `SELECT id,sort_order FROM whiteboard_folders
+			WHERE account_id=$1 AND parent_id IS NOT DISTINCT FROM $2::uuid AND archived_at IS NULL AND id<>$3
+			ORDER BY sort_order,id FOR UPDATE`, accountID, effectiveParentID, folderID)
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		siblings := make([]whiteboardFolderSiblingOrder, 0)
+		for rows.Next() {
+			var sibling whiteboardFolderSiblingOrder
+			if scanErr := rows.Scan(&sibling.ID, &sibling.SortOrder); scanErr != nil {
+				rows.Close()
+				return nil, scanErr
+			}
+			siblings = append(siblings, sibling)
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			rows.Close()
+			return nil, rowsErr
+		}
+		rows.Close()
+		placementPlan, err = planWhiteboardFolderPlacement(folderID, input.Placement.BeforeFolderID, siblings)
+		if err != nil {
+			return nil, err
+		}
+		sortOrder = placementPlan.TargetSortOrder
+	} else if input.SortOrder != nil {
 		sortOrder = *input.SortOrder
 	}
 	item, err := scanWhiteboardFolder(tx.QueryRow(ctx, `UPDATE whiteboard_folders SET
 		parent_id=$3,name=$4,description=$5,sort_order=COALESCE($6::bigint,sort_order),
 		version=version+1,updated_at=NOW()
 		WHERE account_id=$1 AND id=$2 RETURNING `+whiteboardFolderColumns,
-		accountID, folderID, input.ParentID, input.Name, input.Description, sortOrder))
+		accountID, folderID, effectiveParentID, input.Name, input.Description, sortOrder))
 	if err != nil {
 		return nil, normalizeWhiteboardConstraintError(err)
+	}
+	affected := []*domain.WhiteboardFolder{item}
+	if len(placementPlan.Rebalanced) > 0 {
+		ids := make([]uuid.UUID, 0, len(placementPlan.Rebalanced)-1)
+		orders := make([]int64, 0, len(placementPlan.Rebalanced)-1)
+		for id, desiredOrder := range placementPlan.Rebalanced {
+			if id == folderID {
+				continue
+			}
+			ids = append(ids, id)
+			orders = append(orders, desiredOrder)
+		}
+		if len(ids) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE whiteboard_folders folder SET
+				sort_order=desired.sort_order,version=folder.version+1,updated_at=NOW()
+				FROM unnest($3::uuid[],$4::bigint[]) AS desired(id,sort_order)
+				WHERE folder.account_id=$1 AND folder.parent_id IS NOT DISTINCT FROM $2::uuid
+				  AND folder.archived_at IS NULL AND folder.id=desired.id
+				  AND folder.sort_order IS DISTINCT FROM desired.sort_order`, accountID, effectiveParentID, ids, orders); err != nil {
+				return nil, err
+			}
+			rows, err := tx.Query(ctx, `SELECT `+whiteboardFolderColumns+` FROM whiteboard_folders
+				WHERE account_id=$1 AND id=ANY($2::uuid[]) ORDER BY sort_order,id`, accountID, ids)
+			if err != nil {
+				return nil, err
+			}
+			for rows.Next() {
+				folder, scanErr := scanWhiteboardFolder(rows)
+				if scanErr != nil {
+					rows.Close()
+					return nil, scanErr
+				}
+				affected = append(affected, folder)
+			}
+			if rowsErr := rows.Err(); rowsErr != nil {
+				rows.Close()
+				return nil, rowsErr
+			}
+			rows.Close()
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return item, nil
+	return &WhiteboardFolderUpdateResult{Folder: item, AffectedFolders: affected}, nil
 }
 
 func (r *WhiteboardRepository) ArchiveFolder(ctx context.Context, accountID, folderID uuid.UUID, expectedVersion int64) error {

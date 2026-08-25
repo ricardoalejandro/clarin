@@ -18,6 +18,7 @@ ENV NEXT_PUBLIC_BUILD_VERSION=$BUILD_VERSION
 
 # Copy package files
 COPY package*.json ./
+COPY vendor/excalidraw-clarin ./vendor/excalidraw-clarin
 
 # Install dependencies (use npm ci if lock exists, otherwise npm install)
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi

@@ -296,6 +296,7 @@ type Device struct {
 type DeviceRuntimeCapabilities struct {
 	CanStartChat           bool `json:"can_start_chat"`
 	CanCheckWhatsApp       bool `json:"can_check_whatsapp"`
+	CanSendReaction        bool `json:"can_send_reaction"`
 	CanSendSticker         bool `json:"can_send_sticker"`
 	CanSendAnimatedSticker bool `json:"can_send_animated_sticker"`
 	CanPublishStatus       bool `json:"can_publish_status"`
@@ -533,6 +534,10 @@ type Chat struct {
 
 	// Lead blocked status (populated via JOIN on JID)
 	LeadIsBlocked bool `json:"lead_is_blocked"`
+	// IdentityPending is true when WhatsApp supplied only its private LID and
+	// the corresponding phone-number JID has not been resolved yet. Pending
+	// chats stay visible, but callers must not present LID digits as a phone.
+	IdentityPending bool `json:"identity_pending"`
 
 	// Relations (populated on demand)
 	Contact  *Contact   `json:"contact,omitempty"`
@@ -681,6 +686,17 @@ type MessageReaction struct {
 	IsFromMe        bool      `json:"is_from_me"`
 	Timestamp       time.Time `json:"timestamp"`
 	CreatedAt       time.Time `json:"created_at"`
+}
+
+// MessageReactionMutation is the canonical result of an outbound reaction
+// mutation. OperationID lets clients deduplicate their optimistic mutation
+// from its WebSocket echo without suppressing later provider truth.
+type MessageReactionMutation struct {
+	Reaction    *MessageReaction `json:"reaction,omitempty"`
+	Removed     bool             `json:"removed"`
+	Timestamp   time.Time        `json:"timestamp"`
+	Provider    string           `json:"provider"`
+	OperationID string           `json:"operation_id"`
 }
 
 // PollOption represents one option in a poll message
@@ -2113,6 +2129,10 @@ type Program struct {
 	CreatedBy   *uuid.UUID `json:"created_by,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+	// HealthViewColumns stores the configurable columns shown in the Program
+	// health roster. Participant identity and actions are intentionally fixed.
+	HealthViewColumns []string   `json:"health_view_columns"`
+	ExpectedUpdatedAt *time.Time `json:"-"`
 
 	// Schedule fields for recurring sessions (course type)
 	ScheduleStartDate *time.Time `json:"schedule_start_date,omitempty"`
@@ -2427,6 +2447,7 @@ type ProgramHealthParticipant struct {
 	AvatarURL          *string    `json:"avatar_url,omitempty"`
 	AvatarRevision     int64      `json:"avatar_revision"`
 	Status             string     `json:"status"`
+	EnrolledAt         string     `json:"enrolled_at"`
 	Health             string     `json:"health"`
 	AttendanceRate     float64    `json:"attendance_rate"`
 	Present            int        `json:"present"`
@@ -2469,6 +2490,7 @@ type ProgramParticipantAttendanceStat struct {
 
 type ProgramHealthSummary struct {
 	ProgramID             uuid.UUID                   `json:"program_id"`
+	AsOfDate              string                      `json:"as_of_date"`
 	AttendanceGoalPercent int                         `json:"attendance_goal_percent"`
 	TransferGoalPercent   int                         `json:"transfer_goal_percent"`
 	ParticipantCount      int                         `json:"participant_count"`

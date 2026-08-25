@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +109,9 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 	if _, err := db.Exec(ctx, `ALTER TABLE program_sessions DROP COLUMN title`); err != nil {
 		t.Fatalf("drop title to simulate legacy schema: %v", err)
 	}
+	if _, err := db.Exec(ctx, `ALTER TABLE programs DROP COLUMN health_view_columns`); err != nil {
+		t.Fatalf("drop health view columns to simulate legacy schema: %v", err)
+	}
 	if _, err := db.Exec(ctx, `
 		INSERT INTO program_sessions (id,account_id,program_id,date,topic,start_time)
 		VALUES
@@ -128,6 +132,22 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 	}
 	if err := Migrate(db); err != nil {
 		t.Fatalf("idempotent migrate: %v", err)
+	}
+	var healthViewColumns []string
+	if err := db.QueryRow(ctx, `SELECT health_view_columns FROM programs WHERE id=$1`, programID).Scan(&healthViewColumns); err != nil {
+		t.Fatalf("read default program health columns: %v", err)
+	}
+	if !slices.Equal(healthViewColumns, []string{"health", "attendance", "signals"}) {
+		t.Fatalf("unexpected default program health columns: %#v", healthViewColumns)
+	}
+	if _, err := db.Exec(ctx, `UPDATE programs SET health_view_columns=ARRAY[]::text[] WHERE id=$1`, programID); err != nil {
+		t.Fatalf("empty program health column selection must be valid: %v", err)
+	}
+	if _, err := db.Exec(ctx, `UPDATE programs SET health_view_columns=ARRAY['phone']::text[] WHERE id=$1`, programID); err == nil {
+		t.Fatal("unknown program health column bypassed the database constraint")
+	}
+	if _, err := db.Exec(ctx, `UPDATE programs SET health_view_columns=ARRAY['health','attendance','signals']::text[] WHERE id=$1`, programID); err != nil {
+		t.Fatalf("restore program health columns: %v", err)
 	}
 	for _, column := range []string{"enrolled_at", "dropped_at", "completed_at"} {
 		var dataType string
@@ -152,6 +172,29 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 		t.Fatal("program_sessions.title accepted more than 255 characters")
 	}
 	repos := repository.NewRepositories(db)
+	canonicalProgram, err := repos.Program.GetByID(ctx, accountID, programID)
+	if err != nil || canonicalProgram == nil {
+		t.Fatalf("read account-scoped program: program=%v err=%v", canonicalProgram, err)
+	}
+	if hidden, err := repos.Program.GetByID(ctx, otherAccountID, programID); err != nil || hidden != nil {
+		t.Fatalf("cross-account program read must be hidden: program=%v err=%v", hidden, err)
+	}
+	staleTimestamp := canonicalProgram.UpdatedAt.Add(-time.Hour)
+	canonicalProgram.ExpectedUpdatedAt = &staleTimestamp
+	if err := repos.Program.Update(ctx, canonicalProgram); !errors.Is(err, repository.ErrProgramConflict) {
+		t.Fatalf("stale program update must conflict atomically, got %v", err)
+	}
+	healthSummary, err := repos.Program.GetProgramHealth(ctx, accountID, programID)
+	if err != nil {
+		t.Fatalf("read program health projection: %v", err)
+	}
+	wantAsOfDate := time.Now().In(time.FixedZone("PET", -5*60*60)).Format("2006-01-02")
+	if healthSummary.AsOfDate != wantAsOfDate {
+		t.Fatalf("program health as_of_date = %q, want %q", healthSummary.AsOfDate, wantAsOfDate)
+	}
+	if len(healthSummary.Participants) != 2 || healthSummary.Participants[0].EnrolledAt != "2026-07-15" {
+		t.Fatalf("program health did not project enrollment calendar dates: %#v", healthSummary.Participants)
+	}
 	correctedEnrollment := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
 	updatedEnrollment, err := repos.Program.UpdateParticipantEnrollmentDate(ctx, accountID, programID, participantID, correctedEnrollment)
 	if err != nil || updatedEnrollment.Format("2006-01-02") != "2026-07-15" {

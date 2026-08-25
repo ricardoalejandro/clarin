@@ -44,3 +44,22 @@ func TestClientCanReceiveTargetedTaskEvent(t *testing.T) {
 		t.Fatal("targeted user without Tasks permission received a task reminder")
 	}
 }
+
+func TestReactionBroadcastRequiresChatsPermission(t *testing.T) {
+	t.Parallel()
+
+	hub := NewHub()
+	accountID := uuid.New()
+	hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, EventMessageReaction, map[string]string{"emoji": "👍"})
+	message := <-hub.broadcast
+
+	if message.AccountID != accountID.String() || message.Event != EventMessageReaction || message.RequiredPermission != domain.PermChats {
+		t.Fatalf("reaction broadcast metadata = %#v", message)
+	}
+	if clientCanReceive(&Client{Permissions: map[string]bool{domain.PermContacts: true}}, message) {
+		t.Fatal("client without Chats permission received a reaction")
+	}
+	if !clientCanReceive(&Client{Permissions: map[string]bool{domain.PermChats: true}}, message) {
+		t.Fatal("client with Chats permission was denied a reaction")
+	}
+}

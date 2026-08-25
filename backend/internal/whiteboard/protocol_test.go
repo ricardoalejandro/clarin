@@ -86,6 +86,38 @@ func TestDecodeIncomingBoundsEphemeralPayloads(t *testing.T) {
 	}
 }
 
+func TestDecodeIncomingPresentationAndFollowEvents(t *testing.T) {
+	valid := []string{
+		`{"event":"presentation.start","operation_id":"0148b0ff-ff98-4abe-bcee-3dc4723e3066"}`,
+		`{"event":"presentation.stop","operation_id":"1148b0ff-ff98-4abe-bcee-3dc4723e3066","data":{"presentation_id":"0148b0ff-ff98-4abe-bcee-3dc4723e3066"}}`,
+		`{"event":"follow.change","data":{"target_actor_id":"2148b0ff-ff98-4abe-bcee-3dc4723e3066","action":"FOLLOW"}}`,
+		`{"event":"viewport.update","data":{"bounds":[-120.5,20,640,480]}}`,
+	}
+	for _, payload := range valid {
+		if _, err := DecodeIncoming([]byte(payload)); err != nil {
+			t.Fatalf("valid presentation payload was rejected: %s (%v)", payload, err)
+		}
+	}
+}
+
+func TestDecodeIncomingRejectsUnsafePresentationAndViewportEvents(t *testing.T) {
+	invalid := []string{
+		`{"event":"presentation.start"}`,
+		`{"event":"presentation.start","operation_id":"0148b0ff-ff98-4abe-bcee-3dc4723e3066","data":{"actor_id":"2148b0ff-ff98-4abe-bcee-3dc4723e3066"}}`,
+		`{"event":"presentation.stop","operation_id":"1148b0ff-ff98-4abe-bcee-3dc4723e3066","data":{"presentation_id":"invalid"}}`,
+		`{"event":"follow.change","data":{"target_actor_id":"2148b0ff-ff98-4abe-bcee-3dc4723e3066","action":"FORCE"}}`,
+		`{"event":"follow.change","data":{"target_actor_id":"2148b0ff-ff98-4abe-bcee-3dc4723e3066","action":"FOLLOW","account_id":"3148b0ff-ff98-4abe-bcee-3dc4723e3066"}}`,
+		`{"event":"viewport.update","data":{"bounds":[0,0,0,10]}}`,
+		`{"event":"viewport.update","data":{"bounds":[0,0,1000001,10]}}`,
+		`{"event":"viewport.update","data":{"bounds":[0,0,10,10],"board_id":"4148b0ff-ff98-4abe-bcee-3dc4723e3066"}}`,
+	}
+	for _, payload := range invalid {
+		if _, err := DecodeIncoming([]byte(payload)); !errors.Is(err, ErrInvalidRealtimeMessage) {
+			t.Fatalf("unsafe presentation payload was accepted: %s (%v)", payload, err)
+		}
+	}
+}
+
 func TestSanitizePersistedAppStateDropsTransientAndUnknownFields(t *testing.T) {
 	got, err := SanitizePersistedAppState(json.RawMessage(`{"viewBackgroundColor":"#fff","theme":"dark","zoom":{"value":2},"selectedElementIds":{"a":true},"future":42}`))
 	if err != nil {

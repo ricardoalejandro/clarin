@@ -1,4 +1,4 @@
-export const WHITEBOARD_EDITOR_VERSION = '0.18.1'
+export const WHITEBOARD_EDITOR_VERSION = '0.18.1-clarin.4'
 export const WHITEBOARD_EDITOR_ASSET_PATH = `/vendor/whiteboards-editor/${WHITEBOARD_EDITOR_VERSION}/`
 
 /**

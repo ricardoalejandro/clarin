@@ -294,8 +294,10 @@ func serveWhiteboardAsset(c *fiber.Ctx, s *Server, item *repository.WhiteboardAs
 		c.Set(fiber.HeaderContentDisposition, disposition)
 	}
 	c.Set(fiber.HeaderXContentTypeOptions, "nosniff")
-	return s.serveStorageObject(c, item.ObjectKey, "private, no-store, max-age=0")
+	return s.serveStorageObject(c, item.ObjectKey, whiteboardAssetCacheControl)
 }
+
+const whiteboardAssetCacheControl = "private, no-cache, max-age=0, must-revalidate"
 
 func (s *Server) handleDownloadWhiteboardGuestAsset(c *fiber.Ctx) error {
 	expectedLinkID, err := whiteboardGuestExpectedLinkID(c)

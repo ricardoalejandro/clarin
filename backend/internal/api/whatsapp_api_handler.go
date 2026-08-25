@@ -433,7 +433,7 @@ func (s *Server) processCloudAPIMessage(ctx context.Context, device *domain.Devi
 	if err := s.repos.Message.Create(ctx, dbMessage); err != nil && err != pgx.ErrNoRows {
 		return fmt.Errorf("failed to save message: %w", err)
 	}
-	_ = s.repos.Chat.UpdateLastMessage(ctx, chat.ID, body, timestamp, true)
+	_ = s.repos.Chat.UpdateLastMessage(ctx, device.AccountID, chat.ID, body, timestamp, true)
 	_ = s.repos.WhatsAppAPI.UpdateChatServiceWindow(ctx, chat.ID, provider, true, timestamp)
 
 	lead, _ := s.repos.Lead.GetByJID(ctx, device.AccountID, jid)
@@ -523,7 +523,7 @@ func (s *Server) processCloudAPIMessageEcho(ctx context.Context, device *domain.
 	if err := s.repos.Message.Create(ctx, dbMessage); err != nil && err != pgx.ErrNoRows {
 		return fmt.Errorf("failed to save echoed message: %w", err)
 	}
-	_ = s.repos.Chat.UpdateLastMessage(ctx, chat.ID, body, timestamp, false)
+	_ = s.repos.Chat.UpdateLastMessage(ctx, device.AccountID, chat.ID, body, timestamp, false)
 	_ = s.repos.WhatsAppAPI.UpdateChatServiceWindow(ctx, chat.ID, provider, false, timestamp)
 	s.invalidateChatCaches(device.AccountID, &chat.ID)
 	if s.hub != nil {

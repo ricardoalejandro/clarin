@@ -7,7 +7,9 @@ import {
   buildWhiteboardGuestBootstrap,
   buildWhiteboardImportPlan,
   buildWhiteboardCursorUpdate,
+  buildWhiteboardFollowChange,
   buildWhiteboardPresenceUpdate,
+  buildWhiteboardViewportUpdate,
   buildWhiteboardPurgeRequest,
   buildWhiteboardRealtimePatch,
   buildWhiteboardSceneWritePlan,
@@ -25,11 +27,13 @@ import {
   reconcileWhiteboardCanonicalAck,
   reconcileWhiteboardLibraryConflict,
   reconcileWhiteboardCollaborators,
+  reconcileWhiteboardConnectionOpen,
   retainWhiteboardPendingSave,
   combineWhiteboardLibraryItems,
   parseWhiteboardLibraryItems,
   planWhiteboardAssetPersistence,
   personalWhiteboardLibraryItems,
+  parseWhiteboardViewMode,
   sameWhiteboardAccessGrants,
   sanitizeWhiteboardExternalLink,
   sanitizeWhiteboardFilesForPersistence,
@@ -46,10 +50,19 @@ import {
   whiteboardSceneSaveMethod,
   whiteboardThumbnailDelay,
   whiteboardDuplicateName,
+  whiteboardEditorAccess,
+  whiteboardEditorCanvasActions,
   whiteboardEditorLayout,
+  whiteboardImageExportDialogAppState,
+  whiteboardMoreMenuPosition,
+  whiteboardToolbarShowsShare,
+  whiteboardToolbarStacksBelowTools,
   whiteboardSaveFailureAction,
+  whiteboardSaveRetryStateAfterReconnect,
   whiteboardSaveRetryDelay,
+  WHITEBOARD_COMMENTS_UI_ENABLED,
   WHITEBOARD_SHARE_EXPORT_DEFAULT,
+  WHITEBOARD_SHOW_DEPRECATED_OFFICIAL_FONTS,
   type WhiteboardSummary,
 } from './whiteboards'
 import {
@@ -60,7 +73,7 @@ import {
   sanitizeWhiteboardSvg,
   validateWhiteboardImageDataURL,
 } from './whiteboardMedia'
-import { mapWhiteboardConcurrently } from './whiteboardAsync'
+import { mapWhiteboardConcurrently, whiteboardAsyncResultIsStale } from './whiteboardAsync'
 import {
   buildWhiteboardAssetListPath,
   buildWhiteboardLibrariesPath,
@@ -84,6 +97,11 @@ const base: WhiteboardSummary = {
 }
 
 describe('whiteboard frontend contracts', () => {
+  it('reconciles comments only when a realtime room reconnects', () => {
+    expect(reconcileWhiteboardConnectionOpen(false)).toEqual({ hasOpened: true, reloadComments: false })
+    expect(reconcileWhiteboardConnectionOpen(true)).toEqual({ hasOpened: true, reloadComments: true })
+  })
+
   it('merges canonical checkpoints without replacing the active editor session', () => {
     const activeTool = { type: 'rectangle', customType: null, locked: false, lastActiveTool: null }
     const selectedElementIds = { 'rect-1': true }
@@ -206,6 +224,17 @@ describe('whiteboard frontend contracts', () => {
     expect(plan.referencedFileIDs).toEqual(['file-1', 'file-2', 'persisted'])
     expect(plan.uploadFileIDs).toEqual(['file-1'])
     expect(plan.missingFileIDs).toEqual(['file-2'])
+
+    const saveWhileCanonicalImageHydrates = planWhiteboardAssetPersistence(
+      [{ id: 'canonical-image', type: 'image', fileId: 'canonical-file' }],
+      {},
+      new Set(['canonical-file']),
+    )
+    expect(saveWhileCanonicalImageHydrates).toEqual({
+      referencedFileIDs: ['canonical-file'],
+      uploadFileIDs: [],
+      missingFileIDs: [],
+    })
   })
 
   it('flushes before SPA navigation and confirms only after an unsuccessful flush', () => {
@@ -213,6 +242,8 @@ describe('whiteboard frontend contracts', () => {
     expect(whiteboardNavigationAction({ dirty: true, pending: true, saving: false, flushAttempted: false })).toBe('flush')
     expect(whiteboardNavigationAction({ dirty: true, pending: true, saving: true, flushAttempted: false })).toBe('wait')
     expect(whiteboardNavigationAction({ dirty: true, pending: true, saving: false, assetSaving: true, flushAttempted: false })).toBe('wait')
+    expect(whiteboardNavigationAction({ dirty: false, pending: false, saving: false, commentSaving: true, flushAttempted: false })).toBe('wait')
+    expect(whiteboardNavigationAction({ dirty: false, pending: false, saving: false, commentDirty: true, flushAttempted: false })).toBe('confirm')
     expect(whiteboardNavigationAction({
       dirty: false,
       pending: false,
@@ -243,17 +274,77 @@ describe('whiteboard frontend contracts', () => {
       requiredLibraryVersion: 4,
       savedLibraryVersion: 3,
     })).toBe(false)
+    expect(whiteboardNavigationWritesCovered({
+      requiredSceneVersion: null,
+      savedSceneVersion: 0,
+      requiredLibraryVersion: null,
+      savedLibraryVersion: 0,
+      commentsPending: true,
+    })).toBe(false)
+    expect(whiteboardNavigationWritesCovered({
+      requiredSceneVersion: null,
+      savedSceneVersion: 0,
+      requiredLibraryVersion: null,
+      savedLibraryVersion: 0,
+      commentsDirty: true,
+    })).toBe(false)
   })
 
   it('falls back immediately and bounds automatic retries without discarding the operation', () => {
     expect(whiteboardSaveFailureAction(undefined, 1)).toBe('retry')
     expect(whiteboardSaveFailureAction(503, 2)).toBe('retry')
-    expect(whiteboardSaveFailureAction(503, 3)).toBe('block')
-    expect(whiteboardSaveFailureAction(404, 1)).toBe('block')
-    expect(whiteboardSaveFailureAction(400, 1)).toBe('block')
+    expect(whiteboardSaveFailureAction(503, 3)).toBe('transient_exhausted')
+    expect(whiteboardSaveFailureAction(404, 1)).toBe('terminal')
+    expect(whiteboardSaveFailureAction(400, 1)).toBe('terminal')
+    expect(whiteboardSaveFailureAction(403, 1)).toBe('terminal')
     expect(whiteboardSaveFailureAction(409, 1)).toBe('conflict')
     expect(whiteboardSaveRetryDelay(1)).toBe(1_000)
     expect(whiteboardSaveRetryDelay(2)).toBe(2_500)
+  })
+
+  it('unblocks only transiently exhausted pending saves after a real reconnect', () => {
+    const payload = { expected_sequence: 7, operation_id: 'same-operation', scene: { elements: [{ id: 'same-payload' }] } }
+    const pending = {
+      operationID: 'same-operation',
+      payload,
+      automaticFailures: 3,
+      automaticRetryBlockReason: 'transient_exhausted' as const,
+    }
+    const recoveredState = whiteboardSaveRetryStateAfterReconnect({
+      previouslyOpened: true,
+      automaticFailures: pending.automaticFailures,
+      automaticRetryBlockReason: pending.automaticRetryBlockReason,
+    })
+    const recovered = { ...pending, ...recoveredState }
+
+    expect(recovered).toMatchObject({
+      operationID: 'same-operation',
+      automaticFailures: 0,
+      automaticRetryBlockReason: null,
+      shouldRetry: true,
+    })
+    expect(recovered.payload).toBe(payload)
+
+    for (const automaticRetryBlockReason of ['terminal', 'conflict'] as const) {
+      expect(whiteboardSaveRetryStateAfterReconnect({
+        previouslyOpened: true,
+        automaticFailures: 1,
+        automaticRetryBlockReason,
+      })).toEqual({
+        shouldRetry: false,
+        automaticFailures: 1,
+        automaticRetryBlockReason,
+      })
+    }
+    expect(whiteboardSaveRetryStateAfterReconnect({
+      previouslyOpened: false,
+      automaticFailures: 3,
+      automaticRetryBlockReason: 'transient_exhausted',
+    })).toEqual({
+      shouldRetry: false,
+      automaticFailures: 3,
+      automaticRetryBlockReason: 'transient_exhausted',
+    })
   })
 
   it('selects the whiteboard chrome from measured available width', () => {
@@ -263,6 +354,40 @@ describe('whiteboard frontend contracts', () => {
     expect(whiteboardEditorLayout(1_279)).toBe('compact')
     expect(whiteboardEditorLayout(1_280)).toBe('wide')
     expect(whiteboardEditorLayout(Number.NaN)).toBe('mobile')
+    expect(whiteboardToolbarShowsShare(1_279, true)).toBe(false)
+    expect(whiteboardToolbarShowsShare(1_280, true)).toBe(true)
+    expect(whiteboardToolbarShowsShare(1_440, false)).toBe(false)
+    expect(whiteboardToolbarShowsShare(Number.NaN, true)).toBe(false)
+    expect(whiteboardToolbarStacksBelowTools(959)).toBe(true)
+    expect(whiteboardToolbarStacksBelowTools(960)).toBe(false)
+    expect(whiteboardToolbarStacksBelowTools(Number.NaN)).toBe(true)
+    expect(WHITEBOARD_COMMENTS_UI_ENABLED).toBe(false)
+  })
+
+  it('keeps native image export permission-aware and exposes every official pinned font', () => {
+    expect(whiteboardEditorCanvasActions(true)).toEqual({
+      loadScene: false,
+      saveToActiveFile: false,
+      saveAsImage: true,
+      export: false,
+      toggleTheme: false,
+    })
+    expect(whiteboardEditorCanvasActions(false).saveAsImage).toBe(false)
+    expect(whiteboardImageExportDialogAppState()).toEqual({
+      openDialog: { name: 'imageExport' },
+    })
+    expect(WHITEBOARD_SHOW_DEPRECATED_OFFICIAL_FONTS).toBe(true)
+  })
+
+  it('keeps the portaled More menu inside narrow and wide viewports', () => {
+    expect(whiteboardMoreMenuPosition(
+      { right: 256, bottom: 180 },
+      { width: 320, height: 720 },
+    )).toEqual({ top: 188, right: 12 })
+    expect(whiteboardMoreMenuPosition(
+      { right: 1_420, bottom: 60 },
+      { width: 1_440, height: 900 },
+    )).toEqual({ top: 68, right: 20 })
   })
 
   it('keeps the exact pending operation and payload through a lost ACK retry', () => {
@@ -376,6 +501,14 @@ describe('whiteboard frontend contracts', () => {
     expect(result).toEqual([2, 4, 6, 8, 10, 12, 14, 16])
   })
 
+  it('ignores stale async results after abort or editor unmount', () => {
+    const controller = new AbortController()
+    expect(whiteboardAsyncResultIsStale({ signal: controller.signal, mounted: true })).toBe(false)
+    controller.abort()
+    expect(whiteboardAsyncResultIsStale({ signal: controller.signal, mounted: true })).toBe(true)
+    expect(whiteboardAsyncResultIsStale({ mounted: false })).toBe(true)
+  })
+
   it('rejects a repeated asset cursor instead of returning a partial manifest', async () => {
     let calls = 0
     const result = await collectWhiteboardAssetPages(async () => {
@@ -462,7 +595,7 @@ describe('whiteboard frontend contracts', () => {
         },
       },
       scene_schema_version: 'excalidraw',
-      editor_version: '0.18.1',
+      editor_version: '0.18.1-clarin.4',
     })
   })
 
@@ -603,6 +736,17 @@ describe('whiteboard frontend contracts', () => {
     })
   })
 
+  it('preserves member-only comment payloads for board-local reconciliation', () => {
+    const thread = { id: 'thread-1', board_id: 'board-1', version: 2 }
+    expect(parseWhiteboardRealtimeEvent({
+      event: 'comment.changed',
+      data: { board_id: 'board-1', action: 'replied', thread },
+    })).toMatchObject({
+      event: 'comment.changed',
+      data: { board_id: 'board-1', action: 'replied', thread },
+    })
+  })
+
   it('builds the dedicated-room patch with the exact event envelope', () => {
     expect(buildWhiteboardRealtimePatch({
       sceneSequence: 9,
@@ -642,6 +786,23 @@ describe('whiteboard frontend contracts', () => {
       actor: { kind: 'user', id: 'socket-1', display_name: 'Ana', access: 'edit' },
       data: { status: 'left' },
     }).size).toBe(0)
+  })
+
+  it('builds and parses bounded presentation transport events', () => {
+    expect(buildWhiteboardFollowChange('presenter-1', 'FOLLOW')).toEqual({
+      event: 'follow.change', data: { target_actor_id: 'presenter-1', action: 'FOLLOW' },
+    })
+    expect(buildWhiteboardFollowChange('', 'FOLLOW')).toBeNull()
+    expect(buildWhiteboardViewportUpdate([0, 0, 120, 80])).toEqual({
+      event: 'viewport.update', data: { bounds: [0, 0, 120, 80] },
+    })
+    expect(buildWhiteboardViewportUpdate([0, 0, 0, 80])).toBeNull()
+    expect(parseWhiteboardRealtimeEvent({
+      event: 'presentation.snapshot',
+      data: { presentation: { presentation_id: 'p-1' } },
+    })).toMatchObject({ event: 'presentation.snapshot', data: { presentation: { presentation_id: 'p-1' } } })
+    expect(parseWhiteboardRealtimeEvent({ event: 'room.ready', actor: { id: 'self-1', display_name: 'Ana' } }))
+      .toMatchObject({ event: 'room.ready', actor: { id: 'self-1' } })
   })
 
   it('diffs by id/version/versionNonce, keeps tombstones and snapshots deltas over 2000 elements', () => {
@@ -732,6 +893,45 @@ describe('whiteboard frontend contracts', () => {
     })
   })
 
+  it('preserves comment-only access for authenticated members', () => {
+    expect(buildWhiteboardAccessUpdate({
+      board_id: 'board-1',
+      access_mode: 'private',
+      access_revision: 4,
+      effective_access: { ...base.effective_access, level: 'manage', can_comment: true },
+      grants: [{ id: 'grant-1', user_id: 'user-1', access_level: 'comment', can_manage_access: false }],
+    }, 'private')).toEqual({
+      access_mode: 'private',
+      expected_access_revision: 4,
+      grants: [{ user_id: 'user-1', access_level: 'comment' }],
+    })
+  })
+
+  it('keeps comment-only members in scene view mode while enabling comment mutations', () => {
+    expect(whiteboardEditorAccess({
+      level: 'comment',
+      can_view: true,
+      can_comment: true,
+      can_edit: false,
+      can_manage_access: false,
+    })).toEqual({
+      canEdit: false,
+      canComment: true,
+      viewModeEnabled: true,
+    })
+    expect(whiteboardEditorAccess({
+      level: 'edit',
+      can_view: true,
+      can_comment: true,
+      can_edit: true,
+      can_manage_access: false,
+    }, '2026-08-15T00:00:00Z')).toEqual({
+      canEdit: false,
+      canComment: false,
+      viewModeEnabled: true,
+    })
+  })
+
   it('compares ACL drafts by canonical user and level rather than response metadata', () => {
     const canonical = [{ id: 'one', user_id: 'user-1', access_level: 'edit' as const, can_manage_access: false }]
     expect(sameWhiteboardAccessGrants(canonical, [{ ...canonical[0], id: 'draft', display_name: 'Ana' }])).toBe(true)
@@ -795,6 +995,16 @@ describe('whiteboard frontend contracts', () => {
     expect(whiteboardManagerLayout(759)).toBe('narrow')
     expect(whiteboardManagerLayout(760)).toBe('compact')
     expect(whiteboardManagerLayout(1080)).toBe('wide')
+  })
+
+  it('defaults the manager to compact view and restores only supported persisted views', () => {
+    expect(parseWhiteboardViewMode(null)).toBe('compact')
+    expect(parseWhiteboardViewMode(undefined)).toBe('compact')
+    expect(parseWhiteboardViewMode('')).toBe('compact')
+    expect(parseWhiteboardViewMode('cards')).toBe('compact')
+    expect(parseWhiteboardViewMode('grid')).toBe('grid')
+    expect(parseWhiteboardViewMode('compact')).toBe('compact')
+    expect(parseWhiteboardViewMode('list')).toBe('list')
   })
 
   it('flattens active folder hierarchy once and contains malformed cycles', () => {

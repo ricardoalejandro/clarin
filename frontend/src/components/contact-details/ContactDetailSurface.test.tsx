@@ -1,10 +1,10 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ReactNode } from 'react'
+import { createRef, type ReactNode } from 'react'
 import type { ContactProfileContact } from '@/types/contact-profile'
-import ContactDetailSurface from './ContactDetailSurface'
+import ContactDetailSurface, { type ContactDetailSurfaceHandle } from './ContactDetailSurface'
 
-const mocks = vi.hoisted(() => ({ updateContact: vi.fn(), refreshObservations: vi.fn() }))
+const mocks = vi.hoisted(() => ({ updateContact: vi.fn(), refreshObservations: vi.fn(), googleSync: vi.fn() }))
 
 function EmbeddedPanel({ children }: { embedded?: boolean; onCountChange?: (count: number) => void; children: ReactNode }) {
   return <div>{children}</div>
@@ -59,7 +59,17 @@ vi.mock('./useContactProfile', () => ({
 }))
 
 vi.mock('./useGoogleContactSync', () => ({
-  useGoogleContactSync: () => ({
+  useGoogleContactSync: () => mocks.googleSync(),
+}))
+
+vi.mock('@/components/ContactAvatarControl', () => ({ default: () => <div data-testid="avatar" /> }))
+
+afterEach(cleanup)
+
+beforeEach(() => {
+  mocks.updateContact.mockReset().mockResolvedValue({ success: true, contact })
+  mocks.refreshObservations.mockReset().mockResolvedValue(undefined)
+  mocks.googleSync.mockReset().mockReturnValue({
     statusLoading: false,
     connected: false,
     permissionDenied: false,
@@ -71,19 +81,35 @@ vi.mock('./useGoogleContactSync', () => ({
     retryStatus: vi.fn(),
     sync: vi.fn(),
     desync: vi.fn(),
-  }),
-}))
-
-vi.mock('@/components/ContactAvatarControl', () => ({ default: () => <div data-testid="avatar" /> }))
-
-afterEach(cleanup)
-
-beforeEach(() => {
-  mocks.updateContact.mockReset().mockResolvedValue({ success: true, contact })
-  mocks.refreshObservations.mockReset().mockResolvedValue(undefined)
+  })
 })
 
 describe('ContactDetailSurface date editing', () => {
+  it('keeps integrations collapsed and exposes accessible Google Contacts actions when opened', () => {
+    mocks.googleSync.mockReturnValue({
+      statusLoading: false,
+      connected: true,
+      permissionDenied: false,
+      synced: false,
+      mutation: null,
+      statusError: '',
+      actionError: '',
+      feedback: '',
+      retryStatus: vi.fn(),
+      sync: vi.fn(),
+      desync: vi.fn(),
+    })
+    render(<ContactDetailSurface contactId="contact-1" context={{ type: 'contact', id: 'contact-1' }} initialContact={contact} onClose={vi.fn()} />)
+
+    const integrations = screen.getByRole('button', { name: /Integraciones Google Contacts disponible/ })
+    expect(integrations).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('region', { name: 'Google Contacts' })).toBeNull()
+
+    fireEvent.click(integrations)
+    expect(screen.getByRole('region', { name: 'Google Contacts' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Sincronizar contacto con Google Contacts' })).toBeVisible()
+  })
+
   it('keeps scoped and general observations separate, contiguous and lazy', () => {
     render(
       <ContactDetailSurface
@@ -141,5 +167,24 @@ describe('ContactDetailSurface date editing', () => {
       birth_date: '1992-05-08',
       custom_field_values: [expect.objectContaining({ field_id: 'field-date', value_date: '2026-06-15' })],
     }))
+  })
+
+  it('exposes the same dirty-draft close guard to an owning operational window', () => {
+    const ref = createRef<ContactDetailSurfaceHandle>()
+    const onClose = vi.fn()
+    const confirmClose = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    render(<ContactDetailSurface ref={ref} contactId="contact-1" context={{ type: 'contact', id: 'contact-1' }} initialContact={contact} onClose={onClose} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
+    fireEvent.change(screen.getByLabelText('Nombre visible'), { target: { value: 'Gabriela actualizada' } })
+
+    expect(ref.current?.requestClose()).toBe(false)
+    expect(confirmClose).toHaveBeenCalledWith('Hay cambios del contacto sin guardar. ¿Deseas cerrar y descartarlos?')
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByRole('form', { name: 'Editar contacto' })).toBeInTheDocument()
+
+    confirmClose.mockReturnValue(true)
+    expect(ref.current?.requestClose()).toBe(true)
+    expect(onClose).toHaveBeenCalledTimes(1)
   })
 })

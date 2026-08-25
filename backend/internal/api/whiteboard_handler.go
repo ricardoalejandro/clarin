@@ -43,6 +43,14 @@ func whiteboardError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusGone).JSON(fiber.Map{"success": false, "error": "El enlace no está disponible", "code": "whiteboard_share_unavailable"})
 	case errors.Is(err, repository.ErrWhiteboardSessionUnavailable):
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"success": false, "error": "La sesión de invitado no está disponible", "code": "whiteboard_guest_session_unavailable"})
+	case errors.Is(err, repository.ErrWhiteboardLibraryImportExpired):
+		return c.Status(fiber.StatusGone).JSON(fiber.Map{"success": false, "error": "La importación de biblioteca expiró", "code": "whiteboard_library_import_expired"})
+	case errors.Is(err, repository.ErrWhiteboardLibraryImportUnavailable):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La importación de biblioteca ya fue consumida o no está lista", "code": "whiteboard_library_import_unavailable"})
+	case errors.Is(err, repository.ErrWhiteboardLibraryImportNotPersisted):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "Los elementos importados aún no están guardados en la biblioteca personal", "code": "whiteboard_library_import_not_persisted"})
+	case errors.Is(err, service.ErrWhiteboardPublicLibrary):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "La biblioteca pública no es válida o no pudo verificarse", "code": "invalid_public_whiteboard_library"})
 	case errors.Is(err, repository.ErrWhiteboardTrashConfirmation):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "El nombre de confirmación no coincide", "code": "whiteboard_trash_confirmation_mismatch"})
 	case errors.As(err, &trashEligibility):
@@ -217,27 +225,46 @@ func (s *Server) handleUpdateWhiteboardFolder(c *fiber.Ctx) error {
 		return whiteboardError(c, err)
 	}
 	var request struct {
-		ParentID        *uuid.UUID `json:"parent_id"`
-		Name            string     `json:"name"`
-		Description     string     `json:"description"`
-		SortOrder       *int64     `json:"sort_order"`
-		ExpectedVersion int64      `json:"expected_version"`
+		ParentID    *uuid.UUID `json:"parent_id"`
+		Name        string     `json:"name"`
+		Description string     `json:"description"`
+		SortOrder   *int64     `json:"sort_order"`
+		Placement   *struct {
+			ParentID       *uuid.UUID `json:"parent_id"`
+			BeforeFolderID *uuid.UUID `json:"before_folder_id"`
+		} `json:"placement"`
+		ExpectedVersion int64 `json:"expected_version"`
 	}
 	if err := c.BodyParser(&request); err != nil {
+		return whiteboardError(c, repository.ErrWhiteboardInvalid)
+	}
+	var rawFields map[string]json.RawMessage
+	if err := json.Unmarshal(c.Body(), &rawFields); err != nil {
+		return whiteboardError(c, repository.ErrWhiteboardInvalid)
+	}
+	_, parentIDProvided := rawFields["parent_id"]
+	if request.Placement != nil && request.SortOrder != nil {
 		return whiteboardError(c, repository.ErrWhiteboardInvalid)
 	}
 	request.Name, err = service.NormalizeWhiteboardName(request.Name, 120)
 	if err != nil {
 		return whiteboardError(c, err)
 	}
-	item, err := s.repos.Whiteboard.UpdateFolder(c.Context(), accountID, actorID, folderID, repository.WhiteboardFolderInput{
+	var placement *repository.WhiteboardFolderPlacement
+	if request.Placement != nil {
+		placement = &repository.WhiteboardFolderPlacement{
+			ParentID: request.Placement.ParentID, BeforeFolderID: request.Placement.BeforeFolderID,
+		}
+	}
+	result, err := s.repos.Whiteboard.UpdateFolder(c.Context(), accountID, actorID, folderID, repository.WhiteboardFolderInput{
 		ParentID: request.ParentID, Name: request.Name, Description: strings.TrimSpace(request.Description),
-		SortOrder: request.SortOrder, ExpectedVersion: request.ExpectedVersion,
+		ParentIDProvided: parentIDProvided, SortOrder: request.SortOrder, Placement: placement,
+		ExpectedVersion: request.ExpectedVersion,
 	})
 	if err != nil {
 		return whiteboardError(c, err)
 	}
-	return c.JSON(fiber.Map{"success": true, "folder": item})
+	return c.JSON(fiber.Map{"success": true, "folder": result.Folder, "affected_folders": result.AffectedFolders})
 }
 
 func (s *Server) handleArchiveWhiteboardFolder(c *fiber.Ctx) error {

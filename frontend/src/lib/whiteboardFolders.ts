@@ -7,11 +7,15 @@ export interface WhiteboardFolderDestination {
 
 export type WhiteboardFolderPlacement = 'first' | 'last'
 
-export interface WhiteboardFolderRelocationInput {
+export interface WhiteboardFolderStructuralPlacement {
   parent_id: string | null
+  before_folder_id: string | null
+}
+
+export interface WhiteboardFolderRelocationInput {
   name: string
   description: string
-  sort_order: number
+  placement: WhiteboardFolderStructuralPlacement
   expected_version: number
 }
 
@@ -26,6 +30,17 @@ export interface WhiteboardFolderDestinationOption {
   depth: number
   disabled: boolean
   reason?: string
+}
+
+export interface WhiteboardFolderPositionOption {
+  beforeFolderID: string | null
+  label: string
+}
+
+export interface WhiteboardMoveDestinationOption extends WhiteboardFolderDestination {
+  label: string
+  path: string
+  depth: number
 }
 
 const WHITEBOARD_FOLDER_MAX_DEPTH = 20
@@ -87,7 +102,7 @@ function destinationAncestry(
   return ancestry
 }
 
-function folderDestinationError(
+export function whiteboardFolderDestinationError(
   target: WhiteboardFolder,
   folders: readonly WhiteboardFolder[],
   destinationParentID: string | null,
@@ -122,7 +137,7 @@ export function whiteboardFolderDestinationOptions(
 ): WhiteboardFolderDestinationOption[] {
   const active = folders.filter(folder => !folder.archived_at)
   const byID = new Map(active.map(folder => [folder.id, folder] as const))
-  const rootError = folderDestinationError(target, active, null)
+  const rootError = whiteboardFolderDestinationError(target, active, null)
   return [
     {
       id: null,
@@ -133,7 +148,7 @@ export function whiteboardFolderDestinationOptions(
     },
     ...flattenWhiteboardFolders(active).map(({ folder, depth }) => {
       const ancestry = destinationAncestry(byID, folder.id)
-      const error = folderDestinationError(target, active, folder.id)
+      const error = whiteboardFolderDestinationError(target, active, folder.id)
       return {
         id: folder.id,
         label: ancestry?.map(item => item.name).join(' / ') || folder.name,
@@ -153,42 +168,115 @@ export function buildWhiteboardFolderRelocationPlan(
 ): WhiteboardFolderRelocationPlan {
   if (target.archived_at) throw new Error('No se puede organizar una carpeta archivada.')
   if (placement !== 'first' && placement !== 'last') throw new Error('La posición elegida no es válida.')
-  const error = folderDestinationError(target, folders, destinationParentID)
+  const siblings = folders
+    .filter(folder => !folder.archived_at && folder.id !== target.id && normalizedParentID(folder) === destinationParentID)
+    .sort(compareFolderOrder)
+  return buildWhiteboardFolderPlacementPlan(
+    target,
+    folders,
+    destinationParentID,
+    placement === 'first' ? siblings[0]?.id || null : null,
+  )
+}
+
+export function buildWhiteboardFolderPlacementPlan(
+  target: WhiteboardFolder,
+  folders: readonly WhiteboardFolder[],
+  destinationParentID: string | null,
+  beforeFolderID: string | null,
+): WhiteboardFolderRelocationPlan {
+  if (target.archived_at) throw new Error('No se puede organizar una carpeta archivada.')
+  const error = whiteboardFolderDestinationError(target, folders, destinationParentID)
   if (error) throw new Error(error)
   const siblings = folders
     .filter(folder => !folder.archived_at && folder.id !== target.id && normalizedParentID(folder) === destinationParentID)
     .sort(compareFolderOrder)
+  if (beforeFolderID && !siblings.some(folder => folder.id === beforeFolderID)) {
+    throw new Error('La posición de destino ya no está disponible.')
+  }
   const currentSiblings = folders
     .filter(folder => !folder.archived_at && normalizedParentID(folder) === normalizedParentID(target))
     .sort(compareFolderOrder)
   const currentIndex = currentSiblings.findIndex(folder => folder.id === target.id)
-  const alreadyPlaced = normalizedParentID(target) === destinationParentID && (
-    (placement === 'first' && currentIndex === 0)
-    || (placement === 'last' && currentIndex === currentSiblings.length - 1)
-  )
-  const boundary = placement === 'first' ? siblings[0] : siblings[siblings.length - 1]
-  const sortOrder = !boundary
-    ? WHITEBOARD_FOLDER_SORT_GAP
-    : sortableFolderOrder(boundary) + (placement === 'first' ? -WHITEBOARD_FOLDER_SORT_GAP : WHITEBOARD_FOLDER_SORT_GAP)
-  if (!Number.isSafeInteger(sortOrder)) throw new Error('El orden de carpetas necesita mantenimiento antes de continuar.')
+  const currentBeforeFolderID = currentIndex >= 0 ? currentSiblings[currentIndex + 1]?.id || null : null
+  const alreadyPlaced = normalizedParentID(target) === destinationParentID && currentBeforeFolderID === beforeFolderID
   return {
     changed: !alreadyPlaced,
     input: {
-      parent_id: destinationParentID,
       name: target.name,
       description: target.description || '',
-      sort_order: sortOrder,
+      placement: { parent_id: destinationParentID, before_folder_id: beforeFolderID },
       expected_version: target.version,
     },
   }
 }
 
+export function whiteboardFolderPositionOptions(
+  folders: readonly WhiteboardFolder[],
+  target: WhiteboardFolder,
+  destinationParentID: string | null,
+): WhiteboardFolderPositionOption[] {
+  const siblings = folders
+    .filter(folder => !folder.archived_at && folder.id !== target.id && normalizedParentID(folder) === destinationParentID)
+    .sort(compareFolderOrder)
+  if (!siblings.length) return [{ beforeFolderID: null, label: 'Única carpeta en este nivel' }]
+  return [
+    { beforeFolderID: siblings[0].id, label: 'Primera' },
+    ...siblings.map((sibling, index) => ({
+      beforeFolderID: siblings[index + 1]?.id || null,
+      label: `Después de ${sibling.name}`,
+    })),
+  ]
+}
+
+export function currentWhiteboardFolderBeforeID(
+  folders: readonly WhiteboardFolder[],
+  target: WhiteboardFolder,
+) {
+  const siblings = folders
+    .filter(folder => !folder.archived_at && normalizedParentID(folder) === normalizedParentID(target))
+    .sort(compareFolderOrder)
+  const index = siblings.findIndex(folder => folder.id === target.id)
+  return index < 0 ? null : siblings[index + 1]?.id || null
+}
+
+export function optimisticWhiteboardFolderPlacement(
+  folders: readonly WhiteboardFolder[],
+  targetID: string,
+  destinationParentID: string | null,
+  beforeFolderID: string | null,
+) {
+  const target = folders.find(folder => folder.id === targetID)
+  if (!target) return [...folders]
+  const destinationSiblings = folders
+    .filter(folder => !folder.archived_at && folder.id !== targetID && normalizedParentID(folder) === destinationParentID)
+    .sort(compareFolderOrder)
+  const insertAt = beforeFolderID
+    ? destinationSiblings.findIndex(folder => folder.id === beforeFolderID)
+    : destinationSiblings.length
+  if (insertAt < 0) return [...folders]
+  const ordered = [...destinationSiblings]
+  ordered.splice(insertAt, 0, { ...target, parent_id: destinationParentID })
+  const desired = new Map(ordered.map((folder, index) => [folder.id, (index + 1) * WHITEBOARD_FOLDER_SORT_GAP]))
+  return folders.map(folder => {
+    const order = desired.get(folder.id)
+    if (order === undefined) return folder
+    return {
+      ...folder,
+      ...(folder.id === targetID ? { parent_id: destinationParentID } : {}),
+      sort_order: order,
+    }
+  })
+}
+
 export function settleWhiteboardFolderRelocation(
   folders: readonly WhiteboardFolder[],
-  canonical: WhiteboardFolder | null,
+  canonical: WhiteboardFolder | readonly WhiteboardFolder[] | null,
 ) {
   if (!canonical) return [...folders]
-  return folders.map(folder => folder.id === canonical.id ? canonical : folder)
+  const incoming = Array.isArray(canonical) ? canonical : [canonical]
+  const byID = new Map(incoming.map(folder => [folder.id, folder] as const))
+  return folders.map(folder => byID.get(folder.id) || folder)
 }
 
 export function activeWhiteboardFolders(folders: readonly WhiteboardFolder[]) {
@@ -199,12 +287,55 @@ export function archivedWhiteboardFolders(folders: readonly WhiteboardFolder[]) 
   return folders.filter(folder => Boolean(folder.archived_at))
 }
 
+export function whiteboardMoveDestinationOptions(
+  folders: readonly WhiteboardFolder[],
+  settledSearch = '',
+): WhiteboardMoveDestinationOption[] {
+  const active = activeWhiteboardFolders(folders)
+  const byID = new Map(active.map(folder => [folder.id, folder] as const))
+  const options: WhiteboardMoveDestinationOption[] = [
+    { id: null, name: null, label: 'Sin carpeta', path: 'Nivel principal de Pizarras', depth: 0 },
+    ...flattenWhiteboardFolders(active).map(({ folder, depth }) => {
+      const ancestry: string[] = []
+      const visited = new Set<string>()
+      let current: WhiteboardFolder | undefined = folder
+      while (current && !visited.has(current.id) && ancestry.length < WHITEBOARD_FOLDER_MAX_DEPTH) {
+        visited.add(current.id)
+        ancestry.unshift(current.name)
+        current = current.parent_id ? byID.get(current.parent_id) : undefined
+      }
+      return {
+        id: folder.id,
+        name: folder.name,
+        label: folder.name,
+        path: ancestry.join(' / '),
+        depth,
+      }
+    }),
+  ]
+  const query = settledSearch.trim().toLocaleLowerCase('es')
+  if (!query) return options
+  return options.filter(option => `${option.label} ${option.path}`.toLocaleLowerCase('es').includes(query))
+}
+
+export function optimisticWhiteboardFolderCounts(
+  folders: readonly WhiteboardFolder[],
+  sourceFolderID: string | null,
+  destinationFolderID: string | null,
+) {
+  if (sourceFolderID === destinationFolderID) return [...folders]
+  return folders.map(folder => {
+    if (typeof folder.whiteboard_count !== 'number') return folder
+    if (folder.id === sourceFolderID) return { ...folder, whiteboard_count: Math.max(0, folder.whiteboard_count - 1) }
+    if (folder.id === destinationFolderID) return { ...folder, whiteboard_count: folder.whiteboard_count + 1 }
+    return folder
+  })
+}
+
 export function buildWhiteboardFolderRenameInput(folder: WhiteboardFolder, name: string) {
   return {
-    parent_id: folder.parent_id || null,
     name: name.trim(),
     description: folder.description || '',
-    ...(typeof folder.sort_order === 'number' ? { sort_order: folder.sort_order } : {}),
     expected_version: folder.version,
   }
 }
@@ -233,10 +364,21 @@ export function settleWhiteboardMove(
   current: readonly WhiteboardSummary[],
   previous: WhiteboardSummary,
   canonical: WhiteboardSummary | null,
+  destination: WhiteboardFolderDestination,
   activeFolderID: string | null,
 ) {
-  const resolved = canonical || previous
-  if (canonical && activeFolderID && canonical.folder_id !== activeFolderID) {
+  const resolved = canonical
+    ? {
+        ...previous,
+        ...canonical,
+        folder_id: destination.id,
+        folder_name: destination.name,
+        owner_name: canonical.owner_name || previous.owner_name,
+        updated_by_name: canonical.updated_by_name || previous.updated_by_name,
+        shared: previous.shared,
+      }
+    : previous
+  if (canonical && activeFolderID && destination.id !== activeFolderID) {
     return current.filter(item => item.id !== previous.id)
   }
   return current.map(item => item.id === previous.id ? resolved : item)

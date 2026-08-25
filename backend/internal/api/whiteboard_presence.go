@@ -124,5 +124,10 @@ func (s *Server) publishWhiteboardPresenceSnapshot(ctx context.Context, client *
 		Event: whiteboardcore.EventPresenceSnapshot,
 		Data:  presence,
 	}, uuid.Nil)
+	presentation, err := s.whiteboardPresentationSnapshotMessage(ctx, client.AccountID, client.BoardID)
+	if err != nil {
+		return err
+	}
+	s.broadcastWhiteboardMessage(client.AccountID, client.BoardID, presentation, uuid.Nil)
 	return nil
 }

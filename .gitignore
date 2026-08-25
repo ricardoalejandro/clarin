@@ -1,12 +1,20 @@
 # Dependencies
 node_modules/
 vendor/
+!frontend/vendor/
+frontend/vendor/*
+!frontend/vendor/excalidraw-clarin/
+!frontend/vendor/excalidraw-clarin/**
 
 # Build outputs
 .next/
 out/
 dist/
 build/
+!frontend/vendor/excalidraw-clarin/packages/excalidraw/dist/
+frontend/vendor/excalidraw-clarin/packages/excalidraw/dist/*
+!frontend/vendor/excalidraw-clarin/packages/excalidraw/dist/types/
+!frontend/vendor/excalidraw-clarin/packages/excalidraw/dist/types/**
 frontend/public/pdf.worker.min.mjs
 *.exe
 *.dll

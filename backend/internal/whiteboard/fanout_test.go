@@ -59,3 +59,38 @@ func TestFanoutEnvelopeAcceptsBoundedSyncInvalidation(t *testing.T) {
 		t.Fatalf("sync invalidation exceeded fanout limit: %d", len(payload))
 	}
 }
+
+func TestFanoutEnvelopeRequiresMemberAudienceForComments(t *testing.T) {
+	t.Parallel()
+	envelope := FanoutEnvelope{InstanceID: uuid.New(), AccountID: uuid.New(), BoardID: uuid.New(),
+		Message: OutgoingMessage{Event: EventCommentChanged, Data: map[string]string{"action": "created"}}}
+	if _, err := envelope.Encode(); err == nil {
+		t.Fatal("comment fanout without a member-only audience was accepted")
+	}
+	envelope.MembersOnly = true
+	payload, err := envelope.Encode()
+	if err != nil {
+		t.Fatalf("member-only comment fanout rejected: %v", err)
+	}
+	decoded, err := DecodeFanout(payload)
+	if err != nil || !decoded.MembersOnly || decoded.Message.Event != EventCommentChanged {
+		t.Fatalf("comment audience was not preserved: %#v %v", decoded, err)
+	}
+	guestID := uuid.New()
+	envelope.TargetGuestID = &guestID
+	if _, err := envelope.Encode(); err == nil {
+		t.Fatal("member-only comment was targetable to a guest")
+	}
+}
+
+func TestFanoutEnvelopeAllowsBoundedPresentationEvents(t *testing.T) {
+	for _, event := range []string{EventPresentationSnapshot, EventPresentationChanged, EventFollowChange, EventViewportUpdate} {
+		envelope := FanoutEnvelope{
+			InstanceID: uuid.New(), AccountID: uuid.New(), BoardID: uuid.New(),
+			Message: OutgoingMessage{Event: event, Data: map[string]any{"ok": true}},
+		}
+		if _, err := envelope.Encode(); err != nil {
+			t.Fatalf("%s fanout rejected: %v", event, err)
+		}
+	}
+}

@@ -5,6 +5,7 @@ import { Check, Download, Loader2, LockKeyhole, RefreshCw, Save, ShieldAlert } f
 import {
   CaptureUpdateAction,
   Excalidraw,
+  getVisibleSceneBounds,
   MainMenu,
   reconcileElements,
   serializeAsJSON,
@@ -32,7 +33,10 @@ import {
   isWhiteboardSceneSequence,
   shouldRetryWhiteboardDirtySave,
   WHITEBOARD_AUTOSAVE_DELAY_MS,
+  WHITEBOARD_SHOW_DEPRECATED_OFFICIAL_FONTS,
+  whiteboardEditorCanvasActions,
   whiteboardSaveFailureAction,
+  whiteboardSaveRetryStateAfterReconnect,
   whiteboardSaveRetryDelay,
   whiteboardGuestScenePath,
   whiteboardSceneRootExtensions,
@@ -40,6 +44,7 @@ import {
   type WhiteboardCollaboratorState,
   type WhiteboardRealtimeEvent,
   type WhiteboardSavePayload,
+  type WhiteboardSaveRetryBlockReason,
   type WhiteboardSceneRecord,
   type WhiteboardScenePatch,
 } from '@/lib/whiteboards'
@@ -54,9 +59,16 @@ import {
   requestWhiteboardGuestCollabTicket,
   uploadWhiteboardGuestAsset,
   type WhiteboardRealtimeRoom,
+  type WhiteboardRoomConnectionState,
 } from '@/lib/whiteboardsApi'
 import {
-  blobToDataURL,
+  whiteboardGuestAccessAtLevel,
+  whiteboardPermissionChangeFeedback,
+  whiteboardRealtimeAccessLevel,
+  whiteboardRealtimeConnectionNotice,
+  type WhiteboardRealtimeIssue,
+} from '@/lib/whiteboardRealtimeConnection'
+import {
   dataURLToBlob,
   rasterizeWhiteboardFiles,
   referencedWhiteboardFileIDs,
@@ -66,6 +78,17 @@ import { mapWhiteboardConcurrently, whiteboardAbortError } from '@/lib/whiteboar
 import { whiteboardEditorAssetBase } from '@/lib/whiteboardEditorAssets'
 import { excalidrawWhiteboardCollaborators } from '@/lib/whiteboardPresence'
 import { renderBlockedWhiteboardEmbeddable } from '@/lib/whiteboardEmbeds'
+import { useWhiteboardPresentation } from '@/hooks/useWhiteboardPresentation'
+import {
+  useWhiteboardAssetHydration,
+  whiteboardAssetHydrationMessage,
+} from '@/hooks/useWhiteboardAssetHydration'
+import {
+  useWhiteboardFontPreload,
+  whiteboardFontPreloadFirstPassComplete,
+  whiteboardFontPreloadMessage,
+} from '@/hooks/useWhiteboardFontPreload'
+import { WhiteboardPresentationButton, WhiteboardPresentationOverlay } from './WhiteboardPresentationControls'
 
 interface GuestSession {
   id: string
@@ -95,7 +118,7 @@ interface PendingGuestWhiteboardSave {
   capturedVersion: number
   acknowledgedElements: readonly unknown[]
   automaticFailures: number
-  automaticRetryBlocked: boolean
+  automaticRetryBlockReason: WhiteboardSaveRetryBlockReason
 }
 
 async function guestRequest<T>(path: string, options: RequestInit = {}) {
@@ -145,11 +168,9 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
   const acknowledgedAppStateRef = useRef<Record<string, unknown>>({})
   const sceneRootExtensionsRef = useRef<Record<string, unknown>>({})
   const sceneFileMetadataRef = useRef<Record<string, unknown>>({})
-  const uploadedFileIDsRef = useRef(new Set<string>())
+  const persistedFileIDsRef = useRef(new Set<string>())
   const assetUploadControllerRef = useRef<AbortController | null>(null)
   const assetSavingRef = useRef(false)
-  const assetHydrationControllerRef = useRef<AbortController | null>(null)
-  const assetHydrationGenerationRef = useRef(0)
   const collaboratorsRef = useRef(new Map<string, WhiteboardCollaboratorState>())
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const savingRef = useRef(false)
@@ -171,7 +192,11 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
   const [joining, setJoining] = useState(false)
   const [saveState, setSaveState] = useState<'saved' | 'pending' | 'preparing-assets' | 'uploading-assets' | 'saving' | 'error'>('saved')
   const [error, setError] = useState<string | null>(null)
-  const [assetWarning, setAssetWarning] = useState<string | null>(null)
+	const [permissionNotice, setPermissionNotice] = useState<string | null>(null)
+	const [editorAPI, setEditorAPI] = useState<ExcalidrawImperativeAPI | null>(null)
+  const [realtimeConnection, setRealtimeConnection] = useState<WhiteboardRoomConnectionState>('connecting')
+  const [realtimeHasOpened, setRealtimeHasOpened] = useState(false)
+  const [realtimeIssue, setRealtimeIssue] = useState<WhiteboardRealtimeIssue | null>(null)
 
   const runWithTransientSceneSuppressed = useCallback((update: () => void) => {
     transientSceneSuppressionRef.current += 1
@@ -184,6 +209,62 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
     }
   }, [])
 
+	const presentation = useWhiteboardPresentation({
+		editorAPI,
+		roomRef,
+		canPresent: session?.access_level === 'edit',
+		runWithTransientSceneSuppressed,
+	})
+
+  const onHydratedGuestFile = useCallback((file: BinaryFileData) => {
+    runWithTransientSceneSuppressed(() => {
+      editorAPIRef.current?.addFiles([file])
+    })
+    if (latestRef.current) latestRef.current = {
+      ...latestRef.current,
+      files: { ...latestRef.current.files, [file.id]: file } as BinaryFiles,
+    }
+  }, [runWithTransientSceneSuppressed])
+
+  const {
+    progress: fontPreloadProgress,
+    retry: retryFontPreload,
+  } = useWhiteboardFontPreload(
+    `guest:${shareLinkID}:${session?.id || 'pending'}`,
+    editorAPI,
+  )
+  const fontPreloadFirstPassComplete = whiteboardFontPreloadFirstPassComplete(fontPreloadProgress)
+  const fontPreloadMessage = whiteboardFontPreloadMessage(fontPreloadProgress)
+
+  const {
+    progress: assetHydrationProgress,
+    request: requestAssetHydration,
+    retry: retryAssetHydration,
+  } = useWhiteboardAssetHydration({
+    ownerKey: `guest:${shareLinkID}:${session?.id || 'pending'}`,
+    enabled: phase === 'ready' && Boolean(editorAPI) && fontPreloadFirstPassComplete,
+    listAssets: async (fileIDs, signal) => {
+      const response = await listWhiteboardGuestAssets(shareLinkID, fileIDs, signal)
+      return {
+        assets: response.success ? response.data?.assets || [] : [],
+        error: response.success ? undefined : response.error || 'No se pudieron cargar las imágenes compartidas.',
+      }
+    },
+    downloadAsset: async (asset, signal) => {
+      const response = await downloadWhiteboardGuestAsset(shareLinkID, asset.id, signal)
+      return {
+        blob: response.success ? response.blob : undefined,
+        error: response.success ? undefined : response.error || 'No se pudo descargar una imagen compartida.',
+      }
+    },
+    onFile: onHydratedGuestFile,
+    onPersistedFileIDs: fileIDs => {
+      for (const fileID of fileIDs) persistedFileIDsRef.current.add(fileID)
+    },
+  })
+
+  const assetHydrationMessage = whiteboardAssetHydrationMessage(assetHydrationProgress)
+
   useEffect(() => {
     mountedRef.current = true
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -195,8 +276,6 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
     return () => {
       mountedRef.current = false
       assetUploadControllerRef.current?.abort()
-      assetHydrationControllerRef.current?.abort()
-      assetHydrationGenerationRef.current += 1
       canonicalSyncControllerRef.current?.abort()
       canonicalSyncGenerationRef.current += 1
       if (timerRef.current) clearTimeout(timerRef.current)
@@ -217,71 +296,6 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
     return () => document.removeEventListener('keydown', blockNativeHelp, true)
   }, [])
 
-  const hydrateAssets = useCallback(async (elements: readonly unknown[], signal?: AbortSignal) => {
-    assetHydrationControllerRef.current?.abort()
-    const controller = new AbortController()
-    assetHydrationControllerRef.current = controller
-    const generation = ++assetHydrationGenerationRef.current
-    const abort = () => controller.abort()
-    signal?.addEventListener('abort', abort, { once: true })
-    const fileIDs = referencedWhiteboardFileIDs(elements)
-      .filter(fileID => !uploadedFileIDsRef.current.has(fileID))
-    try {
-      if (!fileIDs.length) return { files: {} as BinaryFiles, warning: null as string | null }
-      const response = await listWhiteboardGuestAssets(shareLinkID, fileIDs, controller.signal)
-      if (controller.signal.aborted || generation !== assetHydrationGenerationRef.current) {
-        return { files: {} as BinaryFiles, warning: null as string | null }
-      }
-      if (!response.success) {
-        return { files: {} as BinaryFiles, warning: response.error || 'No se pudieron cargar los recursos compartidos referenciados.' }
-      }
-      const manifest = (response.data?.assets || []).filter(asset => asset.kind === 'asset')
-      const outcomes = await mapWhiteboardConcurrently(manifest, 4, async asset => {
-        const download = await downloadWhiteboardGuestAsset(shareLinkID, asset.id, controller.signal)
-        if (controller.signal.aborted) throw whiteboardAbortError()
-        if (!download.success || !download.blob) return { asset, file: null }
-        try {
-          const file: WhiteboardBinaryFile = {
-            id: asset.file_id,
-            dataURL: await blobToDataURL(download.blob, controller.signal),
-            mimeType: asset.content_type,
-            created: Date.parse(asset.created_at) || Date.now(),
-          }
-          return { asset, file }
-        } catch (downloadError) {
-          if (controller.signal.aborted) throw downloadError
-          return { asset, file: null }
-        }
-      }, controller.signal)
-      if (controller.signal.aborted || generation !== assetHydrationGenerationRef.current) {
-        return { files: {} as BinaryFiles, warning: null as string | null }
-      }
-      const files: Record<string, WhiteboardBinaryFile> = {}
-      let failures = fileIDs.length - new Set(manifest.map(asset => asset.file_id)).size
-      for (const outcome of outcomes) {
-        if (!outcome.file) {
-          failures += 1
-          continue
-        }
-        files[outcome.asset.file_id] = outcome.file
-        uploadedFileIDsRef.current.add(outcome.asset.file_id)
-      }
-      return {
-        files: files as unknown as BinaryFiles,
-        warning: failures > 0 ? `${failures} recursos compartidos referenciados no están disponibles.` : null,
-      }
-    } catch (loadError) {
-      if (controller.signal.aborted) return { files: {} as BinaryFiles, warning: null as string | null }
-      return {
-        files: {} as BinaryFiles,
-        warning: loadError instanceof Error ? loadError.message : 'No se pudieron cargar los recursos compartidos referenciados.',
-      }
-    } finally {
-      signal?.removeEventListener('abort', abort)
-      if (assetHydrationControllerRef.current === controller) assetHydrationControllerRef.current = null
-    }
-  }, [shareLinkID])
-
   const applyResponse = useCallback(async (payload: GuestSceneResponse, signal?: AbortSignal) => {
     canonicalSyncControllerRef.current?.abort()
     canonicalSyncAppliedSequenceRef.current = -1
@@ -289,12 +303,9 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
     const scene = restoreClarinWhiteboardScene(payload.scene.scene)
     sceneRootExtensionsRef.current = whiteboardSceneRootExtensions(scene)
     sceneFileMetadataRef.current = sanitizeWhiteboardFilesForPersistence(scene.files)
-    uploadedFileIDsRef.current = new Set()
-    const assets = await hydrateAssets(scene.elements, signal)
+    persistedFileIDsRef.current = new Set(referencedWhiteboardFileIDs(scene.elements))
     if (signal?.aborted || !mountedRef.current) return
-    const hydratedFileIDs = new Set(Object.keys(assets.files))
-    const files = Object.fromEntries(Object.entries(mergeWhiteboardFileRecords(scene.files, assets.files))
-      .filter(([fileID]) => hydratedFileIDs.has(fileID))) as unknown as BinaryFiles
+    const files = {} as BinaryFiles
     sequenceRef.current = payload.scene.sequence
     acknowledgedElementsRef.current = [...scene.elements]
     acknowledgedAppStateRef.current = sanitizeWhiteboardAppState(scene.appState)
@@ -312,9 +323,12 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
     setInitialData({ elements: scene.elements as readonly ExcalidrawElement[], appState: scene.appState as Partial<AppState>, files })
     setSaveState('saved')
     setError(null)
-    setAssetWarning(assets.warning)
+    setPermissionNotice(null)
+    setRealtimeConnection('connecting')
+    setRealtimeHasOpened(false)
+    setRealtimeIssue(null)
     setPhase('ready')
-  }, [hydrateAssets])
+  }, [])
 
   const resume = useCallback(async () => {
     setPhase('checking')
@@ -384,7 +398,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
       const initialPlan = planWhiteboardAssetPersistence(
         elements,
         files as unknown as Record<string, unknown>,
-        uploadedFileIDsRef.current,
+        persistedFileIDsRef.current,
       )
       const referencedFileIDs = new Set(initialPlan.referencedFileIDs)
       const referencedFiles = Object.fromEntries(Object.entries(files).filter(([fileID]) => referencedFileIDs.has(fileID)))
@@ -393,7 +407,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
       const plan = planWhiteboardAssetPersistence(
         elements,
         safeFiles as unknown as Record<string, unknown>,
-        uploadedFileIDsRef.current,
+        persistedFileIDsRef.current,
       )
       if (plan.missingFileIDs.length > 0) {
         throw new Error('Una imagen todavía no terminó de prepararse. Tus cambios siguen en el lienzo; reintenta el guardado.')
@@ -412,7 +426,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
           )
           if (controller.signal.aborted) throw whiteboardAbortError()
           if (!response.success || !response.data?.asset) throw new Error(response.error || 'No se pudo guardar una imagen compartida.')
-          uploadedFileIDsRef.current.add(fileID)
+          persistedFileIDsRef.current.add(fileID)
         }, controller.signal)
       }
       if (Object.keys(safeFiles).length > 0) editorAPIRef.current?.addFiles(Object.values(safeFiles) as BinaryFileData[])
@@ -423,15 +437,16 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
     }
   }, [shareLinkID])
 
-  const hydrateReferencedAssets = useCallback(async (elements: readonly unknown[]) => {
-    const assets = await hydrateAssets(elements)
-    if (!mountedRef.current) return
-    if (Object.keys(assets.files).length > 0) {
-      editorAPIRef.current?.addFiles(Object.values(assets.files) as BinaryFileData[])
-      if (latestRef.current) latestRef.current = { ...latestRef.current, files: { ...latestRef.current.files, ...assets.files } }
-    }
-    setAssetWarning(assets.warning)
-  }, [hydrateAssets])
+  const hydrateReferencedAssets = useCallback((elements: readonly unknown[]) => {
+    for (const fileID of referencedWhiteboardFileIDs(elements)) persistedFileIDsRef.current.add(fileID)
+    const api = editorAPIRef.current
+    requestAssetHydration(elements, api ? getVisibleSceneBounds(api.getAppState()) : null)
+  }, [requestAssetHydration])
+
+  useEffect(() => {
+    if (phase !== 'ready' || !editorAPI || !initialData) return
+    hydrateReferencedAssets(initialData.elements)
+  }, [editorAPI, hydrateReferencedAssets, initialData, phase])
 
   const applyCanonicalWriteConfirmation = useCallback((
     document: WhiteboardSceneRecord['scene'],
@@ -495,10 +510,10 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
   }, [applyCanonicalWriteConfirmation, shareLinkID])
 
   const save = useCallback(async (reason: 'autosave' | 'manual' = 'autosave') => {
-    if (reason === 'autosave' && pendingSaveRef.current?.automaticRetryBlocked) return
+    if (reason === 'autosave' && pendingSaveRef.current?.automaticRetryBlockReason) return
     if (reason !== 'autosave' && pendingSaveRef.current) {
       pendingSaveRef.current.automaticFailures = 0
-      pendingSaveRef.current.automaticRetryBlocked = false
+      pendingSaveRef.current.automaticRetryBlockReason = null
     }
     if (savingRef.current) {
       queuedSaveRef.current = true
@@ -553,7 +568,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
             ? mergeWhiteboardAcknowledgedElements(acknowledgedElementsRef.current, writePlan.elements)
             : [...current.elements],
           automaticFailures: 0,
-          automaticRetryBlocked: false,
+          automaticRetryBlockReason: null,
         }))
         pendingSaveRef.current = pending
       }
@@ -593,7 +608,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
         if (!response.ok || !response.data.result?.scene) {
           pending.automaticFailures += 1
           const action = whiteboardSaveFailureAction(response.status, pending.automaticFailures)
-          pending.automaticRetryBlocked = action !== 'retry'
+          pending.automaticRetryBlockReason = action === 'retry' ? null : action
           if (action === 'conflict') {
             if (await reconcileWhiteboardWriteConflict()) {
               pendingSaveRef.current = null
@@ -634,7 +649,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
       savingRef.current = false
       const retryUnacknowledged = Boolean(
         pendingSaveRef.current
-        && !pendingSaveRef.current.automaticRetryBlocked
+        && !pendingSaveRef.current.automaticRetryBlockReason
         && dirtyRef.current
         && navigator.onLine,
       )
@@ -665,7 +680,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
     })) return
     changeVersionRef.current += 1
     dirtyRef.current = true
-    const retryBlocked = Boolean(pendingSaveRef.current?.automaticRetryBlocked)
+    const retryBlocked = Boolean(pendingSaveRef.current?.automaticRetryBlockReason)
     setSaveState(retryBlocked ? 'error' : 'pending')
     if (timerRef.current) clearTimeout(timerRef.current)
     if (!retryBlocked) timerRef.current = setTimeout(() => { void save('autosave') }, WHITEBOARD_AUTOSAVE_DELAY_MS)
@@ -732,16 +747,24 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
           canonical.files,
         ) as unknown as BinaryFiles,
       }
+      const feedback = whiteboardPermissionChangeFeedback({
+        canEdit: response.data.session.access_level === 'edit',
+        hasPendingChanges: preserveLocalChanges,
+        online: navigator.onLine,
+      })
       setSession(response.data.session)
       setAllowExport(response.data.allow_export)
       if (!preserveLocalChanges) dirtyRef.current = false
-      setSaveState(preserveLocalChanges ? 'pending' : 'saved')
+      setPermissionNotice(feedback.notice)
+      setSaveState(feedback.saveState || (preserveLocalChanges ? 'pending' : 'saved'))
       setError(null)
       requestAnimationFrame(() => { suppressRef.current = false })
       void hydrateReferencedAssets(elements)
       canonicalSyncAppliedSequenceRef.current = Math.max(requestedSequence, record.sequence)
       if (preserveLocalChanges && response.data.session.access_level === 'edit') {
-        if (!savingRef.current) pendingSaveRef.current = null
+        // A reconnect sync must not replace an unacknowledged operation with a
+        // new one. The existing payload remains safe to retry idempotently and
+        // will be rebased through the normal conflict path when required.
         dirtyRef.current = true
         if (timerRef.current) clearTimeout(timerRef.current)
         timerRef.current = setTimeout(() => { void save('autosave') }, savingRef.current ? 1_000 : 250)
@@ -763,29 +786,65 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
     if (!api) return
     runWithTransientSceneSuppressed(() => {
       api.updateScene({
-        collaborators: excalidrawWhiteboardCollaborators(next),
+        collaborators: excalidrawWhiteboardCollaborators(next, presentation.getSelfActorID()),
         captureUpdate: CaptureUpdateAction.NEVER,
       })
     })
-  }, [runWithTransientSceneSuppressed])
+  }, [presentation.getSelfActorID, runWithTransientSceneSuppressed])
+
+  const handleRealtimeIssue = useCallback((issue: WhiteboardRealtimeIssue | null) => {
+    setRealtimeIssue(issue)
+    if (!issue || issue.kind === 'authorization_unavailable') return
+    setError(issue.kind === 'access_revoked' ? issue.message : 'Esta sesión compartida expiró.')
+    setPhase('error')
+  }, [])
 
   useEffect(() => {
     if (phase !== 'ready' || !boardID) return
+    let hasOpened = false
     const room = connectWhiteboardRoom({
       whiteboardID: boardID,
+      audience: 'guest',
       getSequence: () => sequenceRef.current,
       getTicket: () => requestWhiteboardGuestCollabTicket(shareLinkID),
+      onIssue: handleRealtimeIssue,
       onEvent: realtime => {
+        const handledByPresentation = presentation.handleRealtimeEvent(realtime)
+        if (realtime.event === 'room.ready') {
+          applyCollaboratorEvent(realtime)
+          return
+        }
+		if (handledByPresentation) return
         if (realtime.event === 'presence.snapshot' || realtime.event === 'presence.update' || realtime.event === 'cursor.update') {
           applyCollaboratorEvent(realtime)
           return
         }
         if (realtime.event === 'access.revoked') {
-          setError('Esta sesión compartida fue revocada.')
-          setPhase('error')
+          handleRealtimeIssue({
+            kind: 'access_revoked',
+            message: 'Esta sesión compartida fue revocada.',
+            retryable: false,
+          })
           return
         }
         if (realtime.event === 'error') {
+          if (realtime.code === 'permission_changed') {
+            const immediateLevel = whiteboardRealtimeAccessLevel(realtime.data)
+            if (immediateLevel) {
+              const immediateGuestAccess = whiteboardGuestAccessAtLevel(immediateLevel)
+              setSession(current => current ? { ...current, access_level: immediateGuestAccess } : current)
+              const feedback = whiteboardPermissionChangeFeedback({
+                canEdit: immediateGuestAccess === 'edit',
+                hasPendingChanges: dirtyRef.current || Boolean(pendingSaveRef.current),
+                online: navigator.onLine,
+              })
+              setPermissionNotice(feedback.notice)
+              if (feedback.saveState) setSaveState(feedback.saveState)
+            }
+            void reloadCanonicalForRealtime(realtime, true)
+            return
+          }
+          if (realtime.code === 'session_expired' || realtime.code === 'authorization_unavailable' || realtime.code === 'presence_unavailable') return
           if (!realtime.operation_id) setError(realtime.error || 'La colaboración en tiempo real encontró un error.')
           return
         }
@@ -862,7 +921,24 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
         }
       },
       onConnectionChange: state => {
+			presentation.handleConnectionChange(state)
+        setRealtimeConnection(state)
         if (state === 'open') {
+          setRealtimeHasOpened(true)
+          const pending = pendingSaveRef.current
+          if (pending) {
+            const retryState = whiteboardSaveRetryStateAfterReconnect({
+              previouslyOpened: hasOpened,
+              automaticFailures: pending.automaticFailures,
+              automaticRetryBlockReason: pending.automaticRetryBlockReason,
+            })
+            if (retryState.shouldRetry) {
+              pending.automaticFailures = retryState.automaticFailures
+              pending.automaticRetryBlockReason = retryState.automaticRetryBlockReason
+              setSaveState('pending')
+            }
+          }
+          hasOpened = true
           if (shouldRetryWhiteboardDirtySave({ dirty: dirtyRef.current, saving: savingRef.current, online: navigator.onLine, canEdit: session?.access_level === 'edit' })) {
             if (timerRef.current) clearTimeout(timerRef.current)
             timerRef.current = setTimeout(() => { void save('autosave') }, 250)
@@ -884,7 +960,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
       if (roomRef.current === room) roomRef.current = null
       room.close()
     }
-  }, [applyCollaboratorEvent, boardID, hydrateReferencedAssets, phase, reloadCanonicalForRealtime, runWithTransientSceneSuppressed, save, shareLinkID])
+  }, [applyCollaboratorEvent, boardID, handleRealtimeIssue, hydrateReferencedAssets, phase, presentation.handleConnectionChange, presentation.handleRealtimeEvent, reloadCanonicalForRealtime, runWithTransientSceneSuppressed, save, shareLinkID])
 
   const exportJSON = () => {
     if (!allowExport || !latestRef.current) return
@@ -899,18 +975,87 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
 
   if (phase === 'checking') return <div className="flex min-h-screen items-center justify-center bg-slate-50"><Loader2 className="h-7 w-7 animate-spin text-emerald-600" /><span className="sr-only">Comprobando enlace</span></div>
 
-  if (phase === 'join') return <main className="flex min-h-screen items-center justify-center bg-slate-950 p-4"><form onSubmit={join} className="w-full max-w-md rounded-3xl border border-slate-800 bg-slate-900 p-6 shadow-2xl"><span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-300"><LockKeyhole className="h-6 w-6" /></span><p className="mt-5 text-[10px] font-black uppercase tracking-[.16em] text-emerald-400">Pizarras Clarin</p><h1 className="mt-1 text-2xl font-black text-white">Abrir pizarra compartida</h1><p className="mt-2 text-sm leading-6 text-slate-400">Identifícate para crear una sesión temporal dentro de Clarin.</p><label className="mt-5 block text-xs font-bold text-slate-300">Tu nombre<input autoFocus value={displayName} onChange={event => setDisplayName(event.target.value)} maxLength={120} className="mt-2 h-11 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 text-sm text-white outline-none focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10" /></label><label className="mt-3 block text-xs font-bold text-slate-300">Contraseña, si fue configurada<input type="password" value={password} onChange={event => setPassword(event.target.value)} className="mt-2 h-11 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 text-sm text-white outline-none focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10" /></label>{error && <p className="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">{error}</p>}<button type="submit" disabled={!displayName.trim() || joining} className="mt-5 flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 text-sm font-black text-slate-950 disabled:opacity-40">{joining && <Loader2 className="h-4 w-4 animate-spin" />}Entrar</button></form></main>
+  if (phase === 'join') return <main className="flex min-h-screen items-center justify-center bg-slate-950 p-4"><form onSubmit={join} className="w-full max-w-md rounded-3xl border border-slate-800 bg-slate-900 p-6 shadow-2xl"><span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-300"><LockKeyhole className="h-6 w-6" /></span><p className="mt-5 text-[10px] font-black uppercase tracking-[.16em] text-emerald-400">Pizarras Clarin</p><h1 className="mt-1 text-2xl font-black text-white">Abrir pizarra compartida</h1><p className="mt-2 text-sm leading-6 text-slate-400">Identifícate para crear una sesión temporal dentro de Clarin.</p><label className="mt-5 block text-xs font-bold text-slate-300">Tu nombre<input autoFocus value={displayName} onChange={event => setDisplayName(event.target.value)} maxLength={120} className="dark-input mt-2 h-11 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 text-sm text-white caret-slate-100 outline-none focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10" /></label><label className="mt-3 block text-xs font-bold text-slate-300">Contraseña, si fue configurada<input type="password" value={password} onChange={event => setPassword(event.target.value)} className="dark-input mt-2 h-11 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 text-sm text-white caret-slate-100 outline-none focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10" /></label>{error && <p className="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">{error}</p>}<button type="submit" disabled={!displayName.trim() || joining} className="mt-5 flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 text-sm font-black text-slate-950 disabled:opacity-40">{joining && <Loader2 className="h-4 w-4 animate-spin" />}Entrar</button></form></main>
 
   if (phase === 'error' || !session || !initialData) return <main className="flex min-h-screen items-center justify-center bg-slate-50 p-4"><div className="max-w-md rounded-3xl border border-slate-200 bg-white p-6 text-center"><ShieldAlert className="mx-auto h-9 w-9 text-rose-500" /><h1 className="mt-4 text-xl font-black text-slate-900">Sesión no disponible</h1><p className="mt-2 text-sm text-slate-500">{error}</p><button type="button" onClick={() => void resume()} className="mx-auto mt-5 flex min-h-11 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-bold text-white"><RefreshCw className="h-4 w-4" />Volver a intentar</button></div></main>
 
+  const realtimeNotice = whiteboardRealtimeConnectionNotice({
+    connection: realtimeConnection,
+    hasOpened: realtimeHasOpened,
+    issue: realtimeIssue,
+  })
+  const guestNoticeSource = error
+    ? 'error'
+    : permissionNotice
+      ? 'permission'
+      : realtimeNotice
+        ? 'realtime'
+      : fontPreloadMessage
+        ? 'fonts'
+        : assetHydrationMessage
+          ? 'assets'
+          : null
+  const guestNoticeMessage = guestNoticeSource === 'realtime'
+    ? realtimeNotice?.message || null
+    : guestNoticeSource === 'permission'
+      ? permissionNotice
+    : guestNoticeSource === 'fonts'
+      ? fontPreloadMessage
+      : guestNoticeSource === 'assets'
+        ? assetHydrationMessage
+        : error
+  const guestNoticeIsError = guestNoticeSource === 'error'
+    || (guestNoticeSource === 'fonts' && fontPreloadProgress.phase === 'error')
+    || (guestNoticeSource === 'assets' && assetHydrationProgress.phase === 'error')
+  const guestNoticeIsWarning = guestNoticeSource === 'permission'
+    || (guestNoticeSource === 'realtime' && Boolean(realtimeNotice?.warning))
+  const guestNoticeIsLoading = (guestNoticeSource === 'realtime' && Boolean(realtimeNotice?.busy))
+    || (guestNoticeSource === 'fonts' && (fontPreloadProgress.phase === 'idle' || fontPreloadProgress.phase === 'loading' || fontPreloadProgress.phase === 'offline'))
+    || (guestNoticeSource === 'assets' && assetHydrationProgress.phase === 'loading')
+
   return <main className="whiteboard-editor-shell flex h-[100dvh] min-h-0 flex-col overflow-hidden bg-white">
-    <header className="flex h-[58px] shrink-0 items-center gap-3 border-b border-slate-200 bg-white px-3"><div className="min-w-0 flex-1"><p className="text-[9px] font-black uppercase tracking-[.15em] text-emerald-600">Pizarras Clarin</p><h1 className="truncate text-sm font-black text-slate-900">Pizarra compartida</h1></div><span className="hidden text-xs font-semibold text-slate-500 sm:block">{session.display_name} · {session.access_level === 'edit' ? 'Puede editar' : 'Solo lectura'}</span>{guestWhiteboardSaveIsBusy(saveState) ? <Loader2 className="h-4 w-4 animate-spin text-sky-600" aria-label={saveState === 'preparing-assets' ? 'Preparando imágenes' : saveState === 'uploading-assets' ? 'Subiendo imágenes' : 'Guardando en Clarin'} /> : saveState === 'saved' ? <Check className="h-4 w-4 text-emerald-600" aria-label="Guardado en Clarin" /> : null}{session.access_level === 'edit' && <button type="button" onClick={() => void save('manual')} disabled={saveState === 'saved' || guestWhiteboardSaveIsBusy(saveState)} className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-900 text-white disabled:opacity-35" aria-label="Guardar ahora"><Save className="h-4 w-4" /></button>}{allowExport && <button type="button" onClick={exportJSON} className="flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-600" aria-label="Exportar copia editable"><Download className="h-4 w-4" /></button>}</header>
-    {(error || assetWarning) && <div className={`flex shrink-0 items-center gap-2 border-b px-3 py-2 text-xs font-semibold ${error ? 'border-rose-200 bg-rose-50 text-rose-800' : 'border-sky-200 bg-sky-50 text-sky-800'}`}><span className="min-w-0 flex-1">{error || assetWarning}</span>{error && session.access_level === 'edit' && <button type="button" onClick={() => void save('manual')} className="min-h-9 rounded-lg bg-white px-3 font-black">Reintentar guardado</button>}<button type="button" onClick={() => window.location.reload()} className="min-h-9 rounded-lg bg-white px-3 font-black">Recargar</button></div>}
-    <div className="min-h-0 flex-1"><Excalidraw excalidrawAPI={api => {
-      editorAPIRef.current = api
-      requestAnimationFrame(() => {
-        if (mountedRef.current && editorAPIRef.current === api) suppressRef.current = false
-      })
-    }} initialData={initialData} onChange={onChange} onPointerUpdate={({ pointer, button }) => { roomRef.current?.sendCursor({ pointer, button }) }} langCode="es-ES" viewModeEnabled={session.access_level !== 'edit'} isCollaborating aiEnabled={false} validateEmbeddable={false} renderEmbeddable={renderBlockedWhiteboardEmbeddable} onLinkOpen={(element, event) => { event.preventDefault(); const link = sanitizeWhiteboardExternalLink(element.link); if (link) window.open(link, '_blank', 'noopener,noreferrer') }} UIOptions={{ canvasActions: { loadScene: false, saveToActiveFile: false, saveAsImage: false, export: false, toggleTheme: false }, tools: { image: session.access_level === 'edit' } }}><MainMenu><MainMenu.Group title="Pizarra compartida">{allowExport && <MainMenu.Item icon={<Download className="h-4 w-4" />} onSelect={exportJSON}>Exportar copia editable</MainMenu.Item>}</MainMenu.Group></MainMenu></Excalidraw></div>
+    <header className="flex h-[58px] shrink-0 items-center gap-3 border-b border-slate-200 bg-white px-3"><div className="min-w-0 flex-1"><p className="text-[9px] font-black uppercase tracking-[.15em] text-emerald-600">Pizarras Clarin</p><h1 className="truncate text-sm font-black text-slate-900">Pizarra compartida</h1></div><span className="hidden text-xs font-semibold text-slate-500 sm:block">{session.display_name} · {session.access_level === 'edit' ? 'Puede editar' : 'Solo lectura'}</span>{guestWhiteboardSaveIsBusy(saveState) ? <Loader2 className="h-4 w-4 animate-spin text-sky-600" aria-label={saveState === 'preparing-assets' ? 'Preparando imágenes' : saveState === 'uploading-assets' ? 'Subiendo imágenes' : 'Guardando en Clarin'} /> : saveState === 'saved' ? <Check className="h-4 w-4 text-emerald-600" aria-label="Guardado en Clarin" /> : null}<WhiteboardPresentationButton controlState={presentation.controlState} state={presentation.state} canPresent={session.access_level === 'edit'} onStart={() => { void presentation.start() }} onStop={() => { void presentation.stop() }} />{session.access_level === 'edit' && <button type="button" onClick={() => void save('manual')} disabled={saveState === 'saved' || guestWhiteboardSaveIsBusy(saveState)} className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-900 text-white disabled:opacity-35" aria-label="Guardar ahora"><Save className="h-4 w-4" /></button>}{allowExport && <button type="button" onClick={exportJSON} className="flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-600" aria-label="Exportar copia editable"><Download className="h-4 w-4" /></button>}</header>
+    {guestNoticeMessage && (
+      <div data-whiteboard-realtime-status={guestNoticeSource === 'realtime' ? realtimeConnection : undefined} className={`flex shrink-0 items-center gap-2 border-b px-3 py-2 text-xs font-semibold ${guestNoticeIsError ? 'border-rose-200 bg-rose-50 text-rose-800' : guestNoticeIsWarning ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-sky-200 bg-sky-50 text-sky-800'}`} role={guestNoticeIsError ? 'alert' : 'status'} aria-live="polite">
+        <span className="min-w-0 flex-1">{guestNoticeMessage}</span>
+        {guestNoticeIsLoading && <Loader2 className="h-4 w-4 shrink-0 animate-spin" />}
+        {guestNoticeSource === 'error' && session.access_level === 'edit' && <button type="button" onClick={() => void save('manual')} className="min-h-9 rounded-lg bg-white px-3 font-black">Reintentar guardado</button>}
+        {guestNoticeSource === 'fonts' && fontPreloadProgress.phase === 'error' && <button type="button" onClick={retryFontPreload} className="min-h-9 rounded-lg bg-white px-3 font-black">Reintentar fuentes</button>}
+        {guestNoticeSource === 'assets' && assetHydrationProgress.phase === 'error' && <button type="button" onClick={retryAssetHydration} className="min-h-9 rounded-lg bg-white px-3 font-black">Reintentar imágenes</button>}
+        {guestNoticeSource === 'realtime' && <button type="button" onClick={() => roomRef.current?.retryNow()} className="min-h-9 rounded-lg bg-white px-3 font-black">Reintentar ahora</button>}
+        {guestNoticeSource === 'error' && <button type="button" onClick={() => window.location.reload()} className="min-h-9 rounded-lg bg-white px-3 font-black">Recargar</button>}
+      </div>
+    )}
+    <div className="relative min-h-0 flex-1">
+      <Excalidraw
+        excalidrawAPI={api => {
+          editorAPIRef.current = api
+          setEditorAPI(current => current === api ? current : api)
+          requestAnimationFrame(() => {
+            if (mountedRef.current && editorAPIRef.current === api) suppressRef.current = false
+          })
+        }}
+        initialData={initialData}
+        onChange={onChange}
+        onPointerUpdate={({ pointer, button }) => { roomRef.current?.sendCursor({ pointer, button }) }}
+        langCode="es-ES"
+        viewModeEnabled={session.access_level !== 'edit'}
+        isCollaborating
+        aiEnabled={false}
+        enableRichText
+        showDeprecatedFonts={WHITEBOARD_SHOW_DEPRECATED_OFFICIAL_FONTS}
+        validateEmbeddable={false}
+        renderEmbeddable={renderBlockedWhiteboardEmbeddable}
+        onLinkOpen={(element, event) => {
+          event.preventDefault()
+          const link = sanitizeWhiteboardExternalLink(element.link)
+          if (link) window.open(link, '_blank', 'noopener,noreferrer')
+        }}
+        UIOptions={{ canvasActions: whiteboardEditorCanvasActions(allowExport), tools: { image: session.access_level === 'edit' } }}
+      >
+        <MainMenu><MainMenu.Group title="Pizarra compartida">{allowExport && <><MainMenu.Item icon={<Download className="h-4 w-4" />} onSelect={exportJSON}>Exportar copia editable</MainMenu.Item><MainMenu.DefaultItems.SaveAsImage /></>}</MainMenu.Group></MainMenu>
+      </Excalidraw>
+      <WhiteboardPresentationOverlay state={presentation.state} showInvitation={presentation.showInvitation} onAccept={presentation.acceptInvitation} onDecline={presentation.declineInvitation} onLeave={presentation.leaveFollow} />
+    </div>
   </main>
 }

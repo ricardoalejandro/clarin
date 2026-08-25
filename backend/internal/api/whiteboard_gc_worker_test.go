@@ -16,6 +16,9 @@ func TestWhiteboardTechnicalHistoryRetentionIsThirtyDaysAndBounded(t *testing.T)
 	if whiteboardTechnicalHistoryBatch <= 0 || whiteboardTechnicalHistoryBatch > 500 {
 		t.Fatalf("unsafe technical history batch=%d", whiteboardTechnicalHistoryBatch)
 	}
+	if whiteboardLibraryImportExpiryBatch <= 0 || whiteboardLibraryImportExpiryBatch > 500 {
+		t.Fatalf("unsafe public library import expiry batch=%d", whiteboardLibraryImportExpiryBatch)
+	}
 }
 
 func TestWhiteboardGCObjectKeyRequiresExactAccountPrivateNamespace(t *testing.T) {
@@ -35,5 +38,18 @@ func TestWhiteboardGCObjectKeyRequiresExactAccountPrivateNamespace(t *testing.T)
 		if validWhiteboardGCObjectKey(accountID, candidate) {
 			t.Fatalf("unsafe key accepted: %q", candidate)
 		}
+	}
+}
+
+func TestWhiteboardRetentionDatabaseSweepDoesNotDependOnStorage(t *testing.T) {
+	t.Parallel()
+	databaseRuns, storageRuns := 0, 0
+	runWhiteboardRetentionPhases(false, func() { databaseRuns++ }, func() { storageRuns++ })
+	if databaseRuns != 1 || storageRuns != 0 {
+		t.Fatalf("storage-less retention phases database=%d storage=%d", databaseRuns, storageRuns)
+	}
+	runWhiteboardRetentionPhases(true, func() { databaseRuns++ }, func() { storageRuns++ })
+	if databaseRuns != 2 || storageRuns != 1 {
+		t.Fatalf("storage-backed retention phases database=%d storage=%d", databaseRuns, storageRuns)
 	}
 }

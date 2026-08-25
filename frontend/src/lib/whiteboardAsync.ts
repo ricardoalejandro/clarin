@@ -2,6 +2,14 @@ export function whiteboardAbortError() {
   return new DOMException('La operación de Pizarras fue cancelada.', 'AbortError')
 }
 
+/** Prevents an aborted or unmounted request from publishing stale UI state. */
+export function whiteboardAsyncResultIsStale(input: {
+  signal?: AbortSignal
+  mounted: boolean
+}) {
+  return !input.mounted || Boolean(input.signal?.aborted)
+}
+
 /**
  * Runs bounded async work while preserving source order. Workers stop claiming
  * new items as soon as the owning surface is aborted.

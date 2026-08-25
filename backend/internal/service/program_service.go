@@ -21,6 +21,36 @@ var (
 	ErrProgramParticipantEndInFuture = errors.New("program participant end date is in the future")
 )
 
+var programHealthViewColumnOrder = []string{"health", "attendance", "signals", "enrolled_at", "tenure"}
+
+func normalizeProgramHealthViewColumns(columns []string) ([]string, error) {
+	if columns == nil {
+		return []string{"health", "attendance", "signals"}, nil
+	}
+	selected := make(map[string]struct{}, len(columns))
+	for _, column := range columns {
+		column = strings.TrimSpace(column)
+		valid := false
+		for _, allowed := range programHealthViewColumnOrder {
+			if column == allowed {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return nil, programInputError("la columna de la vista Salud %q no es válida", column)
+		}
+		selected[column] = struct{}{}
+	}
+	normalized := make([]string, 0, len(selected))
+	for _, column := range programHealthViewColumnOrder {
+		if _, ok := selected[column]; ok {
+			normalized = append(normalized, column)
+		}
+	}
+	return normalized, nil
+}
+
 func programInputError(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrProgramInput, fmt.Sprintf(format, args...))
 }
@@ -78,6 +108,11 @@ func (s *ProgramService) CreateProgram(ctx context.Context, p *domain.Program) e
 	if err := normalizeCourseProgramEventFields(p); err != nil {
 		return err
 	}
+	columns, err := normalizeProgramHealthViewColumns(p.HealthViewColumns)
+	if err != nil {
+		return err
+	}
+	p.HealthViewColumns = columns
 	return s.repo.Program.Create(ctx, p)
 }
 
@@ -111,6 +146,11 @@ func (s *ProgramService) UpdateProgram(ctx context.Context, p *domain.Program) e
 	} else {
 		return programInputError("program type is invalid")
 	}
+	columns, err := normalizeProgramHealthViewColumns(p.HealthViewColumns)
+	if err != nil {
+		return err
+	}
+	p.HealthViewColumns = columns
 	return s.repo.Program.Update(ctx, p)
 }
 

@@ -3,7 +3,9 @@
 import { useEffect, useState } from 'react'
 import { apiGet } from '@/lib/api'
 
-export default function useCrmWindowStorageScope(surface: 'leads' | 'events') {
+export type CrmWindowSurface = 'contacts' | 'leads' | 'events'
+
+export default function useCrmWindowStorageScope(surface: CrmWindowSurface) {
   const [actorScope, setActorScope] = useState(`pending:pending:${surface}`)
 
   useEffect(() => {

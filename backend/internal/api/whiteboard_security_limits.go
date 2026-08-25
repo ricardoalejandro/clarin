@@ -34,6 +34,17 @@ func whiteboardRequestWithinLimit(c *fiber.Ctx, maxBytes int) bool {
 	return len(c.Body()) <= maxBytes
 }
 
+func rejectWhiteboardEncodedRequest(c *fiber.Ctx) (bool, error) {
+	if c == nil || strings.TrimSpace(c.Get(fiber.HeaderContentEncoding)) == "" {
+		return false, nil
+	}
+	return true, c.Status(fiber.StatusUnsupportedMediaType).JSON(fiber.Map{
+		"success": false,
+		"error":   "La compresión del cuerpo no está permitida",
+		"code":    "whiteboard_content_encoding_unsupported",
+	})
+}
+
 func whiteboardRequestTooLarge(c *fiber.Ctx, code string, maxBytes int) error {
 	return c.Status(fiber.StatusRequestEntityTooLarge).JSON(fiber.Map{
 		"success":   false,
@@ -47,6 +58,9 @@ func whiteboardRequestTooLarge(c *fiber.Ctx, code string, maxBytes int) error {
 // abuse checks into the handler: invalid JSON, passwords or secrets must still
 // consume the public attempt budget.
 func (s *Server) guardWhiteboardGuestSessionExchange(c *fiber.Ctx) error {
+	if rejected, err := rejectWhiteboardEncodedRequest(c); rejected {
+		return err
+	}
 	if !whiteboardRequestWithinLimit(c, whiteboardGuestSessionMaxRequestBytes) {
 		return whiteboardRequestTooLarge(c, "whiteboard_guest_session_payload_too_large", whiteboardGuestSessionMaxRequestBytes)
 	}
@@ -71,6 +85,9 @@ func (s *Server) guardWhiteboardGuestSessionExchange(c *fiber.Ctx) error {
 // and REST PATCH fallback before JSON parsing, reconciliation, compression,
 // PostgreSQL locks or MinIO writes. WebSocket patches have separate budgets.
 func (s *Server) guardWhiteboardGuestSnapshotWrite(c *fiber.Ctx) error {
+	if rejected, err := rejectWhiteboardEncodedRequest(c); rejected {
+		return err
+	}
 	if !whiteboardRequestWithinLimit(c, whiteboardGuestSnapshotMaxRequestBytes) {
 		return whiteboardRequestTooLarge(c, "whiteboard_guest_snapshot_payload_too_large", whiteboardGuestSnapshotMaxRequestBytes)
 	}

@@ -37,9 +37,11 @@ export default function SurveyInstanceNameField({ templateId, programId, value, 
     const suffix = programId ? `&program_id=${encodeURIComponent(programId)}` : '';
     void api<NameAvailability>(`/api/survey-templates/${templateId}/instance-name?name=${suffix}`, { signal: controller.signal }).then(response => {
       if (controller.signal.aborted || sequence !== sequenceRef.current) return;
-      if (response.success && response.data) {
+      if (response.success && response.data && typeof response.data.suggested_name === 'string') {
         onChange(response.data.suggested_name);
         setState(response.data);
+      } else {
+        setState(null);
       }
       setChecking(false);
     });

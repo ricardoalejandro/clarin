@@ -9,11 +9,17 @@ export interface CalendarInterval {
 export function agendaItemInterval(item: AgendaItem): CalendarInterval | null {
 	if (item.kind === 'task') {
 		const startRaw = item.task.start_at || item.task.due_at
-		const endRaw = item.task.due_end_at || item.task.due_at || item.task.start_at
+		const endRaw = item.task.due_at || item.task.due_end_at || item.task.start_at
 		if (!startRaw || !endRaw) return null
 		const start = new Date(startRaw); const end = new Date(endRaw)
 		if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null
-		return { start, end: end > start ? end : new Date(start.getTime() + 30 * 60_000), allDay: Boolean(item.task.is_all_day) }
+		if (item.task.is_all_day) {
+			start.setHours(0, 0, 0, 0)
+			end.setHours(0, 0, 0, 0)
+			end.setDate(end.getDate() + 1)
+			return { start, end: end > start ? end : new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1), allDay: true }
+		}
+		return { start, end: end > start ? end : new Date(start.getTime() + 30 * 60_000), allDay: false }
 	}
 	const occurrence = item.event
 	if (occurrence.start_date && occurrence.end_date_exclusive) {

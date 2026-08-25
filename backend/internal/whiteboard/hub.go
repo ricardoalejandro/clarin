@@ -22,15 +22,39 @@ type RealtimeActor struct {
 }
 
 type RealtimeClient struct {
-	ID        uuid.UUID
-	AccountID uuid.UUID
-	BoardID   uuid.UUID
-	Actor     RealtimeActor
-	Send      chan []byte
-	stateMu   sync.RWMutex
-	closed    bool
-	done      chan struct{}
-	closeOnce sync.Once
+	ID             uuid.UUID
+	AccountID      uuid.UUID
+	BoardID        uuid.UUID
+	Actor          RealtimeActor
+	Send           chan []byte
+	presentationMu sync.RWMutex
+	presentationID uuid.UUID
+	stateMu        sync.RWMutex
+	closed         bool
+	done           chan struct{}
+	closeOnce      sync.Once
+}
+
+func (c *RealtimeClient) SetPresentation(id uuid.UUID) {
+	c.presentationMu.Lock()
+	c.presentationID = id
+	c.presentationMu.Unlock()
+}
+
+func (c *RealtimeClient) Presentation() uuid.UUID {
+	c.presentationMu.RLock()
+	defer c.presentationMu.RUnlock()
+	return c.presentationID
+}
+
+func (c *RealtimeClient) ClearPresentation(id uuid.UUID) bool {
+	c.presentationMu.Lock()
+	defer c.presentationMu.Unlock()
+	if c.presentationID != id {
+		return false
+	}
+	c.presentationID = uuid.Nil
+	return true
 }
 
 func (c *RealtimeClient) initialize() {
@@ -165,6 +189,27 @@ func (h *RoomHub) Broadcast(accountID, boardID uuid.UUID, message OutgoingMessag
 	var slow []uuid.UUID
 	for id, client := range h.clients[boardID] {
 		if id == exceptClient || client.AccountID != accountID || client.IsClosed() {
+			continue
+		}
+		if !client.Enqueue(payload) {
+			slow = append(slow, id)
+		}
+	}
+	return slow
+}
+
+// BroadcastMembers is the only transport path for Clarin-owned comment data.
+// Guest sockets share the scene room but must never observe comment payloads.
+func (h *RoomHub) BroadcastMembers(accountID, boardID uuid.UUID, message OutgoingMessage, exceptClient uuid.UUID) []uuid.UUID {
+	payload, err := json.Marshal(message)
+	if err != nil {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	var slow []uuid.UUID
+	for id, client := range h.clients[boardID] {
+		if id == exceptClient || client.AccountID != accountID || client.Actor.UserID == nil || client.IsClosed() {
 			continue
 		}
 		if !client.Enqueue(payload) {

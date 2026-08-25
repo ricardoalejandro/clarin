@@ -8,10 +8,13 @@ import { TaskSelectPicker } from './TaskSelectPicker'
 import { canEditTask } from './taskPermissionActions'
 import { resolveTaskIdentityColor } from './taskIdentityColor'
 import { taskColorContrast } from './TaskContainerAppearance'
+import { TaskPriorityIndicator, TaskStatusIndicator } from './TaskSemanticIndicators'
 
 interface Props {
   data: TaskGanttData
-  onOpen: (task: Task) => void
+  activeTaskId?: string
+  taskProjection?: Task | null
+  onOpen: (task: Task, trigger?: HTMLElement | null) => void
   onMove: (task: Task, startAt: Date, dueAt: Date, rescheduleDependencies: boolean) => Promise<void>
 }
 
@@ -29,7 +32,7 @@ function addDays(value: Date, days: number) {
   return new Date(value.getTime() + days * DAY)
 }
 
-export default function TaskGanttView({ data, onOpen, onMove }: Props) {
+export default function TaskGanttView({ data, activeTaskId, taskProjection, onOpen, onMove }: Props) {
   const [cellWidth, setCellWidth] = useState(32)
   const [scale, setScale] = useState<TaskGanttScale>('flexible')
   const [rescheduleDependencies, setRescheduleDependencies] = useState(false)
@@ -39,14 +42,15 @@ export default function TaskGanttView({ data, onOpen, onMove }: Props) {
   const [moving, setMoving] = useState<string | null>(null)
   const [dragPreview, setDragPreview] = useState<{ taskId: string; mode: 'move' | 'start' | 'end'; delta: number } | null>(null)
   const suppressOpenUntilRef = useRef(0)
-  const tasks = useMemo(() => data.tasks.filter(task => {
+  const projectedTasks = useMemo(() => data.tasks.map(task => taskProjection?.id === task.id && (taskProjection.version || 0) >= (task.version || 0) ? taskProjection : task), [data.tasks, taskProjection])
+  const tasks = useMemo(() => projectedTasks.filter(task => {
     if (!task.start_at || !task.due_at) return false
     return Number.isFinite(new Date(task.start_at).getTime()) && Number.isFinite(new Date(task.due_at).getTime())
   }).sort((a, b) => {
     const ad = new Date(a.start_at!).getTime()
     const bd = new Date(b.start_at!).getTime()
     return ad - bd
-  }), [data.tasks])
+  }), [projectedTasks])
   const taskIndex = useMemo(() => new Map(tasks.map((task, index) => [task.id, index])), [tasks])
   const dated = tasks.flatMap(task => [task.start_at, task.due_at].filter(Boolean).map(value => new Date(value!)))
   const today = startOfDay(new Date())
@@ -73,8 +77,8 @@ export default function TaskGanttView({ data, onOpen, onMove }: Props) {
     return { start: new Date(task.start_at!), due: new Date(task.due_at!) }
   }
 
-  const openTask = (task: Task) => {
-    if (Date.now() >= suppressOpenUntilRef.current) onOpen(task)
+  const openTask = (task: Task, trigger?: HTMLElement | null) => {
+    if (Date.now() >= suppressOpenUntilRef.current) onOpen(task, trigger)
   }
 
   const drag = (event: React.PointerEvent, task: Task, mode: 'move' | 'start' | 'end') => {
@@ -143,14 +147,16 @@ export default function TaskGanttView({ data, onOpen, onMove }: Props) {
         </div>
 
         <div className="relative z-20">
-			{tasks.map((task, index) => { let { start, due } = datesFor(task); if (dragPreview?.taskId === task.id) { if (dragPreview.mode === 'move' || dragPreview.mode === 'start') start = addDays(start, dragPreview.delta); if (dragPreview.mode === 'move' || dragPreview.mode === 'end') due = addDays(due, dragPreview.delta) } const left = ((startOfDay(start).getTime() - minDate.getTime()) / DAY) * effectiveCellWidth; const duration = Math.max(1, Math.ceil((due.getTime() - start.getTime()) / DAY)); const width = Math.max(effectiveCellWidth, duration * effectiveCellWidth); const isCritical = critical.has(task.id); const isDone = task.status_detail?.category === 'done'; const invalidPreview = due < start; const editable = canEditTask(task); const identityColor = task.resolved_color || resolveTaskIdentityColor(task.color).color; const identityContrast = taskColorContrast(identityColor); return <div key={task.id} className="relative flex border-b border-slate-100" style={{ height: ROW }}>
-            <button onClick={() => openTask(task)} className="sticky left-0 z-20 flex shrink-0 items-center gap-2 border-r border-slate-200 bg-white px-3 text-left hover:bg-slate-50" style={{ width: LABEL }}>
+			{tasks.map((task, index) => { let { start, due } = datesFor(task); if (dragPreview?.taskId === task.id) { if (dragPreview.mode === 'move' || dragPreview.mode === 'start') start = addDays(start, dragPreview.delta); if (dragPreview.mode === 'move' || dragPreview.mode === 'end') due = addDays(due, dragPreview.delta) } const left = ((startOfDay(start).getTime() - minDate.getTime()) / DAY) * effectiveCellWidth; const duration = Math.max(1, Math.ceil((due.getTime() - start.getTime()) / DAY)); const width = Math.max(effectiveCellWidth, duration * effectiveCellWidth); const isCritical = critical.has(task.id); const isDone = task.status_detail?.category === 'done'; const isOpenTask = task.id === activeTaskId; const invalidPreview = due < start; const editable = canEditTask(task); const identityColor = task.resolved_color || resolveTaskIdentityColor(task.color).color; const identityContrast = taskColorContrast(identityColor); return <div key={task.id} data-task-gantt-row={task.id} data-task-active={isOpenTask || undefined} aria-current={isOpenTask ? 'true' : undefined} className={`relative flex border-b border-slate-100 ${isOpenTask ? 'bg-slate-50/80' : ''}`} style={{ height: ROW }}>
+            <button data-task-gantt-open={task.id} onClick={event => openTask(task, event.currentTarget)} className={`sticky left-0 z-20 flex shrink-0 items-center gap-2 border-r border-slate-200 px-3 text-left hover:bg-slate-50 ${isOpenTask ? 'bg-slate-100 shadow-[inset_3px_0_0_#64748b]' : 'bg-white'}`} style={{ width: LABEL }}>
 								{task.is_milestone ? <Diamond className="h-3.5 w-3.5" style={{ fill: identityColor, color: identityColor }} /> : <span className="h-2 w-2 rounded-full" style={{ backgroundColor: identityColor }} />}
               <span className={`min-w-0 flex-1 truncate text-xs font-medium ${isDone ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{task.title}</span>
+              <TaskPriorityIndicator priority={task.priority} compact className="shrink-0" />
+              <TaskStatusIndicator status={task.status_detail} compact className="shrink-0" />
               {data.dependencies.some(dep => dep.successor_task_id === task.id) && <Link2 className="h-3 w-3 text-slate-300" />}
             </button>
             <div className="relative" style={{ width: dayCount * effectiveCellWidth }}>
-								{task.is_milestone ? <button onClick={() => openTask(task)} onPointerDown={editable ? event => drag(event, task, 'move') : undefined} className={`absolute top-1/2 z-20 h-5 w-5 -translate-x-1/2 -translate-y-1/2 rotate-45 rounded-sm shadow-md ${isCritical ? 'ring-2 ring-rose-500 ring-offset-2' : ''} ${editable ? 'cursor-grab' : 'cursor-pointer opacity-80'}`} style={{ left, backgroundColor: identityColor }} title={editable ? task.title : `${task.title} · solo lectura`} /> : <div onClick={() => openTask(task)} onPointerDown={editable ? event => drag(event, task, 'move') : undefined} className={`group absolute top-2.5 z-20 h-6 overflow-hidden rounded-md shadow-sm transition ${editable ? 'cursor-grab' : 'cursor-pointer opacity-80'} ${moving === task.id ? `opacity-75 ring-2 ${invalidPreview ? 'ring-rose-300' : 'ring-emerald-300'}` : 'hover:-translate-y-px hover:shadow-md'} ${isCritical || invalidPreview ? 'ring-2 ring-rose-500' : ''} ${isDone ? 'opacity-70' : ''}`} style={{ left, width, backgroundColor: identityColor, color: identityContrast.textColor }}>
+								{task.is_milestone ? <button data-task-gantt-bar={task.id} onClick={event => openTask(task, event.currentTarget)} onPointerDown={editable ? event => drag(event, task, 'move') : undefined} className={`absolute top-1/2 z-20 h-5 w-5 -translate-x-1/2 -translate-y-1/2 rotate-45 rounded-sm shadow-md ${isCritical ? 'ring-2 ring-rose-500 ring-offset-2' : ''} ${isOpenTask ? 'outline outline-2 outline-offset-2 outline-slate-700' : ''} ${editable ? 'cursor-grab' : 'cursor-pointer opacity-80'}`} style={{ left, backgroundColor: identityColor }} title={editable ? task.title : `${task.title} · solo lectura`} /> : <div data-task-gantt-bar={task.id} role="button" tabIndex={0} aria-label={`Abrir tarea ${task.title}`} onClick={event => openTask(task, event.currentTarget)} onKeyDown={event => { if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return; event.preventDefault(); openTask(task, event.currentTarget) }} onPointerDown={editable ? event => drag(event, task, 'move') : undefined} className={`group absolute top-2.5 z-20 h-6 overflow-hidden rounded-md shadow-sm outline-none transition focus:ring-2 focus:ring-slate-700 focus:ring-offset-2 ${editable ? 'cursor-grab' : 'cursor-pointer opacity-80'} ${moving === task.id ? `opacity-75 ring-2 ${invalidPreview ? 'ring-rose-300' : 'ring-emerald-300'}` : 'hover:-translate-y-px hover:shadow-md'} ${isCritical || invalidPreview ? 'ring-2 ring-rose-500' : ''} ${isOpenTask ? 'outline outline-2 outline-offset-2 outline-slate-700' : ''} ${isDone ? 'opacity-70' : ''}`} style={{ left, width, backgroundColor: identityColor, color: identityContrast.textColor }}>
                 <div className="absolute inset-y-0 left-0 bg-white/20" style={{ width: `${task.progress || 0}%` }} />
                 {editable && <button onPointerDown={event => drag(event, task, 'start')} className="absolute inset-y-0 left-0 z-30 w-2.5 cursor-ew-resize border-l-2 border-white/80 bg-white/15 hover:bg-white/35" aria-label="Cambiar inicio" />}
 								<span className={`pointer-events-none relative block truncate px-3 py-1 text-[10px] font-semibold ${isDone ? 'line-through' : ''}`}>{task.title}</span>

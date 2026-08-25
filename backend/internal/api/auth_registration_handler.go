@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"log"
 	"strings"
 	"time"
@@ -18,6 +19,8 @@ type registerRequest struct {
 	Password    string `json:"password"`
 	PlanCode    string `json:"plan_code"`
 }
+
+const whiteboardSessionCookieName = "whiteboard-session-token"
 
 func (s *Server) handleRegister(c *fiber.Ctx) error {
 	var req registerRequest
@@ -75,23 +78,93 @@ func (s *Server) handleRegister(c *fiber.Ctx) error {
 	})
 }
 
-func (s *Server) setAuthCookies(c *fiber.Ctx, token string, refreshToken string) {
-	c.Cookie(&fiber.Cookie{
+func authTokenCookie(token string, now time.Time, secure bool) *fiber.Cookie {
+	return &fiber.Cookie{
 		Name:     "auth-token",
 		Value:    token,
-		Expires:  time.Now().Add(1 * time.Hour),
+		Expires:  now.Add(time.Hour),
 		HTTPOnly: true,
-		Secure:   s.cfg.IsProduction(),
+		Secure:   secure,
 		SameSite: "Lax",
 		Path:     "/",
-	})
-	c.Cookie(&fiber.Cookie{
+	}
+}
+
+func refreshTokenCookie(refreshToken string, now time.Time, secure bool) *fiber.Cookie {
+	return &fiber.Cookie{
 		Name:     "refresh-token",
 		Value:    refreshToken,
-		Expires:  time.Now().Add(7 * 24 * time.Hour),
+		Expires:  now.Add(service.AuthSessionAbsoluteLifetime),
 		HTTPOnly: true,
-		Secure:   s.cfg.IsProduction(),
+		Secure:   secure,
 		SameSite: "Strict",
 		Path:     "/api/auth",
-	})
+	}
+}
+
+func whiteboardSessionCookie(refreshToken string, now time.Time, secure bool) *fiber.Cookie {
+	return &fiber.Cookie{
+		Name:     whiteboardSessionCookieName,
+		Value:    refreshToken,
+		Expires:  now.Add(service.AuthSessionAbsoluteLifetime),
+		HTTPOnly: true,
+		Secure:   secure,
+		SameSite: fiber.CookieSameSiteStrictMode,
+		Path:     "/api/whiteboards",
+	}
+}
+
+func clearWhiteboardSessionCookie(now time.Time, secure bool) *fiber.Cookie {
+	return &fiber.Cookie{
+		Name:     whiteboardSessionCookieName,
+		Value:    "",
+		Expires:  now.Add(-time.Hour),
+		MaxAge:   -1,
+		HTTPOnly: true,
+		Secure:   secure,
+		SameSite: fiber.CookieSameSiteStrictMode,
+		Path:     "/api/whiteboards",
+	}
+}
+
+func (s *Server) setAuthCookies(c *fiber.Ctx, token string, refreshToken string) {
+	now := time.Now()
+	secure := s.cfg.IsProduction()
+	c.Cookie(authTokenCookie(token, now, secure))
+	c.Cookie(refreshTokenCookie(refreshToken, now, secure))
+	c.Cookie(whiteboardSessionCookie(refreshToken, now, secure))
+}
+
+type whiteboardSessionBootstrapValidator func(context.Context, string) (*service.AuthSessionIdentity, error)
+
+func bootstrapWhiteboardSessionCookie(c *fiber.Ctx, secure bool, validate whiteboardSessionBootstrapValidator) error {
+	refreshToken := strings.TrimSpace(c.Cookies("refresh-token"))
+	if refreshToken == "" || validate == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"success": false, "error": "Session expired", "code": "session_expired",
+		})
+	}
+	identity, err := validate(c.Context(), refreshToken)
+	if err != nil {
+		disposition := classifyAuthFailure(err)
+		if disposition.Status == fiber.StatusServiceUnavailable {
+			return c.Status(disposition.Status).JSON(fiber.Map{
+				"success": false, "error": "Authentication is temporarily unavailable", "code": disposition.Code,
+			})
+		}
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"success": false, "error": "Session expired", "code": "session_expired",
+		})
+	}
+	if identity == nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"success": false, "error": "Session expired", "code": "session_expired",
+		})
+	}
+	c.Cookie(whiteboardSessionCookie(refreshToken, time.Now(), secure))
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+func (s *Server) handleBootstrapWhiteboardSession(c *fiber.Ctx) error {
+	return bootstrapWhiteboardSessionCookie(c, s.cfg.IsProduction(), s.services.Auth.ValidateRefreshTokenReadOnly)
 }

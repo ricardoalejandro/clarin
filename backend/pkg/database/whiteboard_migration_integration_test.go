@@ -17,6 +17,8 @@ import (
 	"github.com/naperu/clarin/internal/storage"
 )
 
+func whiteboardInt64Pointer(value int64) *int64 { return &value }
+
 func TestWhiteboardMigrationRepositoryIsolationAndIdempotency(t *testing.T) {
 	if os.Getenv("CLARIN_RUN_WHITEBOARD_MIGRATION_INTEGRATION") != "1" {
 		t.Skip("set CLARIN_RUN_WHITEBOARD_MIGRATION_INTEGRATION=1 in an isolated PostgreSQL environment")
@@ -60,13 +62,16 @@ func TestWhiteboardMigrationRepositoryIsolationAndIdempotency(t *testing.T) {
 		t.Fatalf("idempotent migrate: %v", err)
 	}
 	for constraintName, expectedDefinition := range map[string]string{
-		"whiteboard_folders_created_by_account_fk":        "FOREIGN KEY (account_id, created_by) REFERENCES user_accounts(account_id, user_id)",
-		"whiteboard_assets_uploaded_by_account_fk":        "FOREIGN KEY (account_id, uploaded_by) REFERENCES user_accounts(account_id, user_id)",
-		"whiteboard_guest_sessions_link_board_account_fk": "FOREIGN KEY (account_id, board_id, share_link_id) REFERENCES whiteboard_share_links(account_id, board_id, id)",
-		"whiteboard_operations_guest_board_account_fk":    "FOREIGN KEY (account_id, board_id, guest_session_id) REFERENCES whiteboard_guest_sessions(account_id, board_id, id)",
-		"whiteboard_revisions_guest_board_account_fk":     "FOREIGN KEY (account_id, board_id, guest_session_id) REFERENCES whiteboard_guest_sessions(account_id, board_id, id)",
-		"whiteboard_assets_guest_board_account_fk":        "FOREIGN KEY (account_id, board_id, guest_session_id) REFERENCES whiteboard_guest_sessions(account_id, board_id, id)",
-		"whiteboard_activity_guest_board_account_fk":      "FOREIGN KEY (account_id, board_id, guest_session_id) REFERENCES whiteboard_guest_sessions(account_id, board_id, id)",
+		"whiteboard_folders_created_by_account_fk":                      "FOREIGN KEY (account_id, created_by) REFERENCES user_accounts(account_id, user_id)",
+		"whiteboard_assets_uploaded_by_account_fk":                      "FOREIGN KEY (account_id, uploaded_by) REFERENCES user_accounts(account_id, user_id)",
+		"whiteboard_guest_sessions_link_board_account_fk":               "FOREIGN KEY (account_id, board_id, share_link_id) REFERENCES whiteboard_share_links(account_id, board_id, id)",
+		"whiteboard_operations_guest_board_account_fk":                  "FOREIGN KEY (account_id, board_id, guest_session_id) REFERENCES whiteboard_guest_sessions(account_id, board_id, id)",
+		"whiteboard_revisions_guest_board_account_fk":                   "FOREIGN KEY (account_id, board_id, guest_session_id) REFERENCES whiteboard_guest_sessions(account_id, board_id, id)",
+		"whiteboard_assets_guest_board_account_fk":                      "FOREIGN KEY (account_id, board_id, guest_session_id) REFERENCES whiteboard_guest_sessions(account_id, board_id, id)",
+		"whiteboard_activity_guest_board_account_fk":                    "FOREIGN KEY (account_id, board_id, guest_session_id) REFERENCES whiteboard_guest_sessions(account_id, board_id, id)",
+		"whiteboard_comment_threads_account_id_board_id_fkey":           "FOREIGN KEY (account_id, board_id) REFERENCES whiteboards(account_id, id)",
+		"whiteboard_comments_account_id_board_id_thread_id_fkey":        "FOREIGN KEY (account_id, board_id, thread_id) REFERENCES whiteboard_comment_threads(account_id, board_id, id)",
+		"whiteboard_library_import_sessions_account_id_library_id_fkey": "FOREIGN KEY (account_id, library_id) REFERENCES whiteboard_libraries(account_id, id)",
 	} {
 		var definition string
 		if err := db.QueryRow(ctx, `SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname=$1`, constraintName).Scan(&definition); err != nil {
@@ -84,9 +89,19 @@ func TestWhiteboardMigrationRepositoryIsolationAndIdempotency(t *testing.T) {
 	if !libraryDescriptionConstraintValidated {
 		t.Fatal("whiteboard library description constraint must be validated")
 	}
-
+	var importCompletionConstraintValidated bool
+	var importCompletionConstraintDefinition string
+	if err := db.QueryRow(ctx, `SELECT convalidated,pg_get_constraintdef(oid) FROM pg_constraint
+		WHERE conname='whiteboard_library_import_completed_version_check'`).Scan(
+		&importCompletionConstraintValidated, &importCompletionConstraintDefinition); err != nil {
+		t.Fatalf("read library import completion constraint: %v", err)
+	}
+	if !importCompletionConstraintValidated || !strings.Contains(importCompletionConstraintDefinition, "completed_library_version") {
+		t.Fatalf("library import completion version is not enforced: validated=%v definition=%s",
+			importCompletionConstraintValidated, importCompletionConstraintDefinition)
+	}
 	accountA, accountB := uuid.New(), uuid.New()
-	creator, viewer, foreign := uuid.New(), uuid.New(), uuid.New()
+	creator, viewer, observer, foreign := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	if _, err := db.Exec(ctx, `INSERT INTO accounts(id,name) VALUES($1,'Whiteboard A'),($2,'Whiteboard B')`, accountA, accountB); err != nil {
 		t.Fatal(err)
 	}
@@ -99,6 +114,14 @@ func TestWhiteboardMigrationRepositoryIsolationAndIdempotency(t *testing.T) {
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,role,is_default) VALUES
 		($1,$4,'agent',TRUE),($2,$4,'agent',FALSE),($3,$5,'agent',TRUE)`, creator, viewer, foreign, accountA, accountB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO users(id,account_id,username,email,password_hash,display_name)
+		VALUES($1,$2,$3,$4,'test','Observer')`, observer, accountA, "wb-"+observer.String(), observer.String()+"@test.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,role,is_default)
+		VALUES($1,$2,'agent',FALSE)`, observer, accountA); err != nil {
 		t.Fatal(err)
 	}
 	repo := repository.NewRepositories(db).Whiteboard
@@ -158,6 +181,60 @@ func TestWhiteboardMigrationRepositoryIsolationAndIdempotency(t *testing.T) {
 	restoredFolder, err := repo.RestoreFolder(ctx, accountA, emptyFolder.ID, emptyFolder.Version+1)
 	if err != nil || restoredFolder.Version != emptyFolder.Version+2 {
 		t.Fatalf("folder restore did not preserve optimistic version: %#v %v", restoredFolder, err)
+	}
+
+	placementRootA, err := repo.CreateFolder(ctx, accountA, creator, repository.WhiteboardFolderInput{Name: "Placement A", SortOrder: whiteboardInt64Pointer(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placementRootB, err := repo.CreateFolder(ctx, accountA, creator, repository.WhiteboardFolderInput{Name: "Placement B", SortOrder: whiteboardInt64Pointer(2)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placementChild, err := repo.CreateFolder(ctx, accountA, creator, repository.WhiteboardFolderInput{ParentID: &placementRootA.ID, Name: "Placement child"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placementResult, err := repo.UpdateFolder(ctx, accountA, creator, placementChild.ID, repository.WhiteboardFolderInput{
+		Name: placementChild.Name, Description: placementChild.Description, ExpectedVersion: placementChild.Version,
+		Placement: &repository.WhiteboardFolderPlacement{BeforeFolderID: &placementRootB.ID},
+	})
+	if err != nil {
+		t.Fatalf("move child to account root before sibling: %v", err)
+	}
+	canonicalPlacementRootB := placementRootB
+	for _, affectedFolder := range placementResult.AffectedFolders {
+		if affectedFolder.ID == placementRootB.ID {
+			canonicalPlacementRootB = affectedFolder
+		}
+	}
+	if placementResult.Folder.ParentID != nil || !(placementResult.Folder.SortOrder < canonicalPlacementRootB.SortOrder) {
+		t.Fatalf("child did not leave its parent at the requested root position: %#v", placementResult.Folder)
+	}
+	foreignRoot, err := repo.CreateFolder(ctx, accountB, foreign, repository.WhiteboardFolderInput{Name: "Foreign placement"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.UpdateFolder(ctx, accountA, creator, placementResult.Folder.ID, repository.WhiteboardFolderInput{
+		Name: placementResult.Folder.Name, ExpectedVersion: placementResult.Folder.Version,
+		Placement: &repository.WhiteboardFolderPlacement{BeforeFolderID: &foreignRoot.ID},
+	}); !errors.Is(err, repository.ErrWhiteboardInvalid) {
+		t.Fatalf("cross-account placement anchor was accepted: %v", err)
+	}
+
+	gapTarget, err := repo.CreateFolder(ctx, accountA, creator, repository.WhiteboardFolderInput{Name: "Gap target", SortOrder: whiteboardInt64Pointer(10)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gapResult, err := repo.UpdateFolder(ctx, accountA, creator, gapTarget.ID, repository.WhiteboardFolderInput{
+		Name: gapTarget.Name, ExpectedVersion: gapTarget.Version,
+		Placement: &repository.WhiteboardFolderPlacement{BeforeFolderID: &placementRootB.ID},
+	})
+	if err != nil {
+		t.Fatalf("rebalance exhausted folder order gap: %v", err)
+	}
+	if len(gapResult.AffectedFolders) < 3 {
+		t.Fatalf("rebalance did not return every canonically affected sibling: %#v", gapResult.AffectedFolders)
 	}
 
 	sharedLibrary, err := repo.CreateLibrary(ctx, accountA, creator, repository.WhiteboardLibraryInput{
@@ -283,13 +360,170 @@ func TestWhiteboardMigrationRepositoryIsolationAndIdempotency(t *testing.T) {
 		nil, 0, uuid.New()); !errors.Is(err, repository.ErrWhiteboardInvalid) {
 		t.Fatalf("ACL replacement accepted missing expected_access_revision: %v", err)
 	}
-	accessPolicy, err := repo.ReplaceBoardAccess(ctx, accountA, creator, boardID, domain.WhiteboardAccessPrivate,
-		[]repository.WhiteboardGrantInput{{UserID: viewer, AccessLevel: domain.WhiteboardAccessEdit}}, board.AccessRevision, uuid.New())
+	commentPolicy, err := repo.ReplaceBoardAccess(ctx, accountA, creator, boardID, domain.WhiteboardAccessPrivate,
+		[]repository.WhiteboardGrantInput{
+			{UserID: viewer, AccessLevel: domain.WhiteboardAccessComment},
+			{UserID: observer, AccessLevel: domain.WhiteboardAccessView},
+		}, board.AccessRevision, uuid.New())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if accessPolicy.AccessRevision != board.AccessRevision+1 {
-		t.Fatalf("ACL revision did not advance: %#v", accessPolicy)
+	if commentPolicy.AccessRevision != board.AccessRevision+1 {
+		t.Fatalf("comment ACL revision did not advance: %#v", commentPolicy)
+	}
+	if access, err := repo.RequireAccess(ctx, accountA, viewer, boardID, domain.WhiteboardAccessComment); err != nil || !access.CanComment || access.CanEdit {
+		t.Fatalf("comment-only grant did not preserve cumulative boundary: %#v %v", access, err)
+	}
+	if _, err := repo.RequireAccess(ctx, accountA, viewer, boardID, domain.WhiteboardAccessEdit); !errors.Is(err, repository.ErrWhiteboardForbidden) {
+		t.Fatalf("comment-only member edited the scene: %v", err)
+	}
+	if _, err := repo.CreateWhiteboardCommentThread(ctx, accountA, observer, boardID,
+		repository.WhiteboardCommentThreadCreateInput{OperationID: uuid.New(), AnchorX: 5, AnchorY: 5, Body: "No autorizado"}); !errors.Is(err, repository.ErrWhiteboardForbidden) {
+		t.Fatalf("view-only member created a comment thread: %v", err)
+	}
+	threadOperation := uuid.New()
+	thread, err := repo.CreateWhiteboardCommentThread(ctx, accountA, viewer, boardID, repository.WhiteboardCommentThreadCreateInput{
+		OperationID: threadOperation, AnchorX: 10, AnchorY: 20, Body: "Primero 👀",
+	})
+	if err != nil || len(thread.Comments) != 1 {
+		t.Fatalf("comment-only member could not create thread: %#v %v", thread, err)
+	}
+	replayedThread, err := repo.CreateWhiteboardCommentThread(ctx, accountA, viewer, boardID, repository.WhiteboardCommentThreadCreateInput{
+		OperationID: threadOperation, AnchorX: 10, AnchorY: 20, Body: "Primero 👀",
+	})
+	if err != nil || replayedThread.ID != thread.ID || len(replayedThread.Comments) != 1 {
+		t.Fatalf("thread operation replay duplicated content: %#v %v", replayedThread, err)
+	}
+	replyOperation := uuid.New()
+	repliedThread, err := repo.AddWhiteboardCommentReply(ctx, accountA, viewer, boardID, thread.ID,
+		repository.WhiteboardCommentReplyInput{OperationID: replyOperation, Body: "Respuesta"})
+	if err != nil || len(repliedThread.Comments) != 2 {
+		t.Fatalf("comment reply was not persisted: %#v %v", repliedThread, err)
+	}
+	for index := 0; index < 5; index++ {
+		repliedThread, err = repo.AddWhiteboardCommentReply(ctx, accountA, viewer, boardID, thread.ID,
+			repository.WhiteboardCommentReplyInput{OperationID: uuid.New(), Body: "Respuesta adicional " + strings.Repeat("x", index+1)})
+		if err != nil {
+			t.Fatalf("append bounded comment preview fixture %d: %v", index, err)
+		}
+	}
+	previewThreads, _, err := repo.ListWhiteboardCommentThreads(ctx, accountA, viewer, boardID,
+		repository.WhiteboardCommentThreadListOptions{Status: domain.WhiteboardCommentOpen, Limit: 200})
+	if err != nil || len(previewThreads) != 1 || len(previewThreads[0].Comments) != 5 ||
+		previewThreads[0].CommentCount != 7 || !previewThreads[0].CommentsHasMore {
+		t.Fatalf("comment collection escaped bounded preview contract: %#v %v", previewThreads, err)
+	}
+	commentPage, commentPageMore, err := repo.ListWhiteboardThreadComments(ctx, accountA, viewer, boardID, thread.ID,
+		repository.WhiteboardCommentListOptions{Limit: 3})
+	if err != nil || len(commentPage) != 3 || !commentPageMore {
+		t.Fatalf("thread comment pagination failed: %#v more=%v err=%v", commentPage, commentPageMore, err)
+	}
+	resolvedThread, err := repo.UpdateWhiteboardCommentThreadStatus(ctx, accountA, viewer, boardID, thread.ID,
+		repository.WhiteboardCommentStatusInput{OperationID: uuid.New(), ExpectedVersion: repliedThread.Version, Status: domain.WhiteboardCommentResolved})
+	if err != nil || resolvedThread.Status != domain.WhiteboardCommentResolved {
+		t.Fatalf("comment thread was not resolved: %#v %v", resolvedThread, err)
+	}
+	replayedReply, err := repo.AddWhiteboardCommentReply(ctx, accountA, viewer, boardID, thread.ID,
+		repository.WhiteboardCommentReplyInput{OperationID: replyOperation, Body: "Respuesta"})
+	if err != nil || replayedReply.Status != domain.WhiteboardCommentResolved || len(replayedReply.Comments) != 7 {
+		t.Fatalf("reply ACK retry revalidated resolved state or duplicated content: %#v %v", replayedReply, err)
+	}
+	firstOpenThread, err := repo.CreateWhiteboardCommentThread(ctx, accountA, viewer, boardID,
+		repository.WhiteboardCommentThreadCreateInput{OperationID: uuid.New(), AnchorX: 30, AnchorY: 40, Body: "Abierto uno"})
+	if err != nil {
+		t.Fatalf("create first open thread for counts: %v", err)
+	}
+	elementID := "shape-marker"
+	secondOpenThread, err := repo.CreateWhiteboardCommentThread(ctx, accountA, viewer, boardID,
+		repository.WhiteboardCommentThreadCreateInput{OperationID: uuid.New(), ElementID: &elementID, AnchorX: 50, AnchorY: 60, Body: "Abierto dos"})
+	if err != nil {
+		t.Fatalf("create second open thread for markers: %v", err)
+	}
+	counts, err := repo.GetWhiteboardCommentThreadCounts(ctx, accountA, viewer, boardID)
+	if err != nil || counts.Open != 2 || counts.Resolved != 1 || counts.All != 3 {
+		t.Fatalf("canonical comment counts are wrong: %#v %v", counts, err)
+	}
+	for status, expected := range map[string]int{
+		domain.WhiteboardCommentOpen: 2, domain.WhiteboardCommentResolved: 1, "all": 3,
+	} {
+		filtered, _, err := repo.ListWhiteboardCommentThreads(ctx, accountA, viewer, boardID,
+			repository.WhiteboardCommentThreadListOptions{Status: status, Limit: 10})
+		if err != nil || len(filtered) != expected {
+			t.Fatalf("comment status %q was not applied: got=%d expected=%d err=%v", status, len(filtered), expected, err)
+		}
+		for _, filteredThread := range filtered {
+			if status != "all" && filteredThread.Status != status {
+				t.Fatalf("comment status %q leaked thread %s", status, filteredThread.Status)
+			}
+		}
+	}
+	firstMarkerPage, markerHasMore, err := repo.ListWhiteboardCommentMarkers(ctx, accountA, viewer, boardID,
+		repository.WhiteboardCommentMarkerListOptions{Limit: 1})
+	if err != nil || len(firstMarkerPage) != 1 || !markerHasMore || firstMarkerPage[0].CommentCount != 1 {
+		t.Fatalf("first open marker page is invalid: %#v more=%v err=%v", firstMarkerPage, markerHasMore, err)
+	}
+	secondMarkerPage, markerHasMore, err := repo.ListWhiteboardCommentMarkers(ctx, accountA, viewer, boardID,
+		repository.WhiteboardCommentMarkerListOptions{BeforeUpdatedAt: &firstMarkerPage[0].UpdatedAt, BeforeID: &firstMarkerPage[0].ID, Limit: 1})
+	if err != nil || len(secondMarkerPage) != 1 || markerHasMore || secondMarkerPage[0].ID == firstMarkerPage[0].ID {
+		t.Fatalf("second open marker page is invalid: %#v more=%v err=%v", secondMarkerPage, markerHasMore, err)
+	}
+	markerIDs := map[uuid.UUID]bool{firstMarkerPage[0].ID: true, secondMarkerPage[0].ID: true}
+	if !markerIDs[firstOpenThread.ID] || !markerIDs[secondOpenThread.ID] || markerIDs[resolvedThread.ID] {
+		t.Fatalf("marker collection did not contain exactly open threads: %#v", markerIDs)
+	}
+	detail, err := repo.GetWhiteboardCommentThread(ctx, accountA, viewer, boardID, secondOpenThread.ID)
+	if err != nil || detail.ID != secondOpenThread.ID || len(detail.Comments) != 1 || detail.Comments[0].Body != "Abierto dos" {
+		t.Fatalf("authorized comment thread detail failed: %#v %v", detail, err)
+	}
+	ownedComment := detail.Comments[0]
+	if _, err := repo.EditWhiteboardComment(ctx, accountA, creator, boardID, detail.ID, ownedComment.ID,
+		repository.WhiteboardCommentEditInput{OperationID: uuid.New(), ExpectedVersion: ownedComment.Version, Body: "Edición ajena"}); !errors.Is(err, repository.ErrWhiteboardForbidden) {
+		t.Fatalf("another member edited a comment they do not own: %v", err)
+	}
+	if _, err := repo.EditWhiteboardComment(ctx, accountA, viewer, boardID, detail.ID, ownedComment.ID,
+		repository.WhiteboardCommentEditInput{OperationID: uuid.New(), ExpectedVersion: ownedComment.Version + 1, Body: "Versión obsoleta"}); !errors.Is(err, repository.ErrWhiteboardConflict) {
+		t.Fatalf("stale comment edit did not conflict: %v", err)
+	}
+	editedThread, err := repo.EditWhiteboardComment(ctx, accountA, viewer, boardID, detail.ID, ownedComment.ID,
+		repository.WhiteboardCommentEditInput{OperationID: uuid.New(), ExpectedVersion: ownedComment.Version, Body: "Edición canónica"})
+	if err != nil || len(editedThread.Comments) != 1 || editedThread.Comments[0].Body != "Edición canónica" || editedThread.Comments[0].Version != ownedComment.Version+1 {
+		t.Fatalf("owned comment edit was not persisted: %#v %v", editedThread, err)
+	}
+	if _, err := repo.DeleteWhiteboardComment(ctx, accountA, viewer, boardID, detail.ID, ownedComment.ID,
+		repository.WhiteboardCommentDeleteInput{OperationID: uuid.New(), ExpectedVersion: ownedComment.Version}); !errors.Is(err, repository.ErrWhiteboardConflict) {
+		t.Fatalf("stale comment delete did not conflict: %v", err)
+	}
+	deletedThread, err := repo.DeleteWhiteboardComment(ctx, accountA, viewer, boardID, detail.ID, ownedComment.ID,
+		repository.WhiteboardCommentDeleteInput{OperationID: uuid.New(), ExpectedVersion: editedThread.Comments[0].Version})
+	if err != nil || len(deletedThread.Comments) != 1 || deletedThread.Comments[0].DeletedAt == nil || deletedThread.Comments[0].Body != "" {
+		t.Fatalf("owned comment delete did not leave a traceable tombstone: %#v %v", deletedThread, err)
+	}
+	if _, err := repo.AddWhiteboardCommentReply(ctx, accountA, viewer, boardID, resolvedThread.ID,
+		repository.WhiteboardCommentReplyInput{OperationID: uuid.New(), Body: "No debe entrar"}); !errors.Is(err, repository.ErrWhiteboardConflict) {
+		t.Fatalf("new reply to resolved thread did not conflict: %v", err)
+	}
+	if _, err := repo.GetWhiteboardCommentThread(ctx, accountA, viewer, boardID, uuid.New()); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("missing comment thread did not return not found: %v", err)
+	}
+	if _, _, err := repo.ListWhiteboardCommentThreads(ctx, accountB, foreign, boardID, repository.WhiteboardCommentThreadListOptions{}); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("cross-account comment threads leaked: %v", err)
+	}
+	if _, _, err := repo.ListWhiteboardCommentMarkers(ctx, accountB, foreign, boardID, repository.WhiteboardCommentMarkerListOptions{}); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("cross-account comment markers leaked: %v", err)
+	}
+	if _, err := repo.GetWhiteboardCommentThreadCounts(ctx, accountB, foreign, boardID); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("cross-account comment counts leaked: %v", err)
+	}
+	if _, err := repo.GetWhiteboardCommentThread(ctx, accountB, foreign, boardID, secondOpenThread.ID); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("cross-account comment detail leaked: %v", err)
+	}
+	editPolicy, err := repo.ReplaceBoardAccess(ctx, accountA, creator, boardID, domain.WhiteboardAccessPrivate,
+		[]repository.WhiteboardGrantInput{{UserID: viewer, AccessLevel: domain.WhiteboardAccessEdit}}, commentPolicy.AccessRevision, uuid.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if editPolicy.AccessRevision != commentPolicy.AccessRevision+1 {
+		t.Fatalf("edit ACL revision did not advance: %#v", editPolicy)
 	}
 	if _, err := repo.ReplaceBoardAccess(ctx, accountA, creator, boardID, domain.WhiteboardAccessPrivate,
 		nil, board.AccessRevision, uuid.New()); !errors.Is(err, repository.ErrWhiteboardConflict) {
@@ -297,6 +531,249 @@ func TestWhiteboardMigrationRepositoryIsolationAndIdempotency(t *testing.T) {
 	}
 	if _, err := repo.RequireAccess(ctx, accountA, viewer, boardID, domain.WhiteboardAccessEdit); err != nil {
 		t.Fatalf("same-account grant did not apply: %v", err)
+	}
+
+	importNow := time.Now().UTC()
+	mainNavigationHash := strings.Repeat("9", 64)
+	mainCallbackHash := strings.Repeat("a", 64)
+	importItem, err := repo.StartWhiteboardLibraryImport(ctx, accountA, creator, boardID, sharedLibrary.ID,
+		repository.WhiteboardLibraryImportStartInput{TokenHash: mainNavigationHash, ExpiresAt: importNow.Add(15 * time.Minute)})
+	if err != nil {
+		t.Fatalf("start public library import: %v", err)
+	}
+	if _, _, err := repo.ClaimWhiteboardLibraryImport(ctx, accountA, creator, mainCallbackHash, importNow); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("callback was accepted before navigation rotated its secret: %v", err)
+	}
+	if err := repo.RotateWhiteboardLibraryImportNavigation(ctx, accountB, creator, boardID, importItem.ID,
+		mainNavigationHash, mainCallbackHash, importNow); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("another account rotated a library navigation token: %v", err)
+	}
+	if err := repo.RotateWhiteboardLibraryImportNavigation(ctx, accountA, creator, boardID, importItem.ID,
+		mainNavigationHash, mainCallbackHash, importNow); err != nil {
+		t.Fatalf("rotate public library navigation token: %v", err)
+	}
+	if err := repo.RotateWhiteboardLibraryImportNavigation(ctx, accountA, creator, boardID, importItem.ID,
+		mainNavigationHash, strings.Repeat("f", 64), importNow); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("replayed public library navigation token: %v", err)
+	}
+	if _, _, err := repo.ClaimWhiteboardLibraryImport(ctx, accountB, creator, mainCallbackHash, importNow); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("same actor claimed another account's library import: %v", err)
+	}
+	claimedImport, idempotentClaim, err := repo.ClaimWhiteboardLibraryImport(ctx, accountA, creator, mainCallbackHash, importNow)
+	if err != nil || idempotentClaim || claimedImport.ID != importItem.ID {
+		t.Fatalf("claim public library import: %#v %v", claimedImport, err)
+	}
+	importedLibraryJSON := json.RawMessage(`{"type":"excalidrawlib","libraryItems":[{"id":"catalog-item","status":"published","created":1,"elements":[{"id":"catalog-rect","type":"rectangle","version":1,"versionNonce":2}]}],"source":"clarin"}`)
+	if _, err := repo.MarkWhiteboardLibraryImportReady(ctx, accountB, foreign, importItem.ID,
+		"https://libraries.excalidraw.com/libraries/author/catalog.excalidrawlib", importedLibraryJSON); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("another account marked a library import ready: %v", err)
+	}
+	readyImport, err := repo.MarkWhiteboardLibraryImportReady(ctx, accountA, creator, importItem.ID,
+		"https://libraries.excalidraw.com/libraries/author/catalog.excalidrawlib", importedLibraryJSON)
+	if err != nil || readyImport.Status != domain.WhiteboardLibraryImportReady {
+		t.Fatalf("validated library import was not ready: %#v %v", readyImport, err)
+	}
+	if _, err := repo.GetWhiteboardLibraryImport(ctx, accountB, foreign, boardID, importItem.ID, importNow); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("cross-account library import leaked: %v", err)
+	}
+	completeOperation := uuid.New()
+	if _, err := repo.CompleteWhiteboardLibraryImport(ctx, accountA, creator, boardID, importItem.ID,
+		completeOperation, sharedLibrary.Version, importNow); !errors.Is(err, repository.ErrWhiteboardLibraryImportNotPersisted) {
+		t.Fatalf("library import ACK accepted content that was not persisted: %v", err)
+	}
+	var retainedStatus string
+	var retainedPayload []byte
+	if err := db.QueryRow(ctx, `SELECT status,library_json FROM whiteboard_library_import_sessions WHERE id=$1`, importItem.ID).
+		Scan(&retainedStatus, &retainedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if retainedStatus != domain.WhiteboardLibraryImportReady || len(retainedPayload) == 0 {
+		t.Fatalf("failed ACK consumed its payload: status=%s bytes=%d", retainedStatus, len(retainedPayload))
+	}
+	sharedLibrary, err = repo.UpdateLibrary(ctx, accountA, creator, sharedLibrary.ID, repository.WhiteboardLibraryInput{
+		Name: sharedLibrary.Name, LibraryJSON: importedLibraryJSON, Visibility: domain.WhiteboardAccessPrivate,
+		ExpectedVersion: sharedLibrary.Version,
+	})
+	if err != nil {
+		t.Fatalf("persist imported public library items: %v", err)
+	}
+	if _, err := repo.CompleteWhiteboardLibraryImport(ctx, accountA, creator, boardID, importItem.ID,
+		completeOperation, sharedLibrary.Version-1, importNow); !errors.Is(err, repository.ErrWhiteboardConflict) {
+		t.Fatalf("library import ACK accepted a divergent version: %v", err)
+	}
+	libraryLockTx, err := db.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := libraryLockTx.Exec(ctx, `SELECT id FROM whiteboard_libraries WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountA, sharedLibrary.ID); err != nil {
+		_ = libraryLockTx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	blockedLibraryContext, cancelLibraryBlock := context.WithTimeout(ctx, 100*time.Millisecond)
+	_, blockedLibraryErr := repo.CompleteWhiteboardLibraryImport(blockedLibraryContext, accountA, creator, boardID,
+		importItem.ID, completeOperation, sharedLibrary.Version, importNow)
+	cancelLibraryBlock()
+	if !errors.Is(blockedLibraryErr, context.DeadlineExceeded) {
+		_ = libraryLockTx.Rollback(ctx)
+		t.Fatalf("library import ACK bypassed the canonical library lock: %v", blockedLibraryErr)
+	}
+	if err := libraryLockTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	importLockTx, err := db.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := importLockTx.Exec(ctx, `SELECT id FROM whiteboard_library_import_sessions
+		WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountA, importItem.ID); err != nil {
+		_ = importLockTx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	blockedImportContext, cancelImportBlock := context.WithTimeout(ctx, 100*time.Millisecond)
+	_, blockedImportErr := repo.CompleteWhiteboardLibraryImport(blockedImportContext, accountA, creator, boardID,
+		importItem.ID, completeOperation, sharedLibrary.Version, importNow)
+	cancelImportBlock()
+	if !errors.Is(blockedImportErr, context.DeadlineExceeded) {
+		_ = importLockTx.Rollback(ctx)
+		t.Fatalf("library import ACK bypassed the import-session lock: %v", blockedImportErr)
+	}
+	if err := importLockTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	completedImport, err := repo.CompleteWhiteboardLibraryImport(ctx, accountA, creator, boardID, importItem.ID, completeOperation, sharedLibrary.Version, importNow)
+	if err != nil || completedImport.Status != domain.WhiteboardLibraryImportCompleted || len(completedImport.LibraryJSON) != 0 {
+		t.Fatalf("library import completion retained payload or failed: %#v %v", completedImport, err)
+	}
+	if completedImport.CompletedLibraryVersion == nil || *completedImport.CompletedLibraryVersion != sharedLibrary.Version {
+		t.Fatalf("library import completion omitted confirmed version: %#v", completedImport)
+	}
+	if replayedImport, err := repo.CompleteWhiteboardLibraryImport(ctx, accountA, creator, boardID, importItem.ID, completeOperation, sharedLibrary.Version, importNow); err != nil || replayedImport.Status != domain.WhiteboardLibraryImportCompleted {
+		t.Fatalf("library import completion was not idempotent: %#v %v", replayedImport, err)
+	}
+	if _, err := repo.CompleteWhiteboardLibraryImport(ctx, accountA, creator, boardID, importItem.ID,
+		completeOperation, sharedLibrary.Version+1, importNow); !errors.Is(err, repository.ErrWhiteboardConflict) {
+		t.Fatalf("idempotent ACK accepted a divergent version: %v", err)
+	}
+	if _, err := repo.CompleteWhiteboardLibraryImport(ctx, accountA, creator, boardID, importItem.ID,
+		uuid.New(), sharedLibrary.Version, importNow); !errors.Is(err, repository.ErrWhiteboardConflict) {
+		t.Fatalf("completed import accepted another operation: %v", err)
+	}
+
+	revocableLibrary, err := repo.CreateLibrary(ctx, accountA, observer, repository.WhiteboardLibraryInput{
+		Name: "Revocable personal library", LibraryJSON: json.RawMessage(`{"type":"excalidrawlib","libraryItems":[]}`),
+		Visibility: domain.WhiteboardAccessPrivate,
+	})
+	if err != nil {
+		t.Fatalf("create revocable personal library: %v", err)
+	}
+	callbackGrantPolicy, err := repo.ReplaceBoardAccess(ctx, accountA, creator, boardID, domain.WhiteboardAccessPrivate,
+		[]repository.WhiteboardGrantInput{
+			{UserID: viewer, AccessLevel: domain.WhiteboardAccessEdit},
+			{UserID: observer, AccessLevel: domain.WhiteboardAccessView},
+		}, editPolicy.AccessRevision, uuid.New())
+	if err != nil {
+		t.Fatalf("grant callback actor view access: %v", err)
+	}
+	pendingRevokedImport, err := repo.StartWhiteboardLibraryImport(ctx, accountA, observer, boardID, revocableLibrary.ID,
+		repository.WhiteboardLibraryImportStartInput{TokenHash: strings.Repeat("6", 64), ExpiresAt: importNow.Add(15 * time.Minute)})
+	if err != nil {
+		t.Fatalf("start import before callback revocation: %v", err)
+	}
+	if err := repo.RotateWhiteboardLibraryImportNavigation(ctx, accountA, observer, boardID, pendingRevokedImport.ID,
+		strings.Repeat("6", 64), strings.Repeat("b", 64), importNow); err != nil {
+		t.Fatalf("navigate import before callback revocation: %v", err)
+	}
+	callbackRevokedPolicy, err := repo.ReplaceBoardAccess(ctx, accountA, creator, boardID, domain.WhiteboardAccessPrivate,
+		[]repository.WhiteboardGrantInput{{UserID: viewer, AccessLevel: domain.WhiteboardAccessEdit}},
+		callbackGrantPolicy.AccessRevision, uuid.New())
+	if err != nil {
+		t.Fatalf("revoke callback actor before claim: %v", err)
+	}
+	if _, _, err := repo.ClaimWhiteboardLibraryImport(ctx, accountA, observer, strings.Repeat("b", 64), importNow); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("revoked actor claimed a pending public-library callback: %v", err)
+	}
+	var pendingRevokedStatus string
+	if err := db.QueryRow(ctx, `SELECT status FROM whiteboard_library_import_sessions WHERE account_id=$1 AND id=$2`,
+		accountA, pendingRevokedImport.ID).Scan(&pendingRevokedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if pendingRevokedStatus != domain.WhiteboardLibraryImportPending {
+		t.Fatalf("denied callback consumed its token: status=%s", pendingRevokedStatus)
+	}
+
+	fetchGrantPolicy, err := repo.ReplaceBoardAccess(ctx, accountA, creator, boardID, domain.WhiteboardAccessPrivate,
+		[]repository.WhiteboardGrantInput{
+			{UserID: viewer, AccessLevel: domain.WhiteboardAccessEdit},
+			{UserID: observer, AccessLevel: domain.WhiteboardAccessView},
+		}, callbackRevokedPolicy.AccessRevision, uuid.New())
+	if err != nil {
+		t.Fatalf("restore callback actor view access: %v", err)
+	}
+	fetchRevokedImport, err := repo.StartWhiteboardLibraryImport(ctx, accountA, observer, boardID, revocableLibrary.ID,
+		repository.WhiteboardLibraryImportStartInput{TokenHash: strings.Repeat("5", 64), ExpiresAt: importNow.Add(15 * time.Minute)})
+	if err != nil {
+		t.Fatalf("start import before in-flight revocation: %v", err)
+	}
+	if err := repo.RotateWhiteboardLibraryImportNavigation(ctx, accountA, observer, boardID, fetchRevokedImport.ID,
+		strings.Repeat("5", 64), strings.Repeat("c", 64), importNow); err != nil {
+		t.Fatalf("navigate import before in-flight revocation: %v", err)
+	}
+	if _, idempotent, err := repo.ClaimWhiteboardLibraryImport(ctx, accountA, observer, strings.Repeat("c", 64), importNow); err != nil || idempotent {
+		t.Fatalf("claim import before in-flight revocation: idempotent=%v err=%v", idempotent, err)
+	}
+	if _, err := repo.ReplaceBoardAccess(ctx, accountA, creator, boardID, domain.WhiteboardAccessPrivate,
+		[]repository.WhiteboardGrantInput{{UserID: viewer, AccessLevel: domain.WhiteboardAccessEdit}},
+		fetchGrantPolicy.AccessRevision, uuid.New()); err != nil {
+		t.Fatalf("revoke callback actor during fetch: %v", err)
+	}
+	if _, err := repo.MarkWhiteboardLibraryImportReady(ctx, accountA, observer, fetchRevokedImport.ID,
+		"https://libraries.excalidraw.com/libraries/author/revoked.excalidrawlib", importedLibraryJSON); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("revoked in-flight callback persisted a validated payload: %v", err)
+	}
+	var fetchRevokedStatus string
+	var fetchRevokedPayload []byte
+	if err := db.QueryRow(ctx, `SELECT status,library_json FROM whiteboard_library_import_sessions
+		WHERE account_id=$1 AND id=$2`, accountA, fetchRevokedImport.ID).Scan(&fetchRevokedStatus, &fetchRevokedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if fetchRevokedStatus != domain.WhiteboardLibraryImportFetching || len(fetchRevokedPayload) != 0 {
+		t.Fatalf("revoked in-flight callback retained a payload: status=%s bytes=%d", fetchRevokedStatus, len(fetchRevokedPayload))
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO whiteboard_library_import_sessions(
+		account_id,board_id,library_id,actor_id,token_hash,status,completion_operation_id,completed_at,expires_at
+	) VALUES($1,$2,$3,$4,$5,'completed',$6,NOW(),$7)`, accountA, boardID, sharedLibrary.ID, creator,
+		strings.Repeat("7", 64), uuid.New(), importNow.Add(15*time.Minute)); err == nil {
+		t.Fatal("database accepted a completed library import without a confirmed version")
+	}
+	expiredImport, err := repo.StartWhiteboardLibraryImport(ctx, accountA, creator, boardID, sharedLibrary.ID,
+		repository.WhiteboardLibraryImportStartInput{TokenHash: strings.Repeat("8", 64), ExpiresAt: importNow.Add(15 * time.Minute)})
+	if err != nil {
+		t.Fatalf("start expiring public library import: %v", err)
+	}
+	if err := repo.RotateWhiteboardLibraryImportNavigation(ctx, accountA, creator, boardID, expiredImport.ID,
+		strings.Repeat("8", 64), strings.Repeat("d", 64), importNow); err != nil {
+		t.Fatalf("navigate expiring public library import: %v", err)
+	}
+	if _, _, err := repo.ClaimWhiteboardLibraryImport(ctx, accountA, creator, strings.Repeat("d", 64), importNow); err != nil {
+		t.Fatalf("claim expiring public library import: %v", err)
+	}
+	if _, err := repo.MarkWhiteboardLibraryImportReady(ctx, accountA, creator, expiredImport.ID,
+		"https://libraries.excalidraw.com/libraries/author/expired.excalidrawlib", json.RawMessage(`{"type":"excalidrawlib","libraryItems":[]}`)); err != nil {
+		t.Fatalf("ready expiring public library import: %v", err)
+	}
+	if _, err := db.Exec(ctx, `UPDATE whiteboard_library_import_sessions SET expires_at=$1 WHERE id=$2`, importNow.Add(-time.Minute), expiredImport.ID); err != nil {
+		t.Fatal(err)
+	}
+	if cleared, err := repo.ExpireWhiteboardLibraryImports(ctx, importNow, 10); err != nil || cleared != 1 {
+		t.Fatalf("expired public library payload cleanup=%d: %v", cleared, err)
+	}
+	var expiredStatus string
+	var expiredPayload []byte
+	if err := db.QueryRow(ctx, `SELECT status,library_json FROM whiteboard_library_import_sessions WHERE id=$1`, expiredImport.ID).Scan(&expiredStatus, &expiredPayload); err != nil {
+		t.Fatal(err)
+	}
+	if expiredStatus != domain.WhiteboardLibraryImportFailed || len(expiredPayload) != 0 {
+		t.Fatalf("expired public library payload survived cleanup: status=%s bytes=%d", expiredStatus, len(expiredPayload))
 	}
 
 	patchOperation := uuid.New()

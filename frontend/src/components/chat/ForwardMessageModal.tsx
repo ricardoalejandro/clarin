@@ -7,6 +7,7 @@ import { Chat, Message } from '@/types/chat'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import { SearchRequestLifecycle, type SearchRequestLease } from '@/lib/searchRequestLifecycle'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
+import { formatPhone, getChatDisplayName, isPendingChatIdentity } from '@/utils/chat'
 
 interface Props {
   message: Message
@@ -257,8 +258,9 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
           ) : (
             <>
             {chats.map(c => {
-              const displayName = c.contact_custom_name || c.contact_name || c.name || c.jid.split('@')[0]
-              const phone = c.contact_phone || c.jid.split('@')[0]
+              const displayName = getChatDisplayName(c)
+              const phone = formatPhone(c.jid, c.contact_phone)
+              const pendingIdentity = isPendingChatIdentity(c)
               const isSelected = selectedIds.has(c.id)
               return (
                 <button
@@ -285,7 +287,7 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
                   )}
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-slate-800 truncate">{displayName}</p>
-                    <p className="text-xs text-slate-400 truncate">{phone}</p>
+                    <p className={`truncate text-xs ${pendingIdentity ? 'font-medium text-amber-700' : 'text-slate-400'}`}>{pendingIdentity ? 'Identidad pendiente' : (phone || 'Sin teléfono')}</p>
                   </div>
                 </button>
               )

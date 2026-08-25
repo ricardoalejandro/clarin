@@ -65,6 +65,16 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
     },
     {
+      name: 'responsive-firefox',
+      testMatch: /responsive-dashboard\.spec\.ts/,
+      use: { ...devices['Desktop Firefox'] },
+    },
+    {
+      name: 'responsive-webkit',
+      testMatch: /responsive-dashboard\.spec\.ts/,
+      use: { ...devices['Desktop Safari'] },
+    },
+    {
       name: 'responsive-mobile-chrome',
       testMatch: /responsive-dashboard\.spec\.ts/,
       use: { ...devices['Pixel 5'] },

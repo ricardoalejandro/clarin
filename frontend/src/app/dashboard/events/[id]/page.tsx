@@ -17,6 +17,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
 import ContactSelector, { SelectedPerson } from '@/components/ContactSelector'
 import ChatPanel from '@/components/chat/ChatPanel'
+import WhatsAppDevicePicker from '@/components/WhatsAppDevicePicker'
 import ContactDetailSurface from '@/components/contact-details/ContactDetailSurface'
 import OperationalWindowShell from '@/components/operational-window/OperationalWindowShell'
 import CrmDetailWorkspace from '@/components/crm-detail/CrmDetailWorkspace'
@@ -28,16 +29,15 @@ import useCrmPipelineCardDrag from '@/components/crm-detail/useCrmPipelineCardDr
 import CrmPipelineDndContext, { useCrmPipelineStageDrop } from '@/components/crm-detail/CrmPipelineDndContext'
 import { CRM_PIPELINE_UNASSIGNED_STAGE_ID, moveCrmPipelineItems, reconcileCrmPipelineCanonicalItem } from '@/components/crm-detail/crmPipelineDrag'
 import useCrmWindowStorageScope from '@/components/crm-detail/useCrmWindowStorageScope'
-import { crmMessageIsPending, crmMessageTemporaryMode, type CrmMessagePhase } from '@/components/crm-detail/crmMessageWorkflow'
+import { crmMessageTemporaryMode } from '@/components/crm-detail/crmMessageWorkflow'
+import useWhatsAppChatLauncher from '@/hooks/useWhatsAppChatLauncher'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import ObservationHistoryModal from '@/components/ObservationHistoryModal'
 import FormulaEditor from '@/components/FormulaEditor'
-import { Chat } from '@/types/chat'
 import type { ContactProfileContact } from '@/types/contact-profile'
 import { exportToExcel, exportToCSV } from '@/utils/eventExport'
 import { generateWordReport, type ReportStyle, type DetailLevel } from '@/utils/eventWordReport'
 import { subscribeWebSocket } from '@/lib/api'
-import { createWhatsAppChat, deviceDisplayPhone, relationClassName, relationLabel, resolveWhatsAppChat, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher'
 import { useKanbanPan } from '@/lib/useKanbanPan'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
@@ -184,7 +184,6 @@ interface TagInfo { name: string; color: string; count: number }
 
 interface Device {
   id: string; name: string; phone?: string | null; phone_number?: string; jid?: string | null; status: string
-  normalized_phone?: string; historical_relation?: WhatsAppDeviceOption['historical_relation']; matches_historical?: boolean
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -600,53 +599,17 @@ export default function EventDetailPage() {
   const ownStageOperationIdsRef = useRef(new Set<string>())
 
   // WhatsApp inline chat
-  const [showInlineChat, setShowInlineChat] = useState(false)
-  const [messagePhase, setMessagePhase] = useState<CrmMessagePhase>('idle')
-  const [inlineChatId, setInlineChatId] = useState('')
-  const [inlineChat, setInlineChat] = useState<Chat | null>(null)
-  const [inlineChatDeviceId, setInlineChatDeviceId] = useState('')
-  const [inlineChatReadOnly, setInlineChatReadOnly] = useState(false)
-  const [showDeviceSelector, setShowDeviceSelector] = useState(false)
   const [devices, setDevices] = useState<Device[]>([])
-  const [chatDevices, setChatDevices] = useState<Device[]>([])
-  const [whatsappPhone, setWhatsappPhone] = useState('')
-  const [existingChatForWA, setExistingChatForWA] = useState<Chat | null>(null)
-  const [whatsappHistoricalPhone, setWhatsappHistoricalPhone] = useState('')
-  const whatsappPhoneRef = useRef('')
-  const crmMessageTriggerRef = useRef<HTMLElement | null>(null)
-  const whatsappRequestRef = useRef(0)
-  const activeParticipantIdRef = useRef<string | null>(null)
-  const deviceSelectorDialogRef = useRef<HTMLDivElement>(null)
-  const deviceSelectorCancelRef = useRef<HTMLButtonElement>(null)
-
-  useEffect(() => {
-    activeParticipantIdRef.current = detailParticipant?.id || null
-  }, [detailParticipant?.id])
-
-  const resetInlineChatState = useCallback(() => {
-    whatsappRequestRef.current += 1
-    setMessagePhase('idle')
-    setShowDeviceSelector(false)
-    setChatDevices([])
-    setWhatsappPhone('')
-    whatsappPhoneRef.current = ''
-    setShowInlineChat(false)
-    setInlineChatId('')
-    setInlineChat(null)
-    setInlineChatDeviceId('')
-    setInlineChatReadOnly(false)
-    setExistingChatForWA(null)
-    setWhatsappHistoricalPhone('')
-  }, [])
-
-  const closeInlineChatAndRestoreFocus = useCallback(() => {
-    resetInlineChatState()
-    requestAnimationFrame(() => crmMessageTriggerRef.current?.focus({ preventScroll: true }))
-  }, [resetInlineChatState])
-
-  const isCurrentWhatsAppRequest = useCallback((requestId: number, participantId: string | null) => {
-    return whatsappRequestRef.current === requestId && activeParticipantIdRef.current === participantId
-  }, [])
+  const whatsappChat = useWhatsAppChatLauncher({
+    sessionKey: detailParticipant?.id || null,
+    contactId: detailParticipant?.contact_id || null,
+  })
+  const showInlineChat = whatsappChat.chatOpen
+  const showDeviceSelector = whatsappChat.showDeviceSelector
+  const inlineChatId = whatsappChat.chat?.id || ''
+  const inlineChatDeviceId = whatsappChat.device?.id || whatsappChat.chat?.device_id || ''
+  const resetInlineChatState = whatsappChat.reset
+  const closeInlineChatAndRestoreFocus = whatsappChat.close
 
   // Add participant
   const [showAddModal, setShowAddModal] = useState(false)
@@ -1720,91 +1683,7 @@ export default function EventDetailPage() {
   }, [])
 
   // ─── WhatsApp ──────────────────────────────────────────────────────────────
-  const handleSendWhatsApp = async (phone: string) => {
-    crmMessageTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const cleanPhone = (phone || '').replace(/[^0-9]/g, '')
-    if (!cleanPhone) {
-      alert('Este participante no tiene un número válido')
-      return
-    }
-    const participantId = activeParticipantIdRef.current
-    resetInlineChatState()
-    const requestId = whatsappRequestRef.current
-    setMessagePhase('resolving')
-    setWhatsappPhone(cleanPhone)
-    whatsappPhoneRef.current = cleanPhone
-    try {
-      const resolution = await resolveWhatsAppChat(cleanPhone)
-      if (!isCurrentWhatsAppRequest(requestId, participantId)) return
-      if (!resolution.success) {
-        alert(resolution.error || 'Error al resolver conversación')
-        closeInlineChatAndRestoreFocus()
-        return
-      }
-      setExistingChatForWA(resolution.chat || null)
-      setWhatsappHistoricalPhone(resolution.historical_phone || '')
-      if (resolution.mode === 'read_only' && resolution.chat) {
-        setInlineChatId(resolution.chat.id)
-        setInlineChat(resolution.chat)
-        setInlineChatDeviceId(resolution.chat.device_id || '')
-        setInlineChatReadOnly(true)
-        setShowInlineChat(true)
-        setMessagePhase('chat')
-        return
-      }
-      if (resolution.mode === 'open_direct' && resolution.devices[0]) {
-        await handleDeviceSelectedForChat(resolution.devices[0] as Device, cleanPhone, requestId, participantId)
-        return
-      }
-      if (resolution.mode === 'choose_device') {
-        setChatDevices(resolution.devices as Device[])
-        setShowDeviceSelector(true)
-        setMessagePhase('choosing_device')
-        return
-      }
-      alert('No hay dispositivos conectados para enviar')
-      closeInlineChatAndRestoreFocus()
-    } catch {
-      if (!isCurrentWhatsAppRequest(requestId, participantId)) return
-      alert('Error de conexión')
-      closeInlineChatAndRestoreFocus()
-    }
-  }
-
-  const handleDeviceSelectedForChat = async (
-    device: Device,
-    phone?: string,
-    requestId: number = whatsappRequestRef.current,
-    participantId: string | null = activeParticipantIdRef.current,
-  ) => {
-    setShowDeviceSelector(false)
-    setInlineChatReadOnly(false)
-    setMessagePhase('opening_chat')
-    const cleanPhone = (phone || whatsappPhoneRef.current || whatsappPhone).replace(/[^0-9]/g, '')
-    if (!cleanPhone) {
-      alert('No hay número seleccionado para abrir el chat')
-      closeInlineChatAndRestoreFocus()
-      return
-    }
-    try {
-      const data = await createWhatsAppChat(device.id, cleanPhone)
-      if (!isCurrentWhatsAppRequest(requestId, participantId)) return
-      if (data.success && data.chat) {
-        setInlineChatId(data.chat.id)
-        setInlineChat(data.chat)
-        setInlineChatDeviceId(device.id)
-        setShowInlineChat(true)
-        setMessagePhase('chat')
-      } else {
-        alert(data.error || 'Error al crear conversación')
-        closeInlineChatAndRestoreFocus()
-      }
-    } catch {
-      if (!isCurrentWhatsAppRequest(requestId, participantId)) return
-      alert('Error de conexión')
-      closeInlineChatAndRestoreFocus()
-    }
-  }
+  const handleSendWhatsApp = (phone: string) => { void whatsappChat.open(phone) }
 
   // ─── Archive / Block ───────────────────────────────────────────────────────
   const [showBlockModal, setShowBlockModal] = useState(false)
@@ -1825,13 +1704,6 @@ export default function EventDetailPage() {
     () => { if (!savingBlock) setShowBlockModal(false) },
     doNotContactFirstChoiceRef,
   )
-  useAccessibleDialog(
-    showDeviceSelector,
-    deviceSelectorDialogRef,
-    closeInlineChatAndRestoreFocus,
-    deviceSelectorCancelRef,
-  )
-
   const openBlockModal = (contactId: string) => {
     setBlockTargetId(contactId)
     setBlockReason('')
@@ -4388,7 +4260,7 @@ export default function EventDetailPage() {
           minWidth={560}
           minHeight={520}
           dockedWidth={760}
-          temporaryMode={crmMessageTemporaryMode(messagePhase)}
+          temporaryMode={crmMessageTemporaryMode(whatsappChat.crmPhase)}
           motionProfile="smooth"
           align="right"
           overlayZIndex={110}
@@ -4403,8 +4275,10 @@ export default function EventDetailPage() {
               <ChatPanel
                 chatId={inlineChatId}
                 deviceId={inlineChatDeviceId}
-                initialChat={inlineChat || undefined}
-                readOnly={inlineChatReadOnly}
+                device={whatsappChat.device || undefined}
+                initialChat={whatsappChat.chat || undefined}
+                readOnly={whatsappChat.readOnly}
+                readOnlyReason={whatsappChat.readOnlyReason}
                 onClose={closeInlineChatAndRestoreFocus}
                 className="h-full"
               />
@@ -4437,7 +4311,9 @@ export default function EventDetailPage() {
                 hideHeader
                 onClose={() => { setShowDetailPanel(false); resetInlineChatState() }}
                 onSendMessage={(phone: string) => handleSendWhatsApp(phone)}
-                sendingMessage={crmMessageIsPending(messagePhase)}
+                sendingMessage={whatsappChat.pending}
+                messageError={whatsappChat.error}
+                onRetryMessage={whatsappChat.canRetry ? whatsappChat.retry : undefined}
                 onContactChange={(contact) => {
                   updateParticipantInStages(detailParticipant.id, participant => mergeContactProfileIntoParticipant(participant, contact))
                   setDetailParticipant(current => current ? mergeContactProfileIntoParticipant(current, contact) : current)
@@ -4711,41 +4587,18 @@ export default function EventDetailPage() {
           </div>
         </div>
       )}
-      {/* ═══ Device Selector ═══ */}
-      {showDeviceSelector && (
-        <div data-operational-picker-backdrop className={`app-viewport fixed inset-0 z-[170] flex items-center justify-center bg-black/40 backdrop-blur-sm ${isCompactLayout ? 'p-0' : 'p-4'}`}>
-          <div ref={deviceSelectorDialogRef} role="dialog" aria-modal="true" aria-labelledby="event-device-selector-title" className={`bg-white shadow-2xl p-4 sm:p-6 w-full border border-slate-100 overflow-y-auto ${isCompactLayout ? 'h-[var(--app-height)] max-w-none rounded-none border-0 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]' : 'max-w-sm rounded-2xl'}`}>
-            <h2 id="event-device-selector-title" className="text-sm font-semibold text-slate-900 mb-3">Seleccionar dispositivo</h2>
-            <p className="text-xs text-slate-500 mb-4">Elige el dispositivo para el chat con {whatsappPhone}</p>
-            {existingChatForWA && (
-              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-3">
-                Ya existe historial{whatsappHistoricalPhone ? ` con el numero ${whatsappHistoricalPhone}` : ' con numero historico desconocido'}.
-              </p>
-            )}
-            {chatDevices.length === 0 ? (
-              <p className="text-xs text-slate-400 text-center py-4">No hay dispositivos conectados</p>
-            ) : (
-              <div className="space-y-2">
-                {chatDevices.map(device => (
-                  <button key={device.id} onClick={() => handleDeviceSelectedForChat(device)}
-                    className="w-full min-h-11 flex items-center gap-3 p-3 border border-slate-100 rounded-xl hover:bg-emerald-50 hover:border-emerald-200 transition text-left"
-                  >
-                    <div className="w-9 h-9 bg-emerald-50 rounded-full flex items-center justify-center"><Phone className="w-4 h-4 text-emerald-600" /></div>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <p className="text-sm font-medium text-slate-900">{device.name || 'Dispositivo'}</p>
-                        <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${relationClassName(device)}`}>{relationLabel(device)}</span>
-                      </div>
-                      <p className="text-xs text-slate-500">{deviceDisplayPhone(device)}</p>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-            <button ref={deviceSelectorCancelRef} onClick={closeInlineChatAndRestoreFocus} className="w-full min-h-11 mt-4 px-4 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 text-sm">Cancelar</button>
-          </div>
-        </div>
-      )}
+      <WhatsAppDevicePicker
+        open={showDeviceSelector}
+        idPrefix="event-participant"
+        phone={whatsappChat.phone}
+        devices={whatsappChat.devices}
+        existingChat={whatsappChat.chat}
+        historicalPhone={whatsappChat.historicalPhone}
+        busy={whatsappChat.pending}
+        onSelect={whatsappChat.selectDevice}
+        onOpenHistorical={whatsappChat.chat ? whatsappChat.openHistorical : undefined}
+        onCancel={closeInlineChatAndRestoreFocus}
+      />
 
       {/* ═══ Campaign Modal ═══ */}
       <CreateCampaignModal

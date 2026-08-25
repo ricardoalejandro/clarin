@@ -12,17 +12,27 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/storage"
 	whiteboardcore "github.com/naperu/clarin/internal/whiteboard"
+	"github.com/rivo/uniseg"
 )
 
 const (
-	MaxWhiteboardSceneBytes   = 16 * 1024 * 1024
-	MaxWhiteboardLibraryBytes = 8 * 1024 * 1024
+	MaxWhiteboardSceneBytes                 = 16 * 1024 * 1024
+	MaxWhiteboardLibraryBytes               = 8 * 1024 * 1024
+	MaxClarinTextRunsPerElement             = 4_096
+	MaxClarinParagraphsPerElement           = 4_096
+	MaxClarinTextSegmentsPerScene           = 50_000
+	clarinTextFormatVersion                 = 1
+	clarinTextFormatAllowedMarks            = 15
+	clarinTextFormatCustomDataProperty      = "clarinTextFormat"
+	clarinParagraphFormatVersion            = 1
+	clarinParagraphFormatCustomDataProperty = "clarinParagraphFormat"
 )
 
 var ErrWhiteboardPayloadInvalid = errors.New("invalid whiteboard payload")
@@ -86,6 +96,7 @@ func ValidateWhiteboardScene(raw json.RawMessage) (json.RawMessage, error) {
 		return nil, ErrWhiteboardPayloadInvalid
 	}
 	elements = reconciledElements
+	totalClarinTextSegments := 0
 	for _, rawElement := range elements {
 		var element map[string]json.RawMessage
 		if json.Unmarshal(rawElement, &element) != nil {
@@ -115,6 +126,14 @@ func ValidateWhiteboardScene(raw json.RawMessage) (json.RawMessage, error) {
 			if value, exists := element[forbiddenKey]; exists && !emptyWhiteboardJSONValue(value) {
 				return nil, ErrWhiteboardPayloadInvalid
 			}
+		}
+		segmentCount, err := validateClarinTextElementFormats(element, elementType)
+		if err != nil {
+			return nil, ErrWhiteboardPayloadInvalid
+		}
+		totalClarinTextSegments += segmentCount
+		if totalClarinTextSegments > MaxClarinTextSegmentsPerScene {
+			return nil, ErrWhiteboardPayloadInvalid
 		}
 	}
 	encodedElements, err := json.Marshal(elements)
@@ -161,6 +180,186 @@ func ValidateWhiteboardScene(raw json.RawMessage) (json.RawMessage, error) {
 		return nil, ErrWhiteboardPayloadInvalid
 	}
 	return validated, nil
+}
+
+type clarinTextFormatRun struct {
+	From  int `json:"from"`
+	To    int `json:"to"`
+	Marks int `json:"marks"`
+}
+
+type clarinTextFormat struct {
+	Version    int                   `json:"version"`
+	TextLength int                   `json:"textLength"`
+	TextHash   uint32                `json:"textHash"`
+	Runs       []clarinTextFormatRun `json:"runs"`
+}
+
+type clarinParagraphFormatEntry struct {
+	Start int    `json:"start"`
+	Align string `json:"align"`
+}
+
+type clarinParagraphFormat struct {
+	Version    int                          `json:"version"`
+	TextLength int                          `json:"textLength"`
+	TextHash   uint32                       `json:"textHash"`
+	Paragraphs []clarinParagraphFormatEntry `json:"paragraphs"`
+}
+
+func clarinUTF16Length(value string) int {
+	return len(utf16.Encode([]rune(value)))
+}
+
+func clarinTextHash(value string) uint32 {
+	hash := uint32(5381)
+	for _, codeUnit := range utf16.Encode([]rune(value)) {
+		hash = hash*33 + uint32(codeUnit)
+	}
+	return hash
+}
+
+func clarinGraphemeBoundaries(value string) map[int]struct{} {
+	boundaries := map[int]struct{}{0: {}}
+	offset := 0
+	graphemes := uniseg.NewGraphemes(value)
+	for graphemes.Next() {
+		offset += clarinUTF16Length(graphemes.Str())
+		boundaries[offset] = struct{}{}
+	}
+	return boundaries
+}
+
+func clarinParagraphStarts(value string) map[int]struct{} {
+	starts := map[int]struct{}{0: {}}
+	offset := 0
+	for _, char := range value {
+		offset += clarinUTF16Length(string(char))
+		if char == '\n' {
+			starts[offset] = struct{}{}
+		}
+	}
+	return starts
+}
+
+func validClarinTextAlign(value string) bool {
+	return value == "left" || value == "center" || value == "right"
+}
+
+func validateClarinTextElementFormats(element map[string]json.RawMessage, elementType string) (int, error) {
+	rawCustomData, exists := element["customData"]
+	if !exists || bytes.Equal(bytes.TrimSpace(rawCustomData), []byte("null")) {
+		return 0, nil
+	}
+	var customData map[string]json.RawMessage
+	if json.Unmarshal(rawCustomData, &customData) != nil {
+		if elementType == "text" {
+			return 0, ErrWhiteboardPayloadInvalid
+		}
+		return 0, nil
+	}
+	rawTextFormat, hasTextFormat := customData[clarinTextFormatCustomDataProperty]
+	rawParagraphFormat, hasParagraphFormat := customData[clarinParagraphFormatCustomDataProperty]
+	if !hasTextFormat && !hasParagraphFormat {
+		return 0, nil
+	}
+	if elementType != "text" {
+		return 0, ErrWhiteboardPayloadInvalid
+	}
+	var originalText string
+	if json.Unmarshal(element["originalText"], &originalText) != nil || !utf8.ValidString(originalText) {
+		return 0, ErrWhiteboardPayloadInvalid
+	}
+	segmentCount := 0
+	if hasTextFormat {
+		runCount, err := validateClarinTextFormat(rawTextFormat, originalText)
+		if err != nil {
+			return 0, err
+		}
+		segmentCount += runCount
+	}
+	if hasParagraphFormat {
+		paragraphCount, err := validateClarinParagraphFormat(rawParagraphFormat, element, originalText)
+		if err != nil {
+			return 0, err
+		}
+		segmentCount += paragraphCount
+	}
+	return segmentCount, nil
+}
+
+func validateClarinTextFormat(rawFormat json.RawMessage, originalText string) (int, error) {
+	var format clarinTextFormat
+	decoder := json.NewDecoder(bytes.NewReader(rawFormat))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&format) != nil || format.Runs == nil {
+		return 0, ErrWhiteboardPayloadInvalid
+	}
+	if format.Version != clarinTextFormatVersion ||
+		format.TextLength != clarinUTF16Length(originalText) ||
+		format.TextHash != clarinTextHash(originalText) ||
+		len(format.Runs) > MaxClarinTextRunsPerElement {
+		return 0, ErrWhiteboardPayloadInvalid
+	}
+	boundaries := clarinGraphemeBoundaries(originalText)
+	var previous *clarinTextFormatRun
+	for index := range format.Runs {
+		run := &format.Runs[index]
+		_, startsOnGrapheme := boundaries[run.From]
+		_, endsOnGrapheme := boundaries[run.To]
+		if run.From < 0 || run.From >= run.To || run.To > format.TextLength ||
+			run.Marks < 1 || run.Marks > clarinTextFormatAllowedMarks ||
+			!startsOnGrapheme || !endsOnGrapheme {
+			return 0, ErrWhiteboardPayloadInvalid
+		}
+		if previous != nil &&
+			(run.From < previous.To || (run.From == previous.To && run.Marks == previous.Marks)) {
+			return 0, ErrWhiteboardPayloadInvalid
+		}
+		previous = run
+	}
+	return len(format.Runs), nil
+}
+
+func validateClarinParagraphFormat(
+	rawFormat json.RawMessage,
+	element map[string]json.RawMessage,
+	originalText string,
+) (int, error) {
+	var baseAlign string
+	if json.Unmarshal(element["textAlign"], &baseAlign) != nil || !validClarinTextAlign(baseAlign) {
+		return 0, ErrWhiteboardPayloadInvalid
+	}
+
+	var format clarinParagraphFormat
+	decoder := json.NewDecoder(bytes.NewReader(rawFormat))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&format) != nil || format.Paragraphs == nil {
+		return 0, ErrWhiteboardPayloadInvalid
+	}
+	if format.Version != clarinParagraphFormatVersion ||
+		format.TextLength != clarinUTF16Length(originalText) ||
+		format.TextHash != clarinTextHash(originalText) ||
+		len(format.Paragraphs) > MaxClarinParagraphsPerElement {
+		return 0, ErrWhiteboardPayloadInvalid
+	}
+
+	paragraphStarts := clarinParagraphStarts(originalText)
+	previousStart := -1
+	for _, paragraph := range format.Paragraphs {
+		_, startsParagraph := paragraphStarts[paragraph.Start]
+		if paragraph.Start < 0 || paragraph.Start > format.TextLength ||
+			!startsParagraph || paragraph.Start <= previousStart ||
+			!validClarinTextAlign(paragraph.Align) || paragraph.Align == baseAlign {
+			return 0, ErrWhiteboardPayloadInvalid
+		}
+		if paragraph.Start == format.TextLength &&
+			originalText != "" && !strings.HasSuffix(originalText, "\n") {
+			return 0, ErrWhiteboardPayloadInvalid
+		}
+		previousStart = paragraph.Start
+	}
+	return len(format.Paragraphs), nil
 }
 
 var whiteboardFileLocationOrBinaryKeys = map[string]struct{}{
@@ -325,8 +524,22 @@ func ValidateWhiteboardLibrary(raw json.RawMessage) (json.RawMessage, error) {
 	} else {
 		envelope["type"] = json.RawMessage(`"excalidrawlib"`)
 	}
+	rawItems, hasLibraryItems := envelope["libraryItems"]
+	legacyItems, hasLegacyLibrary := envelope["library"]
+	// The official public catalog still contains vetted v1 files whose item
+	// array is named `library`. Accept that one historical shape, but reject an
+	// ambiguous document that supplies both representations. Everything leaving
+	// this validator is canonical `libraryItems`, so downstream persistence and
+	// the one-time public import path have a single contract.
+	if hasLibraryItems == hasLegacyLibrary {
+		return nil, ErrWhiteboardPayloadInvalid
+	}
+	legacyDocument := hasLegacyLibrary
+	if legacyDocument {
+		rawItems = legacyItems
+	}
 	var items []json.RawMessage
-	if json.Unmarshal(envelope["libraryItems"], &items) != nil || len(items) > 5_000 {
+	if json.Unmarshal(rawItems, &items) != nil || len(items) > 5_000 {
 		return nil, ErrWhiteboardPayloadInvalid
 	}
 	cleanItems := make([]json.RawMessage, 0, len(items))
@@ -394,6 +607,10 @@ func ValidateWhiteboardLibrary(raw json.RawMessage) (json.RawMessage, error) {
 		return nil, ErrWhiteboardPayloadInvalid
 	}
 	envelope["libraryItems"] = encodedItems
+	if legacyDocument {
+		delete(envelope, "library")
+		envelope["version"] = json.RawMessage(`2`)
+	}
 	// Library binaries follow the same Clarin-private asset boundary as scene
 	// binaries. Preserve harmless upstream/Clarin metadata, but reject embedded
 	// data URLs and remote locations before the JSON reaches persistence.
@@ -561,6 +778,14 @@ func NewWhiteboardSecret() (plain, hash string, err error) {
 }
 
 func HashWhiteboardSecret(secret string) string { return whiteboardcore.HashSecret(secret) }
+
+func HashWhiteboardLibraryNavigationSecret(secret string) string {
+	return whiteboardcore.HashSecret("clarin:whiteboard-library:navigation:" + secret)
+}
+
+func HashWhiteboardLibraryCallbackSecret(secret string) string {
+	return whiteboardcore.HashSecret("clarin:whiteboard-library:callback:" + secret)
+}
 
 func NormalizeWhiteboardGuestName(raw string) (string, error) {
 	return whiteboardcore.NormalizeGuestDisplayName(raw)

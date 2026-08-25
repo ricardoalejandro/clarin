@@ -3,8 +3,10 @@ import {
   buildWhiteboardListQuery,
   buildWhiteboardManualRevisionRequest,
   buildWhiteboardAccountUserSearchPath,
-  buildWhiteboardCursorUpdate,
-  buildWhiteboardPresenceUpdate,
+	buildWhiteboardCursorUpdate,
+	buildWhiteboardFollowChange,
+	buildWhiteboardPresenceUpdate,
+	buildWhiteboardViewportUpdate,
   buildWhiteboardPurgeRequest,
   createWhiteboardOperationID,
   type WhiteboardAccountUser,
@@ -13,18 +15,26 @@ import {
   type WhiteboardCursorPayload,
   type WhiteboardFolder,
   type WhiteboardLibraryRecord,
-  type WhiteboardRealtimeEvent,
+	type WhiteboardRealtimeEvent,
   type WhiteboardSavePayload,
   type WhiteboardSceneDocument,
   type WhiteboardScenePatch,
   type WhiteboardSceneRecord,
   type WhiteboardScope,
   type WhiteboardShareLink,
-  type WhiteboardSummary,
+	type WhiteboardSummary,
+	type WhiteboardViewportBounds,
   type WhiteboardVersion,
   whiteboardRoomSocketPath,
   whiteboardSceneSaveMethod,
 } from '@/lib/whiteboards'
+import {
+  whiteboardCollabTicketError,
+  whiteboardRealtimeIssueFromEvent,
+  whiteboardRealtimeIssueFromUnknown,
+  type WhiteboardCollabTicketAudience,
+  type WhiteboardRealtimeIssue,
+} from '@/lib/whiteboardRealtimeConnection'
 
 export const WHITEBOARDS_API_ROOT = '/api/whiteboards'
 export const WHITEBOARD_FOLDERS_API_ROOT = '/api/whiteboard-folders'
@@ -131,7 +141,7 @@ export function createWhiteboard(input: {
     folder_id: input.folder_id,
     scene: input.scene,
     scene_schema_version: 'excalidraw',
-    editor_version: '0.18.1',
+    editor_version: '0.18.1-clarin.4',
     operation_id: createWhiteboardOperationID(),
   })
 }
@@ -152,9 +162,13 @@ export function updateWhiteboardFolder(id: string, input: {
   name: string
   description?: string
   sort_order?: number
+  placement?: {
+    parent_id: string | null
+    before_folder_id: string | null
+  }
   expected_version: number
 }) {
-  return apiPut<{ success?: boolean; folder: WhiteboardFolder }>(`${WHITEBOARD_FOLDERS_API_ROOT}/${encodeURIComponent(id)}`, input)
+  return apiPut<{ success?: boolean; folder: WhiteboardFolder; affected_folders?: WhiteboardFolder[] }>(`${WHITEBOARD_FOLDERS_API_ROOT}/${encodeURIComponent(id)}`, input)
 }
 
 export function archiveWhiteboardFolder(id: string, expectedVersion: number) {
@@ -595,20 +609,80 @@ export async function uploadWhiteboardGuestAsset(
   }
 }
 
-export async function requestWhiteboardCollabTicket(id: string) {
-  const response = await apiPost<{ success?: boolean; ticket: string }>(`${WHITEBOARDS_API_ROOT}/${encodeURIComponent(id)}/collab-ticket`, {})
-  if (!response.success || !response.data?.ticket) throw new Error(response.error || 'La colaboración en tiempo real no está disponible.')
+export async function requestWhiteboardCollabTicket(id: string, accountID?: string) {
+  // Reconnect retries must only inspect the existing server session. They must
+  // not refresh credentials or count as user activity, otherwise an unattended
+  // whiteboard would keep an idle session alive by itself.
+  const ticketPath = `${WHITEBOARDS_API_ROOT}/${encodeURIComponent(id)}/collab-ticket`
+  const normalizedAccountID = accountID?.trim()
+  const ticketBody = JSON.stringify(normalizedAccountID ? { account_id: normalizedAccountID } : {})
+  const requestTicket = () => api<{ success?: boolean; ticket?: string; code?: string }>(
+    ticketPath,
+    { method: 'POST', body: ticketBody, authMode: 'passive' },
+  )
+  let response = await requestTicket()
+  if (!response.success && response.status === 401) {
+    // Compatibility for sessions created before the path-limited whiteboard
+    // credential existed. This bootstrap is passive too: it neither rotates
+    // the global access token nor extends the account inactivity timeout.
+    const bootstrap = await api<{ success?: boolean; code?: string }>(
+      '/api/auth/whiteboard-session',
+      { method: 'POST', body: '{}', authMode: 'passive' },
+    )
+    if (!bootstrap.success || bootstrap.data?.success === false) {
+      const sessionExpired = bootstrap.status === 401
+      const unavailableStatus = bootstrap.status === 403 || bootstrap.status === 404 ? 503 : bootstrap.status
+      throw whiteboardCollabTicketError({
+        audience: 'member',
+        status: sessionExpired ? bootstrap.status : unavailableStatus,
+        code: sessionExpired ? 'session_expired' : 'authorization_unavailable',
+        message: bootstrap.error,
+      })
+    }
+    response = await requestTicket()
+    if (!response.success && response.status === 401) {
+      throw whiteboardCollabTicketError({
+        audience: 'member',
+        status: 503,
+        code: 'authorization_unavailable',
+        message: 'La credencial de reconexión todavía no está disponible. Clarin volverá a intentarlo.',
+      })
+    }
+  }
+  if (!response.success || !response.data?.ticket) {
+    throw whiteboardCollabTicketError({
+      audience: 'member',
+      status: response.status,
+      code: response.data?.code,
+      message: response.error,
+    })
+  }
   return response.data.ticket
 }
 
 export async function requestWhiteboardGuestCollabTicket(shareLinkID: string) {
-  const response = await fetch(`/api/whiteboard-guest/collab-ticket?link_id=${encodeURIComponent(shareLinkID)}`, {
-    method: 'POST',
-    credentials: 'include',
-  })
-  const payload = await response.json().catch(() => ({ error: `Error ${response.status}` })) as { ticket?: string; error?: string }
-  if (!response.ok || !payload.ticket) throw new Error(payload.error || 'La colaboración en tiempo real no está disponible.')
-  return payload.ticket
+  try {
+    const response = await fetch(`/api/whiteboard-guest/collab-ticket?link_id=${encodeURIComponent(shareLinkID)}`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+    const payload = await response.json().catch(() => ({ error: `Error ${response.status}` })) as { ticket?: string; error?: string; code?: string }
+    if (!response.ok || !payload.ticket) {
+      throw whiteboardCollabTicketError({
+        audience: 'guest',
+        status: response.status,
+        code: payload.code,
+        message: payload.error,
+      })
+    }
+    return payload.ticket
+  } catch (error) {
+    if (error instanceof Error && error.name === 'WhiteboardCollabTicketError') throw error
+    throw whiteboardCollabTicketError({
+      audience: 'guest',
+      message: error instanceof Error ? error.message : undefined,
+    })
+  }
 }
 
 const WHITEBOARD_REALTIME_MAX_PATCH_BYTES = 900_000
@@ -631,8 +705,13 @@ export interface WhiteboardRealtimeRoom {
   requestSync: () => boolean
   sendPatch: (patch: WhiteboardScenePatch) => Promise<WhiteboardRealtimeEvent> | null
   sendCursor: (cursor: WhiteboardCursorPayload) => boolean
-  sendPresence: () => boolean
-  close: () => void
+	sendPresence: () => boolean
+	startPresentation: () => Promise<WhiteboardRealtimeEvent> | null
+	stopPresentation: (presentationID: string) => Promise<WhiteboardRealtimeEvent> | null
+	sendFollow: (targetActorID: string, action: 'FOLLOW' | 'UNFOLLOW') => boolean
+	sendViewport: (bounds: WhiteboardViewportBounds) => boolean
+	retryNow: () => void
+	close: () => void
 }
 
 function objectRecord(value: unknown): Record<string, unknown> {
@@ -650,7 +729,13 @@ export function parseWhiteboardRealtimeEvent(raw: unknown): WhiteboardRealtimeEv
     'ack',
     'presence.snapshot',
     'presence.update',
-    'cursor.update',
+		'cursor.update',
+		'room.ready',
+		'presentation.snapshot',
+		'presentation.changed',
+		'follow.change',
+		'viewport.update',
+    'comment.changed',
     'access.revoked',
     'error',
   ]
@@ -684,19 +769,26 @@ export function parseWhiteboardRealtimeEvent(raw: unknown): WhiteboardRealtimeEv
 
 export function connectWhiteboardRoom(input: {
   whiteboardID: string
+  audience: WhiteboardCollabTicketAudience
   getSequence: () => number
   getTicket: () => Promise<string>
   onEvent: (event: WhiteboardRealtimeEvent) => void
   onConnectionChange?: (state: WhiteboardRoomConnectionState) => void
+  onIssue?: (issue: WhiteboardRealtimeIssue | null) => void
 }): WhiteboardRealtimeRoom {
   let socket: WebSocket | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectAttempt = 0
   let permanentlyClosed = false
+  let reconnectBlocked = false
+  let connecting = false
   let connectionGeneration = 0
-  let cursorTimer: ReturnType<typeof setTimeout> | null = null
+	let cursorTimer: ReturnType<typeof setTimeout> | null = null
   let pendingCursor: WhiteboardCursorPayload | null = null
-  let lastCursorSentAt = 0
+	let lastCursorSentAt = 0
+	let viewportTimer: ReturnType<typeof setTimeout> | null = null
+	let pendingViewport: WhiteboardViewportBounds | null = null
+	let lastViewportSentAt = 0
   const pending = new Map<string, {
     resolve: (event: WhiteboardRealtimeEvent) => void
     reject: (error: Error) => void
@@ -738,45 +830,95 @@ export function connectWhiteboardRoom(input: {
     return sent
   }
 
-  const sendCursor = (cursor: WhiteboardCursorPayload) => {
+	const sendCursor = (cursor: WhiteboardCursorPayload) => {
     if (!socket || socket.readyState !== WebSocket.OPEN) return false
     pendingCursor = cursor
     const remaining = Math.max(0, 50 - (Date.now() - lastCursorSentAt))
     if (remaining === 0) return flushCursor()
     if (!cursorTimer) cursorTimer = setTimeout(flushCursor, remaining)
     return true
-  }
+	}
+
+	const flushViewport = () => {
+		viewportTimer = null
+		const bounds = pendingViewport
+		pendingViewport = null
+		if (!bounds) return false
+		const message = buildWhiteboardViewportUpdate(bounds)
+		if (!message) return false
+		const sent = send(message)
+		if (sent) lastViewportSentAt = Date.now()
+		return sent
+	}
+
+	const sendViewport = (bounds: WhiteboardViewportBounds) => {
+		if (!socket || socket.readyState !== WebSocket.OPEN || !buildWhiteboardViewportUpdate(bounds)) return false
+		pendingViewport = bounds
+		const remaining = Math.max(0, 50 - (Date.now() - lastViewportSentAt))
+		if (remaining === 0) return flushViewport()
+		if (!viewportTimer) viewportTimer = setTimeout(flushViewport, remaining)
+		return true
+	}
+
+	const sendCorrelated = <T extends { operation_id: string }>(message: T, timeoutMessage: string) => {
+		if (!socket || socket.readyState !== WebSocket.OPEN) return null
+		return new Promise<WhiteboardRealtimeEvent>((resolve, reject) => {
+			const timeout = setTimeout(() => {
+				pending.delete(message.operation_id)
+				reject(new Error(timeoutMessage))
+			}, WHITEBOARD_REALTIME_ACK_TIMEOUT_MS)
+			pending.set(message.operation_id, { resolve, reject, timeout })
+			if (!send(message)) {
+				pending.delete(message.operation_id)
+				clearTimeout(timeout)
+				reject(new Error('No se pudo enviar la operación en tiempo real.'))
+			}
+		})
+	}
 
   const scheduleReconnect = () => {
-    if (permanentlyClosed) return
+    if (permanentlyClosed || reconnectBlocked || reconnectTimer) return
     const delay = Math.min(1_000 * 2 ** reconnectAttempt, 10_000)
     reconnectAttempt += 1
     reconnectTimer = setTimeout(() => { void connect() }, delay)
   }
 
   const connect = async () => {
-    if (permanentlyClosed || typeof window === 'undefined') return
+    if (permanentlyClosed || reconnectBlocked || connecting || typeof window === 'undefined') return
+    if (socket && socket.readyState < WebSocket.CLOSING) return
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    reconnectTimer = null
+    connecting = true
     const generation = ++connectionGeneration
     input.onConnectionChange?.('connecting')
     let ticket: string
     try {
       ticket = await input.getTicket()
-    } catch {
+    } catch (error) {
+      connecting = false
       if (permanentlyClosed || generation !== connectionGeneration) return
+      const issue = whiteboardRealtimeIssueFromUnknown(error)
+      input.onIssue?.(issue)
       input.onConnectionChange?.('closed')
-      scheduleReconnect()
+      if (issue.retryable) scheduleReconnect()
+      else reconnectBlocked = true
       return
     }
-    if (permanentlyClosed || generation !== connectionGeneration) return
+    connecting = false
+    if (permanentlyClosed || reconnectBlocked || generation !== connectionGeneration) return
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    socket = new WebSocket(`${protocol}//${window.location.host}${whiteboardRoomSocketPath(input.whiteboardID, ticket)}`)
-    socket.onopen = () => {
+    const currentSocket = new WebSocket(`${protocol}//${window.location.host}${whiteboardRoomSocketPath(input.whiteboardID, ticket)}`)
+    socket = currentSocket
+    currentSocket.onopen = () => {
+      if (socket !== currentSocket || permanentlyClosed || reconnectBlocked) return
       reconnectAttempt = 0
-      input.onConnectionChange?.('open')
+      input.onIssue?.(null)
       requestSync()
       sendPresence()
+      input.onConnectionChange?.('open')
     }
-    socket.onmessage = message => {
+    currentSocket.onmessage = message => {
+      if (socket !== currentSocket || permanentlyClosed || reconnectBlocked) return
       let decoded: unknown
       try {
         decoded = JSON.parse(String(message.data)) as unknown
@@ -785,6 +927,11 @@ export function connectWhiteboardRoom(input: {
       }
       const event = parseWhiteboardRealtimeEvent(decoded)
       if (!event) return
+      const issue = whiteboardRealtimeIssueFromEvent(event, input.audience)
+      if (issue) {
+        input.onIssue?.(issue)
+        if (!issue.retryable) reconnectBlocked = true
+      }
       if (event.event === 'ack' && event.operation_id) {
         const operation = pending.get(event.operation_id)
         if (operation) {
@@ -806,19 +953,50 @@ export function connectWhiteboardRoom(input: {
       }
       input.onEvent(event)
     }
-    socket.onerror = () => {
+    currentSocket.onerror = () => {
       // onclose owns retry and pending-operation cleanup.
     }
-    socket.onclose = () => {
+    currentSocket.onclose = () => {
+      // A room cleanup or a newer connection already owns the public state.
+      // Late close events from the prior browser socket must not clear that
+      // state or schedule a second reconnect loop.
+      if (socket !== currentSocket) return
       socket = null
       pendingCursor = null
       if (cursorTimer) clearTimeout(cursorTimer)
       cursorTimer = null
+		pendingViewport = null
+		if (viewportTimer) clearTimeout(viewportTimer)
+		viewportTimer = null
       rejectPending('Se interrumpió la conexión en tiempo real antes de confirmar el guardado.')
       input.onConnectionChange?.('closed')
-      if (permanentlyClosed) return
+      if (permanentlyClosed || reconnectBlocked) return
       scheduleReconnect()
     }
+  }
+
+  const retryNow = () => {
+    if (permanentlyClosed || reconnectBlocked || typeof window === 'undefined') return
+    if (socket?.readyState === WebSocket.OPEN) {
+      requestSync()
+      sendPresence()
+      return
+    }
+    if (connecting || socket?.readyState === WebSocket.CONNECTING || socket?.readyState === WebSocket.CLOSING) return
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    reconnectTimer = null
+    void connect()
+  }
+
+  const onOnline = () => retryNow()
+  const onVisibilityChange = () => {
+    if (document.visibilityState === 'visible') retryNow()
+  }
+  const onPageShow = () => retryNow()
+  if (typeof window !== 'undefined') {
+    window.addEventListener('online', onOnline)
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    window.addEventListener('pageshow', onPageShow)
   }
 
   void connect()
@@ -826,35 +1004,46 @@ export function connectWhiteboardRoom(input: {
   return {
     isOpen: () => Boolean(socket && socket.readyState === WebSocket.OPEN),
     requestSync,
-    sendCursor,
-    sendPresence,
-    sendPatch: patch => {
+		sendCursor,
+		sendPresence,
+		startPresentation: () => {
+			const operationID = createWhiteboardOperationID()
+			return sendCorrelated({ event: 'presentation.start', operation_id: operationID }, 'Clarin no confirmó el inicio de la presentación.')
+		},
+		stopPresentation: presentationID => {
+			const operationID = createWhiteboardOperationID()
+			return sendCorrelated({ event: 'presentation.stop', operation_id: operationID, data: { presentation_id: presentationID } }, 'Clarin no confirmó el final de la presentación.')
+		},
+		sendFollow: (targetActorID, action) => {
+			const message = buildWhiteboardFollowChange(targetActorID, action)
+			return Boolean(message && send(message))
+		},
+		sendViewport,
+		retryNow,
+		sendPatch: patch => {
       if (!socket || socket.readyState !== WebSocket.OPEN || patch.elements.length === 0 || patch.elements.length > 2_000) return null
       const serialized = JSON.stringify(patch)
       if (new TextEncoder().encode(serialized).byteLength > WHITEBOARD_REALTIME_MAX_PATCH_BYTES) return null
-      return new Promise<WhiteboardRealtimeEvent>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          pending.delete(patch.operation_id)
-          reject(new Error('Clarin no confirmó el guardado en tiempo real.'))
-        }, WHITEBOARD_REALTIME_ACK_TIMEOUT_MS)
-        pending.set(patch.operation_id, { resolve, reject, timeout })
-        try {
-          socket!.send(serialized)
-        } catch {
-          pending.delete(patch.operation_id)
-          clearTimeout(timeout)
-          reject(new Error('No se pudo enviar el guardado en tiempo real.'))
-        }
-      })
+			return sendCorrelated(patch, 'Clarin no confirmó el guardado en tiempo real.')
     },
     close: () => {
       permanentlyClosed = true
+      reconnectBlocked = true
       connectionGeneration += 1
+      connecting = false
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('online', onOnline)
+        document.removeEventListener('visibilitychange', onVisibilityChange)
+        window.removeEventListener('pageshow', onPageShow)
+      }
       if (reconnectTimer) clearTimeout(reconnectTimer)
       reconnectTimer = null
       pendingCursor = null
-      if (cursorTimer) clearTimeout(cursorTimer)
-      cursorTimer = null
+			if (cursorTimer) clearTimeout(cursorTimer)
+			cursorTimer = null
+			pendingViewport = null
+			if (viewportTimer) clearTimeout(viewportTimer)
+			viewportTimer = null
       rejectPending('La sala de la pizarra se cerró.')
       const current = socket
       socket = null

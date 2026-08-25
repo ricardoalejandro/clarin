@@ -1,18 +1,19 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Activity,
   AlertCircle,
   ArrowRightLeft,
-  Calendar,
+  CalendarRange,
   Check,
   ChevronRight,
   Download,
   File,
   Flag,
   Link2,
+  ListTodo,
   Loader2,
   Maximize2,
   MessageSquare,
@@ -20,6 +21,7 @@ import {
   Move,
   PanelRight,
   Paperclip,
+  Palette,
   Pencil,
   Plus,
   RotateCcw,
@@ -48,10 +50,10 @@ import TaskUserCombobox from './TaskUserCombobox'
 import useTaskDetailWindow, { type TaskDetailResizeEdge } from './useTaskDetailWindow'
 import TaskDestructiveConfirmDialog from './TaskDestructiveConfirmDialog'
 import { TaskListPicker } from './TaskSelectPicker'
-import TaskDateTimePicker from './TaskDateTimePicker'
+import TaskDateRangePicker from './TaskDateRangePicker'
 import TaskAttachmentViewer from './TaskAttachmentViewer'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
-import { taskWindowVisualState } from './taskInteractionVisuals'
+import { taskDetailVisualState } from './taskDetailInspectorState'
 import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 import TaskDescriptionEditor from './TaskDescriptionEditor'
 import { taskAttachmentUploadEndpoint, taskAttachmentUploadForm, taskImageFilesFromClipboard } from './taskAttachmentQueue'
@@ -62,20 +64,30 @@ import { canAdministerTask, canCommentOnTask, canEditTask } from './taskPermissi
 import { mergeCommentAttachmentDrafts, removeCommentAttachmentDrafts, resolveCommentAttachment, type TaskCommentAttachmentLookup } from './taskCommentAttachmentDrafts'
 import { TaskColorPicker } from './TaskContainerAppearance'
 import { resolveTaskIdentityColor } from './taskIdentityColor'
+import { validateManualProgress } from './taskProgress'
+import TaskProgressControl from './TaskProgressControl'
+import TaskCompletionButton from './TaskCompletionButton'
+import TaskQuickSubtaskComposer, { createTaskQuickSubtaskDraft, type TaskQuickSubtaskDraft } from './TaskQuickSubtaskComposer'
+import { taskCompletionTransition } from './taskStatusTransition'
+import { resolveTaskDetailEscape, TASK_DETAIL_ESCAPE_LAYER_SELECTOR } from './taskDetailEscape'
+import { projectTaskVisualUpdate, type TaskVisualUpdate } from './taskVisualProjection'
 
 interface Props {
   taskId: string | null
+  availableWorkspaceWidth?: number
+  inFlowDocked?: boolean
   historicalReadOnly?: boolean
   allTasks: Task[]
   users: TaskAccountUser[]
   lists: TaskList[]
   folders: TaskFolder[]
   workflows: TaskWorkflow[]
+  subtaskDraftResetToken?: number
   storageScope?: string
   onClose: () => void
   onEdit: (task: Task) => void
   onOpenTask: (taskId: string) => void
-  onCreateSubtask: (task: Task) => void
+  onCreateSubtask: (task: Task, draft?: TaskQuickSubtaskDraft) => void
   onChanged: (task?: Task, operationID?: string, hierarchyCounts?: TaskHierarchyCounts) => void
   onDeleted: (taskId: string, version?: number, operationID?: string, hierarchyCounts?: TaskHierarchyCounts) => boolean
 }
@@ -84,7 +96,7 @@ type DetailTab = 'details' | 'activity'
 type FeedFilter = 'all' | 'comments' | 'changes'
 type PendingOperations = Record<string, number>
 type Failure = { message: string; canRetry: boolean }
-type ParticipantGrantPrompt = { affectedUserIDs: string[]; retry: () => void }
+type ParticipantGrantPrompt = { taskId: string; affectedUserIDs: string[]; retry: () => void }
 type TaskMutationResponse = {
   task?: Task
   operation_id?: string
@@ -93,6 +105,23 @@ type TaskMutationResponse = {
   affected_user_ids?: string[]
 }
 type TaskCommentPage = { comments: TaskComment[]; has_more: boolean; next_offset: number }
+type TaskDetailDraft = {
+  title: string
+  description: string
+  comment: string
+  commentMentionIds: string[]
+  commentAttachmentIds: string[]
+  commentAttachmentLookup: TaskCommentAttachmentLookup
+  editingCommentId: string
+  editingCommentBody: string
+  editingMentionIds: string[]
+  editingAttachmentIds: string[]
+  subtaskDraft: TaskQuickSubtaskDraft
+  subtaskDraftTouched: boolean
+}
+type TaskReadSession = { taskId: string; generation: number; controller: AbortController }
+type TaskReadToken = { taskId: string; generation: number; signal?: AbortSignal }
+type TaskUploadContext = { task: Task; taskId: string; generation: number }
 type FeedItem =
   | { kind: 'comment'; id: string; createdAt: string; comment: TaskComment }
   | { kind: 'activity'; id: string; createdAt: string; activity: TaskActivity }
@@ -130,6 +159,13 @@ const resizeHandles: Record<TaskDetailResizeEdge, string> = {
 }
 const inputClass = 'w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none transition focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 disabled:bg-slate-50 disabled:opacity-60'
 
+function TaskPropertyRow({ label, icon, children, className = '' }: { label: string; icon: ReactNode; children: ReactNode; className?: string }) {
+  return <div className={`grid gap-2 border-b border-slate-100 px-3 py-3 last:border-b-0 sm:grid-cols-[8.75rem_minmax(0,1fr)] sm:items-start sm:px-4 ${className}`}>
+    <div className="flex min-h-10 items-center gap-2 text-xs font-bold text-slate-500"><span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500">{icon}</span><span>{label}</span></div>
+    <div className="min-w-0">{children}</div>
+  </div>
+}
+
 function localDateTime(value?: string) {
   if (!value) return ''
   const date = new Date(value)
@@ -142,7 +178,16 @@ function initials(name: string) {
   return name.trim().slice(0, 2).toUpperCase() || 'CL'
 }
 
-export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, allTasks, users, lists, folders, workflows, storageScope, onClose, onEdit, onOpenTask, onCreateSubtask, onChanged, onDeleted }: Props) {
+function taskWorkflowStatuses(task: Task, lists: TaskList[], workflows: TaskWorkflow[]) {
+  const explicitWorkflowID = task.status_detail?.workflow_id
+  const listWorkflowID = lists.find(item => item.id === task.list_id)?.workflow_id
+  const workflow = workflows.find(item => item.id === explicitWorkflowID)
+    || (!explicitWorkflowID ? workflows.find(item => item.id === listWorkflowID) : undefined)
+  if (workflow?.statuses?.length) return workflow.statuses
+  return task.status_detail ? [task.status_detail] : []
+}
+
+export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, inFlowDocked = false, historicalReadOnly = false, allTasks, users, lists, folders, workflows, subtaskDraftResetToken = 0, storageScope, onClose, onEdit, onOpenTask, onCreateSubtask, onChanged, onDeleted }: Props) {
   const [task, setTask] = useState<Task | null>(null)
   const [children, setChildren] = useState<Task[]>([])
   const [comments, setComments] = useState<TaskComment[]>([])
@@ -154,9 +199,11 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
   const [tab, setTab] = useState<DetailTab>('details')
   const [feedFilter, setFeedFilter] = useState<FeedFilter>('all')
   const [loading, setLoading] = useState(false)
+  const [sectionsLoading, setSectionsLoading] = useState(false)
   const [pending, setPending] = useState<PendingOperations>({})
   const [failure, setFailure] = useState<Failure | null>(null)
   const [archiveConfirmOpen, setArchiveConfirmOpen] = useState(false)
+  const [archiveTaskId, setArchiveTaskId] = useState('')
   const [moveEnvironmentOpen, setMoveEnvironmentOpen] = useState(false)
   const [archiveError, setArchiveError] = useState('')
   const [panelWidth, setPanelWidth] = useState(0)
@@ -167,10 +214,13 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
   const [descriptionExpanded, setDescriptionExpanded] = useState(false)
   const [startDraft, setStartDraft] = useState('')
   const [dueDraft, setDueDraft] = useState('')
+  const [allDayDraft, setAllDayDraft] = useState(false)
   const [progressDraft, setProgressDraft] = useState(0)
+  const [progressInput, setProgressInput] = useState('0')
+  const [progressError, setProgressError] = useState('')
   const [progressMode, setProgressMode] = useState<'manual' | 'automatic'>('manual')
   const [previewAttachment, setPreviewAttachment] = useState<TaskAttachment | null>(null)
-  const [subtaskTitle, setSubtaskTitle] = useState('')
+  const [subtaskDraft, setSubtaskDraft] = useState<TaskQuickSubtaskDraft>(() => createTaskQuickSubtaskDraft({ assigned_to: '' }, []))
 
   const [comment, setComment] = useState('')
   const [commentMentionIds, setCommentMentionIds] = useState<string[]>([])
@@ -190,19 +240,30 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
   const [newFeedItems, setNewFeedItems] = useState(false)
 
   const panelRef = useRef<HTMLElement>(null)
+  const detailsScrollRef = useRef<HTMLElement | null>(null)
   const feedScrollRef = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const commentFileRef = useRef<HTMLInputElement>(null)
   const editCommentFileRef = useRef<HTMLInputElement>(null)
-  const taskIdRef = useRef(taskId)
+  const taskIdRef = useRef<string | null>(null)
   const taskRef = useRef<Task | null>(null)
   const loadSequenceRef = useRef(0)
+  const readSessionRef = useRef<TaskReadSession | null>(null)
   const dependencySearchSequenceRef = useRef(0)
   const dependencySearchAbortRef = useRef<AbortController | null>(null)
-  const taskWriteQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const taskWriteQueuesRef = useRef(new Map<string, Promise<void>>())
+  const taskSnapshotsRef = useRef(new Map<string, Task>())
+  const draftsByTaskRef = useRef(new Map<string, TaskDetailDraft>())
+  const currentDraftRef = useRef<TaskDetailDraft | null>(null)
+  const allTasksRef = useRef(allTasks)
+  const listsRef = useRef(lists)
+  const workflowsRef = useRef(workflows)
+  const subtaskDraftResetTokenRef = useRef(subtaskDraftResetToken)
+  const subtaskDraftTouchedRef = useRef(false)
   const preservedDraftKeysRef = useRef(new Set<string>())
   const draftBodiesRef = useRef<Record<string, Record<string, unknown>>>({})
   const failureRetryRef = useRef<(() => void) | null>(null)
+  const failuresByTaskRef = useRef(new Map<string, { failure: Failure; retry: (() => void) | null }>())
   const feedNearBottomRef = useRef(true)
   const feedCountRef = useRef(0)
   const feedContextRef = useRef('')
@@ -216,12 +277,33 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
   const editingDescriptionRef = useRef(false)
   const editingDatesRef = useRef(false)
   const editingProgressRef = useRef(false)
+  const taskNavigationReturnRef = useRef<{ parentTaskId: string; childTaskId: string; scrollTop: number; tab: DetailTab } | null>(null)
+  const pendingParentRestoreRef = useRef<{ parentTaskId: string; childTaskId: string; scrollTop: number; tab: DetailTab } | null>(null)
   const updateTaskRef = useRef<(key: string, body: Record<string, unknown>, confirmGrants?: boolean) => Promise<boolean>>(async () => false)
-  const detailWindow = useTaskDetailWindow(storageScope)
-  const windowVisual = taskWindowVisualState(detailWindow.effectiveMode, detailWindow.isMobile)
+  const detailWindow = useTaskDetailWindow(storageScope, availableWorkspaceWidth)
+  const windowVisual = taskDetailVisualState(detailWindow.effectiveMode, detailWindow.isMobile)
   const taskOpen = Boolean(taskId)
   onCloseRef.current = onClose
+  const onOpenTaskRef = useRef(onOpenTask)
+  onOpenTaskRef.current = onOpenTask
+  allTasksRef.current = allTasks
+  listsRef.current = lists
+  workflowsRef.current = workflows
   commentsRef.current = comments
+  currentDraftRef.current = {
+    title: titleDraft,
+    description: descriptionDraft,
+    comment,
+    commentMentionIds: [...commentMentionIds],
+    commentAttachmentIds: [...commentAttachmentIds],
+    commentAttachmentLookup: { ...commentAttachmentLookup },
+    editingCommentId,
+    editingCommentBody,
+    editingMentionIds: [...editingMentionIds],
+    editingAttachmentIds: [...editingAttachmentIds],
+    subtaskDraft: { ...subtaskDraft },
+    subtaskDraftTouched: subtaskDraftTouchedRef.current,
+  }
   useEffect(() => { setDescriptionExpanded(false) }, [taskId])
   const historicalReadURL = useCallback((url: string) => historicalReadOnly
     ? `${url}${url.includes('?') ? '&' : '?'}lifecycle=archive`
@@ -233,39 +315,72 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
     dates: {
       start_at: startDraft ? new Date(startDraft).toISOString() : '',
       due_at: dueDraft ? new Date(dueDraft).toISOString() : '',
+      is_all_day: allDayDraft,
     },
     progress: { progress_mode: progressMode, manual_progress: progressDraft },
   }
 
-  const beginPending = useCallback((key: string) => {
-    setPending(current => ({ ...current, [key]: (current[key] || 0) + 1 }))
-  }, [])
-  const endPending = useCallback((key: string) => {
+  const pendingOperationKey = useCallback((taskID: string | null, key: string) => `${taskID || 'closed'}:${key}`, [])
+  const beginPending = useCallback((key: string, taskID = taskIdRef.current) => {
+    const scopedKey = pendingOperationKey(taskID, key)
+    setPending(current => ({ ...current, [scopedKey]: (current[scopedKey] || 0) + 1 }))
+  }, [pendingOperationKey])
+  const endPending = useCallback((key: string, taskID = taskIdRef.current) => {
+    const scopedKey = pendingOperationKey(taskID, key)
     setPending(current => {
       const next = { ...current }
-      const count = (next[key] || 1) - 1
-      if (count > 0) next[key] = count
-      else delete next[key]
+      const count = (next[scopedKey] || 1) - 1
+      if (count > 0) next[scopedKey] = count
+      else delete next[scopedKey]
       return next
     })
+  }, [pendingOperationKey])
+  const isPending = useCallback((key: string) => Boolean(pending[pendingOperationKey(taskId, key)]), [pending, pendingOperationKey, taskId])
+  const isTaskPending = useCallback((key: string, taskID: string) => Boolean(pending[pendingOperationKey(taskID, key)]), [pending, pendingOperationKey])
+  const showFailure = useCallback((message: string, retry?: () => void, taskID = taskIdRef.current) => {
+    if (!taskID) return
+    const entry = { failure: { message, canRetry: Boolean(retry) }, retry: retry || null }
+    failuresByTaskRef.current.set(taskID, entry)
+    if (taskIdRef.current !== taskID) return
+    failureRetryRef.current = entry.retry
+    setFailure(entry.failure)
   }, [])
-  const isPending = useCallback((key: string) => Boolean(pending[key]), [pending])
-  const showFailure = useCallback((message: string, retry?: () => void) => {
-    failureRetryRef.current = retry || null
-    setFailure({ message, canRetry: Boolean(retry) })
-  }, [])
-  const clearFailure = useCallback(() => {
+  const clearFailure = useCallback((taskID = taskIdRef.current) => {
+    if (taskID) failuresByTaskRef.current.delete(taskID)
+    if (taskIdRef.current !== taskID) return
     failureRetryRef.current = null
     setFailure(null)
   }, [])
 
+  const captureReadToken = useCallback((): TaskReadToken | null => {
+    const requestedTaskId = taskIdRef.current
+    if (!requestedTaskId) return null
+    const session = readSessionRef.current
+    return {
+      taskId: requestedTaskId,
+      generation: session?.taskId === requestedTaskId ? session.generation : loadSequenceRef.current,
+      signal: session?.taskId === requestedTaskId ? session.controller.signal : undefined,
+    }
+  }, [])
+  const acceptsReadToken = useCallback((token: TaskReadToken) => {
+    const session = readSessionRef.current
+    return !token.signal?.aborted
+      && taskIdRef.current === token.taskId
+      && loadSequenceRef.current === token.generation
+      && session?.taskId === token.taskId
+      && session.generation === token.generation
+  }, [])
+
   const applyTask = useCallback((incoming: Task, forceDrafts = false) => {
-    if (taskIdRef.current !== incoming.id) return
-    const current = taskRef.current
+    const stored = taskSnapshotsRef.current.get(incoming.id)
+    if (stored && Number(incoming.version || 0) < Number(stored.version || 0)) return
+    const current = taskIdRef.current === incoming.id ? taskRef.current : stored
     if (current?.id === incoming.id && Number(incoming.version || 0) < Number(current.version || 0)) return
     const next = incoming.collaborators === undefined && current?.collaborators !== undefined
       ? { ...incoming, collaborators: current.collaborators }
       : incoming
+    taskSnapshotsRef.current.set(incoming.id, next)
+    if (taskIdRef.current !== incoming.id) return
     taskRef.current = next
     setTask(next)
     if (forceDrafts || (!editingTitleRef.current && !preservedDraftKeysRef.current.has('title'))) setTitleDraft(next.title)
@@ -273,33 +388,40 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
     if (forceDrafts || (!editingDatesRef.current && !preservedDraftKeysRef.current.has('dates'))) {
       setStartDraft(localDateTime(next.start_at))
       setDueDraft(localDateTime(next.due_at))
+      setAllDayDraft(Boolean(next.is_all_day))
     }
     if (forceDrafts || (!editingProgressRef.current && !preservedDraftKeysRef.current.has('progress'))) {
-      setProgressDraft(next.manual_progress ?? next.progress ?? 0)
+      const manual = next.manual_progress ?? next.progress ?? 0
+      setProgressDraft(manual)
+      setProgressInput(String(manual))
+      setProgressError('')
       setProgressMode(next.progress_mode || 'manual')
+    }
+    if (!subtaskDraftTouchedRef.current) {
+      setSubtaskDraft(createTaskQuickSubtaskDraft(next, taskWorkflowStatuses(next, listsRef.current, workflowsRef.current)))
     }
   }, [])
 
   const refreshTask = useCallback(async () => {
-    const requestedTaskId = taskIdRef.current
-    if (!requestedTaskId) return
-    const response = await apiGet<{ task: Task }>(historicalReadURL(`/api/tasks/${requestedTaskId}`))
-    if (taskIdRef.current !== requestedTaskId) return
+    const token = captureReadToken()
+    if (!token) return
+    const response = await apiGet<{ task: Task }>(historicalReadURL(`/api/tasks/${token.taskId}`), { signal: token.signal })
+    if (!acceptsReadToken(token)) return
     if (response.success && response.data?.task) applyTask(response.data.task)
-    else showFailure(response.error || 'No se pudo actualizar la tarea', () => { void refreshTask() })
-  }, [applyTask, historicalReadURL, showFailure])
+    else showFailure(response.error || 'No se pudo actualizar la tarea', () => { void refreshTask() }, token.taskId)
+  }, [acceptsReadToken, applyTask, captureReadToken, historicalReadURL, showFailure])
 
   const refreshChildren = useCallback(async () => {
-    const requestedTaskId = taskIdRef.current
-    if (!requestedTaskId) return
-    const response = await apiGet<{ tasks: Task[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/children`))
-    if (taskIdRef.current === requestedTaskId && response.success) setChildren(response.data?.tasks || [])
-  }, [historicalReadURL])
+    const token = captureReadToken()
+    if (!token) return
+    const response = await apiGet<{ tasks: Task[] }>(historicalReadURL(`/api/tasks/${token.taskId}/children`), { signal: token.signal })
+    if (acceptsReadToken(token) && response.success) setChildren(response.data?.tasks || [])
+  }, [acceptsReadToken, captureReadToken, historicalReadURL])
   const refreshComments = useCallback(async () => {
-    const requestedTaskId = taskIdRef.current
-    if (!requestedTaskId) return
-    const response = await apiGet<TaskCommentPage>(historicalReadURL(`/api/tasks/${requestedTaskId}/comments?limit=100&offset=0`))
-    if (taskIdRef.current !== requestedTaskId || !response.success) return
+    const token = captureReadToken()
+    if (!token) return
+    const response = await apiGet<TaskCommentPage>(historicalReadURL(`/api/tasks/${token.taskId}/comments?limit=100&offset=0`), { signal: token.signal })
+    if (!acceptsReadToken(token) || !response.success) return
     const latest = response.data?.comments || []
     const existing = new Map(commentsRef.current.map(item => [item.id, item]))
     let inserted = 0
@@ -315,15 +437,18 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
       commentsNextOffsetRef.current = response.data?.next_offset || latest.length
       setCommentsHasMore(Boolean(response.data?.has_more))
     }
-  }, [historicalReadURL])
+  }, [acceptsReadToken, captureReadToken, historicalReadURL])
   const loadOlderComments = useCallback(async () => {
-    const requestedTaskId = taskIdRef.current
-    if (!requestedTaskId || commentsLoadingMore || !commentsHasMore) return
+    const token = captureReadToken()
+    if (!token || commentsLoadingMore || !commentsHasMore) return
     const offset = commentsNextOffsetRef.current
     setCommentsLoadingMore(true)
     prependScrollHeightRef.current = feedScrollRef.current?.scrollHeight ?? null
-    const response = await apiGet<TaskCommentPage>(historicalReadURL(`/api/tasks/${requestedTaskId}/comments?limit=100&offset=${offset}`))
-    if (taskIdRef.current !== requestedTaskId) return
+    const response = await apiGet<TaskCommentPage>(historicalReadURL(`/api/tasks/${token.taskId}/comments?limit=100&offset=${offset}`), { signal: token.signal })
+    if (!acceptsReadToken(token)) {
+      if (taskIdRef.current === token.taskId) setCommentsLoadingMore(false)
+      return
+    }
     if (!response.success) {
       prependScrollHeightRef.current = null
       showFailure(response.error || 'No se pudieron cargar los comentarios anteriores', () => { void loadOlderComments() })
@@ -338,25 +463,25 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
     commentsNextOffsetRef.current = response.data?.next_offset ?? offset + older.length
     setCommentsHasMore(Boolean(response.data?.has_more))
     setCommentsLoadingMore(false)
-  }, [commentsHasMore, commentsLoadingMore, historicalReadURL, showFailure])
+  }, [acceptsReadToken, captureReadToken, commentsHasMore, commentsLoadingMore, historicalReadURL, showFailure])
   const refreshActivity = useCallback(async () => {
-    const requestedTaskId = taskIdRef.current
-    if (!requestedTaskId) return
-    const response = await apiGet<{ activity: TaskActivity[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/activity`))
-    if (taskIdRef.current === requestedTaskId && response.success) setActivity(response.data?.activity || [])
-  }, [historicalReadURL])
+    const token = captureReadToken()
+    if (!token) return
+    const response = await apiGet<{ activity: TaskActivity[] }>(historicalReadURL(`/api/tasks/${token.taskId}/activity`), { signal: token.signal })
+    if (acceptsReadToken(token) && response.success) setActivity(response.data?.activity || [])
+  }, [acceptsReadToken, captureReadToken, historicalReadURL])
   const refreshAttachments = useCallback(async () => {
-    const requestedTaskId = taskIdRef.current
-    if (!requestedTaskId) return
-    const response = await apiGet<{ attachments: TaskAttachment[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/attachments`))
-    if (taskIdRef.current === requestedTaskId && response.success) setAttachments(response.data?.attachments || [])
-  }, [historicalReadURL])
+    const token = captureReadToken()
+    if (!token) return
+    const response = await apiGet<{ attachments: TaskAttachment[] }>(historicalReadURL(`/api/tasks/${token.taskId}/attachments`), { signal: token.signal })
+    if (acceptsReadToken(token) && response.success) setAttachments(response.data?.attachments || [])
+  }, [acceptsReadToken, captureReadToken, historicalReadURL])
   const refreshDependencies = useCallback(async () => {
-    const requestedTaskId = taskIdRef.current
-    if (!requestedTaskId) return
-    const response = await apiGet<{ dependencies: TaskDependency[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/dependencies`))
-    if (taskIdRef.current === requestedTaskId && response.success) setDependencies(response.data?.dependencies || [])
-  }, [historicalReadURL])
+    const token = captureReadToken()
+    if (!token) return
+    const response = await apiGet<{ dependencies: TaskDependency[] }>(historicalReadURL(`/api/tasks/${token.taskId}/dependencies`), { signal: token.signal })
+    if (acceptsReadToken(token) && response.success) setDependencies(response.data?.dependencies || [])
+  }, [acceptsReadToken, captureReadToken, historicalReadURL])
 
   const removeAttachmentReferences = useCallback((attachmentId: string) => {
     const next = commentsRef.current.map(item => {
@@ -373,23 +498,31 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
   const load = useCallback(async () => {
     const requestedTaskId = taskIdRef.current
     if (!requestedTaskId) return
+    readSessionRef.current?.controller.abort()
     const sequence = ++loadSequenceRef.current
+    const controller = new AbortController()
+    readSessionRef.current = { taskId: requestedTaskId, generation: sequence, controller }
     setLoading(true)
-    const [taskRes, childRes, commentRes, activityRes, attachmentRes, dependencyRes] = await Promise.all([
-      apiGet<{ task: Task }>(historicalReadURL(`/api/tasks/${requestedTaskId}`)),
-      apiGet<{ tasks: Task[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/children`)),
-      apiGet<TaskCommentPage>(historicalReadURL(`/api/tasks/${requestedTaskId}/comments?limit=100&offset=0`)),
-      apiGet<{ activity: TaskActivity[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/activity`)),
-      apiGet<{ attachments: TaskAttachment[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/attachments`)),
-      apiGet<{ dependencies: TaskDependency[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/dependencies`)),
-    ])
-    if (loadSequenceRef.current !== sequence || taskIdRef.current !== requestedTaskId) return
+    setSectionsLoading(true)
+    const taskRequest = apiGet<{ task: Task }>(historicalReadURL(`/api/tasks/${requestedTaskId}`), { signal: controller.signal })
+    const sectionRequests = [
+      apiGet<{ tasks: Task[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/children`), { signal: controller.signal }),
+      apiGet<TaskCommentPage>(historicalReadURL(`/api/tasks/${requestedTaskId}/comments?limit=100&offset=0`), { signal: controller.signal }),
+      apiGet<{ activity: TaskActivity[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/activity`), { signal: controller.signal }),
+      apiGet<{ attachments: TaskAttachment[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/attachments`), { signal: controller.signal }),
+      apiGet<{ dependencies: TaskDependency[] }>(historicalReadURL(`/api/tasks/${requestedTaskId}/dependencies`), { signal: controller.signal }),
+    ] as const
+    const taskRes = await taskRequest
+    if (controller.signal.aborted || loadSequenceRef.current !== sequence || taskIdRef.current !== requestedTaskId) return
     if (!taskRes.success || !taskRes.data?.task) {
       setLoading(false)
-      showFailure(taskRes.error || 'No se pudo abrir la tarea', () => { void load() })
+      setSectionsLoading(false)
+      showFailure(taskRes.error || 'No se pudo abrir la tarea', () => { void load() }, requestedTaskId)
       return
     }
-    applyTask(taskRes.data.task, true)
+    applyTask(taskRes.data.task, !draftsByTaskRef.current.has(requestedTaskId))
+    const [childRes, commentRes, activityRes, attachmentRes, dependencyRes] = await Promise.all(sectionRequests)
+    if (controller.signal.aborted || loadSequenceRef.current !== sequence || taskIdRef.current !== requestedTaskId) return
     setChildren(childRes.data?.tasks || [])
     commentsRef.current = commentRes.data?.comments || []
     setComments(commentsRef.current)
@@ -399,12 +532,27 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
     setAttachments(attachmentRes.data?.attachments || [])
     setDependencies(dependencyRes.data?.dependencies || [])
     if (![childRes, commentRes, activityRes, attachmentRes, dependencyRes].every(result => result.success)) {
-      showFailure('Algunos datos de la tarea no se pudieron cargar.', () => { void load() })
+      showFailure('Algunos datos de la tarea no se pudieron cargar.', () => { void load() }, requestedTaskId)
     }
     setLoading(false)
+    setSectionsLoading(false)
+    const restore = pendingParentRestoreRef.current
+    if (restore?.parentTaskId === requestedTaskId) {
+      pendingParentRestoreRef.current = null
+      setTab(restore.tab)
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+        if (taskIdRef.current !== requestedTaskId) return
+        detailsScrollRef.current?.scrollTo({ top: restore.scrollTop })
+        document.getElementById(`task-child-link-${restore.childTaskId}`)?.focus({ preventScroll: true })
+      }))
+    }
   }, [applyTask, historicalReadURL, showFailure])
 
   useEffect(() => {
+    const previousTaskId = taskIdRef.current
+    if (previousTaskId && currentDraftRef.current) draftsByTaskRef.current.set(previousTaskId, currentDraftRef.current)
+    readSessionRef.current?.controller.abort()
+    loadSequenceRef.current += 1
     taskIdRef.current = taskId
     taskRef.current = null
     editingTitleRef.current = false
@@ -412,9 +560,41 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
     editingDescriptionRef.current = false
     editingDatesRef.current = false
     editingProgressRef.current = false
-    taskWriteQueueRef.current = Promise.resolve()
     preservedDraftKeysRef.current.clear()
-    setTask(null)
+    setParticipantGrantPrompt(null)
+    setArchiveConfirmOpen(false)
+    setArchiveTaskId('')
+    setArchiveError('')
+    setMoveEnvironmentOpen(false)
+    const savedDraft = taskId ? draftsByTaskRef.current.get(taskId) : undefined
+    subtaskDraftTouchedRef.current = Boolean(savedDraft?.subtaskDraftTouched)
+    const seed = taskId ? taskSnapshotsRef.current.get(taskId) || allTasksRef.current.find(item => item.id === taskId) : undefined
+    if (seed) {
+      taskSnapshotsRef.current.set(seed.id, seed)
+      taskRef.current = seed
+      setTask(seed)
+      setTitleDraft(savedDraft?.title ?? seed.title)
+      setDescriptionDraft(savedDraft?.description ?? seed.description ?? '')
+      setStartDraft(localDateTime(seed.start_at))
+      setDueDraft(localDateTime(seed.due_at))
+      setAllDayDraft(Boolean(seed.is_all_day))
+      const manual = seed.manual_progress ?? seed.progress ?? 0
+      setProgressDraft(manual)
+      setProgressInput(String(manual))
+      setProgressMode(seed.progress_mode || 'manual')
+      if (savedDraft?.title !== undefined && savedDraft.title !== seed.title) preservedDraftKeysRef.current.add('title')
+      if (savedDraft?.description !== undefined && savedDraft.description !== (seed.description || '')) preservedDraftKeysRef.current.add('description')
+    } else {
+      setTask(null)
+      setTitleDraft(savedDraft?.title || '')
+      setDescriptionDraft(savedDraft?.description || '')
+      setStartDraft('')
+      setDueDraft('')
+      setAllDayDraft(false)
+      setProgressDraft(0)
+      setProgressInput('0')
+      setProgressMode('manual')
+    }
     setChildren([])
     commentsRef.current = []
     setComments([])
@@ -426,16 +606,23 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
     setAttachments([])
     setPreviewAttachment(null)
     setDependencies([])
-    setTab('details')
     setFeedFilter('all')
-    setPending({})
-    clearFailure()
-    setComment('')
-    setCommentMentionIds([])
-    setCommentAttachmentIds([])
-    setCommentAttachmentLookup({})
-    setEditingCommentId('')
-    setSubtaskTitle('')
+    const savedFailure = taskId ? failuresByTaskRef.current.get(taskId) : undefined
+    failureRetryRef.current = savedFailure?.retry || null
+    setFailure(savedFailure?.failure || null)
+    setProgressError('')
+    setComment(savedDraft?.comment || '')
+    setCommentMentionIds(savedDraft?.commentMentionIds || [])
+    setCommentAttachmentIds(savedDraft?.commentAttachmentIds || [])
+    setCommentAttachmentLookup(savedDraft?.commentAttachmentLookup || {})
+    setEditingCommentId(savedDraft?.editingCommentId || '')
+    setEditingCommentBody(savedDraft?.editingCommentBody || '')
+    setEditingMentionIds(savedDraft?.editingMentionIds || [])
+    setEditingAttachmentIds(savedDraft?.editingAttachmentIds || [])
+    const seedStatuses = seed
+      ? taskWorkflowStatuses(seed, listsRef.current, workflowsRef.current)
+      : workflowsRef.current.find(item => item.is_default)?.statuses || workflowsRef.current[0]?.statuses || []
+    setSubtaskDraft(savedDraft?.subtaskDraft ? { ...savedDraft.subtaskDraft } : createTaskQuickSubtaskDraft({ assigned_to: seed?.assigned_to || '' }, seedStatuses))
     dependencySearchAbortRef.current?.abort()
     dependencySearchSequenceRef.current += 1
     setDependencySearch('')
@@ -445,8 +632,36 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
     feedNearBottomRef.current = true
     feedCountRef.current = 0
     feedContextRef.current = ''
+    const parentRestore = taskId && pendingParentRestoreRef.current?.parentTaskId === taskId
+    if (!parentRestore) detailsScrollRef.current?.scrollTo({ top: 0 })
     if (taskId) void load()
-  }, [clearFailure, load, taskId])
+    else {
+      setLoading(false)
+      setSectionsLoading(false)
+      taskNavigationReturnRef.current = null
+      pendingParentRestoreRef.current = null
+    }
+  }, [load, taskId])
+
+  useEffect(() => () => readSessionRef.current?.controller.abort(), [])
+
+  useEffect(() => {
+    if (subtaskDraftResetTokenRef.current === subtaskDraftResetToken) return
+    subtaskDraftResetTokenRef.current = subtaskDraftResetToken
+    const currentTask = taskRef.current
+    if (!currentTask) return
+    const reset = createTaskQuickSubtaskDraft(currentTask, taskWorkflowStatuses(currentTask, listsRef.current, workflowsRef.current))
+    subtaskDraftTouchedRef.current = false
+    setSubtaskDraft(reset)
+    const saved = draftsByTaskRef.current.get(currentTask.id)
+    if (saved) draftsByTaskRef.current.set(currentTask.id, { ...saved, subtaskDraft: reset, subtaskDraftTouched: false })
+  }, [subtaskDraftResetToken])
+
+  useEffect(() => {
+    if (!taskId) return
+    const incoming = allTasks.find(item => item.id === taskId)
+    if (incoming) applyTask(incoming)
+  }, [allTasks, applyTask, taskId])
 
   useEffect(() => {
     const panel = panelRef.current
@@ -526,8 +741,19 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
   useEffect(() => {
     if (!taskOpen) return
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || document.querySelector('[data-task-editor-modal],[data-task-structure-modal],[data-task-property-picker-portal],[data-task-destructive-dialog],[data-task-attachment-viewer]')) return
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      const currentTask = taskRef.current
+      const resolution = resolveTaskDetailEscape(Boolean(document.querySelector(TASK_DETAIL_ESCAPE_LAYER_SELECTOR)), currentTask?.parent_task_id)
+      if (resolution === 'defer') return
       event.preventDefault()
+      if (resolution === 'parent' && currentTask?.parent_task_id) {
+        const saved = taskNavigationReturnRef.current
+        pendingParentRestoreRef.current = saved?.parentTaskId === currentTask.parent_task_id
+          ? saved
+          : { parentTaskId: currentTask.parent_task_id, childTaskId: currentTask.id, scrollTop: 0, tab: 'details' }
+        onOpenTaskRef.current(currentTask.parent_task_id)
+        return
+      }
       onCloseRef.current()
     }
     window.addEventListener('keydown', closeOnEscape)
@@ -591,78 +817,131 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
     return () => controller.abort()
   }, [dependencySettledSearch, dependencyTaskId, taskId])
 
-  const list = lists.find(item => item.id === task?.list_id)
-  const workflow = workflows.find(item => item.id === list?.workflow_id) || workflows.find(item => item.is_default) || workflows[0]
-  const statuses = workflow?.statuses || []
-  const parentTask = task?.parent_task_id ? allTasks.find(item => item.id === task.parent_task_id) : undefined
+  const visibleTask = task?.id === taskId ? task : null
+  const taskTransitioning = Boolean(task && task.id !== taskId)
+  const list = lists.find(item => item.id === visibleTask?.list_id)
+  const explicitWorkflowID = visibleTask?.status_detail?.workflow_id
+  const workflow = workflows.find(item => item.id === explicitWorkflowID)
+    || (!explicitWorkflowID ? workflows.find(item => item.id === list?.workflow_id) || workflows.find(item => item.is_default) || workflows[0] : undefined)
+  const statuses = workflow?.statuses?.length ? workflow.statuses : visibleTask?.status_detail ? [visibleTask.status_detail] : []
+  const parentTask = visibleTask?.parent_task_id ? allTasks.find(item => item.id === visibleTask.parent_task_id) : undefined
   const isWide = panelWidth >= 980
-  const canEdit = canEditTask(task)
-  const canComment = canCommentOnTask(task)
-  const canAdmin = canAdministerTask(task)
+  const canEdit = canEditTask(visibleTask)
+  const canComment = canCommentOnTask(visibleTask)
+  const canAdmin = canAdministerTask(visibleTask)
 
   const localDependencyCandidates = useMemo(() => allTasks.filter(item => item.id !== taskId && !item.parent_task_id).slice(0, 8), [allTasks, taskId])
   const dependencyCandidates = dependencySearch.trim().length >= 2 ? dependencyResults : localDependencyCandidates
   const dependencySearchPending = !dependencyTaskId && dependencySearch.trim().length >= 2 && dependencySearch.trim() !== dependencySettledSearch
   const selectedDependency = [...dependencyResults, ...allTasks].find(item => item.id === dependencyTaskId)
+  const taskCompleted = visibleTask?.status_detail?.category === 'done' || visibleTask?.status === 'completed'
+  const openChildTask = (childTaskId: string) => {
+    const currentTask = taskRef.current
+    if (!currentTask) return
+    taskNavigationReturnRef.current = {
+      parentTaskId: currentTask.id,
+      childTaskId,
+      scrollTop: detailsScrollRef.current?.scrollTop || 0,
+      tab,
+    }
+    onOpenTask(childTaskId)
+  }
+  const returnToParent = () => {
+    const currentTask = taskRef.current
+    if (!currentTask?.parent_task_id) return
+    const saved = taskNavigationReturnRef.current
+    pendingParentRestoreRef.current = saved?.parentTaskId === currentTask.parent_task_id
+      ? saved
+      : { parentTaskId: currentTask.parent_task_id, childTaskId: currentTask.id, scrollTop: 0, tab: 'details' }
+    onOpenTask(currentTask.parent_task_id)
+  }
 
   const updateTask = useCallback((key: string, body: Record<string, unknown>, confirmGrants = false): Promise<boolean> => {
     const requestedTaskId = taskIdRef.current
     if (!requestedTaskId) return Promise.resolve(false)
-    beginPending(key)
+    beginPending(key, requestedTaskId)
     if (['title', 'description', 'dates', 'progress'].includes(key)) preservedDraftKeysRef.current.add(key)
     const execute = async () => {
-      const current = taskRef.current
-      if (!current || current.id !== requestedTaskId || taskIdRef.current !== requestedTaskId) return false
+      const current = taskSnapshotsRef.current.get(requestedTaskId)
+        || (taskRef.current?.id === requestedTaskId ? taskRef.current : undefined)
+        || allTasksRef.current.find(item => item.id === requestedTaskId)
+      if (!current) return false
       if (!canEditTask(current)) {
-        showFailure('No tienes permiso para modificar esta tarea.')
+        showFailure('No tienes permiso para modificar esta tarea.', undefined, requestedTaskId)
         return false
       }
       const operationID = crypto.randomUUID()
+      const visualUpdate: TaskVisualUpdate = {}
+      if (typeof body.status_id === 'string') visualUpdate.status_id = body.status_id
+      if (typeof body.priority === 'string' && ['low', 'medium', 'high', 'urgent'].includes(body.priority)) visualUpdate.priority = body.priority as Task['priority']
+      const hasVisualUpdate = Boolean(visualUpdate.status_id || visualUpdate.priority)
+      if (hasVisualUpdate) {
+        const optimistic = projectTaskVisualUpdate(current, visualUpdate, workflows.flatMap(workflow => workflow.statuses || []))
+        applyTask(optimistic)
+        onChanged(optimistic, operationID)
+      }
       const result = await apiPut<TaskMutationResponse>(`/api/tasks/${requestedTaskId}`, { ...body, version: current.version, operation_id: operationID, confirm_grants: confirmGrants })
-      if (taskIdRef.current !== requestedTaskId) return false
       if (!result.success || !result.data?.task) {
+        if (hasVisualUpdate) {
+          applyTask(current)
+          onChanged(current, operationID)
+        }
         if (result.status === 409 && result.data?.code === 'access_change_confirmation_required') {
-          const retryBody = draftBodiesRef.current[key] || body
-          setParticipantGrantPrompt({
-            affectedUserIDs: result.data.affected_user_ids || [],
-            retry: () => { void updateTaskRef.current(key, retryBody, true) },
-          })
+          const retryBody = body
+          if (taskIdRef.current === requestedTaskId) {
+            setParticipantGrantPrompt({
+              taskId: requestedTaskId,
+              affectedUserIDs: result.data.affected_user_ids || [],
+              retry: () => { void updateTaskRef.current(key, retryBody, true) },
+            })
+          } else showFailure('Este cambio necesita confirmar acceso. Vuelve a la tarea para continuar.', () => onOpenTaskRef.current(requestedTaskId), requestedTaskId)
           return false
         }
-        if (result.status === 409) await refreshTask()
-        showFailure(result.status === 409 ? 'La tarea cambió en otra sesión. Conservamos tu borrador para que puedas volver a guardarlo.' : result.error || 'No se pudo guardar el cambio', () => { void updateTaskRef.current(key, draftBodiesRef.current[key] || body) })
+        if (result.status === 409 && taskIdRef.current === requestedTaskId) await refreshTask()
+        showFailure(result.status === 409 ? 'La tarea cambió en otra sesión. Conservamos tu borrador para que puedas volver a guardarlo.' : result.error || 'No se pudo guardar el cambio', () => {
+          if (taskIdRef.current !== requestedTaskId) onOpenTaskRef.current(requestedTaskId)
+          window.setTimeout(() => { void updateTaskRef.current(key, body) })
+        }, requestedTaskId)
         return false
       }
-      clearFailure()
-      preservedDraftKeysRef.current.delete(key)
+      clearFailure(requestedTaskId)
+      if (taskIdRef.current === requestedTaskId) preservedDraftKeysRef.current.delete(key)
+      const savedDraft = draftsByTaskRef.current.get(requestedTaskId)
+      if (savedDraft) {
+        if (key === 'title') savedDraft.title = result.data.task.title
+        if (key === 'description') savedDraft.description = result.data.task.description || ''
+        draftsByTaskRef.current.set(requestedTaskId, savedDraft)
+      }
       applyTask(result.data.task)
       onChanged(result.data.task, result.data.operation_id || operationID, result.data.hierarchy_counts)
       return true
     }
-    const queued = taskWriteQueueRef.current.then(execute, execute)
-    taskWriteQueueRef.current = queued.then(() => undefined, () => undefined)
-    return queued.finally(() => endPending(key))
-  }, [applyTask, beginPending, clearFailure, endPending, onChanged, refreshTask, showFailure])
+    const previousQueue = taskWriteQueuesRef.current.get(requestedTaskId) || Promise.resolve()
+    const queued = previousQueue.then(execute, execute)
+    taskWriteQueuesRef.current.set(requestedTaskId, queued.then(() => undefined, () => undefined))
+    return queued.finally(() => endPending(key, requestedTaskId))
+  }, [applyTask, beginPending, clearFailure, endPending, onChanged, refreshTask, showFailure, workflows])
   updateTaskRef.current = updateTask
 
 	const changeColor = async (nextColor: string | null) => {
 		const current = taskRef.current
 		if (!current || !canEditTask(current) || isPending('color')) return
+		const requestedTaskId = current.id
 		const listColor = lists.find(item => item.id === current.list_id)?.color
 		const optimisticColor = resolveTaskIdentityColor(nextColor, listColor)
 		const snapshot = current
-		beginPending('color')
+		beginPending('color', requestedTaskId)
 		applyTask({ ...current, color: nextColor || undefined, resolved_color: optimisticColor.color, color_source: optimisticColor.source })
 		const operationID = crypto.randomUUID()
 		const result = await apiPatch<TaskMutationResponse>(`/api/tasks/${current.id}/appearance`, { color: nextColor, version: current.version, operation_id: operationID })
-		endPending('color')
+		endPending('color', requestedTaskId)
 		if (!result.success || !result.data?.task) {
 			applyTask(snapshot)
-			if (result.status === 409) await refreshTask()
-			showFailure(result.status === 409 ? 'El color cambió en otra sesión. Cargamos la versión canónica.' : result.error || 'No se pudo cambiar el color; restauramos el anterior.', () => { void changeColor(nextColor) })
+			if (result.status === 409 && taskIdRef.current === requestedTaskId) await refreshTask()
+			showFailure(result.status === 409 ? 'El color cambió en otra sesión. Cargamos la versión canónica.' : result.error || 'No se pudo cambiar el color; restauramos el anterior.', () => { if (taskIdRef.current !== requestedTaskId) onOpenTaskRef.current(requestedTaskId); else void changeColor(nextColor) }, requestedTaskId)
 			return
 		}
-		clearFailure(); applyTask(result.data.task); onChanged(result.data.task, result.data.operation_id || operationID, result.data.hierarchy_counts)
+		clearFailure(requestedTaskId); applyTask(result.data.task); onChanged(result.data.task, result.data.operation_id || operationID, result.data.hierarchy_counts)
 	}
 
   const saveTitle = async () => {
@@ -685,7 +964,7 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
     if (task && descriptionDraft !== (task.description || '')) return updateTask('description', { description: descriptionDraft })
     return true
   }
-  const saveDates = async (startValue = startDraft, dueValue = dueDraft) => {
+  const saveDates = async (startValue = startDraft, dueValue = dueDraft, isAllDay = allDayDraft) => {
     editingDatesRef.current = false
     if (!task) return
     if (startValue && dueValue && new Date(dueValue) < new Date(startValue)) {
@@ -694,16 +973,37 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
     }
     const nextStart = startValue ? new Date(startValue).toISOString() : ''
     const nextDue = dueValue ? new Date(dueValue).toISOString() : ''
-    if (nextStart !== (task.start_at || '') || nextDue !== (task.due_at || '')) await updateTask('dates', { start_at: nextStart, due_at: nextDue })
+    if (nextStart !== (task.start_at || '') || nextDue !== (task.due_at || '') || isAllDay !== Boolean(task.is_all_day)) await updateTask('dates', { start_at: nextStart, due_at: nextDue, is_all_day: isAllDay })
   }
   const saveProgress = async (mode = progressMode, manual = progressDraft) => {
     editingProgressRef.current = false
     if (task && (mode !== (task.progress_mode || 'manual') || manual !== (task.manual_progress ?? task.progress ?? 0))) await updateTask('progress', { progress_mode: mode, manual_progress: manual })
   }
+  const commitManualProgress = async () => {
+    editingProgressRef.current = false
+    const validation = validateManualProgress(progressInput)
+    if (!validation.valid) {
+      setProgressError(validation.error)
+      return
+    }
+    setProgressError('')
+    setProgressDraft(validation.value)
+    setProgressInput(String(validation.value))
+    await saveProgress('manual', validation.value)
+  }
+  const changeProgressMode = (mode: 'manual' | 'automatic') => {
+    if (mode === progressMode) return
+    editingProgressRef.current = false
+    setProgressError('')
+    setProgressInput(String(progressDraft))
+    setProgressMode(mode)
+    void saveProgress(mode, progressDraft)
+  }
 
   const setCollaborator = async (userId: string, intendedSelected?: boolean, confirmGrants = false) => {
     const currentTask = taskRef.current
     if (!currentTask || !canEditTask(currentTask) || isPending('collaborators')) return
+    const requestedTaskId = currentTask.id
     const ids = currentTask.collaborators?.map(item => item.user_id) || []
     const selected = ids.includes(userId)
     const shouldSelect = intendedSelected ?? !selected
@@ -716,7 +1016,7 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
     const optimisticCollaborators = shouldSelect
       ? [...(currentTask.collaborators || []), { user_id: userId, display_name: participant?.display_name || participant?.username || 'Usuario', username: participant?.username || '', created_at: new Date().toISOString() }]
       : (currentTask.collaborators || []).filter(item => item.user_id !== userId)
-    beginPending('collaborators')
+    beginPending('collaborators', requestedTaskId)
     applyTask({ ...currentTask, collaborators: optimisticCollaborators })
     const operationID = crypto.randomUUID()
     const result = await apiPut<{ task?: Task; collaborators?: Task['collaborators']; version?: number; code?: string; affected_user_ids?: string[] }>(`/api/tasks/${currentTask.id}/collaborators`, {
@@ -725,25 +1025,27 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
       operation_id: operationID,
       confirm_grants: confirmGrants,
     })
-    if (taskIdRef.current === currentTask.id && result.success && result.data?.task) {
+    if (result.success && result.data?.task) {
       const canonical = { ...result.data.task, collaborators: result.data.collaborators ?? [] }
       applyTask(canonical)
       onChanged(canonical)
-      clearFailure()
+      clearFailure(requestedTaskId)
     } else if (result.status === 409 && result.data?.code === 'access_change_confirmation_required') {
-      if (taskIdRef.current === currentTask.id) applyTask(currentTask)
-      setParticipantGrantPrompt({
-        affectedUserIDs: result.data.affected_user_ids || [],
-        retry: () => { void setCollaborator(userId, shouldSelect, true) },
-      })
+      applyTask(currentTask)
+      if (taskIdRef.current === requestedTaskId) setParticipantGrantPrompt({
+          taskId: requestedTaskId,
+          affectedUserIDs: result.data.affected_user_ids || [],
+          retry: () => { void setCollaborator(userId, shouldSelect, true) },
+        })
+      else showFailure('Este cambio necesita confirmar acceso. Vuelve a la tarea para continuar.', () => onOpenTaskRef.current(requestedTaskId), requestedTaskId)
     } else if (result.status === 409) {
-      await refreshTask()
-      showFailure('La tarea cambió en otra sesión. Ya cargamos la versión reciente; puedes aplicar tu selección nuevamente.', () => { void setCollaborator(userId, shouldSelect) })
+      if (taskIdRef.current === requestedTaskId) await refreshTask()
+      showFailure('La tarea cambió en otra sesión. Ya cargamos la versión reciente; puedes aplicar tu selección nuevamente.', () => { if (taskIdRef.current !== requestedTaskId) onOpenTaskRef.current(requestedTaskId); else void setCollaborator(userId, shouldSelect) }, requestedTaskId)
     } else if (!result.success) {
-      if (taskIdRef.current === currentTask.id) applyTask(currentTask)
-      showFailure(result.error || 'No se pudieron actualizar los colaboradores', () => { void setCollaborator(userId, shouldSelect) })
+      applyTask(currentTask)
+      showFailure(result.error || 'No se pudieron actualizar los colaboradores', () => { if (taskIdRef.current !== requestedTaskId) onOpenTaskRef.current(requestedTaskId); else void setCollaborator(userId, shouldSelect) }, requestedTaskId)
     }
-    endPending('collaborators')
+    endPending('collaborators', requestedTaskId)
   }
 
   const setCollaboratorSelection = (nextIDs: string[]) => {
@@ -755,92 +1057,149 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
   }
 
   const toggleChild = async (child: Task) => {
-    if (!canEditTask(taskRef.current)) return
-    const done = child.status_detail?.category === 'done'
-    const status = statuses.find(item => item.category === (done ? 'not_started' : 'done'))
-    if (!status || isPending(`child:${child.id}`)) return
-    beginPending(`child:${child.id}`)
-    const result = await apiPut<{ task: Task }>(`/api/tasks/${child.id}`, { status_id: status.id, version: child.version })
+    const ownerTaskId = taskRef.current?.id
+    if (!ownerTaskId || !canEditTask(taskRef.current)) return
+    const transition = taskCompletionTransition(child, statuses)
+    if (!transition || isPending(`child:${child.id}`)) return
+    const operationID = crypto.randomUUID()
+    const optimistic = projectTaskVisualUpdate(child, { status_id: transition.target.id }, statuses)
+    beginPending(`child:${child.id}`, ownerTaskId)
+    if (taskIdRef.current === ownerTaskId) setChildren(current => current.map(item => item.id === child.id ? optimistic : item))
+    onChanged(optimistic, operationID)
+    const result = await apiPut<TaskMutationResponse>(`/api/tasks/${child.id}`, { status_id: transition.target.id, version: child.version, operation_id: operationID })
     if (result.success && result.data?.task) {
-      setChildren(current => current.map(item => item.id === child.id ? result.data!.task : item))
-      onChanged()
+      const canonicalChild = result.data.task
+      if (taskIdRef.current === ownerTaskId) setChildren(current => current.map(item => item.id === child.id ? canonicalChild : item))
+      onChanged(canonicalChild, result.data.operation_id || operationID, result.data.hierarchy_counts)
     } else if (result.status === 409) {
-      await refreshChildren()
-      showFailure('La subtarea cambió en otra sesión. Ya cargamos su versión más reciente; vuelve a intentarlo.')
-    } else showFailure(result.error || 'No se pudo actualizar la subtarea', () => { void toggleChild(child) })
-    endPending(`child:${child.id}`)
+      if (taskIdRef.current === ownerTaskId) setChildren(current => current.map(item => item.id === child.id ? child : item))
+      onChanged(child, operationID)
+      if (taskIdRef.current === ownerTaskId) await refreshChildren()
+      showFailure('La subtarea cambió en otra sesión. Ya cargamos su versión más reciente; vuelve a intentarlo.', undefined, ownerTaskId)
+    } else {
+      if (taskIdRef.current === ownerTaskId) setChildren(current => current.map(item => item.id === child.id ? child : item))
+      onChanged(child, operationID)
+      showFailure(result.error || 'No se pudo actualizar la subtarea', () => onOpenTaskRef.current(ownerTaskId), ownerTaskId)
+    }
+    endPending(`child:${child.id}`, ownerTaskId)
   }
 
-  const createQuickSubtask = async (confirmGrants = false) => {
+  const createQuickSubtask = async (draft = subtaskDraft, confirmGrants = false) => {
     const currentTask = taskRef.current
-    const title = subtaskTitle.trim()
+    const title = draft.title.trim()
     if (!currentTask || !canEditTask(currentTask) || !title || isPending('subtask-create')) return
-    beginPending('subtask-create')
-    const result = await apiPost<{ task?: Task; code?: string; affected_user_ids?: string[] }>(`/api/tasks/${currentTask.id}/children`, { title, operation_id: crypto.randomUUID(), confirm_grants: confirmGrants })
-    if (taskIdRef.current === currentTask.id && result.success && result.data?.task) {
+    if (draft.startAt && draft.dueAt && new Date(draft.dueAt) < new Date(draft.startAt)) {
+      showFailure('La entrega de la subtarea no puede ser anterior al inicio.')
+      return
+    }
+    const requestedTaskId = currentTask.id
+    const operationID = crypto.randomUUID()
+    beginPending('subtask-create', requestedTaskId)
+    const result = await apiPost<TaskMutationResponse>(`/api/tasks/${currentTask.id}/children`, {
+      title,
+      assigned_to: draft.assignedTo,
+      status_id: draft.statusId,
+      priority: draft.priority,
+      start_at: draft.startAt ? new Date(draft.startAt).toISOString() : '',
+      due_at: draft.dueAt ? new Date(draft.dueAt).toISOString() : '',
+      is_all_day: draft.isAllDay,
+      operation_id: operationID,
+      confirm_grants: confirmGrants,
+    })
+    if (result.success && result.data?.task) {
       const createdChild = result.data.task
-      setChildren(current => current.some(item => item.id === createdChild.id) ? current : [...current, createdChild])
-      setSubtaskTitle('')
-      setTask(current => current ? { ...current, subtask_count: (current.subtask_count || 0) + 1 } : current)
-      onChanged()
-      window.setTimeout(() => { void refreshActivity() }, 120)
+      if (taskIdRef.current === requestedTaskId) {
+        setChildren(current => current.some(item => item.id === createdChild.id) ? current : [...current, createdChild])
+        subtaskDraftTouchedRef.current = false
+        setSubtaskDraft(createTaskQuickSubtaskDraft(currentTask, statuses))
+        setTask(current => current ? { ...current, subtask_count: (current.subtask_count || 0) + 1 } : current)
+        window.setTimeout(() => { void refreshActivity() }, 120)
+      }
+      const saved = draftsByTaskRef.current.get(requestedTaskId)
+      if (saved) draftsByTaskRef.current.set(requestedTaskId, { ...saved, subtaskDraft: createTaskQuickSubtaskDraft(currentTask, statuses), subtaskDraftTouched: false })
+      onChanged(createdChild, result.data.operation_id || operationID, result.data.hierarchy_counts)
     } else if (result.status === 409 && result.data?.code === 'access_change_confirmation_required') {
-      setParticipantGrantPrompt({
+      if (taskIdRef.current === requestedTaskId) setParticipantGrantPrompt({
+        taskId: requestedTaskId,
         affectedUserIDs: result.data.affected_user_ids || [],
-        retry: () => { void createQuickSubtask(true) },
+        retry: () => { void createQuickSubtask(draft, true) },
       })
-    } else if (!result.success) showFailure(result.error || 'No se pudo crear la subtarea', () => { void createQuickSubtask() })
-    endPending('subtask-create')
+      else showFailure('La subtarea requiere confirmar acceso. Vuelve a la tarea para continuar.', () => onOpenTaskRef.current(requestedTaskId), requestedTaskId)
+    } else if (!result.success) showFailure(result.error || 'No se pudo crear la subtarea', () => { if (taskIdRef.current !== requestedTaskId) onOpenTaskRef.current(requestedTaskId); else void createQuickSubtask(draft) }, requestedTaskId)
+    endPending('subtask-create', requestedTaskId)
   }
 
   const sendComment = async () => {
     const currentTask = taskRef.current
     if (!currentTask || !canCommentOnTask(currentTask) || !comment.trim() || isPending('comment-create')) return
-    beginPending('comment-create')
+    const requestedTaskId = currentTask.id
+    const submittedAttachmentIds = [...commentAttachmentIds]
+    beginPending('comment-create', requestedTaskId)
     const result = await apiPost<{ comment: TaskComment }>(`/api/tasks/${currentTask.id}/comments`, {
       body: comment.trim(),
       mentioned_user_ids: commentMentionIds,
       attachment_ids: commentAttachmentIds,
     })
-    if (taskIdRef.current === currentTask.id && result.success && result.data?.comment) {
-      if (!commentsRef.current.some(item => item.id === result.data!.comment.id)) {
+    if (result.success && result.data?.comment) {
+      if (taskIdRef.current === requestedTaskId && !commentsRef.current.some(item => item.id === result.data!.comment.id)) {
         if (commentsNextOffsetRef.current > 0) commentsNextOffsetRef.current++
         commentsRef.current = [...commentsRef.current, result.data.comment]
         setComments(commentsRef.current)
       }
-      setComment('')
-      setCommentMentionIds([])
-      setCommentAttachmentIds([])
-      setCommentAttachmentLookup(current => removeCommentAttachmentDrafts(current, commentAttachmentIds))
-      window.setTimeout(() => { void refreshActivity() }, 120)
-    } else if (!result.success) showFailure(result.error || 'No se pudo publicar el comentario', () => { void sendComment() })
-    endPending('comment-create')
+      if (taskIdRef.current === requestedTaskId) {
+        setComment('')
+        setCommentMentionIds([])
+        setCommentAttachmentIds([])
+        setCommentAttachmentLookup(current => removeCommentAttachmentDrafts(current, submittedAttachmentIds))
+        window.setTimeout(() => { void refreshActivity() }, 120)
+      }
+      const saved = draftsByTaskRef.current.get(requestedTaskId)
+      if (saved) draftsByTaskRef.current.set(requestedTaskId, { ...saved, comment: '', commentMentionIds: [], commentAttachmentIds: [], commentAttachmentLookup: removeCommentAttachmentDrafts(saved.commentAttachmentLookup, submittedAttachmentIds) })
+    } else if (!result.success) showFailure(result.error || 'No se pudo publicar el comentario', () => onOpenTaskRef.current(requestedTaskId), requestedTaskId)
+    endPending('comment-create', requestedTaskId)
   }
 
   const saveComment = async (item: TaskComment) => {
     const currentTask = taskRef.current
     const key = `comment-edit:${item.id}`
     if (!currentTask || !canCommentOnTask(currentTask) || !item.can_edit || !editingCommentBody.trim() || isPending(key)) return
-    beginPending(key)
+    const requestedTaskId = currentTask.id
+    beginPending(key, requestedTaskId)
     const result = await apiPut<{ comment: TaskComment }>(`/api/tasks/${currentTask.id}/comments/${item.id}`, {
       body: editingCommentBody.trim(),
       mentioned_user_ids: editingMentionIds,
       attachment_ids: editingAttachmentIds,
     })
-    if (taskIdRef.current === currentTask.id && result.success && result.data?.comment) {
-      commentsRef.current = commentsRef.current.map(commentItem => commentItem.id === item.id ? result.data!.comment : commentItem)
-      setComments(commentsRef.current)
-      setEditingCommentId('')
-      setCommentAttachmentLookup(current => removeCommentAttachmentDrafts(current, editingAttachmentIds))
-    } else if (!result.success) showFailure(result.error || 'No se pudo editar el comentario', () => { void saveComment(item) })
-    endPending(key)
+    if (result.success && result.data?.comment) {
+      const submittedAttachmentIds = [...editingAttachmentIds]
+      if (taskIdRef.current === requestedTaskId) {
+        commentsRef.current = commentsRef.current.map(commentItem => commentItem.id === item.id ? result.data!.comment : commentItem)
+        setComments(commentsRef.current)
+        setEditingCommentId('')
+        setEditingCommentBody('')
+        setEditingMentionIds([])
+        setEditingAttachmentIds([])
+        setCommentAttachmentLookup(current => removeCommentAttachmentDrafts(current, submittedAttachmentIds))
+      }
+      const saved = draftsByTaskRef.current.get(requestedTaskId)
+      if (saved) draftsByTaskRef.current.set(requestedTaskId, {
+        ...saved,
+        editingCommentId: '',
+        editingCommentBody: '',
+        editingMentionIds: [],
+        editingAttachmentIds: [],
+        commentAttachmentLookup: removeCommentAttachmentDrafts(saved.commentAttachmentLookup, submittedAttachmentIds),
+      })
+    } else if (!result.success) showFailure(result.error || 'No se pudo editar el comentario', () => onOpenTaskRef.current(requestedTaskId), requestedTaskId)
+    endPending(key, requestedTaskId)
   }
 
   const deleteComment = async (item: TaskComment) => {
     const currentTask = taskRef.current
     const key = `comment-delete:${item.id}`
     if (!currentTask || !canCommentOnTask(currentTask) || !item.can_delete || !window.confirm('¿Eliminar este comentario?') || isPending(key)) return
-    beginPending(key)
+    const requestedTaskId = currentTask.id
+    beginPending(key, requestedTaskId)
     const result = await apiDelete(`/api/tasks/${currentTask.id}/comments/${item.id}`)
     if (taskIdRef.current === currentTask.id && result.success) {
       const existed = commentsRef.current.some(commentItem => commentItem.id === item.id)
@@ -848,37 +1207,60 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
       commentsRef.current = commentsRef.current.filter(commentItem => commentItem.id !== item.id)
       setComments(commentsRef.current)
     }
-    else if (!result.success) showFailure(result.error || 'No se pudo eliminar el comentario')
-    endPending(key)
+    else if (!result.success) showFailure(result.error || 'No se pudo eliminar el comentario', undefined, requestedTaskId)
+    endPending(key, requestedTaskId)
   }
 
-  const upload = async (file?: File, target: 'task' | 'comment' | 'edit-comment' = 'task') => {
-    const currentTask = taskRef.current
+  const upload = async (file: File, target: 'task' | 'comment' | 'edit-comment', context: TaskUploadContext) => {
+    const currentTask = context.task
     const key = `upload:${target}`
     const allowed = target === 'task' ? canEditTask(currentTask) : canCommentOnTask(currentTask)
-    if (!currentTask || !allowed || !file || isPending(key)) return
-    beginPending(key)
+    if (!allowed) return
+    const requestedTaskId = context.taskId
+    beginPending(key, requestedTaskId)
 	const form = taskAttachmentUploadForm(file, crypto.randomUUID(), target === 'task' ? 'task' : 'comment')
-    const attached = await apiUpload<{ success?: boolean; attachment: TaskAttachment; deduped?: boolean; operation_id?: string }>(taskAttachmentUploadEndpoint(currentTask.id), form)
-    if (taskIdRef.current === currentTask.id && attached.success && attached.data?.attachment) {
+    const attached = await apiUpload<{ success?: boolean; attachment: TaskAttachment; deduped?: boolean; operation_id?: string }>(taskAttachmentUploadEndpoint(requestedTaskId), form)
+    if (attached.success && attached.data?.attachment) {
       const uploaded = attached.data.attachment
-      if (target === 'task') setAttachments(current => current.some(item => item.id === uploaded.id) ? current : [...current, uploaded])
-      else setCommentAttachmentLookup(current => mergeCommentAttachmentDrafts(current, [uploaded]))
-      if (target === 'comment') setCommentAttachmentIds(current => current.includes(uploaded.id) ? current : [...current, uploaded.id])
-      if (target === 'edit-comment') setEditingAttachmentIds(current => current.includes(uploaded.id) ? current : [...current, uploaded.id])
-    } else if (!attached.success || !attached.data?.attachment) showFailure(attached.error || 'No se pudo adjuntar el archivo', () => { void upload(file, target) })
-    endPending(key)
-    if (fileRef.current) fileRef.current.value = ''
-    if (commentFileRef.current) commentFileRef.current.value = ''
-    if (editCommentFileRef.current) editCommentFileRef.current.value = ''
+      if (target !== 'task') {
+        const saved = draftsByTaskRef.current.get(requestedTaskId)
+          || (taskIdRef.current === requestedTaskId ? currentDraftRef.current : null)
+        if (saved) draftsByTaskRef.current.set(requestedTaskId, {
+          ...saved,
+          commentAttachmentLookup: mergeCommentAttachmentDrafts(saved.commentAttachmentLookup, [uploaded]),
+          commentAttachmentIds: target === 'comment' && !saved.commentAttachmentIds.includes(uploaded.id)
+            ? [...saved.commentAttachmentIds, uploaded.id]
+            : saved.commentAttachmentIds,
+          editingAttachmentIds: target === 'edit-comment' && !saved.editingAttachmentIds.includes(uploaded.id)
+            ? [...saved.editingAttachmentIds, uploaded.id]
+            : saved.editingAttachmentIds,
+        })
+      }
+      if (taskIdRef.current === requestedTaskId) {
+        if (target === 'task') setAttachments(current => current.some(item => item.id === uploaded.id) ? current : [...current, uploaded])
+        else setCommentAttachmentLookup(current => mergeCommentAttachmentDrafts(current, [uploaded]))
+        if (target === 'comment') setCommentAttachmentIds(current => current.includes(uploaded.id) ? current : [...current, uploaded.id])
+        if (target === 'edit-comment') setEditingAttachmentIds(current => current.includes(uploaded.id) ? current : [...current, uploaded.id])
+      }
+    } else if (!attached.success || !attached.data?.attachment) showFailure(attached.error || 'No se pudo adjuntar el archivo', () => onOpenTaskRef.current(requestedTaskId), requestedTaskId)
+    endPending(key, requestedTaskId)
+    if (taskIdRef.current === requestedTaskId && loadSequenceRef.current === context.generation) {
+      const input = target === 'task' ? fileRef.current : target === 'comment' ? commentFileRef.current : editCommentFileRef.current
+      if (input) input.value = ''
+    }
   }
 
   const uploadFiles = async (files: File[], target: 'task' | 'comment' | 'edit-comment' = 'task') => {
-    for (const file of files) await upload(file, target)
+    const currentTask = taskRef.current
+    const key = `upload:${target}`
+    const allowed = target === 'task' ? canEditTask(currentTask) : canCommentOnTask(currentTask)
+    if (!currentTask || !allowed || !files.length || isTaskPending(key, currentTask.id)) return
+    const context: TaskUploadContext = { task: currentTask, taskId: currentTask.id, generation: loadSequenceRef.current }
+    for (const file of files) await upload(file, target, context)
   }
 
   const pasteTaskImages = (event: ReactClipboardEvent<HTMLElement>) => {
-    if (!canEditTask(taskRef.current)) return
+    if (!taskRef.current || taskRef.current.id !== taskIdRef.current || !canEditTask(taskRef.current)) return
     const files = taskImageFilesFromClipboard(event.clipboardData)
     if (!files.length) return
     event.preventDefault()
@@ -901,9 +1283,10 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
   const addDependency = async () => {
     const currentTask = taskRef.current
     if (!currentTask || !canEditTask(currentTask) || !dependencyTaskId || isPending('dependency-create')) return
-    beginPending('dependency-create')
+    const requestedTaskId = currentTask.id
+    beginPending('dependency-create', requestedTaskId)
     const result = await apiPost<{ dependency: TaskDependency }>(`/api/tasks/${currentTask.id}/dependencies`, { predecessor_task_id: dependencyTaskId, lag_minutes: 0 })
-    if (taskIdRef.current === currentTask.id && result.success) {
+    if (taskIdRef.current === requestedTaskId && result.success) {
       await refreshDependencies()
       dependencySearchAbortRef.current?.abort()
       dependencySearchSequenceRef.current += 1
@@ -913,50 +1296,56 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
       setDependencyPickerOpen(false)
       onChanged()
       window.setTimeout(() => { void refreshActivity() }, 120)
-    } else if (!result.success) showFailure(result.error || 'No se pudo crear la dependencia', () => { void addDependency() })
-    endPending('dependency-create')
+    } else if (!result.success) showFailure(result.error || 'No se pudo crear la dependencia', () => onOpenTaskRef.current(requestedTaskId), requestedTaskId)
+    endPending('dependency-create', requestedTaskId)
   }
 
   const removeDependency = async (item: TaskDependency) => {
     const currentTask = taskRef.current
     const key = `dependency-delete:${item.id}`
     if (!currentTask || !canEditTask(currentTask) || isPending(key)) return
-    beginPending(key)
+    const requestedTaskId = currentTask.id
+    beginPending(key, requestedTaskId)
     const result = await apiDelete(`/api/tasks/${currentTask.id}/dependencies/${item.id}`)
-    if (result.success) setDependencies(current => current.filter(candidate => candidate.id !== item.id))
-    else showFailure(result.error || 'No se pudo eliminar la dependencia')
-    endPending(key)
+    if (result.success && taskIdRef.current === requestedTaskId) setDependencies(current => current.filter(candidate => candidate.id !== item.id))
+    else if (!result.success) showFailure(result.error || 'No se pudo eliminar la dependencia', undefined, requestedTaskId)
+    endPending(key, requestedTaskId)
   }
 
   const removeAttachment = async (item: TaskAttachment) => {
     const currentTask = taskRef.current
     const key = `attachment-delete:${item.id}`
     if (!currentTask || !canEditTask(currentTask) || isPending(key)) return
-    beginPending(key)
+    const requestedTaskId = currentTask.id
+    beginPending(key, requestedTaskId)
     const result = await apiDelete(`/api/tasks/${currentTask.id}/attachments/${item.id}`)
-    if (result.success) {
+    if (result.success && taskIdRef.current === requestedTaskId) {
       setAttachments(current => current.filter(file => file.id !== item.id))
       setPreviewAttachment(current => current?.id === item.id ? null : current)
       removeAttachmentReferences(item.id)
     }
-    else showFailure(result.error || 'No se pudo eliminar el archivo')
-    endPending(key)
+    else if (!result.success) showFailure(result.error || 'No se pudo eliminar el archivo', undefined, requestedTaskId)
+    endPending(key, requestedTaskId)
   }
 
   const removeTask = async () => {
-    const currentTask = taskRef.current
+    const requestedTaskId = archiveTaskId
+    if (!requestedTaskId || taskIdRef.current !== requestedTaskId) return
+    const currentTask = taskSnapshotsRef.current.get(requestedTaskId)
+      || (taskRef.current?.id === requestedTaskId ? taskRef.current : null)
     if (!currentTask || !canAdministerTask(currentTask)) return
     setArchiveError('')
-    beginPending('archive')
+    beginPending('archive', requestedTaskId)
     const operationID = crypto.randomUUID()
     const result = await apiDelete<{ task: Task; version: number; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>(`/api/tasks/${currentTask.id}`, { version: currentTask.version, operation_id: operationID })
     if (result.success) {
       const archivedVersion = result.data?.task?.version || result.data?.version
-      setArchiveConfirmOpen(false)
-      if (onDeleted(currentTask.id, archivedVersion, result.data?.operation_id || operationID, result.data?.hierarchy_counts)) onClose()
-      else await refreshTask()
-    } else setArchiveError(result.error || 'No se pudo mover la tarea a Papelera. Reintenta.')
-    endPending('archive')
+      if (taskIdRef.current === requestedTaskId) setArchiveConfirmOpen(false)
+      if (onDeleted(currentTask.id, archivedVersion, result.data?.operation_id || operationID, result.data?.hierarchy_counts) && taskIdRef.current === requestedTaskId) onClose()
+      else if (taskIdRef.current === requestedTaskId) await refreshTask()
+    } else if (taskIdRef.current === requestedTaskId) setArchiveError(result.error || 'No se pudo mover la tarea a Papelera. Reintenta.')
+    else showFailure(result.error || 'No se pudo mover la tarea a Papelera.', () => onOpenTaskRef.current(requestedTaskId), requestedTaskId)
+    endPending('archive', requestedTaskId)
   }
 
   const feed = useMemo<FeedItem[]>(() => {
@@ -1010,7 +1399,7 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
         {editingCommentId === item.id ? <div className="mt-3 space-y-2">
           <textarea autoFocus rows={3} value={editingCommentBody} onChange={event => setEditingCommentBody(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void saveComment(item) } }} className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-emerald-400 focus:bg-white" />
           <div className="flex flex-wrap gap-1.5">{editingMentionIds.map(id => { const user = users.find(candidate => candidate.id === id); return <button key={id} onClick={() => setEditingMentionIds(current => current.filter(value => value !== id))} className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold text-emerald-700">@{user?.display_name || user?.username} ×</button> })}{editingAttachmentIds.map(id => { const file = resolveCommentAttachment(id, commentAttachmentLookup, attachments); return <button key={id} onClick={() => setEditingAttachmentIds(current => current.filter(value => value !== id))} className="rounded-full bg-slate-200 px-2 py-1 text-[10px] font-semibold text-slate-600">{file?.filename || 'Archivo'} ×</button> })}</div>
-          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2"><TaskUserCombobox users={users} value="" onChange={id => addMention(id, true)} excludeIds={editingMentionIds} placeholder="Mencionar a alguien…" /><button onClick={() => editCommentFileRef.current?.click()} className="flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50"><Paperclip className="h-4 w-4" /></button><input ref={editCommentFileRef} type="file" className="hidden" onChange={event => void upload(event.target.files?.[0], 'edit-comment')} /></div>
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2"><TaskUserCombobox users={users} value="" onChange={id => addMention(id, true)} excludeIds={editingMentionIds} placeholder="Mencionar a alguien…" /><button onClick={() => editCommentFileRef.current?.click()} className="flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50"><Paperclip className="h-4 w-4" /></button><input ref={editCommentFileRef} type="file" className="hidden" onChange={event => void uploadFiles(Array.from(event.target.files || []), 'edit-comment')} /></div>
           <div className="flex justify-end gap-2"><button onClick={() => setEditingCommentId('')} className="min-h-9 rounded-lg px-3 text-xs font-semibold text-slate-500 hover:bg-slate-100">Cancelar</button><button disabled={isPending(editKey) || !editingCommentBody.trim()} onClick={() => void saveComment(item)} className="min-h-9 rounded-lg bg-slate-900 px-3 text-xs font-semibold text-white disabled:opacity-40">{isPending(editKey) ? 'Guardando…' : 'Guardar'}</button></div>
         </div> : <>
           <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-5 text-slate-600">{item.body}</p>
@@ -1036,13 +1425,32 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
       <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm focus-within:border-emerald-300 focus-within:ring-4 focus-within:ring-emerald-50">
         <textarea rows={2} value={comment} onChange={event => setComment(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void sendComment() } }} placeholder="Escribe un comentario…" className="w-full resize-none bg-transparent px-1 text-sm text-slate-700 outline-none placeholder:text-slate-400" />
         <div className="mt-2 flex flex-wrap gap-1.5">{commentMentionIds.map(id => { const user = users.find(candidate => candidate.id === id); return <button key={id} onClick={() => setCommentMentionIds(current => current.filter(value => value !== id))} className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold text-emerald-700">@{user?.display_name || user?.username} ×</button> })}{commentAttachmentIds.map(id => { const file = resolveCommentAttachment(id, commentAttachmentLookup, attachments); return <button key={id} onClick={() => setCommentAttachmentIds(current => current.filter(value => value !== id))} className="rounded-full bg-slate-200 px-2 py-1 text-[10px] font-semibold text-slate-600">{file?.filename || 'Archivo'} ×</button> })}</div>
-        <div className="mt-2 flex items-end gap-2"><div className="min-w-0 flex-1"><TaskUserCombobox users={users} value="" onChange={id => addMention(id)} excludeIds={commentMentionIds} placeholder="Mencionar a alguien…" className="py-2" /></div><button title="Adjuntar archivo" onClick={() => commentFileRef.current?.click()} disabled={isPending('upload:comment')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-40">{isPending('upload:comment') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}</button><input ref={commentFileRef} type="file" className="hidden" onChange={event => void upload(event.target.files?.[0], 'comment')} /><button title="Publicar comentario (Ctrl/⌘ + Enter)" onClick={() => void sendComment()} disabled={isPending('comment-create') || !comment.trim()} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white transition hover:bg-emerald-700 disabled:opacity-30">{isPending('comment-create') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button></div>
+        <div className="mt-2 flex items-end gap-2"><div className="min-w-0 flex-1"><TaskUserCombobox users={users} value="" onChange={id => addMention(id)} excludeIds={commentMentionIds} placeholder="Mencionar a alguien…" className="py-2" /></div><button title="Adjuntar archivo" onClick={() => commentFileRef.current?.click()} disabled={isPending('upload:comment')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-40">{isPending('upload:comment') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}</button><input ref={commentFileRef} type="file" className="hidden" onChange={event => void uploadFiles(Array.from(event.target.files || []), 'comment')} /><button title="Publicar comentario (Ctrl/⌘ + Enter)" onClick={() => void sendComment()} disabled={isPending('comment-create') || !comment.trim()} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white transition hover:bg-emerald-700 disabled:opacity-30">{isPending('comment-create') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button></div>
       </div>
       <p className="mt-1.5 hidden text-center text-[10px] text-slate-400 sm:block">Ctrl/⌘ + Enter para publicar</p>
     </div> : <div className="shrink-0 border-t border-slate-200 bg-white px-4 py-3 text-center text-xs font-semibold text-slate-500">Necesitas Comentar para participar en esta conversación.</div>}
   </div>
 
-  const detailsPane = task && <div className="mx-auto w-full max-w-4xl space-y-7 pb-8">
+  const detailsPane = visibleTask && (() => {
+    const task = visibleTask
+    return <div className="mx-auto w-full max-w-4xl space-y-7 pb-8">
+    <section aria-labelledby={`task-properties-${task.id}`}>
+      <div className="mb-3 flex items-end justify-between gap-3"><div><h3 id={`task-properties-${task.id}`} className="text-xs font-black uppercase tracking-[0.14em] text-slate-500">Propiedades</h3><p className="mt-1 text-[11px] text-slate-400">Actualiza lo esencial sin salir de la tarea.</p></div>{Object.keys(pending).some(key => key.startsWith(`${task.id}:`) && !key.includes('comment')) && <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-emerald-600"><Loader2 className="h-3.5 w-3.5 animate-spin" />Guardando</span>}</div>
+      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_8px_24px_rgba(15,23,42,0.04)]">
+        <TaskPropertyRow label="Estado" icon={<Check className="h-3.5 w-3.5" />}>
+          <div className="flex items-center gap-2"><div className="min-w-0 flex-1"><TaskStatusPicker value={task.status_id || ''} statuses={statuses} disabled={!canEdit} pending={isPending('status')} onChange={statusID => { void updateTask('status', { status_id: statusID }) }} /></div><TaskCompletionButton task={task} statuses={statuses} disabled={!canEdit} pending={isPending('status')} onChange={statusID => { void updateTask('status', { status_id: statusID }) }} /></div>
+        </TaskPropertyRow>
+        <TaskPropertyRow label="Responsable" icon={<UserRound className="h-3.5 w-3.5" />}><TaskUserCombobox users={users} value={task.assigned_to} onChange={userId => { void updateTask('owner', { assigned_to: userId }) }} disabled={!canEdit || isPending('owner')} /></TaskPropertyRow>
+        <TaskPropertyRow label="Fechas" icon={<CalendarRange className="h-3.5 w-3.5" />}><TaskDateRangePicker label="Fechas de la tarea" startValue={startDraft} endValue={dueDraft} allDay={allDayDraft} disabled={!canEdit} pending={isPending('dates')} onApply={range => { setStartDraft(range.startAt); setDueDraft(range.endAt); setAllDayDraft(range.isAllDay); void saveDates(range.startAt, range.endAt, range.isAllDay) }} /></TaskPropertyRow>
+        <TaskPropertyRow label="Prioridad" icon={<Flag className="h-3.5 w-3.5" />}><TaskPriorityPicker value={task.priority} disabled={!canEdit} pending={isPending('priority')} onChange={priority => { void updateTask('priority', { priority }) }} /></TaskPropertyRow>
+        <TaskPropertyRow label="Progreso" icon={<Activity className="h-3.5 w-3.5" />}><TaskProgressControl id={`task-progress-${task.id}`} mode={progressMode} inputValue={progressInput} canonicalManualValue={progressDraft} effectiveProgress={task.progress || 0} completed={taskCompleted} disabled={!canEdit} pending={isPending('progress')} error={progressError} subtaskDone={task.subtask_done || 0} subtaskCount={task.subtask_count || 0} onModeChange={changeProgressMode} onFocus={() => { editingProgressRef.current = true }} onInputChange={value => { setProgressInput(value); setProgressError('') }} onCommit={() => { void commitManualProgress() }} onReset={() => { editingProgressRef.current = false; const canonical = task.manual_progress ?? task.progress ?? 0; setProgressDraft(canonical); setProgressInput(String(canonical)); setProgressError('') }} /></TaskPropertyRow>
+        <TaskPropertyRow label="Lista" icon={<ListTodo className="h-3.5 w-3.5" />}><TaskListPicker value={task.list_id || ''} lists={lists} folders={folders} disabled={!canEdit || Boolean(task.parent_task_id) || isPending('list')} onChange={listID => { void updateTask('list', { list_id: listID }) }} />{task.parent_task_id && <p className="mt-1.5 text-[10px] leading-4 text-slate-400">Las subtareas heredan la lista de su tarea principal y se trasladan junto con ella.</p>}</TaskPropertyRow>
+        <TaskPropertyRow label="Color" icon={<Palette className="h-3.5 w-3.5" />}>
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]"><button type="button" disabled={!canEdit || isPending('color')} onClick={() => { void changeColor(null) }} className={`flex min-h-11 min-w-0 items-center gap-3 rounded-xl border px-3 text-left outline-none transition focus:ring-4 focus:ring-emerald-100 disabled:opacity-50 ${!task.color ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 hover:border-slate-300'}`}><span className="h-7 w-7 shrink-0 rounded-lg border-2 border-white shadow" style={{ backgroundColor: resolveTaskIdentityColor(null, list?.color).color }} /><span className="min-w-0 flex-1"><span className="block text-xs font-bold text-slate-700">Heredar de la lista</span><span className="block truncate text-[10px] text-slate-400">{list?.name || 'Color predeterminado'} · {resolveTaskIdentityColor(null, list?.color).color}</span></span>{!task.color && <Check className="h-4 w-4 shrink-0 text-emerald-600" />}</button><TaskColorPicker value={task.resolved_color || resolveTaskIdentityColor(task.color, list?.color).color} disabled={!canEdit || isPending('color')} label="Cambiar color de la tarea" onChange={value => { void changeColor(value) }} /></div>
+        </TaskPropertyRow>
+      </div>
+    </section>
+
     <TaskDescriptionEditor
       key={task.id}
       value={descriptionDraft}
@@ -1057,22 +1465,6 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
     />
 
     <section>
-      <div className="mb-3 flex items-center justify-between"><h3 className="text-xs font-bold uppercase tracking-[0.14em] text-slate-400">Propiedades</h3>{canEdit && <button onClick={() => onEdit(task)} className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50">Más opciones</button>}</div>
-      <div className="grid gap-x-5 gap-y-4 rounded-2xl border border-slate-200 bg-white p-4 sm:grid-cols-2">
-        <div className="text-xs font-semibold text-slate-500">Estado<div className="mt-1.5"><TaskStatusPicker value={task.status_id || ''} statuses={statuses} disabled={!canEdit} pending={isPending('status')} onChange={statusID => { void updateTask('status', { status_id: statusID }) }} /></div></div>
-        <div className="text-xs font-semibold text-slate-500">Responsable<div className="mt-1.5"><TaskUserCombobox users={users} value={task.assigned_to} onChange={userId => { void updateTask('owner', { assigned_to: userId }) }} disabled={!canEdit || isPending('owner')} /></div></div>
-        <div className="text-xs font-semibold text-slate-500">Prioridad<div className="mt-1.5"><TaskPriorityPicker value={task.priority} disabled={!canEdit} pending={isPending('priority')} onChange={priority => { void updateTask('priority', { priority }) }} /></div></div>
-        <div className="text-xs font-semibold text-slate-500">Lista<div className="mt-1.5"><TaskListPicker value={task.list_id || ''} lists={lists} folders={folders} disabled={!canEdit || Boolean(task.parent_task_id) || isPending('list')} onChange={listID => { void updateTask('list', { list_id: listID }) }} /></div>{task.parent_task_id && <p className="mt-1.5 text-[10px] font-normal leading-4 text-slate-400">Las subtareas heredan la lista de su tarea principal y se trasladan junto con ella.</p>}</div>
-				<div className="text-xs font-semibold text-slate-500 sm:col-span-2"><div className="mb-1.5 flex items-center justify-between"><span>Color de identidad</span>{isPending('color') && <span className="inline-flex items-center gap-1 text-[10px] text-emerald-600"><Loader2 className="h-3 w-3 animate-spin" />Guardando</span>}</div><button type="button" disabled={!canEdit || isPending('color')} onClick={() => { void changeColor(null) }} className={`mb-2 flex min-h-11 w-full items-center gap-3 rounded-xl border px-3 text-left disabled:opacity-50 ${!task.color ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200'}`}><span className="h-7 w-7 rounded-lg border-2 border-white shadow" style={{ backgroundColor: resolveTaskIdentityColor(null, list?.color).color }} /><span className="min-w-0 flex-1"><span className="block text-xs font-bold text-slate-700">Heredar de la lista</span><span className="block truncate text-[10px] font-normal text-slate-400">{list?.name || 'Color predeterminado'} · {resolveTaskIdentityColor(null, list?.color).color}</span></span>{!task.color && <Check className="h-4 w-4 text-emerald-600" />}</button><TaskColorPicker value={task.resolved_color || resolveTaskIdentityColor(task.color, list?.color).color} disabled={!canEdit || isPending('color')} label="Cambiar color de la tarea" onChange={value => { void changeColor(value) }} /></div>
-        <div className="text-xs font-semibold text-slate-500"><span className="mb-1.5 flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Inicio</span><TaskDateTimePicker label="Inicio" value={startDraft} disabled={!canEdit || isPending('dates')} onChange={setStartDraft} onCommit={value => { editingDatesRef.current = false; void saveDates(value, dueDraft) }} /></div>
-        <div className="text-xs font-semibold text-slate-500"><span className="mb-1.5 flex items-center gap-1.5"><Calendar className="h-3.5 w-3.5" /> Entrega</span><TaskDateTimePicker label="Entrega" value={dueDraft} min={startDraft} disabled={!canEdit || isPending('dates')} onChange={setDueDraft} onCommit={value => { editingDatesRef.current = false; void saveDates(startDraft, value) }} /></div>
-        <div className="text-xs font-semibold text-slate-500 sm:col-span-2"><div className="flex flex-wrap items-center justify-between gap-2"><span>Progreso</span><div className="flex rounded-xl bg-slate-100 p-1">{(['manual','automatic'] as const).map(mode => <button key={mode} type="button" disabled={!canEdit || isPending('progress')} onClick={() => { setProgressMode(mode); void saveProgress(mode, progressDraft) }} className={`rounded-lg px-3 py-1.5 text-[10px] font-black transition disabled:cursor-not-allowed disabled:opacity-50 ${progressMode === mode ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-400'}`}>{mode === 'manual' ? 'Manual' : 'Automático'}</button>)}</div></div>
-          {progressMode === 'automatic' ? <div className="mt-3 rounded-2xl border border-emerald-100 bg-emerald-50/60 p-3"><div className="flex items-center justify-between"><span className="text-xs font-bold text-emerald-800">{task.progress || 0}% calculado</span><span className="text-[10px] text-emerald-600">{task.subtask_done || 0}/{task.subtask_count || 0} subtareas</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-white"><div className="h-full rounded-full bg-emerald-500 transition-[width]" style={{ width: `${task.progress || 0}%` }} /></div><p className="mt-2 text-[10px] font-normal leading-4 text-slate-500">Sin subtareas: 0% si está abierta y 100% si está completada.</p></div> : <div className="mt-3 rounded-2xl border border-slate-200 p-3"><div className="flex items-center gap-3"><input aria-label="Progreso manual" type="range" min="0" max="100" step="1" value={progressDraft} disabled={!canEdit || isPending('progress')} onFocus={() => { editingProgressRef.current = true }} onChange={event => setProgressDraft(Number(event.target.value))} onPointerUp={() => { void saveProgress('manual', progressDraft) }} onKeyUp={() => { void saveProgress('manual', progressDraft) }} className="min-w-0 flex-1 accent-emerald-600 disabled:opacity-50" /><div className="flex min-h-10 w-20 items-center rounded-xl bg-slate-50 px-2"><input aria-label="Porcentaje manual" type="number" min="0" max="100" value={progressDraft} disabled={!canEdit} onChange={event => setProgressDraft(Math.max(0, Math.min(100, Number(event.target.value))))} onBlur={() => { void saveProgress('manual', progressDraft) }} className="w-full bg-transparent text-right text-sm font-black text-emerald-700 outline-none disabled:opacity-50" /><span className="text-xs text-slate-400">%</span></div></div><div className="mt-2 flex gap-1.5">{[0,25,50,75,100].map(value => <button key={value} type="button" disabled={!canEdit} onClick={() => { setProgressDraft(value); void saveProgress('manual', value) }} className="flex-1 rounded-lg bg-slate-50 py-1.5 text-[10px] font-bold text-slate-500 hover:bg-emerald-50 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">{value}%</button>)}</div></div>}
-        </div>
-      </div>
-    </section>
-
-    <section>
       <div className="mb-1.5 flex items-center gap-2"><UserRound className="h-4 w-4 text-emerald-600" /><h3 className="text-sm font-bold text-slate-800">Colaboradores</h3>{isPending('collaborators') && <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-600" />}</div>
       <p className="mb-3 text-xs leading-5 text-slate-400">Participan y reciben contexto de la tarea; el responsable continúa siendo su único propietario.</p>
       <TaskCollaboratorPicker users={users} value={task.collaborators?.map(item => item.user_id) || []} ownerID={task.assigned_to} disabled={!canEdit} pending={isPending('collaborators')} onChange={setCollaboratorSelection} />
@@ -1080,16 +1472,18 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
 
     <TaskAccessPanel task={task} users={users} onChanged={(changed, operationID) => {
       if (changed) {
-        setTask(changed)
-        taskRef.current = changed
-      } else void refreshTask()
-      onChanged(changed, operationID)
+        applyTask(changed)
+        onChanged(changed, operationID)
+      } else if (taskIdRef.current === task.id) {
+        void refreshTask()
+        onChanged(undefined, operationID)
+      }
     }} />
 
     {!task.parent_task_id && <section>
-      <div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-bold text-slate-800">Subtareas <span className="font-normal text-slate-400">{children.filter(item => item.status_detail?.category === 'done').length}/{children.length}</span></h3>{canEdit && <button onClick={() => onCreateSubtask(task)} className="flex min-h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"><Plus className="h-3.5 w-3.5" /> Más opciones</button>}</div>
-      {canEdit && <div className="mb-2 flex gap-2"><input value={subtaskTitle} disabled={isPending('subtask-create')} onChange={event => setSubtaskTitle(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void createQuickSubtask() } if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setSubtaskTitle('') } }} placeholder="Añadir una subtarea y presionar Enter…" className={`${inputClass} min-w-0 flex-1`} /><button disabled={!subtaskTitle.trim() || isPending('subtask-create')} onClick={() => { void createQuickSubtask() }} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white disabled:opacity-30">{isPending('subtask-create') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}</button></div>}
-      <div className="space-y-2">{children.map(child => <div key={child.id} className="group flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5 transition hover:border-emerald-200 hover:bg-emerald-50/30"><button title={canEdit ? child.status_detail?.category === 'done' ? 'Marcar pendiente' : 'Completar' : 'Solo lectura'} disabled={!canEdit || isPending(`child:${child.id}`)} onClick={() => { void toggleChild(child) }} className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border disabled:cursor-not-allowed disabled:opacity-55 ${child.status_detail?.category === 'done' ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-slate-300 bg-white hover:border-emerald-400'}`}>{isPending(`child:${child.id}`) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : child.status_detail?.category === 'done' && <Check className="h-3.5 w-3.5" />}</button><button onClick={() => onOpenTask(child.id)} className="min-w-0 flex-1 text-left"><span className={`block truncate text-sm font-medium ${child.status_detail?.category === 'done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{child.title}</span><span className="mt-0.5 block truncate text-[10px] text-slate-400">{child.assigned_to_name || 'Sin responsable'} · {child.due_at ? dateFormatter.format(new Date(child.due_at)) : 'Sin fecha'}</span></button><span className="hidden shrink-0 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-500 sm:block">{child.status_detail?.name || 'Por hacer'}</span><ChevronRight className="h-4 w-4 shrink-0 text-slate-300 transition group-hover:translate-x-0.5" /></div>)}{!children.length && <div className="rounded-xl border border-dashed border-slate-300 px-4 py-5 text-center text-sm text-slate-400">Divide el trabajo en pasos pequeños y asignables.</div>}</div>
+      <div className="mb-3 flex items-center justify-between"><div><h3 className="text-sm font-bold text-slate-800">Subtareas <span className="font-normal text-slate-400">{children.filter(item => item.status_detail?.category === 'done').length}/{children.length}</span></h3><p className="mt-1 text-[11px] text-slate-400">Crea pasos asignables sin perder el contexto.</p></div></div>
+      {canEdit && <div className="mb-3"><TaskQuickSubtaskComposer parent={task} value={subtaskDraft} statuses={statuses} users={users} pending={isPending('subtask-create')} onChange={draft => { subtaskDraftTouchedRef.current = true; setSubtaskDraft(draft) }} onSubmit={draft => createQuickSubtask(draft)} onCancel={() => { subtaskDraftTouchedRef.current = false; setSubtaskDraft(createTaskQuickSubtaskDraft(task, statuses)) }} onMoreOptions={draft => onCreateSubtask(task, draft)} /></div>}
+      <div className="space-y-2">{children.map(child => <div key={child.id} className="group flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5 transition hover:border-emerald-200 hover:bg-emerald-50/30"><TaskCompletionButton compact task={child} statuses={statuses} disabled={!canEdit} pending={isPending(`child:${child.id}`)} onChange={() => toggleChild(child)} /><button id={`task-child-link-${child.id}`} data-task-child-link={child.id} onClick={() => openChildTask(child.id)} className="min-w-0 flex-1 text-left"><span className={`block truncate text-sm font-medium ${child.status_detail?.category === 'done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{child.title}</span><span className="mt-0.5 block truncate text-[10px] text-slate-400">{child.assigned_to_name || 'Sin responsable'} · {child.due_at ? dateFormatter.format(new Date(child.due_at)) : 'Sin fecha'}</span></button><span className="hidden shrink-0 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-500 sm:block">{child.status_detail?.name || 'Por hacer'}</span><ChevronRight className="h-4 w-4 shrink-0 text-slate-300 transition group-hover:translate-x-0.5" /></div>)}{!children.length && <div className="rounded-xl border border-dashed border-slate-300 px-4 py-5 text-center text-sm text-slate-400">Divide el trabajo en pasos pequeños y asignables.</div>}</div>
     </section>}
 
     <section>
@@ -1100,33 +1494,46 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
     <section>
       <h3 className="mb-3 flex items-center gap-2 text-sm font-bold text-slate-800"><Link2 className="h-4 w-4 text-emerald-600" /> Dependencias <span className="font-normal text-slate-400">{dependencies.length}</span></h3>
       <div className="space-y-2">{dependencies.map(dep => { const incoming = dep.successor_task_id === task.id; const linkedTaskId = incoming ? dep.predecessor_task_id : dep.successor_task_id; return <div key={dep.id} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2"><span className="shrink-0 rounded-lg bg-white px-2 py-1 text-[10px] font-semibold text-slate-500">{incoming ? 'Bloqueada por' : 'Bloquea a'}</span><button onClick={() => onOpenTask(linkedTaskId)} className="min-w-0 flex-1 truncate text-left text-xs font-semibold text-slate-700 hover:text-emerald-700 hover:underline">{incoming ? dep.predecessor_title : dep.successor_title}</button>{canEdit && <button aria-label="Eliminar dependencia" disabled={isPending(`dependency-delete:${dep.id}`)} onClick={() => { void removeDependency(dep) }} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600"><X className="h-3.5 w-3.5" /></button>}</div> })}
-        {canEdit && <div className="relative"><div className="flex gap-2"><div className="relative min-w-0 flex-1"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={dependencySearch} onFocus={() => setDependencyPickerOpen(true)} onChange={event => { dependencySearchAbortRef.current?.abort(); dependencySearchSequenceRef.current += 1; setDependencySearching(false); setDependencySearch(event.target.value); if (!event.target.value.trim()) setDependencySettledSearch(''); setDependencyTaskId(''); setDependencyPickerOpen(true) }} placeholder="Buscar tarea predecesora…" className={`${inputClass} pl-9 pr-9`} />{(dependencySearchPending || dependencySearching) && <Loader2 aria-label={dependencySearchPending ? 'Esperando para buscar' : 'Buscando dependencias'} className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-600" />}</div><button onClick={() => { void addDependency() }} disabled={!dependencyTaskId || isPending('dependency-create')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white disabled:opacity-30">{isPending('dependency-create') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}</button></div>
+        {canEdit && <div className="relative"><div className="flex gap-2"><div className="relative min-w-0 flex-1"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={dependencySearch} onFocus={() => setDependencyPickerOpen(true)} onChange={event => { dependencySearchAbortRef.current?.abort(); dependencySearchSequenceRef.current += 1; setDependencySearching(false); setDependencySearch(event.target.value); if (!event.target.value.trim()) setDependencySettledSearch(''); setDependencyTaskId(''); setDependencyPickerOpen(true) }} onKeyDown={event => { if (event.key === 'Escape' && dependencyPickerOpen) { event.preventDefault(); event.stopPropagation(); setDependencyPickerOpen(false) } }} placeholder="Buscar tarea predecesora…" className={`${inputClass} pl-9 pr-9`} />{(dependencySearchPending || dependencySearching) && <Loader2 aria-label={dependencySearchPending ? 'Esperando para buscar' : 'Buscando dependencias'} className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-600" />}</div><button onClick={() => { void addDependency() }} disabled={!dependencyTaskId || isPending('dependency-create')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white disabled:opacity-30">{isPending('dependency-create') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}</button></div>
           {selectedDependency && <p className="mt-1.5 truncate text-[10px] font-medium text-emerald-700">Seleccionada: {selectedDependency.title}</p>}
           {dependencyPickerOpen && !dependencyTaskId && <div className="mt-2 max-h-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">{dependencyCandidates.map(candidate => <button key={candidate.id} onClick={() => { dependencySearchAbortRef.current?.abort(); dependencySearchSequenceRef.current += 1; setDependencyTaskId(candidate.id); setDependencySearch(candidate.title); setDependencySettledSearch(candidate.title.trim()); setDependencySearching(false); setDependencyPickerOpen(false) }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left hover:bg-emerald-50"><span className="min-w-0 flex-1 truncate text-xs font-semibold text-slate-700">{candidate.title}</span><span className="shrink-0 text-[10px] text-slate-400">{candidate.breadcrumbs_visible === false ? 'Compartida contigo' : candidate.list_name || 'Bandeja'}</span></button>)}{!dependencyCandidates.length && !dependencySearching && !dependencySearchPending && <p className="px-3 py-5 text-center text-xs text-slate-400">No encontramos tareas disponibles.</p>}</div>}
         </div>}
       </div>
     </section>
-  </div>
+    </div>
+  })()
 
-  if (!taskId || typeof document === 'undefined') return null
-  return createPortal(
-    <div data-task-detail-window data-window-mode={detailWindow.effectiveMode} data-backdrop-mode={windowVisual.blocksWorkspace ? 'modal' : detailWindow.effectiveMode} style={{ ...windowVisual.backdropStyle, zIndex: TASK_OVERLAY_LAYERS.window }} className={`fixed inset-0 transition-[background-color,backdrop-filter] duration-200 ${windowVisual.blocksWorkspace ? '' : 'pointer-events-none'}`} onMouseDown={event => { if (windowVisual.blocksWorkspace && event.target === event.currentTarget) onClose() }}>
-      <aside ref={panelRef} onPaste={pasteTaskImages} tabIndex={-1} role="dialog" aria-modal={windowVisual.blocksWorkspace} aria-label="Detalle de tarea" style={detailWindow.panelStyle} className={`pointer-events-auto absolute flex flex-col overflow-hidden bg-white shadow-[0_32px_90px_rgba(15,23,42,0.32)] ring-1 ring-slate-900/10 outline-none ${detailWindow.effectiveMode === 'docked' ? 'border-l border-slate-200' : detailWindow.isMobile ? '' : 'rounded-2xl border border-white/80'}`}>
+  if (!taskId) return null
+  const dockedInspector = inFlowDocked && detailWindow.effectiveMode === 'docked' && detailWindow.canDock !== false
+  const panel = <aside
+    ref={panelRef}
+    data-task-detail-window
+    data-window-mode={detailWindow.effectiveMode}
+    data-backdrop-mode={windowVisual.blocksWorkspace ? 'modal' : detailWindow.effectiveMode}
+    onPaste={pasteTaskImages}
+    tabIndex={-1}
+    role={dockedInspector ? 'complementary' : 'dialog'}
+    aria-modal={dockedInspector ? undefined : windowVisual.blocksWorkspace}
+    aria-label="Detalle de tarea"
+    style={dockedInspector ? { width: detailWindow.dockedWidth } : detailWindow.panelStyle}
+    className={`pointer-events-auto flex flex-col overflow-hidden bg-white outline-none ${dockedInspector ? 'relative h-full shrink-0 border-l border-slate-200 shadow-none' : `absolute shadow-[0_32px_90px_rgba(15,23,42,0.32)] ring-1 ring-slate-900/10 ${detailWindow.isMobile ? '' : 'rounded-2xl border border-white/80'}`}`}
+  >
         {detailWindow.effectiveMode === 'floating' && (Object.entries(resizeHandles) as [TaskDetailResizeEdge, string][]).map(([edge, classes]) => <div key={edge} className={`absolute z-30 ${classes}`} onPointerDown={event => detailWindow.beginResize(edge, event)} />)}
-        {loading && !task ? <div className="flex flex-1 flex-col items-center justify-center"><Loader2 className="h-7 w-7 animate-spin text-emerald-600" /><p className="mt-3 text-sm text-slate-400">Abriendo tarea…</p></div> : task ? <>
-          <header onPointerDown={detailWindow.beginDrag} onDoubleClick={event => { if (!(event.target as HTMLElement).closest('button,a,input,textarea,select,[data-no-window-drag]')) detailWindow.toggleMaximized() }} className={`shrink-0 select-none border-b border-slate-200 bg-white px-4 py-3 sm:px-6 sm:py-4 ${detailWindow.effectiveMode === 'floating' ? 'cursor-move' : ''}`}>
+        {(loading || taskTransitioning) && !visibleTask ? <div className="flex flex-1 flex-col items-center justify-center"><Loader2 className="h-7 w-7 animate-spin text-emerald-600" /><p className="mt-3 text-sm text-slate-400">Abriendo tarea…</p></div> : visibleTask ? (() => { const task = visibleTask; return <>
+          <header onPointerDown={detailWindow.beginDrag} onDoubleClick={event => { if (!detailWindow.temporaryModeActive && !(event.target as HTMLElement).closest('button,a,input,textarea,select,[data-no-window-drag]')) detailWindow.toggleMaximized() }} className={`shrink-0 select-none border-b border-slate-200 bg-white px-4 py-3 sm:px-6 sm:py-4 ${detailWindow.effectiveMode === 'floating' ? 'cursor-move' : ''}`}>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
-								<div className="mb-1.5 flex min-w-0 items-center gap-1.5 overflow-hidden text-[11px] text-slate-400"><span className="h-3.5 w-3.5 shrink-0 rounded-md border-2 border-white shadow-sm" style={{ backgroundColor: task.resolved_color || resolveTaskIdentityColor(task.color, list?.color).color }} aria-label={`Color de identidad ${task.resolved_color || resolveTaskIdentityColor(task.color, list?.color).color}`} />{parentTask && <><button data-no-window-drag onClick={() => onOpenTask(parentTask.id)} className="max-w-44 truncate font-semibold text-emerald-700 hover:underline">{parentTask.title}</button><ChevronRight className="h-3 w-3 shrink-0" /></>}{task.breadcrumbs_visible === false ? <span className="truncate font-semibold text-violet-600">Compartida contigo</span> : <><span className="truncate">{task.folder_name || 'Clarin Work'}</span><ChevronRight className="h-3 w-3 shrink-0" /><span className="truncate">{task.list_name || 'Bandeja general'}</span></>}{task.is_milestone && <span className="ml-1 flex shrink-0 items-center gap-1 rounded-full bg-violet-50 px-2 py-1 font-medium text-violet-700"><Flag className="h-3 w-3" /> Hito</span>}</div>
+				<div className="mb-1.5 flex min-w-0 items-center gap-1.5 overflow-hidden text-[11px] text-slate-400"><span className="h-3.5 w-3.5 shrink-0 rounded-md border-2 border-white shadow-sm" style={{ backgroundColor: task.resolved_color || resolveTaskIdentityColor(task.color, list?.color).color }} aria-label={`Color de identidad ${task.resolved_color || resolveTaskIdentityColor(task.color, list?.color).color}`} />{parentTask && <><button data-no-window-drag onClick={returnToParent} className="max-w-44 truncate font-semibold text-emerald-700 hover:underline">{parentTask.title}</button><ChevronRight className="h-3 w-3 shrink-0" /></>}{task.breadcrumbs_visible === false ? <span className="truncate font-semibold text-violet-600">Compartida contigo</span> : <><span className="truncate">{task.folder_name || 'Clarin Work'}</span><ChevronRight className="h-3 w-3 shrink-0" /><span className="truncate">{task.list_name || 'Bandeja general'}</span></>}{task.is_milestone && <span className="ml-1 flex shrink-0 items-center gap-1 rounded-full bg-violet-50 px-2 py-1 font-medium text-violet-700"><Flag className="h-3 w-3" /> Hito</span>}</div>
                 <div data-no-window-drag className="relative"><textarea rows={1} value={titleDraft} disabled={!canEdit || isPending('title')} onFocus={() => { editingTitleRef.current = true }} onChange={event => setTitleDraft(event.target.value.replace(/\n/g, ' '))} onBlur={() => { void saveTitle() }} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); skipTitleSaveRef.current = true; setTitleDraft(task.title); event.currentTarget.blur() } }} aria-label="Título de la tarea" className="block min-h-9 w-full resize-none overflow-hidden rounded-lg border border-transparent bg-transparent py-1 pr-8 text-lg font-bold leading-7 text-slate-900 outline-none transition hover:border-slate-200 focus:border-emerald-300 focus:bg-white focus:px-2 focus:ring-4 focus:ring-emerald-50 disabled:opacity-80 sm:text-xl" />{isPending('title') && <Loader2 className="absolute right-2 top-2 h-4 w-4 animate-spin text-emerald-600" />}</div>
               </div>
               <div data-no-window-drag className="flex shrink-0 gap-0.5">
-                {!detailWindow.isMobile && <><button title="Acoplar a la derecha" onClick={() => detailWindow.setMode('docked')} className={`flex h-9 w-9 items-center justify-center rounded-xl hover:bg-slate-100 ${detailWindow.effectiveMode === 'docked' ? 'text-emerald-600' : 'text-slate-400'}`}><PanelRight className="h-4 w-4" /></button><button title="Ventana flotante" onClick={() => detailWindow.setMode('floating')} className={`flex h-9 w-9 items-center justify-center rounded-xl hover:bg-slate-100 ${detailWindow.effectiveMode === 'floating' ? 'text-emerald-600' : 'text-slate-400'}`}><Move className="h-4 w-4" /></button></>}
+                {!detailWindow.isMobile && detailWindow.temporaryModeActive && <span role="img" aria-label="Vista maximizada temporal por espacio disponible" title="Vista maximizada temporal por espacio disponible" className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400"><Maximize2 className="h-4 w-4" /></span>}
+                {!detailWindow.isMobile && !detailWindow.temporaryModeActive && <><button title="Acoplar a la derecha" onClick={() => detailWindow.setMode('docked')} className={`flex h-9 w-9 items-center justify-center rounded-xl hover:bg-slate-100 ${detailWindow.effectiveMode === 'docked' ? 'text-emerald-600' : 'text-slate-400'}`}><PanelRight className="h-4 w-4" /></button><button title="Ventana flotante" onClick={() => detailWindow.setMode('floating')} className={`flex h-9 w-9 items-center justify-center rounded-xl hover:bg-slate-100 ${detailWindow.effectiveMode === 'floating' ? 'text-emerald-600' : 'text-slate-400'}`}><Move className="h-4 w-4" /></button></>}
                 {!detailWindow.isMobile && detailWindow.effectiveMode === 'floating' && <button title="Restablecer tamaño" aria-label="Restablecer tamaño" onClick={detailWindow.resetGeometry} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700"><RotateCcw className="h-4 w-4" /></button>}
-                {!detailWindow.isMobile && <button title={detailWindow.effectiveMode === 'maximized' ? 'Restaurar ventana' : 'Maximizar'} onClick={detailWindow.toggleMaximized} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700">{detailWindow.effectiveMode === 'maximized' ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button>}
-                {canEdit && <button title="Editar todas las propiedades" onClick={() => onEdit(task)} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700"><Pencil className="h-4 w-4" /></button>}
+                {!detailWindow.isMobile && !detailWindow.temporaryModeActive && <button title={detailWindow.effectiveMode === 'maximized' ? 'Restaurar ventana' : 'Maximizar'} onClick={detailWindow.toggleMaximized} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700">{detailWindow.effectiveMode === 'maximized' ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button>}
+                {canEdit && <button title="Editar todas las propiedades" aria-label="Editar todas las propiedades" onClick={() => onEdit(task)} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 outline-none hover:bg-slate-100 hover:text-slate-700 focus:ring-2 focus:ring-emerald-400 focus:ring-offset-2"><Pencil className="h-4 w-4" /></button>}
                 {!task.parent_task_id && canAdmin && <button title="Mover a otro Entorno" onClick={() => setMoveEnvironmentOpen(true)} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-violet-50 hover:text-violet-700"><ArrowRightLeft className="h-4 w-4" /></button>}
-                {canAdmin && <button title="Mover a Papelera" disabled={isPending('archive')} onClick={() => { setArchiveError(''); setArchiveConfirmOpen(true) }} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"><Trash2 className="h-4 w-4" /></button>}
+                {canAdmin && <button title="Mover a Papelera" disabled={isPending('archive')} onClick={() => { setArchiveTaskId(task.id); setArchiveError(''); setArchiveConfirmOpen(true) }} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"><Trash2 className="h-4 w-4" /></button>}
                 <button title="Cerrar" onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X className="h-5 w-5" /></button>
               </div>
             </div>
@@ -1134,22 +1541,38 @@ export default function TaskDetailDrawer({ taskId, historicalReadOnly = false, a
           </header>
 
           {!canEdit && !descriptionExpanded && <div role="status" className="mx-4 mt-3 rounded-xl border border-violet-100 bg-violet-50 px-3 py-2.5 text-xs font-semibold text-violet-700 sm:mx-6">Acceso {canComment ? 'Comentar' : 'Ver'} · puedes consultar esta tarea{canComment ? ' y participar en la conversación' : ''}.</div>}
-          {failure && !descriptionExpanded && <div className="mx-4 mt-3 flex shrink-0 items-start gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 text-xs text-rose-700 sm:mx-6"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1 leading-5">{failure.message}</span>{failure.canRetry && <button onClick={() => { const retry = failureRetryRef.current; clearFailure(); retry?.() }} className="shrink-0 rounded-lg bg-white px-2.5 py-1 font-semibold shadow-sm hover:bg-rose-100">Reintentar</button>}<button aria-label="Cerrar aviso" onClick={clearFailure} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg hover:bg-rose-100"><X className="h-3.5 w-3.5" /></button></div>}
+          {failure && !descriptionExpanded && <div className="mx-4 mt-3 flex shrink-0 items-start gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 text-xs text-rose-700 sm:mx-6"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1 leading-5">{failure.message}</span>{failure.canRetry && <button onClick={() => { const retry = failureRetryRef.current; clearFailure(); retry?.() }} className="shrink-0 rounded-lg bg-white px-2.5 py-1 font-semibold shadow-sm hover:bg-rose-100">Reintentar</button>}<button aria-label="Cerrar aviso" onClick={() => clearFailure()} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg hover:bg-rose-100"><X className="h-3.5 w-3.5" /></button></div>}
+          {sectionsLoading && !descriptionExpanded && <div role="status" className="mx-4 mt-2 flex shrink-0 items-center gap-2 text-[11px] font-medium text-slate-400 sm:mx-6"><Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-600" />Actualizando comentarios, actividad y archivos…</div>}
 
-          {isWide ? <div className="flex min-h-0 flex-1"><main className="min-w-0 flex-1 overflow-y-auto overscroll-contain px-6 py-6 lg:px-8">{detailsPane}</main><section className="flex w-[390px] min-h-0 shrink-0 flex-col border-l border-slate-200">{activityPane}</section></div> : tab === 'details' ? <main className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-6">{detailsPane}</main> : activityPane}
-        </> : <div className="flex flex-1 flex-col items-center justify-center px-6 text-center"><AlertCircle className="h-8 w-8 text-rose-300" /><p className="mt-3 text-sm font-semibold text-slate-700">No pudimos abrir esta tarea.</p><button onClick={() => { void load() }} className="mt-3 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white">Reintentar</button></div>}
+          {isWide ? <div className="flex min-h-0 flex-1"><main ref={detailsScrollRef} className="min-w-0 flex-1 overflow-y-auto overscroll-contain px-6 py-6 lg:px-8">{detailsPane}</main><section className="flex w-[390px] min-h-0 shrink-0 flex-col border-l border-slate-200">{activityPane}</section></div> : tab === 'details' ? <main ref={detailsScrollRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-6">{detailsPane}</main> : activityPane}
+        </> })() : <div className="flex flex-1 flex-col items-center justify-center px-6 text-center"><AlertCircle className="h-8 w-8 text-rose-300" /><p className="mt-3 text-sm font-semibold text-slate-700">No pudimos abrir esta tarea.</p><button onClick={() => { void load() }} className="mt-3 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white">Reintentar</button></div>}
       </aside>
-      {canAdmin && <TaskDestructiveConfirmDialog open={archiveConfirmOpen} title="Mover tarea a Papelera" description={`${task?.subtask_count ? `También se moverán ${task.subtask_count} subtarea${task.subtask_count === 1 ? '' : 's'}. ` : ''}La tarea podrá restaurarse durante el plazo configurado. Completar una tarea nunca la envía aquí.`} actionLabel="Mover a Papelera" busy={isPending('archive')} error={archiveError} onClose={() => { if (!isPending('archive')) { setArchiveConfirmOpen(false); setArchiveError('') } }} onConfirm={() => { void removeTask() }} />}
-      {task && canAdmin && <TaskMoveEnvironmentDialog open={moveEnvironmentOpen} task={task} onClose={() => setMoveEnvironmentOpen(false)} onMoved={(moved, operationID) => { setMoveEnvironmentOpen(false); onChanged(moved, operationID); onClose() }} />}
-      {previewAttachment && task && task.id === taskId && previewAttachment.task_id === taskId && <TaskAttachmentViewer key={`${task.id}:${previewAttachment.id}`} taskId={task.id} attachment={previewAttachment} users={users} canComment={canComment} historicalReadOnly={historicalReadOnly} onClose={() => setPreviewAttachment(null)} />}
+  const auxiliaryLayers = <>
+      {canAdmin && visibleTask && <TaskDestructiveConfirmDialog open={archiveConfirmOpen && archiveTaskId === taskId} title="Mover tarea a Papelera" description={`${visibleTask.subtask_count ? `También se moverán ${visibleTask.subtask_count} subtarea${visibleTask.subtask_count === 1 ? '' : 's'}. ` : ''}La tarea podrá restaurarse durante el plazo configurado. Completar una tarea nunca la envía aquí.`} actionLabel="Mover a Papelera" busy={isPending('archive')} error={archiveError} onClose={() => { if (!isPending('archive')) { setArchiveConfirmOpen(false); setArchiveTaskId(''); setArchiveError('') } }} onConfirm={() => { void removeTask() }} />}
+      {visibleTask && canAdmin && <TaskMoveEnvironmentDialog key={visibleTask.id} open={moveEnvironmentOpen && visibleTask.id === taskId} task={visibleTask} onClose={() => setMoveEnvironmentOpen(false)} onMoved={(moved, operationID) => { applyTask(moved); onChanged(moved, operationID); if (taskIdRef.current === moved.id) { setMoveEnvironmentOpen(false); onClose() } }} />}
+      {previewAttachment && visibleTask && previewAttachment.task_id === taskId && <TaskAttachmentViewer key={`${visibleTask.id}:${previewAttachment.id}`} taskId={visibleTask.id} attachment={previewAttachment} users={users} canComment={canComment} historicalReadOnly={historicalReadOnly} onClose={() => setPreviewAttachment(null)} />}
       <TaskParticipantGrantConfirmDialog
-        open={Boolean(participantGrantPrompt)}
+        open={Boolean(participantGrantPrompt && participantGrantPrompt.taskId === taskId)}
         affectedUserIDs={participantGrantPrompt?.affectedUserIDs || []}
         users={users}
         busy={false}
         onClose={() => setParticipantGrantPrompt(null)}
-        onConfirm={() => { const retry = participantGrantPrompt?.retry; setParticipantGrantPrompt(null); retry?.() }}
+        onConfirm={() => { const prompt = participantGrantPrompt; setParticipantGrantPrompt(null); if (prompt?.taskId === taskIdRef.current) prompt.retry() }}
       />
+    </>
+  if (dockedInspector) return <>{panel}{auxiliaryLayers}</>
+  if (typeof document === 'undefined') return null
+  return createPortal(
+    <div
+      data-task-detail-overlay
+      data-window-mode={detailWindow.effectiveMode}
+      data-backdrop-mode={windowVisual.blocksWorkspace ? 'modal' : detailWindow.effectiveMode}
+      style={{ ...windowVisual.backdropStyle, zIndex: TASK_OVERLAY_LAYERS.window }}
+      className={`fixed inset-0 transition-[background-color,backdrop-filter] duration-200 ${windowVisual.blocksWorkspace ? '' : 'pointer-events-none'}`}
+      onMouseDown={event => { if (windowVisual.blocksWorkspace && event.target === event.currentTarget) onClose() }}
+    >
+      {panel}
+      {auxiliaryLayers}
     </div>,
     document.body,
   )

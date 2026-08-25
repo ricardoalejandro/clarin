@@ -2,21 +2,29 @@
   "schemaVersion": 1,
   "root": {
     "name": "@excalidraw/excalidraw",
-    "version": "0.18.1",
-    "integrity": "sha512-6i5Gt7IDTOH//qa0Z315Ly5iVRhjWpu2whrlQFqkuwrkKUWgRsMk0P5qdE7bpyDpai7jeLeWYkyj1eVAfni1lw==",
+    "version": "0.18.1-clarin.4",
+    "source": {
+      "type": "vendored",
+      "manifestSpec": "file:vendor/excalidraw-clarin/packages/excalidraw",
+      "lockPath": "vendor/excalidraw-clarin/packages/excalidraw",
+      "treePath": "vendor/excalidraw-clarin",
+      "sha256": "e06e03a382897b421cbf59bc66b2b79a7e6d14a12e9fe8a9cca6e1ac87522874",
+      "upstreamTag": "v0.18.1",
+      "upstreamCommit": "a2ec2889babf7d2295469c6d90ebe77fae57df84"
+    },
     "expectedComponentCount": 251,
-    "expectedSbomSha256": "ccaff4aa10097781f229b8c5f87f187a81e5198d01d20249abdeb6f60c3fc9e6"
+    "expectedSbomSha256": "de60ea5a33eac6d947abb0e0f8d02140e27010404126354a2fdac453bb75c458"
   },
   "audit": {
-    "observedAt": "2026-08-09",
+    "observedAt": "2026-08-23",
     "command": "npm audit --omit=dev --json",
     "frontendSummary": {
       "info": 0,
       "low": 0,
-      "moderate": 7,
+      "moderate": 6,
       "high": 13,
       "critical": 2,
-      "total": 22
+      "total": 21
     }
   },
   "licenseOverrides": [

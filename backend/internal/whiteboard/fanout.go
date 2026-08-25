@@ -17,6 +17,7 @@ type FanoutEnvelope struct {
 	BoardID       uuid.UUID       `json:"board_id"`
 	TargetUserID  *uuid.UUID      `json:"target_user_id,omitempty"`
 	TargetGuestID *uuid.UUID      `json:"target_guest_id,omitempty"`
+	MembersOnly   bool            `json:"members_only,omitempty"`
 	Message       OutgoingMessage `json:"message"`
 }
 
@@ -58,11 +59,18 @@ func (e FanoutEnvelope) Validate() error {
 	if (e.TargetUserID != nil || e.TargetGuestID != nil) && e.Message.Event != EventAccessRevoked {
 		return fmt.Errorf("%w: targeted fanout event", ErrInvalidRealtimeMessage)
 	}
+	if e.MembersOnly && (e.Message.Event != EventCommentChanged || e.TargetUserID != nil || e.TargetGuestID != nil) {
+		return fmt.Errorf("%w: members-only fanout event", ErrInvalidRealtimeMessage)
+	}
 	switch e.Message.Event {
 	case EventScenePatch, EventSceneSnapshot, EventSyncRequired, EventPresenceSnapshot, EventCursorUpdate,
-		EventPresenceUpdate, EventAccessRevoked:
+		EventPresenceUpdate, EventPresentationSnapshot, EventPresentationChanged, EventFollowChange, EventViewportUpdate,
+		EventAccessRevoked, EventCommentChanged:
 	default:
 		return fmt.Errorf("%w: fanout event", ErrInvalidRealtimeMessage)
+	}
+	if e.Message.Event == EventCommentChanged && !e.MembersOnly {
+		return fmt.Errorf("%w: comment fanout audience", ErrInvalidRealtimeMessage)
 	}
 	return nil
 }

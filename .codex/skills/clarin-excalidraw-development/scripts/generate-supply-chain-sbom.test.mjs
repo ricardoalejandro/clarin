@@ -86,6 +86,51 @@ test("builds the exact npm runtime/optional/peer closure and prefers the nearest
   assert.equal(document.metadata.properties.some(({ name }) => name === "clarin:generated-at"), false);
 });
 
+test("binds a vendored fork to its file spec, source hash and upstream commit", () => {
+  const { manifest, lockfile } = fixture();
+  const npmRoot = lockfile.packages["node_modules/@excalidraw/excalidraw"];
+  manifest.dependencies["@excalidraw/excalidraw"] = "file:vendor/excalidraw";
+  lockfile.packages["node_modules/@excalidraw/excalidraw"] = {
+    resolved: "vendor/excalidraw",
+    link: true,
+  };
+  lockfile.packages["vendor/excalidraw"] = {
+    ...npmRoot,
+    version: "0.18.1-clarin.1",
+    resolved: undefined,
+    integrity: undefined,
+  };
+  const sourceSha256 = "b".repeat(64);
+  const vendoredBaseline = {
+    ...baseline(npmRoot.integrity),
+    root: {
+      name: "@excalidraw/excalidraw",
+      version: "0.18.1-clarin.1",
+      source: {
+        type: "vendored",
+        manifestSpec: "file:vendor/excalidraw",
+        lockPath: "vendor/excalidraw",
+        treePath: "vendor/excalidraw",
+        sha256: sourceSha256,
+        upstreamTag: "v0.18.1",
+        upstreamCommit: "a".repeat(40),
+      },
+    },
+  };
+  const document = buildSbom({ manifest, lockfile, baseline: vendoredBaseline });
+  assert.equal(document.metadata.component.version, "0.18.1-clarin.1");
+  assert.deepEqual(document.metadata.component.hashes, [{ alg: "SHA-256", content: sourceSha256.toUpperCase() }]);
+  assert.equal(document.metadata.component.properties.find(({ name }) => name === "clarin:upstream:commit").value, "a".repeat(40));
+  assert.throws(
+    () => buildSbom({
+      manifest: { dependencies: { "@excalidraw/excalidraw": "file:vendor/other" } },
+      lockfile,
+      baseline: vendoredBaseline,
+    }),
+    /manifest spec does not match/,
+  );
+});
+
 test("is byte-for-byte deterministic when lockfile object order changes", () => {
   const { manifest, lockfile } = fixture();
   const reordered = {

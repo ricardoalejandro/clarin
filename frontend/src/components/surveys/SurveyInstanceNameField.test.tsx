@@ -9,6 +9,17 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks(); });
 
 describe('SurveyInstanceNameField', () => {
+  it('ignores a malformed automatic suggestion instead of writing undefined into the draft', async () => {
+    vi.mocked(api).mockResolvedValueOnce({ success: true, data: { available: true } } as never);
+    const onChange = vi.fn();
+    render(<SurveyInstanceNameField templateId="template-1" value="" onChange={onChange} />);
+
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.getByRole('textbox')).toHaveValue('');
+  });
+
   it('waits 500 ms, rejects stale work and offers the server suggestion', async () => {
     vi.mocked(api)
       .mockResolvedValueOnce({ success: true, data: { available: true, suggested_name: 'Informe · 2' } })

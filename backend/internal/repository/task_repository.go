@@ -763,6 +763,10 @@ func taskDependencyPresencePredicate(actorExpression string) string {
 		  AND ` + taskActorCanViewSQL("related_task", "related_list", actorExpression) + `)`
 }
 
+func taskEffectiveCategorySQL(taskAlias, statusAlias string) string {
+	return `COALESCE(` + statusAlias + `.category,CASE ` + taskAlias + `.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END)`
+}
+
 // GetByAccount returns tasks for an account with optional filters
 func (r *TaskRepository) GetByAccount(ctx context.Context, accountID uuid.UUID, filters map[string]string, limit, offset int) ([]*domain.Task, int, error) {
 	return r.getByAccount(ctx, accountID, filters, limit, offset, nil)
@@ -770,6 +774,7 @@ func (r *TaskRepository) GetByAccount(ctx context.Context, accountID uuid.UUID, 
 
 func (r *TaskRepository) getByAccount(ctx context.Context, accountID uuid.UUID, filters map[string]string, limit, offset int, cursor *TaskPageCursor) ([]*domain.Task, int, error) {
 	where := []string{"t.account_id=$1"}
+	effectiveCategory := taskEffectiveCategorySQL("t", "ts")
 	lifecycle := strings.ToLower(strings.TrimSpace(filters["lifecycle"]))
 	if lifecycle == domain.TaskLifecycleTrash || filters["deleted"] == "true" {
 		where = append(where, "t.deleted_at IS NOT NULL")
@@ -822,7 +827,7 @@ func (r *TaskRepository) getByAccount(ctx context.Context, accountID uuid.UUID, 
 			idx++
 		}
 		if overdue {
-			parts = append(parts, "(t.due_at < NOW() AND COALESCE(ts.category,'not_started') NOT IN ('done','cancelled'))")
+			parts = append(parts, "(t.due_at < NOW() AND "+effectiveCategory+" NOT IN ('done','cancelled'))")
 		}
 		if len(parts) > 0 {
 			where = append(where, "("+strings.Join(parts, " OR ")+")")
@@ -972,7 +977,7 @@ func (r *TaskRepository) getByAccount(ctx context.Context, accountID uuid.UUID, 
 		for _, bucket := range taskFilterValues(raw) {
 			switch bucket {
 			case "overdue":
-				parts = append(parts, "(t.due_at < NOW() AND COALESCE(ts.category,'not_started') NOT IN ('done','cancelled'))")
+				parts = append(parts, "(t.due_at < NOW() AND "+effectiveCategory+" NOT IN ('done','cancelled'))")
 			case "today":
 				parts = append(parts, dueDate+"="+localDate)
 			case "tomorrow":
@@ -1265,14 +1270,14 @@ func (r *TaskRepository) GetAgendaRangeForActor(ctx context.Context, accountID, 
 }
 
 func taskStatsSQL() string {
-	category := `COALESCE(ts.category,CASE t.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END)`
+	category := taskEffectiveCategorySQL("t", "ts")
 	return `SELECT
 		COUNT(*) FILTER (WHERE ` + category + ` NOT IN ('done','cancelled') AND NOT (t.due_at IS NOT NULL AND t.due_at<NOW()))::int,
 		COUNT(*) FILTER (WHERE ` + category + `='done')::int,
 		COUNT(*) FILTER (WHERE ` + category + ` NOT IN ('done','cancelled') AND t.due_at<NOW())::int,
 		COUNT(*) FILTER (WHERE ` + category + `='cancelled')::int,
 		COUNT(*) FILTER (WHERE ` + category + ` NOT IN ('done','cancelled') AND
-			(t.due_at AT TIME ZONE 'America/Lima')::date=(NOW() AT TIME ZONE 'America/Lima')::date)::int
+			t.due_at>=NOW() AND (t.due_at AT TIME ZONE 'America/Lima')::date=(NOW() AT TIME ZONE 'America/Lima')::date)::int
 		FROM tasks t
 		JOIN task_lists tl ON tl.account_id=t.account_id AND tl.id=t.list_id
 		LEFT JOIN task_statuses ts ON ts.id=t.status_id AND ts.account_id=t.account_id

@@ -510,26 +510,30 @@ func (s *Server) handleMarkChatAPIRead(c *fiber.Ctx) error {
 	if device == nil || device.PhoneNumberID == nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat API no encontrado"})
 	}
-	if err := s.services.Chat.MarkAsRead(c.Context(), chatID); err != nil {
+	unreadCount, readThrough, err := s.services.Chat.MarkAsRead(c.Context(), accountID, chatID, "")
+	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	s.invalidateChatCaches(accountID, &chatID)
+	if s.hub != nil {
+		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventChatUpdate, fiber.Map{"chat_id": chatID.String(), "unread_count": unreadCount, "read_through": readThrough})
+	}
 	messageID, err := s.repos.WhatsAppAPI.LatestInboundCloudMessageID(c.Context(), accountID, device.ID, chatID)
 	if err != nil || messageID == "" {
-		return c.JSON(fiber.Map{"success": true})
+		return c.JSON(fiber.Map{"success": true, "chat_id": chatID.String(), "unread_count": unreadCount, "read_through": readThrough})
 	}
 	token, err := s.loadCloudAccessToken(c.Context(), accountID, device.ID)
 	if err != nil {
-		return c.JSON(fiber.Map{"success": true, "warning": "El chat se marcó leído en Clarin, pero no se pudo confirmar en Meta"})
+		return c.JSON(fiber.Map{"success": true, "chat_id": chatID.String(), "unread_count": unreadCount, "read_through": readThrough, "warning": "El chat se marcó leído en Clarin, pero no se pudo confirmar en Meta"})
 	}
 	client, err := s.cloudClient()
 	if err != nil {
-		return c.JSON(fiber.Map{"success": true, "warning": "El chat se marcó leído en Clarin, pero no se pudo confirmar en Meta"})
+		return c.JSON(fiber.Map{"success": true, "chat_id": chatID.String(), "unread_count": unreadCount, "read_through": readThrough, "warning": "El chat se marcó leído en Clarin, pero no se pudo confirmar en Meta"})
 	}
 	if err := client.MarkRead(c.Context(), token, *device.PhoneNumberID, messageID); err != nil {
-		return c.JSON(fiber.Map{"success": true, "warning": "El chat se marcó leído en Clarin, pero Meta no confirmó el recibo de lectura"})
+		return c.JSON(fiber.Map{"success": true, "chat_id": chatID.String(), "unread_count": unreadCount, "read_through": readThrough, "warning": "El chat se marcó leído en Clarin, pero Meta no confirmó el recibo de lectura"})
 	}
-	return c.JSON(fiber.Map{"success": true})
+	return c.JSON(fiber.Map{"success": true, "chat_id": chatID.String(), "unread_count": unreadCount, "read_through": readThrough})
 }
 
 func (s *Server) handleListChatAPITemplates(c *fiber.Ctx) error {
@@ -761,7 +765,7 @@ func (s *Server) handleSendWhatsAppCloudMessage(c *fiber.Ctx) error {
 			"warning": "Meta envió el mensaje, pero Clarin no pudo guardarlo todavía. No lo reenvíes.",
 		})
 	}
-	_ = s.repos.Chat.UpdateLastMessage(c.Context(), chat.ID, body, now, false)
+	_ = s.repos.Chat.UpdateLastMessage(c.Context(), accountID, chat.ID, body, now, false)
 	_ = s.repos.WhatsAppAPI.UpdateChatServiceWindow(c.Context(), chat.ID, provider, false, now)
 	s.invalidateChatCaches(accountID, &chat.ID)
 	if s.hub != nil {

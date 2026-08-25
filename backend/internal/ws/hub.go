@@ -34,6 +34,7 @@ const (
 	EventDeviceStatus           = "device_status"
 	EventQRCode                 = "qr_code"
 	EventChatUpdate             = "chat_update"
+	EventChatIdentityReconciled = "chat_identity_reconciled"
 	EventPresence               = "presence"
 	EventTyping                 = "typing"
 	EventLeadUpdate             = "lead_update"

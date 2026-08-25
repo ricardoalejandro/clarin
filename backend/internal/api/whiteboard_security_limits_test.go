@@ -2,12 +2,75 @@ package api
 
 import (
 	"bytes"
+	"compress/gzip"
+	"io"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 )
+
+func TestWhiteboardJSONGuardsRejectCompressedBodiesBeforeHandler(t *testing.T) {
+	t.Parallel()
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write([]byte(`{"body":"`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte(strings.Repeat("x", 64*1024))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte(`"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if compressed.Len() >= 1024 {
+		t.Fatalf("gzip fixture is not small: %d bytes", compressed.Len())
+	}
+
+	server := &Server{abuseLimiter: newInMemoryAbuseLimiter()}
+	for _, test := range []struct {
+		name, method, path string
+		guard              fiber.Handler
+	}{
+		{"guest session", fiber.MethodPost, "/api/public/whiteboard-links/" + uuid.NewString() + "/session", server.guardWhiteboardGuestSessionExchange},
+		{"guest snapshot", fiber.MethodPatch, "/api/whiteboard-guest/scene", server.guardWhiteboardGuestSnapshotWrite},
+		{"library callback or complete", fiber.MethodPost, "/api/whiteboards/library-import", server.guardWhiteboardLibraryImportMutation},
+		{"comment mutation", fiber.MethodPost, "/api/whiteboards/" + uuid.NewString() + "/comment-threads", server.guardWhiteboardCommentMutation},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			observedEncoding := ""
+			app := fiber.New()
+			app.Add(test.method, test.path, func(c *fiber.Ctx) error {
+				observedEncoding = c.Get(fiber.HeaderContentEncoding)
+				return c.Next()
+			}, test.guard, func(c *fiber.Ctx) error {
+				called = true
+				return c.SendStatus(fiber.StatusNoContent)
+			})
+			request := httptest.NewRequest(test.method, test.path, bytes.NewReader(compressed.Bytes()))
+			request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+			request.Header.Set(fiber.HeaderContentEncoding, "gzip")
+			response, err := app.Test(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != fiber.StatusUnsupportedMediaType || called || !bytes.Contains(body, []byte(`"code":"whiteboard_content_encoding_unsupported"`)) {
+				t.Fatalf("encoded request was not rejected before handler: status=%d called=%v encoding=%q body=%s", response.StatusCode, called, observedEncoding, body)
+			}
+		})
+	}
+}
 
 func TestWhiteboardGuestSessionGuardRejectsOversizeBeforeHandler(t *testing.T) {
 	t.Parallel()
