@@ -14,7 +14,7 @@ export function taskListTitleAction({ editable, selectionMode, ctrlKey, metaKey,
 
 interface Props {
   title: string
-  metadata: string
+  metadata?: string
   done: boolean
   editable: boolean
   selectionMode: boolean
@@ -42,6 +42,6 @@ export default function TaskListTitleButton({ title, metadata, done, editable, s
     className="group/title min-w-0 flex-1 cursor-pointer rounded-lg py-0.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 focus-visible:ring-offset-2"
   >
     <span data-task-title-text className={`block truncate text-sm font-semibold decoration-emerald-200 decoration-2 underline-offset-2 transition-colors motion-reduce:transition-none group-hover/title:text-emerald-700 group-hover/title:underline group-focus-visible/title:text-emerald-700 group-focus-visible/title:underline ${done ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{title}</span>
-    <span className="block truncate text-[10px] leading-4 text-slate-400">{metadata}</span>
+    {metadata && <span data-task-title-metadata className="block truncate text-[10px] leading-4 text-slate-400">{metadata}</span>}
   </button>
 }

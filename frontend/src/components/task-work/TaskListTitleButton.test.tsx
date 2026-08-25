@@ -33,4 +33,11 @@ describe('TaskListTitleButton', () => {
   it('keeps read-only titles openable and never turns them into structural selection', () => {
     expect(taskListTitleAction({ editable: false, selectionMode: true, ctrlKey: true, metaKey: false, shiftKey: true })).toBe('open')
   })
+
+  it('does not reserve a second line when the active context leaves no metadata', () => {
+    render(<TaskListTitleButton title="Una sola línea" metadata="" done={false} editable selectionMode={false} onOpen={() => {}} onSelect={() => {}} />)
+
+    expect(screen.getByRole('button', { name: 'Abrir tarea Una sola línea' })).toBeInTheDocument()
+    expect(document.querySelector('[data-task-title-metadata]')).not.toBeInTheDocument()
+  })
 })

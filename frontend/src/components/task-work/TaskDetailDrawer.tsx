@@ -71,6 +71,13 @@ import TaskQuickSubtaskComposer, { createTaskQuickSubtaskDraft, type TaskQuickSu
 import { taskCompletionTransition } from './taskStatusTransition'
 import { resolveTaskDetailEscape, TASK_DETAIL_ESCAPE_LAYER_SELECTOR } from './taskDetailEscape'
 import { projectTaskVisualUpdate, type TaskVisualUpdate } from './taskVisualProjection'
+import {
+  TaskDescriptionAutosaveCoordinator,
+  type TaskDescriptionAutosaveState,
+  type TaskDescriptionConflict,
+  type TaskDescriptionSaveOutcome,
+  type TaskDescriptionSaveRequest,
+} from './taskDescriptionAutosave'
 
 interface Props {
   taskId: string | null
@@ -103,6 +110,7 @@ type TaskMutationResponse = {
   hierarchy_counts?: TaskHierarchyCounts
   code?: string
   affected_user_ids?: string[]
+  current?: TaskDescriptionConflict
 }
 type TaskCommentPage = { comments: TaskComment[]; has_more: boolean; next_offset: number }
 type TaskDetailDraft = {
@@ -145,6 +153,7 @@ const activityLabels: Record<string, string> = {
   attachment_comment_deleted: 'eliminó un comentario de adjunto',
   dependency_added: 'añadió una dependencia',
   dependency_deleted: 'quitó una dependencia',
+  description_updated: 'actualizó la descripción',
 }
 const taskStructureActions = new Set(['folder_created', 'folder_updated', 'folder_archived', 'list_created', 'list_updated', 'list_archived', 'list_deleted', 'workflow_created', 'workflow_updated', 'status_created', 'status_updated', 'status_deleted'])
 const resizeHandles: Record<TaskDetailResizeEdge, string> = {
@@ -212,6 +221,7 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
   const [titleDraft, setTitleDraft] = useState('')
   const [descriptionDraft, setDescriptionDraft] = useState('')
   const [descriptionExpanded, setDescriptionExpanded] = useState(false)
+  const [descriptionSaveState, setDescriptionSaveState] = useState<TaskDescriptionAutosaveState | undefined>()
   const [startDraft, setStartDraft] = useState('')
   const [dueDraft, setDueDraft] = useState('')
   const [allDayDraft, setAllDayDraft] = useState(false)
@@ -269,17 +279,21 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
   const feedContextRef = useRef('')
   const modalPreviousFocusRef = useRef<HTMLElement | null>(null)
   const onCloseRef = useRef(onClose)
+  const requestCloseRef = useRef<() => void>(() => onClose())
   const commentsNextOffsetRef = useRef(0)
   const commentsRef = useRef<TaskComment[]>([])
   const prependScrollHeightRef = useRef<number | null>(null)
   const editingTitleRef = useRef(false)
   const skipTitleSaveRef = useRef(false)
   const editingDescriptionRef = useRef(false)
+  const descriptionComposingRef = useRef(false)
   const editingDatesRef = useRef(false)
   const editingProgressRef = useRef(false)
   const taskNavigationReturnRef = useRef<{ parentTaskId: string; childTaskId: string; scrollTop: number; tab: DetailTab } | null>(null)
   const pendingParentRestoreRef = useRef<{ parentTaskId: string; childTaskId: string; scrollTop: number; tab: DetailTab } | null>(null)
   const updateTaskRef = useRef<(key: string, body: Record<string, unknown>, confirmGrants?: boolean) => Promise<boolean>>(async () => false)
+  const descriptionSaveHandlerRef = useRef<(request: TaskDescriptionSaveRequest) => Promise<TaskDescriptionSaveOutcome>>(async () => ({ kind: 'error', message: 'No se pudo guardar la descripción.' }))
+  const descriptionAutosaveRef = useRef<TaskDescriptionAutosaveCoordinator | null>(null)
   const detailWindow = useTaskDetailWindow(storageScope, availableWorkspaceWidth)
   const windowVisual = taskDetailVisualState(detailWindow.effectiveMode, detailWindow.isMobile)
   const taskOpen = Boolean(taskId)
@@ -290,6 +304,24 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
   listsRef.current = lists
   workflowsRef.current = workflows
   commentsRef.current = comments
+  if (!descriptionAutosaveRef.current) {
+    descriptionAutosaveRef.current = new TaskDescriptionAutosaveCoordinator({
+      save: request => descriptionSaveHandlerRef.current(request),
+      onStateChange: (changedTaskId, state) => {
+        const savedDraft = draftsByTaskRef.current.get(changedTaskId)
+        if (savedDraft) {
+          savedDraft.description = state.draft
+          draftsByTaskRef.current.set(changedTaskId, savedDraft)
+        }
+        if (taskIdRef.current !== changedTaskId) return
+        const clean = state.draft === state.canonical && state.phase !== 'conflict' && state.phase !== 'error'
+        editingDescriptionRef.current = !clean
+        if (clean) preservedDraftKeysRef.current.delete('description')
+        else preservedDraftKeysRef.current.add('description')
+        setDescriptionSaveState(state)
+      },
+    })
+  }
   currentDraftRef.current = {
     title: titleDraft,
     description: descriptionDraft,
@@ -380,11 +412,16 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
       ? { ...incoming, collaborators: current.collaborators }
       : incoming
     taskSnapshotsRef.current.set(incoming.id, next)
+    descriptionAutosaveRef.current?.syncCanonical(incoming.id, next.description || '', {
+      description: next.description || '',
+      version: Number(next.version || 0),
+      updated_at: next.updated_at,
+    })
     if (taskIdRef.current !== incoming.id) return
     taskRef.current = next
     setTask(next)
     if (forceDrafts || (!editingTitleRef.current && !preservedDraftKeysRef.current.has('title'))) setTitleDraft(next.title)
-    if (forceDrafts || (!editingDescriptionRef.current && !preservedDraftKeysRef.current.has('description'))) setDescriptionDraft(next.description || '')
+    if (!preservedDraftKeysRef.current.has('description') && (forceDrafts || !editingDescriptionRef.current)) setDescriptionDraft(next.description || '')
     if (forceDrafts || (!editingDatesRef.current && !preservedDraftKeysRef.current.has('dates'))) {
       setStartDraft(localDateTime(next.start_at))
       setDueDraft(localDateTime(next.due_at))
@@ -401,6 +438,76 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
       setSubtaskDraft(createTaskQuickSubtaskDraft(next, taskWorkflowStatuses(next, listsRef.current, workflowsRef.current)))
     }
   }, [])
+
+  const persistDescription = useCallback((request: TaskDescriptionSaveRequest): Promise<TaskDescriptionSaveOutcome> => {
+    const requestedTaskId = request.taskId
+    beginPending('description', requestedTaskId)
+    if (taskIdRef.current === requestedTaskId) preservedDraftKeysRef.current.add('description')
+    const execute = async (): Promise<TaskDescriptionSaveOutcome> => {
+      const current = taskSnapshotsRef.current.get(requestedTaskId)
+        || (taskRef.current?.id === requestedTaskId ? taskRef.current : undefined)
+        || allTasksRef.current.find(item => item.id === requestedTaskId)
+      if (!current) return { kind: 'error', message: 'No pudimos encontrar la tarea para guardar la descripción.' }
+      if (!canEditTask(current)) return { kind: 'error', message: 'No tienes permiso para modificar esta tarea.' }
+
+      const operationID = crypto.randomUUID()
+      const result = await apiPatch<TaskMutationResponse>(`/api/tasks/${requestedTaskId}/description`, {
+        description: request.description,
+        version: request.versionOverride ?? current.version,
+        operation_id: operationID,
+      })
+      if (!result.success || !result.data?.current) {
+        if (result.status === 409 && result.data?.code === 'version_conflict' && result.data.current) {
+          const remote = result.data.current
+          const canonical = {
+            ...current,
+            description: remote.description,
+            version: remote.version,
+            updated_at: remote.updated_at || current.updated_at,
+          }
+          taskSnapshotsRef.current.set(requestedTaskId, canonical)
+          if (taskIdRef.current === requestedTaskId) {
+            taskRef.current = canonical
+            setTask(canonical)
+          }
+          onChanged(canonical)
+          return { kind: 'conflict', message: result.error || 'La descripción cambió en otra sesión.', current: remote }
+        }
+        return { kind: 'error', message: result.error || 'No se pudo guardar la descripción.' }
+      }
+      const saved = result.data.current
+      const latestSnapshot = taskSnapshotsRef.current.get(requestedTaskId)
+      if (latestSnapshot && Number(latestSnapshot.version || 0) > Number(saved.version || 0)) {
+        if ((latestSnapshot.description || '') !== (saved.description || '')) {
+          return {
+            kind: 'conflict',
+            message: 'La descripción cambió en otra sesión.',
+            current: {
+              description: latestSnapshot.description || '',
+              version: Number(latestSnapshot.version || 0),
+              updated_at: latestSnapshot.updated_at,
+            },
+          }
+        }
+        return { kind: 'success', description: latestSnapshot.description || '' }
+      }
+      const savedTask = {
+        ...(latestSnapshot || current),
+        description: saved.description,
+        version: saved.version,
+        updated_at: saved.updated_at || current.updated_at,
+      }
+      applyTask(savedTask)
+      onChanged(savedTask, result.data.operation_id || operationID)
+      return { kind: 'success', description: saved.description || '' }
+    }
+
+    const previousQueue = taskWriteQueuesRef.current.get(requestedTaskId) || Promise.resolve()
+    const queued = previousQueue.then(execute, execute)
+    taskWriteQueuesRef.current.set(requestedTaskId, queued.then(() => undefined, () => undefined))
+    return queued.finally(() => endPending('description', requestedTaskId))
+  }, [applyTask, beginPending, endPending, onChanged])
+  descriptionSaveHandlerRef.current = persistDescription
 
   const refreshTask = useCallback(async () => {
     const token = captureReadToken()
@@ -550,7 +657,12 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
 
   useEffect(() => {
     const previousTaskId = taskIdRef.current
-    if (previousTaskId && currentDraftRef.current) draftsByTaskRef.current.set(previousTaskId, currentDraftRef.current)
+    if (previousTaskId && currentDraftRef.current) {
+      const latestDescription = descriptionAutosaveRef.current?.getState(previousTaskId)?.draft ?? currentDraftRef.current.description
+      draftsByTaskRef.current.set(previousTaskId, { ...currentDraftRef.current, description: latestDescription })
+      descriptionAutosaveRef.current?.setComposing(previousTaskId, false)
+      void descriptionAutosaveRef.current?.flush(previousTaskId)
+    }
     readSessionRef.current?.controller.abort()
     loadSequenceRef.current += 1
     taskIdRef.current = taskId
@@ -558,6 +670,7 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
     editingTitleRef.current = false
     skipTitleSaveRef.current = false
     editingDescriptionRef.current = false
+    descriptionComposingRef.current = false
     editingDatesRef.current = false
     editingProgressRef.current = false
     preservedDraftKeysRef.current.clear()
@@ -595,6 +708,15 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
       setProgressInput('0')
       setProgressMode('manual')
     }
+    if (taskId) {
+      const canonicalDescription = seed?.description || ''
+      const autosaveState = descriptionAutosaveRef.current?.hydrate(taskId, canonicalDescription, savedDraft?.description ?? canonicalDescription, seed ? {
+        description: canonicalDescription,
+        version: Number(seed.version || 0),
+        updated_at: seed.updated_at,
+      } : undefined)
+      setDescriptionSaveState(autosaveState)
+    } else setDescriptionSaveState(undefined)
     setChildren([])
     commentsRef.current = []
     setComments([])
@@ -643,7 +765,22 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
     }
   }, [load, taskId])
 
-  useEffect(() => () => readSessionRef.current?.controller.abort(), [])
+  useEffect(() => () => {
+    readSessionRef.current?.controller.abort()
+    const autosave = descriptionAutosaveRef.current
+    void autosave?.flushAll()
+    autosave?.dispose()
+  }, [])
+
+  useEffect(() => {
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!descriptionAutosaveRef.current?.hasUnsaved()) return
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', warnBeforeUnload)
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload)
+  }, [])
 
   useEffect(() => {
     if (subtaskDraftResetTokenRef.current === subtaskDraftResetToken) return
@@ -676,7 +813,7 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
   useEffect(() => subscribeWebSocket(raw => {
     const envelope = raw as {
       event?: string
-      data?: { action?: string; task_id?: string; version?: number; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts; related_task_ids?: string[]; task?: Task; subtask?: Task; comment_id?: string; comment?: TaskComment; attachment_id?: string }
+      data?: { action?: string; task_id?: string; description?: string; version?: number; updated_at?: string; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts; related_task_ids?: string[]; task?: Task; subtask?: Task; comment_id?: string; comment?: TaskComment; attachment_id?: string }
     }
     if (envelope.event !== 'task_update' && envelope.event !== 'task_overdue') return
     const message = envelope.data || {}
@@ -692,6 +829,33 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
     if (message.action && taskStructureActions.has(message.action)) {
       void refreshTask()
       if (!currentParentId) void refreshChildren()
+      return
+    }
+    if (message.action === 'description_updated' && message.task_id === currentTaskId && typeof message.description === 'string' && Number.isFinite(message.version)) {
+      const current = taskSnapshotsRef.current.get(currentTaskId) || taskRef.current
+      if (!current || Number(message.version) <= Number(current.version || 0)) return
+      const remote: TaskDescriptionConflict = {
+        description: message.description,
+        version: Number(message.version),
+        updated_at: message.updated_at,
+      }
+      descriptionAutosaveRef.current?.receiveRemote(currentTaskId, remote)
+      const canonical = {
+        ...current,
+        description: remote.description,
+        version: remote.version,
+        updated_at: remote.updated_at || current.updated_at,
+      }
+      taskSnapshotsRef.current.set(currentTaskId, canonical)
+      taskRef.current = canonical
+      setTask(canonical)
+      const autosaveState = descriptionAutosaveRef.current?.getState(currentTaskId)
+      if (autosaveState && autosaveState.draft === remote.description && autosaveState.phase !== 'conflict') {
+        editingDescriptionRef.current = false
+        preservedDraftKeysRef.current.delete('description')
+        setDescriptionDraft(remote.description)
+      }
+      window.setTimeout(() => { void refreshActivity() }, 120)
       return
     }
     if (message.task?.id === currentTaskId) applyTask(message.task)
@@ -754,7 +918,7 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
         onOpenTaskRef.current(currentTask.parent_task_id)
         return
       }
-      onCloseRef.current()
+      requestCloseRef.current()
     }
     window.addEventListener('keydown', closeOnEscape)
     return () => window.removeEventListener('keydown', closeOnEscape)
@@ -960,10 +1124,52 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
     if (value !== task.title) await updateTask('title', { title: value })
   }
   const saveDescription = async () => {
-    editingDescriptionRef.current = false
-    if (task && descriptionDraft !== (task.description || '')) return updateTask('description', { description: descriptionDraft })
-    return true
+    const requestedTaskId = taskIdRef.current
+    if (!requestedTaskId) return true
+    if (descriptionComposingRef.current) return false
+    return descriptionAutosaveRef.current?.flush(requestedTaskId) ?? true
   }
+  const changeDescription = (value: string) => {
+    const requestedTaskId = taskIdRef.current
+    editingDescriptionRef.current = true
+    preservedDraftKeysRef.current.add('description')
+    setDescriptionDraft(value)
+    if (requestedTaskId) descriptionAutosaveRef.current?.change(requestedTaskId, value, descriptionComposingRef.current)
+  }
+  const changeDescriptionComposition = (composing: boolean) => {
+    descriptionComposingRef.current = composing
+    const requestedTaskId = taskIdRef.current
+    if (requestedTaskId) descriptionAutosaveRef.current?.setComposing(requestedTaskId, composing)
+  }
+  const useRemoteDescription = () => {
+    const requestedTaskId = taskIdRef.current
+    if (!requestedTaskId) return
+    const remote = descriptionAutosaveRef.current?.useRemote(requestedTaskId)
+    if (!remote) return
+    setDescriptionDraft(remote.description)
+    editingDescriptionRef.current = false
+    preservedDraftKeysRef.current.delete('description')
+    const savedDraft = draftsByTaskRef.current.get(requestedTaskId)
+    if (savedDraft) {
+      savedDraft.description = remote.description
+      draftsByTaskRef.current.set(requestedTaskId, savedDraft)
+    }
+  }
+  const requestClose = useCallback(async () => {
+    const requestedTaskId = taskIdRef.current
+    if (!requestedTaskId || !descriptionAutosaveRef.current?.hasUnsaved(requestedTaskId)) {
+      onClose()
+      return
+    }
+    if (requestedTaskId) {
+      descriptionComposingRef.current = false
+      descriptionAutosaveRef.current?.setComposing(requestedTaskId, false)
+      const saved = await descriptionAutosaveRef.current?.flush(requestedTaskId)
+      if (saved === false) return
+    }
+    onClose()
+  }, [onClose])
+  requestCloseRef.current = () => { void requestClose() }
   const saveDates = async (startValue = startDraft, dueValue = dueDraft, isAllDay = allDayDraft) => {
     editingDatesRef.current = false
     if (!task) return
@@ -1454,13 +1660,18 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
     <TaskDescriptionEditor
       key={task.id}
       value={descriptionDraft}
-      onChange={value => { editingDescriptionRef.current = true; setDescriptionDraft(value) }}
+      onChange={changeDescription}
+      onCompositionChange={changeDescriptionComposition}
       storageScope={storageScope}
       panelRef={panelRef}
       pending={isPending('description')}
       disabled={!canEdit}
       onCommit={saveDescription}
       onExpandedChange={expanded => { editingDescriptionRef.current = expanded; setDescriptionExpanded(expanded) }}
+      saveState={descriptionSaveState?.taskId === task.id ? descriptionSaveState : undefined}
+      onRetry={() => { void descriptionAutosaveRef.current?.retry(task.id) }}
+      onKeepLocal={() => { void descriptionAutosaveRef.current?.keepLocal(task.id) }}
+      onUseRemote={useRemoteDescription}
       error={failure && <div role="alert" className="mb-3 flex shrink-0 items-start gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 text-xs text-rose-700"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1 leading-5">{failure.message}</span>{failure.canRetry && <button type="button" onClick={() => { const retry = failureRetryRef.current; clearFailure(); retry?.() }} className="shrink-0 rounded-lg bg-white px-2.5 py-1 font-semibold shadow-sm hover:bg-rose-100">Reintentar</button>}</div>}
     />
 
@@ -1534,7 +1745,7 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
                 {canEdit && <button title="Editar todas las propiedades" aria-label="Editar todas las propiedades" onClick={() => onEdit(task)} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 outline-none hover:bg-slate-100 hover:text-slate-700 focus:ring-2 focus:ring-emerald-400 focus:ring-offset-2"><Pencil className="h-4 w-4" /></button>}
                 {!task.parent_task_id && canAdmin && <button title="Mover a otro Entorno" onClick={() => setMoveEnvironmentOpen(true)} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-violet-50 hover:text-violet-700"><ArrowRightLeft className="h-4 w-4" /></button>}
                 {canAdmin && <button title="Mover a Papelera" disabled={isPending('archive')} onClick={() => { setArchiveTaskId(task.id); setArchiveError(''); setArchiveConfirmOpen(true) }} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"><Trash2 className="h-4 w-4" /></button>}
-                <button title="Cerrar" onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X className="h-5 w-5" /></button>
+                <button title="Cerrar" onClick={() => requestCloseRef.current()} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X className="h-5 w-5" /></button>
               </div>
             </div>
             {!isWide && <nav data-no-window-drag className="mt-3 flex rounded-xl bg-slate-100 p-1">{([['details', 'Detalles'], ['activity', `Actividad${comments.length ? ` · ${comments.length}${commentsHasMore ? '+' : ''}` : ''}`]] as [DetailTab, string][]).map(([key, label]) => <button key={key} onClick={() => setTab(key)} className={`min-h-9 flex-1 rounded-lg px-3 text-xs font-semibold transition ${tab === key ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>{label}</button>)}</nav>}
@@ -1569,7 +1780,7 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
       data-backdrop-mode={windowVisual.blocksWorkspace ? 'modal' : detailWindow.effectiveMode}
       style={{ ...windowVisual.backdropStyle, zIndex: TASK_OVERLAY_LAYERS.window }}
       className={`fixed inset-0 transition-[background-color,backdrop-filter] duration-200 ${windowVisual.blocksWorkspace ? '' : 'pointer-events-none'}`}
-      onMouseDown={event => { if (windowVisual.blocksWorkspace && event.target === event.currentTarget) onClose() }}
+      onMouseDown={event => { if (windowVisual.blocksWorkspace && event.target === event.currentTarget) requestCloseRef.current() }}
     >
       {panel}
       {auxiliaryLayers}

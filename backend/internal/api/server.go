@@ -825,6 +825,7 @@ func (s *Server) setupRoutes() {
 	tasks.Get("/:id/access", s.handleGetTaskAccess)
 	tasks.Put("/:id/access", s.handlePutTaskAccess)
 	tasks.Get("/:id", s.handleGetTask)
+	tasks.Patch("/:id/description", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleUpdateTaskDescription)
 	tasks.Patch("/:id/appearance", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleUpdateTaskAppearance)
 	tasks.Put("/:id", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleUpdateTask)
 	tasks.Post("/:id/move", s.requireTaskAccessParam("id", domain.TaskAccessEdit), s.handleMoveTask)

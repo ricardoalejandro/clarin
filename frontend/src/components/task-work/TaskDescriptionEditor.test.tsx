@@ -3,9 +3,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import TaskDescriptionEditor, { taskDescriptionHeightStorageKey } from './TaskDescriptionEditor'
 
+const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+
 afterEach(() => {
   cleanup()
   localStorage.clear()
+  vi.restoreAllMocks()
+  if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard)
+  else Reflect.deleteProperty(navigator, 'clipboard')
 })
 
 function ControlledDescription(props: Omit<React.ComponentProps<typeof TaskDescriptionEditor>, 'value' | 'onChange'>) {
@@ -53,6 +58,22 @@ describe('TaskDescriptionEditor', () => {
     expect(submit).toHaveBeenCalledTimes(2)
   })
 
+  it('keeps regular Enter for multiline text and commits Ctrl/Command+Enter without blurring', async () => {
+    const commit = vi.fn().mockResolvedValue(true)
+    render(<ControlledDescription onCommit={commit} />)
+    const inline = document.querySelector('[data-task-description]') as HTMLTextAreaElement
+    inline.focus()
+
+    expect(fireEvent.keyDown(inline, { key: 'Enter' })).toBe(true)
+    expect(commit).not.toHaveBeenCalled()
+    fireEvent.change(inline, { target: { value: 'Primera línea\nSegunda línea' } })
+    fireEvent.keyDown(inline, { key: 'Enter', ctrlKey: true })
+
+    await waitFor(() => expect(commit).toHaveBeenCalledTimes(1))
+    expect(inline).toHaveFocus()
+    expect(inline).toHaveValue('Primera línea\nSegunda línea')
+  })
+
   it('closes the expanded editor after a successful task submission', async () => {
     const submit = vi.fn().mockResolvedValue(true)
     render(<ControlledDescription onSubmit={submit} />)
@@ -90,5 +111,48 @@ describe('TaskDescriptionEditor', () => {
 
     rerender(<ControlledDescription storageScope="account-b:user-a" />)
     expect(screen.getByRole('slider', { name: 'Ajustar altura de la descripción' })).toHaveAttribute('aria-valuenow', '112')
+  })
+
+  it('lets read-only users expand and copy, then restores focus to the invoking control', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    render(<ControlledDescription disabled />)
+    const expand = screen.getByRole('button', { name: 'Expandir descripción' })
+    expand.focus()
+    fireEvent.click(expand)
+
+    expect(screen.getByRole('dialog', { name: 'Editor ampliado de descripción' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cerrar' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Copiar' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('Borrador inicial'))
+    expect(screen.getByText('Descripción copiada')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cerrar' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Editor ampliado de descripción' })).not.toBeInTheDocument())
+    await waitFor(() => expect(expand).toHaveFocus())
+  })
+
+  it('exposes save, retry and conflict feedback accessibly', () => {
+    const retry = vi.fn()
+    const keepLocal = vi.fn()
+    const useRemote = vi.fn()
+    const { rerender } = render(<ControlledDescription
+      saveState={{ taskId: 'task-a', draft: 'Local', canonical: 'Remota', phase: 'error', message: 'Sin conexión' }}
+      onRetry={retry}
+    />)
+    expect(screen.getByRole('alert')).toHaveTextContent('Sin conexión')
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar' }))
+    expect(retry).toHaveBeenCalledTimes(1)
+
+    rerender(<ControlledDescription
+      saveState={{ taskId: 'task-a', draft: 'Local', canonical: 'Remota', phase: 'conflict', conflict: { description: 'Remota', version: 2 } }}
+      onKeepLocal={keepLocal}
+      onUseRemote={useRemote}
+    />)
+    expect(screen.getByRole('alert')).toHaveTextContent('Conservamos tu texto')
+    fireEvent.click(screen.getByRole('button', { name: 'Conservar mi versión' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Usar versión recibida' }))
+    expect(keepLocal).toHaveBeenCalledTimes(1)
+    expect(useRemote).toHaveBeenCalledTimes(1)
   })
 })

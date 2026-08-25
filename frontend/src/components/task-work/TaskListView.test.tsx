@@ -1,7 +1,9 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Task, TaskWorkflowStatus } from '@/types/task'
-import TaskListView from './TaskListView'
+import TaskListView, { taskListRowMetadata, taskListShouldShowLocation } from './TaskListView'
+
+let resizeObserverWidth = 0
 
 const apiMocks = vi.hoisted(() => ({
   get: vi.fn(),
@@ -69,6 +71,7 @@ const props = {
   groupBy: 'none' as const,
   groupDirection: 'asc' as const,
   collapsedGroupKeys: [],
+  scopeType: 'list' as const,
   subtaskDisplayMode: 'collapsed' as const,
   subtaskScope: 'account-1:user-1:environment-1:list:list-1',
   onGroupingChange: vi.fn(),
@@ -85,7 +88,11 @@ const props = {
 describe('TaskListView compact interaction', () => {
   beforeAll(() => {
     class ResizeObserverMock {
-      observe() {}
+      private readonly callback: ResizeObserverCallback
+      constructor(callback: ResizeObserverCallback) { this.callback = callback }
+      observe() {
+        if (resizeObserverWidth > 0) this.callback([{ contentRect: { width: resizeObserverWidth } } as ResizeObserverEntry], this as unknown as ResizeObserver)
+      }
       unobserve() {}
       disconnect() {}
     }
@@ -94,6 +101,7 @@ describe('TaskListView compact interaction', () => {
 
   afterEach(() => {
     cleanup()
+    resizeObserverWidth = 0
     vi.clearAllMocks()
     apiMocks.get.mockResolvedValue({ success: true, data: { tasks: [] } })
     apiMocks.put.mockResolvedValue({ success: true, data: { task: childTask } })
@@ -112,10 +120,73 @@ describe('TaskListView compact interaction', () => {
 
   it('renders dense rows and keeps completion, status and star as separate controls', () => {
     render(<TaskListView {...props} />)
-    expect(document.querySelector('[data-task-list-row="task-1"]')).toHaveClass('min-h-12', '[@media(pointer:coarse)]:min-h-14')
+    expect(document.querySelector('[data-task-list-row="task-1"]')).toHaveClass('min-h-11', '[@media(pointer:coarse)]:min-h-14')
     expect(document.querySelector('[data-task-list-row="task-1"] [data-task-completion-control]')).toHaveAccessibleName('Marcar como finalizada')
     expect(document.querySelector('[data-task-status-picker]')).toHaveClass('min-h-9')
     expect(screen.getByRole('button', { name: `Destacar ${task.title}` })).toBeInTheDocument()
+  })
+
+  it('shows location only when the active context does not already communicate it', () => {
+    expect(taskListShouldShowLocation('list', 'none')).toBe(false)
+    expect(taskListShouldShowLocation('environment', 'list')).toBe(false)
+    expect(taskListShouldShowLocation('environment', 'none')).toBe(true)
+    expect(taskListRowMetadata(task, 'comfortable', false, true)).toBe('')
+
+    const view = render(<TaskListView {...props} />)
+    expect(document.querySelector(`[data-task-list-row="${task.id}"] [data-task-title-metadata]`)).not.toBeInTheDocument()
+    expect(screen.queryByText('Propaganda')).not.toBeInTheDocument()
+
+    view.rerender(<TaskListView {...props} scopeType="environment" />)
+    expect(document.querySelector(`[data-task-list-row="${task.id}"] [data-task-title-metadata]`)).toHaveTextContent('Propaganda')
+  })
+
+  it('preserves sharing and read-only context even when the selected list hides its repeated name', () => {
+    const readOnlyShared = {
+      ...task,
+      breadcrumbs_visible: false,
+      permissions: { can_view: true, can_edit: false, can_delete: false },
+    } as Task
+
+    expect(taskListRowMetadata(readOnlyShared, 'comfortable', false, false)).toBe('Compartida contigo · Solo lectura')
+    render(<TaskListView {...props} tasks={[readOnlyShared]} />)
+
+    expect(document.querySelector('[data-task-title-metadata]')).toHaveTextContent('Compartida contigo · Solo lectura')
+    expect(document.querySelector('[data-task-row-actions]')).not.toBeInTheDocument()
+  })
+
+  it('switches measured compact rows to one 36px menu slot before priority', () => {
+    resizeObserverWidth = 900
+    render(<TaskListView {...props} />)
+
+    const row = document.querySelector(`[data-task-list-row="${task.id}"]`)
+    const actions = row?.querySelector('[data-task-row-actions]')
+    const trigger = screen.getByRole('button', { name: `Acciones de ${task.title}` })
+    expect(actions).toHaveAttribute('data-task-row-action-mode', 'menu')
+    expect(actions).toHaveClass('w-9', '[@media(pointer:coarse)]:w-11')
+    expect(trigger).toHaveClass('flex', 'h-9', 'w-9', '[@media(pointer:coarse)]:h-11', '[@media(pointer:coarse)]:w-11')
+    expect(actions?.nextElementSibling).toHaveAttribute('data-task-priority', 'medium')
+    expect(screen.queryByRole('button', { name: `Agregar subtarea a ${task.title}` })).not.toBeInTheDocument()
+  })
+
+  it('keeps a compact starred task honest: the ellipsis opens actions and the dot only indicates state', () => {
+    resizeObserverWidth = 900
+    render(<TaskListView {...props} tasks={[{ ...task, starred: true }]} />)
+
+    const trigger = screen.getByRole('button', { name: `Acciones de ${task.title}, destacada` })
+    expect(trigger.querySelector('[data-task-starred-indicator]')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: `Quitar ${task.title} de destacadas` })).not.toBeInTheDocument()
+
+    fireEvent.click(trigger)
+    expect(screen.getByRole('menuitem', { name: 'Quitar de destacadas' })).toBeInTheDocument()
+  })
+
+  it('keeps a starred state visible inside the contextual slot at rest', () => {
+    const starred = { ...task, starred: true }
+    render(<TaskListView {...props} tasks={[starred]} />)
+
+    const star = screen.getByRole('button', { name: `Quitar ${task.title} de destacadas` })
+    expect(star).toHaveClass('pointer-events-auto', 'text-amber-500', 'opacity-100')
+    expect(star.querySelector('svg')).toHaveClass('fill-current')
   })
 
   it('keeps fine-pointer controls mounted without geometry changes and reveals them for selection, focus and touch', () => {
@@ -126,11 +197,15 @@ describe('TaskListView compact interaction', () => {
     const completionSlot = row?.querySelector('[data-task-row-completion]')
     const completion = completionSlot?.querySelector('[data-task-completion-control]')
     const actions = row?.querySelector('[data-task-row-actions]')
+    const add = screen.getByRole('button', { name: `Agregar subtarea a ${task.title}` })
+    const rename = screen.getByRole('button', { name: `Cambiar nombre de ${task.title}` })
     expect(grip).toHaveClass('pointer-events-none', 'opacity-0', 'group-hover:pointer-events-auto', 'group-focus-within:opacity-100', '[@media(pointer:coarse)]:opacity-100', '[@media(pointer:coarse)]:w-11')
     expect(completion).toHaveClass('pointer-events-none', 'opacity-0', '[@media(pointer:coarse)]:pointer-events-auto', '[@media(pointer:coarse)]:h-11', '[@media(pointer:coarse)]:w-11')
-    expect(actions).toHaveClass('absolute', 'pointer-events-none', 'opacity-0', '[@media(pointer:coarse)]:opacity-100')
-    expect(screen.getByRole('button', { name: `Agregar subtarea a ${task.title}` })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: `Cambiar nombre de ${task.title}` })).toBeInTheDocument()
+    expect(actions).toHaveAttribute('data-task-row-action-mode', 'direct')
+    expect(actions).toHaveClass('relative', 'w-[104px]', '[@media(pointer:coarse)]:w-11')
+    expect(add).toHaveClass('pointer-events-none', 'opacity-0', 'group-hover:pointer-events-auto', '[@media(pointer:coarse)]:hidden')
+    expect(rename).toHaveClass('pointer-events-none', 'opacity-0', 'group-focus-within:opacity-100')
+    expect(actions?.nextElementSibling).toHaveAttribute('data-task-priority', 'medium')
 
     fireEvent.click(screen.getByRole('button', { name: `Abrir tarea ${task.title}` }), { ctrlKey: true })
 
@@ -141,6 +216,7 @@ describe('TaskListView compact interaction', () => {
     expect(grip).toHaveClass('pointer-events-auto', 'opacity-100')
     expect(completion).toHaveClass('pointer-events-auto', 'opacity-100')
     expect(actions).toHaveAttribute('data-task-row-controls-pinned', 'true')
+    expect(add).toHaveClass('pointer-events-auto', 'opacity-100')
   })
 
   it('isolates add-subtask pointer and click ownership from opening, selecting and dragging the row', () => {
@@ -302,6 +378,8 @@ describe('TaskListView compact interaction', () => {
     })
 
     expect(within(childRow).queryByRole('button', { name: `Agregar subtarea a ${childTask.title}` })).not.toBeInTheDocument()
+    expect(within(childRow).queryByText('Subtarea')).not.toBeInTheDocument()
+    expect(within(childRow).getByRole('button', { name: `Destacar ${childTask.title}` })).toBeInTheDocument()
     fireEvent.click(within(childRow).getByRole('button', { name: `Acciones de ${childTask.title}` }))
     const childMenu = screen.getByRole('menu', { name: `Acciones de ${childTask.title}` })
     expect(within(childMenu).queryByRole('menuitem', { name: 'Agregar subtarea' })).not.toBeInTheDocument()

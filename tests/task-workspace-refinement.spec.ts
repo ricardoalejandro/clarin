@@ -431,6 +431,33 @@ async function installWorkspaceMock(page: Page, options: { subtasks?: boolean; c
       await json(route, { task: taskWithoutCollaborators, collaborators: task.collaborators, version: task.version })
       return
     }
+    if (path === `/api/tasks/${task.id}/description` && request.method() === 'PATCH') {
+      taskWrites.push(body)
+      if (failNextDescriptionWrite) {
+        failNextDescriptionWrite = false
+        await json(route, { success: false, error: 'No pudimos guardar la descripción.' }, 500)
+        return
+      }
+      const description = String(body.description ?? '')
+      if (description !== task.description && Number(body.version) !== task.version) {
+        await json(route, {
+          success: false,
+          code: 'version_conflict',
+          error: 'La descripción cambió en otra sesión',
+          current: { description: task.description, version: task.version, updated_at: task.updated_at },
+        }, 409)
+        return
+      }
+      if (description !== task.description) {
+        task = { ...task, description, version: task.version + 1, updated_at: new Date().toISOString() }
+      }
+      await json(route, {
+        success: true,
+        current: { description: task.description, version: task.version, updated_at: task.updated_at },
+        operation_id: body.operation_id,
+      })
+      return
+    }
     if (path === `/api/tasks/${task.id}` && request.method() === 'PUT') {
       taskWrites.push(body)
       if (failNextDescriptionWrite && Object.prototype.hasOwnProperty.call(body, 'description')) {
@@ -867,7 +894,9 @@ test.describe('Clarin Work workspace refinement', () => {
     const editor = page.getByRole('dialog', { name: 'Crear una tarea' })
     await expect(editor).toBeVisible()
     await expect(editor.getByPlaceholder('¿Qué hay que lograr?')).toHaveValue('Borrador completo desde Calendario')
-    await expect(editor.getByRole('button', { name: 'Todo el día', exact: true })).toBeVisible()
+    const dateRange = editor.locator('[data-task-date-range-trigger]')
+    await expect(dateRange).toHaveAttribute('aria-label', /^Fechas de la tarea:/)
+    await expect(dateRange).toContainText('Todo el día')
   })
 
   test('keeps Calendario usable at the six supported responsive widths', async ({ page }) => {
@@ -1846,6 +1875,52 @@ test.describe('Clarin Work workspace refinement', () => {
     await expect(backdrop).toHaveCSS('backdrop-filter', 'blur(3px)')
     const mobileBox = await detail.boundingBox()
     expect(mobileBox!.width).toBeLessThanOrEqual(375)
+  })
+
+  test('autosaves multiline descriptions and keeps scoped list rows compact without hover shift', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1600, height: 818 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+
+    await page.locator('[data-task-hierarchy-list="list-work"] button').first().click()
+    const row = page.locator('[data-task-list-row="task-refinement"]')
+    await expect(row).toBeVisible()
+    await expect(row.locator('[data-task-title-metadata]')).toHaveCount(0)
+    await expect.poll(async () => Math.round((await row.boundingBox())?.height || 0)).toBe(44)
+
+    const actions = row.locator('[data-task-row-actions]')
+    const priority = row.locator('[data-task-priority]')
+    const priorityBefore = await priority.boundingBox()
+    await row.hover()
+    const actionMode = await actions.getAttribute('data-task-row-action-mode')
+    if (actionMode === 'direct') {
+      await expect(row.getByRole('button', { name: 'Agregar subtarea a Preparar propuesta profesional' })).toBeVisible()
+      await expect(row.getByRole('button', { name: 'Cambiar nombre de Preparar propuesta profesional' })).toBeVisible()
+    } else {
+      const actionTrigger = row.getByRole('button', { name: 'Acciones de Preparar propuesta profesional' })
+      await expect(actionTrigger).toBeVisible()
+      await actionTrigger.click()
+      const actionMenu = page.getByRole('menu', { name: 'Acciones de Preparar propuesta profesional' })
+      await expect(actionMenu.getByRole('menuitem', { name: 'Agregar subtarea' })).toBeVisible()
+      await expect(actionMenu.getByRole('menuitem', { name: 'Cambiar nombre' })).toBeVisible()
+      await page.keyboard.press('Escape')
+      await expect(actionMenu).toHaveCount(0)
+    }
+    const actionsBox = await actions.boundingBox()
+    const priorityAfter = await priority.boundingBox()
+    expect(actionsBox!.x + actionsBox!.width).toBeLessThanOrEqual(priorityAfter!.x + 1)
+    expect(Math.round(priorityAfter!.x)).toBe(Math.round(priorityBefore!.x))
+
+    await row.getByText('Preparar propuesta profesional', { exact: true }).click()
+    const detail = page.locator('[data-task-detail-window]')
+    const description = detail.locator('[data-task-description]')
+    await description.fill('Primera línea')
+    await description.press('Enter')
+    await description.type('Segunda línea')
+    await expect(description).toHaveValue('Primera línea\nSegunda línea')
+    await expect(detail.getByText('Sin guardar', { exact: true })).toBeVisible()
+    await expect.poll(() => mock.taskWrites.filter(write => write.description === 'Primera línea\nSegunda línea').length).toBe(1)
+    await expect(detail.getByText('Guardado', { exact: true })).toBeVisible()
   })
 
   test('keeps one in-flow inspector mounted while navigating tasks and restores each draft', async ({ page }) => {

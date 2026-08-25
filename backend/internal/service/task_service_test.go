@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/repository"
 )
 
 func TestNextRecurringDue(t *testing.T) {
@@ -150,6 +151,34 @@ func TestTaskCreatedEventPayloadCarriesOperationID(t *testing.T) {
 	withoutOperation := taskCreatedEventPayload(task, nil)
 	if _, exists := withoutOperation["operation_id"]; exists {
 		t.Fatalf("optional operation id was fabricated: %#v", withoutOperation)
+	}
+}
+
+func TestTaskDescriptionUpdatedEventPayloadIsNarrowAndCanonical(t *testing.T) {
+	taskID := uuid.New()
+	operationID := uuid.New()
+	updatedAt := time.Date(2026, time.August, 25, 12, 45, 0, 0, time.UTC)
+	state := &repository.TaskDescriptionState{
+		Description: "línea uno\nlínea dos",
+		Version:     12,
+		UpdatedAt:   updatedAt,
+		Changed:     true,
+	}
+	payload := taskDescriptionUpdatedEventPayload(taskID, state, operationID)
+	if payload["action"] != "description_updated" || payload["task_id"] != taskID.String() ||
+		payload["description"] != state.Description || payload["version"] != state.Version ||
+		payload["updated_at"] != updatedAt || payload["operation_id"] != operationID.String() {
+		t.Fatalf("unexpected description event: %#v", payload)
+	}
+	if _, leaked := payload["task"]; leaked {
+		t.Fatalf("description event leaked a task hierarchy: %#v", payload)
+	}
+	if _, leaked := payload["hierarchy_counts"]; leaked {
+		t.Fatalf("description event leaked hierarchy counts: %#v", payload)
+	}
+	sanitized := taskACLRealtimePayload(taskID, payload)
+	if sanitized["description"] != state.Description || sanitized["operation_id"] != operationID.String() {
+		t.Fatalf("ACL realtime sanitizer dropped canonical description data: %#v", sanitized)
 	}
 }
 
