@@ -2,13 +2,14 @@ import type { EVENT } from "./constants";
 import type { ExcalidrawBindableElement, FontFamilyValues, FontString } from "./element/types";
 import type { ActiveTool, AppState, ToolType, UnsubscribeCallback, Zoom } from "./types";
 import type { MaybePromise, ResolutionType } from "./utility-types";
+export { isWysiwygTarget } from "./wysiwygTarget";
 export declare const setDateTimeForTests: (dateTime: string) => void;
 export declare const getDateTime: () => string;
 export declare const capitalizeString: (str: string) => string;
 export declare const isToolIcon: (target: Element | EventTarget | null) => target is HTMLElement;
-export declare const isInputLike: (target: Element | EventTarget | null) => target is HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLBRElement | HTMLDivElement;
+export declare const isInputLike: (target: Element | EventTarget | null) => boolean;
 export declare const isInteractive: (target: Element | EventTarget | null) => boolean;
-export declare const isWritableElement: (target: Element | EventTarget | null) => target is HTMLInputElement | HTMLTextAreaElement | HTMLBRElement | HTMLDivElement;
+export declare const isWritableElement: (target: Element | EventTarget | null) => boolean;
 export declare const getFontFamilyString: ({ fontFamily, }: {
     fontFamily: FontFamilyValues;
 }) => string;
@@ -259,4 +260,3 @@ export declare class PromisePool<T> {
  */
 export declare const escapeDoubleQuotes: (str: string) => string;
 export declare const castArray: <T>(value: T | T[]) => T[];
-export {};

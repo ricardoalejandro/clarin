@@ -56,6 +56,7 @@ export declare const actionSelectAllElementsInFrame: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -226,6 +227,7 @@ export declare const actionRemoveAllElementsFromFrame: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -394,6 +396,7 @@ export declare const actionupdateFrameRendering: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -562,6 +565,7 @@ export declare const actionSetFrameAsActiveTool: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -937,6 +941,7 @@ export declare const actionWrapSelectionInFrame: {
             points: readonly import("@excalidraw/math").LocalPoint[];
             pressures: readonly number[];
             simulatePressure: boolean;
+            strokeOptions: import("../element/types").StrokeOptions;
             lastCommittedPoint: import("@excalidraw/math").LocalPoint | null;
         }> & {
             index: import("../element/types").FractionalIndex;

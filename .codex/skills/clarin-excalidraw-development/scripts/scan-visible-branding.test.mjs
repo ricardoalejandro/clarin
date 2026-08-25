@@ -100,15 +100,16 @@ test("conserva avisos MIT exactos pero bloquea la misma marca en un artefacto de
     mkdirSync(join(root, "vendor"));
     writeFileSync(join(root, "vendor", "LICENSE"), "Excalidraw\nMIT License\n", "utf8");
     writeFileSync(join(root, "vendor", "NOTICE.md"), "Copyright (c) Excalidraw\n", "utf8");
+    writeFileSync(join(root, "vendor", "LASER-POINTER-MIT.txt"), "Excalidraw laser pointer\nMIT License\n", "utf8");
     writeFileSync(join(root, "manifest.json"), "{\"product\":\"Pizarras Clarin\"}\n", "utf8");
     const clean = scanBrandingRoot(root, policy);
-    assert.equal(clean.legalFiles, 2);
+    assert.equal(clean.legalFiles, 3);
     assert.equal(clean.scannedFiles, 1);
     assert.deepEqual(clean.violations, []);
 
     writeFileSync(join(root, "product-ui.js"), "const label = 'Made with Excalidraw';\n", "utf8");
     const leaked = scanBrandingRoot(root, policy);
-    assert.equal(leaked.legalFiles, 2);
+    assert.equal(leaked.legalFiles, 3);
     assert.equal(leaked.violations.length, 1);
     assert.equal(leaked.violations[0].rule, "upstream-product-name");
   } finally {

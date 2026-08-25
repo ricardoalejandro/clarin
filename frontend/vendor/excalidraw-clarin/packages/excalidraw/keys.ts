@@ -139,6 +139,14 @@ export const isArrowKey = (key: string) =>
   key === KEYS.ARROW_DOWN ||
   key === KEYS.ARROW_UP;
 
+export const shouldAllowInputLikeElementKeydown = (
+  key: string,
+  targetIsWritable: boolean,
+  targetIsInputLike: boolean,
+) =>
+  (targetIsWritable && key !== KEYS.ESCAPE) ||
+  (targetIsInputLike && (isArrowKey(key) || key === KEYS.SPACE));
+
 export const shouldResizeFromCenter = (event: MouseEvent | KeyboardEvent) =>
   event.altKey;
 

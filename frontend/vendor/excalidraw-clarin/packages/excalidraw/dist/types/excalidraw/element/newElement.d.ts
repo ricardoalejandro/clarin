@@ -39,6 +39,7 @@ export declare const newFreeDrawElement: (opts: {
     type: "freedraw";
     points?: ExcalidrawFreeDrawElement["points"];
     simulatePressure: boolean;
+    strokeOptions?: ExcalidrawFreeDrawElement["strokeOptions"];
     pressures?: ExcalidrawFreeDrawElement["pressures"];
 } & ElementConstructorOpts) => NonDeleted<ExcalidrawFreeDrawElement>;
 export declare const newLinearElement: (opts: {

@@ -184,6 +184,7 @@ export declare const isLatinChar: (key: string) => boolean;
  */
 export declare const matchKey: (event: KeyboardEvent | React.KeyboardEvent<Element>, key: ValueOf<typeof KEYS>) => boolean;
 export declare const isArrowKey: (key: string) => key is "ArrowDown" | "ArrowLeft" | "ArrowRight" | "ArrowUp";
+export declare const shouldAllowInputLikeElementKeydown: (key: string, targetIsWritable: boolean, targetIsInputLike: boolean) => boolean;
 export declare const shouldResizeFromCenter: (event: MouseEvent | KeyboardEvent) => boolean;
 export declare const shouldMaintainAspectRatio: (event: MouseEvent | KeyboardEvent) => boolean;
 export declare const shouldRotateWithDiscreteAngle: (event: MouseEvent | KeyboardEvent | React.PointerEvent<HTMLCanvasElement>) => boolean;

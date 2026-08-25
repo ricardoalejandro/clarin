@@ -24,7 +24,7 @@ export async function loadWhiteboardFontCatalog(frontendRoot = process.cwd()) {
 }
 
 export async function verifyWhiteboardFontCatalog(catalog, root) {
-  if (catalog.schemaVersion !== 1 || catalog.engineVersion !== '0.18.1-clarin.4') throw new Error('Versión inválida del catálogo de fuentes.')
+  if (catalog.schemaVersion !== 1 || catalog.engineVersion !== '0.18.1-clarin.5') throw new Error('Versión inválida del catálogo de fuentes.')
   if (catalog.officialSelectableFonts !== 7 || catalog.customSelectableFonts !== 25 || catalog.totalSelectableFonts !== 32) throw new Error('El catálogo debe declarar exactamente 32 fuentes seleccionables (7 oficiales + 25 Clarin).')
   if (catalog.reservedIDRange?.start !== 10001 || catalog.reservedIDRange?.end !== 10025 || catalog.reservedIDRange?.recyclable !== false) throw new Error('El rango privado 10001–10025 debe permanecer reservado y no reciclable.')
   if (!Array.isArray(catalog.entries) || catalog.entries.length !== WHITEBOARD_CUSTOM_FONT_DEFINITIONS.length) throw new Error('El catálogo debe contener exactamente 25 familias Clarin.')

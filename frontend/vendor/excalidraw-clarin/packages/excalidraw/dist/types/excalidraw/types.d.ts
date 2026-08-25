@@ -1,6 +1,6 @@
 import type { JSX } from "react";
 import type React from "react";
-import type { PointerType, ExcalidrawLinearElement, NonDeletedExcalidrawElement, NonDeleted, TextAlign, ExcalidrawElement, GroupId, ExcalidrawBindableElement, Arrowhead, ChartType, FontFamilyValues, FileId, ExcalidrawImageElement, Theme, StrokeRoundness, ExcalidrawEmbeddableElement, ExcalidrawMagicFrameElement, ExcalidrawFrameLikeElement, ExcalidrawElementType, ExcalidrawIframeLikeElement, OrderedExcalidrawElement, ExcalidrawNonSelectionElement } from "./element/types";
+import type { PointerType, ExcalidrawLinearElement, NonDeletedExcalidrawElement, NonDeleted, TextAlign, ExcalidrawElement, GroupId, ExcalidrawBindableElement, Arrowhead, ChartType, FontFamilyValues, FileId, ExcalidrawImageElement, Theme, StrokeRoundness, ExcalidrawEmbeddableElement, ExcalidrawMagicFrameElement, ExcalidrawFrameLikeElement, ExcalidrawElementType, ExcalidrawIframeLikeElement, OrderedExcalidrawElement, ExcalidrawNonSelectionElement, StrokeVariability } from "./element/types";
 import type { Action } from "./actions/types";
 import type { LinearElementEditor } from "./element/linearElementEditor";
 import type { SuggestedBinding } from "./element/binding";
@@ -232,6 +232,7 @@ export interface AppState {
     currentItemStrokeWidth: number;
     currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
     currentItemRoughness: number;
+    currentItemStrokeVariability: StrokeVariability;
     currentItemOpacity: number;
     currentItemFontFamily: FontFamilyValues;
     currentItemFontSize: number;

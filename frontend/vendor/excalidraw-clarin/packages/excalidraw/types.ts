@@ -23,6 +23,7 @@ import type {
   ExcalidrawIframeLikeElement,
   OrderedExcalidrawElement,
   ExcalidrawNonSelectionElement,
+  StrokeVariability,
 } from "./element/types";
 import type { Action } from "./actions/types";
 import type { LinearElementEditor } from "./element/linearElementEditor";
@@ -306,6 +307,7 @@ export interface AppState {
   currentItemStrokeWidth: number;
   currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
   currentItemRoughness: number;
+  currentItemStrokeVariability: StrokeVariability;
   currentItemOpacity: number;
   currentItemFontFamily: FontFamilyValues;
   currentItemFontSize: number;

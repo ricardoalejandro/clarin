@@ -146,6 +146,7 @@ import {
   newIframeElement,
   newArrowElement,
 } from "../element/newElement";
+import { getFreedrawStrokeOptions } from "../element/freedraw";
 import {
   hasBoundTextElement,
   isArrowElement,
@@ -210,6 +211,7 @@ import {
   shouldRotateWithDiscreteAngle,
   isArrowKey,
   KEYS,
+  shouldAllowInputLikeElementKeydown,
 } from "../keys";
 import {
   isElementCompletelyInViewport,
@@ -4267,14 +4269,14 @@ class App extends React.Component<AppProps, AppState> {
         }
       }
 
-      // bail if
+      // Let writable controls keep their native editing behavior and let
+      // input-like controls (including radios) own navigation and activation.
       if (
-        // inside an input
-        (isWritableElement(event.target) &&
-          // unless pressing escape (finalize action)
-          event.key !== KEYS.ESCAPE) ||
-        // or unless using arrows (to move between buttons)
-        (isArrowKey(event.key) && isInputLike(event.target))
+        shouldAllowInputLikeElementKeydown(
+          event.key,
+          isWritableElement(event.target),
+          isInputLike(event.target),
+        )
       ) {
         return;
       }
@@ -7529,7 +7531,6 @@ class App extends React.Component<AppProps, AppState> {
     });
 
     const simulatePressure = event.pressure === 0.5;
-
     const element = newFreeDrawElement({
       type: elementType,
       x: gridX,
@@ -7543,6 +7544,10 @@ class App extends React.Component<AppProps, AppState> {
       opacity: this.state.currentItemOpacity,
       roundness: null,
       simulatePressure,
+      strokeOptions: getFreedrawStrokeOptions(
+        event.pointerType,
+        this.state.currentItemStrokeVariability,
+      ),
       locked: false,
       frameId: topLayerFrame ? topLayerFrame.id : null,
       points: [pointFrom<LocalPoint>(0, 0)],

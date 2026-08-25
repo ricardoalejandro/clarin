@@ -53,6 +53,42 @@ function linearElement(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function freedrawElement(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'freedraw-one',
+    type: 'freedraw',
+    x: 0,
+    y: 0,
+    width: 20,
+    height: 10,
+    angle: 0,
+    strokeColor: '#1e1e1e',
+    backgroundColor: 'transparent',
+    fillStyle: 'solid',
+    strokeWidth: 2,
+    strokeStyle: 'solid',
+    roughness: 0,
+    opacity: 100,
+    groupIds: [],
+    frameId: null,
+    index: 'a0',
+    roundness: { type: 3 },
+    seed: 5,
+    version: 1,
+    versionNonce: 6,
+    isDeleted: false,
+    boundElements: null,
+    updated: 1,
+    link: null,
+    locked: false,
+    points: [[0, 0], [5, 2], [20, 10]],
+    pressures: [0.1, 0.8, 0.4],
+    simulatePressure: false,
+    lastCommittedPoint: null,
+    ...overrides,
+  }
+}
+
 function textElement(overrides: Record<string, unknown> = {}) {
   const originalText = typeof overrides.originalText === 'string'
     ? overrides.originalText
@@ -139,6 +175,100 @@ describe('Clarin Excalidraw format adapter', () => {
     expect(payload.scene.appState).toEqual({ viewBackgroundColor: '#ffffff' })
     expect(payload.scene.files.image).not.toHaveProperty('dataURL')
     expect(payload.scene.futureRoot).toBe(7)
+  })
+
+  it('restores and persists freedraw variability without losing pressure samples', () => {
+    const sourceElements = [
+      freedrawElement({
+        id: 'freedraw-legacy',
+        pressures: [],
+        simulatePressure: true,
+      }),
+      freedrawElement({
+        id: 'freedraw-constant',
+        index: 'a1',
+        strokeOptions: { variability: 'constant', streamline: 0.5 },
+      }),
+      freedrawElement({
+        id: 'freedraw-variable',
+        index: 'a2',
+        strokeOptions: { variability: 'variable', streamline: 0.5 },
+      }),
+      freedrawElement({
+        id: 'freedraw-invalid',
+        index: 'a3',
+        strokeOptions: { variability: 'future-mode', streamline: 'invalid' },
+      }),
+    ]
+    const restored = restoreClarinWhiteboardScene({
+      type: 'excalidraw',
+      version: 2,
+      elements: sourceElements,
+      appState: {},
+      files: {},
+    })
+    const restoredByID = new Map(restored.elements.map(element => [
+      (element as Record<string, unknown>).id,
+      element as Record<string, unknown>,
+    ]))
+
+    expect(restoredByID.get('freedraw-legacy')?.strokeOptions).toEqual({
+      variability: 'variable',
+      streamline: 0.5,
+    })
+    expect(restoredByID.get('freedraw-constant')?.strokeOptions).toEqual({
+      variability: 'constant',
+      streamline: 0.5,
+    })
+    expect(restoredByID.get('freedraw-variable')?.strokeOptions).toEqual({
+      variability: 'variable',
+      streamline: 0.5,
+    })
+    expect(restoredByID.get('freedraw-invalid')?.strokeOptions).toEqual({
+      variability: 'variable',
+      streamline: 0.5,
+    })
+    for (const source of sourceElements) {
+      const next = restoredByID.get(source.id)
+      expect(next?.points).toEqual(source.points)
+      expect(next?.pressures).toEqual(source.pressures)
+      expect(next?.simulatePressure).toBe(source.simulatePressure)
+    }
+
+    const payload = buildExcalidrawWhiteboardSavePayload({
+      sceneSequence: 4,
+      operationID: '00000000-0000-4000-8000-000000000005',
+      reason: 'autosave',
+      elements: restored.elements,
+      patchElements: restored.elements,
+      includePatch: true,
+      appState: {
+        viewBackgroundColor: '#ffffff',
+        currentItemStrokeVariability: 'variable',
+      },
+    })
+    const persistedByID = new Map(payload.scene.elements.map(element => [
+      (element as Record<string, unknown>).id,
+      element as Record<string, unknown>,
+    ]))
+
+    for (const [id, expected] of [
+      ['freedraw-legacy', 'variable'],
+      ['freedraw-constant', 'constant'],
+      ['freedraw-variable', 'variable'],
+      ['freedraw-invalid', 'variable'],
+    ] as const) {
+      expect(persistedByID.get(id)?.strokeOptions).toEqual({
+        variability: expected,
+        streamline: 0.5,
+      })
+      expect(persistedByID.get(id)?.points).toEqual(restoredByID.get(id)?.points)
+      expect(persistedByID.get(id)?.pressures).toEqual(restoredByID.get(id)?.pressures)
+      expect(persistedByID.get(id)?.simulatePressure).toBe(restoredByID.get(id)?.simulatePressure)
+    }
+    expect(payload.scene.appState).toEqual({ viewBackgroundColor: '#ffffff' })
+    expect(payload.scene.appState).not.toHaveProperty('currentItemStrokeVariability')
+    expect(payload.patch?.app_state).toEqual({ viewBackgroundColor: '#ffffff' })
   })
 
   it('uses the same official boundary for imported snapshots', () => {

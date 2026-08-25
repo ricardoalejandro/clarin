@@ -257,6 +257,8 @@ export declare const STROKE_WIDTH: {
     readonly bold: 2;
     readonly extraBold: 4;
 };
+export declare const DEFAULT_STROKE_STREAMLINE = 0.5;
+export declare const DEFAULT_STROKE_STREAMLINE_PRECISE = 0.2;
 export declare const DEFAULT_ELEMENT_PROPS: {
     strokeColor: ExcalidrawElement["strokeColor"];
     backgroundColor: ExcalidrawElement["backgroundColor"];

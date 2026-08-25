@@ -40,14 +40,16 @@ import type {
 import { getDefaultAppState } from "../appState";
 import {
   BOUND_TEXT_PADDING,
+  DEFAULT_STROKE_STREAMLINE,
   DEFAULT_REDUCED_GLOBAL_ALPHA,
   ELEMENT_READY_TO_ERASE_OPACITY,
   FRAME_STYLE,
   MIME_TYPES,
   THEME,
 } from "../constants";
-import type { StrokeOptions } from "perfect-freehand";
+import type { StrokeOptions as PerfectFreehandStrokeOptions } from "perfect-freehand";
 import { getStroke } from "perfect-freehand";
+import { LaserPointer } from "@excalidraw/laser-pointer";
 import {
   getBoundTextElement,
   getContainerCoords,
@@ -1081,6 +1083,29 @@ export function getFreeDrawPath2D(element: ExcalidrawFreeDrawElement) {
 }
 
 export function getFreeDrawSvgPath(element: ExcalidrawFreeDrawElement) {
+  return getSvgPathFromStroke(getFreedrawOutlinePoints(element));
+}
+
+/**
+ * Freedraw stroke geometry tuning constants. The variable branch intentionally
+ * retains the exact v0.18.1 values so legacy scenes render identically.
+ */
+const VARIABLE_WIDTH_FREEDRAW = {
+  SIZE_FACTOR: 4.25,
+  THINNING: 0.6,
+  SMOOTHING: 0.5,
+} as const;
+
+const CONSTANT_WIDTH_FREEDRAW = {
+  SIZE_FACTOR: 1.4,
+} as const;
+
+const getFreedrawStreamline = (element: ExcalidrawFreeDrawElement) =>
+  element.strokeOptions?.streamline ?? DEFAULT_STROKE_STREAMLINE;
+
+const getVariableWidthFreedrawOutline = (
+  element: ExcalidrawFreeDrawElement,
+): [number, number][] => {
   // If input points are empty (should they ever be?) return a dot
   const inputPoints = element.simulatePressure
     ? element.points
@@ -1089,18 +1114,44 @@ export function getFreeDrawSvgPath(element: ExcalidrawFreeDrawElement) {
     : [[0, 0, 0.5]];
 
   // Consider changing the options for simulated pressure vs real pressure
-  const options: StrokeOptions = {
+  const options: PerfectFreehandStrokeOptions = {
     simulatePressure: element.simulatePressure,
-    size: element.strokeWidth * 4.25,
-    thinning: 0.6,
-    smoothing: 0.5,
-    streamline: 0.5,
+    size: element.strokeWidth * VARIABLE_WIDTH_FREEDRAW.SIZE_FACTOR,
+    thinning: VARIABLE_WIDTH_FREEDRAW.THINNING,
+    smoothing: VARIABLE_WIDTH_FREEDRAW.SMOOTHING,
+    streamline: getFreedrawStreamline(element),
     easing: (t) => Math.sin((t * Math.PI) / 2), // https://easings.net/#easeOutSine
     last: !!element.lastCommittedPoint, // LastCommittedPoint is added on pointerup
   };
 
-  return getSvgPathFromStroke(getStroke(inputPoints as number[][], options));
-}
+  return getStroke(inputPoints as number[][], options) as [number, number][];
+};
+
+const getConstantWidthFreedrawOutline = (
+  element: ExcalidrawFreeDrawElement,
+): [number, number][] => {
+  const laserPointer = new LaserPointer({
+    size: element.strokeWidth * CONSTANT_WIDTH_FREEDRAW.SIZE_FACTOR,
+    streamline: getFreedrawStreamline(element),
+    simplify: 0,
+    sizeMapping: ({ pressure }) => Math.max(0.1, pressure),
+  });
+
+  element.points.forEach(([x, y]) => laserPointer.addPoint([x, y, 1]));
+
+  return laserPointer
+    .getStrokeOutline()
+    .map(([x, y]) => [x, y] as [number, number]);
+};
+
+export const getFreedrawOutlinePoints = (
+  element: ExcalidrawFreeDrawElement,
+): [number, number][] => {
+  // Unknown/absent variability must keep the original variable rendering.
+  return element.strokeOptions?.variability === "constant"
+    ? getConstantWidthFreedrawOutline(element)
+    : getVariableWidthFreedrawOutline(element);
+};
 
 function med(A: number[], B: number[]) {
   return [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2];

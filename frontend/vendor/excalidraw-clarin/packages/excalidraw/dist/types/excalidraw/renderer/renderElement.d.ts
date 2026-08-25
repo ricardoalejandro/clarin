@@ -26,3 +26,4 @@ export declare const pathsCache: WeakMap<ExcalidrawFreeDrawElement, Path2D>;
 export declare function generateFreeDrawShape(element: ExcalidrawFreeDrawElement): Path2D;
 export declare function getFreeDrawPath2D(element: ExcalidrawFreeDrawElement): Path2D | undefined;
 export declare function getFreeDrawSvgPath(element: ExcalidrawFreeDrawElement): string;
+export declare const getFreedrawOutlinePoints: (element: ExcalidrawFreeDrawElement) => [number, number][];

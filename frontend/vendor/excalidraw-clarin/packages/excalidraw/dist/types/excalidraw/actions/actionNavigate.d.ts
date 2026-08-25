@@ -55,6 +55,7 @@ export declare const actionGoToCollaborator: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: import("../element/types").ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -213,6 +214,7 @@ export declare const actionGoToCollaborator: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: import("../element/types").ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;

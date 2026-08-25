@@ -53,6 +53,7 @@ export declare const actionChangeProjectName: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: import("../element/types").ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -218,6 +219,7 @@ export declare const actionChangeExportScale: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: import("../element/types").ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -384,6 +386,7 @@ export declare const actionChangeExportBackground: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: import("../element/types").ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -550,6 +553,7 @@ export declare const actionChangeExportEmbedScene: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: import("../element/types").ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -722,6 +726,7 @@ export declare const actionSaveToActiveFile: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: import("../element/types").ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -891,6 +896,7 @@ export declare const actionSaveFileToDisk: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: import("../element/types").ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -1051,6 +1057,7 @@ export declare const actionLoadScene: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: import("../element/types").ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -1196,6 +1203,7 @@ export declare const actionLoadScene: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: import("../element/types").ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -1363,6 +1371,7 @@ export declare const actionExportWithDarkMode: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: import("../element/types").ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;

@@ -147,7 +147,7 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 	requestBody := map[string]any{
 		"expected_sequence": 0, "operation_id": operationID, "scene": scene,
 		"patch":                map[string]any{"base_sequence": 0, "elements": elements, "app_state": scene["appState"]},
-		"scene_schema_version": "excalidraw", "editor_version": "0.18.1-clarin.4",
+		"scene_schema_version": "excalidraw", "editor_version": "0.18.1-clarin.5",
 	}
 
 	repos := repository.NewRepositories(db)
@@ -346,7 +346,7 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 			"elements":      []map[string]any{rebasedElements[len(rebasedElements)-1]},
 			"app_state":     scene["appState"],
 		},
-		"scene_schema_version": "excalidraw", "editor_version": "0.18.1-clarin.4",
+		"scene_schema_version": "excalidraw", "editor_version": "0.18.1-clarin.5",
 	}
 	rebased := performWhiteboardSceneRequest(t, app, http.MethodPatch, "/api/whiteboards/"+boardID.String()+"/scene", rebasedRequest)
 	if rebased.StatusCode != http.StatusOK || rebased.Result == nil || rebased.Result.Scene == nil || rebased.Result.Scene.Sequence != 2 || !rebased.Rebased {
@@ -359,7 +359,7 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 	futureRequest := map[string]any{
 		"expected_sequence": 99, "operation_id": uuid.New(), "scene": rebasedScene,
 		"patch":                map[string]any{"base_sequence": 99, "elements": []map[string]any{}, "app_state": scene["appState"]},
-		"scene_schema_version": "excalidraw", "editor_version": "0.18.1-clarin.4",
+		"scene_schema_version": "excalidraw", "editor_version": "0.18.1-clarin.5",
 	}
 	future := performWhiteboardSceneRequest(t, app, http.MethodPatch, "/api/whiteboards/"+boardID.String()+"/scene", futureRequest)
 	if future.StatusCode != http.StatusConflict {
@@ -400,7 +400,7 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 	}
 	checkpoint, err := repos.Whiteboard.UpdateScene(ctx, accountID, actorID, boardID, repository.WhiteboardSceneWriteInput{
 		ExpectedSequence: 2, OperationID: checkpointOperationID, Scene: rebasedSceneJSON,
-		SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1-clarin.4", WriteKind: "snapshot", RevisionKind: "automatic",
+		SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1-clarin.5", WriteKind: "snapshot", RevisionKind: "automatic",
 		RequestPayloadHash: prepared.SceneHash, ResultSceneHash: prepared.SceneHash,
 		SnapshotObjectKey: prepared.ObjectKey, SnapshotContentHash: prepared.ContentHash, SnapshotSizeBytes: prepared.SizeBytes,
 	})
@@ -730,7 +730,7 @@ func TestWhiteboardDeployedRuntimePersistsControlledScene(t *testing.T) {
 	createOperationID := uuid.New()
 	created := performWhiteboardRuntimeRequest(t, http.MethodPost, baseURL+"/api/whiteboards", token, map[string]any{
 		"name": "QA temporal · guardado desplegado", "operation_id": createOperationID,
-		"scene": json.RawMessage(emptyWhiteboardScene), "scene_schema_version": "excalidraw", "editor_version": "0.18.1-clarin.4",
+		"scene": json.RawMessage(emptyWhiteboardScene), "scene_schema_version": "excalidraw", "editor_version": "0.18.1-clarin.5",
 	})
 	if created.StatusCode != http.StatusCreated {
 		t.Fatalf("runtime create status=%d body=%s", created.StatusCode, created.Body)
@@ -793,7 +793,7 @@ func TestWhiteboardDeployedRuntimePersistsControlledScene(t *testing.T) {
 	payload := map[string]any{
 		"expected_sequence": 0, "operation_id": writeOperationID, "scene": scene,
 		"patch":                map[string]any{"base_sequence": 0, "elements": elements, "app_state": scene["appState"]},
-		"scene_schema_version": "excalidraw", "editor_version": "0.18.1-clarin.4",
+		"scene_schema_version": "excalidraw", "editor_version": "0.18.1-clarin.5",
 	}
 	written := performWhiteboardRuntimeRequest(t, http.MethodPatch, baseURL+"/api/whiteboards/"+boardID.String()+"/scene", token, payload)
 	if written.StatusCode != http.StatusOK {

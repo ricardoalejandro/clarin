@@ -2,7 +2,7 @@ export { actionDeleteSelected } from "./actionDeleteSelected";
 export { actionBringForward, actionBringToFront, actionSendBackward, actionSendToBack, } from "./actionZindex";
 export { actionSelectAll } from "./actionSelectAll";
 export { actionDuplicateSelection } from "./actionDuplicateSelection";
-export { actionChangeStrokeColor, actionChangeBackgroundColor, actionChangeStrokeWidth, actionChangeFillStyle, actionChangeSloppiness, actionChangeOpacity, actionChangeFontSize, actionChangeFontFamily, actionChangeTextAlign, actionChangeVerticalAlign, } from "./actionProperties";
+export { actionChangeStrokeColor, actionChangeBackgroundColor, actionChangeStrokeWidth, actionChangeFillStyle, actionChangeFreedrawMode, actionChangeSloppiness, actionChangeOpacity, actionChangeFontSize, actionChangeFontFamily, actionChangeTextAlign, actionChangeVerticalAlign, } from "./actionProperties";
 export { actionChangeViewBackgroundColor, actionClearCanvas, actionZoomIn, actionZoomOut, actionResetZoom, actionZoomToFit, actionToggleTheme, } from "./actionCanvas";
 export { actionFinalize } from "./actionFinalize";
 export { actionChangeProjectName, actionChangeExportBackground, actionSaveToActiveFile, actionSaveFileToDisk, actionLoadScene, } from "./actionExport";

@@ -70,6 +70,28 @@ func TestReconcileElementsKeepsDeletedTombstones(t *testing.T) {
 	}
 }
 
+func TestReconcileElementsPreservesFreedrawStrokeOptionsByVersionAndNonce(t *testing.T) {
+	canonical := rawElement(t, `{"id":"freedraw-pressure","index":"a0","version":4,"versionNonce":40,"type":"freedraw","points":[[0,0],[10,5]],"pressures":[0.2,0.8],"simulatePressure":false,"strokeOptions":{"variability":"variable","streamline":0.5}}`)
+	constant := rawElement(t, `{"id":"freedraw-pressure","index":"a0","version":4,"versionNonce":12,"type":"freedraw","points":[[0,0],[10,5]],"pressures":[0.2,0.8],"simulatePressure":false,"strokeOptions":{"variability":"constant","streamline":0.5}}`)
+
+	merged, err := ReconcileElements([]json.RawMessage{canonical}, []json.RawMessage{constant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged) != 1 || string(merged[0]) != string(constant) {
+		t.Fatalf("equal-version lower-nonce pressure change was rebuilt or lost: %s", merged)
+	}
+
+	stale := rawElement(t, `{"id":"freedraw-pressure","index":"a0","version":4,"versionNonce":99,"type":"freedraw","points":[[0,0],[10,5]],"pressures":[0.2,0.8],"simulatePressure":false,"strokeOptions":{"variability":"variable","streamline":0.5}}`)
+	merged, err = ReconcileElements([]json.RawMessage{constant}, []json.RawMessage{stale})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged) != 1 || string(merged[0]) != string(constant) {
+		t.Fatalf("higher-nonce stale pressure change replaced canonical JSON: %s", merged)
+	}
+}
+
 func TestReconcileElementsMatchesUpstreamOrderingContract(t *testing.T) {
 	canonical := []json.RawMessage{
 		rawElement(t, `{"id":"z","index":"a0","version":1,"versionNonce":9}`),

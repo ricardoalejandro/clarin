@@ -25,7 +25,7 @@ const (
 	whiteboardPingInterval           = 30 * time.Second
 	whiteboardAutomaticRevisionEvery = 5 * time.Minute
 	whiteboardRealtimeDBTimeout      = 15 * time.Second
-	whiteboardEditorVersion          = "0.18.1-clarin.4"
+	whiteboardEditorVersion          = "0.18.1-clarin.5"
 )
 
 type whiteboardRealtimePrincipal struct {

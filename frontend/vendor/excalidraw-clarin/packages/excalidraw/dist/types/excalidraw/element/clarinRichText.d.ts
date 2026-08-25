@@ -51,8 +51,9 @@ export declare const updateClarinTextCustomData: (customData: Record<string, unk
     [x: string]: unknown;
 } | undefined;
 /**
- * Signals the `newElementWith()` edge case where removing the final
- * rich-text field transitions `customData` from defined to `undefined`.
+ * `newElementWith()` intentionally treats `undefined` as "leave unchanged".
+ * Rich-text metadata, however, must be able to remove the final customData
+ * field. Callers use this predicate to force that otherwise invisible update.
  */
 export declare const shouldForceClarinCustomDataRemoval: (previous: Record<string, unknown> | undefined, next: Record<string, unknown> | undefined) => boolean;
 export declare const getClarinMarksAtCaret: (format: ClarinTextFormat | null, offset: number) => number;

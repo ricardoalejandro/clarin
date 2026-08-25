@@ -2284,7 +2284,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
             scene: event.scene,
             sequence: remoteSequence,
             scene_schema_version: 'excalidraw',
-            editor_version: '0.18.1-clarin.4',
+            editor_version: '0.18.1-clarin.5',
             updated_at: new Date().toISOString(),
           }, preserveLocalChanges)
           void hydrateReferencedAssets(event.scene.elements)

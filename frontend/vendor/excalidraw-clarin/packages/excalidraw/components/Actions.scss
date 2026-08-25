@@ -24,6 +24,18 @@
   }
 }
 
+.excalidraw .App-mobile-menu .freedraw-pressure .buttonList label {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+@media (pointer: coarse) {
+  .excalidraw .freedraw-pressure .buttonList label {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
 .reset-zoom-button {
   border-left: 0 !important;
   border-right: 0 !important;

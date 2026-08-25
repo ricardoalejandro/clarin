@@ -70,6 +70,60 @@ func TestMaterializeScenePatchInitializesEmptyDocument(t *testing.T) {
 	}
 }
 
+func TestMaterializeScenePatchPreservesFreedrawPressureContract(t *testing.T) {
+	canonical := json.RawMessage(`{
+		"type":"excalidraw","version":2,
+		"elements":[
+			{"id":"freedraw-legacy","index":"a0","version":1,"versionNonce":10,"type":"freedraw","points":[[0,0],[4,2]],"pressures":[],"simulatePressure":true},
+			{"id":"freedraw-pressure","index":"a1","version":1,"versionNonce":20,"type":"freedraw","points":[[0,0],[10,5]],"pressures":[0.2,0.8],"simulatePressure":false,"strokeOptions":{"variability":"constant","streamline":0.5}}
+		],
+		"appState":{"viewBackgroundColor":"#fff"},"files":{}
+	}`)
+	remote := []json.RawMessage{json.RawMessage(`{"id":"freedraw-pressure","index":"a1","version":2,"versionNonce":21,"type":"freedraw","points":[[0,0],[10,5]],"pressures":[0.2,0.8],"simulatePressure":false,"strokeOptions":{"variability":"variable","streamline":0.5}}`)}
+
+	materialized, _, err := MaterializeScenePatch(
+		canonical,
+		remote,
+		json.RawMessage(`{"currentItemStrokeVariability":"variable"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scene map[string]json.RawMessage
+	if err := json.Unmarshal(materialized, &scene); err != nil {
+		t.Fatal(err)
+	}
+	var elements []map[string]json.RawMessage
+	if err := json.Unmarshal(scene["elements"], &elements); err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]map[string]json.RawMessage, len(elements))
+	for _, element := range elements {
+		var id string
+		if err := json.Unmarshal(element["id"], &id); err != nil {
+			t.Fatal(err)
+		}
+		byID[id] = element
+	}
+	if _, exists := byID["freedraw-legacy"]["strokeOptions"]; exists {
+		t.Fatalf("backend rewrote the untouched legacy freedraw: %s", byID["freedraw-legacy"])
+	}
+	pressure := byID["freedraw-pressure"]
+	if string(pressure["strokeOptions"]) != `{"variability":"variable","streamline":0.5}` {
+		t.Fatalf("stroke options were lost or rebuilt: %s", pressure["strokeOptions"])
+	}
+	if string(pressure["points"]) != `[[0,0],[10,5]]` || string(pressure["pressures"]) != `[0.2,0.8]` || string(pressure["simulatePressure"]) != `false` {
+		t.Fatalf("freedraw samples changed during materialization: %s", pressure)
+	}
+	var appState map[string]json.RawMessage
+	if err := json.Unmarshal(scene["appState"], &appState); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := appState["currentItemStrokeVariability"]; exists {
+		t.Fatalf("per-user pressure preference leaked into canonical app state: %s", scene["appState"])
+	}
+}
+
 func TestReferencedFileIDsUsesOnlyLiveElements(t *testing.T) {
 	t.Parallel()
 	ids, err := ReferencedFileIDs(json.RawMessage(`{

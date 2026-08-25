@@ -36,6 +36,7 @@ import { getResizedElementAbsoluteCoords } from "./bounds";
 import { getBoundTextMaxWidth } from "./textElement";
 import { wrapClarinText } from "./textWrapping";
 import {
+  DEFAULT_STROKE_STREAMLINE,
   DEFAULT_ELEMENT_PROPS,
   DEFAULT_FONT_FAMILY,
   DEFAULT_FONT_SIZE,
@@ -445,6 +446,7 @@ export const newFreeDrawElement = (
     type: "freedraw";
     points?: ExcalidrawFreeDrawElement["points"];
     simulatePressure: boolean;
+    strokeOptions?: ExcalidrawFreeDrawElement["strokeOptions"];
     pressures?: ExcalidrawFreeDrawElement["pressures"];
   } & ElementConstructorOpts,
 ): NonDeleted<ExcalidrawFreeDrawElement> => {
@@ -453,6 +455,10 @@ export const newFreeDrawElement = (
     points: opts.points || [],
     pressures: opts.pressures || [],
     simulatePressure: opts.simulatePressure,
+    strokeOptions: opts.strokeOptions ?? {
+      variability: "variable",
+      streamline: DEFAULT_STROKE_STREAMLINE,
+    },
     lastCommittedPoint: null,
   };
 };

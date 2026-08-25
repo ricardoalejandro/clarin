@@ -53,6 +53,7 @@ export declare const actionToggleCanvasMenu: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: import("../element/types").ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -218,6 +219,7 @@ export declare const actionToggleEditMenu: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: import("../element/types").ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -388,6 +390,7 @@ export declare const actionShortcuts: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: import("../element/types").ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;

@@ -31,6 +31,7 @@ export declare const actionClearCanvas: {
             theme: import("../element/types").Theme;
             penMode: boolean;
             penDetected: boolean;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             exportBackground: boolean;
             exportEmbedScene: boolean;
             gridSize: number;
@@ -242,6 +243,7 @@ export declare const actionZoomIn: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -412,6 +414,7 @@ export declare const actionZoomOut: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -582,6 +585,7 @@ export declare const actionResetZoom: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -753,6 +757,7 @@ export declare const zoomToFitBounds: ({ bounds, appState, canvasOffsets, fitToV
         currentItemStrokeWidth: number;
         currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
         currentItemRoughness: number;
+        currentItemStrokeVariability: import("../element/types").StrokeVariability;
         currentItemOpacity: number;
         currentItemFontFamily: import("../element/types").FontFamilyValues;
         currentItemFontSize: number;
@@ -920,6 +925,7 @@ export declare const zoomToFit: ({ canvasOffsets, targetElements, appState, fitT
         currentItemStrokeWidth: number;
         currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
         currentItemRoughness: number;
+        currentItemStrokeVariability: import("../element/types").StrokeVariability;
         currentItemOpacity: number;
         currentItemFontFamily: import("../element/types").FontFamilyValues;
         currentItemFontSize: number;
@@ -1084,6 +1090,7 @@ export declare const actionZoomToFitSelectionInViewport: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -1252,6 +1259,7 @@ export declare const actionZoomToFitSelection: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -1421,6 +1429,7 @@ export declare const actionZoomToFit: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -1587,6 +1596,7 @@ export declare const actionToggleTheme: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -1751,6 +1761,7 @@ export declare const actionToggleEraserTool: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -1912,6 +1923,7 @@ export declare const actionToggleHandTool: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;

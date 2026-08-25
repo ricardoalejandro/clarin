@@ -67,9 +67,12 @@ import {
   ArrowheadCrowfootIcon,
   ArrowheadCrowfootOneIcon,
   ArrowheadCrowfootOneOrManyIcon,
+  strokeVariabilityConstantIcon,
+  strokeVariabilityVariableIcon,
 } from "../components/icons";
 import {
   ARROW_TYPE,
+  DEFAULT_STROKE_STREAMLINE,
   DEFAULT_FONT_FAMILY,
   DEFAULT_FONT_SIZE,
   FONT_FAMILY,
@@ -95,12 +98,14 @@ import type {
   Arrowhead,
   ExcalidrawBindableElement,
   ExcalidrawElement,
+  ExcalidrawFreeDrawElement,
   ExcalidrawLinearElement,
   ExcalidrawTextElement,
   FontFamilyValues,
   TextAlign,
   VerticalAlign,
   NonDeletedSceneElementsMap,
+  StrokeVariability,
 } from "../element/types";
 import { getLanguage, t } from "../i18n";
 import { KEYS } from "../keys";
@@ -811,6 +816,73 @@ export const actionChangeStrokeWidth = register({
       />
     </fieldset>
   ),
+});
+
+export const actionChangeFreedrawMode = register({
+  name: "changeFreedrawMode",
+  label: "labels.pressure",
+  trackEvent: false,
+  perform: (elements, appState, value: StrokeVariability | null) => {
+    const variability = value ?? "constant";
+
+    return {
+      elements: changeProperty(elements, appState, (element) => {
+        if (element.type !== "freedraw") {
+          return element;
+        }
+
+        return newElementWith(element, {
+          strokeOptions: {
+            ...element.strokeOptions,
+            variability,
+            streamline:
+              element.strokeOptions?.streamline ?? DEFAULT_STROKE_STREAMLINE,
+          },
+        });
+      }),
+      appState: {
+        ...appState,
+        currentItemStrokeVariability: variability,
+      },
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+    };
+  },
+  PanelComponent: ({ elements, appState, updateData }) => {
+    const strokeVariability = getFormValue(
+      elements,
+      appState,
+      (element) =>
+        (element as ExcalidrawFreeDrawElement).strokeOptions?.variability,
+      (element) => element.type === "freedraw",
+      (hasSelection) =>
+        hasSelection ? null : appState.currentItemStrokeVariability,
+    );
+
+    return (
+      <fieldset className="freedraw-pressure">
+        <legend>{t("labels.pressure")}</legend>
+        <ButtonIconSelect
+          group="strokeOptions.variability"
+          options={[
+            {
+              value: "constant" as const,
+              text: t("labels.pressure_constant"),
+              icon: strokeVariabilityConstantIcon,
+              testId: "pressure-constant",
+            },
+            {
+              value: "variable" as const,
+              text: t("labels.pressure_variable"),
+              icon: strokeVariabilityVariableIcon,
+              testId: "pressure-variable",
+            },
+          ]}
+          value={strokeVariability}
+          onChange={(value) => updateData(value)}
+        />
+      </fieldset>
+    );
+  },
 });
 
 export const actionChangeSloppiness = register({

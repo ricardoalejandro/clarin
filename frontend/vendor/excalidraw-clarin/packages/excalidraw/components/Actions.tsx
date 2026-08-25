@@ -13,6 +13,7 @@ import {
   canHaveArrowheads,
   getTargetElements,
   hasBackground,
+  hasFreedrawMode,
   hasStrokeStyle,
   hasStrokeWidth,
 } from "../scene";
@@ -154,9 +155,9 @@ export const SelectedShapeActions = ({
         targetElements.some((element) => hasStrokeWidth(element.type))) &&
         renderAction("changeStrokeWidth")}
 
-      {(appState.activeTool.type === "freedraw" ||
-        targetElements.some((element) => element.type === "freedraw")) &&
-        renderAction("changeStrokeShape")}
+      {(hasFreedrawMode(appState.activeTool.type) ||
+        targetElements.some((element) => hasFreedrawMode(element.type))) &&
+        renderAction("changeFreedrawMode")}
 
       {(hasStrokeStyle(appState.activeTool.type) ||
         targetElements.some((element) => hasStrokeStyle(element.type))) && (
@@ -283,6 +284,9 @@ export const ShapesSwitcher = ({
   const frameToolSelected = activeTool.type === "frame";
   const laserToolSelected = activeTool.type === "laser";
   const embeddableToolSelected = activeTool.type === "embeddable";
+  const clarinHighlighterActive =
+    (app as AppClassProperties & { __clarinHighlighterActive?: boolean })
+      .__clarinHighlighterActive === true;
 
   const { TTDDialogTriggerTunnel } = useTunnels();
 
@@ -309,7 +313,10 @@ export const ShapesSwitcher = ({
             key={value}
             type="radio"
             icon={icon}
-            checked={activeTool.type === value}
+            checked={
+              activeTool.type === value &&
+              !(value === "freedraw" && clarinHighlighterActive)
+            }
             name="editor-current-shape"
             title={`${capitalizeString(label)} — ${shortcut}`}
             keyBindingLabel={numericKey || letter}

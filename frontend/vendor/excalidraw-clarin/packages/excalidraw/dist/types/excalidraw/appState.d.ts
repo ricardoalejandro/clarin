@@ -24,6 +24,7 @@ export declare const clearAppStateForLocalStorage: (appState: Partial<AppState>)
     currentItemStrokeWidth?: number | undefined;
     currentItemStrokeStyle?: import("./element/types").StrokeStyle | undefined;
     currentItemRoughness?: number | undefined;
+    currentItemStrokeVariability?: import("./element/types").StrokeVariability | undefined;
     currentItemOpacity?: number | undefined;
     currentItemFontFamily?: number | undefined;
     currentItemFontSize?: number | undefined;

@@ -595,7 +595,7 @@ describe('whiteboard frontend contracts', () => {
         },
       },
       scene_schema_version: 'excalidraw',
-      editor_version: '0.18.1-clarin.4',
+      editor_version: '0.18.1-clarin.5',
     })
   })
 
@@ -829,6 +829,46 @@ describe('whiteboard frontend contracts', () => {
       appState: {},
       includePatch: false,
     }))).toBe('PUT')
+  })
+
+  it('detects freedraw variability patches through element version metadata', () => {
+    const acknowledged = {
+      id: 'freedraw-pressure',
+      type: 'freedraw',
+      version: 4,
+      versionNonce: 40,
+      isDeleted: false,
+      points: [[0, 0], [10, 5]],
+      pressures: [0.2, 0.8],
+      simulatePressure: false,
+      strokeOptions: { variability: 'constant', streamline: 0.5 },
+    }
+    const sameRevision = {
+      ...acknowledged,
+      strokeOptions: { variability: 'variable', streamline: 0.5 },
+    }
+    expect(hasWhiteboardDocumentMutation({
+      currentElements: [sameRevision],
+      previousElements: [acknowledged],
+      currentAppState: {},
+      previousAppState: {},
+    })).toBe(false)
+
+    const changed = {
+      ...sameRevision,
+      version: 5,
+      versionNonce: 41,
+    }
+    expect(hasWhiteboardDocumentMutation({
+      currentElements: [changed],
+      previousElements: [acknowledged],
+      currentAppState: {},
+      previousAppState: {},
+    })).toBe(true)
+    expect(buildWhiteboardSceneWritePlan([changed], [acknowledged])).toEqual({
+      kind: 'patch',
+      elements: [changed],
+    })
   })
 
   it('closes patches over bound text, containers, arrows and frames even without a container version bump', () => {

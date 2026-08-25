@@ -4,7 +4,7 @@ import { extname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { parse } from 'acorn'
 
-export const EXPECTED_EDITOR_VERSION = '0.18.1-clarin.4'
+export const EXPECTED_EDITOR_VERSION = '0.18.1-clarin.5'
 export const LOCAL_EDITOR_ASSET_PATH = `/vendor/whiteboards-editor/${EXPECTED_EDITOR_VERSION}/`
 const LOCAL_EDITOR_ASSET_BASE_EXPRESSION = `new URL(${JSON.stringify(LOCAL_EDITOR_ASSET_PATH)}, globalThis.location.origin).href`
 
@@ -934,6 +934,7 @@ if (${JSON.stringify(fontCatalog.map(entry => entry.cssFamily))}.includes(this.f
         className: "clarin-highlighter-tool",
         "data-testid": "toolbar-highlighter",
         selected: ${menu.receiver}.__clarinHighlighterActive === true && ${menu.receiver}.state.activeTool.type === "freedraw",
+        "aria-pressed": ${menu.receiver}.__clarinHighlighterActive === true && ${menu.receiver}.state.activeTool.type === "freedraw",
         children: "Resaltador"
       })`,
     })
@@ -950,6 +951,7 @@ if (${JSON.stringify(fontCatalog.map(entry => entry.cssFamily))}.includes(this.f
         this.__clarinHighlighterStyles = {
           currentItemStrokeColor: this.state.currentItemStrokeColor,
           currentItemStrokeWidth: this.state.currentItemStrokeWidth,
+          currentItemStrokeVariability: this.state.currentItemStrokeVariability,
           currentItemOpacity: this.state.currentItemOpacity,
           currentItemRoughness: this.state.currentItemRoughness,
           currentItemStrokeStyle: this.state.currentItemStrokeStyle
@@ -962,19 +964,21 @@ if (${JSON.stringify(fontCatalog.map(entry => entry.cssFamily))}.includes(this.f
           this.__clarinDrawStyles = {
             currentItemStrokeColor: this.state.currentItemStrokeColor,
             currentItemStrokeWidth: this.state.currentItemStrokeWidth,
+            currentItemStrokeVariability: this.state.currentItemStrokeVariability,
             currentItemOpacity: this.state.currentItemOpacity,
             currentItemRoughness: this.state.currentItemRoughness,
             currentItemStrokeStyle: this.state.currentItemStrokeStyle
           };
+          this.__clarinHighlighterActive = true;
+          this.setState(this.__clarinHighlighterStyles || {
+            currentItemStrokeColor: "#FFD43B",
+            currentItemStrokeWidth: 4,
+            currentItemStrokeVariability: "constant",
+            currentItemOpacity: 40,
+            currentItemRoughness: 0,
+            currentItemStrokeStyle: "solid"
+          });
         }
-        this.__clarinHighlighterActive = true;
-        this.setState(this.__clarinHighlighterStyles || {
-          currentItemStrokeColor: "#FFD43B",
-          currentItemStrokeWidth: 4,
-          currentItemOpacity: 40,
-          currentItemRoughness: 0,
-          currentItemStrokeStyle: "solid"
-        });
       }
       `,
     })

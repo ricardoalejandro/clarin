@@ -62,7 +62,7 @@ export type ActionName =
   | "changeBackgroundColor"
   | "changeFillStyle"
   | "changeStrokeWidth"
-  | "changeStrokeShape"
+  | "changeFreedrawMode"
   | "changeSloppiness"
   | "changeStrokeStyle"
   | "changeArrowhead"

@@ -12,6 +12,7 @@ import type {
   OrderedExcalidrawElement,
   PointBinding,
   StrokeRoundness,
+  StrokeVariability,
 } from "../element/types";
 import type { AppState, BinaryFiles, LibraryItem } from "../types";
 import type { ImportedDataState, LegacyAppState } from "./types";
@@ -38,6 +39,7 @@ import {
   ROUNDNESS,
   DEFAULT_SIDEBAR,
   DEFAULT_ELEMENT_PROPS,
+  DEFAULT_STROKE_STREAMLINE,
   DEFAULT_GRID_SIZE,
   DEFAULT_GRID_STEP,
 } from "../constants";
@@ -97,6 +99,36 @@ export type RestoredDataState = {
   elements: OrderedExcalidrawElement[];
   appState: RestoredAppState;
   files: BinaryFiles;
+};
+
+const ALLOWED_STROKE_VARIABILITIES = new Set<StrokeVariability>([
+  "constant",
+  "variable",
+]);
+
+const restoreFreedrawStrokeOptions = (
+  strokeOptions: unknown,
+): { variability: StrokeVariability; streamline: number } => {
+  const options =
+    strokeOptions && typeof strokeOptions === "object"
+      ? (strokeOptions as { variability?: unknown; streamline?: unknown })
+      : null;
+
+  return {
+    // Missing and invalid values are historical data. Preserve the original
+    // Excalidraw variable-width rendering rather than changing the scene on
+    // open.
+    variability:
+      typeof options?.variability === "string" &&
+      ALLOWED_STROKE_VARIABILITIES.has(
+        options.variability as StrokeVariability,
+      )
+        ? (options.variability as StrokeVariability)
+        : "variable",
+    streamline: isFiniteNumber(options?.streamline)
+      ? options.streamline
+      : DEFAULT_STROKE_STREAMLINE,
+  };
 };
 
 const getFontFamilyByName = (fontFamilyName: string): FontFamilyValues => {
@@ -282,6 +314,7 @@ const restoreElement = (
         points: element.points,
         lastCommittedPoint: null,
         simulatePressure: element.simulatePressure,
+        strokeOptions: restoreFreedrawStrokeOptions(element.strokeOptions),
         pressures: element.pressures,
       });
     }

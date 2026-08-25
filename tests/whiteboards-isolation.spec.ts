@@ -145,6 +145,11 @@ class WhiteboardRealtimeHarness {
   elements: Array<Record<string, unknown>> = [clone(loadedTextFixture)]
   appState: Record<string, unknown> = { viewBackgroundColor: '#ffffff', gridModeEnabled: false, gridStep: 5 }
   readonly patchAttempts: Array<{ userID: string; operationID: string; baseSequence: number; acceptedSequence: number }> = []
+  readonly scenePatches: Array<{
+    userID: string
+    operationID: string
+    elements: Array<Record<string, unknown>>
+  }> = []
   readonly deliveries: Array<{ recipient: string; operationID: string }> = []
   readonly httpSceneWrites: Array<{ method: string; operationID: string }> = []
   readonly ticketReads = new Map<string, number>()
@@ -345,6 +350,11 @@ class WhiteboardRealtimeHarness {
 		}
         if (message.event !== 'scene.patch' || typeof message.operation_id !== 'string') return
         const operationID = message.operation_id
+        this.scenePatches.push({
+          userID,
+          operationID,
+          elements: Array.isArray(message.elements) ? clone(message.elements) : [],
+        })
         if (this.rejectPatchUserID === userID) {
           this.rejectPatchUserID = null
           this.patchAttempts.push({
@@ -415,7 +425,7 @@ class WhiteboardRealtimeHarness {
         type: 'excalidraw', version: 2, source: 'clarin', elements: clone(this.elements),
         appState: clone(this.appState), files: {},
       },
-      scene_schema_version: 'excalidraw', editor_version: '0.18.1-clarin.4', sequence: this.sequence, updated_at: now,
+      scene_schema_version: 'excalidraw', editor_version: '0.18.1-clarin.5', sequence: this.sequence, updated_at: now,
     }
   }
 }
@@ -803,6 +813,130 @@ async function drawRectangle(page: Page, offset: number) {
   await page.mouse.move(startX + 130, startY + 80, { steps: 8 })
   await page.mouse.up()
   return { x: startX + 65, y: startY + 40 }
+}
+
+async function drawFreeDraw(page: Page, offset: number) {
+  const surface = page.locator('.whiteboard-editor-shell .excalidraw').first()
+  const box = await surface.boundingBox()
+  expect(box).not.toBeNull()
+  const startX = box!.x + box!.width * 0.46
+  const startY = box!.y + box!.height * 0.36 + offset
+  const points = [
+    { x: startX, y: startY },
+    { x: startX + 32, y: startY - 8 },
+    { x: startX + 64, y: startY + 10 },
+    { x: startX + 96, y: startY - 5 },
+    { x: startX + 128, y: startY + 12 },
+  ]
+  await page.mouse.move(points[0].x, points[0].y)
+  await page.mouse.down()
+  for (const point of points.slice(1)) await page.mouse.move(point.x, point.y, { steps: 3 })
+  await page.mouse.up()
+  return {
+    left: Math.min(...points.map(point => point.x)),
+    top: Math.min(...points.map(point => point.y)),
+    right: Math.max(...points.map(point => point.x)),
+    bottom: Math.max(...points.map(point => point.y)),
+  }
+}
+
+function visiblePressureGroup(root: Page | Locator) {
+  return root.getByRole('group', { name: 'Presión' }).filter({ visible: true })
+}
+
+async function waitForEditorResponsiveMode(page: Page) {
+  const editor = page.locator('.whiteboard-editor-shell .excalidraw').first()
+  await expect.poll(() => editor.evaluate(element => {
+    const { width, height } = element.getBoundingClientRect()
+    const shouldBeMobile = width < 730 || (height < 500 && width < 1_000)
+    return element.classList.contains('excalidraw--mobile') === shouldBeMobile
+  }), { timeout: 5_000 }).toBe(true)
+  await page.evaluate(() => new Promise<void>(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+  }))
+}
+
+async function expectPressureControls(root: Page | Locator, expected: 'constant' | 'variable' | 'mixed') {
+  const pressure = visiblePressureGroup(root)
+  await expect(pressure).toBeVisible()
+  const constant = pressure.getByRole('radio', { name: 'Constante', exact: true })
+  const variable = pressure.getByRole('radio', { name: 'Variable', exact: true })
+  await expect(constant).toBeVisible()
+  await expect(variable).toBeVisible()
+  await expect(constant).toBeChecked({ checked: expected === 'constant' })
+  await expect(variable).toBeChecked({ checked: expected === 'variable' })
+  return { pressure, constant, variable }
+}
+
+async function drawAndCaptureFreeDraw(
+  page: Page,
+  harness: WhiteboardRealtimeHarness,
+  userID: string,
+  variability: 'constant' | 'variable',
+  offset: number,
+) {
+  const knownIDs = new Set(harness.elements.map(element => String(element.id)))
+  const patchStart = harness.scenePatches.length
+  const screenBounds = await drawFreeDraw(page, offset)
+  await expect.poll(() => harness.elements.filter(element => (
+    element.type === 'freedraw' && !knownIDs.has(String(element.id))
+  )).length, { timeout: 30_000 }).toBe(1)
+  await expectEditorSaved(page)
+
+  const element = harness.elements.find(candidate => (
+    candidate.type === 'freedraw' && !knownIDs.has(String(candidate.id))
+  ))!
+  const matchingPatches = harness.scenePatches.slice(patchStart).filter(patch => (
+    patch.userID === userID && patch.elements.some(candidate => candidate.id === element.id)
+  ))
+  expect(matchingPatches, 'un trazo debe producir un solo scene.patch lógico').toHaveLength(1)
+  const patchedElement = matchingPatches[0].elements.find(candidate => candidate.id === element.id)
+  expect(patchedElement?.strokeOptions).toEqual({ variability, streamline: 0.5 })
+  return { element, operationID: matchingPatches[0].operationID, screenBounds }
+}
+
+async function selectFreeDraws(
+  page: Page,
+  strokes: Array<{ screenBounds: { left: number; top: number; right: number; bottom: number } }>,
+) {
+  const left = Math.min(...strokes.map(stroke => stroke.screenBounds.left)) - 12
+  const top = Math.min(...strokes.map(stroke => stroke.screenBounds.top)) - 12
+  const right = Math.max(...strokes.map(stroke => stroke.screenBounds.right)) + 12
+  const bottom = Math.max(...strokes.map(stroke => stroke.screenBounds.bottom)) + 12
+  await page.getByTestId('toolbar-selection').check({ force: true })
+  await page.mouse.move(left, top)
+  await page.mouse.down()
+  await page.mouse.move(right, bottom, { steps: 8 })
+  await page.mouse.up()
+}
+
+async function captureSelectedPressurePatch(
+  page: Page,
+  harness: WhiteboardRealtimeHarness,
+  userID: string,
+  elementIDs: string[],
+  expected: Array<'constant' | 'variable'>,
+  action: () => Promise<void>,
+) {
+  const patchStart = harness.scenePatches.length
+  await action()
+  await expect.poll(() => elementIDs.map(id => {
+    const element = harness.elements.find(candidate => String(candidate.id) === id)
+    return element?.strokeOptions && typeof element.strokeOptions === 'object'
+      ? (element.strokeOptions as Record<string, unknown>).variability
+      : null
+  }), { timeout: 30_000 }).toEqual(expected)
+  await expectEditorSaved(page)
+  const matchingPatches = harness.scenePatches.slice(patchStart).filter(patch => (
+    patch.userID === userID
+    && elementIDs.every(id => patch.elements.some(element => String(element.id) === id))
+  ))
+  expect(matchingPatches, 'la acción de Presión debe producir un solo scene.patch con toda la selección').toHaveLength(1)
+  expect(new Set(matchingPatches[0].elements
+    .filter(element => element.type === 'freedraw')
+    .map(element => String(element.id))), 'el patch debe contener exactamente los dos trazos seleccionados')
+    .toEqual(new Set(elementIDs))
+  return matchingPatches[0].operationID
 }
 
 async function drawStandaloneText(page: Page, text: string, offset: number) {
@@ -1622,6 +1756,237 @@ test('integración simulada · la barra tiene un único dueño y Comentarios per
     )
   } finally {
     await context.close()
+  }
+})
+
+test('presión de trazo · Lápiz y Resaltador exponen el control, persisten su modo y reconcilian sin duplicar', async ({ browser, browserName }) => {
+  test.skip(browserName !== 'chromium', 'La persistencia y el realtime de Presión se validan una vez en Chromium.')
+  test.setTimeout(360_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  const firstContext = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  const secondContext = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  await firstContext.addInitScript(() => {
+    // Chromium otherwise opens its native save picker, which is not exposed as
+    // a Playwright download. Exercise the same audited HTML fallback as Firefox.
+    Reflect.deleteProperty(globalThis, 'showOpenFilePicker')
+    Reflect.deleteProperty(globalThis, 'showSaveFilePicker')
+    Reflect.deleteProperty(globalThis, 'showDirectoryPicker')
+  })
+  await harness.install(firstContext, 'Ana QA')
+  await harness.install(secondContext, 'Luis QA')
+  await installWhiteboardHTTP(firstContext, harness, 'Ana QA', requests, blocked, explicitNavigations)
+  await installWhiteboardHTTP(secondContext, harness, 'Luis QA', requests, blocked, explicitNavigations)
+  const first = await firstContext.newPage()
+  const second = await secondContext.newPage()
+
+  const selectHighlighter = async () => {
+    const extraTools = first.getByTitle(/Más herramientas|More tools/u)
+    await extraTools.click()
+    const extraToolsMenu = first.locator('.App-toolbar__extra-tools-dropdown')
+    await expect(extraToolsMenu).toBeVisible()
+    await extraToolsMenu.getByTestId('toolbar-highlighter').click()
+    await expect(extraTools).toHaveClass(/App-toolbar__extra-tools-trigger--selected/u)
+  }
+
+  try {
+    await Promise.all([openEditor(first), openEditor(second)])
+    await expect.poll(() => harness.socketCount(), { timeout: 30_000 }).toBe(2)
+
+    await test.step('Lápiz muestra Presión en el orden pedido y comienza constante', async () => {
+      const pencil = first.getByTestId('toolbar-freedraw')
+      await pencil.check({ force: true })
+      await expect(pencil).toBeChecked()
+      const controls = await expectPressureControls(first, 'constant')
+      await expect(first.getByRole('group', { name: 'Grosor del trazo' })).toBeVisible()
+      await expect(first.getByTestId('opacity')).toBeVisible()
+      const order = await controls.pressure.evaluate(fieldset => {
+        const siblings = Array.from(fieldset.parentElement?.children || [])
+        return {
+          strokeWidth: siblings.findIndex(element => (
+            element.querySelector(':scope > legend')?.textContent?.trim() === 'Grosor del trazo'
+          )),
+          pressure: siblings.indexOf(fieldset),
+          opacity: siblings.findIndex(element => Boolean(element.querySelector('input[data-testid="opacity"]'))),
+        }
+      })
+      expect(order.strokeWidth).toBeGreaterThanOrEqual(0)
+      expect(order.pressure).toBe(order.strokeWidth + 1)
+      expect(order.opacity).toBe(order.pressure + 1)
+    })
+
+    const pencilConstant = await drawAndCaptureFreeDraw(first, harness, 'Ana QA', 'constant', 0)
+    const pencilVariableControls = await expectPressureControls(first, 'constant')
+    await pencilVariableControls.variable.focus()
+    await first.keyboard.press('Space')
+    await expectPressureControls(first, 'variable')
+    const pencilVariable = await drawAndCaptureFreeDraw(first, harness, 'Ana QA', 'variable', 54)
+
+    await test.step('Resaltador empieza constante y recuerda su preferencia aparte del Lápiz', async () => {
+      await selectHighlighter()
+      await expectPressureControls(first, 'constant')
+    })
+    const highlighterConstant = await drawAndCaptureFreeDraw(first, harness, 'Ana QA', 'constant', 108)
+    expect(highlighterConstant.element).toMatchObject({
+      strokeColor: '#FFD43B',
+      strokeWidth: 4,
+      opacity: 40,
+    })
+
+    const extraTools = first.getByTitle(/Más herramientas|More tools/u)
+    await expect(extraTools).toHaveClass(/App-toolbar__extra-tools-trigger--selected/u)
+    await expect(first.getByTestId('toolbar-freedraw')).not.toBeChecked()
+    await first.getByTestId('toolbar-freedraw').check({ force: true })
+    await expect(first.getByTestId('toolbar-freedraw')).toBeChecked()
+    await expect(extraTools).not.toHaveClass(/App-toolbar__extra-tools-trigger--selected/u)
+    await expectPressureControls(first, 'variable')
+    await selectHighlighter()
+    const highlighterVariableControls = await expectPressureControls(first, 'constant')
+    await highlighterVariableControls.variable.check({ force: true })
+    await expectPressureControls(first, 'variable')
+    await selectHighlighter()
+    await expectPressureControls(first, 'variable')
+    const highlighterVariable = await drawAndCaptureFreeDraw(first, harness, 'Ana QA', 'variable', 162)
+    expect(highlighterVariable.element).toMatchObject({
+      strokeColor: '#FFD43B',
+      strokeWidth: 4,
+      opacity: 40,
+    })
+
+    await test.step('la exportación de los cuatro trazos produce SVG y PNG válidos sin salir de Clarin', async () => {
+      await first.getByTestId('main-menu-trigger').click()
+      await first.getByText('Exportar imagen...', { exact: true }).click()
+      const exportDialog = first.locator('.ImageExportModal')
+      await expect(exportDialog).toBeVisible()
+      await expect(exportDialog.locator('.ImageExportModal__preview canvas')).toBeVisible()
+      await expect(exportDialog.getByRole('button', { name: 'Exportar a SVG' })).toBeVisible()
+      await expect(exportDialog.getByRole('button', { name: 'Exportar a PNG' })).toBeVisible()
+
+      const svgDownloadPromise = first.waitForEvent('download', { timeout: 30_000 })
+      await exportDialog.getByRole('button', { name: 'Exportar a SVG' }).click()
+      const svgDownload = await svgDownloadPromise
+      const svgPath = await svgDownload.path()
+      expect(svgPath).not.toBeNull()
+      expect(readFileSync(svgPath!, 'utf8')).toContain('<svg')
+      await first.locator('.Modal__background').click({ position: { x: 8, y: 8 } })
+      await expect(exportDialog).toBeHidden()
+
+      await first.getByTestId('main-menu-trigger').click()
+      await first.getByText('Exportar imagen...', { exact: true }).click()
+      await expect(exportDialog).toBeVisible()
+      const pngDownloadPromise = first.waitForEvent('download', { timeout: 30_000 })
+      await exportDialog.getByRole('button', { name: 'Exportar a PNG' }).click()
+      const pngDownload = await pngDownloadPromise
+      const pngPath = await pngDownload.path()
+      expect(pngPath).not.toBeNull()
+      expect(readFileSync(pngPath!).subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a')
+      await first.locator('.Modal__background').click({ position: { x: 8, y: 8 } })
+      await expect(exportDialog).toBeHidden()
+    })
+
+    const pressureHistoryOperationIDs: string[] = []
+    await test.step('una selección mixta cambia junta y comparte una entrada de undo/redo', async () => {
+      const selectedIDs = [String(pencilConstant.element.id), String(pencilVariable.element.id)]
+      await selectFreeDraws(first, [pencilConstant, pencilVariable])
+      const mixedControls = await expectPressureControls(first, 'mixed')
+
+      pressureHistoryOperationIDs.push(await captureSelectedPressurePatch(
+        first,
+        harness,
+        'Ana QA',
+        selectedIDs,
+        ['constant', 'constant'],
+        () => mixedControls.constant.check({ force: true }),
+      ))
+      await expectPressureControls(first, 'constant')
+
+      pressureHistoryOperationIDs.push(await captureSelectedPressurePatch(
+        first,
+        harness,
+        'Ana QA',
+        selectedIDs,
+        ['constant', 'variable'],
+        () => first.keyboard.press('Control+z'),
+      ))
+      await expectPressureControls(first, 'mixed')
+
+      pressureHistoryOperationIDs.push(await captureSelectedPressurePatch(
+        first,
+        harness,
+        'Ana QA',
+        selectedIDs,
+        ['constant', 'constant'],
+        () => first.keyboard.press('Control+Shift+z'),
+      ))
+      await expectPressureControls(first, 'constant')
+      expect(new Set(pressureHistoryOperationIDs).size).toBe(3)
+    })
+
+    await test.step('el panel compacto conserva ambas opciones accesibles en 320, 375 y 768 px', async () => {
+      for (const viewport of [
+        { width: 320, height: 720 },
+        { width: 375, height: 812 },
+        { width: 768, height: 800 },
+      ]) {
+        await first.setViewportSize(viewport)
+        await waitForEditorResponsiveMode(first)
+        if (!await visiblePressureGroup(first).isVisible().catch(() => false)) {
+          await first.getByRole('button', { name: 'Editar', exact: true }).filter({ visible: true }).click({ timeout: 5_000 })
+        }
+        const label = `Presión en ${viewport.width}x${viewport.height}`
+        const compactControls = await expectPressureControls(first, 'constant')
+        await compactControls.pressure.scrollIntoViewIfNeeded()
+        expect(await compactControls.pressure.evaluate(element => {
+          const panel = element.closest('section')
+          return Boolean(panel?.classList.contains('App-mobile-menu')
+            || panel?.classList.contains('selected-shape-actions'))
+        }), `${label}: Presión debe pertenecer al panel de propiedades activo`).toBe(true)
+        await expectInsideViewport(first, compactControls.pressure, `${label}: grupo`)
+        await expectInsideViewport(first, compactControls.constant.locator('..'), `${label}: Constante`)
+        await expectInsideViewport(first, compactControls.variable.locator('..'), `${label}: Variable`)
+        await expectNoDocumentHorizontalOverflow(first, label)
+      }
+      await first.setViewportSize({ width: 1440, height: 900 })
+    })
+
+    const strokes = [pencilConstant, pencilVariable, highlighterConstant, highlighterVariable]
+    const strokeIDs = strokes.map(stroke => String(stroke.element.id))
+    const deliveredOperationIDs = [...strokes.map(stroke => stroke.operationID), ...pressureHistoryOperationIDs]
+    await expect.poll(() => deliveredOperationIDs.map(operationID => (
+      harness.deliveries.filter(delivery => (
+        delivery.recipient === 'Luis QA' && delivery.operationID === operationID
+      )).length
+    )), { timeout: 30_000 }).toEqual(deliveredOperationIDs.map(() => 1))
+    await second.evaluate(() => new Promise<void>(resolve => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+
+    await test.step('la segunda sesión y su recarga conservan cada modo sin duplicar elementos', async () => {
+      const expectPersistedPressure = (scene: { elements: Array<Record<string, any>> }) => {
+        const byID = new Map(scene.elements.map(element => [String(element.id), element]))
+        expect(new Set(scene.elements.map(element => String(element.id))).size).toBe(scene.elements.length)
+        expect(byID.get(String(pencilConstant.element.id))?.strokeOptions).toEqual({ variability: 'constant', streamline: 0.5 })
+        expect(byID.get(String(pencilVariable.element.id))?.strokeOptions).toEqual({ variability: 'constant', streamline: 0.5 })
+        expect(byID.get(String(highlighterConstant.element.id))?.strokeOptions).toEqual({ variability: 'constant', streamline: 0.5 })
+        expect(byID.get(String(highlighterVariable.element.id))?.strokeOptions).toEqual({ variability: 'variable', streamline: 0.5 })
+        expect(strokeIDs.every(id => byID.has(id))).toBe(true)
+      }
+
+      expectPersistedPressure(await exportEditableScene(second))
+      await second.reload({ waitUntil: 'domcontentloaded' })
+      await expect(second.getByLabel('Nombre de la pizarra')).toHaveValue('Pizarra QA autónoma', { timeout: 30_000 })
+      await expect(second.locator('canvas.interactive')).toBeVisible({ timeout: 30_000 })
+      expectPersistedPressure(await exportEditableScene(second))
+    })
+
+    expect(blocked).toEqual([])
+  } finally {
+    await Promise.all([
+      firstContext.close().catch(() => undefined),
+      secondContext.close().catch(() => undefined),
+    ])
   }
 })
 
@@ -2703,7 +3068,7 @@ test('integración simulada · Pizarras permanece same-origin y reconcilia ACK p
     page.on('requestfailed', request => recordWhiteboardRequestFailure(requestFailures, request))
     page.on('response', response => {
       const path = new URL(response.url()).pathname
-      if (path.startsWith('/vendor/whiteboards-editor/0.18.1-clarin.4/fonts/')) {
+      if (path.startsWith('/vendor/whiteboards-editor/0.18.1-clarin.5/fonts/')) {
         fontResponses.push({ url: response.url(), status: response.status() })
       }
       if (response.status() === 409 && /\/api\/whiteboards\/[^/]+\/scene$/.test(path)) sceneConflicts.push(response.url())

@@ -61,6 +61,7 @@ export declare const actionSetEmbeddableAsActiveTool: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("./types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("./types").FontFamilyValues;
             currentItemFontSize: number;

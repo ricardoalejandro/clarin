@@ -23,13 +23,13 @@ test('neutralizes external URLs in literals and dynamic template helpers', () =>
 test('keeps XML namespaces and rewrites the audited font fallback to an absolute same-origin URL', () => {
   const source = [
     'const svg = "http://www.w3.org/2000/svg";',
-    'const pkg = { name: "@excalidraw/excalidraw", version: "0.18.1-clarin.4" };',
+    'const pkg = { name: "@excalidraw/excalidraw", version: "0.18.1-clarin.5" };',
     'const fallback = `https://esm.sh/${pkg.name}@${pkg.version}/dist/prod/`;',
     'const fontURL = (asset) => new URL(asset, fallback).href;',
   ].join('\n')
   const result = hardenEditorBundle(source, 'hardening-local-fixture.js')
   assert.match(result.hardened, /http:\/\/www\.w3\.org\/2000\/svg/)
-  assert.match(result.hardened, /\/vendor\/whiteboards-editor\/0\.18\.1-clarin\.4\//)
+  assert.match(result.hardened, /\/vendor\/whiteboards-editor\/0\.18\.1-clarin\.5\//)
   assert.doesNotMatch(result.hardened, /\/dist\/prod\//)
   assert.equal(result.localFallbacks, 1)
   const resolveFont = new Function(
@@ -38,14 +38,14 @@ test('keeps XML namespaces and rewrites the audited font fallback to an absolute
   )
   assert.equal(
     resolveFont({ location: { origin: 'https://clarin.example.invalid' } }),
-    'https://clarin.example.invalid/vendor/whiteboards-editor/0.18.1-clarin.4/fonts/Excalifont/Excalifont-Regular.woff2',
+    'https://clarin.example.invalid/vendor/whiteboards-editor/0.18.1-clarin.5/fonts/Excalifont/Excalifont-Regular.woff2',
   )
 })
 
 test('repairs bundles transformed with a relative fork fallback', () => {
   const source = [
-    'const pkg = { name: "@excalidraw/excalidraw", version: "0.18.1-clarin.4" };',
-    'const fallback = `/vendor/whiteboards-editor/0.18.1-clarin.4/${pkg.name}@${pkg.version}/dist/prod/`;',
+    'const pkg = { name: "@excalidraw/excalidraw", version: "0.18.1-clarin.5" };',
+    'const fallback = `/vendor/whiteboards-editor/0.18.1-clarin.5/${pkg.name}@${pkg.version}/dist/prod/`;',
     'const fontURL = (asset) => new URL(asset, fallback).href;',
   ].join('\n')
   const result = hardenEditorBundle(source, 'hardening-legacy-local-fixture.js')
@@ -56,7 +56,7 @@ test('repairs bundles transformed with a relative fork fallback', () => {
   assert.equal(result.localFallbacks, 1)
   assert.equal(
     resolveFont({ location: { origin: 'https://clarin.example.invalid' } }),
-    'https://clarin.example.invalid/vendor/whiteboards-editor/0.18.1-clarin.4/fonts/Virgil/Virgil.woff2',
+    'https://clarin.example.invalid/vendor/whiteboards-editor/0.18.1-clarin.5/fonts/Virgil/Virgil.woff2',
   )
 })
 
@@ -146,7 +146,7 @@ test('adds one native, idempotent highlighter tool while preserving freedraw sce
     'const bind = (owner, key, value) => { owner[key] = value; };',
     'class App {',
     '  constructor() {',
-    '    this.state = { currentItemStrokeColor: "#111111", currentItemStrokeWidth: 1, currentItemOpacity: 100, currentItemRoughness: 1, currentItemStrokeStyle: "dashed" };',
+    '    this.state = { currentItemStrokeColor: "#111111", currentItemStrokeWidth: 1, currentItemStrokeVariability: "constant", currentItemOpacity: 100, currentItemRoughness: 1, currentItemStrokeStyle: "dashed" };',
     '    this.setState = (next) => { Object.assign(this.state, typeof next === "function" ? next(this.state) : next); };',
     '    bind(this, "setActiveTool", (tool) => { this.lastTool = tool; });',
     '  }',
@@ -160,7 +160,9 @@ test('adds one native, idempotent highlighter tool while preserving freedraw sce
   assert.match(result.hardened, /children: "Resaltador"/u)
   assert.match(result.hardened, /currentItemStrokeColor: "#FFD43B"/u)
   assert.match(result.hardened, /currentItemStrokeWidth: 4/u)
+  assert.match(result.hardened, /currentItemStrokeVariability: "constant"/u)
   assert.match(result.hardened, /currentItemOpacity: 40/u)
+  assert.match(result.hardened, /"aria-pressed": app\.__clarinHighlighterActive === true/u)
   assert.match(result.hardened, /setActiveTool\(\{ type: "freedraw" \}\)/u)
   assert.doesNotMatch(result.hardened, /children: "Generate"/u)
 
@@ -172,17 +174,44 @@ test('adds one native, idempotent highlighter tool while preserving freedraw sce
   assert.deepEqual({
     color: editor.state.currentItemStrokeColor,
     width: editor.state.currentItemStrokeWidth,
+    variability: editor.state.currentItemStrokeVariability,
     opacity: editor.state.currentItemOpacity,
     roughness: editor.state.currentItemRoughness,
     style: editor.state.currentItemStrokeStyle,
-  }, { color: '#FFD43B', width: 4, opacity: 40, roughness: 0, style: 'solid' })
+  }, { color: '#FFD43B', width: 4, variability: 'constant', opacity: 40, roughness: 0, style: 'solid' })
   editor.state.currentItemStrokeColor = '#F59E0B'
+  editor.state.currentItemStrokeVariability = 'variable'
   editor.setActiveTool({ type: 'selection' })
   assert.equal(editor.__clarinHighlighterActive, false)
   assert.equal(editor.__clarinHighlighterStyles.currentItemStrokeColor, '#F59E0B')
+  assert.equal(editor.__clarinHighlighterStyles.currentItemStrokeVariability, 'variable')
   assert.equal(editor.state.currentItemStrokeColor, '#111111')
   assert.equal(editor.state.currentItemStrokeWidth, 1)
+  assert.equal(editor.state.currentItemStrokeVariability, 'constant')
   assert.equal(editor.state.currentItemOpacity, 100)
+
+  editor.state.currentItemStrokeVariability = 'variable'
+  editor.__clarinHighlighterRequested = true
+  editor.setActiveTool({ type: 'freedraw' })
+  assert.equal(editor.state.currentItemStrokeColor, '#F59E0B')
+  assert.equal(editor.state.currentItemStrokeVariability, 'variable')
+
+  editor.__clarinHighlighterRequested = true
+  editor.setActiveTool({ type: 'freedraw' })
+  assert.equal(editor.state.currentItemStrokeColor, '#F59E0B')
+  assert.equal(editor.state.currentItemStrokeVariability, 'variable')
+
+  editor.state.currentItemStrokeVariability = 'constant'
+  editor.setActiveTool({ type: 'selection' })
+  assert.equal(editor.state.currentItemStrokeColor, '#111111')
+  assert.equal(editor.state.currentItemStrokeVariability, 'variable')
+
+  editor.__clarinHighlighterRequested = true
+  editor.setActiveTool({ type: 'freedraw' })
+  assert.equal(editor.state.currentItemStrokeColor, '#F59E0B')
+  assert.equal(editor.state.currentItemStrokeVariability, 'constant')
+  editor.setActiveTool({ type: 'selection' })
+  assert.equal(editor.state.currentItemStrokeVariability, 'variable')
 
   const repeated = hardenEditorBundle(result.hardened, 'highlighter-fixture-repeated.js')
   assert.equal(repeated.highlighterMenus, 0)

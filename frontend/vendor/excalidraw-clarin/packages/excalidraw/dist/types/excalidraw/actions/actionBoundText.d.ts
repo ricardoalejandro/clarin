@@ -75,6 +75,7 @@ export declare const actionBindText: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;
@@ -241,6 +242,7 @@ export declare const actionWrapTextInContainer: {
             currentItemStrokeWidth: number;
             currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
             currentItemRoughness: number;
+            currentItemStrokeVariability: import("../element/types").StrokeVariability;
             currentItemOpacity: number;
             currentItemFontFamily: import("../element/types").FontFamilyValues;
             currentItemFontSize: number;

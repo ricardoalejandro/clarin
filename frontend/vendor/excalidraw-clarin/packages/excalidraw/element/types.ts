@@ -357,12 +357,20 @@ export type ExcalidrawElbowArrowElement = Merge<
   }
 >;
 
+export type StrokeVariability = "constant" | "variable";
+
+export type StrokeOptions = Readonly<{
+  variability: StrokeVariability;
+  streamline: number;
+}>;
+
 export type ExcalidrawFreeDrawElement = _ExcalidrawElementBase &
   Readonly<{
     type: "freedraw";
     points: readonly LocalPoint[];
     pressures: readonly number[];
     simulatePressure: boolean;
+    strokeOptions: StrokeOptions;
     lastCommittedPoint: LocalPoint | null;
   }>;
 

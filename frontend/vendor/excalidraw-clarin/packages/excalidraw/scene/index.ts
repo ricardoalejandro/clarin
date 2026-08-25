@@ -10,6 +10,7 @@ export {
   hasBackground,
   hasStrokeWidth,
   hasStrokeStyle,
+  hasFreedrawMode,
   canHaveArrowheads,
   canChangeRoundness,
 } from "./comparisons";

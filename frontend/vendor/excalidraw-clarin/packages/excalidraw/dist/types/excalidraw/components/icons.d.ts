@@ -108,6 +108,8 @@ export declare const StrokeStyleDottedIcon: import("react/jsx-runtime").JSX.Elem
 export declare const SloppinessArchitectIcon: import("react/jsx-runtime").JSX.Element;
 export declare const SloppinessArtistIcon: import("react/jsx-runtime").JSX.Element;
 export declare const SloppinessCartoonistIcon: import("react/jsx-runtime").JSX.Element;
+export declare const strokeVariabilityConstantIcon: import("react/jsx-runtime").JSX.Element;
+export declare const strokeVariabilityVariableIcon: import("react/jsx-runtime").JSX.Element;
 export declare const EdgeSharpIcon: import("react/jsx-runtime").JSX.Element;
 export declare const EdgeRoundIcon: import("react/jsx-runtime").JSX.Element;
 export declare const ArrowheadNoneIcon: import("react/jsx-runtime").JSX.Element;

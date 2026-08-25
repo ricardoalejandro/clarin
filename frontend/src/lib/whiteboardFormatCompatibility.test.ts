@@ -39,6 +39,7 @@ describe('Excalidraw 0.18.1 historical format corpus', () => {
   it('keeps a versioned scene and library corpus discoverable by the release gate', () => {
     expect(readdirSync(fixturesRoot).sort()).toEqual([
       'complex-scene.excalidraw',
+      'freedraw-pressure.excalidraw',
       'image-import.excalidraw',
       'internal-library.excalidrawlib',
     ])
@@ -108,6 +109,76 @@ describe('Excalidraw 0.18.1 historical format corpus', () => {
       expect(localExport.futureSceneMetadata ?? localExport.unknownImportEnvelope).toEqual(source.futureSceneMetadata ?? source.unknownImportEnvelope)
     })
   }
+
+  it('round-trips legacy, constant, and variable freedraw pressure modes', async () => {
+    const source = fixture('freedraw-pressure.excalidraw')
+    const sourceByID = new Map((source.elements as Array<Record<string, any>>).map(element => [element.id, element]))
+    expect(sourceByID.get('freedraw-legacy')).not.toHaveProperty('strokeOptions')
+
+    const restoredByClarin = restoreClarinWhiteboardScene(source)
+    const opened = await loadFromBlob(jsonBlob(source), null, null)
+    const restoredClarinByID = new Map(restoredByClarin.elements.map(element => {
+      const restoredElement = element as unknown as Record<string, any>
+      return [restoredElement.id, restoredElement] as const
+    }))
+    const openedByID = new Map(opened.elements.map(element => [
+      element.id,
+      element as unknown as Record<string, any>,
+    ]))
+    const expectedVariability = {
+      'freedraw-legacy': 'variable',
+      'freedraw-constant': 'constant',
+      'freedraw-variable': 'variable',
+    } as const
+
+    for (const [id, variability] of Object.entries(expectedVariability)) {
+      const original = sourceByID.get(id)!
+      const clarinElement = restoredClarinByID.get(id)!
+      const openedElement = openedByID.get(id)!
+      expect(clarinElement.strokeOptions).toEqual({ variability, streamline: 0.5 })
+      expect(openedElement.strokeOptions).toEqual({ variability, streamline: 0.5 })
+      for (const field of ['points', 'pressures', 'simulatePressure', 'strokeWidth', 'opacity'] as const) {
+        expect(clarinElement[field]).toEqual(original[field])
+        expect(openedElement[field]).toEqual(original[field])
+      }
+    }
+
+    const saved = buildExcalidrawWhiteboardSavePayload({
+      sceneSequence: 5,
+      operationID: 'compat-freedraw-pressure',
+      reason: 'manual',
+      elements: opened.elements,
+      appState: {
+        ...opened.appState,
+        currentItemStrokeVariability: 'variable',
+      },
+      files: opened.files,
+      rootExtensions: whiteboardSceneRootExtensions(source),
+    }).scene
+    expect(saved.appState).toMatchObject({ viewBackgroundColor: '#ffffff' })
+    expect(saved.appState).not.toHaveProperty('currentItemStrokeVariability')
+    expect(saved.futurePressureFixtureMetadata).toEqual({ synthetic: true })
+
+    const localExport = JSON.parse(serializeAsJSON(
+      opened.elements,
+      opened.appState,
+      opened.files,
+      'local',
+    )) as Record<string, any>
+    const reopened = await loadFromBlob(jsonBlob(localExport), null, null)
+    const reopenedByID = new Map(reopened.elements.map(element => [
+      element.id,
+      element as unknown as Record<string, any>,
+    ]))
+    for (const [id, variability] of Object.entries(expectedVariability)) {
+      const original = sourceByID.get(id)!
+      const reopenedElement = reopenedByID.get(id)!
+      expect(reopenedElement.strokeOptions).toEqual({ variability, streamline: 0.5 })
+      expect(reopenedElement.points).toEqual(original.points)
+      expect(reopenedElement.pressures).toEqual(original.pressures)
+      expect(reopenedElement.simulatePressure).toBe(original.simulatePressure)
+    }
+  })
 
   it('round-trips an internal .excalidrawlib without losing opaque item or element fields', async () => {
     const source = fixture('internal-library.excalidrawlib')
