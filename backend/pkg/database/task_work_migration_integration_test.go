@@ -59,8 +59,13 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 
 	accountA, accountB := uuid.New(), uuid.New()
 	userA, userB := uuid.New(), uuid.New()
+	taskRoleID := uuid.New()
 	if _, err := db.Exec(ctx, `INSERT INTO accounts(id,name) VALUES($1,'Task A'),($2,'Task B')`, accountA, accountB); err != nil {
 		t.Fatalf("insert accounts: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO roles(id,name,permissions)
+		VALUES($1,$2,ARRAY[$3]::text[])`, taskRoleID, "Task Work integration "+taskRoleID.String(), domain.PermTasks); err != nil {
+		t.Fatalf("insert task module role: %v", err)
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO users(id,account_id,username,email,password_hash) VALUES
 		($1,$3,$4,$5,'test'),($2,$6,$7,$8,'test')`, userA, userB, accountA,
@@ -68,7 +73,7 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 		"task-b-"+userB.String(), userB.String()+"@test.invalid"); err != nil {
 		t.Fatalf("insert users: %v", err)
 	}
-	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,is_default) VALUES($1,$2,TRUE),($3,$4,TRUE)`, userA, accountA, userB, accountB); err != nil {
+	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,role_id,is_default) VALUES($1,$2,$5,TRUE),($3,$4,$5,TRUE)`, userA, accountA, userB, accountB, taskRoleID); err != nil {
 		t.Fatalf("insert memberships: %v", err)
 	}
 	viewerA := uuid.New()
@@ -76,7 +81,7 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 		VALUES($1,$2,$3,$4,'test')`, viewerA, accountA, "task-viewer-"+viewerA.String(), viewerA.String()+"@test.invalid"); err != nil {
 		t.Fatalf("insert same-account task viewer: %v", err)
 	}
-	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,is_default) VALUES($1,$2,FALSE)`, viewerA, accountA); err != nil {
+	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,role_id,is_default) VALUES($1,$2,$3,FALSE)`, viewerA, accountA, taskRoleID); err != nil {
 		t.Fatalf("insert same-account viewer membership: %v", err)
 	}
 	legacyViewerA := uuid.New()
@@ -84,7 +89,7 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 		VALUES($1,$2,$3,$4,'test')`, legacyViewerA, accountA, "task-legacy-viewer-"+legacyViewerA.String(), legacyViewerA.String()+"@test.invalid"); err != nil {
 		t.Fatalf("insert legacy viewer: %v", err)
 	}
-	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,is_default) VALUES($1,$2,FALSE)`, legacyViewerA, accountA); err != nil {
+	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,role_id,is_default) VALUES($1,$2,$3,FALSE)`, legacyViewerA, accountA, taskRoleID); err != nil {
 		t.Fatalf("insert legacy viewer membership: %v", err)
 	}
 	var workflowA, environmentA uuid.UUID
@@ -125,7 +130,7 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 		t.Fatalf("new environment was not forced private: %#v", privateEnvironment)
 	}
 	privateEnvironment.Name = "PRIVADO"
-	if err := workRepo.UpdateEnvironment(ctx, accountA, userA, privateEnvironment, nil, nil); err != nil {
+	if _, err := workRepo.UpdateEnvironment(ctx, accountA, userA, privateEnvironment, nil, nil); err != nil {
 		t.Fatalf("case-only environment rename hit a PostgreSQL parameter error: %v", err)
 	}
 	privateEnvironment.Version++
@@ -344,6 +349,9 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,is_default) VALUES($1,$2,FALSE)`, departingUserID, accountA); err != nil {
 		t.Fatalf("insert departing membership: %v", err)
 	}
+	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,is_default) VALUES($1,$2,FALSE)`, departingUserID, accountB); err != nil {
+		t.Fatalf("insert retained membership: %v", err)
+	}
 	if _, err := db.Exec(ctx, `INSERT INTO task_environment_grants(account_id,environment_id,user_id,access_level,created_by)
 		VALUES($1,$2,$3,'view',$4)`, accountA, environmentA, departingUserID, userA); err != nil {
 		t.Fatalf("insert departing environment grant: %v", err)
@@ -368,10 +376,10 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 		t.Fatalf("load task revision before membership removal: %v", err)
 	}
 	repositories := repository.NewRepositories(db)
-	if err := repositories.UserAccount.RemoveWithActor(ctx, departingUserID, accountA, userA); err != nil {
+	if _, err := repositories.UserAccount.RemoveWithActorAndNormalize(ctx, departingUserID, accountA, userA); err != nil {
 		t.Fatalf("remove membership with ACL audit: %v", err)
 	}
-	if err := repositories.UserAccount.RemoveWithActor(ctx, departingUserID, accountA, userA); err != nil {
+	if _, err := repositories.UserAccount.RemoveWithActorAndNormalize(ctx, departingUserID, accountA, userA); err != nil {
 		t.Fatalf("retry membership removal was not idempotent: %v", err)
 	}
 	var auditCount, remainingGrantCount int
@@ -953,7 +961,7 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 		t.Fatalf("insert target workflow statuses: %v", err)
 	}
 	notInherited := false
-	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, defaultListA, nil, false, nil, false, &targetWorkflowID, &notInherited, nil, nil, nil, nil); !errors.Is(err, repository.ErrTaskStatusMappingInvalid) {
+	if _, err := repos.TaskWork.UpdateListLocation(ctx, accountA, defaultListA, nil, false, nil, false, &targetWorkflowID, &notInherited, nil, nil, nil, nil); !errors.Is(err, repository.ErrTaskStatusMappingInvalid) {
 		t.Fatalf("list accepted a workflow without equivalent active status: %v", err)
 	}
 	folder := &domain.TaskFolder{AccountID: accountA, EnvironmentID: environmentA, WorkflowID: &targetWorkflowID, Name: "General contract", CreatedBy: userA}
@@ -974,11 +982,11 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 		t.Fatalf("insert movable task lists: %v", err)
 	}
 	inherited := true
-	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, secondMovableList, &folder.ID, true, nil, true, nil, &inherited, nil, nil, nil, nil); err != nil {
+	if _, err := repos.TaskWork.UpdateListLocation(ctx, accountA, secondMovableList, &folder.ID, true, nil, true, nil, &inherited, nil, nil, nil, nil); err != nil {
 		t.Fatalf("append list into folder: %v", err)
 	}
 	listIcon := "target"
-	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, firstMovableList, &folder.ID, true, &secondMovableList, true, nil, &inherited, nil, nil, nil, &listIcon); err != nil {
+	if _, err := repos.TaskWork.UpdateListLocation(ctx, accountA, firstMovableList, &folder.ID, true, &secondMovableList, true, nil, &inherited, nil, nil, nil, &listIcon); err != nil {
 		t.Fatalf("insert list before folder anchor: %v", err)
 	}
 	var firstFolderID, secondFolderID uuid.UUID
@@ -1038,13 +1046,13 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 	if err := db.QueryRow(ctx, `SELECT id FROM task_lists WHERE account_id=$1 AND is_default AND archived_at IS NULL`, accountB).Scan(&defaultListB); err != nil {
 		t.Fatalf("load other account default list: %v", err)
 	}
-	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, firstMovableList, &folder.ID, true, &defaultListB, true, nil, &inherited, nil, nil, nil, nil); !errors.Is(err, repository.ErrTaskListOrderInvalid) {
+	if _, err := repos.TaskWork.UpdateListLocation(ctx, accountA, firstMovableList, &folder.ID, true, &defaultListB, true, nil, &inherited, nil, nil, nil, nil); !errors.Is(err, repository.ErrTaskListOrderInvalid) {
 		t.Fatalf("cross-account list anchor was accepted: %v", err)
 	}
-	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, defaultListA, &folder.ID, true, nil, true, nil, &inherited, nil, nil, nil, nil); !errors.Is(err, repository.ErrDefaultTaskList) {
+	if _, err := repos.TaskWork.UpdateListLocation(ctx, accountA, defaultListA, &folder.ID, true, nil, true, nil, &inherited, nil, nil, nil, nil); !errors.Is(err, repository.ErrDefaultTaskList) {
 		t.Fatalf("default list moved into folder: %v", err)
 	}
-	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, defaultListA, nil, true, &firstMovableList, true, nil, &notInherited, nil, nil, nil, nil); !errors.Is(err, repository.ErrDefaultTaskList) {
+	if _, err := repos.TaskWork.UpdateListLocation(ctx, accountA, defaultListA, nil, true, &firstMovableList, true, nil, &notInherited, nil, nil, nil, nil); !errors.Is(err, repository.ErrDefaultTaskList) {
 		t.Fatalf("default list reordered in root: %v", err)
 	}
 	limitedFolder := &domain.TaskFolder{AccountID: accountA, EnvironmentID: environmentA, WorkflowID: &targetWorkflowID, Name: "Limited folder", CreatedBy: userA}
@@ -1059,7 +1067,7 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 	if _, err := db.Exec(ctx, `INSERT INTO tasks(id,account_id,created_by,assigned_to,title,type,priority,status,status_id,list_id,sort_order) VALUES($1,$2,$3,$3,'Keep active state','reminder','medium','in_progress',$4,$5,1024)`, workflowRollbackTask, accountA, userA, activeStatusID, workflowRollbackList); err != nil {
 		t.Fatalf("insert workflow rollback task: %v", err)
 	}
-	if err := repos.TaskWork.UpdateListLocation(ctx, accountA, workflowRollbackList, &limitedFolder.ID, true, nil, true, nil, &inherited, nil, nil, nil, nil); !errors.Is(err, repository.ErrTaskStatusMappingInvalid) {
+	if _, err := repos.TaskWork.UpdateListLocation(ctx, accountA, workflowRollbackList, &limitedFolder.ID, true, nil, true, nil, &inherited, nil, nil, nil, nil); !errors.Is(err, repository.ErrTaskStatusMappingInvalid) {
 		t.Fatalf("list moved into incompatible workflow: %v", err)
 	}
 	var rollbackFolderID *uuid.UUID
@@ -1073,13 +1081,13 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 	if rollbackFolderID != nil || rollbackWorkflowID != workflowA || rollbackStatusID != activeStatusID {
 		t.Fatalf("incompatible workflow move was not rolled back: folder=%v workflow=%s status=%s", rollbackFolderID, rollbackWorkflowID, rollbackStatusID)
 	}
-	if err := repos.Task.DeleteList(ctx, listID, accountA); !errors.Is(err, repository.ErrTaskContainerNotEmpty) {
-		t.Fatalf("list with active tasks was archived: %v", err)
+	if _, err := repos.TaskWork.ArchiveList(ctx, accountA, userA, listID); !errors.Is(err, repository.ErrTaskContainerHasOpenTasks) {
+		t.Fatalf("list with open tasks was archived: %v", err)
 	}
 	if err := repos.TaskWork.SoftDeleteTask(ctx, accountA, orderConflictID, userA); err != nil {
 		t.Fatalf("soft-delete task before archiving list: %v", err)
 	}
-	if err := repos.Task.DeleteList(ctx, listID, accountA); err != nil {
+	if _, err := repos.TaskWork.ArchiveList(ctx, accountA, userA, listID); err != nil {
 		t.Fatalf("archive list containing only deleted tasks: %v", err)
 	}
 	if err := repos.TaskWork.RestoreTask(ctx, accountA, userA, orderConflictID); err != nil {

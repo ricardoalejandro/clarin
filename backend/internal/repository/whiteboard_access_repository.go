@@ -19,6 +19,15 @@ type WhiteboardGrantInput struct {
 }
 
 func (r *WhiteboardRepository) GetBoardAccessPolicy(ctx context.Context, accountID, actorID, boardID uuid.UUID) (*domain.WhiteboardAccessPolicy, error) {
+	// Prove visibility before origin so hidden Work boards remain 404. A visible
+	// contextual board then receives the explicit structural error instead of
+	// ever consulting its standalone grants or access_mode.
+	if _, err := r.RequireAccess(ctx, accountID, actorID, boardID, domain.WhiteboardAccessView); err != nil {
+		return nil, err
+	}
+	if err := requireStandaloneWhiteboardWith(ctx, r.db, accountID, boardID); err != nil {
+		return nil, err
+	}
 	access, err := r.RequireManageAccess(ctx, accountID, actorID, boardID)
 	if err != nil {
 		return nil, err
@@ -103,6 +112,41 @@ func (r *WhiteboardRepository) ReplaceBoardAccess(ctx context.Context, accountID
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// A replay must remain successful even when a recipient from the original
+	// payload has since left the account. This preflight only selects which
+	// membership set to lock; the canonical audit row is still checked again
+	// after the board lock below.
+	var replayPreflight bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM whiteboard_access_audit
+		WHERE account_id=$1 AND board_id=$2 AND operation_id=$3 AND action='access_replaced')`,
+		accountID, boardID, operationID).Scan(&replayPreflight); err != nil {
+		return nil, err
+	}
+	// created_by is immutable board provenance. Discover it without a row lock
+	// so every membership that the replacement may preserve is locked before
+	// the board itself, then verify the same value again under FOR UPDATE.
+	var discoveredCreatorID *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT created_by FROM whiteboards
+		WHERE account_id=$1 AND id=$2`, accountID, boardID).Scan(&discoveredCreatorID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrWhiteboardNotFound
+		}
+		return nil, err
+	}
+	relatedMembershipIDs := make([]uuid.UUID, 0, len(requestedIDs)+1)
+	if !replayPreflight {
+		relatedMembershipIDs = append(relatedMembershipIDs, requestedIDs...)
+		if discoveredCreatorID != nil {
+			relatedMembershipIDs = append(relatedMembershipIDs, *discoveredCreatorID)
+		}
+	}
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID, relatedMembershipIDs...); err != nil {
+		return nil, err
+	}
+	workLock, err := lockWorkWhiteboardParentViewTx(ctx, tx, accountID, boardID, true, true)
+	if err != nil {
+		return nil, err
+	}
 	var creatorID *uuid.UUID
 	var beforeMode string
 	var beforeRevision int64
@@ -111,6 +155,16 @@ func (r *WhiteboardRepository) ReplaceBoardAccess(ctx context.Context, accountID
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrWhiteboardNotFound
 		}
+		return nil, err
+	}
+	if (creatorID == nil) != (discoveredCreatorID == nil) ||
+		(creatorID != nil && *creatorID != *discoveredCreatorID) {
+		return nil, ErrWhiteboardConflict
+	}
+	if _, err := requireWhiteboardAccessTx(ctx, tx, accountID, actorID, boardID, domain.WhiteboardAccessView, false); err != nil {
+		return nil, err
+	}
+	if err := requireStandaloneWhiteboardMutationLock(workLock); err != nil {
 		return nil, err
 	}
 	actorAccess, err := requireWhiteboardAccessTx(ctx, tx, accountID, actorID, boardID, domain.WhiteboardAccessManage, true)

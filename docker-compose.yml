@@ -113,6 +113,8 @@ services:
       MINIO_BUCKET: clarin-media
       MINIO_USE_SSL: "false"
       MINIO_PUBLIC_URL: https://media.clarin.naperu.cloud
+      # El resolver contextual permanece activo aunque la experiencia se apague.
+      WORK_WHITEBOARD_VIEWS_ENABLED: ${WORK_WHITEBOARD_VIEWS_ENABLED:-false}
       # Kommo CRM
       KOMMO_SUBDOMAIN: ${KOMMO_SUBDOMAIN:-}
       KOMMO_CLIENT_ID: ${KOMMO_CLIENT_ID:-}

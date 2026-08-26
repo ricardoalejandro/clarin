@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/naperu/clarin/internal/domain"
 )
 
 type WhiteboardPurgeResult struct {
@@ -56,6 +57,16 @@ func (r *WhiteboardRepository) UpdateTrashRetentionDays(ctx context.Context, acc
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var lockedAccountID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM accounts WHERE id=$1 FOR UPDATE`, accountID).Scan(&lockedAccountID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrWhiteboardNotFound
+		}
+		return err
+	}
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return err
+	}
 	if err := requireWhiteboardAccountAdminTx(ctx, tx, accountID, actorID); err != nil {
 		return err
 	}
@@ -75,19 +86,40 @@ func (r *WhiteboardRepository) PurgeBoard(ctx context.Context, accountID, actorI
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := requireWhiteboardAccountAdminTx(ctx, tx, accountID, actorID); err != nil {
+	var retentionDays int
+	if err := tx.QueryRow(ctx, `SELECT whiteboard_trash_retention_days FROM accounts
+		WHERE id=$1 FOR UPDATE`, accountID).Scan(&retentionDays); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrWhiteboardNotFound
+		}
+		return nil, err
+	}
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
+	workLock, err := lockWorkWhiteboardParentViewTx(ctx, tx, accountID, boardID, true, true)
+	if err != nil {
 		return nil, err
 	}
 	var name string
 	var archivedAt *time.Time
-	var retentionDays int
-	if err := tx.QueryRow(ctx, `SELECT board.name,board.archived_at,account.whiteboard_trash_retention_days
-		FROM whiteboards board JOIN accounts account ON account.id=board.account_id
-		WHERE board.account_id=$1 AND board.id=$2 FOR UPDATE OF board,account`, accountID, boardID).Scan(
-		&name, &archivedAt, &retentionDays); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT name,archived_at FROM whiteboards
+		WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, boardID).Scan(&name, &archivedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrWhiteboardNotFound
 		}
+		return nil, err
+	}
+	if workLock != nil {
+		// A contextual board is governed exclusively by its Work location. Global
+		// super-admin state, creator ownership and standalone grants must never
+		// bypass real account membership, both modules and Administrar on Work.
+		if _, _, err := requireWorkWhiteboardLifecycleAccessTx(
+			ctx, tx, accountID, actorID, boardID, domain.WhiteboardAccessManage,
+		); err != nil {
+			return nil, err
+		}
+	} else if err := requireWhiteboardAccountAdminTx(ctx, tx, accountID, actorID); err != nil {
 		return nil, err
 	}
 	if confirmationName != name {
@@ -96,7 +128,16 @@ func (r *WhiteboardRepository) PurgeBoard(ctx context.Context, accountID, actorI
 	if archivedAt == nil {
 		return nil, ErrWhiteboardTrashNotEligible
 	}
-	nextEligibleAt, eligible := whiteboardTrashEligibility(*archivedAt, retentionDays, now)
+	retentionStartedAt := *archivedAt
+	if workLock != nil {
+		if workLock.DeletedAt == nil {
+			return nil, ErrWhiteboardTrashNotEligible
+		}
+		if workLock.DeletedAt.After(retentionStartedAt) {
+			retentionStartedAt = *workLock.DeletedAt
+		}
+	}
+	nextEligibleAt, eligible := whiteboardTrashEligibility(retentionStartedAt, retentionDays, now)
 	if !eligible {
 		return nil, &WhiteboardTrashEligibilityError{NextEligibleAt: nextEligibleAt}
 	}
@@ -145,6 +186,17 @@ func (r *WhiteboardRepository) PurgeBoard(ctx context.Context, accountID, actorI
 	}
 	snapshotRows.Close()
 
+	if workLock != nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM task_location_whiteboard_views
+			WHERE account_id=$1 AND task_view_id=$2 AND whiteboard_id=$3`, accountID, workLock.ViewID, boardID); err != nil {
+			return nil, err
+		}
+		if command, err := tx.Exec(ctx, `DELETE FROM task_location_views WHERE account_id=$1 AND id=$2`, accountID, workLock.ViewID); err != nil {
+			return nil, err
+		} else if command.RowsAffected() != 1 {
+			return nil, ErrWhiteboardConflict
+		}
+	}
 	command, err := tx.Exec(ctx, `DELETE FROM whiteboards WHERE account_id=$1 AND id=$2`, accountID, boardID)
 	if err != nil {
 		return nil, err

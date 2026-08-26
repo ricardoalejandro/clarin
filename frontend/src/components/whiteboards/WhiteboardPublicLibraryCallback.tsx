@@ -6,6 +6,7 @@ import { tryRefreshTokenOutcome, type AuthRefreshOutcome } from '@/lib/api'
 import {
   buildWhiteboardPublicLibraryLoginPath,
   buildWhiteboardPublicLibraryReturnPath,
+  consumeWhiteboardPublicLibraryWorkReturn,
   isWhiteboardPublicLibraryIdentifier,
   parseWhiteboardPublicLibraryCallbackFragment,
   WHITEBOARD_PUBLIC_LIBRARY_CALLBACK_STORAGE_KEY,
@@ -191,7 +192,11 @@ async function submitPreparedCallback(pending: PendingCallback, runtime: Whitebo
       }
       const returnPath = buildWhiteboardPublicLibraryReturnPath(boardID, importID)
       if (!returnPath) throw new Error('Clarin no pudo confirmar el destino seguro de la biblioteca.')
-      return returnPath
+      const workReturnPath = consumeWhiteboardPublicLibraryWorkReturn(boardID, importID, {
+        getItem: runtime.readSession,
+        removeItem: runtime.removeSession,
+      })
+      return workReturnPath || returnPath
     })().finally(() => {
       pending.inFlight = undefined
     })

@@ -165,6 +165,21 @@ type AuthSessionIdentity struct {
 	CreatedAt time.Time
 }
 
+// accountSessionAuthority derives an access-token authority snapshot from the
+// selected account membership. user.IsAdmin is intentionally ignored: that
+// legacy mirror belongs to the default account and must not follow the user
+// when they switch to another account.
+func accountSessionAuthority(user *domain.User, membership *domain.UserAccount) (bool, []string) {
+	if user == nil || membership == nil {
+		return false, nil
+	}
+	isAdmin := domain.HasAccountAdminAuthority(membership.Role, user.IsSuperAdmin)
+	if isAdmin {
+		return true, []string{domain.PermAll}
+	}
+	return false, append([]string(nil), membership.Permissions...)
+}
+
 func (s *AuthService) storeRefreshCredential(ctx context.Context, refreshToken string, payload []byte) error {
 	if s.cache == nil {
 		return fmt.Errorf("%w: cache not configured", ErrAuthSessionUnavailable)
@@ -192,9 +207,9 @@ func (s *AuthService) rotateRefreshCredential(ctx context.Context, oldRefreshTok
 	return nil
 }
 
-func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret string) (string, string, *domain.User, int, error) {
+func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret string) (string, string, *domain.User, int, *repository.WhiteboardAuthorityMutationEffect, error) {
 	if s.cache == nil {
-		return "", "", nil, 0, fmt.Errorf("session service unavailable")
+		return "", "", nil, 0, nil, fmt.Errorf("session service unavailable")
 	}
 
 	// Check login rate limiting
@@ -204,7 +219,7 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 		if data != nil {
 			var failures int
 			if err := json.Unmarshal(data, &failures); err == nil && failures >= maxLoginAttempts {
-				return "", "", nil, 0, fmt.Errorf("cuenta bloqueada temporalmente, intente en 15 minutos")
+				return "", "", nil, 0, nil, fmt.Errorf("cuenta bloqueada temporalmente, intente en 15 minutos")
 			}
 		}
 	}
@@ -212,16 +227,16 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	user, err := s.repos.User.GetByUsername(ctx, username)
 	if err != nil {
 		s.recordLoginFailure(ctx, username)
-		return "", "", nil, 0, fmt.Errorf("invalid credentials")
+		return "", "", nil, 0, nil, fmt.Errorf("invalid credentials")
 	}
 	if user == nil {
 		s.recordLoginFailure(ctx, username)
-		return "", "", nil, 0, fmt.Errorf("invalid credentials")
+		return "", "", nil, 0, nil, fmt.Errorf("invalid credentials")
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
 		s.recordLoginFailure(ctx, username)
-		return "", "", nil, 0, fmt.Errorf("invalid credentials")
+		return "", "", nil, 0, nil, fmt.Errorf("invalid credentials")
 	}
 
 	// Clear login failures on success
@@ -231,33 +246,34 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	}
 
 	// Get user's account assignments
-	if err := s.repos.UserAccount.NormalizeForUser(ctx, user.ID); err != nil {
-		return "", "", nil, 0, fmt.Errorf("failed to normalize user accounts: %w", err)
+	authorityEffect, err := s.repos.UserAccount.NormalizeForUserWithAuthorityImpact(ctx, user.ID)
+	if err != nil {
+		return "", "", nil, 0, nil, fmt.Errorf("failed to normalize user accounts: %w", err)
+	}
+	// Normalization can repair legacy global role/admin mirrors. Reload before
+	// minting claims so this login cannot carry the pre-repair authority.
+	user, err = s.repos.User.GetByID(ctx, user.ID)
+	if err != nil || user == nil {
+		return "", "", nil, 0, authorityEffect, fmt.Errorf("failed to reload normalized user authority")
 	}
 	membership, err := s.repos.UserAccount.GetPreferredByUserID(ctx, user.ID)
 	if err != nil {
-		return "", "", nil, 0, fmt.Errorf("no account assignment available: %w", err)
+		return "", "", nil, 0, authorityEffect, fmt.Errorf("no account assignment available: %w", err)
 	}
 	accountCount, err := s.repos.UserAccount.CountByUserID(ctx, user.ID)
 	if err != nil {
-		return "", "", nil, 0, fmt.Errorf("failed to count account assignments: %w", err)
+		return "", "", nil, 0, authorityEffect, fmt.Errorf("failed to count account assignments: %w", err)
 	}
 	activeAccountID := membership.AccountID
 	activeRole := membership.Role
 
 	// Generate JWT with default account
 	// Admins/super_admins get wildcard; agents get their role's permissions
-	isAdmin := user.IsAdmin || user.IsSuperAdmin || activeRole == domain.RoleAdmin || activeRole == domain.RoleSuperAdmin
-	var permissions []string
-	if isAdmin {
-		permissions = []string{domain.PermAll}
-	} else {
-		permissions, _ = s.repos.UserAccount.GetUserPermissions(ctx, user.ID, activeAccountID)
-	}
+	isAdmin, permissions := accountSessionAuthority(user, membership)
 
 	sessionID, sessionCreatedAt, err := s.createSession(ctx, user.ID, activeAccountID, user.Username)
 	if err != nil {
-		return "", "", nil, 0, err
+		return "", "", nil, 0, authorityEffect, err
 	}
 
 	jti := uuid.New().String()
@@ -281,7 +297,7 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := token.SignedString([]byte(jwtSecret))
 	if err != nil {
-		return "", "", nil, 0, fmt.Errorf("failed to sign token: %w", err)
+		return "", "", nil, 0, authorityEffect, fmt.Errorf("failed to sign token: %w", err)
 	}
 
 	// Generate refresh token and store in Redis
@@ -296,7 +312,7 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	rtJSON, _ := json.Marshal(rtData)
 	if err := s.storeRefreshCredential(ctx, refreshToken, rtJSON); err != nil {
 		_ = s.cache.Del(ctx, sessionKeyPrefix+sessionID)
-		return "", "", nil, 0, err
+		return "", "", nil, 0, authorityEffect, err
 	}
 
 	// Update user fields to match active account
@@ -306,10 +322,10 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	if err := s.repos.UserAccount.MarkSelected(ctx, user.ID, activeAccountID); err != nil {
 		_ = s.cache.Del(ctx, refreshTokenKeyPrefix+refreshToken)
 		_ = s.cache.Del(ctx, sessionKeyPrefix+sessionID)
-		return "", "", nil, 0, fmt.Errorf("failed to remember selected account: %w", err)
+		return "", "", nil, 0, authorityEffect, fmt.Errorf("failed to remember selected account: %w", err)
 	}
 
-	return tokenString, refreshToken, user, accountCount, nil
+	return tokenString, refreshToken, user, accountCount, authorityEffect, nil
 }
 
 func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID uuid.UUID, sessionID, oldRefreshToken, jwtSecret string) (string, string, *domain.User, error) {
@@ -336,13 +352,7 @@ func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID
 	accountName := membership.AccountName
 
 	// Generate new JWT for the target account
-	isAdmin := user.IsAdmin || user.IsSuperAdmin || accountRole == domain.RoleAdmin || accountRole == domain.RoleSuperAdmin
-	var permissions []string
-	if isAdmin {
-		permissions = []string{domain.PermAll}
-	} else {
-		permissions, _ = s.repos.UserAccount.GetUserPermissions(ctx, userID, targetAccountID)
-	}
+	isAdmin, permissions := accountSessionAuthority(user, membership)
 
 	jti := uuid.New().String()
 	claims := &JWTClaims{
@@ -702,13 +712,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, oldRefreshToken, jwtSecr
 	accountRole := membership.Role
 
 	// Get current permissions — per-account admin gets full access
-	isAdmin := user.IsAdmin || user.IsSuperAdmin || accountRole == domain.RoleAdmin || accountRole == domain.RoleSuperAdmin
-	var permissions []string
-	if isAdmin {
-		permissions = []string{domain.PermAll}
-	} else {
-		permissions = append([]string(nil), membership.Permissions...)
-	}
+	isAdmin, permissions := accountSessionAuthority(user, membership)
 
 	// Generate new JWT
 	jti := uuid.New().String()
@@ -953,30 +957,12 @@ func (s *AccountService) GetUsers(ctx context.Context, accountID *uuid.UUID) ([]
 	return s.repos.User.GetAll(ctx)
 }
 
-func (s *AccountService) CreateUser(ctx context.Context, user *domain.User, password string) error {
-	if err := ValidateStrongPassword(password); err != nil {
-		return err
-	}
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return fmt.Errorf("failed to hash password: %w", err)
-	}
-	user.PasswordHash = string(hashedPassword)
-	if err := s.repos.User.Create(ctx, user); err != nil {
-		return err
-	}
-	// Auto-assign user to their primary account in user_accounts
-	ua := &domain.UserAccount{
-		UserID:    user.ID,
-		AccountID: user.AccountID,
-		Role:      user.Role,
-		IsDefault: true,
-	}
-	return s.repos.UserAccount.Assign(ctx, ua)
-}
-
 func (s *AccountService) UpdateUser(ctx context.Context, user *domain.User) error {
 	return s.repos.User.Update(ctx, user)
+}
+
+func (s *AccountService) UpdateUserWithAuthorityImpact(ctx context.Context, user *domain.User) (*repository.WhiteboardAuthorityMutationEffect, error) {
+	return s.repos.User.UpdateWithAuthorityImpact(ctx, user)
 }
 
 func (s *AccountService) ResetPassword(ctx context.Context, userID uuid.UUID, password string) error {
@@ -990,57 +976,23 @@ func (s *AccountService) ResetPassword(ctx context.Context, userID uuid.UUID, pa
 	return s.repos.User.UpdatePassword(ctx, userID, string(hashedPassword))
 }
 
-func (s *AccountService) ToggleUserActive(ctx context.Context, userID uuid.UUID) error {
-	return s.repos.User.ToggleActive(ctx, userID)
+func (s *AccountService) ToggleUserActiveWithAuthorityImpact(ctx context.Context, userID uuid.UUID) (*repository.WhiteboardAuthorityMutationEffect, error) {
+	return s.repos.User.ToggleActiveWithAuthorityImpact(ctx, userID)
 }
 
-func (s *AccountService) DeleteUser(ctx context.Context, userID uuid.UUID) error {
-	return s.repos.User.Delete(ctx, userID)
+func (s *AccountService) DeleteUserAsWithAuthorityImpact(ctx context.Context, userID, actorID uuid.UUID) (*repository.WhiteboardAuthorityMutationEffect, error) {
+	return s.repos.User.DeleteWithActorAndAuthorityImpact(ctx, userID, actorID)
 }
 
-func (s *AccountService) DeleteUserAs(ctx context.Context, userID, actorID uuid.UUID) error {
-	return s.repos.User.DeleteWithActor(ctx, userID, actorID)
+func (s *AccountService) AssignUserAccountWithAuthorityImpact(ctx context.Context, ua *domain.UserAccount) (*repository.WhiteboardAuthorityMutationEffect, error) {
+	return s.repos.UserAccount.AssignAndNormalize(ctx, ua)
 }
 
-func (s *AccountService) AssignUserAccount(ctx context.Context, ua *domain.UserAccount) error {
-	if err := s.repos.UserAccount.Assign(ctx, ua); err != nil {
-		return err
-	}
-	return s.repos.UserAccount.NormalizeForUser(ctx, ua.UserID)
-}
-
-func (s *AccountService) RemoveUserAccount(ctx context.Context, userID, accountID uuid.UUID) error {
-	return s.removeUserAccount(ctx, userID, accountID, nil)
-}
-
-func (s *AccountService) RemoveUserAccountAs(ctx context.Context, userID, accountID, actorID uuid.UUID) error {
-	return s.removeUserAccount(ctx, userID, accountID, &actorID)
-}
-
-func (s *AccountService) removeUserAccount(ctx context.Context, userID, accountID uuid.UUID, actorID *uuid.UUID) error {
-	count, err := s.repos.UserAccount.CountByUserID(ctx, userID)
-	if err != nil {
-		return err
-	}
-	if count <= 1 {
-		return fmt.Errorf("el usuario debe conservar al menos una cuenta asignada")
-	}
-	var removeErr error
-	if actorID != nil {
-		removeErr = s.repos.UserAccount.RemoveWithActor(ctx, userID, accountID, *actorID)
-	} else {
-		removeErr = s.repos.UserAccount.Remove(ctx, userID, accountID)
-	}
-	if removeErr != nil {
-		return removeErr
-	}
-	return s.repos.UserAccount.NormalizeForUser(ctx, userID)
+func (s *AccountService) RemoveUserAccountAsWithAuthorityImpact(ctx context.Context, userID, accountID, actorID uuid.UUID) (*repository.WhiteboardAuthorityMutationEffect, error) {
+	return s.repos.UserAccount.RemoveWithActorAndNormalize(ctx, userID, accountID, actorID)
 }
 
 func (s *AccountService) GetUserAccountAssignments(ctx context.Context, userID uuid.UUID) ([]*domain.UserAccount, error) {
-	if err := s.repos.UserAccount.NormalizeForUser(ctx, userID); err != nil {
-		return nil, err
-	}
 	return s.repos.UserAccount.GetByUserID(ctx, userID)
 }
 
@@ -2858,10 +2810,10 @@ func (s *RoleService) Create(ctx context.Context, role *domain.Role) error {
 	return s.repos.Role.Create(ctx, role)
 }
 
-func (s *RoleService) Update(ctx context.Context, role *domain.Role) error {
-	return s.repos.Role.Update(ctx, role)
+func (s *RoleService) UpdateWithAuthorityImpact(ctx context.Context, role *domain.Role) (*repository.WhiteboardAuthorityMutationEffect, error) {
+	return s.repos.Role.UpdateWithAuthorityImpact(ctx, role)
 }
 
-func (s *RoleService) Delete(ctx context.Context, id uuid.UUID) error {
-	return s.repos.Role.Delete(ctx, id)
+func (s *RoleService) DeleteWithAuthorityImpact(ctx context.Context, id uuid.UUID) (*repository.WhiteboardAuthorityMutationEffect, error) {
+	return s.repos.Role.DeleteWithAuthorityImpact(ctx, id)
 }

@@ -31,6 +31,8 @@ func whiteboardError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Recurso no encontrado", "code": "whiteboard_not_found"})
 	case errors.Is(err, repository.ErrWhiteboardForbidden):
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"success": false, "error": "No tienes acceso suficiente", "code": "whiteboard_forbidden"})
+	case errors.Is(err, repository.ErrWhiteboardInheritsWorkAccess):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "El acceso y la ubicación de esta pizarra se administran desde Clarin Work", "code": "whiteboard_inherits_work_access"})
 	case errors.Is(err, repository.ErrWhiteboardFolderNotEmpty):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La carpeta contiene carpetas o pizarras activas", "code": "whiteboard_folder_not_empty"})
 	case errors.Is(err, repository.ErrWhiteboardConflict):
@@ -73,6 +75,8 @@ func whiteboardWriteFailureCode(err error) string {
 		return "whiteboard_not_found"
 	case errors.Is(err, repository.ErrWhiteboardForbidden):
 		return "whiteboard_forbidden"
+	case errors.Is(err, repository.ErrWhiteboardInheritsWorkAccess):
+		return "whiteboard_inherits_work_access"
 	case errors.Is(err, repository.ErrWhiteboardStorageLimit):
 		return "storage_limit_reached"
 	case errors.Is(err, repository.ErrWhiteboardUploadInProgress):
@@ -196,6 +200,7 @@ func (s *Server) handleCreateWhiteboardFolder(c *fiber.Ctx) error {
 	if err != nil {
 		return whiteboardError(c, err)
 	}
+	s.notifyWhiteboardHubChanged(accountID)
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true, "folder": item})
 }
 
@@ -264,6 +269,7 @@ func (s *Server) handleUpdateWhiteboardFolder(c *fiber.Ctx) error {
 	if err != nil {
 		return whiteboardError(c, err)
 	}
+	s.notifyWhiteboardHubChanged(accountID)
 	return c.JSON(fiber.Map{"success": true, "folder": result.Folder, "affected_folders": result.AffectedFolders})
 }
 
@@ -283,6 +289,7 @@ func (s *Server) handleArchiveWhiteboardFolder(c *fiber.Ctx) error {
 	if err := s.repos.Whiteboard.ArchiveFolder(c.Context(), accountID, folderID, version); err != nil {
 		return whiteboardError(c, err)
 	}
+	s.notifyWhiteboardHubChanged(accountID)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -305,6 +312,7 @@ func (s *Server) handleRestoreWhiteboardFolder(c *fiber.Ctx) error {
 	if err != nil {
 		return whiteboardError(c, err)
 	}
+	s.notifyWhiteboardHubChanged(accountID)
 	return c.JSON(fiber.Map{"success": true, "folder": item})
 }
 
@@ -313,7 +321,11 @@ func (s *Server) handleListWhiteboards(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	options := repository.WhiteboardListOptions{Query: c.Query("q"), Scope: c.Query("scope", repository.WhiteboardScopeAll), Limit: whiteboardLimit(c)}
+	workWhiteboardViewsEnabled := s.workWhiteboardViewsEnabled()
+	options := repository.WhiteboardListOptions{
+		Query: c.Query("q"), Scope: c.Query("scope", repository.WhiteboardScopeAll),
+		Origin: c.Query("origin"), Limit: whiteboardLimit(c), IncludeWork: workWhiteboardViewsEnabled,
+	}
 	if rawFolder := strings.TrimSpace(c.Query("folder_id")); rawFolder != "" {
 		folderID, parseErr := uuid.Parse(rawFolder)
 		if parseErr != nil {
@@ -334,13 +346,14 @@ func (s *Server) handleListWhiteboards(c *fiber.Ctx) error {
 		last := items[len(items)-1]
 		nextCursor = service.EncodeWhiteboardBoardCursor(last.UpdatedAt, last.ID)
 	}
-	counts, err := s.repos.Whiteboard.CountBoardScopes(c.Context(), accountID, actorID)
+	counts, err := s.repos.Whiteboard.CountBoardScopes(c.Context(), accountID, actorID, workWhiteboardViewsEnabled)
 	if err != nil {
 		return whiteboardError(c, err)
 	}
 	return c.JSON(fiber.Map{
 		"success": true, "whiteboards": items, "next_cursor": nextCursor, "counts": counts,
-		"permissions": fiber.Map{"can_create": true, "can_create_folder": true},
+		"work_whiteboard_views_enabled": workWhiteboardViewsEnabled,
+		"permissions":                   fiber.Map{"can_create": true, "can_create_folder": true},
 	})
 }
 
@@ -446,6 +459,7 @@ func (s *Server) handleCreateWhiteboard(c *fiber.Ctx) error {
 	if existing, found, findErr := s.repos.Whiteboard.FindCreatedBoardByOperation(c.Context(), accountID, actorID, boardID, operationID, createPayloadHash); findErr != nil {
 		return whiteboardError(c, findErr)
 	} else if found {
+		s.notifyWhiteboardHubChanged(accountID)
 		return c.JSON(fiber.Map{"success": true, "whiteboard": existing, "idempotent": true})
 	}
 	prepared, err := s.prepareAndUploadWhiteboardSnapshot(c.Context(), accountID, boardID, operationID, request.Scene)
@@ -465,6 +479,7 @@ func (s *Server) handleCreateWhiteboard(c *fiber.Ctx) error {
 		}
 		return whiteboardError(c, err)
 	}
+	s.notifyWhiteboardHubChanged(accountID)
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true, "whiteboard": item})
 }
 
@@ -505,6 +520,9 @@ func (s *Server) handleDuplicateWhiteboard(c *fiber.Ctx) error {
 	if err != nil {
 		return whiteboardError(c, err)
 	}
+	if source.Origin == domain.WhiteboardOriginWork {
+		return whiteboardError(c, repository.ErrWhiteboardInheritsWorkAccess)
+	}
 	if source.ArchivedAt != nil {
 		return whiteboardError(c, repository.ErrWhiteboardConflict)
 	}
@@ -543,6 +561,7 @@ func (s *Server) handleDuplicateWhiteboard(c *fiber.Ctx) error {
 	); findErr != nil {
 		return whiteboardError(c, findErr)
 	} else if found {
+		s.notifyWhiteboardHubChanged(accountID)
 		return c.JSON(fiber.Map{"success": true, "whiteboard": existing, "idempotent": true})
 	}
 	scene, err := s.repos.Whiteboard.GetScene(c.Context(), accountID, actorID, sourceBoardID, domain.WhiteboardAccessView)
@@ -567,6 +586,7 @@ func (s *Server) handleDuplicateWhiteboard(c *fiber.Ctx) error {
 		}
 		return whiteboardError(c, err)
 	}
+	s.notifyWhiteboardHubChanged(accountID)
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true, "whiteboard": item})
 }
 
@@ -640,6 +660,7 @@ func (s *Server) handleUpdateWhiteboard(c *fiber.Ctx) error {
 	if err != nil {
 		return whiteboardError(c, err)
 	}
+	s.notifyWhiteboardHubChanged(accountID)
 	return c.JSON(fiber.Map{"success": true, "whiteboard": item})
 }
 
@@ -662,7 +683,16 @@ func (s *Server) handleArchiveWhiteboard(c *fiber.Ctx) error {
 	// Archiving terminates every live collaboration principal immediately;
 	// relying only on the next rejected write would leave presence and cursors
 	// visible for an inactive board.
-	s.revokeWhiteboardBoardSockets(accountID, boardID)
+	s.invalidateArchivedWhiteboardSockets(accountID, boardID)
+	workOrigin, originErr := s.repos.Whiteboard.IsWorkOrigin(c.Context(), accountID, boardID)
+	if originErr != nil || workOrigin {
+		// A failed post-commit origin lookup must not retain inherited Work
+		// labels. The payload-free control pessimistically redacts only Work
+		// cards until the canonical Hub request resolves.
+		s.notifyWhiteboardWorkHubRevoked(accountID)
+	} else {
+		s.notifyWhiteboardHubChanged(accountID)
+	}
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -685,6 +715,7 @@ func (s *Server) handleRestoreWhiteboard(c *fiber.Ctx) error {
 	if err != nil {
 		return whiteboardError(c, err)
 	}
+	s.notifyWhiteboardHubChanged(accountID)
 	return c.JSON(fiber.Map{"success": true, "whiteboard": item})
 }
 

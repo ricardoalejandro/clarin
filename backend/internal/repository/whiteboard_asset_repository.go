@@ -262,8 +262,22 @@ func (r *WhiteboardRepository) attachBoardAsset(ctx context.Context, accountID, 
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if actorID != nil {
+		if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, *actorID); err != nil {
+			return nil, err
+		}
+	}
+	workState, err := lockActiveWhiteboardMutationRowsTx(ctx, tx, accountID, boardID)
+	if err != nil {
+		return nil, err
+	}
 	var guestSessionID *uuid.UUID
 	if guestTokenHash != "" {
+		// Work boards never accept guest authority. This remains true even if a
+		// legacy share/session row somehow survived from before the binding.
+		if workState != nil {
+			return nil, ErrWhiteboardSessionUnavailable
+		}
 		guest, err := resolveGuestSessionWith(ctx, tx, guestTokenHash, domain.WhiteboardAccessEdit, now)
 		if err != nil {
 			return nil, err
@@ -277,13 +291,6 @@ func (r *WhiteboardRepository) attachBoardAsset(ctx context.Context, accountID, 
 		if _, err := requireWhiteboardAccessTx(ctx, tx, accountID, *actorID, boardID, domain.WhiteboardAccessEdit, false); err != nil {
 			return nil, err
 		}
-	}
-	var lockedBoardID uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT id FROM whiteboards WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, accountID, boardID).Scan(&lockedBoardID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrWhiteboardNotFound
-		}
-		return nil, err
 	}
 	var status, objectKey string
 	if err := tx.QueryRow(ctx, `SELECT status,object_key FROM media_assets
@@ -524,9 +531,15 @@ func (r *WhiteboardRepository) DeleteBoardAsset(ctx context.Context, accountID, 
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return err
+	}
+	if _, err := lockActiveWhiteboardMutationRowsTx(ctx, tx, accountID, boardID); err != nil {
+		return err
+	}
 	var scene []byte
 	if err := tx.QueryRow(ctx, `SELECT scene_json FROM whiteboards
-		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`, accountID, boardID).Scan(&scene); err != nil {
+		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL`, accountID, boardID).Scan(&scene); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrWhiteboardNotFound
 		}

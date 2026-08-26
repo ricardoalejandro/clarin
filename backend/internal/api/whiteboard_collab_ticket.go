@@ -120,6 +120,16 @@ func (s *Server) handleCreateWhiteboardCollabTicket(c *fiber.Ctx) error {
 	if err != nil {
 		return whiteboardError(c, err)
 	}
+	boardID, err := whiteboardPathID(c, "id")
+	if err != nil {
+		return whiteboardError(c, err)
+	}
+	if accountErr := s.requireWhiteboardAccountAccess(c.Context(), accountID); accountErr != nil {
+		if classifyWhiteboardRealtimeAuthorization(accountErr) == whiteboardAuthorizationAccessRevoked {
+			return whiteboardError(c, repository.ErrWhiteboardForbidden)
+		}
+		return whiteboardCollabAuthorizationUnavailable(c)
+	}
 	moduleAllowed, err := s.whiteboardModuleAllowed(c.Context(), userID, accountID)
 	if err != nil {
 		return whiteboardCollabAuthorizationUnavailable(c)
@@ -127,16 +137,25 @@ func (s *Server) handleCreateWhiteboardCollabTicket(c *fiber.Ctx) error {
 	if !moduleAllowed {
 		return whiteboardError(c, repository.ErrWhiteboardForbidden)
 	}
-	boardID, err := whiteboardPathID(c, "id")
-	if err != nil {
-		return whiteboardError(c, err)
-	}
 	access, err := s.repos.Whiteboard.RequireActiveAccess(c.Context(), accountID, userID, boardID, domain.WhiteboardAccessView)
 	if err != nil {
 		if !errors.Is(err, repository.ErrWhiteboardNotFound) && !errors.Is(err, repository.ErrWhiteboardForbidden) {
 			return whiteboardCollabAuthorizationUnavailable(c)
 		}
 		return whiteboardError(c, err)
+	}
+	// The account in the body may differ from the JWT's current account. Resolve
+	// canonical Ver access in that effective account before inspecting origin,
+	// then keep a disabled Work board indistinguishable from an unavailable UUID.
+	// No one-use Redis ticket is written until both checks have succeeded.
+	if !s.workWhiteboardViewsEnabled() {
+		contextual, originErr := s.repos.Whiteboard.IsWorkOrigin(c.Context(), accountID, boardID)
+		if originErr != nil {
+			return whiteboardCollabAuthorizationUnavailable(c)
+		}
+		if contextual {
+			return whiteboardError(c, repository.ErrWhiteboardNotFound)
+		}
 	}
 	displayName := "Usuario de Clarin"
 	if user, userErr := s.repos.User.GetByID(c.Context(), userID); userErr == nil && user != nil && strings.TrimSpace(user.DisplayName) != "" {
@@ -166,6 +185,12 @@ func (s *Server) handleCreateWhiteboardGuestCollabTicket(c *fiber.Ctx) error {
 			return whiteboardCollabAuthorizationUnavailable(c)
 		}
 		return whiteboardError(c, resolutionErr)
+	}
+	if accountErr := s.requireWhiteboardAccountAccess(c.Context(), guest.Session.AccountID); accountErr != nil {
+		if classifyWhiteboardRealtimeAuthorization(accountErr) == whiteboardAuthorizationAccessRevoked {
+			return whiteboardError(c, repository.ErrWhiteboardSessionUnavailable)
+		}
+		return whiteboardCollabAuthorizationUnavailable(c)
 	}
 	guestID := guest.Session.ID
 	guestExpiresAt := guest.Session.ExpiresAt

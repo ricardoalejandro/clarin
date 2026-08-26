@@ -6,10 +6,12 @@ import {
   buildWhiteboardPublicLibraryStartPath,
   acknowledgeWhiteboardPublicLibraryImportAfterConflict,
   consumeWhiteboardPublicLibraryImport,
+  consumeWhiteboardPublicLibraryWorkReturn,
   installWhiteboardPublicLibraryStartPath,
   isWhiteboardPublicLibraryStartPath,
   parseWhiteboardPublicLibraryCallbackFragment,
   readWhiteboardPublicLibraryImportID,
+  rememberWhiteboardPublicLibraryWorkReturn,
   stripWhiteboardPublicLibraryImportFromPath,
   validateWhiteboardPublicLibraryNavigationPath,
   validateWhiteboardPublicLibraryImportRecord,
@@ -104,6 +106,29 @@ describe('public whiteboard library routing', () => {
       `?view=library&library_import=${importID}`,
       '#selection',
     )).toBe(`/dashboard/whiteboards/${boardID}?view=library#selection`)
+  })
+
+  it('round-trips a single-use Work destination without accepting arbitrary return URLs', () => {
+    const workViewID = '44444444-4444-4444-8444-444444444444'
+    expect(rememberWhiteboardPublicLibraryWorkReturn(
+      boardID,
+      `/dashboard/tasks?work_view=${workViewID}`,
+      window.sessionStorage,
+    )).toBe(true)
+    expect(consumeWhiteboardPublicLibraryWorkReturn(boardID, importID, window.sessionStorage)).toBe(
+      `/dashboard/tasks?work_view=${workViewID}&library_import=${importID}`,
+    )
+    expect(consumeWhiteboardPublicLibraryWorkReturn(boardID, importID, window.sessionStorage)).toBeNull()
+    expect(rememberWhiteboardPublicLibraryWorkReturn(
+      boardID,
+      `https://attacker.example/dashboard/tasks?work_view=${workViewID}`,
+      window.sessionStorage,
+    )).toBe(false)
+    expect(rememberWhiteboardPublicLibraryWorkReturn(
+      boardID,
+      `/dashboard/tasks?work_view=not-a-view`,
+      window.sessionStorage,
+    )).toBe(false)
   })
 })
 

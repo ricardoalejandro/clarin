@@ -1,9 +1,9 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { apiGet, apiPost, apiPut, apiUpload } from '@/lib/api'
 import type { Task, TaskAttachment, TaskList, TaskWorkflow, TaskWorkflowStatus } from '@/types/task'
-import TaskEditorModal from './TaskEditorModal'
+import TaskEditorModal, { type TaskEditorModalHandle } from './TaskEditorModal'
 
 vi.mock('@/lib/api', () => ({
   apiGet: vi.fn(),
@@ -64,6 +64,55 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('TaskEditorModal', () => {
+  it('requires an explicit discard decision before an external surface can close a dirty draft', async () => {
+    const ref = React.createRef<TaskEditorModalHandle>()
+    const onClose = vi.fn()
+    const modalProps: React.ComponentProps<typeof TaskEditorModal> = {
+      open: true,
+      lists: [list],
+      folders: [],
+      workflows: [workflow],
+      users: [{ id: 'user-1', display_name: 'Usuario', username: 'usuario' }],
+      defaultListId: list.id,
+      defaultStatusId: status.id,
+      defaultOwnerId: 'user-1',
+      defaultTitle: 'Borrador que no debe perderse',
+      initialDraftDirty: true,
+      onClose,
+      onSaved: vi.fn(),
+    }
+    const rendered = render(<TaskEditorModal ref={ref} {...modalProps} />)
+    expect(screen.getByPlaceholderText('¿Qué hay que lograr?')).toHaveValue('Borrador que no debe perderse')
+
+    let cancelled!: Promise<boolean>
+    await act(async () => { cancelled = ref.current!.requestClose() })
+    expect(await screen.findByRole('alertdialog', { name: '¿Descartar el borrador?' })).toBeVisible()
+    const continueEditing = screen.getByRole('button', { name: 'Continuar editando' })
+    const discard = screen.getByRole('button', { name: 'Descartar' })
+    await waitFor(() => expect(continueEditing).toHaveFocus())
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(discard).toHaveFocus()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await expect(cancelled).resolves.toBe(false)
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByPlaceholderText('¿Qué hay que lograr?')).toHaveValue('Borrador que no debe perderse')
+
+    let revoked!: Promise<boolean>
+    await act(async () => { revoked = ref.current!.requestClose() })
+    expect(await screen.findByRole('alertdialog', { name: '¿Descartar el borrador?' })).toBeVisible()
+    rendered.rerender(<TaskEditorModal ref={ref} {...modalProps} open={false} />)
+    await expect(revoked).resolves.toBe(false)
+    expect(screen.queryByRole('alertdialog', { name: '¿Descartar el borrador?' })).not.toBeInTheDocument()
+
+    rendered.rerender(<TaskEditorModal ref={ref} {...modalProps} open />)
+    expect(await screen.findByPlaceholderText('¿Qué hay que lograr?')).toHaveValue('Borrador que no debe perderse')
+    let discarded!: Promise<boolean>
+    await act(async () => { discarded = ref.current!.requestClose() })
+    fireEvent.click(await screen.findByRole('button', { name: 'Descartar' }))
+    await expect(discarded).resolves.toBe(true)
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it('uses the shared numeric progress control and preserves automatic mode when editing', async () => {
     const automaticTask = {
       ...savedTask,

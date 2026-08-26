@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import { createPortal } from 'react-dom'
 import {
@@ -49,6 +49,7 @@ import {
   personalWhiteboardLibraryItems,
   reconcileWhiteboardCollaborators,
   reconcileWhiteboardConnectionOpen,
+  whiteboardRealtimeSyncRecoveryPlan,
   reconcileWhiteboardCanonicalAck,
   reconcileWhiteboardLibraryConflict,
   retainWhiteboardPendingSave,
@@ -189,6 +190,7 @@ import {
   installWhiteboardPublicLibraryStartPath,
   isWhiteboardPublicLibraryStartPath,
   readWhiteboardPublicLibraryImportID,
+  rememberWhiteboardPublicLibraryWorkReturn,
   stripWhiteboardPublicLibraryImportFromPath,
   validateWhiteboardPublicLibraryNavigationPath,
 } from '@/lib/whiteboardPublicLibraries'
@@ -378,8 +380,38 @@ function WhiteboardCommentsCapability({
   >{children}</WhiteboardCommentsProvider>
 }
 
-export default function WhiteboardEditor({ boardID }: { boardID: string }) {
+export interface WhiteboardEditorHandle {
+  requestLeave: (options?: WhiteboardLeaveGuardOptions) => Promise<boolean>
+}
+
+export interface WhiteboardLeaveGuardOptions {
+  forced?: boolean
+}
+
+export type WhiteboardLeaveGuard = (options?: WhiteboardLeaveGuardOptions) => Promise<boolean>
+
+export interface WhiteboardEditorProps {
+  boardID: string
+  canonicalName?: string
+  hostContext?: 'whiteboards' | 'work'
+  returnHref?: string
+  returnLabel?: string
+  onExit?: () => void
+  onLeaveGuardReady?: (guard: WhiteboardLeaveGuard | null) => void
+}
+
+const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProps>(function WhiteboardEditor({
+  boardID,
+  canonicalName,
+  hostContext = 'whiteboards',
+  returnHref = '/dashboard/whiteboards',
+  returnLabel,
+  onExit,
+  onLeaveGuardReady,
+}, forwardedRef) {
   const router = useRouter()
+  const canonicalNameRef = useRef(canonicalName)
+  canonicalNameRef.current = canonicalName
   const editorShellRef = useRef<HTMLDivElement>(null)
   const canvasHostRef = useRef<HTMLDivElement>(null)
   const moreButtonRef = useRef<HTMLButtonElement>(null)
@@ -454,6 +486,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
   const [saveState, setSaveState] = useState<WhiteboardSaveState>('saved')
   const [error, setError] = useState<string | null>(null)
   const [permissionNotice, setPermissionNotice] = useState<string | null>(null)
+  const [permissionRevalidating, setPermissionRevalidating] = useState(false)
   const [realtimeConnection, setRealtimeConnection] = useState<WhiteboardRoomConnectionState>('connecting')
   const [realtimeHasOpened, setRealtimeHasOpened] = useState(false)
   const [realtimeIssue, setRealtimeIssue] = useState<WhiteboardRealtimeIssue | null>(null)
@@ -480,12 +513,24 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
   const [publicLibraryImportRetryable, setPublicLibraryImportRetryable] = useState(true)
   const [publicLibraryImportRetryKey, setPublicLibraryImportRetryKey] = useState(0)
 
-  const editorAccess = whiteboardEditorAccess(board?.effective_access, board?.archived_at)
+  const isWorkOrigin = hostContext === 'work' || board?.origin === 'work'
+  const historicalWorkView = board?.origin === 'work' && board.work_location?.lifecycle === 'location_archived'
+  const baseEditorAccess = whiteboardEditorAccess(board?.effective_access, board?.archived_at)
+  const editorAccess = historicalWorkView
+    ? { canEdit: false, canComment: false, viewModeEnabled: true }
+    : baseEditorAccess
   const { canEdit, canComment } = editorAccess
-  const canManageAccess = Boolean(board?.effective_access?.can_manage_access) && !board?.archived_at
+  const canManageAccess = !isWorkOrigin && Boolean(board?.effective_access?.can_manage_access) && !board?.archived_at
+  const backLabel = returnLabel || (hostContext === 'work' ? 'Volver a Clarin Work' : 'Volver a Pizarras')
   const showIntegratedTitle = editorLayout === 'wide' || (editorLayout === 'compact' && editorAvailableWidth >= 1_100)
   const showShareInToolbar = whiteboardToolbarShowsShare(editorAvailableWidth, canManageAccess)
   const stackToolbarBelowTools = whiteboardToolbarStacksBelowTools(editorAvailableWidth)
+
+  useEffect(() => {
+    if (hostContext !== 'work' || !canonicalName?.trim()) return
+    setTitleDraft(canonicalName)
+    setBoard(current => current && current.name !== canonicalName ? { ...current, name: canonicalName } : current)
+  }, [canonicalName, hostContext])
 
   useEffect(() => {
     if (phase !== 'ready') return
@@ -908,8 +953,10 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     setLibraryCatalogs([])
     setLibrarySaveState(actor ? 'saving' : 'error')
     setLibraryError(actor ? null : actorResponse.error || 'No se pudo identificar tu biblioteca privada.')
-    setBoard(metadata)
-    setTitleDraft(metadata.name)
+    const canonicalWorkName = hostContext === 'work' ? canonicalNameRef.current?.trim() : ''
+    const effectiveMetadata = canonicalWorkName ? { ...metadata, name: canonicalWorkName } : metadata
+    setBoard(effectiveMetadata)
+    setTitleDraft(effectiveMetadata.name)
     setInitialData({
       elements: scene.elements as readonly ExcalidrawElement[],
       appState: scene.appState as Partial<AppState>,
@@ -947,7 +994,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
         setLibraryError(loadError instanceof Error ? loadError.message : 'No se pudieron cargar las bibliotecas de Pizarras.')
       })
     }
-  }, [applyLibraryComposition, boardID, fetchLibraries])
+  }, [applyLibraryComposition, boardID, fetchLibraries, hostContext])
 
   useEffect(() => {
     window.EXCALIDRAW_ASSET_PATH = whiteboardEditorAssetBase(window.location.origin)
@@ -2139,13 +2186,15 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     collaboratorsRef.current = next
     const api = editorAPIRef.current
     if (!api) return
-    runWithTransientSceneSuppressed(() => {
-      api.updateScene({
-        collaborators: excalidrawWhiteboardCollaborators(next, presentation.getSelfActorID()),
-        captureUpdate: CaptureUpdateAction.NEVER,
-      })
+    // Collaborators are ephemeral and excluded by
+    // hasWhiteboardDocumentMutation(). Do not hold the document-wide
+    // suppression window here: a user stroke can land in the same animation
+    // frame as a presence update and must still become dirty/autosaved.
+    api.updateScene({
+      collaborators: excalidrawWhiteboardCollaborators(next, presentation.getSelfActorID()),
+      captureUpdate: CaptureUpdateAction.NEVER,
     })
-  }, [presentation.getSelfActorID, runWithTransientSceneSuppressed])
+  }, [presentation.getSelfActorID])
 
   const handleRealtimeIssue = useCallback((issue: WhiteboardRealtimeIssue | null) => {
     setRealtimeIssue(issue)
@@ -2166,17 +2215,25 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     const controller = new AbortController()
     permissionRefreshControllerRef.current = controller
     const generation = ++permissionRefreshGenerationRef.current
+    setPermissionRevalidating(true)
     const response = await loadWhiteboardMetadata(boardID, controller.signal)
     if (controller.signal.aborted || generation !== permissionRefreshGenerationRef.current || !mountedRef.current) return
+    setPermissionRevalidating(false)
     if (!response.success || !response.data?.whiteboard) {
-      handleRealtimeIssue(classifyWhiteboardCollabTicketFailure({
-        audience: 'member',
-        status: response.status,
-        message: response.error || 'No se pudieron actualizar temporalmente los permisos de la pizarra.',
-      }))
+      if (response.status === 403 || response.status === 404) {
+        setRealtimeIssue({ kind: 'access_revoked', message: 'Tu acceso a esta pizarra fue revocado.', retryable: false })
+        setError('Tu acceso a esta pizarra fue revocado.')
+        setPhase('error')
+        return
+      }
+      setRealtimeIssue({ kind: 'authorization_unavailable', message: 'No pudimos revalidar tu acceso.', retryable: true })
+      setError('No pudimos revalidar tu acceso. Por seguridad ocultamos el lienzo hasta que vuelvas a intentarlo.')
+      setPhase('error')
       return
     }
-    const metadata = response.data.whiteboard
+    const rawMetadata = response.data.whiteboard
+    const canonicalWorkName = hostContext === 'work' ? canonicalNameRef.current?.trim() : ''
+    const metadata = canonicalWorkName ? { ...rawMetadata, name: canonicalWorkName } : rawMetadata
     const nextAccess = whiteboardEditorAccess(metadata.effective_access, metadata.archived_at)
     const feedback = whiteboardPermissionChangeFeedback({
       canEdit: nextAccess.canEdit,
@@ -2187,10 +2244,10 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     setPermissionNotice(feedback.notice)
     if (feedback.saveState) setSaveState(feedback.saveState)
     setRealtimeIssue(null)
-  }, [boardID, handleRealtimeIssue])
+  }, [boardID, hostContext])
 
   useEffect(() => {
-    if (phase !== 'ready') return
+    if (phase !== 'ready' || historicalWorkView) return
     let hasOpened = false
     const room = connectWhiteboardRoom({
       whiteboardID: boardID,
@@ -2221,6 +2278,10 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
           return
         }
         if (event.event === 'access.revoked') {
+          if (event.code === 'work_access_changed') {
+            void refreshMetadataForPermissionChange()
+            return
+          }
           handleRealtimeIssue({
             kind: 'access_revoked',
             message: 'Tu acceso a esta pizarra fue revocado.',
@@ -2254,7 +2315,12 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
           return
         }
         if (event.event === 'sync.required') {
-          void reloadCanonicalForRealtime(event, true)
+          const recovery = whiteboardRealtimeSyncRecoveryPlan('member')
+          // Keep the recovery contract complete even while the comments UI is
+          // feature-hidden. A mounted provider reloads immediately; when the
+          // capability is hidden the optional ref is simply absent.
+          if (recovery.reloadComments) void commentsRef.current?.reload()
+          if (recovery.reloadScene) void reloadCanonicalForRealtime(event, true)
           return
         }
         if (event.event === 'ack') {
@@ -2343,9 +2409,9 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
           if (dirtyRef.current && navigator.onLine) setSaveState('pending')
           collaboratorsRef.current = new Map()
           const api = editorAPIRef.current
-          if (api) runWithTransientSceneSuppressed(() => {
+          if (api) {
             api.updateScene({ collaborators: new Map(), captureUpdate: CaptureUpdateAction.NEVER })
-          })
+          }
         }
       },
     })
@@ -2354,7 +2420,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       if (roomRef.current === room) roomRef.current = null
       room.close()
     }
-  }, [applyCollaboratorEvent, applySceneRecord, board?.account_id, boardID, flushSave, handleRealtimeIssue, hydrateReferencedAssets, phase, presentation.handleConnectionChange, presentation.handleRealtimeEvent, refreshMetadataForPermissionChange, reloadCanonicalForRealtime, runWithTransientSceneSuppressed])
+  }, [applyCollaboratorEvent, applySceneRecord, board?.account_id, boardID, flushSave, handleRealtimeIssue, historicalWorkView, hydrateReferencedAssets, phase, presentation.handleConnectionChange, presentation.handleRealtimeEvent, refreshMetadataForPermissionChange, reloadCanonicalForRealtime])
 
   const reloadCanonical = async () => {
     const response = await loadWhiteboardScene(boardID)
@@ -2371,7 +2437,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
   }
 
   const saveTitle = async () => {
-    if (!board || !canEdit || titleSaving) return
+    if (!board || isWorkOrigin || !canEdit || titleSaving) return
     const name = titleDraft.trim()
     if (!name) {
       setTitleDraft(board.name)
@@ -2456,11 +2522,8 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     }
   }
 
-  const navigateFromWhiteboard = useCallback(async (
-    href: string,
-    publicLibraryID: string | null = null,
-  ) => {
-    if (navigationInProgressRef.current) return
+  const prepareToLeave = useCallback(async () => {
+    if (navigationInProgressRef.current) return false
     navigationInProgressRef.current = true
     const requiredSceneVersion = dirtyRef.current || pendingSaveRef.current || savingRef.current
       ? changeVersionRef.current
@@ -2509,25 +2572,108 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       const action = durableWritesCoverClick ? 'leave' : whiteboardNavigationAction(state())
       if (action !== 'leave') {
         const discard = window.confirm('Clarin no pudo confirmar todos los cambios. ¿Salir y descartar únicamente lo que siga pendiente?')
-        if (!discard) return
+        if (!discard) return false
       }
-      if (publicLibraryID) {
-        const response = await startWhiteboardPublicLibraryImport(boardID, publicLibraryID)
-        const navigation = response.success && response.data?.success !== false
-          ? validateWhiteboardPublicLibraryNavigationPath(response.data?.navigation_path, boardID)
-          : null
-        if (!navigation) {
-          setLibraryError(response.error || 'Clarin no pudo autorizar la exploración de bibliotecas. Inténtalo de nuevo.')
-          return
-        }
-        window.location.assign(navigation.path)
-      } else {
-        router.push(href)
-      }
+      return true
     } finally {
       navigationInProgressRef.current = false
     }
-  }, [boardID, flushSave, persistPersonalLibrary, router])
+  }, [flushSave, persistPersonalLibrary])
+
+  const prepareForForcedClose = useCallback(async () => {
+    const requiredSceneVersion = dirtyRef.current || pendingSaveRef.current || savingRef.current
+      ? changeVersionRef.current
+      : null
+    const requiredLibraryVersion = libraryDirtyRef.current || librarySavingRef.current
+      ? libraryChangeVersionRef.current
+      : null
+    if (requiredSceneVersion === null
+      && requiredLibraryVersion === null
+      && !assetSavingRef.current
+      && !commentsRef.current?.hasPendingMutations()
+      && !commentsRef.current?.hasUnsavedDrafts()) return true
+
+    const attempt = (async () => {
+      try {
+        if (dirtyRef.current || pendingSaveRef.current) await flushSave('manual')
+        if (libraryDirtyRef.current) await persistPersonalLibrary(true)
+        const deadline = Date.now() + 900
+        while ((savingRef.current || assetSavingRef.current || librarySavingRef.current || commentsRef.current?.hasPendingMutations()) && Date.now() < deadline) {
+          await new Promise(resolve => window.setTimeout(resolve, 40))
+        }
+        return whiteboardNavigationWritesCovered({
+          requiredSceneVersion,
+          savedSceneVersion: lastSavedChangeVersionRef.current,
+          requiredLibraryVersion,
+          savedLibraryVersion: lastSavedLibraryChangeVersionRef.current,
+          commentsPending: commentsRef.current?.hasPendingMutations() || false,
+          commentsDirty: commentsRef.current?.hasUnsavedDrafts() || false,
+        })
+      } catch {
+        return false
+      }
+    })()
+    let timeout: number | null = null
+    try {
+      return await Promise.race([
+        attempt,
+        new Promise<boolean>(resolve => { timeout = window.setTimeout(() => resolve(false), 1_200) }),
+      ])
+    } finally {
+      if (timeout !== null) window.clearTimeout(timeout)
+    }
+  }, [flushSave, persistPersonalLibrary])
+
+  const requestLeave = useCallback((options?: WhiteboardLeaveGuardOptions) => (
+    options?.forced ? prepareForForcedClose() : prepareToLeave()
+  ), [prepareForForcedClose, prepareToLeave])
+
+  useImperativeHandle(forwardedRef, () => ({ requestLeave }), [requestLeave])
+  useEffect(() => {
+    onLeaveGuardReady?.(requestLeave)
+    return () => onLeaveGuardReady?.(null)
+  }, [onLeaveGuardReady, requestLeave])
+
+  const openHistory = useCallback(async () => {
+    if (!await prepareToLeave()) return
+    setHistoryOpen(true)
+  }, [prepareToLeave])
+
+  const navigateFromWhiteboard = useCallback(async (
+    href: string,
+    publicLibraryID: string | null = null,
+  ) => {
+    if (!await prepareToLeave()) return
+    if (publicLibraryID) {
+      const response = await startWhiteboardPublicLibraryImport(boardID, publicLibraryID)
+      const navigation = response.success && response.data?.success !== false
+        ? validateWhiteboardPublicLibraryNavigationPath(response.data?.navigation_path, boardID)
+        : null
+      if (!navigation) {
+        setLibraryError(response.error || 'Clarin no pudo autorizar la exploración de bibliotecas. Inténtalo de nuevo.')
+        return
+      }
+      if (hostContext === 'work') {
+        try {
+          rememberWhiteboardPublicLibraryWorkReturn(
+            boardID,
+            `${window.location.pathname}${window.location.search}`,
+            window.sessionStorage,
+          )
+        } catch {
+          // The callback remains safe and returns to the Pizarras editor when
+          // browser storage is unavailable.
+        }
+      }
+      window.location.assign(navigation.path)
+      return
+    }
+    if (onExit && href === returnHref) {
+      onExit()
+      return
+    }
+    router.push(href)
+  }, [boardID, hostContext, onExit, prepareToLeave, returnHref, router])
 
   useEffect(() => {
     if (phase !== 'ready') return
@@ -2557,7 +2703,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
 
   const editorMenu = useMemo(() => <MainMenu>
     <MainMenu.Group title="Pizarra Clarin">
-      <MainMenu.Item icon={<ArrowLeft className="h-4 w-4" />} onSelect={() => void navigateFromWhiteboard('/dashboard/whiteboards')}>Volver a Pizarras</MainMenu.Item>
+      <MainMenu.Item icon={<ArrowLeft className="h-4 w-4" />} onSelect={() => void navigateFromWhiteboard(returnHref)}>{backLabel}</MainMenu.Item>
       {canEdit && <MainMenu.Item icon={<Save className="h-4 w-4" />} shortcut="Ctrl+S" onSelect={() => void flushSave('manual')}>Guardar ahora</MainMenu.Item>}
       {canEdit && <MainMenu.Item icon={<FileUp className="h-4 w-4" />} onSelect={() => importInputRef.current?.click()}>Importar archivo</MainMenu.Item>}
     </MainMenu.Group>
@@ -2572,9 +2718,9 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     </MainMenu.Group>
     {(canManageAccess || board?.effective_access?.can_view) && <><MainMenu.Separator /><MainMenu.Group title="Colaboración">
       {canManageAccess && <MainMenu.Item icon={<Share2 className="h-4 w-4" />} onSelect={() => setShareOpen(true)}>Compartir desde Clarin</MainMenu.Item>}
-      <MainMenu.Item icon={<History className="h-4 w-4" />} onSelect={() => setHistoryOpen(true)}>Historial de Clarin</MainMenu.Item>
+      <MainMenu.Item icon={<History className="h-4 w-4" />} onSelect={() => { void openHistory() }}>Historial de Clarin</MainMenu.Item>
     </MainMenu.Group></>}
-  </MainMenu>, [board?.effective_access?.can_view, canEdit, canManageAccess, flushSave, navigateFromWhiteboard])
+  </MainMenu>, [backLabel, board?.effective_access?.can_view, canEdit, canManageAccess, flushSave, navigateFromWhiteboard, returnHref])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2611,7 +2757,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
 
   if (phase === 'loading') return <div className="flex h-full min-h-0 items-center justify-center bg-slate-50"><div className="flex flex-col items-center gap-3 text-sm font-bold text-slate-500"><Loader2 className="h-7 w-7 animate-spin text-emerald-600" />Abriendo pizarra…</div></div>
 
-  if (phase === 'error' || !board || !initialData) return <div className="flex h-full min-h-0 items-center justify-center bg-slate-50 p-5"><div className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 text-center shadow-sm"><ShieldAlert className="mx-auto h-9 w-9 text-rose-500" /><h1 className="mt-4 text-xl font-black text-slate-900">No se pudo abrir la pizarra</h1><p className="mt-2 text-sm leading-6 text-slate-500">{error}</p><div className="mt-5 flex flex-wrap justify-center gap-2"><button type="button" onClick={() => router.push('/dashboard/whiteboards')} className="min-h-11 rounded-xl border border-slate-200 px-4 text-sm font-bold text-slate-600">Volver</button><button type="button" onClick={() => void load()} className="flex min-h-11 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-bold text-white"><RefreshCw className="h-4 w-4" />Reintentar</button></div></div></div>
+  if (phase === 'error' || !board || !initialData) return <div className="flex h-full min-h-0 items-center justify-center bg-slate-50 p-5"><div className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 text-center shadow-sm"><ShieldAlert className="mx-auto h-9 w-9 text-rose-500" /><h1 className="mt-4 text-xl font-black text-slate-900">No se pudo abrir la pizarra</h1><p className="mt-2 text-sm leading-6 text-slate-500">{error}</p><div className="mt-5 flex flex-wrap justify-center gap-2"><button type="button" onClick={() => void navigateFromWhiteboard(returnHref)} className="min-h-11 rounded-xl border border-slate-200 px-4 text-sm font-bold text-slate-600">Volver</button><button type="button" onClick={() => void load()} className="flex min-h-11 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-bold text-white"><RefreshCw className="h-4 w-4" />Reintentar</button></div></div></div>
 
   const realtimeNotice = whiteboardRealtimeConnectionNotice({
     connection: realtimeConnection,
@@ -2628,6 +2774,8 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
           ? 'library-error'
           : permissionNotice
             ? 'permission'
+            : historicalWorkView
+            ? 'historical'
             : realtimeNotice
               ? 'realtime'
           : board.archived_at
@@ -2643,6 +2791,8 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
     ? 'Clarin está validando y guardando la biblioteca seleccionada…'
     : canvasNoticeSource === 'archived'
       ? 'Esta pizarra está en la Papelera y se abre en modo lectura.'
+      : canvasNoticeSource === 'historical'
+        ? 'La ubicación está archivada. Esta pizarra se conserva como histórico de solo lectura.'
       : canvasNoticeSource === 'library-loading'
         ? 'Cargando imágenes de la biblioteca…'
         : canvasNoticeSource === 'permission'
@@ -2662,12 +2812,18 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
   const canvasNoticeIsWarning = canvasNoticeSource === 'permission'
     || (canvasNoticeSource === 'realtime' && Boolean(realtimeNotice?.warning))
     || canvasNoticeSource === 'archived'
+    || canvasNoticeSource === 'historical'
     || librarySaveState === 'conflict'
   const canvasNoticeIsLoading = canvasNoticeSource === 'public-loading'
     || canvasNoticeSource === 'library-loading'
     || (canvasNoticeSource === 'fonts' && (fontPreloadProgress.phase === 'idle' || fontPreloadProgress.phase === 'loading' || fontPreloadProgress.phase === 'offline'))
     || (canvasNoticeSource === 'assets' && assetHydrationProgress.phase === 'loading')
     || (canvasNoticeSource === 'realtime' && Boolean(realtimeNotice?.busy))
+  const canvasNoticeHasActions = canvasNoticeSource === 'public-error'
+    || canvasNoticeSource === 'library-error'
+    || (canvasNoticeSource === 'fonts' && fontPreloadProgress.phase === 'error')
+    || (canvasNoticeSource === 'assets' && assetHydrationProgress.phase === 'error')
+    || canvasNoticeSource === 'realtime'
 
   return <div ref={editorShellRef} data-whiteboard-layout={editorLayout} className="whiteboard-editor-shell flex h-full min-h-0 flex-col overflow-hidden bg-slate-100">
     <input ref={importInputRef} type="file" accept=".excalidraw,.json,application/json" className="hidden" onChange={importScene} />
@@ -2775,6 +2931,7 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
           />
         </div>}
       </WhiteboardCommentsCapability>
+	  {permissionRevalidating && <div data-whiteboard-permission-revalidating className="absolute inset-0 z-[70] flex items-center justify-center bg-slate-950/70 p-5 backdrop-blur-sm" role="status" aria-live="assertive"><div className="flex max-w-sm items-center gap-3 rounded-2xl border border-white/20 bg-slate-900 px-5 py-4 text-sm font-bold text-white shadow-2xl"><Loader2 className="h-5 w-5 shrink-0 animate-spin text-emerald-400" /><span>Verificando tu acceso a esta pizarra…</span></div></div>}
 	  <WhiteboardPresentationOverlay
 		state={presentation.state}
 		showInvitation={presentation.showInvitation}
@@ -2783,12 +2940,12 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
 		onLeave={presentation.leaveFollow}
 	  />
       {showIntegratedTitle && <div className="whiteboard-integrated-title absolute left-16 top-2 z-30 flex h-11 min-w-0 items-center gap-1">
-        <button type="button" onClick={() => void navigateFromWhiteboard('/dashboard/whiteboards')} aria-label="Volver a Pizarras" title="Volver a Pizarras" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><ArrowLeft className="h-5 w-5" /></button>
+        <button type="button" onClick={() => void navigateFromWhiteboard(returnHref)} aria-label={backLabel} title={backLabel} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><ArrowLeft className="h-5 w-5" /></button>
         <span className="mx-1 h-8 w-px shrink-0 bg-slate-200" />
-        <label className="min-w-0"><span className="sr-only">Nombre de la pizarra</span><span className="block text-[9px] font-black uppercase tracking-[.14em] text-emerald-600">Pizarras Clarin</span><span className="flex items-center gap-1"><input value={titleDraft} onChange={event => setTitleDraft(event.target.value)} onBlur={() => void saveTitle()} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setTitleDraft(board.name); event.currentTarget.blur() } }} readOnly={!canEdit} maxLength={200} aria-label="Nombre de la pizarra" className="h-6 min-w-0 w-full truncate border-0 bg-transparent p-0 text-sm font-black text-slate-900 outline-none read-only:cursor-default" />{titleSaving && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-slate-400" />}</span></label>
+		<label className="min-w-0"><span className="sr-only">Nombre de la pizarra</span><span className="block text-[9px] font-black uppercase tracking-[.14em] text-emerald-600">{isWorkOrigin ? 'Clarin Work · Pizarra' : 'Pizarras Clarin'}</span><span className="flex items-center gap-1"><input value={titleDraft} onChange={event => setTitleDraft(event.target.value)} onBlur={() => { if (!isWorkOrigin) void saveTitle() }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setTitleDraft(board.name); event.currentTarget.blur() } }} readOnly={isWorkOrigin || !canEdit} maxLength={200} aria-label="Nombre de la pizarra" title={isWorkOrigin ? 'Renombra esta vista desde el menú de su pestaña en Work.' : undefined} className="h-6 min-w-0 w-full truncate border-0 bg-transparent p-0 text-sm font-black text-slate-900 outline-none read-only:cursor-default" />{titleSaving && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-slate-400" />}</span></label>
       </div>}
       {canvasNoticeSource && (
-        <div data-whiteboard-realtime-status={canvasNoticeSource === 'realtime' ? realtimeConnection : undefined} className={`whiteboard-canvas-notice absolute left-1/2 top-[4.25rem] z-40 flex w-[min(92%,52rem)] -translate-x-1/2 flex-wrap items-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold shadow-lg ${canvasNoticeIsError ? 'border-rose-200 bg-rose-50 text-rose-800' : canvasNoticeIsWarning ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-sky-200 bg-sky-50 text-sky-800'}`} role={canvasNoticeIsError ? 'alert' : 'status'} aria-live="polite">
+        <div data-whiteboard-realtime-status={canvasNoticeSource === 'realtime' ? realtimeConnection : undefined} style={{ pointerEvents: canvasNoticeHasActions ? 'auto' : 'none' }} className={`whiteboard-canvas-notice absolute left-1/2 top-[4.25rem] z-40 flex w-[min(92%,52rem)] -translate-x-1/2 flex-wrap items-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold shadow-lg ${canvasNoticeIsError ? 'border-rose-200 bg-rose-50 text-rose-800' : canvasNoticeIsWarning ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-sky-200 bg-sky-50 text-sky-800'}`} role={canvasNoticeIsError ? 'alert' : 'status'} aria-live="polite">
           <span className="min-w-0 flex-1">{canvasNoticeMessage}</span>
           {canvasNoticeIsLoading && <Loader2 className="h-4 w-4 shrink-0 animate-spin" />}
           {canvasNoticeSource === 'public-error' && publicLibraryImportRetryable && <button type="button" onClick={() => setPublicLibraryImportRetryKey(current => current + 1)} className="min-h-9 rounded-lg bg-white px-3 font-black shadow-sm">Reintentar importación</button>}
@@ -2809,10 +2966,10 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
         {thumbnailWarning && <button type="button" onClick={retryThumbnail} className="mt-2 flex min-h-9 w-full items-center gap-2 rounded-lg bg-amber-50 px-2.5 text-left text-xs font-bold text-amber-800"><RefreshCw className="h-3.5 w-3.5 shrink-0" />Miniatura pendiente · Reintentar</button>}
       </div>
       <div className="grid gap-1 py-1">
-        {!showIntegratedTitle && <button autoFocus type="button" role="menuitem" onClick={() => { setMoreOpen(false); void navigateFromWhiteboard('/dashboard/whiteboards') }} className="whiteboard-more-item"><ArrowLeft className="h-4 w-4" />Volver a Pizarras</button>}
+        {!showIntegratedTitle && <button autoFocus type="button" role="menuitem" onClick={() => { setMoreOpen(false); void navigateFromWhiteboard(returnHref) }} className="whiteboard-more-item"><ArrowLeft className="h-4 w-4" />{backLabel}</button>}
         <button autoFocus={showIntegratedTitle} type="button" role="menuitem" onClick={() => { setMoreOpen(false); setLibraryOpen(true) }} className="whiteboard-more-item"><LibraryBig className="h-4 w-4" />Administrar bibliotecas</button>
         {canManageAccess && !showShareInToolbar && <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); setShareOpen(true) }} className="whiteboard-more-item"><Share2 className="h-4 w-4" />Compartir</button>}
-        <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); setHistoryOpen(true) }} className="whiteboard-more-item"><History className="h-4 w-4" />Historial</button>
+        <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); void openHistory() }} className="whiteboard-more-item"><History className="h-4 w-4" />Historial</button>
         {canEdit && <button type="button" role="menuitem" disabled={whiteboardSaveIsBusy(saveState) || saveState === 'saved'} onClick={() => { setMoreOpen(false); void flushSave('manual') }} className="whiteboard-more-item disabled:opacity-40"><Save className="h-4 w-4" />Guardar ahora</button>}
       </div>
       <div className="grid gap-1 border-t border-slate-100 pt-1">
@@ -2846,4 +3003,6 @@ export default function WhiteboardEditor({ boardID }: { boardID: string }) {
       onClose={() => setLibraryOpen(false)}
     />}
   </div>
-}
+})
+
+export default WhiteboardEditor

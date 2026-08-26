@@ -1,5 +1,14 @@
 # Changelog — Clarin CRM
 
+## 2026-08-25
+
+### Build 2 — Pizarras contextuales dentro de Clarin Work
+- ✨ Las listas y carpetas pueden añadir varias Pizarras como vistas operativas sin duplicar escenas, revisiones ni archivos.
+- 🧭 La misma pizarra se abre desde Work y desde el Hub de Pizarras con su ubicación real, navegación contextual y una experiencia full-bleed responsiva.
+- 🔒 El acceso combina permisos de Tareas y Pizarras con la ACL efectiva de la Lista o Carpeta; grants, enlaces públicos e invitados no pueden saltarse esa herencia.
+- ♻️ Archivo, Papelera, restauración y purga preservan la ubicación, retención y limpieza reference-safe de cada pizarra contextual.
+- 🛡️ Un interruptor de rollout permite desactivar la experiencia sin volver a un backend antiguo ni degradar el aislamiento de datos.
+
 ## 2026-08-02
 
 ### Build 2 — Traslados inmediatos e identidad fija de carpetas

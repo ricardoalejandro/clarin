@@ -112,6 +112,20 @@ const whiteboardLibraryImportClaimBoardSQL = `SELECT import_item.board_id
 	FROM whiteboard_library_import_sessions import_item
 	WHERE import_item.token_hash=$1 AND import_item.account_id=$2 AND import_item.actor_id=$3`
 
+func (r *WhiteboardRepository) WhiteboardLibraryImportCallbackBoard(ctx context.Context, accountID, actorID uuid.UUID, tokenHash string) (uuid.UUID, error) {
+	if accountID == uuid.Nil || actorID == uuid.Nil || len(tokenHash) != 64 {
+		return uuid.Nil, ErrWhiteboardInvalid
+	}
+	var boardID uuid.UUID
+	if err := r.db.QueryRow(ctx, whiteboardLibraryImportClaimBoardSQL, tokenHash, accountID, actorID).Scan(&boardID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, ErrWhiteboardNotFound
+		}
+		return uuid.Nil, err
+	}
+	return boardID, nil
+}
+
 const whiteboardLibraryImportClaimSelectSQL = `SELECT ` + whiteboardLibraryImportColumns + `
 	FROM whiteboard_library_import_sessions import_item
 	WHERE import_item.token_hash=$1 AND import_item.account_id=$2 AND import_item.actor_id=$3
@@ -147,6 +161,10 @@ const whiteboardLibraryImportNavigationRotateSQL = `UPDATE whiteboard_library_im
 // removal and actor deactivation, so a validated catalog payload cannot become
 // ready after the originating actor has lost access.
 func lockWhiteboardLibraryImportViewAccessTx(ctx context.Context, tx pgx.Tx, accountID, actorID, boardID uuid.UUID) error {
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return err
+	}
+
 	var boardExists bool
 	if err := tx.QueryRow(ctx, `SELECT TRUE FROM whiteboards
 		WHERE account_id=$1 AND id=$2 FOR SHARE`, accountID, boardID).Scan(&boardExists); errors.Is(err, pgx.ErrNoRows) {
@@ -155,26 +173,11 @@ func lockWhiteboardLibraryImportViewAccessTx(ctx context.Context, tx pgx.Tx, acc
 		return err
 	}
 
-	// Membership precedes actor to match the canonical user-removal order and
-	// avoid a membership/user lock inversion while a user is being deleted.
-	var membershipID uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT id FROM user_accounts
-		WHERE account_id=$1 AND user_id=$2 FOR SHARE`, accountID, actorID).Scan(&membershipID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return err
-	}
 	var grantID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT id FROM whiteboard_grants
 		WHERE account_id=$1 AND board_id=$2 AND user_id=$3 FOR SHARE`, accountID, boardID, actorID).Scan(&grantID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
-	var actorExists bool
-	if err := tx.QueryRow(ctx, `SELECT TRUE FROM users
-		WHERE id=$1 AND is_active FOR SHARE`, actorID).Scan(&actorExists); errors.Is(err, pgx.ErrNoRows) {
-		return ErrWhiteboardNotFound
-	} else if err != nil {
-		return err
-	}
-
 	_, err := requireWhiteboardAccessTx(ctx, tx, accountID, actorID, boardID, domain.WhiteboardAccessView, false)
 	return err
 }
@@ -192,8 +195,11 @@ func (r *WhiteboardRepository) StartWhiteboardLibraryImport(ctx context.Context,
 		defer cancel()
 		_ = tx.Rollback(rollbackCtx)
 	}()
+	if err := lockWhiteboardLibraryImportViewAccessTx(ctx, tx, accountID, actorID, boardID); err != nil {
+		return nil, err
+	}
 	var archivedAt *time.Time
-	if err := tx.QueryRow(ctx, `SELECT archived_at FROM whiteboards WHERE account_id=$1 AND id=$2 FOR SHARE`, accountID, boardID).Scan(&archivedAt); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT archived_at FROM whiteboards WHERE account_id=$1 AND id=$2`, accountID, boardID).Scan(&archivedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrWhiteboardNotFound
 		}
@@ -201,9 +207,6 @@ func (r *WhiteboardRepository) StartWhiteboardLibraryImport(ctx context.Context,
 	}
 	if archivedAt != nil {
 		return nil, ErrWhiteboardConflict
-	}
-	if _, err := requireWhiteboardAccessTx(ctx, tx, accountID, actorID, boardID, domain.WhiteboardAccessView, false); err != nil {
-		return nil, err
 	}
 	var libraryExists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM whiteboard_libraries

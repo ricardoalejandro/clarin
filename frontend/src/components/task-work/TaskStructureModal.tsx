@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { DndContext, DragEndEvent, KeyboardSensor, PointerSensor, TouchSensor, useSensor, useSensors } from '@dnd-kit/core'
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
@@ -18,6 +18,7 @@ import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { mergeCanonicalTaskFolderWorkflowDrafts, mergeCanonicalTaskStatusDrafts, taskStatusDraftChanged, taskStructureHasPendingChanges } from './taskStructureDraftState'
 
 interface Props { open: boolean; environmentId: string; folders: TaskFolder[]; lists: TaskList[]; workflows: TaskWorkflow[]; users?: TaskAccountUser[]; storageScope?: string; onClose: () => void; onChanged: () => Promise<void> | void; onCreated?: (created: { type: 'folder'; folder: TaskFolder } | { type: 'list'; list: TaskList }) => void; onOperation?: (operationID: string, active: boolean) => void }
+export interface TaskStructureModalHandle { requestClose: () => Promise<boolean> }
 const field = 'w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm text-slate-800 outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50'
 const categories: Array<{ value: TaskStatusCategory; label: string; description: string; color: string }> = [
   { value: 'not_started', label: 'Inicial', description: 'Trabajo todavía no iniciado', color: '#64748b' },
@@ -46,7 +47,7 @@ function StatusRow({ original, status, index, count, busy, onDraft, onMove, onSa
   </div>
 }
 
-export default function TaskStructureModal({ open, environmentId, folders, lists, workflows, users = [], storageScope, onClose, onChanged, onCreated, onOperation }: Props) {
+const TaskStructureModal = forwardRef<TaskStructureModalHandle, Props>(function TaskStructureModal({ open, environmentId, folders, lists, workflows, users = [], storageScope, onClose, onChanged, onCreated, onOperation }, forwardedRef) {
   const [tab, setTab] = useState<'structure' | 'workflow'>('structure')
   const [structureInspector, setStructureInspector] = useState<'folder' | 'list' | 'flows'>('folder')
   const [folderName, setFolderName] = useState(''); const [folderColor, setFolderColor] = useState('#10b981'); const [folderWorkflow, setFolderWorkflow] = useState('')
@@ -61,7 +62,10 @@ export default function TaskStructureModal({ open, environmentId, folders, lists
   const [busy, setBusy] = useState(false); const [error, setError] = useState('')
   const [discardConfirm, setDiscardConfirm] = useState(false)
   const discardDialogRef = useRef<HTMLDivElement>(null)
+  const discardContinueRef = useRef<HTMLButtonElement>(null)
   const discardReturnFocusRef = useRef<HTMLElement | null>(null)
+  const closeDecisionRef = useRef<((allowed: boolean) => void) | null>(null)
+  const closeDecisionPromiseRef = useRef<Promise<boolean> | null>(null)
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }), useSensor(TouchSensor, { activationConstraint: { delay: 220, tolerance: 8 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }))
   const workflow = workflows.find(item => item.id === selectedWorkflow) || workflows.find(item => item.is_default) || workflows[0]
   const orderedStatuses = useMemo(() => statusOrder.map(id => workflow?.statuses.find(item => item.id === id)).filter(Boolean) as TaskWorkflowStatus[], [statusOrder, workflow])
@@ -116,12 +120,11 @@ export default function TaskStructureModal({ open, environmentId, folders, lists
   }
   const hasPendingChanges = taskStructureHasPendingChanges({
     dirtyStatusIDs,
+    dirtyFolderWorkflowIDs,
     folderName,
     listName,
     workflowName,
     newStatusName: newStatus.name,
-    folders,
-    folderWorkflows,
   })
   const discardDrafts = () => {
     setFolderName(''); setListName(''); setWorkflowName('')
@@ -131,23 +134,38 @@ export default function TaskStructureModal({ open, environmentId, folders, lists
     setDrafts(Object.fromEntries(workflows.flatMap(item => item.statuses.map(status => [status.id, { ...status }]))))
     setFolderWorkflows(Object.fromEntries(folders.map(folder => [folder.id, folder.workflow_id || workflows.find(item => item.is_default)?.id || ''])))
   }
-  const requestClose = () => {
-    if (busy) return
+  const settleCloseDecision = useCallback((allowed: boolean) => {
+    const resolve = closeDecisionRef.current
+    closeDecisionRef.current = null
+    closeDecisionPromiseRef.current = null
+    resolve?.(allowed)
+  }, [])
+  const requestClose = useCallback((): Promise<boolean> => {
+    if (busy) return Promise.resolve(false)
     if (hasPendingChanges) {
       discardReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
       setDiscardConfirm(true)
-      return
+      if (!closeDecisionPromiseRef.current) {
+        closeDecisionPromiseRef.current = new Promise<boolean>(resolve => {
+          closeDecisionRef.current = resolve
+        })
+      }
+      return closeDecisionPromiseRef.current
     }
     onClose()
-  }
+    return Promise.resolve(true)
+  }, [busy, hasPendingChanges, onClose])
+  useImperativeHandle(forwardedRef, () => ({ requestClose }), [requestClose])
 
   useEffect(() => {
     if (!discardConfirm) return
+    const frame = requestAnimationFrame(() => discardContinueRef.current?.focus({ preventScroll: true }))
     const handleKeyboard = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault()
-        event.stopPropagation()
+        event.stopImmediatePropagation()
         setDiscardConfirm(false)
+        settleCloseDecision(false)
         requestAnimationFrame(() => discardReturnFocusRef.current?.focus({ preventScroll: true }))
         return
       }
@@ -156,12 +174,23 @@ export default function TaskStructureModal({ open, environmentId, folders, lists
       if (!focusable.length) return
       const first = focusable[0]
       const last = focusable[focusable.length - 1]
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+      const index = focusable.indexOf(document.activeElement as HTMLElement)
+      event.preventDefault()
+      focusable[(index + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length]?.focus({ preventScroll: true })
+      event.stopImmediatePropagation()
     }
-    window.addEventListener('keydown', handleKeyboard)
-    return () => window.removeEventListener('keydown', handleKeyboard)
-  }, [discardConfirm])
+    document.addEventListener('keydown', handleKeyboard, true)
+    return () => {
+      cancelAnimationFrame(frame)
+      document.removeEventListener('keydown', handleKeyboard, true)
+    }
+  }, [discardConfirm, settleCloseDecision])
+  useEffect(() => {
+    if (open) return
+    setDiscardConfirm(false)
+    settleCloseDecision(false)
+  }, [open, settleCloseDecision])
+  useEffect(() => () => settleCloseDecision(false), [settleCloseDecision])
 
   if (!open) return null
   return <><TaskWorkWindowShell
@@ -177,7 +206,7 @@ export default function TaskStructureModal({ open, environmentId, folders, lists
     minWidth={620}
     minHeight={540}
     busy={busy}
-    onRequestClose={requestClose}
+    onRequestClose={() => { void requestClose() }}
     dataAttribute="task-structure-window"
     contentClassName="min-h-0 flex-1 overflow-y-auto bg-slate-50/60"
   >
@@ -209,6 +238,8 @@ export default function TaskStructureModal({ open, environmentId, folders, lists
       </main>
     </div>}
   </TaskWorkWindowShell>
-  {discardConfirm && createPortal(<div data-task-destructive-dialog className="fixed inset-0 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm" style={{ zIndex: TASK_OVERLAY_LAYERS.confirmation }} role="presentation"><div ref={discardDialogRef} role="alertdialog" aria-modal="true" aria-labelledby="task-structure-discard-title" className="w-full max-w-md rounded-3xl border border-white/70 bg-white p-6 shadow-2xl"><p className="text-[10px] font-black uppercase tracking-[.16em] text-amber-600">Cambios pendientes</p><h2 id="task-structure-discard-title" className="mt-1 text-xl font-black text-slate-900">¿Descartar la configuración?</h2><p className="mt-2 text-sm leading-6 text-slate-500">Los nombres, estados o asignaciones de flujo que todavía no guardaste se perderán.</p><div className="mt-6 flex justify-end gap-2"><button type="button" autoFocus onClick={() => { setDiscardConfirm(false); requestAnimationFrame(() => discardReturnFocusRef.current?.focus({ preventScroll: true })) }} className="rounded-xl px-4 py-2.5 text-sm font-bold text-slate-600 hover:bg-slate-100">Seguir editando</button><button type="button" onClick={() => { setDiscardConfirm(false); discardDrafts(); onClose() }} className="rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-black text-white hover:bg-rose-700">Descartar cambios</button></div></div></div>, document.body)}
+  {discardConfirm && createPortal(<div data-task-destructive-dialog className="fixed inset-0 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm" style={{ zIndex: TASK_OVERLAY_LAYERS.confirmation }} role="presentation"><div ref={discardDialogRef} role="alertdialog" aria-modal="true" aria-labelledby="task-structure-discard-title" className="w-full max-w-md rounded-3xl border border-white/70 bg-white p-6 shadow-2xl"><p className="text-[10px] font-black uppercase tracking-[.16em] text-amber-600">Cambios pendientes</p><h2 id="task-structure-discard-title" className="mt-1 text-xl font-black text-slate-900">¿Descartar la configuración?</h2><p className="mt-2 text-sm leading-6 text-slate-500">Los nombres, estados o asignaciones de flujo que todavía no guardaste se perderán.</p><div className="mt-6 flex justify-end gap-2"><button ref={discardContinueRef} type="button" onClick={() => { setDiscardConfirm(false); settleCloseDecision(false); requestAnimationFrame(() => discardReturnFocusRef.current?.focus({ preventScroll: true })) }} className="rounded-xl px-4 py-2.5 text-sm font-bold text-slate-600 hover:bg-slate-100">Seguir editando</button><button type="button" onClick={() => { setDiscardConfirm(false); discardDrafts(); onClose(); settleCloseDecision(true) }} className="rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-black text-white hover:bg-rose-700">Descartar cambios</button></div></div></div>, document.body)}
   </>
-}
+})
+
+export default TaskStructureModal

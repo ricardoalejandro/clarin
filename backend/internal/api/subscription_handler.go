@@ -69,7 +69,6 @@ func (s *Server) handleAdminUpdateAccountSubscription(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
-
 	overview, err := s.services.Subscription.GetOverview(c.Context(), accountID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to load subscription"})
@@ -132,6 +131,7 @@ func (s *Server) handleAdminUpdateAccountSubscription(c *fiber.Ctx) error {
 	if err := s.services.Subscription.Upsert(c.Context(), sub); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.notifyAccountAuthorityChanged(accountID)
 	overview, err = s.services.Subscription.GetOverview(c.Context(), accountID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to load subscription"})
@@ -157,6 +157,7 @@ func (s *Server) handleAdminExtendTrial(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.notifyAccountAuthorityChanged(accountID)
 	return c.JSON(fiber.Map{"success": true, "subscription": overview})
 }
 
@@ -169,6 +170,7 @@ func (s *Server) handleAdminSuspendSubscription(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.notifyAccountAuthorityChanged(accountID)
 	devices, deviceErr := s.services.Device.GetByAccountID(c.Context(), accountID)
 	if deviceErr == nil && s.pool != nil {
 		for _, device := range devices {
@@ -189,6 +191,7 @@ func (s *Server) handleAdminReactivateSubscription(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.notifyAccountAuthorityChanged(accountID)
 	return c.JSON(fiber.Map{"success": true, "subscription": overview})
 }
 

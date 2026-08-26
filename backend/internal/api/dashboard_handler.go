@@ -219,7 +219,7 @@ func dashboardHasPermission(claims *service.JWTClaims, module string) bool {
 	if claims == nil {
 		return false
 	}
-	if claims.IsAdmin || claims.IsSuperAdmin || claims.Role == domain.RoleAdmin || claims.Role == domain.RoleSuperAdmin {
+	if domain.HasAccountAdminAuthority(claims.Role, claims.IsSuperAdmin) {
 		return true
 	}
 	for _, permission := range claims.Permissions {
@@ -231,7 +231,7 @@ func dashboardHasPermission(claims *service.JWTClaims, module string) bool {
 }
 
 func dashboardClaimsAreAdmin(claims *service.JWTClaims) bool {
-	return claims != nil && (claims.IsAdmin || claims.IsSuperAdmin || claims.Role == domain.RoleAdmin || claims.Role == domain.RoleSuperAdmin)
+	return claims != nil && domain.HasAccountAdminAuthority(claims.Role, claims.IsSuperAdmin)
 }
 
 func (s *Server) handleGetDashboardSummary(c *fiber.Ctx) error {

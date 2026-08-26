@@ -251,6 +251,33 @@ describe('connectWhiteboardRoom', () => {
     room.close()
   })
 
+  it('revalidates Work access changes instead of permanently blocking reconnect', async () => {
+    const getTicket = vi.fn(async () => 'ticket')
+    const issues: Array<WhiteboardRealtimeIssue | null> = []
+    const onEvent = vi.fn()
+    const room = connectWhiteboardRoom({
+      whiteboardID: 'board-work',
+      audience: 'member',
+      getSequence: () => 0,
+      getTicket,
+      onEvent,
+      onIssue: value => issues.push(value),
+    })
+    await settlePromises()
+    const first = FakeWhiteboardWebSocket.instances[0]
+    first.open()
+    first.emit({ event: 'access.revoked', code: 'work_access_changed' })
+    first.serverClose(1008, 'work_access_changed')
+    await vi.advanceTimersByTimeAsync(1_100)
+    await settlePromises()
+
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ event: 'access.revoked', code: 'work_access_changed' }))
+    expect(issues.filter(Boolean)).toEqual([])
+    expect(getTicket).toHaveBeenCalledTimes(2)
+    expect(FakeWhiteboardWebSocket.instances).toHaveLength(2)
+    room.close()
+  })
+
   it('does not duplicate sockets on online, visibility and pageshow wake-ups', async () => {
     const getTicket = vi.fn(async () => `ticket-${getTicket.mock.calls.length}`)
     const connections: string[] = []

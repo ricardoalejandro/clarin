@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -62,6 +63,7 @@ type Repositories struct {
 	Dynamic            *DynamicRepository
 	Task               *TaskRepository
 	TaskWork           *TaskWorkRepository
+	TaskLocationView   *TaskLocationViewRepository
 	WorkEvent          *WorkEventRepository
 	DocumentTemplate   *DocumentTemplateRepository
 	Whiteboard         *WhiteboardRepository
@@ -121,6 +123,7 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		Dynamic:            &DynamicRepository{db: db},
 		Task:               &TaskRepository{db: db},
 		TaskWork:           &TaskWorkRepository{db: db},
+		TaskLocationView:   &TaskLocationViewRepository{db: db},
 		WorkEvent:          &WorkEventRepository{db: db},
 		DocumentTemplate:   &DocumentTemplateRepository{db: db},
 		Whiteboard:         NewWhiteboardRepository(db),
@@ -242,11 +245,52 @@ func (r *UserRepository) Create(ctx context.Context, user *domain.User) error {
 }
 
 func (r *UserRepository) Update(ctx context.Context, user *domain.User) error {
-	_, err := r.db.Exec(ctx, `
-		UPDATE users SET username = $2, email = $3, display_name = $4, is_admin = $5, role = $6, updated_at = NOW()
-		WHERE id = $1
-	`, user.ID, user.Username, user.Email, user.DisplayName, user.IsAdmin, user.Role)
+	// Update is intentionally metadata-only. The only product caller is the
+	// self-service profile endpoint; copying authority fields from its earlier
+	// read would otherwise be able to overwrite a concurrent admin mutation.
+	_, err := r.db.Exec(ctx, `UPDATE users SET username=$2,email=$3,display_name=$4,updated_at=NOW()
+		WHERE id=$1`, user.ID, user.Username, user.Email, user.DisplayName)
 	return err
+}
+
+func (r *UserRepository) UpdateWithAuthorityImpact(ctx context.Context, user *domain.User) (*WhiteboardAuthorityMutationEffect, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockUserAuthorityTx(ctx, tx, user.ID); err != nil {
+		return nil, err
+	}
+	accountIDs, err := lockUserAuthorizationAccountsTx(ctx, tx, user.ID)
+	if err != nil {
+		return nil, err
+	}
+	// Bump before locking the global user row. Library callbacks lock a board
+	// before revalidating the user, so user -> board would form an inverse lock
+	// cycle. A metadata-only update may conservatively invalidate sockets; that
+	// is preferable to retaining an ambiguous global-admin authorization.
+	for _, accountID := range accountIDs {
+		if err := bumpAllWhiteboardAccessRevisionTx(ctx, tx, accountID); err != nil {
+			return nil, err
+		}
+	}
+	command, err := tx.Exec(ctx, `UPDATE users SET username=$2,email=$3,display_name=$4,
+		is_admin=$5,is_super_admin=$6,role=$7,updated_at=NOW() WHERE id=$1`, user.ID,
+		user.Username, user.Email, user.DisplayName, user.IsAdmin, user.IsSuperAdmin, user.Role)
+	if err != nil {
+		return nil, err
+	}
+	if command.RowsAffected() == 0 {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		return &WhiteboardAuthorityMutationEffect{}, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &WhiteboardAuthorityMutationEffect{AccountIDs: accountIDs, UserIDs: []uuid.UUID{user.ID}}, nil
 }
 
 func (r *UserRepository) UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash string) error {
@@ -254,9 +298,72 @@ func (r *UserRepository) UpdatePassword(ctx context.Context, userID uuid.UUID, p
 	return err
 }
 
-func (r *UserRepository) ToggleActive(ctx context.Context, userID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `UPDATE users SET is_active = NOT is_active, updated_at = NOW() WHERE id = $1`, userID)
-	return err
+func (r *UserRepository) ToggleActiveWithAuthorityImpact(ctx context.Context, userID uuid.UUID) (*WhiteboardAuthorityMutationEffect, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockUserAuthorityTx(ctx, tx, userID); err != nil {
+		return nil, err
+	}
+	accountIDs, err := lockUserAuthorizationAccountsTx(ctx, tx, userID)
+	if err != nil {
+		return nil, err
+	}
+	for _, accountID := range accountIDs {
+		if err := bumpAllWhiteboardAccessRevisionTx(ctx, tx, accountID); err != nil {
+			return nil, err
+		}
+	}
+	command, err := tx.Exec(ctx, `UPDATE users SET is_active=NOT is_active,updated_at=NOW() WHERE id=$1`, userID)
+	if err != nil {
+		return nil, err
+	}
+	if command.RowsAffected() == 0 {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		return &WhiteboardAuthorityMutationEffect{}, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &WhiteboardAuthorityMutationEffect{AccountIDs: accountIDs, UserIDs: []uuid.UUID{userID}}, nil
+}
+
+func lockUserAuthorizationAccountsTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := tx.Query(ctx, `SELECT account_id FROM user_accounts
+		WHERE user_id=$1 ORDER BY account_id FOR SHARE`, userID)
+	if err != nil {
+		return nil, err
+	}
+	accountIDs := make([]uuid.UUID, 0)
+	seen := make(map[uuid.UUID]struct{})
+	for rows.Next() {
+		var accountID uuid.UUID
+		if err := rows.Scan(&accountID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		accountIDs = append(accountIDs, accountID)
+		seen[accountID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	var primaryAccountID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT account_id FROM users WHERE id=$1`, userID).Scan(&primaryAccountID); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+	} else if _, exists := seen[primaryAccountID]; !exists {
+		accountIDs = append(accountIDs, primaryAccountID)
+	}
+	sort.Slice(accountIDs, func(i, j int) bool { return accountIDs[i].String() < accountIDs[j].String() })
+	return accountIDs, nil
 }
 
 func (r *UserRepository) SetErosEnabled(ctx context.Context, userID uuid.UUID, enabled bool) error {
@@ -270,47 +377,66 @@ func (r *UserRepository) IsErosEnabled(ctx context.Context, userID uuid.UUID) (b
 	return enabled, err
 }
 
-func (r *UserRepository) Delete(ctx context.Context, userID uuid.UUID) error {
-	return r.deleteWithTaskACLActor(ctx, userID, nil)
-}
-
-func (r *UserRepository) DeleteWithActor(ctx context.Context, userID, actorID uuid.UUID) error {
+func (r *UserRepository) DeleteWithActorAndAuthorityImpact(ctx context.Context, userID, actorID uuid.UUID) (*WhiteboardAuthorityMutationEffect, error) {
 	return r.deleteWithTaskACLActor(ctx, userID, &actorID)
 }
 
-func (r *UserRepository) deleteWithTaskACLActor(ctx context.Context, userID uuid.UUID, actorID *uuid.UUID) error {
+func (r *UserRepository) deleteWithTaskACLActor(ctx context.Context, userID uuid.UUID, actorID *uuid.UUID) (*WhiteboardAuthorityMutationEffect, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockUserAuthorityTx(ctx, tx, userID); err != nil {
+		return nil, err
+	}
 	rows, err := tx.Query(ctx, `SELECT account_id FROM user_accounts WHERE user_id=$1 ORDER BY account_id FOR UPDATE`, userID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	accountIDs := make([]uuid.UUID, 0)
+	membershipAccounts := make(map[uuid.UUID]struct{})
 	for rows.Next() {
 		var accountID uuid.UUID
 		if err := rows.Scan(&accountID); err != nil {
 			rows.Close()
-			return err
+			return nil, err
 		}
 		accountIDs = append(accountIDs, accountID)
+		membershipAccounts[accountID] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return err
+		return nil, err
 	}
 	rows.Close()
+	var primaryAccountID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT account_id FROM users WHERE id=$1`, userID).Scan(&primaryAccountID); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+	} else if _, exists := membershipAccounts[primaryAccountID]; !exists {
+		accountIDs = append(accountIDs, primaryAccountID)
+	}
+	sort.Slice(accountIDs, func(i, j int) bool { return accountIDs[i].String() < accountIDs[j].String() })
 	for _, accountID := range accountIDs {
+		if _, hasMembership := membershipAccounts[accountID]; !hasMembership {
+			if err := bumpAllWhiteboardAccessRevisionTx(ctx, tx, accountID); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if err := removeTaskMembershipACLTx(ctx, tx, accountID, userID, actorID); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM users WHERE id=$1`, userID); err != nil {
-		return err
+		return nil, err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &WhiteboardAuthorityMutationEffect{AccountIDs: accountIDs, UserIDs: []uuid.UUID{userID}}, nil
 }
 
 func (r *UserRepository) GetGroqAPIKey(ctx context.Context, userID uuid.UUID) (string, error) {
@@ -500,16 +626,38 @@ func (r *UserAccountRepository) CountByUserID(ctx context.Context, userID uuid.U
 	return count, err
 }
 
-// NormalizeForUser keeps the legacy users.account_id in sync with the user's
-// default assignment and guarantees exactly one default account when possible.
-func (r *UserAccountRepository) NormalizeForUser(ctx context.Context, userID uuid.UUID) error {
+// NormalizeForUserWithAuthorityImpact keeps the legacy users.account_id in
+// sync with the default assignment and returns the exact committed accounts.
+// Callers must publish that effect even if later login work fails.
+func (r *UserAccountRepository) NormalizeForUserWithAuthorityImpact(ctx context.Context, userID uuid.UUID) (*WhiteboardAuthorityMutationEffect, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockUserAuthorityTx(ctx, tx, userID); err != nil {
+		return nil, err
+	}
+	affectedAccountIDs, err := normalizeUserAccountsTx(ctx, tx, userID)
+	if err != nil {
+		return nil, err
+	}
+	for _, accountID := range affectedAccountIDs {
+		if err := bumpAllWhiteboardAccessRevisionTx(ctx, tx, accountID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &WhiteboardAuthorityMutationEffect{
+		AccountIDs: canonicalAuthorityUUIDs(affectedAccountIDs),
+		UserIDs:    []uuid.UUID{userID},
+	}, nil
+}
 
-	if _, err := tx.Exec(ctx, `
+func normalizeUserAccountsTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) ([]uuid.UUID, error) {
+	insertResult, err := tx.Exec(ctx, `
 		INSERT INTO user_accounts (user_id, account_id, role, is_default)
 		SELECT id, account_id, COALESCE(NULLIF(role, ''), 'agent'), TRUE
 		FROM users
@@ -519,8 +667,9 @@ func (r *UserAccountRepository) NormalizeForUser(ctx context.Context, userID uui
 		  	SELECT 1 FROM user_accounts existing WHERE existing.user_id = users.id
 		  )
 		ON CONFLICT (user_id, account_id) DO NOTHING
-	`, userID); err != nil {
-		return err
+	`, userID)
+	if err != nil {
+		return nil, err
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -536,50 +685,101 @@ func (r *UserAccountRepository) NormalizeForUser(ctx context.Context, userID uui
 		SET is_default = (ua.id = (SELECT id FROM preferred))
 		WHERE ua.user_id = $1
 	`, userID); err != nil {
-		return err
+		return nil, err
 	}
 
-	if _, err := tx.Exec(ctx, `
-		WITH chosen AS (
-			SELECT ua.account_id, COALESCE(NULLIF(ua.role, ''), 'agent') AS role
-			FROM user_accounts ua
-			WHERE ua.user_id = $1 AND ua.is_default = TRUE
-			ORDER BY ua.created_at ASC, ua.id ASC
-			LIMIT 1
-		)
-		UPDATE users u
-		SET account_id = chosen.account_id,
-			role = chosen.role,
-			is_admin = CASE
-				WHEN u.is_super_admin THEN TRUE
-				ELSE chosen.role IN ('admin', 'super_admin')
-			END,
-			is_super_admin = CASE
-				WHEN chosen.role = 'super_admin' THEN TRUE
-				ELSE u.is_super_admin
-			END,
-			updated_at = NOW()
-		FROM chosen
-		WHERE u.id = $1
-	`, userID); err != nil {
-		return err
+	var currentAccountID, nextAccountID uuid.UUID
+	var currentRole, nextRole string
+	var currentAdmin, currentSuperAdmin, nextAdmin, nextSuperAdmin bool
+	err = tx.QueryRow(ctx, `SELECT account_user.account_id,account_user.role,
+		account_user.is_admin,account_user.is_super_admin,
+		chosen.account_id,chosen.role,
+		CASE WHEN account_user.is_super_admin THEN TRUE ELSE chosen.role IN ('admin','super_admin') END,
+		account_user.is_super_admin
+		FROM users account_user
+		JOIN LATERAL (
+			SELECT membership.account_id,COALESCE(NULLIF(membership.role,''),'agent') AS role
+			FROM user_accounts membership
+			WHERE membership.user_id=account_user.id AND membership.is_default
+			ORDER BY membership.created_at,membership.id LIMIT 1
+		) chosen ON TRUE
+		WHERE account_user.id=$1`, userID).Scan(
+		&currentAccountID, &currentRole, &currentAdmin, &currentSuperAdmin,
+		&nextAccountID, &nextRole, &nextAdmin, &nextSuperAdmin,
+	)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
 	}
-
-	return tx.Commit(ctx)
+	globalAuthorityChanged := err == nil && (currentAccountID != nextAccountID || currentRole != nextRole ||
+		currentAdmin != nextAdmin || currentSuperAdmin != nextSuperAdmin)
+	affectedAccountIDs := make([]uuid.UUID, 0)
+	if insertResult.RowsAffected() > 0 || globalAuthorityChanged {
+		accountRows, queryErr := tx.Query(ctx, `SELECT account_id FROM user_accounts
+			WHERE user_id=$1 ORDER BY account_id FOR SHARE`, userID)
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		for accountRows.Next() {
+			var accountID uuid.UUID
+			if scanErr := accountRows.Scan(&accountID); scanErr != nil {
+				accountRows.Close()
+				return nil, scanErr
+			}
+			affectedAccountIDs = append(affectedAccountIDs, accountID)
+		}
+		if rowsErr := accountRows.Err(); rowsErr != nil {
+			accountRows.Close()
+			return nil, rowsErr
+		}
+		accountRows.Close()
+	}
+	if err == nil && globalAuthorityChanged {
+		if _, err := tx.Exec(ctx, `UPDATE users SET account_id=$2,role=$3,is_admin=$4,is_super_admin=$5,updated_at=NOW()
+			WHERE id=$1`, userID, nextAccountID, nextRole, nextAdmin, nextSuperAdmin); err != nil {
+			return nil, err
+		}
+	}
+	return affectedAccountIDs, nil
 }
 
-func (r *UserAccountRepository) Assign(ctx context.Context, ua *domain.UserAccount) error {
+func (r *UserAccountRepository) AssignAndNormalize(ctx context.Context, ua *domain.UserAccount) (*WhiteboardAuthorityMutationEffect, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockRoleAuthorityReferenceTx(ctx, tx, ua.RoleID); err != nil {
+		return nil, err
+	}
+	if err := lockUserAuthorityTx(ctx, tx, ua.UserID); err != nil {
+		return nil, err
+	}
+	if err := assignUserAccountTx(ctx, tx, ua); err != nil {
+		return nil, err
+	}
+	normalizedAccountIDs, err := normalizeUserAccountsTx(ctx, tx, ua.UserID)
+	if err != nil {
+		return nil, err
+	}
+	affectedAccountIDs := canonicalAuthorityUUIDs([]uuid.UUID{ua.AccountID}, normalizedAccountIDs)
+	for _, accountID := range affectedAccountIDs {
+		if err := bumpAllWhiteboardAccessRevisionTx(ctx, tx, accountID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &WhiteboardAuthorityMutationEffect{AccountIDs: affectedAccountIDs, UserIDs: []uuid.UUID{ua.UserID}}, nil
+}
+
+func assignUserAccountTx(ctx context.Context, tx pgx.Tx, ua *domain.UserAccount) error {
 	if ua.IsDefault {
 		if _, err := tx.Exec(ctx, `UPDATE user_accounts SET is_default = FALSE WHERE user_id = $1`, ua.UserID); err != nil {
 			return err
 		}
 	}
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		INSERT INTO user_accounts (user_id, account_id, role, role_id, is_default)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (user_id, account_id) DO UPDATE SET
@@ -591,12 +791,7 @@ func (r *UserAccountRepository) Assign(ctx context.Context, ua *domain.UserAccou
 	if err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
-}
-
-func (r *UserAccountRepository) UpdateRoleID(ctx context.Context, userID, accountID uuid.UUID, roleID *uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `UPDATE user_accounts SET role_id = $3 WHERE user_id = $1 AND account_id = $2`, userID, accountID, roleID)
-	return err
+	return nil
 }
 
 // GetUserPermissions returns the permissions slice for a user in a given account
@@ -618,39 +813,58 @@ func (r *UserAccountRepository) GetUserPermissions(ctx context.Context, userID, 
 	return permissions, nil
 }
 
-func (r *UserAccountRepository) UpdateRole(ctx context.Context, userID, accountID uuid.UUID, role string) error {
-	_, err := r.db.Exec(ctx, `UPDATE user_accounts SET role = $3 WHERE user_id = $1 AND account_id = $2`, userID, accountID, role)
-	return err
+func (r *UserAccountRepository) RemoveWithActorAndNormalize(ctx context.Context, userID, accountID, actorID uuid.UUID) (*WhiteboardAuthorityMutationEffect, error) {
+	return r.removeAndNormalize(ctx, userID, accountID, &actorID)
 }
 
-func (r *UserAccountRepository) Remove(ctx context.Context, userID, accountID uuid.UUID) error {
-	return r.removeWithTaskACLActor(ctx, userID, accountID, nil)
+func (r *UserAccountRepository) RemoveAndNormalize(ctx context.Context, userID, accountID uuid.UUID) (*WhiteboardAuthorityMutationEffect, error) {
+	return r.removeAndNormalize(ctx, userID, accountID, nil)
 }
 
-func (r *UserAccountRepository) RemoveWithActor(ctx context.Context, userID, accountID, actorID uuid.UUID) error {
-	return r.removeWithTaskACLActor(ctx, userID, accountID, &actorID)
-}
-
-func (r *UserAccountRepository) removeWithTaskACLActor(ctx context.Context, userID, accountID uuid.UUID, actorID *uuid.UUID) error {
+func (r *UserAccountRepository) removeAndNormalize(ctx context.Context, userID, accountID uuid.UUID, actorID *uuid.UUID) (*WhiteboardAuthorityMutationEffect, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockUserAuthorityTx(ctx, tx, userID); err != nil {
+		return nil, err
+	}
+	var membershipExists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM user_accounts WHERE user_id=$1 AND account_id=$2)`,
+		userID, accountID).Scan(&membershipExists); err != nil {
+		return nil, err
+	}
+	if !membershipExists {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		return &WhiteboardAuthorityMutationEffect{}, nil
+	}
+	var membershipCount int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM user_accounts WHERE user_id=$1`, userID).Scan(&membershipCount); err != nil {
+		return nil, err
+	}
+	if membershipCount <= 1 {
+		return nil, fmt.Errorf("el usuario debe conservar al menos una cuenta asignada")
+	}
 	if err := removeTaskMembershipACLTx(ctx, tx, accountID, userID, actorID); err != nil {
-		return err
+		return nil, err
 	}
-	return tx.Commit(ctx)
-}
-
-func (r *UserAccountRepository) SetDefault(ctx context.Context, userID, accountID uuid.UUID) error {
-	// Unset all defaults for this user, then set the new one
-	_, err := r.db.Exec(ctx, `UPDATE user_accounts SET is_default = FALSE WHERE user_id = $1`, userID)
+	normalizedAccountIDs, err := normalizeUserAccountsTx(ctx, tx, userID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = r.db.Exec(ctx, `UPDATE user_accounts SET is_default = TRUE WHERE user_id = $1 AND account_id = $2`, userID, accountID)
-	return err
+	for _, normalizedAccountID := range normalizedAccountIDs {
+		if err := bumpAllWhiteboardAccessRevisionTx(ctx, tx, normalizedAccountID); err != nil {
+			return nil, err
+		}
+	}
+	affectedAccountIDs := canonicalAuthorityUUIDs([]uuid.UUID{accountID}, normalizedAccountIDs)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &WhiteboardAuthorityMutationEffect{AccountIDs: affectedAccountIDs, UserIDs: []uuid.UUID{userID}}, nil
 }
 
 // AccountRepository handles account data access
@@ -717,6 +931,18 @@ func (r *AccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.
 	return a, err
 }
 
+// IsActive is the lightweight tenant-lifecycle gate used by high-frequency
+// authorization checks. A missing account is indistinguishable from an
+// inactive one at this boundary and therefore cannot authorize data access.
+func (r *AccountRepository) IsActive(ctx context.Context, id uuid.UUID) (bool, error) {
+	var active bool
+	err := r.db.QueryRow(ctx, `SELECT COALESCE(is_active,TRUE) FROM accounts WHERE id=$1`, id).Scan(&active)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return active, err
+}
+
 func (r *AccountRepository) Create(ctx context.Context, a *domain.Account) error {
 	return r.db.QueryRow(ctx, `
 		INSERT INTO accounts (name, slug, plan, max_devices, max_users_override, storage_limit_bytes, is_active)
@@ -734,8 +960,22 @@ func (r *AccountRepository) Update(ctx context.Context, a *domain.Account) error
 }
 
 func (r *AccountRepository) ToggleActive(ctx context.Context, id uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `UPDATE accounts SET is_active = NOT COALESCE(is_active, true), updated_at = NOW() WHERE id = $1`, id)
-	return err
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	result, err := tx.Exec(ctx, `UPDATE accounts SET is_active=NOT COALESCE(is_active,TRUE),updated_at=NOW() WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	if err := bumpAllWhiteboardAccessRevisionTx(ctx, tx, id); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *AccountRepository) Delete(ctx context.Context, id uuid.UUID) error {
@@ -8763,30 +9003,104 @@ func (r *RoleRepository) Create(ctx context.Context, role *domain.Role) error {
 	`, role.Name, role.Description, role.Permissions).Scan(&role.ID, &role.CreatedAt, &role.UpdatedAt)
 }
 
-func (r *RoleRepository) Update(ctx context.Context, role *domain.Role) error {
+func (r *RoleRepository) UpdateWithAuthorityImpact(ctx context.Context, role *domain.Role) (*WhiteboardAuthorityMutationEffect, error) {
 	if role.Permissions == nil {
 		role.Permissions = []string{}
 	}
-	result, err := r.db.Exec(ctx, `
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	var roleLocked uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM roles WHERE id=$1 FOR UPDATE`, role.ID).Scan(&roleLocked); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("role not found")
+		}
+		return nil, err
+	}
+	accountIDs, userIDs, err := roleAuthorityImpactTx(ctx, tx, role.ID)
+	if err != nil {
+		return nil, err
+	}
+	result, err := tx.Exec(ctx, `
 		UPDATE roles SET name = $2, description = $3, permissions = $4, updated_at = NOW()
 		WHERE id = $1
 	`, role.ID, role.Name, role.Description, role.Permissions)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if result.RowsAffected() == 0 {
-		return fmt.Errorf("role not found")
+		return nil, fmt.Errorf("role not found")
 	}
-	return nil
+	for _, accountID := range accountIDs {
+		if err := bumpAllWhiteboardAccessRevisionTx(ctx, tx, accountID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &WhiteboardAuthorityMutationEffect{AccountIDs: accountIDs, UserIDs: userIDs}, nil
 }
 
-func (r *RoleRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	result, err := r.db.Exec(ctx, `DELETE FROM roles WHERE id = $1 AND is_system = FALSE`, id)
+func (r *RoleRepository) DeleteWithAuthorityImpact(ctx context.Context, id uuid.UUID) (*WhiteboardAuthorityMutationEffect, error) {
+	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	var isSystem bool
+	if err := tx.QueryRow(ctx, `SELECT is_system FROM roles WHERE id=$1 FOR UPDATE`, id).Scan(&isSystem); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("role not found or cannot delete system role")
+		}
+		return nil, err
+	}
+	if isSystem {
+		return nil, fmt.Errorf("role not found or cannot delete system role")
+	}
+	accountIDs, userIDs, err := roleAuthorityImpactTx(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	result, err := tx.Exec(ctx, `DELETE FROM roles WHERE id = $1 AND is_system = FALSE`, id)
+	if err != nil {
+		return nil, err
 	}
 	if result.RowsAffected() == 0 {
-		return fmt.Errorf("role not found or cannot delete system role")
+		return nil, fmt.Errorf("role not found or cannot delete system role")
 	}
-	return nil
+	for _, accountID := range accountIDs {
+		if err := bumpAllWhiteboardAccessRevisionTx(ctx, tx, accountID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &WhiteboardAuthorityMutationEffect{AccountIDs: accountIDs, UserIDs: userIDs}, nil
+}
+
+func roleAuthorityImpactTx(ctx context.Context, tx pgx.Tx, roleID uuid.UUID) ([]uuid.UUID, []uuid.UUID, error) {
+	rows, err := tx.Query(ctx, `SELECT account_id,user_id FROM user_accounts
+		WHERE role_id=$1 ORDER BY account_id,user_id FOR UPDATE`, roleID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	accountIDs := make([]uuid.UUID, 0)
+	userIDs := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var accountID, userID uuid.UUID
+		if err := rows.Scan(&accountID, &userID); err != nil {
+			return nil, nil, err
+		}
+		accountIDs = append(accountIDs, accountID)
+		userIDs = append(userIDs, userID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return canonicalAuthorityUUIDs(accountIDs), canonicalAuthorityUUIDs(userIDs), nil
 }

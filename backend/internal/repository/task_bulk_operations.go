@@ -52,11 +52,30 @@ func (r *TaskWorkRepository) BulkUpdateTasks(ctx context.Context, accountID uuid
 		}
 		seen[item.ID] = struct{}{}
 	}
+	var participantAssignee *uuid.UUID
+	if input.Property == "assigned_to" {
+		assignee, ok := input.Value.(uuid.UUID)
+		if !ok || assignee == uuid.Nil {
+			return nil, ErrTaskBulkUpdateInvalid
+		}
+		participantAssignee = &assignee
+	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if participantAssignee != nil {
+		lockedParticipantMemberships, lockErr := lockTaskParticipantMembershipsTx(
+			ctx, tx, accountID, input.ActorID, []uuid.UUID{*participantAssignee},
+		)
+		if lockErr != nil {
+			return nil, lockErr
+		}
+		if !taskParticipantMembershipsLocked(lockedParticipantMemberships, []uuid.UUID{*participantAssignee}) {
+			return nil, ErrTaskBulkUpdateInvalid
+		}
+	}
 	currentAssignees := make(map[uuid.UUID]uuid.UUID, len(items))
 	for _, item := range items {
 		var version int64
@@ -84,10 +103,7 @@ func (r *TaskWorkRepository) BulkUpdateTasks(ctx context.Context, accountID uuid
 		return nil, err
 	}
 	if input.Property == "assigned_to" {
-		assignee, ok := input.Value.(uuid.UUID)
-		if !ok || assignee == uuid.Nil {
-			return nil, ErrTaskBulkUpdateInvalid
-		}
+		assignee := *participantAssignee
 		var belongs bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM user_accounts WHERE account_id=$1 AND user_id=$2)`, accountID, assignee).Scan(&belongs); err != nil {
 			return nil, err

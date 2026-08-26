@@ -4,6 +4,9 @@ import { expect, test, type BrowserContext, type Locator, type Page, type Reques
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:3011'
 const boardID = '10000000-0000-4000-8000-000000000001'
+const workViewID = '10000000-0000-4000-8000-000000000101'
+const workEnvironmentID = '10000000-0000-4000-8000-000000000102'
+const workListID = '10000000-0000-4000-8000-000000000103'
 const now = '2026-08-09T06:00:00.000Z'
 const explicitLinkOrigin = 'http://whiteboard-link.invalid'
 const fixtureRoot = resolve(process.cwd(), '.codex/skills/clarin-excalidraw-development/assets/compat-fixtures/v0.18.1')
@@ -152,6 +155,17 @@ class WhiteboardRealtimeHarness {
   }> = []
   readonly deliveries: Array<{ recipient: string; operationID: string }> = []
   readonly httpSceneWrites: Array<{ method: string; operationID: string }> = []
+  assetUploads = 0
+  readonly assets = new Map<string, {
+    id: string
+    board_id: string
+    file_id: string
+    kind: string
+    filename: string
+    content_type: string
+    size_bytes: number
+    created_at: string
+  }>()
   readonly ticketReads = new Map<string, number>()
   readonly createdBoardNames: string[] = []
   readonly createdFolders: Array<{ id: string; name: string; parentID: string | null }> = []
@@ -451,6 +465,30 @@ function board(harness: WhiteboardRealtimeHarness) {
   }
 }
 
+function workLocationView(harness: WhiteboardRealtimeHarness) {
+  return {
+    id: workViewID,
+    type: 'whiteboard',
+    environment_id: workEnvironmentID,
+    scope: {
+      scope_type: 'list',
+      scope_id: workListID,
+      scope_name: 'Lista QA de egress',
+      breadcrumb: [
+        { type: 'environment', id: workEnvironmentID, name: 'Entorno QA' },
+        { type: 'list', id: workListID, name: 'Lista QA de egress' },
+      ],
+    },
+    sort_order: 1024,
+    version: 1,
+    access_revision: 1,
+    lifecycle: 'active',
+    created_by: actorIDFor('Ana QA'),
+    resource: { whiteboard: { ...board(harness), folder_id: undefined, folder_name: undefined } },
+    capabilities: { can_view: true, can_comment: true, can_edit: true, can_manage: true, can_manage_access: false },
+  }
+}
+
 async function installWhiteboardHTTP(
   context: BrowserContext,
   harness: WhiteboardRealtimeHarness,
@@ -502,10 +540,61 @@ async function installWhiteboardHTTP(
         success: true,
         user: {
           id: actorID, username: userID, display_name: userID, role: 'admin', is_admin: true, is_super_admin: false,
-          account_id: 'account-whiteboard-qa', account_name: 'Cuenta QA', permissions: ['whiteboards'],
+          account_id: 'account-whiteboard-qa', account_name: 'Cuenta QA', permissions: ['whiteboards', 'tasks'],
         },
         accounts: [{ account_id: 'account-whiteboard-qa', account_name: 'Cuenta QA', role: 'admin', is_default: true }],
       })
+      return
+    }
+    if (url.pathname === '/api/tasks/environments' && request.method() === 'GET') {
+      await json(route, {
+        success: true,
+        environments: [{
+          id: workEnvironmentID, account_id: 'account-whiteboard-qa', name: 'Entorno QA', description: '', color: '#10b981', icon: 'layers',
+          sort_order: 0, visibility: 'account', default_access_level: 'edit', is_default: true, version: 1, access_revision: 1,
+          created_at: now, updated_at: now, folder_count: 0, list_count: 1, task_count: 0,
+          permissions: { level: 'full', can_view: true, can_comment: true, can_edit: true, can_delete: false, can_archive: true, can_trash: false, can_restore: true, can_manage_access: true, inherited_from: 'account_admin' },
+        }],
+        next_cursor: null,
+        can_create: true,
+      })
+      return
+    }
+    if (url.pathname === '/api/account/users') {
+      await json(route, { success: true, users: [] })
+      return
+    }
+    if (url.pathname === `/api/tasks/environments/${workEnvironmentID}/folders`) {
+      await json(route, { success: true, folders: [], next_cursor: null })
+      return
+    }
+    if (url.pathname === `/api/tasks/environments/${workEnvironmentID}/lists`) {
+      await json(route, {
+        success: true,
+        lists: [{
+          id: workListID, account_id: 'account-whiteboard-qa', environment_id: workEnvironmentID, name: 'Lista QA de egress', description: '',
+          color: '#10b981', icon: 'list', sort_order: 1024, created_by: actorID, created_at: now, updated_at: now,
+          task_count: 0, open_task_count: 0, completed_task_count: 0, cancelled_task_count: 0,
+          permissions: { level: 'full', can_view: true, can_comment: true, can_edit: true, can_delete: true, can_archive: true, can_trash: true, can_restore: true, can_manage_access: true, inherited_from: 'account_admin' },
+        }],
+        next_cursor: null,
+      })
+      return
+    }
+    if (url.pathname === '/api/tasks/workflows') {
+      await json(route, { success: true, workflows: [] })
+      return
+    }
+    if (url.pathname === '/api/tasks' && request.method() === 'GET') {
+      await json(route, { success: true, tasks: [], total: 0, next_cursor: null })
+      return
+    }
+    if (url.pathname === `/api/tasks/location-views/${workViewID}` && request.method() === 'GET') {
+      await json(route, { success: true, feature_enabled: true, location_view: workLocationView(harness) })
+      return
+    }
+    if (url.pathname === '/api/tasks/location-views' && request.method() === 'GET') {
+      await json(route, { success: true, feature_enabled: true, location_views: [workLocationView(harness)], next_cursor: null })
       return
     }
     if (url.pathname === '/api/whiteboards' && request.method() === 'GET') {
@@ -513,6 +602,7 @@ async function installWhiteboardHTTP(
       const boards = requestedFolderID && requestedFolderID !== harness.boardFolderID ? [] : [board(harness)]
       await json(route, {
         success: true,
+        work_whiteboard_views_enabled: true,
         whiteboards: boards,
         next_cursor: null,
         permissions: { can_create: true, can_create_folder: true },
@@ -637,16 +727,42 @@ async function installWhiteboardHTTP(
       return
     }
     if (url.pathname === `/api/whiteboards/${boardID}/assets` && request.method() === 'GET') {
-      await json(route, { success: true, assets: [], next_cursor: null })
+      await json(route, { success: true, assets: Array.from(harness.assets.values()), next_cursor: null })
       return
     }
     if (url.pathname === `/api/whiteboards/${boardID}/assets` && request.method() === 'POST') {
-      await json(route, {
+      const multipart = request.postData() || ''
+      const multipartValue = (name: string) => multipart.match(new RegExp(`name="${name}"\\r\\n\\r\\n([^\\r\\n]+)`, 'u'))?.[1]?.trim() || ''
+      const fileID = multipartValue('file_id')
+      const kind = multipartValue('kind') || 'asset'
+      if (kind === 'asset') harness.assetUploads += 1
+      const asset = {
+        id: `asset-${fileID || kind}-${harness.assets.size + 1}`,
+        board_id: boardID,
+        file_id: fileID || (kind === 'thumbnail' ? 'thumbnail' : `file-${harness.assets.size + 1}`),
+        kind,
+        filename: `${fileID || kind}.png`,
+        content_type: 'image/png',
+        size_bytes: imageFixtureBytes.length,
+        created_at: now,
+      }
+      harness.assets.set(asset.id, asset)
+      const response: Record<string, unknown> = {
         success: true,
-        asset: { id: `thumbnail-${userID}`, board_id: boardID, file_id: 'thumbnail', kind: 'thumbnail', filename: 'thumbnail.png', content_type: 'image/png', size_bytes: 100, created_at: now },
+        asset,
         deduped: false,
-        whiteboard: board(harness),
-      }, 201)
+      }
+      if (kind === 'thumbnail') response.whiteboard = board(harness)
+      await json(route, response, 201)
+      return
+    }
+    if (url.pathname.startsWith(`/api/whiteboards/${boardID}/assets/`) && request.method() === 'GET') {
+      const assetID = decodeURIComponent(url.pathname.split('/').at(-1) || '')
+      if (!harness.assets.has(assetID)) {
+        await json(route, { success: false, error: 'Recurso no encontrado.' }, 404)
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'image/png', body: imageFixtureBytes })
       return
     }
     if (url.pathname === `/api/whiteboards/${boardID}/collab-ticket`) {
@@ -791,6 +907,26 @@ async function openEditor(page: Page) {
     throw new Error(`El editor no llegó a ready en ${page.url()}. UI: ${JSON.stringify(body)}. Errores: ${JSON.stringify(browserErrors)}`, { cause })
   }
   await expect(page.locator('canvas.interactive')).toBeVisible({ timeout: 30_000 })
+}
+
+async function openWorkEditor(page: Page) {
+  const browserErrors: string[] = []
+  page.on('pageerror', error => browserErrors.push(error.message))
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(`${baseURL}/dashboard/tasks?work_view=${workViewID}`, { waitUntil: 'domcontentloaded' })
+  try {
+    await expect(page.locator('.whiteboard-editor-shell canvas.interactive')).toBeVisible({ timeout: 30_000 })
+  } catch (cause) {
+    const body = (await page.locator('body').innerText().catch(() => '')).slice(0, 2_000)
+    throw new Error(`El editor Work no llegó a ready en ${page.url()}. UI: ${JSON.stringify(body)}. Errores: ${JSON.stringify(browserErrors)}`, { cause })
+  }
+  const title = page.getByLabel('Nombre de la pizarra')
+  if (await title.count()) {
+    await expect(title).toHaveValue('Pizarra QA autónoma')
+    await expect(title).toHaveAttribute('readonly', '')
+  } else {
+    await expect(page.getByText('Pizarra QA autónoma', { exact: true }).first()).toBeVisible()
+  }
 }
 
 async function openGuestEditor(page: Page, shareLinkID: string) {
@@ -1254,7 +1390,7 @@ async function expectPublicLibraryDisclosure(page: Page, label: string) {
   expect(disclosureContent, `${label}: el aviso inline debe explicar la validación de Clarin`).toContain('Clarin validará el archivo')
 }
 
-async function exerciseResponsiveEditor(page: Page) {
+async function exerciseResponsiveEditor(page: Page, workContext = false) {
   for (const viewport of [
     { width: 320, height: 720 },
     { width: 375, height: 812 },
@@ -1280,8 +1416,13 @@ async function exerciseResponsiveEditor(page: Page) {
     await expect(page.getByRole('menuitem', { name: /^Comentarios/u })).toHaveCount(0)
     const toolbarShare = page.locator('[data-whiteboard-action="share"]').filter({ visible: true })
     const menuShare = page.getByRole('menuitem', { name: 'Compartir', exact: true })
-    expect((await toolbarShare.count()) + (await menuShare.count()), `${suffix}: Compartir debe tener un solo dueño`).toBe(1)
-    if (viewport.width < 1_100) await expect(page.getByRole('menuitem', { name: 'Volver a Pizarras' })).toBeVisible()
+    expect(
+      (await toolbarShare.count()) + (await menuShare.count()),
+      `${suffix}: Compartir debe respetar el origen de la pizarra`,
+    ).toBe(workContext ? 0 : 1)
+    if (viewport.width < 1_100) {
+      await expect(page.getByRole('menuitem', { name: workContext ? 'Volver a las tareas' : 'Volver a Pizarras' })).toBeVisible()
+    }
     await page.keyboard.press('Escape')
     await expectInsideViewport(page, page.getByTestId('main-menu-trigger'), `${suffix}: menú`)
     await expectInsideViewport(page, page.locator('canvas.interactive'), `${suffix}: lienzo`)
@@ -1316,7 +1457,7 @@ async function exerciseResponsiveManager(page: Page) {
     await expectInsideViewport(page, page.getByRole('heading', { name: 'Mis pizarras' }), `${suffix}: título`)
     await expectInsideViewport(page, page.getByLabel('Actualizar pizarras'), `${suffix}: actualizar`)
     await expectInsideViewport(page, page.getByRole('button', { name: 'Nueva pizarra' }).first(), `${suffix}: nueva pizarra`)
-    await expectInsideViewport(page, page.getByPlaceholder('Buscar por nombre, carpeta o propietario…'), `${suffix}: buscar`)
+    await expectInsideViewport(page, page.getByPlaceholder('Buscar por nombre, ubicación o propietario…'), `${suffix}: buscar`)
     await expectInsideViewport(page, page.getByLabel('Vista de cuadrícula'), `${suffix}: cuadrícula`)
     await expect(page.locator('iframe'), `${suffix}: el gestor no debe depender de iframe`).toHaveCount(0)
     await expectNoDocumentHorizontalOverflow(page, suffix)
@@ -1481,7 +1622,7 @@ async function exerciseManagerViewsAndFolderMoves(page: Page, harness: Whiteboar
   const movesBeforeOutsideDrop = harness.boardMoves.length
   const handle = page.getByRole('button', { name: 'Arrastrar Pizarra QA autónoma a una carpeta' })
   const handleBox = await handle.boundingBox()
-  const searchBox = await page.getByPlaceholder('Buscar por nombre, carpeta o propietario…').boundingBox()
+  const searchBox = await page.getByPlaceholder('Buscar por nombre, ubicación o propietario…').boundingBox()
   expect(handleBox).not.toBeNull()
   expect(searchBox).not.toBeNull()
   await page.mouse.move(handleBox!.x + handleBox!.width / 2, handleBox!.y + handleBox!.height / 2)
@@ -1662,6 +1803,27 @@ async function importLocalSceneWithBlockedEmbed(page: Page, harness: WhiteboardR
   const exported = await exportEditableScene(page)
   expect(exported.elements.map(element => element.id)).toContain('blocked-external-embed')
   expect(exported.elements.map(element => element.id)).toContain('frame-operaciones')
+}
+
+async function insertLocalImageAsset(page: Page) {
+  const canvas = page.locator('.whiteboard-editor-shell canvas.interactive').first()
+  const box = await canvas.boundingBox()
+  expect(box).not.toBeNull()
+  await page.keyboard.press('Escape')
+  await page.keyboard.press('1')
+  const targetX = box!.x + box!.width * 0.55
+  const targetY = box!.y + box!.height * 0.55
+  await page.mouse.move(targetX, targetY)
+  await page.mouse.click(targetX, targetY)
+  await page.evaluate(({ bytes }) => {
+    const transfer = new DataTransfer()
+    transfer.items.add(new File([new Uint8Array(bytes)], 'imagen-local-egress.png', { type: 'image/png' }))
+    document.dispatchEvent(new ClipboardEvent('paste', {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: transfer,
+    }))
+  }, { bytes: Array.from(imageFixtureBytes) })
 }
 
 test('integración simulada · la barra tiene un único dueño y Comentarios permanece oculto en la matriz de navegadores', async ({ browser, browserName }, testInfo) => {
@@ -2573,7 +2735,10 @@ test('integración simulada · el checkpoint automático conserva zoom y herrami
 
 test('integración simulada · el gestor usa compacta por defecto y mueve pizarras con selector, drag y rollback', async ({ browser, browserName }) => {
   test.skip(browserName !== 'chromium', 'La interacción de puntero determinista usa Chromium.')
-  test.setTimeout(120_000)
+  // This scenario intentionally performs the complete picker, pointer, keyboard,
+  // conflict rollback and folder-configuration sequence. Keep enough headroom
+  // for a cold Next.js development compile without weakening any assertion.
+  test.setTimeout(240_000)
   const harness = new WhiteboardRealtimeHarness()
   harness.createdFolders.push(
     { id: 'folder-1', name: 'Carpeta completa', parentID: null },
@@ -2586,6 +2751,8 @@ test('integración simulada · el gestor usa compacta por defecto y mueve pizarr
   await harness.install(context, 'Ana QA')
   await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
   const page = await context.newPage()
+  page.setDefaultTimeout(15_000)
+  page.setDefaultNavigationTimeout(60_000)
 
   try {
     await page.goto(`${baseURL}/dashboard/whiteboards`, { waitUntil: 'domcontentloaded' })
@@ -3042,7 +3209,7 @@ test('integración simulada · presentación pide consentimiento, sigue el viewp
 
 test('integración simulada · Pizarras permanece same-origin y reconcilia ACK perdido, reconexión y revocación', async ({ browser, browserName }, testInfo) => {
   test.skip(browserName !== 'chromium', 'El gate determinista usa dos contextos Chromium; la matriz visual cubre los demás motores.')
-  test.setTimeout(150_000)
+  test.setTimeout(240_000)
   const harness = new WhiteboardRealtimeHarness()
   const requests = new Set<string>()
   const webSockets = new Set<string>()
@@ -3082,7 +3249,7 @@ test('integración simulada · Pizarras permanece same-origin y reconcilia ACK p
 
   try {
     await test.step('abre dos editores y conecta la sala', async () => {
-      await Promise.all([openEditor(first), openEditor(second)])
+      await Promise.all([openWorkEditor(first), openEditor(second)])
       await expect.poll(() => harness.socketCount()).toBe(2)
       await expect.poll(
         () => fontResponses.filter(response => response.status === 200).length,
@@ -3104,6 +3271,13 @@ test('integración simulada · Pizarras permanece same-origin y reconcilia ACK p
       expect(harness.elements.some(element => element.id === boundText?.id)).toBe(true)
       expect(harness.patchAttempts[0]).toMatchObject({ baseSequence: 0, acceptedSequence: 1 })
       expect(sceneConflicts).toEqual([])
+    })
+
+    await test.step('sube y guarda una imagen local desde la pizarra contextual de Work', async () => {
+      const uploadsBefore = harness.assetUploads
+      await insertLocalImageAsset(first)
+      await expect.poll(() => harness.assetUploads, { timeout: 30_000 }).toBeGreaterThan(uploadsBefore)
+      await expectEditorSaved(first)
     })
 
     await test.step('reintenta el mismo operation_id tras perder el ACK', async () => {
@@ -3221,7 +3395,7 @@ test('integración simulada · Pizarras permanece same-origin y reconcilia ACK p
     })
 
     await test.step('mantiene el editor dentro del viewport móvil y tablet', async () => {
-      await exerciseResponsiveEditor(first)
+      await exerciseResponsiveEditor(first, true)
       visibleBrandingSurfaces.push(await captureVisibleBrandingSurface(first, 'editor-autenticado'))
     })
 
@@ -3232,10 +3406,17 @@ test('integración simulada · Pizarras permanece same-origin y reconcilia ACK p
         await dialog.accept()
       })
       await drawRectangle(first, 144)
-      await first.getByLabel('Volver a Pizarras').click()
+      const directReturn = first.getByRole('button', { name: 'Volver a las tareas' })
+      if (await directReturn.isVisible().catch(() => false)) {
+        await directReturn.click()
+      } else {
+        await first.getByLabel('Más acciones de Pizarras').click()
+        await first.getByRole('menuitem', { name: 'Volver a las tareas' }).click()
+      }
       await expect.poll(() => harness.httpSceneWrites.length, { timeout: 20_000 }).toBeGreaterThan(writesBeforeNavigation)
-      await expect(first).toHaveURL(`${baseURL}/dashboard/whiteboards`, { timeout: 30_000 })
+      await expect(first).toHaveURL(`${baseURL}/dashboard/tasks`, { timeout: 30_000 })
       expect(unexpectedDialogs).toEqual([])
+      await first.goto(`${baseURL}/dashboard/whiteboards`, { waitUntil: 'domcontentloaded' })
     })
 
     await test.step('mantiene el gestor dentro del viewport móvil y tablet', async () => {

@@ -47,12 +47,18 @@ func (r *WhiteboardRepository) DuplicateBoard(ctx context.Context, input Whitebo
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockActiveWhiteboardTenantTx(ctx, tx, input.AccountID); err != nil {
+		return nil, err
+	}
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, input.AccountID, input.ActorID); err != nil {
+		return nil, err
+	}
 
 	if err := lockWhiteboardHierarchyTx(ctx, tx, input.AccountID); err != nil {
 		return nil, err
 	}
-	if _, err := requireWhiteboardAccessTx(ctx, tx, input.AccountID, input.ActorID,
-		input.SourceBoardID, domain.WhiteboardAccessView, false); err != nil {
+	workLock, err := lockWorkWhiteboardParentViewTx(ctx, tx, input.AccountID, input.SourceBoardID, true, true)
+	if err != nil {
 		return nil, err
 	}
 	var sourceArchived bool
@@ -63,6 +69,13 @@ func (r *WhiteboardRepository) DuplicateBoard(ctx context.Context, input Whitebo
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrWhiteboardNotFound
 		}
+		return nil, err
+	}
+	if _, err := requireWhiteboardAccessTx(ctx, tx, input.AccountID, input.ActorID,
+		input.SourceBoardID, domain.WhiteboardAccessView, false); err != nil {
+		return nil, err
+	}
+	if err := requireStandaloneWhiteboardMutationLock(workLock); err != nil {
 		return nil, err
 	}
 	if sourceArchived || string(sourceScene) != string(input.Scene) {

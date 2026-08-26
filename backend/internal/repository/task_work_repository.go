@@ -480,10 +480,10 @@ func lockTaskWorkflowStatuses(ctx context.Context, tx pgx.Tx, accountID, workflo
 	return nil
 }
 
-func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, listID uuid.UUID, folderID *uuid.UUID, folderProvided bool, beforeListID *uuid.UUID, orderProvided bool, workflowID *uuid.UUID, inherited *bool, description, name, color, icon *string) error {
+func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, listID uuid.UUID, folderID *uuid.UUID, folderProvided bool, beforeListID *uuid.UUID, orderProvided bool, workflowID *uuid.UUID, inherited *bool, description, name, color, icon *string) ([]uuid.UUID, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback(ctx)
 	var environmentID uuid.UUID
@@ -494,14 +494,14 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL AND deleted_at IS NULL`, accountID, listID).
 		Scan(&environmentID, &observedFolderID, &observedWorkflowID, &observedInherited, &observedDefault); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrTaskWorkNotFound
+			return nil, ErrTaskWorkNotFound
 		}
-		return err
+		return nil, err
 	}
 	finalFolderID := observedFolderID
 	if folderProvided {
 		if observedDefault && folderID != nil {
-			return ErrDefaultTaskList
+			return nil, ErrDefaultTaskList
 		}
 		finalFolderID = folderID
 	}
@@ -522,28 +522,28 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 		folderRows, err := tx.Query(ctx, `SELECT id,workflow_id,archived_at FROM task_folders
 			WHERE account_id=$1 AND environment_id=$3 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE`, accountID, folderIDs, environmentID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for folderRows.Next() {
 			var id, folderWorkflow uuid.UUID
 			var archivedAt *time.Time
 			if err := folderRows.Scan(&id, &folderWorkflow, &archivedAt); err != nil {
 				folderRows.Close()
-				return err
+				return nil, err
 			}
 			if archivedAt != nil {
 				folderRows.Close()
-				return ErrTaskWorkNotFound
+				return nil, ErrTaskWorkNotFound
 			}
 			folderWorkflows[id] = folderWorkflow
 		}
 		if err := folderRows.Err(); err != nil {
 			folderRows.Close()
-			return err
+			return nil, err
 		}
 		folderRows.Close()
 		if len(folderWorkflows) != len(folderIDs) {
-			return ErrTaskWorkNotFound
+			return nil, ErrTaskWorkNotFound
 		}
 	}
 	type lockedTaskList struct {
@@ -562,7 +562,7 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 		)
 		ORDER BY id FOR UPDATE`, accountID, listID, observedFolderID, finalFolderID, environmentID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	lockedLists := make([]lockedTaskList, 0)
 	var current *lockedTaskList
@@ -570,7 +570,7 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 		item := lockedTaskList{}
 		if err := lockedRows.Scan(&item.ID, &item.FolderID, &item.WorkflowID, &item.WorkflowInherited, &item.IsDefault, &item.SortOrder, &item.CreatedAt); err != nil {
 			lockedRows.Close()
-			return err
+			return nil, err
 		}
 		lockedLists = append(lockedLists, item)
 		if item.ID == listID {
@@ -580,11 +580,11 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 	}
 	if err := lockedRows.Err(); err != nil {
 		lockedRows.Close()
-		return err
+		return nil, err
 	}
 	lockedRows.Close()
 	if current == nil {
-		return ErrTaskWorkNotFound
+		return nil, ErrTaskWorkNotFound
 	}
 	currentFolderID := current.FolderID
 	currentWorkflowID := current.WorkflowID
@@ -592,14 +592,15 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 	isDefault := current.IsDefault
 	if !taskUUIDPointersEqual(observedFolderID, currentFolderID) || observedWorkflowID != currentWorkflowID ||
 		observedInherited != currentInherited || observedDefault != isDefault {
-		return ErrTaskVersionConflict
+		return nil, ErrTaskVersionConflict
 	}
+	locationChanged := !taskUUIDPointersEqual(currentFolderID, finalFolderID)
 	if isDefault && (finalFolderID != nil || orderProvided) {
-		return ErrDefaultTaskList
+		return nil, ErrDefaultTaskList
 	}
 	if orderProvided && beforeListID != nil {
 		if *beforeListID == listID {
-			return ErrTaskListOrderInvalid
+			return nil, ErrTaskListOrderInvalid
 		}
 		validAnchor := false
 		for _, candidate := range lockedLists {
@@ -609,7 +610,7 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 			}
 		}
 		if !validAnchor {
-			return ErrTaskListOrderInvalid
+			return nil, ErrTaskListOrderInvalid
 		}
 	}
 	var folderWorkflowID *uuid.UUID
@@ -629,25 +630,25 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 		if folderWorkflowID != nil {
 			finalWorkflowID = *folderWorkflowID
 		} else if err := tx.QueryRow(ctx, `SELECT id FROM task_workflows WHERE account_id=$1 AND environment_id=$2 AND is_default`, accountID, environmentID).Scan(&finalWorkflowID); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	var workflowValid bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM task_workflows WHERE account_id=$1 AND environment_id=$2 AND id=$3)`, accountID, environmentID, finalWorkflowID).Scan(&workflowValid); err != nil {
-		return err
+		return nil, err
 	}
 	if !workflowValid {
-		return ErrTaskWorkNotFound
+		return nil, ErrTaskWorkNotFound
 	}
 	if _, err := tx.Exec(ctx, `UPDATE task_lists SET folder_id=$3,workflow_id=$4,
 		workflow_inherited=$5,description=COALESCE($6::text,description),
 		name=COALESCE($7::text,name),color=COALESCE($8::text,color),icon=COALESCE($9::text,icon),updated_at=NOW()
 		WHERE account_id=$1 AND id=$2`, accountID, listID, finalFolderID, finalWorkflowID, finalInherited, description, name, color, icon); err != nil {
-		return err
+		return nil, err
 	}
 	if finalWorkflowID != currentWorkflowID {
 		if err := remapListTaskStatuses(ctx, tx, accountID, []uuid.UUID{listID}, finalWorkflowID); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if orderProvided {
@@ -685,16 +686,28 @@ func (r *TaskWorkRepository) UpdateListLocation(ctx context.Context, accountID, 
 		UPDATE task_lists list SET sort_order=ordered.position,updated_at=NOW()
 		FROM ordered WHERE list.account_id=$1 AND list.id=ordered.id
 			AND list.archived_at IS NULL AND list.deleted_at IS NULL`, accountID, orderedIDs, finalFolderID != nil); err != nil {
-			return err
+			return nil, err
 		}
 		if finalFolderID == nil {
 			if _, err := tx.Exec(ctx, `UPDATE task_lists SET sort_order=0,updated_at=NOW()
 				WHERE account_id=$1 AND environment_id=$2 AND is_default AND archived_at IS NULL AND deleted_at IS NULL`, accountID, environmentID); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
-	return tx.Commit(ctx)
+	affectedBoardIDs := []uuid.UUID{}
+	if locationChanged {
+		affectedBoardIDs, err = bumpTaskLocationWhiteboardAccessRevisionReturningIDsTx(
+			ctx, tx, accountID, environmentID, nil, []uuid.UUID{listID}, false,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return affectedBoardIDs, nil
 }
 
 func (r *TaskWorkRepository) ReorderFolder(ctx context.Context, accountID, folderID uuid.UUID, beforeFolderID *uuid.UUID) error {
@@ -2066,6 +2079,27 @@ func (r *TaskWorkRepository) SetCollaborators(ctx context.Context, accountID, ta
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+	// The responsible owner can also require an automatic task grant. Discover
+	// the current owner without locking the task, lock every potential grant
+	// recipient first, then verify the owner again under the task row lock.
+	var observedOwnerID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT assigned_to FROM tasks
+		WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL`, accountID, taskID).Scan(&observedOwnerID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrTaskWorkNotFound
+		}
+		return 0, err
+	}
+	preflightParticipantIDs := canonicalTaskParticipantIDs(observedOwnerID, userIDs)
+	lockedParticipantMemberships, err := lockTaskParticipantMembershipsTx(
+		ctx, tx, accountID, actorID, preflightParticipantIDs,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if !taskParticipantMembershipsLocked(lockedParticipantMemberships, preflightParticipantIDs) {
+		return 0, ErrTaskCollaboratorInvalid
+	}
 	var ownerID, rootTaskID, environmentID uuid.UUID
 	var currentVersion int64
 	if err := tx.QueryRow(ctx, `SELECT task.assigned_to,COALESCE(task.version,1),COALESCE(task.parent_task_id,task.id),list_item.environment_id
@@ -2076,6 +2110,9 @@ func (r *TaskWorkRepository) SetCollaborators(ctx context.Context, accountID, ta
 			return 0, ErrTaskWorkNotFound
 		}
 		return 0, err
+	}
+	if ownerID != observedOwnerID {
+		return 0, ErrTaskVersionConflict
 	}
 	if currentVersion != expectedVersion {
 		return 0, ErrTaskVersionConflict
@@ -2953,12 +2990,25 @@ func (r *TaskWorkRepository) SoftDeleteTaskVersioned(ctx context.Context, accoun
 	}
 	return tx.Commit(ctx)
 }
+func requireTaskRestoreDestinationAccess(access *domain.TaskEffectiveAccess) error {
+	if TaskAccessAllows(access, domain.TaskAccessEdit) {
+		return nil
+	}
+	if access == nil || !access.CanView {
+		return ErrTaskWorkNotFound
+	}
+	return ErrTaskAccessDenied
+}
+
 func (r *TaskWorkRepository) RestoreTask(ctx context.Context, accountID, actorID, taskID uuid.UUID) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return err
+	}
 	if err := lockAndRequireDeletedTaskAccessTx(ctx, tx, accountID, actorID, []uuid.UUID{taskID}, domain.TaskAccessFull); err != nil {
 		return err
 	}
@@ -3033,6 +3083,18 @@ func (r *TaskWorkRepository) RestoreTask(ctx context.Context, accountID, actorID
 	if len(lockedLists) != len(lockIDs) || lockedLists[targetListID] != nil {
 		return ErrTaskWorkNotFound
 	}
+	listChanged := targetListID != *listID
+	if listChanged {
+		destinationAccess, _, accessErr := resolveContainerAccessWith(
+			ctx, tx, accountID, actorID, targetListID, domain.TaskAccessTargetList,
+		)
+		if accessErr != nil {
+			return accessErr
+		}
+		if err := requireTaskRestoreDestinationAccess(destinationAccess); err != nil {
+			return err
+		}
+	}
 	if parentID != nil {
 		var parentListID, parentParentID *uuid.UUID
 		if err := tx.QueryRow(ctx, `SELECT list_id,parent_task_id FROM tasks
@@ -3058,7 +3120,6 @@ func (r *TaskWorkRepository) RestoreTask(ctx context.Context, accountID, actorID
 	if !taskUUIDPointersEqual(listID, lockedListID) || !taskUUIDPointersEqual(parentID, lockedParentID) {
 		return ErrTaskVersionConflict
 	}
-	listChanged := targetListID != *listID
 	if listChanged {
 		var targetWorkflowID uuid.UUID
 		if err := tx.QueryRow(ctx, `SELECT workflow_id FROM task_lists

@@ -9,6 +9,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/service"
 )
@@ -296,8 +297,25 @@ func (s *Server) handleWhiteboardPublicLibraryCallback(c *fiber.Ctx) error {
 	if _, err := service.ValidatePublicWhiteboardLibraryURL(request.LibraryURL); err != nil {
 		return whiteboardError(c, err)
 	}
+	tokenHash := service.HashWhiteboardLibraryCallbackSecret(request.Token)
+	callbackBoardID, err := s.repos.Whiteboard.WhiteboardLibraryImportCallbackBoard(c.Context(), accountID, actorID, tokenHash)
+	if err != nil {
+		return whiteboardError(c, err)
+	}
+	if _, err := s.repos.Whiteboard.RequireActiveAccess(c.Context(), accountID, actorID, callbackBoardID, domain.WhiteboardAccessView); err != nil {
+		return whiteboardError(c, err)
+	}
+	if !s.workWhiteboardViewsEnabled() {
+		contextual, originErr := s.repos.Whiteboard.IsWorkOrigin(c.Context(), accountID, callbackBoardID)
+		if originErr != nil {
+			return whiteboardError(c, originErr)
+		}
+		if contextual {
+			return whiteboardError(c, repository.ErrWhiteboardNotFound)
+		}
+	}
 	item, idempotent, err := s.repos.Whiteboard.ClaimWhiteboardLibraryImport(c.Context(), accountID, actorID,
-		service.HashWhiteboardLibraryCallbackSecret(request.Token), time.Now().UTC())
+		tokenHash, time.Now().UTC())
 	if err != nil {
 		return whiteboardError(c, err)
 	}
@@ -316,6 +334,19 @@ func (s *Server) handleWhiteboardPublicLibraryCallback(c *fiber.Ctx) error {
 		if fetchErr != nil {
 			_ = s.repos.Whiteboard.MarkWhiteboardLibraryImportFailed(c.Context(), accountID, actorID, item.ID, "item_namespace_failed")
 			return whiteboardError(c, fetchErr)
+		}
+		if !s.workWhiteboardViewsEnabled() {
+			if _, accessErr := s.repos.Whiteboard.RequireActiveAccess(c.Context(), accountID, actorID, item.BoardID, domain.WhiteboardAccessView); accessErr != nil {
+				return whiteboardError(c, accessErr)
+			}
+			contextual, originErr := s.repos.Whiteboard.IsWorkOrigin(c.Context(), accountID, item.BoardID)
+			if originErr != nil {
+				return whiteboardError(c, originErr)
+			}
+			if contextual {
+				_ = s.repos.Whiteboard.MarkWhiteboardLibraryImportFailed(c.Context(), accountID, actorID, item.ID, "work_whiteboard_views_disabled")
+				return whiteboardError(c, repository.ErrWhiteboardNotFound)
+			}
 		}
 		item, err = s.repos.Whiteboard.MarkWhiteboardLibraryImportReady(c.Context(), accountID, actorID, item.ID, sourceURL, libraryJSON)
 		if err != nil {

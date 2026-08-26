@@ -169,12 +169,26 @@ func (r *WhiteboardRepository) CreateLibrary(ctx context.Context, accountID, act
 		// are promoted by UpdateLibrary in one transaction.
 		return nil, ErrWhiteboardInvalid
 	}
-	item, err := scanWhiteboardLibrary(r.db.QueryRow(ctx, `INSERT INTO whiteboard_libraries AS library(
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockActiveWhiteboardTenantTx(ctx, tx, accountID); err != nil {
+		return nil, err
+	}
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
+	item, err := scanWhiteboardLibrary(tx.QueryRow(ctx, `INSERT INTO whiteboard_libraries AS library(
 		account_id,name,description,library_json,visibility,created_by,updated_by
 	) VALUES($1,$2,$3,$4::jsonb,$5,$6,$6) RETURNING `+whiteboardLibraryColumns,
 		accountID, input.Name, input.Description, input.LibraryJSON, input.Visibility, actorID))
 	if err != nil {
 		return nil, normalizeWhiteboardConstraintError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
 	}
 	return item, nil
 }
@@ -249,6 +263,9 @@ func (r *WhiteboardRepository) UpdateLibrary(ctx context.Context, accountID, act
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
 	state, err := requireWhiteboardLibraryMutationAccessTx(ctx, tx, accountID, actorID, libraryID, domain.WhiteboardAccessEdit)
 	if err != nil {
 		return nil, err
@@ -293,6 +310,9 @@ func (r *WhiteboardRepository) ArchiveLibrary(ctx context.Context, accountID, ac
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return err
+	}
 	state, err := requireWhiteboardLibraryMutationAccessTx(ctx, tx, accountID, actorID, libraryID, domain.WhiteboardAccessManage)
 	if err != nil {
 		return err

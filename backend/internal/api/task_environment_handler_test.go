@@ -1,6 +1,9 @@
 package api
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -132,5 +135,32 @@ func TestTaskSharedResourceCursorIsEnvironmentBound(t *testing.T) {
 	}
 	if _, err := parseTaskSharedResourceCursor("invalid", environmentID); err == nil {
 		t.Fatal("malformed shared cursor was accepted")
+	}
+}
+
+func TestEnvironmentPrivacyUpdateReauthorizesWorkWhiteboardsAfterCommit(t *testing.T) {
+	t.Parallel()
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve environment handler source")
+	}
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(currentFile), "task_environment_handler.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(raw)
+	start := strings.Index(source, "func (s *Server) handleUpdateTaskEnvironment")
+	end := strings.Index(source, "func optionalTaskOperationID")
+	if start < 0 || end <= start {
+		t.Fatal("environment update handler bounds changed")
+	}
+	body := source[start:end]
+	mutationIndex := strings.Index(body, "s.repos.TaskWork.UpdateEnvironment")
+	invalidationIndex := strings.Index(body, "s.notifyTaskLocationWhiteboardAccessChanged(accountID, boardIDs)")
+	if mutationIndex < 0 || invalidationIndex < 0 || invalidationIndex < mutationIndex {
+		t.Fatal("environment privacy mutation must reauthorize affected Work whiteboards after the repository commit")
+	}
+	if strings.Contains(body, "s.revokeTaskLocationWhiteboardSockets(accountID, boardIDs)") {
+		t.Fatal("environment ACL update must not terminal-disconnect retained viewers")
 	}
 }

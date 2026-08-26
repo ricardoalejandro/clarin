@@ -83,6 +83,16 @@ type Client struct {
 	Permissions map[string]bool
 }
 
+// AuthorityEpoch is the local registration barrier for long-lived account
+// sockets. User revocations advance only User so the originating instance can
+// disconnect the affected principal exactly. Cross-instance, account-scoped
+// control signals advance Account because they intentionally carry no user
+// identifiers.
+type AuthorityEpoch struct {
+	Account uint64
+	User    uint64
+}
+
 func (c *Client) HasPermission(permission string) bool {
 	if c == nil || permission == "" {
 		return permission == ""
@@ -122,11 +132,13 @@ type Hub struct {
 	// Clients indexed by account ID for targeted broadcasts
 	accountClients map[uuid.UUID]map[*Client]bool
 
+	// Monotonic, process-local authority barriers. They close the gap between
+	// validating a session and registering the upgraded socket.
+	accountAuthorityGenerations map[uuid.UUID]uint64
+	userAuthorityGenerations    map[uuid.UUID]uint64
+
 	// Inbound messages from clients
 	broadcast chan *Message
-
-	// Register requests from clients
-	register chan *Client
 
 	// Unregister requests from clients
 	unregister chan *Client
@@ -138,11 +150,12 @@ type Hub struct {
 // NewHub creates a new Hub instance
 func NewHub() *Hub {
 	return &Hub{
-		clients:        make(map[*Client]bool),
-		accountClients: make(map[uuid.UUID]map[*Client]bool),
-		broadcast:      make(chan *Message, 256),
-		register:       make(chan *Client),
-		unregister:     make(chan *Client),
+		clients:                     make(map[*Client]bool),
+		accountClients:              make(map[uuid.UUID]map[*Client]bool),
+		accountAuthorityGenerations: make(map[uuid.UUID]uint64),
+		userAuthorityGenerations:    make(map[uuid.UUID]uint64),
+		broadcast:                   make(chan *Message, 256),
+		unregister:                  make(chan *Client),
 	}
 }
 
@@ -150,39 +163,9 @@ func NewHub() *Hub {
 func (h *Hub) Run() {
 	for {
 		select {
-		case client := <-h.register:
-			h.mu.Lock()
-			if _, ok := h.accountClients[client.AccountID]; !ok {
-				h.accountClients[client.AccountID] = make(map[*Client]bool)
-			}
-			// Enforce connection limit per account — evict oldest if at capacity
-			for len(h.accountClients[client.AccountID]) >= maxConnectionsPerAccount {
-				for old := range h.accountClients[client.AccountID] {
-					delete(h.clients, old)
-					delete(h.accountClients[client.AccountID], old)
-					close(old.Send)
-					log.Printf("[WS Hub] Evicted client %s (account %s): connection limit %d reached", old.ID, client.AccountID, maxConnectionsPerAccount)
-					break
-				}
-			}
-			h.clients[client] = true
-			h.accountClients[client.AccountID][client] = true
-			count := len(h.accountClients[client.AccountID])
-			h.mu.Unlock()
-			log.Printf("[WS Hub] Client registered: %s (Account: %s, connections: %d/%d)", client.ID, client.AccountID, count, maxConnectionsPerAccount)
-
 		case client := <-h.unregister:
 			h.mu.Lock()
-			if _, ok := h.clients[client]; ok {
-				delete(h.clients, client)
-				if accountClients, ok := h.accountClients[client.AccountID]; ok {
-					delete(accountClients, client)
-					if len(accountClients) == 0 {
-						delete(h.accountClients, client.AccountID)
-					}
-				}
-				close(client.Send)
-			}
+			h.removeClientLocked(client)
 			h.mu.Unlock()
 			log.Printf("[WS Hub] Client unregistered: %s", client.ID)
 
@@ -190,6 +173,39 @@ func (h *Hub) Run() {
 			h.broadcastMessage(message)
 		}
 	}
+}
+
+func (h *Hub) registerClientLocked(client *Client) {
+	if client == nil {
+		return
+	}
+	if _, ok := h.accountClients[client.AccountID]; !ok {
+		h.accountClients[client.AccountID] = make(map[*Client]bool)
+	}
+	// Enforce connection limit per account — evict oldest if at capacity.
+	for len(h.accountClients[client.AccountID]) >= maxConnectionsPerAccount {
+		for old := range h.accountClients[client.AccountID] {
+			h.removeClientLocked(old)
+			log.Printf("[WS Hub] Evicted client %s (account %s): connection limit %d reached", old.ID, client.AccountID, maxConnectionsPerAccount)
+			break
+		}
+	}
+	h.clients[client] = true
+	h.accountClients[client.AccountID][client] = true
+}
+
+func (h *Hub) removeClientLocked(client *Client) {
+	if client == nil || !h.clients[client] {
+		return
+	}
+	delete(h.clients, client)
+	if accountClients, ok := h.accountClients[client.AccountID]; ok {
+		delete(accountClients, client)
+		if len(accountClients) == 0 {
+			delete(h.accountClients, client.AccountID)
+		}
+	}
+	close(client.Send)
 }
 
 // broadcastMessage sends a message to relevant clients
@@ -241,14 +257,86 @@ func (h *Hub) broadcastMessage(msg *Message) {
 	}
 }
 
-// Register adds a client to the hub
-func (h *Hub) Register(client *Client) {
-	h.register <- client
+// AuthorityEpoch snapshots the process-local account and user barriers. The
+// caller must take this snapshot before its final canonical authority read.
+func (h *Hub) AuthorityEpoch(accountID, userID uuid.UUID) AuthorityEpoch {
+	if h == nil {
+		return AuthorityEpoch{}
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return AuthorityEpoch{
+		Account: h.accountAuthorityGenerations[accountID],
+		User:    h.userAuthorityGenerations[userID],
+	}
+}
+
+// RegisterAtAuthorityEpoch atomically rejects an upgraded connection when an
+// account or user authority signal raced its canonical session validation.
+func (h *Hub) RegisterAtAuthorityEpoch(client *Client, expected AuthorityEpoch) bool {
+	if h == nil || client == nil || client.AccountID == uuid.Nil || client.UserID == uuid.Nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.accountAuthorityGenerations[client.AccountID] != expected.Account ||
+		h.userAuthorityGenerations[client.UserID] != expected.User {
+		return false
+	}
+	h.registerClientLocked(client)
+	return true
 }
 
 // Unregister removes a client from the hub
 func (h *Hub) Unregister(client *Client) {
 	h.unregister <- client
+}
+
+// DisconnectUsers immediately removes every live socket for the selected
+// users, across all accounts. Authority mutations invalidate all of a user's
+// sessions, so retaining a socket with its old account and permission snapshot
+// would otherwise keep delivering tenant events until the browser reconnects.
+func (h *Hub) DisconnectUsers(userIDs []uuid.UUID) {
+	if h == nil || len(userIDs) == 0 {
+		return
+	}
+	targets := make(map[uuid.UUID]struct{}, len(userIDs))
+	for _, userID := range userIDs {
+		if userID != uuid.Nil {
+			targets[userID] = struct{}{}
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for userID := range targets {
+		h.userAuthorityGenerations[userID]++
+	}
+	for client := range h.clients {
+		if _, disconnect := targets[client.UserID]; !disconnect {
+			continue
+		}
+		h.removeClientLocked(client)
+	}
+}
+
+// DisconnectAccountForAuthority advances the tenant-wide registration barrier
+// and removes every local account socket. It is used for account-wide changes
+// and for payload-free authority signals received from another instance.
+func (h *Hub) DisconnectAccountForAuthority(accountID uuid.UUID) {
+	if h == nil || accountID == uuid.Nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.accountAuthorityGenerations[accountID]++
+	clients := h.accountClients[accountID]
+	for client := range clients {
+		h.removeClientLocked(client)
+	}
 }
 
 // Broadcast sends a message to all clients or specific account clients

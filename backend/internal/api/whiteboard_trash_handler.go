@@ -62,10 +62,19 @@ func (s *Server) handlePurgeWhiteboard(c *fiber.Ctx) error {
 	if err := c.BodyParser(&request); err != nil || request.ConfirmationName == "" || request.OperationID == uuid.Nil {
 		return whiteboardError(c, repository.ErrWhiteboardInvalid)
 	}
+	workOrigin, err := s.repos.Whiteboard.IsWorkOrigin(c.Context(), accountID, boardID)
+	if err != nil {
+		return whiteboardError(c, err)
+	}
 	result, err := s.repos.Whiteboard.PurgeBoard(c.Context(), accountID, actorID, boardID, request.ConfirmationName, time.Now().UTC())
 	if err != nil {
 		return whiteboardError(c, err)
 	}
 	s.revokeWhiteboardBoardSockets(accountID, boardID)
+	if workOrigin {
+		s.notifyWhiteboardWorkHubRevoked(accountID)
+	} else {
+		s.notifyWhiteboardHubChanged(accountID)
+	}
 	return c.JSON(fiber.Map{"success": true, "operation_id": request.OperationID, "purged": result})
 }

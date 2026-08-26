@@ -55,3 +55,39 @@ func TestWhiteboardGuestAssetDownloadQueryRequiresCanonicalCommittedAsset(t *tes
 		}
 	}
 }
+
+func TestWhiteboardAssetMutationsUseWorkParentViewBoardLockOrder(t *testing.T) {
+	t.Parallel()
+	assetSource := readRepositorySource(t, "whiteboard_asset_repository.go")
+	attachStart := strings.Index(assetSource, "func (r *WhiteboardRepository) attachBoardAsset(")
+	attachEnd := strings.Index(assetSource, "func (r *WhiteboardRepository) GetBoardAsset(")
+	deleteStart := strings.Index(assetSource, "func (r *WhiteboardRepository) DeleteBoardAsset(")
+	if attachStart < 0 || attachEnd <= attachStart || deleteStart < 0 {
+		t.Fatal("whiteboard asset mutation bounds changed")
+	}
+	attach := assetSource[attachStart:attachEnd]
+	attachLock := strings.Index(attach, "lockActiveWhiteboardMutationRowsTx(ctx, tx, accountID, boardID)")
+	attachActorAuth := strings.Index(attach, "requireWhiteboardAccessTx(ctx, tx, accountID, *actorID")
+	attachGuestAuth := strings.Index(attach, "resolveGuestSessionWith(ctx, tx, guestTokenHash")
+	if attachLock < 0 || attachActorAuth < 0 || attachGuestAuth < 0 || attachLock > attachActorAuth || attachLock > attachGuestAuth {
+		t.Fatal("asset attach must lock Work parent/view/board before actor or guest reauthorization")
+	}
+	if !strings.Contains(attach, "if workState != nil") || !strings.Contains(attach, "ErrWhiteboardSessionUnavailable") {
+		t.Fatal("guest asset attach could regain authority over a Work-origin board")
+	}
+
+	delete := assetSource[deleteStart:]
+	deleteLock := strings.Index(delete, "lockActiveWhiteboardMutationRowsTx(ctx, tx, accountID, boardID)")
+	deleteScene := strings.Index(delete, "SELECT scene_json FROM whiteboards")
+	deleteAuth := strings.Index(delete, "requireWhiteboardAccessTx(ctx, tx, accountID, actorID")
+	if deleteLock < 0 || deleteScene < 0 || deleteAuth < 0 || !(deleteLock < deleteScene && deleteScene < deleteAuth) {
+		t.Fatal("asset/thumbnail delete must lock Work parent/view/board before reading scene and reauthorizing")
+	}
+
+	lockSource := readRepositorySource(t, "whiteboard_work_lock_repository.go")
+	parentIndex := strings.Index(lockSource, "lockWorkWhiteboardParentViewTx(ctx, tx, accountID, boardID, false, false)")
+	boardIndex := strings.Index(lockSource, "SELECT id FROM whiteboards")
+	if parentIndex < 0 || boardIndex < 0 || parentIndex > boardIndex {
+		t.Fatal("common active mutation lock must preserve parent -> view -> board order")
+	}
+}

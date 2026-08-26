@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type ReactNode } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Activity,
@@ -97,6 +97,10 @@ interface Props {
   onCreateSubtask: (task: Task, draft?: TaskQuickSubtaskDraft) => void
   onChanged: (task?: Task, operationID?: string, hierarchyCounts?: TaskHierarchyCounts) => void
   onDeleted: (taskId: string, version?: number, operationID?: string, hierarchyCounts?: TaskHierarchyCounts) => boolean
+}
+
+export interface TaskDetailDrawerHandle {
+  requestClose: () => Promise<boolean>
 }
 
 type DetailTab = 'details' | 'activity'
@@ -196,7 +200,7 @@ function taskWorkflowStatuses(task: Task, lists: TaskList[], workflows: TaskWork
   return task.status_detail ? [task.status_detail] : []
 }
 
-export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, inFlowDocked = false, historicalReadOnly = false, allTasks, users, lists, folders, workflows, subtaskDraftResetToken = 0, storageScope, onClose, onEdit, onOpenTask, onCreateSubtask, onChanged, onDeleted }: Props) {
+const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, inFlowDocked = false, historicalReadOnly = false, allTasks, users, lists, folders, workflows, subtaskDraftResetToken = 0, storageScope, onClose, onEdit, onOpenTask, onCreateSubtask, onChanged, onDeleted }, forwardedRef) {
   const [task, setTask] = useState<Task | null>(null)
   const [children, setChildren] = useState<Task[]>([])
   const [comments, setComments] = useState<TaskComment[]>([])
@@ -1159,17 +1163,19 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
     const requestedTaskId = taskIdRef.current
     if (!requestedTaskId || !descriptionAutosaveRef.current?.hasUnsaved(requestedTaskId)) {
       onClose()
-      return
+      return true
     }
     if (requestedTaskId) {
       descriptionComposingRef.current = false
       descriptionAutosaveRef.current?.setComposing(requestedTaskId, false)
       const saved = await descriptionAutosaveRef.current?.flush(requestedTaskId)
-      if (saved === false) return
+      if (saved === false) return false
     }
     onClose()
+    return true
   }, [onClose])
   requestCloseRef.current = () => { void requestClose() }
+  useImperativeHandle(forwardedRef, () => ({ requestClose }), [requestClose])
   const saveDates = async (startValue = startDraft, dueValue = dueDraft, isAllDay = allDayDraft) => {
     editingDatesRef.current = false
     if (!task) return
@@ -1787,4 +1793,6 @@ export default function TaskDetailDrawer({ taskId, availableWorkspaceWidth = 0, 
     </div>,
     document.body,
   )
-}
+})
+
+export default TaskDetailDrawer

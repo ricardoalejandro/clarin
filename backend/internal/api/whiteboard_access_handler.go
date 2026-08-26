@@ -68,5 +68,10 @@ func (s *Server) handlePutWhiteboardAccess(c *fiber.Ctx) error {
 			}
 		}
 	}
+	// Retained viewers may have gained or lost edit/manage without losing view.
+	// Advance them locally and publish a payload-free Redis signal so every
+	// backend revalidates its own sockets against the committed policy.
+	s.notifyWhiteboardAccessChanged(accountID, boardID)
+	s.notifyWhiteboardHubChanged(accountID)
 	return c.JSON(fiber.Map{"success": true, "access": policy, "operation_id": operationID})
 }

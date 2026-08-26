@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/repository"
 	whiteboardcore "github.com/naperu/clarin/internal/whiteboard"
 )
 
@@ -22,6 +24,114 @@ type whiteboardPresentation struct {
 	ID        uuid.UUID                    `json:"presentation_id"`
 	Actor     whiteboardcore.RealtimeActor `json:"actor"`
 	StartedAt time.Time                    `json:"started_at"`
+}
+
+func runWhiteboardPresentationStartAtEpoch(
+	authorize func() error,
+	acquire func() (*whiteboardPresentation, bool, error),
+	fanout func(*whiteboardPresentation) error,
+	acknowledge func(*whiteboardPresentation, bool),
+) (*whiteboardPresentation, bool, error) {
+	if err := authorize(); err != nil {
+		return nil, false, err
+	}
+	presentation, idempotent, err := acquire()
+	if err != nil {
+		return nil, false, err
+	}
+	if !idempotent {
+		if err := fanout(presentation); err != nil {
+			return presentation, false, err
+		}
+	}
+	acknowledge(presentation, idempotent)
+	return presentation, idempotent, nil
+}
+
+// startAuthorizedWhiteboardPresentation serializes the edit check, Redis
+// lease, local/Redis started fanout and ACK under the canonical board epoch.
+// An ACL downgrade can therefore win either before the lease exists (no lease
+// and no ACK) or after the complete start is visible (normal stopped release),
+// but never in the middle.
+func (s *Server) startAuthorizedWhiteboardPresentation(
+	ctx context.Context,
+	principal *whiteboardRealtimePrincipal,
+	client *whiteboardcore.RealtimeClient,
+	operationID uuid.UUID,
+) (*whiteboardPresentation, bool, error) {
+	if principal == nil || client == nil || operationID == uuid.Nil {
+		return nil, false, whiteboardRealtimeAuthorizationFailure(
+			domain.WhiteboardAccessEdit, repository.ErrWhiteboardForbidden,
+		)
+	}
+	var presentation *whiteboardPresentation
+	var idempotent bool
+	var presentationsToRelease []*whiteboardcore.RealtimeClient
+	err := s.withWhiteboardFanoutEpoch(ctx, principal.AccountID, principal.BoardID, func(revision int64) error {
+		var runErr error
+		presentation, idempotent, runErr = runWhiteboardPresentationStartAtEpoch(
+			func() error {
+				access, accessErr := s.resolveWhiteboardRealtimeAccess(ctx, principal, domain.WhiteboardAccessEdit)
+				if accessErr != nil {
+					return accessErr
+				}
+				registered, updated := s.whiteboardRooms.UpdateClientAuthorization(
+					principal.AccountID, principal.BoardID, client.ID, revision, access,
+				)
+				if !updated || registered != client || !client.IsActiveAtRevision(revision) ||
+					!whiteboardRealtimeAccessCanEdit(client.ActorSnapshot().Access) {
+					return whiteboardRealtimeAuthorizationFailure(
+						domain.WhiteboardAccessEdit, repository.ErrWhiteboardForbidden,
+					)
+				}
+				releases, reconcileErr := s.reconcileWhiteboardFanoutAuthorizationAtRevision(
+					ctx, principal.AccountID, principal.BoardID, revision, false,
+				)
+				presentationsToRelease = append(presentationsToRelease, releases...)
+				return reconcileErr
+			},
+			func() (*whiteboardPresentation, bool, error) {
+				return s.startWhiteboardPresentation(ctx, client, operationID)
+			},
+			func(started *whiteboardPresentation) error {
+				message := whiteboardRealtimeBroadcastMessage(whiteboardcore.OutgoingMessage{
+					Event: whiteboardcore.EventPresentationChanged,
+					Actor: client.ActorSnapshot(),
+					Data:  map[string]any{"presentation": started, "status": "started"},
+				})
+				if !s.enqueueWhiteboardFanoutAtRevision(
+					principal.AccountID, principal.BoardID, message, uuid.Nil, client, revision,
+				) {
+					return whiteboardRealtimeAuthorizationFailure(
+						domain.WhiteboardAccessEdit, repository.ErrWhiteboardForbidden,
+					)
+				}
+				s.publishWhiteboardFanout(principal.AccountID, principal.BoardID, message, false, revision)
+				return nil
+			},
+			func(started *whiteboardPresentation, retry bool) {
+				s.queueWhiteboardMessage(client, whiteboardcore.OutgoingMessage{
+					Event: whiteboardcore.EventAck, OperationID: &operationID,
+					Data: map[string]any{
+						"presentation": started,
+						"idempotent":   retry,
+					},
+				})
+			},
+		)
+		return runErr
+	})
+	// These stopped broadcasts require their own epoch and must occur only after
+	// the start epoch releases its board-row lock.
+	if err != nil && presentation != nil && !idempotent {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = s.stopWhiteboardPresentation(cleanupCtx, client, presentation.ID, "start_cancelled")
+		cleanupCancel()
+	}
+	for _, presenter := range presentationsToRelease {
+		s.releaseWhiteboardPresentation(presenter, "permission_revoked")
+	}
+	return presentation, idempotent, err
 }
 
 func whiteboardPresentationIndexKey(accountID, boardID uuid.UUID) string {
@@ -79,13 +189,13 @@ func (s *Server) startWhiteboardPresentation(ctx context.Context, client *whiteb
 		return nil, false, err
 	}
 	if active != nil {
-		if active.ID == presentationID && active.Actor.ID == client.Actor.ID {
+		if active.ID == presentationID && active.Actor.ID == client.ActorSnapshot().ID {
 			client.SetPresentation(presentationID)
 			return active, true, nil
 		}
 		return nil, false, errWhiteboardPresentationOccupied
 	}
-	presentation := &whiteboardPresentation{ID: presentationID, Actor: client.Actor, StartedAt: time.Now().UTC()}
+	presentation := &whiteboardPresentation{ID: presentationID, Actor: client.ActorSnapshot(), StartedAt: time.Now().UTC()}
 	payload, err := json.Marshal(presentation)
 	if err != nil {
 		return nil, false, errWhiteboardPresentationUnavailable
@@ -116,7 +226,7 @@ func (s *Server) stopWhiteboardPresentation(ctx context.Context, client *whitebo
 		client.ClearPresentation(presentationID)
 		return nil
 	}
-	if active.ID != presentationID || active.Actor.ID != client.Actor.ID {
+	if active.ID != presentationID || active.Actor.ID != client.ActorSnapshot().ID {
 		return errWhiteboardPresentationNotOwned
 	}
 	if err := s.cache.RemoveExpiringMember(ctx,
@@ -127,7 +237,7 @@ func (s *Server) stopWhiteboardPresentation(ctx context.Context, client *whitebo
 	client.ClearPresentation(presentationID)
 	s.broadcastWhiteboardMessage(client.AccountID, client.BoardID, whiteboardcore.OutgoingMessage{
 		Event: whiteboardcore.EventPresentationChanged,
-		Actor: client.Actor,
+		Actor: client.ActorSnapshot(),
 		Data:  map[string]any{"presentation_id": presentationID, "status": "stopped", "reason": reason},
 	}, uuid.Nil)
 	return nil
@@ -167,7 +277,7 @@ func (s *Server) refreshWhiteboardPresentation(ctx context.Context, client *whit
 	if client.ClearPresentation(presentationID) {
 		s.broadcastWhiteboardMessage(client.AccountID, client.BoardID, whiteboardcore.OutgoingMessage{
 			Event: whiteboardcore.EventPresentationChanged,
-			Actor: client.Actor,
+			Actor: client.ActorSnapshot(),
 			Data:  map[string]any{"presentation_id": presentationID, "status": "stopped", "reason": "expired"},
 		}, uuid.Nil)
 	}

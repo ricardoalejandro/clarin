@@ -9,9 +9,84 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/naperu/clarin/internal/domain"
 	whiteboardcore "github.com/naperu/clarin/internal/whiteboard"
+	"github.com/naperu/clarin/internal/ws"
 	clarincache "github.com/naperu/clarin/pkg/cache"
 )
+
+func TestWhiteboardHubControlAcrossInstances(t *testing.T) {
+	if os.Getenv("CLARIN_RUN_WHITEBOARD_REDIS_INTEGRATION") != "1" {
+		t.Skip("set CLARIN_RUN_WHITEBOARD_REDIS_INTEGRATION=1 with a disposable REDIS_URL")
+	}
+	redisURL := os.Getenv("REDIS_URL")
+	if redisURL == "" {
+		t.Fatal("REDIS_URL is required for the whiteboard Redis integration test")
+	}
+	cacheA, err := clarincache.New(redisURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheB, err := clarincache.New(redisURL)
+	if err != nil {
+		_ = cacheA.Close()
+		t.Fatal(err)
+	}
+	serverA := &Server{cache: cacheA, whiteboardInstanceID: uuid.New()}
+	serverB := &Server{cache: cacheB, hub: ws.NewHub(), whiteboardRooms: whiteboardcore.NewRoomHub(), whiteboardInstanceID: uuid.New()}
+	go serverB.hub.Run()
+	serverB.startWhiteboardFanout()
+	t.Cleanup(func() {
+		if serverB.whiteboardFanoutCancel != nil {
+			serverB.whiteboardFanoutCancel()
+		}
+		_ = cacheA.Close()
+		_ = cacheB.Close()
+	})
+
+	accountID, otherAccountID := uuid.New(), uuid.New()
+	target := &ws.Client{ID: "Hub target", AccountID: accountID, UserID: uuid.New(), Send: make(chan []byte, 2), Permissions: map[string]bool{domain.PermWhiteboards: true}}
+	withoutPermission := &ws.Client{ID: "Hub denied", AccountID: accountID, UserID: uuid.New(), Send: make(chan []byte, 2), Permissions: map[string]bool{}}
+	other := &ws.Client{ID: "Hub other account", AccountID: otherAccountID, UserID: uuid.New(), Send: make(chan []byte, 2), Permissions: map[string]bool{domain.PermWhiteboards: true}}
+	for _, client := range []*ws.Client{target, withoutPermission, other} {
+		if !serverB.hub.RegisterAtAuthorityEpoch(client, serverB.hub.AuthorityEpoch(client.AccountID, client.UserID)) {
+			t.Fatalf("could not register %s", client.ID)
+		}
+	}
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(75 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		serverA.notifyWhiteboardWorkHubRevoked(accountID)
+		select {
+		case raw := <-target.Send:
+			var message ws.Message
+			if err := json.Unmarshal(raw, &message); err != nil {
+				t.Fatal(err)
+			}
+			payload, ok := message.Data.(map[string]any)
+			if message.Event != ws.EventTaskUpdate || !ok || payload["action"] != whiteboardWorkHubRevokedAction {
+				t.Fatalf("unexpected remote Hub control: %#v", message)
+			}
+			select {
+			case leaked := <-withoutPermission.Send:
+				t.Fatalf("Hub control crossed module permission: %s", leaked)
+			default:
+			}
+			select {
+			case leaked := <-other.Send:
+				t.Fatalf("Hub control crossed account boundary: %s", leaked)
+			default:
+			}
+			return
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("timed out waiting for remote Hub control")
+		}
+	}
+}
 
 // This opt-in integration test uses a disposable Redis instance to prove that
 // fan-out and immediate revocation work across two backend instances without
@@ -110,20 +185,106 @@ guestSceneQueueDrained:
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	assertEventuallyRedisMessage(t, 5*time.Second, target.Send, func() {
+	assertEventuallyWhiteboardClientClosed(t, 5*time.Second, target, func() {
 		serverA.revokeWhiteboardUserSockets(accountID, boardID, userID)
-	}, func(message whiteboardcore.OutgoingMessage) bool {
-		return message.Event == whiteboardcore.EventAccessRevoked && message.Code == "access_revoked"
 	})
-	select {
-	case <-target.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("remote access revocation did not close the target client")
+	var terminal whiteboardcore.OutgoingMessage
+	if err := json.Unmarshal(target.TakeTerminal(), &terminal); err != nil {
+		t.Fatal(err)
+	}
+	if terminal.Event != whiteboardcore.EventAccessRevoked || terminal.Code != "access_revoked" {
+		t.Fatalf("unexpected remote terminal: %#v", terminal)
 	}
 	select {
 	case <-otherAccount.Done():
 		t.Fatal("remote access revocation crossed the account boundary")
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestGeneralWebSocketAuthoritySignalAcrossInstances(t *testing.T) {
+	if os.Getenv("CLARIN_RUN_WHITEBOARD_REDIS_INTEGRATION") != "1" {
+		t.Skip("set CLARIN_RUN_WHITEBOARD_REDIS_INTEGRATION=1 with a disposable REDIS_URL")
+	}
+	redisURL := os.Getenv("REDIS_URL")
+	if redisURL == "" {
+		t.Fatal("REDIS_URL is required for the realtime Redis integration test")
+	}
+
+	cacheA, err := clarincache.New(redisURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheB, err := clarincache.New(redisURL)
+	if err != nil {
+		_ = cacheA.Close()
+		t.Fatal(err)
+	}
+	serverA := &Server{cache: cacheA, hub: ws.NewHub(), whiteboardRooms: whiteboardcore.NewRoomHub(), whiteboardInstanceID: uuid.New()}
+	serverB := &Server{cache: cacheB, hub: ws.NewHub(), whiteboardRooms: whiteboardcore.NewRoomHub(), whiteboardInstanceID: uuid.New()}
+	serverA.startWhiteboardFanout()
+	serverB.startWhiteboardFanout()
+	t.Cleanup(func() {
+		if serverA.whiteboardFanoutCancel != nil {
+			serverA.whiteboardFanoutCancel()
+		}
+		if serverB.whiteboardFanoutCancel != nil {
+			serverB.whiteboardFanoutCancel()
+		}
+		_ = cacheA.Close()
+		_ = cacheB.Close()
+	})
+
+	accountID, otherAccountID := uuid.New(), uuid.New()
+	target := &ws.Client{ID: "target", AccountID: accountID, UserID: uuid.New(), Send: make(chan []byte, 1)}
+	other := &ws.Client{ID: "other", AccountID: otherAccountID, UserID: uuid.New(), Send: make(chan []byte, 1)}
+	if !serverB.hub.RegisterAtAuthorityEpoch(target, serverB.hub.AuthorityEpoch(target.AccountID, target.UserID)) ||
+		!serverB.hub.RegisterAtAuthorityEpoch(other, serverB.hub.AuthorityEpoch(other.AccountID, other.UserID)) {
+		t.Fatal("could not register remote general WebSocket clients")
+	}
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(75 * time.Millisecond)
+	defer ticker.Stop()
+	for serverB.hub.GetAccountClientCount(accountID) != 0 {
+		serverA.publishGeneralRealtimeUserAuthorityChanged(accountID)
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("timed out waiting for remote general WebSocket authority closure")
+		}
+	}
+	if got := serverB.hub.GetAccountClientCount(otherAccountID); got != 1 {
+		t.Fatalf("cross-instance authority signal crossed tenant boundary: %d sockets remain", got)
+	}
+	select {
+	case <-other.Send:
+		t.Fatal("other-account general socket was closed")
+	default:
+	}
+}
+
+func assertEventuallyWhiteboardClientClosed(
+	t *testing.T,
+	timeout time.Duration,
+	client *whiteboardcore.RealtimeClient,
+	publish func(),
+) {
+	t.Helper()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(75 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		publish()
+		select {
+		case <-client.Done():
+			return
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("timed out waiting for remote client closure")
+		}
 	}
 }
 

@@ -35,7 +35,14 @@ func (r *WhiteboardRepository) UpdateBoard(ctx context.Context, accountID, actor
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
 	if err := lockWhiteboardHierarchyTx(ctx, tx, accountID); err != nil {
+		return nil, err
+	}
+	workLock, err := lockWorkWhiteboardParentViewTx(ctx, tx, accountID, boardID, true, true)
+	if err != nil {
 		return nil, err
 	}
 	var currentVersion int64
@@ -48,6 +55,16 @@ func (r *WhiteboardRepository) UpdateBoard(ctx context.Context, accountID, actor
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrWhiteboardNotFound
 		}
+		return nil, err
+	}
+	if _, err := requireWhiteboardAccessTx(ctx, tx, accountID, actorID, boardID, domain.WhiteboardAccessView, false); err != nil {
+		return nil, err
+	}
+	if err := requireStandaloneWhiteboardMutationLock(workLock); err != nil {
+		// Metadata and naming are structural state for a contextual view. Only
+		// PATCH /tasks/location-views/:id may change them because it enforces
+		// Work Administrar, the location-view version and operation idempotency.
+		// Origin is intentionally inspected only after canonical Ver access.
 		return nil, err
 	}
 	if _, err := requireWhiteboardAccessTx(ctx, tx, accountID, actorID, boardID, domain.WhiteboardAccessEdit, false); err != nil {
@@ -106,7 +123,14 @@ func (r *WhiteboardRepository) ArchiveBoard(ctx context.Context, accountID, acto
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return err
+	}
 	if err := lockWhiteboardHierarchyTx(ctx, tx, accountID); err != nil {
+		return err
+	}
+	workLock, err := lockWorkWhiteboardParentViewTx(ctx, tx, accountID, boardID, true, true)
+	if err != nil {
 		return err
 	}
 	var version int64
@@ -121,14 +145,28 @@ func (r *WhiteboardRepository) ArchiveBoard(ctx context.Context, accountID, acto
 	if _, err := requireWhiteboardAccessTx(ctx, tx, accountID, actorID, boardID, domain.WhiteboardAccessManage, false); err != nil {
 		return err
 	}
+	contextual := workLock != nil
 	if err := checkWhiteboardExpectedVersion(expectedVersion, version); err != nil {
 		return err
 	}
+	if contextual {
+		if _, err := tx.Exec(ctx, `UPDATE task_location_views location_view SET
+			deleted_at=COALESCE(location_view.deleted_at,NOW()),deleted_by=COALESCE(location_view.deleted_by,$3),
+			version=CASE WHEN location_view.deleted_at IS NULL THEN location_view.version+1 ELSE location_view.version END,
+			access_revision=CASE WHEN location_view.deleted_at IS NULL THEN location_view.access_revision+1 ELSE location_view.access_revision END,
+			updated_at=CASE WHEN location_view.deleted_at IS NULL THEN NOW() ELSE location_view.updated_at END
+			FROM task_location_whiteboard_views binding
+			WHERE binding.account_id=$1 AND binding.whiteboard_id=$2
+			AND location_view.account_id=binding.account_id AND location_view.id=binding.task_view_id`, accountID, boardID, actorID); err != nil {
+			return err
+		}
+	}
 	if archivedAt != nil {
-		return nil
+		return tx.Commit(ctx)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE whiteboards SET archived_at=NOW(),updated_by=$3,
-		version=version+1,updated_at=NOW() WHERE account_id=$1 AND id=$2`, accountID, boardID, actorID); err != nil {
+		version=version+1,access_revision=access_revision+1,updated_at=NOW()
+		WHERE account_id=$1 AND id=$2`, accountID, boardID, actorID); err != nil {
 		return err
 	}
 	details, _ := json.Marshal(map[string]any{"previous_version": version})
@@ -150,7 +188,14 @@ func (r *WhiteboardRepository) RestoreBoard(ctx context.Context, accountID, acto
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
 	if err := lockWhiteboardHierarchyTx(ctx, tx, accountID); err != nil {
+		return nil, err
+	}
+	workLock, err := lockWorkWhiteboardParentViewTx(ctx, tx, accountID, boardID, true, true)
+	if err != nil {
 		return nil, err
 	}
 	var folderID *uuid.UUID
@@ -163,11 +208,27 @@ func (r *WhiteboardRepository) RestoreBoard(ctx context.Context, accountID, acto
 		}
 		return nil, err
 	}
-	if _, err := requireWhiteboardAccessTx(ctx, tx, accountID, actorID, boardID, domain.WhiteboardAccessManage, false); err != nil {
+	contextual := workLock != nil
+	if contextual {
+		if _, _, err := requireWorkWhiteboardLifecycleAccessTx(ctx, tx, accountID, actorID, boardID, domain.WhiteboardAccessManage); err != nil {
+			return nil, err
+		}
+	} else if _, err := requireWhiteboardAccessTx(ctx, tx, accountID, actorID, boardID, domain.WhiteboardAccessManage, false); err != nil {
 		return nil, err
 	}
 	if err := checkWhiteboardExpectedVersion(expectedVersion, currentVersion); err != nil {
 		return nil, err
+	}
+	if contextual {
+		if _, err := tx.Exec(ctx, `UPDATE task_location_views location_view SET
+			deleted_at=NULL,deleted_by=NULL,version=location_view.version+1,
+			access_revision=location_view.access_revision+1,updated_at=NOW()
+			FROM task_location_whiteboard_views binding
+			WHERE binding.account_id=$1 AND binding.whiteboard_id=$2
+			AND location_view.account_id=binding.account_id AND location_view.id=binding.task_view_id
+			AND location_view.deleted_at IS NOT NULL`, accountID, boardID); err != nil {
+			return nil, err
+		}
 	}
 	if archivedAt == nil {
 		if err := tx.Commit(ctx); err != nil {
@@ -186,7 +247,8 @@ func (r *WhiteboardRepository) RestoreBoard(ctx context.Context, accountID, acto
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE whiteboards SET archived_at=NULL,updated_by=$3,
-		version=version+1,updated_at=NOW() WHERE account_id=$1 AND id=$2`, accountID, boardID, actorID); err != nil {
+		version=version+1,access_revision=access_revision+1,updated_at=NOW()
+		WHERE account_id=$1 AND id=$2`, accountID, boardID, actorID); err != nil {
 		return nil, err
 	}
 	details, _ := json.Marshal(map[string]any{"previous_version": currentVersion})

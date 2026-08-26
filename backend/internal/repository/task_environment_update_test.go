@@ -36,3 +36,23 @@ func TestTaskEnvironmentWriteErrorMapsOnlyActiveNameConflict(t *testing.T) {
 		t.Fatal("unrelated PostgreSQL error was unexpectedly rewritten")
 	}
 }
+
+func TestEnvironmentPrivacyUpdateInvalidatesContextualBoardsInsideTransaction(t *testing.T) {
+	t.Parallel()
+	source := readRepositorySource(t, "task_environment_repository.go")
+	start := strings.Index(source, "func (r *TaskWorkRepository) UpdateEnvironment")
+	end := strings.Index(source, "func (r *TaskWorkRepository) ArchiveEnvironment")
+	if start < 0 || end <= start {
+		t.Fatal("environment update function bounds changed")
+	}
+	body := source[start:end]
+	privacyIndex := strings.Index(body, "if privacyChanged {")
+	bumpIndex := strings.Index(body, "bumpTaskLocationWhiteboardAccessRevisionReturningIDsTx(")
+	commitIndex := strings.LastIndex(body, "tx.Commit(ctx)")
+	if privacyIndex < 0 || bumpIndex < 0 || commitIndex < 0 || !(privacyIndex < bumpIndex && bumpIndex < commitIndex) {
+		t.Fatal("privacy update must bump contextual board revisions before committing")
+	}
+	if !strings.Contains(body, "return boardIDs, nil") {
+		t.Fatal("environment update no longer returns the exact committed board invalidation set")
+	}
+}

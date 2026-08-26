@@ -18,7 +18,7 @@ import (
 )
 
 var (
-	cfSlugRegex  = regexp.MustCompile(`[^a-z0-9_]+`)
+	cfSlugRegex       = regexp.MustCompile(`[^a-z0-9_]+`)
 	cfMultiUnderscore = regexp.MustCompile(`_{2,}`)
 )
 
@@ -87,11 +87,11 @@ func (s *Server) handleCreateCustomFieldDefinition(c *fiber.Ctx) error {
 	}
 
 	var req struct {
-		Name         string           `json:"name"`
-		FieldType    string           `json:"field_type"`
-		Config       json.RawMessage  `json:"config"`
-		IsRequired   bool             `json:"is_required"`
-		DefaultValue *string          `json:"default_value"`
+		Name         string          `json:"name"`
+		FieldType    string          `json:"field_type"`
+		Config       json.RawMessage `json:"config"`
+		IsRequired   bool            `json:"is_required"`
+		DefaultValue *string         `json:"default_value"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Datos inválidos"})
@@ -213,11 +213,11 @@ func (s *Server) handleUpdateCustomFieldDefinition(c *fiber.Ctx) error {
 	}
 
 	var req struct {
-		Name         *string          `json:"name"`
-		FieldType    *string          `json:"field_type"`
-		Config       json.RawMessage  `json:"config"`
-		IsRequired   *bool            `json:"is_required"`
-		DefaultValue *string          `json:"default_value"`
+		Name         *string         `json:"name"`
+		FieldType    *string         `json:"field_type"`
+		Config       json.RawMessage `json:"config"`
+		IsRequired   *bool           `json:"is_required"`
+		DefaultValue *string         `json:"default_value"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Datos inválidos"})
@@ -555,7 +555,9 @@ func (s *Server) mapValueToColumns(def *domain.CustomFieldDefinition, value inte
 		}
 		// Check max_length from config
 		if def.Config != nil {
-			var cfg struct{ MaxLength int `json:"max_length"` }
+			var cfg struct {
+				MaxLength int `json:"max_length"`
+			}
 			if err := json.Unmarshal(def.Config, &cfg); err == nil && cfg.MaxLength > 0 && len(str) > cfg.MaxLength {
 				return fmt.Errorf("El texto excede el largo máximo de %d caracteres", cfg.MaxLength)
 			}
@@ -603,7 +605,9 @@ func (s *Server) mapValueToColumns(def *domain.CustomFieldDefinition, value inte
 		// Validate against options
 		if def.Config != nil && str != "" {
 			var cfg struct {
-				Options []struct{ Value string `json:"value"` } `json:"options"`
+				Options []struct {
+					Value string `json:"value"`
+				} `json:"options"`
 			}
 			if err := json.Unmarshal(def.Config, &cfg); err == nil && len(cfg.Options) > 0 {
 				valid := false
@@ -685,7 +689,9 @@ func (s *Server) mapValueToColumns(def *domain.CustomFieldDefinition, value inte
 		// Validate against options
 		if def.Config != nil && len(strs) > 0 {
 			var cfg struct {
-				Options []struct{ Value string `json:"value"` } `json:"options"`
+				Options []struct {
+					Value string `json:"value"`
+				} `json:"options"`
 			}
 			if err := json.Unmarshal(def.Config, &cfg); err == nil && len(cfg.Options) > 0 {
 				validOpts := make(map[string]bool)
@@ -754,7 +760,7 @@ func isValidEmail(email string) bool {
 }
 
 func isAdmin(claims *service.JWTClaims) bool {
-	return claims.IsAdmin || claims.IsSuperAdmin || claims.Role == domain.RoleAdmin || claims.Role == domain.RoleSuperAdmin
+	return domain.HasAccountAdminAuthority(claims.Role, claims.IsSuperAdmin)
 }
 
 func (s *Server) broadcastContactUpdate(accountID, contactID uuid.UUID) {

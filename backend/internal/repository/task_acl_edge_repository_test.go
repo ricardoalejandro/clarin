@@ -1,8 +1,11 @@
 package repository
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/naperu/clarin/internal/domain"
 )
 
 func TestSavedViewScopePredicateRequiresActorAccessInEveryHierarchyScope(t *testing.T) {
@@ -120,5 +123,107 @@ func TestTrashMutationsKeepACLAndAdminChecksInsideTransaction(t *testing.T) {
 		if !strings.Contains(workSource, invariant) {
 			t.Fatalf("task trash/restore lost transactional invariant %q", invariant)
 		}
+	}
+}
+
+func TestRestoreTaskLocksActorAndReauthorizesMovedDestination(t *testing.T) {
+	t.Parallel()
+	source := readRepositorySource(t, "task_work_repository.go")
+	start := strings.Index(source, "func (r *TaskWorkRepository) RestoreTask(")
+	if start < 0 {
+		t.Fatal("RestoreTask source start changed")
+	}
+	end := strings.Index(source[start:], "func (r *TaskWorkRepository) Summary(")
+	if end <= 0 {
+		t.Fatal("RestoreTask source bounds changed")
+	}
+	body := source[start : start+end]
+	actorLock := strings.Index(body, "lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil)")
+	sourceAccess := strings.Index(body, "lockAndRequireDeletedTaskAccessTx(ctx, tx, accountID, actorID")
+	listLock := strings.Index(body, "ORDER BY id FOR UPDATE")
+	destinationAccess := strings.Index(body, "resolveContainerAccessWith(")
+	editGate := strings.Index(body, "requireTaskRestoreDestinationAccess(destinationAccess)")
+	write := strings.Index(body, "UPDATE tasks task SET deleted_at=NULL")
+	if actorLock < 0 || sourceAccess <= actorLock || listLock <= sourceAccess || destinationAccess <= listLock ||
+		editGate <= destinationAccess || write <= editGate {
+		t.Fatalf("RestoreTask lost actor -> source -> destination lock/revalidation -> write order")
+	}
+}
+
+func TestRestoreTaskDestinationRevalidationSerializesEnvironmentRevocation(t *testing.T) {
+	t.Parallel()
+	restoreSource := readRepositorySource(t, "task_work_repository.go")
+	restoreStart := strings.Index(restoreSource, "func (r *TaskWorkRepository) RestoreTask(")
+	if restoreStart < 0 {
+		t.Fatal("RestoreTask source start changed")
+	}
+	restoreEnd := strings.Index(restoreSource[restoreStart:], "func (r *TaskWorkRepository) Summary(")
+	if restoreEnd <= 0 {
+		t.Fatal("RestoreTask source bounds changed")
+	}
+	restoreBody := restoreSource[restoreStart : restoreStart+restoreEnd]
+	for _, invariant := range []string{
+		"list_item.environment_id=$2",
+		"lockAndRequireDeletedTaskAccessTx(ctx, tx, accountID, actorID",
+		"resolveContainerAccessWith(",
+		"UPDATE tasks task SET deleted_at=NULL",
+	} {
+		if !strings.Contains(restoreBody, invariant) {
+			t.Fatalf("RestoreTask lost destination authority invariant %q", invariant)
+		}
+	}
+
+	edgeSource := readRepositorySource(t, "task_acl_edge_repository.go")
+	edgeStart := strings.Index(edgeSource, "func lockAndRequireTaskAccessStateTx(")
+	if edgeStart < 0 {
+		t.Fatal("task access lock helper source start changed")
+	}
+	edgeEnd := strings.Index(edgeSource[edgeStart:], "func lockAndRequireActiveEnvironmentAccessTx(")
+	if edgeEnd <= 0 {
+		t.Fatal("task access lock helper source bounds changed")
+	}
+	edgeBody := edgeSource[edgeStart : edgeStart+edgeEnd]
+	if !strings.Contains(edgeBody, "SELECT id FROM task_environments") ||
+		!strings.Contains(edgeBody, "ORDER BY id FOR SHARE") {
+		t.Fatal("deleted-task authorization no longer holds the Entorno row through commit")
+	}
+
+	accessSource := readRepositorySource(t, "task_access_repository.go")
+	replaceStart := strings.Index(accessSource, "func (r *TaskWorkRepository) ReplaceAccessGrants(")
+	if replaceStart < 0 {
+		t.Fatal("ReplaceAccessGrants source start changed")
+	}
+	replaceEnd := strings.Index(accessSource[replaceStart:], "func taskActorAdminSQL(")
+	if replaceEnd <= 0 {
+		t.Fatal("ReplaceAccessGrants source bounds changed")
+	}
+	replaceBody := accessSource[replaceStart : replaceStart+replaceEnd]
+	if !strings.Contains(replaceBody, "SELECT visibility FROM task_environments") ||
+		!strings.Contains(replaceBody, "FOR UPDATE") {
+		t.Fatal("Entorno ACL replacement no longer conflicts with RestoreTask's shared authority lock")
+	}
+}
+
+func TestRestoreTaskDestinationAccessKeeps404And403Semantics(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		access *domain.TaskEffectiveAccess
+		want   error
+	}{
+		{name: "missing", want: ErrTaskWorkNotFound},
+		{name: "hidden", access: buildTaskEffectiveAccess(domain.TaskAccessNone, false, "test"), want: ErrTaskWorkNotFound},
+		{name: "visible view", access: buildTaskEffectiveAccess(domain.TaskAccessView, false, "test"), want: ErrTaskAccessDenied},
+		{name: "visible comment", access: buildTaskEffectiveAccess(domain.TaskAccessComment, false, "test"), want: ErrTaskAccessDenied},
+		{name: "edit", access: buildTaskEffectiveAccess(domain.TaskAccessEdit, false, "test")},
+		{name: "full", access: buildTaskEffectiveAccess(domain.TaskAccessFull, false, "test")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := requireTaskRestoreDestinationAccess(test.access)
+			if !errors.Is(got, test.want) {
+				t.Fatalf("destination authorization error = %v, want %v", got, test.want)
+			}
+		})
 	}
 }

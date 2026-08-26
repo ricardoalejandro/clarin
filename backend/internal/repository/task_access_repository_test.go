@@ -196,6 +196,36 @@ func TestOrdinaryTaskResolverHidesTrash(t *testing.T) {
 	}
 }
 
+func TestDeletedTaskResolverAllowsArchiveButNeverParentTrash(t *testing.T) {
+	t.Parallel()
+	taskPredicate, hierarchyPredicate := taskAccessLifecyclePredicates(true)
+	if taskPredicate != "" || strings.Contains(hierarchyPredicate, "archived_at") {
+		t.Fatalf("deleted task history unexpectedly rejected Archive: task=%q hierarchy=%q", taskPredicate, hierarchyPredicate)
+	}
+	for _, invariant := range []string{
+		"environment.deleted_at IS NULL",
+		"list_item.deleted_at IS NULL",
+		"folder.deleted_at IS NULL",
+	} {
+		if !strings.Contains(hierarchyPredicate, invariant) {
+			t.Fatalf("deleted task history lost parent Trash boundary %q: %s", invariant, hierarchyPredicate)
+		}
+	}
+
+	activeTaskPredicate, activeHierarchyPredicate := taskAccessLifecyclePredicates(false)
+	for _, invariant := range []string{
+		"task.deleted_at IS NULL",
+		"root.deleted_at IS NULL",
+		"environment.archived_at IS NULL",
+		"list_item.archived_at IS NULL",
+		"folder.archived_at IS NULL",
+	} {
+		if !strings.Contains(activeTaskPredicate+activeHierarchyPredicate, invariant) {
+			t.Fatalf("ordinary task resolver lost active lifecycle boundary %q", invariant)
+		}
+	}
+}
+
 func TestTaskAccessBatchSQLResolvesOneWholePage(t *testing.T) {
 	t.Parallel()
 	sql := taskAccessBatchSQL()

@@ -1415,6 +1415,7 @@ type TaskEnvironment struct {
 	FolderCount          int                  `json:"folder_count"`
 	ListCount            int                  `json:"list_count"`
 	TaskCount            int                  `json:"task_count"`
+	WhiteboardCount      int                  `json:"whiteboard_count"`
 	OpenTaskCount        int                  `json:"open_task_count"`
 	CompletedTaskCount   int                  `json:"completed_task_count"`
 	CancelledTaskCount   int                  `json:"cancelled_task_count"`
@@ -1485,6 +1486,7 @@ type TaskList struct {
 	CreatedAt            time.Time            `json:"created_at"`
 	UpdatedAt            time.Time            `json:"updated_at"`
 	TaskCount            int                  `json:"task_count"`
+	WhiteboardCount      int                  `json:"whiteboard_count"`
 	OpenTaskCount        int                  `json:"open_task_count"`
 	CompletedTaskCount   int                  `json:"completed_task_count"`
 	CancelledTaskCount   int                  `json:"cancelled_task_count"`
@@ -1535,6 +1537,7 @@ type TaskTrashContainer struct {
 	Version            int64      `json:"version,omitempty"`
 	ListCount          int        `json:"list_count"`
 	TaskCount          int        `json:"task_count"`
+	WhiteboardCount    int        `json:"whiteboard_count"`
 	NextEligibleAt     *time.Time `json:"next_eligible_at,omitempty"`
 	CanPurge           bool       `json:"can_purge"`
 	CanRestore         bool       `json:"can_restore"`
@@ -1546,6 +1549,10 @@ type TaskTrashPurgeResult struct {
 	Lists        int `json:"lists"`
 	Folders      int `json:"folders"`
 	Environments int `json:"environments"`
+	Whiteboards  int `json:"whiteboards"`
+	// WhiteboardIDs is the exact transaction-locked purge set used only for
+	// post-commit room invalidation. Purged identifiers are never serialized.
+	WhiteboardIDs []uuid.UUID `json:"-"`
 }
 
 type TaskMediaGCJob struct {
@@ -1604,6 +1611,7 @@ type TaskFolder struct {
 	CreatedAt            time.Time            `json:"created_at"`
 	UpdatedAt            time.Time            `json:"updated_at"`
 	TaskCount            int                  `json:"task_count"`
+	WhiteboardCount      int                  `json:"whiteboard_count"`
 	OpenTaskCount        int                  `json:"open_task_count"`
 	CompletedTaskCount   int                  `json:"completed_task_count"`
 	CancelledTaskCount   int                  `json:"cancelled_task_count"`
@@ -3491,6 +3499,8 @@ type Whiteboard struct {
 	OwnerName             string                     `json:"owner_name,omitempty"`
 	UpdatedByName         string                     `json:"updated_by_name,omitempty"`
 	Shared                bool                       `json:"shared"`
+	Origin                string                     `json:"origin,omitempty"`
+	WorkLocation          *WhiteboardWorkLocation    `json:"work_location,omitempty"`
 }
 
 type WhiteboardScene struct {

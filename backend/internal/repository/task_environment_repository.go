@@ -31,7 +31,7 @@ func environmentActorAdminSQL(environmentAlias, actorExpression string) string {
 		JOIN users environment_user ON environment_user.id=environment_membership.user_id
 		WHERE environment_membership.account_id=` + environmentAlias + `.account_id
 		  AND environment_membership.user_id=` + actorExpression + `
-		  AND (environment_membership.role IN ('admin','super_admin') OR COALESCE(environment_user.is_admin,FALSE) OR COALESCE(environment_user.is_super_admin,FALSE)))`
+		  AND (environment_membership.role IN ('admin','super_admin') OR COALESCE(environment_user.is_super_admin,FALSE)))`
 }
 
 func environmentActorAccessRankSQL(environmentAlias, actorExpression string) string {
@@ -294,10 +294,10 @@ func (r *TaskWorkRepository) CreateEnvironment(ctx context.Context, environment 
 	return tx.Commit(ctx)
 }
 
-func (r *TaskWorkRepository) UpdateEnvironment(ctx context.Context, accountID, actorID uuid.UUID, environment *domain.TaskEnvironment, expectedAccessRevision *int64, operationID *uuid.UUID) error {
+func (r *TaskWorkRepository) UpdateEnvironment(ctx context.Context, accountID, actorID uuid.UUID, environment *domain.TaskEnvironment, expectedAccessRevision *int64, operationID *uuid.UUID) ([]uuid.UUID, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback(ctx)
 	var previousVisibility, previousDefaultAccess string
@@ -306,84 +306,112 @@ func (r *TaskWorkRepository) UpdateEnvironment(ctx context.Context, accountID, a
 		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL AND deleted_at IS NULL FOR UPDATE`, accountID, environment.ID).
 		Scan(&previousVisibility, &previousDefaultAccess, &previousAccessRevision); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrTaskWorkNotFound
+			return nil, ErrTaskWorkNotFound
 		}
-		return err
+		return nil, err
 	}
 	access, _, err := resolveEnvironmentAccessWith(ctx, tx, accountID, actorID, environment.ID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !TaskAccessAllows(access, domain.TaskAccessFull) {
-		return ErrTaskAccessDenied
+		if access == nil || !access.CanView {
+			return nil, ErrTaskWorkNotFound
+		}
+		return nil, ErrTaskAccessDenied
 	}
 	privacyChanged := previousVisibility != environment.Visibility || previousDefaultAccess != environment.DefaultAccessLevel
 	if privacyChanged {
 		if !access.CanManageAccess {
-			return ErrTaskAccessDenied
+			return nil, ErrTaskAccessDenied
 		}
 		if expectedAccessRevision == nil || *expectedAccessRevision != previousAccessRevision {
-			return ErrTaskAccessRevisionConflict
+			return nil, ErrTaskAccessRevisionConflict
 		}
 	}
 	if environment.Visibility == "restricted" {
 		var managerCount int
 		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM task_environment_grants
 			WHERE account_id=$1 AND environment_id=$2 AND access_level='full' AND can_manage_access`, accountID, environment.ID).Scan(&managerCount); err != nil {
-			return err
+			return nil, err
 		}
 		if managerCount == 0 {
-			return ErrTaskLastAccessManager
+			return nil, ErrTaskLastAccessManager
 		}
 	}
 	command, err := tx.Exec(ctx, taskEnvironmentUpdateSQL, accountID, environment.ID, environment.Version,
 		environment.Name, environment.Description, environment.Color, environment.Icon, environment.Visibility, environment.DefaultAccessLevel)
 	if err != nil {
-		return taskEnvironmentWriteError(err)
+		return nil, taskEnvironmentWriteError(err)
 	}
 	if command.RowsAffected() == 0 {
-		return ErrTaskVersionConflict
+		return nil, ErrTaskVersionConflict
 	}
+	boardIDs := []uuid.UUID{}
 	if privacyChanged {
+		boardIDs, err = bumpTaskLocationWhiteboardAccessRevisionReturningIDsTx(
+			ctx, tx, accountID, environment.ID, nil, nil, true,
+		)
+		if err != nil {
+			return nil, err
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO task_access_audit(account_id,actor_id,target_type,target_id,action,before_state,after_state,operation_id)
 			VALUES($1,$2,'environment',$3,'environment_policy_updated',
 				jsonb_build_object('visibility',$4::text,'default_access_level',$5::text,'access_revision',$6::bigint),
-				jsonb_build_object('visibility',$7::text,'default_access_level',$8::text,'access_revision',$6::bigint+1),$9)`,
+					jsonb_build_object('visibility',$7::text,'default_access_level',$8::text,'access_revision',$6::bigint+1),$9)`,
 			accountID, actorID, environment.ID, previousVisibility, previousDefaultAccess, previousAccessRevision,
 			environment.Visibility, environment.DefaultAccessLevel, operationID); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return boardIDs, nil
 }
 
-func (r *TaskWorkRepository) ArchiveEnvironment(ctx context.Context, accountID, actorID, environmentID uuid.UUID, expectedVersion int64) error {
+func (r *TaskWorkRepository) ArchiveEnvironment(ctx context.Context, accountID, actorID, environmentID uuid.UUID, expectedVersion int64) ([]uuid.UUID, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return nil, err
+	}
 	var isDefault bool
 	var version int64
 	if err := tx.QueryRow(ctx, `SELECT is_default,version FROM task_environments
 		WHERE account_id=$1 AND id=$2 AND archived_at IS NULL AND deleted_at IS NULL FOR UPDATE`, accountID, environmentID).Scan(&isDefault, &version); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrTaskWorkNotFound
+			return nil, ErrTaskWorkNotFound
 		}
-		return err
+		return nil, err
 	}
 	access, _, err := resolveEnvironmentAccessWith(ctx, tx, accountID, actorID, environmentID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !TaskAccessAllows(access, domain.TaskAccessFull) {
-		return ErrTaskAccessDenied
+		if access == nil || !access.CanView {
+			return nil, ErrTaskWorkNotFound
+		}
+		return nil, ErrTaskAccessDenied
 	}
 	if isDefault {
-		return ErrTaskEnvironmentDefault
+		return nil, ErrTaskEnvironmentDefault
 	}
 	if version != expectedVersion {
-		return ErrTaskVersionConflict
+		return nil, ErrTaskVersionConflict
+	}
+	folderIDs, listIDs, err := lockEnvironmentLifecycleDescendantsTx(
+		ctx, tx, accountID, environmentID, taskEnvironmentLifecycleRetained,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireEnvironmentDescendantAccessIncludingLifecycleTx(ctx, tx, accountID, actorID, folderIDs, listIDs); err != nil {
+		return nil, err
 	}
 	var openTasks int
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM tasks task JOIN task_lists list_item
@@ -391,74 +419,91 @@ func (r *TaskWorkRepository) ArchiveEnvironment(ctx context.Context, accountID, 
 		LEFT JOIN task_statuses status ON status.account_id=task.account_id AND status.id=task.status_id
 		WHERE task.account_id=$1 AND list_item.environment_id=$2 AND task.deleted_at IS NULL
 		  AND COALESCE(status.category,CASE task.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END) NOT IN ('done','cancelled')`, accountID, environmentID).Scan(&openTasks); err != nil {
-		return err
+		return nil, err
 	}
 	if openTasks > 0 {
-		return ErrTaskContainerHasOpenTasks
+		return nil, ErrTaskContainerHasOpenTasks
 	}
-	rows, err := tx.Query(ctx, `SELECT id FROM task_lists WHERE account_id=$1 AND environment_id=$2 AND deleted_at IS NULL ORDER BY id FOR SHARE`, accountID, environmentID)
-	if err != nil {
-		return err
-	}
-	listIDs := make([]uuid.UUID, 0)
-	for rows.Next() {
-		var listID uuid.UUID
-		if err := rows.Scan(&listID); err != nil {
-			rows.Close()
-			return err
-		}
-		listIDs = append(listIDs, listID)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
 	hasFutureEvents, err := hasFutureScheduledWorkEventsWith(ctx, tx, accountID, listIDs, nil, time.Now())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if hasFutureEvents {
-		return ErrTaskContainerHasFutureEvents
+		return nil, ErrTaskContainerHasFutureEvents
+	}
+	if err := revalidateEnvironmentLifecycleAuthorityTx(ctx, tx, accountID, actorID, environmentID, false, folderIDs, listIDs); err != nil {
+		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE task_environments SET archived_at=NOW(),version=version+1,updated_at=NOW()
 		WHERE account_id=$1 AND id=$2`, accountID, environmentID); err != nil {
-		return err
+		return nil, err
 	}
-	return tx.Commit(ctx)
+	boardIDs, err := bumpTaskLocationWhiteboardAccessRevisionReturningIDsTx(ctx, tx, accountID, environmentID, nil, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return boardIDs, nil
 }
 
-func (r *TaskWorkRepository) RestoreEnvironment(ctx context.Context, accountID, actorID, environmentID uuid.UUID, expectedVersion int64) error {
+func (r *TaskWorkRepository) RestoreEnvironment(ctx context.Context, accountID, actorID, environmentID uuid.UUID, expectedVersion int64) ([]uuid.UUID, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return nil, err
+	}
 	var version int64
 	if err := tx.QueryRow(ctx, `SELECT version FROM task_environments
 		WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL AND deleted_at IS NULL FOR UPDATE`, accountID, environmentID).Scan(&version); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrTaskWorkNotFound
+			return nil, ErrTaskWorkNotFound
 		}
-		return err
+		return nil, err
 	}
 	access, _, err := resolveEnvironmentAccessWith(ctx, tx, accountID, actorID, environmentID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !TaskAccessAllows(access, domain.TaskAccessFull) {
-		return ErrTaskAccessDenied
+		if access == nil || !access.CanView {
+			return nil, ErrTaskWorkNotFound
+		}
+		return nil, ErrTaskAccessDenied
 	}
 	if version != expectedVersion {
-		return ErrTaskVersionConflict
+		return nil, ErrTaskVersionConflict
+	}
+	folderIDs, listIDs, err := lockEnvironmentLifecycleDescendantsTx(
+		ctx, tx, accountID, environmentID, taskEnvironmentLifecycleRetained,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireEnvironmentDescendantAccessIncludingLifecycleTx(ctx, tx, accountID, actorID, folderIDs, listIDs); err != nil {
+		return nil, err
+	}
+	if err := revalidateEnvironmentLifecycleAuthorityTx(ctx, tx, accountID, actorID, environmentID, false, folderIDs, listIDs); err != nil {
+		return nil, err
 	}
 	command, err := tx.Exec(ctx, `UPDATE task_environments SET archived_at=NULL,version=version+1,updated_at=NOW()
 		WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL AND deleted_at IS NULL`, accountID, environmentID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if command.RowsAffected() == 0 {
-		return ErrTaskVersionConflict
+		return nil, ErrTaskVersionConflict
 	}
-	return tx.Commit(ctx)
+	boardIDs, err := bumpTaskLocationWhiteboardAccessRevisionReturningIDsTx(ctx, tx, accountID, environmentID, nil, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return boardIDs, nil
 }

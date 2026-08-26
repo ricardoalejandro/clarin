@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState, type ClipboardEvent as ReactClipboardEvent } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState, type ClipboardEvent as ReactClipboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { CalendarRange, Check, FileImage, Flag, Loader2, Maximize2, Minimize2, Move, PanelRight, Paperclip, Repeat2, RotateCcw, Sparkles, X } from 'lucide-react'
 import { apiGet, apiPost, apiPut, apiUpload } from '@/lib/api'
@@ -74,6 +74,7 @@ interface Props {
   defaultDueAt?: string
   defaultStartAt?: string
   defaultAllDay?: boolean
+  initialDraftDirty?: boolean
   parentTaskId?: string
   parentTaskTitle?: string
   lists: TaskList[]
@@ -87,6 +88,10 @@ interface Props {
   onOperation?: (operationId: string, active: boolean) => void
 }
 
+export interface TaskEditorModalHandle {
+  requestClose: () => Promise<boolean>
+}
+
 const inputClass = 'w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none transition focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100'
 
 function localDateTime(value?: string) {
@@ -96,7 +101,7 @@ function localDateTime(value?: string) {
   return new Date(date.getTime() - offset).toISOString().slice(0, 16)
 }
 
-export default function TaskEditorModal({ open, environmentId, task, defaultListId, defaultFolderId, defaultStatusId, defaultOwnerId, defaultTitle, defaultPriority, defaultDueAt, defaultStartAt, defaultAllDay, parentTaskId, parentTaskTitle, lists, folders, workflows, users, relatedScope, storageScope, onClose, onSaved, onOperation }: Props) {
+const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEditorModal({ open, environmentId, task, defaultListId, defaultFolderId, defaultStatusId, defaultOwnerId, defaultTitle, defaultPriority, defaultDueAt, defaultStartAt, defaultAllDay, initialDraftDirty = false, parentTaskId, parentTaskTitle, lists, folders, workflows, users, relatedScope, storageScope, onClose, onSaved, onOperation }, forwardedRef) {
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [type, setType] = useState<TaskType>('reminder')
@@ -127,13 +132,17 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
   const [catalogLists, setCatalogLists] = useState<TaskList[]>(lists)
   const [catalogFolders, setCatalogFolders] = useState<TaskFolder[]>(folders)
   const dialogRef = useRef<HTMLDivElement>(null)
+  const confirmCloseDialogRef = useRef<HTMLDivElement>(null)
+  const confirmCloseContinueRef = useRef<HTMLButtonElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
   const onCloseRef = useRef(onClose)
   const savingRef = useRef(false)
   const attachmentObjectURLsRef = useRef(new Map<string, string>())
   const dirtyRef = useRef(false)
-  const requestCloseRef = useRef<() => void>(() => {})
+  const requestCloseRef = useRef<() => Promise<boolean>>(async () => true)
+  const closeDecisionRef = useRef<((allowed: boolean) => void) | null>(null)
+  const closeDecisionPromiseRef = useRef<Promise<boolean> | null>(null)
   const taskWindow = useTaskWindow({ storageKey: 'clarin:tasks:editor-window', storageScope, defaultMode: 'floating', defaultWidth: 980, defaultHeight: 820, minWidth: 560, minHeight: 520, align: 'center' })
   onCloseRef.current = onClose
   savingRef.current = saving
@@ -181,7 +190,9 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
 		setColor(task?.color || null)
     setEditVersion(task?.version || 1)
     setError('')
-    setDirty(false)
+    const seededDirty = Boolean(!task && initialDraftDirty)
+    dirtyRef.current = seededDirty
+    setDirty(seededDirty)
     setConfirmClose(false)
     setAttachmentQueue([])
     setCreatedTask(null)
@@ -337,6 +348,62 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
   const saveIntent = taskCreationAttachmentSaveIntent(createdTask?.id, attachmentQueue, baseCanSave)
   const canSave = task ? baseCanSave : saveIntent !== 'none'
 
+  const settleCloseDecision = useCallback((allowed: boolean) => {
+    const resolve = closeDecisionRef.current
+    closeDecisionRef.current = null
+    closeDecisionPromiseRef.current = null
+    resolve?.(allowed)
+  }, [])
+  const requestClose = useCallback((): Promise<boolean> => {
+    if (savingRef.current) return Promise.resolve(false)
+    if (dirtyRef.current || (createdTask && queueProgress.pending > 0)) {
+      setConfirmClose(true)
+      if (!closeDecisionPromiseRef.current) {
+        closeDecisionPromiseRef.current = new Promise<boolean>(resolve => {
+          closeDecisionRef.current = resolve
+        })
+      }
+      return closeDecisionPromiseRef.current
+    }
+    onCloseRef.current()
+    return Promise.resolve(true)
+  }, [createdTask, queueProgress.pending])
+  requestCloseRef.current = requestClose
+  useImperativeHandle(forwardedRef, () => ({ requestClose }), [requestClose])
+  useEffect(() => {
+    if (!confirmClose) return
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const frame = requestAnimationFrame(() => confirmCloseContinueRef.current?.focus({ preventScroll: true }))
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        setConfirmClose(false)
+        settleCloseDecision(false)
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = Array.from(confirmCloseDialogRef.current?.querySelectorAll<HTMLButtonElement>('button:not([disabled])') || [])
+      if (!focusable.length) return
+      const index = focusable.indexOf(document.activeElement as HTMLButtonElement)
+      event.preventDefault()
+      focusable[(index + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length]?.focus({ preventScroll: true })
+      event.stopImmediatePropagation()
+    }
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => {
+      cancelAnimationFrame(frame)
+      document.removeEventListener('keydown', onKeyDown, true)
+      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true })
+    }
+  }, [confirmClose, settleCloseDecision])
+  useEffect(() => {
+    if (open) return
+    setConfirmClose(false)
+    settleCloseDecision(false)
+  }, [open, settleCloseDecision])
+  useEffect(() => () => settleCloseDecision(false), [settleCloseDecision])
+
   const save = async (confirmGrants = false) => {
     if (!taskEditable || !canSave || savingRef.current) return false
     savingRef.current = true
@@ -433,8 +500,6 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
   }
 
   if (!open || typeof document === 'undefined') return null
-  const requestClose = () => { if (saving) return; if (dirtyRef.current || (createdTask && queueProgress.pending > 0)) { setConfirmClose(true); return }; onClose() }
-  requestCloseRef.current = requestClose
   const recurrenceOptions = [
     { value: '', label: 'No se repite', description: 'Tarea única', leading: <Repeat2 className="h-4 w-4" /> },
     { value: 'daily', label: 'Cada día', description: 'Se repite diariamente', leading: <Repeat2 className="h-4 w-4" /> },
@@ -446,7 +511,7 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
   const resizeEdges: TaskWindowResizeEdge[] = ['n', 'e', 's', 'w', 'ne', 'nw', 'se', 'sw']
   const windowVisual = taskWindowVisualState(taskWindow.effectiveMode, taskWindow.isMobile)
   return createPortal(
-    <div data-task-editor-modal data-window-mode={taskWindow.effectiveMode} data-backdrop-mode={windowVisual.blocksWorkspace ? 'modal' : taskWindow.effectiveMode} style={{ ...windowVisual.backdropStyle, zIndex: TASK_OVERLAY_LAYERS.window }} className={`fixed inset-0 transition-[background-color,backdrop-filter] duration-200 ${windowVisual.blocksWorkspace ? '' : 'pointer-events-none'}`} onMouseDown={event => event.target === event.currentTarget && windowVisual.blocksWorkspace && requestClose()}>
+    <div data-task-editor-modal data-window-mode={taskWindow.effectiveMode} data-backdrop-mode={windowVisual.blocksWorkspace ? 'modal' : taskWindow.effectiveMode} style={{ ...windowVisual.backdropStyle, zIndex: TASK_OVERLAY_LAYERS.window }} className={`fixed inset-0 transition-[background-color,backdrop-filter] duration-200 ${windowVisual.blocksWorkspace ? '' : 'pointer-events-none'}`} onMouseDown={event => { if (event.target === event.currentTarget && windowVisual.blocksWorkspace) void requestClose() }}>
       <div ref={dialogRef} onPaste={pasteTaskImages} onKeyDown={event => { if (!event.defaultPrevented && isTaskEditorSubmitShortcut(event.nativeEvent) && !document.querySelector(`${TASK_PICKER_BLOCKING_LAYER_SELECTOR}, [role="dialog"][aria-label^="Elegir "]`)) { event.preventDefault(); void save() } }} data-window-mode={taskWindow.effectiveMode} tabIndex={-1} role="dialog" aria-modal={taskWindow.isModal} aria-labelledby="task-editor-title" aria-busy={saving} style={taskWindow.panelStyle} className={`pointer-events-auto fixed flex flex-col overflow-hidden border border-white/80 bg-white shadow-[0_28px_80px_rgba(15,23,42,0.24)] ring-1 ring-slate-900/5 outline-none ${taskWindow.effectiveMode === 'maximized' || taskWindow.isMobile ? 'rounded-none sm:rounded-2xl' : taskWindow.effectiveMode === 'docked' ? 'rounded-l-3xl' : 'rounded-3xl'}`}>
         <div onPointerDown={taskWindow.beginDrag} onDoubleClick={taskWindow.toggleMaximized} className={`flex select-none items-center justify-between border-b border-slate-100 px-5 py-4 sm:px-7 ${taskWindow.effectiveMode === 'floating' ? 'cursor-move' : ''}`}>
           <div>
@@ -454,7 +519,7 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
             <h2 id="task-editor-title" className="mt-1 text-xl font-bold text-slate-900">{task ? 'Editar tarea' : parentTaskId ? 'Crear subtarea' : 'Crear una tarea'}</h2>
             {parentTaskTitle && !task && <p className="mt-1 max-w-lg truncate text-xs text-slate-400">Dentro de {parentTaskTitle}</p>}
           </div>
-          <div data-no-window-drag className="flex items-center gap-1"><button type="button" title="Acoplar a la derecha" aria-label="Acoplar a la derecha" onClick={() => taskWindow.setMode('docked')} className={`rounded-xl p-2 transition ${taskWindow.effectiveMode === 'docked' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-400 hover:bg-slate-100'}`}><PanelRight className="h-4 w-4" /></button><button type="button" title="Ventana flotante" aria-label="Ventana flotante" onClick={() => taskWindow.setMode('floating')} className={`rounded-xl p-2 transition ${taskWindow.effectiveMode === 'floating' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-400 hover:bg-slate-100'}`}><Move className="h-4 w-4" /></button>{taskWindow.effectiveMode === 'floating' && <button type="button" title="Restablecer tamaño" aria-label="Restablecer tamaño" onClick={taskWindow.resetGeometry} className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"><RotateCcw className="h-4 w-4" /></button>}<button type="button" title={taskWindow.effectiveMode === 'maximized' ? 'Restaurar' : 'Maximizar'} aria-label={taskWindow.effectiveMode === 'maximized' ? 'Restaurar' : 'Maximizar'} onClick={taskWindow.toggleMaximized} className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700">{taskWindow.effectiveMode === 'maximized' ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button><button disabled={saving} onClick={requestClose} className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40"><X className="h-5 w-5" /></button></div>
+          <div data-no-window-drag className="flex items-center gap-1"><button type="button" title="Acoplar a la derecha" aria-label="Acoplar a la derecha" onClick={() => taskWindow.setMode('docked')} className={`rounded-xl p-2 transition ${taskWindow.effectiveMode === 'docked' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-400 hover:bg-slate-100'}`}><PanelRight className="h-4 w-4" /></button><button type="button" title="Ventana flotante" aria-label="Ventana flotante" onClick={() => taskWindow.setMode('floating')} className={`rounded-xl p-2 transition ${taskWindow.effectiveMode === 'floating' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-400 hover:bg-slate-100'}`}><Move className="h-4 w-4" /></button>{taskWindow.effectiveMode === 'floating' && <button type="button" title="Restablecer tamaño" aria-label="Restablecer tamaño" onClick={taskWindow.resetGeometry} className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"><RotateCcw className="h-4 w-4" /></button>}<button type="button" title={taskWindow.effectiveMode === 'maximized' ? 'Restaurar' : 'Maximizar'} aria-label={taskWindow.effectiveMode === 'maximized' ? 'Restaurar' : 'Maximizar'} onClick={taskWindow.toggleMaximized} className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700">{taskWindow.effectiveMode === 'maximized' ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button><button disabled={saving} onClick={() => { void requestClose() }} className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40"><X className="h-5 w-5" /></button></div>
         </div>
 
         <div {...({ inert: createdTask ? '' : undefined } as Record<string, string | undefined>)} aria-disabled={Boolean(createdTask)} className={`overflow-y-auto px-5 py-5 transition sm:px-7 ${createdTask ? 'opacity-70' : ''}`}>
@@ -499,11 +564,11 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
 
         <div className="flex items-center justify-between border-t border-slate-100 bg-slate-50 px-5 py-4 sm:px-7">
           <span className={`hidden text-xs sm:block ${createdTask ? 'font-semibold text-amber-700' : 'text-slate-400'}`}>{createdTask ? 'La tarea ya existe; sólo quedan adjuntos pendientes.' : 'Ctrl/⌘ + Enter guarda la tarea desde cualquier campo.'}</span>
-          <div className="ml-auto flex gap-2"><button disabled={saving} onClick={requestClose} className="rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40">{createdTask ? 'Cerrar' : 'Cancelar'}</button><button disabled={!canSave || saving} onClick={() => { void save() }} className="rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-300 transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">{saving ? createdTask ? 'Reintentando…' : attachmentQueue.length && !task ? 'Creando y adjuntando…' : parentTaskId && !task ? 'Creando subtarea…' : 'Guardando…' : createdTask ? `Reintentar ${queueProgress.pending} ${queueProgress.pending === 1 ? 'adjunto' : 'adjuntos'}` : task ? 'Guardar cambios' : parentTaskId ? 'Crear subtarea' : 'Crear tarea'}</button></div>
+          <div className="ml-auto flex gap-2"><button disabled={saving} onClick={() => { void requestClose() }} className="rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40">{createdTask ? 'Cerrar' : 'Cancelar'}</button><button disabled={!canSave || saving} onClick={() => { void save() }} className="rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-300 transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">{saving ? createdTask ? 'Reintentando…' : attachmentQueue.length && !task ? 'Creando y adjuntando…' : parentTaskId && !task ? 'Creando subtarea…' : 'Guardando…' : createdTask ? `Reintentar ${queueProgress.pending} ${queueProgress.pending === 1 ? 'adjunto' : 'adjuntos'}` : task ? 'Guardar cambios' : parentTaskId ? 'Crear subtarea' : 'Crear tarea'}</button></div>
         </div>
         {taskWindow.effectiveMode === 'floating' && resizeEdges.map(edge => <span key={edge} data-task-window-resize={edge} aria-hidden="true" onPointerDown={event => taskWindow.beginResize(edge, event)} className={`absolute z-10 ${edge === 'n' ? '-top-1 left-4 right-4 h-2 cursor-n-resize' : edge === 's' ? '-bottom-1 left-4 right-4 h-2 cursor-s-resize' : edge === 'e' ? '-right-1 bottom-4 top-4 w-2 cursor-e-resize' : edge === 'w' ? '-left-1 bottom-4 top-4 w-2 cursor-w-resize' : edge === 'ne' ? '-right-1 -top-1 h-4 w-4 cursor-ne-resize' : edge === 'nw' ? '-left-1 -top-1 h-4 w-4 cursor-nw-resize' : edge === 'se' ? '-bottom-1 -right-1 h-4 w-4 cursor-se-resize' : '-bottom-1 -left-1 h-4 w-4 cursor-sw-resize'}`} />)}
       </div>
-      {confirmClose && <div className="pointer-events-auto fixed inset-0 z-[160] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"><div role="alertdialog" aria-modal="true" className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl"><h3 className="text-lg font-black text-slate-900">{createdTask ? '¿Cerrar con adjuntos pendientes?' : '¿Descartar el borrador?'}</h3><p className="mt-2 text-sm leading-6 text-slate-500">{createdTask ? 'La tarea ya fue creada y no se duplicará. Si cierras ahora, los archivos fallidos saldrán de esta cola.' : 'Hay cambios sin guardar. Puedes continuar editando o cerrar y descartarlos.'}</p><div className="mt-6 flex justify-end gap-2"><button type="button" onClick={() => setConfirmClose(false)} className="rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-100">Continuar editando</button><button type="button" onClick={() => { setConfirmClose(false); setDirty(false); onClose() }} className="rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white">{createdTask ? 'Cerrar' : 'Descartar'}</button></div></div></div>}
+      {confirmClose && <div className="pointer-events-auto fixed inset-0 z-[160] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"><div ref={confirmCloseDialogRef} role="alertdialog" aria-modal="true" aria-labelledby="task-editor-close-title" aria-describedby="task-editor-close-description" className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl"><h3 id="task-editor-close-title" className="text-lg font-black text-slate-900">{createdTask ? '¿Cerrar con adjuntos pendientes?' : '¿Descartar el borrador?'}</h3><p id="task-editor-close-description" className="mt-2 text-sm leading-6 text-slate-500">{createdTask ? 'La tarea ya fue creada y no se duplicará. Si cierras ahora, los archivos fallidos saldrán de esta cola.' : 'Hay cambios sin guardar. Puedes continuar editando o cerrar y descartarlos.'}</p><div className="mt-6 flex justify-end gap-2"><button ref={confirmCloseContinueRef} type="button" onClick={() => { setConfirmClose(false); settleCloseDecision(false) }} className="rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-100">Continuar editando</button><button type="button" onClick={() => { setConfirmClose(false); setDirty(false); onCloseRef.current(); settleCloseDecision(true) }} className="rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white">{createdTask ? 'Cerrar' : 'Descartar'}</button></div></div></div>}
       <TaskParticipantGrantConfirmDialog
         open={participantGrantPrompt.length > 0}
         affectedUserIDs={participantGrantPrompt}
@@ -515,4 +580,6 @@ export default function TaskEditorModal({ open, environmentId, task, defaultList
     </div>,
     document.body,
   )
-}
+})
+
+export default TaskEditorModal

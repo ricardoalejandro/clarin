@@ -149,7 +149,7 @@ func (s *Server) contactAvatarCallerHasPermission(c *fiber.Ctx, permission strin
 	if !ok || claims == nil {
 		return false
 	}
-	if claims.IsAdmin || claims.IsSuperAdmin || claims.Role == domain.RoleAdmin || claims.Role == domain.RoleSuperAdmin {
+	if domain.HasAccountAdminAuthority(claims.Role, claims.IsSuperAdmin) {
 		return true
 	}
 	for _, candidate := range claims.Permissions {

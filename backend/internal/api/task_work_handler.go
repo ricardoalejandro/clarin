@@ -97,6 +97,8 @@ func taskWorkError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La Bandeja general debe permanecer como lista raíz predeterminada", "code": "default_list_invariant"})
 	case errors.Is(err, repository.ErrTaskTrashConfirmation):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "El nombre escrito no coincide exactamente", "code": "trash_confirmation_mismatch"})
+	case errors.Is(err, repository.ErrTaskLocationViewDisabled):
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Las vistas de Pizarra aún no están disponibles", "code": "work_whiteboard_views_disabled"})
 	case errors.Is(err, repository.ErrTaskTrashDisabled):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La eliminación permanente está desactivada para esta cuenta", "code": "trash_purge_disabled"})
 	case errors.Is(err, repository.ErrTaskTrashNotEligible):
@@ -1040,9 +1042,11 @@ func (s *Server) handleArchiveTaskFolder(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	if err := s.repos.TaskWork.TrashFolderConfirmed(c.Context(), accountID, userID, folderID, request.ConfirmationName); err != nil {
+	boardIDs, err := s.repos.TaskWork.TrashFolderConfirmed(c.Context(), accountID, userID, folderID, request.ConfirmationName)
+	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.revokeTaskLocationWhiteboardSockets(accountID, boardIDs)
 	s.invalidateTasksCache(accountID)
 	s.broadcastTaskWork(c.Context(), accountID, "folder_trashed", fiber.Map{"folder_id": folderID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
@@ -1111,9 +1115,13 @@ func (s *Server) handleUpdateTaskListStructure(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "operation_id inválido"})
 	}
-	if err := s.repos.TaskWork.UpdateListLocation(c.Context(), accountID, listID, folderID, folderProvided, beforeListID, orderProvided, workflowID, inherited, req.Description, req.Name, req.Color, req.Icon); err != nil {
+	affectedBoardIDs, err := s.repos.TaskWork.UpdateListLocation(c.Context(), accountID, listID, folderID, folderProvided, beforeListID, orderProvided, workflowID, inherited, req.Description, req.Name, req.Color, req.Icon)
+	if err != nil {
 		return taskWorkError(c, err)
 	}
+	// Reparenting changes inherited Work authorization and breadcrumb context,
+	// but is not a terminal lifecycle transition for retained viewers.
+	s.notifyTaskLocationWhiteboardAccessChanged(accountID, affectedBoardIDs)
 	environmentID, err := s.repos.TaskWork.ContainerEnvironmentID(c.Context(), accountID, listID, "list")
 	if err != nil {
 		return taskWorkError(c, err)

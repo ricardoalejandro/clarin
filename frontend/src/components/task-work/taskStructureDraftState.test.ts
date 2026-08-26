@@ -51,9 +51,16 @@ describe('task structure draft state', () => {
     const original = status('status', 'En curso')
     expect(taskStatusDraftChanged(original, { ...original })).toBe(false)
     expect(taskStatusDraftChanged(original, { ...original, color: '#EF4444' })).toBe(true)
-    const folder = { id: 'folder', workflow_id: 'workflow-a' } as TaskFolder
-    expect(taskStructureHasPendingChanges({ dirtyStatusIDs: [], folderName: '', listName: '', workflowName: '', newStatusName: '', folders: [folder], folderWorkflows: { folder: 'workflow-a' } })).toBe(false)
-    expect(taskStructureHasPendingChanges({ dirtyStatusIDs: [], folderName: 'Operaciones', listName: '', workflowName: '', newStatusName: '', folders: [folder], folderWorkflows: { folder: 'workflow-a' } })).toBe(true)
-    expect(taskStructureHasPendingChanges({ dirtyStatusIDs: [], folderName: '', listName: '', workflowName: '', newStatusName: '', folders: [folder], folderWorkflows: { folder: 'workflow-b' } })).toBe(true)
+    expect(taskStructureHasPendingChanges({ dirtyStatusIDs: [], dirtyFolderWorkflowIDs: [], folderName: '', listName: '', workflowName: '', newStatusName: '' })).toBe(false)
+    expect(taskStructureHasPendingChanges({ dirtyStatusIDs: [], dirtyFolderWorkflowIDs: [], folderName: 'Operaciones', listName: '', workflowName: '', newStatusName: '' })).toBe(true)
+    expect(taskStructureHasPendingChanges({ dirtyStatusIDs: [], dirtyFolderWorkflowIDs: ['folder'], folderName: '', listName: '', workflowName: '', newStatusName: '' })).toBe(true)
+  })
+
+  it('does not mark an inherited default workflow as dirty until the user changes it', () => {
+    const inherited = { id: 'folder', workflow_id: undefined } as TaskFolder
+    const merged = mergeCanonicalTaskFolderWorkflowDrafts([inherited], {}, new Set(), 'workflow-default')
+
+    expect(merged).toEqual({ drafts: { folder: 'workflow-default' }, dirtyFolderIDs: [] })
+    expect(taskStructureHasPendingChanges({ dirtyStatusIDs: [], dirtyFolderWorkflowIDs: merged.dirtyFolderIDs, folderName: '', listName: '', workflowName: '', newStatusName: '' })).toBe(false)
   })
 })

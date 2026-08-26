@@ -24,9 +24,17 @@ func resolveGuestSessionWith(ctx context.Context, q whiteboardQuerier, tokenHash
 		JOIN whiteboard_share_links link ON link.account_id=session.account_id AND link.id=session.share_link_id
 		JOIN whiteboards board ON board.account_id=session.account_id AND board.id=session.board_id
 		JOIN accounts account ON account.id=session.account_id AND COALESCE(account.is_active,TRUE)
+		JOIN subscriptions account_subscription ON account_subscription.account_id=session.account_id
+			AND (
+				(account_subscription.status='active' AND (account_subscription.current_period_end IS NULL OR account_subscription.current_period_end>=CURRENT_TIMESTAMP)) OR
+				(account_subscription.status='trialing' AND (account_subscription.trial_ends_at IS NULL OR account_subscription.trial_ends_at>=CURRENT_TIMESTAMP)) OR
+				(account_subscription.status='grace' AND (account_subscription.grace_ends_at IS NULL OR account_subscription.grace_ends_at>=CURRENT_TIMESTAMP))
+			)
 		WHERE session.token_hash=$1 AND session.revoked_at IS NULL AND session.expires_at>$2
 		AND link.revoked_at IS NULL AND (link.expires_at IS NULL OR link.expires_at>$2)
 		AND board.archived_at IS NULL
+		AND NOT EXISTS(SELECT 1 FROM task_location_whiteboard_views work_binding
+			WHERE work_binding.account_id=board.account_id AND work_binding.whiteboard_id=board.id)
 		AND ($3::text='view' OR session.access_level='edit')`, tokenHash, now, requiredLevel).Scan(
 		&item.Session.ID, &item.Session.AccountID, &item.Session.BoardID, &item.Session.ShareLinkID,
 		&item.Session.DisplayName, &item.Session.AccessLevel, &item.Session.ExpiresAt,
@@ -156,6 +164,14 @@ func (r *WhiteboardRepository) writeSceneAsGuest(ctx context.Context, tokenHash 
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrWhiteboardSessionUnavailable
 		}
+		return nil, err
+	}
+	// The public exchange is resolved once to discover the board, then again
+	// after its mutation lock. Account/subscription transitions lock every board
+	// after changing authority, so this second read serializes the write on the
+	// correct side of a concurrent suspension or tenant deactivation.
+	guest, err = resolveGuestSessionWith(ctx, tx, tokenHash, domain.WhiteboardAccessEdit, now)
+	if err != nil {
 		return nil, err
 	}
 	if archivedAt != nil {

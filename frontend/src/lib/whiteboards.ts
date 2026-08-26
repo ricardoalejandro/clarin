@@ -11,7 +11,7 @@ export const WHITEBOARD_SHOW_DEPRECATED_OFFICIAL_FONTS = true
 // does not expose their UI until a new product interaction is approved.
 export const WHITEBOARD_COMMENTS_UI_ENABLED = false
 
-export type WhiteboardScope = 'all' | 'mine' | 'recent' | 'shared' | 'trash'
+export type WhiteboardScope = 'all' | 'mine' | 'recent' | 'shared' | 'work' | 'trash'
 export type WhiteboardViewMode = 'grid' | 'compact' | 'list'
 export type WhiteboardManagerLayout = 'narrow' | 'compact' | 'wide'
 export type WhiteboardAccessLevel = 'view' | 'comment' | 'edit' | 'manage'
@@ -195,6 +195,16 @@ export interface WhiteboardSummary {
   version: number
   scene_sequence: number
   effective_access: WhiteboardEffectiveAccess
+  origin?: 'standalone' | 'work'
+  work_location?: {
+    task_view_id: string
+    environment_id: string
+    scope_type: 'folder' | 'list'
+    scope_id: string
+    scope_name: string
+    breadcrumb?: Array<{ type: 'environment' | 'folder' | 'list'; id: string; name: string }>
+    lifecycle: 'active' | 'location_archived' | 'trash'
+  } | null
 }
 
 export interface WhiteboardSceneDocument {
@@ -1177,7 +1187,8 @@ export function buildWhiteboardListQuery(input: {
   limit?: number
 }) {
   const params = new URLSearchParams()
-  params.set('scope', input.scope)
+  params.set('scope', input.scope === 'work' ? 'all' : input.scope)
+  if (input.scope === 'work') params.set('origin', 'work')
   params.set('limit', String(Math.min(Math.max(input.limit || 50, 1), 200)))
   if (input.scope === 'trash') params.set('include_archived', 'true')
   if (input.folderID) params.set('folder_id', input.folderID)
@@ -1186,10 +1197,21 @@ export function buildWhiteboardListQuery(input: {
   return params.toString()
 }
 
+export function reconcileWhiteboardScopeCapability(scope: WhiteboardScope, workWhiteboardsEnabled: boolean): WhiteboardScope {
+  return scope === 'work' && !workWhiteboardsEnabled ? 'mine' : scope
+}
+
 export function filterWhiteboards(whiteboards: readonly WhiteboardSummary[], settledSearch: string) {
   const query = settledSearch.trim().toLocaleLowerCase('es')
   if (!query) return [...whiteboards]
-  return whiteboards.filter(whiteboard => [whiteboard.name, whiteboard.description, whiteboard.folder_name, whiteboard.owner_name]
+  return whiteboards.filter(whiteboard => [
+    whiteboard.name,
+    whiteboard.description,
+    whiteboard.folder_name,
+    whiteboard.owner_name,
+    whiteboard.work_location?.scope_name,
+    ...(whiteboard.work_location?.breadcrumb?.map(item => item.name) || []),
+  ]
     .some(value => value?.toLocaleLowerCase('es').includes(query)))
 }
 
@@ -1202,6 +1224,7 @@ export function reconcileWhiteboardSummary(
   if ((scope === 'trash') !== Boolean(incoming.archived_at)) return withoutIncoming
   if (scope === 'mine' && incoming.shared) return withoutIncoming
   if (scope === 'shared' && !incoming.shared) return withoutIncoming
+  if (scope === 'work' && incoming.origin !== 'work') return withoutIncoming
   if (scope === 'recent' && Date.now() - Date.parse(incoming.updated_at) > 30 * 24 * 60 * 60 * 1000) return withoutIncoming
   return [...withoutIncoming, incoming].sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))
 }
@@ -1219,6 +1242,17 @@ export function reconcileWhiteboardConnectionOpen(previouslyOpened: boolean) {
   return {
     hasOpened: true,
     reloadComments: previouslyOpened,
+  }
+}
+
+// A sync.required can replace a saturated realtime queue. Scene recovery alone
+// is insufficient for authenticated members because the displaced payload may
+// have been comment.changed; reload both canonical resources. Guests never
+// receive Clarin-owned comments.
+export function whiteboardRealtimeSyncRecoveryPlan(audience: 'member' | 'guest') {
+  return {
+    reloadScene: true,
+    reloadComments: audience === 'member',
   }
 }
 

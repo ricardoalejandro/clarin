@@ -24,10 +24,12 @@ import {
   mergeWhiteboardFileRecords,
   mergeWhiteboardSessionAppState,
   reconcileWhiteboardSummary,
+  reconcileWhiteboardScopeCapability,
   reconcileWhiteboardCanonicalAck,
   reconcileWhiteboardLibraryConflict,
   reconcileWhiteboardCollaborators,
   reconcileWhiteboardConnectionOpen,
+  whiteboardRealtimeSyncRecoveryPlan,
   retainWhiteboardPendingSave,
   combineWhiteboardLibraryItems,
   parseWhiteboardLibraryItems,
@@ -171,7 +173,13 @@ describe('whiteboard frontend contracts', () => {
     expect(hasWhiteboardDocumentMutation({
       currentElements: [{ ...elements[0], version: 2, versionNonce: 11 }],
       previousElements: elements,
-      currentAppState: canonicalAppState,
+      // A presence projection can arrive in the exact same editor callback as
+      // the user's document mutation. Collaborators must remain ephemeral
+      // without masking the real edit.
+      currentAppState: {
+        ...canonicalAppState,
+        collaborators: new Map([['peer-1', { username: 'Ana' }]]),
+      },
       previousAppState: canonicalAppState,
     })).toBe(true)
     expect(hasWhiteboardDocumentMutation({
@@ -525,6 +533,11 @@ describe('whiteboard frontend contracts', () => {
   it('builds one bounded account-scoped list request from settled filters', () => {
     expect(buildWhiteboardListQuery({ scope: 'shared', folderID: 'folder/1', search: '  mapa  ', limit: 500 }))
       .toBe('scope=shared&limit=200&folder_id=folder%2F1&q=mapa')
+		expect(buildWhiteboardListQuery({ scope: 'work' }))
+			.toBe('scope=all&origin=work&limit=50')
+		expect(reconcileWhiteboardScopeCapability('work', false)).toBe('mine')
+		expect(reconcileWhiteboardScopeCapability('work', true)).toBe('work')
+		expect(reconcileWhiteboardScopeCapability('trash', false)).toBe('trash')
   })
 
   it('builds cursor-safe API paths for old share links and revisions', () => {
@@ -554,6 +567,21 @@ describe('whiteboard frontend contracts', () => {
     expect(filterWhiteboards([base, second], 'luis').map(item => item.id)).toEqual(['board-2'])
     expect(filterWhiteboards([{ ...base, description: 'Proceso de admisión' }, second], 'admisión').map(item => item.id)).toEqual(['board-1'])
     expect(filterWhiteboards([base, second], '').map(item => item.id)).toEqual(['board-1', 'board-2'])
+		const contextual = {
+			...base,
+			id: 'board-work',
+			origin: 'work' as const,
+			work_location: {
+				task_view_id: 'view-1',
+				environment_id: 'environment-1',
+				scope_type: 'list' as const,
+				scope_id: 'list-1',
+				scope_name: 'Operación diaria',
+				breadcrumb: [{ type: 'environment' as const, id: 'environment-1', name: 'General' }, { type: 'list' as const, id: 'list-1', name: 'Operación diaria' }],
+				lifecycle: 'active' as const,
+			},
+		}
+		expect(filterWhiteboards([base, contextual], 'operación diaria').map(item => item.id)).toEqual(['board-work'])
   })
 
   it('persists only durable scene app state and carries optimistic concurrency metadata', () => {
@@ -1045,6 +1073,11 @@ describe('whiteboard frontend contracts', () => {
     expect(parseWhiteboardViewMode('grid')).toBe('grid')
     expect(parseWhiteboardViewMode('compact')).toBe('compact')
     expect(parseWhiteboardViewMode('list')).toBe('list')
+  })
+
+  it('recovers comments as well as scene when a member queue requires canonical sync', () => {
+    expect(whiteboardRealtimeSyncRecoveryPlan('member')).toEqual({ reloadScene: true, reloadComments: true })
+    expect(whiteboardRealtimeSyncRecoveryPlan('guest')).toEqual({ reloadScene: true, reloadComments: false })
   })
 
   it('flattens active folder hierarchy once and contains malformed cycles', () => {

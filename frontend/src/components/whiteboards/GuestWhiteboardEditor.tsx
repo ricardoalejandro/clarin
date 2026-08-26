@@ -784,13 +784,13 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
     collaboratorsRef.current = next
     const api = editorAPIRef.current
     if (!api) return
-    runWithTransientSceneSuppressed(() => {
-      api.updateScene({
-        collaborators: excalidrawWhiteboardCollaborators(next, presentation.getSelfActorID()),
-        captureUpdate: CaptureUpdateAction.NEVER,
-      })
+    // Presence is session-only state. Suppressing every scene change until the
+    // next frame can swallow a real guest edit that overlaps this update.
+    api.updateScene({
+      collaborators: excalidrawWhiteboardCollaborators(next, presentation.getSelfActorID()),
+      captureUpdate: CaptureUpdateAction.NEVER,
     })
-  }, [presentation.getSelfActorID, runWithTransientSceneSuppressed])
+  }, [presentation.getSelfActorID])
 
   const handleRealtimeIssue = useCallback((issue: WhiteboardRealtimeIssue | null) => {
     setRealtimeIssue(issue)
@@ -949,9 +949,9 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
           if (dirtyRef.current) setSaveState('pending')
           collaboratorsRef.current = new Map()
           const api = editorAPIRef.current
-          if (api) runWithTransientSceneSuppressed(() => {
+          if (api) {
             api.updateScene({ collaborators: new Map(), captureUpdate: CaptureUpdateAction.NEVER })
-          })
+          }
         }
       },
     })
@@ -960,7 +960,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
       if (roomRef.current === room) roomRef.current = null
       room.close()
     }
-  }, [applyCollaboratorEvent, boardID, handleRealtimeIssue, hydrateReferencedAssets, phase, presentation.handleConnectionChange, presentation.handleRealtimeEvent, reloadCanonicalForRealtime, runWithTransientSceneSuppressed, save, shareLinkID])
+  }, [applyCollaboratorEvent, boardID, handleRealtimeIssue, hydrateReferencedAssets, phase, presentation.handleConnectionChange, presentation.handleRealtimeEvent, reloadCanonicalForRealtime, save, shareLinkID])
 
   const exportJSON = () => {
     if (!allowExport || !latestRef.current) return

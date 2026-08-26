@@ -74,6 +74,10 @@ type Config struct {
 	// production until a real-device smoke test has passed.
 	WhatsAppStatusEnabled     bool
 	WhatsAppStatusSyncEnabled bool
+	// Work whiteboard views are an additive rollout. The backend keeps the
+	// contextual authorization resolver active even while entry points are
+	// hidden, so persisted bindings can never fall back to standalone ACLs.
+	WorkWhiteboardViewsEnabled bool
 	// Login abuse protection
 	TurnstileSiteKey   string
 	TurnstileSecretKey string
@@ -137,6 +141,7 @@ func Load() *Config {
 		WhatsAppCloudTokenEncryptionKey: getEnv("WHATSAPP_CLOUD_TOKEN_ENCRYPTION_KEY", ""),
 		WhatsAppStatusEnabled:           getEnvBool("WHATSAPP_STATUS_ENABLED", false),
 		WhatsAppStatusSyncEnabled:       getEnvBool("WHATSAPP_STATUS_SYNC_ENABLED", false),
+		WorkWhiteboardViewsEnabled:      getEnvBool("WORK_WHITEBOARD_VIEWS_ENABLED", false),
 		TurnstileSiteKey:                getEnv("TURNSTILE_SITE_KEY", getEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "")),
 		TurnstileSecretKey:              getEnv("TURNSTILE_SECRET_KEY", ""),
 	}

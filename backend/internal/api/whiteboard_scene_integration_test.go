@@ -81,6 +81,7 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 	personalLibraryID := uuid.New()
 	commenterID, viewerID := uuid.New(), uuid.New()
 	foreignAccountID, foreignActorID := uuid.New(), uuid.New()
+	whiteboardRoleID := uuid.New()
 	// Fixture insertion deliberately bypasses unrelated account bootstrap
 	// triggers. The test exercises the real whiteboard schema/repositories and
 	// keeps task/default-environment seed behavior outside this focused path.
@@ -89,6 +90,15 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO accounts(id,name) VALUES
 		($1,'Whiteboard API test'),($2,'Whiteboard API foreign test')`, accountID, foreignAccountID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO subscriptions(account_id,plan_code,status,current_period_start,current_period_end)
+		VALUES($1,'enterprise','active',NOW(),NOW()+INTERVAL '1 year'),
+			($2,'enterprise','active',NOW(),NOW()+INTERVAL '1 year')`, accountID, foreignAccountID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO roles(id,name,permissions)
+		VALUES($1,$2,ARRAY[$3]::text[])`, whiteboardRoleID, "Whiteboard API integration "+whiteboardRoleID.String(), domain.PermWhiteboards); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO users(id,account_id,username,email,password_hash,display_name,is_admin)
@@ -104,9 +114,9 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 		foreignAccountID, "wb-api-"+foreignActorID.String(), foreignActorID.String()+"@test.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,role,is_default) VALUES
-		($1,$5,'admin',TRUE),($2,$5,'agent',FALSE),($3,$5,'agent',FALSE),($4,$6,'agent',TRUE)`,
-		actorID, commenterID, viewerID, foreignActorID, accountID, foreignAccountID); err != nil {
+	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,role,role_id,is_default) VALUES
+		($1,$5,'admin',NULL,TRUE),($2,$5,'agent',$7,FALSE),($3,$5,'agent',$7,FALSE),($4,$6,'agent',$7,TRUE)`,
+		actorID, commenterID, viewerID, foreignActorID, accountID, foreignAccountID, whiteboardRoleID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO whiteboards(
@@ -692,15 +702,15 @@ func TestWhiteboardDeployedRuntimePersistsControlledScene(t *testing.T) {
 
 	var actorID, accountID uuid.UUID
 	var username, role string
-	var isAdmin, isSuperAdmin bool
+	var isSuperAdmin bool
 	if err := db.QueryRow(ctx, `SELECT account_user.id,membership.account_id,account_user.username,
-		COALESCE(account_user.is_admin,FALSE),COALESCE(account_user.is_super_admin,FALSE),membership.role
+		COALESCE(account_user.is_super_admin,FALSE),membership.role
 		FROM user_accounts membership
 		JOIN users account_user ON account_user.id=membership.user_id AND account_user.is_active
 		JOIN accounts account ON account.id=membership.account_id AND account.is_active
-		WHERE account_user.is_admin OR account_user.is_super_admin OR membership.role IN ('admin','super_admin')
-		ORDER BY account_user.is_super_admin DESC,account_user.is_admin DESC,membership.created_at
-		LIMIT 1`).Scan(&actorID, &accountID, &username, &isAdmin, &isSuperAdmin, &role); err != nil {
+		WHERE account_user.is_super_admin OR membership.role IN ('admin','super_admin')
+		ORDER BY account_user.is_super_admin DESC,(membership.role IN ('admin','super_admin')) DESC,membership.created_at
+		LIMIT 1`).Scan(&actorID, &accountID, &username, &isSuperAdmin, &role); err != nil {
 		t.Fatalf("select smoke-test administrator: %v", err)
 	}
 	now := time.Now().UTC()
@@ -716,7 +726,7 @@ func TestWhiteboardDeployedRuntimePersistsControlledScene(t *testing.T) {
 	defer func() { _ = redisCache.Del(ctx, sessionKey) }()
 	claims := service.JWTClaims{
 		UserID: actorID, AccountID: accountID, SessionID: sessionID, Username: username,
-		IsAdmin:      isAdmin || role == domain.RoleAdmin || role == domain.RoleSuperAdmin,
+		IsAdmin:      domain.HasAccountAdminAuthority(role, isSuperAdmin),
 		IsSuperAdmin: isSuperAdmin, Role: role, Permissions: []string{domain.PermAll},
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID: uuid.NewString(), Issuer: "clarin", IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(5 * time.Minute)),

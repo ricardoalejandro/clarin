@@ -34,6 +34,38 @@ func (r *TaskWorkRepository) MoveTaskToEnvironment(ctx context.Context, accountI
 	}
 	defer tx.Rollback(ctx)
 
+	participantRows, err := tx.Query(ctx, `SELECT participant.user_id FROM (
+		SELECT assigned_to AS user_id FROM tasks WHERE account_id=$1 AND id=$2 AND parent_task_id IS NULL AND deleted_at IS NULL
+		UNION SELECT collaborator.user_id FROM task_collaborators collaborator
+		WHERE collaborator.account_id=$1 AND collaborator.task_id=$2
+	) participant WHERE participant.user_id IS NOT NULL ORDER BY participant.user_id`, accountID, taskID)
+	if err != nil {
+		return nil, nil, err
+	}
+	participants := make([]uuid.UUID, 0)
+	for participantRows.Next() {
+		var id uuid.UUID
+		if err := participantRows.Scan(&id); err != nil {
+			participantRows.Close()
+			return nil, nil, err
+		}
+		participants = append(participants, id)
+	}
+	if err := participantRows.Err(); err != nil {
+		participantRows.Close()
+		return nil, nil, err
+	}
+	participantRows.Close()
+	lockedParticipantMemberships, err := lockTaskParticipantMembershipsTx(
+		ctx, tx, accountID, actorID, participants,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !taskParticipantMembershipsLocked(lockedParticipantMemberships, participants) {
+		return nil, nil, ErrTaskAccessInvalid
+	}
+
 	var sourceListID uuid.UUID
 	var version int64
 	var accessMode string
@@ -195,28 +227,31 @@ func (r *TaskWorkRepository) MoveTaskToEnvironment(ctx context.Context, accountI
 		return nil, nil, err
 	}
 
-	participantRows, err := tx.Query(ctx, `SELECT participant.user_id FROM (
-		SELECT assigned_to AS user_id FROM tasks WHERE account_id=$1 AND id=$2
+	participantRows, err = tx.Query(ctx, `SELECT participant.user_id FROM (
+		SELECT assigned_to AS user_id FROM tasks WHERE account_id=$1 AND id=$2 AND parent_task_id IS NULL AND deleted_at IS NULL
 		UNION SELECT collaborator.user_id FROM task_collaborators collaborator
 		WHERE collaborator.account_id=$1 AND collaborator.task_id=$2
 	) participant WHERE participant.user_id IS NOT NULL ORDER BY participant.user_id`, accountID, taskID)
 	if err != nil {
 		return nil, nil, err
 	}
-	participants := make([]uuid.UUID, 0)
+	currentParticipants := make([]uuid.UUID, 0)
 	for participantRows.Next() {
 		var id uuid.UUID
 		if err := participantRows.Scan(&id); err != nil {
 			participantRows.Close()
 			return nil, nil, err
 		}
-		participants = append(participants, id)
+		currentParticipants = append(currentParticipants, id)
 	}
 	if err := participantRows.Err(); err != nil {
 		participantRows.Close()
 		return nil, nil, err
 	}
 	participantRows.Close()
+	if !taskParticipantIDSetsEqual(participants, currentParticipants) {
+		return nil, nil, ErrTaskVersionConflict
+	}
 
 	affected := make([]uuid.UUID, 0)
 	for _, participantID := range participants {

@@ -824,7 +824,7 @@ func (s *Server) currentUserIsAccountAdmin(c *fiber.Ctx) bool {
 	if !ok {
 		return false
 	}
-	if claims.IsAdmin || claims.IsSuperAdmin || claims.Role == domain.RoleAdmin || claims.Role == domain.RoleSuperAdmin {
+	if domain.HasAccountAdminAuthority(claims.Role, claims.IsSuperAdmin) {
 		return true
 	}
 	var role string

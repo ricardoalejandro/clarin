@@ -567,6 +567,7 @@ export function createWebSocket(
 
 type WSListener = (data: unknown) => void
 type WSConnectListener = (send: (data: string) => void) => void
+type WSDisconnectListener = (event: CloseEvent) => void
 
 let _sharedWS: WebSocket | null = null
 let _sharedReconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -575,6 +576,7 @@ let _sharedIntentionallyClosed = false
 let _sharedRefCount = 0
 const _sharedListeners = new Set<WSListener>()
 const _sharedConnectListeners = new Set<WSConnectListener>()
+const _sharedDisconnectListeners = new Set<WSDisconnectListener>()
 
 function _sharedSend(data: string) {
   if (_sharedWS && _sharedWS.readyState === WebSocket.OPEN) {
@@ -620,9 +622,12 @@ function _sharedConnect() {
     // Logged natively by the browser
   }
 
-  _sharedWS.onclose = () => {
+  _sharedWS.onclose = (event) => {
     _sharedWS = null
     if (_sharedIntentionallyClosed || _sharedRefCount <= 0) return
+    _sharedDisconnectListeners.forEach(cb => {
+      try { cb(event) } catch (e) { console.error('WS disconnect listener error:', e) }
+    })
     const delay = Math.min(1000 * Math.pow(2, _sharedReconnectAttempts), 30000)
     _sharedReconnectAttempts++
     console.log(`WebSocket reconnecting in ${delay / 1000}s...`)
@@ -636,10 +641,12 @@ function _sharedConnect() {
  */
 export function subscribeWebSocket(
   onMessage: WSListener,
-  onConnect?: WSConnectListener
+  onConnect?: WSConnectListener,
+  onDisconnect?: WSDisconnectListener,
 ): () => void {
   _sharedListeners.add(onMessage)
   if (onConnect) _sharedConnectListeners.add(onConnect)
+  if (onDisconnect) _sharedDisconnectListeners.add(onDisconnect)
 
   _sharedRefCount++
   _sharedIntentionallyClosed = false
@@ -656,6 +663,7 @@ export function subscribeWebSocket(
   return () => {
     _sharedListeners.delete(onMessage)
     if (onConnect) _sharedConnectListeners.delete(onConnect)
+    if (onDisconnect) _sharedDisconnectListeners.delete(onDisconnect)
     _sharedRefCount--
 
     if (_sharedRefCount <= 0) {

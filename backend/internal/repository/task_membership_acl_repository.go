@@ -19,6 +19,18 @@ func removeTaskMembershipACLTx(ctx context.Context, tx pgx.Tx, accountID, userID
 		}
 		return err
 	}
+	// Work event organizer identity is durable history and its composite FK is
+	// deliberately RESTRICT. Surface that product invariant before touching any
+	// grants so account-membership removal fails atomically and actionably rather
+	// than bubbling an opaque constraint error after partial work.
+	var ownsWorkEvents bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM work_events
+		WHERE account_id=$1 AND organizer_id=$2)`, accountID, userID).Scan(&ownsWorkEvents); err != nil {
+		return err
+	}
+	if ownsWorkEvents {
+		return ErrTaskMembershipOwnsEvents
+	}
 
 	// Serialize membership removal with ACL replacement and with another
 	// manager removal. Task roots are locked before environments, matching the
@@ -199,6 +211,9 @@ func removeTaskMembershipACLTx(ctx context.Context, tx pgx.Tx, accountID, userID
 		SELECT task_id FROM task_access_grants WHERE account_id=$1 AND user_id=$2
 	) UPDATE tasks task SET access_revision=COALESCE(access_revision,1)+1,updated_at=NOW()
 	FROM affected WHERE task.account_id=$1 AND task.id=affected.task_id AND task.parent_task_id IS NULL`, accountID, userID); err != nil {
+		return err
+	}
+	if err := bumpAllWhiteboardAccessRevisionTx(ctx, tx, accountID); err != nil {
 		return err
 	}
 	_, err = tx.Exec(ctx, `DELETE FROM user_accounts WHERE account_id=$1 AND user_id=$2`, accountID, userID)

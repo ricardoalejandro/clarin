@@ -79,6 +79,19 @@ async function installTaskBoardMock(page: Page) {
   const moveRequests: Array<{ taskId: string; body: Record<string, unknown> }> = []
   const bulkRequests: Array<Record<string, unknown>> = []
 
+  if (process.env.PLAYWRIGHT_LOCAL_SERVER === '1') {
+    await page.route(`${baseURL}/dashboard/tasks**`, async route => {
+      if (route.request().resourceType() !== 'document') {
+        await route.continue()
+        return
+      }
+      const response = await route.fetch()
+      const headers = response.headers()
+      const csp = headers['content-security-policy']
+      if (csp) headers['content-security-policy'] = csp.replace("script-src 'self' 'unsafe-inline'", "script-src 'self' 'unsafe-inline' 'unsafe-eval'")
+      await route.fulfill({ response, headers })
+    })
+  }
   await page.routeWebSocket('**/ws**', socket => {
     socket.onMessage(() => undefined)
   })
@@ -252,6 +265,11 @@ async function openBoard(page: Page) {
   await page.goto(`${baseURL}/dashboard/tasks`)
   await expect(page.getByTestId('task-board-viewport')).toBeVisible()
   const progress = page.locator('[data-task-page-progress]')
+  await expect(progress).toContainText('Mostrando 11 de 90 tareas autorizadas')
+  await page.getByRole('button', { name: 'Filtros' }).click()
+  const filters = page.getByRole('dialog', { name: 'Filtrar tareas' })
+  await filters.getByRole('checkbox', { name: /Mostrar tareas cerradas/ }).click()
+  await filters.getByRole('button', { name: 'Aplicar filtros (1)', exact: true }).click()
   await expect(progress).toContainText('Mostrando 50 de 90 tareas autorizadas')
   await progress.getByRole('button', { name: 'Cargar más' }).click()
   await expect(progress).toHaveCount(0)

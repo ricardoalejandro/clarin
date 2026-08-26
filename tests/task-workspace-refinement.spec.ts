@@ -138,6 +138,19 @@ async function installWorkspaceMock(page: Page, options: { subtasks?: boolean; c
   let requireNextBulkParticipantGrant = false
   let createDelayMs = 0
 
+  if (process.env.PLAYWRIGHT_LOCAL_SERVER === '1') {
+    await page.route(`${baseURL}/dashboard/tasks**`, async route => {
+      if (route.request().resourceType() !== 'document') {
+        await route.continue()
+        return
+      }
+      const response = await route.fetch()
+      const headers = response.headers()
+      const csp = headers['content-security-policy']
+      if (csp) headers['content-security-policy'] = csp.replace("script-src 'self' 'unsafe-inline'", "script-src 'self' 'unsafe-inline' 'unsafe-eval'")
+      await route.fulfill({ response, headers })
+    })
+  }
   await page.routeWebSocket('**/ws**', socket => { workspaceSocket = socket; socket.onMessage(() => undefined) })
   await page.route('**/api/**', async route => {
     const request = route.request()
@@ -1269,9 +1282,15 @@ test.describe('Clarin Work workspace refinement', () => {
     await page.mouse.up()
     await expect.poll(() => mock.bulkMoves.length).toBe(1)
     expect(mock.bulkMoves[0]).toMatchObject({ destination_list_id: 'list-default' })
+    await expect(page.getByText('1 tarea movida correctamente', { exact: true })).toBeVisible()
+    await expect(taskCard).toContainText('Bandeja general')
+    await expect(page.locator('[data-operational-drag-overlay]')).toBeHidden()
 
     const folderTarget = page.getByRole('button', { name: 'Cliente Alfa 0 tareas abiertas', exact: true })
+    const folderDropTarget = page.locator('[data-task-drop-folder="folder-client"]')
     await dragTaskToNavigation(page, taskCard, folderTarget)
+    await expect(folderDropTarget.locator('[data-task-drop-highlight]')).toHaveCount(1)
+    await expect(page.getByText('Suelta para elegir una lista', { exact: true })).toBeVisible()
     await page.mouse.up()
     const chooser = page.getByRole('dialog', { name: 'Cliente Alfa' })
     await expect(chooser).toBeVisible()

@@ -126,6 +126,12 @@ func (r *WhiteboardRepository) CreateFolder(ctx context.Context, accountID, acto
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockActiveWhiteboardTenantTx(ctx, tx, accountID); err != nil {
+		return nil, err
+	}
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
 	if err := lockWhiteboardHierarchyTx(ctx, tx, accountID); err != nil {
 		return nil, err
 	}

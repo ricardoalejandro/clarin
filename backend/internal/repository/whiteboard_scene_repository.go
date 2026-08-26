@@ -205,6 +205,12 @@ func (r *WhiteboardRepository) writeScene(ctx context.Context, accountID, userID
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, userID); err != nil {
+		return nil, err
+	}
+	if _, err := lockWorkWhiteboardParentViewTx(ctx, tx, accountID, boardID, false, false); err != nil {
+		return nil, err
+	}
 	var currentSequence int64
 	var archivedAt *time.Time
 	if err := tx.QueryRow(ctx, `SELECT scene_sequence,archived_at FROM whiteboards

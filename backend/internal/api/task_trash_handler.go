@@ -78,7 +78,13 @@ func (s *Server) handleGetTaskTrashContainers(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Entorno inválido", "code": "invalid_environment_id"})
 	}
-	items, err := s.repos.TaskWork.ListTrashContainers(c.Context(), accountID, userID, environmentID, time.Now().UTC())
+	includeWhiteboardCounts, err := s.includeTaskLocationWhiteboardCounts(c)
+	if err != nil {
+		return taskWorkError(c, err)
+	}
+	items, err := s.repos.TaskWork.ListTrashContainers(
+		c.Context(), accountID, userID, environmentID, time.Now().UTC(), includeWhiteboardCounts,
+	)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
@@ -88,7 +94,13 @@ func (s *Server) handleGetTaskTrashContainers(c *fiber.Ctx) error {
 func (s *Server) handleGetTaskTrashEnvironments(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	userID := c.Locals("user_id").(uuid.UUID)
-	items, err := s.repos.TaskWork.ListTrashEnvironments(c.Context(), accountID, userID, time.Now().UTC())
+	includeWhiteboardCounts, err := s.includeTaskLocationWhiteboardCounts(c)
+	if err != nil {
+		return taskWorkError(c, err)
+	}
+	items, err := s.repos.TaskWork.ListTrashEnvironments(
+		c.Context(), accountID, userID, time.Now().UTC(), includeWhiteboardCounts,
+	)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
@@ -106,9 +118,11 @@ func (s *Server) handleArchiveTaskList(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	if err := s.repos.TaskWork.ArchiveList(c.Context(), accountID, userID, listID); err != nil {
+	boardIDs, err := s.repos.TaskWork.ArchiveList(c.Context(), accountID, userID, listID)
+	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.revokeTaskLocationWhiteboardSockets(accountID, boardIDs)
 	s.invalidateTasksCache(accountID)
 	s.broadcastTaskWork(c.Context(), accountID, "list_archived", fiber.Map{"list_id": listID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
@@ -125,9 +139,11 @@ func (s *Server) handleUnarchiveTaskList(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	if err := s.repos.TaskWork.UnarchiveList(c.Context(), accountID, userID, listID); err != nil {
+	boardIDs, err := s.repos.TaskWork.UnarchiveList(c.Context(), accountID, userID, listID)
+	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.revokeTaskLocationWhiteboardSockets(accountID, boardIDs)
 	s.invalidateTasksCache(accountID)
 	s.broadcastTaskWork(c.Context(), accountID, "list_unarchived", fiber.Map{"list_id": listID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
@@ -144,9 +160,11 @@ func (s *Server) handleArchiveTaskFolderHistorical(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	if err := s.repos.TaskWork.ArchiveFolder(c.Context(), accountID, userID, folderID); err != nil {
+	boardIDs, err := s.repos.TaskWork.ArchiveFolder(c.Context(), accountID, userID, folderID)
+	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.revokeTaskLocationWhiteboardSockets(accountID, boardIDs)
 	s.invalidateTasksCache(accountID)
 	s.broadcastTaskWork(c.Context(), accountID, "folder_archived", fiber.Map{"folder_id": folderID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
@@ -163,9 +181,11 @@ func (s *Server) handleUnarchiveTaskFolder(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	if err := s.repos.TaskWork.UnarchiveFolder(c.Context(), accountID, userID, folderID); err != nil {
+	boardIDs, err := s.repos.TaskWork.UnarchiveFolder(c.Context(), accountID, userID, folderID)
+	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.revokeTaskLocationWhiteboardSockets(accountID, boardIDs)
 	s.invalidateTasksCache(accountID)
 	s.broadcastTaskWork(c.Context(), accountID, "folder_unarchived", fiber.Map{"folder_id": folderID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
@@ -182,9 +202,13 @@ func (s *Server) handleTrashTaskEnvironment(c *fiber.Ctx) error {
 	if err != nil || request.Version == nil || *request.Version < 1 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Confirmación y versión obligatorias"})
 	}
-	if err := s.repos.TaskWork.TrashEnvironment(c.Context(), accountID, userID, environmentID, request.ConfirmationName, *request.Version); err != nil {
+	boardIDs, err := s.repos.TaskWork.TrashEnvironment(
+		c.Context(), accountID, userID, environmentID, request.ConfirmationName, *request.Version,
+	)
+	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.revokeTaskLocationWhiteboardSockets(accountID, boardIDs)
 	s.invalidateTasksCache(accountID)
 	s.broadcastTaskWork(c.Context(), accountID, "environment_trashed", fiber.Map{"environment_id": environmentID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
@@ -201,9 +225,11 @@ func (s *Server) handleRestoreTaskEnvironmentFromTrash(c *fiber.Ctx) error {
 	if err != nil || request.Version == nil || *request.Version < 1 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Versión obligatoria"})
 	}
-	if err := s.repos.TaskWork.RestoreEnvironmentFromTrash(c.Context(), accountID, userID, environmentID, *request.Version); err != nil {
+	boardIDs, err := s.repos.TaskWork.RestoreEnvironmentFromTrash(c.Context(), accountID, userID, environmentID, *request.Version)
+	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.revokeTaskLocationWhiteboardSockets(accountID, boardIDs)
 	s.invalidateTasksCache(accountID)
 	s.broadcastTaskWork(c.Context(), accountID, "environment_restored", fiber.Map{"environment_id": environmentID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
@@ -221,9 +247,11 @@ func (s *Server) handleRestoreTaskList(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
 	_ = request
-	if err := s.repos.TaskWork.RestoreList(c.Context(), accountID, userID, listID); err != nil {
+	boardIDs, err := s.repos.TaskWork.RestoreList(c.Context(), accountID, userID, listID)
+	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.revokeTaskLocationWhiteboardSockets(accountID, boardIDs)
 	s.invalidateTasksCache(accountID)
 	s.broadcastTaskWork(c.Context(), accountID, "list_restored", fiber.Map{"list_id": listID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
@@ -240,9 +268,11 @@ func (s *Server) handleRestoreTaskFolder(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	if err := s.repos.TaskWork.RestoreFolder(c.Context(), accountID, userID, folderID); err != nil {
+	boardIDs, err := s.repos.TaskWork.RestoreFolder(c.Context(), accountID, userID, folderID)
+	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.revokeTaskLocationWhiteboardSockets(accountID, boardIDs)
 	s.invalidateTasksCache(accountID)
 	s.broadcastTaskWork(c.Context(), accountID, "folder_restored", fiber.Map{"folder_id": folderID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
@@ -294,10 +324,13 @@ func (s *Server) handlePurgeTaskList(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	result, err := s.repos.TaskWork.PurgeList(c.Context(), accountID, userID, listID, request.ConfirmationName, time.Now().UTC())
+	result, err := s.repos.TaskWork.PurgeList(
+		c.Context(), accountID, userID, listID, request.ConfirmationName, time.Now().UTC(), s.workWhiteboardViewsEnabled(),
+	)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.purgeTaskLocationWhiteboardSockets(accountID, result.WhiteboardIDs)
 	s.invalidateTasksCache(accountID)
 	s.broadcastTaskWork(c.Context(), accountID, "list_purged", fiber.Map{"list_id": listID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID, "purged": result})
@@ -317,10 +350,13 @@ func (s *Server) handlePurgeTaskFolder(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	result, err := s.repos.TaskWork.PurgeFolder(c.Context(), accountID, userID, folderID, request.ConfirmationName, time.Now().UTC())
+	result, err := s.repos.TaskWork.PurgeFolder(
+		c.Context(), accountID, userID, folderID, request.ConfirmationName, time.Now().UTC(), s.workWhiteboardViewsEnabled(),
+	)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.purgeTaskLocationWhiteboardSockets(accountID, result.WhiteboardIDs)
 	s.invalidateTasksCache(accountID)
 	s.broadcastTaskWork(c.Context(), accountID, "folder_purged", fiber.Map{"folder_id": folderID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID, "purged": result})
@@ -340,10 +376,13 @@ func (s *Server) handlePurgeTaskEnvironment(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	result, err := s.repos.TaskWork.PurgeEnvironment(c.Context(), accountID, userID, environmentID, request.ConfirmationName, time.Now().UTC())
+	result, err := s.repos.TaskWork.PurgeEnvironment(
+		c.Context(), accountID, userID, environmentID, request.ConfirmationName, time.Now().UTC(), s.workWhiteboardViewsEnabled(),
+	)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.purgeTaskLocationWhiteboardSockets(accountID, result.WhiteboardIDs)
 	s.invalidateTasksCache(accountID)
 	s.broadcastTaskWork(c.Context(), accountID, "environment_purged", fiber.Map{"environment_id": environmentID, "operation_id": operationID})
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID, "purged": result})

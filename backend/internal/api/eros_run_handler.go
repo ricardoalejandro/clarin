@@ -47,7 +47,7 @@ func claimsPermissions(claims *service.JWTClaims) []string {
 	if claims == nil {
 		return nil
 	}
-	if claims.IsAdmin || claims.IsSuperAdmin || claims.Role == domain.RoleAdmin || claims.Role == domain.RoleSuperAdmin {
+	if domain.HasAccountAdminAuthority(claims.Role, claims.IsSuperAdmin) {
 		return []string{domain.PermAll}
 	}
 	return append([]string(nil), claims.Permissions...)

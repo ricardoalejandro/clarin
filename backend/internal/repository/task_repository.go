@@ -188,6 +188,20 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	actorID := t.CreatedBy
+	if t.MutationActor != nil {
+		actorID = *t.MutationActor
+	}
+	participantIDs := canonicalTaskParticipantIDs(t.AssignedTo, t.CollaboratorIDs)
+	lockedParticipantMemberships, err := lockTaskParticipantMembershipsTx(
+		ctx, tx, t.AccountID, actorID, participantIDs,
+	)
+	if err != nil {
+		return err
+	}
+	if !taskParticipantMembershipsLocked(lockedParticipantMemberships, participantIDs) {
+		return ErrTaskAccessInvalid
+	}
 	var environmentID uuid.UUID
 	// Serialize placement per list. This prevents simultaneous quick creates
 	// from receiving the same order while keeping different lists independent.
@@ -246,7 +260,6 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 			}
 		}
 	}
-	participantIDs := canonicalTaskParticipantIDs(t.AssignedTo, t.CollaboratorIDs)
 	var participantRootID *uuid.UUID
 	if t.ParentTaskID != nil {
 		participantRootID = t.ParentTaskID
@@ -325,10 +338,6 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 		if t.ParentTaskID != nil {
 			rootTaskID = *t.ParentTaskID
 		}
-		actorID := t.CreatedBy
-		if t.MutationActor != nil {
-			actorID = *t.MutationActor
-		}
 		if err := confirmTaskParticipantGrants(ctx, tx, t.AccountID, rootTaskID, actorID,
 			affectedParticipants, t.MutationOperationID); err != nil {
 			return err
@@ -344,6 +353,20 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	actorID := t.CreatedBy
+	if t.MutationActor != nil {
+		actorID = *t.MutationActor
+	}
+	participantIDs := canonicalTaskParticipantIDs(t.AssignedTo, t.CollaboratorIDs)
+	lockedParticipantMemberships, err := lockTaskParticipantMembershipsTx(
+		ctx, tx, t.AccountID, actorID, participantIDs,
+	)
+	if err != nil {
+		return err
+	}
+	if !taskParticipantMembershipsLocked(lockedParticipantMemberships, participantIDs) {
+		return ErrTaskAccessInvalid
+	}
 	var observedListID, observedParentID *uuid.UUID
 	var observedVersion int64
 	if err := tx.QueryRow(ctx, `SELECT list_id,parent_task_id,COALESCE(version,1) FROM tasks
@@ -434,7 +457,6 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 				participantRootID = *t.ParentTaskID
 			}
 			participantEnvironmentID = lockedLists[*t.ListID].environmentID
-			participantIDs := canonicalTaskParticipantIDs(t.AssignedTo, t.CollaboratorIDs)
 			var accessErr error
 			affectedParticipants, accessErr = taskParticipantsNeedingGrant(ctx, tx, t.AccountID,
 				participantEnvironmentID, &participantRootID, participantIDs)
@@ -555,10 +577,6 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 		return err
 	}
 	if len(affectedParticipants) > 0 {
-		actorID := t.CreatedBy
-		if t.MutationActor != nil {
-			actorID = *t.MutationActor
-		}
 		if err := confirmTaskParticipantGrants(ctx, tx, t.AccountID, participantRootID,
 			actorID, affectedParticipants, t.MutationOperationID); err != nil {
 			return err

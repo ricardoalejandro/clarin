@@ -7,6 +7,7 @@ export const WHITEBOARD_PUBLIC_LIBRARY_FRAGMENT_MAX_LENGTH = 8 * 1024
 export const WHITEBOARD_PUBLIC_LIBRARY_START_GLOBAL = '__CLARIN_WHITEBOARD_LIBRARY_START_URL__'
 export const WHITEBOARD_PUBLIC_LIBRARY_CALLBACK_STORAGE_KEY = 'clarin:whiteboard-public-library-callback:v1'
 export const WHITEBOARD_PUBLIC_LIBRARY_CALLBACK_TTL_MS = 10 * 60 * 1000
+export const WHITEBOARD_PUBLIC_LIBRARY_WORK_RETURN_STORAGE_PREFIX = 'clarin:whiteboard-public-library-work-return:v1:'
 
 declare global {
   // Read only by Clarin's audited Excalidraw hardening patch. The value is
@@ -147,6 +148,75 @@ export function buildWhiteboardPublicLibraryReturnPath(boardID: string, importID
   if (!isWhiteboardPublicLibraryIdentifier(board) || !isWhiteboardPublicLibraryIdentifier(imported)) return null
   const query = new URLSearchParams({ [WHITEBOARD_PUBLIC_LIBRARY_IMPORT_QUERY]: imported })
   return `/dashboard/whiteboards/${encodeURIComponent(board)}?${query.toString()}`
+}
+
+type WhiteboardPublicLibrarySessionStorage = {
+  getItem: (key: string) => string | null
+  setItem: (key: string, value: string) => void
+  removeItem: (key: string) => void
+}
+
+function whiteboardPublicLibraryWorkReturnKey(boardID: string) {
+  return `${WHITEBOARD_PUBLIC_LIBRARY_WORK_RETURN_STORAGE_PREFIX}${boardID}`
+}
+
+/**
+ * Remembers only the authorized Work view identifier before the browser leaves
+ * Clarin for the official public-library flow. It never persists an arbitrary
+ * return URL and expires with the callback credential.
+ */
+export function rememberWhiteboardPublicLibraryWorkReturn(
+  boardID: string,
+  currentPath: string,
+  storage?: WhiteboardPublicLibrarySessionStorage,
+) {
+  if (!isWhiteboardPublicLibraryIdentifier(boardID) || !storage) return false
+  try {
+    const parsed = new URL(currentPath, 'https://clarin.invalid')
+    const workViewID = parsed.searchParams.get('work_view')?.trim()
+    if (parsed.origin !== 'https://clarin.invalid'
+      || parsed.pathname !== '/dashboard/tasks'
+      || parsed.hash
+      || !isWhiteboardPublicLibraryIdentifier(workViewID)) return false
+    storage.setItem(whiteboardPublicLibraryWorkReturnKey(boardID), JSON.stringify({
+      boardID,
+      workViewID,
+      createdAt: Date.now(),
+    }))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Returns a canonical deep link and consumes its single-use session record. */
+export function consumeWhiteboardPublicLibraryWorkReturn(
+  boardID: string,
+  importID: string,
+  storage?: Pick<WhiteboardPublicLibrarySessionStorage, 'getItem' | 'removeItem'>,
+) {
+  if (!isWhiteboardPublicLibraryIdentifier(boardID)
+    || !isWhiteboardPublicLibraryIdentifier(importID)
+    || !storage) return null
+  const key = whiteboardPublicLibraryWorkReturnKey(boardID)
+  try {
+    const raw = storage.getItem(key)
+    if (!raw) return null
+    const value = JSON.parse(raw) as { boardID?: unknown; workViewID?: unknown; createdAt?: unknown }
+    storage.removeItem(key)
+    if (value.boardID !== boardID
+      || !isWhiteboardPublicLibraryIdentifier(value.workViewID)
+      || typeof value.createdAt !== 'number'
+      || Date.now() - value.createdAt > WHITEBOARD_PUBLIC_LIBRARY_CALLBACK_TTL_MS) return null
+    const query = new URLSearchParams({
+      work_view: value.workViewID,
+      [WHITEBOARD_PUBLIC_LIBRARY_IMPORT_QUERY]: importID,
+    })
+    return `/dashboard/tasks?${query.toString()}`
+  } catch {
+    try { storage.removeItem(key) } catch { /* no-op */ }
+    return null
+  }
 }
 
 export function buildWhiteboardPublicLibraryLoginPath() {

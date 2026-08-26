@@ -26,6 +26,7 @@ var (
 	ErrWhiteboardSessionUnavailable = errors.New("whiteboard guest session is unavailable")
 	ErrWhiteboardTrashConfirmation  = errors.New("whiteboard trash confirmation does not match")
 	ErrWhiteboardTrashNotEligible   = errors.New("whiteboard is not eligible for permanent deletion")
+	ErrWhiteboardInheritsWorkAccess = errors.New("whiteboard inherits access from Clarin Work")
 )
 
 type WhiteboardTrashEligibilityError struct {
@@ -105,98 +106,62 @@ func WhiteboardAccessAllows(access *domain.WhiteboardEffectiveAccess, required s
 		whiteboardAccessRank(access.Level) >= whiteboardAccessRank(required)
 }
 
-const whiteboardEffectiveAccessQuery = `
-		SELECT
-			CASE
-				WHEN COALESCE(account_user.is_super_admin,FALSE) OR COALESCE(membership.role,'') IN ('admin','super_admin') THEN 'manage'
-				WHEN board.created_by=$2 THEN 'manage'
-				WHEN grant_item.access_level IS NOT NULL THEN grant_item.access_level
-				WHEN board.access_mode='account' THEN 'view'
-				ELSE 'none'
-			END,
-			CASE
-				WHEN COALESCE(account_user.is_super_admin,FALSE) OR COALESCE(membership.role,'') IN ('admin','super_admin') THEN TRUE
-				WHEN board.created_by=$2 THEN TRUE
-				ELSE COALESCE(grant_item.can_manage_access,FALSE)
-			END,
-			CASE
-				WHEN COALESCE(account_user.is_super_admin,FALSE) OR COALESCE(membership.role,'') IN ('admin','super_admin') THEN 'account_admin'
-				WHEN board.created_by=$2 THEN 'creator'
-				WHEN grant_item.access_level IS NOT NULL THEN 'direct_grant'
-				WHEN board.access_mode='account' THEN 'account_visibility'
-				ELSE 'private'
-			END
-		FROM whiteboards board
-		JOIN users account_user ON account_user.id=$2 AND account_user.is_active
-		LEFT JOIN user_accounts membership ON membership.account_id=board.account_id AND membership.user_id=$2
-		LEFT JOIN whiteboard_grants grant_item ON grant_item.account_id=board.account_id
-			AND grant_item.board_id=board.id AND grant_item.user_id=$2
-		WHERE board.account_id=$1 AND board.id=$3
-			AND (membership.user_id IS NOT NULL OR account_user.account_id=$1)
-	`
-
-const whiteboardActiveEffectiveAccessQuery = whiteboardEffectiveAccessQuery + `
-			AND board.archived_at IS NULL
-	`
-
-func resolveWhiteboardAccessWithQuery(ctx context.Context, q whiteboardQuerier, query string, accountID, userID, boardID uuid.UUID) (*domain.WhiteboardEffectiveAccess, error) {
-	var level, source string
-	var canManage bool
-	err := q.QueryRow(ctx, query, accountID, userID, boardID).Scan(&level, &canManage, &source)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrWhiteboardNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return BuildWhiteboardEffectiveAccess(level, canManage, source), nil
-}
-
-func resolveWhiteboardAccessWith(ctx context.Context, q whiteboardQuerier, accountID, userID, boardID uuid.UUID) (*domain.WhiteboardEffectiveAccess, error) {
-	return resolveWhiteboardAccessWithQuery(ctx, q, whiteboardEffectiveAccessQuery, accountID, userID, boardID)
-}
-
-func resolveActiveWhiteboardAccessWith(ctx context.Context, q whiteboardQuerier, accountID, userID, boardID uuid.UUID) (*domain.WhiteboardEffectiveAccess, error) {
-	return resolveWhiteboardAccessWithQuery(ctx, q, whiteboardActiveEffectiveAccessQuery, accountID, userID, boardID)
-}
-
 // RequireAccess is the canonical actor authorization gate prepared for both
 // REST and a future board-room WebSocket gateway.
 func (r *WhiteboardRepository) RequireAccess(ctx context.Context, accountID, userID, boardID uuid.UUID, requiredLevel string) (*domain.WhiteboardEffectiveAccess, error) {
+	access, _, err := r.requireAccessWithOrigin(ctx, accountID, userID, boardID, requiredLevel, false)
+	return access, err
+}
+
+func (r *WhiteboardRepository) requireAccessWithOrigin(ctx context.Context, accountID, userID, boardID uuid.UUID, requiredLevel string, active bool) (*domain.WhiteboardEffectiveAccess, *domain.WhiteboardWorkLocation, error) {
 	if !validWhiteboardAccessLevel(requiredLevel, false) {
-		return nil, ErrWhiteboardInvalid
+		return nil, nil, ErrWhiteboardInvalid
 	}
-	access, err := resolveWhiteboardAccessWith(ctx, r.db, accountID, userID, boardID)
+	access, location, err := resolveWhiteboardActorAccessWith(ctx, r.db, accountID, userID, boardID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	if active {
+		if location != nil && location.Lifecycle != domain.WhiteboardWorkLifecycleActive {
+			return nil, nil, ErrWhiteboardNotFound
+		}
+		var archived bool
+		if err := r.db.QueryRow(ctx, `SELECT archived_at IS NOT NULL FROM whiteboards WHERE account_id=$1 AND id=$2`, accountID, boardID).Scan(&archived); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, nil, ErrWhiteboardNotFound
+			}
+			return nil, nil, err
+		}
+		if archived {
+			return nil, nil, ErrWhiteboardNotFound
+		}
 	}
 	if !access.CanView {
-		return nil, ErrWhiteboardNotFound
+		return nil, nil, ErrWhiteboardNotFound
 	}
 	if !WhiteboardAccessAllows(access, requiredLevel) {
-		return nil, ErrWhiteboardForbidden
+		return nil, location, ErrWhiteboardForbidden
 	}
-	return access, nil
+	return access, location, nil
 }
 
 // RequireActiveAccess is the collaboration authorization gate. Unlike the
 // historical RequireAccess contract used by archive/restore workflows, it
 // treats archived (and therefore also purged) boards as unavailable.
 func (r *WhiteboardRepository) RequireActiveAccess(ctx context.Context, accountID, userID, boardID uuid.UUID, requiredLevel string) (*domain.WhiteboardEffectiveAccess, error) {
-	if !validWhiteboardAccessLevel(requiredLevel, false) {
-		return nil, ErrWhiteboardInvalid
+	access, _, err := r.requireAccessWithOrigin(ctx, accountID, userID, boardID, requiredLevel, true)
+	return access, err
+}
+
+func (r *WhiteboardRepository) AccessRevision(ctx context.Context, accountID, boardID uuid.UUID) (int64, error) {
+	var revision int64
+	if err := r.db.QueryRow(ctx, `SELECT access_revision FROM whiteboards WHERE account_id=$1 AND id=$2`, accountID, boardID).Scan(&revision); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrWhiteboardNotFound
+		}
+		return 0, err
 	}
-	access, err := resolveActiveWhiteboardAccessWith(ctx, r.db, accountID, userID, boardID)
-	if err != nil {
-		return nil, err
-	}
-	if !access.CanView {
-		return nil, ErrWhiteboardNotFound
-	}
-	if !WhiteboardAccessAllows(access, requiredLevel) {
-		return nil, ErrWhiteboardForbidden
-	}
-	return access, nil
+	return revision, nil
 }
 
 func (r *WhiteboardRepository) RequireManageAccess(ctx context.Context, accountID, userID, boardID uuid.UUID) (*domain.WhiteboardEffectiveAccess, error) {
@@ -223,6 +188,8 @@ type WhiteboardListOptions struct {
 	FolderID        *uuid.UUID
 	Query           string
 	Scope           string
+	Origin          string
+	IncludeWork     bool
 	IncludeArchived bool
 	BeforeUpdatedAt *time.Time
 	BeforeID        *uuid.UUID
@@ -235,11 +202,12 @@ const (
 	WhiteboardScopeRecent = "recent"
 	WhiteboardScopeShared = "shared"
 	WhiteboardScopeTrash  = "trash"
+	WhiteboardScopeWork   = "work"
 )
 
 func validWhiteboardListScope(scope string) bool {
 	switch scope {
-	case WhiteboardScopeAll, WhiteboardScopeMine, WhiteboardScopeRecent, WhiteboardScopeShared, WhiteboardScopeTrash:
+	case WhiteboardScopeAll, WhiteboardScopeMine, WhiteboardScopeRecent, WhiteboardScopeShared, WhiteboardScopeTrash, WhiteboardScopeWork:
 		return true
 	default:
 		return false
@@ -326,6 +294,12 @@ func (r *WhiteboardRepository) CreateBoard(ctx context.Context, input Whiteboard
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockActiveWhiteboardTenantTx(ctx, tx, input.AccountID); err != nil {
+		return nil, err
+	}
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, input.AccountID, input.ActorID); err != nil {
+		return nil, err
+	}
 	if input.FolderID != nil {
 		if err := lockWhiteboardHierarchyTx(ctx, tx, input.AccountID); err != nil {
 			return nil, err
@@ -409,7 +383,7 @@ func (r *WhiteboardRepository) CreateBoard(ctx context.Context, input Whiteboard
 }
 
 func (r *WhiteboardRepository) GetBoard(ctx context.Context, accountID, userID, boardID uuid.UUID) (*domain.Whiteboard, error) {
-	access, err := r.RequireAccess(ctx, accountID, userID, boardID, domain.WhiteboardAccessView)
+	access, workLocation, err := r.requireAccessWithOrigin(ctx, accountID, userID, boardID, domain.WhiteboardAccessView, false)
 	if err != nil {
 		return nil, err
 	}
@@ -422,6 +396,11 @@ func (r *WhiteboardRepository) GetBoard(ctx context.Context, accountID, userID, 
 		return nil, err
 	}
 	item.EffectiveAccess = access
+	item.Origin = domain.WhiteboardOriginStandalone
+	if workLocation != nil {
+		item.Origin = domain.WhiteboardOriginWork
+		item.WorkLocation = workLocation
+	}
 	if item.ThumbnailAssetID != nil {
 		item.ThumbnailURL = "/api/whiteboards/" + item.ID.String() + "/assets/" + item.ThumbnailAssetID.String()
 	}
@@ -444,58 +423,41 @@ func (r *WhiteboardRepository) ListBoards(ctx context.Context, accountID, userID
 	if !validWhiteboardListScope(scope) {
 		return nil, false, ErrWhiteboardInvalid
 	}
-	rows, err := r.db.Query(ctx, `WITH visible AS (
-		SELECT `+whiteboardSelectColumns+`,
-			COALESCE(folder.name,'') AS folder_name,
-			COALESCE(NULLIF(creator.display_name,''),creator.username,'') AS owner_name,
-			COALESCE(NULLIF(updater.display_name,''),updater.username,'') AS updated_by_name,
-			(board.created_by<>$2 AND (grant_item.user_id IS NOT NULL OR board.access_mode='account')) AS shared,
-			CASE
-				WHEN COALESCE(account_user.is_super_admin,FALSE) OR COALESCE(membership.role,'') IN ('admin','super_admin') THEN 'manage'
-				WHEN board.created_by=$2 THEN 'manage'
-				WHEN grant_item.access_level IS NOT NULL THEN grant_item.access_level
-				WHEN board.access_mode='account' THEN 'view'
-				ELSE 'none'
-			END AS effective_level,
-			CASE
-				WHEN COALESCE(account_user.is_super_admin,FALSE) OR COALESCE(membership.role,'') IN ('admin','super_admin') THEN TRUE
-				WHEN board.created_by=$2 THEN TRUE
-				ELSE COALESCE(grant_item.can_manage_access,FALSE)
-			END AS can_manage,
-			CASE
-				WHEN COALESCE(account_user.is_super_admin,FALSE) OR COALESCE(membership.role,'') IN ('admin','super_admin') THEN 'account_admin'
-				WHEN board.created_by=$2 THEN 'creator'
-				WHEN grant_item.access_level IS NOT NULL THEN 'direct_grant'
-				WHEN board.access_mode='account' THEN 'account_visibility'
-				ELSE 'private'
-			END AS access_source
-		FROM whiteboards board
-		JOIN users account_user ON account_user.id=$2 AND account_user.is_active
-		LEFT JOIN user_accounts membership ON membership.account_id=board.account_id AND membership.user_id=$2
-		LEFT JOIN whiteboard_grants grant_item ON grant_item.account_id=board.account_id
-			AND grant_item.board_id=board.id AND grant_item.user_id=$2
-		LEFT JOIN whiteboard_folders folder ON folder.account_id=board.account_id AND folder.id=board.folder_id
-		LEFT JOIN users creator ON creator.id=board.created_by
-		LEFT JOIN users updater ON updater.id=board.updated_by
-		WHERE board.account_id=$1
-			AND (membership.user_id IS NOT NULL OR account_user.account_id=$1)
-			AND (($3::text='trash' AND board.archived_at IS NOT NULL) OR ($3::text<>'trash' AND board.archived_at IS NULL))
-			AND ($3::text<>'mine' OR board.created_by=$2)
-			AND ($3::text<>'recent' OR board.updated_at>=NOW()-INTERVAL '30 days')
-			AND ($3::text<>'shared' OR (board.created_by<>$2
-				AND (grant_item.user_id IS NOT NULL OR board.access_mode='account')))
-			AND ($4::uuid IS NULL OR board.folder_id=$4::uuid)
-			AND ($5::text='' OR board.name ILIKE '%'||$5::text||'%' OR board.description ILIKE '%'||$5::text||'%'
-				OR COALESCE(folder.name,'') ILIKE '%'||$5::text||'%'
-				OR COALESCE(NULLIF(creator.display_name,''),creator.username,'') ILIKE '%'||$5::text||'%')
-			AND ($6::timestamptz IS NULL OR (board.updated_at,board.id)<($6::timestamptz,$7::uuid))
-	)
+	origin := strings.ToLower(strings.TrimSpace(options.Origin))
+	if scope == WhiteboardScopeWork {
+		origin, scope = domain.WhiteboardOriginWork, WhiteboardScopeAll
+	}
+	if origin == "" {
+		origin = WhiteboardScopeAll
+	}
+	if origin != WhiteboardScopeAll && origin != domain.WhiteboardOriginStandalone && origin != domain.WhiteboardOriginWork {
+		return nil, false, ErrWhiteboardInvalid
+	}
+	rows, err := r.db.Query(ctx, whiteboardHubAccessCTE+`
 	SELECT id,account_id,folder_id,name,description,scene_schema_version,editor_version,scene_sequence,
 		version,access_mode,access_revision,thumbnail_media_asset_id,thumbnail_asset_id,created_by,updated_by,archived_at,
-		created_at,updated_at,effective_level,can_manage,access_source,folder_name,owner_name,updated_by_name,shared
-	FROM visible WHERE effective_level<>'none'
-	ORDER BY updated_at DESC,id DESC LIMIT $8`, accountID, userID, scope,
-		options.FolderID, query, options.BeforeUpdatedAt, options.BeforeID, limit+1)
+		created_at,updated_at,effective_level,can_manage,access_source,folder_name,owner_name,updated_by_name,
+		origin,task_view_id,work_environment_id,environment_name,
+		view_folder_id,view_list_id,work_folder_id,work_folder_name,work_folder_visible,work_list_id,work_list_name,work_lifecycle
+		,work_can_restore
+	FROM visible
+	WHERE effective_level<>'none'
+		AND (($3::text='trash' AND (archived_at IS NOT NULL OR view_deleted_at IS NOT NULL))
+			OR ($3::text<>'trash' AND archived_at IS NULL AND view_deleted_at IS NULL))
+		AND ($3::text<>'mine' OR created_by=$2)
+		AND ($3::text<>'recent' OR updated_at>=NOW()-INTERVAL '30 days')
+		AND ($3::text<>'shared' OR COALESCE(created_by<>$2,TRUE))
+		AND ($4::uuid IS NULL OR (origin='standalone' AND folder_id=$4::uuid))
+		AND ($5::text='' OR name ILIKE '%'||$5::text||'%' OR description ILIKE '%'||$5::text||'%'
+			OR folder_name ILIKE '%'||$5::text||'%' OR owner_name ILIKE '%'||$5::text||'%'
+			OR environment_name ILIKE '%'||$5::text||'%'
+			OR (work_folder_visible AND work_folder_name ILIKE '%'||$5::text||'%')
+			OR work_list_name ILIKE '%'||$5::text||'%')
+		AND ($6::timestamptz IS NULL OR (updated_at,id)<($6::timestamptz,$7::uuid))
+		AND ($8::text='all' OR origin=$8::text)
+		AND ($9::boolean OR origin='standalone')
+	ORDER BY updated_at DESC,id DESC LIMIT $10`, accountID, userID, scope,
+		options.FolderID, query, options.BeforeUpdatedAt, options.BeforeID, origin, options.IncludeWork, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -505,14 +467,40 @@ func (r *WhiteboardRepository) ListBoards(ctx context.Context, accountID, userID
 		item := &domain.Whiteboard{}
 		var level, source string
 		var manage bool
+		var origin, workLifecycle string
+		var taskViewID, environmentID, viewFolderID, viewListID, workFolderID, workListID *uuid.UUID
+		var environmentName, workFolderName, workListName string
+		var workFolderVisible, workCanRestore bool
 		if err := rows.Scan(&item.ID, &item.AccountID, &item.FolderID, &item.Name, &item.Description,
 			&item.SceneSchemaVersion, &item.EditorVersion, &item.SceneSequence, &item.Version, &item.AccessMode,
 			&item.AccessRevision, &item.ThumbnailMediaAssetID, &item.ThumbnailAssetID, &item.CreatedBy, &item.UpdatedBy, &item.ArchivedAt,
 			&item.CreatedAt, &item.UpdatedAt, &level, &manage, &source, &item.FolderName, &item.OwnerName,
-			&item.UpdatedByName, &item.Shared); err != nil {
+			&item.UpdatedByName, &origin, &taskViewID, &environmentID, &environmentName,
+			&viewFolderID, &viewListID, &workFolderID, &workFolderName, &workFolderVisible,
+			&workListID, &workListName, &workLifecycle, &workCanRestore); err != nil {
 			return nil, false, err
 		}
 		item.EffectiveAccess = BuildWhiteboardEffectiveAccess(level, manage, source)
+		item.Shared = whiteboardHubSharedWithActor(item.CreatedBy, userID)
+		applyWhiteboardHubStructuralCapabilities(item.EffectiveAccess, origin, workLifecycle, workCanRestore)
+		item.Origin = origin
+		if origin == domain.WhiteboardOriginWork && taskViewID != nil && environmentID != nil {
+			location := &domain.WhiteboardWorkLocation{
+				TaskViewID: *taskViewID, EnvironmentID: *environmentID, Lifecycle: workLifecycle,
+				Breadcrumb: []domain.WhiteboardWorkBreadcrumbItem{{Type: domain.TaskAccessTargetEnvironment, ID: *environmentID, Name: environmentName}},
+			}
+			if viewListID != nil && workListID != nil {
+				location.ScopeType, location.ScopeID, location.ScopeName = domain.TaskAccessTargetList, *workListID, workListName
+				if workFolderVisible && workFolderID != nil {
+					location.Breadcrumb = append(location.Breadcrumb, domain.WhiteboardWorkBreadcrumbItem{Type: domain.TaskAccessTargetFolder, ID: *workFolderID, Name: workFolderName})
+				}
+				location.Breadcrumb = append(location.Breadcrumb, domain.WhiteboardWorkBreadcrumbItem{Type: domain.TaskAccessTargetList, ID: *workListID, Name: workListName})
+			} else if viewFolderID != nil && workFolderID != nil {
+				location.ScopeType, location.ScopeID, location.ScopeName = domain.TaskAccessTargetFolder, *workFolderID, workFolderName
+				location.Breadcrumb = append(location.Breadcrumb, domain.WhiteboardWorkBreadcrumbItem{Type: domain.TaskAccessTargetFolder, ID: *workFolderID, Name: workFolderName})
+			}
+			item.WorkLocation = location
+		}
 		if item.ThumbnailAssetID != nil {
 			item.ThumbnailURL = "/api/whiteboards/" + item.ID.String() + "/assets/" + item.ThumbnailAssetID.String()
 		}
@@ -528,39 +516,45 @@ func (r *WhiteboardRepository) ListBoards(ctx context.Context, accountID, userID
 	return items, hasMore, nil
 }
 
-func (r *WhiteboardRepository) CountBoardScopes(ctx context.Context, accountID, userID uuid.UUID) (map[string]int64, error) {
-	var all, mine, recent, shared, trash int64
-	err := r.db.QueryRow(ctx, `WITH visible AS (
-		SELECT board.archived_at,board.updated_at,board.created_by,
-			(board.created_by<>$2 AND (grant_item.user_id IS NOT NULL OR board.access_mode='account')) AS shared,
-			CASE
-				WHEN COALESCE(account_user.is_super_admin,FALSE) OR COALESCE(membership.role,'') IN ('admin','super_admin') THEN 'manage'
-				WHEN board.created_by=$2 THEN 'manage'
-				WHEN grant_item.access_level IS NOT NULL THEN grant_item.access_level
-				WHEN board.access_mode='account' THEN 'view'
-				ELSE 'none'
-			END AS effective_level
-		FROM whiteboards board
-		JOIN users account_user ON account_user.id=$2 AND account_user.is_active
-		LEFT JOIN user_accounts membership ON membership.account_id=board.account_id AND membership.user_id=$2
-		LEFT JOIN whiteboard_grants grant_item ON grant_item.account_id=board.account_id
-			AND grant_item.board_id=board.id AND grant_item.user_id=$2
-		WHERE board.account_id=$1 AND (membership.user_id IS NOT NULL OR account_user.account_id=$1)
-	)
+// A Work parent may be archived while one of its whiteboards is explicitly in
+// Whiteboards Trash. Content remains read-only, but an actor who still has the
+// underlying Work Administrar level must be able to restore that explicit
+// deletion. Keep this structural capability separate from level/edit and from
+// ACL management so archived content cannot be mutated or re-shared.
+func applyWhiteboardHubStructuralCapabilities(access *domain.WhiteboardEffectiveAccess, origin, lifecycle string, canRestore bool) {
+	if access == nil || origin != domain.WhiteboardOriginWork || lifecycle != domain.WhiteboardWorkLifecycleTrash || !canRestore {
+		return
+	}
+	access.CanDelete = true
+	access.CanManageAccess = false
+}
+
+func (r *WhiteboardRepository) CountBoardScopes(ctx context.Context, accountID, userID uuid.UUID, includeWork bool) (map[string]int64, error) {
+	var all, mine, recent, shared, trash, work int64
+	err := r.db.QueryRow(ctx, whiteboardHubAccessCTE+`
 	SELECT
-		COUNT(*) FILTER (WHERE archived_at IS NULL),
-		COUNT(*) FILTER (WHERE archived_at IS NULL AND created_by=$2),
-		COUNT(*) FILTER (WHERE archived_at IS NULL AND updated_at>=NOW()-INTERVAL '30 days'),
-		COUNT(*) FILTER (WHERE archived_at IS NULL AND shared),
-		COUNT(*) FILTER (WHERE archived_at IS NOT NULL)
-	FROM visible WHERE effective_level<>'none'`, accountID, userID).Scan(&all, &mine, &recent, &shared, &trash)
+		COUNT(*) FILTER (WHERE archived_at IS NULL AND view_deleted_at IS NULL),
+		COUNT(*) FILTER (WHERE archived_at IS NULL AND view_deleted_at IS NULL AND created_by=$2),
+		COUNT(*) FILTER (WHERE archived_at IS NULL AND view_deleted_at IS NULL AND updated_at>=NOW()-INTERVAL '30 days'),
+		COUNT(*) FILTER (WHERE archived_at IS NULL AND view_deleted_at IS NULL AND COALESCE(created_by<>$2,TRUE)),
+		COUNT(*) FILTER (WHERE archived_at IS NOT NULL OR view_deleted_at IS NOT NULL),
+		COUNT(*) FILTER (WHERE archived_at IS NULL AND view_deleted_at IS NULL AND origin='work')
+	FROM visible WHERE effective_level<>'none' AND ($3::boolean OR origin='standalone')`, accountID, userID, includeWork).
+		Scan(&all, &mine, &recent, &shared, &trash, &work)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]int64{
 		WhiteboardScopeAll: all, WhiteboardScopeMine: mine, WhiteboardScopeRecent: recent,
-		WhiteboardScopeShared: shared, WhiteboardScopeTrash: trash,
+		WhiteboardScopeShared: shared, WhiteboardScopeTrash: trash, WhiteboardScopeWork: work,
 	}, nil
+}
+
+// Historical boards outlive account memberships. A NULL creator therefore
+// means the current actor is not the creator; treating SQL NULL as false would
+// both hide the board from Compartidas and make the Hub row scan nullable.
+func whiteboardHubSharedWithActor(createdBy *uuid.UUID, actorID uuid.UUID) bool {
+	return createdBy == nil || *createdBy != actorID
 }
 
 func normalizeWhiteboardConstraintError(err error) error {

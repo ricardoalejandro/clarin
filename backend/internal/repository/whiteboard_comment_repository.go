@@ -498,18 +498,11 @@ func (r *WhiteboardRepository) ListWhiteboardThreadComments(ctx context.Context,
 }
 
 func requireActiveWhiteboardCommentAccessTx(ctx context.Context, tx pgx.Tx, accountID, actorID, boardID uuid.UUID) error {
-	var archivedAt *time.Time
-	if err := tx.QueryRow(ctx, `SELECT archived_at FROM whiteboards WHERE account_id=$1 AND id=$2 FOR SHARE`, accountID, boardID).Scan(&archivedAt); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrWhiteboardNotFound
-		}
+	if _, err := lockActiveWhiteboardMutationRowsTx(ctx, tx, accountID, boardID); err != nil {
 		return err
 	}
 	if _, err := requireWhiteboardAccessTx(ctx, tx, accountID, actorID, boardID, domain.WhiteboardAccessComment, false); err != nil {
 		return err
-	}
-	if archivedAt != nil {
-		return ErrWhiteboardConflict
 	}
 	return nil
 }
@@ -563,6 +556,9 @@ func (r *WhiteboardRepository) CreateWhiteboardCommentThread(ctx context.Context
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
 	if err := requireActiveWhiteboardCommentAccessTx(ctx, tx, accountID, actorID, boardID); err != nil {
 		return nil, err
 	}
@@ -611,7 +607,10 @@ func (r *WhiteboardRepository) AddWhiteboardCommentReply(ctx context.Context, ac
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := requireWhiteboardAccessTx(ctx, tx, accountID, actorID, boardID, domain.WhiteboardAccessComment, false); err != nil {
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
+	if err := requireActiveWhiteboardCommentAccessTx(ctx, tx, accountID, actorID, boardID); err != nil {
 		return nil, err
 	}
 	commentID, idempotent, err := reserveWhiteboardCommentOperationTx(ctx, tx, accountID, boardID, actorID,
@@ -624,9 +623,6 @@ func (r *WhiteboardRepository) AddWhiteboardCommentReply(ctx context.Context, ac
 			return nil, err
 		}
 		return r.getWhiteboardCommentThread(ctx, accountID, boardID, threadID)
-	}
-	if err := requireActiveWhiteboardCommentAccessTx(ctx, tx, accountID, actorID, boardID); err != nil {
-		return nil, err
 	}
 	var status string
 	var count int
@@ -678,6 +674,9 @@ func (r *WhiteboardRepository) EditWhiteboardComment(ctx context.Context, accoun
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
 	if err := requireActiveWhiteboardCommentAccessTx(ctx, tx, accountID, actorID, boardID); err != nil {
 		return nil, err
 	}
@@ -744,6 +743,9 @@ func (r *WhiteboardRepository) DeleteWhiteboardComment(ctx context.Context, acco
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
 	if err := requireActiveWhiteboardCommentAccessTx(ctx, tx, accountID, actorID, boardID); err != nil {
 		return nil, err
 	}
@@ -815,6 +817,9 @@ func (r *WhiteboardRepository) UpdateWhiteboardCommentThreadStatus(ctx context.C
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
 	if err := requireActiveWhiteboardCommentAccessTx(ctx, tx, accountID, actorID, boardID); err != nil {
 		return nil, err
 	}

@@ -101,6 +101,9 @@ func (r *WhiteboardRepository) AttachLibraryAsset(ctx context.Context, accountID
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
 	state, err := requireWhiteboardLibraryMutationAccessTx(ctx, tx, accountID, actorID, libraryID, domain.WhiteboardAccessEdit)
 	if err != nil {
 		return nil, err
@@ -270,6 +273,9 @@ func (r *WhiteboardRepository) DeleteLibraryAsset(ctx context.Context, accountID
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID); err != nil {
+		return err
+	}
 	state, err := requireWhiteboardLibraryMutationAccessTx(ctx, tx, accountID, actorID, libraryID, domain.WhiteboardAccessEdit)
 	if err != nil {
 		return err

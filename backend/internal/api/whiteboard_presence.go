@@ -39,7 +39,7 @@ func (s *Server) registerWhiteboardPresence(ctx context.Context, client *whitebo
 	if s.cache == nil {
 		return nil
 	}
-	payload, err := json.Marshal(client.Actor)
+	payload, err := json.Marshal(client.ActorSnapshot())
 	if err != nil {
 		return err
 	}

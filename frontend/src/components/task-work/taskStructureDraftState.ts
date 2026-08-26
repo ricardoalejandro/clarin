@@ -38,14 +38,14 @@ export function mergeCanonicalTaskFolderWorkflowDrafts(
 
 export function taskStructureHasPendingChanges(input: {
   dirtyStatusIDs: readonly string[]
+  dirtyFolderWorkflowIDs: readonly string[]
   folderName: string
   listName: string
   workflowName: string
   newStatusName: string
-  folders: TaskFolder[]
-  folderWorkflows: Record<string, string>
 }) {
   if (input.dirtyStatusIDs.length > 0) return true
+  if (input.dirtyFolderWorkflowIDs.length > 0) return true
   if ([input.folderName, input.listName, input.workflowName, input.newStatusName].some(value => value.trim().length > 0)) return true
-  return input.folders.some(folder => (input.folderWorkflows[folder.id] || '') !== (folder.workflow_id || ''))
+  return false
 }

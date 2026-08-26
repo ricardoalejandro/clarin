@@ -145,13 +145,16 @@ func lockAndRequireActiveEnvironmentAccessTx(ctx context.Context, tx pgx.Tx, acc
 }
 
 func lockAndRequireTaskAccountAdminTx(ctx context.Context, tx pgx.Tx, accountID, actorID uuid.UUID) error {
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return err
+	}
 	var admin bool
 	err := tx.QueryRow(ctx, `SELECT membership.role IN ('admin','super_admin')
-			OR COALESCE(account_user.is_admin,FALSE) OR COALESCE(account_user.is_super_admin,FALSE)
+			OR COALESCE(account_user.is_super_admin,FALSE)
 		FROM user_accounts membership
 		JOIN users account_user ON account_user.id=membership.user_id
 		WHERE membership.account_id=$1 AND membership.user_id=$2
-		FOR SHARE OF membership,account_user`, accountID, actorID).Scan(&admin)
+	`, accountID, actorID).Scan(&admin)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrTaskWorkNotFound
 	}

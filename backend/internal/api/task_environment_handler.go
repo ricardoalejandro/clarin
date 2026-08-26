@@ -256,9 +256,14 @@ func (s *Server) handleUpdateTaskEnvironment(c *fiber.Ctx) error {
 	if err := validateTaskEnvironment(current); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Datos del entorno inválidos"})
 	}
-	if err := s.repos.TaskWork.UpdateEnvironment(c.Context(), accountID, userID, current, req.ExpectedAccessRevision, operationID); err != nil {
+	boardIDs, err := s.repos.TaskWork.UpdateEnvironment(c.Context(), accountID, userID, current, req.ExpectedAccessRevision, operationID)
+	if err != nil {
 		return taskWorkError(c, err)
 	}
+	// Privacy/default-access changes advance every affected board revision in
+	// the same transaction. Reauthorize retained viewers in place; only actors
+	// that canonically lost Ver receive a terminal revocation.
+	s.notifyTaskLocationWhiteboardAccessChanged(accountID, boardIDs)
 	updated, err := s.repos.TaskWork.GetEnvironment(c.Context(), accountID, userID, environmentID)
 	if err != nil {
 		return taskWorkError(c, err)
@@ -313,9 +318,11 @@ func (s *Server) handleArchiveTaskEnvironment(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Versión obligatoria"})
 	}
 	viewers, _ := s.repos.TaskWork.EnvironmentViewerUserIDs(c.Context(), accountID, environmentID)
-	if err := s.repos.TaskWork.ArchiveEnvironment(c.Context(), accountID, userID, environmentID, version); err != nil {
+	boardIDs, err := s.repos.TaskWork.ArchiveEnvironment(c.Context(), accountID, userID, environmentID, version)
+	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.revokeTaskLocationWhiteboardSockets(accountID, boardIDs)
 	updated, err := s.repos.TaskWork.GetEnvironment(c.Context(), accountID, userID, environmentID)
 	if err != nil {
 		return taskWorkError(c, err)
@@ -338,9 +345,11 @@ func (s *Server) handleRestoreTaskEnvironment(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Versión obligatoria"})
 	}
-	if err := s.repos.TaskWork.RestoreEnvironment(c.Context(), accountID, userID, environmentID, version); err != nil {
+	boardIDs, err := s.repos.TaskWork.RestoreEnvironment(c.Context(), accountID, userID, environmentID, version)
+	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.revokeTaskLocationWhiteboardSockets(accountID, boardIDs)
 	updated, err := s.repos.TaskWork.GetEnvironment(c.Context(), accountID, userID, environmentID)
 	if err != nil {
 		return taskWorkError(c, err)
@@ -358,7 +367,13 @@ func (s *Server) handleGetTaskEnvironmentHierarchy(c *fiber.Ctx) error {
 	}
 	lifecycle := strings.ToLower(strings.TrimSpace(c.Query("lifecycle")))
 	if lifecycle == "archive" || lifecycle == domain.TaskLifecycleArchived {
-		folders, roots, err := s.repos.TaskWork.ListArchiveHierarchyForActor(c.Context(), accountID, userID, environmentID)
+		includeWhiteboardCounts, err := s.includeTaskLocationWhiteboardCounts(c)
+		if err != nil {
+			return taskWorkError(c, err)
+		}
+		folders, roots, err := s.repos.TaskWork.ListArchiveHierarchyForActor(
+			c.Context(), accountID, userID, environmentID, includeWhiteboardCounts,
+		)
 		if err != nil {
 			return taskWorkError(c, err)
 		}
@@ -776,11 +791,16 @@ func (s *Server) replaceTaskAccess(c *fiber.Ctx, targetType string, requestedID 
 	if err != nil {
 		return taskWorkError(c, err)
 	}
+	var mutationEffects repository.TaskAccessMutationEffects
 	_, accessMode, revision, err := s.repos.TaskWork.ReplaceAccessGrants(c.Context(), accountID, userID, targetType,
-		targetID, req.AccessMode, inputs, req.ExpectedAccessRevision, operationID)
+		targetID, req.AccessMode, inputs, req.ExpectedAccessRevision, operationID, &mutationEffects)
 	if err != nil {
 		return taskWorkError(c, err)
 	}
+	// Contextual rooms inherit this ACL. Revalidate every affected room on all
+	// instances, retaining users who still have Ver and updating their effective
+	// Comentar/Editar/Administrar level without interrupting collaboration.
+	s.notifyTaskLocationWhiteboardAccessChanged(accountID, mutationEffects.WhiteboardIDs)
 	var afterViewers []uuid.UUID
 	if targetType == domain.TaskAccessTargetTask {
 		afterViewers, err = s.repos.TaskWork.TaskViewerUserIDs(c.Context(), accountID, targetID)

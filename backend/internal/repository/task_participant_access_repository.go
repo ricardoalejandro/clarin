@@ -34,6 +34,99 @@ func canonicalTaskParticipantIDs(ownerID uuid.UUID, collaboratorIDs []uuid.UUID)
 	return items
 }
 
+func taskActorMembershipAllows(role string, permissions []string, active, globalSuperAdmin bool) bool {
+	return active && (domain.HasAccountAdminAuthority(role, globalSuperAdmin) ||
+		whiteboardPermissionSetAllows(permissions, domain.PermTasks))
+}
+
+// lockTaskActorAndMembershipsTx serializes one authenticated Work mutation
+// with account-membership removal and authority changes. The actor and every
+// membership whose FK may be inserted are locked together in canonical UUID
+// order; locking the actor separately first would let inverse A->B and B->A
+// mutations deadlock.
+func lockTaskActorAndMembershipsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID, actorID uuid.UUID,
+	relatedUserIDs []uuid.UUID,
+) (map[uuid.UUID]struct{}, error) {
+	if actorID == uuid.Nil {
+		return nil, ErrTaskWorkNotFound
+	}
+	if err := lockUserAuthorityTx(ctx, tx, actorID); err != nil {
+		return nil, err
+	}
+	userIDs := make([]uuid.UUID, 0, len(relatedUserIDs)+1)
+	userIDs = append(userIDs, actorID)
+	userIDs = append(userIDs, relatedUserIDs...)
+	locked, err := lockAccountMembershipsKeyShareTx(ctx, tx, accountID, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	if _, actorIsMember := locked[actorID]; !actorIsMember {
+		return nil, ErrTaskWorkNotFound
+	}
+
+	var active, globalSuperAdmin bool
+	var role string
+	var permissions []string
+	if err := tx.QueryRow(ctx, `SELECT account_user.is_active,
+		COALESCE(account_user.is_super_admin,FALSE),membership.role,
+		COALESCE(role_item.permissions,'{}'::text[])
+		FROM user_accounts membership
+		JOIN users account_user ON account_user.id=membership.user_id
+		LEFT JOIN roles role_item ON role_item.id=membership.role_id
+		WHERE membership.account_id=$1 AND membership.user_id=$2`, accountID, actorID).
+		Scan(&active, &globalSuperAdmin, &role, &permissions); err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, ErrTaskWorkNotFound
+		}
+		return nil, err
+	}
+	if !taskActorMembershipAllows(role, permissions, active, globalSuperAdmin) {
+		return nil, ErrTaskWorkNotFound
+	}
+	return locked, nil
+}
+
+// lockTaskParticipantMembershipsTx is the mandatory first lock for a task
+// mutation that may insert or strengthen participant grants. Membership
+// removal locks user_accounts before the affected task rows, so callers must
+// invoke this helper before taking any task/list/environment lock and then
+// revalidate all resource state under their normal optimistic transaction.
+func lockTaskParticipantMembershipsTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	accountID, actorID uuid.UUID,
+	participantIDs []uuid.UUID,
+) (map[uuid.UUID]struct{}, error) {
+	return lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, participantIDs)
+}
+
+func taskParticipantMembershipsLocked(locked map[uuid.UUID]struct{}, participantIDs []uuid.UUID) bool {
+	canonical := canonicalAccountMembershipUserIDs(participantIDs)
+	for _, participantID := range canonical {
+		if _, ok := locked[participantID]; !ok {
+			return false
+		}
+	}
+	return len(canonical) == len(participantIDs)
+}
+
+func taskParticipantIDSetsEqual(left, right []uuid.UUID) bool {
+	canonicalLeft := canonicalAccountMembershipUserIDs(left)
+	canonicalRight := canonicalAccountMembershipUserIDs(right)
+	if len(canonicalLeft) != len(canonicalRight) {
+		return false
+	}
+	for index := range canonicalLeft {
+		if canonicalLeft[index] != canonicalRight[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func taskParticipantsNeedingGrant(ctx context.Context, q taskAccessQuerier, accountID, environmentID uuid.UUID, rootTaskID *uuid.UUID, participantIDs []uuid.UUID) ([]uuid.UUID, error) {
 	affected := make([]uuid.UUID, 0)
 	for _, participantID := range participantIDs {

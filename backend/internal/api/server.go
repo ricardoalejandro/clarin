@@ -76,8 +76,12 @@ type Server struct {
 	whiteboardRooms        *whiteboardcore.RoomHub
 	whiteboardInstanceID   uuid.UUID
 	whiteboardFanoutCancel context.CancelFunc
-	whiteboardCheckpointMu sync.Mutex
-	whiteboardCheckpoints  map[string]*whiteboardCheckpointEntry
+	// whiteboardFanoutEpochRunner is normally backed by PostgreSQL's shared
+	// board-row lock. Tests may inject the same callback contract to prove
+	// commit-vs-enqueue ordering deterministically.
+	whiteboardFanoutEpochRunner whiteboardFanoutEpochRunner
+	whiteboardCheckpointMu      sync.Mutex
+	whiteboardCheckpoints       map[string]*whiteboardCheckpointEntry
 }
 
 func NewServer(cfg *config.Config, services *service.Services, repos *repository.Repositories, hub *ws.Hub, pool *whatsapp.DevicePool, store *storage.Storage, kommoSyncSvc *kommo.SyncService, kommoManager *kommo.Manager, c *cache.Cache, gc *googleclient.Client, version string) *Server {
@@ -815,6 +819,16 @@ func (s *Server) setupRoutes() {
 	tasks.Post("/saved-views", s.handleCreateTaskSavedView)
 	tasks.Put("/saved-views/:viewId", s.handleUpdateTaskSavedView)
 	tasks.Delete("/saved-views/:viewId", s.handleDeleteTaskSavedView)
+	// Location views are real Work resources backed by their owning module.
+	// The tasks group already enforces PermTasks; the additional middleware
+	// closes the second module boundary required by contextual whiteboards.
+	tasks.Get("/location-views", s.requirePermission(domain.PermWhiteboards), s.handleListTaskLocationViews)
+	tasks.Post("/location-views", s.requirePermission(domain.PermWhiteboards), s.requireWorkWhiteboardViewsEnabled, s.handleCreateTaskLocationView)
+	tasks.Get("/location-views/:viewId", s.requirePermission(domain.PermWhiteboards), s.requireWorkWhiteboardViewsEnabled, s.handleGetTaskLocationView)
+	tasks.Patch("/location-views/:viewId", s.requirePermission(domain.PermWhiteboards), s.requireWorkWhiteboardViewsEnabled, s.handleUpdateTaskLocationView)
+	tasks.Post("/location-views/:viewId/duplicate", s.requirePermission(domain.PermWhiteboards), s.requireWorkWhiteboardViewsEnabled, s.handleDuplicateTaskLocationView)
+	tasks.Delete("/location-views/:viewId", s.requirePermission(domain.PermWhiteboards), s.requireWorkWhiteboardViewsEnabled, s.handleTrashTaskLocationView)
+	tasks.Post("/location-views/:viewId/restore", s.requirePermission(domain.PermWhiteboards), s.requireWorkWhiteboardViewsEnabled, s.handleRestoreTaskLocationView)
 	tasks.Post("/reorder", s.handleReorderTasks)
 	tasks.Post("/bulk-move", s.handleBulkMoveTasks)
 	tasks.Post("/bulk-update", s.handleBulkUpdateTasks)
@@ -897,6 +911,9 @@ func (s *Server) setupRoutes() {
 	whiteboards.Get("/trash-policy", s.handleGetWhiteboardTrashPolicy)
 	whiteboards.Put("/trash-policy", s.handlePutWhiteboardTrashPolicy)
 	whiteboards.Post("/public-library-import/callback", s.guardWhiteboardLibraryImportMutation, s.handleWhiteboardPublicLibraryCallback)
+	// Keep the contextual resolver live while the rollout is disabled, but hide
+	// every persisted Work board from generic board routes and deep links.
+	whiteboards.Use("/:id", s.requireWorkWhiteboardOriginEnabled)
 	whiteboards.Post("/:id/public-library-import/start", s.guardWhiteboardLibraryImportMutation, s.guardWhiteboardPublicLibraryStart, s.handleStartWhiteboardPublicLibraryImport)
 	whiteboards.Get("/:id/public-library-imports/:importId/navigate", s.guardWhiteboardPublicLibraryNavigation, s.handleNavigateWhiteboardPublicLibraryImport)
 	whiteboards.Get("/:id/public-library-imports/:importId", s.handleGetWhiteboardPublicLibraryImport)
@@ -1280,6 +1297,9 @@ func (s *Server) authMiddleware(c *fiber.Ctx) error {
 	if err != nil {
 		return writeAuthValidationFailure(c, err)
 	}
+	if err := s.hydrateAccountScopedClaims(c.Context(), claims); err != nil {
+		return writeAccountAuthorityFailure(c, err)
+	}
 
 	// Check if user sessions were invalidated (admin toggled/deleted the user)
 	if s.services.Auth.IsUserSessionInvalidated(claims) {
@@ -1315,6 +1335,9 @@ func (s *Server) whiteboardCollabAuthMiddleware(c *fiber.Ctx) error {
 			UserID: identity.UserID, AccountID: identity.AccountID, SessionID: identity.SessionID, Username: identity.Username,
 		}
 	}
+	if err := s.hydrateAccountScopedClaims(c.Context(), claims); err != nil {
+		return writeAccountAuthorityFailure(c, err)
+	}
 	c.Locals("claims", claims)
 	c.Locals("user_id", claims.UserID)
 	c.Locals("account_id", claims.AccountID)
@@ -1342,8 +1365,9 @@ func (s *Server) requirePermission(module string) fiber.Handler {
 			return c.Status(401).JSON(fiber.Map{"success": false, "error": "Unauthorized"})
 		}
 
-		// Derive admin status from JWT role (covers old tokens with stale IsAdmin flag)
-		isAdmin := claims.IsAdmin || claims.IsSuperAdmin || claims.Role == domain.RoleAdmin || claims.Role == domain.RoleSuperAdmin
+		// users.is_admin is only a legacy mirror of the default account. The
+		// active membership role (or the global super-admin bit) is authoritative.
+		isAdmin := domain.HasAccountAdminAuthority(claims.Role, claims.IsSuperAdmin)
 
 		// Admins always have full access
 		if isAdmin {
@@ -1397,6 +1421,16 @@ func (s *Server) wsUpgrade(c *fiber.Ctx) error {
 		if err != nil {
 			return c.Status(401).JSON(fiber.Map{"error": "Invalid token"})
 		}
+		if s.hub == nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Realtime unavailable"})
+		}
+		// Snapshot before the final account hydration. Any authority mutation
+		// that commits after this point advances one of these local barriers;
+		// registration then fails even if the upgrade already authenticated.
+		authorityEpoch := s.hub.AuthorityEpoch(claims.AccountID, claims.UserID)
+		if err := s.hydrateAccountScopedClaims(c.Context(), claims); err != nil {
+			return writeAccountAuthorityFailure(c, err)
+		}
 		if !claims.IsSuperAdmin {
 			decision, accessErr := s.services.Subscription.CheckAccess(c.Context(), claims.AccountID)
 			if accessErr != nil {
@@ -1407,18 +1441,9 @@ func (s *Server) wsUpgrade(c *fiber.Ctx) error {
 			}
 		}
 
-		permissions := claims.Permissions
-		isAdmin := claims.IsAdmin || claims.IsSuperAdmin || claims.Role == domain.RoleAdmin || claims.Role == domain.RoleSuperAdmin
-		if isAdmin {
-			permissions = []string{domain.PermAll}
-		} else {
-			// Resolve the effective role on each socket connection so a stale JWT
-			// cannot retain a revoked module permission for real-time payloads.
-			permissions, _ = s.repos.UserAccount.GetUserPermissions(c.Context(), claims.UserID, claims.AccountID)
-		}
-
 		c.Locals("claims", claims)
-		c.Locals("ws_permissions", permissions)
+		c.Locals("ws_permissions", append([]string(nil), claims.Permissions...))
+		c.Locals("ws_authority_epoch", authorityEpoch)
 		return c.Next()
 	}
 	return fiber.ErrUpgradeRequired
@@ -1443,7 +1468,8 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 		return err
 	}
 
-	token, refreshToken, user, accountCount, err := s.services.Auth.Login(c.Context(), username, req.Password, s.cfg.JWTSecret)
+	token, refreshToken, user, accountCount, authorityEffect, err := s.services.Auth.Login(c.Context(), username, req.Password, s.cfg.JWTSecret)
+	s.notifyWhiteboardAuthorityEffect(authorityEffect)
 	if err != nil {
 		if errors.Is(err, service.ErrAuthSessionUnavailable) {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
@@ -1466,7 +1492,7 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 	// Build permissions for response (mirrors JWT logic)
 	// Per-account admin/super_admin gets full access
 	activeRole := user.Role
-	isAdmin := user.IsAdmin || user.IsSuperAdmin || activeRole == domain.RoleAdmin || activeRole == domain.RoleSuperAdmin
+	isAdmin := domain.HasAccountAdminAuthority(activeRole, user.IsSuperAdmin)
 	permissions := []string{domain.PermAll}
 	if !isAdmin {
 		permissions, _ = s.repos.UserAccount.GetUserPermissions(c.Context(), user.ID, user.AccountID)
@@ -1610,7 +1636,7 @@ func (s *Server) handleGetMe(c *fiber.Ctx) error {
 
 	// Compute per-account admin status (same logic as login/switchAccount)
 	activeRole := membership.Role
-	isAdmin := user.IsAdmin || user.IsSuperAdmin || activeRole == domain.RoleAdmin || activeRole == domain.RoleSuperAdmin
+	isAdmin := domain.HasAccountAdminAuthority(activeRole, user.IsSuperAdmin)
 
 	// Compute permissions: admins get wildcard, agents get role-based permissions
 	var permissions []string
@@ -1668,7 +1694,7 @@ func (s *Server) handleGetMe(c *fiber.Ctx) error {
 			"display_name":           user.DisplayName,
 			"is_admin":               isAdmin,
 			"is_super_admin":         user.IsSuperAdmin,
-			"role":                   user.Role,
+			"role":                   activeRole,
 			"account_id":             accountID,
 			"account_name":           activeAccountName,
 			"plan":                   plan,
@@ -4198,7 +4224,7 @@ func (s *Server) userCanManageStorage(c *fiber.Ctx) bool {
 	if !ok {
 		return false
 	}
-	if claims.IsSuperAdmin || claims.IsAdmin || claims.Role == domain.RoleAdmin || claims.Role == domain.RoleSuperAdmin {
+	if domain.HasAccountAdminAuthority(claims.Role, claims.IsSuperAdmin) {
 		return true
 	}
 	for _, p := range claims.Permissions {
@@ -15958,6 +15984,12 @@ func (s *Server) handleGetStats(c *fiber.Ctx) error {
 
 func (s *Server) handleWebSocket(c *websocket.Conn) {
 	claims := c.Locals("claims").(*service.JWTClaims)
+	authorityEpoch, ok := c.Locals("ws_authority_epoch").(ws.AuthorityEpoch)
+	if !ok || s.hub == nil {
+		_ = c.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "authority unavailable"), time.Now().Add(time.Second))
+		_ = c.Close()
+		return
+	}
 	permissions := make(map[string]bool)
 	if values, ok := c.Locals("ws_permissions").([]string); ok {
 		for _, permission := range values {
@@ -15975,7 +16007,28 @@ func (s *Server) handleWebSocket(c *websocket.Conn) {
 		Permissions: permissions,
 	}
 
-	s.hub.Register(client)
+	// Re-read the canonical Redis session immediately before the atomic hub
+	// registration barrier. If invalidation won before this read it fails here;
+	// if invalidation races after the read, RegisterAtAuthorityEpoch rejects it.
+	validationCtx, validationCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	validationErr := s.services.Auth.ValidateSessionReadOnly(validationCtx, claims.SessionID, claims.UserID)
+	validationCancel()
+	if validationErr != nil {
+		closeCode := websocket.ClosePolicyViolation
+		closeReason := "session invalidated"
+		if errors.Is(validationErr, service.ErrAuthSessionUnavailable) {
+			closeCode = websocket.CloseTryAgainLater
+			closeReason = "authorization unavailable"
+		}
+		_ = c.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(closeCode, closeReason), time.Now().Add(time.Second))
+		_ = c.Close()
+		return
+	}
+	if !s.hub.RegisterAtAuthorityEpoch(client, authorityEpoch) {
+		_ = c.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "authority changed"), time.Now().Add(time.Second))
+		_ = c.Close()
+		return
+	}
 
 	go client.WritePump()
 	client.ReadPump()
@@ -16276,7 +16329,6 @@ func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
 	if req.MaxUsersOverride != nil && *req.MaxUsersOverride < 0 {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "max_users_override must be 0 or greater"})
 	}
-
 	account := &domain.Account{
 		ID:                id,
 		Name:              req.Name,
@@ -16300,6 +16352,7 @@ func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
 		if err := s.services.Subscription.Upsert(c.Context(), subOverview.Subscription); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
+		s.notifyAccountAuthorityChanged(id)
 	}
 
 	return c.JSON(fiber.Map{"success": true, "account": account})
@@ -16314,6 +16367,7 @@ func (s *Server) handleAdminToggleAccount(c *fiber.Ctx) error {
 	if err := s.services.Account.ToggleActive(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.notifyAccountAuthorityChanged(id)
 
 	return c.JSON(fiber.Map{"success": true})
 }
@@ -16342,6 +16396,7 @@ func (s *Server) handleAdminDeleteAccount(c *fiber.Ctx) error {
 	if err := s.services.Account.Delete(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.notifyAccountAuthorityChanged(id)
 
 	return c.JSON(fiber.Map{"success": true})
 }
@@ -16353,6 +16408,13 @@ func (s *Server) adminAccountPurgeSummary(ctx context.Context, accountID uuid.UU
 		"whiteboard_folders", "whiteboards", "whiteboard_grants", "whiteboard_access_audit", "whiteboard_activity",
 		"whiteboard_operations", "whiteboard_revisions", "whiteboard_revision_assets", "whiteboard_share_links", "whiteboard_guest_sessions",
 		"whiteboard_libraries", "whiteboard_assets", "whiteboard_media_gc_jobs", "whiteboard_snapshot_gc_jobs",
+		"task_environments", "task_workflows", "task_statuses", "task_folders", "task_lists", "tasks",
+		"task_collaborators", "task_comments", "task_comment_mentions", "task_comment_attachments",
+		"task_attachments", "task_attachment_comments", "task_attachment_comment_mentions", "task_attachment_previews",
+		"task_attachment_preview_jobs", "task_dependencies", "task_reminders", "task_saved_views", "task_activity",
+		"task_environment_grants", "task_folder_access_grants", "task_list_access_grants", "task_access_grants", "task_access_audit",
+		"task_media_gc_jobs", "work_events", "work_event_attendees", "work_event_occurrence_overrides", "work_event_reminder_jobs",
+		"task_location_views", "task_location_whiteboard_views", "task_location_view_operations",
 		"kommo_connected_pipelines", "kommo_push_outbox", "integration_instance_accounts",
 	}
 	counts := fiber.Map{}
@@ -16766,7 +16828,10 @@ func (s *Server) handleAdminPurgeAccount(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	if account == nil {
-		return c.JSON(fiber.Map{"success": true, "purged": true, "already_purged": true, "deleted_files": 0})
+		return c.JSON(fiber.Map{
+			"success": true, "purged": true, "already_purged": true, "deleted_files": 0,
+			"storage_cleanup": fiber.Map{"state": "managed_by_deleted_account_orphan_cleanup"},
+		})
 	}
 	var req struct {
 		Confirmation string `json:"confirmation"`
@@ -16788,40 +16853,41 @@ func (s *Server) handleAdminPurgeAccount(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	var deletedFiles int64
-	if deleteFiles && s.storage != nil {
-		deletedFiles, err = s.storage.DeletePrefix(c.Context(), id.String()+"/")
-		if err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	authorityEffect, err := s.repos.Account.PurgeWithAuthorityImpact(c.Context(), id, req.Confirmation)
+	if err != nil {
+		if errors.Is(err, repository.ErrAccountPurgeConfirmation) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"success": false, "code": "account_changed",
+				"error": "La cuenta cambió mientras se confirmaba la purga; revisa el nombre y vuelve a intentarlo",
+			})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	s.invalidateAndNotifyUserAuthority(authorityEffect)
+	s.reloadKommoManager(c.Context())
+
+	// Physical storage is intentionally post-commit. A storage failure must
+	// never leave live database rows pointing at bytes already deleted. Failed
+	// prefixes remain discoverable and retryable through the deleted-account
+	// orphan cleanup flow.
+	var deletePrefix func() (int64, error)
+	if s.storage != nil {
+		deletePrefix = func() (int64, error) {
+			return s.storage.DeletePrefix(c.Context(), id.String()+"/")
 		}
 	}
-
-	tx, err := s.repos.DB().Begin(c.Context())
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	cleanup := finalizeAccountPurgeStorageCleanup(deleteFiles, deletePrefix)
+	if cleanup.Err != nil {
+		log.Printf("[AdminAccounts] account %s purged; storage prefix awaits orphan cleanup: %v", id, cleanup.Err)
 	}
-	defer tx.Rollback(c.Context())
-
-	_, _ = tx.Exec(c.Context(), `
-		UPDATE users u
-		SET account_id = (
-			SELECT ua.account_id
-			FROM user_accounts ua
-			WHERE ua.user_id = u.id AND ua.account_id <> $1
-			ORDER BY ua.created_at ASC
-			LIMIT 1
-		)
-		WHERE u.account_id = $1
-		  AND EXISTS (SELECT 1 FROM user_accounts ua WHERE ua.user_id = u.id AND ua.account_id <> $1)
-	`, id)
-	if _, err := tx.Exec(c.Context(), `DELETE FROM accounts WHERE id = $1`, id); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	storageCleanup := fiber.Map{"state": cleanup.State}
+	if cleanup.Code != "" {
+		storageCleanup["code"] = cleanup.Code
 	}
-	if err := tx.Commit(c.Context()); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-	s.reloadKommoManager(c.Context())
-	return c.JSON(fiber.Map{"success": true, "purged": true, "deleted_files": deletedFiles, "summary": summary})
+	return c.JSON(fiber.Map{
+		"success": true, "purged": true, "deleted_files": cleanup.DeletedFiles,
+		"storage_cleanup": storageCleanup, "summary": summary,
+	})
 }
 
 func (s *Server) handleAdminGetUsers(c *fiber.Ctx) error {
@@ -16925,9 +16991,11 @@ func (s *Server) handleAdminCreateUser(c *fiber.Ctx) error {
 		IsSuperAdmin: primaryRole == domain.RoleSuperAdmin,
 	}
 
-	if err := s.services.Account.CreateUserWithAccounts(c.Context(), user, req.Password, assignments); err != nil {
+	authorityEffect, err := s.services.Account.CreateUserWithAccountsAndAuthorityImpact(c.Context(), user, req.Password, assignments)
+	if err != nil {
 		return writeAdminUserMutationError(c, err)
 	}
+	s.notifyWhiteboardAuthorityEffect(authorityEffect)
 	assignmentsResp, _ := s.services.Account.GetUserAccountAssignments(c.Context(), user.ID)
 	if assignmentsResp != nil {
 		user.Accounts = make([]domain.UserAccount, 0, len(assignmentsResp))
@@ -16976,10 +17044,11 @@ func (s *Server) handleAdminUpdateUser(c *fiber.Ctx) error {
 		IsAdmin:      req.Role == domain.RoleAdmin || req.Role == domain.RoleSuperAdmin,
 		IsSuperAdmin: req.Role == domain.RoleSuperAdmin,
 	}
-
-	if err := s.services.Account.UpdateUser(c.Context(), user); err != nil {
+	authorityEffect, err := s.services.Account.UpdateUserWithAuthorityImpact(c.Context(), user)
+	if err != nil {
 		return writeAdminUserMutationError(c, err)
 	}
+	s.invalidateAndNotifyUserAuthority(authorityEffect)
 
 	return c.JSON(fiber.Map{"success": true})
 }
@@ -17014,12 +17083,13 @@ func (s *Server) handleAdminToggleUser(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
 	}
 
-	if err := s.services.Account.ToggleUserActive(c.Context(), id); err != nil {
+	authorityEffect, err := s.services.Account.ToggleUserActiveWithAuthorityImpact(c.Context(), id)
+	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-
-	// Invalidate active sessions so the user must re-login
-	s.services.Auth.InvalidateUserSessions(id)
+	// Invalidate active sessions so the user must re-login, then publish the
+	// account-scoped authority control only after Redis has the new generation.
+	s.invalidateAndNotifyUserAuthority(authorityEffect)
 
 	return c.JSON(fiber.Map{"success": true})
 }
@@ -17047,10 +17117,14 @@ func (s *Server) handleAdminResetPassword(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
+	authorityEffect, err := s.authorityEffectForUser(c.Context(), id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo resolver la autoridad activa del usuario"})
+	}
 	if err := s.services.Account.ResetPassword(c.Context(), id, req.Password); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	s.services.Auth.InvalidateUserSessions(id)
+	s.invalidateAndNotifyUserAuthority(authorityEffect)
 	adminID, _ := c.Locals("user_id").(uuid.UUID)
 	targetUser, _ := s.services.Auth.GetUser(c.Context(), id)
 	var accountID *uuid.UUID
@@ -17084,19 +17158,65 @@ func (s *Server) handleAdminDeleteUser(c *fiber.Ctx) error {
 	if user != nil && user.IsSuperAdmin {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "No se puede eliminar un super administrador"})
 	}
-
-	// Invalidate active sessions before deleting
-	s.services.Auth.InvalidateUserSessions(id)
-
-	if err := s.services.Account.DeleteUserAs(c.Context(), id, claims.UserID); err != nil {
+	authorityEffect, err := s.services.Account.DeleteUserAsWithAuthorityImpact(c.Context(), id, claims.UserID)
+	if err != nil {
 		if errors.Is(err, repository.ErrTaskLastAccessManager) {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "last_private_access_manager",
 				"error": "Reasigna la gestión de los Entornos o tareas privadas antes de eliminar al usuario"})
 		}
+		if errors.Is(err, repository.ErrTaskMembershipOwnsEvents) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "work_event_organizer_history",
+				"error": "Reasigna o conserva la membresía: este usuario organiza Eventos de Work con historial"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateAndNotifyUserAuthority(authorityEffect)
 
 	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) notifyWhiteboardAuthorityEffect(effect *repository.WhiteboardAuthorityMutationEffect) {
+	if effect == nil {
+		return
+	}
+	for _, accountID := range effect.AccountIDs {
+		s.notifyWhiteboardAccountAccessChanged(accountID)
+	}
+}
+
+func (s *Server) authorityEffectForUser(ctx context.Context, userID uuid.UUID) (*repository.WhiteboardAuthorityMutationEffect, error) {
+	memberships, err := s.services.Auth.GetUserAccounts(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	accountIDs := make([]uuid.UUID, 0, len(memberships))
+	seen := make(map[uuid.UUID]struct{}, len(memberships))
+	for _, membership := range memberships {
+		if membership == nil || membership.AccountID == uuid.Nil {
+			continue
+		}
+		if _, exists := seen[membership.AccountID]; exists {
+			continue
+		}
+		seen[membership.AccountID] = struct{}{}
+		accountIDs = append(accountIDs, membership.AccountID)
+	}
+	sort.Slice(accountIDs, func(i, j int) bool { return accountIDs[i].String() < accountIDs[j].String() })
+	return &repository.WhiteboardAuthorityMutationEffect{AccountIDs: accountIDs, UserIDs: []uuid.UUID{userID}}, nil
+}
+
+// invalidateAndNotifyUserAuthority preserves the revocation order: first the
+// canonical Redis session generation, then exact local socket invalidation,
+// and only then payload-free account signals for other backend instances.
+func (s *Server) invalidateAndNotifyUserAuthority(effect *repository.WhiteboardAuthorityMutationEffect) {
+	if effect == nil {
+		return
+	}
+	s.invalidateUserSessions(effect.UserIDs)
+	for _, accountID := range effect.AccountIDs {
+		s.publishGeneralRealtimeUserAuthorityChanged(accountID)
+	}
+	s.notifyWhiteboardAuthorityEffect(effect)
 }
 
 // --- Switch Account Handler ---
@@ -17135,7 +17255,7 @@ func (s *Server) handleSwitchAccount(c *fiber.Ctx) error {
 	s.setAuthCookies(c, token, refreshToken)
 
 	// Compute permissions for response — per-account admin gets full access
-	isAdmin := user.IsAdmin || user.IsSuperAdmin || user.Role == domain.RoleAdmin || user.Role == domain.RoleSuperAdmin
+	isAdmin := domain.HasAccountAdminAuthority(user.Role, user.IsSuperAdmin)
 	perms := []string{domain.PermAll}
 	if !isAdmin {
 		perms, _ = s.repos.UserAccount.GetUserPermissions(c.Context(), userID, targetAccountID)
@@ -17266,7 +17386,6 @@ func (s *Server) handleAdminAssignUserAccount(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_users"})
 		}
 	}
-
 	ua := &domain.UserAccount{
 		UserID:    userID,
 		AccountID: accountID,
@@ -17282,9 +17401,11 @@ func (s *Server) handleAdminAssignUserAccount(c *fiber.Ctx) error {
 		}
 	}
 
-	if err := s.services.Account.AssignUserAccount(c.Context(), ua); err != nil {
+	authorityEffect, err := s.services.Account.AssignUserAccountWithAuthorityImpact(c.Context(), ua)
+	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateAndNotifyUserAuthority(authorityEffect)
 	accountsList, err := s.adminUserAccountsResponse(c.Context(), userID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error(), "persisted": true})
@@ -17303,8 +17424,6 @@ func (s *Server) handleAdminAssignUserAccount(c *fiber.Ctx) error {
 		metadata["new_role_id"] = ua.RoleID.String()
 	}
 	s.recordSecurityEventWithRefs(c.Context(), "admin_user_account_assigned", "", c, &accountID, &userID, metadata)
-	s.services.Auth.InvalidateUserSessions(userID)
-
 	return c.JSON(fiber.Map{
 		"success":                  true,
 		"accounts":                 accountsList,
@@ -17343,14 +17462,19 @@ func (s *Server) handleAdminRemoveUserAccount(c *fiber.Ctx) error {
 		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-
-	if err := s.services.Account.RemoveUserAccountAs(c.Context(), userID, accountID, actorID); err != nil {
+	authorityEffect, err := s.services.Account.RemoveUserAccountAsWithAuthorityImpact(c.Context(), userID, accountID, actorID)
+	if err != nil {
 		if errors.Is(err, repository.ErrTaskLastAccessManager) {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "last_private_access_manager",
 				"error": "Reasigna la gestión de los Entornos o tareas privadas antes de retirar esta cuenta"})
 		}
+		if errors.Is(err, repository.ErrTaskMembershipOwnsEvents) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "work_event_organizer_history",
+				"error": "Reasigna o conserva la membresía: este usuario organiza Eventos de Work con historial"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateAndNotifyUserAuthority(authorityEffect)
 	accountsList, err := s.adminUserAccountsResponse(c.Context(), userID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error(), "persisted": true})
@@ -17363,8 +17487,6 @@ func (s *Server) handleAdminRemoveUserAccount(c *fiber.Ctx) error {
 		metadata["previous_role_id"] = previousRoleID.String()
 	}
 	s.recordSecurityEventWithRefs(c.Context(), "admin_user_account_removed", "", c, &accountID, &userID, metadata)
-	s.services.Auth.InvalidateUserSessions(userID)
-
 	return c.JSON(fiber.Map{
 		"success":                  true,
 		"accounts":                 accountsList,
@@ -17858,24 +17980,20 @@ func normalizeRolePermissions(input []string) ([]string, string) {
 	return normalized, ""
 }
 
-func (s *Server) invalidateUsersWithRole(ctx context.Context, roleID uuid.UUID) {
-	rows, err := s.repos.DB().Query(ctx, `SELECT DISTINCT user_id FROM user_accounts WHERE role_id = $1`, roleID)
-	if err != nil {
-		log.Printf("[ADMIN] failed to load users for role invalidation %s: %v", roleID, err)
-		return
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var userID uuid.UUID
-		if err := rows.Scan(&userID); err != nil {
-			log.Printf("[ADMIN] failed to scan user for role invalidation %s: %v", roleID, err)
+func (s *Server) invalidateUserSessions(userIDs []uuid.UUID) {
+	seen := make(map[uuid.UUID]struct{}, len(userIDs))
+	for _, userID := range userIDs {
+		if userID == uuid.Nil {
 			continue
 		}
+		if _, exists := seen[userID]; exists {
+			continue
+		}
+		seen[userID] = struct{}{}
 		s.services.Auth.InvalidateUserSessions(userID)
-	}
-	if err := rows.Err(); err != nil {
-		log.Printf("[ADMIN] failed during role invalidation %s: %v", roleID, err)
+		if s.hub != nil {
+			s.hub.DisconnectUsers([]uuid.UUID{userID})
+		}
 	}
 }
 
@@ -17952,10 +18070,11 @@ func (s *Server) handleAdminUpdateRole(c *fiber.Ctx) error {
 		Description: req.Description,
 		Permissions: permissions,
 	}
-	if err := s.services.Role.Update(c.Context(), role); err != nil {
+	authorityEffect, err := s.services.Role.UpdateWithAuthorityImpact(c.Context(), role)
+	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	s.invalidateUsersWithRole(c.Context(), roleID)
+	s.invalidateAndNotifyUserAuthority(authorityEffect)
 	return c.JSON(fiber.Map{"success": true, "role": role})
 }
 
@@ -17965,9 +18084,11 @@ func (s *Server) handleAdminDeleteRole(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid role ID"})
 	}
 
-	if err := s.services.Role.Delete(c.Context(), roleID); err != nil {
+	authorityEffect, err := s.services.Role.DeleteWithAuthorityImpact(c.Context(), roleID)
+	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	s.invalidateAndNotifyUserAuthority(authorityEffect)
 	return c.JSON(fiber.Map{"success": true})
 }
 

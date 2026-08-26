@@ -104,7 +104,19 @@ func (r *SubscriptionRepository) Upsert(ctx context.Context, sub *domain.Subscri
 	if metadata == "" {
 		metadata = "{}"
 	}
-	return r.db.QueryRow(ctx, `
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	// Canonical tenant authority order is account -> subscription -> Work view
+	// -> board. Take the account row explicitly before ON CONFLICT acquires the
+	// subscription row, matching creation and deactivation transactions.
+	var lockedAccountID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM accounts WHERE id=$1 FOR UPDATE`, sub.AccountID).Scan(&lockedAccountID); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(ctx, `
 		INSERT INTO subscriptions (
 			account_id, plan_code, status, trial_started_at, trial_ends_at, current_period_start, current_period_end,
 			grace_ends_at, canceled_at, suspended_at, billing_provider, provider_customer_id, provider_subscription_id, metadata
@@ -129,7 +141,26 @@ func (r *SubscriptionRepository) Upsert(ctx context.Context, sub *domain.Subscri
 	`, sub.AccountID, sub.PlanCode, sub.Status, sub.TrialStartedAt, sub.TrialEndsAt, sub.CurrentPeriodStart, sub.CurrentPeriodEnd,
 		sub.GraceEndsAt, sub.CanceledAt, sub.SuspendedAt, sub.BillingProvider, sub.ProviderCustomerID, sub.ProviderSubscriptionID, metadata).Scan(
 		&sub.ID, &sub.CreatedAt, &sub.UpdatedAt,
-	)
+	); err != nil {
+		return err
+	}
+	// accounts.plan is a compatibility mirror used by older account surfaces.
+	// Keep it in the same transaction as the canonical subscription and the
+	// authorization revision bump. Lock the account before any board/view: the
+	// account deactivation path uses that same account -> view -> board order.
+	// Reversing it here would permit a deadlock between concurrent suspension
+	// and deactivation.
+	result, err := tx.Exec(ctx, `UPDATE accounts SET plan=$2,updated_at=NOW() WHERE id=$1`, sub.AccountID, sub.PlanCode)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	if err := bumpAllWhiteboardAccessRevisionTx(ctx, tx, sub.AccountID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *SubscriptionRepository) SetAccountPlan(ctx context.Context, accountID uuid.UUID, planCode string) error {

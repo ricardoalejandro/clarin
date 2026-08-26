@@ -7,7 +7,7 @@ import WhiteboardPublicLibraryCallback, {
   type WhiteboardPublicLibraryCallbackRuntime,
 } from './WhiteboardPublicLibraryCallback'
 import { tryRefreshTokenOutcome } from '@/lib/api'
-import { buildWhiteboardPublicLibraryLoginPath } from '@/lib/whiteboardPublicLibraries'
+import { buildWhiteboardPublicLibraryLoginPath, rememberWhiteboardPublicLibraryWorkReturn } from '@/lib/whiteboardPublicLibraries'
 import { submitWhiteboardPublicLibraryCallback } from '@/lib/whiteboardPublicLibrariesApi'
 
 vi.mock('@/lib/whiteboardPublicLibrariesApi', () => ({
@@ -86,6 +86,37 @@ describe('WhiteboardPublicLibraryCallback', () => {
     expect(order.slice(0, 2)).toEqual(['clear', 'submit'])
     expect(navigate.mock.calls[0][0]).not.toContain(token)
     expect(navigate.mock.calls[0][0]).not.toContain(libraryURL)
+  })
+
+  it('returns a Work-hosted import to the same contextual view and consumes the destination once', async () => {
+    const storage = new Map<string, string>()
+    const storageAdapter = {
+      getItem: (key: string) => storage.get(key) || null,
+      setItem: (key: string, value: string) => { storage.set(key, value) },
+      removeItem: (key: string) => { storage.delete(key) },
+    }
+    const workViewID = '44444444-4444-4444-8444-444444444444'
+    expect(rememberWhiteboardPublicLibraryWorkReturn(
+      boardID,
+      `/dashboard/tasks?work_view=${workViewID}`,
+      storageAdapter,
+    )).toBe(true)
+    mockedSubmit.mockResolvedValue({
+      success: true,
+      data: { success: true, board_id: boardID, import_id: importID },
+      status: 200,
+    })
+    const { navigate, runtime } = callbackRuntime(
+      `#addLibrary=${encodeURIComponent(libraryURL)}&token=${token}`,
+      [],
+      storage,
+    )
+
+    render(<WhiteboardPublicLibraryCallback runtime={runtime} />)
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(
+      `/dashboard/tasks?work_view=${workViewID}&library_import=${importID}`,
+    ))
+    expect(Array.from(storage.keys()).some(key => key.includes('work-return'))).toBe(false)
   })
 
   it('deduplicates the one-time callback through a React StrictMode remount', async () => {

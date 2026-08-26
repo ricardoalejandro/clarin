@@ -6,9 +6,43 @@ import {
   getLoginRedirectForLogout,
   markAuthSessionDetected,
   markAuthTokenRefreshed,
+  subscribeWebSocket,
   tryRefreshToken,
   tryRefreshTokenOutcome,
 } from './api'
+
+class FakeSharedWebSocket {
+  static readonly CONNECTING = 0
+  static readonly OPEN = 1
+  static readonly CLOSED = 3
+  static instances: FakeSharedWebSocket[] = []
+
+  readyState = FakeSharedWebSocket.CONNECTING
+  onopen: (() => void) | null = null
+  onmessage: ((event: MessageEvent) => void) | null = null
+  onerror: (() => void) | null = null
+  onclose: ((event: CloseEvent) => void) | null = null
+
+  constructor(public readonly url: string) {
+    FakeSharedWebSocket.instances.push(this)
+  }
+
+  open() {
+    this.readyState = FakeSharedWebSocket.OPEN
+    this.onopen?.()
+  }
+
+  serverClose(code = 1006) {
+    this.readyState = FakeSharedWebSocket.CLOSED
+    this.onclose?.({ code, wasClean: false } as CloseEvent)
+  }
+
+  close() {
+    this.readyState = FakeSharedWebSocket.CLOSED
+  }
+
+  send() {}
+}
 
 const AUTH_REFRESHED_KEY = 'clarin:auth_refreshed_at'
 const LAST_ACTIVITY_KEY = 'clarin:last_activity_at'
@@ -22,7 +56,28 @@ afterEach(() => {
   clearIdleTimeout()
   vi.useRealTimers()
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   localStorage.clear()
+})
+
+describe('shared general WebSocket lifecycle', () => {
+  it('keeps old subscriptions compatible and notifies optional unexpected disconnects', () => {
+    vi.stubGlobal('WebSocket', FakeSharedWebSocket)
+    FakeSharedWebSocket.instances = []
+    localStorage.setItem('token', 'test-session')
+    const onDisconnect = vi.fn()
+    const unsubscribe = subscribeWebSocket(vi.fn(), vi.fn(), onDisconnect)
+    const socket = FakeSharedWebSocket.instances[0]
+    expect(socket.url).toMatch(/\/ws$/)
+    socket.open()
+    socket.serverClose()
+    expect(onDisconnect).toHaveBeenCalledWith(expect.objectContaining({ code: 1006, wasClean: false }))
+    expect(() => unsubscribe()).not.toThrow()
+
+    const legacyUnsubscribe = subscribeWebSocket(vi.fn())
+    expect(FakeSharedWebSocket.instances.length).toBeGreaterThanOrEqual(2)
+    expect(() => legacyUnsubscribe()).not.toThrow()
+  })
 })
 
 describe('logout navigation', () => {

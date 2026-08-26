@@ -3,6 +3,9 @@ export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent'
 export type TaskStatus = 'pending' | 'completed' | 'overdue' | 'cancelled'
 export type TaskStatusCategory = 'not_started' | 'active' | 'done' | 'cancelled'
 export type TaskViewMode = 'list' | 'board' | 'calendar' | 'gantt' | 'summary'
+export type TaskLocationViewType = 'whiteboard'
+export type TaskLocationViewScopeType = 'folder' | 'list'
+export type TaskLocationViewLifecycle = 'active' | 'location_archived' | 'trash'
 export type TaskGroupBy = 'none' | 'status' | 'list' | 'assignee' | 'priority' | 'type' | 'due'
 export type TaskGroupDirection = 'asc' | 'desc'
 export type TaskAccessLevel = 'none' | 'view' | 'comment' | 'edit' | 'full'
@@ -304,6 +307,57 @@ export interface TaskSavedView {
   updated_at: string
 }
 
+export interface TaskLocationViewBreadcrumbItem {
+  type: 'environment' | TaskLocationViewScopeType
+  id: string
+  name: string
+}
+
+export interface TaskLocationViewCapabilities {
+  can_view: boolean
+  can_comment: boolean
+  can_edit: boolean
+  can_manage: boolean
+  can_manage_access: boolean
+}
+
+export interface TaskLocationWhiteboardSummary {
+  id: string
+  name: string
+  description?: string
+  thumbnail_url?: string | null
+  archived_at?: string | null
+  version: number
+  scene_sequence: number
+  updated_at: string
+}
+
+export interface TaskLocationView {
+  id: string
+  type: TaskLocationViewType
+  environment_id: string
+  scope: {
+    scope_type: TaskLocationViewScopeType
+    scope_id: string
+    scope_name: string
+    breadcrumb: TaskLocationViewBreadcrumbItem[]
+  }
+  sort_order: number
+  version: number
+  access_revision: number
+  lifecycle: TaskLocationViewLifecycle
+  created_by?: string | null
+  deleted_at?: string | null
+  resource: {
+    whiteboard: TaskLocationWhiteboardSummary
+  }
+  capabilities: TaskLocationViewCapabilities
+}
+
+export type ActiveTaskView =
+  | { kind: 'builtin'; view: TaskViewMode }
+  | { kind: 'location'; view: TaskLocationView }
+
 export interface TaskMoveResponse {
   task: Task
   operation_id: string
@@ -384,6 +438,7 @@ export interface TaskList {
   open_task_count: number
   completed_task_count: number
   cancelled_task_count: number
+  whiteboard_count?: number
   effective_access_level?: TaskAccessLevel
   can_manage_access?: boolean
   capabilities?: TaskPermissions
@@ -411,6 +466,7 @@ export interface TaskTrashContainer {
 	deleted_with_folder?: boolean
   list_count: number
   task_count: number
+  whiteboard_count?: number
   next_eligible_at?: string
   can_purge: boolean
   can_restore: boolean
@@ -440,6 +496,7 @@ export interface TaskFolder {
   open_task_count: number
   completed_task_count: number
   cancelled_task_count: number
+  whiteboard_count?: number
   effective_access_level?: TaskAccessLevel
   can_manage_access?: boolean
   capabilities?: TaskPermissions

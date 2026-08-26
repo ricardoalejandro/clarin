@@ -1742,9 +1742,11 @@ func (s *Server) handleDeleteTaskList(c *fiber.Ctx) error {
 	if parseErr != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	if err := s.repos.TaskWork.TrashListConfirmed(c.Context(), accountID, userID, listID, request.ConfirmationName); err != nil {
+	boardIDs, err := s.repos.TaskWork.TrashListConfirmed(c.Context(), accountID, userID, listID, request.ConfirmationName)
+	if err != nil {
 		return taskWorkError(c, err)
 	}
+	s.revokeTaskLocationWhiteboardSockets(accountID, boardIDs)
 
 	s.invalidateTasksCache(accountID)
 	s.broadcastTaskWork(c.Context(), accountID, "list_trashed", fiber.Map{"list_id": listID, "operation_id": operationID})

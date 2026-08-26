@@ -1,6 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Archive, Boxes, Check, Eye, FileLock2, FolderTree, Globe2, Layers3, Loader2,
   LockKeyhole, MessageCircle, Pencil, Plus, RotateCcw, Save, ShieldCheck, Trash2, UserRound, Workflow, X,
@@ -16,6 +17,7 @@ import TaskWorkWindowShell from './TaskWorkWindowShell'
 import { normalizeTaskAccessGrants, TASK_ACCESS_LEVELS, taskAccessLabel, validatePrivateAccessManagers } from './taskEnvironmentAccess'
 import { taskEnvironmentSaveError } from './taskEnvironmentErrors'
 import { taskContainerCanManageStructure } from './taskContainerCapabilities'
+import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 
 type EnvironmentTab = 'general' | 'structure' | 'workflows' | 'access' | 'archive'
 
@@ -66,11 +68,39 @@ interface Props {
   onOpenStructure: () => void
 }
 
+export interface TaskEnvironmentWindowHandle { requestClose: () => Promise<boolean> }
+
+type EnvironmentGeneralDraft = {
+  name: string
+  description: string
+  color: string
+  icon: string
+  visibility: 'account' | 'restricted'
+  defaultAccess: TaskAccessLevel
+}
+
+function environmentGeneralDraft(environment: TaskEnvironment | null): EnvironmentGeneralDraft {
+  return {
+    name: environment?.name || '',
+    description: environment?.description || '',
+    color: normalizeTaskHexColor(environment?.color || '#6366F1', '#6366F1'),
+    icon: environment?.icon || 'layers',
+    visibility: environment?.visibility || 'restricted',
+    defaultAccess: environment?.default_access_level || 'none',
+  }
+}
+
+function environmentAccessDraftKey(grants: TaskAccessGrant[]) {
+  return normalizeTaskAccessGrants(grants)
+    .map(({ user_id, access_level, can_manage_access }) => `${user_id}:${access_level}:${can_manage_access ? '1' : '0'}`)
+    .join('|')
+}
+
 function userName(user?: TaskAccountUser, grant?: TaskAccessGrant) {
   return grant?.display_name || user?.display_name || grant?.username || user?.username || 'Usuario'
 }
 
-export default function TaskEnvironmentWindow({
+const TaskEnvironmentWindow = forwardRef<TaskEnvironmentWindowHandle, Props>(function TaskEnvironmentWindow({
   open,
   environment,
   users,
@@ -81,7 +111,7 @@ export default function TaskEnvironmentWindow({
   onClose,
   onSaved,
   onOpenStructure,
-}: Props) {
+}, forwardedRef) {
   const creating = !environment
   const [tab, setTab] = useState<EnvironmentTab>('general')
   const [name, setName] = useState('')
@@ -100,16 +130,27 @@ export default function TaskEnvironmentWindow({
   const [notice, setNotice] = useState('')
   const [confirmArchive, setConfirmArchive] = useState(false)
   const [confirmTrash, setConfirmTrash] = useState(false)
+  const [discardConfirm, setDiscardConfirm] = useState(false)
+  const generalBaselineRef = useRef<EnvironmentGeneralDraft>(environmentGeneralDraft(environment))
+  const accessBaselineRef = useRef<TaskAccessGrant[]>([])
+  const discardDialogRef = useRef<HTMLDivElement>(null)
+  const discardContinueRef = useRef<HTMLButtonElement>(null)
+  const discardReturnFocusRef = useRef<HTMLElement | null>(null)
+  const closeDecisionRef = useRef<((allowed: boolean) => void) | null>(null)
+  const closeDecisionPromiseRef = useRef<Promise<boolean> | null>(null)
 
   useEffect(() => {
     if (!open) return
+    const baseline = environmentGeneralDraft(environment)
+    generalBaselineRef.current = baseline
+    accessBaselineRef.current = []
     setTab(environment?.archived_at ? 'archive' : 'general')
-    setName(environment?.name || '')
-    setDescription(environment?.description || '')
-    setColor(normalizeTaskHexColor(environment?.color || '#6366F1', '#6366F1'))
-    setIcon(environment?.icon || 'layers')
-    setVisibility(environment?.visibility || 'restricted')
-    setDefaultAccess(environment?.default_access_level || 'none')
+    setName(baseline.name)
+    setDescription(baseline.description)
+    setColor(baseline.color)
+    setIcon(baseline.icon)
+    setVisibility(baseline.visibility)
+    setDefaultAccess(baseline.defaultAccess)
     setGrants([])
     setAccessRevision(environment?.access_revision || 1)
     setSelectedUser('')
@@ -119,7 +160,8 @@ export default function TaskEnvironmentWindow({
     setError('')
     setNotice('')
     setConfirmArchive(false)
-		setConfirmTrash(false)
+    setConfirmTrash(false)
+    setDiscardConfirm(false)
   // Initialize only when the work-window opens or switches to another Entorno.
   // Canonical saves below reconcile their own fields; depending on the whole
   // object would erase success/error feedback every time the parent patches it.
@@ -135,7 +177,9 @@ export default function TaskEnvironmentWindow({
       setError(result.error || 'No se pudo cargar el acceso de este Entorno.')
       return
     }
-    setGrants(normalizeTaskAccessGrants(result.data?.grants || []))
+    const canonicalGrants = normalizeTaskAccessGrants(result.data?.grants || [])
+    accessBaselineRef.current = canonicalGrants
+    setGrants(canonicalGrants)
     setAccessRevision(result.data?.access_revision || environment.access_revision || 1)
     setAccessLoaded(true)
   }, [environment])
@@ -192,6 +236,7 @@ export default function TaskEnvironmentWindow({
       return
     }
     const canonical = result.data.environment
+    generalBaselineRef.current = environmentGeneralDraft(canonical)
     setName(canonical.name)
     setDescription(canonical.description || '')
     setColor(normalizeTaskHexColor(canonical.color, '#6366F1'))
@@ -243,7 +288,9 @@ export default function TaskEnvironmentWindow({
       setError(result.status === 409 ? 'Los permisos cambiaron en otra sesión. Recarga el acceso y vuelve a aplicar tus cambios.' : result.error || 'No se pudieron guardar los permisos.')
       return
     }
-    setGrants(normalizeTaskAccessGrants(result.data?.grants || canonical))
+    const canonicalGrants = normalizeTaskAccessGrants(result.data?.grants || canonical)
+    accessBaselineRef.current = canonicalGrants
+    setGrants(canonicalGrants)
     setAccessRevision(result.data?.access_revision || accessRevision + 1)
     if (result.data?.environment) onSaved(result.data.environment)
     setNotice('Acceso actualizado y reconciliado con el servidor.')
@@ -289,9 +336,99 @@ export default function TaskEnvironmentWindow({
 
   const canAdmin = creating || taskContainerCanManageStructure(environment)
   const canManageAccess = creating || Boolean(environment?.permissions?.can_manage_access)
-	const archiveBlocked = Boolean(environment?.is_default || (!environment?.archived_at && (environment?.open_task_count || 0) > 0))
-	const trashBlocked = Boolean(environment?.is_default || (environment?.task_count || 0) > 0)
+  const archiveBlocked = Boolean(environment?.is_default || (!environment?.archived_at && (environment?.open_task_count || 0) > 0))
+  const trashBlocked = Boolean(environment?.is_default || (environment?.task_count || 0) > 0)
   const availableUsers = users.filter(user => !grants.some(grant => grant.user_id === user.id))
+  const currentGeneralDraft: EnvironmentGeneralDraft = { name, description, color: normalizeTaskHexColor(color, '#6366F1'), icon, visibility, defaultAccess }
+  const generalBaseline = generalBaselineRef.current
+  const generalDirty = currentGeneralDraft.name !== generalBaseline.name
+    || currentGeneralDraft.description !== generalBaseline.description
+    || currentGeneralDraft.color !== generalBaseline.color
+    || currentGeneralDraft.icon !== generalBaseline.icon
+    || currentGeneralDraft.visibility !== generalBaseline.visibility
+    || currentGeneralDraft.defaultAccess !== generalBaseline.defaultAccess
+  const accessDirty = accessLoaded && environmentAccessDraftKey(grants) !== environmentAccessDraftKey(accessBaselineRef.current)
+  const hasPendingChanges = generalDirty || accessDirty
+
+  const settleCloseDecision = useCallback((allowed: boolean) => {
+    const resolve = closeDecisionRef.current
+    closeDecisionRef.current = null
+    closeDecisionPromiseRef.current = null
+    resolve?.(allowed)
+  }, [])
+  const requestClose = useCallback((): Promise<boolean> => {
+    if (busy) return Promise.resolve(false)
+    if (hasPendingChanges) {
+      setDiscardConfirm(true)
+      if (!closeDecisionPromiseRef.current) {
+        discardReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+        closeDecisionPromiseRef.current = new Promise<boolean>(resolve => {
+          closeDecisionRef.current = resolve
+        })
+      }
+      return closeDecisionPromiseRef.current
+    }
+    onClose()
+    return Promise.resolve(true)
+  }, [busy, hasPendingChanges, onClose])
+  useImperativeHandle(forwardedRef, () => ({ requestClose }), [requestClose])
+
+  const discardDrafts = useCallback(() => {
+    const baseline = generalBaselineRef.current
+    setName(baseline.name)
+    setDescription(baseline.description)
+    setColor(baseline.color)
+    setIcon(baseline.icon)
+    setVisibility(baseline.visibility)
+    setDefaultAccess(baseline.defaultAccess)
+    setGrants(accessBaselineRef.current)
+    setSelectedUser('')
+    setError('')
+    setNotice('')
+  }, [])
+  const restoreDiscardFocus = useCallback(() => {
+    requestAnimationFrame(() => {
+      if (discardReturnFocusRef.current?.isConnected) discardReturnFocusRef.current.focus({ preventScroll: true })
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!discardConfirm) return
+    const frame = requestAnimationFrame(() => discardContinueRef.current?.focus({ preventScroll: true }))
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        setDiscardConfirm(false)
+        settleCloseDecision(false)
+        restoreDiscardFocus()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = Array.from(discardDialogRef.current?.querySelectorAll<HTMLButtonElement>('button:not([disabled])') || [])
+      if (!focusable.length) return
+      const index = focusable.indexOf(document.activeElement as HTMLButtonElement)
+      event.preventDefault()
+      focusable[(index + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length]?.focus({ preventScroll: true })
+      event.stopImmediatePropagation()
+    }
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => {
+      cancelAnimationFrame(frame)
+      document.removeEventListener('keydown', onKeyDown, true)
+    }
+  }, [discardConfirm, restoreDiscardFocus, settleCloseDecision])
+  useEffect(() => {
+    if (open) return
+    setDiscardConfirm(false)
+    settleCloseDecision(false)
+  }, [open, settleCloseDecision])
+  useEffect(() => () => settleCloseDecision(false), [settleCloseDecision])
+
+  const requestOpenStructure = useCallback(async () => {
+    if (!await requestClose()) return
+    onOpenStructure()
+  }, [onOpenStructure, requestClose])
 
   return <>
     <TaskWorkWindowShell
@@ -307,12 +444,12 @@ export default function TaskEnvironmentWindow({
       minWidth={620}
       minHeight={560}
       busy={busy}
-      onRequestClose={onClose}
+      onRequestClose={() => { void requestClose() }}
       contentClassName="flex min-h-0 flex-1 flex-col overflow-hidden"
       dataAttribute="task-environment-window"
       footer={<div className="flex items-center gap-3">
         <div className="min-w-0 flex-1" aria-live="polite">{error ? <p className="truncate text-xs font-semibold text-rose-700">{error}</p> : notice ? <p className="flex items-center gap-1.5 truncate text-xs font-semibold text-emerald-700"><Check className="h-3.5 w-3.5" />{notice}</p> : <p className="text-xs text-slate-400">Los permisos se validan nuevamente en el servidor.</p>}</div>
-        <button type="button" disabled={busy} onClick={onClose} className="rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-white disabled:opacity-40">Cerrar</button>
+        <button type="button" disabled={busy} onClick={() => { void requestClose() }} className="rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-white disabled:opacity-40">Cerrar</button>
         {tab === 'general' && <button type="button" disabled={busy || !canAdmin} onClick={() => void saveGeneral()} className="flex min-w-32 items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-black text-white shadow-lg shadow-slate-200 hover:bg-slate-800 disabled:opacity-35">{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}{creating ? 'Crear Entorno' : 'Guardar'}</button>}
         {tab === 'access' && !creating && <button type="button" disabled={busy || accessLoading || !canManageAccess} onClick={() => void saveAccess()} className="flex min-w-32 items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-black text-white shadow-lg shadow-slate-200 hover:bg-slate-800 disabled:opacity-35">{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}Guardar acceso</button>}
       </div>}
@@ -346,9 +483,9 @@ export default function TaskEnvironmentWindow({
           { label: 'Carpetas', value: environment?.folder_count ?? selectedEnvironmentFolders.length, icon: FolderTree },
           { label: 'Listas', value: environment?.list_count ?? selectedEnvironmentLists.length, icon: Boxes },
           { label: 'Tareas activas', value: environment?.task_count || 0, icon: Check },
-        ].map(item => <div key={item.label} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><item.icon className="h-5 w-5 text-emerald-600" /><p className="mt-4 text-2xl font-black text-slate-900">{item.value}</p><p className="mt-1 text-xs font-semibold text-slate-400">{item.label}</p></div>)}</div><section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm"><h3 className="text-base font-black text-slate-900">Carpetas y listas del Entorno</h3><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Las carpetas y listas permanecen dentro de este Entorno y heredan sus permisos. La Bandeja general permanece fija en la raíz.</p><button type="button" disabled={!canAdmin} onClick={onOpenStructure} className="mt-5 flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-35"><FolderTree className="h-4 w-4" />Administrar estructura</button></section></div>}
+        ].map(item => <div key={item.label} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><item.icon className="h-5 w-5 text-emerald-600" /><p className="mt-4 text-2xl font-black text-slate-900">{item.value}</p><p className="mt-1 text-xs font-semibold text-slate-400">{item.label}</p></div>)}</div><section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm"><h3 className="text-base font-black text-slate-900">Carpetas y listas del Entorno</h3><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Las carpetas y listas permanecen dentro de este Entorno y heredan sus permisos. La Bandeja general permanece fija en la raíz.</p><button type="button" disabled={!canAdmin} onClick={() => { void requestOpenStructure() }} className="mt-5 flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-35"><FolderTree className="h-4 w-4" />Administrar estructura</button></section></div>}
 
-        {tab === 'workflows' && <div className="mx-auto max-w-4xl space-y-3">{selectedEnvironmentWorkflows.map(workflow => <section key={workflow.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center gap-3"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-50 text-violet-700"><Workflow className="h-4 w-4" /></span><div className="min-w-0 flex-1"><p className="truncate text-sm font-black text-slate-800">{workflow.name}</p><p className="mt-0.5 text-[11px] text-slate-400">{workflow.statuses?.length || 0} estados{workflow.is_default ? ' · predeterminado' : ''}</p></div></div><div className="mt-4 flex flex-wrap gap-2">{(workflow.statuses || []).sort((left, right) => left.sort_order - right.sort_order).map(status => <span key={status.id} className="flex items-center gap-1.5 rounded-lg bg-slate-50 px-2.5 py-1.5 text-[10px] font-bold text-slate-600"><i className="h-2 w-2 rounded-full" style={{ backgroundColor: status.color }} />{status.name}</span>)}</div></section>)}{!selectedEnvironmentWorkflows.length && <div className="rounded-3xl border border-dashed border-slate-300 py-16 text-center"><Workflow className="mx-auto h-7 w-7 text-slate-300" /><p className="mt-3 text-sm font-semibold text-slate-500">No hay flujos disponibles.</p></div>}<button type="button" disabled={!canAdmin} onClick={onOpenStructure} className="flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-35"><Workflow className="h-4 w-4" />Configurar flujos</button></div>}
+        {tab === 'workflows' && <div className="mx-auto max-w-4xl space-y-3">{selectedEnvironmentWorkflows.map(workflow => <section key={workflow.id} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center gap-3"><span className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-50 text-violet-700"><Workflow className="h-4 w-4" /></span><div className="min-w-0 flex-1"><p className="truncate text-sm font-black text-slate-800">{workflow.name}</p><p className="mt-0.5 text-[11px] text-slate-400">{workflow.statuses?.length || 0} estados{workflow.is_default ? ' · predeterminado' : ''}</p></div></div><div className="mt-4 flex flex-wrap gap-2">{(workflow.statuses || []).sort((left, right) => left.sort_order - right.sort_order).map(status => <span key={status.id} className="flex items-center gap-1.5 rounded-lg bg-slate-50 px-2.5 py-1.5 text-[10px] font-bold text-slate-600"><i className="h-2 w-2 rounded-full" style={{ backgroundColor: status.color }} />{status.name}</span>)}</div></section>)}{!selectedEnvironmentWorkflows.length && <div className="rounded-3xl border border-dashed border-slate-300 py-16 text-center"><Workflow className="mx-auto h-7 w-7 text-slate-300" /><p className="mt-3 text-sm font-semibold text-slate-500">No hay flujos disponibles.</p></div>}<button type="button" disabled={!canAdmin} onClick={() => { void requestOpenStructure() }} className="flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-35"><Workflow className="h-4 w-4" />Configurar flujos</button></div>}
 
         {tab === 'access' && <div className="mx-auto max-w-4xl space-y-5">
           <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6"><div className="flex items-start gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700"><ShieldCheck className="h-5 w-5" /></span><div><h3 className="text-base font-black text-slate-900">Acceso explícito</h3><p className="mt-1 text-xs leading-5 text-slate-400">Administrar acceso es una capacidad de gobernanza y requiere nivel Administrar. Los administradores de cuenta mantienen recuperación total.</p></div></div>
@@ -377,17 +514,20 @@ export default function TaskEnvironmentWindow({
       onClose={() => { if (!busy) setConfirmArchive(false) }}
       onConfirm={() => void archiveOrRestore()}
     />
-		<TaskDestructiveConfirmDialog
-			open={confirmTrash}
-			title="Mover Entorno a Papelera"
-			description={`“${environment?.name || ''}” y su estructura vacía iniciarán la retención. Si estaba archivado, restaurarlo desde Papelera lo devolverá al Archivo histórico.`}
-			actionLabel="Mover a Papelera"
-			confirmationName={!trashBlocked ? environment?.name : undefined}
-			blockedReason={trashBlocked ? (environment?.is_default ? 'General debe permanecer activo.' : 'El Entorno todavía conserva tareas.') : undefined}
-			busy={busy}
-			error={error}
-			onClose={() => { if (!busy) setConfirmTrash(false) }}
-			onConfirm={() => void moveToTrash()}
-		/>
+    <TaskDestructiveConfirmDialog
+      open={confirmTrash}
+      title="Mover Entorno a Papelera"
+      description={`“${environment?.name || ''}” y su estructura vacía iniciarán la retención. Si estaba archivado, restaurarlo desde Papelera lo devolverá al Archivo histórico.`}
+      actionLabel="Mover a Papelera"
+      confirmationName={!trashBlocked ? environment?.name : undefined}
+      blockedReason={trashBlocked ? (environment?.is_default ? 'General debe permanecer activo.' : 'El Entorno todavía conserva tareas.') : undefined}
+      busy={busy}
+      error={error}
+      onClose={() => { if (!busy) setConfirmTrash(false) }}
+      onConfirm={() => void moveToTrash()}
+    />
+    {discardConfirm && createPortal(<div data-task-destructive-dialog className="fixed inset-0 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm" style={{ zIndex: TASK_OVERLAY_LAYERS.confirmation }} role="presentation"><div ref={discardDialogRef} role="alertdialog" aria-modal="true" aria-labelledby="task-environment-discard-title" aria-describedby="task-environment-discard-description" className="w-full max-w-md rounded-3xl border border-white/70 bg-white p-6 shadow-2xl"><p className="text-[10px] font-black uppercase tracking-[.16em] text-amber-600">Cambios pendientes</p><h2 id="task-environment-discard-title" className="mt-1 text-xl font-black text-slate-900">¿Descartar cambios del Entorno?</h2><p id="task-environment-discard-description" className="mt-2 text-sm leading-6 text-slate-500">La identidad, privacidad o configuración de acceso que todavía no guardaste se perderá.</p><div className="mt-6 flex justify-end gap-2"><button ref={discardContinueRef} type="button" onClick={() => { setDiscardConfirm(false); settleCloseDecision(false); restoreDiscardFocus() }} className="rounded-xl px-4 py-2.5 text-sm font-bold text-slate-600 hover:bg-slate-100">Seguir editando</button><button type="button" onClick={() => { setDiscardConfirm(false); discardDrafts(); onClose(); settleCloseDecision(true) }} className="rounded-xl bg-rose-600 px-4 py-2.5 text-sm font-black text-white hover:bg-rose-700">Descartar cambios</button></div></div></div>, document.body)}
   </>
-}
+})
+
+export default TaskEnvironmentWindow

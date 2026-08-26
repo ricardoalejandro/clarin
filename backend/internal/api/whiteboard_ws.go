@@ -37,6 +37,7 @@ type whiteboardRealtimePrincipal struct {
 	GuestTokenHash          string                       `json:"guest_token_hash,omitempty"`
 	GuestExpiresAt          *time.Time                   `json:"guest_expires_at,omitempty"`
 	Actor                   whiteboardcore.RealtimeActor `json:"actor"`
+	AccessRevision          int64                        `json:"-"`
 	LastEphemeralValidation time.Time                    `json:"-"`
 }
 
@@ -165,6 +166,34 @@ func writeWhiteboardSocketTermination(conn *websocket.Conn, termination whiteboa
 		time.Now().Add(whiteboardWriteWait))
 }
 
+func writeClosedWhiteboardClient(conn *websocket.Conn, client *whiteboardcore.RealtimeClient) {
+	payload := client.TakeTerminal()
+	closeCode, closeReason := websocket.CloseNormalClosure, "connection closed"
+	if len(payload) > 0 {
+		_ = conn.SetWriteDeadline(time.Now().Add(whiteboardWriteWait))
+		_ = conn.WriteMessage(websocket.TextMessage, payload)
+		var message whiteboardcore.OutgoingMessage
+		if json.Unmarshal(payload, &message) == nil {
+			if message.Code == "authorization_unavailable" {
+				closeCode, closeReason = websocket.CloseTryAgainLater, "authorization unavailable"
+			} else if message.Code == "session_expired" {
+				closeCode, closeReason = websocket.ClosePolicyViolation, "session expired"
+			} else if message.Event == whiteboardcore.EventAccessRevoked {
+				closeCode, closeReason = websocket.ClosePolicyViolation, "access revoked"
+			}
+		}
+	}
+	_ = conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(closeCode, closeReason), time.Now().Add(whiteboardWriteWait))
+}
+
+func deliverWhiteboardSocketPayload(conn *websocket.Conn, client *whiteboardcore.RealtimeClient, payload []byte) (bool, error) {
+	return client.DeliverIfActive(payload, func(candidate []byte) error {
+		_ = conn.SetWriteDeadline(time.Now().Add(whiteboardWriteWait))
+		return conn.WriteMessage(websocket.TextMessage, candidate)
+	})
+}
+
 func logWhiteboardRealtimeAuthorizationFailure(principal *whiteboardRealtimePrincipal, origin, requiredLevel string, connectedAt time.Time, err error) {
 	if principal == nil {
 		return
@@ -198,13 +227,17 @@ func (s *Server) whiteboardRealtimeAuthorizationTermination(
 	requiredLevel := whiteboardRealtimeAuthorizationRequiredLevel(err, whiteboardRealtimeRequiredLevelForEvent(incoming.Event))
 	if classifyWhiteboardRealtimeAuthorization(err) == whiteboardAuthorizationAccessRevoked && requiredLevel == domain.WhiteboardAccessEdit {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		accessLevel, viewErr := s.resolveWhiteboardRealtimeAccess(ctx, principal, domain.WhiteboardAccessView)
+		viewErr := s.revalidateRegisteredWhiteboardClient(ctx, principal, client)
+		accessLevel := client.AuthorizationSnapshot().Access
 		cancel()
 		if viewErr == nil {
 			if client.Presentation() != uuid.Nil {
 				s.releaseWhiteboardPresentation(client, "permission_revoked")
 			}
-			s.queueWhiteboardMessage(client, whiteboardcore.OutgoingMessage{
+			presenceCtx, presenceCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = s.registerWhiteboardPresence(presenceCtx, client)
+			presenceCancel()
+			s.queuePriorityWhiteboardMessage(client, whiteboardcore.OutgoingMessage{
 				Event: whiteboardcore.EventError, OperationID: incoming.OperationID,
 				Code: "permission_changed", Error: "Tus permisos de la pizarra cambiaron",
 				Data: map[string]any{"access": accessLevel},
@@ -223,13 +256,6 @@ func (s *Server) whiteboardRealtimeAuthorizationTermination(
 	logWhiteboardRealtimeAuthorizationFailure(principal, "message", requiredLevel, connectedAt, err)
 	termination := whiteboardSocketTerminationForAuthorization(err)
 	return &termination
-}
-
-func requestWhiteboardSocketTermination(requests chan<- whiteboardSocketTermination, writerDone <-chan struct{}, termination whiteboardSocketTermination) {
-	select {
-	case requests <- termination:
-	case <-writerDone:
-	}
 }
 
 func (s *Server) whiteboardWSUpgrade(c *fiber.Ctx) error {
@@ -252,6 +278,16 @@ func (s *Server) whiteboardWSUpgrade(c *fiber.Ctx) error {
 		}
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"success": false, "error": "Collaboration ticket unavailable"})
 	}
+	if err := s.requireWhiteboardAccountAccess(c.Context(), principal.AccountID); err != nil {
+		switch classifyWhiteboardRealtimeAuthorization(err) {
+		case whiteboardAuthorizationAccessRevoked:
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"success": false, "error": "El acceso a la cuenta no está disponible", "code": "access_revoked"})
+		default:
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"success": false, "error": "No se pudo verificar el acceso temporalmente", "code": "authorization_unavailable",
+			})
+		}
+	}
 	if err := s.validateWhiteboardRealtimeAccess(c.Context(), principal, domain.WhiteboardAccessView); err != nil {
 		switch classifyWhiteboardRealtimeAuthorization(err) {
 		case whiteboardAuthorizationSessionExpired:
@@ -262,8 +298,64 @@ func (s *Server) whiteboardWSUpgrade(c *fiber.Ctx) error {
 			return whiteboardError(c, err)
 		}
 	}
+	accessRevision, err := s.repos.Whiteboard.AccessRevision(c.Context(), principal.AccountID, boardID)
+	if err != nil {
+		return whiteboardError(c, err)
+	}
+	principal.AccessRevision = accessRevision
 	c.Locals(whiteboardRealtimePrincipalLocal, principal)
 	return c.Next()
+}
+
+func (s *Server) requireWhiteboardAccountAccess(ctx context.Context, accountID uuid.UUID) error {
+	if accountID == uuid.Nil || s.services == nil || s.services.Subscription == nil {
+		return service.ErrAuthSessionUnavailable
+	}
+	decision, err := s.services.Subscription.CheckAccess(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if decision == nil || !decision.Allowed {
+		return repository.ErrWhiteboardForbidden
+	}
+	return nil
+}
+
+func (s *Server) revalidateRegisteredWhiteboardClient(
+	ctx context.Context,
+	principal *whiteboardRealtimePrincipal,
+	client *whiteboardcore.RealtimeClient,
+) error {
+	if principal == nil || client == nil || s.whiteboardRooms == nil {
+		return whiteboardRealtimeAuthorizationFailure(domain.WhiteboardAccessView, repository.ErrWhiteboardForbidden)
+	}
+	err := s.withWhiteboardFanoutEpoch(ctx, principal.AccountID, principal.BoardID, func(revision int64) error {
+		access, err := s.resolveWhiteboardRealtimeAccess(ctx, principal, domain.WhiteboardAccessView)
+		if err != nil {
+			return err
+		}
+		registered, updated := s.whiteboardRooms.UpdateClientAuthorization(
+			principal.AccountID, principal.BoardID, client.ID, revision, access,
+		)
+		if !updated {
+			// A newer canonical revalidation may have won immediately before this
+			// callback in a test/delayed path. Never roll it backward or convert
+			// the monotonic win into a terminal revocation.
+			if registered != nil && registered.AuthorizationSnapshot().AccessRevision > revision {
+				return nil
+			}
+			return whiteboardRealtimeAuthorizationFailure(domain.WhiteboardAccessView, repository.ErrWhiteboardForbidden)
+		}
+		return nil
+	})
+	if err == nil {
+		return nil
+	}
+	var authorizationErr *whiteboardRealtimeAuthorizationError
+	if errors.As(err, &authorizationErr) {
+		return err
+	}
+	return whiteboardRealtimeAuthorizationFailure(domain.WhiteboardAccessView, err)
 }
 
 func (s *Server) whiteboardModuleAllowed(ctx context.Context, userID, accountID uuid.UUID) (bool, error) {
@@ -294,7 +386,7 @@ func whiteboardMembershipAllowsModule(user *domain.User, membership *domain.User
 	if user == nil || membership == nil || !user.IsActive {
 		return false
 	}
-	if user.IsAdmin || user.IsSuperAdmin || membership.Role == domain.RoleAdmin || membership.Role == domain.RoleSuperAdmin {
+	if domain.HasAccountAdminAuthority(membership.Role, user.IsSuperAdmin) {
 		return true
 	}
 	for _, permission := range membership.Permissions {
@@ -316,26 +408,57 @@ func (s *Server) handleWhiteboardWebSocket(conn *websocket.Conn) {
 		s.whiteboardRooms = whiteboardcore.NewRoomHub()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), whiteboardRealtimeDBTimeout)
-	initialScene, err := s.whiteboardRealtimeScene(ctx, principal, domain.WhiteboardAccessView)
-	cancel()
-	if err != nil {
-		_ = conn.WriteJSON(whiteboardcore.OutgoingMessage{Event: whiteboardcore.EventError, Code: "scene_unavailable", Error: "No se pudo cargar la pizarra"})
+	client := &whiteboardcore.RealtimeClient{
+		ID: uuid.New(), AccountID: principal.AccountID, BoardID: principal.BoardID,
+		AccessRevision: principal.AccessRevision, GuestExpiresAt: principal.GuestExpiresAt,
+		AuthorizationCheckedAt: time.Now().UTC(), Actor: principal.Actor, Send: make(chan []byte, 64),
+		HoldUntilActivated: true,
+	}
+	if err := s.whiteboardRooms.Register(client); err != nil {
+		_ = conn.WriteJSON(whiteboardcore.OutgoingMessage{Event: whiteboardcore.EventError, Code: "room_capacity", Error: "La sala alcanzó su límite de conexiones"})
 		_ = conn.Close()
 		return
 	}
-
-	client := &whiteboardcore.RealtimeClient{
-		ID:        uuid.New(),
-		AccountID: principal.AccountID,
-		BoardID:   principal.BoardID,
-		Actor:     principal.Actor,
-		Send:      make(chan []byte, 64),
+	// Close the ticket/scene/register TOCTOU window before any snapshot becomes
+	// deliverable. A stable revision is read on both sides of the current access
+	// check; an ACL signal can also close this registered client concurrently.
+	finalCtx, finalCancel := context.WithTimeout(context.Background(), whiteboardRealtimeDBTimeout)
+	err := s.revalidateRegisteredWhiteboardClient(finalCtx, principal, client)
+	finalCancel()
+	if err != nil || client.IsClosed() {
+		termination := whiteboardSocketTerminationForAuthorization(err)
+		if err == nil {
+			termination = whiteboardSocketTermination{
+				Message:   whiteboardcore.OutgoingMessage{Event: whiteboardcore.EventAccessRevoked, Code: "access_revoked", Error: "El acceso a la pizarra fue revocado"},
+				CloseCode: websocket.ClosePolicyViolation, CloseReason: "access revoked",
+			}
+		}
+		s.whiteboardRooms.Disconnect(principal.AccountID, principal.BoardID, []uuid.UUID{client.ID}, &termination.Message)
+		writeClosedWhiteboardClient(conn, client)
+		_ = conn.Close()
+		return
+	}
+	// The client is already registered but remains behind its activation
+	// barrier. Room broadcasts are now retained for it while this canonical
+	// scene is read; none can become deliverable ahead of the snapshot.
+	sceneCtx, sceneCancel := context.WithTimeout(context.Background(), whiteboardRealtimeDBTimeout)
+	initialScene, err := s.whiteboardRealtimeScene(sceneCtx, principal, domain.WhiteboardAccessView)
+	sceneCancel()
+	if err != nil || client.IsClosed() {
+		message := whiteboardcore.OutgoingMessage{Event: whiteboardcore.EventError, Code: "scene_unavailable", Error: "No se pudo cargar la pizarra"}
+		if isWhiteboardRealtimeAuthorizationFailure(err) {
+			message = whiteboardSocketTerminationForAuthorization(err).Message
+		}
+		s.whiteboardRooms.Disconnect(principal.AccountID, principal.BoardID, []uuid.UUID{client.ID}, &message)
+		writeClosedWhiteboardClient(conn, client)
+		_ = conn.Close()
+		return
 	}
 	presenceCtx, presenceCancel := context.WithTimeout(context.Background(), whiteboardRealtimeDBTimeout)
 	err = s.registerWhiteboardPresence(presenceCtx, client)
 	presenceCancel()
 	if err != nil {
+		s.whiteboardRooms.Unregister(client.ID, principal.BoardID)
 		code := "presence_unavailable"
 		message := "No se pudo abrir la sala de colaboración"
 		if errors.Is(err, whiteboardcore.ErrRoomCapacity) {
@@ -346,9 +469,9 @@ func (s *Server) handleWhiteboardWebSocket(conn *websocket.Conn) {
 		_ = conn.Close()
 		return
 	}
-	if err := s.whiteboardRooms.Register(client); err != nil {
+	if client.IsClosed() {
 		s.unregisterWhiteboardPresence(client)
-		_ = conn.WriteJSON(whiteboardcore.OutgoingMessage{Event: whiteboardcore.EventError, Code: "room_capacity", Error: "La sala alcanzó su límite de conexiones"})
+		writeClosedWhiteboardClient(conn, client)
 		_ = conn.Close()
 		return
 	}
@@ -362,34 +485,66 @@ func (s *Server) handleWhiteboardWebSocket(conn *websocket.Conn) {
 		_ = conn.Close()
 		return
 	}
+	if client.IsClosed() {
+		s.unregisterWhiteboardPresence(client)
+		writeClosedWhiteboardClient(conn, client)
+		_ = conn.Close()
+		return
+	}
 
-	connectedAt := time.Now().UTC()
-	writerDone := make(chan struct{})
-	terminationRequests := make(chan whiteboardSocketTermination)
-	go s.writeWhiteboardSocket(conn, client, principal, connectedAt, terminationRequests, writerDone)
-	s.queueWhiteboardMessage(client, whiteboardSceneSnapshotMessage(initialScene))
-	s.queueWhiteboardMessage(client, whiteboardcore.OutgoingMessage{
-		Event: whiteboardcore.EventRoomReady,
-		Actor: principal.Actor,
-		Data:  map[string]any{"actor_id": principal.Actor.ID},
-	})
-	s.queueWhiteboardMessage(client, whiteboardcore.OutgoingMessage{
-		Event: whiteboardcore.EventPresenceSnapshot,
-		Data:  presence,
-	})
+	actor := client.ActorSnapshot()
+	initialMessages := []whiteboardcore.OutgoingMessage{
+		whiteboardSceneSnapshotMessage(initialScene), {
+			Event: whiteboardcore.EventRoomReady,
+			Actor: actor,
+			Data:  map[string]any{"actor_id": actor.ID},
+		}, {
+			Event: whiteboardcore.EventPresenceSnapshot,
+			Data:  presence,
+		}}
 	presentationCtx, presentationCancel := context.WithTimeout(context.Background(), whiteboardRealtimeDBTimeout)
 	presentationSnapshot, presentationErr := s.whiteboardPresentationSnapshotMessage(presentationCtx, principal.AccountID, principal.BoardID)
 	presentationCancel()
 	if presentationErr != nil {
-		s.queueWhiteboardError(client, "presentation_unavailable", "La presentación no está disponible temporalmente")
+		initialMessages = append(initialMessages, whiteboardcore.OutgoingMessage{
+			Event: whiteboardcore.EventError, Code: "presentation_unavailable", Error: "La presentación no está disponible temporalmente",
+		})
 	} else {
-		s.queueWhiteboardMessage(client, presentationSnapshot)
+		initialMessages = append(initialMessages, presentationSnapshot)
 	}
-	s.broadcastWhiteboardMessage(principal.AccountID, principal.BoardID, whiteboardcore.OutgoingMessage{
-		Event: whiteboardcore.EventPresenceUpdate,
-		Actor: principal.Actor,
-		Data:  map[string]any{"status": "joined"},
-	}, client.ID)
+	initialPayloads := make([][]byte, 0, len(initialMessages))
+	for _, message := range initialMessages {
+		payload, ok := encodeWhiteboardMessage(message)
+		if !ok {
+			failure := whiteboardcore.OutgoingMessage{Event: whiteboardcore.EventError,
+				Code: "initial_sync_unavailable", Error: "No se pudo iniciar la sincronización de la pizarra"}
+			s.whiteboardRooms.Disconnect(principal.AccountID, principal.BoardID, []uuid.UUID{client.ID}, &failure)
+			s.unregisterWhiteboardPresence(client)
+			writeClosedWhiteboardClient(conn, client)
+			_ = conn.Close()
+			return
+		}
+		initialPayloads = append(initialPayloads, payload)
+	}
+	if !client.ActivateWithInitial(initialPayloads...) {
+		failure := whiteboardcore.OutgoingMessage{Event: whiteboardcore.EventError,
+			Code: "initial_sync_unavailable", Error: "No se pudo iniciar la sincronización de la pizarra"}
+		s.whiteboardRooms.Disconnect(principal.AccountID, principal.BoardID, []uuid.UUID{client.ID}, &failure)
+		s.unregisterWhiteboardPresence(client)
+		writeClosedWhiteboardClient(conn, client)
+		_ = conn.Close()
+		return
+	}
+	connectedAt := time.Now().UTC()
+	writerDone := make(chan struct{})
+	go s.writeWhiteboardSocket(conn, client, principal, connectedAt, writerDone)
+	if !client.IsClosed() {
+		s.broadcastWhiteboardMessage(principal.AccountID, principal.BoardID, whiteboardcore.OutgoingMessage{
+			Event: whiteboardcore.EventPresenceUpdate,
+			Actor: client.ActorSnapshot(),
+			Data:  map[string]any{"status": "joined"},
+		}, client.ID)
+	}
 
 	defer func() {
 		s.releaseWhiteboardPresentation(client, "presenter_left")
@@ -397,7 +552,7 @@ func (s *Server) handleWhiteboardWebSocket(conn *websocket.Conn) {
 		s.unregisterWhiteboardPresence(client)
 		s.broadcastWhiteboardMessage(principal.AccountID, principal.BoardID, whiteboardcore.OutgoingMessage{
 			Event: whiteboardcore.EventPresenceUpdate,
-			Actor: principal.Actor,
+			Actor: client.ActorSnapshot(),
 			Data:  map[string]any{"status": "left"},
 		}, client.ID)
 		<-writerDone
@@ -458,7 +613,7 @@ func (s *Server) handleWhiteboardWebSocket(conn *websocket.Conn) {
 				if termination == nil {
 					continue
 				}
-				requestWhiteboardSocketTermination(terminationRequests, writerDone, *termination)
+				s.whiteboardRooms.Disconnect(principal.AccountID, principal.BoardID, []uuid.UUID{client.ID}, &termination.Message)
 				break
 			}
 			if errors.Is(handleErr, errWhiteboardPresentationOccupied) {
@@ -520,6 +675,7 @@ func (s *Server) handleWhiteboardRealtimeMessage(ctx context.Context, principal 
 		if err != nil {
 			return err
 		}
+		outgoing.Actor = client.ActorSnapshot()
 		for _, message := range whiteboardRealtimePatchAckMessages(result, outgoing, incoming.BaseSequence, incoming.OperationID) {
 			s.queueWhiteboardMessage(client, message)
 		}
@@ -537,34 +693,17 @@ func (s *Server) handleWhiteboardRealtimeMessage(ctx context.Context, principal 
 		}
 		return s.syncWhiteboardRealtimeClient(ctx, principal, client, incoming.BaseSequence)
 	case whiteboardcore.EventCursorUpdate, whiteboardcore.EventPresenceUpdate:
-		if err := s.validateWhiteboardRealtimeEphemeralAccess(ctx, principal); err != nil {
+		if err := s.validateWhiteboardRealtimeEphemeralAccess(ctx, principal, client); err != nil {
 			return err
 		}
-		outgoing := whiteboardcore.OutgoingMessage{Event: incoming.Event, Actor: principal.Actor, Data: json.RawMessage(incoming.Data)}
-		s.broadcastWhiteboardMessage(principal.AccountID, principal.BoardID, outgoing, client.ID)
+		outgoing := whiteboardcore.OutgoingMessage{Event: incoming.Event, Actor: client.ActorSnapshot(), Data: json.RawMessage(incoming.Data)}
+		s.broadcastWhiteboardMessageFromClient(principal.AccountID, principal.BoardID, outgoing, client.ID, client)
 		return nil
 	case whiteboardcore.EventPresentationStart:
-		if err := s.validateWhiteboardRealtimeAccess(ctx, principal, domain.WhiteboardAccessEdit); err != nil {
-			return err
-		}
-		presentation, idempotent, err := s.startWhiteboardPresentation(ctx, client, *incoming.OperationID)
-		if err != nil {
-			return err
-		}
-		s.queueWhiteboardMessage(client, whiteboardcore.OutgoingMessage{
-			Event: whiteboardcore.EventAck, OperationID: incoming.OperationID,
-			Data: map[string]any{"presentation": presentation, "idempotent": idempotent},
-		})
-		if !idempotent {
-			s.broadcastWhiteboardMessage(principal.AccountID, principal.BoardID, whiteboardcore.OutgoingMessage{
-				Event: whiteboardcore.EventPresentationChanged,
-				Actor: principal.Actor,
-				Data:  map[string]any{"presentation": presentation, "status": "started"},
-			}, uuid.Nil)
-		}
-		return nil
+		_, _, err := s.startAuthorizedWhiteboardPresentation(ctx, principal, client, *incoming.OperationID)
+		return err
 	case whiteboardcore.EventPresentationStop:
-		if err := s.validateWhiteboardRealtimeEphemeralAccess(ctx, principal); err != nil {
+		if err := s.validateWhiteboardRealtimeEphemeralAccess(ctx, principal, client); err != nil {
 			return err
 		}
 		var data whiteboardcore.PresentationStopData
@@ -580,14 +719,15 @@ func (s *Server) handleWhiteboardRealtimeMessage(ctx context.Context, principal 
 		})
 		return nil
 	case whiteboardcore.EventFollowChange:
-		if err := s.validateWhiteboardRealtimeEphemeralAccess(ctx, principal); err != nil {
+		if err := s.validateWhiteboardRealtimeEphemeralAccess(ctx, principal, client); err != nil {
 			return err
 		}
 		var data whiteboardcore.FollowChangeData
 		if err := json.Unmarshal(incoming.Data, &data); err != nil {
 			return whiteboardcore.ErrInvalidRealtimeMessage
 		}
-		if data.TargetActorID == principal.Actor.ID {
+		actor := client.ActorSnapshot()
+		if data.TargetActorID == actor.ID {
 			return nil
 		}
 		present, err := s.whiteboardActorIsPresent(ctx, principal.AccountID, principal.BoardID, data.TargetActorID)
@@ -598,24 +738,24 @@ func (s *Server) handleWhiteboardRealtimeMessage(ctx context.Context, principal 
 			s.queueWhiteboardError(client, "follow_target_unavailable", "La persona ya no está en la sala")
 			return nil
 		}
-		s.broadcastWhiteboardMessage(principal.AccountID, principal.BoardID, whiteboardcore.OutgoingMessage{
-			Event: whiteboardcore.EventFollowChange, Actor: principal.Actor, Data: data,
-		}, client.ID)
+		s.broadcastWhiteboardMessageFromClient(principal.AccountID, principal.BoardID, whiteboardcore.OutgoingMessage{
+			Event: whiteboardcore.EventFollowChange, Actor: actor, Data: data,
+		}, client.ID, client)
 		return nil
 	case whiteboardcore.EventViewportUpdate:
 		if !s.allowWhiteboardRoomViewport(ctx, principal.AccountID, principal.BoardID) {
 			return errWhiteboardRealtimeRateLimited
 		}
-		if err := s.validateWhiteboardRealtimeEphemeralAccess(ctx, principal); err != nil {
+		if err := s.validateWhiteboardRealtimeEphemeralAccess(ctx, principal, client); err != nil {
 			return err
 		}
 		var data whiteboardcore.ViewportUpdateData
 		if err := json.Unmarshal(incoming.Data, &data); err != nil {
 			return whiteboardcore.ErrInvalidRealtimeMessage
 		}
-		s.broadcastWhiteboardMessage(principal.AccountID, principal.BoardID, whiteboardcore.OutgoingMessage{
-			Event: whiteboardcore.EventViewportUpdate, Actor: principal.Actor, Data: data,
-		}, client.ID)
+		s.broadcastWhiteboardMessageFromClient(principal.AccountID, principal.BoardID, whiteboardcore.OutgoingMessage{
+			Event: whiteboardcore.EventViewportUpdate, Actor: client.ActorSnapshot(), Data: data,
+		}, client.ID, client)
 		return nil
 	default:
 		return whiteboardcore.ErrInvalidRealtimeMessage
@@ -867,6 +1007,9 @@ func (s *Server) resolveWhiteboardRealtimeAccess(ctx context.Context, principal 
 	if principal == nil {
 		return "", whiteboardRealtimeAuthorizationFailure(requiredLevel, repository.ErrWhiteboardForbidden)
 	}
+	if err := s.requireWhiteboardAccountAccess(ctx, principal.AccountID); err != nil {
+		return "", whiteboardRealtimeAuthorizationFailure(requiredLevel, err)
+	}
 	if principal.GuestSession != nil {
 		guest, err := s.repos.Whiteboard.ResolveGuestSession(ctx, principal.GuestTokenHash, requiredLevel, time.Now().UTC())
 		if err != nil {
@@ -894,6 +1037,19 @@ func (s *Server) resolveWhiteboardRealtimeAccess(ctx context.Context, principal 
 	if err != nil {
 		return "", whiteboardRealtimeAuthorizationFailure(requiredLevel, err)
 	}
+	// Ticket possession is not durable authority. Resolve the live member
+	// session, module and board/Work ACL first; only then inspect origin for the
+	// rollout kill switch. Hidden or revoked principals therefore never learn
+	// whether their board UUID has a contextual binding.
+	if !s.workWhiteboardViewsEnabled() {
+		contextual, err := s.repos.Whiteboard.IsWorkOrigin(ctx, principal.AccountID, principal.BoardID)
+		if err != nil {
+			return "", whiteboardRealtimeAuthorizationFailure(requiredLevel, err)
+		}
+		if contextual {
+			return "", whiteboardRealtimeAuthorizationFailure(requiredLevel, repository.ErrWhiteboardNotFound)
+		}
+	}
 	return access.Level, nil
 }
 
@@ -902,14 +1058,53 @@ func (s *Server) validateWhiteboardRealtimeAccess(ctx context.Context, principal
 	return err
 }
 
-func (s *Server) validateWhiteboardRealtimeEphemeralAccess(ctx context.Context, principal *whiteboardRealtimePrincipal) error {
-	if time.Since(principal.LastEphemeralValidation) < 2*time.Second {
-		return nil
+func whiteboardRealtimeEphemeralCacheValid(
+	client *whiteboardcore.RealtimeClient,
+	canonicalRevision int64,
+	validatedAt, now time.Time,
+) bool {
+	if client == nil || canonicalRevision <= 0 || validatedAt.IsZero() || now.Before(validatedAt) ||
+		now.Sub(validatedAt) >= 2*time.Second {
+		return false
 	}
-	if err := s.validateWhiteboardRealtimeAccess(ctx, principal, domain.WhiteboardAccessView); err != nil {
-		return err
+	return client.IsActiveAtRevision(canonicalRevision)
+}
+
+func (s *Server) validateWhiteboardRealtimeEphemeralAccess(
+	ctx context.Context,
+	principal *whiteboardRealtimePrincipal,
+	client *whiteboardcore.RealtimeClient,
+) error {
+	if principal == nil || client == nil || client.IsClosed() {
+		return whiteboardRealtimeAuthorizationFailure(domain.WhiteboardAccessView, repository.ErrWhiteboardForbidden)
 	}
-	principal.LastEphemeralValidation = time.Now()
+	if s.repos == nil || s.repos.Whiteboard == nil {
+		// In-memory protocol tests intentionally omit repositories. They may use
+		// only an already fresh cache; production servers always take the
+		// canonical revision path below.
+		now := time.Now()
+		if !principal.LastEphemeralValidation.IsZero() && !now.Before(principal.LastEphemeralValidation) &&
+			now.Sub(principal.LastEphemeralValidation) < 2*time.Second {
+			return nil
+		}
+		return whiteboardRealtimeAuthorizationFailure(domain.WhiteboardAccessView, service.ErrAuthSessionUnavailable)
+	}
+	// The two-second cache may skip full session/module resolution, but never
+	// the canonical board epoch. A stale client is reauthorized (or closed)
+	// before its cursor/presence/viewport can enter fanout.
+	canonicalRevision, err := s.repos.Whiteboard.AccessRevision(ctx, principal.AccountID, principal.BoardID)
+	if err != nil {
+		return whiteboardRealtimeAuthorizationFailure(domain.WhiteboardAccessView, err)
+	}
+	if !whiteboardRealtimeEphemeralCacheValid(client, canonicalRevision, principal.LastEphemeralValidation, time.Now()) {
+		if err := s.revalidateRegisteredWhiteboardClient(ctx, principal, client); err != nil {
+			return err
+		}
+		principal.LastEphemeralValidation = time.Now()
+	}
+	if client.IsClosed() {
+		return whiteboardRealtimeAuthorizationFailure(domain.WhiteboardAccessView, repository.ErrWhiteboardForbidden)
+	}
 	return nil
 }
 
@@ -920,6 +1115,9 @@ func (s *Server) validateWhiteboardRealtimeEphemeralAccess(ctx context.Context, 
 func (s *Server) validateWhiteboardCheckpointAccess(ctx context.Context, principal *whiteboardRealtimePrincipal) error {
 	if principal == nil {
 		return repository.ErrWhiteboardForbidden
+	}
+	if err := s.requireWhiteboardAccountAccess(ctx, principal.AccountID); err != nil {
+		return err
 	}
 	if principal.GuestSession != nil {
 		return s.validateWhiteboardRealtimeAccess(ctx, principal, domain.WhiteboardAccessEdit)
@@ -966,12 +1164,17 @@ func whiteboardSceneSyncRequiredMessage(sequence int64, reason string) whiteboar
 	}
 }
 
-func (s *Server) queueWhiteboardMessage(client *whiteboardcore.RealtimeClient, message whiteboardcore.OutgoingMessage) bool {
+func encodeWhiteboardMessage(message whiteboardcore.OutgoingMessage) ([]byte, bool) {
 	payload, err := json.Marshal(message)
 	if err != nil || len(payload) == 0 || len(payload) > whiteboardcore.MaxRealtimeMessageBytes {
-		return false
+		return nil, false
 	}
-	return client.Enqueue(payload)
+	return payload, true
+}
+
+func (s *Server) queueWhiteboardMessage(client *whiteboardcore.RealtimeClient, message whiteboardcore.OutgoingMessage) bool {
+	payload, ok := encodeWhiteboardMessage(message)
+	return ok && client != nil && client.Enqueue(payload)
 }
 
 func (s *Server) queueWhiteboardError(client *whiteboardcore.RealtimeClient, code, message string) {
@@ -989,7 +1192,6 @@ func (s *Server) writeWhiteboardSocket(
 	client *whiteboardcore.RealtimeClient,
 	principal *whiteboardRealtimePrincipal,
 	connectedAt time.Time,
-	terminationRequests <-chan whiteboardSocketTermination,
 	done chan<- struct{},
 ) {
 	defer close(done)
@@ -999,28 +1201,54 @@ func (s *Server) writeWhiteboardSocket(
 	authorizationTicker := time.NewTicker(15 * time.Second)
 	defer authorizationTicker.Stop()
 	for {
+		if payload, ok := client.TakeBootstrap(); ok {
+			delivered, err := deliverWhiteboardSocketPayload(conn, client, payload)
+			if err != nil {
+				return
+			}
+			if !delivered {
+				writeClosedWhiteboardClient(conn, client)
+				return
+			}
+			continue
+		}
+		// Give canonical permission controls a dedicated fast lane. A second
+		// select still observes Done and ordinary data without busy waiting.
 		select {
-		case termination := <-terminationRequests:
-			writeWhiteboardSocketTermination(conn, termination)
-			return
+		case payload := <-client.Control():
+			delivered, err := deliverWhiteboardSocketPayload(conn, client, payload)
+			if err != nil {
+				return
+			}
+			if !delivered {
+				writeClosedWhiteboardClient(conn, client)
+				return
+			}
+			continue
+		default:
+		}
+		select {
+		case payload := <-client.Control():
+			delivered, err := deliverWhiteboardSocketPayload(conn, client, payload)
+			if err != nil {
+				return
+			}
+			if !delivered {
+				writeClosedWhiteboardClient(conn, client)
+				return
+			}
 		case payload := <-client.Send:
-			_ = conn.SetWriteDeadline(time.Now().Add(whiteboardWriteWait))
-			if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+			delivered, err := deliverWhiteboardSocketPayload(conn, client, payload)
+			if err != nil {
+				return
+			}
+			if !delivered {
+				writeClosedWhiteboardClient(conn, client)
 				return
 			}
 		case <-client.Done():
-			for {
-				select {
-				case payload := <-client.Send:
-					_ = conn.SetWriteDeadline(time.Now().Add(whiteboardWriteWait))
-					if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
-						return
-					}
-				default:
-					_ = conn.WriteMessage(websocket.CloseMessage, nil)
-					return
-				}
-			}
+			writeClosedWhiteboardClient(conn, client)
+			return
 		case <-ticker.C:
 			presenceCtx, presenceCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			presenceErr := s.refreshWhiteboardPresence(presenceCtx, client)
@@ -1032,22 +1260,51 @@ func (s *Server) writeWhiteboardSocket(
 				payload, _ := json.Marshal(whiteboardcore.OutgoingMessage{
 					Event: whiteboardcore.EventError, Code: "presence_unavailable", Error: "La presencia de la sala dejó de estar disponible",
 				})
-				_ = conn.SetWriteDeadline(time.Now().Add(whiteboardWriteWait))
-				_ = conn.WriteMessage(websocket.TextMessage, payload)
+				_, _ = deliverWhiteboardSocketPayload(conn, client, payload)
 				return
 			}
-			_ = conn.SetWriteDeadline(time.Now().Add(whiteboardWriteWait))
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			delivered, pingErr := client.DeliverIfActive([]byte{1}, func([]byte) error {
+				_ = conn.SetWriteDeadline(time.Now().Add(whiteboardWriteWait))
+				return conn.WriteMessage(websocket.PingMessage, nil)
+			})
+			if pingErr != nil {
+				return
+			}
+			if !delivered {
+				writeClosedWhiteboardClient(conn, client)
 				return
 			}
 		case <-authorizationTicker.C:
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			viewAccess, err := s.resolveWhiteboardRealtimeAccess(ctx, principal, domain.WhiteboardAccessView)
+			before := client.AuthorizationSnapshot()
+			err := s.revalidateRegisteredWhiteboardClient(ctx, principal, client)
 			if err != nil {
 				cancel()
 				logWhiteboardRealtimeAuthorizationFailure(principal, "periodic", domain.WhiteboardAccessView, connectedAt, err)
+				if client.IsClosed() {
+					writeClosedWhiteboardClient(conn, client)
+					return
+				}
 				writeWhiteboardSocketTermination(conn, whiteboardSocketTerminationForAuthorization(err))
 				return
+			}
+			after := client.AuthorizationSnapshot()
+			viewAccess := after.Access
+			if before.AccessRevision != after.AccessRevision || before.Access != viewAccess {
+				presenceCtx, presenceCancel := context.WithTimeout(ctx, 2*time.Second)
+				_ = s.registerWhiteboardPresence(presenceCtx, client)
+				presenceCancel()
+				payload, _ := json.Marshal(whiteboardcore.OutgoingMessage{
+					Event: whiteboardcore.EventError, Code: "permission_changed", Error: "Tus permisos de la pizarra cambiaron",
+					Data: map[string]any{"access": viewAccess},
+				})
+				if delivered, writeErr := deliverWhiteboardSocketPayload(conn, client, payload); writeErr != nil || !delivered {
+					cancel()
+					if !delivered {
+						writeClosedWhiteboardClient(conn, client)
+					}
+					return
+				}
 			}
 			if client.Presentation() != uuid.Nil {
 				if editErr := s.validateWhiteboardRealtimeAccess(ctx, principal, domain.WhiteboardAccessEdit); editErr != nil {
@@ -1058,8 +1315,7 @@ func (s *Server) writeWhiteboardSocket(
 							Event: whiteboardcore.EventError, Code: "permission_changed", Error: "Tus permisos de la pizarra cambiaron",
 							Data: map[string]any{"access": viewAccess},
 						})
-						_ = conn.SetWriteDeadline(time.Now().Add(whiteboardWriteWait))
-						_ = conn.WriteMessage(websocket.TextMessage, payload)
+						_, _ = deliverWhiteboardSocketPayload(conn, client, payload)
 						continue
 					}
 					logWhiteboardRealtimeAuthorizationFailure(principal, "periodic_edit", domain.WhiteboardAccessEdit, connectedAt, editErr)
@@ -1070,8 +1326,7 @@ func (s *Server) writeWhiteboardSocket(
 					payload, _ := json.Marshal(whiteboardcore.OutgoingMessage{
 						Event: whiteboardcore.EventError, Code: "presentation_unavailable", Error: "La presentación no se pudo renovar",
 					})
-					_ = conn.SetWriteDeadline(time.Now().Add(whiteboardWriteWait))
-					_ = conn.WriteMessage(websocket.TextMessage, payload)
+					_, _ = deliverWhiteboardSocketPayload(conn, client, payload)
 				}
 			}
 			cancel()

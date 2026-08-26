@@ -55,6 +55,7 @@ describe('whiteboard realtime authorization', () => {
       kind: 'access_revoked',
       retryable: false,
     })
+    expect(whiteboardRealtimeIssueFromEvent({ event: 'access.revoked', code: 'work_access_changed' }, 'member')).toBeNull()
     expect(whiteboardRealtimeIssueFromEvent({ event: 'error', code: 'authorization_unavailable' }, 'member')).toMatchObject({
       kind: 'authorization_unavailable',
       retryable: true,

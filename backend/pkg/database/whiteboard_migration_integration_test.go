@@ -101,8 +101,18 @@ func TestWhiteboardMigrationRepositoryIsolationAndIdempotency(t *testing.T) {
 			importCompletionConstraintValidated, importCompletionConstraintDefinition)
 	}
 	accountA, accountB := uuid.New(), uuid.New()
+	whiteboardRoleID := uuid.New()
 	creator, viewer, observer, foreign := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	if _, err := db.Exec(ctx, `INSERT INTO accounts(id,name) VALUES($1,'Whiteboard A'),($2,'Whiteboard B')`, accountA, accountB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO subscriptions(account_id,plan_code,status,current_period_start,current_period_end)
+		VALUES($1,'enterprise','active',NOW(),NOW()+INTERVAL '1 year'),
+			($2,'enterprise','active',NOW(),NOW()+INTERVAL '1 year')`, accountA, accountB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO roles(id,name,permissions)
+		VALUES($1,$2,ARRAY[$3]::text[])`, whiteboardRoleID, "Whiteboard integration "+whiteboardRoleID.String(), domain.PermWhiteboards); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO users(id,account_id,username,email,password_hash,display_name) VALUES
@@ -112,21 +122,21 @@ func TestWhiteboardMigrationRepositoryIsolationAndIdempotency(t *testing.T) {
 		"wb-"+foreign.String(), foreign.String()+"@test.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,role,is_default) VALUES
-		($1,$4,'agent',TRUE),($2,$4,'agent',FALSE),($3,$5,'agent',TRUE)`, creator, viewer, foreign, accountA, accountB); err != nil {
+	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,role,role_id,is_default) VALUES
+		($1,$4,'agent',$6,TRUE),($2,$4,'agent',$6,FALSE),($3,$5,'agent',$6,TRUE)`, creator, viewer, foreign, accountA, accountB, whiteboardRoleID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO users(id,account_id,username,email,password_hash,display_name)
 		VALUES($1,$2,$3,$4,'test','Observer')`, observer, accountA, "wb-"+observer.String(), observer.String()+"@test.invalid"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,role,is_default)
-		VALUES($1,$2,'agent',FALSE)`, observer, accountA); err != nil {
+	if _, err := db.Exec(ctx, `INSERT INTO user_accounts(user_id,account_id,role,role_id,is_default)
+		VALUES($1,$2,'agent',$3,FALSE)`, observer, accountA, whiteboardRoleID); err != nil {
 		t.Fatal(err)
 	}
 	repo := repository.NewRepositories(db).Whiteboard
-	if _, err := repo.CreateFolder(ctx, accountA, foreign, repository.WhiteboardFolderInput{Name: "Foreign author"}); !errors.Is(err, repository.ErrWhiteboardInvalid) {
-		t.Fatalf("cross-account folder author was accepted: %v", err)
+	if _, err := repo.CreateFolder(ctx, accountA, foreign, repository.WhiteboardFolderInput{Name: "Foreign author"}); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("cross-account folder author leaked account membership: %v", err)
 	}
 	lockTx, err := db.Begin(ctx)
 	if err != nil {
@@ -222,18 +232,26 @@ func TestWhiteboardMigrationRepositoryIsolationAndIdempotency(t *testing.T) {
 		t.Fatalf("cross-account placement anchor was accepted: %v", err)
 	}
 
-	gapTarget, err := repo.CreateFolder(ctx, accountA, creator, repository.WhiteboardFolderInput{Name: "Gap target", SortOrder: whiteboardInt64Pointer(10)})
+	gapLeft, err := repo.CreateFolder(ctx, accountA, creator, repository.WhiteboardFolderInput{Name: "Gap left", SortOrder: whiteboardInt64Pointer(10)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gapRight, err := repo.CreateFolder(ctx, accountA, creator, repository.WhiteboardFolderInput{Name: "Gap right", SortOrder: whiteboardInt64Pointer(11)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gapTarget, err := repo.CreateFolder(ctx, accountA, creator, repository.WhiteboardFolderInput{Name: "Gap target", SortOrder: whiteboardInt64Pointer(20)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	gapResult, err := repo.UpdateFolder(ctx, accountA, creator, gapTarget.ID, repository.WhiteboardFolderInput{
 		Name: gapTarget.Name, ExpectedVersion: gapTarget.Version,
-		Placement: &repository.WhiteboardFolderPlacement{BeforeFolderID: &placementRootB.ID},
+		Placement: &repository.WhiteboardFolderPlacement{BeforeFolderID: &gapRight.ID},
 	})
 	if err != nil {
 		t.Fatalf("rebalance exhausted folder order gap: %v", err)
 	}
-	if len(gapResult.AffectedFolders) < 3 {
+	if len(gapResult.AffectedFolders) < 3 || !(gapLeft.SortOrder < gapResult.Folder.SortOrder) {
 		t.Fatalf("rebalance did not return every canonically affected sibling: %#v", gapResult.AffectedFolders)
 	}
 
@@ -353,8 +371,8 @@ func TestWhiteboardMigrationRepositoryIsolationAndIdempotency(t *testing.T) {
 		t.Fatalf("cross-account activity leaked: %v", err)
 	}
 	if _, err := repo.ReplaceBoardAccess(ctx, accountA, creator, boardID, domain.WhiteboardAccessPrivate,
-		[]repository.WhiteboardGrantInput{{UserID: foreign, AccessLevel: domain.WhiteboardAccessView}}, board.AccessRevision, uuid.New()); !errors.Is(err, repository.ErrWhiteboardInvalid) {
-		t.Fatalf("cross-account grant was accepted: %v", err)
+		[]repository.WhiteboardGrantInput{{UserID: foreign, AccessLevel: domain.WhiteboardAccessView}}, board.AccessRevision, uuid.New()); !errors.Is(err, repository.ErrWhiteboardNotFound) {
+		t.Fatalf("cross-account grant recipient leaked account membership: %v", err)
 	}
 	if _, err := repo.ReplaceBoardAccess(ctx, accountA, creator, boardID, domain.WhiteboardAccessPrivate,
 		nil, 0, uuid.New()); !errors.Is(err, repository.ErrWhiteboardInvalid) {

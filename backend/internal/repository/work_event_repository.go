@@ -1526,7 +1526,7 @@ func (r *WorkEventRepository) Purge(ctx context.Context, accountID, eventID, act
 		JOIN user_accounts membership ON membership.account_id=event_item.account_id AND membership.user_id=$3
 		JOIN users actor ON actor.id=membership.user_id
 		WHERE event_item.account_id=$1 AND event_item.id=$2
-		  AND (membership.role IN ('admin','super_admin') OR actor.is_admin OR actor.is_super_admin)
+		  AND (membership.role IN ('admin','super_admin') OR actor.is_super_admin)
 		FOR UPDATE OF event_item`, accountID, eventID, actorID).Scan(&title, &currentVersion, &eligible); errors.Is(err, pgx.ErrNoRows) {
 		return ErrWorkEventPurgeForbidden
 	} else if err != nil {

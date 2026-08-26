@@ -49,6 +49,7 @@ export interface WhiteboardListResponse {
     can_create_folder: boolean
   }
   counts?: Partial<Record<WhiteboardScope, number>>
+  work_whiteboard_views_enabled: boolean
 }
 
 export interface WhiteboardFolderListResponse {

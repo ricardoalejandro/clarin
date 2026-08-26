@@ -94,6 +94,13 @@ func (s *SubscriptionService) GetOverview(ctx context.Context, accountID uuid.UU
 }
 
 func (s *SubscriptionService) CheckAccess(ctx context.Context, accountID uuid.UUID) (*SubscriptionAccessDecision, error) {
+	accountActive, err := s.repos.Account.IsActive(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if decision := inactiveAccountAccessDecision(accountActive); decision != nil {
+		return decision, nil
+	}
 	overview, err := s.GetOverview(ctx, accountID)
 	if err != nil {
 		return nil, err
@@ -157,6 +164,13 @@ func (s *SubscriptionService) CheckAccess(ctx context.Context, accountID uuid.UU
 		overview.IsActive = decision.Allowed
 	}
 	return decision, nil
+}
+
+func inactiveAccountAccessDecision(active bool) *SubscriptionAccessDecision {
+	if active {
+		return nil
+	}
+	return &SubscriptionAccessDecision{Allowed: false, Reason: "account_inactive", Message: "La cuenta está inactiva"}
 }
 
 func (s *SubscriptionService) HasFeature(ctx context.Context, accountID uuid.UUID, key string) (bool, error) {
@@ -245,10 +259,7 @@ func (s *SubscriptionService) Upsert(ctx context.Context, sub *domain.Subscripti
 	if len(sub.Metadata) == 0 {
 		sub.Metadata = json.RawMessage(`{}`)
 	}
-	if err := s.repos.Subscription.Upsert(ctx, sub); err != nil {
-		return err
-	}
-	return s.repos.Subscription.SetAccountPlan(ctx, sub.AccountID, sub.PlanCode)
+	return s.repos.Subscription.Upsert(ctx, sub)
 }
 
 func (s *SubscriptionService) ExtendTrial(ctx context.Context, accountID uuid.UUID, days int) (*domain.SubscriptionOverview, error) {

@@ -119,6 +119,11 @@ export function whiteboardRealtimeIssueFromEvent(
   audience: WhiteboardCollabTicketAudience,
 ): WhiteboardRealtimeIssue | null {
   if (event.event === 'access.revoked') {
+    // Work broadcasts one invalidation event for both ACL changes and parent
+    // lifecycle transitions. The editor must re-read canonical metadata before
+    // deciding whether access was actually lost; the room may reconnect when
+    // the actor is still authorized.
+    if (audience === 'member' && normalizedCode(event.code) === 'work_access_changed') return null
     return {
       kind: 'access_revoked',
       message: audience === 'guest'

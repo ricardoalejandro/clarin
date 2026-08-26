@@ -18,6 +18,7 @@ var (
 	ErrTaskAccessInvalid           = errors.New("task access grant is invalid")
 	ErrTaskAccessRevisionConflict  = errors.New("task access revision changed concurrently")
 	ErrTaskLastAccessManager       = errors.New("task resource requires an access manager")
+	ErrTaskMembershipOwnsEvents    = errors.New("task account membership owns historical work events")
 	ErrTaskEnvironmentDefault      = errors.New("default task environment cannot be archived")
 	ErrTaskEnvironmentNameConflict = errors.New("task environment name already exists")
 )
@@ -32,6 +33,13 @@ type TaskAccessGrantInput struct {
 	UserID          uuid.UUID
 	AccessLevel     string
 	CanManageAccess bool
+}
+
+// TaskAccessMutationEffects contains the exact contextual resources whose
+// authorization revision changed in the same transaction as an ACL write.
+// Callers publish these invalidations only after ReplaceAccessGrants returns.
+type TaskAccessMutationEffects struct {
+	WhiteboardIDs []uuid.UUID
 }
 
 func taskAccessRank(level string) int {
@@ -97,7 +105,7 @@ func resolveEnvironmentAccessWith(ctx context.Context, q taskAccessQuerier, acco
 	var admin bool
 	err := q.QueryRow(ctx, `
 		SELECT environment.visibility,environment.default_access_level,
-			(membership.role IN ('admin','super_admin') OR COALESCE(account_user.is_admin,FALSE) OR COALESCE(account_user.is_super_admin,FALSE)) AS is_admin,
+			(membership.role IN ('admin','super_admin') OR COALESCE(account_user.is_super_admin,FALSE)) AS is_admin,
 			grant_item.access_level,grant_item.can_manage_access
 		FROM task_environments environment
 		JOIN user_accounts membership ON membership.account_id=environment.account_id AND membership.user_id=$2
@@ -177,6 +185,22 @@ func resolveTaskAccessWith(ctx context.Context, q taskAccessQuerier, accountID, 
 	return resolveTaskAccessWithState(ctx, q, accountID, userID, taskID, false)
 }
 
+func taskAccessLifecyclePredicates(includeDeleted bool) (string, string) {
+	if includeDeleted {
+		// Explicit Trash operations may need to authorize a deleted task through
+		// its archived historical hierarchy, but a parent in Trash remains an
+		// opaque boundary. Restoring such a task is handled with its parent tree.
+		return "", `
+		  AND environment.deleted_at IS NULL
+		  AND list_item.deleted_at IS NULL
+		  AND (folder.id IS NULL OR folder.deleted_at IS NULL)`
+	}
+	return " AND task.deleted_at IS NULL AND root.deleted_at IS NULL", `
+		  AND environment.archived_at IS NULL AND environment.deleted_at IS NULL
+		  AND list_item.archived_at IS NULL AND list_item.deleted_at IS NULL
+		  AND (folder.id IS NULL OR (folder.archived_at IS NULL AND folder.deleted_at IS NULL))`
+}
+
 func resolveTaskAccessWithState(ctx context.Context, q taskAccessQuerier, accountID, userID, taskID uuid.UUID, includeDeleted bool) (*taskAccessContext, error) {
 	var result taskAccessContext
 	var visibility, defaultLevel string
@@ -184,13 +208,10 @@ func resolveTaskAccessWithState(ctx context.Context, q taskAccessQuerier, accoun
 	var environmentGrantManage, folderGrantManage, listGrantManage, taskGrantManage *bool
 	var folderMode *string
 	var listMode string
-	deletedPredicate := " AND task.deleted_at IS NULL AND root.deleted_at IS NULL"
-	if includeDeleted {
-		deletedPredicate = ""
-	}
+	deletedPredicate, hierarchyLifecyclePredicate := taskAccessLifecyclePredicates(includeDeleted)
 	err := q.QueryRow(ctx, `
 		SELECT environment.id,root.id,COALESCE(root.access_mode,'inherit'),environment.visibility,environment.default_access_level,
-			(membership.role IN ('admin','super_admin') OR COALESCE(account_user.is_admin,FALSE) OR COALESCE(account_user.is_super_admin,FALSE)) AS is_admin,
+			(membership.role IN ('admin','super_admin') OR COALESCE(account_user.is_super_admin,FALSE)) AS is_admin,
 			environment_grant.access_level,environment_grant.can_manage_access,
 			folder.access_mode,folder_grant.access_level,folder_grant.can_manage_access,
 			COALESCE(list_item.access_mode,'inherit'),list_grant.access_level,list_grant.can_manage_access,
@@ -210,10 +231,7 @@ func resolveTaskAccessWithState(ctx context.Context, q taskAccessQuerier, accoun
 			AND list_grant.list_id=list_item.id AND list_grant.user_id=membership.user_id
 		LEFT JOIN task_access_grants task_grant ON task_grant.account_id=root.account_id
 			AND task_grant.task_id=root.id AND task_grant.user_id=membership.user_id
-		WHERE task.account_id=$1 AND task.id=$3`+deletedPredicate+`
-		  AND environment.archived_at IS NULL AND environment.deleted_at IS NULL
-		  AND list_item.archived_at IS NULL AND list_item.deleted_at IS NULL
-		  AND (folder.id IS NULL OR (folder.archived_at IS NULL AND folder.deleted_at IS NULL))
+		WHERE task.account_id=$1 AND task.id=$3`+deletedPredicate+hierarchyLifecyclePredicate+`
 	`, accountID, userID, taskID).Scan(&result.EnvironmentID, &result.RootTaskID, &result.AccessMode, &visibility,
 		&defaultLevel, &result.Admin, &environmentGrantLevel, &environmentGrantManage,
 		&folderMode, &folderGrantLevel, &folderGrantManage, &listMode, &listGrantLevel, &listGrantManage,
@@ -363,7 +381,7 @@ func resolveContainerAccessWith(ctx context.Context, q taskAccessQuerier, accoun
 		return nil, uuid.Nil, ErrTaskAccessInvalid
 	}
 	query := `SELECT environment.id,
-		(membership.role IN ('admin','super_admin') OR COALESCE(account_user.is_admin,FALSE) OR COALESCE(account_user.is_super_admin,FALSE)) AS is_admin,
+		(membership.role IN ('admin','super_admin') OR COALESCE(account_user.is_super_admin,FALSE)) AS is_admin,
 		environment.visibility,environment.default_access_level,
 		environment_grant.access_level,environment_grant.can_manage_access,
 		folder.access_mode,folder_grant.access_level,folder_grant.can_manage_access,
@@ -380,7 +398,7 @@ func resolveContainerAccessWith(ctx context.Context, q taskAccessQuerier, accoun
 	  AND (folder.id IS NULL OR (folder.archived_at IS NULL AND folder.deleted_at IS NULL))`
 	if resourceType == domain.TaskAccessTargetFolder {
 		query = `SELECT environment.id,
-			(membership.role IN ('admin','super_admin') OR COALESCE(account_user.is_admin,FALSE) OR COALESCE(account_user.is_super_admin,FALSE)) AS is_admin,
+			(membership.role IN ('admin','super_admin') OR COALESCE(account_user.is_super_admin,FALSE)) AS is_admin,
 			environment.visibility,environment.default_access_level,
 			environment_grant.access_level,environment_grant.can_manage_access,
 			folder.access_mode,folder_grant.access_level,folder_grant.can_manage_access,
@@ -454,12 +472,16 @@ func (r *TaskWorkRepository) RequireContainerAccess(ctx context.Context, account
 }
 
 func (r *TaskWorkRepository) ListAccessGrants(ctx context.Context, accountID uuid.UUID, targetType string, targetID uuid.UUID) ([]*domain.TaskAccessGrant, string, int64, error) {
+	return listAccessGrantsWith(ctx, r.db, accountID, targetType, targetID)
+}
+
+func listAccessGrantsWith(ctx context.Context, q taskAccessQuerier, accountID uuid.UUID, targetType string, targetID uuid.UUID) ([]*domain.TaskAccessGrant, string, int64, error) {
 	table, targetColumn := "task_environment_grants", "environment_id"
 	accessMode := "inherit"
 	var revision int64
 	if targetType == domain.TaskAccessTargetFolder {
 		table, targetColumn = "task_folder_access_grants", "folder_id"
-		if err := r.db.QueryRow(ctx, `SELECT access_mode,access_revision FROM task_folders WHERE account_id=$1 AND id=$2`, accountID, targetID).Scan(&accessMode, &revision); err != nil {
+		if err := q.QueryRow(ctx, `SELECT access_mode,access_revision FROM task_folders WHERE account_id=$1 AND id=$2`, accountID, targetID).Scan(&accessMode, &revision); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, "", 0, ErrTaskWorkNotFound
 			}
@@ -467,7 +489,7 @@ func (r *TaskWorkRepository) ListAccessGrants(ctx context.Context, accountID uui
 		}
 	} else if targetType == domain.TaskAccessTargetList {
 		table, targetColumn = "task_list_access_grants", "list_id"
-		if err := r.db.QueryRow(ctx, `SELECT access_mode,access_revision FROM task_lists WHERE account_id=$1 AND id=$2`, accountID, targetID).Scan(&accessMode, &revision); err != nil {
+		if err := q.QueryRow(ctx, `SELECT access_mode,access_revision FROM task_lists WHERE account_id=$1 AND id=$2`, accountID, targetID).Scan(&accessMode, &revision); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, "", 0, ErrTaskWorkNotFound
 			}
@@ -475,7 +497,7 @@ func (r *TaskWorkRepository) ListAccessGrants(ctx context.Context, accountID uui
 		}
 	} else if targetType == domain.TaskAccessTargetTask {
 		table, targetColumn = "task_access_grants", "task_id"
-		if err := r.db.QueryRow(ctx, `SELECT COALESCE(root.access_mode,'inherit'),COALESCE(root.access_revision,1)
+		if err := q.QueryRow(ctx, `SELECT COALESCE(root.access_mode,'inherit'),COALESCE(root.access_revision,1)
 			FROM tasks task JOIN tasks root ON root.account_id=task.account_id AND root.id=COALESCE(task.parent_task_id,task.id)
 			WHERE task.account_id=$1 AND task.id=$2`, accountID, targetID).Scan(&accessMode, &revision); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -484,7 +506,7 @@ func (r *TaskWorkRepository) ListAccessGrants(ctx context.Context, accountID uui
 			return nil, "", 0, err
 		}
 	} else if targetType == domain.TaskAccessTargetEnvironment {
-		if err := r.db.QueryRow(ctx, `SELECT access_revision FROM task_environments WHERE account_id=$1 AND id=$2`, accountID, targetID).Scan(&revision); err != nil {
+		if err := q.QueryRow(ctx, `SELECT access_revision FROM task_environments WHERE account_id=$1 AND id=$2`, accountID, targetID).Scan(&revision); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, "", 0, ErrTaskWorkNotFound
 			}
@@ -493,7 +515,7 @@ func (r *TaskWorkRepository) ListAccessGrants(ctx context.Context, accountID uui
 	} else {
 		return nil, "", 0, ErrTaskAccessInvalid
 	}
-	rows, err := r.db.Query(ctx, fmt.Sprintf(`SELECT grant_item.user_id,COALESCE(account_user.display_name,''),account_user.username,
+	rows, err := q.Query(ctx, fmt.Sprintf(`SELECT grant_item.user_id,COALESCE(account_user.display_name,''),account_user.username,
 		grant_item.access_level,grant_item.can_manage_access,grant_item.created_by,grant_item.created_at,grant_item.updated_at
 		FROM %s grant_item JOIN users account_user ON account_user.id=grant_item.user_id
 		WHERE grant_item.account_id=$1 AND grant_item.%s=$2
@@ -558,7 +580,7 @@ func (r *TaskWorkRepository) CanonicalTaskAccessTarget(ctx context.Context, acco
 // ReplaceAccessGrants is the one atomic ACL write. Validation, replacement,
 // revision bump and audit are committed together, so a failed request can
 // never leave a partially shared resource or an unaudited permission change.
-func (r *TaskWorkRepository) ReplaceAccessGrants(ctx context.Context, accountID, actorID uuid.UUID, targetType string, targetID uuid.UUID, accessMode *string, inputs []TaskAccessGrantInput, expectedAccessRevision int64, operationID uuid.UUID) ([]*domain.TaskAccessGrant, string, int64, error) {
+func (r *TaskWorkRepository) ReplaceAccessGrants(ctx context.Context, accountID, actorID uuid.UUID, targetType string, targetID uuid.UUID, accessMode *string, inputs []TaskAccessGrantInput, expectedAccessRevision int64, operationID uuid.UUID, effects ...*TaskAccessMutationEffects) ([]*domain.TaskAccessGrant, string, int64, error) {
 	if expectedAccessRevision < 1 {
 		return nil, "", 0, ErrTaskAccessInvalid
 	}
@@ -586,6 +608,19 @@ func (r *TaskWorkRepository) ReplaceAccessGrants(ctx context.Context, accountID,
 		return nil, "", 0, err
 	}
 	defer tx.Rollback(ctx)
+	membershipUserIDs := make([]uuid.UUID, 0, len(inputs))
+	for _, input := range inputs {
+		membershipUserIDs = append(membershipUserIDs, input.UserID)
+	}
+	lockedMemberships, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, membershipUserIDs)
+	if err != nil {
+		return nil, "", 0, err
+	}
+	for _, input := range inputs {
+		if _, recipientIsMember := lockedMemberships[input.UserID]; !recipientIsMember {
+			return nil, "", 0, ErrTaskAccessInvalid
+		}
+	}
 
 	table, targetColumn := "task_environment_grants", "environment_id"
 	currentMode := "inherit"
@@ -778,6 +813,23 @@ func (r *TaskWorkRepository) ReplaceAccessGrants(ctx context.Context, accountID,
 			return nil, "", 0, err
 		}
 	}
+	var affectedWhiteboardIDs []uuid.UUID
+	if targetType == domain.TaskAccessTargetEnvironment {
+		affectedWhiteboardIDs, err = bumpTaskLocationWhiteboardAccessRevisionReturningIDsTx(ctx, tx, accountID, environmentID, nil, nil, true)
+		if err != nil {
+			return nil, "", 0, err
+		}
+	} else if targetType == domain.TaskAccessTargetFolder {
+		affectedWhiteboardIDs, err = bumpTaskLocationWhiteboardAccessRevisionReturningIDsTx(ctx, tx, accountID, environmentID, []uuid.UUID{canonicalTargetID}, nil, false)
+		if err != nil {
+			return nil, "", 0, err
+		}
+	} else if targetType == domain.TaskAccessTargetList {
+		affectedWhiteboardIDs, err = bumpTaskLocationWhiteboardAccessRevisionReturningIDsTx(ctx, tx, accountID, environmentID, nil, []uuid.UUID{canonicalTargetID}, false)
+		if err != nil {
+			return nil, "", 0, err
+		}
+	}
 	afterState, err := accessStateJSON(ctx, tx, accountID, table, targetColumn, canonicalTargetID, currentMode)
 	if err != nil {
 		return nil, "", 0, err
@@ -787,12 +839,15 @@ func (r *TaskWorkRepository) ReplaceAccessGrants(ctx context.Context, accountID,
 		beforeState, afterState, operationID); err != nil {
 		return nil, "", 0, err
 	}
+	grants, returnedMode, returnedRevision, err := listAccessGrantsWith(ctx, tx, accountID, targetType, canonicalTargetID)
+	if err != nil {
+		return nil, "", 0, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, "", 0, err
 	}
-	grants, returnedMode, returnedRevision, err := r.ListAccessGrants(ctx, accountID, targetType, canonicalTargetID)
-	if err != nil {
-		return nil, "", 0, err
+	if len(effects) > 0 && effects[0] != nil {
+		effects[0].WhiteboardIDs = append([]uuid.UUID(nil), affectedWhiteboardIDs...)
 	}
 	return grants, returnedMode, returnedRevision, nil
 }
@@ -800,7 +855,7 @@ func (r *TaskWorkRepository) ReplaceAccessGrants(ctx context.Context, accountID,
 func taskActorAdminSQL(taskAlias, actorExpression string) string {
 	return fmt.Sprintf(`EXISTS(SELECT 1 FROM user_accounts actor_membership JOIN users actor_user ON actor_user.id=actor_membership.user_id
 		WHERE actor_membership.account_id=%s.account_id AND actor_membership.user_id=%s
-		  AND (actor_membership.role IN ('admin','super_admin') OR COALESCE(actor_user.is_admin,FALSE) OR COALESCE(actor_user.is_super_admin,FALSE)))`, taskAlias, actorExpression)
+		  AND (actor_membership.role IN ('admin','super_admin') OR COALESCE(actor_user.is_super_admin,FALSE)))`, taskAlias, actorExpression)
 }
 
 func taskAccessLevelRankSQL(levelExpression string) string {
@@ -924,7 +979,7 @@ func taskActorDirectSharedSQL(taskAlias, listAlias, actorExpression string) stri
 
 func taskAccessBatchSQL() string {
 	return `SELECT task.id,environment.id,COALESCE(root.access_mode,'inherit'),
-		(membership.role IN ('admin','super_admin') OR COALESCE(account_user.is_admin,FALSE) OR COALESCE(account_user.is_super_admin,FALSE)) AS is_admin,
+		(membership.role IN ('admin','super_admin') OR COALESCE(account_user.is_super_admin,FALSE)) AS is_admin,
 		environment.visibility,environment.default_access_level,
 		environment_grant.access_level,environment_grant.can_manage_access,
 		folder.access_mode,folder_grant.access_level,folder_grant.can_manage_access,

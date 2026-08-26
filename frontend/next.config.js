@@ -58,6 +58,7 @@ const nextConfig = {
       { source: '/signup', headers: noStore },
       { source: '/dashboard/:path*', headers: noStore },
       { source: '/dashboard/whiteboards/:path*', headers: whiteboardHeaders },
+      { source: '/dashboard/tasks/:path*', headers: whiteboardHeaders },
       { source: '/shared/whiteboards/:path*', headers: whiteboardHeaders },
       { source: '/d/:path*', headers: noStore },
       { source: '/f/:path*', headers: noStore },

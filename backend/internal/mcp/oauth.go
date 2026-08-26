@@ -349,9 +349,21 @@ func (s *MCPServer) currentOAuthUser(r *http.Request) (*serviceJWTClaims, error)
 	if err != nil {
 		return nil, err
 	}
+	// OAuth authorization is a global MCP administration action. Never trust
+	// the role or super-admin snapshot embedded in a previously issued JWT:
+	// account roles are not global authority, and both activation and the
+	// global super-admin bit can change while the cookie is still valid.
+	var active, globalSuperAdmin bool
+	if err := s.repos.DB().QueryRow(r.Context(), `SELECT is_active,COALESCE(is_super_admin,FALSE)
+		FROM users WHERE id=$1`, claims.UserID).Scan(&active, &globalSuperAdmin); err != nil {
+		return nil, err
+	}
+	if !active {
+		return nil, errors.New("inactive OAuth user")
+	}
 	return &serviceJWTClaims{
 		UserID:       claims.UserID,
-		IsSuperAdmin: claims.IsSuperAdmin || claims.Role == domain.RoleSuperAdmin,
+		IsSuperAdmin: globalSuperAdmin,
 	}, nil
 }
 
