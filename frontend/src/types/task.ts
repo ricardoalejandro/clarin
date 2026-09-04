@@ -180,6 +180,52 @@ export interface Task {
   subtasks?: Subtask[]
 }
 
+export type TaskMyWorkSuggestionReason = 'overdue' | 'due_today' | 'previous_focus'
+
+export interface TaskMyWorkSummary {
+  business_date: string
+  timezone: 'America/Lima'
+  reset_at: string
+  revision: number
+  focus_count: number
+  completed_count: number
+  suggestion_count: number
+  overdue_suggestion_count: number
+  due_today_suggestion_count: number
+  previous_suggestion_count: number
+  maximum_daily_task_count: number
+}
+
+export interface TaskMyWorkItem {
+  task: Task
+  position: number
+  added_at: string
+}
+
+export interface TaskMyWorkSuggestion {
+  task: Task
+  reasons: TaskMyWorkSuggestionReason[]
+}
+
+export interface TaskMyWorkResponse {
+  summary: TaskMyWorkSummary
+  focus_items: TaskMyWorkItem[]
+  completed_items: TaskMyWorkItem[]
+  suggestions: TaskMyWorkSuggestion[]
+  focus_next_cursor?: string
+  suggestions_next_cursor?: string
+}
+
+export interface TaskMyWorkMutation {
+  business_date: string
+  revision: number
+  ordered_task_ids: string[]
+  focus_count: number
+  completed_count: number
+  operation_id: string
+  idempotent: boolean
+}
+
 export type WorkEventRSVP = 'pending' | 'accepted' | 'tentative' | 'declined'
 
 export interface WorkEventCapabilities {

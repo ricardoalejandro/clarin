@@ -1,13 +1,36 @@
 package service
 
 import (
-	"fmt"
+	"errors"
 	"unicode"
+	"unicode/utf8"
 )
 
+var ErrPasswordPolicy = errors.New("password does not satisfy the security policy")
+
+type PasswordPolicyError struct {
+	Message string
+}
+
+func (e *PasswordPolicyError) Error() string {
+	return e.Message
+}
+
+func (e *PasswordPolicyError) Unwrap() error {
+	return ErrPasswordPolicy
+}
+
 func ValidateStrongPassword(password string) error {
-	if len(password) < 10 {
-		return fmt.Errorf("la contraseña debe tener al menos 10 caracteres")
+	if !utf8.ValidString(password) {
+		return &PasswordPolicyError{Message: "La contraseña contiene texto no válido."}
+	}
+	if utf8.RuneCountInString(password) < 10 {
+		return &PasswordPolicyError{Message: "La contraseña debe tener al menos 10 caracteres."}
+	}
+	// bcrypt only consumes credentials up to 72 bytes. Rejecting longer input
+	// avoids two visually different passwords authenticating as the same value.
+	if len(password) > 72 {
+		return &PasswordPolicyError{Message: "La contraseña no puede superar 72 bytes en UTF-8."}
 	}
 	var hasUpper, hasLower, hasDigit, hasSymbol bool
 	for _, r := range password {
@@ -23,7 +46,7 @@ func ValidateStrongPassword(password string) error {
 		}
 	}
 	if !hasUpper || !hasLower || !hasDigit || !hasSymbol {
-		return fmt.Errorf("usa una contraseña fuerte con mayúscula, minúscula, número y símbolo")
+		return &PasswordPolicyError{Message: "Usa una contraseña con mayúscula, minúscula, número y símbolo."}
 	}
 	return nil
 }

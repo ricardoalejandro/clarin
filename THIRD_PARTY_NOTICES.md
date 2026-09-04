@@ -4,13 +4,13 @@ This file indexes notices that must accompany third-party software distributed b
 
 ## `@excalidraw/excalidraw`
 
-- Distributed version: `0.18.1-clarin.5`
-- Vendored source SHA-256: `90a340dc85d73636f5e65dc9f7c77008551a36954b6b1a73d8462174b25d498b`
+- Distributed version: `0.18.1-clarin.6`
+- Vendored source SHA-256: `942466e44ec36aa2e652ac1a8fefd52dd1f3cef578183ed959a50c271c0e2fd5`
 - Upstream source: tag `v0.18.1`, commit `a2ec2889babf7d2295469c6d90ebe77fae57df84`
 - Editor license: MIT, Copyright (c) 2020 Excalidraw
 - Canonical component notice and current advisory record: [`frontend/THIRD_PARTY_EXCALIDRAW.md`](frontend/THIRD_PARTY_EXCALIDRAW.md)
 
-The frontend build serves the audited editor assets from `frontend/public/vendor/whiteboards-editor/0.18.1-clarin.5/`. The selector exposes 32 local families: 7 official selectable families plus 25 Clarin-catalog families represented by 49 independently hashed WOFF2 files. The upstream asset set also contains these licensed families:
+The frontend build serves the audited editor assets from `frontend/public/vendor/whiteboards-editor/0.18.1-clarin.6/`. The selector exposes 32 local families: 7 official selectable families plus 25 Clarin-catalog families represented by 49 independently hashed WOFF2 files. The upstream asset set also contains these licensed families:
 
 | Family | Recorded upstream license |
 | --- | --- |
@@ -30,7 +30,7 @@ This notice covers the public MIT-licensed Excalidraw project only. It grants no
 
 ## Reproducible Excalidraw dependency inventory
 
-The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1-clarin.5` is defined by `frontend/package-lock.json` and audited through [the machine-readable supply-chain baseline](.codex/skills/clarin-excalidraw-development/references/supply-chain-baseline.json). The deterministic CycloneDX 1.6 inventory binds the vendored tree to upstream tag `v0.18.1`/commit `a2ec2889babf7d2295469c6d90ebe77fae57df84` plus the documented pressure backports, contains 251 components and has SHA-256 `96ed1ec0d3f9bca71796a584a71b4b46243e6f40db2558a263ba28087f5414fc`. The advisory snapshot was refreshed on `2026-08-23`.
+The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1-clarin.6` is defined by `frontend/package-lock.json` and audited through [the machine-readable supply-chain baseline](.codex/skills/clarin-excalidraw-development/references/supply-chain-baseline.json). The deterministic CycloneDX 1.6 inventory binds the vendored tree to upstream tag `v0.18.1`/commit `a2ec2889babf7d2295469c6d90ebe77fae57df84` plus the documented rich-text, paragraph, caret, IME, clipboard, local-font and pressure patches, contains 251 components and has SHA-256 `ca6a0ae4e12ecc94cd4778a2bae94b5b431c9030756cbd43b9a0966bada8c302`. The advisory snapshot was refreshed on `2026-08-29`.
 
 Generate and verify it without contacting a third-party service:
 
@@ -62,4 +62,4 @@ network destination.
 - Upstream source: <https://github.com/rocicorp/fractional-indexing/tree/v3.2.0>
 - License: CC0 1.0 Universal (`CC0-1.0`; no rights reserved)
 
-Excalidraw `0.18.1-clarin.5` uses this exact package to generate fractional ordering keys. Clarin's backend ports the same key-generation rules for canonical scene reconciliation, and the differential golden generator imports the exact installed `3.2.0` source after verifying its SHA-256. CC0 applies to that fractional-indexing implementation; Excalidraw's surrounding reconciliation and index-grouping code remains under the Excalidraw MIT notice above.
+Excalidraw `0.18.1-clarin.6` uses this exact package to generate fractional ordering keys. Clarin's backend ports the same key-generation rules for canonical scene reconciliation, and the differential golden generator imports the exact installed `3.2.0` source after verifying its SHA-256. CC0 applies to that fractional-indexing implementation; Excalidraw's surrounding reconciliation and index-grouping code remains under the Excalidraw MIT notice above.

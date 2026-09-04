@@ -6,7 +6,7 @@
     "dev": "npm run prepare:excalidraw && next dev",
     "prepare:excalidraw": "node scripts/prepare-excalidraw.mjs",
     "prepare:excalidraw:build": "node scripts/prepare-excalidraw.mjs --clean-next",
-    "verify:excalidraw": "node scripts/verify-excalidraw-build.mjs && node scripts/scan-visible-branding-build.mjs --root public/vendor/whiteboards-editor/0.18.1-clarin.5",
+    "verify:excalidraw": "node scripts/verify-excalidraw-build.mjs && node scripts/scan-visible-branding-build.mjs --root public/vendor/whiteboards-editor/0.18.1-clarin.6",
     "prepare:pdf-worker": "node scripts/prepare-pdf-worker.mjs",
     "build": "npm run prepare:excalidraw:build && npm run prepare:pdf-worker && next build && npm run verify:excalidraw",
     "start": "next start",

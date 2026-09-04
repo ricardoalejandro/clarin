@@ -1,39 +1,25 @@
 'use client'
 
 import { CheckCircle2, Circle } from 'lucide-react'
+import {
+  getAdminPasswordChecks,
+  getAdminPasswordIssues,
+  isAdminPasswordValid,
+  type AdminPasswordCheck,
+} from '@/lib/adminPassword'
 
-export interface PasswordCheck {
-  key: string
-  label: string
-  passed: boolean
-}
+export type PasswordCheck = AdminPasswordCheck
 
 export function getPasswordChecks(password: string, confirmPassword?: string): PasswordCheck[] {
-  const checks: PasswordCheck[] = [
-    { key: 'length', label: '10 caracteres como mínimo', passed: password.length >= 10 },
-    { key: 'upper', label: 'Una letra mayúscula', passed: /[A-Z]/.test(password) },
-    { key: 'lower', label: 'Una letra minúscula', passed: /[a-z]/.test(password) },
-    { key: 'number', label: 'Un número', passed: /\d/.test(password) },
-    { key: 'symbol', label: 'Un símbolo', passed: /[^A-Za-z0-9]/.test(password) },
-  ]
-  if (confirmPassword !== undefined) {
-    checks.push({
-      key: 'match',
-      label: 'Las contraseñas coinciden',
-      passed: password.length > 0 && password === confirmPassword,
-    })
-  }
-  return checks
+  return getAdminPasswordChecks(password, confirmPassword)
 }
 
 export function getPasswordIssues(password: string, confirmPassword?: string) {
-  return getPasswordChecks(password, confirmPassword)
-    .filter(check => !check.passed)
-    .map(check => check.label.toLowerCase())
+  return getAdminPasswordIssues(password, confirmPassword)
 }
 
 export function isStrongPassword(password: string) {
-  return getPasswordChecks(password).every(check => check.passed)
+  return isAdminPasswordValid(password)
 }
 
 export default function PasswordStrengthChecklist({
@@ -51,7 +37,7 @@ export default function PasswordStrengthChecklist({
   const progress = Math.round((passedCount / checks.length) * 100)
 
   return (
-    <div className={`rounded-lg border ${complete ? 'border-emerald-200 bg-emerald-50/70' : 'border-slate-200 bg-slate-50'} ${compact ? 'p-3' : 'p-4'}`}>
+    <div className={`rounded-xl border ${complete ? 'border-emerald-200 bg-emerald-50/70' : 'border-slate-200 bg-slate-50'} ${compact ? 'p-3' : 'p-4'}`}>
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">Seguridad de contraseña</p>
@@ -63,16 +49,25 @@ export default function PasswordStrengthChecklist({
           {complete ? 'Fuerte' : `${progress}%`}
         </span>
       </div>
-      <div className="mt-3 h-1.5 rounded-full bg-white border border-slate-100 overflow-hidden">
+      <div
+        role="progressbar"
+        aria-label="Requisitos de contraseña cumplidos"
+        aria-valuemin={0}
+        aria-valuemax={checks.length}
+        aria-valuenow={passedCount}
+        className="mt-3 h-1.5 overflow-hidden rounded-full border border-slate-100 bg-white"
+      >
         <div
-          className={`h-full rounded-full transition-all duration-300 ${complete ? 'bg-emerald-500' : 'bg-amber-400'}`}
+          className={`h-full rounded-full transition-all duration-200 motion-reduce:transition-none ${complete ? 'bg-emerald-500' : 'bg-amber-400'}`}
           style={{ width: `${progress}%` }}
         />
       </div>
       <div className={`mt-3 grid ${compact ? 'gap-1.5' : 'sm:grid-cols-2 gap-2'}`}>
         {checks.map(check => (
           <div key={check.key} className={`flex items-center gap-2 text-xs ${check.passed ? 'text-emerald-700' : 'text-slate-500'}`}>
-            {check.passed ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <Circle className="w-4 h-4 shrink-0 text-slate-300" />}
+            {check.passed
+              ? <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden="true" />
+              : <Circle className="h-4 w-4 shrink-0 text-slate-300" aria-hidden="true" />}
             <span>{check.label}</span>
           </div>
         ))}

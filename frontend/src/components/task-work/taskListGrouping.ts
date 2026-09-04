@@ -53,7 +53,9 @@ export function buildTaskListGroups(
   const listMap = new Map(lists.map(list => [list.id, list]))
   const order = groupBy === 'due'
     ? ['overdue', 'today', 'week', 'later', 'none']
-    : Array.from(new Set(tasks.map(task => taskListGroupKey(task, groupBy, now))))
+    : groupBy === 'priority'
+      ? ['low', 'medium', 'high', 'urgent']
+      : Array.from(new Set(tasks.map(task => taskListGroupKey(task, groupBy, now))))
   const groups = order.map((key): TaskListGroup => {
     const matching = tasks.filter(task => taskListGroupKey(task, groupBy, now) === key)
     if (groupBy === 'none') return { key, label: 'Todas las tareas', color: '#64748b', value: null, tasks: matching }

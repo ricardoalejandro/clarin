@@ -75,7 +75,7 @@ MIME identifiers remain format-compatibility tokens, not branding exceptions.
 
 ```bash
 node .codex/skills/clarin-excalidraw-development/scripts/scan-visible-branding.mjs \
-  --root frontend/public/vendor/whiteboards-editor/0.18.1-clarin.5 \
+  --root frontend/public/vendor/whiteboards-editor/0.18.1-clarin.6 \
   --snapshot /tmp/clarin-whiteboard-visible-branding.json \
   --policy .codex/skills/clarin-excalidraw-development/references/visible-branding-policy.json \
   --json /tmp/clarin-whiteboard-branding-report.json

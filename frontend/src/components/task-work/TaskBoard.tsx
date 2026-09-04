@@ -78,6 +78,7 @@ import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 import { taskLocationLabel } from './taskBreadcrumbVisibility'
 import { taskWorkspaceMenuPosition } from './taskInteractionVisuals'
 import TaskDateTimePicker from './TaskDateTimePicker'
+import { taskDueDateOnlyValue } from './TaskDateRangePicker'
 import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 import { allTasksCanBeAdministered, canAdministerTask, canEditTask } from './taskPermissionActions'
 import { resolveTaskIdentityColor, taskIdentityTint } from './taskIdentityColor'
@@ -477,9 +478,14 @@ function InlineCreate({
     setListId(lists.find(item => item.id === defaultListId)?.id || (lists.length === 1 ? lists[0].id : ''))
   }, [defaultListId, listId, lists])
 
-  const draft = (): TaskInlineDraft | undefined => list && targetStatus ? {
-    title: title.trim(), listId: list.id, statusId: targetStatus.id, ownerId, dueDate, priority,
-  } : undefined
+  const draft = (): TaskInlineDraft | undefined => {
+    if (!list || !targetStatus) return undefined
+    const dueAt = taskDueDateOnlyValue(dueDate)
+    return {
+      title: title.trim(), listId: list.id, statusId: targetStatus.id, ownerId, dueDate, priority,
+      dueAt, isAllDay: Boolean(dueAt),
+    }
+  }
 
   const close = () => { setOpen(false); setTitle(''); setDueDate(''); setPriority('medium'); setError('') }
   const create = async () => {
@@ -487,6 +493,7 @@ function InlineCreate({
     setSaving(true)
     setError('')
     const operationId = crypto.randomUUID()
+    const dueAt = taskDueDateOnlyValue(dueDate)
     onOperation(operationId, true)
     const result = await apiPost<{ task: Task; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>('/api/tasks', {
       title: title.trim(),
@@ -496,7 +503,9 @@ function InlineCreate({
       assigned_to: ownerId,
       list_id: list.id,
       status_id: targetStatus.id,
-      due_at: dueDate ? new Date(`${dueDate}T17:00:00`).toISOString() : '',
+      start_at: '',
+      due_at: dueAt ? new Date(dueAt).toISOString() : '',
+      is_all_day: Boolean(dueAt),
       recurrence_rule: '',
       reminder_minutes: 0,
       placement: 'top',
@@ -523,7 +532,7 @@ function InlineCreate({
     {list && !targetStatus && <p className="mt-2 rounded-lg bg-amber-50 px-2 py-1.5 text-[10px] font-medium text-amber-700">La lista no tiene un estado equivalente.</p>}
     <div className="mt-2 grid grid-cols-2 gap-1.5">
       <TaskUserCombobox users={users} value={ownerId} onChange={setOwnerId} className="min-h-9 !rounded-lg !px-2 !py-1 text-xs" />
-      <TaskDateTimePicker label="Entrega" allDay value={dueDate ? `${dueDate}T17:00` : ''} onChange={value => setDueDate(value ? value.slice(0, 10) : '')} className="!min-h-9 !rounded-lg !px-2" />
+      <TaskDateTimePicker label="Fecha de entrega" allDay value={taskDueDateOnlyValue(dueDate)} onChange={value => setDueDate(value ? value.slice(0, 10) : '')} className="!min-h-9 !rounded-lg !px-2" />
       <select value={priority} onChange={event => setPriority(event.target.value as TaskPriority)} aria-label="Prioridad" className="rounded-lg border border-slate-200 px-2 py-2 text-[11px] font-medium text-slate-600 outline-none focus:border-emerald-400">{(Object.keys(TASK_PRIORITY_CONFIG) as TaskPriority[]).map(value => <option key={value} value={value}>{TASK_PRIORITY_CONFIG[value].label}</option>)}</select>
       <button type="button" onClick={() => { const snapshot = draft(); const selectedStatusId = targetStatus?.id; close(); onMore(selectedStatusId, snapshot) }} className="rounded-lg border border-slate-200 px-2 py-2 text-[11px] font-semibold text-slate-500 hover:bg-slate-50">Abrir formulario completo</button>
     </div>

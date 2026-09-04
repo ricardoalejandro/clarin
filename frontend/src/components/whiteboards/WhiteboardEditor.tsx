@@ -166,6 +166,11 @@ import {
 } from './WhiteboardEditorActionBar'
 import { WhiteboardPresentationOverlay } from './WhiteboardPresentationControls'
 import { useWhiteboardPresentation } from '@/hooks/useWhiteboardPresentation'
+import { useWhiteboardFocusMode } from '@/hooks/useWhiteboardFocusMode'
+import {
+  WHITEBOARD_OVERLAY_LAYERS,
+  whiteboardFocusAppStateOwnsEscape,
+} from '@/lib/whiteboardFocusMode'
 import {
   useWhiteboardAssetHydration,
   whiteboardAssetHydrationMessage,
@@ -183,6 +188,7 @@ import {
   type WhiteboardCommentsProviderHandle,
 } from './WhiteboardComments'
 import type { WhiteboardCommentChangedEvent } from '@/lib/whiteboardComments'
+import WhiteboardFocusModeMenuItem from './WhiteboardFocusModeMenuItem'
 import { consumeWhiteboardViewModeCommentPointer } from '@/lib/whiteboardCommentPlacement'
 import {
   acknowledgeWhiteboardPublicLibraryImportAfterConflict,
@@ -525,6 +531,25 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   const showIntegratedTitle = editorLayout === 'wide' || (editorLayout === 'compact' && editorAvailableWidth >= 1_100)
   const showShareInToolbar = whiteboardToolbarShowsShare(editorAvailableWidth, canManageAccess)
   const stackToolbarBelowTools = whiteboardToolbarStacksBelowTools(editorAvailableWidth)
+  const focusInteractionBlocked = useCallback(() => {
+    if (moreOpen || shareOpen || historyOpen || libraryOpen || permissionRevalidating) return true
+    return whiteboardFocusAppStateOwnsEscape(editorAPIRef.current?.getAppState())
+  }, [historyOpen, libraryOpen, moreOpen, permissionRevalidating, shareOpen])
+  const {
+    active: focusModeActive,
+    announcement: focusModeAnnouncement,
+    enter: enterFocusMode,
+    exit: exitFocusMode,
+    clearBeforeNavigation: clearFocusModeBeforeNavigation,
+  } = useWhiteboardFocusMode({
+    boardID,
+    ready: phase === 'ready',
+    rootRef: editorShellRef,
+    fallbackFocusRef: moreButtonRef,
+    editorAPI,
+    isInteractionBlocked: focusInteractionBlocked,
+  })
+  const backActionLabel = focusModeActive ? 'Volver a vista normal' : backLabel
 
   useEffect(() => {
     if (hostContext !== 'work' || !canonicalName?.trim()) return
@@ -556,6 +581,8 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     }
     const escape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopImmediatePropagation()
       setMoreOpen(false)
       moreButtonRef.current?.focus()
     }
@@ -2350,7 +2377,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
             scene: event.scene,
             sequence: remoteSequence,
             scene_schema_version: 'excalidraw',
-            editor_version: '0.18.1-clarin.5',
+            editor_version: '0.18.1-clarin.6',
             updated_at: new Date().toISOString(),
           }, preserveLocalChanges)
           void hydrateReferencedAssets(event.scene.elements)
@@ -2665,15 +2692,25 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
           // browser storage is unavailable.
         }
       }
+      clearFocusModeBeforeNavigation()
       window.location.assign(navigation.path)
       return
     }
+    clearFocusModeBeforeNavigation()
     if (onExit && href === returnHref) {
       onExit()
       return
     }
     router.push(href)
-  }, [boardID, hostContext, onExit, prepareToLeave, returnHref, router])
+  }, [boardID, clearFocusModeBeforeNavigation, hostContext, onExit, prepareToLeave, returnHref, router])
+
+  const requestBackFromWhiteboard = useCallback(() => {
+    if (focusModeActive) {
+      exitFocusMode()
+      return
+    }
+    void navigateFromWhiteboard(returnHref)
+  }, [exitFocusMode, focusModeActive, navigateFromWhiteboard, returnHref])
 
   useEffect(() => {
     if (phase !== 'ready') return
@@ -2703,7 +2740,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
 
   const editorMenu = useMemo(() => <MainMenu>
     <MainMenu.Group title="Pizarra Clarin">
-      <MainMenu.Item icon={<ArrowLeft className="h-4 w-4" />} onSelect={() => void navigateFromWhiteboard(returnHref)}>{backLabel}</MainMenu.Item>
+      <MainMenu.Item icon={<ArrowLeft className="h-4 w-4" />} onSelect={requestBackFromWhiteboard}>{backActionLabel}</MainMenu.Item>
       {canEdit && <MainMenu.Item icon={<Save className="h-4 w-4" />} shortcut="Ctrl+S" onSelect={() => void flushSave('manual')}>Guardar ahora</MainMenu.Item>}
       {canEdit && <MainMenu.Item icon={<FileUp className="h-4 w-4" />} onSelect={() => importInputRef.current?.click()}>Importar archivo</MainMenu.Item>}
     </MainMenu.Group>
@@ -2720,7 +2757,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
       {canManageAccess && <MainMenu.Item icon={<Share2 className="h-4 w-4" />} onSelect={() => setShareOpen(true)}>Compartir desde Clarin</MainMenu.Item>}
       <MainMenu.Item icon={<History className="h-4 w-4" />} onSelect={() => { void openHistory() }}>Historial de Clarin</MainMenu.Item>
     </MainMenu.Group></>}
-  </MainMenu>, [backLabel, board?.effective_access?.can_view, canEdit, canManageAccess, flushSave, navigateFromWhiteboard, returnHref])
+  </MainMenu>, [backActionLabel, board?.effective_access?.can_view, canEdit, canManageAccess, flushSave, openHistory, requestBackFromWhiteboard])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2825,7 +2862,16 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     || (canvasNoticeSource === 'assets' && assetHydrationProgress.phase === 'error')
     || canvasNoticeSource === 'realtime'
 
-  return <div ref={editorShellRef} data-whiteboard-layout={editorLayout} className="whiteboard-editor-shell flex h-full min-h-0 flex-col overflow-hidden bg-slate-100">
+  return <div
+    ref={editorShellRef}
+    data-whiteboard-layout={editorLayout}
+    data-whiteboard-focus-mode={focusModeActive ? 'true' : 'false'}
+    role="region"
+    aria-label={focusModeActive ? 'Pizarra maximizada' : 'Editor de pizarra'}
+    style={focusModeActive ? { zIndex: WHITEBOARD_OVERLAY_LAYERS.focusSurface } : undefined}
+    className={`whiteboard-editor-shell flex h-full min-h-0 flex-col overflow-hidden bg-slate-100${focusModeActive ? ' app-viewport fixed whiteboard-editor-shell--focused' : ''}`}
+  >
+    <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{focusModeAnnouncement}</span>
     <input ref={importInputRef} type="file" accept=".excalidraw,.json,application/json" className="hidden" onChange={importScene} />
     <input ref={libraryImportInputRef} type="file" accept=".excalidrawlib,application/json" className="hidden" onChange={importLibrary} />
 
@@ -2940,7 +2986,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
 		onLeave={presentation.leaveFollow}
 	  />
       {showIntegratedTitle && <div className="whiteboard-integrated-title absolute left-16 top-2 z-30 flex h-11 min-w-0 items-center gap-1">
-        <button type="button" onClick={() => void navigateFromWhiteboard(returnHref)} aria-label={backLabel} title={backLabel} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><ArrowLeft className="h-5 w-5" /></button>
+        <button type="button" onClick={requestBackFromWhiteboard} aria-label={backActionLabel} title={backActionLabel} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><ArrowLeft className="h-5 w-5" /></button>
         <span className="mx-1 h-8 w-px shrink-0 bg-slate-200" />
 		<label className="min-w-0"><span className="sr-only">Nombre de la pizarra</span><span className="block text-[9px] font-black uppercase tracking-[.14em] text-emerald-600">{isWorkOrigin ? 'Clarin Work · Pizarra' : 'Pizarras Clarin'}</span><span className="flex items-center gap-1"><input value={titleDraft} onChange={event => setTitleDraft(event.target.value)} onBlur={() => { if (!isWorkOrigin) void saveTitle() }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setTitleDraft(board.name); event.currentTarget.blur() } }} readOnly={isWorkOrigin || !canEdit} maxLength={200} aria-label="Nombre de la pizarra" title={isWorkOrigin ? 'Renombra esta vista desde el menú de su pestaña en Work.' : undefined} className="h-6 min-w-0 w-full truncate border-0 bg-transparent p-0 text-sm font-black text-slate-900 outline-none read-only:cursor-default" />{titleSaving && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-slate-400" />}</span></label>
       </div>}
@@ -2959,15 +3005,24 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
       {!canEdit && <div className="pointer-events-none absolute bottom-3 left-1/2 z-20 -translate-x-1/2 rounded-full border border-slate-200 bg-white/95 px-3 py-1.5 text-xs font-bold text-slate-600 shadow-lg">{WHITEBOARD_COMMENTS_UI_ENABLED && canComment ? 'Lectura y comentarios' : 'Solo lectura'}</div>}
     </div>
 
-    {moreOpen && typeof document !== 'undefined' && createPortal(<div id="whiteboard-more-menu" role="menu" aria-label="Más acciones de Pizarras" style={{ top: moreMenuPosition.top, right: moreMenuPosition.right }} className="whiteboard-more-menu fixed z-[120] w-[min(21rem,calc(100vw-1.5rem))] overflow-hidden rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl">
+    {moreOpen && typeof document !== 'undefined' && createPortal(<div id="whiteboard-more-menu" role="menu" aria-label="Más acciones de Pizarras" style={{ top: moreMenuPosition.top, right: moreMenuPosition.right, zIndex: WHITEBOARD_OVERLAY_LAYERS.focusPopover }} className="whiteboard-more-menu fixed w-[min(21rem,calc(100vw-1.5rem))] overflow-hidden rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl">
       <div className="border-b border-slate-100 px-3 py-2.5">
         <div className="text-[10px] font-black uppercase tracking-[.14em] text-emerald-600">Pizarras Clarin</div>
         <div className="mt-0.5 truncate text-sm font-black text-slate-900" title={board.name}>{board.name}</div>
         {thumbnailWarning && <button type="button" onClick={retryThumbnail} className="mt-2 flex min-h-9 w-full items-center gap-2 rounded-lg bg-amber-50 px-2.5 text-left text-xs font-bold text-amber-800"><RefreshCw className="h-3.5 w-3.5 shrink-0" />Miniatura pendiente · Reintentar</button>}
       </div>
       <div className="grid gap-1 py-1">
-        {!showIntegratedTitle && <button autoFocus type="button" role="menuitem" onClick={() => { setMoreOpen(false); void navigateFromWhiteboard(returnHref) }} className="whiteboard-more-item"><ArrowLeft className="h-4 w-4" />{backLabel}</button>}
-        <button autoFocus={showIntegratedTitle} type="button" role="menuitem" onClick={() => { setMoreOpen(false); setLibraryOpen(true) }} className="whiteboard-more-item"><LibraryBig className="h-4 w-4" />Administrar bibliotecas</button>
+        {!showIntegratedTitle && !focusModeActive && <button autoFocus type="button" role="menuitem" onClick={() => { setMoreOpen(false); requestBackFromWhiteboard() }} className="whiteboard-more-item"><ArrowLeft className="h-4 w-4" />{backLabel}</button>}
+        <WhiteboardFocusModeMenuItem
+          active={focusModeActive}
+          autoFocus={showIntegratedTitle || focusModeActive}
+          onToggle={() => {
+            setMoreOpen(false)
+            if (focusModeActive) exitFocusMode()
+            else enterFocusMode(moreButtonRef.current)
+          }}
+        />
+        <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); setLibraryOpen(true) }} className="whiteboard-more-item"><LibraryBig className="h-4 w-4" />Administrar bibliotecas</button>
         {canManageAccess && !showShareInToolbar && <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); setShareOpen(true) }} className="whiteboard-more-item"><Share2 className="h-4 w-4" />Compartir</button>}
         <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); void openHistory() }} className="whiteboard-more-item"><History className="h-4 w-4" />Historial</button>
         {canEdit && <button type="button" role="menuitem" disabled={whiteboardSaveIsBusy(saveState) || saveState === 'saved'} onClick={() => { setMoreOpen(false); void flushSave('manual') }} className="whiteboard-more-item disabled:opacity-40"><Save className="h-4 w-4" />Guardar ahora</button>}

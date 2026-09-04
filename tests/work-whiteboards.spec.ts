@@ -501,7 +501,7 @@ async function installWorkWhiteboardMock(context: BrowserContext, state: WorkWhi
     }
     const sceneMatch = url.pathname.match(/^\/api\/whiteboards\/([^/]+)\/scene$/)
     if (sceneMatch && request.method() === 'GET') {
-      await json(route, { success: true, scene: { board_id: sceneMatch[1], scene: { type: 'excalidraw', version: 2, source: 'clarin', elements: [], appState: { viewBackgroundColor: '#ffffff' }, files: {} }, scene_schema_version: 'excalidraw', editor_version: '0.18.1-clarin.5', sequence: 0, updated_at: now } })
+      await json(route, { success: true, scene: { board_id: sceneMatch[1], scene: { type: 'excalidraw', version: 2, source: 'clarin', elements: [], appState: { viewBackgroundColor: '#ffffff' }, files: {} }, scene_schema_version: 'excalidraw', editor_version: '0.18.1-clarin.6', sequence: 0, updated_at: now } })
       return
     }
     if (sceneMatch && ['PATCH', 'PUT'].includes(request.method())) {
@@ -1077,11 +1077,26 @@ test('reconciliación de listado · un 403 oculta contenido protegido y declara 
 
 test('Hub y Papelera · la misma pizarra abre Work y nunca ofrece moverla a carpetas físicas', async ({ browser, browserName }) => {
   test.skip(browserName !== 'chromium')
-  test.setTimeout(90_000)
+  test.setTimeout(process.env.WHITEBOARD_CATALOG_CAPTURE_DIR ? 180_000 : 90_000)
   const state = initialState()
   const trashed = makeView(90, 'list', 'trash')
   state.views.push(trashed)
   state.boards.set(trashed.resource.whiteboard.id, boardFromView(trashed))
+  const standaloneID = '33000000-0000-4000-8000-000000000091'
+  state.boards.set(standaloneID, {
+    ...boardFromView(state.views[0]),
+    id: standaloneID,
+    name: 'Mapa autónomo compartido',
+    origin: 'standalone',
+    work_location: null,
+    shared: true,
+    folder_id: null,
+    folder_name: null,
+    effective_access: {
+      level: 'view', inherited_from: 'share', can_view: true, can_comment: false,
+      can_edit: false, can_delete: false, can_manage_access: false,
+    },
+  })
   const context = await browser.newContext({ viewport: { width: 1100, height: 780 } })
   await installWorkWhiteboardMock(context, state)
   const page = await context.newPage()
@@ -1089,6 +1104,62 @@ test('Hub y Papelera · la misma pizarra abre Work y nunca ofrece moverla a carp
   page.setDefaultNavigationTimeout(120_000)
   try {
     await page.goto(`${baseURL}/dashboard/whiteboards`, { waitUntil: 'domcontentloaded' })
+    await page.getByRole('button', { name: 'Vista de lista' }).click()
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('clarin.whiteboards.view.v1'))).toBe('list')
+    const mixedRows = [
+      page.locator(`[data-whiteboard-id="${standaloneID}"]`),
+      page.locator(`[data-whiteboard-id="${state.views[0].resource.whiteboard.id}"]`),
+    ]
+    await expect(mixedRows[0]).toBeVisible()
+    await expect(mixedRows[1]).toBeVisible()
+    for (const slot of ['drag', 'thumbnail', 'identity', 'location', 'actions']) {
+      const positions = await Promise.all(mixedRows.map(row => row.locator(`[data-whiteboard-slot="${slot}"]`).boundingBox()))
+      expect(positions[0]).not.toBeNull()
+      expect(positions[1]).not.toBeNull()
+      expect(Math.abs(positions[0]!.x - positions[1]!.x)).toBeLessThanOrEqual(1)
+    }
+    await expect(mixedRows[1].getByText('Clarin Work', { exact: true })).toHaveCount(1)
+    await expect(mixedRows[1].getByText('Entorno QA / Lista Operativa', { exact: true })).toHaveCount(1)
+    await expect(mixedRows[1].getByText('Abrir ubicación', { exact: true })).toHaveCount(1)
+    await expect(mixedRows[0].getByRole('button', { name: /Cambiar carpeta/ })).toHaveCount(0)
+
+    const captureDir = process.env.WHITEBOARD_CATALOG_CAPTURE_DIR
+    if (captureDir) {
+      const viewports = [
+        { width: 320, height: 720 },
+        { width: 375, height: 812 },
+        { width: 768, height: 860 },
+        { width: 1024, height: 768 },
+        { width: 1280, height: 800 },
+        { width: 1440, height: 900 },
+        { width: 1671, height: 831 },
+      ]
+      for (const viewport of viewports) {
+        await page.setViewportSize(viewport)
+        await expect(mixedRows[1]).toBeVisible()
+        await page.waitForTimeout(250)
+        await page.screenshot({ path: `${captureDir}/pizarras-lista-${viewport.width}.png` })
+      }
+
+      await page.getByRole('button', { name: 'Vista compacta' }).click()
+      await page.screenshot({ path: `${captureDir}/pizarras-compacta-1671.png` })
+      await page.getByRole('button', { name: 'Vista de cuadrícula' }).click()
+      await page.screenshot({ path: `${captureDir}/pizarras-cuadricula-1671.png` })
+      await page.getByRole('button', { name: 'Vista de lista' }).click()
+
+      await page.getByRole('button', { name: 'Colapsar menú' }).click()
+      await page.screenshot({ path: `${captureDir}/pizarras-sidebar-colapsado-1671.png` })
+      await page.getByRole('button', { name: 'Expandir menú' }).click()
+      await page.getByRole('button', { name: 'Abrir Eros' }).click()
+      const eros = page.locator('[aria-label="Asistente Eros"]')
+      await expect(eros).toBeVisible()
+      const dockEros = eros.getByTitle('Acoplar a la derecha')
+      if (await dockEros.isVisible()) await dockEros.click()
+      await page.screenshot({ path: `${captureDir}/pizarras-eros-acoplado-1671.png` })
+      await eros.getByTitle('Cerrar').click()
+    }
+
+    await page.getByRole('button', { name: 'Vista compacta' }).click()
     await selectWhiteboardHubScope(page, 'work')
     const workCard = page.locator(`[data-whiteboard-id="${state.views[0].resource.whiteboard.id}"]`)
     await expect(workCard.getByText('Clarin Work', { exact: true })).toBeVisible()

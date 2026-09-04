@@ -1,8 +1,8 @@
 # Pizarras Clarin: avisos de terceros
 
-Pizarras Clarin integra el fork auditable `@excalidraw/excalidraw` **0.18.1-clarin.5**, derivado sin saltos del tag upstream `v0.18.1` y del commit exacto `a2ec2889babf7d2295469c6d90ebe77fae57df84`. El producto, sus rutas, almacenamiento, permisos, colaboración y marca pertenecen a Clarin; no se utilizan servicios operativos de Excalidraw.
+Pizarras Clarin integra el fork auditable `@excalidraw/excalidraw` **0.18.1-clarin.6**, derivado sin saltos del tag upstream `v0.18.1` y del commit exacto `a2ec2889babf7d2295469c6d90ebe77fae57df84`. El producto, sus rutas, almacenamiento, permisos, colaboración y marca pertenecen a Clarin; no se utilizan servicios operativos de Excalidraw.
 
-El código fuente mantenido vive en `frontend/vendor/excalidraw-clarin`. La superficie propia se limita al modelo de marcas parciales de texto y alineación por párrafos, el editor `contenteditable`, medición/render de runs y párrafos, controles accesibles, precarga determinista de fuentes locales y el backport documentado de presión constante/variable. La compilación genera la ruta inmutable `/vendor/whiteboards-editor/0.18.1-clarin.5/`; el catálogo no inicia cargas por apertura, hover, foco, desplazamiento ni selección.
+El código fuente mantenido vive en `frontend/vendor/excalidraw-clarin`. La superficie propia se limita al modelo de marcas parciales de texto y alineación por párrafos, el editor `contenteditable` con navegación nativa de líneas vacías y reconciliación IME, selección y portapapeles enriquecido, medición/render de runs y párrafos, controles accesibles, precarga determinista de fuentes locales y el backport documentado de presión constante/variable. La compilación genera la ruta inmutable `/vendor/whiteboards-editor/0.18.1-clarin.6/`; el catálogo no inicia cargas por apertura, hover, foco, desplazamiento ni selección.
 
 ## Licencia del editor
 
@@ -22,9 +22,9 @@ El orden fraccional del editor usa `fractional-indexing@3.2.0`, publicado bajo C
 
 El modo de trazo constante usa `@excalidraw/laser-pointer@1.3.1`, publicado bajo MIT, Copyright (c) 2023 Excalidraw. La dependencia ya forma parte del cierre exacto fijado por `v0.18.1`; Clarin distribuye su licencia completa como `frontend/third_party/excalidraw/LASER-POINTER-MIT.txt` y no incorpora servicios ni tráfico de red asociados.
 
-## Riesgo de dependencias conocido (2026-08-23)
+## Riesgo de dependencias conocido (2026-08-29)
 
-`npm audit --omit=dev --json` informa 21 hallazgos en el grafo completo de producción del frontend: 6 moderados, 13 altos y 2 críticos. No todos pertenecen al motor, pero siguen siendo un gate de producción de Clarin. Para el cierre de `@excalidraw/excalidraw@0.18.1-clarin.5`, npm agrega hallazgos originados en estas dependencias transitivas fijadas por upstream:
+`npm audit --omit=dev --json` informa 21 hallazgos en el grafo completo de producción del frontend: 6 moderados, 13 altos y 2 críticos. No todos pertenecen al motor, pero siguen siendo un gate de producción de Clarin. Para el cierre de `@excalidraw/excalidraw@0.18.1-clarin.6`, npm agrega hallazgos originados en estas dependencias transitivas fijadas por upstream:
 
 - `nanoid@3.3.3` y `nanoid@4.0.2`: [GHSA-mwcw-c2x4-8c55](https://github.com/advisories/GHSA-mwcw-c2x4-8c55), rangos `<3.3.8` y `>=4.0.0 <5.0.9`.
 - `nanoid@3.3.3` y `nanoid@4.0.2`: [GHSA-28wg-ghj8-5hjv](https://github.com/advisories/GHSA-28wg-ghj8-5hjv), rangos `<3.3.16` y `>=4.0.0 <5.1.16`.

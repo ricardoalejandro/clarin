@@ -10,7 +10,7 @@ client reconciliation functions.
 
 The editor is client-only in Next.js and is loaded with SSR disabled. Clarin
 hosts every required font and runtime asset under the versioned
-`/vendor/whiteboards-editor/0.18.1-clarin.5/` path. Product menus, persistence, sharing,
+`/vendor/whiteboards-editor/0.18.1-clarin.6/` path. Product menus, persistence, sharing,
 history and libraries are Clarin controls. The complete `excalidraw-app`,
 Firebase integrations and Excalidraw-hosted collaboration are not part of the
 runtime.
@@ -72,7 +72,7 @@ referenced by file ID and resolved through private Clarin asset manifests.
 The normal save path is:
 
 1. Load authorized metadata, scene and only the scene's referenced assets.
-2. Restore through the exact `@excalidraw/excalidraw@0.18.1-clarin.5` public APIs, based on upstream `v0.18.1`.
+2. Restore through the exact `@excalidraw/excalidraw@0.18.1-clarin.6` public APIs, based on upstream `v0.18.1`.
 3. Upload new image bytes to the board-scoped private asset path before
    committing a live scene reference.
 4. Send an `operation_id`, `base_sequence`, changed elements and allowed

@@ -41,7 +41,6 @@ import (
 	"github.com/naperu/clarin/internal/ws"
 	"github.com/naperu/clarin/pkg/cache"
 	"github.com/naperu/clarin/pkg/config"
-	"github.com/naperu/clarin/pkg/database"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -813,6 +812,11 @@ func (s *Server) setupRoutes() {
 	tasks.Delete("/events/:eventId/purge", s.handlePurgeWorkEvent)
 	tasks.Delete("/events/:eventId", s.handleTrashWorkEvent)
 	tasks.Get("/stats", s.handleGetTaskStats)
+	tasks.Get("/my-work/summary", s.handleGetTaskMyWorkSummary)
+	tasks.Get("/my-work", s.handleGetTaskMyWork)
+	tasks.Post("/my-work/items", s.handleAddTaskMyWorkItem)
+	tasks.Put("/my-work/items/:taskId/order", s.handleReorderTaskMyWorkItem)
+	tasks.Delete("/my-work/items/:taskId", s.handleRemoveTaskMyWorkItem)
 	tasks.Get("/summary", s.handleGetTaskWorkSummary)
 	tasks.Get("/gantt", s.handleGetTaskGantt)
 	tasks.Get("/saved-views", s.handleListTaskSavedViews)
@@ -16232,51 +16236,22 @@ func (s *Server) handleAdminGetAccounts(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleAdminCreateAccount(c *fiber.Ctx) error {
-	var req struct {
-		Name              string `json:"name"`
-		Slug              string `json:"slug"`
-		Plan              string `json:"plan"`
-		MaxDevices        int    `json:"max_devices"`
-		MaxUsersOverride  *int   `json:"max_users_override"`
-		StorageLimitBytes int64  `json:"storage_limit_bytes"`
-	}
+	var req adminAccountMutationRequest
 	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "invalid_request", "error": "La solicitud no es válida."})
 	}
-	if req.Name == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+	account, inputErr := req.account(nil)
+	if inputErr != nil {
+		return writeAdminAccountInputError(c, inputErr)
 	}
-	if req.Plan == "" {
-		req.Plan = "basic"
-	}
-	if req.MaxDevices <= 0 {
-		req.MaxDevices = 5
-	}
-	if req.MaxUsersOverride != nil && *req.MaxUsersOverride < 0 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "max_users_override must be 0 or greater"})
+	if err := s.services.Account.CreateWithSubscription(c.Context(), account); err != nil {
+		return writeAdminAccountMutationError(c, err)
 	}
 
-	account := &domain.Account{
-		Name:              req.Name,
-		Slug:              req.Slug,
-		Plan:              req.Plan,
-		MaxDevices:        req.MaxDevices,
-		MaxUsersOverride:  req.MaxUsersOverride,
-		StorageLimitBytes: req.StorageLimitBytes,
-		IsActive:          true,
-	}
-
-	if err := s.services.Account.Create(c.Context(), account); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-	if err := s.services.Subscription.CreateForAccount(c.Context(), account.ID, account.Plan, domain.SubscriptionStatusActive, 0); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-
-	// Seed template surveys for the new account
-	if err := database.SeedTemplateSurveysForAccount(s.repos.DB(), account.ID.String()); err != nil {
-		log.Printf("[API] Warning: failed to seed template surveys for new account %s: %v", account.ID, err)
-	}
+	// Survey templates are idempotent and intentionally seeded after commit.
+	// Keep this best-effort work out of the admin request path and never retain
+	// Fiber's request context beyond the response lifetime.
+	seedAdminAccountTemplatesAsync(s.repos.DB(), account.ID)
 
 	return c.Status(201).JSON(fiber.Map{"success": true, "account": account})
 }
@@ -16304,56 +16279,25 @@ func (s *Server) handleAdminUpdateAccount(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
 	}
 
-	var req struct {
-		Name              string `json:"name"`
-		Slug              string `json:"slug"`
-		Plan              string `json:"plan"`
-		MaxDevices        int    `json:"max_devices"`
-		MaxUsersOverride  *int   `json:"max_users_override"`
-		StorageLimitBytes int64  `json:"storage_limit_bytes"`
-		KommoEnabled      bool   `json:"kommo_enabled"`
-	}
+	var req adminAccountMutationRequest
 	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "invalid_request", "error": "La solicitud no es válida."})
 	}
-	if req.Plan == "" {
-		existing, err := s.services.Account.GetByID(c.Context(), id)
-		if err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-		}
-		if existing == nil {
-			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Account not found"})
-		}
-		req.Plan = existing.Plan
-	}
-	if req.MaxUsersOverride != nil && *req.MaxUsersOverride < 0 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "max_users_override must be 0 or greater"})
-	}
-	account := &domain.Account{
-		ID:                id,
-		Name:              req.Name,
-		Slug:              req.Slug,
-		Plan:              req.Plan,
-		MaxDevices:        req.MaxDevices,
-		MaxUsersOverride:  req.MaxUsersOverride,
-		StorageLimitBytes: req.StorageLimitBytes,
-		KommoEnabled:      req.KommoEnabled,
-	}
-
-	if err := s.services.Account.Update(c.Context(), account); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-	subOverview, err := s.services.Subscription.GetOverview(c.Context(), id)
+	existing, err := s.services.Account.GetByID(c.Context(), id)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return writeAdminAccountMutationError(c, err)
 	}
-	if subOverview != nil && subOverview.Subscription != nil {
-		subOverview.Subscription.PlanCode = req.Plan
-		if err := s.services.Subscription.Upsert(c.Context(), subOverview.Subscription); err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-		}
-		s.notifyAccountAuthorityChanged(id)
+	if existing == nil {
+		return writeAdminAccountMutationError(c, pgx.ErrNoRows)
 	}
+	account, inputErr := req.account(existing)
+	if inputErr != nil {
+		return writeAdminAccountInputError(c, inputErr)
+	}
+	if err := s.services.Account.UpdateWithSubscription(c.Context(), account, req.updateMask()); err != nil {
+		return writeAdminAccountMutationError(c, err)
+	}
+	s.notifyAccountAuthorityChanged(id)
 
 	return c.JSON(fiber.Map{"success": true, "account": account})
 }
@@ -16930,14 +16874,11 @@ func (s *Server) handleAdminCreateUser(c *fiber.Ctx) error {
 
 	req.Username = strings.TrimSpace(req.Username)
 	req.Email = strings.TrimSpace(req.Email)
-	if req.Username == "" || req.Password == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "username and password are required"})
+	if req.Username == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "username_required", "field": "username", "error": "Ingresa un nombre de usuario."})
 	}
-	if req.PasswordConfirm != "" && req.Password != req.PasswordConfirm {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Las contraseñas no coinciden"})
-	}
-	if err := service.ValidateStrongPassword(req.Password); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+	if inputErr := validateAdminPasswordInput(req.Password, req.PasswordConfirm); inputErr != nil {
+		return writeAdminPasswordInputError(c, inputErr)
 	}
 	if req.Email == "" {
 		req.Email = fmt.Sprintf("%s@users.clarin.local", strings.ToLower(req.Username))
@@ -17107,14 +17048,8 @@ func (s *Server) handleAdminResetPassword(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
-	if req.Password == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Password is required"})
-	}
-	if req.PasswordConfirm != "" && req.Password != req.PasswordConfirm {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Las contraseñas no coinciden"})
-	}
-	if err := service.ValidateStrongPassword(req.Password); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+	if inputErr := validateAdminPasswordInput(req.Password, req.PasswordConfirm); inputErr != nil {
+		return writeAdminPasswordInputError(c, inputErr)
 	}
 
 	authorityEffect, err := s.authorityEffectForUser(c.Context(), id)
@@ -17122,7 +17057,7 @@ func (s *Server) handleAdminResetPassword(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo resolver la autoridad activa del usuario"})
 	}
 	if err := s.services.Account.ResetPassword(c.Context(), id, req.Password); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return writeAdminResetPasswordError(c, err)
 	}
 	s.invalidateAndNotifyUserAuthority(authorityEffect)
 	adminID, _ := c.Locals("user_id").(uuid.UUID)
@@ -18015,17 +17950,18 @@ func (s *Server) handleAdminCreateRole(c *fiber.Ctx) error {
 		Permissions []string `json:"permissions"`
 	}
 	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "invalid_request", "error": "La solicitud no es válida."})
 	}
+	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "role_name_required", "field": "name", "error": "Ingresa el nombre del rol."})
 	}
 	if req.Permissions == nil {
 		req.Permissions = []string{}
 	}
 	permissions, invalid := normalizeRolePermissions(req.Permissions)
 	if invalid != "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": fmt.Sprintf("Invalid permission: %s", invalid)})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "invalid_permission", "field": "permissions", "error": fmt.Sprintf("El permiso %q no es válido.", invalid)})
 	}
 
 	role := &domain.Role{
@@ -18034,7 +17970,7 @@ func (s *Server) handleAdminCreateRole(c *fiber.Ctx) error {
 		Permissions: permissions,
 	}
 	if err := s.services.Role.Create(c.Context(), role); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return writeAdminRoleMutationError(c, err)
 	}
 	return c.Status(201).JSON(fiber.Map{"success": true, "role": role})
 }
@@ -18051,17 +17987,18 @@ func (s *Server) handleAdminUpdateRole(c *fiber.Ctx) error {
 		Permissions []string `json:"permissions"`
 	}
 	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "invalid_request", "error": "La solicitud no es válida."})
 	}
+	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "role_name_required", "field": "name", "error": "Ingresa el nombre del rol."})
 	}
 	if req.Permissions == nil {
 		req.Permissions = []string{}
 	}
 	permissions, invalid := normalizeRolePermissions(req.Permissions)
 	if invalid != "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": fmt.Sprintf("Invalid permission: %s", invalid)})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "invalid_permission", "field": "permissions", "error": fmt.Sprintf("El permiso %q no es válido.", invalid)})
 	}
 
 	role := &domain.Role{
@@ -18072,7 +18009,7 @@ func (s *Server) handleAdminUpdateRole(c *fiber.Ctx) error {
 	}
 	authorityEffect, err := s.services.Role.UpdateWithAuthorityImpact(c.Context(), role)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return writeAdminRoleMutationError(c, err)
 	}
 	s.invalidateAndNotifyUserAuthority(authorityEffect)
 	return c.JSON(fiber.Map{"success": true, "role": role})
@@ -18086,7 +18023,7 @@ func (s *Server) handleAdminDeleteRole(c *fiber.Ctx) error {
 
 	authorityEffect, err := s.services.Role.DeleteWithAuthorityImpact(c.Context(), roleID)
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return writeAdminRoleMutationError(c, err)
 	}
 	s.invalidateAndNotifyUserAuthority(authorityEffect)
 	return c.JSON(fiber.Map{"success": true})

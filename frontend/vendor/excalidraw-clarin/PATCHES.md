@@ -7,6 +7,14 @@ surface is:
 - `packages/excalidraw/element/clarinParagraphFormat.ts`: canonical partial
   paragraph-alignment model.
 - `packages/excalidraw/element/textWysiwyg.tsx`: controlled contenteditable editor.
+  Empty paragraphs keep a DOM `<br>` placeholder so native vertical caret
+  navigation stops on every intentionally blank line without persisting HTML.
+  UTF-16 selections retain their real forward/backward anchor and focus across
+  formatting, history and DOM rerenders. Native IME DOM is reconciled back to
+  canonical plain text without swallowing block or `<br>` line breaks. The
+  private version-1 clipboard remains backward compatible and transports
+  paragraph alignment only for complete source paragraphs, without changing a
+  destination paragraph when an inline fragment is pasted into it.
 - `packages/excalidraw/actions/actionProperties.tsx` and UI components: accessible
   bold, italic, underline, strike-through, and mixed paragraph-alignment controls.
 - `packages/excalidraw/renderer/*` plus text measurement/wrapping: run-aware and

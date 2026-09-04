@@ -3,12 +3,19 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/repository"
+)
+
+var (
+	ErrSubscriptionPlanInvalid   = errors.New("subscription plan is invalid")
+	ErrSubscriptionStatusInvalid = errors.New("subscription status is invalid")
 )
 
 type SubscriptionAccessDecision struct {
@@ -254,7 +261,7 @@ func (s *SubscriptionService) Upsert(ctx context.Context, sub *domain.Subscripti
 		sub.Status = domain.SubscriptionStatusActive
 	}
 	if !validSubscriptionStatus(sub.Status) {
-		return fmt.Errorf("invalid subscription status")
+		return ErrSubscriptionStatusInvalid
 	}
 	if len(sub.Metadata) == 0 {
 		sub.Metadata = json.RawMessage(`{}`)
@@ -335,6 +342,7 @@ func (s *SubscriptionService) Reactivate(ctx context.Context, accountID uuid.UUI
 }
 
 func (s *SubscriptionService) validPlanCode(ctx context.Context, planCode string) (string, error) {
+	planCode = strings.TrimSpace(planCode)
 	if planCode == "" {
 		planCode = "basic"
 	}
@@ -345,14 +353,7 @@ func (s *SubscriptionService) validPlanCode(ctx context.Context, planCode string
 	if plan != nil {
 		return planCode, nil
 	}
-	fallback, err := s.repos.Subscription.GetPlan(ctx, "enterprise")
-	if err != nil {
-		return "", err
-	}
-	if fallback == nil {
-		return "", fmt.Errorf("plan not found")
-	}
-	return "enterprise", nil
+	return "", ErrSubscriptionPlanInvalid
 }
 
 func validSubscriptionStatus(status string) bool {

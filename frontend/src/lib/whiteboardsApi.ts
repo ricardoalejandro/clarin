@@ -142,7 +142,7 @@ export function createWhiteboard(input: {
     folder_id: input.folder_id,
     scene: input.scene,
     scene_schema_version: 'excalidraw',
-    editor_version: '0.18.1-clarin.5',
+    editor_version: '0.18.1-clarin.6',
     operation_id: createWhiteboardOperationID(),
   })
 }

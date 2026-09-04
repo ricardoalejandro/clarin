@@ -187,10 +187,10 @@ describe('TaskDetailDrawer simplified full-editor access', () => {
 
     await screen.findByDisplayValue(task.title)
     expect(document.querySelectorAll('[data-task-date-range-trigger]')).toHaveLength(1)
-    fireEvent.click(screen.getByRole('button', { name: /Fechas de la tarea:/ }))
-    expect(screen.getByRole('dialog', { name: 'Editar Fechas de la tarea' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Fecha de entrega:/ }))
+    expect(screen.getByRole('dialog', { name: 'Editar Fecha de entrega' })).toBeInTheDocument()
     fireEvent.keyDown(window, { key: 'Escape' })
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Editar Fechas de la tarea' })).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Editar Fecha de entrega' })).not.toBeInTheDocument())
     expect(screen.getByRole('dialog', { name: 'Detalle de tarea' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Marcar como finalizada' }))
 
@@ -224,6 +224,12 @@ describe('TaskDetailDrawer simplified full-editor access', () => {
     const title = await screen.findByRole('textbox', { name: 'Nombre de la subtarea' })
     fireEvent.focus(title)
     fireEvent.change(title, { target: { value: 'Confirmar cobertura' } })
+    const tomorrow = new Date()
+    tomorrow.setDate(tomorrow.getDate() + 1)
+    const dueAt = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 23, 59, 0, 0).toISOString()
+    fireEvent.click(screen.getByRole('button', { name: 'Fecha de entrega de la subtarea: Agregar fecha de entrega' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Mañana' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Aplicar' }))
     fireEvent.click(screen.getByRole('button', { name: 'Guardar' }))
 
     await waitFor(() => expect(apiMocks.post).toHaveBeenCalledWith('/api/tasks/task-1/children', expect.objectContaining({
@@ -231,6 +237,9 @@ describe('TaskDetailDrawer simplified full-editor access', () => {
       assigned_to: 'user-1',
       status_id: 'status-1',
       priority: 'medium',
+      start_at: '',
+      due_at: dueAt,
+      is_all_day: true,
       operation_id: expect.any(String),
       confirm_grants: false,
     })))

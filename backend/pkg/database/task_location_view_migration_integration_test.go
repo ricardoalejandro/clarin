@@ -197,7 +197,7 @@ func TestTaskLocationViewMigrationIdempotencyAndForeignKeys(t *testing.T) {
 	createInput := repository.TaskLocationViewCreateInput{
 		ViewID: createdViewID, BoardID: createdBoardID, AccountID: accountA, ActorID: actorA,
 		ScopeType: domain.TaskAccessTargetList, ScopeID: listA, Name: "Atomic board", Scene: scene,
-		SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1-clarin.5", OperationID: createOperationID,
+		SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1-clarin.6", OperationID: createOperationID,
 		RequestPayloadHash: strings.Repeat("a", 64), ResultSceneHash: strings.Repeat("b", 64),
 		SnapshotObjectKey: snapshotKey, SnapshotContentHash: strings.Repeat("c", 64), SnapshotSizeBytes: 128,
 	}
@@ -276,7 +276,7 @@ func TestTaskLocationViewMigrationIdempotencyAndForeignKeys(t *testing.T) {
 	duplicateInput := repository.TaskLocationViewDuplicateInput{
 		ViewID: uuid.New(), BoardID: uuid.New(), SourceViewID: createdViewID, SourceBoardID: createdBoardID,
 		AccountID: accountA, ActorID: actorA, Name: "Atomic board copy", ExpectedVersion: created.Version,
-		Scene: canonicalScene, SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1-clarin.5",
+		Scene: canonicalScene, SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1-clarin.6",
 		OperationID: uuid.New(), RequestPayloadHash: strings.Repeat("e", 64), ResultSceneHash: strings.Repeat("f", 64),
 		SnapshotObjectKey: duplicateSnapshotKey, SnapshotContentHash: strings.Repeat("1", 64), SnapshotSizeBytes: 128,
 	}

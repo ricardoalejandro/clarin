@@ -27,6 +27,12 @@ describe('task list grouping', () => {
     expect(taskListDropMutation('due', noDate)).toEqual({ endpoint: 'date', clear: true })
   })
 
+  it('orders shared priorities deterministically instead of by arrival order', () => {
+    const rows = (['medium', 'urgent', 'low', 'high'] as const).map((priority, index) => ({ ...task, id: String(index), priority }))
+    expect(buildTaskListGroups(rows, 'priority', 'desc', [status], [list]).map(group => group.key)).toEqual(['urgent', 'high', 'medium', 'low'])
+    expect(buildTaskListGroups(rows, 'priority', 'asc', [status], [list]).map(group => group.key)).toEqual(['low', 'medium', 'high', 'urgent'])
+  })
+
   it('keeps cursor ownership stable', () => {
     expect(taskListCursor('idle')).toBe('pointer')
     expect(taskListCursor('handle')).toBe('grab')

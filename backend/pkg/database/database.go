@@ -3810,6 +3810,7 @@ func Migrate(db *pgxpool.Pool) error {
 		)
 			EXECUTE FUNCTION sync_contact_identity_snapshots()`,
 	}
+	migrations = append(migrations, normalizedRoleNameMigrations()...)
 	migrations = append(migrations, surveyTemplateInstanceMigrations()...)
 	migrations = append(migrations, surveyPublicSlugReservationMigrations()...)
 
@@ -3876,6 +3877,9 @@ func Migrate(db *pgxpool.Pool) error {
 		return err
 	}
 	if err := migrateTaskEnvironments(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateTaskMyWork(ctx, db); err != nil {
 		return err
 	}
 	if err := migrateTaskContainerLifecycle(ctx, db); err != nil {

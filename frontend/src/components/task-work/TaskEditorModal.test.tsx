@@ -166,6 +166,41 @@ describe('TaskEditorModal', () => {
       contact_id: 'contact-1',
       lead_id: 'lead-1',
       event_id: 'event-1',
+      start_at: '',
+      due_at: '',
+      is_all_day: false,
+    }))
+  })
+
+  it('creates a due-only all-day task without deriving a start or a 17:00 deadline', async () => {
+    vi.mocked(apiPost).mockResolvedValue({ success: true, data: { task: savedTask, operation_id: 'operation-due-only' } })
+    const dueAt = '2026-08-26T23:59'
+    renderEditor({ defaultDueAt: dueAt, defaultAllDay: true })
+    fireEvent.change(screen.getByPlaceholderText('¿Qué hay que lograr?'), { target: { value: 'Entregar informe' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Crear tarea' }))
+
+    await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks', expect.objectContaining({
+      start_at: '',
+      due_at: new Date(dueAt).toISOString(),
+      is_all_day: true,
+    }))
+    expect((vi.mocked(apiPost).mock.calls[0]?.[1] as { due_at: string }).due_at).not.toContain('T17:00')
+  })
+
+  it('preserves the exact interval supplied by Calendar more options', async () => {
+    vi.mocked(apiPost).mockResolvedValue({ success: true, data: { task: savedTask, operation_id: 'operation-calendar' } })
+    const startAt = '2026-08-26T09:15'
+    const dueAt = '2026-08-26T10:45'
+    renderEditor({ defaultStartAt: startAt, defaultDueAt: dueAt, defaultAllDay: false })
+    fireEvent.change(screen.getByPlaceholderText('¿Qué hay que lograr?'), { target: { value: 'Tarea desde calendario' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Crear tarea' }))
+
+    await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks', expect.objectContaining({
+      start_at: new Date(startAt).toISOString(),
+      due_at: new Date(dueAt).toISOString(),
+      is_all_day: false,
     }))
   })
 
@@ -187,6 +222,9 @@ describe('TaskEditorModal', () => {
       assigned_to: 'user-1',
       status_id: 'status-1',
       priority: 'medium',
+      start_at: '',
+      due_at: '',
+      is_all_day: false,
       operation_id: expect.any(String),
       confirm_grants: false,
     }))
@@ -264,15 +302,15 @@ describe('TaskEditorModal', () => {
     vi.mocked(apiPost).mockResolvedValue({ success: true, data: { task: savedTask } })
     const { props } = renderEditor()
     fireEvent.change(screen.getByPlaceholderText('¿Qué hay que lograr?'), { target: { value: 'Programar sin cerrar' } })
-    const dateTrigger = screen.getByRole('button', { name: /Fechas de la tarea:/ })
+    const dateTrigger = screen.getByRole('button', { name: /Fecha de entrega:/ })
 
     fireEvent.click(dateTrigger)
-    const picker = screen.getByRole('dialog', { name: 'Editar Fechas de la tarea' })
+    const picker = screen.getByRole('dialog', { name: 'Editar Fecha de entrega' })
     fireEvent.keyDown(picker, { key: 'Enter', ctrlKey: true })
     expect(apiPost).not.toHaveBeenCalled()
 
     fireEvent.keyDown(window, { key: 'Escape' })
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Editar Fechas de la tarea' })).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Editar Fecha de entrega' })).not.toBeInTheDocument())
     expect(screen.getByRole('dialog', { name: 'Crear una tarea' })).toBeInTheDocument()
     expect(props.onClose).not.toHaveBeenCalled()
   })

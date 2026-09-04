@@ -21,6 +21,7 @@ import {
   Clock3,
   Globe2,
   Loader2,
+  Plus,
   Trash2,
   X,
 } from 'lucide-react'
@@ -61,7 +62,7 @@ const months = Array.from({ length: 12 }, (_, month) => new Date(2020, month, 1)
 const initialGeometry: OperationalDatePickerGeometry = {
   left: 12,
   top: 12,
-  width: 680,
+  width: 360,
   maxHeight: 720,
   placement: 'below',
 }
@@ -91,6 +92,14 @@ function rangeAnchor(endpoint: RangeEndpoint, startValue: string, endValue: stri
     || new Date()
 }
 
+function preferredEndpoint(startValue: string, endValue: string): RangeEndpoint {
+  return endValue || !startValue ? 'end' : 'start'
+}
+
+function draftAllDayMode(startValue: string, endValue: string, allDay: boolean) {
+  return startValue || endValue ? allDay : true
+}
+
 function localizedEndpoint(value: string, allDay: boolean) {
   const date = parsedDate(value)
   if (!date) return value ? 'Fecha no válida' : 'Sin fecha'
@@ -103,9 +112,9 @@ export function taskDateRangeSummary(startValue: string, endValue: string, allDa
   const start = startValue ? localizedEndpoint(startValue, allDay) : ''
   const end = endValue ? localizedEndpoint(endValue, allDay) : ''
   if (start && end) return `${start} → ${end}`
-  if (start) return `Desde ${start}`
-  if (end) return `Hasta ${end}`
-  return 'Agregar fechas'
+  if (start) return `Inicio: ${start}`
+  if (end) return `Entrega: ${end}`
+  return 'Agregar fecha de entrega'
 }
 
 export function taskDateRangeIsValid(startValue: string, endValue: string, allDay: boolean) {
@@ -124,6 +133,12 @@ export function taskAllDayBoundary(value: string, endpoint: RangeEndpoint) {
   if (endpoint === 'start') normalized.setHours(0, 0, 0, 0)
   else normalized.setHours(23, 59, 0, 0)
   return operationalDateLocalValue(normalized, 'datetime')
+}
+
+export function taskDueDateOnlyValue(dateKey: string) {
+  const parsed = operationalDateValue(`${dateKey}T12:00`, 'datetime')
+  if (!parsed || operationalDateDayKey(parsed) !== dateKey) return ''
+  return taskAllDayBoundary(operationalDateLocalValue(parsed, 'datetime'), 'end')
 }
 
 function invalidRangeMessage(startValue: string, endValue: string, allDay: boolean) {
@@ -187,11 +202,13 @@ export default function TaskDateRangePicker({
   const yearInputRef = useRef<HTMLInputElement>(null)
   const dayRefs = useRef(new Map<string, HTMLButtonElement>())
   const [open, setOpen] = useState(false)
-  const [activeEndpoint, setActiveEndpoint] = useState<RangeEndpoint>('start')
+  const [activeEndpoint, setActiveEndpoint] = useState<RangeEndpoint>(() => preferredEndpoint(startValue, endValue))
+  const [showStart, setShowStart] = useState(Boolean(startValue))
   const [draftStart, setDraftStart] = useState(startValue)
   const [draftEnd, setDraftEnd] = useState(endValue)
-  const [draftAllDay, setDraftAllDay] = useState(allDay)
-  const initialAnchor = rangeAnchor(startValue ? 'start' : endValue ? 'end' : 'start', startValue, endValue)
+  const [draftAllDay, setDraftAllDay] = useState(() => draftAllDayMode(startValue, endValue, allDay))
+  const initialEndpoint = preferredEndpoint(startValue, endValue)
+  const initialAnchor = rangeAnchor(initialEndpoint, startValue, endValue)
   const [cursor, setCursor] = useState(() => monthCursor(initialAnchor))
   const [focusedDay, setFocusedDay] = useState(initialAnchor)
   const [monthYearOpen, setMonthYearOpen] = useState(false)
@@ -205,11 +222,12 @@ export default function TaskDateRangePicker({
   const endDayKey = parsedDate(draftEnd) ? operationalDateDayKey(parsedDate(draftEnd) as Date) : ''
 
   const resetDraft = useCallback(() => {
-    const endpoint: RangeEndpoint = startValue ? 'start' : endValue ? 'end' : 'start'
+    const endpoint = preferredEndpoint(startValue, endValue)
     const anchor = rangeAnchor(endpoint, startValue, endValue)
     setDraftStart(startValue)
     setDraftEnd(endValue)
-    setDraftAllDay(allDay)
+    setDraftAllDay(draftAllDayMode(startValue, endValue, allDay))
+    setShowStart(Boolean(startValue))
     setActiveEndpoint(endpoint)
     setFocusedDay(anchor)
     setCursor(monthCursor(anchor))
@@ -233,7 +251,8 @@ export default function TaskDateRangePicker({
   const updateGeometry = useCallback(() => {
     if (!open || !triggerRef.current || typeof window === 'undefined') return
     const viewport = window.visualViewport
-    const panelHeight = panelRef.current?.offsetHeight || 650
+    const panelHeight = panelRef.current?.offsetHeight || (showStart ? 650 : 590)
+    const panelWidth = showStart ? 680 : 360
     setGeometry(operationalDatePickerGeometry(
       triggerRef.current.getBoundingClientRect(),
       {
@@ -242,16 +261,16 @@ export default function TaskDateRangePicker({
         width: viewport?.width || window.innerWidth,
         height: viewport?.height || window.innerHeight,
       },
-      { width: 680, height: panelHeight },
+      { width: panelWidth, height: panelHeight },
     ))
-  }, [open])
+  }, [open, showStart])
 
   useLayoutEffect(() => {
     if (!open) return
     updateGeometry()
     const frame = requestAnimationFrame(updateGeometry)
     return () => cancelAnimationFrame(frame)
-  }, [activeEndpoint, cursor, draftAllDay, invalidMessage, monthYearOpen, open, updateGeometry])
+  }, [activeEndpoint, cursor, draftAllDay, invalidMessage, monthYearOpen, open, showStart, updateGeometry])
 
   useEffect(() => {
     if (!open || typeof window === 'undefined') return
@@ -292,7 +311,7 @@ export default function TaskDateRangePicker({
       else (activeEndpoint === 'start' ? startEndpointRef : endEndpointRef).current?.focus({ preventScroll: true })
     })
     return () => cancelAnimationFrame(frame)
-  }, [monthYearOpen, open])
+  }, [activeEndpoint, monthYearOpen, open, showStart])
 
   const openPicker = () => {
     if (disabled || pending) return
@@ -307,6 +326,19 @@ export default function TaskDateRangePicker({
     setFocusedDay(anchor)
     setCursor(monthCursor(anchor))
     setMonthYearOpen(false)
+  }
+
+  const revealStart = () => {
+    setShowStart(true)
+    activateEndpoint('start')
+    requestAnimationFrame(() => startEndpointRef.current?.focus({ preventScroll: true }))
+  }
+
+  const removeStart = () => {
+    setDraftStart('')
+    setShowStart(false)
+    activateEndpoint('end')
+    requestAnimationFrame(() => endEndpointRef.current?.focus({ preventScroll: true }))
   }
 
   const updateActiveValue = (value: string) => {
@@ -369,7 +401,7 @@ export default function TaskDateRangePicker({
     onApply({
       startAt: draftAllDay ? taskAllDayBoundary(draftStart, 'start') : draftStart,
       endAt: draftAllDay ? taskAllDayBoundary(draftEnd, 'end') : draftEnd,
-      isAllDay: draftAllDay,
+      isAllDay: Boolean(draftStart || draftEnd) && draftAllDay,
     })
     setOpen(false)
     restoreTriggerFocus()
@@ -377,8 +409,12 @@ export default function TaskDateRangePicker({
 
   const activeLabel = activeEndpoint === 'start' ? 'Inicio' : 'Entrega'
   const activeHasValue = Boolean(activeValue && parsedDate(activeValue))
-  const splitLayout = geometry.width >= 600
-  const splitEndpoints = geometry.width >= 500
+  const splitLayout = showStart && geometry.width >= 600
+  const splitEndpoints = showStart && geometry.width >= 500
+  const triggerContext = startValue ? 'Rango de la tarea' : 'Fecha de entrega'
+  const triggerTiming = startValue || endValue
+    ? allDay ? 'Todo el día' : Intl.DateTimeFormat().resolvedOptions().timeZone
+    : 'Inicio opcional'
 
   return <>
     <button
@@ -399,7 +435,7 @@ export default function TaskDateRangePicker({
       </span>
       <span className="min-w-0 flex-1">
         <span className={`block truncate font-semibold ${compact ? 'text-xs' : 'text-sm'} ${startValue || endValue ? 'text-slate-700' : 'text-slate-400'}`}>{summary}</span>
-        {!compact && <span className="block truncate text-[10px] font-medium text-slate-400">{label} · {allDay ? 'Todo el día' : Intl.DateTimeFormat().resolvedOptions().timeZone}</span>}
+        {!compact && <span className="block truncate text-[10px] font-medium text-slate-400">{triggerContext} · {triggerTiming}</span>}
       </span>
       {pending
         ? <Loader2 aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin text-emerald-500 motion-reduce:animate-none" />
@@ -439,8 +475,8 @@ export default function TaskDateRangePicker({
             <CalendarDays className="h-4 w-4" />
           </span>
           <span className="min-w-0 flex-1">
-            <span className="block text-sm font-black text-slate-900">Programar tarea</span>
-            <span className="mt-0.5 block text-[10px] leading-4 text-slate-400">Define inicio, entrega o ambos antes de aplicar.</span>
+            <span className="block text-sm font-black text-slate-900">{showStart ? 'Programar tarea' : 'Fecha de entrega'}</span>
+            <span className="mt-0.5 block text-[10px] leading-4 text-slate-400">{showStart ? 'La entrega es el límite; el inicio sigue siendo opcional.' : 'Elige el día límite. Puedes añadir el inicio después.'}</span>
           </span>
           <button type="button" aria-label={`Cerrar selector de ${label}`} onClick={cancel} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
             <X className="h-4 w-4" />
@@ -449,22 +485,23 @@ export default function TaskDateRangePicker({
 
         <div className="p-3 sm:p-4">
           <div className="grid gap-2" style={{ gridTemplateColumns: splitEndpoints ? 'minmax(0, 1fr) minmax(0, 1fr)' : 'minmax(0, 1fr)' }}>
-            <div className={`flex min-w-0 items-center rounded-2xl border p-1 transition motion-reduce:transition-none ${activeEndpoint === 'start' ? 'border-emerald-300 bg-emerald-50/50 ring-2 ring-emerald-100' : 'border-slate-200 bg-slate-50/70'}`}>
+            {showStart && <div className={`flex min-w-0 items-center rounded-2xl border p-1 transition motion-reduce:transition-none ${activeEndpoint === 'start' ? 'border-emerald-300 bg-emerald-50/50 ring-2 ring-emerald-100' : 'border-slate-200 bg-slate-50/70'}`}>
               <button ref={startEndpointRef} type="button" aria-pressed={activeEndpoint === 'start'} onClick={() => activateEndpoint('start')} className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-xl px-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
-                <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${activeEndpoint === 'start' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-400 shadow-sm'}`}>1</span>
-                <span className="min-w-0 flex-1"><span className="block text-[9px] font-black uppercase tracking-[.12em] text-slate-400">Inicio</span><EndpointSummary value={draftStart} allDay={draftAllDay} /></span>
+                <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${activeEndpoint === 'start' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-400 shadow-sm'}`}><CalendarDays className="h-3.5 w-3.5" /></span>
+                <span className="min-w-0 flex-1"><span className="block text-[9px] font-black uppercase tracking-[.12em] text-slate-400">Inicio opcional</span><EndpointSummary value={draftStart} allDay={draftAllDay} /></span>
               </button>
-              {draftStart && <button type="button" disabled={pending} aria-label="Quitar inicio" onClick={() => setDraftStart('')} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-white hover:text-rose-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 disabled:opacity-40"><X className="h-3.5 w-3.5" /></button>}
-            </div>
-
+              <button type="button" disabled={pending} aria-label={draftStart ? 'Quitar inicio' : 'Ocultar fecha de inicio'} onClick={removeStart} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-white hover:text-rose-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 disabled:opacity-40"><X className="h-3.5 w-3.5" /></button>
+            </div>}
             <div className={`flex min-w-0 items-center rounded-2xl border p-1 transition motion-reduce:transition-none ${activeEndpoint === 'end' ? 'border-emerald-300 bg-emerald-50/50 ring-2 ring-emerald-100' : 'border-slate-200 bg-slate-50/70'}`}>
               <button ref={endEndpointRef} type="button" aria-pressed={activeEndpoint === 'end'} onClick={() => activateEndpoint('end')} className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-xl px-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
-                <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${activeEndpoint === 'end' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-400 shadow-sm'}`}>2</span>
-                <span className="min-w-0 flex-1"><span className="block text-[9px] font-black uppercase tracking-[.12em] text-slate-400">Entrega</span><EndpointSummary value={draftEnd} allDay={draftAllDay} /></span>
+                <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${activeEndpoint === 'end' ? 'bg-emerald-600 text-white' : 'bg-white text-slate-400 shadow-sm'}`}><CalendarDays className="h-3.5 w-3.5" /></span>
+                <span className="min-w-0 flex-1"><span className="block text-[9px] font-black uppercase tracking-[.12em] text-slate-400">Fecha de entrega</span><EndpointSummary value={draftEnd} allDay={draftAllDay} /></span>
               </button>
               {draftEnd && <button type="button" disabled={pending} aria-label="Quitar entrega" onClick={() => setDraftEnd('')} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-white hover:text-rose-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 disabled:opacity-40"><X className="h-3.5 w-3.5" /></button>}
             </div>
           </div>
+
+          {!showStart && <button type="button" disabled={pending} onClick={revealStart} className="mt-2 inline-flex min-h-10 items-center gap-1.5 rounded-xl px-2 text-xs font-bold text-slate-500 outline-none transition hover:bg-emerald-50 hover:text-emerald-700 focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-40"><Plus className="h-3.5 w-3.5" />Añadir fecha de inicio</button>}
 
           <div className="mt-3 grid gap-3" style={{ gridTemplateColumns: splitLayout ? 'minmax(0, 1fr) 248px' : 'minmax(0, 1fr)' }}>
             <section aria-label="Calendario del rango" className="min-w-0 rounded-2xl border border-slate-200 bg-white">
@@ -533,37 +570,35 @@ export default function TaskDateRangePicker({
               </>}
             </section>
 
-            <aside aria-label="Ajustes del rango" className="min-w-0 space-y-3">
-              <section className="rounded-2xl border border-slate-200 bg-slate-50/70 p-3">
+            <aside aria-label="Ajustes de fecha" className="min-w-0 space-y-3">
+              {draftAllDay ? <button
+                type="button"
+                disabled={pending || !activeHasValue}
+                onClick={() => setDraftAllDay(false)}
+                className="inline-flex min-h-11 w-full items-center gap-2 rounded-xl px-2.5 text-left text-xs font-bold text-slate-500 outline-none transition hover:bg-emerald-50 hover:text-emerald-700 focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Clock3 className="h-4 w-4 shrink-0" />
+                <span><span className="block">Añadir hora</span><span className="mt-0.5 block text-[9px] font-medium text-slate-400">Añade una hora exacta solo si la necesitas.</span></span>
+              </button> : <section className="rounded-2xl border border-slate-200 bg-slate-50/70 p-3">
                 <div className="flex items-center gap-2">
                   <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-white text-emerald-600 shadow-sm"><Clock3 className="h-4 w-4" /></span>
-                  <span className="min-w-0"><span className="block text-[9px] font-black uppercase tracking-[.12em] text-slate-400">Editando</span><span className="block truncate text-xs font-bold text-slate-700">{activeLabel}</span></span>
+                  <span className="min-w-0"><span className="block text-[9px] font-black uppercase tracking-[.12em] text-slate-400">Hora exacta</span><span className="block truncate text-xs font-bold text-slate-700">{activeLabel}</span></span>
                 </div>
                 <label className="mt-3 block text-[10px] font-bold text-slate-500">Hora
                   <input
                     aria-label={`Hora de ${activeLabel.toLocaleLowerCase('es')}`}
                     type="time"
                     value={timeValue(activeValue)}
-                    disabled={pending || draftAllDay || !activeHasValue}
+                    disabled={pending || !activeHasValue}
                     onChange={event => updateActiveValue(replaceTime(activeValue, event.target.value))}
                     className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:opacity-45"
                   />
                 </label>
-                {!activeHasValue && <p className="mt-2 text-[10px] leading-4 text-slate-400">Elige una fecha para habilitar la hora.</p>}
-              </section>
+                {!activeHasValue && <p className="mt-2 text-[10px] leading-4 text-slate-400">Elige una fecha para definir su hora.</p>}
+                <button type="button" disabled={pending} onClick={() => setDraftAllDay(true)} className="mt-2 inline-flex min-h-10 items-center gap-1.5 rounded-xl px-2 text-[10px] font-bold text-emerald-700 outline-none hover:bg-white focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-40"><Check className="h-3.5 w-3.5" />Usar todo el día</button>
+              </section>}
 
-              <button
-                type="button"
-                aria-pressed={draftAllDay}
-                disabled={pending}
-                onClick={() => setDraftAllDay(current => !current)}
-                className={`flex min-h-11 w-full items-center gap-3 rounded-2xl border px-3 text-left outline-none transition focus-visible:ring-4 focus-visible:ring-emerald-100 disabled:opacity-45 motion-reduce:transition-none ${draftAllDay ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-200 bg-white text-slate-600 hover:border-emerald-200'}`}
-              >
-                <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${draftAllDay ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-400'}`}><Check className="h-3.5 w-3.5" /></span>
-                <span className="min-w-0"><span className="block text-xs font-bold">Todo el día</span><span className="block text-[9px] leading-4 text-slate-400">Inicio 00:00 · entrega 23:59.</span></span>
-              </button>
-
-              <p className="flex items-start gap-1.5 rounded-xl bg-slate-50 px-3 py-2 text-[9px] leading-4 text-slate-400"><Globe2 className="mt-0.5 h-3 w-3 shrink-0" /><span>{Intl.DateTimeFormat().resolvedOptions().timeZone}<br />Se guardará la hora local.</span></p>
+              {!draftAllDay && <p className="flex items-start gap-1.5 rounded-xl bg-slate-50 px-3 py-2 text-[9px] leading-4 text-slate-400"><Globe2 className="mt-0.5 h-3 w-3 shrink-0" /><span>{Intl.DateTimeFormat().resolvedOptions().timeZone}<br />Se guardará la hora local.</span></p>}
             </aside>
           </div>
 
@@ -571,7 +606,7 @@ export default function TaskDateRangePicker({
         </div>
 
         <footer className="sticky bottom-0 flex flex-wrap items-center gap-2 border-t border-slate-100 bg-white/95 px-3 py-3 backdrop-blur sm:px-4">
-          <button type="button" disabled={pending || (!draftStart && !draftEnd)} onClick={() => { setDraftStart(''); setDraftEnd('') }} className="flex min-h-10 items-center gap-1.5 rounded-xl px-3 text-xs font-bold text-rose-600 hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 disabled:cursor-not-allowed disabled:opacity-35"><Trash2 className="h-3.5 w-3.5" />Quitar todas</button>
+          <button type="button" disabled={pending || (!draftStart && !draftEnd)} onClick={() => { setDraftStart(''); setDraftEnd(''); setDraftAllDay(true); setShowStart(false); activateEndpoint('end') }} className="flex min-h-10 items-center gap-1.5 rounded-xl px-3 text-xs font-bold text-rose-600 hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 disabled:cursor-not-allowed disabled:opacity-35"><Trash2 className="h-3.5 w-3.5" />Quitar fechas</button>
           <div className="ml-auto flex items-center gap-2">
             <button type="button" disabled={pending} onClick={cancel} className="min-h-10 rounded-xl px-3 text-xs font-bold text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 disabled:opacity-40">Cancelar</button>
             <button type="button" disabled={pending || Boolean(invalidMessage)} onClick={apply} className="flex min-h-10 items-center gap-1.5 rounded-xl bg-emerald-600 px-4 text-xs font-black text-white shadow-lg shadow-emerald-100 hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-40">

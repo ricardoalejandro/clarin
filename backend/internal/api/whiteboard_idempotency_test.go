@@ -51,7 +51,7 @@ func TestWhiteboardRealtimePatchAckCarriesCanonicalSceneAfterRebaseOrReplay(t *t
 	t.Parallel()
 	scene := &domain.WhiteboardScene{
 		BoardID: uuid.New(), Sequence: 9, Scene: json.RawMessage(`{"type":"excalidraw","elements":[{"id":"remote"}]}`),
-		SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1-clarin.5", UpdatedAt: time.Unix(1_700_000_000, 0).UTC(),
+		SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1-clarin.6", UpdatedAt: time.Unix(1_700_000_000, 0).UTC(),
 	}
 	outgoing := whiteboardcore.OutgoingMessage{Data: whiteboardRealtimePatchData{BaseSequence: 8, ClientBaseSequence: 6}}
 	data := whiteboardRealtimePatchAckData(&domain.WhiteboardSceneWriteResult{Scene: scene, OperationSequence: 9}, outgoing, 6)
@@ -77,7 +77,7 @@ func TestWhiteboardRealtimePatchAckUsesBoundedSyncForLargeCanonicalScene(t *test
 	largeScene := json.RawMessage(`{"type":"excalidraw","opaque":"` + strings.Repeat("x", whiteboardcore.MaxRealtimeSnapshotMessageBytes) + `","elements":[]}`)
 	scene := &domain.WhiteboardScene{
 		BoardID: uuid.New(), Sequence: 11, Scene: largeScene,
-		SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1-clarin.5", UpdatedAt: time.Now().UTC(),
+		SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1-clarin.6", UpdatedAt: time.Now().UTC(),
 	}
 	operationID := uuid.New()
 	outgoing := whiteboardcore.OutgoingMessage{Data: whiteboardRealtimePatchData{BaseSequence: 10, ClientBaseSequence: 8}}

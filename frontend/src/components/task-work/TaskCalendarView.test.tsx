@@ -114,6 +114,29 @@ afterEach(() => {
 })
 
 describe('TaskCalendarView schedule gestures', () => {
+  it('preserves the selected all-day interval when opening the full task form', async () => {
+    const { props } = renderCalendar()
+    const selectedDay = new Date()
+    const dayKey = [selectedDay.getFullYear(), String(selectedDay.getMonth() + 1).padStart(2, '0'), String(selectedDay.getDate()).padStart(2, '0')].join('-')
+    const start = new Date(selectedDay)
+    start.setHours(0, 0, 0, 0)
+    const due = new Date(selectedDay)
+    due.setHours(23, 59, 0, 0)
+    await waitFor(() => expect(document.querySelector(`[data-calendar-month-day="${dayKey}"]`)).not.toBeNull())
+
+    fireEvent.click(document.querySelector(`[data-calendar-month-day="${dayKey}"]`) as HTMLElement)
+    fireEvent.click(screen.getByRole('button', { name: 'Tarea' }))
+    fireEvent.change(screen.getByPlaceholderText('¿Qué hay que lograr?'), { target: { value: 'Plan desde calendario' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Abrir formulario completo' }))
+
+    expect(props.onMore).toHaveBeenCalledWith(status.id, expect.objectContaining({
+      title: 'Plan desde calendario',
+      startAt: start.toISOString(),
+      dueAt: due.toISOString(),
+      isAllDay: true,
+    }))
+  })
+
   it('keeps a short click as summary-only and never opens the editor automatically', async () => {
     const { props } = renderCalendar()
     const block = await calendarBlock()

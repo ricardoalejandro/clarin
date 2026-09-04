@@ -4,6 +4,20 @@
   height: 100%;
 }
 
+/* Focus mode keeps the mounted editor instance in place while promoting its
+   host over every Clarin workspace surface. The shared visual-viewport
+   variables preserve the reachable area on mobile and browser zoom. */
+.whiteboard-editor-shell.whiteboard-editor-shell--focused {
+  position: fixed;
+  top: var(--visual-viewport-offset-top, 0px);
+  left: var(--visual-viewport-offset-left, 0px);
+  width: var(--app-width, 100vw);
+  height: var(--app-height, 100dvh);
+  max-height: var(--app-height, 100dvh);
+  isolation: isolate;
+  background: #fff;
+}
+
 .whiteboard-editor-shell .excalidraw [data-testid="toolbar-embeddable"],
 .whiteboard-editor-shell .excalidraw [data-testid="toolbar-magicframe"],
 .whiteboard-editor-shell .excalidraw [data-testid="help-menu-item"],

@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom'
 import { Archive, ChevronRight, Inbox, Settings2, Share2, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { TASK_OVERLAY_LAYERS } from './taskOverlayLayers'
 
-type ScopeType = 'all' | 'environment' | 'shared' | 'folder' | 'list' | 'archive' | 'trash'
+type ScopeType = 'all' | 'environment' | 'shared' | 'folder' | 'list' | 'archive' | 'trash' | 'personal'
 
 interface ScopeProps {
   collapsed: boolean

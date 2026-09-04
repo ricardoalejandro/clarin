@@ -439,7 +439,7 @@ class WhiteboardRealtimeHarness {
         type: 'excalidraw', version: 2, source: 'clarin', elements: clone(this.elements),
         appState: clone(this.appState), files: {},
       },
-      scene_schema_version: 'excalidraw', editor_version: '0.18.1-clarin.5', sequence: this.sequence, updated_at: now,
+      scene_schema_version: 'excalidraw', editor_version: '0.18.1-clarin.6', sequence: this.sequence, updated_at: now,
     }
   }
 }
@@ -1574,6 +1574,44 @@ async function exerciseManagerViewsAndFolderMoves(page: Page, harness: Whiteboar
   await expect(page.getByRole('button', { name: 'Vista compacta' })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByRole('button', { name: 'Cambiar carpeta de Pizarra QA autónoma. Carpeta actual: Sin carpeta' })).toBeVisible()
 
+  await page.getByRole('button', { name: 'Vista de lista' }).click()
+  await expect(page.getByRole('button', { name: 'Vista de lista' })).toHaveAttribute('aria-pressed', 'true')
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('clarin.whiteboards.view.v1'))).toBe('list')
+  const listRow = page.locator(`[data-whiteboard-id="${boardID}"][data-whiteboard-view="list"]`)
+  const listThumbnail = listRow.locator('[data-whiteboard-slot="thumbnail"]')
+  await expect(listThumbnail).toHaveCSS('width', '64px')
+  await expect(listThumbnail).toHaveCSS('height', '44px')
+
+  const responsiveViewports = [
+    { width: 320, height: 720 },
+    { width: 375, height: 812 },
+    { width: 768, height: 860 },
+    { width: 1024, height: 768 },
+    { width: 1280, height: 800 },
+    { width: 1440, height: 900 },
+    { width: 1671, height: 831 },
+  ]
+  for (const viewport of responsiveViewports) {
+    await page.setViewportSize(viewport)
+    await expect(listRow).toBeVisible()
+    await expect.poll(() => page.evaluate(() => ({
+      documentWidth: document.documentElement.scrollWidth,
+      viewportWidth: window.innerWidth,
+    }))).toEqual({ documentWidth: viewport.width, viewportWidth: viewport.width })
+    const geometry = await listRow.evaluate(row => {
+      const rect = row.getBoundingClientRect()
+      const actionTargets = Array.from(row.querySelectorAll<HTMLElement>('button, a'))
+      return {
+        left: rect.left,
+        right: rect.right,
+        minimumTarget: Math.min(...actionTargets.map(target => Math.min(target.getBoundingClientRect().width, target.getBoundingClientRect().height))),
+      }
+    })
+    expect(geometry.left).toBeGreaterThanOrEqual(0)
+    expect(geometry.right).toBeLessThanOrEqual(viewport.width + 1)
+    expect(geometry.minimumTarget).toBeGreaterThanOrEqual(44)
+  }
+
   await page.getByRole('button', { name: 'Vista de cuadrícula' }).click()
   await expect(page.getByRole('button', { name: 'Vista de cuadrícula' })).toHaveAttribute('aria-pressed', 'true')
   await expect.poll(() => page.evaluate(() => localStorage.getItem('clarin.whiteboards.view.v1'))).toBe('grid')
@@ -2263,6 +2301,213 @@ test('catálogo precargado de fuentes · conserva la apariencia nativa en tema o
   }
 })
 
+test('texto enriquecido · recorre cada línea vacía con el teclado y conserva los saltos', async ({ browser, browserName }) => {
+  test.setTimeout(120_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
+  const page = await context.newPage()
+
+  try {
+    await openEditor(page)
+    await page.getByTestId('toolbar-text').check({ force: true })
+    await expect(page.getByTestId('font-family-show-fonts')).toBeEnabled({ timeout: 30_000 })
+    const surface = page.locator('.whiteboard-editor-shell .excalidraw').first()
+    const box = await surface.boundingBox()
+    expect(box).not.toBeNull()
+    await page.mouse.click(box!.x + box!.width * 0.58, box!.y + box!.height * 0.38)
+
+    const editable = page.locator('[contenteditable="true"][data-type="wysiwyg"]')
+    await expect(editable).toBeVisible()
+    await page.keyboard.insertText('Primera')
+    await page.keyboard.press('Enter')
+    await page.keyboard.press('Enter')
+    await page.keyboard.press('Enter')
+    await page.keyboard.insertText('Cuarta')
+
+    const expectedText = 'Primera\n\n\nCuarta'
+    await expect.poll(() => editable.evaluate(element => (
+      element as HTMLElement & { value: string }
+    ).value)).toBe(expectedText)
+    await expect(editable.locator('[data-clarin-empty-paragraph]')).toHaveCount(2)
+
+    const selectionOffset = () => editable.evaluate(element => {
+      const richEditable = element as HTMLElement & { selectionStart: number; selectionEnd: number }
+      return { start: richEditable.selectionStart, end: richEditable.selectionEnd }
+    })
+    const directionalSelection = () => editable.evaluate(element => {
+      const selection = window.getSelection()
+      const pointOffset = (node: Node | null, offset: number) => {
+        if (!node) return -1
+        const owner = node.nodeType === Node.ELEMENT_NODE ? node as Element : node.parentElement
+        const paragraph = owner?.closest<HTMLElement>('[data-clarin-paragraph-start]')
+        if (!paragraph || !element.contains(paragraph)) return -1
+        const range = document.createRange()
+        range.selectNodeContents(paragraph)
+        range.setEnd(node, offset)
+        return Number(paragraph.dataset.clarinParagraphStart || 0) + range.toString().length
+      }
+      const richEditable = element as HTMLElement & { selectionStart: number; selectionEnd: number }
+      return {
+        start: richEditable.selectionStart,
+        end: richEditable.selectionEnd,
+        anchor: pointOffset(selection?.anchorNode ?? null, selection?.anchorOffset ?? 0),
+        focus: pointOffset(selection?.focusNode ?? null, selection?.focusOffset ?? 0),
+      }
+    })
+    const expectCaret = async (offset: number) => {
+      await expect.poll(selectionOffset).toEqual({ start: offset, end: offset })
+    }
+
+    await editable.evaluate(element => {
+      const richEditable = element as HTMLElement & { selectionStart: number; selectionEnd: number }
+      richEditable.selectionStart = 0
+      richEditable.selectionEnd = 0
+      element.focus()
+    })
+    await expectCaret(0)
+    await page.keyboard.press('ArrowDown')
+    await expectCaret(8)
+    await page.keyboard.press('ArrowDown')
+    await expectCaret(9)
+    await page.keyboard.press('ArrowDown')
+    await expectCaret(10)
+    await page.keyboard.press('ArrowUp')
+    await expectCaret(9)
+    await page.keyboard.press('ArrowUp')
+    await expectCaret(8)
+    await page.keyboard.press('ArrowUp')
+    await expectCaret(0)
+
+    // A backward selection must keep its real anchor/focus after a formatting
+    // rerender; otherwise the next Shift+Arrow continues from the wrong edge.
+    await editable.evaluate(element => {
+      const richEditable = element as HTMLElement & { selectionStart: number; selectionEnd: number }
+      richEditable.selectionStart = 11
+      richEditable.selectionEnd = 11
+      element.focus()
+    })
+    await page.keyboard.press('Shift+ArrowLeft')
+    await expect.poll(directionalSelection).toEqual({ start: 10, end: 11, anchor: 11, focus: 10 })
+    await page.keyboard.press('Control+b')
+    await expect.poll(directionalSelection).toEqual({ start: 10, end: 11, anchor: 11, focus: 10 })
+    await expect(page.locator('[aria-label="Asistente Eros"]')).toHaveCount(0)
+    await page.keyboard.press('Control+i')
+    await expect.poll(directionalSelection).toEqual({ start: 10, end: 11, anchor: 11, focus: 10 })
+    await expect(page.locator('[aria-label="Asistente Eros"]')).toHaveCount(0)
+    await page.keyboard.press('Shift+ArrowLeft')
+    await expect.poll(directionalSelection).toEqual({ start: 9, end: 11, anchor: 11, focus: 9 })
+
+    const paragraphHeights = await editable.locator('[data-clarin-paragraph-start]').evaluateAll(elements =>
+      elements.map(element => element.getBoundingClientRect().height),
+    )
+    expect(paragraphHeights).toHaveLength(4)
+    expect(Math.max(...paragraphHeights) - Math.min(...paragraphHeights)).toBeLessThanOrEqual(1)
+
+    if (browserName === 'webkit') {
+      await page.setViewportSize({ width: 390, height: 844 })
+      const webKitRunsIOSPolicy = await page.evaluate(() => CSS.supports('-webkit-touch-callout', 'none'))
+      if (!webKitRunsIOSPolicy) {
+        // Playwright's Linux WebKit does not expose the iOS-only feature used
+        // by the production @supports gate. Reapply the declaration found in
+        // the loaded stylesheet (not a test copy) so this runner still checks
+        // the exact clamp and logical paragraph geometry contract.
+        const iosPolicyRule = await page.evaluate(() => {
+          const findPolicy = (rules: CSSRuleList): string | null => {
+            for (const rule of Array.from(rules)) {
+              if (
+                rule instanceof CSSStyleRule
+                && rule.selectorText === '.excalidraw-wysiwyg'
+                && rule.style.fontSize.includes('--clarin-wysiwyg-font-size')
+              ) {
+                return rule.cssText
+              }
+              if ('cssRules' in rule) {
+                const nested = findPolicy((rule as CSSGroupingRule).cssRules)
+                if (nested) return nested
+              }
+            }
+            return null
+          }
+          for (const sheet of Array.from(document.styleSheets)) {
+            try {
+              const policy = findPolicy(sheet.cssRules)
+              if (policy) return policy
+            } catch {
+              // Ignore browser-managed or cross-origin sheets. Clarin's own
+              // compiled stylesheet remains same-origin and readable.
+            }
+          }
+          return null
+        })
+        expect(iosPolicyRule).toContain('max(16px')
+        expect(iosPolicyRule).toContain('--clarin-wysiwyg-font-size')
+        expect(iosPolicyRule).toContain('min-height')
+        await page.addStyleTag({ content: iosPolicyRule! })
+      }
+      const mobileFontGeometry = () => editable.evaluate(element => {
+        const paragraphs = Array.from(element.querySelectorAll<HTMLElement>('[data-clarin-paragraph-start]'))
+        return {
+          value: (element as HTMLElement & { value: string }).value,
+          inline: element.style.fontSize,
+          logical: element.style.getPropertyValue('--clarin-wysiwyg-font-size'),
+          computed: getComputedStyle(element).fontSize,
+          paragraphFonts: paragraphs.map(paragraph => getComputedStyle(paragraph).fontSize),
+          paragraphHeights: paragraphs.map(paragraph => paragraph.getBoundingClientRect().height),
+        }
+      })
+
+      await expect.poll(async () => {
+        const { paragraphHeights: _paragraphHeights, ...geometry } = await mobileFontGeometry()
+        return geometry
+      }).toEqual({
+        value: expectedText,
+        inline: '20px',
+        logical: '20px',
+        computed: '20px',
+        paragraphFonts: ['20px', '20px', '20px', '20px'],
+      })
+      const regularMobileHeights = (await mobileFontGeometry()).paragraphHeights
+      expect(regularMobileHeights).toHaveLength(4)
+      expect(Math.max(...regularMobileHeights) - Math.min(...regularMobileHeights)).toBeLessThanOrEqual(1)
+
+      // Safari iOS computes focus zoom from the focused contenteditable root.
+      // Keep that root at 16px while every paragraph retains the real 12px
+      // scene typography and equal line boxes; user scaling remains enabled.
+      for (let step = 0; step < 6; step += 1) {
+        await page.keyboard.press('Control+Shift+,')
+      }
+      await expect.poll(mobileFontGeometry).toMatchObject({
+        value: expectedText,
+        inline: '12px',
+        logical: '12px',
+        computed: '16px',
+        paragraphFonts: ['12px', '12px', '12px', '12px'],
+      })
+      const compactHeights = (await mobileFontGeometry()).paragraphHeights
+      expect(compactHeights).toHaveLength(4)
+      expect(Math.max(...compactHeights) - Math.min(...compactHeights)).toBeLessThanOrEqual(1)
+      expect(Math.max(...compactHeights)).toBeLessThan(Math.max(...regularMobileHeights))
+    }
+
+    await page.keyboard.press('Control+Enter')
+    await expect(editable).toBeHidden()
+    await expect.poll(() => harness.elements.find(element => element.type === 'text' && element.originalText === expectedText)?.originalText)
+      .toBe(expectedText)
+    await expectEditorSaved(page)
+    const exported = await exportEditableScene(page)
+    expect(exported.elements.find(element => element.type === 'text' && element.originalText === expectedText)?.text)
+      .toBe(expectedText)
+    expect(blocked).toEqual([])
+  } finally {
+    await context.close()
+  }
+})
+
 test('texto enriquecido · Ctrl+C conserva el texto seleccionado y no lo reemplaza por el sobre del lienzo', async ({ browser, browserName }) => {
   test.skip(browserName !== 'chromium', 'La escritura asíncrona del portapapeles del sistema se valida en Chromium.')
   test.setTimeout(120_000)
@@ -2752,7 +2997,7 @@ test('integración simulada · el gestor usa compacta por defecto y mueve pizarr
   await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
   const page = await context.newPage()
   page.setDefaultTimeout(15_000)
-  page.setDefaultNavigationTimeout(60_000)
+  page.setDefaultNavigationTimeout(120_000)
 
   try {
     await page.goto(`${baseURL}/dashboard/whiteboards`, { waitUntil: 'domcontentloaded' })
@@ -3235,7 +3480,7 @@ test('integración simulada · Pizarras permanece same-origin y reconcilia ACK p
     page.on('requestfailed', request => recordWhiteboardRequestFailure(requestFailures, request))
     page.on('response', response => {
       const path = new URL(response.url()).pathname
-      if (path.startsWith('/vendor/whiteboards-editor/0.18.1-clarin.5/fonts/')) {
+      if (path.startsWith('/vendor/whiteboards-editor/0.18.1-clarin.6/fonts/')) {
         fontResponses.push({ url: response.url(), status: response.status() })
       }
       if (response.status() === 409 && /\/api\/whiteboards\/[^/]+\/scene$/.test(path)) sceneConflicts.push(response.url())

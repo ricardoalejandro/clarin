@@ -112,7 +112,7 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
   const [collaboratorIds, setCollaboratorIds] = useState<string[]>([])
   const [startAt, setStartAt] = useState('')
   const [dueAt, setDueAt] = useState('')
-  const [allDay, setAllDay] = useState(false)
+  const [allDay, setAllDay] = useState(true)
   const [progressMode, setProgressMode] = useState<'manual' | 'automatic'>('manual')
   const [manualProgress, setManualProgress] = useState(0)
   const [progressInput, setProgressInput] = useState('0')
@@ -178,7 +178,8 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
     setCollaboratorIds(task?.collaborators?.map(item => item.user_id) || [])
     setStartAt(localDateTime(task?.start_at || defaultStartAt))
     setDueAt(localDateTime(task?.due_at || defaultDueAt))
-    setAllDay(task ? Boolean(task.is_all_day) : Boolean(defaultAllDay))
+    const seededDates = Boolean(task?.start_at || task?.due_at || defaultStartAt || defaultDueAt)
+    setAllDay(task ? Boolean(task.is_all_day) : defaultAllDay ?? !seededDates)
     const canonicalManualProgress = task?.manual_progress ?? task?.progress ?? 0
     setProgressMode(task?.progress_mode || 'manual')
     setManualProgress(canonicalManualProgress)
@@ -428,7 +429,7 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
       list_id: listId, status_id: statusId,
       start_at: startAt ? new Date(startAt).toISOString() : '',
       due_at: dueAt ? new Date(dueAt).toISOString() : '',
-      is_all_day: allDay,
+      is_all_day: Boolean(startAt || dueAt) && allDay,
       progress: taskCompleted ? 100 : progressMode === 'automatic' ? (task?.progress || 0) : manualProgress,
       progress_mode: progressMode,
       manual_progress: manualProgress,
@@ -552,7 +553,7 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
 
             <section className="space-y-4 rounded-2xl border border-slate-200 p-4">
               <div className="flex items-center gap-2 text-sm font-semibold text-slate-800"><CalendarRange className="h-4 w-4 text-emerald-600" /> Planificación</div>
-              <TaskDateRangePicker label="Fechas de la tarea" startValue={startAt} endValue={dueAt} allDay={allDay} disabled={saving || Boolean(createdTask)} pending={saving} onApply={range => { setStartAt(range.startAt); setDueAt(range.endAt); setAllDay(range.isAllDay); markDirty() }} />
+              <TaskDateRangePicker label="Fecha de entrega" startValue={startAt} endValue={dueAt} allDay={allDay} disabled={saving || Boolean(createdTask)} pending={saving} onApply={range => { setStartAt(range.startAt); setDueAt(range.endAt); setAllDay(range.isAllDay); markDirty() }} />
               {startAt && dueAt && new Date(dueAt) < new Date(startAt) && <p className="text-xs font-medium text-rose-600">La entrega no puede ser anterior al inicio.</p>}
               {!parentTaskId && <div className="flex flex-wrap gap-2"><button onClick={() => { setMilestone(value => !value); markDirty() }} className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium ${milestone ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-slate-200 text-slate-600'}`}><Flag className="h-3.5 w-3.5" /> Hito</button></div>}
               {!parentTaskId && <TaskProgressControl id={`task-editor-progress-${task?.id || 'new'}`} mode={progressMode} inputValue={progressInput} canonicalManualValue={manualProgress} effectiveProgress={task?.progress || 0} completed={taskCompleted} disabled={saving || Boolean(createdTask)} error={progressError} subtaskDone={task?.subtask_done || 0} subtaskCount={task?.subtask_count || 0} onModeChange={nextMode => { if (nextMode === progressMode) return; setProgressMode(nextMode); setProgressError(''); setProgressInput(String(manualProgress)); markDirty() }} onInputChange={value => { setProgressInput(value); setProgressError('') }} onCommit={() => { const validation = validateManualProgress(progressInput); if (!validation.valid) { setProgressError(validation.error); return }; setProgressError(''); setManualProgress(validation.value); setProgressInput(String(validation.value)); if (validation.value !== manualProgress) markDirty() }} onReset={() => { setProgressInput(String(manualProgress)); setProgressError('') }} />}

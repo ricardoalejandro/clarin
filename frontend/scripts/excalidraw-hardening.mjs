@@ -4,7 +4,7 @@ import { extname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { parse } from 'acorn'
 
-export const EXPECTED_EDITOR_VERSION = '0.18.1-clarin.5'
+export const EXPECTED_EDITOR_VERSION = '0.18.1-clarin.6'
 export const LOCAL_EDITOR_ASSET_PATH = `/vendor/whiteboards-editor/${EXPECTED_EDITOR_VERSION}/`
 const LOCAL_EDITOR_ASSET_BASE_EXPRESSION = `new URL(${JSON.stringify(LOCAL_EDITOR_ASSET_PATH)}, globalThis.location.origin).href`
 

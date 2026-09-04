@@ -2807,10 +2807,12 @@ func (s *RoleService) GetByID(ctx context.Context, id uuid.UUID) (*domain.Role, 
 }
 
 func (s *RoleService) Create(ctx context.Context, role *domain.Role) error {
+	role.Name = strings.TrimSpace(role.Name)
 	return s.repos.Role.Create(ctx, role)
 }
 
 func (s *RoleService) UpdateWithAuthorityImpact(ctx context.Context, role *domain.Role) (*repository.WhiteboardAuthorityMutationEffect, error) {
+	role.Name = strings.TrimSpace(role.Name)
 	return s.repos.Role.UpdateWithAuthorityImpact(ctx, role)
 }
 

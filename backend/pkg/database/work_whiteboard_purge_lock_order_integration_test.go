@@ -176,7 +176,7 @@ func TestWorkWhiteboardPurgeAccountActorLockOrder(t *testing.T) {
 				_, _, operationErr := repositories.TaskLocationView.Create(operationCtx, repository.TaskLocationViewCreateInput{
 					ViewID: uuid.New(), BoardID: uuid.New(), AccountID: accountID, ActorID: actorID,
 					ScopeType: domain.TaskAccessTargetList, ScopeID: uuid.New(), Name: "Lock create",
-					Scene: scene, SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1-clarin.5",
+					Scene: scene, SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1-clarin.6",
 					OperationID: uuid.New(), RequestPayloadHash: strings.Repeat("a", 64),
 					ResultSceneHash: strings.Repeat("b", 64), SnapshotObjectKey: "lock/create.json",
 					SnapshotContentHash: strings.Repeat("c", 64), SnapshotSizeBytes: int64(len(scene)),
@@ -190,7 +190,7 @@ func TestWorkWhiteboardPurgeAccountActorLockOrder(t *testing.T) {
 				_, _, operationErr := repositories.TaskLocationView.Duplicate(operationCtx, repository.TaskLocationViewDuplicateInput{
 					ViewID: uuid.New(), BoardID: uuid.New(), SourceViewID: uuid.New(), SourceBoardID: uuid.New(),
 					AccountID: accountID, ActorID: actorID, Name: "Lock duplicate", ExpectedVersion: 1,
-					Scene: scene, SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1-clarin.5",
+					Scene: scene, SceneSchemaVersion: "excalidraw", EditorVersion: "0.18.1-clarin.6",
 					OperationID: uuid.New(), RequestPayloadHash: strings.Repeat("d", 64),
 					ResultSceneHash: strings.Repeat("e", 64), SnapshotObjectKey: "lock/duplicate.json",
 					SnapshotContentHash: strings.Repeat("f", 64), SnapshotSizeBytes: int64(len(scene)),

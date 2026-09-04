@@ -4,7 +4,7 @@
 
 The machine-readable baseline is
 `references/supply-chain-baseline.json`. For the vendored
-`@excalidraw/excalidraw@0.18.1-clarin.5` fork it records the exact local tree
+`@excalidraw/excalidraw@0.18.1-clarin.6` fork it records the exact local tree
 SHA-256, upstream tag/commit, the current advisory snapshot, two
 audited lockfile-license omissions, the expected component count, and the
 SHA-256 of the deterministic CycloneDX 1.6 document.
@@ -28,7 +28,7 @@ Use `--verify archived.cdx.json` to require byte-for-byte equality with release
 evidence.
 
 The current baseline is 251 components and SBOM SHA-256
-`96ed1ec0d3f9bca71796a584a71b4b46243e6f40db2558a263ba28087f5414fc`.
+`ca6a0ae4e12ecc94cd4778a2bae94b5b431c9030756cbd43b9a0966bada8c302`.
 The npm lock omits a license field for `fuzzy@0.1.3` and `khroma@2.1.0`;
 the baseline records their MIT license-file paths and SHA-256 values, and the
 generator verifies those exact files in installed material. An SBOM is an
@@ -37,7 +37,7 @@ notices.
 
 ## Current Advisory Snapshot
 
-On 2026-08-23, `npm audit --omit=dev --json` reported 21 findings for the whole
+On 2026-08-29, `npm audit --omit=dev --json` reported 21 findings for the whole
 frontend production graph: 6 moderate, 13 high, and 2 critical. The two critical
 aggregate findings (`jspdf` and `tar`, the latter through the pre-existing
 Fabric/canvas chain) are outside the Excalidraw-rooted closure, as are the

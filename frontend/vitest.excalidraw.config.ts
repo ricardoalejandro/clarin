@@ -42,6 +42,7 @@ export default defineConfig({
     setupFiles: ['./vitest.setup.ts'],
     include: [
       'vendor/excalidraw-clarin/packages/excalidraw/tests/clarinFreedrawPressure.test.ts',
+      'vendor/excalidraw-clarin/packages/excalidraw/tests/clarinTextWysiwyg.test.ts',
     ],
     restoreMocks: true,
   },

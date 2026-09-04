@@ -8,8 +8,8 @@ import {
   Activity, Eye, Send, Clock, Copy, Sparkles, ExternalLink, LogOut,
   Loader2, Wifi, WifiOff
 } from 'lucide-react'
-import PasswordStrengthChecklist, { getPasswordIssues } from '@/components/PasswordStrengthChecklist'
-import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
+import { getPasswordIssues } from '@/components/PasswordStrengthChecklist'
+import { AdminFormDialog, AdminPasswordFields } from '@/components/admin'
 import { apiDelete, apiGet, apiPost, logoutFromBrowser, tryRefreshToken } from '@/lib/api'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 import {
@@ -286,6 +286,22 @@ interface UserFormError {
   field?: 'username' | 'email' | 'password' | 'accounts'
 }
 
+interface AccountFormError {
+  message: string
+  field?: 'name' | 'plan' | 'subscription_status' | 'trial_ends_at' | 'current_period_end'
+}
+
+interface RoleFormError {
+  message: string
+  field?: 'name' | 'permissions'
+}
+
+interface CredentialHandoff {
+  username: string
+  password: string
+  displayName: string
+}
+
 const ALL_MODULES = [
   { key: 'chats', label: 'Chats', color: 'emerald' },
   { key: 'contacts', label: 'Contactos', color: 'blue' },
@@ -410,16 +426,31 @@ export default function AdminPage() {
   // Modals
   const [showAccountModal, setShowAccountModal] = useState(false)
   const [editingAccount, setEditingAccount] = useState<Account | null>(null)
+  const [accountFormError, setAccountFormError] = useState<AccountFormError | null>(null)
+  const [accountSubmitting, setAccountSubmitting] = useState(false)
+  const [accountAdvancedOpen, setAccountAdvancedOpen] = useState(false)
+  const accountNameInputRef = useRef<HTMLInputElement>(null)
   const [showUserModal, setShowUserModal] = useState(false)
   const [editingUser, setEditingUser] = useState<User | null>(null)
   const [userFormError, setUserFormError] = useState<UserFormError | null>(null)
   const [userSubmitting, setUserSubmitting] = useState(false)
+  const [createdUserCredentials, setCreatedUserCredentials] = useState<CredentialHandoff | null>(null)
+  const [credentialCopyStatus, setCredentialCopyStatus] = useState('')
+  const credentialCopyOperationRef = useRef(0)
   const usernameInputRef = useRef<HTMLInputElement>(null)
-  const userDialogRef = useRef<HTMLDivElement>(null)
+  const userEmailInputRef = useRef<HTMLInputElement>(null)
+  const createdCredentialsInputRef = useRef<HTMLInputElement>(null)
   const [showPasswordModal, setShowPasswordModal] = useState(false)
   const [passwordUserId, setPasswordUserId] = useState('')
+  const [passwordUserName, setPasswordUserName] = useState('')
+  const [passwordUsername, setPasswordUsername] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [newPasswordConfirm, setNewPasswordConfirm] = useState('')
+  const [passwordSubmitting, setPasswordSubmitting] = useState(false)
+  const [passwordError, setPasswordError] = useState('')
+  const [passwordChanged, setPasswordChanged] = useState(false)
+  const passwordInputRef = useRef<HTMLInputElement>(null)
+  const passwordCredentialsInputRef = useRef<HTMLInputElement>(null)
 
   const [showPurgeModal, setShowPurgeModal] = useState(false)
   const [purgeAccount, setPurgeAccount] = useState<Account | null>(null)
@@ -450,6 +481,9 @@ export default function AdminPage() {
   const [showRoleModal, setShowRoleModal] = useState(false)
   const [editingRole, setEditingRole] = useState<Role | null>(null)
   const [roleForm, setRoleForm] = useState({ name: '', description: '', permissions: [] as string[] })
+  const [roleFormError, setRoleFormError] = useState<RoleFormError | null>(null)
+  const [roleSubmitting, setRoleSubmitting] = useState(false)
+  const roleNameInputRef = useRef<HTMLInputElement>(null)
 
   const [showIntegrationModal, setShowIntegrationModal] = useState(false)
   const [editingIntegration, setEditingIntegration] = useState<IntegrationInstance | null>(null)
@@ -487,13 +521,6 @@ export default function AdminPage() {
   const userPasswordIssues = editingUser
     ? []
     : getPasswordIssues(userForm.password, userForm.password_confirm)
-  const hasValidUserAssignment = Boolean(editingUser) || userFormAssignments.some(item => item.account_id)
-  const canSaveUser = !userSubmitting
-    && trimmedUsername !== ''
-    && !usernameAlreadyExists
-    && !userFormError?.field
-    && hasValidUserAssignment
-    && userPasswordIssues.length === 0
   const usernameError = userFormError?.field === 'username'
     ? userFormError.message
     : usernameAlreadyExists
@@ -889,53 +916,39 @@ export default function AdminPage() {
     }
   }, [showErosOpenAIModal, erosOpenAI?.login?.status, erosOpenAI?.login?.login_id, token])
 
-  // Close modals on Escape (topmost first)
-  useAccessibleDialog(
-    showUserModal,
-    userDialogRef,
-    () => {
-      if (userSubmitting) return
-      setShowUserModal(false)
-      setUserFormError(null)
-    },
-    usernameInputRef,
-  )
-
+  // Legacy overlays below still share the page-level Escape owner. The four
+  // admin form dialogs own Escape/focus through AdminFormDialog.
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       if (showErosOpenAIModal) { setShowErosOpenAIModal(false); return }
       if (showIntegrationMonitor) { setShowIntegrationMonitor(false); return }
-      if (showPasswordModal) { setShowPasswordModal(false); return }
       if (showPurgeModal) { setShowPurgeModal(false); return }
       if (showIntegrationModal) { setShowIntegrationModal(false); return }
-      if (showRoleModal) { setShowRoleModal(false); return }
       if (showAssignModal) {
         if (!assignMutationAccountId) setShowAssignModal(false)
         return
       }
-      if (showUserModal) {
-        if (!userSubmitting) {
-          setShowUserModal(false)
-          setUserFormError(null)
-        }
-        return
-      }
-      if (showAccountModal) { setShowAccountModal(false); return }
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [showErosOpenAIModal, showIntegrationMonitor, showPasswordModal, showPurgeModal, showIntegrationModal, showRoleModal, showAssignModal, showUserModal, showAccountModal, userSubmitting, assignMutationAccountId])
+  }, [showErosOpenAIModal, showIntegrationMonitor, showPurgeModal, showIntegrationModal, showAssignModal, assignMutationAccountId])
 
   // Account CRUD
-	  function openCreateAccount() {
-	    setEditingAccount(null)
-	    setAccountForm({ name: '', slug: '', plan: 'basic', max_devices: 5, max_users_override: '', storage_limit_gb: 0, subscription_status: 'active', trial_ends_at: '', current_period_end: '' })
-	    setShowAccountModal(true)
-	  }
+  function openCreateAccount() {
+    setEditingAccount(null)
+    setAccountFormError(null)
+    setAccountSubmitting(false)
+    setAccountAdvancedOpen(false)
+    setAccountForm({ name: '', slug: '', plan: 'basic', max_devices: 5, max_users_override: '', storage_limit_gb: 0, subscription_status: 'active', trial_ends_at: '', current_period_end: '' })
+    setShowAccountModal(true)
+  }
 
   function openEditAccount(a: Account) {
     setEditingAccount(a)
+    setAccountFormError(null)
+    setAccountSubmitting(false)
+    setAccountAdvancedOpen(false)
     setAccountForm({
       name: a.name,
       slug: a.slug,
@@ -950,46 +963,71 @@ export default function AdminPage() {
     setShowAccountModal(true)
   }
 
+  function closeAccountModal() {
+    if (accountSubmitting) return
+    setShowAccountModal(false)
+    setAccountFormError(null)
+    setAccountAdvancedOpen(false)
+  }
+
   async function saveAccount() {
+    if (accountSubmitting) return
+    const trimmedName = accountForm.name.trim()
+    setAccountFormError(null)
+    if (!trimmedName) {
+      setAccountFormError({ field: 'name', message: 'Ingresa el nombre de la cuenta.' })
+      window.requestAnimationFrame(() => accountNameInputRef.current?.focus())
+      return
+    }
+
     const method = editingAccount ? 'PUT' : 'POST'
     const url = editingAccount
       ? `/api/admin/accounts/${editingAccount.id}`
       : '/api/admin/accounts'
 
     const accountPayload = {
-      name: accountForm.name,
-      slug: accountForm.slug,
+      name: trimmedName,
+      slug: accountForm.slug.trim(),
       plan: accountForm.plan,
-	      max_devices: accountForm.max_devices,
-	      max_users_override: accountForm.max_users_override === '' ? null : Math.max(0, parseInt(accountForm.max_users_override, 10) || 0),
-	      storage_limit_bytes: gbToBytes(accountForm.storage_limit_gb),
-	    }
+      max_devices: accountForm.max_devices,
+      max_users_override: accountForm.max_users_override === '' ? null : Math.max(0, parseInt(accountForm.max_users_override, 10) || 0),
+      storage_limit_bytes: gbToBytes(accountForm.storage_limit_gb),
+      subscription_status: accountForm.subscription_status,
+      trial_ends_at: accountForm.trial_ends_at,
+      current_period_end: accountForm.current_period_end,
+    }
 
-    const res = await fetch(url, { method, headers, body: JSON.stringify(accountPayload) })
-    const data = await res.json()
-    if (data.success) {
-      const accountId = editingAccount?.id || data.account?.id
-      if (accountId) {
-        const subRes = await fetch(`/api/admin/accounts/${accountId}/subscription`, {
-          method: 'PUT',
-          headers,
-          body: JSON.stringify({
-            plan_code: accountForm.plan,
-            status: accountForm.subscription_status,
-            trial_ends_at: accountForm.trial_ends_at,
-            current_period_end: accountForm.current_period_end,
-          }),
-        })
-        const subData = await subRes.json()
-        if (!subData.success) {
-          alert(subData.error || 'La cuenta se guardó, pero no se pudo actualizar la suscripción')
-          return
-        }
+    setAccountSubmitting(true)
+    try {
+      const res = await fetch(url, { method, headers, body: JSON.stringify(accountPayload) })
+      const data = await res.json().catch(() => ({ success: false })) as {
+        success?: boolean
+        error?: string
+        code?: string
+        field?: string
       }
-      setShowAccountModal(false)
-      fetchAccounts()
-    } else {
-      alert(data.error || 'Error al guardar')
+      if (res.ok && data.success) {
+        setShowAccountModal(false)
+        setAccountFormError(null)
+        await fetchAccounts()
+        return
+      }
+
+      const supportedFields = new Set<AccountFormError['field']>(['name', 'plan', 'subscription_status', 'trial_ends_at', 'current_period_end'])
+      const field = supportedFields.has(data.field as AccountFormError['field'])
+        ? data.field as AccountFormError['field']
+        : data.code === 'account_name_required'
+          ? 'name'
+          : data.code === 'invalid_plan'
+            ? 'plan'
+            : undefined
+      if (field && field !== 'name' && field !== 'plan') setAccountAdvancedOpen(true)
+      setAccountFormError({ field, message: data.error || 'No se pudo guardar la cuenta.' })
+      if (field === 'name') window.requestAnimationFrame(() => accountNameInputRef.current?.focus())
+    } catch {
+      setAccountFormError({ message: 'No se pudo conectar con el servidor. Revisa tu conexión e inténtalo nuevamente.' })
+    } finally {
+      setAccountSubmitting(false)
     }
   }
 
@@ -1062,9 +1100,12 @@ export default function AdminPage() {
 
   // User CRUD
   function openCreateUser() {
+    credentialCopyOperationRef.current += 1
     setEditingUser(null)
     setUserFormError(null)
     setUserSubmitting(false)
+    setCreatedUserCredentials(null)
+    setCredentialCopyStatus('')
     const initialAccount = filterAccountId || accounts.find(a => a.is_active)?.id || ''
     setUserForm({ account_id: initialAccount, username: '', email: '', password: '', password_confirm: '', display_name: '', role: 'agent' })
     setUserFormAssignments(initialAccount ? [{ account_id: initialAccount, role: 'agent', role_id: '', is_default: true }] : [])
@@ -1072,12 +1113,25 @@ export default function AdminPage() {
   }
 
   function openEditUser(u: User) {
+    credentialCopyOperationRef.current += 1
     setEditingUser(u)
     setUserFormError(null)
     setUserSubmitting(false)
+    setCreatedUserCredentials(null)
+    setCredentialCopyStatus('')
     setUserForm({ account_id: u.account_id, username: u.username, email: u.email, password: '', password_confirm: '', display_name: u.display_name, role: u.role })
     setUserFormAssignments([])
     setShowUserModal(true)
+  }
+
+  function closeUserModal() {
+    if (userSubmitting) return
+    credentialCopyOperationRef.current += 1
+    setShowUserModal(false)
+    setUserFormError(null)
+    setCreatedUserCredentials(null)
+    setCredentialCopyStatus('')
+    setUserForm(current => ({ ...current, password: '', password_confirm: '' }))
   }
 
   function addUserFormAssignment() {
@@ -1105,10 +1159,43 @@ export default function AdminPage() {
     })
   }
 
+  function focusPasswordIssue(password: string, confirmation: string, passwordId: string, confirmationId: string) {
+    const passwordMeetsPolicy = getPasswordIssues(password).length === 0
+    const targetId = passwordMeetsPolicy && password !== confirmation ? confirmationId : passwordId
+    window.requestAnimationFrame(() => {
+      const input = document.getElementById(targetId) as HTMLInputElement | null
+      input?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      input?.focus({ preventScroll: true })
+    })
+  }
+
+  function focusUserField(id: string) {
+    window.requestAnimationFrame(() => {
+      const target = document.getElementById(id) as HTMLElement | null
+      target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      target?.focus({ preventScroll: true })
+    })
+  }
+
+  function focusUserAccountsError() {
+    focusUserField(userFormAssignments.length > 0 ? 'admin-user-account-0' : 'admin-user-accounts-empty')
+  }
+
   async function saveUser() {
     if (userSubmitting) return
 
     setUserFormError(null)
+    const invalidAssignmentIndex = userFormAssignments.findIndex(item => !item.account_id)
+    if (!editingUser && (userFormAssignments.length === 0 || invalidAssignmentIndex >= 0)) {
+      setUserFormError({
+        field: 'accounts',
+        message: userFormAssignments.length === 0
+          ? 'Asigna al usuario al menos a una cuenta.'
+          : 'Selecciona una cuenta en cada asignación.',
+      })
+      focusUserField(invalidAssignmentIndex >= 0 ? `admin-user-account-${invalidAssignmentIndex}` : 'admin-user-accounts-empty')
+      return
+    }
     if (!trimmedUsername) {
       setUserFormError({ field: 'username', message: 'Ingresa un nombre de usuario.' })
       usernameInputRef.current?.focus()
@@ -1121,14 +1208,11 @@ export default function AdminPage() {
     }
     if (!editingUser && userPasswordIssues.length > 0) {
       setUserFormError({ field: 'password', message: `Completa los requisitos de contraseña: ${userPasswordIssues.join(', ')}.` })
+      focusPasswordIssue(userForm.password, userForm.password_confirm, 'admin-user-password', 'admin-user-password-confirm')
       return
     }
 
     const validAssignments = userFormAssignments.filter(item => item.account_id)
-    if (!editingUser && validAssignments.length === 0) {
-      setUserFormError({ field: 'accounts', message: 'Asigna al usuario al menos a una cuenta.' })
-      return
-    }
 
     setUserSubmitting(true)
     try {
@@ -1157,11 +1241,21 @@ export default function AdminPage() {
         error?: string
         code?: string
         field?: string
+        user?: User
       }
       if (res.ok && data.success) {
-        setShowUserModal(false)
         setUserFormError(null)
-        await fetchUsers()
+        if (editingUser) {
+          setShowUserModal(false)
+          setUserForm(current => ({ ...current, password: '', password_confirm: '' }))
+        } else {
+          setCreatedUserCredentials({
+            username: trimmedUsername,
+            password: userForm.password,
+            displayName: userForm.display_name.trim() || trimmedUsername,
+          })
+        }
+        void fetchUsers()
         return
       }
 
@@ -1170,8 +1264,13 @@ export default function AdminPage() {
         window.requestAnimationFrame(() => usernameInputRef.current?.focus())
       } else if (data.code === 'email_taken' || data.field === 'email') {
         setUserFormError({ field: 'email', message: 'Este correo ya está asociado a otro usuario.' })
+        focusUserField('admin-user-email')
+      } else if (data.code === 'password_required' || data.code === 'password_mismatch' || data.code === 'password_policy' || data.field === 'password') {
+        setUserFormError({ field: 'password', message: data.error || 'Revisa los requisitos de la contraseña.' })
+        focusPasswordIssue(userForm.password, userForm.password_confirm, 'admin-user-password', 'admin-user-password-confirm')
       } else if (data.code === 'invalid_account_assignments' || data.field === 'accounts') {
         setUserFormError({ field: 'accounts', message: data.error || 'Revisa las cuentas y roles seleccionados.' })
+        focusUserAccountsError()
       } else if (data.code === 'plan_limit_reached') {
         setUserFormError({ message: data.error || 'La cuenta alcanzó el límite de usuarios de su plan.' })
       } else if (res.status >= 500) {
@@ -1206,23 +1305,71 @@ export default function AdminPage() {
   }
 
   async function resetPassword() {
-    if (!newPassword) return
+    if (passwordSubmitting || passwordChanged) return
+    setPasswordError('')
     const passwordIssues = getPasswordIssues(newPassword, newPasswordConfirm)
     if (passwordIssues.length > 0) {
-      alert(`Usa una contraseña fuerte: ${passwordIssues.join(', ')}.`)
+      setPasswordError(`Completa los requisitos de contraseña: ${passwordIssues.join(', ')}.`)
+      focusPasswordIssue(newPassword, newPasswordConfirm, 'admin-reset-password', 'admin-reset-password-confirm')
       return
     }
-    const res = await fetch(`/api/admin/users/${passwordUserId}/password`, {
-      method: 'PATCH', headers, body: JSON.stringify({ password: newPassword, password_confirm: newPasswordConfirm })
-    })
-    const data = await res.json()
-    if (data.success) {
-      setShowPasswordModal(false)
-      setNewPassword('')
-      setNewPasswordConfirm('')
-      alert('Contraseña actualizada')
-    } else {
-      alert(data.error || 'Error')
+
+    setPasswordSubmitting(true)
+    try {
+      const res = await fetch(`/api/admin/users/${passwordUserId}/password`, {
+        method: 'PATCH', headers, body: JSON.stringify({ password: newPassword, password_confirm: newPasswordConfirm })
+      })
+      const data = await res.json().catch(() => ({ success: false })) as { success?: boolean; error?: string; code?: string; field?: string }
+      if (res.ok && data.success) {
+        setPasswordChanged(true)
+        setCredentialCopyStatus('')
+        return
+      }
+      setPasswordError(data.error || (data.code === 'user_not_found' ? 'El usuario ya no existe.' : 'No se pudo cambiar la contraseña.'))
+    } catch {
+      setPasswordError('No se pudo conectar con el servidor. Revisa tu conexión e inténtalo nuevamente.')
+    } finally {
+      setPasswordSubmitting(false)
+    }
+  }
+
+  function openPasswordDialog(user: User) {
+    credentialCopyOperationRef.current += 1
+    setPasswordUserId(user.id)
+    setPasswordUserName(user.display_name || user.username)
+    setPasswordUsername(user.username)
+    setNewPassword('')
+    setNewPasswordConfirm('')
+    setPasswordError('')
+    setPasswordSubmitting(false)
+    setPasswordChanged(false)
+    setCredentialCopyStatus('')
+    setShowPasswordModal(true)
+  }
+
+  function closePasswordModal() {
+    if (passwordSubmitting) return
+    credentialCopyOperationRef.current += 1
+    setShowPasswordModal(false)
+    setPasswordUserId('')
+    setPasswordUserName('')
+    setPasswordUsername('')
+    setNewPassword('')
+    setNewPasswordConfirm('')
+    setPasswordError('')
+    setPasswordChanged(false)
+    setCredentialCopyStatus('')
+  }
+
+  async function copyCredentialText(text: string, successMessage: string) {
+    const operation = ++credentialCopyOperationRef.current
+    try {
+      await navigator.clipboard.writeText(text)
+      if (operation !== credentialCopyOperationRef.current) return
+      setCredentialCopyStatus(successMessage)
+    } catch {
+      if (operation !== credentialCopyOperationRef.current) return
+      setCredentialCopyStatus('No se pudo copiar. Selecciona el valor y cópialo manualmente.')
     }
   }
 
@@ -1406,13 +1553,23 @@ export default function AdminPage() {
   function openCreateRole() {
     setEditingRole(null)
     setRoleForm({ name: '', description: '', permissions: [] })
+    setRoleFormError(null)
+    setRoleSubmitting(false)
     setShowRoleModal(true)
   }
 
   function openEditRole(r: Role) {
     setEditingRole(r)
     setRoleForm({ name: r.name, description: r.description, permissions: [...r.permissions] })
+    setRoleFormError(null)
+    setRoleSubmitting(false)
     setShowRoleModal(true)
+  }
+
+  function closeRoleModal() {
+    if (roleSubmitting) return
+    setShowRoleModal(false)
+    setRoleFormError(null)
   }
 
   function toggleModulePermission(module: string) {
@@ -1425,16 +1582,37 @@ export default function AdminPage() {
   }
 
   async function saveRole() {
-    if (!roleForm.name.trim()) { alert('El nombre del rol es requerido'); return }
+    if (roleSubmitting) return
+    const trimmedName = roleForm.name.trim()
+    setRoleFormError(null)
+    if (!trimmedName) {
+      setRoleFormError({ field: 'name', message: 'Ingresa el nombre del rol.' })
+      window.requestAnimationFrame(() => roleNameInputRef.current?.focus())
+      return
+    }
     const method = editingRole ? 'PUT' : 'POST'
     const url = editingRole ? `/api/admin/roles/${editingRole.id}` : '/api/admin/roles'
-    const res = await fetch(url, { method, headers, body: JSON.stringify(roleForm) })
-    const data = await res.json()
-    if (data.success) {
-      setShowRoleModal(false)
-      fetchRoles()
-    } else {
-      alert(data.error || 'Error al guardar rol')
+    setRoleSubmitting(true)
+    try {
+      const res = await fetch(url, { method, headers, body: JSON.stringify({ ...roleForm, name: trimmedName, description: roleForm.description.trim() }) })
+      const data = await res.json().catch(() => ({ success: false })) as { success?: boolean; error?: string; code?: string; field?: string }
+      if (res.ok && data.success) {
+        setShowRoleModal(false)
+        setRoleFormError(null)
+        await fetchRoles()
+        return
+      }
+      const field: RoleFormError['field'] = data.field === 'name' || data.code === 'role_name_required' || data.code === 'role_name_taken'
+        ? 'name'
+        : data.field === 'permissions' || data.code === 'invalid_permission'
+          ? 'permissions'
+          : undefined
+      setRoleFormError({ field, message: data.error || 'No se pudo guardar el rol.' })
+      if (field === 'name') window.requestAnimationFrame(() => roleNameInputRef.current?.focus())
+    } catch {
+      setRoleFormError({ message: 'No se pudo conectar con el servidor. Revisa tu conexión e inténtalo nuevamente.' })
+    } finally {
+      setRoleSubmitting(false)
     }
   }
 
@@ -2261,7 +2439,7 @@ export default function AdminPage() {
                       <button onClick={() => openAssignModal(u)} className="p-1.5 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded" title="Gestionar cuentas">
                         <Link2 className="w-4 h-4" />
                       </button>
-                      <button onClick={() => { setPasswordUserId(u.id); setNewPassword(''); setNewPasswordConfirm(''); setShowPasswordModal(true) }} className="p-1.5 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded" title="Cambiar contraseña">
+                      <button type="button" onClick={() => openPasswordDialog(u)} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-gray-400 hover:bg-purple-50 hover:text-purple-600" title="Cambiar contraseña" aria-label={`Cambiar contraseña de ${u.display_name || u.username}`}>
                         <KeyRound className="w-4 h-4" />
                       </button>
                       <button onClick={() => toggleUser(u.id)} className="p-1.5 text-gray-400 hover:text-yellow-600 hover:bg-yellow-50 rounded" title={u.is_active ? 'Desactivar' : 'Activar'}>
@@ -3036,259 +3214,314 @@ export default function AdminPage() {
       )}
 
       {/* Role Modal */}
-      {showRoleModal && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg">
-            <div className="p-6 border-b border-gray-200">
-              <h2 className="text-lg font-semibold text-gray-900">
-                {editingRole ? 'Editar Rol' : 'Nuevo Rol'}
-              </h2>
-              <p className="text-sm text-gray-500 mt-1">Define qué módulos pueden acceder los usuarios con este rol</p>
+      <AdminFormDialog
+        open={showRoleModal}
+        size="role"
+        title={editingRole ? 'Editar rol' : 'Crear rol'}
+        description="Define el acceso a módulos y capacidades para este rol global."
+        icon={Shield}
+        busy={roleSubmitting}
+        formNoValidate
+        onClose={closeRoleModal}
+        initialFocusRef={editingRole?.is_system ? undefined : roleNameInputRef}
+        onSubmit={event => { event.preventDefault(); void saveRole() }}
+        footer={(
+          <>
+            <button type="button" onClick={closeRoleModal} disabled={roleSubmitting} className="min-h-11 rounded-xl px-4 text-sm font-medium text-slate-600 transition hover:bg-slate-200/70 disabled:cursor-not-allowed disabled:opacity-50">
+              Cancelar
+            </button>
+            <button type="submit" disabled={roleSubmitting} className="inline-flex min-h-11 min-w-28 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300">
+              {roleSubmitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+              {roleSubmitting ? 'Guardando…' : editingRole ? 'Guardar cambios' : 'Crear rol'}
+            </button>
+          </>
+        )}
+      >
+        <div className="space-y-4">
+          {roleFormError && !roleFormError.field && (
+            <div role="alert" className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-900">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>{roleFormError.message}</span>
             </div>
-            <div className="p-6 space-y-5">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Nombre del rol</label>
-                <input
-                  type="text"
-                  value={roleForm.name}
-                  onChange={e => setRoleForm(f => ({ ...f, name: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
-                  placeholder="Ej: Vendedor, Soporte, Supervisor..."
-                  disabled={editingRole?.is_system}
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Descripción (opcional)</label>
-                <input
-                  type="text"
-                  value={roleForm.description}
-                  onChange={e => setRoleForm(f => ({ ...f, description: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
-                  placeholder="Breve descripción del rol..."
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-3">
-                  Módulos accesibles
-                  <span className="ml-2 text-xs font-normal text-gray-400">
-                    ({roleForm.permissions.length} de {ALL_MODULES.length} seleccionados)
-                  </span>
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  {ALL_MODULES.map(mod => {
-                    const active = roleForm.permissions.includes(mod.key)
-                    return (
-                      <button
-                        key={mod.key}
-                        type="button"
-                        onClick={() => toggleModulePermission(mod.key)}
-                        className={`flex items-center gap-2.5 px-3 py-2.5 rounded-lg border text-sm font-medium transition-all ${
-                          active
-                            ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
-                            : 'border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:bg-gray-50'
-                        }`}
-                      >
-                        {active
-                          ? <CheckSquare className="w-4 h-4 shrink-0 text-emerald-500" />
-                          : <Square className="w-4 h-4 shrink-0 text-gray-300" />
-                        }
-                        {mod.label}
-                      </button>
-                    )
-                  })}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setRoleForm(f => ({
-                    ...f,
-                    permissions: f.permissions.length === ALL_MODULES.length ? [] : ALL_MODULES.map(m => m.key)
-                  }))}
-                  className="mt-3 text-xs text-emerald-600 hover:underline"
-                >
-                  {roleForm.permissions.length === ALL_MODULES.length ? 'Quitar todos' : 'Seleccionar todos'}
-                </button>
-              </div>
-            </div>
-            <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
-              <button onClick={() => setShowRoleModal(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">
-                Cancelar
-              </button>
-              <button onClick={saveRole} className="px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700">
-                {editingRole ? 'Guardar' : 'Crear Rol'}
-              </button>
-            </div>
+          )}
+          <div>
+            <label htmlFor="admin-role-name" className="mb-1.5 block text-sm font-medium text-slate-700">Nombre del rol</label>
+            <input
+              ref={roleNameInputRef}
+              id="admin-role-name"
+              type="text"
+              value={roleForm.name}
+              onChange={event => {
+                setRoleForm(form => ({ ...form, name: event.target.value }))
+                setRoleFormError(current => current?.field === 'name' ? null : current)
+              }}
+              disabled={Boolean(editingRole?.is_system) || roleSubmitting}
+              aria-invalid={roleFormError?.field === 'name'}
+              aria-describedby={roleFormError?.field === 'name' ? 'admin-role-name-error' : undefined}
+              className={`min-h-11 w-full rounded-xl border px-3 text-sm outline-none transition focus:ring-2 disabled:bg-slate-100 disabled:text-slate-500 ${roleFormError?.field === 'name' ? 'border-red-300 bg-red-50/40 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`}
+              placeholder="Ej.: Vendedor, Soporte, Supervisor"
+            />
+            {roleFormError?.field === 'name' && <p id="admin-role-name-error" role="alert" className="mt-1.5 text-xs font-medium text-red-600">{roleFormError.message}</p>}
           </div>
+          <div>
+            <label htmlFor="admin-role-description" className="mb-1.5 block text-sm font-medium text-slate-700">Descripción <span className="font-normal text-slate-400">(opcional)</span></label>
+            <input
+              id="admin-role-description"
+              type="text"
+              value={roleForm.description}
+              onChange={event => setRoleForm(form => ({ ...form, description: event.target.value }))}
+              disabled={roleSubmitting}
+              className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 disabled:bg-slate-100"
+              placeholder="Breve descripción del rol"
+            />
+          </div>
+          <fieldset aria-describedby={roleFormError?.field === 'permissions' ? 'admin-role-permissions-error' : undefined}>
+            <legend className="mb-2 flex w-full items-center justify-between gap-3 text-sm font-medium text-slate-700">
+              <span>Módulos accesibles</span>
+              <span className="text-xs font-normal text-slate-400">{roleForm.permissions.length} de {ALL_MODULES.length}</span>
+            </legend>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {ALL_MODULES.map(mod => {
+                const active = roleForm.permissions.includes(mod.key)
+                return (
+                  <button
+                    key={mod.key}
+                    type="button"
+                    aria-pressed={active}
+                    disabled={roleSubmitting}
+                    onClick={() => {
+                      toggleModulePermission(mod.key)
+                      setRoleFormError(current => current?.field === 'permissions' ? null : current)
+                    }}
+                    className={`flex min-h-11 items-center gap-2.5 rounded-xl border px-3 py-2 text-left text-sm font-medium transition ${active ? 'border-emerald-400 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'} disabled:cursor-not-allowed disabled:opacity-60`}
+                  >
+                    {active ? <CheckSquare className="h-4 w-4 shrink-0 text-emerald-500" /> : <Square className="h-4 w-4 shrink-0 text-slate-300" />}
+                    <span>{mod.label}</span>
+                  </button>
+                )
+              })}
+            </div>
+            {roleFormError?.field === 'permissions' && <p id="admin-role-permissions-error" role="alert" className="mt-2 text-xs font-medium text-red-600">{roleFormError.message}</p>}
+            <button
+              type="button"
+              disabled={roleSubmitting}
+              onClick={() => setRoleForm(form => ({ ...form, permissions: form.permissions.length === ALL_MODULES.length ? [] : ALL_MODULES.map(module => module.key) }))}
+              className="mt-2 min-h-11 rounded-lg px-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+            >
+              {roleForm.permissions.length === ALL_MODULES.length ? 'Quitar todos' : 'Seleccionar todos'}
+            </button>
+          </fieldset>
         </div>
-      )}
+      </AdminFormDialog>
 
       {/* Account Modal */}
-      {showAccountModal && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl">
-            <div className="p-6 border-b border-gray-200">
-              <h2 className="text-lg font-semibold text-gray-900">
-                {editingAccount ? 'Editar Cuenta' : 'Nueva Cuenta'}
-              </h2>
+      <AdminFormDialog
+        open={showAccountModal}
+        size="account"
+        title={editingAccount ? 'Editar cuenta' : 'Crear cuenta'}
+        description={editingAccount ? 'Actualiza la identidad, límites y suscripción de la cuenta.' : 'Configura una nueva cuenta y su suscripción en una sola operación.'}
+        icon={Building2}
+        busy={accountSubmitting}
+        formNoValidate
+        onClose={closeAccountModal}
+        initialFocusRef={accountNameInputRef}
+        onSubmit={event => { event.preventDefault(); void saveAccount() }}
+        footer={(
+          <>
+            <button type="button" onClick={closeAccountModal} disabled={accountSubmitting} className="min-h-11 rounded-xl px-4 text-sm font-medium text-slate-600 transition hover:bg-slate-200/70 disabled:cursor-not-allowed disabled:opacity-50">Cancelar</button>
+            <button type="submit" disabled={accountSubmitting} className="inline-flex min-h-11 min-w-28 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300">
+              {accountSubmitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+              {accountSubmitting ? 'Guardando…' : editingAccount ? 'Guardar cambios' : 'Crear cuenta'}
+            </button>
+          </>
+        )}
+      >
+        <div className="space-y-4">
+          {accountFormError && !accountFormError.field && (
+            <div role="alert" className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-900">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>{accountFormError.message}</span>
             </div>
-            <div className="p-6 space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Nombre</label>
-                <input
-                  type="text"
-                  value={accountForm.name}
-                  onChange={e => setAccountForm(f => ({ ...f, name: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
-                  placeholder="Nombre de la cuenta"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Slug (opcional)</label>
-                <input
-                  type="text"
-                  value={accountForm.slug}
-                  onChange={e => setAccountForm(f => ({ ...f, slug: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
-                  placeholder="mi-cuenta"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Plan</label>
-                  <select
-                    value={accountForm.plan}
-                    onChange={e => setAccountForm(f => ({ ...f, plan: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
-                  >
-                    {planOptions.map(plan => (
-                      <option key={plan.code} value={plan.code}>{plan.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Max Dispositivos</label>
-                  <input
-                    type="number"
-                    value={accountForm.max_devices}
-                    onChange={e => setAccountForm(f => ({ ...f, max_devices: parseInt(e.target.value) || 1 }))}
-                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
-                    min={1}
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Límite de usuarios</label>
-                <input
-                  type="number"
-                  value={accountForm.max_users_override}
-                  onChange={e => setAccountForm(f => ({ ...f, max_users_override: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
-                  min={0}
-                  placeholder={`Según plan (${planMaxUsers(accountForm.plan) ?? 'sin límite'})`}
-                />
-                <p className="mt-1 text-xs text-gray-400">Vacío usa el plan. 0 deja la cuenta sin límite.</p>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Límite de almacenamiento (GB)</label>
-                <input
-                  type="number"
-                  value={accountForm.storage_limit_gb}
-                  onChange={e => setAccountForm(f => ({ ...f, storage_limit_gb: Math.max(0, parseFloat(e.target.value) || 0) }))}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
-                  min={0}
-                  step={0.5}
-                />
-                <p className="mt-1 text-xs text-gray-400">Usa 0 para dejar la cuenta sin límite.</p>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Estado</label>
-                  <select
-                    value={accountForm.subscription_status}
-                    onChange={e => setAccountForm(f => ({ ...f, subscription_status: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
-                  >
-                    <option value="active">Activa</option>
-                    <option value="trialing">Prueba</option>
-                    <option value="grace">Gracia</option>
-                    <option value="past_due">Pendiente</option>
-                    <option value="suspended">Suspendida</option>
-                    <option value="canceled">Cancelada</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Prueba hasta</label>
-                  <input
-                    type="date"
-                    value={accountForm.trial_ends_at}
-                    onChange={e => setAccountForm(f => ({ ...f, trial_ends_at: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Periodo hasta</label>
-                  <input
-                    type="date"
-                    value={accountForm.current_period_end}
-                    onChange={e => setAccountForm(f => ({ ...f, current_period_end: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
-                  />
-                </div>
-              </div>
-	            </div>
-            <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
-              <button onClick={() => setShowAccountModal(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">
-                Cancelar
-              </button>
-              <button onClick={saveAccount} className="px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700">
-                {editingAccount ? 'Guardar' : 'Crear'}
-              </button>
+          )}
+          <div>
+            <label htmlFor="admin-account-name" className="mb-1.5 block text-sm font-medium text-slate-700">Nombre</label>
+            <input
+              ref={accountNameInputRef}
+              id="admin-account-name"
+              value={accountForm.name}
+              onChange={event => {
+                setAccountForm(form => ({ ...form, name: event.target.value }))
+                setAccountFormError(current => current?.field === 'name' ? null : current)
+              }}
+              disabled={accountSubmitting}
+              aria-invalid={accountFormError?.field === 'name'}
+              aria-describedby={accountFormError?.field === 'name' ? 'admin-account-name-error' : undefined}
+              className={`min-h-11 w-full rounded-xl border px-3 text-sm outline-none transition focus:ring-2 disabled:bg-slate-100 ${accountFormError?.field === 'name' ? 'border-red-300 bg-red-50/40 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`}
+              placeholder="Nombre de la cuenta"
+            />
+            {accountFormError?.field === 'name' && <p id="admin-account-name-error" role="alert" className="mt-1.5 text-xs font-medium text-red-600">{accountFormError.message}</p>}
+          </div>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label htmlFor="admin-account-slug" className="mb-1.5 block text-sm font-medium text-slate-700">Slug <span className="font-normal text-slate-400">(opcional)</span></label>
+              <input id="admin-account-slug" value={accountForm.slug} onChange={event => setAccountForm(form => ({ ...form, slug: event.target.value }))} disabled={accountSubmitting} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 disabled:bg-slate-100" placeholder="mi-cuenta" />
+            </div>
+            <div>
+              <label htmlFor="admin-account-plan" className="mb-1.5 block text-sm font-medium text-slate-700">Plan</label>
+              <select
+                id="admin-account-plan"
+                value={accountForm.plan}
+                onChange={event => {
+                  setAccountForm(form => ({ ...form, plan: event.target.value }))
+                  setAccountFormError(current => current?.field === 'plan' ? null : current)
+                }}
+                disabled={accountSubmitting}
+                aria-invalid={accountFormError?.field === 'plan'}
+                aria-describedby={accountFormError?.field === 'plan' ? 'admin-account-plan-error' : undefined}
+                className={`min-h-11 w-full rounded-xl border px-3 text-sm outline-none transition focus:ring-2 disabled:bg-slate-100 ${accountFormError?.field === 'plan' ? 'border-red-300 bg-red-50/40 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`}
+              >
+                {planOptions.map(plan => <option key={plan.code} value={plan.code}>{plan.name}</option>)}
+              </select>
+              {accountFormError?.field === 'plan' && <p id="admin-account-plan-error" role="alert" className="mt-1.5 text-xs font-medium text-red-600">{accountFormError.message}</p>}
             </div>
           </div>
+          <section className="rounded-2xl border border-slate-200 bg-slate-50/60">
+            <button
+              type="button"
+              aria-expanded={accountAdvancedOpen}
+              aria-controls="admin-account-advanced"
+              onClick={() => setAccountAdvancedOpen(open => !open)}
+              className="flex min-h-12 w-full items-center justify-between gap-3 rounded-2xl px-4 text-left"
+            >
+              <span>
+                <span className="block text-sm font-semibold text-slate-800">Límites y suscripción</span>
+                <span className="block text-xs text-slate-500">{accountForm.subscription_status === 'active' ? 'Activa' : accountForm.subscription_status} · {accountForm.max_users_override === '' ? `Plan: ${planMaxUsers(accountForm.plan) ?? 'sin límite'} usuarios` : `${accountForm.max_users_override} usuarios`}</span>
+              </span>
+              <ChevronDown className={`h-4 w-4 shrink-0 text-slate-500 transition-transform ${accountAdvancedOpen ? 'rotate-180' : ''}`} aria-hidden="true" />
+            </button>
+            {accountAdvancedOpen && (
+              <div id="admin-account-advanced" className="space-y-4 border-t border-slate-200 px-4 py-4">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <label htmlFor="admin-account-devices" className="mb-1.5 block text-sm font-medium text-slate-700">Máximo de dispositivos</label>
+                    <input id="admin-account-devices" type="number" min={1} value={accountForm.max_devices} onChange={event => setAccountForm(form => ({ ...form, max_devices: Math.max(1, parseInt(event.target.value, 10) || 1) }))} disabled={accountSubmitting} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 disabled:bg-slate-100" />
+                  </div>
+                  <div>
+                    <label htmlFor="admin-account-users" className="mb-1.5 block text-sm font-medium text-slate-700">Límite de usuarios</label>
+                    <input id="admin-account-users" type="number" min={0} value={accountForm.max_users_override} onChange={event => setAccountForm(form => ({ ...form, max_users_override: event.target.value }))} disabled={accountSubmitting} placeholder={`Según plan (${planMaxUsers(accountForm.plan) ?? 'sin límite'})`} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 disabled:bg-slate-100" />
+                    <p className="mt-1 text-xs text-slate-500">Vacío usa el plan; 0 significa sin límite.</p>
+                  </div>
+                </div>
+                <div>
+                  <label htmlFor="admin-account-storage" className="mb-1.5 block text-sm font-medium text-slate-700">Almacenamiento (GB)</label>
+                  <input id="admin-account-storage" type="number" min={0} step={0.5} value={accountForm.storage_limit_gb} onChange={event => setAccountForm(form => ({ ...form, storage_limit_gb: Math.max(0, parseFloat(event.target.value) || 0) }))} disabled={accountSubmitting} className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 disabled:bg-slate-100" />
+                  <p className="mt-1 text-xs text-slate-500">0 significa sin límite específico.</p>
+                </div>
+                <div>
+                  <label htmlFor="admin-account-status" className="mb-1.5 block text-sm font-medium text-slate-700">Estado de suscripción</label>
+                  <select
+                    id="admin-account-status"
+                    value={accountForm.subscription_status}
+                    onChange={event => {
+                      setAccountForm(form => ({ ...form, subscription_status: event.target.value }))
+                      setAccountFormError(current => current?.field === 'subscription_status' ? null : current)
+                    }}
+                    disabled={accountSubmitting}
+                    aria-invalid={accountFormError?.field === 'subscription_status'}
+                    aria-describedby={accountFormError?.field === 'subscription_status' ? 'admin-account-status-error' : undefined}
+                    className={`min-h-11 w-full rounded-xl border px-3 text-sm outline-none focus:ring-2 disabled:bg-slate-100 ${accountFormError?.field === 'subscription_status' ? 'border-red-300 bg-red-50/40 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`}
+                  >
+                    <option value="active">Activa</option><option value="trialing">Prueba</option><option value="grace">Gracia</option><option value="past_due">Pendiente</option><option value="suspended">Suspendida</option><option value="canceled">Cancelada</option>
+                  </select>
+                  {accountFormError?.field === 'subscription_status' && <p id="admin-account-status-error" role="alert" className="mt-1.5 text-xs font-medium text-red-600">{accountFormError.message}</p>}
+                </div>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <label htmlFor="admin-account-trial-end" className="mb-1.5 block text-sm font-medium text-slate-700">Prueba hasta</label>
+                    <input id="admin-account-trial-end" type="date" value={accountForm.trial_ends_at} onChange={event => { setAccountForm(form => ({ ...form, trial_ends_at: event.target.value })); setAccountFormError(current => current?.field === 'trial_ends_at' ? null : current) }} disabled={accountSubmitting} aria-invalid={accountFormError?.field === 'trial_ends_at'} aria-describedby={accountFormError?.field === 'trial_ends_at' ? 'admin-account-trial-end-error' : undefined} className={`min-h-11 w-full rounded-xl border px-3 text-sm outline-none focus:ring-2 disabled:bg-slate-100 ${accountFormError?.field === 'trial_ends_at' ? 'border-red-300 bg-red-50/40 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`} />
+                    {accountFormError?.field === 'trial_ends_at' && <p id="admin-account-trial-end-error" role="alert" className="mt-1.5 text-xs font-medium text-red-600">{accountFormError.message}</p>}
+                  </div>
+                  <div>
+                    <label htmlFor="admin-account-period-end" className="mb-1.5 block text-sm font-medium text-slate-700">Periodo hasta</label>
+                    <input id="admin-account-period-end" type="date" value={accountForm.current_period_end} onChange={event => { setAccountForm(form => ({ ...form, current_period_end: event.target.value })); setAccountFormError(current => current?.field === 'current_period_end' ? null : current) }} disabled={accountSubmitting} aria-invalid={accountFormError?.field === 'current_period_end'} aria-describedby={accountFormError?.field === 'current_period_end' ? 'admin-account-period-end-error' : undefined} className={`min-h-11 w-full rounded-xl border px-3 text-sm outline-none focus:ring-2 disabled:bg-slate-100 ${accountFormError?.field === 'current_period_end' ? 'border-red-300 bg-red-50/40 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`} />
+                    {accountFormError?.field === 'current_period_end' && <p id="admin-account-period-end-error" role="alert" className="mt-1.5 text-xs font-medium text-red-600">{accountFormError.message}</p>}
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
         </div>
-      )}
+      </AdminFormDialog>
 
       {/* User Modal */}
       {showUserModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-3 backdrop-blur-sm sm:p-6">
-          <div
-            ref={userDialogRef}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="user-modal-title"
-            tabIndex={-1}
-            className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-white/60 bg-white shadow-2xl shadow-slate-950/20"
-          >
-            <div className="flex items-start justify-between border-b border-slate-200 bg-gradient-to-r from-emerald-50/80 via-white to-white px-5 py-5 sm:px-6">
-              <div className="flex min-w-0 items-start gap-3">
-                <div className="mt-0.5 rounded-xl bg-emerald-100 p-2.5 text-emerald-700">
-                  <Users className="h-5 w-5" aria-hidden="true" />
-                </div>
-                <div>
-                  <h2 id="user-modal-title" className="text-lg font-semibold text-slate-900">
-                    {editingUser ? 'Editar usuario' : 'Crear usuario'}
-                  </h2>
-                  <p className="mt-1 text-sm text-slate-500">
-                    {editingUser
-                      ? 'Actualiza sus datos de acceso y permisos principales.'
-                      : 'Configura el acceso y las cuentas en las que podrá trabajar.'}
-                  </p>
+        <AdminFormDialog
+          open={showUserModal}
+          size="user"
+          title={createdUserCredentials ? 'Usuario creado' : editingUser ? 'Editar usuario' : 'Crear usuario'}
+          description={createdUserCredentials ? 'Guarda estas credenciales antes de cerrar.' : editingUser ? 'Actualiza sus datos de acceso y permisos principales.' : 'Configura el acceso y las cuentas en las que podrá trabajar.'}
+          icon={createdUserCredentials ? CheckCircle2 : Users}
+          busy={userSubmitting}
+          formNoValidate
+          onClose={closeUserModal}
+          initialFocusRef={createdUserCredentials ? createdCredentialsInputRef : usernameInputRef}
+          onSubmit={event => { event.preventDefault(); if (!createdUserCredentials) void saveUser() }}
+          footer={createdUserCredentials ? (
+            <button type="button" onClick={closeUserModal} className="min-h-11 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700">He guardado las credenciales</button>
+          ) : (
+            <>
+              {editingUser && (
+                <button
+                  type="button"
+                  disabled={userSubmitting}
+                  onClick={() => {
+                    const target = editingUser
+                    closeUserModal()
+                    openPasswordDialog(target)
+                  }}
+                  className="mr-auto inline-flex min-h-11 items-center gap-2 rounded-xl px-3 text-sm font-medium text-violet-700 transition hover:bg-violet-50 disabled:opacity-50"
+                >
+                  <KeyRound className="h-4 w-4" aria-hidden="true" />
+                  Cambiar contraseña
+                </button>
+              )}
+              <button type="button" onClick={closeUserModal} disabled={userSubmitting} className="min-h-11 rounded-xl px-4 text-sm font-medium text-slate-600 transition hover:bg-slate-200/70 disabled:cursor-not-allowed disabled:opacity-50">Cancelar</button>
+              <button type="submit" disabled={userSubmitting} className="inline-flex min-h-11 min-w-32 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300">
+                {userSubmitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+                {userSubmitting ? 'Guardando…' : editingUser ? 'Guardar cambios' : 'Crear usuario'}
+              </button>
+            </>
+          )}
+        >
+          {createdUserCredentials ? (
+            <div className="space-y-4">
+              <div role="status" aria-live="polite" className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4">
+                <div className="flex items-start gap-3">
+                  <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" aria-hidden="true" />
+                  <div>
+                    <p className="font-semibold text-emerald-950">{createdUserCredentials.displayName} ya puede iniciar sesión.</p>
+                    <p className="mt-1 text-sm text-emerald-800">Clarin no podrá volver a mostrar esta contraseña. Cópiala antes de cerrar.</p>
+                  </div>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  if (userSubmitting) return
-                  setShowUserModal(false)
-                  setUserFormError(null)
-                }}
-                disabled={userSubmitting}
-                className="rounded-lg p-2 text-slate-400 transition hover:bg-white hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
-                aria-label="Cerrar"
-              >
-                <X className="h-5 w-5" />
-              </button>
+              <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div>
+                  <label htmlFor="created-user-username" className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500">Usuario</label>
+                  <input ref={createdCredentialsInputRef} id="created-user-username" readOnly value={createdUserCredentials.username} className="min-h-11 w-full select-all rounded-xl border border-slate-200 bg-white px-3 font-mono text-sm text-slate-900" />
+                </div>
+                <div>
+                  <label htmlFor="created-user-password" className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500">Contraseña inicial</label>
+                  <input id="created-user-password" readOnly value={createdUserCredentials.password} className="min-h-11 w-full select-all rounded-xl border border-slate-200 bg-white px-3 font-mono text-sm text-slate-900" />
+                </div>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <button type="button" onClick={() => void copyCredentialText(createdUserCredentials.password, 'Contraseña copiada.')} className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"><Copy className="h-4 w-4" />Copiar clave</button>
+                  <button type="button" onClick={() => void copyCredentialText(`Usuario: ${createdUserCredentials.username}\nContraseña: ${createdUserCredentials.password}`, 'Credenciales copiadas.')} className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-slate-900 px-3 text-sm font-medium text-white hover:bg-slate-800"><Copy className="h-4 w-4" />Copiar credenciales</button>
+                </div>
+                <p aria-live="polite" className={`min-h-5 text-xs ${credentialCopyStatus.startsWith('No se pudo') ? 'text-amber-700' : 'text-emerald-700'}`}>{credentialCopyStatus}</p>
+              </div>
             </div>
-            <div className="space-y-5 overflow-y-auto px-5 py-5 sm:px-6">
+          ) : (
+            <div className="space-y-5">
               {userFormError && !userFormError.field && (
                 <div role="alert" className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
@@ -3296,20 +3529,29 @@ export default function AdminPage() {
                 </div>
               )}
               {!editingUser && (
-                <div>
+                <div
+                  role="group"
+                  aria-labelledby="admin-user-accounts-label"
+                  aria-describedby={userFormError?.field === 'accounts' ? 'admin-user-accounts-error' : undefined}
+                >
                   <div className="flex items-center justify-between mb-2">
-                    <label className="block text-sm font-medium text-gray-700">Cuentas y roles</label>
-                    <button type="button" onClick={addUserFormAssignment} className="text-xs text-emerald-600 hover:underline disabled:text-gray-300" disabled={userFormAssignments.length >= accounts.filter(a => a.is_active).length}>
+                    <span id="admin-user-accounts-label" className="block text-sm font-medium text-gray-700">Cuentas y roles</span>
+                    <button type="button" onClick={addUserFormAssignment} className="min-h-11 rounded-lg px-2 text-xs font-semibold text-emerald-600 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:text-gray-300" disabled={userSubmitting || userFormAssignments.length >= accounts.filter(a => a.is_active).length}>
                       Agregar cuenta
                     </button>
                   </div>
                   <div className="space-y-2">
                     {userFormAssignments.map((assignment, index) => (
-                      <div key={`${assignment.account_id}-${index}`} className="grid grid-cols-1 items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/80 p-3 lg:grid-cols-[1fr_120px_1fr_auto_auto]">
+                      <div key={`${assignment.account_id}-${index}`} className="grid grid-cols-1 items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/80 p-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_120px_minmax(0,1fr)_auto_auto]">
                         <select
+                          id={`admin-user-account-${index}`}
+                          aria-label={`Cuenta ${index + 1}`}
+                          aria-invalid={userFormError?.field === 'accounts'}
+                          aria-describedby={userFormError?.field === 'accounts' ? 'admin-user-accounts-error' : undefined}
                           value={assignment.account_id}
                           onChange={e => updateUserFormAssignment(index, { account_id: e.target.value })}
-                          className="min-w-0 px-2 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                          disabled={userSubmitting}
+                          className="min-h-11 min-w-0 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
                         >
                           <option value="">Cuenta...</option>
                           {accounts.filter(a => a.is_active && (a.id === assignment.account_id || !userFormAssignments.some(ua => ua.account_id === a.id))).map(a => (
@@ -3317,38 +3559,48 @@ export default function AdminPage() {
                           ))}
                         </select>
                         <select
+                          aria-label={`Nivel de acceso ${index + 1}`}
                           value={assignment.role}
                           onChange={e => updateUserFormAssignment(index, { role: e.target.value })}
-                          className="px-2 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                          disabled={userSubmitting}
+                          className="min-h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
                         >
                           <option value="agent">Agente</option>
                           <option value="admin">Admin</option>
                           <option value="super_admin">Super Admin</option>
                         </select>
                         <select
+                          aria-label={`Rol de permisos ${index + 1}`}
                           value={assignment.role_id}
                           onChange={e => updateUserFormAssignment(index, { role_id: e.target.value })}
-                          disabled={assignment.role !== 'agent'}
-                          className="min-w-0 px-2 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500 disabled:bg-gray-100 disabled:text-gray-400"
+                          disabled={userSubmitting || assignment.role !== 'agent'}
+                          className="min-h-11 min-w-0 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 disabled:bg-slate-100 disabled:text-slate-400"
                         >
                           <option value="">Rol manual...</option>
                           {roles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
                         </select>
-                        <button type="button" onClick={() => updateUserFormAssignment(index, { is_default: true })} className={`px-2 py-2 rounded-lg text-xs font-medium ${assignment.is_default ? 'bg-emerald-100 text-emerald-700' : 'bg-white text-gray-500 border border-gray-200'}`}>
+                        <button type="button" disabled={userSubmitting} aria-pressed={assignment.is_default} onClick={() => updateUserFormAssignment(index, { is_default: true })} className={`min-h-11 rounded-xl px-3 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${assignment.is_default ? 'bg-emerald-100 text-emerald-700' : 'border border-slate-200 bg-white text-slate-500'}`}>
                           Principal
                         </button>
-                        <button type="button" onClick={() => removeUserFormAssignment(index)} className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg" disabled={userFormAssignments.length === 1}>
-                          <Trash2 className="w-4 h-4" />
+                        <button type="button" aria-label={`Quitar cuenta ${index + 1}`} onClick={() => removeUserFormAssignment(index)} className="flex min-h-11 min-w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-40" disabled={userSubmitting || userFormAssignments.length === 1}>
+                          <Trash2 className="h-4 w-4" aria-hidden="true" />
                         </button>
                       </div>
                     ))}
                     {userFormAssignments.length === 0 && (
-                      <button type="button" onClick={addUserFormAssignment} className="w-full px-3 py-3 border border-dashed border-gray-300 rounded-lg text-sm text-gray-500 hover:border-emerald-400 hover:text-emerald-600">
-                        Agregar primera cuenta
-                      </button>
+                      accounts.some(account => account.is_active) ? (
+                        <button type="button" id="admin-user-accounts-empty" disabled={userSubmitting} onClick={addUserFormAssignment} className="min-h-11 w-full rounded-xl border border-dashed border-slate-300 px-3 text-sm font-medium text-slate-500 hover:border-emerald-400 hover:text-emerald-600 disabled:opacity-50">
+                          Agregar primera cuenta
+                        </button>
+                      ) : (
+                        <div id="admin-user-accounts-empty" tabIndex={-1} className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 outline-none focus:ring-2 focus:ring-amber-400">
+                          <p>No hay cuentas activas a las que asignar este usuario.</p>
+                          <button type="button" disabled={userSubmitting} onClick={() => { closeUserModal(); setTab('accounts') }} className="mt-2 min-h-11 rounded-lg px-2 font-semibold text-amber-950 underline decoration-amber-400 underline-offset-4 disabled:opacity-50">Gestionar cuentas</button>
+                        </div>
+                      )
                     )}
                     {userFormError?.field === 'accounts' && (
-                      <p role="alert" className="text-xs font-medium text-red-600">{userFormError.message}</p>
+                      <p id="admin-user-accounts-error" role="alert" className="text-xs font-medium text-red-600">{userFormError.message}</p>
                     )}
                   </div>
                 </div>
@@ -3365,10 +3617,11 @@ export default function AdminPage() {
                       setUserForm(f => ({ ...f, username: e.target.value }))
                       setUserFormError(current => current?.field === 'username' ? null : current)
                     }}
+                    disabled={userSubmitting}
                     autoComplete="username"
                     aria-invalid={Boolean(usernameError)}
                     aria-describedby={usernameError ? 'admin-user-username-error' : 'admin-user-username-help'}
-                    className={`w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-2 ${usernameError ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`}
+                    className={`min-h-11 w-full rounded-xl border px-3 text-sm outline-none transition focus:ring-2 disabled:bg-slate-100 ${usernameError ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`}
                   />
                   {usernameError ? (
                     <p id="admin-user-username-error" role="alert" className="mt-1.5 text-xs font-medium text-red-600">{usernameError}</p>
@@ -3383,14 +3636,16 @@ export default function AdminPage() {
                     type="text"
                     value={userForm.display_name}
                     onChange={e => setUserForm(f => ({ ...f, display_name: e.target.value }))}
+                    disabled={userSubmitting}
                     autoComplete="name"
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+                    className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 disabled:bg-slate-100"
                   />
                 </div>
               </div>
               <div>
                 <label htmlFor="admin-user-email" className="mb-1 block text-sm font-medium text-slate-700">Correo electrónico <span className="font-normal text-slate-400">(opcional)</span></label>
                 <input
+                  ref={userEmailInputRef}
                   id="admin-user-email"
                   type="email"
                   value={userForm.email}
@@ -3398,59 +3653,45 @@ export default function AdminPage() {
                     setUserForm(f => ({ ...f, email: e.target.value }))
                     setUserFormError(current => current?.field === 'email' ? null : current)
                   }}
+                  disabled={userSubmitting}
                   autoComplete="email"
                   aria-invalid={userFormError?.field === 'email'}
                   aria-describedby={userFormError?.field === 'email' ? 'admin-user-email-error' : undefined}
-                  className={`w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-2 ${userFormError?.field === 'email' ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`}
+                  className={`min-h-11 w-full rounded-xl border px-3 text-sm outline-none transition focus:ring-2 disabled:bg-slate-100 ${userFormError?.field === 'email' ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`}
                 />
                 {userFormError?.field === 'email' && (
                   <p id="admin-user-email-error" role="alert" className="mt-1.5 text-xs font-medium text-red-600">{userFormError.message}</p>
                 )}
               </div>
               {!editingUser && (
-                <>
-                  <div>
-                    <label htmlFor="admin-user-password" className="mb-1 block text-sm font-medium text-slate-700">Contraseña</label>
-                    <input
-                      id="admin-user-password"
-                      type="password"
-                      value={userForm.password}
-                      onChange={e => {
-                        setUserForm(f => ({ ...f, password: e.target.value }))
-                        setUserFormError(current => current?.field === 'password' ? null : current)
-                      }}
-                      autoComplete="new-password"
-                      aria-invalid={userFormError?.field === 'password'}
-                      className={`w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-2 ${userFormError?.field === 'password' ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`}
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="admin-user-password-confirm" className="mb-1 block text-sm font-medium text-slate-700">Confirmar contraseña</label>
-                    <input
-                      id="admin-user-password-confirm"
-                      type="password"
-                      value={userForm.password_confirm}
-                      onChange={e => {
-                        setUserForm(f => ({ ...f, password_confirm: e.target.value }))
-                        setUserFormError(current => current?.field === 'password' ? null : current)
-                      }}
-                      autoComplete="new-password"
-                      aria-invalid={userFormError?.field === 'password'}
-                      className={`w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-2 ${userFormError?.field === 'password' ? 'border-red-300 bg-red-50/40 focus:border-red-400 focus:ring-red-100' : 'border-slate-200 focus:border-emerald-500 focus:ring-emerald-100'}`}
-                    />
-                  </div>
-                  {userFormError?.field === 'password' && (
-                    <p role="alert" className="text-xs font-medium text-red-600">{userFormError.message}</p>
-                  )}
-                  <PasswordStrengthChecklist password={userForm.password} confirmPassword={userForm.password_confirm} compact />
-                </>
+                <AdminPasswordFields
+                  password={userForm.password}
+                  confirmation={userForm.password_confirm}
+                  onPasswordChange={password => {
+                    setUserForm(form => ({ ...form, password }))
+                    setUserFormError(current => current?.field === 'password' ? null : current)
+                  }}
+                  onConfirmationChange={password_confirm => {
+                    setUserForm(form => ({ ...form, password_confirm }))
+                    setUserFormError(current => current?.field === 'password' ? null : current)
+                  }}
+                  onGenerated={() => setUserFormError(current => current?.field === 'password' ? null : current)}
+                  passwordId="admin-user-password"
+                  confirmationId="admin-user-password-confirm"
+                  error={userFormError?.field === 'password' ? userFormError.message : undefined}
+                  disabled={userSubmitting}
+                  required
+                  layout="responsive"
+                />
               )}
               {editingUser && <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Rol</label>
+                <label htmlFor="admin-user-role" className="mb-1 block text-sm font-medium text-gray-700">Rol</label>
                 <select
+                  id="admin-user-role"
                   value={userForm.role}
                   onChange={e => setUserForm(f => ({ ...f, role: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                  disabled={userSubmitting}
+                  className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 disabled:bg-slate-100"
                 >
                   <option value="agent">Agente</option>
                   <option value="admin">Admin</option>
@@ -3458,71 +3699,85 @@ export default function AdminPage() {
                 </select>
               </div>}
             </div>
-            <div className="flex items-center justify-end gap-3 border-t border-slate-200 bg-slate-50/70 px-5 py-4 sm:px-6">
-              <button
-                type="button"
-                onClick={() => {
-                  if (userSubmitting) return
-                  setShowUserModal(false)
-                  setUserFormError(null)
-                }}
-                disabled={userSubmitting}
-                className="rounded-lg px-4 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-200/70 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                onClick={saveUser}
-                disabled={!canSaveUser}
-                className="inline-flex min-w-28 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:shadow-none"
-              >
-                {userSubmitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
-                {userSubmitting ? 'Guardando…' : editingUser ? 'Guardar cambios' : 'Crear usuario'}
-              </button>
-            </div>
-          </div>
-        </div>
+          )}
+        </AdminFormDialog>
       )}
 
       {/* Password Modal */}
       {showPasswordModal && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm">
-            <div className="p-6 border-b border-gray-200">
-              <h2 className="text-lg font-semibold text-gray-900">Cambiar Contraseña</h2>
-            </div>
-            <div className="p-6 space-y-4">
-              <label className="block text-sm font-medium text-gray-700 mb-1">Nueva Contraseña</label>
-              <input
-                type="password"
-                value={newPassword}
-                onChange={e => setNewPassword(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
-                placeholder="Ingrese nueva contraseña"
-              />
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Confirmar contraseña</label>
-                <input
-                  type="password"
-                  value={newPasswordConfirm}
-                  onChange={e => setNewPasswordConfirm(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
-                  placeholder="Repita la nueva contraseña"
-                />
+        <AdminFormDialog
+          open={showPasswordModal}
+          size="password"
+          title={passwordChanged ? 'Contraseña actualizada' : 'Cambiar contraseña'}
+          description={passwordChanged ? 'Entrega la nueva clave antes de cerrar.' : `Establece una nueva clave para ${passwordUserName}.`}
+          icon={passwordChanged ? CheckCircle2 : KeyRound}
+          busy={passwordSubmitting}
+          formNoValidate
+          onClose={closePasswordModal}
+          initialFocusRef={passwordChanged ? passwordCredentialsInputRef : passwordInputRef}
+          onSubmit={event => { event.preventDefault(); if (!passwordChanged) void resetPassword() }}
+          footer={passwordChanged ? (
+            <button type="button" onClick={closePasswordModal} className="min-h-11 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700">He guardado la nueva clave</button>
+          ) : (
+            <>
+              <button type="button" onClick={closePasswordModal} disabled={passwordSubmitting} className="min-h-11 rounded-xl px-4 text-sm font-medium text-slate-600 transition hover:bg-slate-200/70 disabled:opacity-50">Cancelar</button>
+              <button type="submit" disabled={passwordSubmitting} className="inline-flex min-h-11 min-w-32 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300">
+                {passwordSubmitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+                {passwordSubmitting ? 'Actualizando…' : 'Cambiar contraseña'}
+              </button>
+            </>
+          )}
+        >
+          {passwordChanged ? (
+            <div className="space-y-4">
+              <div role="status" aria-live="polite" className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4">
+                <div className="flex items-start gap-3">
+                  <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" aria-hidden="true" />
+                  <div>
+                    <p className="font-semibold text-emerald-950">La contraseña de {passwordUserName} se actualizó.</p>
+                    <p className="mt-1 text-sm text-emerald-800">Sus sesiones activas se cerraron. Clarin no volverá a mostrar esta clave.</p>
+                  </div>
+                </div>
               </div>
-              <PasswordStrengthChecklist password={newPassword} confirmPassword={newPasswordConfirm} compact />
+              <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div>
+                  <label htmlFor="reset-user-username" className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500">Usuario</label>
+                  <input ref={passwordCredentialsInputRef} id="reset-user-username" readOnly value={passwordUsername} className="min-h-11 w-full select-all rounded-xl border border-slate-200 bg-white px-3 font-mono text-sm text-slate-900" />
+                </div>
+                <div>
+                  <label htmlFor="reset-user-password" className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500">Nueva contraseña</label>
+                  <input id="reset-user-password" readOnly value={newPassword} className="min-h-11 w-full select-all rounded-xl border border-slate-200 bg-white px-3 font-mono text-sm text-slate-900" />
+                </div>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <button type="button" onClick={() => void copyCredentialText(newPassword, 'Contraseña copiada.')} className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50"><Copy className="h-4 w-4" aria-hidden="true" />Copiar clave</button>
+                  <button type="button" onClick={() => void copyCredentialText(`Usuario: ${passwordUsername}\nContraseña: ${newPassword}`, 'Credenciales copiadas.')} className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-slate-900 px-3 text-sm font-medium text-white hover:bg-slate-800"><Copy className="h-4 w-4" aria-hidden="true" />Copiar credenciales</button>
+                </div>
+                <p aria-live="polite" className={`min-h-5 text-xs ${credentialCopyStatus.startsWith('No se pudo') ? 'text-amber-700' : 'text-emerald-700'}`}>{credentialCopyStatus}</p>
+              </div>
             </div>
-            <div className="p-6 border-t border-gray-200 flex justify-end gap-3">
-              <button onClick={() => setShowPasswordModal(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">
-                Cancelar
-              </button>
-              <button onClick={resetPassword} className="px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700">
-                Cambiar
-              </button>
+          ) : (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900">
+                Esta contraseña es global para todas las cuentas de <strong>{passwordUserName}</strong>. Al guardarla, se cerrarán todas sus sesiones activas.
+              </div>
+              <AdminPasswordFields
+                password={newPassword}
+                confirmation={newPasswordConfirm}
+                onPasswordChange={password => { setNewPassword(password); setPasswordError('') }}
+                onConfirmationChange={confirmation => { setNewPasswordConfirm(confirmation); setPasswordError('') }}
+                onGenerated={() => setPasswordError('')}
+                passwordId="admin-reset-password"
+                confirmationId="admin-reset-password-confirm"
+                passwordInputRef={passwordInputRef}
+                passwordLabel="Nueva contraseña"
+                error={passwordError || undefined}
+                disabled={passwordSubmitting}
+                required
+                layout="stacked"
+              />
             </div>
-          </div>
-        </div>
+          )}
+        </AdminFormDialog>
       )}
 
       {/* Account Assignments Modal */}

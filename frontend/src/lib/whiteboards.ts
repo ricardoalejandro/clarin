@@ -207,6 +207,19 @@ export interface WhiteboardSummary {
   } | null
 }
 
+export interface WhiteboardCatalogPresentation {
+  archived: boolean
+  work: boolean
+  badge: 'Clarin Work' | 'Compartida' | null
+  contextLabel: string
+  actorLabel: string
+  updatedLabel: string
+  folderLabel: string
+  purgeLabel: string | null
+  workLocationHref: string | null
+  workLocationAriaLabel: string | null
+}
+
 export interface WhiteboardSceneDocument {
   [key: string]: unknown
   type: 'excalidraw'
@@ -371,7 +384,7 @@ export interface WhiteboardSavePayload {
     app_state: Record<string, unknown>
   }
   scene_schema_version: 'excalidraw'
-  editor_version: '0.18.1-clarin.5'
+  editor_version: '0.18.1-clarin.6'
 }
 
 export interface WhiteboardScenePatch {
@@ -600,7 +613,7 @@ export function buildWhiteboardSavePayload(input: {
     },
     ...(input.includePatch ? { patch: { elements: input.patchElements || input.elements, app_state: appState } } : {}),
     scene_schema_version: 'excalidraw',
-    editor_version: '0.18.1-clarin.5',
+    editor_version: '0.18.1-clarin.6',
   }
 }
 
@@ -1291,6 +1304,52 @@ export function whiteboardPurgeEligibleAt(archivedAt: string | null | undefined,
   const archivedTime = Date.parse(archivedAt)
   if (!Number.isFinite(archivedTime)) return null
   return new Date(archivedTime + Math.floor(retentionDays) * 86_400_000).toISOString()
+}
+
+export function formatWhiteboardPurgeEligibility(value: string | null) {
+  if (!value) return 'Fecha de eliminación no disponible'
+  return `Eliminación definitiva desde ${new Intl.DateTimeFormat('es', { dateStyle: 'medium' }).format(new Date(value))}`
+}
+
+export function whiteboardCatalogPresentation(
+  whiteboard: WhiteboardSummary,
+  purgeEligibleAt: string | null,
+  now = Date.now(),
+): WhiteboardCatalogPresentation {
+  const archived = Boolean(whiteboard.archived_at)
+  const work = whiteboard.origin === 'work' && Boolean(whiteboard.work_location)
+  const workBreadcrumb = whiteboard.work_location?.breadcrumb
+    ?.map(item => item.name.trim())
+    .filter(Boolean)
+    .join(' / ')
+    || whiteboard.work_location?.scope_name?.trim()
+    || 'Ubicación autorizada'
+  const taskViewID = whiteboard.work_location?.task_view_id?.trim()
+  const canOpenWorkLocation = work
+    && !archived
+    && whiteboard.work_location?.lifecycle !== 'trash'
+    && Boolean(taskViewID)
+  const workLocationHref = canOpenWorkLocation
+    ? `/dashboard/tasks?work_view=${encodeURIComponent(taskViewID as string)}`
+    : null
+  const folderLabel = whiteboard.folder_name?.trim() || 'Sin carpeta'
+  const actorLabel = whiteboard.updated_by_name?.trim() || whiteboard.owner_name?.trim() || 'Cuenta'
+  const standaloneContext = whiteboard.description?.trim() || actorLabel
+
+  return {
+    archived,
+    work,
+    badge: work ? 'Clarin Work' : whiteboard.shared ? 'Compartida' : null,
+    contextLabel: work ? workBreadcrumb : standaloneContext,
+    actorLabel,
+    updatedLabel: formatWhiteboardUpdatedAt(whiteboard.updated_at, now),
+    folderLabel,
+    purgeLabel: archived ? formatWhiteboardPurgeEligibility(purgeEligibleAt) : null,
+    workLocationHref,
+    workLocationAriaLabel: workLocationHref
+      ? `Abrir ubicación en Work · ${whiteboard.name} · ${workBreadcrumb}`
+      : null,
+  }
 }
 
 export function buildWhiteboardPurgeRequest(confirmationName: string, operationID: string) {

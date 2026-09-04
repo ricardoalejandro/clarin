@@ -3,6 +3,7 @@
 import { createPortal } from 'react-dom'
 import { useRef, type RefObject } from 'react'
 import { X } from 'lucide-react'
+import { WHITEBOARD_OVERLAY_LAYERS } from '@/lib/whiteboardFocusMode'
 import { useWhiteboardDialogFocus } from './useWhiteboardDialogFocus'
 
 export default function WhiteboardModal({
@@ -24,7 +25,7 @@ export default function WhiteboardModal({
   useWhiteboardDialogFocus(dialogRef, onClose, initialFocusRef)
 
   return createPortal(
-    <div className="fixed inset-0 z-[310] flex items-center justify-center bg-slate-950/55 p-3 backdrop-blur-sm sm:p-5" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
+    <div className="fixed inset-0 flex items-center justify-center bg-slate-950/55 p-3 backdrop-blur-sm sm:p-5" style={{ zIndex: WHITEBOARD_OVERLAY_LAYERS.dialog }} role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
       <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="whiteboard-modal-title" aria-describedby="whiteboard-modal-description" className={`flex max-h-[min(760px,calc(100dvh-1.5rem))] w-full flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl outline-none ${wide ? 'max-w-3xl' : 'max-w-lg'}`}>
         <header className="flex shrink-0 items-start gap-4 border-b border-slate-100 px-5 py-4">
           <div className="min-w-0 flex-1">

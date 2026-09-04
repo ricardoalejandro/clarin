@@ -352,8 +352,16 @@ body {
     input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']),
     textarea,
     select,
-    [contenteditable='true'] {
+    [contenteditable='true']:not(.excalidraw-wysiwyg) {
       font-size: 16px !important;
+    }
+
+    /* WebKit derives focus zoom from the focused contenteditable itself. The
+       whiteboard editor exposes its logical font separately so the focus root
+       can stay readable without changing the size or line boxes it renders. */
+    .excalidraw-wysiwyg {
+      font-size: max(16px, var(--clarin-wysiwyg-font-size, 16px)) !important;
+      min-height: var(--clarin-wysiwyg-font-size, 16px) !important;
     }
   }
 }

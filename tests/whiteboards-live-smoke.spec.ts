@@ -779,7 +779,7 @@ async function sceneWriteResult(
       operation_id: randomUUID(),
       scene: record.scene,
       scene_schema_version: 'excalidraw',
-      editor_version: '0.18.1-clarin.5',
+      editor_version: '0.18.1-clarin.6',
     },
   })
 }
@@ -2752,7 +2752,7 @@ test.describe('smoke real opt-in · barra de Pizarras y Bibliotecas', () => {
             folder_id: null,
             scene: emptyScene(),
             scene_schema_version: 'excalidraw',
-            editor_version: '0.18.1-clarin.5',
+            editor_version: '0.18.1-clarin.6',
             access_mode: 'private',
             operation_id: randomUUID(),
           },

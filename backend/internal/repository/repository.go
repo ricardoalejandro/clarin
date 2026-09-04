@@ -294,8 +294,14 @@ func (r *UserRepository) UpdateWithAuthorityImpact(ctx context.Context, user *do
 }
 
 func (r *UserRepository) UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash string) error {
-	_, err := r.db.Exec(ctx, `UPDATE users SET password_hash = $2, updated_at = NOW() WHERE id = $1`, userID, passwordHash)
-	return err
+	result, err := r.db.Exec(ctx, `UPDATE users SET password_hash = $2, updated_at = NOW() WHERE id = $1`, userID, passwordHash)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
 }
 
 func (r *UserRepository) ToggleActiveWithAuthorityImpact(ctx context.Context, userID uuid.UUID) (*WhiteboardAuthorityMutationEffect, error) {
@@ -8996,11 +9002,12 @@ func (r *RoleRepository) Create(ctx context.Context, role *domain.Role) error {
 	if role.Permissions == nil {
 		role.Permissions = []string{}
 	}
-	return r.db.QueryRow(ctx, `
+	err := r.db.QueryRow(ctx, `
 		INSERT INTO roles (name, description, is_system, permissions)
 		VALUES ($1, $2, FALSE, $3)
 		RETURNING id, created_at, updated_at
 	`, role.Name, role.Description, role.Permissions).Scan(&role.ID, &role.CreatedAt, &role.UpdatedAt)
+	return normalizeRoleWriteError(err)
 }
 
 func (r *RoleRepository) UpdateWithAuthorityImpact(ctx context.Context, role *domain.Role) (*WhiteboardAuthorityMutationEffect, error) {
@@ -9015,7 +9022,7 @@ func (r *RoleRepository) UpdateWithAuthorityImpact(ctx context.Context, role *do
 	var roleLocked uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT id FROM roles WHERE id=$1 FOR UPDATE`, role.ID).Scan(&roleLocked); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("role not found")
+			return nil, ErrRoleNotFound
 		}
 		return nil, err
 	}
@@ -9028,10 +9035,10 @@ func (r *RoleRepository) UpdateWithAuthorityImpact(ctx context.Context, role *do
 		WHERE id = $1
 	`, role.ID, role.Name, role.Description, role.Permissions)
 	if err != nil {
-		return nil, err
+		return nil, normalizeRoleWriteError(err)
 	}
 	if result.RowsAffected() == 0 {
-		return nil, fmt.Errorf("role not found")
+		return nil, ErrRoleNotFound
 	}
 	for _, accountID := range accountIDs {
 		if err := bumpAllWhiteboardAccessRevisionTx(ctx, tx, accountID); err != nil {
@@ -9053,12 +9060,12 @@ func (r *RoleRepository) DeleteWithAuthorityImpact(ctx context.Context, id uuid.
 	var isSystem bool
 	if err := tx.QueryRow(ctx, `SELECT is_system FROM roles WHERE id=$1 FOR UPDATE`, id).Scan(&isSystem); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("role not found or cannot delete system role")
+			return nil, ErrRoleNotFound
 		}
 		return nil, err
 	}
 	if isSystem {
-		return nil, fmt.Errorf("role not found or cannot delete system role")
+		return nil, ErrRoleNotFound
 	}
 	accountIDs, userIDs, err := roleAuthorityImpactTx(ctx, tx, id)
 	if err != nil {
@@ -9069,7 +9076,7 @@ func (r *RoleRepository) DeleteWithAuthorityImpact(ctx context.Context, id uuid.
 		return nil, err
 	}
 	if result.RowsAffected() == 0 {
-		return nil, fmt.Errorf("role not found or cannot delete system role")
+		return nil, ErrRoleNotFound
 	}
 	for _, accountID := range accountIDs {
 		if err := bumpAllWhiteboardAccessRevisionTx(ctx, tx, accountID); err != nil {

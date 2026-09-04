@@ -1,7 +1,7 @@
 'use client'
 
 import { createPortal } from 'react-dom'
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   DndContext,
@@ -25,11 +25,9 @@ import {
 } from '@dnd-kit/core'
 import {
   Archive,
-  ArrowRight,
   Check,
   Clock3,
   BriefcaseBusiness,
-  Copy,
   FileUp,
   Folder,
   FolderArchive,
@@ -43,7 +41,6 @@ import {
   List,
   Loader2,
   Menu,
-  MoreHorizontal,
   Move,
   Network,
   Plus,
@@ -60,7 +57,7 @@ import {
   createWhiteboardOperationID,
   filterWhiteboards,
   flattenWhiteboardFolders,
-  formatWhiteboardUpdatedAt,
+  formatWhiteboardPurgeEligibility,
   validateWhiteboardImport,
   parseWhiteboardViewMode,
   reconcileWhiteboardScopeCapability,
@@ -113,6 +110,7 @@ import { OPERATIONAL_OVERLAY_LAYERS } from '@/components/operational-overlay/ope
 import { useWhiteboardDialogFocus } from './useWhiteboardDialogFocus'
 import WhiteboardSettingsPanel, { type WhiteboardSettingsTarget } from './WhiteboardSettingsPanel'
 import WhiteboardShareDialog from './WhiteboardShareDialog'
+import WhiteboardCatalogItem, { type WhiteboardCatalogMenuAction } from './WhiteboardCatalogItem'
 import {
   duplicateTaskLocationView,
   loadTaskLocationView,
@@ -133,7 +131,7 @@ const SCOPE_ITEMS: Array<{ id: WhiteboardScope; label: string; icon: typeof Inbo
 ]
 
 type DialogKind = 'board' | 'folder' | null
-type WhiteboardMenuAction = 'settings' | 'move' | 'duplicate' | 'archive' | 'restore' | 'purge'
+type WhiteboardMenuAction = WhiteboardCatalogMenuAction
 
 interface WhiteboardFolderStructuralDestination {
   parentID: string | null
@@ -289,15 +287,15 @@ function WhiteboardFolderDropTarget({
       ref={node => { insideDrop.setNodeRef(node); drag.setNodeRef(node) }}
       data-whiteboard-folder-drop={folder.id}
       style={{ opacity: drag.isDragging ? 0.32 : 1 }}
-      className={`group flex min-h-11 w-full items-center rounded-xl border text-sm transition-[transform,opacity,background-color,border-color,box-shadow,color] duration-150 motion-reduce:transition-none ${isOver ? 'scale-[1.02] border-emerald-400 bg-emerald-50 font-bold text-emerald-800 shadow-lg ring-2 ring-emerald-100' : active ? 'border-slate-900 bg-slate-900 font-bold text-white' : draggingBoard || draggingFolder ? 'border-emerald-100 bg-white font-medium text-slate-700 shadow-sm' : 'border-transparent font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900'}`}
+      className={`group flex min-h-11 w-full items-center rounded-xl border text-sm transition-[transform,opacity,background-color,border-color,box-shadow,color] duration-150 motion-reduce:transition-none ${isOver ? 'scale-[1.02] border-emerald-400 bg-emerald-50 font-bold text-emerald-800 shadow-lg ring-2 ring-emerald-100' : active ? 'border-emerald-100 bg-emerald-50 font-bold text-emerald-800' : draggingBoard || draggingFolder ? 'border-emerald-100 bg-white font-medium text-slate-700 shadow-sm' : 'border-transparent font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900'}`}
     >
-      {canManage && <button ref={drag.setActivatorNodeRef} type="button" disabled={busy || Boolean(draggingBoard)} {...drag.attributes} {...drag.listeners} aria-label={`Mover carpeta ${folder.name}`} className={`flex h-11 w-9 shrink-0 touch-none items-center justify-center rounded-l-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 disabled:opacity-30 [@media(pointer:fine)]:cursor-grab ${active ? 'text-slate-300 hover:text-white' : 'text-slate-300 hover:text-emerald-700'}`}><GripVertical className="h-4 w-4" /></button>}
+      {canManage && <button ref={drag.setActivatorNodeRef} type="button" disabled={busy || Boolean(draggingBoard)} {...drag.attributes} {...drag.listeners} aria-label={`Mover carpeta ${folder.name}`} className={`flex h-11 w-9 shrink-0 touch-none items-center justify-center rounded-l-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 disabled:opacity-30 [@media(pointer:fine)]:cursor-grab ${active ? 'text-emerald-400 hover:text-emerald-700' : 'text-slate-300 hover:text-emerald-700'}`}><GripVertical className="h-4 w-4" /></button>}
       <button type="button" onClick={onSelect} aria-current={active ? 'page' : undefined} className="flex min-h-11 min-w-0 flex-1 items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500">
-        {isOver || active ? <FolderOpen className={`h-4 w-4 shrink-0 ${active && !isOver ? 'text-emerald-300' : 'text-emerald-600'}`} /> : <Folder className="h-4 w-4 shrink-0 text-slate-400" />}
+        {isOver || active ? <FolderOpen className="h-4 w-4 shrink-0 text-emerald-600" /> : <Folder className="h-4 w-4 shrink-0 text-slate-400" />}
         <span className="min-w-0 flex-1 truncate">{isOver ? draggingFolder ? `Mover dentro de ${folder.name}` : `Mover a ${folder.name}` : folder.name}</span>
-        {typeof folder.whiteboard_count === 'number' && <span className={`text-[10px] tabular-nums ${active && !isOver ? 'text-slate-300' : 'text-slate-400'}`}>{folder.whiteboard_count}</span>}
+        {typeof folder.whiteboard_count === 'number' && <span className={`rounded-md px-1.5 py-0.5 text-[10px] tabular-nums ${active && !isOver ? 'bg-white/80 text-emerald-700' : 'text-slate-400'}`}>{folder.whiteboard_count}</span>}
       </button>
-      {canManage && <button type="button" disabled={busy} onClick={onSettings} aria-label={`Configurar carpeta ${folder.name}`} className={`flex h-11 w-9 shrink-0 items-center justify-center rounded-r-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 disabled:opacity-30 ${active ? 'text-slate-300 hover:bg-white/10 hover:text-white' : 'text-slate-300 hover:bg-slate-100 hover:text-slate-700'}`}><Settings2 className="h-4 w-4" /></button>}
+      {canManage && <button type="button" disabled={busy} onClick={onSettings} aria-label={`Configurar carpeta ${folder.name}`} className={`flex h-11 w-9 shrink-0 items-center justify-center rounded-r-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 disabled:opacity-30 ${active ? 'text-emerald-400 hover:bg-white/70 hover:text-emerald-700' : 'text-slate-300 hover:bg-slate-100 hover:text-slate-700'}`}><Settings2 className="h-4 w-4" /></button>}
     </div>
   </div>
 }
@@ -312,103 +310,10 @@ function WhiteboardRootDropTarget({ active, draggingBoard, draggingFolder }: { a
     ref={setNodeRef}
     data-whiteboard-root-drop
     aria-label={draggingBoard || draggingFolder ? 'Destino Sin carpeta' : undefined}
-    className={`mb-2 flex min-h-11 items-center gap-2 rounded-xl border px-3 text-sm transition-[transform,background-color,border-color,box-shadow,color] duration-150 motion-reduce:transition-none ${isOver || active ? 'scale-[1.02] border-emerald-400 bg-emerald-50 font-bold text-emerald-800 shadow-lg ring-2 ring-emerald-100' : draggingBoard || draggingFolder ? 'border-dashed border-emerald-200 bg-emerald-50/40 font-bold text-emerald-700' : 'border-transparent bg-slate-50/70 font-medium text-slate-500'}`}
+    className={`mb-2 flex min-h-11 items-center gap-2 rounded-xl border px-3 text-sm transition-[transform,background-color,border-color,box-shadow,color] duration-150 motion-reduce:transition-none ${isOver || active ? 'scale-[1.02] border-emerald-400 bg-emerald-50 font-bold text-emerald-800 shadow-lg ring-2 ring-emerald-100' : draggingBoard || draggingFolder ? 'border-dashed border-emerald-200 bg-emerald-50/40 font-bold text-emerald-700' : 'border-transparent bg-transparent font-medium text-slate-500'}`}
   >
     <Home className={`h-4 w-4 shrink-0 ${draggingBoard || draggingFolder ? 'text-emerald-600' : 'text-slate-400'}`} /><span className="min-w-0 flex-1 truncate">{isOver || active ? draggingFolder ? 'Mover al nivel principal' : 'Soltar en Sin carpeta' : 'Sin carpeta'}</span>{!draggingBoard && !draggingFolder && <span className="text-[9px] font-bold uppercase tracking-wide text-slate-400">Raíz</span>}
   </div>
-}
-
-function WhiteboardActionsMenu({
-  whiteboard,
-  busy,
-  canMove,
-  canConfigure,
-  canDuplicate,
-  canManage,
-  canPurge,
-  purgeReady,
-  purgeEligibleAt,
-  onAction,
-}: {
-  whiteboard: WhiteboardSummary
-  busy: boolean
-  canMove: boolean
-  canConfigure: boolean
-  canDuplicate: boolean
-  canManage: boolean
-  canPurge: boolean
-  purgeReady: boolean
-  purgeEligibleAt: string | null
-  onAction: (action: WhiteboardMenuAction) => void
-}) {
-  const triggerRef = useRef<HTMLButtonElement>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
-  const [open, setOpen] = useState(false)
-  const [position, setPosition] = useState({ top: 0, left: 0, width: 224 })
-  const archived = Boolean(whiteboard.archived_at)
-  const hasActions = archived
-    ? canManage || canPurge
-    : canConfigure || canMove || canDuplicate || canManage
-
-  const close = useCallback((restoreFocus = true) => {
-    setOpen(false)
-    if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }))
-  }, [])
-
-  useEffect(() => {
-    if (!open) return
-    const update = () => {
-      const rect = triggerRef.current?.getBoundingClientRect()
-      if (!rect) return
-      const width = Math.min(224, window.innerWidth - 24)
-      const estimatedHeight = menuRef.current?.offsetHeight || 224
-      const below = rect.bottom + 8
-      const top = below + estimatedHeight <= window.innerHeight - 12
-        ? below
-        : Math.max(12, rect.top - estimatedHeight - 8)
-      const left = Math.max(12, Math.min(rect.right - width, window.innerWidth - width - 12))
-      setPosition({ top, left, width })
-    }
-    update()
-    window.addEventListener('resize', update)
-    window.addEventListener('scroll', update, true)
-    requestAnimationFrame(() => menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus({ preventScroll: true }))
-    return () => {
-      window.removeEventListener('resize', update)
-      window.removeEventListener('scroll', update, true)
-    }
-  }, [open])
-
-  const choose = (action: WhiteboardMenuAction) => {
-    close(false)
-    onAction(action)
-  }
-
-  if (!hasActions) return null
-
-  return <>
-    <button ref={triggerRef} type="button" disabled={busy} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-40" aria-label={`Más acciones de ${whiteboard.name}`}><MoreHorizontal className="h-4 w-4" /></button>
-    {open && typeof document !== 'undefined' && createPortal(<>
-      <button type="button" aria-label="Cerrar acciones de pizarra" onMouseDown={() => close()} className="fixed inset-0 cursor-default" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.workspacePopover - 1 }} />
-      <div ref={menuRef} role="menu" aria-label={`Acciones de ${whiteboard.name}`} style={{ ...position, zIndex: OPERATIONAL_OVERLAY_LAYERS.workspacePopover }} onKeyDown={event => {
-        const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'))
-        const current = items.indexOf(document.activeElement as HTMLButtonElement)
-        if (event.key === 'Escape') { event.preventDefault(); close() }
-        else if (event.key === 'ArrowDown') { event.preventDefault(); items[(current + 1 + items.length) % items.length]?.focus() }
-        else if (event.key === 'ArrowUp') { event.preventDefault(); items[(current - 1 + items.length) % items.length]?.focus() }
-        else if (event.key === 'Home') { event.preventDefault(); items[0]?.focus() }
-        else if (event.key === 'End') { event.preventDefault(); items.at(-1)?.focus() }
-        else if (event.key === 'Tab') close(false)
-      }} className="fixed rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl shadow-slate-900/15 outline-none">
-        {!archived && canConfigure && <button type="button" role="menuitem" onClick={() => choose('settings')} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-emerald-50 hover:text-emerald-800"><Settings2 className="h-4 w-4 text-emerald-600" />Configurar</button>}
-        {!archived && canMove && <button type="button" role="menuitem" onClick={() => choose('move')} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-600 hover:bg-emerald-50 hover:text-emerald-800"><Folder className="h-4 w-4 text-emerald-600" />Cambiar carpeta</button>}
-        {!archived && canDuplicate && <button type="button" role="menuitem" onClick={() => choose('duplicate')} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-50"><Copy className="h-4 w-4 text-slate-400" />Duplicar</button>}
-        {!archived && canManage && <button type="button" role="menuitem" onClick={() => choose('archive')} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-600 hover:bg-slate-50"><Archive className="h-4 w-4 text-slate-400" />Mover a Papelera</button>}
-        {archived && canManage && <button type="button" role="menuitem" onClick={() => choose('restore')} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-emerald-700 hover:bg-emerald-50"><RotateCcw className="h-4 w-4" />Restaurar</button>}
-        {archived && canPurge && <button type="button" role="menuitem" disabled={!purgeReady} onClick={() => choose('purge')} title={purgeReady ? 'Eliminar definitivamente' : purgeEligibilityLabel(purgeEligibleAt)} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-rose-600 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-35"><Trash2 className="h-4 w-4" />Eliminar definitivamente</button>}
-      </div>
-    </>, document.body)}
-  </>
 }
 
 function apiFailureMessage(status: number | undefined, fallback?: string) {
@@ -416,11 +321,6 @@ function apiFailureMessage(status: number | undefined, fallback?: string) {
   if (status === 404) return fallback || 'El recurso ya no está disponible o dejó de ser visible para tu cuenta.'
   if (status === 409) return fallback || 'El recurso cambió mientras trabajabas. Actualiza la lista e inténtalo de nuevo.'
   return fallback || 'No se pudo completar la operación.'
-}
-
-function purgeEligibilityLabel(value: string | null) {
-  if (!value) return 'Fecha de eliminación no disponible'
-  return `Eliminación definitiva desde ${new Intl.DateTimeFormat('es', { dateStyle: 'medium' }).format(new Date(value))}`
 }
 
 function OperationalDialog({
@@ -455,137 +355,6 @@ function OperationalDialog({
       </div>
     </div>,
     document.body,
-  )
-}
-
-function WhiteboardCard({
-  whiteboard,
-  view,
-  busy,
-  onOpen,
-  onMove,
-  purgeEligibleAt,
-  canPurge,
-  canDuplicate,
-  canMove,
-  canDrag,
-  onMenuAction,
-}: {
-  whiteboard: WhiteboardSummary
-  view: WhiteboardViewMode
-  busy: boolean
-  onOpen: () => void
-  onMove: () => void
-  purgeEligibleAt: string | null
-  canPurge: boolean
-  canDuplicate: boolean
-  canMove: boolean
-  canDrag: boolean
-  onMenuAction: (action: WhiteboardMenuAction) => void
-}) {
-  const archived = Boolean(whiteboard.archived_at)
-  const isWork = whiteboard.origin === 'work' && Boolean(whiteboard.work_location)
-  const canOpenWorkLocation = isWork && !archived && whiteboard.work_location?.lifecycle !== 'trash'
-  const workLocationHref = canOpenWorkLocation && whiteboard.work_location?.task_view_id
-    ? `/dashboard/tasks?work_view=${encodeURIComponent(whiteboard.work_location.task_view_id)}`
-    : null
-  const canManage = Boolean(whiteboard.effective_access.can_delete || whiteboard.effective_access.can_manage_access)
-  const canConfigure = !isWork && whiteboard.effective_access.can_manage_access
-  const workBreadcrumb = whiteboard.work_location?.breadcrumb?.map(item => item.name).filter(Boolean).join(' / ')
-    || whiteboard.work_location?.scope_name
-    || 'Ubicación autorizada'
-  const workLocationAriaLabel = `Abrir ubicación en Work · ${whiteboard.name} · ${workBreadcrumb}`
-  const secondaryLabel = archived
-    ? purgeEligibilityLabel(purgeEligibleAt)
-    : isWork
-      ? `Clarin Work · ${workBreadcrumb}`
-      : `${whiteboard.folder_name || 'Sin carpeta'} · ${whiteboard.updated_by_name || whiteboard.owner_name || 'Cuenta'}`
-  const purgeReady = Boolean(purgeEligibleAt && Date.parse(purgeEligibleAt) <= Date.now())
-  const drag = useDraggable({
-    id: `whiteboard:${whiteboard.id}`,
-    data: { type: 'whiteboard', whiteboardID: whiteboard.id, sourceFolderID: whiteboard.folder_id || null },
-    disabled: archived || !canDrag || busy,
-  })
-  const articleStyle: CSSProperties = {
-    opacity: drag.isDragging ? 0.32 : 1,
-  }
-  const dragHandle = !archived && canMove && <button
-    ref={drag.setActivatorNodeRef}
-    type="button"
-    disabled={busy || !canDrag}
-    {...drag.attributes}
-    {...drag.listeners}
-    className="flex h-11 w-11 shrink-0 touch-none items-center justify-center rounded-xl text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-40 [@media(pointer:fine)]:cursor-grab"
-    aria-label={canDrag ? `Arrastrar ${whiteboard.name} a una carpeta` : `No hay otra carpeta disponible para ${whiteboard.name}`}
-    title={canDrag ? 'Arrastrar a una carpeta' : 'Crea una carpeta para habilitar el arrastre'}
-  ><GripVertical className="h-4 w-4" /></button>
-  if (view === 'list') {
-    return (
-      <article ref={drag.setNodeRef} data-whiteboard-id={whiteboard.id} style={articleStyle} className="group flex min-w-0 items-center gap-2 border-b border-slate-100 bg-white px-3 py-2.5 transition-[opacity,background-color] hover:bg-slate-50 sm:px-4">
-        {dragHandle}
-        <button type="button" onClick={onOpen} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-emerald-700 shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label={`Abrir ${whiteboard.name}`}>
-          <Network className="h-5 w-5" />
-        </button>
-        <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
-          <span className="block truncate text-sm font-bold text-slate-800">{whiteboard.name}</span>
-          <span className="mt-0.5 block truncate text-xs text-slate-400">{secondaryLabel}</span>
-        </button>
-        {isWork && <span className="hidden rounded-full bg-violet-50 px-2 py-1 text-[10px] font-bold text-violet-700 sm:inline">Clarin Work</span>}
-        {whiteboard.shared && <span className="hidden rounded-full bg-sky-50 px-2 py-1 text-[10px] font-bold text-sky-700 sm:inline">Compartida</span>}
-        <span className="hidden w-28 text-right text-xs text-slate-400 md:block">{formatWhiteboardUpdatedAt(whiteboard.updated_at)}</span>
-        {!archived && canMove && <button type="button" disabled={busy} onClick={onMove} className="hidden min-h-9 max-w-44 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-40 sm:flex" aria-label={`Cambiar carpeta de ${whiteboard.name}`}><Folder className="h-3.5 w-3.5" /><span className="truncate">{whiteboard.folder_name || 'Sin carpeta'}</span></button>}
-        {workLocationHref && <a href={workLocationHref} aria-label={workLocationAriaLabel} aria-disabled={busy} onClick={event => { if (busy) event.preventDefault() }} className={`hidden min-h-9 items-center gap-1.5 rounded-xl border border-violet-100 bg-violet-50 px-3 text-xs font-bold text-violet-700 hover:bg-violet-100 lg:flex ${busy ? 'pointer-events-none opacity-40' : ''}`}><BriefcaseBusiness className="h-3.5 w-3.5" />Abrir ubicación</a>}
-        <WhiteboardActionsMenu whiteboard={whiteboard} busy={busy} canMove={canMove} canConfigure={canConfigure} canDuplicate={canDuplicate} canManage={canManage} canPurge={canPurge} purgeReady={purgeReady} purgeEligibleAt={purgeEligibleAt} onAction={onMenuAction} />
-        <button type="button" onClick={onOpen} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-white hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label={`Abrir ${whiteboard.name}`}>
-          <ArrowRight className="h-4 w-4" />
-        </button>
-      </article>
-    )
-  }
-
-  if (view === 'compact') {
-    return <article ref={drag.setNodeRef} data-whiteboard-id={whiteboard.id} style={articleStyle} className="group flex min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition-[opacity,transform,border-color,box-shadow] duration-200 hover:-translate-y-0.5 hover:border-emerald-200 hover:shadow-md motion-reduce:transform-none motion-reduce:transition-none">
-      <button type="button" onClick={onOpen} className="relative flex w-[38%] min-w-[104px] max-w-[152px] shrink-0 items-center justify-center overflow-hidden border-r border-slate-100 bg-slate-50 text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500" aria-label={`Abrir ${whiteboard.name}`}>
-        {whiteboard.thumbnail_url ? <img src={whiteboard.thumbnail_url} alt="" className="absolute inset-0 h-full w-full object-cover" /> : <Network className="h-7 w-7" />}
-        {isWork && <span className="absolute right-2 top-2 rounded-full border border-violet-100 bg-white/95 px-2 py-1 text-[9px] font-bold text-violet-700 shadow-sm">Clarin Work</span>}
-      </button>
-      <div className="flex min-w-0 flex-1 flex-col p-3">
-        <div className="flex min-w-0 items-start gap-1">
-          <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
-            <span className="line-clamp-2 text-sm font-black leading-5 text-slate-800">{whiteboard.name}</span>
-          </button>
-          {dragHandle}
-          <WhiteboardActionsMenu whiteboard={whiteboard} busy={busy} canMove={canMove} canConfigure={canConfigure} canDuplicate={canDuplicate} canManage={canManage} canPurge={canPurge} purgeReady={purgeReady} purgeEligibleAt={purgeEligibleAt} onAction={onMenuAction} />
-        </div>
-        <p className="mt-1 truncate text-[11px] text-slate-400">{isWork && !archived ? workBreadcrumb : archived ? purgeEligibilityLabel(purgeEligibleAt) : `${formatWhiteboardUpdatedAt(whiteboard.updated_at)} · ${whiteboard.updated_by_name || whiteboard.owner_name || 'Cuenta'}`}</p>
-        <div className="mt-auto flex min-w-0 items-center gap-2 pt-2">
-          {workLocationHref ? <a href={workLocationHref} aria-label={workLocationAriaLabel} aria-disabled={busy} onClick={event => { if (busy) event.preventDefault() }} className={`flex min-h-9 min-w-0 flex-1 items-center gap-1.5 rounded-xl bg-violet-50 px-2.5 text-left text-xs font-bold text-violet-700 hover:bg-violet-100 ${busy ? 'pointer-events-none opacity-40' : ''}`}><BriefcaseBusiness className="h-3.5 w-3.5 shrink-0" /><span className="truncate">Abrir ubicación en Work</span></a> : isWork ? <span className="min-w-0 flex-1 truncate text-[11px] text-slate-400">Ubicación original · {workBreadcrumb}</span> : !archived && canMove ? <button type="button" disabled={busy} onClick={onMove} className="flex min-h-9 min-w-0 flex-1 items-center gap-1.5 rounded-xl bg-slate-50 px-2.5 text-left text-xs font-bold text-slate-600 hover:bg-emerald-50 hover:text-emerald-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-40" aria-label={`Cambiar carpeta de ${whiteboard.name}. Carpeta actual: ${whiteboard.folder_name || 'Sin carpeta'}`}><Folder className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{whiteboard.folder_name || 'Sin carpeta'}</span></button> : <span className="min-w-0 flex-1 truncate text-[11px] text-slate-400">{whiteboard.folder_name || 'Sin carpeta'}</span>}
-          {whiteboard.shared && <span className="shrink-0 rounded-full bg-sky-50 px-2 py-1 text-[10px] font-bold text-sky-700">Compartida</span>}
-        </div>
-      </div>
-    </article>
-  }
-
-  return (
-    <article ref={drag.setNodeRef} data-whiteboard-id={whiteboard.id} style={articleStyle} className="group flex min-w-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition duration-200 hover:-translate-y-0.5 hover:border-emerald-200 hover:shadow-lg motion-reduce:transform-none motion-reduce:transition-none">
-      <button type="button" onClick={onOpen} className="relative flex aspect-[16/10] w-full items-center justify-center overflow-hidden border-b border-slate-100 bg-slate-50 text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500">
-        {whiteboard.thumbnail_url
-          ? <img src={whiteboard.thumbnail_url} alt="" className="h-full w-full object-cover" />
-          : <span className="flex h-14 w-14 items-center justify-center rounded-2xl border border-emerald-100 bg-white shadow-sm"><Network className="h-7 w-7" /></span>}
-        {isWork ? <span className="absolute right-2 top-2 rounded-full border border-violet-100 bg-white/95 px-2 py-1 text-[10px] font-bold text-violet-700 shadow-sm">Clarin Work</span> : whiteboard.shared && <span className="absolute right-2 top-2 rounded-full border border-sky-100 bg-white/95 px-2 py-1 text-[10px] font-bold text-sky-700 shadow-sm">Compartida</span>}
-      </button>
-      <div className="p-3">
-        <div className="flex min-w-0 items-start gap-2">
-          {dragHandle}
-          <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
-            <span className="block truncate text-sm font-black text-slate-800">{whiteboard.name}</span>
-            <span className="mt-1 block truncate text-[11px] text-slate-400">{isWork && !archived ? workBreadcrumb : archived ? purgeEligibilityLabel(purgeEligibleAt) : formatWhiteboardUpdatedAt(whiteboard.updated_at)}</span>
-          </button>
-          <WhiteboardActionsMenu whiteboard={whiteboard} busy={busy} canMove={canMove} canConfigure={canConfigure} canDuplicate={canDuplicate} canManage={canManage} canPurge={canPurge} purgeReady={purgeReady} purgeEligibleAt={purgeEligibleAt} onAction={onMenuAction} />
-        </div>
-        {workLocationHref ? <a href={workLocationHref} aria-label={workLocationAriaLabel} aria-disabled={busy} onClick={event => { if (busy) event.preventDefault() }} className={`mt-2 flex min-h-9 w-full items-center gap-2 rounded-xl bg-violet-50 px-3 text-left text-xs font-bold text-violet-700 hover:bg-violet-100 ${busy ? 'pointer-events-none opacity-40' : ''}`}><BriefcaseBusiness className="h-3.5 w-3.5 shrink-0" /><span className="min-w-0 flex-1 truncate">Abrir ubicación en Work</span><ArrowRight className="h-3.5 w-3.5 shrink-0 text-violet-300" /></a> : isWork ? <p className="mt-2 truncate rounded-xl bg-slate-50 px-3 py-2 text-[11px] text-slate-500">Ubicación original · {workBreadcrumb}</p> : !archived && canMove && <button type="button" disabled={busy} onClick={onMove} className="mt-2 flex min-h-9 w-full items-center gap-2 rounded-xl bg-slate-50 px-3 text-left text-xs font-bold text-slate-600 hover:bg-emerald-50 hover:text-emerald-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-40" aria-label={`Cambiar carpeta de ${whiteboard.name}. Carpeta actual: ${whiteboard.folder_name || 'Sin carpeta'}`}><Folder className="h-3.5 w-3.5 shrink-0" /><span className="min-w-0 flex-1 truncate">{whiteboard.folder_name || 'Sin carpeta'}</span><ArrowRight className="h-3.5 w-3.5 shrink-0 text-slate-300" /></button>}
-      </div>
-    </article>
   )
 }
 
@@ -1342,7 +1111,7 @@ export default function WhiteboardsManager() {
       const nextEligibleAt = response.data?.next_eligible_at
       if (response.status === 409 && nextEligibleAt) {
         setPurgeEligibilityOverrides(current => ({ ...current, [target.id]: nextEligibleAt }))
-        setError(`La retención todavía no terminó. ${purgeEligibilityLabel(nextEligibleAt)}.`)
+        setError(`La retención todavía no terminó. ${formatWhiteboardPurgeEligibility(nextEligibleAt)}.`)
       } else {
         setError(apiFailureMessage(response.status, response.error))
       }
@@ -1422,16 +1191,16 @@ export default function WhiteboardsManager() {
   const visibleScopeItems = workWhiteboardsEnabled ? SCOPE_ITEMS : SCOPE_ITEMS.filter(item => item.id !== 'work')
   const scopeLabel = selectedFolder?.name || visibleScopeItems.find(item => item.id === scope)?.label || 'Pizarras'
   const collectionClassName = view === 'grid'
-    ? `grid gap-3 p-3 sm:p-4 ${layout === 'wide' ? 'grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4' : layout === 'compact' ? 'grid-cols-2' : 'grid-cols-1 sm:grid-cols-2'}`
+    ? `grid gap-3 p-3 sm:p-4 ${layout === 'wide' ? 'grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4' : layout === 'compact' ? 'grid-cols-2' : 'grid-cols-1'}`
     : view === 'compact'
       ? 'grid gap-3 p-3 sm:p-4'
-      : 'm-3 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm sm:m-4'
+      : 'm-3 overflow-hidden rounded-lg border border-slate-200 bg-white sm:m-4'
   const collectionStyle = view === 'compact'
-    ? { gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 320px), 1fr))' }
+    ? { gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 340px), 1fr))' }
     : undefined
   const navigation = (
-    <aside className={`flex h-full min-h-0 flex-col border-r border-slate-200 bg-white ${layout === 'compact' ? 'w-[220px]' : 'w-[248px]'}`}>
-      <div className="flex h-[58px] shrink-0 items-center gap-3 border-b border-slate-100 px-3">
+    <aside className={`flex h-full min-h-0 flex-col border-r border-slate-200 bg-white ${layout === 'compact' ? 'w-[224px]' : 'w-[244px]'}`}>
+      <div className="flex h-14 shrink-0 items-center gap-3 border-b border-slate-100 px-3">
         <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white"><Network className="h-5 w-5" /></span>
         <div className="min-w-0 flex-1"><p className="truncate text-sm font-black text-slate-900">Pizarras Clarin</p><p className="text-[9px] font-bold uppercase tracking-[.14em] text-emerald-600">Espacio visual</p></div>
         {layout === 'narrow' && <button type="button" onClick={closeNavigation} aria-label="Cerrar navegación" className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
@@ -1440,8 +1209,8 @@ export default function WhiteboardsManager() {
         <div className="space-y-1">
           {visibleScopeItems.map(item => {
             const active = scope === item.id && !folderID
-              return <button key={item.id} type="button" disabled={Boolean(busyID)} onClick={() => selectScope(item.id)} aria-current={active ? 'page' : undefined} className={`flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-55 ${active ? 'bg-emerald-50 text-emerald-800' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'}`}>
-              <item.icon className="h-4 w-4 shrink-0" /><span className="min-w-0 flex-1 truncate">{item.label}</span>{typeof counts[item.id] === 'number' && <span className="text-[10px] tabular-nums text-slate-400">{counts[item.id]}</span>}
+              return <button key={item.id} type="button" disabled={Boolean(busyID)} onClick={() => selectScope(item.id)} aria-current={active ? 'page' : undefined} className={`flex min-h-11 w-full items-center gap-3 rounded-xl border px-3 text-left text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-55 ${active ? 'border-emerald-100 bg-emerald-50 text-emerald-800' : 'border-transparent text-slate-600 hover:bg-slate-50 hover:text-slate-900'}`}>
+              <item.icon className="h-4 w-4 shrink-0" /><span className="min-w-0 flex-1 truncate">{item.label}</span>{typeof counts[item.id] === 'number' && <span className={`rounded-md px-1.5 py-0.5 text-[10px] tabular-nums ${active ? 'bg-white/80 text-emerald-700' : 'text-slate-400'}`}>{counts[item.id]}</span>}
             </button>
           })}
         </div>
@@ -1510,7 +1279,7 @@ export default function WhiteboardsManager() {
         onDragCancel: () => 'Movimiento cancelado sin cambios.',
       } }}
     >
-    <div ref={rootRef} className="relative flex h-full min-h-0 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+    <div ref={rootRef} className="relative flex h-full min-h-0 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
       <p className="sr-only" aria-live="polite" aria-atomic="true">{dragAnnouncement}</p>
       {layout !== 'narrow' && navigation}
       {layout === 'narrow' && navigationOpen && <>
@@ -1519,13 +1288,10 @@ export default function WhiteboardsManager() {
       </>}
 
       <section className="flex min-w-0 flex-1 flex-col" aria-labelledby="whiteboards-title">
-        <header className="shrink-0 border-b border-slate-200 bg-white px-3 py-3 sm:px-4">
+        <header className="shrink-0 border-b border-slate-200 bg-white px-3 py-2.5 sm:px-4">
           <div className="flex min-w-0 items-center gap-2">
             {layout === 'narrow' && <button type="button" onClick={() => setNavigationOpen(true)} aria-label="Abrir navegación de Pizarras" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Menu className="h-5 w-5" /></button>}
-            <div className="min-w-0 flex-1">
-              <p className="text-[10px] font-bold uppercase tracking-[.13em] text-emerald-600">Pizarras Clarin</p>
-              <h1 id="whiteboards-title" className="truncate text-lg font-black text-slate-900">{scopeLabel}</h1>
-            </div>
+            <h1 id="whiteboards-title" className="min-w-0 flex-1 truncate text-xl font-black text-slate-900">{scopeLabel}</h1>
             {selectedFolder && capabilities.can_create_folder && <button type="button" onClick={() => { setError(null); setSettingsTarget({ kind: 'folder', value: selectedFolder }) }} disabled={Boolean(folderBusyID || busyID)} aria-label={`Configurar carpeta ${selectedFolder.name}`} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-35"><Settings2 className="h-4 w-4" /></button>}
             <button type="button" onClick={() => void loadIndex(false)} disabled={refreshing || Boolean(busyID)} aria-label="Actualizar pizarras" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-40"><RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} /></button>
             <button type="button" onClick={() => importInputRef.current?.click()} disabled={scope === 'work' || !capabilities.can_create || submitting || Boolean(busyID)} title={scope === 'work' ? 'Añade pizarras contextuales desde una Lista o Carpeta de Work.' : undefined} className="hidden min-h-11 items-center gap-2 rounded-xl border border-slate-200 px-3 text-sm font-bold text-slate-600 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-35 sm:flex"><FileUp className="h-4 w-4" />Importar</button>
@@ -1540,10 +1306,10 @@ export default function WhiteboardsManager() {
               {searchPending && <Loader2 className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-600" aria-label="Actualizando búsqueda" />}
               {!searchPending && rawSearch && <button type="button" onClick={() => { setRawSearch(''); setSettledSearch('') }} aria-label="Limpiar búsqueda" className="absolute right-1 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
             </label>
-            <div className="flex rounded-xl border border-slate-200 bg-white p-1" role="group" aria-label="Vista de pizarras">
-              <button type="button" onClick={() => chooseView('grid')} aria-pressed={view === 'grid'} aria-label="Vista de cuadrícula" title="Cuadrícula" className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${view === 'grid' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-700'}`}><Grid2X2 className="h-4 w-4" /></button>
-              <button type="button" onClick={() => chooseView('compact')} aria-pressed={view === 'compact'} aria-label="Vista compacta" title="Compacta" className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${view === 'compact' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-700'}`}><LayoutTemplate className="h-4 w-4" /></button>
-              <button type="button" onClick={() => chooseView('list')} aria-pressed={view === 'list'} aria-label="Vista de lista" title="Lista" className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${view === 'list' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-700'}`}><List className="h-4 w-4" /></button>
+            <div className="flex rounded-xl bg-slate-100 p-1" role="group" aria-label="Vista de pizarras">
+              <button type="button" onClick={() => chooseView('grid')} aria-pressed={view === 'grid'} aria-label="Vista de cuadrícula" title="Cuadrícula" className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${view === 'grid' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-400 hover:bg-white/70 hover:text-slate-700'}`}><Grid2X2 className="h-4 w-4" /></button>
+              <button type="button" onClick={() => chooseView('compact')} aria-pressed={view === 'compact'} aria-label="Vista compacta" title="Compacta" className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${view === 'compact' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-400 hover:bg-white/70 hover:text-slate-700'}`}><LayoutTemplate className="h-4 w-4" /></button>
+              <button type="button" onClick={() => chooseView('list')} aria-pressed={view === 'list'} aria-label="Vista de lista" title="Lista" className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${view === 'list' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-400 hover:bg-white/70 hover:text-slate-700'}`}><List className="h-4 w-4" /></button>
             </div>
           </div>
           {scope === 'trash' && trashPolicy && <div className="mt-3 flex flex-wrap items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2">
@@ -1553,15 +1319,16 @@ export default function WhiteboardsManager() {
           {error && phase !== 'error' && <div className="mt-3 flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800" role="alert"><span className="min-w-0 flex-1">{error}</span><button type="button" onClick={() => setError(null)} aria-label="Cerrar error" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg hover:bg-rose-100"><X className="h-4 w-4" /></button></div>}
         </header>
 
-        <div className="min-h-0 flex-1 overflow-y-auto bg-slate-50/60">
-          {phase === 'loading' && <div className={collectionClassName} style={collectionStyle} aria-label="Cargando pizarras">{Array.from({ length: 8 }).map((_, index) => <div key={index} className={`${view === 'list' ? 'h-16 border-b last:border-b-0' : view === 'compact' ? 'h-32 rounded-2xl border' : 'aspect-[4/3] rounded-2xl border'} animate-pulse border-slate-200 bg-white`} />)}</div>}
+        <div className="min-h-0 flex-1 overflow-y-auto bg-slate-50/50">
+          {phase === 'loading' && <div className={collectionClassName} style={collectionStyle} aria-label="Cargando pizarras">{Array.from({ length: 8 }).map((_, index) => <div key={index} className={`${view === 'list' ? layout === 'narrow' ? 'h-28 border-b last:border-b-0' : 'h-16 border-b last:border-b-0' : view === 'compact' ? 'h-[142px] rounded-lg border' : 'aspect-[4/3] rounded-lg border'} animate-pulse border-slate-200 bg-white`} />)}</div>}
           {phase === 'error' && <div className="flex h-full min-h-80 flex-col items-center justify-center px-6 text-center"><span className="flex h-14 w-14 items-center justify-center rounded-2xl border border-rose-100 bg-white text-rose-600 shadow-sm"><Network className="h-7 w-7" /></span><h2 className="mt-4 text-lg font-black text-slate-900">No se pudieron abrir las Pizarras</h2><p className="mt-2 max-w-md text-sm leading-6 text-slate-500">{error}</p><button type="button" onClick={() => void loadIndex(false)} className="mt-5 flex min-h-11 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-bold text-white hover:bg-slate-800"><RefreshCw className="h-4 w-4" />Reintentar</button></div>}
           {phase === 'ready' && visibleWhiteboards.length === 0 && <div className="flex h-full min-h-80 flex-col items-center justify-center px-6 text-center"><span className="flex h-14 w-14 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-400 shadow-sm">{settledSearch ? <Search className="h-7 w-7" /> : scope === 'work' ? <BriefcaseBusiness className="h-7 w-7" /> : selectedFolder ? <FolderOpen className="h-7 w-7" /> : <Network className="h-7 w-7" />}</span><h2 className="mt-4 text-lg font-black text-slate-900">{settledSearch ? 'No hay coincidencias' : scope === 'trash' ? 'La Papelera está vacía' : scope === 'work' ? 'Aún no hay pizarras de Work' : 'Este espacio está vacío'}</h2><p className="mt-2 max-w-md text-sm leading-6 text-slate-500">{settledSearch ? 'Prueba otra búsqueda o limpia el texto.' : scope === 'trash' ? 'Las pizarras que muevas a la Papelera aparecerán aquí y se podrán restaurar.' : scope === 'work' ? 'Añádelas con + Vista dentro de una Lista o Carpeta; aquí aparecerá el mismo documento canónico.' : 'Crea una pizarra para empezar a trabajar visualmente dentro de la cuenta.'}</p>{!settledSearch && scope === 'work' && <button type="button" onClick={() => router.push('/dashboard/tasks')} className="mt-5 flex min-h-11 items-center gap-2 rounded-xl bg-violet-600 px-4 text-sm font-black text-white hover:bg-violet-700"><BriefcaseBusiness className="h-4 w-4" />Abrir Clarin Work</button>}{!settledSearch && scope !== 'trash' && scope !== 'work' && <button type="button" disabled={!capabilities.can_create || Boolean(busyID)} onClick={() => openCreate('board')} className="mt-5 flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-black text-white hover:bg-emerald-700 disabled:opacity-35"><Plus className="h-4 w-4" />Nueva pizarra</button>}</div>}
-          {phase === 'ready' && visibleWhiteboards.length > 0 && <div className={collectionClassName} style={collectionStyle}>
-            {visibleWhiteboards.map(whiteboard => <WhiteboardCard
+          {phase === 'ready' && visibleWhiteboards.length > 0 && <div className={collectionClassName} style={collectionStyle} role="list" aria-label={scopeLabel}>
+            {visibleWhiteboards.map(whiteboard => <WhiteboardCatalogItem
               key={whiteboard.id}
               whiteboard={whiteboard}
               view={view}
+              layout={layout}
               busy={Boolean(busyID) || refreshing || loadingMore || searchPending}
               onOpen={() => router.push(`/dashboard/whiteboards/${whiteboard.id}`)}
               onMove={() => openMove(whiteboard)}
@@ -1649,7 +1416,7 @@ export default function WhiteboardsManager() {
         <div className="p-5">
           <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-3 text-sm leading-5 text-rose-800">Escribe exactamente <strong>{purgeTarget.name}</strong> para confirmar.</p>
           <label className="mt-4 block text-xs font-black uppercase tracking-[.12em] text-slate-500">Nombre de la pizarra<input autoFocus value={purgeConfirmation} onChange={event => setPurgeConfirmation(event.target.value)} className="mt-2 h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-800 outline-none focus:border-rose-400 focus:ring-4 focus:ring-rose-100" /></label>
-          <p className="mt-2 text-xs text-slate-400">{purgeEligibilityLabel(purgeEligibilityOverrides[purgeTarget.id] || whiteboardPurgeEligibleAt(purgeTarget.archived_at, trashPolicy?.retention_days || 0))}</p>
+          <p className="mt-2 text-xs text-slate-400">{formatWhiteboardPurgeEligibility(purgeEligibilityOverrides[purgeTarget.id] || whiteboardPurgeEligibleAt(purgeTarget.archived_at, trashPolicy?.retention_days || 0))}</p>
           <div className="mt-5 flex justify-end gap-2"><button type="button" disabled={Boolean(busyID)} onClick={() => { setPurgeTarget(null); setPurgeConfirmation('') }} className="min-h-11 rounded-xl px-4 text-sm font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-40">Cancelar</button><button type="button" disabled={Boolean(busyID) || purgeConfirmation !== purgeTarget.name} onClick={() => void confirmPurge()} className="flex min-h-11 items-center gap-2 rounded-xl bg-rose-600 px-4 text-sm font-black text-white hover:bg-rose-700 disabled:opacity-35">{busyID ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}Eliminar definitivamente</button></div>
         </div>
       </OperationalDialog>}

@@ -19,6 +19,7 @@ import {
 import { PwaInstallExperience, PwaInstallMenuAction, PwaRuntimeProvider, usePwaRuntime } from '@/components/mobile-app/PwaRuntime'
 import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshTokenOutcome, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthSessionDetected, markAuthTokenRefreshed } from '@/lib/api'
 import { dashboardSidebarHeaderState } from '@/lib/dashboardSidebarState'
+import { shouldToggleErosFromKeyboard } from '@/lib/dashboardKeyboard'
 import {
   availableMobileAppModules,
   canUseMobileAppModule,
@@ -234,10 +235,9 @@ function DashboardLayoutContent({
   useEffect(() => {
     if (mobileAppMode) return
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'i') {
-        e.preventDefault()
-        setIsErosOpen(prev => !prev)
-      }
+      if (!shouldToggleErosFromKeyboard(e)) return
+      e.preventDefault()
+      setIsErosOpen(prev => !prev)
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
