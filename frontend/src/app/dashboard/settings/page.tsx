@@ -115,6 +115,33 @@ interface UserProfile {
   permissions?: string[]
 }
 
+interface QuickReplyAttachmentItem {
+  id?: string
+  media_asset_id?: string
+  media_url: string
+  media_type: string
+  media_filename: string
+  caption: string
+  position: number
+}
+
+interface QuickReplyItem {
+  id: string
+  shortcut: string
+  title: string
+  body: string
+  media_url: string
+  media_type: string
+  media_filename: string
+  attachments: QuickReplyAttachmentItem[]
+  updated_at: string
+}
+
+type QuickReplyDraft = Omit<QuickReplyItem, 'id' | 'updated_at'> & {
+  id?: string
+  updated_at?: string
+}
+
 // ─── API Keys / MCP Panel ───────────────────────────────────────────────────
 function APIKeysPanel() {
   const [apiKeys, setApiKeys] = useState<any[]>([])
@@ -1062,10 +1089,16 @@ export default function SettingsPage() {
   const [notifSettings, setNotifSettings] = useState<NotificationSettings | null>(null)
   const [notifPermission, setNotifPermission] = useState<NotificationPermission>('default')
   const { refreshSettings: refreshProviderSettings } = useNotifications()
-  const [quickReplies, setQuickReplies] = useState<{ id: string; shortcut: string; title: string; body: string; media_url: string; media_type: string; media_filename: string; attachments: { id?: string; media_url: string; media_type: string; media_filename: string; caption: string; position: number }[] }[]>([])
-  const [editingQR, setEditingQR] = useState<{ id?: string; shortcut: string; title: string; body: string; media_url: string; media_type: string; media_filename: string; attachments: { id?: string; media_url: string; media_type: string; media_filename: string; caption: string; position: number }[] } | null>(null)
+  const [quickReplies, setQuickReplies] = useState<QuickReplyItem[]>([])
+  const [editingQR, setEditingQR] = useState<QuickReplyDraft | null>(null)
   const [savingQR, setSavingQR] = useState(false)
   const [uploadingQRMedia, setUploadingQRMedia] = useState(false)
+  const canManageQuickReplies = Boolean(
+    user?.is_super_admin
+    || user?.is_admin
+    || user?.permissions?.includes('quick_replies_manage')
+    || user?.permissions?.includes('*'),
+  )
   const [integrationView, setIntegrationView] = useState<'list' | 'google'>('list')
   const [incomingStageId, setIncomingStageId] = useState<string>('')
   const [pipelineStages, setPipelineStages] = useState<{ id: string; name: string; color: string; pipeline_name: string }[]>([])
@@ -1216,8 +1249,8 @@ export default function SettingsPage() {
   }, [])
 
   useEffect(() => {
-    fetchQuickReplies()
-  }, [fetchQuickReplies])
+    if (canManageQuickReplies) fetchQuickReplies()
+  }, [canManageQuickReplies, fetchQuickReplies])
 
   const fetchPipelineStages = useCallback(async () => {
     const token = localStorage.getItem('token')
@@ -1409,18 +1442,20 @@ export default function SettingsPage() {
         }
         const formData = new FormData()
         formData.append('file', file)
+        formData.append('folder', 'quick-reply-drafts')
         const res = await fetch('/api/media/upload', {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}` },
           body: formData,
         })
         const data = await res.json()
-        if (data.success && (data.proxy_url || data.public_url)) {
+        if (data.success && data.media_asset_id && (data.proxy_url || data.public_url)) {
           let mediaType = 'document'
           if (file.type.startsWith('image/')) mediaType = 'image'
           else if (file.type.startsWith('video/')) mediaType = 'video'
           else if (file.type.startsWith('audio/')) mediaType = 'audio'
           newAttachments.push({
+            media_asset_id: String(data.media_asset_id),
             media_url: data.proxy_url || data.public_url,
             media_type: mediaType,
             media_filename: files[i].name,
@@ -1440,8 +1475,38 @@ export default function SettingsPage() {
     }
   }
 
+  const releaseQuickReplyDraftMedia = async (mediaAssetID?: string) => {
+    if (!mediaAssetID) return
+    const token = localStorage.getItem('token')
+    try {
+      await fetch(`/api/quick-replies/draft-media/${mediaAssetID}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+    } catch {
+      // Draft inventory has a 24-hour fallback retention if immediate release fails.
+    }
+  }
+
+  const handleRemoveQuickReplyAttachment = (index: number) => {
+    if (!editingQR) return
+    const removed = editingQR.attachments[index]
+    const attachments = editingQR.attachments
+      .filter((_, attachmentIndex) => attachmentIndex !== index)
+      .map((attachment, position) => ({ ...attachment, position }))
+    setEditingQR({ ...editingQR, attachments })
+    void releaseQuickReplyDraftMedia(removed?.media_asset_id)
+  }
+
+  const handleCancelQuickReply = () => {
+    if (!editingQR || uploadingQRMedia || savingQR) return
+    const attachments = editingQR.attachments
+    setEditingQR(null)
+    for (const attachment of attachments) void releaseQuickReplyDraftMedia(attachment.media_asset_id)
+  }
+
   const handleSaveQuickReply = async () => {
-    if (!editingQR || !editingQR.shortcut.trim() || (!editingQR.body.trim() && !editingQR.media_url && editingQR.attachments.length === 0)) return
+    if (!editingQR || !editingQR.shortcut.trim() || (!editingQR.body.trim() && editingQR.attachments.length === 0)) return
     setSavingQR(true)
     const token = localStorage.getItem('token')
     try {
@@ -1453,11 +1518,10 @@ export default function SettingsPage() {
           shortcut: editingQR.shortcut.trim(),
           title: editingQR.title.trim(),
           body: editingQR.body.trim(),
-          media_url: editingQR.media_url || '',
-          media_type: editingQR.media_type || '',
-          media_filename: editingQR.media_filename || '',
-          attachments: editingQR.attachments.map((a, i) => ({
-            media_url: a.media_url,
+          expected_updated_at: editingQR.updated_at || '',
+          attachments: editingQR.attachments.map(a => ({
+            id: a.id,
+            media_asset_id: a.media_asset_id,
             media_type: a.media_type,
             media_filename: a.media_filename,
             caption: a.caption || '',
@@ -1942,7 +2006,7 @@ export default function SettingsPage() {
     ...((user?.is_super_admin || user?.is_admin || user?.permissions?.includes('integrations') || user?.permissions?.includes('*')) ? [{ id: 'integrations', label: 'Integraciones', icon: Link2 }] : []),
     ...((user?.is_super_admin || user?.is_admin || user?.permissions?.includes('devices') || user?.permissions?.includes('*')) ? [{ id: 'devices', label: 'Dispositivos', icon: Smartphone }] : []),
     ...((user?.is_super_admin || user?.is_admin || user?.permissions?.includes('integrations') || user?.permissions?.includes('*')) ? [{ id: 'whatsapp-api', label: 'WhatsApp API', icon: Globe }] : []),
-    { id: 'quick-replies', label: 'Resp. Rápidas', icon: Zap },
+    ...(canManageQuickReplies ? [{ id: 'quick-replies', label: 'Resp. Rápidas', icon: Zap }] : []),
     ...((user?.is_super_admin || user?.is_admin || user?.permissions?.includes('settings') || user?.permissions?.includes('*')) ? [{ id: 'custom-fields', label: 'Campos', icon: Tag }] : []),
     { id: 'notifications', label: 'Notificaciones', icon: Bell },
     ...((user?.is_super_admin || user?.is_admin) ? [{ id: 'api-keys', label: 'API Keys', icon: Key }] : []),
@@ -3025,7 +3089,7 @@ export default function SettingsPage() {
                     <h4 className="text-xs font-medium text-slate-900">
                       {editingQR.id ? 'Editar respuesta rápida' : 'Nueva respuesta rápida'}
                     </h4>
-                    <button onClick={() => setEditingQR(null)} className="p-1 text-slate-400 hover:text-slate-600">
+                    <button onClick={handleCancelQuickReply} disabled={uploadingQRMedia || savingQR} className="p-1 text-slate-400 hover:text-slate-600 disabled:opacity-50">
                       <X className="w-4 h-4" />
                     </button>
                   </div>
@@ -3094,7 +3158,7 @@ export default function SettingsPage() {
                                 {idx < editingQR.attachments.length - 1 && (
                                   <button onClick={() => { const atts = [...editingQR.attachments]; [atts[idx], atts[idx+1]] = [atts[idx+1], atts[idx]]; setEditingQR({ ...editingQR, attachments: atts.map((a, i) => ({ ...a, position: i })) }) }} className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition" title="Bajar"><ChevronDown className="w-3.5 h-3.5" /></button>
                                 )}
-                                <button onClick={() => { const atts = editingQR.attachments.filter((_, i) => i !== idx).map((a, i) => ({ ...a, position: i })); setEditingQR({ ...editingQR, attachments: atts }) }} className="p-1 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition" title="Eliminar"><X className="w-3.5 h-3.5" /></button>
+                                <button onClick={() => handleRemoveQuickReplyAttachment(idx)} disabled={uploadingQRMedia || savingQR} className="p-1 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition disabled:opacity-50" title="Eliminar"><X className="w-3.5 h-3.5" /></button>
                               </div>
                             </div>
                             {(att.media_type === 'image' || att.media_type === 'video') && (
@@ -3173,8 +3237,9 @@ export default function SettingsPage() {
 
                   <div className="flex justify-end gap-2">
                     <button
-                      onClick={() => setEditingQR(null)}
-                      className="px-3 py-1.5 text-slate-600 hover:bg-slate-100 rounded-xl text-xs"
+                      onClick={handleCancelQuickReply}
+                      disabled={uploadingQRMedia || savingQR}
+                      className="px-3 py-1.5 text-slate-600 hover:bg-slate-100 rounded-xl text-xs disabled:opacity-50"
                     >
                       Cancelar
                     </button>
@@ -3230,7 +3295,7 @@ export default function SettingsPage() {
                       </div>
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
                         <button
-                          onClick={() => setEditingQR({ id: qr.id, shortcut: qr.shortcut, title: qr.title, body: qr.body, media_url: qr.media_url || '', media_type: qr.media_type || '', media_filename: qr.media_filename || '', attachments: qr.attachments || [] })}
+                          onClick={() => setEditingQR({ id: qr.id, shortcut: qr.shortcut, title: qr.title, body: qr.body, media_url: qr.media_url || '', media_type: qr.media_type || '', media_filename: qr.media_filename || '', attachments: qr.attachments || [], updated_at: qr.updated_at })}
                           className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-white rounded-lg"
                           title="Editar"
                         >

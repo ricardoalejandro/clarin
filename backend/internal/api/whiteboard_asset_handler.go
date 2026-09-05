@@ -289,12 +289,11 @@ func (s *Server) handleDownloadWhiteboardRevisionAsset(c *fiber.Ctx) error {
 }
 
 func serveWhiteboardAsset(c *fiber.Ctx, s *Server, item *repository.WhiteboardAssetDownload) error {
-	c.Set(fiber.HeaderContentType, item.ContentType)
 	if disposition := mime.FormatMediaType("inline", map[string]string{"filename": item.Filename}); disposition != "" {
 		c.Set(fiber.HeaderContentDisposition, disposition)
 	}
 	c.Set(fiber.HeaderXContentTypeOptions, "nosniff")
-	return s.serveStorageObject(c, item.ObjectKey, whiteboardAssetCacheControl)
+	return s.serveStorageObject(c, item.ObjectKey, whiteboardAssetCacheControl, item.ContentType)
 }
 
 const whiteboardAssetCacheControl = "private, no-cache, max-age=0, must-revalidate"

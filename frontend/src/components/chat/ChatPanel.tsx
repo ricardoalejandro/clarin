@@ -17,6 +17,7 @@ import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import { getChatDisplayName } from '@/utils/chat'
 import WhatsAppTextInput, { WhatsAppTextInputHandle } from '../WhatsAppTextInput'
 import ImageViewer from './ImageViewer'
+import ChatDocumentViewer from './ChatDocumentViewer'
 import MessageBubble from './MessageBubble'
 import StickerPicker from './StickerPicker'
 import EmojiPicker from './EmojiPicker'
@@ -47,6 +48,7 @@ import {
 import { getMessageReactionAvailability } from '@/utils/chatCapabilities'
 import { ChatMediaType, validateChatAttachment } from '@/utils/chatAttachments'
 import { chatMediaIdentity } from '@/utils/chatMediaUrl'
+import type { ChatDocumentDescriptor } from '@/utils/chatDocuments'
 import { useContainerWidth } from '../responsive/useContainerWidth'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
@@ -277,6 +279,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
   // Modals & Viewers
   const [viewImage, setViewImage] = useState<string | null>(null)
+  const [viewDocument, setViewDocument] = useState<ChatDocumentDescriptor | null>(null)
   const [activePopup, setActivePopup] = useState<'emoji' | 'sticker' | null>(null)
   const [mobileAccessoryReady, setMobileAccessoryReady] = useState(false)
   const [mobileAccessoryHeight, setMobileAccessoryHeight] = useState(280)
@@ -689,6 +692,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   useEffect(() => {
     clearMessageSelection(false)
     setInfoMessage(null)
+    setViewDocument(null)
   }, [chatId, clearMessageSelection])
 
   useEffect(() => {
@@ -701,6 +705,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     setQuickReplyFilter('')
     setShowContactPicker(false)
     setViewImage(null)
+    setViewDocument(null)
     setForwardingMsg(null)
     clearMessageSelection(false)
     setInfoMessage(null)
@@ -1302,7 +1307,18 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         const eventType = msg.type || msg.event
         const payload = msg.data || msg.message
 
-        if (eventType === 'device_status' && payload?.device_id === deviceId) {
+        if (eventType === 'quick_reply_update' && payload) {
+          setQuickRepliesData(previous => {
+            if (payload.action === 'deleted' && payload.quick_reply_id) {
+              return previous.filter(reply => reply.id !== payload.quick_reply_id)
+            }
+            const canonical = payload.quick_reply
+            if (!canonical?.id) return previous
+            const exists = previous.some(reply => reply.id === canonical.id)
+            if (!exists) return [...previous, canonical]
+            return previous.map(reply => reply.id === canonical.id ? canonical : reply)
+          })
+        } else if (eventType === 'device_status' && payload?.device_id === deviceId) {
           const nextStatus = typeof payload.status === 'string' ? payload.status : 'disconnected'
           if (nextStatus !== 'connected') {
             setCanonicalDevice(previous => previous ? {
@@ -2613,6 +2629,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
   const savedStickerUrls = useMemo(() => new Set(savedStickers), [savedStickers])
   const openMessageMedia = useCallback((url: string) => setViewImage(url), [])
+  const openMessageDocument = useCallback((document: ChatDocumentDescriptor) => setViewDocument(document), [])
+  const closeMessageDocument = useCallback(() => setViewDocument(null), [])
   const retryMessage = useStableCallback(handleRetrySend)
   const revealQuotedMessageStable = useStableCallback(revealQuotedMessage)
   const beginReplyStable = useStableCallback(handleBeginReply)
@@ -2922,6 +2940,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                                 message={msg}
                                 contactName={contactName}
 	                                onMediaClick={openMessageMedia}
+	                                onDocumentClick={openMessageDocument}
 	                                onRetry={effectiveReadOnly ? undefined : retryMessage}
 	                                onReply={effectiveReadOnly ? undefined : beginReplyStable}
 	                                onQuotedMessageClick={revealQuotedMessageStable}
@@ -3245,6 +3264,10 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
          {/* Image Viewer */}
          {viewImage && (
              <ImageViewer src={viewImage} isOpen={!!viewImage} onClose={() => setViewImage(null)} />
+         )}
+
+         {viewDocument && (
+           <ChatDocumentViewer key={viewDocument.sessionId} document={viewDocument} onClose={closeMessageDocument} />
          )}
 
          {infoMessage && (

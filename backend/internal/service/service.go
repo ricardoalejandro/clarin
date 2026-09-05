@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -2773,24 +2775,82 @@ type QuickReplyService struct {
 	repos *repository.Repositories
 }
 
+var ErrQuickReplyValidation = errors.New("invalid quick reply")
+
 func (s *QuickReplyService) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.QuickReply, error) {
 	return s.repos.QuickReply.GetByAccountID(ctx, accountID)
 }
 
-func (s *QuickReplyService) GetByID(ctx context.Context, id uuid.UUID) (*domain.QuickReply, error) {
-	return s.repos.QuickReply.GetByID(ctx, id)
+func (s *QuickReplyService) List(ctx context.Context, accountID uuid.UUID, filter repository.QuickReplyListFilter) (*repository.QuickReplyListResult, error) {
+	return s.repos.QuickReply.List(ctx, accountID, filter)
 }
 
-func (s *QuickReplyService) Create(ctx context.Context, qr *domain.QuickReply) error {
-	return s.repos.QuickReply.Create(ctx, qr)
+func (s *QuickReplyService) GetByID(ctx context.Context, accountID, id uuid.UUID) (*domain.QuickReply, error) {
+	return s.repos.QuickReply.GetByID(ctx, accountID, id)
 }
 
-func (s *QuickReplyService) Update(ctx context.Context, qr *domain.QuickReply) error {
-	return s.repos.QuickReply.Update(ctx, qr)
+func (s *QuickReplyService) Create(ctx context.Context, quickReply *domain.QuickReply) (*domain.QuickReply, error) {
+	if err := prepareQuickReply(quickReply); err != nil {
+		return nil, err
+	}
+	return s.repos.QuickReply.Create(ctx, quickReply)
 }
 
-func (s *QuickReplyService) Delete(ctx context.Context, id uuid.UUID) error {
-	return s.repos.QuickReply.Delete(ctx, id)
+func (s *QuickReplyService) Update(ctx context.Context, accountID uuid.UUID, expectedUpdatedAt time.Time, quickReply *domain.QuickReply) (*domain.QuickReply, error) {
+	if err := prepareQuickReply(quickReply); err != nil {
+		return nil, err
+	}
+	return s.repos.QuickReply.Update(ctx, accountID, expectedUpdatedAt, quickReply)
+}
+
+func (s *QuickReplyService) Delete(ctx context.Context, accountID, id uuid.UUID) error {
+	return s.repos.QuickReply.Delete(ctx, accountID, id)
+}
+
+func (s *QuickReplyService) GetAttachmentForSend(ctx context.Context, accountID, quickReplyID, attachmentID uuid.UUID) (*domain.QuickReplyAttachment, error) {
+	return s.repos.QuickReply.GetAttachmentForSend(ctx, accountID, quickReplyID, attachmentID)
+}
+
+func (s *QuickReplyService) ReleaseDraftMedia(ctx context.Context, accountID, assetID uuid.UUID) error {
+	return s.repos.QuickReply.ReleaseDraftMedia(ctx, accountID, assetID)
+}
+
+func NormalizeQuickReplyShortcut(raw string) (string, error) {
+	shortcut := strings.TrimSpace(raw)
+	shortcut = strings.TrimPrefix(shortcut, "/")
+	shortcut = strings.ToLower(shortcut)
+	if shortcut == "" || utf8.RuneCountInString(shortcut) > 100 {
+		return "", ErrQuickReplyValidation
+	}
+	for _, character := range shortcut {
+		if unicode.IsLetter(character) || unicode.IsNumber(character) || character == '_' || character == '-' {
+			continue
+		}
+		return "", ErrQuickReplyValidation
+	}
+	return shortcut, nil
+}
+
+func prepareQuickReply(quickReply *domain.QuickReply) error {
+	shortcut, err := NormalizeQuickReplyShortcut(quickReply.Shortcut)
+	if err != nil {
+		return err
+	}
+	quickReply.Shortcut = shortcut
+	quickReply.Title = strings.TrimSpace(quickReply.Title)
+	quickReply.Body = strings.TrimSpace(quickReply.Body)
+	if utf8.RuneCountInString(quickReply.Title) > 255 || len(quickReply.Attachments) > 5 || (quickReply.Body == "" && len(quickReply.Attachments) == 0) {
+		return ErrQuickReplyValidation
+	}
+	for position := range quickReply.Attachments {
+		attachment := &quickReply.Attachments[position]
+		if (attachment.MediaAssetID == nil || *attachment.MediaAssetID == uuid.Nil) && attachment.ID == uuid.Nil {
+			return ErrQuickReplyValidation
+		}
+		attachment.Position = position
+		attachment.Caption = strings.TrimSpace(attachment.Caption)
+	}
+	return nil
 }
 
 // RoleService handles RBAC role management

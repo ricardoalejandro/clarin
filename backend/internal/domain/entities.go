@@ -174,6 +174,7 @@ const (
 	PermDocuments              = "documents"
 	PermWhiteboards            = "whiteboards"
 	PermReports                = "reports"
+	PermQuickRepliesManage     = "quick_replies_manage"
 	PermAll                    = "*"
 )
 
@@ -183,6 +184,7 @@ var AllPermissions = []string{
 	PermAutomations, PermBots, PermDevices, PermEvents,
 	PermBroadcasts, PermSurveys, PermTasks, PermTaskEnvironmentsCreate, PermDynamics,
 	PermDocuments, PermWhiteboards, PermReports, PermTags, PermSettings, PermIntegrations,
+	PermQuickRepliesManage,
 }
 
 // Role represents a named set of module permissions
@@ -2084,6 +2086,8 @@ type QuickReply struct {
 type QuickReplyAttachment struct {
 	ID            uuid.UUID `json:"id"`
 	QuickReplyID  uuid.UUID `json:"quick_reply_id"`
+	AccountID     uuid.UUID `json:"account_id"`
+	MediaAssetID  *uuid.UUID `json:"media_asset_id,omitempty"`
 	MediaURL      string    `json:"media_url"`
 	MediaType     string    `json:"media_type"`
 	MediaFilename string    `json:"media_filename"`

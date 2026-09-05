@@ -169,7 +169,7 @@ import { useWhiteboardPresentation } from '@/hooks/useWhiteboardPresentation'
 import { useWhiteboardFocusMode } from '@/hooks/useWhiteboardFocusMode'
 import {
   WHITEBOARD_OVERLAY_LAYERS,
-  whiteboardFocusAppStateOwnsEscape,
+  whiteboardFocusAppStateHasTransientLayer,
 } from '@/lib/whiteboardFocusMode'
 import {
   useWhiteboardAssetHydration,
@@ -533,7 +533,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   const stackToolbarBelowTools = whiteboardToolbarStacksBelowTools(editorAvailableWidth)
   const focusInteractionBlocked = useCallback(() => {
     if (moreOpen || shareOpen || historyOpen || libraryOpen || permissionRevalidating) return true
-    return whiteboardFocusAppStateOwnsEscape(editorAPIRef.current?.getAppState())
+    return whiteboardFocusAppStateHasTransientLayer(editorAPIRef.current?.getAppState())
   }, [historyOpen, libraryOpen, moreOpen, permissionRevalidating, shareOpen])
   const {
     active: focusModeActive,

@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState, type ReactNode, type PointerEvent as ReactPointerEvent } from 'react'
-import { Check, Copy, Expand, GripHorizontal, Loader2, RotateCcw } from 'lucide-react'
+import { Copy, Expand, GripHorizontal, Loader2, RotateCcw } from 'lucide-react'
 import {
   TASK_DESCRIPTION_DEFAULT_HEIGHT,
   TASK_DESCRIPTION_MAX_HEIGHT,
@@ -35,6 +35,7 @@ interface Props {
   onRetry?: () => void
   onKeepLocal?: () => void
   onUseRemote?: () => void
+  saveIndicator?: ReactNode
 }
 
 export default function TaskDescriptionEditor({
@@ -55,6 +56,7 @@ export default function TaskDescriptionEditor({
   onRetry,
   onKeepLocal,
   onUseRemote,
+  saveIndicator,
 }: Props) {
   const [height, setHeight] = useState(TASK_DESCRIPTION_DEFAULT_HEIGHT)
   const [expanded, setExpanded] = useState(false)
@@ -178,24 +180,12 @@ export default function TaskDescriptionEditor({
   }, [closing, onSubmit, pending, setExpandedState])
 
   const busy = pending || closing
-  const phase = pending ? 'saving' : saveState?.phase
-  const status = phase === 'dirty'
-    ? <span className="text-amber-600">Sin guardar</span>
-    : phase === 'saving'
-      ? <span className="flex items-center gap-1 text-emerald-600"><Loader2 className="h-3 w-3 animate-spin" /> Guardando…</span>
-      : phase === 'saved'
-        ? <span className="flex items-center gap-1 text-emerald-600"><Check className="h-3 w-3" /> Guardado</span>
-        : phase === 'error'
-          ? <span className="text-rose-600">No se guardó</span>
-          : phase === 'conflict'
-            ? <span className="text-amber-700">Revisión necesaria</span>
-            : null
   const saveFeedback = <>
-    {saveState?.phase === 'error' && <div role="alert" className="mb-3 flex items-center gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 text-xs text-rose-700">
+    {saveState?.phase === 'error' && <div data-task-description-save-feedback="error" role="alert" className="mb-3 flex items-center gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 text-xs text-rose-700">
       <span className="min-w-0 flex-1 leading-5">{saveState.message || 'No se pudo guardar la descripción.'}</span>
       {onRetry && <button type="button" onClick={onRetry} className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg bg-white px-2.5 font-semibold shadow-sm hover:bg-rose-100"><RotateCcw className="h-3.5 w-3.5" />Reintentar</button>}
     </div>}
-    {saveState?.phase === 'conflict' && <div role="alert" className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
+    {saveState?.phase === 'conflict' && <div data-task-description-save-feedback="conflict" role="alert" className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
       <p className="font-semibold">La descripción cambió en otra sesión.</p>
       <p className="mt-1 leading-5 text-amber-800">Conservamos tu texto. Elige qué versión debe quedar guardada.</p>
       <div className="mt-2 flex flex-wrap gap-2">
@@ -207,10 +197,7 @@ export default function TaskDescriptionEditor({
   return <section className={className}>
     <div className="mb-2 flex items-center justify-between gap-3">
       <h3 className="text-xs font-bold uppercase tracking-[0.14em] text-slate-400">Descripción</h3>
-      <div className="flex items-center gap-2">
-        <span aria-live="polite" aria-atomic="true" className="min-w-16 text-right text-[10px] font-semibold">{status}</span>
-        <button type="button" onClick={openExpanded} className="inline-flex min-h-8 items-center gap-1.5 rounded-lg px-2 text-[11px] font-semibold text-slate-500 transition hover:bg-slate-100 hover:text-emerald-700" aria-label="Expandir descripción"><Expand className="h-3.5 w-3.5" />Expandir</button>
-      </div>
+      <button type="button" onClick={openExpanded} className="inline-flex min-h-8 items-center gap-1.5 rounded-lg px-2 text-[11px] font-semibold text-slate-500 transition hover:bg-slate-100 hover:text-emerald-700" aria-label="Expandir descripción"><Expand className="h-3.5 w-3.5" />Expandir</button>
     </div>
     {!expanded && saveFeedback}
     <div className="relative">
@@ -282,7 +269,7 @@ export default function TaskDescriptionEditor({
       className="absolute inset-0 z-40 flex flex-col bg-white"
     >
       <header className="flex shrink-0 items-center justify-between gap-4 border-b border-slate-200 px-5 py-4 sm:px-6">
-        <div><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Clarin Work</p><h2 className="mt-1 text-lg font-black text-slate-900">Descripción</h2></div>
+        <div className="min-w-0"><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Clarin Work</p><h2 className="mt-1 text-lg font-black text-slate-900">Descripción</h2>{saveIndicator && <div className="mt-0.5 min-w-0">{saveIndicator}</div>}</div>
         <div className="flex items-center gap-2">
           <button type="button" onClick={() => { void copyDescription() }} className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 transition hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700"><Copy className="h-4 w-4" />Copiar</button>
           <button type="button" disabled={busy} onClick={() => { void commitAndClose() }} className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-bold text-white shadow-sm transition hover:bg-slate-800 disabled:opacity-50">{busy && <Loader2 className="h-4 w-4 animate-spin" />}{disabled ? 'Cerrar' : 'Listo'}</button>

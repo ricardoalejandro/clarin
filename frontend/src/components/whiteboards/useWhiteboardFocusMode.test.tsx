@@ -127,9 +127,15 @@ describe('useWhiteboardFocusMode', () => {
 
     fireEvent.keyDown(document, { key: 'f', metaKey: true, shiftKey: true })
     expect(rendered.result.current.active).toBe(true)
+    expect(rendered.result.current.announcement).toContain('Control o Comando')
+    expect(rendered.result.current.announcement).not.toContain('Escape')
+
+    const historyBack = vi.spyOn(window.history, 'back').mockImplementation(() => {})
+    fireEvent.keyDown(document, { key: 'f', ctrlKey: true, shiftKey: true })
+    expect(historyBack).toHaveBeenCalledTimes(1)
   })
 
-  it('lets fields and higher layers consume Escape before restoring the focused view', () => {
+  it('leaves Escape to the editor without restoring the focused view', () => {
     window.history.replaceState({}, '', '/dashboard/whiteboards/board-1')
     const historyBack = vi.spyOn(window.history, 'back').mockImplementation(() => {})
     const blocked = vi.fn(() => false)
@@ -139,18 +145,14 @@ describe('useWhiteboardFocusMode', () => {
     const input = document.createElement('input')
     const canvas = document.createElement('div')
     rendered.editor.append(input, canvas)
-    blocked.mockReturnValue(true)
-    fireEvent.keyDown(canvas, { key: 'Escape' })
-    expect(historyBack).not.toHaveBeenCalled()
+    const editorEscape = vi.fn()
+    canvas.addEventListener('keydown', editorEscape)
 
-    blocked.mockReturnValue(false)
-    fireEvent.keyDown(input, { key: 'Escape' })
-    expect(historyBack).not.toHaveBeenCalled()
-    const hiddenExternalHandler = vi.fn((event: KeyboardEvent) => event.preventDefault())
-    document.addEventListener('keydown', hiddenExternalHandler)
     fireEvent.keyDown(canvas, { key: 'Escape' })
-    expect(historyBack).toHaveBeenCalledTimes(1)
-    expect(hiddenExternalHandler).not.toHaveBeenCalled()
-    document.removeEventListener('keydown', hiddenExternalHandler)
+    fireEvent.keyDown(input, { key: 'Escape' })
+
+    expect(historyBack).not.toHaveBeenCalled()
+    expect(rendered.result.current.active).toBe(true)
+    expect(editorEscape).toHaveBeenCalledTimes(1)
   })
 })

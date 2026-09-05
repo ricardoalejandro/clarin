@@ -8,6 +8,7 @@ import { Message, Reaction, PollOption } from '@/types/chat'
 import { splitEmojiSegments } from '@/utils/appleEmoji'
 import dynamic from 'next/dynamic'
 import { canonicalChatMediaUrl, chatMediaIdentity } from '@/utils/chatMediaUrl'
+import { chatDocumentDescriptor, isPdfChatDocument, type ChatDocumentDescriptor } from '@/utils/chatDocuments'
 import { dedupeReactions } from '@/utils/chatReactions'
 import styles from './MessageBubble.module.css'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
@@ -46,6 +47,7 @@ interface MessageBubbleProps {
   message: Message
   contactName?: string
   onMediaClick?: (url: string, type: string) => void
+  onDocumentClick?: (document: ChatDocumentDescriptor) => void
   onRetry?: (message: Message) => void
   onReply?: (message: Message) => void
   onQuotedMessageClick?: (quotedMessageId: string) => void
@@ -79,7 +81,7 @@ const formatQuotedSender = (sender?: string, isFromMe?: boolean): string => {
   return sender.replace(/@s\.whatsapp\.net$/, '').replace(/@lid$/, '')
 }
 
-function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, onQuotedMessageClick, onForward, onDelete, onEdit, onInfo, onCopy, compactSelection = false, selected = false, onSelect, onToggleStickerFavorite, onReact, reactionUnavailableReason, savedStickerUrls, savingStickerUrls }: MessageBubbleProps) {
+function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, onRetry, onReply, onQuotedMessageClick, onForward, onDelete, onEdit, onInfo, onCopy, compactSelection = false, selected = false, onSelect, onToggleStickerFavorite, onReact, reactionUnavailableReason, savedStickerUrls, savingStickerUrls }: MessageBubbleProps) {
   const [imageLoaded, setImageLoaded] = useState(false)
   const [imageError, setImageError] = useState(false)
   const [stickerLoadError, setStickerLoadError] = useState(false)
@@ -448,12 +450,11 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
           </div>
         )
 
-      case 'document':
-        return (
-          <div
-            className="flex items-center gap-3 p-2 bg-gray-100 rounded-lg mb-1 cursor-pointer hover:bg-gray-200"
-            onClick={() => window.open(proxyUrl, '_blank')}
-          >
+      case 'document': {
+        const descriptor = chatDocumentDescriptor(message, proxyUrl)
+        const opensPreview = isPdfChatDocument(message) && Boolean(onDocumentClick)
+        const content = (
+          <>
             <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center flex-shrink-0">
               <FileText className="w-5 h-5 text-green-600" />
             </div>
@@ -465,9 +466,31 @@ function MessageBubble({ message, contactName, onMediaClick, onRetry, onReply, o
                 {formatFileSize(message.media_size)}
               </p>
             </div>
-            <Download className="w-5 h-5 text-gray-400" />
-          </div>
+            {opensPreview ? <Eye className="h-5 w-5 text-emerald-600" /> : <Download className="h-5 w-5 text-gray-400" />}
+          </>
         )
+        const className = "mb-1 flex w-full items-center gap-3 rounded-lg bg-gray-100 p-2 text-left transition hover:bg-gray-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+        if (!proxyUrl) {
+          return (
+            <div className="mb-1 flex items-center gap-3 rounded-lg bg-gray-100 p-2 text-left opacity-70" role="status">
+              {content}
+              <span className="sr-only">Archivo no disponible</span>
+            </div>
+          )
+        }
+        if (opensPreview) {
+          return (
+            <button type="button" className={className} onClick={() => onDocumentClick?.(descriptor)} aria-label={`Abrir vista previa de ${descriptor.filename}`}>
+              {content}
+            </button>
+          )
+        }
+        return (
+          <a href={proxyUrl} download={descriptor.filename} className={className} aria-label={`Descargar ${descriptor.filename}`}>
+            {content}
+          </a>
+        )
+      }
 
       case 'sticker': {
         const stickerIdentity = chatMediaIdentity(message.media_url)

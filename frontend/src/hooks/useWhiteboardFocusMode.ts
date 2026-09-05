@@ -6,11 +6,12 @@ import {
   isWhiteboardFocusShortcut,
   isolateWhiteboardFocusSurface,
   whiteboardFocusHistoryMarker,
-  whiteboardFocusTargetIsWritable,
   withWhiteboardFocusHistoryMarker,
   withoutWhiteboardFocusHistoryMarker,
   type WhiteboardFocusHistoryMarker,
 } from '@/lib/whiteboardFocusMode'
+
+const WHITEBOARD_FOCUS_ACTIVE_ANNOUNCEMENT = 'Pizarra maximizada. Usa Control o Comando más Mayúsculas más F para volver a la vista normal.'
 
 export interface UseWhiteboardFocusModeOptions {
   boardID: string
@@ -39,7 +40,7 @@ export function useWhiteboardFocusMode({
     : whiteboardFocusHistoryMarker(window.history.state, boardID)
   const [active, setActive] = useState(Boolean(initialMarker))
   const [announcement, setAnnouncement] = useState(initialMarker
-    ? 'Pizarra maximizada. Presiona Escape para volver a la vista normal.'
+    ? WHITEBOARD_FOCUS_ACTIVE_ANNOUNCEMENT
     : '')
   const activeRef = useRef(active)
   const markerRef = useRef<WhiteboardFocusHistoryMarker | null>(initialMarker)
@@ -56,7 +57,7 @@ export function useWhiteboardFocusMode({
     markerRef.current = marker
     setActive(next)
     setAnnouncement(next
-      ? 'Pizarra maximizada. Presiona Escape para volver a la vista normal.'
+      ? WHITEBOARD_FOCUS_ACTIVE_ANNOUNCEMENT
       : 'Vista normal de la pizarra restaurada.')
   }, [])
 
@@ -168,25 +169,11 @@ export function useWhiteboardFocusMode({
       event.stopImmediatePropagation()
       toggle(document.activeElement instanceof HTMLElement ? document.activeElement : fallbackFocusRef.current)
     }
-    const onEscape = (event: KeyboardEvent) => {
-      if (!activeRef.current
-        || event.key !== 'Escape'
-        || event.repeat
-        || event.isComposing
-        || event.defaultPrevented
-        || whiteboardFocusTargetIsWritable(event.target)
-        || interactionBlockedRef.current()) return
-      event.preventDefault()
-      event.stopImmediatePropagation()
-      exit()
-    }
     document.addEventListener('keydown', onShortcut, true)
-    window.addEventListener('keydown', onEscape, true)
     return () => {
       document.removeEventListener('keydown', onShortcut, true)
-      window.removeEventListener('keydown', onEscape, true)
     }
-  }, [exit, fallbackFocusRef, ready, toggle])
+  }, [fallbackFocusRef, ready, toggle])
 
   useEffect(() => {
     if (!active || !ready) return

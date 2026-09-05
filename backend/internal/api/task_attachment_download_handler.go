@@ -2,7 +2,6 @@ package api
 
 import (
 	"mime"
-	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -29,9 +28,6 @@ func (s *Server) serveTaskAttachmentDownload(c *fiber.Ctx, preview bool) error {
 	if err != nil {
 		return taskWorkError(c, err)
 	}
-	if contentType := strings.TrimSpace(item.ContentType); contentType != "" {
-		c.Set(fiber.HeaderContentType, contentType)
-	}
 	dispositionType := "attachment"
 	if preview {
 		dispositionType = "inline"
@@ -40,5 +36,5 @@ func (s *Server) serveTaskAttachmentDownload(c *fiber.Ctx, preview bool) error {
 		c.Set(fiber.HeaderContentDisposition, disposition)
 	}
 	c.Set(fiber.HeaderXContentTypeOptions, "nosniff")
-	return s.serveStorageObject(c, item.ObjectKey, "private, no-store, max-age=0")
+	return s.serveStorageObject(c, item.ObjectKey, "private, no-store, max-age=0", item.ContentType)
 }

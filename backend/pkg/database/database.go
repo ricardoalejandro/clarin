@@ -755,6 +755,46 @@ func Migrate(db *pgxpool.Pool) error {
 			CONSTRAINT quick_reply_attachments_max_5 CHECK (position >= 0 AND position < 5)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_quick_reply_attachments_qr ON quick_reply_attachments(quick_reply_id)`,
+		`ALTER TABLE quick_reply_attachments ADD COLUMN IF NOT EXISTS account_id UUID`,
+		`ALTER TABLE quick_reply_attachments ADD COLUMN IF NOT EXISTS media_asset_id UUID`,
+		`UPDATE quick_reply_attachments attachment
+		 SET account_id = reply.account_id
+		 FROM quick_replies reply
+		 WHERE attachment.quick_reply_id = reply.id
+		   AND attachment.account_id IS NULL`,
+		`WITH migrated AS (
+			INSERT INTO quick_reply_attachments (
+			id, quick_reply_id, account_id, media_url, media_type, media_filename, caption, position
+			)
+			SELECT gen_random_uuid(), reply.id, reply.account_id, reply.media_url,
+			COALESCE(NULLIF(reply.media_type, ''), 'document'), COALESCE(reply.media_filename, ''),
+			CASE WHEN COALESCE(reply.body, '') <> '' THEN reply.body ELSE '' END,
+			COALESCE((SELECT MAX(existing.position) + 1 FROM quick_reply_attachments existing WHERE existing.quick_reply_id = reply.id), 0)
+			FROM quick_replies reply
+			WHERE COALESCE(reply.media_url, '') <> ''
+			  AND (SELECT COUNT(*) FROM quick_reply_attachments existing WHERE existing.quick_reply_id = reply.id) = 0
+			RETURNING quick_reply_id
+		)
+		UPDATE quick_replies reply
+		SET body = ''
+		WHERE reply.id IN (SELECT quick_reply_id FROM migrated)`,
+		`ALTER TABLE quick_reply_attachments ALTER COLUMN account_id SET NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_quick_replies_account_shortcut_ci
+		 ON quick_replies(account_id, LOWER(BTRIM(shortcut)))`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_quick_replies_id_account ON quick_replies(id, account_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_quick_reply_attachments_position
+		 ON quick_reply_attachments(quick_reply_id, position)`,
+		`CREATE INDEX IF NOT EXISTS idx_quick_reply_attachments_account_asset
+		 ON quick_reply_attachments(account_id, media_asset_id) WHERE media_asset_id IS NOT NULL`,
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'quick_reply_attachments_reply_account_fkey') THEN
+				ALTER TABLE quick_reply_attachments
+				ADD CONSTRAINT quick_reply_attachments_reply_account_fkey
+				FOREIGN KEY (quick_reply_id, account_id)
+				REFERENCES quick_replies(id, account_id) ON DELETE CASCADE;
+			END IF;
+		END $$`,
 
 		// Lead pipeline linkage
 		`ALTER TABLE leads ADD COLUMN IF NOT EXISTS pipeline_id UUID REFERENCES pipelines(id) ON DELETE SET NULL`,
@@ -912,6 +952,19 @@ func Migrate(db *pgxpool.Pool) error {
 			key TEXT PRIMARY KEY,
 			applied_at TIMESTAMPTZ DEFAULT NOW()
 		)`,
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM migration_flags WHERE key = 'quick_reply_manage_permission_20260905') THEN
+				UPDATE roles
+				SET permissions = array_append(permissions, 'quick_replies_manage')
+				WHERE 'chats' = ANY(permissions)
+				  AND NOT ('quick_replies_manage' = ANY(permissions));
+
+				INSERT INTO migration_flags (key)
+				VALUES ('quick_reply_manage_permission_20260905')
+				ON CONFLICT (key) DO NOTHING;
+			END IF;
+		END $$`,
 		// One-time repair for roles affected by the previous Leads backfill.
 		// After this marker is set, admins can grant these permissions normally.
 		`DO $$
@@ -1856,6 +1909,26 @@ func Migrate(db *pgxpool.Pool) error {
 		END $$`,
 		`ALTER TABLE chats VALIDATE CONSTRAINT chats_account_contact_fkey`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_media_assets_account_id ON media_assets(account_id, id)`,
+		`UPDATE quick_reply_attachments attachment
+		 SET media_asset_id = asset.id
+		 FROM media_assets asset
+		 WHERE attachment.media_asset_id IS NULL
+		   AND asset.account_id = attachment.account_id
+		   AND asset.object_key = CASE
+			WHEN POSITION('/api/media/file/' IN attachment.media_url) > 0
+				THEN SPLIT_PART(attachment.media_url, '/api/media/file/', 2)
+			WHEN POSITION('/clarin-media/' IN attachment.media_url) > 0
+				THEN SPLIT_PART(attachment.media_url, '/clarin-media/', 2)
+			ELSE ''
+		   END`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='quick_reply_attachments_account_asset_fkey' AND conrelid='quick_reply_attachments'::regclass) THEN
+				ALTER TABLE quick_reply_attachments
+				ADD CONSTRAINT quick_reply_attachments_account_asset_fkey
+				FOREIGN KEY (account_id, media_asset_id) REFERENCES media_assets(account_id, id) NOT VALID;
+			END IF;
+		END $$`,
+		`ALTER TABLE quick_reply_attachments VALIDATE CONSTRAINT quick_reply_attachments_account_asset_fkey`,
 		`UPDATE contacts c SET avatar_media_asset_id=NULL
 		 WHERE avatar_media_asset_id IS NOT NULL AND NOT EXISTS (
 			SELECT 1 FROM media_assets ma WHERE ma.id=c.avatar_media_asset_id AND ma.account_id=c.account_id

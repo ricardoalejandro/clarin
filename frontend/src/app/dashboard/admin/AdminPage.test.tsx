@@ -294,7 +294,7 @@ describe('AdminPage administrative creation flows', () => {
     )).toBe(false)
   })
 
-  it('renders exactly 19 permission controls and protects role creation from double submission', async () => {
+  it('renders exactly 20 permission controls and protects role creation from double submission', async () => {
     let resolveCreateRole: ((response: Response) => void) | undefined
     const pendingCreateRole = new Promise<Response>(resolve => { resolveCreateRole = resolve })
     const fetchMock = installFetch({ createRole: () => pendingCreateRole })
@@ -304,7 +304,7 @@ describe('AdminPage administrative creation flows', () => {
 
     const dialog = await screen.findByRole('dialog', { name: 'Crear rol' })
     const permissionControls = within(dialog).getAllByRole('button').filter(control => control.hasAttribute('aria-pressed'))
-    expect(permissionControls).toHaveLength(19)
+    expect(permissionControls).toHaveLength(20)
     expect(permissionControls.every(control => control.getAttribute('aria-pressed') === 'false')).toBe(true)
 
     fireEvent.change(within(dialog).getByLabelText('Nombre del rol'), { target: { value: 'Supervisor local' } })

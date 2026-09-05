@@ -148,7 +148,7 @@ func (s *Server) handleGetOwnWhatsAppStatusMedia(c *fiber.Ctx) error {
 	if objectKey == "" || !strings.HasPrefix(objectKey, accountID.String()+"/") {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Media no disponible"})
 	}
-	return s.serveStorageObject(c, objectKey, "private, no-store, max-age=0")
+	return s.serveStorageObject(c, objectKey, "private, no-store, max-age=0", "")
 }
 
 func (s *Server) handleListOwnWhatsAppStatusViewers(c *fiber.Ctx) error {

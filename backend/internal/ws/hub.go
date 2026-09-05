@@ -60,6 +60,7 @@ const (
 	EventWorkEventReminder      = "work_event_reminder"
 	EventCustomFieldDefUpdate   = "custom_field_def_update"
 	EventWhatsAppStatus         = "whatsapp_status"
+	EventQuickReplyUpdate       = "quick_reply_update"
 )
 
 // Message represents a WebSocket message

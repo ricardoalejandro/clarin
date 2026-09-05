@@ -62,12 +62,7 @@ export function isWhiteboardFocusShortcut(event: Pick<KeyboardEvent,
     && event.key.toLocaleLowerCase('en') === 'f'
 }
 
-export function whiteboardFocusTargetIsWritable(target: EventTarget | null) {
-  return Boolean(target instanceof HTMLElement
-    && (target.matches('input, textarea, select') || target.isContentEditable))
-}
-
-export function whiteboardFocusAppStateOwnsEscape(appState: Partial<AppState> | null | undefined) {
+export function whiteboardFocusAppStateHasTransientLayer(appState: Partial<AppState> | null | undefined) {
   return Boolean(appState && (
     appState.openMenu
     || appState.openPopup

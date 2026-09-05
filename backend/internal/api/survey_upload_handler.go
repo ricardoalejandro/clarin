@@ -131,7 +131,7 @@ func (s *Server) handleGetPublicSurveyFile(c *fiber.Ctx) error {
 	if upload.Status == "attached" {
 		cacheControl = "private, max-age=3600"
 	}
-	return s.serveStorageObject(c, upload.ObjectKey, cacheControl)
+	return s.serveStorageObject(c, upload.ObjectKey, cacheControl, upload.ContentType)
 }
 
 func (s *Server) startSurveyUploadCleanupWorker() {

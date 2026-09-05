@@ -20,11 +20,12 @@ vi.mock('../WhatsAppTextInput', async () => {
   }
 })
 vi.mock('./MessageBubble', () => ({
-  default: ({ message, onReact, onSelect }: { message: { reactions?: Array<{ emoji: string; is_from_me: boolean }> }; onReact?: (message: unknown, emoji: string) => void; onSelect?: (message: unknown) => void }) => (
+  default: ({ message, onDocumentClick, onReact, onSelect }: { message: { reactions?: Array<{ emoji: string; is_from_me: boolean }> }; onDocumentClick?: (document: { sessionId: string; src: string; filename: string; mimeType: string; size: number }) => void; onReact?: (message: unknown, emoji: string) => void; onSelect?: (message: unknown) => void }) => (
     <div data-testid="message-bubble">
       <span data-testid="own-reaction">{message.reactions?.find(reaction => reaction.is_from_me)?.emoji || ''}</span>
       <span data-testid="contact-reaction">{message.reactions?.find(reaction => !reaction.is_from_me)?.emoji || ''}</span>
       <button type="button" onClick={() => onReact?.(message, '👍')} disabled={!onReact}>Reaccionar con 👍</button>
+      {onDocumentClick && <button type="button" onClick={() => onDocumentClick({ sessionId: 'document-session-1', src: '/api/media/document.pdf', filename: 'Documento QA.pdf', mimeType: 'application/pdf', size: 2048 })}>Abrir documento simulado</button>}
       {onSelect && <button type="button" onClick={() => onSelect(message)}>Seleccionar mensaje</button>}
     </div>
   ),
@@ -37,6 +38,13 @@ vi.mock('./ForwardMessageModal', () => ({ default: () => null }))
 vi.mock('./MessageInfoDialog', () => ({ default: () => null }))
 vi.mock('./QuickReplyPicker', () => ({ default: () => null }))
 vi.mock('./ImageViewer', () => ({ default: () => null }))
+vi.mock('./ChatDocumentViewer', () => ({
+  default: ({ document, onClose }: { document: { filename: string }; onClose: () => void }) => (
+    <div role="dialog" aria-label={`Vista previa de ${document.filename}`}>
+      <button type="button" onClick={onClose}>Cerrar documento simulado</button>
+    </div>
+  ),
+}))
 vi.mock('../ContactSelector', () => ({ default: () => null }))
 
 import ChatPanel from './ChatPanel'
@@ -114,6 +122,37 @@ describe('ChatPanel canonical device truth', () => {
     })
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('El dispositivo de WhatsApp no está conectado'))
     expect(screen.queryByTestId('chat-composer')).not.toBeInTheDocument()
+  })
+
+  it('owns the PDF viewer session and closes it when the chat becomes inactive', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/chats/chat-1') return Promise.resolve(jsonResponse({ success: true, chat, device: device('connected') }))
+      if (url.startsWith('/api/chats/chat-1/messages')) return Promise.resolve(jsonResponse({ success: true, messages: [{
+        id: 'row-document-1',
+        message_id: 'provider-document-1',
+        device_id: 'device-1',
+        body: '',
+        message_type: 'document',
+        media_url: '/api/media/document.pdf',
+        media_mimetype: 'application/pdf',
+        media_filename: 'Documento QA.pdf',
+        is_from_me: false,
+        is_read: true,
+        status: 'read',
+        timestamp: '2026-08-13T10:00:00Z',
+      }] }))
+      if (url === '/api/stickers/saved') return Promise.resolve(jsonResponse({ success: true, stickers: [] }))
+      if (url === '/api/quick-replies') return Promise.resolve(jsonResponse({ success: true, quick_replies: [] }))
+      return Promise.resolve(jsonResponse({ success: true }))
+    }))
+
+    const view = render(<ChatPanel chatId="chat-1" deviceId="device-1" device={device('connected')} initialChat={chat} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Abrir documento simulado' }))
+    expect(screen.getByRole('dialog', { name: 'Vista previa de Documento QA.pdf' })).toBeInTheDocument()
+
+    view.rerender(<ChatPanel chatId="chat-1" deviceId="device-1" device={device('connected')} initialChat={chat} isActive={false} />)
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Vista previa de Documento QA.pdf' })).not.toBeInTheDocument())
   })
 
   it('marks only the displayed incoming watermark as locally read and reconciles its canonical count', async () => {

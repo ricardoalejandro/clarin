@@ -322,6 +322,7 @@ const ALL_MODULES = [
   { key: 'tasks.environments.create', label: 'Crear Entornos de Work', color: 'lime' },
   { key: 'documents', label: 'Plantillas', color: 'purple' },
   { key: 'reports', label: 'Reportería', color: 'emerald' },
+  { key: 'quick_replies_manage', label: 'Administrar respuestas rápidas', color: 'emerald' },
 ]
 
 const KOMMO_ADMIN_UI_ENABLED = false

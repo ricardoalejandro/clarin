@@ -4,9 +4,8 @@ import {
   WHITEBOARD_OVERLAY_LAYERS,
   isWhiteboardFocusShortcut,
   isolateWhiteboardFocusSurface,
-  whiteboardFocusAppStateOwnsEscape,
+  whiteboardFocusAppStateHasTransientLayer,
   whiteboardFocusHistoryMarker,
-  whiteboardFocusTargetIsWritable,
   whiteboardOverlayIsAbove,
   withWhiteboardFocusHistoryMarker,
   withoutWhiteboardFocusHistoryMarker,
@@ -52,15 +51,11 @@ describe('whiteboardFocusMode', () => {
     expect(isWhiteboardFocusShortcut({ ...keyboard, key: 'G' })).toBe(false)
   })
 
-  it('gives writable fields and transient Excalidraw surfaces first Escape ownership', () => {
-    const input = document.createElement('input')
-    const canvas = document.createElement('div')
-    expect(whiteboardFocusTargetIsWritable(input)).toBe(true)
-    expect(whiteboardFocusTargetIsWritable(canvas)).toBe(false)
-    expect(whiteboardFocusAppStateOwnsEscape({ openMenu: 'canvas' })).toBe(true)
-    expect(whiteboardFocusAppStateOwnsEscape({ openPopup: 'fontFamily' })).toBe(true)
-    expect(whiteboardFocusAppStateOwnsEscape({ openSidebar: { name: 'default', tab: 'library' } })).toBe(true)
-    expect(whiteboardFocusAppStateOwnsEscape({ openMenu: null, openPopup: null, openDialog: null, openSidebar: null })).toBe(false)
+  it('recognizes transient Excalidraw surfaces that block focus-mode shortcuts', () => {
+    expect(whiteboardFocusAppStateHasTransientLayer({ openMenu: 'canvas' })).toBe(true)
+    expect(whiteboardFocusAppStateHasTransientLayer({ openPopup: 'fontFamily' })).toBe(true)
+    expect(whiteboardFocusAppStateHasTransientLayer({ openSidebar: { name: 'default', tab: 'library' } })).toBe(true)
+    expect(whiteboardFocusAppStateHasTransientLayer({ openMenu: null, openPopup: null, openDialog: null, openSidebar: null })).toBe(false)
   })
 
   it('isolates every external sibling and restores pre-existing inert state exactly', () => {

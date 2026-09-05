@@ -18,6 +18,41 @@ const baseMessage: Message = {
 }
 
 describe('MessageBubble message actions', () => {
+  it('opens PDF documents in the internal viewer with their original metadata', () => {
+    const onDocumentClick = vi.fn()
+    render(<MessageBubble message={{
+      ...baseMessage,
+      message_type: 'document',
+      media_url: '/api/media/file/account/contrato.pdf',
+      media_filename: 'Contrato firmado.pdf',
+      media_mimetype: 'application/pdf',
+      media_size: 2048,
+    }} onDocumentClick={onDocumentClick} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Abrir vista previa de Contrato firmado.pdf' }))
+
+    expect(onDocumentClick).toHaveBeenCalledWith(expect.objectContaining({
+      src: '/api/media/file/account/contrato.pdf',
+      filename: 'Contrato firmado.pdf',
+      mimeType: 'application/pdf',
+      size: 2048,
+    }))
+  })
+
+  it('keeps non-PDF documents as explicit downloads', () => {
+    render(<MessageBubble message={{
+      ...baseMessage,
+      message_type: 'document',
+      media_url: '/api/media/file/account/presupuesto.xlsx',
+      media_filename: 'Presupuesto.xlsx',
+      media_mimetype: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    }} onDocumentClick={vi.fn()} />)
+
+    const download = screen.getByRole('link', { name: 'Descargar Presupuesto.xlsx' })
+    expect(download).toHaveAttribute('href', '/api/media/file/account/presupuesto.xlsx')
+    expect(download).toHaveAttribute('download', 'Presupuesto.xlsx')
+  })
+
   it.each([
     ['texto', baseMessage],
     ['sticker', { ...baseMessage, message_type: 'sticker', body: undefined }],

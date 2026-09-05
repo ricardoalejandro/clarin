@@ -66,6 +66,8 @@ const task = {
   progress_mode: 'manual',
   progress: 0,
   collaborator_ids: [],
+  created_at: '2026-09-05T09:00:00.000Z',
+  updated_at: '2026-09-05T10:00:00.000Z',
   permissions: { can_view: true, can_comment: true, can_edit: true, can_delete: true, can_administer: true },
 } as unknown as Task
 
@@ -125,6 +127,7 @@ describe('TaskDetailDrawer simplified full-editor access', () => {
     }
     vi.stubGlobal('ResizeObserver', ResizeObserverMock)
     HTMLElement.prototype.scrollTo = vi.fn()
+    HTMLElement.prototype.scrollIntoView = vi.fn()
   })
 
   afterEach(() => {
@@ -165,6 +168,74 @@ describe('TaskDetailDrawer simplified full-editor access', () => {
     fireEvent.click(fullEditorButtons[0])
     await waitFor(() => expect(onEdit).toHaveBeenCalledTimes(1))
     expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: task.id }))
+  })
+
+  it('shows title changes as pending and saving before the canonical response confirms them', async () => {
+    mockTaskDetailAPI([task])
+    const write = deferred<{ success: boolean; data: { task: Task; operation_id: string } }>()
+    apiMocks.put.mockReturnValue(write.promise)
+    render(<TaskDetailDrawer taskId={task.id} allTasks={[task]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+
+    const title = await screen.findByRole('textbox', { name: 'Título de la tarea' })
+    expect(screen.getByText(/Guardado automáticamente/)).toBeInTheDocument()
+    fireEvent.change(title, { target: { value: 'Guardias confirmadas' } })
+    expect(screen.getByText('Cambios pendientes')).toBeInTheDocument()
+
+    fireEvent.blur(title)
+    expect(await screen.findByText('Guardando cambios…')).toBeInTheDocument()
+    expect(screen.queryByText(/Guardado automáticamente/)).not.toBeInTheDocument()
+
+    await act(async () => {
+      write.resolve({
+        success: true,
+        data: {
+          task: { ...task, title: 'Guardias confirmadas', version: 2, updated_at: new Date().toISOString() },
+          operation_id: 'title-save',
+        },
+      })
+      await write.promise
+    })
+    expect(await screen.findByText(/Guardado automáticamente/)).toBeInTheDocument()
+  })
+
+  it('retries only the failed title write from the global indicator', async () => {
+    mockTaskDetailAPI([task])
+    apiMocks.put
+      .mockResolvedValueOnce({ success: false, status: 503, error: 'Servicio temporalmente no disponible' })
+      .mockResolvedValueOnce({
+        success: true,
+        data: {
+          task: { ...task, title: 'Título recuperado', version: 2, updated_at: new Date().toISOString() },
+          operation_id: 'title-retry',
+        },
+      })
+    render(<TaskDetailDrawer taskId={task.id} allTasks={[task]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+
+    const title = await screen.findByRole('textbox', { name: 'Título de la tarea' })
+    fireEvent.change(title, { target: { value: 'Título recuperado' } })
+    fireEvent.blur(title)
+
+    const retry = await screen.findByRole('button', { name: 'No se pudo guardar · Reintentar' })
+    expect(apiMocks.put).toHaveBeenCalledTimes(1)
+    fireEvent.click(retry)
+    await waitFor(() => expect(apiMocks.put).toHaveBeenCalledTimes(2))
+    expect(apiMocks.put).toHaveBeenLastCalledWith(`/api/tasks/${task.id}`, expect.objectContaining({ title: 'Título recuperado', version: 1 }))
+    expect(await screen.findByText(/Guardado automáticamente/)).toBeInTheDocument()
+  })
+
+  it('uses read-only copy and repeats the indicator inside the expanded description editor', async () => {
+    const readOnlyTask = {
+      ...task,
+      permissions: { ...task.permissions!, can_edit: false, can_delete: false, can_administer: false },
+    }
+    mockTaskDetailAPI([readOnlyTask])
+    render(<TaskDetailDrawer taskId={readOnlyTask.id} allTasks={[readOnlyTask]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+
+    await screen.findByDisplayValue(readOnlyTask.title)
+    expect(screen.getByText(/Actualizado ·/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Expandir descripción' }))
+    const expanded = screen.getByRole('dialog', { name: 'Editor ampliado de descripción' })
+    expect(within(expanded).getByText(/Actualizado ·/)).toBeInTheDocument()
   })
 
   it('uses one date-range field and completes through the preferred done status', async () => {
@@ -597,7 +668,7 @@ describe('TaskDetailDrawer simplified full-editor access', () => {
     const description = await screen.findByDisplayValue(task.description)
     description.focus()
     fireEvent.change(description, { target: { value: 'Primera línea\nSegunda línea' } })
-    expect(screen.getByText('Sin guardar')).toBeInTheDocument()
+    expect(screen.getByText('Cambios pendientes')).toBeInTheDocument()
     fireEvent.keyDown(description, { key: 'Enter' })
     expect(apiMocks.patch).not.toHaveBeenCalled()
 
@@ -608,7 +679,7 @@ describe('TaskDetailDrawer simplified full-editor access', () => {
       operation_id: expect.any(String),
     }))
     expect(description).toHaveFocus()
-    await screen.findByText('Guardado')
+    await screen.findByText(/Guardado automáticamente/)
     expect(onChanged).toHaveBeenCalledWith(expect.objectContaining({ id: task.id, description: 'Primera línea\nSegunda línea', version: 2 }), 'description-operation')
   })
 
@@ -737,7 +808,7 @@ describe('TaskDetailDrawer simplified full-editor access', () => {
       description: 'Mi versión local',
       version: 7,
     })))
-    await screen.findByText('Guardado')
+    await screen.findByText(/Guardado automáticamente/)
   })
 
   it('applies a clean realtime description and turns a newer remote edit into a decision when local text is dirty', async () => {

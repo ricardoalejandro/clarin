@@ -78,6 +78,12 @@ import {
   type TaskDescriptionSaveOutcome,
   type TaskDescriptionSaveRequest,
 } from './taskDescriptionAutosave'
+import TaskSaveStatusIndicator from './TaskSaveStatusIndicator'
+import {
+  deriveTaskSaveStatus,
+  taskHasPendingSave,
+  type TaskSaveFailureKind,
+} from './taskSaveStatus'
 
 interface Props {
   taskId: string | null
@@ -106,7 +112,12 @@ export interface TaskDetailDrawerHandle {
 type DetailTab = 'details' | 'activity'
 type FeedFilter = 'all' | 'comments' | 'changes'
 type PendingOperations = Record<string, number>
-type Failure = { message: string; canRetry: boolean }
+type Failure = {
+  message: string
+  canRetry: boolean
+  scope: 'operation' | 'save'
+  kind: TaskSaveFailureKind
+}
 type ParticipantGrantPrompt = { taskId: string; affectedUserIDs: string[]; retry: () => void }
 type TaskMutationResponse = {
   task?: Task
@@ -373,9 +384,22 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
   }, [pendingOperationKey])
   const isPending = useCallback((key: string) => Boolean(pending[pendingOperationKey(taskId, key)]), [pending, pendingOperationKey, taskId])
   const isTaskPending = useCallback((key: string, taskID: string) => Boolean(pending[pendingOperationKey(taskID, key)]), [pending, pendingOperationKey])
-  const showFailure = useCallback((message: string, retry?: () => void, taskID = taskIdRef.current) => {
+  const showFailure = useCallback((
+    message: string,
+    retry?: () => void,
+    taskID = taskIdRef.current,
+    options: { scope?: Failure['scope']; kind?: Failure['kind'] } = {},
+  ) => {
     if (!taskID) return
-    const entry = { failure: { message, canRetry: Boolean(retry) }, retry: retry || null }
+    const entry = {
+      failure: {
+        message,
+        canRetry: Boolean(retry),
+        scope: options.scope || 'operation',
+        kind: options.kind || 'error',
+      },
+      retry: retry || null,
+    }
     failuresByTaskRef.current.set(taskID, entry)
     if (taskIdRef.current !== taskID) return
     failureRetryRef.current = entry.retry
@@ -997,6 +1021,56 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
   const canEdit = canEditTask(visibleTask)
   const canComment = canCommentOnTask(visibleTask)
   const canAdmin = canAdministerTask(visibleTask)
+  const progressValidation = validateManualProgress(progressInput)
+  const hasTaskDraftChanges = Boolean(visibleTask && (
+    titleDraft.trim() !== visibleTask.title
+    || progressMode !== (visibleTask.progress_mode || 'manual')
+    || (progressMode === 'manual'
+      && progressValidation.valid
+      && progressValidation.value !== (visibleTask.manual_progress ?? visibleTask.progress ?? 0))
+  ))
+  const currentDescriptionPhase = visibleTask && descriptionSaveState?.taskId === visibleTask.id
+    ? descriptionSaveState.phase
+    : undefined
+  const saveStatusModel = deriveTaskSaveStatus({
+    canEdit: canEdit && !historicalReadOnly,
+    updatedAt: visibleTask?.updated_at,
+    descriptionPhase: currentDescriptionPhase,
+    hasPendingSave: taskHasPendingSave(pending, visibleTask?.id),
+    hasDraftChanges: hasTaskDraftChanges,
+    failureKind: failure?.scope === 'save' ? failure.kind : undefined,
+  })
+  const compactSaveStatus = detailWindow.isMobile || (panelWidth > 0 && panelWidth < 620)
+  const revealSaveFeedback = useCallback((description: boolean) => {
+    setTab('details')
+    window.requestAnimationFrame(() => {
+      const selector = description ? '[data-task-description-save-feedback]' : '[data-task-detail-failure]'
+      const target = panelRef.current?.querySelector<HTMLElement>(selector)
+      target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      target?.querySelector<HTMLElement>('button')?.focus({ preventScroll: true })
+    })
+  }, [])
+  const handleSaveStatusAction = useCallback(() => {
+    if (currentDescriptionPhase === 'conflict') {
+      revealSaveFeedback(true)
+      return
+    }
+    if (failure?.scope === 'save' && failure.kind === 'conflict') {
+      revealSaveFeedback(false)
+      return
+    }
+    if (currentDescriptionPhase === 'error' && visibleTask?.id) {
+      void descriptionAutosaveRef.current?.retry(visibleTask.id)
+      return
+    }
+    if (failure?.scope === 'save') {
+      const retry = failureRetryRef.current
+      if (retry) {
+        clearFailure()
+        retry()
+      } else revealSaveFeedback(false)
+    }
+  }, [clearFailure, currentDescriptionPhase, failure, revealSaveFeedback, visibleTask?.id])
 
   const localDependencyCandidates = useMemo(() => allTasks.filter(item => item.id !== taskId && !item.parent_task_id).slice(0, 8), [allTasks, taskId])
   const dependencyCandidates = dependencySearch.trim().length >= 2 ? dependencyResults : localDependencyCandidates
@@ -1069,7 +1143,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
         showFailure(result.status === 409 ? 'La tarea cambió en otra sesión. Conservamos tu borrador para que puedas volver a guardarlo.' : result.error || 'No se pudo guardar el cambio', () => {
           if (taskIdRef.current !== requestedTaskId) onOpenTaskRef.current(requestedTaskId)
           window.setTimeout(() => { void updateTaskRef.current(key, body) })
-        }, requestedTaskId)
+        }, requestedTaskId, { scope: 'save', kind: result.status === 409 ? 'conflict' : 'error' })
         return false
       }
       clearFailure(requestedTaskId)
@@ -1106,7 +1180,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
 		if (!result.success || !result.data?.task) {
 			applyTask(snapshot)
 			if (result.status === 409 && taskIdRef.current === requestedTaskId) await refreshTask()
-			showFailure(result.status === 409 ? 'El color cambió en otra sesión. Cargamos la versión canónica.' : result.error || 'No se pudo cambiar el color; restauramos el anterior.', () => { if (taskIdRef.current !== requestedTaskId) onOpenTaskRef.current(requestedTaskId); else void changeColor(nextColor) }, requestedTaskId)
+			showFailure(result.status === 409 ? 'El color cambió en otra sesión. Cargamos la versión canónica.' : result.error || 'No se pudo cambiar el color; restauramos el anterior.', () => { if (taskIdRef.current !== requestedTaskId) onOpenTaskRef.current(requestedTaskId); else void changeColor(nextColor) }, requestedTaskId, { scope: 'save', kind: result.status === 409 ? 'conflict' : 'error' })
 			return
 		}
 		clearFailure(requestedTaskId); applyTask(result.data.task); onChanged(result.data.task, result.data.operation_id || operationID, result.data.hierarchy_counts)
@@ -1252,10 +1326,10 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
       else showFailure('Este cambio necesita confirmar acceso. Vuelve a la tarea para continuar.', () => onOpenTaskRef.current(requestedTaskId), requestedTaskId)
     } else if (result.status === 409) {
       if (taskIdRef.current === requestedTaskId) await refreshTask()
-      showFailure('La tarea cambió en otra sesión. Ya cargamos la versión reciente; puedes aplicar tu selección nuevamente.', () => { if (taskIdRef.current !== requestedTaskId) onOpenTaskRef.current(requestedTaskId); else void setCollaborator(userId, shouldSelect) }, requestedTaskId)
+      showFailure('La tarea cambió en otra sesión. Ya cargamos la versión reciente; puedes aplicar tu selección nuevamente.', () => { if (taskIdRef.current !== requestedTaskId) onOpenTaskRef.current(requestedTaskId); else void setCollaborator(userId, shouldSelect) }, requestedTaskId, { scope: 'save', kind: 'conflict' })
     } else if (!result.success) {
       applyTask(currentTask)
-      showFailure(result.error || 'No se pudieron actualizar los colaboradores', () => { if (taskIdRef.current !== requestedTaskId) onOpenTaskRef.current(requestedTaskId); else void setCollaborator(userId, shouldSelect) }, requestedTaskId)
+      showFailure(result.error || 'No se pudieron actualizar los colaboradores', () => { if (taskIdRef.current !== requestedTaskId) onOpenTaskRef.current(requestedTaskId); else void setCollaborator(userId, shouldSelect) }, requestedTaskId, { scope: 'save', kind: 'error' })
     }
     endPending('collaborators', requestedTaskId)
   }
@@ -1647,7 +1721,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
     const task = visibleTask
     return <div className="mx-auto w-full max-w-4xl space-y-7 pb-8">
     <section aria-labelledby={`task-properties-${task.id}`}>
-      <div className="mb-3 flex items-end justify-between gap-3"><div><h3 id={`task-properties-${task.id}`} className="text-xs font-black uppercase tracking-[0.14em] text-slate-500">Propiedades</h3><p className="mt-1 text-[11px] text-slate-400">Actualiza lo esencial sin salir de la tarea.</p></div>{Object.keys(pending).some(key => key.startsWith(`${task.id}:`) && !key.includes('comment')) && <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-emerald-600"><Loader2 className="h-3.5 w-3.5 animate-spin" />Guardando</span>}</div>
+      <div className="mb-3"><h3 id={`task-properties-${task.id}`} className="text-xs font-black uppercase tracking-[0.14em] text-slate-500">Propiedades</h3><p className="mt-1 text-[11px] text-slate-400">Actualiza lo esencial sin salir de la tarea.</p></div>
       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_8px_24px_rgba(15,23,42,0.04)]">
         <TaskPropertyRow label="Estado" icon={<Check className="h-3.5 w-3.5" />}>
           <div className="flex items-center gap-2"><div className="min-w-0 flex-1"><TaskStatusPicker value={task.status_id || ''} statuses={statuses} disabled={!canEdit} pending={isPending('status')} onChange={statusID => { void updateTask('status', { status_id: statusID }) }} /></div><TaskCompletionButton task={task} statuses={statuses} disabled={!canEdit} pending={isPending('status')} onChange={statusID => { void updateTask('status', { status_id: statusID }) }} /></div>
@@ -1678,6 +1752,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
       onRetry={() => { void descriptionAutosaveRef.current?.retry(task.id) }}
       onKeepLocal={() => { void descriptionAutosaveRef.current?.keepLocal(task.id) }}
       onUseRemote={useRemoteDescription}
+      saveIndicator={<TaskSaveStatusIndicator model={saveStatusModel} compact={compactSaveStatus} onAction={handleSaveStatusAction} />}
       error={failure && <div role="alert" className="mb-3 flex shrink-0 items-start gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 text-xs text-rose-700"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1 leading-5">{failure.message}</span>{failure.canRetry && <button type="button" onClick={() => { const retry = failureRetryRef.current; clearFailure(); retry?.() }} className="shrink-0 rounded-lg bg-white px-2.5 py-1 font-semibold shadow-sm hover:bg-rose-100">Reintentar</button>}</div>}
     />
 
@@ -1741,7 +1816,8 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
 				<div className="mb-1.5 flex min-w-0 items-center gap-1.5 overflow-hidden text-[11px] text-slate-400"><span className="h-3.5 w-3.5 shrink-0 rounded-md border-2 border-white shadow-sm" style={{ backgroundColor: task.resolved_color || resolveTaskIdentityColor(task.color, list?.color).color }} aria-label={`Color de identidad ${task.resolved_color || resolveTaskIdentityColor(task.color, list?.color).color}`} />{parentTask && <><button data-no-window-drag onClick={returnToParent} className="max-w-44 truncate font-semibold text-emerald-700 hover:underline">{parentTask.title}</button><ChevronRight className="h-3 w-3 shrink-0" /></>}{task.breadcrumbs_visible === false ? <span className="truncate font-semibold text-violet-600">Compartida contigo</span> : <><span className="truncate">{task.folder_name || 'Clarin Work'}</span><ChevronRight className="h-3 w-3 shrink-0" /><span className="truncate">{task.list_name || 'Bandeja general'}</span></>}{task.is_milestone && <span className="ml-1 flex shrink-0 items-center gap-1 rounded-full bg-violet-50 px-2 py-1 font-medium text-violet-700"><Flag className="h-3 w-3" /> Hito</span>}</div>
-                <div data-no-window-drag className="relative"><textarea rows={1} value={titleDraft} disabled={!canEdit || isPending('title')} onFocus={() => { editingTitleRef.current = true }} onChange={event => setTitleDraft(event.target.value.replace(/\n/g, ' '))} onBlur={() => { void saveTitle() }} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); skipTitleSaveRef.current = true; setTitleDraft(task.title); event.currentTarget.blur() } }} aria-label="Título de la tarea" className="block min-h-9 w-full resize-none overflow-hidden rounded-lg border border-transparent bg-transparent py-1 pr-8 text-lg font-bold leading-7 text-slate-900 outline-none transition hover:border-slate-200 focus:border-emerald-300 focus:bg-white focus:px-2 focus:ring-4 focus:ring-emerald-50 disabled:opacity-80 sm:text-xl" />{isPending('title') && <Loader2 className="absolute right-2 top-2 h-4 w-4 animate-spin text-emerald-600" />}</div>
+				<div data-no-window-drag className="relative"><textarea rows={1} value={titleDraft} disabled={!canEdit || isPending('title')} onFocus={() => { editingTitleRef.current = true }} onChange={event => setTitleDraft(event.target.value.replace(/\n/g, ' '))} onBlur={() => { void saveTitle() }} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); skipTitleSaveRef.current = true; setTitleDraft(task.title); event.currentTarget.blur() } }} aria-label="Título de la tarea" className="block min-h-9 w-full resize-none overflow-hidden rounded-lg border border-transparent bg-transparent py-1 pr-8 text-lg font-bold leading-7 text-slate-900 outline-none transition hover:border-slate-200 focus:border-emerald-300 focus:bg-white focus:px-2 focus:ring-4 focus:ring-emerald-50 disabled:opacity-80 sm:text-xl" />{isPending('title') && <Loader2 className="absolute right-2 top-2 h-4 w-4 animate-spin motion-reduce:animate-none text-emerald-600" />}</div>
+                <div data-no-window-drag className="mt-0.5 min-w-0"><TaskSaveStatusIndicator model={saveStatusModel} compact={compactSaveStatus} onAction={handleSaveStatusAction} announce={!descriptionExpanded} /></div>
               </div>
               <div data-no-window-drag className="flex shrink-0 gap-0.5">
                 {!detailWindow.isMobile && detailWindow.temporaryModeActive && <span role="img" aria-label="Vista maximizada temporal por espacio disponible" title="Vista maximizada temporal por espacio disponible" className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400"><Maximize2 className="h-4 w-4" /></span>}
@@ -1758,7 +1834,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
           </header>
 
           {!canEdit && !descriptionExpanded && <div role="status" className="mx-4 mt-3 rounded-xl border border-violet-100 bg-violet-50 px-3 py-2.5 text-xs font-semibold text-violet-700 sm:mx-6">Acceso {canComment ? 'Comentar' : 'Ver'} · puedes consultar esta tarea{canComment ? ' y participar en la conversación' : ''}.</div>}
-          {failure && !descriptionExpanded && <div className="mx-4 mt-3 flex shrink-0 items-start gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 text-xs text-rose-700 sm:mx-6"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1 leading-5">{failure.message}</span>{failure.canRetry && <button onClick={() => { const retry = failureRetryRef.current; clearFailure(); retry?.() }} className="shrink-0 rounded-lg bg-white px-2.5 py-1 font-semibold shadow-sm hover:bg-rose-100">Reintentar</button>}<button aria-label="Cerrar aviso" onClick={() => clearFailure()} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg hover:bg-rose-100"><X className="h-3.5 w-3.5" /></button></div>}
+          {failure && !descriptionExpanded && <div data-task-detail-failure role="alert" className="mx-4 mt-3 flex shrink-0 items-start gap-2 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 text-xs text-rose-700 sm:mx-6"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1 leading-5">{failure.message}</span>{failure.canRetry && <button onClick={() => { const retry = failureRetryRef.current; clearFailure(); retry?.() }} className="shrink-0 rounded-lg bg-white px-2.5 py-1 font-semibold shadow-sm hover:bg-rose-100">Reintentar</button>}<button aria-label="Cerrar aviso" onClick={() => clearFailure()} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg hover:bg-rose-100"><X className="h-3.5 w-3.5" /></button></div>}
           {sectionsLoading && !descriptionExpanded && <div role="status" className="mx-4 mt-2 flex shrink-0 items-center gap-2 text-[11px] font-medium text-slate-400 sm:mx-6"><Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-600" />Actualizando comentarios, actividad y archivos…</div>}
 
           {isWide ? <div className="flex min-h-0 flex-1"><main ref={detailsScrollRef} className="min-w-0 flex-1 overflow-y-auto overscroll-contain px-6 py-6 lg:px-8">{detailsPane}</main><section className="flex w-[390px] min-h-0 shrink-0 flex-col border-l border-slate-200">{activityPane}</section></div> : tab === 'details' ? <main ref={detailsScrollRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-6">{detailsPane}</main> : activityPane}

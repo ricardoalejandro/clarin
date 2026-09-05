@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -976,11 +977,12 @@ func (s *Server) setupRoutes() {
 	whiteboardLibraries.Delete("/:libraryId", s.handleArchiveWhiteboardLibrary)
 
 	// Quick replies (canned responses)
-	quickReplies := protected.Group("/quick-replies", s.requirePermission(domain.PermChats))
-	quickReplies.Get("/", s.handleGetQuickReplies)
-	quickReplies.Post("/", s.handleCreateQuickReply)
-	quickReplies.Put("/:id", s.handleUpdateQuickReply)
-	quickReplies.Delete("/:id", s.handleDeleteQuickReply)
+	quickReplies := protected.Group("/quick-replies")
+	quickReplies.Get("/", s.requirePermission(domain.PermChats), s.handleGetQuickReplies)
+	quickReplies.Post("/", s.requirePermission(domain.PermQuickRepliesManage), s.handleCreateQuickReply)
+	quickReplies.Put("/:id", s.requirePermission(domain.PermQuickRepliesManage), s.handleUpdateQuickReply)
+	quickReplies.Delete("/draft-media/:assetId", s.requirePermission(domain.PermQuickRepliesManage), s.handleReleaseQuickReplyDraftMedia)
+	quickReplies.Delete("/:id", s.requirePermission(domain.PermQuickRepliesManage), s.handleDeleteQuickReply)
 
 	// Legacy per-account Kommo configuration routes are disabled. Kommo is now
 	// administered centrally through /admin/integrations and assigned to account groups.
@@ -5175,10 +5177,16 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 		contentType = asset.ContentType
 	}
 	_, _ = s.repos.DB().Exec(c.Context(), `
-		INSERT INTO storage_objects (account_id, object_key, media_type, content_type, filename, size_bytes, source, status, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NOW())
+		INSERT INTO storage_objects (account_id, object_key, media_type, content_type, filename, size_bytes, source, status, next_delete_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'active',
+			CASE WHEN $7::text = 'quick-reply-drafts' THEN NOW() + INTERVAL '24 hours' ELSE NULL END,
+			NOW())
 		ON CONFLICT (account_id, object_key) DO UPDATE
-		SET size_bytes = EXCLUDED.size_bytes, content_type = EXCLUDED.content_type, media_type = EXCLUDED.media_type, status = 'active', updated_at = NOW()
+		SET size_bytes = EXCLUDED.size_bytes, content_type = EXCLUDED.content_type, media_type = EXCLUDED.media_type,
+			status = 'active', next_delete_at = CASE
+				WHEN storage_objects.source = 'quick-reply-drafts' THEN EXCLUDED.next_delete_at
+				ELSE storage_objects.next_delete_at
+			END, updated_at = NOW()
 	`, accountID, objectKey, mediaType, contentType, uniqueFilename, int64(len(data)), folder)
 	var mediaAssetID interface{}
 	if asset != nil {
@@ -5251,7 +5259,7 @@ func (s *Server) handleMediaProxy(c *fiber.Ctx) error {
 		c.Set("Vary", "Cookie, Authorization")
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "File not found"})
 	}
-	return s.serveStorageObject(c, objectKey, "public, max-age=31536000")
+	return s.serveStorageObject(c, objectKey, "public, max-age=31536000", "")
 }
 
 func storageResponseNotModified(cacheControl, rangeHeader, ifNoneMatch, etag string) bool {
@@ -5259,73 +5267,114 @@ func storageResponseNotModified(cacheControl, rangeHeader, ifNoneMatch, etag str
 		(ifNoneMatch == etag || strings.Contains(ifNoneMatch, etag))
 }
 
-func (s *Server) serveStorageObject(c *fiber.Ctx, objectKey, cacheControl string) error {
-	if s.storage == nil {
-		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Storage not configured"})
+var safeStoredContentTypes = map[string]string{
+	"application/msword":            "application/msword",
+	"application/pdf":               "application/pdf",
+	"application/vnd.ms-excel":      "application/vnd.ms-excel",
+	"application/vnd.ms-powerpoint": "application/vnd.ms-powerpoint",
+	"application/vnd.openxmlformats-officedocument.presentationml.presentation": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document":   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	"application/x-rar-compressed":                                              "application/x-rar-compressed",
+	"application/zip":                                                           "application/zip",
+	"audio/aac":                                                                 "audio/aac",
+	"audio/mp4":                                                                 "audio/mp4",
+	"audio/mpeg":                                                                "audio/mpeg",
+	"audio/ogg":                                                                 "audio/ogg",
+	"audio/opus":                                                                "audio/opus",
+	"audio/wav":                                                                 "audio/wav",
+	"image/gif":                                                                 "image/gif",
+	"image/jpeg":                                                                "image/jpeg",
+	"image/png":                                                                 "image/png",
+	"image/webp":                                                                "image/webp",
+	"text/csv":                                                                  "text/csv; charset=utf-8",
+	"text/plain":                                                                "text/plain; charset=utf-8",
+	"video/3gpp":                                                                "video/3gpp",
+	"video/mp4":                                                                 "video/mp4",
+	"video/quicktime":                                                           "video/quicktime",
+	"video/webm":                                                                "video/webm",
+}
+
+func safeStoredContentType(raw string) string {
+	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return safeStoredContentTypes[strings.ToLower(mediaType)]
+}
+
+func storageContentType(objectKey, explicitContentType, storedContentType string) string {
+	if explicit := strings.TrimSpace(explicitContentType); explicit != "" {
+		return explicit
 	}
 
-	// Detect content type from extension
-	contentType := strings.TrimSpace(c.GetRespHeader(fiber.HeaderContentType))
-	hasContentTypeOverride := contentType != ""
-	if !hasContentTypeOverride {
-		contentType = "application/octet-stream"
+	extensionTypes := map[string]string{
+		".3gp":  "video/3gpp",
+		".aac":  "audio/aac",
+		".csv":  "text/csv; charset=utf-8",
+		".doc":  "application/msword",
+		".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		".gif":  "image/gif",
+		".jpeg": "image/jpeg",
+		".jpg":  "image/jpeg",
+		".m4a":  "audio/mp4",
+		".mov":  "video/quicktime",
+		".mp3":  "audio/mpeg",
+		".mp4":  "video/mp4",
+		".ogg":  "audio/ogg",
+		".opus": "audio/opus",
+		".pdf":  "application/pdf",
+		".png":  "image/png",
+		".ppt":  "application/vnd.ms-powerpoint",
+		".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		".rar":  "application/x-rar-compressed",
+		".txt":  "text/plain; charset=utf-8",
+		".wav":  "audio/wav",
+		".webm": "video/webm",
+		".webp": "image/webp",
+		".xls":  "application/vnd.ms-excel",
+		".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		".zip":  "application/zip",
 	}
-	if dotIdx := strings.LastIndex(objectKey, "."); !hasContentTypeOverride && dotIdx >= 0 {
-		ext := strings.ToLower(objectKey[dotIdx:])
-		switch ext {
-		case ".jpg", ".jpeg":
-			contentType = "image/jpeg"
-		case ".png":
-			contentType = "image/png"
-		case ".gif":
-			contentType = "image/gif"
-		case ".webp":
-			contentType = "image/webp"
-		case ".mp4":
-			contentType = "video/mp4"
-		case ".webm":
-			contentType = "video/webm"
-		case ".mp3":
-			contentType = "audio/mpeg"
-		case ".ogg":
-			contentType = "audio/ogg"
-		case ".pdf":
-			contentType = "application/pdf"
-		case ".doc":
-			contentType = "application/msword"
-		case ".docx":
-			contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-		case ".xls":
-			contentType = "application/vnd.ms-excel"
-		case ".xlsx":
-			contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-		case ".ppt":
-			contentType = "application/vnd.ms-powerpoint"
-		case ".pptx":
-			contentType = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-		case ".txt":
-			contentType = "text/plain; charset=utf-8"
-		}
+	if contentType := extensionTypes[strings.ToLower(filepath.Ext(objectKey))]; contentType != "" {
+		return contentType
+	}
+	if contentType := safeStoredContentType(storedContentType); contentType != "" {
+		return contentType
+	}
+	return "application/octet-stream"
+}
+
+func setStorageResponseHeaders(c *fiber.Ctx, contentType, cacheControl, etag, lastModified, defaultFilename string) {
+	c.Set(fiber.HeaderContentType, contentType)
+	c.Set(fiber.HeaderAcceptRanges, "bytes")
+	c.Set(fiber.HeaderETag, etag)
+	c.Set(fiber.HeaderLastModified, lastModified)
+	c.Set(fiber.HeaderCacheControl, cacheControl)
+	if strings.Contains(cacheControl, "private") {
+		c.Set(fiber.HeaderVary, "Cookie, Authorization")
+	}
+	if c.GetRespHeader(fiber.HeaderContentDisposition) == "" {
+		c.Set(fiber.HeaderContentDisposition, fmt.Sprintf("inline; filename=%q", defaultFilename))
+	}
+}
+
+func (s *Server) serveStorageObject(c *fiber.Ctx, objectKey, cacheControl, explicitContentType string) error {
+	if s.storage == nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Storage not configured"})
 	}
 
 	info, err := s.storage.GetFileInfo(c.Context(), objectKey)
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "File not found"})
 	}
+	contentType := storageContentType(objectKey, explicitContentType, info.ContentType)
 	etagSeed := fmt.Sprintf("%s:%d:%d", objectKey, info.Size, info.LastModified.UnixNano())
 	etagHash := sha256.Sum256([]byte(etagSeed))
 	etag := fmt.Sprintf("\"%x\"", etagHash[:])
 	lastModified := info.LastModified.UTC().Format(time.RFC1123)
 	setMediaCacheHeaders := func() {
-		c.Set("ETag", etag)
-		c.Set("Last-Modified", lastModified)
-		c.Set("Cache-Control", cacheControl)
-		if strings.Contains(cacheControl, "private") {
-			c.Set("Vary", "Cookie, Authorization")
-		}
-		if c.GetRespHeader(fiber.HeaderContentDisposition) == "" {
-			c.Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filepath.Base(objectKey)))
-		}
+		setStorageResponseHeaders(c, contentType, cacheControl, etag, lastModified, filepath.Base(objectKey))
 	}
 
 	ifNoneMatch := c.Get("If-None-Match")
@@ -5365,9 +5414,7 @@ func (s *Server) serveStorageObject(c *fiber.Ctx, objectKey, cacheControl string
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to read file"})
 		}
 
-		c.Set("Content-Type", contentType)
 		c.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, totalSize))
-		c.Set("Accept-Ranges", "bytes")
 		c.Set("Content-Length", fmt.Sprintf("%d", len(data)))
 		setMediaCacheHeaders()
 		return c.Status(206).Send(data)
@@ -5379,8 +5426,6 @@ func (s *Server) serveStorageObject(c *fiber.Ctx, objectKey, cacheControl string
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "File not found"})
 	}
 
-	c.Set("Content-Type", contentType)
-	c.Set("Accept-Ranges", "bytes")
 	c.Set("Content-Length", fmt.Sprintf("%d", len(data)))
 	setMediaCacheHeaders()
 	return c.Send(data)
@@ -16471,7 +16516,15 @@ func (s *Server) storageReferencedObjectKeysWithInventory(ctx context.Context, i
 		{"whiteboard_revisions", "snapshot_object_key", "", true},
 	}
 	if includeInventory {
-		columns = append(columns, refColumn{"media_assets", "object_key", "status = 'active'", true})
+		columns = append(columns, refColumn{"media_assets", "object_key", `status = 'active'
+			AND NOT EXISTS (
+				SELECT 1 FROM storage_objects draft_object
+				WHERE draft_object.account_id = media_assets.account_id
+				  AND draft_object.object_key = media_assets.object_key
+				  AND draft_object.source = 'quick-reply-drafts'
+				  AND draft_object.next_delete_at IS NOT NULL
+				  AND draft_object.next_delete_at <= NOW()
+			)`, true})
 	}
 	refs := make(map[string]struct{})
 	for _, col := range columns {
@@ -17431,6 +17484,51 @@ func (s *Server) handleAdminRemoveUserAccount(c *fiber.Ctx) error {
 
 // --- Quick Reply Handlers ---
 
+type quickReplyAttachmentRequest struct {
+	ID            uuid.UUID  `json:"id"`
+	MediaAssetID  *uuid.UUID `json:"media_asset_id"`
+	MediaType     string     `json:"media_type"`
+	MediaFilename string     `json:"media_filename"`
+	Caption       string     `json:"caption"`
+}
+
+type quickReplyMutationRequest struct {
+	Shortcut          string                        `json:"shortcut"`
+	Title             string                        `json:"title"`
+	Body              string                        `json:"body"`
+	ExpectedUpdatedAt string                        `json:"expected_updated_at"`
+	Attachments       []quickReplyAttachmentRequest `json:"attachments"`
+}
+
+func (req quickReplyMutationRequest) quickReply(id, accountID uuid.UUID) *domain.QuickReply {
+	quickReply := &domain.QuickReply{
+		ID: id, AccountID: accountID, Shortcut: req.Shortcut, Title: req.Title, Body: req.Body,
+		Attachments: make([]domain.QuickReplyAttachment, 0, len(req.Attachments)),
+	}
+	for position, attachment := range req.Attachments {
+		quickReply.Attachments = append(quickReply.Attachments, domain.QuickReplyAttachment{
+			ID: attachment.ID, MediaAssetID: attachment.MediaAssetID, MediaType: attachment.MediaType,
+			MediaFilename: attachment.MediaFilename, Caption: attachment.Caption, Position: position,
+		})
+	}
+	return quickReply
+}
+
+func writeQuickReplyError(c *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, service.ErrQuickReplyValidation), errors.Is(err, repository.ErrQuickReplyInvalidMedia):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "code": "invalid_quick_reply", "error": "Revisa el atajo, el mensaje y los adjuntos"})
+	case errors.Is(err, repository.ErrQuickReplyNotFound):
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "code": "quick_reply_not_found", "error": "La respuesta rápida ya no existe"})
+	case errors.Is(err, repository.ErrQuickReplyConflict):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "quick_reply_conflict", "error": "La respuesta rápida cambió en otra sesión. Recarga e inténtalo de nuevo"})
+	case errors.Is(err, repository.ErrQuickReplyShortcut):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "quick_reply_shortcut_exists", "error": "Ya existe una respuesta rápida con ese atajo"})
+	default:
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "code": "quick_reply_failed", "error": "No se pudo completar la operación"})
+	}
+}
+
 func (s *Server) handleGetQuickReplies(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	replies, err := s.services.QuickReply.GetByAccountID(c.Context(), accountID)
@@ -17445,85 +17543,61 @@ func (s *Server) handleGetQuickReplies(c *fiber.Ctx) error {
 
 func (s *Server) handleCreateQuickReply(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
-	var req struct {
-		Shortcut      string `json:"shortcut"`
-		Title         string `json:"title"`
-		Body          string `json:"body"`
-		MediaURL      string `json:"media_url"`
-		MediaType     string `json:"media_type"`
-		MediaFilename string `json:"media_filename"`
-		Attachments   []struct {
-			MediaURL      string `json:"media_url"`
-			MediaType     string `json:"media_type"`
-			MediaFilename string `json:"media_filename"`
-			Caption       string `json:"caption"`
-		} `json:"attachments"`
-	}
+	var req quickReplyMutationRequest
 	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "invalid_request", "error": "No se pudo leer la solicitud"})
 	}
-	if req.Shortcut == "" || (req.Body == "" && req.MediaURL == "" && len(req.Attachments) == 0) {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Shortcut and body or media are required"})
+	quickReply, err := s.services.QuickReply.Create(c.Context(), req.quickReply(uuid.Nil, accountID))
+	if err != nil {
+		return writeQuickReplyError(c, err)
 	}
-	qr := &domain.QuickReply{AccountID: accountID, Shortcut: req.Shortcut, Title: req.Title, Body: req.Body, MediaURL: req.MediaURL, MediaType: req.MediaType, MediaFilename: req.MediaFilename}
-	for i, a := range req.Attachments {
-		if i >= 5 {
-			break
-		}
-		qr.Attachments = append(qr.Attachments, domain.QuickReplyAttachment{
-			MediaURL: a.MediaURL, MediaType: a.MediaType, MediaFilename: a.MediaFilename, Caption: a.Caption, Position: i,
-		})
-	}
-	if err := s.services.QuickReply.Create(c.Context(), qr); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-	return c.Status(201).JSON(fiber.Map{"success": true, "quick_reply": qr})
+	s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventQuickReplyUpdate, fiber.Map{"action": "created", "quick_reply": quickReply})
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true, "quick_reply": quickReply})
 }
 
 func (s *Server) handleUpdateQuickReply(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid quick reply ID"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "invalid_quick_reply_id", "error": "El ID de la respuesta rápida no es válido"})
 	}
-	var req struct {
-		Shortcut      string `json:"shortcut"`
-		Title         string `json:"title"`
-		Body          string `json:"body"`
-		MediaURL      string `json:"media_url"`
-		MediaType     string `json:"media_type"`
-		MediaFilename string `json:"media_filename"`
-		Attachments   []struct {
-			MediaURL      string `json:"media_url"`
-			MediaType     string `json:"media_type"`
-			MediaFilename string `json:"media_filename"`
-			Caption       string `json:"caption"`
-		} `json:"attachments"`
-	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	var req quickReplyMutationRequest
 	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "invalid_request", "error": "No se pudo leer la solicitud"})
 	}
-	qr := &domain.QuickReply{ID: id, Shortcut: req.Shortcut, Title: req.Title, Body: req.Body, MediaURL: req.MediaURL, MediaType: req.MediaType, MediaFilename: req.MediaFilename}
-	for i, a := range req.Attachments {
-		if i >= 5 {
-			break
-		}
-		qr.Attachments = append(qr.Attachments, domain.QuickReplyAttachment{
-			MediaURL: a.MediaURL, MediaType: a.MediaType, MediaFilename: a.MediaFilename, Caption: a.Caption, Position: i,
-		})
+	expectedUpdatedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(req.ExpectedUpdatedAt))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "missing_quick_reply_version", "error": "Recarga la respuesta rápida antes de editarla"})
 	}
-	if err := s.services.QuickReply.Update(c.Context(), qr); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	quickReply, err := s.services.QuickReply.Update(c.Context(), accountID, expectedUpdatedAt, req.quickReply(id, accountID))
+	if err != nil {
+		return writeQuickReplyError(c, err)
 	}
-	return c.JSON(fiber.Map{"success": true, "quick_reply": qr})
+	s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventQuickReplyUpdate, fiber.Map{"action": "updated", "quick_reply": quickReply})
+	return c.JSON(fiber.Map{"success": true, "quick_reply": quickReply})
 }
 
 func (s *Server) handleDeleteQuickReply(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid quick reply ID"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "invalid_quick_reply_id", "error": "El ID de la respuesta rápida no es válido"})
 	}
-	if err := s.services.QuickReply.Delete(c.Context(), id); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	accountID := c.Locals("account_id").(uuid.UUID)
+	if err := s.services.QuickReply.Delete(c.Context(), accountID, id); err != nil {
+		return writeQuickReplyError(c, err)
+	}
+	s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventQuickReplyUpdate, fiber.Map{"action": "deleted", "quick_reply_id": id})
+	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) handleReleaseQuickReplyDraftMedia(c *fiber.Ctx) error {
+	assetID, err := uuid.Parse(c.Params("assetId"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "invalid_media_asset_id", "error": "El archivo no es válido"})
+	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	if err := s.services.QuickReply.ReleaseDraftMedia(c.Context(), accountID, assetID); err != nil {
+		return writeQuickReplyError(c, err)
 	}
 	return c.JSON(fiber.Map{"success": true})
 }

@@ -7,6 +7,33 @@ const accountName = process.env.CLARIN_E2E_ACCOUNT
 const useMockSession = process.env.CLARIN_E2E_MOCK_AUTH === '1'
 const captureVisuals = process.env.CLARIN_E2E_CAPTURE === '1'
 
+function buildMockPdf(): Buffer {
+  const pageOne = 'BT /F1 24 Tf 72 720 Td (Pagina 1) Tj ET'
+  const pageTwo = 'BT /F1 24 Tf 72 720 Td (Pagina 2) Tj ET'
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>',
+    `<< /Length ${pageOne.length} >>\nstream\n${pageOne}\nendstream`,
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>',
+    `<< /Length ${pageTwo.length} >>\nstream\n${pageTwo}\nendstream`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ]
+  let pdf = '%PDF-1.4\n% Clarin responsive fixture\n'
+  const offsets = [0]
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(pdf, 'ascii'))
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`
+  })
+  const xrefOffset = Buffer.byteLength(pdf, 'ascii')
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`
+  pdf += offsets.slice(1).map(offset => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`
+  return Buffer.from(pdf, 'ascii')
+}
+
+const mockPdf = buildMockPdf()
+
 const priorityRoutes = [
   '/dashboard',
   '/dashboard/chats',
@@ -423,6 +450,8 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
     { id: 'message-out-1', account_id: 'account-responsive', device_id: 'device-1', chat_id: 'chat-1', message_id: 'wa-out-1', from_jid: '51911111111@s.whatsapp.net', from_name: 'Me', body: 'Mensaje enviado para acciones', message_type: 'text', is_from_me: true, is_read: true, status: 'read', delivered_at: new Date(Date.now() - 45_000).toISOString(), read_at: new Date(Date.now() - 20_000).toISOString(), timestamp: new Date(Date.now() - 60_000).toISOString(), created_at: new Date(Date.now() - 60_000).toISOString() },
     { id: 'message-image-1', account_id: 'account-responsive', device_id: 'device-1', chat_id: 'chat-1', message_id: 'wa-image-1', from_jid: '51999999999@s.whatsapp.net', from_name: 'Contacto móvil', body: '', message_type: 'image', media_url: '/api/media/test-image', media_mimetype: 'image/png', is_from_me: false, is_read: true, status: 'read', timestamp: new Date(Date.now() - 30_000).toISOString(), created_at: new Date(Date.now() - 30_000).toISOString(), reactions: [{ id: 'reaction-contact-image', target_message_id: 'wa-image-1', sender_jid: '51999999999@s.whatsapp.net', sender_name: 'Contacto móvil', emoji: '🙏', is_from_me: false, timestamp: new Date(Date.now() - 20_000).toISOString(), provider: 'whatsapp_web' }] },
     { id: 'message-sticker-1', account_id: 'account-responsive', device_id: 'device-1', chat_id: 'chat-1', message_id: 'wa-sticker-1', from_jid: '51999999999@s.whatsapp.net', from_name: 'Contacto móvil', body: '', message_type: 'sticker', media_url: '/api/media/test-image', media_mimetype: 'image/webp', is_from_me: false, is_read: true, status: 'read', timestamp: new Date(Date.now() - 20_000).toISOString(), created_at: new Date(Date.now() - 20_000).toISOString() },
+    { id: 'message-document-1', account_id: 'account-responsive', device_id: 'device-1', chat_id: 'chat-1', message_id: 'wa-document-1', from_jid: '51999999999@s.whatsapp.net', from_name: 'Contacto móvil', body: '', message_type: 'document', media_url: '/api/media/test-document.pdf', media_mimetype: 'application/pdf', media_filename: 'Contrato de seguimiento con nombre largo.pdf', media_size: mockPdf.length, is_from_me: false, is_read: true, status: 'read', timestamp: new Date(Date.now() - 15_000).toISOString(), created_at: new Date(Date.now() - 15_000).toISOString() },
+    { id: 'message-document-retry', account_id: 'account-responsive', device_id: 'device-1', chat_id: 'chat-1', message_id: 'wa-document-retry', from_jid: '51999999999@s.whatsapp.net', from_name: 'Contacto móvil', body: '', message_type: 'document', media_url: '/api/media/test-document-retry.pdf', media_mimetype: 'application/pdf', media_filename: 'Documento para reintentar.pdf', media_size: mockPdf.length, is_from_me: false, is_read: true, status: 'read', timestamp: new Date(Date.now() - 12_000).toISOString(), created_at: new Date(Date.now() - 12_000).toISOString() },
     { id: 'message-emoji-1', account_id: 'account-responsive', device_id: 'device-1', chat_id: 'chat-1', message_id: 'wa-emoji-1', from_jid: '51999999999@s.whatsapp.net', from_name: 'Contacto móvil', body: '👨‍👩‍👧‍👦', message_type: 'text', is_from_me: false, is_read: true, status: 'read', timestamp: new Date(Date.now() - 10_000).toISOString(), created_at: new Date(Date.now() - 10_000).toISOString() },
   ] }
   if (path === '/api/chats/chat-1/read' && method === 'POST') {
@@ -647,18 +676,31 @@ type MockWebSocketControl = {
 
 async function installMockSession(page: Page): Promise<MockWebSocketControl> {
   let activeSocket: WebSocketRoute | null = null
+  let retryPdfRequests = 0
   const clientMessages: string[] = []
   await page.routeWebSocket('**/ws**', socket => {
     activeSocket = socket
     socket.onMessage(message => clientMessages.push(message.toString()))
   })
   await page.route('**/api/**', async route => {
-    if (new URL(route.request().url()).pathname === '/api/media/test-image') {
+    const requestPath = new URL(route.request().url()).pathname
+    if (requestPath === '/api/media/test-image') {
       await route.fulfill({
         status: 200,
         contentType: 'image/png',
         body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAEAAAAAwCAIAAAAuKetIAAAAC0lEQVR4nO3PQQ0AIBDAsAP/nuGNAvZoFSzZOjNnyNiBNwNvBt4MvBl4M/Bm4M3Am4E3A28G3gy8GXgz8GbgzcCbgTcDbwbeDLwZeDPwZuDNwJuBNwNvBt4MvBl4M/Bm4M3Am4E3A28G3gy8GXgz8GbgzcCbgTcDbwbeDLwZeDPwZuDNwJuBNwNvBt4MvBl4M/Bm4M3Am4E3A28G3gy8GXgz8GbgzcCbgTcDbwbeDLwZeDPwZuDNwJuBNwNvBt4MvBl4M/Bm4M3Am4E3A28G3gy8GXgz8GbgzcCbgTcDbwbeDLwZeDPwZuDNwJuBNwNvBt4MvBl4M/Bm4M3Am4E3A28G3gy8GXgz8GbgzcCbgTcDbwbeDLwZeDPwZuDNwJuBNwNvBt4MvBl4M/Bm4M3Am4E3A28G3gy8GXgz8GbgzcCbgTcDbwbeDLwZeDPwZuDNwJuBNwNvBt4MvBl4M/Bm4G3gB4x8BfU3pFQAAAABJRU5ErkJggg==', 'base64'),
       })
+      return
+    }
+    if (requestPath === '/api/media/test-document.pdf' || requestPath === '/api/media/test-document-retry.pdf') {
+      // Next development mode mounts effects twice under React StrictMode. Fail
+      // both initial session requests so the visible session reaches its error
+      // state; the explicit user retry is the next successful request.
+      if (requestPath.endsWith('test-document-retry.pdf') && retryPdfRequests++ < 2) {
+        await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Fallo de red simulado' }) })
+        return
+      }
+      await route.fulfill({ status: 200, contentType: 'application/pdf', body: mockPdf })
       return
     }
     let requestBody: unknown
@@ -1359,6 +1401,59 @@ test.describe('Clarin responsive authenticated matrix', () => {
     expect(await page.evaluate(() => window.visualViewport?.scale || 1)).toBe(initialDocumentScale)
     await page.getByRole('button', { name: 'Cerrar visor' }).click()
     await expect(viewer).toHaveCount(0)
+  })
+
+  test('El visor PDF conserva el chat y funciona entre 320 y 1440 px', async ({ page }) => {
+    test.setTimeout(150_000)
+    await authenticate(page)
+
+    for (const viewport of [
+      { width: 320, height: 568 },
+      { width: 375, height: 812 },
+      { width: 768, height: 1024 },
+      { width: 1280, height: 800 },
+      { width: 1440, height: 900 },
+    ]) {
+      await page.setViewportSize(viewport)
+      await page.goto(`${baseURL}/dashboard/chats`, { waitUntil: 'domcontentloaded' })
+      await page.getByRole('button', { name: 'Conversación con Contacto móvil' }).click()
+
+      const trigger = page.getByRole('button', { name: 'Abrir vista previa de Contrato de seguimiento con nombre largo.pdf' })
+      await trigger.scrollIntoViewIfNeeded()
+      await trigger.click()
+
+      const viewer = page.getByRole('dialog', { name: 'Vista previa de Contrato de seguimiento con nombre largo.pdf' })
+      await expectInsideVisualViewport(page, viewer)
+      await expect(viewer.getByText('Contrato de seguimiento con nombre largo.pdf', { exact: true })).toBeVisible()
+      await expect(viewer.getByText('Página 1 de 2', { exact: true })).toBeVisible({ timeout: 20_000 })
+      await expect(viewer.getByRole('button', { name: 'Página siguiente' })).toBeEnabled()
+      await viewer.getByRole('button', { name: 'Página siguiente' }).click()
+      await expect(viewer.getByText('Página 2 de 2', { exact: true })).toBeVisible()
+      await viewer.getByRole('button', { name: 'Acercar PDF' }).click()
+      await expect(viewer.getByRole('link', { name: 'Descargar Contrato de seguimiento con nombre largo.pdf' })).toHaveAttribute('download', 'Contrato de seguimiento con nombre largo.pdf')
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
+
+      await page.keyboard.press('Escape')
+      await expect(viewer).toHaveCount(0)
+      await expect(trigger).toBeFocused()
+    }
+  })
+
+  test('El visor PDF permite reintentar tras un fallo de red', async ({ page }) => {
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width: 375, height: 812 })
+    await authenticate(page)
+    await page.goto(`${baseURL}/dashboard/chats`, { waitUntil: 'domcontentloaded' })
+    await page.getByRole('button', { name: 'Conversación con Contacto móvil' }).click()
+    const trigger = page.getByRole('button', { name: 'Abrir vista previa de Documento para reintentar.pdf' })
+    await trigger.scrollIntoViewIfNeeded()
+    await trigger.click()
+
+    const viewer = page.getByRole('dialog', { name: 'Vista previa de Documento para reintentar.pdf' })
+    await expect(viewer.getByRole('alert')).toContainText('No pudimos mostrar este PDF')
+    await expect(viewer.getByRole('link', { name: 'Descargar original' })).toHaveAttribute('download', 'Documento para reintentar.pdf')
+    await viewer.getByRole('button', { name: 'Reintentar' }).click()
+    await expect(viewer.getByText('Página 1 de 2', { exact: true })).toBeVisible({ timeout: 20_000 })
   })
 
   test('Chats cede la cabecera global al teclado solo en teléfono y conserva la conversación', async ({ page }) => {
