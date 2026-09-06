@@ -44,6 +44,10 @@ describe('TaskSaveStatusIndicator', () => {
     view.rerender(<TaskSaveStatusIndicator model={{ phase: 'conflict', updatedAt: savedAt }} onAction={onAction} />)
     fireEvent.click(screen.getByRole('button', { name: 'Conflicto de cambios · Revisar' }))
     expect(onAction).toHaveBeenCalledTimes(2)
+
+    view.rerender(<TaskSaveStatusIndicator model={{ phase: 'comment-error', updatedAt: savedAt }} onAction={onAction} />)
+    fireEvent.click(screen.getByRole('button', { name: 'No se pudo publicar · Reintentar' }))
+    expect(onAction).toHaveBeenCalledTimes(3)
   })
 
   it('can suppress a duplicate live announcement while keeping the visual status', () => {

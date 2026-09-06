@@ -81,6 +81,7 @@ import {
 import TaskSaveStatusIndicator from './TaskSaveStatusIndicator'
 import {
   deriveTaskSaveStatus,
+  latestTaskPersistenceTimestamp,
   taskHasPendingSave,
   type TaskSaveFailureKind,
 } from './taskSaveStatus'
@@ -115,8 +116,13 @@ type PendingOperations = Record<string, number>
 type Failure = {
   message: string
   canRetry: boolean
-  scope: 'operation' | 'save'
+  scope: 'operation' | 'save' | 'comment'
   kind: TaskSaveFailureKind
+}
+type TaskCommentCreatePayload = {
+  body: string
+  mentioned_user_ids: string[]
+  attachment_ids: string[]
 }
 type ParticipantGrantPrompt = { taskId: string; affectedUserIDs: string[]; retry: () => void }
 type TaskMutationResponse = {
@@ -226,6 +232,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
   const [sectionsLoading, setSectionsLoading] = useState(false)
   const [pending, setPending] = useState<PendingOperations>({})
   const [failure, setFailure] = useState<Failure | null>(null)
+  const [lastConfirmedAtByTask, setLastConfirmedAtByTask] = useState<Record<string, string>>({})
   const [archiveConfirmOpen, setArchiveConfirmOpen] = useState(false)
   const [archiveTaskId, setArchiveTaskId] = useState('')
   const [moveEnvironmentOpen, setMoveEnvironmentOpen] = useState(false)
@@ -289,6 +296,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
   const draftBodiesRef = useRef<Record<string, Record<string, unknown>>>({})
   const failureRetryRef = useRef<(() => void) | null>(null)
   const failuresByTaskRef = useRef(new Map<string, { failure: Failure; retry: (() => void) | null }>())
+  const commentPublishActiveRef = useRef(new Set<string>())
   const feedNearBottomRef = useRef(true)
   const feedCountRef = useRef(0)
   const feedContextRef = useRef('')
@@ -410,6 +418,17 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
     if (taskIdRef.current !== taskID) return
     failureRetryRef.current = null
     setFailure(null)
+  }, [])
+  const clearCommentFailure = useCallback((taskID = taskIdRef.current) => {
+    if (!taskID || failuresByTaskRef.current.get(taskID)?.failure.scope !== 'comment') return
+    clearFailure(taskID)
+  }, [clearFailure])
+  const recordCommentPersistence = useCallback((taskID: string, taskComments: readonly TaskComment[]) => {
+    setLastConfirmedAtByTask(current => {
+      const latest = latestTaskPersistenceTimestamp(undefined, taskComments, current[taskID])
+      if (!latest || latest === current[taskID]) return current
+      return { ...current, [taskID]: latest }
+    })
   }, [])
 
   const captureReadToken = useCallback((): TaskReadToken | null => {
@@ -568,11 +587,12 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
     const merged = Array.from(existing.values()).sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime())
     commentsRef.current = merged
     setComments(merged)
+    recordCommentPersistence(token.taskId, merged)
     if (commentsNextOffsetRef.current <= 100) {
       commentsNextOffsetRef.current = response.data?.next_offset || latest.length
       setCommentsHasMore(Boolean(response.data?.has_more))
     }
-  }, [acceptsReadToken, captureReadToken, historicalReadURL])
+  }, [acceptsReadToken, captureReadToken, historicalReadURL, recordCommentPersistence])
   const loadOlderComments = useCallback(async () => {
     const token = captureReadToken()
     if (!token || commentsLoadingMore || !commentsHasMore) return
@@ -661,6 +681,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
     setChildren(childRes.data?.tasks || [])
     commentsRef.current = commentRes.data?.comments || []
     setComments(commentsRef.current)
+    recordCommentPersistence(requestedTaskId, commentsRef.current)
     commentsNextOffsetRef.current = commentRes.data?.next_offset || commentRes.data?.comments?.length || 0
     setCommentsHasMore(Boolean(commentRes.data?.has_more))
     setActivity(activityRes.data?.activity || [])
@@ -681,7 +702,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
         document.getElementById(`task-child-link-${restore.childTaskId}`)?.focus({ preventScroll: true })
       }))
     }
-  }, [applyTask, historicalReadURL, showFailure])
+  }, [applyTask, historicalReadURL, recordCommentPersistence, showFailure])
 
   useEffect(() => {
     const previousTaskId = taskIdRef.current
@@ -911,6 +932,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
       setComments(commentsRef.current)
     } else if (message.action === 'comment_updated' && message.comment) {
       const previous = commentsRef.current.find(item => item.id === message.comment!.id)
+      recordCommentPersistence(currentTaskId, [message.comment])
       if (previous) {
         commentsRef.current = commentsRef.current.map(item => item.id === message.comment!.id
           ? { ...message.comment!, can_edit: previous.can_edit, can_delete: previous.can_delete }
@@ -928,7 +950,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
     else if (message.action?.includes('dependency')) void refreshDependencies()
     else if (!message.task) void refreshTask()
     window.setTimeout(() => { void refreshActivity() }, 120)
-  }), [applyTask, refreshActivity, refreshAttachments, refreshChildren, refreshComments, refreshDependencies, refreshTask, removeAttachmentReferences])
+  }), [applyTask, recordCommentPersistence, refreshActivity, refreshAttachments, refreshChildren, refreshComments, refreshDependencies, refreshTask, removeAttachmentReferences])
 
   useEffect(() => {
     if (!taskOpen) return
@@ -1032,13 +1054,29 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
   const currentDescriptionPhase = visibleTask && descriptionSaveState?.taskId === visibleTask.id
     ? descriptionSaveState.phase
     : undefined
+  const commentPublishing = Boolean(visibleTask && isPending('comment-create'))
+  const commentUploadPending = Boolean(visibleTask && isPending('upload:comment'))
+  const hasCommentDraft = Boolean(visibleTask && (comment.trim() || commentMentionIds.length || commentAttachmentIds.length))
+  const commentPhase = failure?.scope === 'comment'
+    ? 'error' as const
+    : commentPublishing
+      ? 'publishing' as const
+      : hasCommentDraft
+        ? 'dirty' as const
+        : undefined
+  const latestPersistedAt = latestTaskPersistenceTimestamp(
+    visibleTask?.updated_at,
+    comments,
+    visibleTask ? lastConfirmedAtByTask[visibleTask.id] : undefined,
+  )
   const saveStatusModel = deriveTaskSaveStatus({
     canEdit: canEdit && !historicalReadOnly,
-    updatedAt: visibleTask?.updated_at,
+    updatedAt: latestPersistedAt,
     descriptionPhase: currentDescriptionPhase,
     hasPendingSave: taskHasPendingSave(pending, visibleTask?.id),
     hasDraftChanges: hasTaskDraftChanges,
     failureKind: failure?.scope === 'save' ? failure.kind : undefined,
+    commentPhase,
   })
   const compactSaveStatus = detailWindow.isMobile || (panelWidth > 0 && panelWidth < 620)
   const revealSaveFeedback = useCallback((description: boolean) => {
@@ -1069,6 +1107,14 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
         clearFailure()
         retry()
       } else revealSaveFeedback(false)
+      return
+    }
+    if (failure?.scope === 'comment') {
+      const retry = failureRetryRef.current
+      if (retry) {
+        clearFailure()
+        retry()
+      }
     }
   }, [clearFailure, currentDescriptionPhase, failure, revealSaveFeedback, visibleTask?.id])
 
@@ -1415,34 +1461,70 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
     endPending('subtask-create', requestedTaskId)
   }
 
+  async function publishComment(requestedTaskId: string, payload: TaskCommentCreatePayload) {
+    const requestedTask = taskSnapshotsRef.current.get(requestedTaskId)
+      || (taskRef.current?.id === requestedTaskId ? taskRef.current : undefined)
+      || allTasksRef.current.find(item => item.id === requestedTaskId)
+    if (!requestedTask || !canCommentOnTask(requestedTask) || commentPublishActiveRef.current.has(requestedTaskId)) return
+
+    commentPublishActiveRef.current.add(requestedTaskId)
+    clearCommentFailure(requestedTaskId)
+    beginPending('comment-create', requestedTaskId)
+    try {
+      const result = await apiPost<{ comment: TaskComment }>(`/api/tasks/${requestedTaskId}/comments`, payload)
+      if (result.success && result.data?.comment) {
+        const savedComment = result.data.comment
+        recordCommentPersistence(requestedTaskId, [savedComment])
+        if (taskIdRef.current === requestedTaskId && !commentsRef.current.some(item => item.id === savedComment.id)) {
+          if (commentsNextOffsetRef.current > 0) commentsNextOffsetRef.current++
+          commentsRef.current = [...commentsRef.current, savedComment]
+          setComments(commentsRef.current)
+        }
+        if (taskIdRef.current === requestedTaskId) {
+          setComment('')
+          setCommentMentionIds([])
+          setCommentAttachmentIds([])
+          setCommentAttachmentLookup(current => removeCommentAttachmentDrafts(current, payload.attachment_ids))
+          window.setTimeout(() => { void refreshActivity() }, 120)
+        }
+        const saved = draftsByTaskRef.current.get(requestedTaskId)
+        if (saved) draftsByTaskRef.current.set(requestedTaskId, {
+          ...saved,
+          comment: '',
+          commentMentionIds: [],
+          commentAttachmentIds: [],
+          commentAttachmentLookup: removeCommentAttachmentDrafts(saved.commentAttachmentLookup, payload.attachment_ids),
+        })
+        clearCommentFailure(requestedTaskId)
+        return
+      }
+      showFailure(
+        result.error || 'No se pudo publicar el comentario',
+        () => { void publishComment(requestedTaskId, payload) },
+        requestedTaskId,
+        { scope: 'comment', kind: 'error' },
+      )
+    } catch {
+      showFailure(
+        'No se pudo publicar el comentario',
+        () => { void publishComment(requestedTaskId, payload) },
+        requestedTaskId,
+        { scope: 'comment', kind: 'error' },
+      )
+    } finally {
+      commentPublishActiveRef.current.delete(requestedTaskId)
+      endPending('comment-create', requestedTaskId)
+    }
+  }
+
   const sendComment = async () => {
     const currentTask = taskRef.current
-    if (!currentTask || !canCommentOnTask(currentTask) || !comment.trim() || isPending('comment-create')) return
-    const requestedTaskId = currentTask.id
-    const submittedAttachmentIds = [...commentAttachmentIds]
-    beginPending('comment-create', requestedTaskId)
-    const result = await apiPost<{ comment: TaskComment }>(`/api/tasks/${currentTask.id}/comments`, {
+    if (!currentTask || !canCommentOnTask(currentTask) || !comment.trim() || commentPublishActiveRef.current.has(currentTask.id) || isPending('upload:comment')) return
+    await publishComment(currentTask.id, {
       body: comment.trim(),
-      mentioned_user_ids: commentMentionIds,
-      attachment_ids: commentAttachmentIds,
+      mentioned_user_ids: [...commentMentionIds],
+      attachment_ids: [...commentAttachmentIds],
     })
-    if (result.success && result.data?.comment) {
-      if (taskIdRef.current === requestedTaskId && !commentsRef.current.some(item => item.id === result.data!.comment.id)) {
-        if (commentsNextOffsetRef.current > 0) commentsNextOffsetRef.current++
-        commentsRef.current = [...commentsRef.current, result.data.comment]
-        setComments(commentsRef.current)
-      }
-      if (taskIdRef.current === requestedTaskId) {
-        setComment('')
-        setCommentMentionIds([])
-        setCommentAttachmentIds([])
-        setCommentAttachmentLookup(current => removeCommentAttachmentDrafts(current, submittedAttachmentIds))
-        window.setTimeout(() => { void refreshActivity() }, 120)
-      }
-      const saved = draftsByTaskRef.current.get(requestedTaskId)
-      if (saved) draftsByTaskRef.current.set(requestedTaskId, { ...saved, comment: '', commentMentionIds: [], commentAttachmentIds: [], commentAttachmentLookup: removeCommentAttachmentDrafts(saved.commentAttachmentLookup, submittedAttachmentIds) })
-    } else if (!result.success) showFailure(result.error || 'No se pudo publicar el comentario', () => onOpenTaskRef.current(requestedTaskId), requestedTaskId)
-    endPending('comment-create', requestedTaskId)
   }
 
   const saveComment = async (item: TaskComment) => {
@@ -1458,6 +1540,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
     })
     if (result.success && result.data?.comment) {
       const submittedAttachmentIds = [...editingAttachmentIds]
+      recordCommentPersistence(requestedTaskId, [result.data.comment])
       if (taskIdRef.current === requestedTaskId) {
         commentsRef.current = commentsRef.current.map(commentItem => commentItem.id === item.id ? result.data!.comment : commentItem)
         setComments(commentsRef.current)
@@ -1509,6 +1592,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
     if (attached.success && attached.data?.attachment) {
       const uploaded = attached.data.attachment
       if (target !== 'task') {
+        if (target === 'comment') clearCommentFailure(requestedTaskId)
         const saved = draftsByTaskRef.current.get(requestedTaskId)
           || (taskIdRef.current === requestedTaskId ? currentDraftRef.current : null)
         if (saved) draftsByTaskRef.current.set(requestedTaskId, {
@@ -1561,6 +1645,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
       setEditingMentionIds(current => current.includes(userId) ? current : [...current, userId])
       setEditingCommentBody(current => `${current}${current && !current.endsWith(' ') ? ' ' : ''}${label} `)
     } else {
+      clearCommentFailure()
       setCommentMentionIds(current => current.includes(userId) ? current : [...current, userId])
       setComment(current => `${current}${current && !current.endsWith(' ') ? ' ' : ''}${label} `)
     }
@@ -1708,10 +1793,10 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
       {newFeedItems && <button type="button" onClick={() => { const element = feedScrollRef.current; if (element) element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' }); feedNearBottomRef.current = true; setNewFeedItems(false) }} className="sticky bottom-2 left-1/2 z-10 -translate-x-1/2 rounded-full bg-slate-900 px-3 py-1.5 text-[10px] font-bold text-white shadow-lg">Nueva actividad ↓</button>}
     </div>
     {canComment ? <div className="shrink-0 border-t border-slate-200 bg-white p-3 sm:p-4">
-      <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm focus-within:border-emerald-300 focus-within:ring-4 focus-within:ring-emerald-50">
-        <textarea rows={2} value={comment} onChange={event => setComment(event.target.value)} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void sendComment() } }} placeholder="Escribe un comentario…" className="w-full resize-none bg-transparent px-1 text-sm text-slate-700 outline-none placeholder:text-slate-400" />
-        <div className="mt-2 flex flex-wrap gap-1.5">{commentMentionIds.map(id => { const user = users.find(candidate => candidate.id === id); return <button key={id} onClick={() => setCommentMentionIds(current => current.filter(value => value !== id))} className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold text-emerald-700">@{user?.display_name || user?.username} ×</button> })}{commentAttachmentIds.map(id => { const file = resolveCommentAttachment(id, commentAttachmentLookup, attachments); return <button key={id} onClick={() => setCommentAttachmentIds(current => current.filter(value => value !== id))} className="rounded-full bg-slate-200 px-2 py-1 text-[10px] font-semibold text-slate-600">{file?.filename || 'Archivo'} ×</button> })}</div>
-        <div className="mt-2 flex items-end gap-2"><div className="min-w-0 flex-1"><TaskUserCombobox users={users} value="" onChange={id => addMention(id)} excludeIds={commentMentionIds} placeholder="Mencionar a alguien…" className="py-2" /></div><button title="Adjuntar archivo" onClick={() => commentFileRef.current?.click()} disabled={isPending('upload:comment')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-40">{isPending('upload:comment') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}</button><input ref={commentFileRef} type="file" className="hidden" onChange={event => void uploadFiles(Array.from(event.target.files || []), 'comment')} /><button title="Publicar comentario (Ctrl/⌘ + Enter)" onClick={() => void sendComment()} disabled={isPending('comment-create') || !comment.trim()} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white transition hover:bg-emerald-700 disabled:opacity-30">{isPending('comment-create') ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</button></div>
+      <div aria-busy={commentPublishing} className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm focus-within:border-emerald-300 focus-within:ring-4 focus-within:ring-emerald-50">
+        <textarea rows={2} value={comment} readOnly={commentPublishing} onChange={event => { clearCommentFailure(); setComment(event.target.value) }} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void sendComment() } }} placeholder="Escribe un comentario…" className="w-full resize-none bg-transparent px-1 text-sm text-slate-700 outline-none placeholder:text-slate-400 read-only:cursor-wait" />
+        <div className="mt-2 flex flex-wrap gap-1.5">{commentMentionIds.map(id => { const user = users.find(candidate => candidate.id === id); return <button key={id} disabled={commentPublishing} onClick={() => { clearCommentFailure(); setCommentMentionIds(current => current.filter(value => value !== id)) }} className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold text-emerald-700 disabled:cursor-wait disabled:opacity-60">@{user?.display_name || user?.username} ×</button> })}{commentAttachmentIds.map(id => { const file = resolveCommentAttachment(id, commentAttachmentLookup, attachments); return <button key={id} disabled={commentPublishing} onClick={() => { clearCommentFailure(); setCommentAttachmentIds(current => current.filter(value => value !== id)) }} className="rounded-full bg-slate-200 px-2 py-1 text-[10px] font-semibold text-slate-600 disabled:cursor-wait disabled:opacity-60">{file?.filename || 'Archivo'} ×</button> })}</div>
+        <div className="mt-2 flex items-end gap-2"><div className="min-w-0 flex-1"><TaskUserCombobox users={users} value="" onChange={id => addMention(id)} excludeIds={commentMentionIds} placeholder="Mencionar a alguien…" className="py-2" disabled={commentPublishing} /></div><button title="Adjuntar archivo" onClick={() => commentFileRef.current?.click()} disabled={commentUploadPending || commentPublishing} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-40">{commentUploadPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}</button><input ref={commentFileRef} type="file" disabled={commentPublishing} className="hidden" onChange={event => void uploadFiles(Array.from(event.target.files || []), 'comment')} /><button title="Publicar comentario (Ctrl/⌘ + Enter)" onClick={() => void sendComment()} disabled={commentPublishing || commentUploadPending || !comment.trim()} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white transition hover:bg-emerald-700 disabled:opacity-30">{commentPublishing ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <Send className="h-4 w-4" />}</button></div>
       </div>
       <p className="mt-1.5 hidden text-center text-[10px] text-slate-400 sm:block">Ctrl/⌘ + Enter para publicar</p>
     </div> : <div className="shrink-0 border-t border-slate-200 bg-white px-4 py-3 text-center text-xs font-semibold text-slate-500">Necesitas Comentar para participar en esta conversación.</div>}

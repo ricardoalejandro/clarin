@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import type { Task, TaskAttachment } from '@/types/task'
+import type { Task, TaskAttachment, TaskComment } from '@/types/task'
 import TaskDetailDrawer from './TaskDetailDrawer'
 
 const apiMocks = vi.hoisted(() => ({
@@ -71,13 +71,17 @@ const task = {
   permissions: { can_view: true, can_comment: true, can_edit: true, can_delete: true, can_administer: true },
 } as unknown as Task
 
-function mockTaskDetailAPI(tasks: Task[], children: Record<string, Task[]> = {}) {
+function mockTaskDetailAPI(tasks: Task[], children: Record<string, Task[]> = {}, comments: Record<string, TaskComment[]> = {}) {
   apiMocks.get.mockImplementation(async (endpoint: string) => {
     const taskMatch = endpoint.match(/^\/api\/tasks\/([^/?]+)$/)
     if (taskMatch) return { success: true, data: { task: tasks.find(item => item.id === taskMatch[1]) } }
     const childrenMatch = endpoint.match(/^\/api\/tasks\/([^/]+)\/children$/)
     if (childrenMatch) return { success: true, data: { tasks: children[childrenMatch[1]] || [] } }
-    if (endpoint.includes('/comments?')) return { success: true, data: { comments: [], has_more: false, next_offset: 0 } }
+    const commentsMatch = endpoint.match(/^\/api\/tasks\/([^/]+)\/comments\?/)
+    if (commentsMatch) {
+      const items = comments[commentsMatch[1]] || []
+      return { success: true, data: { comments: items, has_more: false, next_offset: items.length } }
+    }
     if (endpoint.endsWith('/activity')) return { success: true, data: { activity: [] } }
     if (endpoint.endsWith('/attachments')) return { success: true, data: { attachments: [] } }
     if (endpoint.endsWith('/dependencies')) return { success: true, data: { dependencies: [] } }
@@ -115,6 +119,25 @@ function attachment(id: string, taskID: string, filename: string): TaskAttachmen
     size_bytes: 128,
     url: `/api/media/${id}`,
     created_at: '2026-08-24T00:00:00.000Z',
+  }
+}
+
+function canonicalComment(body: string, overrides: Partial<TaskComment> = {}): TaskComment {
+  const now = new Date().toISOString()
+  return {
+    id: 'comment-1',
+    account_id: 'account-1',
+    task_id: task.id,
+    author_id: 'user-1',
+    author_name: 'Usuario',
+    body,
+    created_at: now,
+    updated_at: now,
+    mentions: [],
+    attachments: [],
+    can_edit: true,
+    can_delete: true,
+    ...overrides,
   }
 }
 
@@ -236,6 +259,128 @@ describe('TaskDetailDrawer simplified full-editor access', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Expandir descripción' }))
     const expanded = screen.getByRole('dialog', { name: 'Editor ampliado de descripción' })
     expect(within(expanded).getByText(/Actualizado ·/)).toBeInTheDocument()
+  })
+
+  it('shows the complete comment publish cycle and confirms the canonical comment timestamp', async () => {
+    mockTaskDetailAPI([task])
+    const write = deferred<{ success: boolean; data: { comment: TaskComment } }>()
+    apiMocks.post.mockReturnValue(write.promise)
+    render(<TaskDetailDrawer taskId={task.id} allTasks={[task]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+
+    await screen.findByDisplayValue(task.title)
+    fireEvent.click(screen.getByRole('button', { name: /^Actividad/ }))
+    const composer = screen.getByPlaceholderText('Escribe un comentario…')
+    fireEvent.change(composer, { target: { value: 'Confirmar guardia' } })
+    expect(screen.getByText('Comentario sin publicar')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTitle('Publicar comentario (Ctrl/⌘ + Enter)'))
+    expect(await screen.findByText('Publicando comentario…')).toBeInTheDocument()
+    expect(composer).toHaveAttribute('readonly')
+    expect(screen.getByTitle('Adjuntar archivo')).toBeDisabled()
+    expect(apiMocks.post).toHaveBeenCalledWith(`/api/tasks/${task.id}/comments`, {
+      body: 'Confirmar guardia',
+      mentioned_user_ids: [],
+      attachment_ids: [],
+    })
+
+    await act(async () => {
+      write.resolve({ success: true, data: { comment: canonicalComment('Confirmar guardia') } })
+      await write.promise
+    })
+    expect(await screen.findByText('Guardado automáticamente · ahora')).toBeInTheDocument()
+    expect(composer).toHaveValue('')
+  })
+
+  it('hydrates the global timestamp from the newest canonical comment', async () => {
+    const recentComment = canonicalComment('Comentario ya publicado')
+    mockTaskDetailAPI([task], {}, { [task.id]: [recentComment] })
+    render(<TaskDetailDrawer taskId={task.id} allTasks={[task]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+
+    await screen.findByDisplayValue(task.title)
+    expect(await screen.findByText('Guardado automáticamente · ahora')).toBeInTheDocument()
+  })
+
+  it('keeps an in-flight comment status isolated to its owning task', async () => {
+    const second = { ...task, id: 'task-2', title: 'Segunda tarea', version: 2 }
+    mockTaskDetailAPI([task, second])
+    const write = deferred<{ success: boolean; data: { comment: TaskComment } }>()
+    apiMocks.post.mockReturnValue(write.promise)
+    const common = { allTasks: [task, second], users: [], lists: [], folders: [], workflows: [], onClose: vi.fn(), onEdit: vi.fn(), onOpenTask: vi.fn(), onCreateSubtask: vi.fn(), onChanged: vi.fn(), onDeleted: vi.fn(() => true) }
+    const view = render(<TaskDetailDrawer taskId={task.id} {...common} />)
+
+    await screen.findByDisplayValue(task.title)
+    fireEvent.click(screen.getByRole('button', { name: /^Actividad/ }))
+    fireEvent.change(screen.getByPlaceholderText('Escribe un comentario…'), { target: { value: 'Publicación exclusiva de A' } })
+    fireEvent.click(screen.getByTitle('Publicar comentario (Ctrl/⌘ + Enter)'))
+    expect(await screen.findByText('Publicando comentario…')).toBeInTheDocument()
+
+    view.rerender(<TaskDetailDrawer taskId={second.id} {...common} />)
+    await screen.findByDisplayValue(second.title)
+    expect(screen.queryByText('Publicando comentario…')).not.toBeInTheDocument()
+
+    view.rerender(<TaskDetailDrawer taskId={task.id} {...common} />)
+    await screen.findByDisplayValue(task.title)
+    expect(await screen.findByText('Publicando comentario…')).toBeInTheDocument()
+    await act(async () => {
+      write.resolve({ success: true, data: { comment: canonicalComment('Publicación exclusiva de A') } })
+      await write.promise
+    })
+    expect(await screen.findByText('Guardado automáticamente · ahora')).toBeInTheDocument()
+  })
+
+  it('preserves a failed comment and retries only its exact publication', async () => {
+    mockTaskDetailAPI([task])
+    apiMocks.post
+      .mockResolvedValueOnce({ success: false, status: 503, error: 'Servicio de comentarios no disponible' })
+      .mockResolvedValueOnce({ success: false, status: 503, error: 'Servicio todavía no disponible' })
+      .mockResolvedValueOnce({ success: true, data: { comment: canonicalComment('Comentario actualizado') } })
+    render(<TaskDetailDrawer taskId={task.id} allTasks={[task]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+
+    await screen.findByDisplayValue(task.title)
+    fireEvent.click(screen.getByRole('button', { name: /^Actividad/ }))
+    const composer = screen.getByPlaceholderText('Escribe un comentario…')
+    fireEvent.change(composer, { target: { value: 'Comentario recuperable' } })
+    fireEvent.click(screen.getByTitle('Publicar comentario (Ctrl/⌘ + Enter)'))
+
+    const retry = await screen.findByRole('button', { name: 'No se pudo publicar · Reintentar' })
+    expect(composer).toHaveValue('Comentario recuperable')
+    fireEvent.click(retry)
+    await waitFor(() => expect(apiMocks.post).toHaveBeenCalledTimes(2))
+    expect(apiMocks.post.mock.calls).toEqual([
+      [`/api/tasks/${task.id}/comments`, { body: 'Comentario recuperable', mentioned_user_ids: [], attachment_ids: [] }],
+      [`/api/tasks/${task.id}/comments`, { body: 'Comentario recuperable', mentioned_user_ids: [], attachment_ids: [] }],
+    ])
+    expect(await screen.findByRole('button', { name: 'No se pudo publicar · Reintentar' })).toBeInTheDocument()
+    fireEvent.change(composer, { target: { value: 'Comentario actualizado' } })
+    expect(screen.getByText('Comentario sin publicar')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'No se pudo publicar · Reintentar' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTitle('Publicar comentario (Ctrl/⌘ + Enter)'))
+    await waitFor(() => expect(apiMocks.post).toHaveBeenCalledTimes(3))
+    expect(apiMocks.post).toHaveBeenLastCalledWith(`/api/tasks/${task.id}/comments`, {
+      body: 'Comentario actualizado',
+      mentioned_user_ids: [],
+      attachment_ids: [],
+    })
+    expect(await screen.findByText('Guardado automáticamente · ahora')).toBeInTheDocument()
+    expect(composer).toHaveValue('')
+  })
+
+  it('uses Updated after a commenter-only user publishes successfully', async () => {
+    const commentOnlyTask = {
+      ...task,
+      permissions: { ...task.permissions!, can_edit: false, can_delete: false, can_administer: false, can_comment: true },
+    }
+    mockTaskDetailAPI([commentOnlyTask])
+    apiMocks.post.mockResolvedValue({ success: true, data: { comment: canonicalComment('Participación', { task_id: commentOnlyTask.id }) } })
+    render(<TaskDetailDrawer taskId={commentOnlyTask.id} allTasks={[commentOnlyTask]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+
+    await screen.findByDisplayValue(commentOnlyTask.title)
+    fireEvent.click(screen.getByRole('button', { name: /^Actividad/ }))
+    const composer = screen.getByPlaceholderText('Escribe un comentario…')
+    fireEvent.change(composer, { target: { value: 'Participación' } })
+    expect(screen.getByText('Comentario sin publicar')).toBeInTheDocument()
+    fireEvent.keyDown(composer, { key: 'Enter', ctrlKey: true })
+    expect(await screen.findByText('Actualizado · ahora')).toBeInTheDocument()
   })
 
   it('uses one date-range field and completes through the preferred done status', async () => {

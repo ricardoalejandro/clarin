@@ -24,6 +24,9 @@ const presentation = {
   saving: { icon: Loader2, className: 'text-emerald-600' },
   error: { icon: CloudOff, className: 'text-rose-600' },
   conflict: { icon: ShieldAlert, className: 'text-amber-700' },
+  'comment-dirty': { icon: Clock3, className: 'text-amber-600' },
+  'comment-publishing': { icon: Loader2, className: 'text-emerald-600' },
+  'comment-error': { icon: CloudOff, className: 'text-rose-600' },
 } satisfies Record<TaskSaveStatusModel['phase'], { icon: typeof Cloud; className: string }>
 
 export default function TaskSaveStatusIndicator({ model, compact = false, onAction, announce = true }: Props) {
@@ -40,14 +43,14 @@ export default function TaskSaveStatusIndicator({ model, compact = false, onActi
   const Icon = current.icon
   const text = taskSaveStatusText(model, now, compact)
   const time = formatTaskSaveTime(model.updatedAt, now)
-  const retryable = model.phase === 'error' || model.phase === 'conflict'
+  const retryable = model.phase === 'error' || model.phase === 'conflict' || model.phase === 'comment-error'
   const title = model.phase === 'saved'
     ? `${time.absolute ? `Última versión confirmada por Clarin: ${time.absolute}. ` : ''}Los cambios se guardan automáticamente.`
     : model.phase === 'readonly'
       ? time.absolute ? `Última actualización confirmada por Clarin: ${time.absolute}.` : 'Última actualización confirmada por Clarin.'
       : text
   const content = <>
-    <Icon className={`h-3.5 w-3.5 shrink-0 ${model.phase === 'saving' ? 'animate-spin motion-reduce:animate-none' : ''}`} />
+    <Icon className={`h-3.5 w-3.5 shrink-0 ${model.phase === 'saving' || model.phase === 'comment-publishing' ? 'animate-spin motion-reduce:animate-none' : ''}`} />
     <span className="truncate">{text}</span>
   </>
   const className = `inline-flex max-w-full items-center gap-1.5 text-[11px] font-semibold leading-5 ${current.className}`
