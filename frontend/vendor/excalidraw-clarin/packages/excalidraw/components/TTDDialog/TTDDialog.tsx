@@ -30,6 +30,7 @@ import { trackEvent } from "../../analytics";
 import { InlineIcon } from "../InlineIcon";
 import { TTDDialogSubmitShortcut } from "./TTDDialogSubmitShortcut";
 import { isFiniteNumber } from "@excalidraw/math";
+import { isMermaidEnabled, loadMermaidParser } from "../../mermaid";
 
 const MIN_PROMPT_LENGTH = 3;
 const MAX_PROMPT_LENGTH = 1000;
@@ -63,8 +64,14 @@ export const TTDDialog = (
     | { __fallback: true },
 ) => {
   const appState = useUIAppState();
+  const app = useApp();
 
-  if (appState.openDialog?.name !== "ttd") {
+  if (
+    appState.openDialog?.name !== "ttd" ||
+    (appState.openDialog.tab === "mermaid"
+      ? !isMermaidEnabled(app.props.mermaidEnabled)
+      : !(app.props.aiEnabled && isMermaidEnabled(app.props.mermaidEnabled)))
+  ) {
     return null;
   }
 
@@ -112,6 +119,7 @@ export const TTDDialogBase = withInternalFallback(
     const [rateLimits, setRateLimits] = useAtom(rateLimitsAtom);
 
     const onGenerate = async () => {
+      if (!app.props.aiEnabled || !isMermaidEnabled(app.props.mermaidEnabled)) return;
       if (
         prompt.length > MAX_PROMPT_LENGTH ||
         prompt.length < MIN_PROMPT_LENGTH ||
@@ -206,15 +214,19 @@ export const TTDDialogBase = withInternalFallback(
     refOnGenerate.current = onGenerate;
 
     const [mermaidToExcalidrawLib, setMermaidToExcalidrawLib] =
-      useState<MermaidToExcalidrawLibProps>({
+      useState<MermaidToExcalidrawLibProps>(() => ({
         loaded: false,
-        api: import("@excalidraw/mermaid-to-excalidraw"),
-      });
+        api: loadMermaidParser(app.props.mermaidEnabled),
+      }));
 
     useEffect(() => {
       const fn = async () => {
-        await mermaidToExcalidrawLib.api;
-        setMermaidToExcalidrawLib((prev) => ({ ...prev, loaded: true }));
+        try {
+          await mermaidToExcalidrawLib.api;
+          setMermaidToExcalidrawLib((prev) => ({ ...prev, loaded: true }));
+        } catch (error) {
+          setError(error instanceof Error ? error : new Error("Diagram conversion unavailable"));
+        }
       };
       fn();
     }, [mermaidToExcalidrawLib.api]);
@@ -240,7 +252,7 @@ export const TTDDialogBase = withInternalFallback(
         <TTDDialogTabs dialog="ttd" tab={tab}>
           {"__fallback" in rest && rest.__fallback ? (
             <p className="dialog-mermaid-title">{t("mermaid.title")}</p>
-          ) : (
+          ) : app.props.aiEnabled ? (
             <TTDDialogTabTriggers>
               <TTDDialogTabTrigger tab="text-to-diagram">
                 <div style={{ display: "flex", alignItems: "center" }}>
@@ -264,14 +276,14 @@ export const TTDDialogBase = withInternalFallback(
               </TTDDialogTabTrigger>
               <TTDDialogTabTrigger tab="mermaid">Mermaid</TTDDialogTabTrigger>
             </TTDDialogTabTriggers>
-          )}
+          ) : <p className="dialog-mermaid-title">{t("mermaid.title")}</p>}
 
           <TTDDialogTab className="ttd-dialog-content" tab="mermaid">
             <MermaidToExcalidraw
               mermaidToExcalidrawLib={mermaidToExcalidrawLib}
             />
           </TTDDialogTab>
-          {!("__fallback" in rest) && (
+          {!("__fallback" in rest) && app.props.aiEnabled && (
             <TTDDialogTab className="ttd-dialog-content" tab="text-to-diagram">
               <div className="ttd-dialog-desc">
                 Currently we use Mermaid as a middle step, so you'll get best

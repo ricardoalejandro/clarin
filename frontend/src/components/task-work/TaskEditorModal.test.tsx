@@ -322,6 +322,8 @@ describe('TaskEditorModal', () => {
       .mockResolvedValueOnce({ success: true, data: { success: true, attachment, operation_id: 'attachment-operation' } })
     const { props } = renderEditor()
     fireEvent.change(screen.getByPlaceholderText('¿Qué hay que lograr?'), { target: { value: 'Nueva tarea' } })
+    const formFields = screen.getByPlaceholderText('¿Qué hay que lograr?').closest('[aria-disabled]')
+    expect(formFields).not.toHaveAttribute('inert')
     const image = new File(['captura'], 'captura.png', { type: 'image/png', lastModified: 4 })
     fireEvent.paste(screen.getByRole('dialog', { name: 'Crear una tarea' }), {
       clipboardData: {
@@ -334,6 +336,9 @@ describe('TaskEditorModal', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Crear tarea' }))
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Reintentar 1 adjunto' })).toBeEnabled())
+    expect(formFields).toHaveAttribute('inert')
+    expect(formFields).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByRole('button', { name: 'Reintentar 1 adjunto' }).closest('[inert]')).toBeNull()
     expect(apiPost).toHaveBeenCalledTimes(1)
     expect(apiUpload).toHaveBeenCalledTimes(1)
     expect(props.onSaved).toHaveBeenCalledTimes(1)

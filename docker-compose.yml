@@ -32,6 +32,36 @@ services:
     networks:
       - clarin-internal
 
+  offline-signer:
+    build:
+      context: ./offline-signer
+      dockerfile: ../deploy/Dockerfile.offline-signer
+    container_name: clarin-offline-signer
+    restart: unless-stopped
+    user: "0:65532"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    environment:
+      OFFLINE_V3_SIGNING_KEY_VERSION: ${OFFLINE_V3_SIGNING_KEY_VERSION:-3}
+      OFFLINE_V3_SERVER_ORIGIN: ${OFFLINE_V3_SERVER_ORIGIN:-https://clarin.naperu.cloud}
+      OFFLINE_V4_SERVER_ORIGIN: ${OFFLINE_V4_SERVER_ORIGIN:-https://clarin.naperu.cloud}
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - offline_signer_key:/data
+      - offline_signer_auth:/auth
+    healthcheck:
+      test: ["CMD", "/offline-signer", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - clarin-internal
+
   minio:
     image: minio/minio:latest
     container_name: clarin-minio
@@ -155,6 +185,38 @@ services:
       # Cloudflare Turnstile (login protection)
       TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
       TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+      # Certificate-free Windows pilot. The private device key remains in CNG;
+      # the isolated signer holds only the lease key and exposes no host port.
+      OFFLINE_V3_ENABLED: ${OFFLINE_V3_ENABLED:-false}
+      OFFLINE_V3_TASK_WRITES_ENABLED: ${OFFLINE_V3_TASK_WRITES_ENABLED:-false}
+      OFFLINE_V3_SERVER_ORIGIN: ${OFFLINE_V3_SERVER_ORIGIN:-https://clarin.naperu.cloud}
+      OFFLINE_V3_MIN_CLIENT_VERSION: ${OFFLINE_V3_MIN_CLIENT_VERSION:-3.0.0}
+      # Browser-only v4 has no installer, localhost listener or Windows identity.
+      OFFLINE_V4_ENABLED: ${OFFLINE_V4_ENABLED:-false}
+      OFFLINE_V4_TASK_WRITES_ENABLED: ${OFFLINE_V4_TASK_WRITES_ENABLED:-false}
+      OFFLINE_V4_SERVER_ORIGIN: ${OFFLINE_V4_SERVER_ORIGIN:-https://clarin.naperu.cloud}
+      # Browser-only v5 reuses the real Next.js routes and components. Enabling
+      # the service never grants a user/account/resource by itself: an explicit
+      # superadmin grant and a user-selected manifest remain mandatory.
+      OFFLINE_V5_ENABLED: ${OFFLINE_V5_ENABLED:-false}
+      OFFLINE_V5_PREPARE_ENABLED: ${OFFLINE_V5_PREPARE_ENABLED:-false}
+      OFFLINE_V5_WRITES_ENABLED: ${OFFLINE_V5_WRITES_ENABLED:-false}
+      OFFLINE_V5_SERVER_ORIGIN: ${OFFLINE_V5_SERVER_ORIGIN:-https://clarin.naperu.cloud}
+      # Retired native/v2 surfaces stay closed. Browser v5 has independent
+      # authorization, selection, signing and sync gates above.
+      OFFLINE_TERMINALS_ENABLED: ${OFFLINE_TERMINALS_ENABLED:-false}
+      OFFLINE_CONTROL_ENABLED: ${OFFLINE_CONTROL_ENABLED:-false}
+      OFFLINE_ENROLLMENT_ENABLED: ${OFFLINE_ENROLLMENT_ENABLED:-false}
+      OFFLINE_SYNC_READ_ENABLED: ${OFFLINE_SYNC_READ_ENABLED:-false}
+      OFFLINE_WRITE_WHITEBOARDS_ENABLED: ${OFFLINE_WRITE_WHITEBOARDS_ENABLED:-false}
+      OFFLINE_WRITE_TASKS_ENABLED: ${OFFLINE_WRITE_TASKS_ENABLED:-false}
+      OFFLINE_WRITE_CONTACTS_ENABLED: ${OFFLINE_WRITE_CONTACTS_ENABLED:-false}
+      OFFLINE_WRITE_PROGRAMS_ENABLED: ${OFFLINE_WRITE_PROGRAMS_ENABLED:-false}
+      OFFLINE_MIN_CLIENT_VERSION: ${OFFLINE_MIN_CLIENT_VERSION:-0.3.3}
+      OFFLINE_SIGNER_ADDRESS: ${OFFLINE_SIGNER_ADDRESS:-http://clarin-offline-signer:8200}
+      OFFLINE_SIGNER_TOKEN_FILE: ${OFFLINE_SIGNER_TOKEN_FILE:-/run/clarin-offline-signer/token}
+      OFFLINE_INSTALLER_PATH: ${OFFLINE_INSTALLER_PATH:-/run/clarin-offline-artifacts/Clarin-Offline-Setup.exe}
+      OFFLINE_INSTALLER_SHA256: ${OFFLINE_INSTALLER_SHA256:-}
       # SOCKS5 proxy for WhatsApp CDN media uploads (Cloudflare WARP)
       MEDIA_SOCKS5_PROXY: socks5://host-gateway:40001
     extra_hosts:
@@ -168,8 +230,12 @@ services:
         condition: service_healthy
       codex-bridge:
         condition: service_started
+      offline-signer:
+        condition: service_healthy
     volumes:
       - whatsapp_sessions:/app/sessions
+      - offline_signer_auth:/run/clarin-offline-signer:ro
+      - ${OFFLINE_ARTIFACTS_DIR:-./.runtime/offline/artifacts}:/run/clarin-offline-artifacts:ro
     mem_limit: 1536m
     cpus: 1.5
     healthcheck:
@@ -196,6 +262,29 @@ services:
       - "traefik.http.services.clarin-api.loadbalancer.server.port=8080"
       - "traefik.http.routers.clarin-api.service=clarin-api"
       - "traefik.http.routers.clarin-api.priority=100"
+      # Browser offline control/sync accepts bounded JSON, never file uploads.
+      # Bound unauthenticated proof bodies before Fiber's global upload parser.
+      - "traefik.http.routers.clarin-offline-v4.rule=Host(`clarin.naperu.cloud`) && Path(`/{offline:(?i:api/(?:offline/v4|admin/offline-v4)(?:/.*)?)}`)"
+      - "traefik.http.routers.clarin-offline-v4.entrypoints=websecure"
+      - "traefik.http.routers.clarin-offline-v4.tls=true"
+      - "traefik.http.routers.clarin-offline-v4.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.clarin-offline-v4.service=clarin-api"
+      - "traefik.http.routers.clarin-offline-v4.priority=270"
+      - "traefik.http.routers.clarin-offline-v4.middlewares=clarin-offline-v4-limit"
+      - "traefik.http.middlewares.clarin-offline-v4-limit.buffering.maxRequestBodyBytes=2097152"
+      - "traefik.http.middlewares.clarin-offline-v4-limit.buffering.memRequestBodyBytes=65536"
+      # V5 keeps the same 2 MiB authenticated/proof-bound JSON ceiling. This
+      # exact higher-priority router prevents the generic API body allowance
+      # from becoming an allocation path before Fiber validates the envelope.
+      - "traefik.http.routers.clarin-offline-v5.rule=Host(`clarin.naperu.cloud`) && PathRegexp(`(?i)^/api/(offline/v5|admin/offline-v5)(/.*)?$`)"
+      - "traefik.http.routers.clarin-offline-v5.entrypoints=websecure"
+      - "traefik.http.routers.clarin-offline-v5.tls=true"
+      - "traefik.http.routers.clarin-offline-v5.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.clarin-offline-v5.service=clarin-api"
+      - "traefik.http.routers.clarin-offline-v5.priority=271"
+      - "traefik.http.routers.clarin-offline-v5.middlewares=clarin-offline-v5-limit"
+      - "traefik.http.middlewares.clarin-offline-v5-limit.buffering.maxRequestBodyBytes=2097152"
+      - "traefik.http.middlewares.clarin-offline-v5-limit.buffering.memRequestBodyBytes=65536"
       # Public whiteboard link exchange accepts only a tiny JSON credential
       # envelope. This higher-priority router rejects oversized bodies at the
       # edge, before Fiber's global 52 MiB upload parser can allocate them.
@@ -369,6 +458,8 @@ volumes:
   whatsapp_sessions:
   minio_data:
   codex_bridge_home:
+  offline_signer_key:
+  offline_signer_auth:
 networks:
   clarin-internal:
     driver: bridge

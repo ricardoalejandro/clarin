@@ -19,7 +19,7 @@ export interface TaskSelectOption {
   disabled?: boolean
 }
 
-function pickerPosition(open: boolean, triggerRef: React.RefObject<HTMLButtonElement>) {
+function pickerPosition(open: boolean, triggerRef: React.RefObject<HTMLButtonElement | null>) {
   const [style, setStyle] = useState<CSSProperties>({})
   useEffect(() => {
     if (!open) return

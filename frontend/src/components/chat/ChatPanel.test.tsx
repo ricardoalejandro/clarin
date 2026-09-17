@@ -113,6 +113,7 @@ describe('ChatPanel canonical device truth', () => {
 
     resolveDetails(jsonResponse({ success: true, chat, device: device('connected') }))
     await waitFor(() => expect(screen.getByTestId('chat-composer')).toHaveTextContent('Escribe un mensaje'))
+	await waitFor(() => expect(websocket.listeners.size).toBeGreaterThan(0))
 
     act(() => {
       websocket.listeners.forEach(listener => listener({

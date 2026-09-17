@@ -287,6 +287,67 @@ func TestWhiteboardWorkAccessMatrixRequiresBothModulesAndMapsContainerLevel(t *t
 	}
 }
 
+func TestWhiteboardWorkRestrictedAudienceNeverElevatesParentAccess(t *testing.T) {
+	t.Parallel()
+	actorID := uuid.New()
+	state := testWorkWhiteboardListState(actorID)
+	state.Permissions = []string{domain.PermTasks, domain.PermWhiteboards}
+	state.EnvironmentLevel = domain.TaskAccessEdit
+	state.VisibilityMode = domain.TaskLocationViewVisibilityRestricted
+
+	access, location, err := resolveWhiteboardActorAccessState(state, actorID, true)
+	if err != nil || access.Level != domain.WhiteboardAccessNone || access.CanView || location == nil {
+		t.Fatalf("restricted audience admitted an unlisted actor: access=%#v location=%#v err=%v", access, location, err)
+	}
+
+	state.VisibilityMember = true
+	access, location, err = resolveWhiteboardActorAccessState(state, actorID, true)
+	if err != nil || access.Level != domain.WhiteboardAccessEdit || !access.CanEdit || access.CanManageAccess || location == nil {
+		t.Fatalf("listed actor did not retain exactly the parent level: access=%#v location=%#v err=%v", access, location, err)
+	}
+
+	state.EnvironmentLevel = domain.TaskAccessNone
+	access, _, err = resolveWhiteboardActorAccessState(state, actorID, true)
+	if err != nil || access.Level != domain.WhiteboardAccessNone || access.CanView {
+		t.Fatalf("audience membership elevated missing parent access: access=%#v err=%v", access, err)
+	}
+
+	state.EnvironmentLevel = domain.TaskAccessView
+	state.ListGrant = stringPtr(domain.TaskAccessFull)
+	state.ListManage = boolPtr(true)
+	state.VisibilityMember = false
+	access, location, err = resolveWhiteboardActorAccessState(state, actorID, true)
+	if err != nil || access.Level != domain.WhiteboardAccessManage || !access.CanManageAccess || location == nil {
+		t.Fatalf("parent access governor lost recovery access: access=%#v location=%#v err=%v", access, location, err)
+	}
+}
+
+func TestWhiteboardHubScopesKeepWorkOutOfPersonalCollections(t *testing.T) {
+	t.Parallel()
+	repositorySource := readRepositorySource(t, "whiteboard_repository.go")
+	for _, invariant := range []string{
+		"scope == WhiteboardScopeMine || scope == WhiteboardScopeRecent || scope == WhiteboardScopeShared",
+		"origin = domain.WhiteboardOriginStandalone",
+		"origin='standalone' AND created_by=$2",
+		"origin='standalone' AND updated_at>=NOW()-INTERVAL '30 days'",
+		"origin='standalone' AND COALESCE(created_by<>$2,TRUE)",
+	} {
+		if !strings.Contains(repositorySource, invariant) {
+			t.Fatalf("personal Hub scopes lost standalone-only invariant %q", invariant)
+		}
+	}
+	normalizedHub := strings.Join(strings.Fields(strings.ToLower(whiteboardHubAccessCTE)), " ")
+	for _, invariant := range []string{
+		"work_visibility_mode='restricted'",
+		"not work_visibility_member",
+		"not work_target_manage",
+	} {
+		if !strings.Contains(normalizedHub, invariant) {
+			t.Fatalf("Hub audience gate lost %q", invariant)
+		}
+	}
+}
+
 func TestWhiteboardWorkIgnoresCreatorGrantAndAccountVisibilityBypasses(t *testing.T) {
 	t.Parallel()
 	actorID := uuid.New()
@@ -345,7 +406,7 @@ func TestWhiteboardWorkAdminRecoveryArchiveAndTrashRules(t *testing.T) {
 	state.MembershipRole = domain.RoleAdmin
 
 	access, location, err := resolveWhiteboardActorAccessState(state, actorID, true)
-	if err != nil || access.Level != domain.WhiteboardAccessManage || !access.CanDelete || access.CanManageAccess || location == nil {
+	if err != nil || access.Level != domain.WhiteboardAccessManage || !access.CanDelete || !access.CanManageAccess || location == nil {
 		t.Fatalf("account admin recovery failed: %#v location=%#v err=%v", access, location, err)
 	}
 

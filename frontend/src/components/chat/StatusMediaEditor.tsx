@@ -53,7 +53,7 @@ export default function StatusMediaEditor({ open, file, kind, onCancel, onApply 
   const canvasElementRef = useRef<HTMLCanvasElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<Canvas | null>(null)
-  const fabricRef = useRef<typeof import('fabric') | null>(null)
+  const fabricRef = useRef<typeof import('@/lib/fabric/runtime') | null>(null)
   const objectURLRef = useRef('')
   const historyRef = useRef<string[]>([])
   const historyIndexRef = useRef(-1)
@@ -106,7 +106,7 @@ export default function StatusMediaEditor({ open, file, kind, onCancel, onApply 
     objectURLRef.current = objectURL
 
     const initialize = async () => {
-      const fabric = await import('fabric')
+      const fabric = await import('@/lib/fabric/runtime')
       if (disposed || !canvasElementRef.current) return
       fabricRef.current = fabric
       const canvas = new fabric.Canvas(canvasElementRef.current, {

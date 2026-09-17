@@ -534,7 +534,7 @@ describe('whiteboard frontend contracts', () => {
     expect(buildWhiteboardListQuery({ scope: 'shared', folderID: 'folder/1', search: '  mapa  ', limit: 500 }))
       .toBe('scope=shared&limit=200&folder_id=folder%2F1&q=mapa')
 		expect(buildWhiteboardListQuery({ scope: 'work' }))
-			.toBe('scope=all&origin=work&limit=50')
+			.toBe('scope=work&limit=50')
 		expect(reconcileWhiteboardScopeCapability('work', false)).toBe('mine')
 		expect(reconcileWhiteboardScopeCapability('work', true)).toBe('work')
 		expect(reconcileWhiteboardScopeCapability('trash', false)).toBe('trash')
@@ -623,7 +623,7 @@ describe('whiteboard frontend contracts', () => {
         },
       },
       scene_schema_version: 'excalidraw',
-      editor_version: '0.18.1-clarin.6',
+      editor_version: '0.18.1-clarin.7',
     })
   })
 
@@ -1046,6 +1046,9 @@ describe('whiteboard frontend contracts', () => {
     expect(reconcileWhiteboardSummary([], { ...base, archived_at: '2026-08-09T10:00:00Z' }, 'trash')).toHaveLength(1)
     expect(reconcileWhiteboardSummary([base], { ...base, shared: true }, 'mine')).toEqual([])
     expect(reconcileWhiteboardSummary([base], { ...base, shared: false }, 'shared')).toEqual([])
+    expect(reconcileWhiteboardSummary([base], { ...base, id: 'work-board', origin: 'work' }, 'mine')).toEqual([base])
+    expect(reconcileWhiteboardSummary([base], { ...base, id: 'work-board', origin: 'work' }, 'recent')).toEqual([base])
+    expect(reconcileWhiteboardSummary([], { ...base, id: 'work-board', origin: 'work' }, 'work')).toHaveLength(1)
   })
 
   it('validates import type/size and formats recent updates deterministically', () => {

@@ -39,6 +39,7 @@ const formatDate = (value: string) => {
 }
 
 const statusPresentation = (status: ProgramParticipantAttendanceHistorySession['status']) => {
+  if (status === 'confirmed') return { letter: 'C', label: 'Confirmó su participación', badge: 'border-blue-200 bg-blue-50 text-blue-700', dot: 'bg-blue-500' }
   if (status === 'present') return { letter: 'P', label: 'Estuvo presente', badge: 'border-emerald-200 bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500' }
   if (status === 'absent') return { letter: 'F', label: 'Faltó', badge: 'border-red-200 bg-red-50 text-red-700', dot: 'bg-red-500' }
   if (status === 'late') return { letter: 'T', label: 'Asistió, llegó tarde', badge: 'border-amber-200 bg-amber-50 text-amber-800', dot: 'bg-amber-500' }

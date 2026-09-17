@@ -9,6 +9,10 @@ import ErosAssistant from '@/components/ErosAssistant'
 import TaskBadge from '@/components/TaskBadge'
 import AccountSwitcher from '@/components/AccountSwitcher'
 import ClarinBrandMark from '@/components/branding/ClarinBrandMark'
+import { ClarinRuntimeProvider, useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider'
+import OfflineConnectionBannerV5 from '@/components/offline-v5/OfflineConnectionBannerV5'
+import OfflineRuntimeIndicator from '@/components/offline-v5/OfflineRuntimeIndicator'
+import { offlineV5DashboardPathAllowed, runtimeNeedsOfflineUnlock } from '@/components/offline-v5/runtimeState'
 import { CHAT_CONVERSATION_ACTIVE_EVENT, ChatMobileChromeProvider } from '@/components/chat/ChatMobileChromeContext'
 import {
   MobileAppBottomNavigation,
@@ -17,8 +21,9 @@ import {
   MobileUnavailableSurface,
 } from '@/components/mobile-app/MobileAppChrome'
 import { PwaInstallExperience, PwaInstallMenuAction, PwaRuntimeProvider, usePwaRuntime } from '@/components/mobile-app/PwaRuntime'
-import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshTokenOutcome, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthSessionDetected, markAuthTokenRefreshed } from '@/lib/api'
+import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshTokenOutcome, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthSessionDetected, markAuthTokenRefreshed, invalidateOfflineBeforeIdentityChange } from '@/lib/api'
 import { dashboardSidebarHeaderState } from '@/lib/dashboardSidebarState'
+import { browserOfflineV5Client } from '@/offline-v5/client'
 import { shouldToggleErosFromKeyboard } from '@/lib/dashboardKeyboard'
 import {
   availableMobileAppModules,
@@ -108,7 +113,9 @@ export default function DashboardLayout({
 }) {
   return (
     <PwaRuntimeProvider>
-      <DashboardLayoutContent>{children}</DashboardLayoutContent>
+      <ClarinRuntimeProvider>
+        <DashboardLayoutContent>{children}</DashboardLayoutContent>
+      </ClarinRuntimeProvider>
     </PwaRuntimeProvider>
   )
 }
@@ -120,6 +127,7 @@ function DashboardLayoutContent({
 }) {
   const router = useRouter()
   const pathname = usePathname()
+  const { snapshot: offlineRuntime, isOffline, activity: registerOfflineActivity, requireOnline } = useClarinRuntime()
   const { ready: pwaReady, mobileApp: mobileAppMode } = usePwaRuntime()
   const [user, setUser] = useState<User | null>(null)
   const [accountCount, setAccountCount] = useState(1)
@@ -140,6 +148,17 @@ function DashboardLayoutContent({
   }), [])
   const chatKeyboardSessionRef = useRef(false)
   const clientVersion = process.env.NEXT_PUBLIC_BUILD_VERSION || 'dev'
+
+  useEffect(() => {
+    if (!runtimeNeedsOfflineUnlock(offlineRuntime)) return
+    clearIdleTimeout()
+    router.replace('/login?offline_resume=1')
+  }, [offlineRuntime, router])
+
+  useEffect(() => {
+    if (!isOffline || offlineV5DashboardPathAllowed(pathname, offlineRuntime.authorizedModules)) return
+    router.replace('/dashboard')
+  }, [isOffline, offlineRuntime.authorizedModules, pathname, router])
 
   useEffect(() => {
     const handleConversationActive = (event: Event) => {
@@ -233,7 +252,7 @@ function DashboardLayoutContent({
 
   // Ctrl+I to toggle Eros in the complete dashboard only.
   useEffect(() => {
-    if (mobileAppMode) return
+    if (mobileAppMode || isOffline) return
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!shouldToggleErosFromKeyboard(e)) return
       e.preventDefault()
@@ -241,7 +260,28 @@ function DashboardLayoutContent({
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [mobileAppMode])
+  }, [isOffline, mobileAppMode])
+
+  useEffect(() => {
+    if (!isOffline) return
+    let lastActivityAt = 0
+    const register = () => {
+      const now = Date.now()
+      if (now - lastActivityAt < 10_000) return
+      lastActivityAt = now
+      registerOfflineActivity()
+    }
+    const onVisibility = () => { if (document.visibilityState === 'visible') register() }
+    window.addEventListener('pointerdown', register, { passive: true })
+    window.addEventListener('keydown', register)
+    document.addEventListener('visibilitychange', onVisibility)
+    register()
+    return () => {
+      window.removeEventListener('pointerdown', register)
+      window.removeEventListener('keydown', register)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [isOffline, registerOfflineActivity])
 
   useEffect(() => {
     const saved = localStorage.getItem('sidebar_collapsed')
@@ -271,8 +311,11 @@ function DashboardLayoutContent({
       setUser(data.user)
       setAccountCount(Math.max(1, Number(data.account_count) || 1))
       localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
-      markAuthSessionDetected()
-      initIdleTimeout()
+      if (isOffline) clearIdleTimeout()
+      else {
+        markAuthSessionDetected()
+        initIdleTimeout()
+      }
     }
 
     const checkAuth = async () => {
@@ -282,13 +325,13 @@ function DashboardLayoutContent({
         scheduleRetry()
       }
       try {
-        if (isAuthIdleExpired()) {
+        if (!isOffline && isAuthIdleExpired()) {
           await logoutFromBrowser('idle')
           return
         }
 
         const token = localStorage.getItem('token')
-        if (!token) {
+        if (!isOffline && !token) {
           // Try refresh — maybe the JWT expired but refresh token cookie is valid
           const refreshOutcome = await tryRefreshTokenOutcome()
           if (refreshOutcome === 'unavailable') {
@@ -305,8 +348,13 @@ function DashboardLayoutContent({
         const res = await fetch('/api/me', {
           credentials: 'include',
         })
+        if (disposed) return
 
         if (!res.ok) {
+          if (isOffline) {
+            retryUnavailable()
+            return
+          }
           if (res.status >= 500 || res.status === 408 || res.status === 429) {
             retryUnavailable()
             return
@@ -321,6 +369,7 @@ function DashboardLayoutContent({
             const retryRes = await fetch('/api/me', {
               credentials: 'include',
             })
+            if (disposed) return
             if (retryRes.status >= 500 || retryRes.status === 408 || retryRes.status === 429) {
               retryUnavailable()
               return
@@ -342,6 +391,10 @@ function DashboardLayoutContent({
         if (data.success) {
           acceptSession(data)
         } else {
+          if (isOffline) {
+            retryUnavailable()
+            return
+          }
           clearAuthState()
           router.push('/login')
         }
@@ -358,7 +411,7 @@ function DashboardLayoutContent({
       if (retryTimer) clearTimeout(retryTimer)
       clearIdleTimeout()
     }
-  }, [router])
+  }, [isOffline, router])
 
   // Version detection — WebSocket + header interception + polling fallback
   const checkForUpdate = useCallback((newVersion: string) => {
@@ -372,6 +425,7 @@ function DashboardLayoutContent({
   }, [clientVersion])
 
   useEffect(() => {
+    if (isOffline) return
     // 1. Listen for version changes from API response headers
     const unsubHeader = onServerVersionChange(checkForUpdate)
 
@@ -398,7 +452,7 @@ function DashboardLayoutContent({
       unsubWS()
       clearInterval(pollInterval)
     }
-  }, [checkForUpdate])
+  }, [checkForUpdate, isOffline])
 
   // Close changelog on Escape (capture phase to intercept before page handlers)
   useEffect(() => {
@@ -420,6 +474,7 @@ function DashboardLayoutContent({
   }
 
   const openChangelog = async () => {
+    if (!requireOnline('Consultar novedades de la versión')) return
     setShowChangelog(true)
     try {
       const res = await fetch('/api/version')
@@ -432,11 +487,24 @@ function DashboardLayoutContent({
 
   const handleLogout = async () => {
     clearIdleTimeout()
-    await logoutFromBrowser('manual')
+    if (isOffline) {
+      try {
+        await browserOfflineV5Client.lock()
+        clearAuthState()
+        router.push('/login')
+      } catch {
+        window.alert('No se pudo bloquear la copia offline. Cierra las otras pestañas de Clarin y vuelve a intentarlo.')
+      }
+      return
+    }
+    try { await logoutFromBrowser('manual') }
+    catch { window.alert('No se pudo bloquear la copia offline anterior. Cierra las otras pestañas de Clarin y vuelve a intentar cerrar sesión.') }
   }
 
   const handleSwitchAccount = async (accountId: string): Promise<string | null> => {
+    if (isOffline) return 'Para proteger la separación entre cuentas, cierra esta sesión offline e ingresa de nuevo para elegir otra cuenta autorizada.'
     try {
+      await invalidateOfflineBeforeIdentityChange()
       const res = await fetch('/api/auth/switch-account', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -512,16 +580,20 @@ function DashboardLayoutContent({
     { href: '/dashboard/storage', icon: Database, label: 'Almacenamiento', desc: 'Archivos y espacio' },
     { href: '/dashboard/settings', icon: Settings, label: 'Configuración', desc: 'Ajustes del sistema' },
     ...(user?.is_super_admin ? [{ href: '/dashboard/admin', icon: Shield, label: 'Admin', desc: 'Administración global' }] : []),
-  ].filter(item => hasPermission(item.href))
+  ].filter(item => hasPermission(item.href) && (!isOffline || offlineV5DashboardPathAllowed(item.href, offlineRuntime.authorizedModules)))
 
-  const mobileModules = user ? availableMobileAppModules(user) : []
+  const mobileModules = user
+    ? availableMobileAppModules(user).filter(module => !isOffline || offlineRuntime.authorizedModules.includes(module.key))
+    : []
   const mobileModule = mobileAppModuleForPath(pathname)
-  const mobileDefaultHref = user ? firstMobileAppHref(user) : ''
+  const mobileDefaultHref = isOffline ? mobileModules[0]?.href || '' : user ? firstMobileAppHref(user) : ''
   const subscriptionRecoveryPath = Boolean(
     user?.subscription_active === false && pathname?.startsWith('/dashboard/settings'),
   )
   const mobilePathAllowed = user
-    ? isAllowedMobileAppPath(pathname, user, { allowSubscriptionRecovery: subscriptionRecoveryPath })
+    ? isOffline
+      ? Boolean(mobileModule && offlineRuntime.authorizedModules.includes(mobileModule.key))
+      : isAllowedMobileAppPath(pathname, user, { allowSubscriptionRecovery: subscriptionRecoveryPath })
     : false
   const mobilePermissionDenied = Boolean(
     user && mobileModule && !canUseMobileAppModule(user, mobileModule),
@@ -529,9 +601,9 @@ function DashboardLayoutContent({
 
   useEffect(() => {
     if (!pwaReady || !mobileAppMode || !user || pathname !== '/dashboard') return
-    const destination = firstMobileAppHref(user)
+    const destination = mobileDefaultHref
     if (destination) router.replace(destination)
-  }, [mobileAppMode, pathname, pwaReady, router, user])
+  }, [mobileAppMode, mobileDefaultHref, pathname, pwaReady, router, user])
 
   // When mobile overlay is open, always show expanded (not collapsed)
   const isCollapsed = sidebarCollapsed && !sidebarOpen
@@ -550,7 +622,7 @@ function DashboardLayoutContent({
 
   if (!user) return null
 
-  const subscriptionBlocked = user.subscription_active === false && !pathname?.startsWith('/dashboard/settings')
+  const subscriptionBlocked = !isOffline && user.subscription_active === false && !pathname?.startsWith('/dashboard/settings')
   const mobileNoModules = mobileAppMode && mobileModules.length === 0
   const mobilePathUnavailable = mobileAppMode && !mobileNoModules && pathname !== '/dashboard' && !mobilePathAllowed
 
@@ -664,17 +736,17 @@ function DashboardLayoutContent({
         </nav>
 
         {/* Installation stays optional and never changes the complete dashboard. */}
-        <PwaInstallMenuAction compact={isCollapsed} onInvoked={() => setSidebarOpen(false)} />
+        {!isOffline && <PwaInstallMenuAction compact={isCollapsed} onInvoked={() => setSidebarOpen(false)} />}
 
         {/* Eros launcher stays visible without exposing the mascot while closed. */}
-        <div className={`shrink-0 border-t border-slate-700/50 ${isCollapsed ? 'p-2' : 'px-2.5 py-2'}`}>
+        {!isOffline && <div className={`shrink-0 border-t border-slate-700/50 ${isCollapsed ? 'p-2' : 'px-2.5 py-2'}`}>
           <button
             type="button"
-            onClick={() => setIsErosOpen(true)}
+            onClick={() => { if (requireOnline('Abrir Eros')) setIsErosOpen(true) }}
             aria-label="Abrir Eros"
             aria-keyshortcuts="Control+I Meta+I"
             className={`w-full min-h-11 lg:min-h-0 flex items-center ${isCollapsed ? 'justify-center p-2' : 'gap-2.5 px-3 py-2'} rounded-lg border border-emerald-500/20 bg-emerald-500/10 text-emerald-300 transition-all hover:border-emerald-400/40 hover:bg-emerald-500/15 hover:text-emerald-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60`}
-            title={isCollapsed ? 'Abrir Eros (Ctrl+I)' : undefined}
+            title={isOffline ? 'Eros necesita conexión' : isCollapsed ? 'Abrir Eros (Ctrl+I)' : undefined}
           >
             <Sparkles className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
             {!isCollapsed && (
@@ -684,11 +756,11 @@ function DashboardLayoutContent({
               </>
             )}
           </button>
-        </div>
+        </div>}
 
         {/* Account name / switcher */}
         <div className={`shrink-0 border-t border-slate-700/50 ${isCollapsed ? 'p-2' : 'px-2.5 py-2'}`}>
-          <AccountSwitcher currentAccount={{ id: user.account_id, name: user.account_name || 'Cuenta' }} accountCount={accountCount} collapsed={isCollapsed} onSwitch={handleSwitchAccount} />
+          <AccountSwitcher currentAccount={{ id: user.account_id, name: user.account_name || 'Cuenta' }} accountCount={isOffline ? 1 : accountCount} collapsed={isCollapsed} onSwitch={handleSwitchAccount} />
         </div>
 
         {/* User section */}
@@ -735,7 +807,7 @@ function DashboardLayoutContent({
         </div>
 
         {/* Version */}
-        <div className={`shrink-0 ${isCollapsed ? 'px-2 pb-2' : 'px-2.5 pb-3'}`}>
+        {!isOffline && <div className={`shrink-0 ${isCollapsed ? 'px-2 pb-2' : 'px-2.5 pb-3'}`}>
           <button
             onClick={openChangelog}
             title="Ver changelog"
@@ -748,7 +820,7 @@ function DashboardLayoutContent({
               </span>
             )}
           </button>
-        </div>
+        </div>}
       </aside>}
 
       {/* Main content */}
@@ -809,18 +881,20 @@ function DashboardLayoutContent({
               <ClarinBrandMark className="h-6 w-6 rounded-md" />
               <span className="font-semibold text-slate-800 text-sm">Clarin</span>
             </div>
-            <button
+            {!isOffline && <button
               type="button"
-              onClick={() => setIsErosOpen(true)}
+              onClick={() => { if (requireOnline('Abrir Eros')) setIsErosOpen(true) }}
               className="flex h-11 w-11 items-center justify-center rounded-lg text-emerald-600 transition-colors hover:bg-emerald-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
               aria-label="Abrir Eros"
             >
               <Sparkles className="h-5 w-5" aria-hidden="true" />
-            </button>
+            </button>}
           </header>
         )}
 
-        {mobileAppMode && <MobileOfflineStatus />}
+        {mobileAppMode && !isOffline && <MobileOfflineStatus />}
+        {user && <OfflineConnectionBannerV5 key={`${user.id}:${user.account_id}`} userId={user.id} accountId={user.account_id} username={user.username} />}
+        <OfflineRuntimeIndicator />
 
         {/* Page content */}
         <main className={`flex-1 flex flex-col overflow-hidden min-h-0 ${
@@ -843,7 +917,7 @@ function DashboardLayoutContent({
       </div>
 
       {/* In docked mode Eros is a real flex sibling and the CRM yields space to it. */}
-      {!mobileAppMode && <ErosAssistant isOpenProp={isErosOpen} onClose={() => setIsErosOpen(false)} />}
+      {!mobileAppMode && !isOffline && <ErosAssistant isOpenProp={isErosOpen} onClose={() => setIsErosOpen(false)} />}
 
     </div>
 

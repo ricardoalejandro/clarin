@@ -334,7 +334,7 @@ function OperationalDialog({
   description: string
   onClose: () => void
   children: React.ReactNode
-  initialFocusRef?: RefObject<HTMLElement>
+  initialFocusRef?: RefObject<HTMLElement | null>
 }) {
   const dialogRef = useRef<HTMLDivElement>(null)
   useWhiteboardDialogFocus(dialogRef, onClose, initialFocusRef)

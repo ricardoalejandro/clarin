@@ -18,7 +18,7 @@ export function mergeTaskCatalogPage<T extends { id: string }>(current: T[], inc
   return Array.from(new Map([...(reset ? [] : current), ...incoming].map(item => [item.id, item])).values())
 }
 
-function usePickerPosition(open: boolean, triggerRef: RefObject<HTMLButtonElement>) {
+function usePickerPosition(open: boolean, triggerRef: RefObject<HTMLButtonElement | null>) {
   const [style, setStyle] = useState<CSSProperties>({})
   useEffect(() => {
     if (!open) return
@@ -47,7 +47,7 @@ function usePickerPosition(open: boolean, triggerRef: RefObject<HTMLButtonElemen
 }
 
 function PickerTrigger({ triggerRef, open, disabled, selected, placeholder, onClick, className = '' }: {
-  triggerRef: RefObject<HTMLButtonElement>
+  triggerRef: RefObject<HTMLButtonElement | null>
   open: boolean
   disabled?: boolean
   selected?: { name: string; description?: string; color?: string; icon?: string }

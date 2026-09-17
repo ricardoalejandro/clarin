@@ -240,7 +240,7 @@ export function substituteFields(elements: CanvasElement[], lead: Lead): CanvasE
  * Iterates all objects, replacing text on DynamicText instances.
  */
 async function substituteFabricFields(
-  fabricModule: typeof import('fabric'),
+  fabricModule: typeof import('@/lib/fabric/runtime'),
   canvasObjects: any[],
   lead: Lead
 ): Promise<void> {
@@ -283,7 +283,7 @@ export async function renderDocument(
   _background: { color: string; imageUrl?: string },
   options: RenderOptions
 ): Promise<Blob> {
-  const fabricModule = await import('fabric')
+  const fabricModule = await import('@/lib/fabric/runtime')
   const fabricLib = await import('@/lib/fabric')
   await fabricLib.ensureFontsLoaded()
 
@@ -334,8 +334,8 @@ async function renderForLead(
   template: DocumentTemplate,
   lead: Lead,
   multiplier: number,
-): Promise<{ canvas: InstanceType<typeof import('fabric').StaticCanvas>; bg: { color: string; imageUrl?: string } }> {
-  const fabricModule = await import('fabric')
+): Promise<{ canvas: InstanceType<typeof import('@/lib/fabric/runtime').StaticCanvas>; bg: { color: string; imageUrl?: string } }> {
+  const fabricModule = await import('@/lib/fabric/runtime')
   const fabricLib = await import('@/lib/fabric')
   await fabricLib.ensureFontsLoaded()
 

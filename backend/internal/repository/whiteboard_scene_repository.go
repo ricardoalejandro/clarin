@@ -155,6 +155,93 @@ func (r *WhiteboardRepository) ApplyScenePatch(ctx context.Context, accountID, u
 	return r.writeScene(ctx, accountID, userID, boardID, input, true)
 }
 
+// ApplyScenePatchTx is the transaction-aware form of the canonical patch
+// writer. It exists so an offline command receipt and the whiteboard operation
+// share one commit boundary. The caller owns commit/rollback and post-commit
+// realtime fanout.
+func (r *WhiteboardRepository) ApplyScenePatchTx(ctx context.Context, tx pgx.Tx, accountID, userID, boardID uuid.UUID, input WhiteboardSceneWriteInput) (*domain.WhiteboardSceneWriteResult, error) {
+	if input.OperationID == uuid.Nil || len(input.Patch) == 0 || !json.Valid(input.Patch) || !json.Valid(input.Scene) || input.ResultSceneHash == "" {
+		return nil, ErrWhiteboardInvalid
+	}
+	if input.RequestPayloadHash == "" {
+		input.RequestPayloadHash = input.ResultSceneHash
+	}
+	if err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, userID); err != nil {
+		return nil, err
+	}
+	if _, err := lockWorkWhiteboardParentViewTx(ctx, tx, accountID, boardID, false, false); err != nil {
+		return nil, err
+	}
+	var currentSequence int64
+	var archivedAt *time.Time
+	if err := tx.QueryRow(ctx, `SELECT scene_sequence,archived_at FROM whiteboards
+		WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, boardID).Scan(&currentSequence, &archivedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrWhiteboardNotFound
+		}
+		return nil, err
+	}
+	if _, err := requireWhiteboardAccessTx(ctx, tx, accountID, userID, boardID, domain.WhiteboardAccessEdit, false); err != nil {
+		return nil, err
+	}
+	if archivedAt != nil {
+		return nil, ErrWhiteboardConflict
+	}
+	var existingSequence int64
+	var existingPayloadHash *string
+	var existingResultHash string
+	err := tx.QueryRow(ctx, `SELECT sequence,request_payload_hash,result_scene_hash FROM whiteboard_operations
+		WHERE account_id=$1 AND board_id=$2 AND operation_id=$3`, accountID, boardID, input.OperationID).
+		Scan(&existingSequence, &existingPayloadHash, &existingResultHash)
+	if err == nil {
+		if existingPayloadHash == nil || !strings.EqualFold(*existingPayloadHash, input.RequestPayloadHash) {
+			return nil, ErrWhiteboardConflict
+		}
+		scene := &domain.WhiteboardScene{BoardID: boardID}
+		if err := tx.QueryRow(ctx, `SELECT scene_json,scene_schema_version,editor_version,scene_sequence,updated_at
+			FROM whiteboards WHERE account_id=$1 AND id=$2`, accountID, boardID).Scan(&scene.Scene, &scene.SceneSchemaVersion,
+			&scene.EditorVersion, &scene.Sequence, &scene.UpdatedAt); err != nil {
+			return nil, err
+		}
+		return &domain.WhiteboardSceneWriteResult{Scene: scene, OperationSequence: existingSequence, Idempotent: true}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	if input.ExpectedSequence != currentSequence {
+		return nil, &WhiteboardConflictError{CurrentSequence: currentSequence}
+	}
+	if err := reconcileWhiteboardSceneAssetsTx(ctx, tx, accountID, boardID, input.Scene); err != nil {
+		return nil, err
+	}
+	newSequence := currentSequence + 1
+	if _, err := tx.Exec(ctx, `UPDATE whiteboards SET scene_json=$3::jsonb,scene_schema_version=$4,
+		editor_version=$5,scene_sequence=$6,version=version+1,updated_by=$7,updated_at=NOW()
+		WHERE account_id=$1 AND id=$2`, accountID, boardID, input.Scene, input.SceneSchemaVersion,
+		input.EditorVersion, newSequence, userID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO whiteboard_operations(
+		account_id,board_id,base_sequence,sequence,operation_id,operation_kind,patch_json,
+		request_payload_hash,result_scene_hash,actor_id
+	) VALUES($1,$2,$3,$4,$5,'patch',$6::jsonb,$7,$8,$9)`, accountID, boardID, currentSequence,
+		newSequence, input.OperationID, input.Patch, input.RequestPayloadHash, input.ResultSceneHash, userID); err != nil {
+		return nil, normalizeWhiteboardConstraintError(err)
+	}
+	details, _ := json.Marshal(map[string]any{"sequence": newSequence, "write_kind": "patch", "origin": "offline_v5"})
+	if err := insertWhiteboardActivityTx(ctx, tx, WhiteboardActivityInput{AccountID: accountID, BoardID: boardID,
+		ActorID: &userID, Action: WhiteboardActivityScenePatched, Details: details, OperationID: &input.OperationID}); err != nil {
+		return nil, err
+	}
+	scene := &domain.WhiteboardScene{BoardID: boardID}
+	if err := tx.QueryRow(ctx, `SELECT scene_json,scene_schema_version,editor_version,scene_sequence,updated_at
+		FROM whiteboards WHERE account_id=$1 AND id=$2`, accountID, boardID).Scan(&scene.Scene, &scene.SceneSchemaVersion,
+		&scene.EditorVersion, &scene.Sequence, &scene.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &domain.WhiteboardSceneWriteResult{Scene: scene, OperationSequence: newSequence}, nil
+}
+
 func (r *WhiteboardRepository) FindSceneOperation(ctx context.Context, accountID, userID, boardID, operationID uuid.UUID, requestPayloadHash string) (*domain.WhiteboardSceneWriteResult, bool, error) {
 	if operationID == uuid.Nil || len(requestPayloadHash) != 64 {
 		return nil, false, ErrWhiteboardInvalid

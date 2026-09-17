@@ -81,6 +81,14 @@ func synchronizeTaskStatusCategory(task *domain.Task, category string) {
 	}
 }
 
+// normalizeTaskReadProgress exposes completion as 100% while preserving the
+// stored manual progress that must be restored if the task is reopened.
+func normalizeTaskReadProgress(task *domain.Task) {
+	if task.Status == domain.TaskStatusCompleted || (task.StatusDetail != nil && task.StatusDetail.Category == domain.TaskStatusCategoryDone) {
+		task.Progress = 100
+	}
+}
+
 const taskSelectFields = `
 	t.id, t.account_id, t.created_by, t.assigned_to, t.title, t.description, t.type,
 	t.start_at, t.due_at, t.due_end_at, COALESCE(t.is_all_day,FALSE), t.priority, t.status, t.status_id, t.completed_at, t.completed_by,
@@ -162,11 +170,29 @@ func (r *TaskRepository) scanTask(row interface {
 			SortOrder: statusSortOrder, IsDefault: statusIsDefault,
 		}
 	}
+	normalizeTaskReadProgress(t)
 	return t, nil
 }
 
 func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
-	t.ID = uuid.New()
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := r.CreateTx(ctx, tx, t); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// CreateTx is the same canonical task write used online. The caller owns the
+// transaction so offline commands can commit the task, activity and receipt
+// atomically. It must never commit or emit external effects by itself.
+func (r *TaskRepository) CreateTx(ctx context.Context, tx pgx.Tx, t *domain.Task) error {
+	// Offline retries use a client-generated UUID as the durable idempotency
+	// anchor. Ordinary callers still receive a fresh server UUID.
+	ensureTaskCreateID(t)
 	now := time.Now()
 	t.CreatedAt = now
 	t.UpdatedAt = now
@@ -183,11 +209,6 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 		t.ManualProgress = t.Progress
 	}
 
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
 	actorID := t.CreatedBy
 	if t.MutationActor != nil {
 		actorID = *t.MutationActor
@@ -241,11 +262,23 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 		if accessErr != nil {
 			return accessErr
 		}
-		if !TaskAccessAllows(destinationAccess, domain.TaskAccessEdit) {
+		if !TaskAccessAllows(destinationAccess, domain.TaskAccessView) {
 			if !destinationAccess.CanView {
 				return ErrTaskWorkNotFound
 			}
 			return ErrTaskAccessDenied
+		}
+		if t.ListID != nil && t.ParentTaskID == nil {
+			listAccess, _, accessErr := resolveContainerAccessWith(ctx, tx, t.AccountID, *t.MutationActor, *t.ListID, domain.TaskAccessTargetList)
+			if accessErr != nil {
+				return accessErr
+			}
+			if !TaskAccessAllows(listAccess, domain.TaskAccessEdit) {
+				if !listAccess.CanView {
+					return ErrTaskWorkNotFound
+				}
+				return ErrTaskAccessDenied
+			}
 		}
 		if t.ParentTaskID != nil {
 			parentAccess, accessErr := resolveTaskAccessWith(ctx, tx, t.AccountID, *t.MutationActor, *t.ParentTaskID)
@@ -264,7 +297,7 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 	if t.ParentTaskID != nil {
 		participantRootID = t.ParentTaskID
 	}
-	affectedParticipants, err := taskParticipantsNeedingGrant(ctx, tx, t.AccountID, environmentID, participantRootID, participantIDs)
+	affectedParticipants, err := taskCreateParticipantsNeedingGrant(ctx, tx, t.AccountID, environmentID, t.ListID, participantRootID, participantIDs)
 	if err != nil {
 		return err
 	}
@@ -343,16 +376,35 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	return nil
+}
+
+func ensureTaskCreateID(task *domain.Task) {
+	if task.ID == uuid.Nil {
+		task.ID = uuid.New()
+	}
 }
 
 func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
-	t.UpdatedAt = time.Now()
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := r.UpdateTx(ctx, tx, t); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Version--
+		return err
+	}
+	return nil
+}
+
+// UpdateTx shares all Work ACL, workflow, ordering and progress invariants with
+// normal online writes; the surrounding command owns commit and side effects.
+func (r *TaskRepository) UpdateTx(ctx context.Context, tx pgx.Tx, t *domain.Task) error {
+	t.UpdatedAt = time.Now()
 	actorID := t.CreatedBy
 	if t.MutationActor != nil {
 		actorID = *t.MutationActor
@@ -620,9 +672,6 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 		`, t.AccountID, t.ID, t.ListID, t.UpdatedAt); err != nil {
 			return err
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
 	}
 	t.Version++
 	return nil

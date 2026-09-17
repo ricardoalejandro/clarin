@@ -35,22 +35,25 @@ type TaskLocationViewListOptions struct {
 }
 
 type TaskLocationViewCreateInput struct {
-	ViewID              uuid.UUID
-	BoardID             uuid.UUID
-	AccountID           uuid.UUID
-	ActorID             uuid.UUID
-	ScopeType           string
-	ScopeID             uuid.UUID
-	Name                string
-	Scene               json.RawMessage
-	SceneSchemaVersion  string
-	EditorVersion       string
-	OperationID         uuid.UUID
-	RequestPayloadHash  string
-	ResultSceneHash     string
-	SnapshotObjectKey   string
-	SnapshotContentHash string
-	SnapshotSizeBytes   int64
+	ViewID                       uuid.UUID
+	BoardID                      uuid.UUID
+	AccountID                    uuid.UUID
+	ActorID                      uuid.UUID
+	ScopeType                    string
+	ScopeID                      uuid.UUID
+	Name                         string
+	Scene                        json.RawMessage
+	SceneSchemaVersion           string
+	EditorVersion                string
+	OperationID                  uuid.UUID
+	RequestPayloadHash           string
+	ResultSceneHash              string
+	SnapshotObjectKey            string
+	SnapshotContentHash          string
+	SnapshotSizeBytes            int64
+	VisibilityMode               string
+	VisibleUserIDs               []uuid.UUID
+	ExpectedParentAccessRevision int64
 }
 
 type TaskLocationViewUpdateInput struct {
@@ -75,6 +78,8 @@ type taskLocationViewMutationState struct {
 	ScopeID         uuid.UUID
 	BoardID         uuid.UUID
 	Version         int64
+	AccessRevision  int64
+	VisibilityMode  string
 	DeletedAt       *time.Time
 	BoardArchivedAt *time.Time
 }
@@ -82,7 +87,8 @@ type taskLocationViewMutationState struct {
 func readTaskLocationViewMutationState(ctx context.Context, q taskAccessQuerier, accountID, viewID uuid.UUID, lock bool) (*taskLocationViewMutationState, error) {
 	state := &taskLocationViewMutationState{}
 	viewQuery := `SELECT CASE WHEN view_item.folder_id IS NOT NULL THEN 'folder' ELSE 'list' END,
-		COALESCE(view_item.folder_id,view_item.list_id),binding.whiteboard_id,view_item.version,view_item.deleted_at
+		COALESCE(view_item.folder_id,view_item.list_id),binding.whiteboard_id,view_item.version,
+		view_item.access_revision,view_item.visibility_mode,view_item.deleted_at
 		FROM task_location_views view_item JOIN task_location_whiteboard_views binding
 		ON binding.account_id=view_item.account_id AND binding.task_view_id=view_item.id
 		WHERE view_item.account_id=$1 AND view_item.id=$2`
@@ -93,7 +99,7 @@ func readTaskLocationViewMutationState(ctx context.Context, q taskAccessQuerier,
 		viewQuery += ` FOR UPDATE OF view_item`
 	}
 	if err := q.QueryRow(ctx, viewQuery, accountID, viewID).Scan(&state.ScopeType, &state.ScopeID, &state.BoardID,
-		&state.Version, &state.DeletedAt); err != nil {
+		&state.Version, &state.AccessRevision, &state.VisibilityMode, &state.DeletedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrTaskLocationViewNotFound
 		}
@@ -115,6 +121,7 @@ func readTaskLocationViewMutationState(ctx context.Context, q taskAccessQuerier,
 const taskLocationViewSelect = `
 	view_item.id,view_item.account_id,view_item.environment_id,view_item.folder_id,view_item.list_id,
 	view_item.view_type,view_item.sort_order,view_item.version,view_item.access_revision,
+	view_item.visibility_mode,
 	view_item.created_by,view_item.deleted_at,view_item.created_at,view_item.updated_at,
 	environment.name,COALESCE(location_folder.name,location_list.name,''),
 	list_parent.id,list_parent.name,
@@ -152,6 +159,7 @@ func scanTaskLocationView(scanner taskLocationViewScanner) (*domain.TaskLocation
 	if err := scanner.Scan(
 		&item.ID, &item.AccountID, &item.EnvironmentID, &folderID, &listID,
 		&item.Type, &item.SortOrder, &item.Version, &item.AccessRevision,
+		&item.VisibilityMode,
 		&item.CreatedBy, &item.DeletedAt, &item.CreatedAt, &item.UpdatedAt,
 		&environmentName, &scopeName, &listParentID, &listParentName,
 		&locationArchived, &locationDeleted,
@@ -246,7 +254,7 @@ func applyTaskLocationWhiteboardAccess(item *domain.TaskLocationView, access *do
 	}
 	item.Capabilities = domain.TaskLocationViewCapabilities{
 		CanView: access.CanView, CanComment: access.CanComment, CanEdit: access.CanEdit,
-		CanManage: access.Level == domain.WhiteboardAccessManage, CanManageAccess: false,
+		CanManage: access.Level == domain.WhiteboardAccessManage, CanManageAccess: access.CanManageAccess,
 	}
 	if item.Resource.Whiteboard != nil {
 		item.Resource.Whiteboard.EffectiveAccess = access
@@ -288,11 +296,11 @@ func (r *TaskLocationViewRepository) List(ctx context.Context, accountID, actorI
 	if options.ScopeType == domain.TaskAccessTargetList {
 		whereScope = "view_item.list_id=$2"
 	}
-	args := []any{accountID, options.ScopeID}
+	args := []any{accountID, options.ScopeID, actorID, access.CanManageAccess}
 	cursor := ""
 	if options.AfterSortOrder != nil && options.AfterID != nil {
 		args = append(args, *options.AfterSortOrder, *options.AfterID)
-		cursor = " AND (view_item.sort_order,view_item.id)>($3,$4)"
+		cursor = " AND (view_item.sort_order,view_item.id)>($5,$6)"
 	}
 	limit := taskLocationViewLimit(options.Limit)
 	args = append(args, limit+1)
@@ -310,13 +318,18 @@ func (r *TaskLocationViewRepository) List(ctx context.Context, accountID, actorI
 	}
 	query := `SELECT ` + taskLocationViewSelect + taskLocationViewFrom + `
 		WHERE view_item.account_id=$1 AND ` + whereScope + ` AND view_item.deleted_at IS NULL
-		AND board.archived_at IS NULL` + lifecycleWhere + cursor + `
+		AND board.archived_at IS NULL
+		AND (view_item.visibility_mode='inherit' OR $4::boolean OR EXISTS(
+			SELECT 1 FROM task_location_view_visibility_members visibility_member
+			WHERE visibility_member.account_id=view_item.account_id
+			AND visibility_member.task_view_id=view_item.id AND visibility_member.user_id=$3
+		))` + lifecycleWhere + cursor + `
 		ORDER BY view_item.sort_order,view_item.id LIMIT $`
 	// The limit placeholder follows the optional cursor pair.
 	if cursor == "" {
-		query += "3"
-	} else {
 		query += "5"
+	} else {
+		query += "7"
 	}
 	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
@@ -338,19 +351,6 @@ func (r *TaskLocationViewRepository) List(ctx context.Context, accountID, actorI
 	hasMore := len(items) > limit
 	if hasMore {
 		items = items[:limit]
-	}
-	if len(items) > 0 && items[0].Resource.Whiteboard != nil {
-		boardAccess, canonicalLocation, accessErr := NewWhiteboardRepository(r.db).ResolveWorkWhiteboardAccess(ctx,
-			accountID, actorID, items[0].Resource.Whiteboard.ID, domain.WhiteboardAccessView, false)
-		if accessErr != nil {
-			return nil, false, accessErr
-		}
-		for _, item := range items {
-			location := *canonicalLocation
-			location.TaskViewID = item.ID
-			location.Breadcrumb = append([]domain.WhiteboardWorkBreadcrumbItem(nil), canonicalLocation.Breadcrumb...)
-			applyTaskLocationWhiteboardAccess(item, boardAccess, &location)
-		}
 	}
 	return items, hasMore, nil
 }
@@ -679,12 +679,15 @@ func taskLocationScopeColumns(scopeType string, scopeID uuid.UUID) (folderID, li
 }
 
 func (r *TaskLocationViewRepository) Create(ctx context.Context, input TaskLocationViewCreateInput) (*domain.TaskLocationView, bool, error) {
+	visibilityMode, visibleUserIDs, visibilityErr := normalizeTaskLocationVisibility(input.VisibilityMode, input.VisibleUserIDs)
 	if input.ViewID == uuid.Nil || input.BoardID == uuid.Nil || input.AccountID == uuid.Nil || input.ActorID == uuid.Nil ||
 		input.OperationID == uuid.Nil || !validTaskLocationScope(input.ScopeType, input.ScopeID) || strings.TrimSpace(input.Name) == "" ||
 		len(input.RequestPayloadHash) != 64 || len(input.Scene) == 0 || input.SnapshotObjectKey == "" ||
-		input.SnapshotContentHash == "" || input.SnapshotSizeBytes <= 0 {
+		input.SnapshotContentHash == "" || input.SnapshotSizeBytes <= 0 || visibilityErr != nil ||
+		(visibilityMode == domain.TaskLocationViewVisibilityRestricted && input.ExpectedParentAccessRevision < 1) {
 		return nil, false, ErrTaskLocationViewInvalid
 	}
+	input.VisibilityMode, input.VisibleUserIDs = visibilityMode, visibleUserIDs
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return nil, false, err
@@ -693,7 +696,7 @@ func (r *TaskLocationViewRepository) Create(ctx context.Context, input TaskLocat
 	if err := lockActiveWhiteboardTenantTx(ctx, tx, input.AccountID); err != nil {
 		return nil, false, ErrTaskLocationViewNotFound
 	}
-	if err := lockTaskLocationViewActorMembershipTx(ctx, tx, input.AccountID, input.ActorID); err != nil {
+	if err := lockTaskLocationViewActorMembershipTx(ctx, tx, input.AccountID, input.ActorID, input.VisibleUserIDs...); err != nil {
 		return nil, false, err
 	}
 	if err := lockTaskLocationOperationTx(ctx, tx, input.AccountID, input.ActorID, input.OperationID); err != nil {
@@ -707,9 +710,24 @@ func (r *TaskLocationViewRepository) Create(ctx context.Context, input TaskLocat
 		item, getErr := r.getOperationResult(ctx, input.AccountID, input.ActorID, existingID)
 		return item, true, getErr
 	}
-	_, environmentID, err := requireTaskLocationManageTx(ctx, tx, input.AccountID, input.ActorID, input.ScopeID, input.ScopeType)
+	parentAccess, environmentID, err := requireTaskLocationManageTx(ctx, tx, input.AccountID, input.ActorID, input.ScopeID, input.ScopeType)
 	if err != nil {
 		return nil, false, err
+	}
+	if input.VisibilityMode == domain.TaskLocationViewVisibilityRestricted {
+		if parentAccess == nil || !parentAccess.CanManageAccess {
+			return nil, false, ErrTaskAccessDenied
+		}
+		parentRevision, revisionErr := taskLocationParentAccessRevisionWith(ctx, tx, input.AccountID, input.ScopeID, input.ScopeType)
+		if revisionErr != nil {
+			return nil, false, revisionErr
+		}
+		if parentRevision != input.ExpectedParentAccessRevision {
+			return nil, false, ErrTaskAccessRevisionConflict
+		}
+		if err := validateTaskLocationVisibilityMembersWith(ctx, tx, input.AccountID, input.ScopeID, input.ScopeType, input.VisibleUserIDs); err != nil {
+			return nil, false, err
+		}
 	}
 	if err := requireTaskLocationModulesWith(ctx, tx, input.AccountID, input.ActorID); err != nil {
 		return nil, false, err
@@ -729,9 +747,12 @@ func (r *TaskLocationViewRepository) Create(ctx context.Context, input TaskLocat
 		return nil, false, normalizeWhiteboardConstraintError(err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO task_location_views(
-		id,account_id,environment_id,folder_id,list_id,view_type,sort_order,created_by
-	) VALUES($1,$2,$3,$4,$5,'whiteboard',$6,$7)`, input.ViewID, input.AccountID, environmentID,
-		folderID, listID, sortOrder, input.ActorID); err != nil {
+		id,account_id,environment_id,folder_id,list_id,view_type,sort_order,visibility_mode,created_by
+	) VALUES($1,$2,$3,$4,$5,'whiteboard',$6,$7,$8)`, input.ViewID, input.AccountID, environmentID,
+		folderID, listID, sortOrder, input.VisibilityMode, input.ActorID); err != nil {
+		return nil, false, err
+	}
+	if err := insertTaskLocationVisibilityMembersTx(ctx, tx, input.AccountID, input.ViewID, input.ActorID, input.VisibleUserIDs); err != nil {
 		return nil, false, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO task_location_whiteboard_views(account_id,task_view_id,whiteboard_id)
@@ -770,7 +791,7 @@ func (r *TaskLocationViewRepository) Create(ctx context.Context, input TaskLocat
 		input.SnapshotSizeBytes, input.SceneSchemaVersion, input.EditorVersion, input.ActorID); err != nil {
 		return nil, false, normalizeWhiteboardConstraintError(err)
 	}
-	after, _ := json.Marshal(map[string]any{"access_mode": "work_inherited", "creator_id": input.ActorID,
+	after, _ := json.Marshal(map[string]any{"access_mode": "work_" + input.VisibilityMode, "creator_id": input.ActorID,
 		"task_view_id": input.ViewID, "scope_type": input.ScopeType, "scope_id": input.ScopeID})
 	if _, err := tx.Exec(ctx, `INSERT INTO whiteboard_access_audit(
 		account_id,board_id,actor_id,action,after_state,operation_id,request_payload_hash

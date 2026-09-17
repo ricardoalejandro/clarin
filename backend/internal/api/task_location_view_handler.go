@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -58,9 +59,9 @@ func taskLocationViewError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "La vista no está disponible", "code": "location_view_not_found"})
 	case errors.Is(err, repository.ErrTaskAccessDenied), errors.Is(err, repository.ErrWhiteboardForbidden):
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"success": false, "error": "No tienes permiso para realizar esta acción", "code": "location_view_forbidden"})
-	case errors.Is(err, repository.ErrTaskLocationViewConflict), errors.Is(err, repository.ErrWhiteboardConflict):
+	case errors.Is(err, repository.ErrTaskLocationViewConflict), errors.Is(err, repository.ErrTaskAccessRevisionConflict), errors.Is(err, repository.ErrWhiteboardConflict):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La vista cambió en otra sesión; actualiza y reintenta", "code": "location_view_conflict"})
-	case errors.Is(err, repository.ErrTaskLocationViewInvalid), errors.Is(err, repository.ErrWhiteboardInvalid),
+	case errors.Is(err, repository.ErrTaskLocationViewInvalid), errors.Is(err, repository.ErrTaskAccessInvalid), errors.Is(err, repository.ErrWhiteboardInvalid),
 		errors.Is(err, service.ErrWhiteboardPayloadInvalid):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "Los datos de la vista no son válidos", "code": "invalid_location_view"})
 	default:
@@ -197,6 +198,34 @@ func stableTaskLocationBoardID(accountID, actorID, operationID uuid.UUID) (uuid.
 	return service.StableWhiteboardID(accountID, actorOperationID)
 }
 
+func normalizeTaskLocationVisibilityRequest(mode string, userIDs []uuid.UUID) (string, []uuid.UUID, error) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		mode = domain.TaskLocationViewVisibilityInherit
+	}
+	if mode != domain.TaskLocationViewVisibilityInherit && mode != domain.TaskLocationViewVisibilityRestricted || len(userIDs) > 200 {
+		return "", nil, repository.ErrTaskLocationViewInvalid
+	}
+	seen := make(map[uuid.UUID]struct{}, len(userIDs))
+	canonical := make([]uuid.UUID, 0, len(userIDs))
+	for _, userID := range userIDs {
+		if userID == uuid.Nil {
+			return "", nil, repository.ErrTaskLocationViewInvalid
+		}
+		if _, duplicate := seen[userID]; duplicate {
+			return "", nil, repository.ErrTaskLocationViewInvalid
+		}
+		seen[userID] = struct{}{}
+		canonical = append(canonical, userID)
+	}
+	sort.Slice(canonical, func(i, j int) bool { return canonical[i].String() < canonical[j].String() })
+	if mode == domain.TaskLocationViewVisibilityInherit && len(canonical) != 0 ||
+		mode == domain.TaskLocationViewVisibilityRestricted && len(canonical) == 0 {
+		return "", nil, repository.ErrTaskLocationViewInvalid
+	}
+	return mode, canonical, nil
+}
+
 func (s *Server) handleListTaskLocationViews(c *fiber.Ctx) error {
 	if !s.workWhiteboardViewsEnabled() {
 		return c.JSON(fiber.Map{"success": true, "location_views": []*domain.TaskLocationView{}, "next_cursor": "", "feature_enabled": false})
@@ -242,15 +271,113 @@ func (s *Server) handleGetTaskLocationView(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "location_view": item, "feature_enabled": true})
 }
 
+func (s *Server) handleListTaskLocationViewAccessCandidates(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	actorID := c.Locals("user_id").(uuid.UUID)
+	scopeType := strings.ToLower(strings.TrimSpace(c.Query("scope_type")))
+	scopeID, err := uuid.Parse(strings.TrimSpace(c.Query("scope_id")))
+	if err != nil {
+		return taskLocationViewError(c, repository.ErrTaskLocationViewInvalid)
+	}
+	limit, _ := strconv.Atoi(strings.TrimSpace(c.Query("limit")))
+	items, err := s.repos.TaskLocationView.ListVisibilityCandidates(c.Context(), accountID, actorID,
+		scopeID, scopeType, c.Query("q"), limit)
+	if err != nil {
+		return taskLocationViewError(c, err)
+	}
+	return c.JSON(fiber.Map{"success": true, "users": items})
+}
+
+func (s *Server) handleGetTaskLocationViewAccess(c *fiber.Ctx) error {
+	viewID, err := taskLocationViewID(c)
+	if err != nil {
+		return taskLocationViewError(c, err)
+	}
+	policy, err := s.repos.TaskLocationView.GetVisibilityPolicy(c.Context(),
+		c.Locals("account_id").(uuid.UUID), c.Locals("user_id").(uuid.UUID), viewID)
+	if err != nil {
+		return taskLocationViewError(c, err)
+	}
+	return c.JSON(fiber.Map{"success": true, "access": policy})
+}
+
+func (s *Server) handlePutTaskLocationViewAccess(c *fiber.Ctx) error {
+	viewID, err := taskLocationViewID(c)
+	if err != nil {
+		return taskLocationViewError(c, err)
+	}
+	var request struct {
+		VisibilityMode         string      `json:"visibility_mode"`
+		VisibleUserIDs         []uuid.UUID `json:"visible_user_ids"`
+		ExpectedAccessRevision int64       `json:"expected_access_revision"`
+		OperationID            *uuid.UUID  `json:"operation_id"`
+	}
+	if err := c.BodyParser(&request); err != nil || request.ExpectedAccessRevision < 1 || request.OperationID == nil || *request.OperationID == uuid.Nil {
+		return taskLocationViewError(c, repository.ErrTaskLocationViewInvalid)
+	}
+	mode, userIDs, err := normalizeTaskLocationVisibilityRequest(request.VisibilityMode, request.VisibleUserIDs)
+	if err != nil {
+		return taskLocationViewError(c, err)
+	}
+	accountID := c.Locals("account_id").(uuid.UUID)
+	actorID := c.Locals("user_id").(uuid.UUID)
+	contextItem, err := s.repos.TaskLocationView.Get(c.Context(), accountID, actorID, viewID)
+	if err != nil || contextItem.Resource.Whiteboard == nil || contextItem.Scope == nil {
+		if err == nil {
+			err = repository.ErrTaskLocationViewNotFound
+		}
+		return taskLocationViewError(c, err)
+	}
+	payloadHash, err := taskLocationMutationHash(struct {
+		Action                 string      `json:"action"`
+		AccountID              uuid.UUID   `json:"account_id"`
+		EnvironmentID          uuid.UUID   `json:"environment_id"`
+		ScopeType              string      `json:"scope_type"`
+		ScopeID                uuid.UUID   `json:"scope_id"`
+		ViewID                 uuid.UUID   `json:"view_id"`
+		VisibilityMode         string      `json:"visibility_mode"`
+		VisibleUserIDs         []uuid.UUID `json:"visible_user_ids"`
+		ExpectedAccessRevision int64       `json:"expected_access_revision"`
+	}{"replace_visibility", accountID, contextItem.EnvironmentID, contextItem.Scope.ScopeType,
+		contextItem.Scope.ScopeID, viewID, mode, userIDs, request.ExpectedAccessRevision})
+	if err != nil {
+		return taskLocationViewError(c, err)
+	}
+	policy, idempotent, err := s.repos.TaskLocationView.ReplaceVisibility(c.Context(), accountID, actorID, viewID,
+		repository.TaskLocationViewVisibilityReplaceInput{VisibilityMode: mode, VisibleUserIDs: userIDs,
+			ExpectedAccessRevision: request.ExpectedAccessRevision, OperationID: *request.OperationID,
+			RequestPayloadHash: payloadHash})
+	if err != nil {
+		return taskLocationViewError(c, err)
+	}
+	boardID := contextItem.Resource.Whiteboard.ID
+	if users, listErr := s.repos.User.GetByAccountID(c.Context(), accountID); listErr == nil {
+		for _, user := range users {
+			if user == nil {
+				continue
+			}
+			if _, accessErr := s.repos.Whiteboard.RequireAccess(c.Context(), accountID, user.ID, boardID, domain.WhiteboardAccessView); errors.Is(accessErr, repository.ErrWhiteboardNotFound) || errors.Is(accessErr, repository.ErrWhiteboardForbidden) {
+				s.revokeWhiteboardUserSockets(accountID, boardID, user.ID)
+			}
+		}
+	}
+	s.notifyWhiteboardAccessChanged(accountID, boardID)
+	s.notifyWhiteboardHubChanged(accountID)
+	return c.JSON(fiber.Map{"success": true, "access": policy, "operation_id": *request.OperationID, "idempotent": idempotent})
+}
+
 func (s *Server) handleCreateTaskLocationView(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	actorID := c.Locals("user_id").(uuid.UUID)
 	var request struct {
-		Type        string     `json:"type"`
-		ScopeType   string     `json:"scope_type"`
-		ScopeID     uuid.UUID  `json:"scope_id"`
-		Name        string     `json:"name"`
-		OperationID *uuid.UUID `json:"operation_id"`
+		Type                         string      `json:"type"`
+		ScopeType                    string      `json:"scope_type"`
+		ScopeID                      uuid.UUID   `json:"scope_id"`
+		Name                         string      `json:"name"`
+		VisibilityMode               string      `json:"visibility_mode"`
+		VisibleUserIDs               []uuid.UUID `json:"visible_user_ids"`
+		ExpectedParentAccessRevision int64       `json:"expected_parent_access_revision"`
+		OperationID                  *uuid.UUID  `json:"operation_id"`
 	}
 	if err := c.BodyParser(&request); err != nil {
 		return taskLocationViewError(c, repository.ErrTaskLocationViewInvalid)
@@ -264,6 +391,10 @@ func (s *Server) handleCreateTaskLocationView(c *fiber.Ctx) error {
 	if err != nil {
 		return taskLocationViewError(c, err)
 	}
+	visibilityMode, visibleUserIDs, err := normalizeTaskLocationVisibilityRequest(request.VisibilityMode, request.VisibleUserIDs)
+	if err != nil || visibilityMode == domain.TaskLocationViewVisibilityRestricted && request.ExpectedParentAccessRevision < 1 {
+		return taskLocationViewError(c, repository.ErrTaskLocationViewInvalid)
+	}
 	operationID := uuid.New()
 	if request.OperationID != nil && *request.OperationID != uuid.Nil {
 		operationID = *request.OperationID
@@ -275,15 +406,22 @@ func (s *Server) handleCreateTaskLocationView(c *fiber.Ctx) error {
 		}
 		return taskLocationViewError(c, err)
 	}
+	if visibilityMode == domain.TaskLocationViewVisibilityRestricted && !access.CanManageAccess {
+		return taskLocationViewError(c, repository.ErrTaskAccessDenied)
+	}
 	payloadHash, err := taskLocationMutationHash(struct {
-		Action        string    `json:"action"`
-		AccountID     uuid.UUID `json:"account_id"`
-		EnvironmentID uuid.UUID `json:"environment_id"`
-		Type          string    `json:"type"`
-		ScopeType     string    `json:"scope_type"`
-		ScopeID       uuid.UUID `json:"scope_id"`
-		Name          string    `json:"name"`
-	}{"create", accountID, environmentID, request.Type, request.ScopeType, request.ScopeID, name})
+		Action                       string      `json:"action"`
+		AccountID                    uuid.UUID   `json:"account_id"`
+		EnvironmentID                uuid.UUID   `json:"environment_id"`
+		Type                         string      `json:"type"`
+		ScopeType                    string      `json:"scope_type"`
+		ScopeID                      uuid.UUID   `json:"scope_id"`
+		Name                         string      `json:"name"`
+		VisibilityMode               string      `json:"visibility_mode"`
+		VisibleUserIDs               []uuid.UUID `json:"visible_user_ids"`
+		ExpectedParentAccessRevision int64       `json:"expected_parent_access_revision"`
+	}{"create", accountID, environmentID, request.Type, request.ScopeType, request.ScopeID, name,
+		visibilityMode, visibleUserIDs, request.ExpectedParentAccessRevision})
 	if err != nil {
 		return taskLocationViewError(c, err)
 	}
@@ -315,6 +453,8 @@ func (s *Server) handleCreateTaskLocationView(c *fiber.Ctx) error {
 		SceneSchemaVersion: "excalidraw", EditorVersion: whiteboardEditorVersion,
 		OperationID: operationID, RequestPayloadHash: payloadHash, ResultSceneHash: sceneHash,
 		SnapshotObjectKey: prepared.ObjectKey, SnapshotContentHash: prepared.ContentHash, SnapshotSizeBytes: prepared.SizeBytes,
+		VisibilityMode: visibilityMode, VisibleUserIDs: visibleUserIDs,
+		ExpectedParentAccessRevision: request.ExpectedParentAccessRevision,
 	})
 	if err != nil {
 		if prepared.UploadedByRequest {
@@ -375,11 +515,12 @@ func (s *Server) handleDuplicateTaskLocationView(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	actorID := c.Locals("user_id").(uuid.UUID)
 	var request struct {
-		Name            string     `json:"name"`
-		ExpectedVersion int64      `json:"expected_version"`
-		OperationID     *uuid.UUID `json:"operation_id"`
+		Name                   string     `json:"name"`
+		ExpectedVersion        int64      `json:"expected_version"`
+		ExpectedAccessRevision int64      `json:"expected_access_revision"`
+		OperationID            *uuid.UUID `json:"operation_id"`
 	}
-	if err := c.BodyParser(&request); err != nil || request.ExpectedVersion <= 0 || request.OperationID == nil || *request.OperationID == uuid.Nil {
+	if err := c.BodyParser(&request); err != nil || request.ExpectedVersion <= 0 || request.ExpectedAccessRevision <= 0 || request.OperationID == nil || *request.OperationID == uuid.Nil {
 		return taskLocationViewError(c, repository.ErrTaskLocationViewInvalid)
 	}
 	source, err := s.repos.TaskLocationView.Get(c.Context(), accountID, actorID, viewID)
@@ -398,18 +539,20 @@ func (s *Server) handleDuplicateTaskLocationView(c *fiber.Ctx) error {
 		return taskLocationViewError(c, err)
 	}
 	payloadHash, err := taskLocationMutationHash(struct {
-		Action          string    `json:"action"`
-		Type            string    `json:"type"`
-		AccountID       uuid.UUID `json:"account_id"`
-		EnvironmentID   uuid.UUID `json:"environment_id"`
-		ScopeType       string    `json:"scope_type"`
-		ScopeID         uuid.UUID `json:"scope_id"`
-		SourceViewID    uuid.UUID `json:"source_view_id"`
-		SourceBoardID   uuid.UUID `json:"source_board_id"`
-		ExpectedVersion int64     `json:"expected_version"`
-		Name            string    `json:"name"`
+		Action                 string    `json:"action"`
+		Type                   string    `json:"type"`
+		AccountID              uuid.UUID `json:"account_id"`
+		EnvironmentID          uuid.UUID `json:"environment_id"`
+		ScopeType              string    `json:"scope_type"`
+		ScopeID                uuid.UUID `json:"scope_id"`
+		SourceViewID           uuid.UUID `json:"source_view_id"`
+		SourceBoardID          uuid.UUID `json:"source_board_id"`
+		ExpectedVersion        int64     `json:"expected_version"`
+		ExpectedAccessRevision int64     `json:"expected_access_revision"`
+		Name                   string    `json:"name"`
 	}{"duplicate", domain.TaskLocationViewTypeWhiteboard, accountID, source.EnvironmentID,
-		source.Scope.ScopeType, source.Scope.ScopeID, viewID, source.Resource.Whiteboard.ID, request.ExpectedVersion, name})
+		source.Scope.ScopeType, source.Scope.ScopeID, viewID, source.Resource.Whiteboard.ID, request.ExpectedVersion,
+		request.ExpectedAccessRevision, name})
 	if err != nil {
 		return taskLocationViewError(c, err)
 	}
@@ -436,7 +579,8 @@ func (s *Server) handleDuplicateTaskLocationView(c *fiber.Ctx) error {
 	item, idempotent, err := s.repos.TaskLocationView.Duplicate(c.Context(), repository.TaskLocationViewDuplicateInput{
 		ViewID: newViewID, BoardID: boardID, SourceViewID: viewID, SourceBoardID: source.Resource.Whiteboard.ID,
 		AccountID: accountID, ActorID: actorID, Name: name, ExpectedVersion: request.ExpectedVersion,
-		Scene: scene.Scene, SceneSchemaVersion: scene.SceneSchemaVersion, EditorVersion: scene.EditorVersion,
+		ExpectedAccessRevision: request.ExpectedAccessRevision,
+		Scene:                  scene.Scene, SceneSchemaVersion: scene.SceneSchemaVersion, EditorVersion: scene.EditorVersion,
 		OperationID: *request.OperationID, RequestPayloadHash: payloadHash, ResultSceneHash: prepared.SceneHash,
 		SnapshotObjectKey: prepared.ObjectKey, SnapshotContentHash: prepared.ContentHash, SnapshotSizeBytes: prepared.SizeBytes,
 	})

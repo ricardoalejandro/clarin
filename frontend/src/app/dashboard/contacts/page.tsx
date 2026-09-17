@@ -32,6 +32,7 @@ import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 import { subscribeWebSocket } from '@/lib/api'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
+import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider'
 import type { Lead } from '@/types/contact'
 import type { CustomFieldDefinition, CustomFieldValue, CustomFieldFilter } from '@/types/custom-field'
 
@@ -313,6 +314,7 @@ function ContactOpportunitySummary({
 }
 
 export default function ContactsPage() {
+  const { requireOnline } = useClarinRuntime()
   const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>()
   const crmWindowStorageScope = useCrmWindowStorageScope('contacts')
   const isCompactWorkspace = workspaceWidth > 0 && workspaceWidth < 1024
@@ -427,6 +429,21 @@ export default function ContactsPage() {
   const [showBroadcastModal, setShowBroadcastModal] = useState(false)
   const [submittingBroadcast, setSubmittingBroadcast] = useState(false)
   const [pendingBroadcastCampaignId, setPendingBroadcastCampaignId] = useState<string | null>(null)
+
+  const openContactCreation = () => {
+    if (requireOnline('Crear un contacto nuevo')) setShowCreateContact(true)
+  }
+  const openContactBroadcast = () => {
+    if (!requireOnline('Crear una campaña masiva')) return
+    fetchDevices()
+    setShowBroadcastModal(true)
+  }
+  const openContactPasteImport = () => {
+    if (requireOnline('Importar contactos desde Excel')) setShowPasteExcel(true)
+  }
+  const openContactFileImport = () => {
+    if (requireOnline('Importar contactos desde Excel')) setShowImportModal(true)
+  }
 
   // Send message / Inline chat
   const activeContactIdRef = useRef<string | null>(null)
@@ -930,6 +947,7 @@ export default function ContactsPage() {
   }
 
   const handleGoogleBatchSync = async () => {
+    if (!requireOnline('Sincronizar contactos con Google')) return
     if (selectedIds.size === 0 || selectedIds.size > 30) return
     setGoogleSyncing(true)
     try {
@@ -954,6 +972,7 @@ export default function ContactsPage() {
   }
 
   const handleGoogleBatchDesync = async () => {
+    if (!requireOnline('Desconectar contactos de Google')) return
     if (selectedIds.size === 0 || selectedIds.size > 30) return
     if (!confirm(`¿Dejar de sincronizar ${selectedIds.size} contacto(s) con Google?`)) return
     setGoogleSyncing(true)
@@ -979,6 +998,7 @@ export default function ContactsPage() {
   }
 
   const handleGoogleSyncSingle = async (contactId: string) => {
+    if (!requireOnline('Sincronizar el contacto con Google')) return
     setGoogleSyncing(true)
     try {
       const res = await fetch(`/api/google/contacts/${contactId}/sync`, {
@@ -999,6 +1019,7 @@ export default function ContactsPage() {
   }
 
   const handleFindDuplicates = async () => {
+    if (!requireOnline('Buscar y combinar contactos duplicados')) return
     setLoadingDuplicates(true)
     try {
       const res = await fetch('/api/contacts/duplicates', {
@@ -1090,6 +1111,7 @@ export default function ContactsPage() {
 
 
   const handleSendWhatsApp = (phone: string, contactOverride?: Contact) => {
+    if (!requireOnline('Abrir WhatsApp')) return
     const contactId = contactOverride?.id || activeContactIdRef.current
     if (contactOverride) {
       if (showDetailPanel && selectedContact?.id !== contactOverride.id && !requestCloseDetailPanel()) return
@@ -1235,6 +1257,7 @@ export default function ContactsPage() {
   }
 
   const handleCreateBroadcastFromContacts = async (formResult: CampaignFormResult) => {
+    if (!requireOnline('Crear una campaña masiva')) return
     setSubmittingBroadcast(true)
     let campaignId = pendingBroadcastCampaignId
     try {
@@ -1936,14 +1959,14 @@ export default function ContactsPage() {
                 {showMoreMenu && !isCompactWorkspace && (
                   <div className="absolute right-0 top-full z-30 mt-1.5 w-56 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-xl">
                     <button
-                      onClick={() => { setShowCreateContact(true); setShowMoreMenu(false) }}
+                      onClick={() => { openContactCreation(); setShowMoreMenu(false) }}
                       className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-emerald-700 font-medium hover:bg-emerald-50 transition-colors"
                     >
                       <UserPlus className="w-4 h-4 text-emerald-500" />
                       Nuevo contacto
                     </button>
                     <button
-                      onClick={() => { fetchDevices(); setShowBroadcastModal(true); setShowMoreMenu(false) }}
+                      onClick={() => { openContactBroadcast(); setShowMoreMenu(false) }}
                       disabled={total === 0}
                       className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
@@ -1952,14 +1975,14 @@ export default function ContactsPage() {
                     </button>
                     <div className="my-1 border-t border-slate-100" />
                     <button
-                      onClick={() => { setShowPasteExcel(true); setShowMoreMenu(false) }}
+                      onClick={() => { openContactPasteImport(); setShowMoreMenu(false) }}
                       className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
                     >
                       <ClipboardPaste className="w-4 h-4 text-slate-400" />
                       Pegar desde Excel
                     </button>
                     <button
-                      onClick={() => { setShowImportModal(true); setShowMoreMenu(false) }}
+                      onClick={() => { openContactFileImport(); setShowMoreMenu(false) }}
                       className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
                     >
                       <Upload className="w-4 h-4 text-slate-400" />
@@ -2376,10 +2399,10 @@ export default function ContactsPage() {
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">
             {[
-              { group: 'Crear y comunicar', label: 'Nuevo contacto', icon: UserPlus, action: () => setShowCreateContact(true), accent: 'text-emerald-700' },
-              { group: 'Crear y comunicar', label: 'Masivo', icon: Radio, action: () => { fetchDevices(); setShowBroadcastModal(true) }, disabled: total === 0 },
-              { group: 'Importar', label: 'Pegar desde Excel', icon: ClipboardPaste, action: () => setShowPasteExcel(true) },
-              { group: 'Importar', label: 'Importar Excel', icon: Upload, action: () => setShowImportModal(true) },
+              { group: 'Crear y comunicar', label: 'Nuevo contacto', icon: UserPlus, action: openContactCreation, accent: 'text-emerald-700' },
+              { group: 'Crear y comunicar', label: 'Masivo', icon: Radio, action: openContactBroadcast, disabled: total === 0 },
+              { group: 'Importar', label: 'Pegar desde Excel', icon: ClipboardPaste, action: openContactPasteImport },
+              { group: 'Importar', label: 'Importar Excel', icon: Upload, action: openContactFileImport },
               { group: 'Herramientas', label: loadingDuplicates ? 'Buscando duplicados…' : 'Buscar duplicados', icon: Merge, action: handleFindDuplicates, disabled: loadingDuplicates },
               { group: 'Herramientas', label: 'Seleccionar contactos', icon: CheckSquare, action: () => setSelectionMode(true) },
               { group: 'Herramientas', label: 'Exportar contactos', icon: Download, action: () => setShowExportModal(true) },

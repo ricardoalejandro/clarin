@@ -359,10 +359,35 @@ describe('TaskListView compact interaction', () => {
 
     fireEvent.click(trigger)
     expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    expect(region).not.toHaveAttribute('inert')
+    expect(region).toHaveAttribute('aria-hidden', 'false')
     await waitFor(() => expect(screen.getByText(childTask.title)).toBeInTheDocument())
     expect(apiMocks.get).toHaveBeenCalledWith(`/api/tasks/${parent.id}/children`, expect.objectContaining({ signal: expect.any(AbortSignal) }))
     expect(document.querySelectorAll('[data-task-list-row]')).toHaveLength(1)
     expect(document.querySelector('[data-task-subtask-row="child-1"]')).toBeInTheDocument()
+
+    fireEvent.click(trigger)
+    expect(region).toHaveAttribute('inert')
+    expect(region).toHaveAttribute('aria-hidden', 'true')
+    expect(screen.queryByRole('button', { name: `Abrir tarea ${childTask.title}` })).not.toBeInTheDocument()
+    fireEvent.click(trigger)
+    expect(region).not.toHaveAttribute('inert')
+    expect(apiMocks.get).toHaveBeenCalledTimes(1)
+  })
+
+  it('removes and restores group inertness without unmounting cached task rows', () => {
+    const view = render(<TaskListView {...props} collapsedGroupKeys={['all']} />)
+    const region = document.getElementById('task-list-group-all')
+    const row = document.querySelector(`[data-task-list-row="${task.id}"]`)
+    expect(region).toHaveAttribute('inert')
+    expect(region).toHaveAttribute('aria-hidden', 'true')
+    expect(screen.queryByRole('button', { name: `Abrir tarea ${task.title}` })).not.toBeInTheDocument()
+
+    view.rerender(<TaskListView {...props} collapsedGroupKeys={[]} />)
+    expect(region).not.toHaveAttribute('inert')
+    expect(region).toHaveAttribute('aria-hidden', 'false')
+    expect(document.querySelector(`[data-task-list-row="${task.id}"]`)).toBe(row)
+    expect(screen.getByRole('button', { name: `Abrir tarea ${task.title}` })).toBeInTheDocument()
   })
 
   it('allows an inline child rename without ever offering a second subtask level', async () => {

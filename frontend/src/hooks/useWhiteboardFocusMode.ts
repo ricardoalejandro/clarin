@@ -16,8 +16,8 @@ const WHITEBOARD_FOCUS_ACTIVE_ANNOUNCEMENT = 'Pizarra maximizada. Usa Control o 
 export interface UseWhiteboardFocusModeOptions {
   boardID: string
   ready: boolean
-  rootRef: RefObject<HTMLElement>
-  fallbackFocusRef: RefObject<HTMLElement>
+  rootRef: RefObject<HTMLElement | null>
+  fallbackFocusRef: RefObject<HTMLElement | null>
   editorAPI: ExcalidrawImperativeAPI | null
   isInteractionBlocked: () => boolean
 }

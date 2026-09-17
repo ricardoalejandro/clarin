@@ -68,7 +68,7 @@ describe('task container icon rules', () => {
 
     await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
     expect(vi.mocked(apiPost).mock.calls[0][0]).toBe('/api/tasks/lists/list-ernesto/archive')
-    expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ type: 'list', id: 'list-ernesto', action: 'archived' }))
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ type: 'list', id: 'list-ernesto', action: 'archived' })))
     expect(apiDelete).not.toHaveBeenCalled()
   })
 

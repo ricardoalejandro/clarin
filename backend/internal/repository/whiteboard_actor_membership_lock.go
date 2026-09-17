@@ -90,8 +90,9 @@ func lockTaskLocationViewActorMembershipTx(
 	ctx context.Context,
 	tx pgx.Tx,
 	accountID, actorID uuid.UUID,
+	relatedMembershipIDs ...uuid.UUID,
 ) error {
-	err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID)
+	err := lockWhiteboardActorMembershipsTx(ctx, tx, accountID, actorID, relatedMembershipIDs...)
 	if errors.Is(err, ErrWhiteboardNotFound) {
 		return ErrTaskWorkNotFound
 	}

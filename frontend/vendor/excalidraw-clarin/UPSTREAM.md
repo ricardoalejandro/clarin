@@ -5,7 +5,7 @@
 - Upstream commit: `a2ec2889babf7d2295469c6d90ebe77fae57df84`
 - Backported pressure commits: `cd514d72d6350082c7f173f7147607c7dc4cb523`
   (#11507) and `2a82821ec5970691199e1ffc6a49ac31f311ab59` (#11551)
-- Clarin package version: `0.18.1-clarin.6`
+- Clarin package version: `0.18.1-clarin.7`
 - License: MIT (see `LICENSE`)
 
 The `packages/excalidraw`, `packages/math`, and `packages/utils` directories

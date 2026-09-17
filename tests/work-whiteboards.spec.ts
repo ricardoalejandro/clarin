@@ -573,15 +573,12 @@ async function selectWhiteboardHubScope(page: Page, scope: 'work' | 'trash') {
     await openNavigation.click()
     await expect(navigation).toBeVisible()
   }
-  const loaded = page.waitForResponse(response => {
-    const url = new URL(response.url())
-    if (url.pathname !== '/api/whiteboards' || response.request().method() !== 'GET') return false
-    return scope === 'work'
-      ? url.searchParams.get('origin') === 'work'
-      : url.searchParams.get('scope') === 'trash'
-  })
-  await navigation.getByRole('button', { name: new RegExp(`^${label}`) }).click()
-  await loaded
+  const scopeButton = navigation.getByRole('button', { name: new RegExp(`^${label}`) })
+  if (await scopeButton.getAttribute('aria-current') === 'page') {
+    await expect(page.getByRole('heading', { name: label, exact: true })).toBeVisible()
+    return
+  }
+  await scopeButton.click()
   await expect(page.getByRole('heading', { name: label, exact: true })).toBeVisible()
 }
 

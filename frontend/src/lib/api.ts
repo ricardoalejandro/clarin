@@ -10,6 +10,10 @@ const SESSION_MARKER = 'cookie-session'
 export type AuthRefreshOutcome = 'refreshed' | 'expired' | 'unavailable'
 
 let _refreshPromise: Promise<AuthRefreshOutcome> | null = null
+// Set only while the canonical UI is backed by the encrypted browser copy.
+// Authentication, WebSockets and binary transfers must not bypass the v5
+// interceptor during that window.
+let _offlineRuntimeActive = false
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000 // 30 minutes
 const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000
@@ -37,10 +41,28 @@ export function getLoginNoticeForLogoutReason(reason: string | null) {
 
 export function clearAuthState() {
   if (typeof window === 'undefined') return
+  // Expiry can originate in any online tab. Notify an already-running offline
+  // worker without provisioning storage or a profile for ordinary users.
+  void invalidateOfflineBeforeIdentityChange().catch(() => {})
   localStorage.removeItem('token')
   localStorage.removeItem('kommo_enabled')
   localStorage.removeItem(LAST_ACTIVITY_KEY)
   localStorage.removeItem(AUTH_REFRESHED_KEY)
+}
+
+export async function invalidateOfflineBeforeIdentityChange() {
+  if (typeof window === 'undefined') return
+  // Both browser-only generations may still exist while v5 replaces the
+  // former recovery shell. Invalidate them before any online identity switch
+  // so a delayed worker response can never write under the prior actor.
+  const [v4, v5] = await Promise.all([
+    import('@/offline-v4/client'),
+    import('@/offline-v5/client'),
+  ])
+  await Promise.all([
+    v4.invalidateActiveOfflineSession(),
+    v5.invalidateActiveOfflineV5Session(),
+  ])
 }
 
 export function markAuthActivity(force = false) {
@@ -78,6 +100,7 @@ export async function logoutFromBrowser(
 ) {
   if (typeof window === 'undefined') return
   clearIdleTimeout()
+  await invalidateOfflineBeforeIdentityChange()
   try {
     await fetch(`${API_BASE}/api/auth/logout`, {
       method: 'POST',
@@ -181,6 +204,7 @@ function handleUserActivity() {
 
 async function sendActivityHeartbeat() {
   if (typeof window === 'undefined') return
+  if (_offlineRuntimeActive) return
   if (!localStorage.getItem('token')) return
   if (isAuthIdleExpired()) {
     await logoutFromBrowser('idle')
@@ -207,7 +231,7 @@ async function sendActivityHeartbeat() {
 }
 
 export function initIdleTimeout() {
-  if (typeof window === 'undefined' || _idleInitialized) return
+  if (typeof window === 'undefined' || _idleInitialized || _offlineRuntimeActive) return
   _idleInitialized = true
   if (!localStorage.getItem(LAST_ACTIVITY_KEY)) markAuthActivity(true)
 
@@ -286,12 +310,12 @@ export async function api<T>(
   const { skipAuth = false, authMode = 'active', ...fetchOptions } = options
   const activeAuth = !skipAuth && authMode === 'active'
 
-  if (activeAuth && isAuthIdleExpired()) {
+  if (activeAuth && !_offlineRuntimeActive && isAuthIdleExpired()) {
     await logoutFromBrowser('idle')
     return { success: false, error: 'Sesión expirada por inactividad', status: 401 }
   }
 
-  if (activeAuth) {
+  if (activeAuth && !_offlineRuntimeActive) {
     const refreshOutcome = await refreshAccessTokenIfStale()
     if (refreshOutcome === 'expired') {
       await logoutFromBrowser('expired')
@@ -333,7 +357,7 @@ export async function api<T>(
 
     if (!res.ok) {
       // Handle 401 - try to refresh token before giving up
-      if (res.status === 401 && typeof window !== 'undefined' && activeAuth) {
+      if (res.status === 401 && typeof window !== 'undefined' && activeAuth && !_offlineRuntimeActive) {
         const refreshOutcome = await tryRefreshTokenOutcome()
         if (refreshOutcome === 'refreshed') {
           const retryRes = await fetch(`${API_BASE}${endpoint}`, {
@@ -369,7 +393,7 @@ export async function api<T>(
       return { success: false, data: data as T, error: data?.error || `Error ${res.status}`, status: res.status }
     }
 
-    if (activeAuth) markAuthActivity()
+    if (activeAuth && !_offlineRuntimeActive) markAuthActivity()
     return { success: true, data: data as T, status: res.status }
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
@@ -408,6 +432,9 @@ export const apiDelete = <T>(endpoint: string, body?: unknown) =>
 	})
 
 export async function apiBlob(endpoint: string, options: { signal?: AbortSignal; method?: string; body?: BodyInit; headers?: HeadersInit } = {}): Promise<{ success: boolean; blob?: Blob; filename?: string; error?: string; status?: number }> {
+  if (_offlineRuntimeActive) {
+    return { success: false, error: 'Este archivo no forma parte de la copia offline preparada.', status: 503 }
+  }
   const request = () => fetch(`${API_BASE}${endpoint}`, {
     credentials: 'include', signal: options.signal, method: options.method, body: options.body, headers: options.headers,
   })
@@ -445,6 +472,9 @@ export async function apiBlob(endpoint: string, options: { signal?: AbortSignal;
 }
 
 export async function apiUpload<T = any>(endpoint: string, formData: FormData, options: { signal?: AbortSignal } = {}): Promise<{ success: boolean; data?: T; error?: string; status?: number }> {
+  if (_offlineRuntimeActive) {
+    return { success: false, error: 'Los archivos requieren conexión y no se guardaron.', status: 503 }
+  }
   if (isAuthIdleExpired()) {
     await logoutFromBrowser('idle')
     return { success: false, error: 'Sesión expirada por inactividad' }
@@ -496,6 +526,8 @@ export function createWebSocket(
 ) {
   if (typeof window === 'undefined') return null
 
+  if (_offlineRuntimeActive) return null
+
   if (!localStorage.getItem('token')) return null
 
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -507,6 +539,7 @@ export function createWebSocket(
   let intentionallyClosed = false
 
   function connect() {
+    if (_offlineRuntimeActive) return
     ws = new WebSocket(wsUrl)
 
     ws.onopen = () => {
@@ -533,7 +566,7 @@ export function createWebSocket(
     }
 
     ws.onclose = () => {
-      if (intentionallyClosed) return
+      if (intentionallyClosed || _offlineRuntimeActive) return
       const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000)
       reconnectAttempts++
       console.log(`WebSocket reconnecting in ${delay / 1000}s...`)
@@ -573,6 +606,7 @@ let _sharedWS: WebSocket | null = null
 let _sharedReconnectTimer: ReturnType<typeof setTimeout> | null = null
 let _sharedReconnectAttempts = 0
 let _sharedIntentionallyClosed = false
+let _sharedOfflineSuppressed = false
 let _sharedRefCount = 0
 const _sharedListeners = new Set<WSListener>()
 const _sharedConnectListeners = new Set<WSConnectListener>()
@@ -586,6 +620,8 @@ function _sharedSend(data: string) {
 
 function _sharedConnect() {
   if (typeof window === 'undefined') return
+
+  if (_sharedOfflineSuppressed) return
 
   if (!localStorage.getItem('token')) return
 
@@ -679,6 +715,32 @@ export function subscribeWebSocket(
       }
     }
   }
+}
+
+/**
+ * Keep the canonical pages mounted while they use their encrypted local data,
+ * but prevent their existing realtime subscriptions from leaking a stale
+ * online cookie or creating an endless reconnect loop. Restoring online mode
+ * reconnects the same subscriptions without forcing a page reload.
+ */
+export function setSharedWebSocketOfflineSuppressed(suppressed: boolean) {
+  _offlineRuntimeActive = suppressed
+  if (_sharedOfflineSuppressed === suppressed) return
+  _sharedOfflineSuppressed = suppressed
+  if (suppressed) {
+    _sharedIntentionallyClosed = true
+    if (_sharedReconnectTimer) {
+      clearTimeout(_sharedReconnectTimer)
+      _sharedReconnectTimer = null
+    }
+    if (_sharedWS) {
+      _sharedWS.close()
+      _sharedWS = null
+    }
+    return
+  }
+  _sharedIntentionallyClosed = false
+  if (_sharedRefCount > 0) _sharedConnect()
 }
 
 /** Send a message through the shared WebSocket */

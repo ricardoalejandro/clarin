@@ -8,6 +8,11 @@ import (
 
 const TaskLocationViewTypeWhiteboard = "whiteboard"
 
+const (
+	TaskLocationViewVisibilityInherit    = "inherit"
+	TaskLocationViewVisibilityRestricted = "restricted"
+)
+
 // TaskLocationViewCapabilities are derived from the owning Work container.
 // They deliberately do not expose a second ACL for the linked resource.
 type TaskLocationViewCapabilities struct {
@@ -34,6 +39,7 @@ type TaskLocationView struct {
 	SortOrder      int64                        `json:"sort_order"`
 	Version        int64                        `json:"version"`
 	AccessRevision int64                        `json:"access_revision"`
+	VisibilityMode string                       `json:"visibility_mode"`
 	Lifecycle      string                       `json:"lifecycle"`
 	CreatedBy      *uuid.UUID                   `json:"created_by,omitempty"`
 	DeletedAt      *time.Time                   `json:"deleted_at,omitempty"`
@@ -41,6 +47,29 @@ type TaskLocationView struct {
 	UpdatedAt      time.Time                    `json:"updated_at"`
 	Resource       TaskLocationViewResource     `json:"resource"`
 	Capabilities   TaskLocationViewCapabilities `json:"capabilities"`
+}
+
+type TaskLocationViewVisibilityMember struct {
+	UserID               uuid.UUID `json:"user_id"`
+	DisplayName          string    `json:"display_name"`
+	Username             string    `json:"username"`
+	EffectiveAccessLevel string    `json:"effective_access_level"`
+	Eligible             bool      `json:"eligible"`
+}
+
+type TaskLocationViewVisibilityPolicy struct {
+	ViewID          uuid.UUID                           `json:"view_id"`
+	VisibilityMode  string                              `json:"visibility_mode"`
+	AccessRevision  int64                               `json:"access_revision"`
+	Members         []*TaskLocationViewVisibilityMember `json:"members"`
+	EffectiveAccess *WhiteboardEffectiveAccess          `json:"effective_access"`
+}
+
+type TaskLocationViewVisibilityCandidate struct {
+	UserID               uuid.UUID `json:"user_id"`
+	DisplayName          string    `json:"display_name"`
+	Username             string    `json:"username"`
+	EffectiveAccessLevel string    `json:"effective_access_level"`
 }
 
 func TaskLocationCapabilities(access *TaskEffectiveAccess) TaskLocationViewCapabilities {

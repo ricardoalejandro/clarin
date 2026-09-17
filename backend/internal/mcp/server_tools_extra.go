@@ -6,11 +6,55 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/naperu/clarin/internal/domain"
 )
 
 // ═══════════════════════════════════════════════════════════════
 // Tools: Programs, Campaigns, Surveys, Automations, Contacts, Chats
 // ═══════════════════════════════════════════════════════════════
+
+type programSessionResult struct {
+	ID        string `json:"id"`
+	Date      string `json:"date"`
+	Title     string `json:"title"`
+	Topic     string `json:"topic,omitempty"`
+	StartTime string `json:"start_time,omitempty"`
+	EndTime   string `json:"end_time,omitempty"`
+	Location  string `json:"location,omitempty"`
+	Confirmed int    `json:"confirmed"`
+	Present   int    `json:"present"`
+	Absent    int    `json:"absent"`
+	Late      int    `json:"late"`
+	Excused   int    `json:"excused"`
+}
+
+func buildProgramSessionResult(session *domain.ProgramSession) programSessionResult {
+	result := programSessionResult{
+		ID:    session.ID.String(),
+		Date:  session.Date.Format("2006-01-02"),
+		Title: session.Title,
+	}
+	if session.Topic != nil {
+		result.Topic = *session.Topic
+	}
+	if session.StartTime != nil {
+		result.StartTime = *session.StartTime
+	}
+	if session.EndTime != nil {
+		result.EndTime = *session.EndTime
+	}
+	if session.Location != nil {
+		result.Location = *session.Location
+	}
+	if session.AttendanceStats != nil {
+		result.Confirmed = session.AttendanceStats[domain.AttendanceStatusConfirmed]
+		result.Present = session.AttendanceStats[domain.AttendanceStatusPresent]
+		result.Absent = session.AttendanceStats[domain.AttendanceStatusAbsent]
+		result.Late = session.AttendanceStats[domain.AttendanceStatusLate]
+		result.Excused = session.AttendanceStats["excused"]
+	}
+	return result
+}
 
 // ──── list_programs ────
 func (s *MCPServer) toolListPrograms(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -139,45 +183,9 @@ func (s *MCPServer) toolGetProgramDetail(ctx context.Context, req mcp.CallToolRe
 	// Sessions
 	sessions, err := s.repos.Program.ListSessions(ctx, accountID, programID)
 	if err == nil {
-		type sessResult struct {
-			ID        string `json:"id"`
-			Date      string `json:"date"`
-			Title     string `json:"title"`
-			Topic     string `json:"topic,omitempty"`
-			StartTime string `json:"start_time,omitempty"`
-			EndTime   string `json:"end_time,omitempty"`
-			Location  string `json:"location,omitempty"`
-			Present   int    `json:"present"`
-			Absent    int    `json:"absent"`
-			Late      int    `json:"late"`
-			Excused   int    `json:"excused"`
-		}
-		sessList := make([]sessResult, 0, len(sessions))
+		sessList := make([]programSessionResult, 0, len(sessions))
 		for _, ss := range sessions {
-			sr := sessResult{
-				ID:    ss.ID.String(),
-				Date:  ss.Date.Format("2006-01-02"),
-				Title: ss.Title,
-			}
-			if ss.Topic != nil {
-				sr.Topic = *ss.Topic
-			}
-			if ss.StartTime != nil {
-				sr.StartTime = *ss.StartTime
-			}
-			if ss.EndTime != nil {
-				sr.EndTime = *ss.EndTime
-			}
-			if ss.Location != nil {
-				sr.Location = *ss.Location
-			}
-			if ss.AttendanceStats != nil {
-				sr.Present = ss.AttendanceStats["present"]
-				sr.Absent = ss.AttendanceStats["absent"]
-				sr.Late = ss.AttendanceStats["late"]
-				sr.Excused = ss.AttendanceStats["excused"]
-			}
-			sessList = append(sessList, sr)
+			sessList = append(sessList, buildProgramSessionResult(ss))
 		}
 		detail["sessions"] = sessList
 	}

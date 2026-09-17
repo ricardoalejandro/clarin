@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"log"
 	"os"
 	"strconv"
@@ -81,6 +82,36 @@ type Config struct {
 	// Login abuse protection
 	TurnstileSiteKey   string
 	TurnstileSecretKey string
+	// Offline Windows terminals. Production enablement requires the isolated
+	// signer and its token supplied through a read-only shared volume.
+	OfflineEnabled           bool // legacy master switch; every v2 flag is additionally fail-closed
+	OfflineControlEnabled    bool
+	OfflineEnrollmentEnabled bool
+	OfflineSyncReadEnabled   bool
+	OfflineWriteWhiteboards  bool
+	OfflineWriteTasks        bool
+	OfflineWriteContacts     bool
+	OfflineWritePrograms     bool
+	OfflineMinClientVersion  string
+	OfflineSignerAddress     string
+	OfflineSignerTokenFile   string
+	OfflineInstallerPath     string
+	OfflineInstallerSHA256   string
+	// Offline web v3 is a separate, fail-closed rollout.  It deliberately does
+	// not inherit any v2 switch: enabling a legacy terminal must never enable
+	// the browser/grant data plane by accident.
+	OfflineV3Enabled          bool
+	OfflineV4Enabled          bool
+	OfflineV4TaskWrites       bool
+	OfflineV4ServerOrigin     string
+	OfflineV5Enabled          bool
+	OfflineV5PrepareEnabled   bool
+	OfflineV5WritesEnabled    bool
+	OfflineV5BlobSyncEnabled  bool
+	OfflineV5ServerOrigin     string
+	OfflineV3TaskWrites       bool
+	OfflineV3ServerOrigin     string
+	OfflineV3MinClientVersion string
 }
 
 func Load() *Config {
@@ -89,6 +120,7 @@ func Load() *Config {
 	for i := range origins {
 		origins[i] = strings.TrimSpace(origins[i])
 	}
+	offlineInstallerPath := getEnv("OFFLINE_INSTALLER_PATH", "")
 
 	return &Config{
 		DatabaseURL:                     getEnv("DATABASE_URL", "postgres://clarin:clarin_secret_2026@localhost:5432/clarin?sslmode=disable"),
@@ -144,7 +176,53 @@ func Load() *Config {
 		WorkWhiteboardViewsEnabled:      getEnvBool("WORK_WHITEBOARD_VIEWS_ENABLED", false),
 		TurnstileSiteKey:                getEnv("TURNSTILE_SITE_KEY", getEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "")),
 		TurnstileSecretKey:              getEnv("TURNSTILE_SECRET_KEY", ""),
+		OfflineEnabled:                  getEnvBool("OFFLINE_TERMINALS_ENABLED", false),
+		OfflineControlEnabled:           getEnvBool("OFFLINE_CONTROL_ENABLED", false),
+		OfflineEnrollmentEnabled:        getEnvBool("OFFLINE_ENROLLMENT_ENABLED", false),
+		OfflineSyncReadEnabled:          getEnvBool("OFFLINE_SYNC_READ_ENABLED", false),
+		OfflineWriteWhiteboards:         getEnvBool("OFFLINE_WRITE_WHITEBOARDS_ENABLED", false),
+		OfflineWriteTasks:               getEnvBool("OFFLINE_WRITE_TASKS_ENABLED", false),
+		OfflineWriteContacts:            getEnvBool("OFFLINE_WRITE_CONTACTS_ENABLED", false),
+		OfflineWritePrograms:            getEnvBool("OFFLINE_WRITE_PROGRAMS_ENABLED", false),
+		OfflineMinClientVersion:         strings.TrimSpace(getEnv("OFFLINE_MIN_CLIENT_VERSION", "0.1.0")),
+		OfflineSignerAddress:            strings.TrimRight(getEnv("OFFLINE_SIGNER_ADDRESS", ""), "/"),
+		OfflineSignerTokenFile:          getEnv("OFFLINE_SIGNER_TOKEN_FILE", ""),
+		OfflineInstallerPath:            offlineInstallerPath,
+		OfflineInstallerSHA256:          artifactSHA256("OFFLINE_INSTALLER_SHA256", offlineInstallerPath),
+		OfflineV3Enabled:                getEnvBool("OFFLINE_V3_ENABLED", false),
+		OfflineV4Enabled:                getEnvBool("OFFLINE_V4_ENABLED", false),
+		OfflineV4TaskWrites:             getEnvBool("OFFLINE_V4_TASK_WRITES_ENABLED", false),
+		OfflineV4ServerOrigin:           strings.TrimRight(getEnv("OFFLINE_V4_SERVER_ORIGIN", "https://clarin.naperu.cloud"), "/"),
+		OfflineV5Enabled:                getEnvBool("OFFLINE_V5_ENABLED", false),
+		OfflineV5PrepareEnabled:         getEnvBool("OFFLINE_V5_PREPARE_ENABLED", false),
+		OfflineV5WritesEnabled:          getEnvBool("OFFLINE_V5_WRITES_ENABLED", false),
+		// Reserved for a future end-to-end blob transport. Keep this false even
+		// if a stale deployment environment still contains the former flag: the
+		// v5 contract must never advertise a capability it cannot enforce.
+		OfflineV5BlobSyncEnabled:  false,
+		OfflineV5ServerOrigin:     strings.TrimRight(getEnv("OFFLINE_V5_SERVER_ORIGIN", getEnv("OFFLINE_V4_SERVER_ORIGIN", "https://clarin.naperu.cloud")), "/"),
+		OfflineV3TaskWrites:       getEnvBool("OFFLINE_V3_TASK_WRITES_ENABLED", false),
+		OfflineV3ServerOrigin:     strings.TrimRight(getEnv("OFFLINE_V3_SERVER_ORIGIN", "https://clarin.naperu.cloud"), "/"),
+		OfflineV3MinClientVersion: strings.TrimSpace(getEnv("OFFLINE_V3_MIN_CLIENT_VERSION", "3.0.0")),
 	}
+}
+
+func artifactSHA256(envName, artifactPath string) string {
+	if configured := strings.ToLower(strings.TrimSpace(os.Getenv(envName))); configured != "" {
+		return configured
+	}
+	if artifactPath == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(artifactPath + ".sha256")
+	if err != nil {
+		return ""
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.ToLower(fields[0])
 }
 
 func getEnv(key, defaultValue string) string {
@@ -204,5 +282,41 @@ func (c *Config) Validate() {
 	}
 	if c.AdminPassword == "clarin123" {
 		log.Fatal("[CONFIG] FATAL: ADMIN_PASSWORD is using the default value in production. Set a secure ADMIN_PASSWORD environment variable.")
+	}
+	offlineDataPlane := c.OfflineEnrollmentEnabled || c.OfflineSyncReadEnabled || c.OfflineWriteWhiteboards || c.OfflineWriteTasks || c.OfflineWriteContacts || c.OfflineWritePrograms
+	if c.OfflineEnabled && offlineDataPlane && (c.OfflineSignerAddress == "" || c.OfflineSignerTokenFile == "") {
+		log.Fatal("[CONFIG] FATAL: offline terminals require the isolated signer address and token file")
+	}
+	if c.OfflineEnabled && c.OfflineEnrollmentEnabled && (c.OfflineInstallerPath == "" || len(c.OfflineInstallerSHA256) != 64) {
+		log.Fatal("[CONFIG] FATAL: offline terminals require a published installer with a SHA-256 value")
+	}
+	if c.OfflineEnabled && c.OfflineEnrollmentEnabled {
+		if _, err := hex.DecodeString(c.OfflineInstallerSHA256); err != nil {
+			log.Fatal("[CONFIG] FATAL: OFFLINE_INSTALLER_SHA256 must be hexadecimal")
+		}
+	}
+	if (c.OfflineWriteWhiteboards || c.OfflineWriteTasks || c.OfflineWriteContacts || c.OfflineWritePrograms) && !c.OfflineSyncReadEnabled {
+		log.Fatal("[CONFIG] FATAL: offline module writes require OFFLINE_SYNC_READ_ENABLED")
+	}
+	if c.OfflineV3TaskWrites && !c.OfflineV3Enabled {
+		log.Fatal("[CONFIG] FATAL: OFFLINE_V3_TASK_WRITES_ENABLED requires OFFLINE_V3_ENABLED")
+	}
+	if c.OfflineV4TaskWrites && !c.OfflineV4Enabled {
+		log.Fatal("[CONFIG] FATAL: OFFLINE_V4_TASK_WRITES_ENABLED requires OFFLINE_V4_ENABLED")
+	}
+	if (c.OfflineV5PrepareEnabled || c.OfflineV5WritesEnabled || c.OfflineV5BlobSyncEnabled) && !c.OfflineV5Enabled {
+		log.Fatal("[CONFIG] FATAL: offline v5 feature flags require OFFLINE_V5_ENABLED")
+	}
+	if (c.OfflineV5WritesEnabled && !c.OfflineV5PrepareEnabled) || (c.OfflineV5BlobSyncEnabled && !c.OfflineV5WritesEnabled) {
+		log.Fatal("[CONFIG] FATAL: offline v5 writes require preparation and blob sync additionally requires writes")
+	}
+	if c.OfflineV5Enabled && (c.OfflineSignerAddress == "" || c.OfflineSignerTokenFile == "" || c.OfflineV5ServerOrigin != c.OfflineV4ServerOrigin) {
+		log.Fatal("[CONFIG] FATAL: offline web v5 requires the v4-compatible isolated signer and the exact same trusted origin")
+	}
+	if c.OfflineV4Enabled && (c.OfflineSignerAddress == "" || c.OfflineSignerTokenFile == "") {
+		log.Fatal("[CONFIG] FATAL: offline web v4 requires the isolated signer address and token file")
+	}
+	if c.OfflineV3Enabled && (c.OfflineSignerAddress == "" || c.OfflineSignerTokenFile == "") {
+		log.Fatal("[CONFIG] FATAL: offline web v3 requires the isolated signer address and token file")
 	}
 }

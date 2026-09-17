@@ -1042,6 +1042,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
         viewModeEnabled={session.access_level !== 'edit'}
         isCollaborating
         aiEnabled={false}
+        mermaidEnabled
         enableRichText
         showDeprecatedFonts={WHITEBOARD_SHOW_DEPRECATED_OFFICIAL_FONTS}
         validateEmbeddable={false}

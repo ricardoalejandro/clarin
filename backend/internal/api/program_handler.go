@@ -855,9 +855,10 @@ SELECT EXISTS(
 
 	var req struct {
 		Records []struct {
-			ParticipantID uuid.UUID `json:"participant_id"`
-			Status        string    `json:"status"`
-			Notes         string    `json:"notes"`
+			ParticipantID  uuid.UUID `json:"participant_id"`
+			Status         string    `json:"status"`
+			ExpectedStatus *string   `json:"expected_status"`
+			Notes          string    `json:"notes"`
 		} `json:"records"`
 	}
 	if err := c.BodyParser(&req); err != nil {
@@ -871,18 +872,34 @@ SELECT EXISTS(
 	for _, r := range req.Records {
 		notes := r.Notes
 		attendances = append(attendances, &domain.ProgramAttendance{
-			SessionID:     sessionID,
-			ParticipantID: r.ParticipantID,
-			Status:        r.Status,
-			Notes:         &notes,
+			SessionID:      sessionID,
+			ParticipantID:  r.ParticipantID,
+			Status:         r.Status,
+			ExpectedStatus: r.ExpectedStatus,
+			Notes:          &notes,
 		})
 	}
 
 	if err := s.services.Program.BatchMarkAttendance(c.Context(), accountID, userID, programID, sessionID, attendances); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		return writeAttendanceBatchError(c, err)
 	}
 
 	return c.JSON(fiber.Map{"success": true, "count": len(attendances)})
+}
+
+func writeAttendanceBatchError(c *fiber.Ctx, err error) error {
+	var conflict *repository.ProgramAttendanceConflictError
+	if errors.As(err, &conflict) {
+		const message = "La asistencia cambió mientras editabas. Revisa los participantes en conflicto."
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"success":   false,
+			"code":      "attendance_conflict",
+			"error":     message,
+			"message":   message,
+			"conflicts": conflict.Conflicts,
+		})
+	}
+	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": err.Error()})
 }
 
 func (s *Server) handleGetAttendance(c *fiber.Ctx) error {
@@ -1376,17 +1393,21 @@ func (s *Server) handleCreateProgramFolder(c *fiber.Ctx) error {
 		folder.ParentID = &pid
 	}
 	if err := s.services.Program.CreateFolder(c.Context(), folder); err != nil {
+		if errors.Is(err, repository.ErrProgramFolderDestinationInvalid) {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Parent folder not found"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	return c.Status(201).JSON(fiber.Map{"success": true, "folder": folder})
 }
 
 func (s *Server) handleUpdateProgramFolder(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	fid, err := uuid.Parse(c.Params("fid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid folder ID"})
 	}
-	folder, err := s.services.Program.GetFolderByID(c.Context(), fid)
+	folder, err := s.services.Program.GetFolderByID(c.Context(), accountID, fid)
 	if err != nil || folder == nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Folder not found"})
 	}
@@ -1407,24 +1428,32 @@ func (s *Server) handleUpdateProgramFolder(c *fiber.Ctx) error {
 	if req.Icon != nil {
 		folder.Icon = *req.Icon
 	}
-	if err := s.services.Program.UpdateFolder(c.Context(), folder); err != nil {
+	if err := s.services.Program.UpdateFolder(c.Context(), accountID, folder); err != nil {
+		if errors.Is(err, repository.ErrProgramFolderNotFound) {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Folder not found"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true, "folder": folder})
 }
 
 func (s *Server) handleDeleteProgramFolder(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	fid, err := uuid.Parse(c.Params("fid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid folder ID"})
 	}
-	if err := s.services.Program.DeleteFolder(c.Context(), fid); err != nil {
+	if err := s.services.Program.DeleteFolder(c.Context(), accountID, fid); err != nil {
+		if errors.Is(err, repository.ErrProgramFolderNotFound) {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Folder not found"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})
 }
 
 func (s *Server) handleMoveProgramToFolder(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
 	programID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid program ID"})
@@ -1443,7 +1472,10 @@ func (s *Server) handleMoveProgramToFolder(c *fiber.Ctx) error {
 		}
 		folderID = &fid
 	}
-	if err := s.services.Program.MoveProgramToFolder(c.Context(), programID, folderID); err != nil {
+	if err := s.services.Program.MoveProgramToFolder(c.Context(), accountID, programID, folderID); err != nil {
+		if errors.Is(err, repository.ErrProgramFolderDestinationInvalid) {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Program or folder not found"})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true})

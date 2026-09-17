@@ -29,6 +29,13 @@ func TestTaskLocationViewMigrationKeepsContextAndIsolationInvariants(t *testing.
 		"FOREIGN KEY(account_id,actor_id) REFERENCES user_accounts(account_id,user_id) ON DELETE CASCADE",
 		"request_payload_hash CHAR(64) NOT NULL",
 		"access_revision BIGINT NOT NULL DEFAULT 1",
+		"visibility_mode VARCHAR(16) NOT NULL DEFAULT 'inherit'",
+		"CHECK (visibility_mode IN ('inherit','restricted'))",
+		"CREATE TABLE IF NOT EXISTS task_location_view_visibility_members",
+		"PRIMARY KEY(account_id,task_view_id,user_id)",
+		"FOREIGN KEY(account_id,user_id) REFERENCES user_accounts(account_id,user_id) ON DELETE CASCADE",
+		"task_location_view_operations_action_check",
+		"'replace_visibility'",
 		"idx_task_location_views_folder_order",
 		"idx_task_location_views_list_order",
 	} {

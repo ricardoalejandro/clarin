@@ -1,0 +1,15 @@
+@import '../offline-v3/offline-runtime.css';
+
+.offline-mobile-session-actions { display: none; }
+@media (max-width: 860px) {
+  .offline-mobile-session-actions { display: flex; flex-shrink: 0; justify-content: flex-end; padding: 8px 12px; border-bottom: 1px solid #dbe4ee; background: #f8fafc; }
+  .offline-mobile-session-actions .offline-button { min-height: 44px; white-space: normal; text-align: left; }
+}
+
+.offline-copy-options { border: 0; margin: 0 0 18px; padding: 0; max-height: 180px; overflow-y: auto; }
+.offline-copy-options legend { margin-bottom: 8px; font-size: 13px; font-weight: 600; color: #475569; }
+.offline-copy-options label { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 8px; border-bottom: 1px solid #e2e8f0; font-size: 14px; }
+.offline-copy-options input { accent-color: #059669; }
+.offline-sidebar__lock { white-space: normal; text-align: left; }
+.offline-login__card { max-height: none; }
+.offline-account-options { display: grid; gap: 10px; max-height: 260px; overflow-y: auto; margin-bottom: 12px; }

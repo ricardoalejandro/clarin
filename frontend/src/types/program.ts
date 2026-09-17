@@ -175,7 +175,7 @@ export interface ProgramAttendance {
   id: string;
   session_id: string;
   participant_id: string;
-  status: 'present' | 'absent' | 'late' | '';
+  status: 'confirmed' | 'present' | 'absent' | 'late' | '';
   notes: string;
   observation_count: number;
   observation_preview: ProgramAttendanceObservation[];
@@ -218,7 +218,7 @@ export interface ProgramParticipantAttendanceHistorySession {
   end_time?: string | null;
   session_type: 'regular' | 'recovery';
   topics: ProgramSessionTopic[];
-  status: 'present' | 'absent' | 'late' | null;
+  status: 'confirmed' | 'present' | 'absent' | 'late' | null;
   observation_count: number;
   observation_preview?: ProgramAttendanceObservation | null;
   /** Temporary compatibility alias for early attendance-history responses. */
@@ -294,6 +294,7 @@ export interface ProgramSessionAttendanceStat {
   title: string;
   topic: string;
   date: string;
+  confirmed: number;
   present: number;
   absent: number;
   late: number;

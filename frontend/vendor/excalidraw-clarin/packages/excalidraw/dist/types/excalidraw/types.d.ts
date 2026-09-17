@@ -462,6 +462,8 @@ export interface ExcalidrawProps {
     validateEmbeddable?: boolean | string[] | RegExp | RegExp[] | ((link: string) => boolean | undefined);
     renderEmbeddable?: (element: NonDeleted<ExcalidrawEmbeddableElement>, appState: AppState) => JSX.Element | null;
     aiEnabled?: boolean;
+    /** Enables local Mermaid parsing independently from AI generation. */
+    mermaidEnabled?: boolean;
     showDeprecatedFonts?: boolean;
 }
 export type SceneData = {
@@ -503,7 +505,8 @@ export type AppProps = Merge<ExcalidrawProps, {
     handleKeyboardGlobally: boolean;
     isCollaborating: boolean;
     children?: React.ReactNode;
-    aiEnabled: boolean;
+        aiEnabled: boolean;
+        mermaidEnabled: boolean;
 }>;
 /** A subset of App class properties that we need to use elsewhere
  * in the app, eg Manager. Factored out into a separate type to keep DRY. */

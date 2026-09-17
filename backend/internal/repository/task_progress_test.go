@@ -25,3 +25,25 @@ func TestSynchronizeTaskStatusCategoryMarksDoneWithoutDeleting(t *testing.T) {
 		t.Fatal("completing a task must never send it to trash")
 	}
 }
+
+func TestNormalizeTaskReadProgressShowsDoneAsCompleteWithoutLosingManualValue(t *testing.T) {
+	task := &domain.Task{
+		Status:         domain.TaskStatusCompleted,
+		Progress:       35,
+		ManualProgress: 35,
+		StatusDetail:   &domain.TaskStatus{Category: domain.TaskStatusCategoryDone},
+	}
+	normalizeTaskReadProgress(task)
+	if task.Progress != 100 {
+		t.Fatalf("completed task exposed progress %d instead of 100", task.Progress)
+	}
+	if task.ManualProgress != 35 {
+		t.Fatalf("manual progress was destroyed: %d", task.ManualProgress)
+	}
+
+	active := &domain.Task{Status: domain.TaskStatusPending, Progress: 42, ManualProgress: 42, StatusDetail: &domain.TaskStatus{Category: domain.TaskStatusCategoryActive}}
+	normalizeTaskReadProgress(active)
+	if active.Progress != 42 {
+		t.Fatalf("active manual progress changed: %d", active.Progress)
+	}
+}

@@ -1,5 +1,26 @@
 # Changelog — Clarin CRM
 
+## 2026-09-15
+
+### Offline web v5 — mismas pantallas, edición local segura
+
+- Un superadmin activo también puede solicitar acceso offline para una cuenta concreta. La copia no hereda privilegios globales: continúa limitada a las cuentas, módulos, capacidades y recursos que se aprueben expresamente.
+- Clarín continúa en las mismas rutas y componentes de Tareas, Contactos, Programas y Pizarras cuando falta Internet; solo muestra un indicador discreto de modo offline y no instala aplicaciones, servicios, extensiones ni certificados en la PC.
+- El superadmin autoriza exactamente el perfil de navegador, usuario y cuenta. El usuario elige hasta 20 recursos raíz; únicamente esos recursos y sus dependencias necesarias se cifran en el navegador, sin mezclar usuarios o cuentas.
+- Las funciones editables admitidas por los recursos seleccionados guardan cambios localmente y los sincronizan de forma idempotente al recuperar conectividad. Los archivos y otras funciones no transportables permanecen explícitamente disponibles solo online.
+- La contraseña actual de Clarín se usa de forma transitoria para desbloquear la copia, nunca se persiste. IndexedDB conserva solo registros cifrados; CacheStorage contiene exclusivamente el shell público verificado por SHA-256 y dos generaciones recuperables.
+- Cerrar por completo el navegador y abrir la misma dirección sin conexión permite volver a desbloquear una copia vigente. Una caída de Cloudflare u origen ofrece esperar o entrar offline, y volver a tener red no cambia automáticamente de identidad ni abandona la sesión offline.
+- Leases firmados de hasta 24 horas, bloqueo tras 30 minutos de inactividad, ACL y capacidades vivas, límites previos al procesamiento, recibos exactos y política server-wins protegen revocaciones, conflictos, reintentos y pérdida de respuestas sin repetir mutaciones.
+
+### Offline web v4 — acceso desde el navegador
+
+- Acceso offline desde la misma dirección de Clarin, sin instalador, servicio Windows ni certificados de cliente.
+- El superadmin autoriza cada perfil de navegador, usuario y cuenta; el usuario elige los recursos que se guardan cifrados.
+- Desbloqueo con la contraseña de Clarin, vigencia máxima de 24 horas, bloqueo por inactividad e indicador visible del modo offline.
+- Consulta de contactos, programas y pizarras; creación y completado local de tareas cuando existe permiso y almacenamiento persistente.
+- Reconexión sin cambiar de identidad, operaciones idempotentes y conservación de conflictos; cambios de sesión invalidan el acceso local previo.
+- Activación independiente del flujo nativo retirado. El navegador no acredita una PC física y borrar sus datos puede eliminar las copias locales.
+
 ## 2026-08-25
 
 ### Build 2 — Pizarras contextuales dentro de Clarin Work

@@ -2,6 +2,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AdminPage from './page'
 
+vi.mock('@/components/admin/OfflineAccessAdminV5', () => ({ default: () => <section aria-label="Autorizaciones offline del navegador" /> }))
+
 interface TestRouteOptions {
   createAccount?: (init: RequestInit) => Response | Promise<Response>
   createRole?: (init: RequestInit) => Response | Promise<Response>
@@ -173,6 +175,16 @@ afterEach(() => {
 })
 
 describe('AdminPage administrative creation flows', () => {
+  it('removes the unrelated global search from the self-contained offline approval panel', async () => {
+    installFetch()
+    await renderAdminPage()
+    expect(screen.getByPlaceholderText('Buscar cuentas...')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Offline' }))
+    expect(screen.getByRole('region', { name: 'Autorizaciones offline del navegador' })).toBeVisible()
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^Cuentas\b/ }))
+    expect(screen.getByPlaceholderText('Buscar cuentas...')).toBeVisible()
+  })
   it('reports and focuses the first invalid account assignment before later fields', async () => {
     const fetchMock = installFetch()
     await renderAdminPage()

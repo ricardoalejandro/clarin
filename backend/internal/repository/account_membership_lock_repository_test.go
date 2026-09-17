@@ -173,8 +173,8 @@ func TestTaskParticipantGrantCallersLockMembershipsBeforeResources(t *testing.T)
 		preflight  string
 		revalidate string
 	}{
-		{"task_repository.go", "func (r *TaskRepository) Create(", "func (r *TaskRepository) Update(", "", "taskParticipantsNeedingGrant("},
-		{"task_repository.go", "func (r *TaskRepository) Update(", "func (r *TaskRepository) GetByID(", "", "taskParticipantsNeedingGrant("},
+		{"task_repository.go", "func (r *TaskRepository) CreateTx(", "func (r *TaskRepository) Update(", "", "taskCreateParticipantsNeedingGrant("},
+		{"task_repository.go", "func (r *TaskRepository) UpdateTx(", "func (r *TaskRepository) GetByID(", "", "taskParticipantsNeedingGrant("},
 		{"task_work_repository.go", "func (r *TaskWorkRepository) SetCollaborators(", "func (r *TaskWorkRepository) ListCollaborators(", "SELECT assigned_to FROM tasks", "ownerID != observedOwnerID"},
 		{"task_bulk_operations.go", "func (r *TaskWorkRepository) BulkUpdateTasks(", "func (r *TaskWorkRepository) BulkTrashTasks(", "", "taskParticipantsNeedingGrant("},
 		{"task_environment_move_repository.go", "func (r *TaskWorkRepository) MoveTaskToEnvironment(", "", "SELECT participant.user_id", "taskParticipantIDSetsEqual(participants, currentParticipants)"},

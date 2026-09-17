@@ -3,6 +3,18 @@
 The fork is kept source-connected to Excalidraw `v0.18.1`. The maintained patch
 surface is:
 
+- `packages/excalidraw/mermaid.ts`, `components/App.tsx` and
+  `components/TTDDialog/TTDDialog.tsx`: `.7` closes implicit Mermaid clipboard
+  conversion and dialog/parser loading when the host sets `aiEnabled={false}`.
+  Diagram-like clipboard text remains ordinary editable text. Both parser
+  entry points use one tested capability boundary, including direct dialog use.
+  Nanoid 3.3.19 and Radix Tabs 1.1.21 retain the same APIs with security fixes
+  and React 19 support; remaining transitives are pinned by the root lock.
+  Upstream's unused development dependency block is omitted from this vendored
+  package: Clarin builds and tests it exclusively with the pinned tools in
+  `frontend/package.json`. This avoids a second unmaintained test/build stack;
+  the upstream application build scripts are provenance, not release commands.
+
 - `packages/excalidraw/element/clarinRichText.ts`: canonical partial-text marks.
 - `packages/excalidraw/element/clarinParagraphFormat.ts`: canonical partial
   paragraph-alignment model.

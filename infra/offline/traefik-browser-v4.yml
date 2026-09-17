@@ -1,0 +1,37 @@
+# Managed by Clarin browser offline deployment. No private data.
+http:
+  routers:
+    clarin-offline-v5-file:
+      rule: "Host(`clarin.naperu.cloud`) && PathRegexp(`(?i)^/api/(offline/v5|admin/offline-v5)(/.*)?$`)"
+      service: clarin-offline-browser-file
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      priority: 271
+      middlewares:
+        - clarin-offline-v5-file-limit
+    clarin-offline-v4-file:
+      rule: "Host(`clarin.naperu.cloud`) && Path(`/{offline:(?i:api/(?:offline/v4|admin/offline-v4)(?:/.*)?)}`)"
+      service: clarin-offline-browser-file
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      priority: 270
+      middlewares:
+        - clarin-offline-v4-file-limit
+  services:
+    clarin-offline-browser-file:
+      loadBalancer:
+        servers:
+          - url: http://clarin-backend:8080
+  middlewares:
+    clarin-offline-v5-file-limit:
+      buffering:
+        maxRequestBodyBytes: 2097152
+        memRequestBodyBytes: 65536
+    clarin-offline-v4-file-limit:
+      buffering:
+        maxRequestBodyBytes: 2097152
+        memRequestBodyBytes: 65536

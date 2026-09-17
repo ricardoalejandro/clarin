@@ -12,6 +12,22 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+const programAttendanceStatusConstraintMigration = `DO $$
+	BEGIN
+		IF NOT EXISTS (
+			SELECT 1
+			FROM pg_constraint
+			WHERE conname = 'program_attendance_status_v2_check'
+			  AND conrelid = 'program_attendance'::regclass
+		) THEN
+			ALTER TABLE program_attendance
+				DROP CONSTRAINT IF EXISTS program_attendance_status_check;
+			ALTER TABLE program_attendance
+				ADD CONSTRAINT program_attendance_status_v2_check
+				CHECK (status IS NULL OR status IN ('confirmed', 'present', 'absent', 'late'));
+		END IF;
+	END $$`
+
 func Connect(databaseURL string) (*pgxpool.Pool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -3108,17 +3124,7 @@ func Migrate(db *pgxpool.Pool) error {
 			  AND existing.program_participant_id = pp.id
 		   )`,
 		`UPDATE program_attendance SET status = 'absent' WHERE status = 'excused'`,
-		`DO $$ BEGIN
-			IF NOT EXISTS (
-				SELECT 1 FROM pg_constraint
-				WHERE conname = 'program_attendance_status_check'
-				  AND conrelid = 'program_attendance'::regclass
-			) THEN
-				ALTER TABLE program_attendance
-					ADD CONSTRAINT program_attendance_status_check
-					CHECK (status IS NULL OR status IN ('present', 'absent', 'late'));
-			END IF;
-		END $$`,
+		programAttendanceStatusConstraintMigration,
 
 		// ─── Kommo Push Outbox: batched, coalesced push worker ─────────────
 		// Enables bulk PATCH to Kommo (up to 250 items/req) with coalescing
@@ -3964,7 +3970,31 @@ func Migrate(db *pgxpool.Pool) error {
 	if err := migrateWhiteboards(ctx, db); err != nil {
 		return err
 	}
+	if err := migrateOfflineTerminals(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateOfflineSyncV2(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateOfflineEnrollmentRequests(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateOfflineCertificateFree(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateOfflineDevicePosture(ctx, db); err != nil {
+		return err
+	}
 	if err := migrateTaskLocationViews(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateOfflineV3(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateOfflineV4(ctx, db); err != nil {
+		return err
+	}
+	if err := migrateOfflineV5(ctx, db); err != nil {
 		return err
 	}
 

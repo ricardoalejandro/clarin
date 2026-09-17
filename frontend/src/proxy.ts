@@ -9,7 +9,7 @@ function getHost(request: NextRequest) {
   return (request.headers.get('host') || '').split(':')[0].toLowerCase()
 }
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
   const host = getHost(request)
   const isMarketingHost = host === MARKETING_HOST

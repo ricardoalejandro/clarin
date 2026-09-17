@@ -674,6 +674,24 @@ func (r *ContactProfileRepository) Update(ctx context.Context, accountID, contac
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	contact, err := r.updateTx(ctx, tx, accountID, contactID, patch)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return contact, nil
+}
+
+// UpdateTx exposes the same canonical Contact identity mutation to compound
+// transactions such as offline synchronization. The caller owns commit and
+// rollback; all account/alias/compatibility guarantees remain identical.
+func (r *ContactProfileRepository) UpdateTx(ctx context.Context, tx pgx.Tx, accountID, contactID uuid.UUID, patch ContactProfilePatch) (*domain.Contact, error) {
+	return r.updateTx(ctx, tx, accountID, contactID, patch)
+}
+
+func (r *ContactProfileRepository) updateTx(ctx context.Context, tx pgx.Tx, accountID, contactID uuid.UUID, patch ContactProfilePatch) (*domain.Contact, error) {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1::text))`, accountID); err != nil {
 		return nil, err
 	}
@@ -842,9 +860,6 @@ func (r *ContactProfileRepository) Update(ctx context.Context, accountID, contac
 		return nil, err
 	}
 	if err := r.hydrate(ctx, tx, accountID, contact); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return contact, nil

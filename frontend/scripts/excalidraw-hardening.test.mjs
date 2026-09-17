@@ -7,6 +7,20 @@ import { fileURLToPath } from 'node:url'
 import { hardenEditorBundle } from './excalidraw-hardening.mjs'
 import { loadWhiteboardFontCatalog, runtimeWhiteboardFontCatalog } from './whiteboard-font-catalog.mjs'
 
+test('all Mermaid parser imports are behind the host capability boundary', async () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '../vendor/excalidraw-clarin/packages/excalidraw')
+  const app = await readFile(resolve(root, 'components/App.tsx'), 'utf8')
+  const dialog = await readFile(resolve(root, 'components/TTDDialog/TTDDialog.tsx'), 'utf8')
+  const loader = await readFile(resolve(root, 'mermaid.ts'), 'utf8')
+  assert.doesNotMatch(app + dialog, /import\(["']@excalidraw\/mermaid-to-excalidraw["']\)/u)
+  assert.match(app, /isMermaidEnabled\(this\.props\.mermaidEnabled\) && isMaybeMermaidDefinition/u)
+  assert.match(app, /loadMermaidParser\(this\.props\.mermaidEnabled\)/u)
+  assert.match(dialog, /\? !isMermaidEnabled\(app\.props\.mermaidEnabled\)/u)
+  assert.match(dialog, /api: loadMermaidParser\(app\.props\.mermaidEnabled\)/u)
+  assert.match(loader, /if \(!isMermaidEnabled\(mermaidEnabled\)\)/u)
+  assert.doesNotMatch(app + dialog + loader, /loadMermaidParser\([^)]*aiEnabled/u)
+})
+
 test('neutralizes external URLs in literals and dynamic template helpers', () => {
   const source = [
     'const docs = "https://docs.example.invalid/help";',
@@ -23,13 +37,13 @@ test('neutralizes external URLs in literals and dynamic template helpers', () =>
 test('keeps XML namespaces and rewrites the audited font fallback to an absolute same-origin URL', () => {
   const source = [
     'const svg = "http://www.w3.org/2000/svg";',
-    'const pkg = { name: "@excalidraw/excalidraw", version: "0.18.1-clarin.6" };',
+    'const pkg = { name: "@excalidraw/excalidraw", version: "0.18.1-clarin.7" };',
     'const fallback = `https://esm.sh/${pkg.name}@${pkg.version}/dist/prod/`;',
     'const fontURL = (asset) => new URL(asset, fallback).href;',
   ].join('\n')
   const result = hardenEditorBundle(source, 'hardening-local-fixture.js')
   assert.match(result.hardened, /http:\/\/www\.w3\.org\/2000\/svg/)
-  assert.match(result.hardened, /\/vendor\/whiteboards-editor\/0\.18\.1-clarin\.6\//)
+  assert.match(result.hardened, /\/vendor\/whiteboards-editor\/0\.18\.1-clarin\.7\//)
   assert.doesNotMatch(result.hardened, /\/dist\/prod\//)
   assert.equal(result.localFallbacks, 1)
   const resolveFont = new Function(
@@ -38,14 +52,14 @@ test('keeps XML namespaces and rewrites the audited font fallback to an absolute
   )
   assert.equal(
     resolveFont({ location: { origin: 'https://clarin.example.invalid' } }),
-    'https://clarin.example.invalid/vendor/whiteboards-editor/0.18.1-clarin.6/fonts/Excalifont/Excalifont-Regular.woff2',
+    'https://clarin.example.invalid/vendor/whiteboards-editor/0.18.1-clarin.7/fonts/Excalifont/Excalifont-Regular.woff2',
   )
 })
 
 test('repairs bundles transformed with a relative fork fallback', () => {
   const source = [
-    'const pkg = { name: "@excalidraw/excalidraw", version: "0.18.1-clarin.6" };',
-    'const fallback = `/vendor/whiteboards-editor/0.18.1-clarin.6/${pkg.name}@${pkg.version}/dist/prod/`;',
+    'const pkg = { name: "@excalidraw/excalidraw", version: "0.18.1-clarin.7" };',
+    'const fallback = `/vendor/whiteboards-editor/0.18.1-clarin.7/${pkg.name}@${pkg.version}/dist/prod/`;',
     'const fontURL = (asset) => new URL(asset, fallback).href;',
   ].join('\n')
   const result = hardenEditorBundle(source, 'hardening-legacy-local-fixture.js')
@@ -56,7 +70,7 @@ test('repairs bundles transformed with a relative fork fallback', () => {
   assert.equal(result.localFallbacks, 1)
   assert.equal(
     resolveFont({ location: { origin: 'https://clarin.example.invalid' } }),
-    'https://clarin.example.invalid/vendor/whiteboards-editor/0.18.1-clarin.6/fonts/Virgil/Virgil.woff2',
+    'https://clarin.example.invalid/vendor/whiteboards-editor/0.18.1-clarin.7/fonts/Virgil/Virgil.woff2',
   )
 })
 

@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 import { getPasswordIssues } from '@/components/PasswordStrengthChecklist'
 import { AdminFormDialog, AdminPasswordFields } from '@/components/admin'
+import OfflineAccessAdminV5 from '@/components/admin/OfflineAccessAdminV5'
 import { apiDelete, apiGet, apiPost, logoutFromBrowser, tryRefreshToken } from '@/lib/api'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 import {
@@ -380,7 +381,7 @@ function bytesToGb(value?: number) {
   return value && value > 0 ? Math.round((value / 1024 / 1024 / 1024) * 10) / 10 : 0
 }
 
-type Tab = 'accounts' | 'users' | 'roles' | 'eros' | 'mcp' | 'integrations'
+type Tab = 'accounts' | 'users' | 'roles' | 'eros' | 'mcp' | 'offline' | 'integrations'
 
 export default function AdminPage() {
   const [tab, setTab] = useState<Tab>('accounts')
@@ -2076,7 +2077,7 @@ export default function AdminPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit mb-4">
+      <div className="flex max-w-full gap-1 overflow-x-auto bg-gray-100 p-1 rounded-lg w-fit mb-4">
         <button
           onClick={() => { setTab('accounts'); setSearch(''); setDebouncedSearch('') }}
           className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
@@ -2122,6 +2123,14 @@ export default function AdminPage() {
           <Bot className="w-4 h-4" /> MCP Global
           <span className="ml-1 bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 text-xs">{mcpClients.length}</span>
         </button>
+        <button
+          onClick={() => { setTab('offline'); setSearch(''); setDebouncedSearch('') }}
+          className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium whitespace-nowrap transition-colors ${
+            tab === 'offline' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <WifiOff className="w-4 h-4" /> Offline
+        </button>
         {KOMMO_ADMIN_UI_ENABLED && (
           <button
             onClick={() => { setTab('integrations'); setSearch(''); setDebouncedSearch('') }}
@@ -2137,7 +2146,7 @@ export default function AdminPage() {
 
       {/* Search & Actions */}
       <div className="flex flex-col sm:flex-row gap-3 mb-4">
-        <div className="relative flex-1">
+        {tab !== 'offline' && <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
             type="text"
@@ -2157,7 +2166,7 @@ export default function AdminPage() {
               <X className="w-4 h-4 text-gray-400" />
             </button>
           )}
-        </div>
+        </div>}
 
         {tab === 'users' && (
           <select
@@ -2204,7 +2213,7 @@ export default function AdminPage() {
               <RefreshCw className="w-4 h-4" /> Actualizar
             </button>
           </div>
-        ) : KOMMO_ADMIN_UI_ENABLED && tab === 'integrations' ? (
+        ) : tab === 'offline' ? null : KOMMO_ADMIN_UI_ENABLED && tab === 'integrations' ? (
           <div className="flex items-center gap-2">
             <button
               onClick={reloadIntegrations}
@@ -2688,6 +2697,8 @@ export default function AdminPage() {
               </div>
             </div>
           </div>
+        ) : tab === 'offline' ? (
+          <OfflineAccessAdminV5 />
         ) : tab === 'mcp' ? (
           <div className="p-5 space-y-6">
             <div className="grid grid-cols-1 xl:grid-cols-[1fr_360px] gap-5">

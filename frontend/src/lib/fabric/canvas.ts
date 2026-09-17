@@ -3,7 +3,7 @@
  * Uses a pasteboard model: canvas fills viewport, white Rect = "page".
  */
 
-import { Canvas, Rect, Shadow, Point, type FabricObject } from 'fabric'
+import { Canvas, Rect, Shadow, Point, type FabricObject } from './runtime'
 import { MM_TO_PX, ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, GRID_COLOR } from './constants'
 import { calculateSnap, calculateDistances, type SnapGuide, type DistanceLabel, type UserGuide } from './snap'
 

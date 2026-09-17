@@ -314,6 +314,7 @@ func (r *TaskWorkRepository) ListArchiveHierarchyForActor(ctx context.Context, a
 				JOIN whiteboards board ON board.account_id=binding.account_id AND board.id=binding.whiteboard_id
 				WHERE $5::boolean AND location_view.account_id=folder.account_id AND location_view.deleted_at IS NULL AND board.archived_at IS NULL
 				  AND location_view.folder_id=folder.id
+				  AND `+taskTrashLocationViewCanViewSQL("location_view", "$3")+`
 			) contextual ON TRUE
 		WHERE folder.account_id=$1 AND folder.environment_id=$2 AND folder.deleted_at IS NULL
 		  AND `+taskActorAccountMembershipSQL("folder", "$3")+`
@@ -379,6 +380,7 @@ func (r *TaskWorkRepository) ListArchiveHierarchyForActor(ctx context.Context, a
 				JOIN whiteboards board ON board.account_id=binding.account_id AND board.id=binding.whiteboard_id
 				WHERE $5::boolean AND location_view.account_id=list_item.account_id AND location_view.list_id=list_item.id
 				  AND location_view.deleted_at IS NULL AND board.archived_at IS NULL
+				  AND `+taskTrashLocationViewCanViewSQL("location_view", "$3")+`
 			) contextual ON TRUE
 		WHERE list_item.account_id=$1 AND list_item.environment_id=$2 AND list_item.deleted_at IS NULL
 		  AND `+taskActorAccountMembershipSQL("list_item", "$3")+`

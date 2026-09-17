@@ -8,16 +8,17 @@ describe('chunk recovery', () => {
     expect(isChunkLoadError({ name: 'Error', message: '401 Unauthorized' })).toBe(false)
   })
 
-  it('generates a bounded, one-reload recovery script for Clarin PWA state', () => {
+  it('generates a bounded recovery that preserves caches and requests the previous shell', () => {
     const source = buildChunkRecoveryScript('2026.08.07-141530-c967995')
 
     expect(() => new Function(source)).not.toThrow()
     expect(source).toContain('clarin-pwa-')
     expect(source).toContain('sessionStorage')
-    expect(source).toContain('getRegistrations')
-    expect(source).toContain("registration.scope === window.location.origin + '/'")
-    expect(source).toContain('key.indexOf(cachePrefix) === 0')
-    expect(source).toContain('window.setTimeout(resolve, 1500)')
+    expect(source).toContain('CLARIN_OFFLINE_V4_USE_PREVIOUS')
+    expect(source).not.toContain('getRegistrations')
+    expect(source).not.toContain('unregister()')
+    expect(source).not.toContain('window.caches.delete')
+    expect(source).toContain('window.setTimeout(resolve, 150)')
     expect(source).toContain('window.location.reload()')
     expect(source).toContain('Clarin necesita actualizarse')
     expect(source).toContain('<img src="/favicon.svg" alt="Clarín"')

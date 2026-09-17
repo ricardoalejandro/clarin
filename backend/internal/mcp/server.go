@@ -430,7 +430,7 @@ func New(repos *repository.Repositories, services *service.Services, jwtSecret s
 	), s.toolGetProgramDetail)
 
 	mcpSrv.AddTool(readOnlyTool("get_program_attendance",
-		mcp.WithDescription("Asistencia detallada de una sesión de programa: lista de participantes con su estado (present, absent o late), observación más reciente y cantidad de observaciones."),
+		mcp.WithDescription("Asistencia detallada de una sesión de programa: lista de participantes con su estado (confirmed, present, absent o late), observación más reciente y cantidad de observaciones. confirmed es una confirmación previa y no cuenta como asistencia marcada ni en porcentajes."),
 		mcp.WithString("account_id", mcp.Description("UUID de cuenta. Obténlo con list_accounts.")),
 		mcp.WithString("account_slug", mcp.Description(mcpAccountSlugArgDescription)),
 		mcp.WithString("session_id", mcp.Required(), mcp.Description("UUID de la sesión")),

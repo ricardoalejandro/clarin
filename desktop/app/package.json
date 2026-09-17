@@ -1,0 +1,59 @@
+{
+  "name": "clarin-offline-desktop",
+  "version": "0.3.3",
+  "private": true,
+  "description": "Cliente Windows local-first de Clarin",
+  "main": "main.cjs",
+  "author": "Clarin",
+  "license": "UNLICENSED",
+	"engines": {
+		"node": ">=22.12.0"
+	},
+  "scripts": {
+    "test": "node --test test/*.test.cjs",
+    "check": "node --check main.cjs && node --check preload.cjs && node --check src/offline.js && node --test test/*.test.cjs",
+    "dist:win": "electron-builder --win nsis --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "44.3.0",
+    "electron-builder": "26.16.1"
+  },
+  "build": {
+    "appId": "cloud.naperu.clarin.offline",
+    "productName": "Clarin",
+    "artifactName": "Clarin-Offline-Setup-${version}-${arch}.${ext}",
+    "asar": true,
+    "forceCodeSigning": false,
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "lib/**/*",
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/bin/clarin-offline-agent.exe",
+        "to": "bin/clarin-offline-agent.exe"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "requestedExecutionLevel": "asInvoker",
+      "verifyUpdateCodeSignature": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": false,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Clarin"
+    }
+  }
+}

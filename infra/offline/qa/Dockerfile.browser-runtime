@@ -1,0 +1,9 @@
+# QA-only incremental artifact: retain the already verified localhost Next.js
+# build and replace its independent browser runtime after focused engine fixes.
+# Never use this image for production; make deploy rebuilds every final artifact.
+ARG QA_BASE=clarin-frontend-offline-v4-qa
+FROM ${QA_BASE}
+USER root
+COPY --chown=root:root public/offline-v4/ /app/public/offline-v4/
+RUN chmod -R a+rX /app/public/offline-v4
+USER node

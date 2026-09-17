@@ -2446,8 +2446,13 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await page.getByRole('button', { name: 'Asistencia', exact: true }).click()
     const attendanceDialog = page.getByRole('dialog', { name: 'Tomar asistencia' })
     await expectInsideVisualViewport(page, attendanceDialog)
+    const attendanceSearch = attendanceDialog.getByRole('searchbox', { name: 'Buscar participante por nombre o teléfono' })
+    await expect(attendanceSearch).toBeVisible()
+    await attendanceSearch.fill('92300100')
+    await expect(attendanceDialog.getByTestId('program-attendance-search-bar').getByText('1 de 1', { exact: true })).toBeVisible()
+    await attendanceDialog.getByRole('button', { name: 'Limpiar búsqueda de asistencia' }).click()
     await expect(attendanceDialog.getByRole('button', { name: 'Presente: Álexis Tarillo Mejio' })).toBeVisible()
-    await expect(attendanceDialog.getByRole('button', { name: 'Falta: Álexis Tarillo Mejio' })).toBeVisible()
+    await expect(attendanceDialog.getByRole('button', { name: 'Faltó: Álexis Tarillo Mejio' })).toBeVisible()
     await expect(attendanceDialog.getByRole('button', { name: 'Tarde: Álexis Tarillo Mejio' })).toBeVisible()
     await expect(attendanceDialog.getByRole('button', { name: /Justificada/ })).toHaveCount(0)
     await expect(attendanceDialog.getByText('Llegó con una incidencia informada').first()).toBeVisible()
@@ -2481,14 +2486,168 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expect(attendanceDialog.getByRole('button', { name: 'Guardar Asistencia' })).toBeVisible()
     const saveRequest = page.waitForRequest(request => request.url().endsWith('/api/programs/program-1/sessions/session-previous/attendance/batch') && request.method() === 'POST')
     await attendanceDialog.getByRole('button', { name: 'Guardar Asistencia' }).click()
-    expect((await saveRequest).postDataJSON()).toEqual({ records: [{ participant_id: 'program-participant-1', status: 'present' }] })
+    expect((await saveRequest).postDataJSON()).toEqual({ records: [{ participant_id: 'program-participant-1', status: 'present', expected_status: 'absent' }] })
+  })
+
+  test('Asistencia Kanban fija sus cabeceras, acepta destinos vacíos y mantiene compactas las observaciones', async ({ page }) => {
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width: 465, height: 818 })
+    await authenticate(page)
+
+    const longObservation = 'Esta observación extensa solo debe aparecer dentro de la ventana de observaciones y nunca agrandar la ficha Kanban.'
+    const boardRoster = Array.from({ length: 24 }, (_, index) => ({
+      participant_id: `board-participant-${index + 1}`,
+      contact_id: `board-contact-${index + 1}`,
+      contact_name: `Participante Kanban ${String(index + 1).padStart(2, '0')}`,
+      contact_phone: `5198800${String(index + 1).padStart(3, '0')}`,
+      participation_status: 'active',
+      enrolled_at: mockNow,
+      attendance_status: 'present',
+      observation_count: index === 11 ? 50 : 0,
+      observation_preview: index === 11 ? [{ id: 'board-observation-1', notes: longObservation, created_by_name: 'Responsive QA', created_at: mockNow }] : [],
+    }))
+    const boardObservations = Array.from({ length: 50 }, (_, index) => ({
+      id: `board-observation-${index + 1}`,
+      notes: index === 0 ? longObservation : `Observación histórica ${index + 1}`,
+      created_by_name: 'Responsive QA',
+      created_at: mockNow,
+      source_label: 'Programa sin sesiones · Sesión de apertura · 20/07/2026',
+    }))
+    const attendanceWrites: Array<{ records: Array<{ participant_id: string; status: string; expected_status: string }> }> = []
+    let attendanceRosterRequests = 0
+
+    await page.route('**/api/programs/program-1/sessions', route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([mockPreviousSession]),
+    }))
+    await page.route('**/api/programs/program-1/sessions/session-previous/roster', route => {
+      // Search is intentionally local and must not reload the roster.
+      attendanceRosterRequests += 1
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, roster: boardRoster }),
+      })
+    })
+    await page.route('**/api/programs/program-1/sessions/session-previous/observations', route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true, observations: [] }),
+    }))
+    await page.route(/\/api\/programs\/program-1\/sessions\/session-previous\/participants\/board-participant-12\/attendance-observations$/, route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true, observations: boardObservations }),
+    }))
+    await page.route('**/api/programs/program-1/sessions/session-previous/attendance/batch', async route => {
+      attendanceWrites.push(route.request().postDataJSON())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, count: 1 }) })
+    })
+
+    await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
+    await page.getByRole('button', { name: /Cambiar sección\. Actual: Participantes/ }).click()
+    await page.getByRole('button', { name: /Sesiones 1 registradas/ }).click()
+    await page.setViewportSize({ width: 1510, height: 987 })
+    await page.getByRole('button', { name: 'Asistencia', exact: true }).click()
+
+    const dialog = page.getByRole('dialog', { name: 'Tomar asistencia' })
+    await dialog.getByRole('button', { name: 'Tablero' }).click()
+    const scrollViewport = dialog.getByTestId('program-attendance-scroll')
+    const stickyHeader = dialog.getByTestId('program-attendance-board-header')
+    const headerScroller = dialog.getByTestId('program-attendance-board-header-scroll')
+    const board = dialog.getByTestId('program-attendance-board')
+    await expect(stickyHeader).toBeVisible()
+    const attendanceSearch = dialog.getByRole('searchbox', { name: 'Buscar participante por nombre o teléfono' })
+    await expect(attendanceSearch).toBeVisible()
+    const rosterRequestsBeforeSearch = attendanceRosterRequests
+    await attendanceSearch.fill('kanban 12')
+    await expect(dialog.getByText('Mostrando 1 de 24 participantes')).toBeVisible()
+    await expect(dialog.locator('[data-attendance-participant-card="board-participant-12"]')).toHaveCount(1)
+    await expect(dialog.locator('[data-attendance-participant-card="board-participant-11"]')).toHaveCount(0)
+    expect(attendanceRosterRequests).toBe(rosterRequestsBeforeSearch)
+    await dialog.getByRole('button', { name: 'Limpiar búsqueda de asistencia' }).click()
+    await expect(dialog.locator('[data-attendance-participant-card="board-participant-11"]')).toHaveCount(1)
+    await attendanceSearch.fill('sin coincidencias')
+    await expect(dialog.getByTestId('program-attendance-no-results')).toBeVisible()
+    await dialog.getByTestId('program-attendance-no-results').getByRole('button', { name: 'Limpiar búsqueda' }).click()
+    await expect(dialog.locator('[data-attendance-participant-card="board-participant-12"]')).toHaveCount(1)
+
+    await board.evaluate(element => {
+      element.scrollLeft = 160
+      element.dispatchEvent(new Event('scroll', { bubbles: true }))
+    })
+    await expect.poll(() => headerScroller.evaluate(element => element.scrollLeft)).toBe(160)
+    const [presentHeaderBox, presentColumnBox] = await Promise.all([
+      dialog.locator('[data-attendance-column-header="present"]').boundingBox(),
+      dialog.locator('[data-attendance-column="present"]').boundingBox(),
+    ])
+    expect(presentHeaderBox).not.toBeNull()
+    expect(presentColumnBox).not.toBeNull()
+    expect(Math.abs(presentHeaderBox!.x - presentColumnBox!.x)).toBeLessThanOrEqual(1)
+    await board.evaluate(element => {
+      element.scrollLeft = 0
+      element.dispatchEvent(new Event('scroll', { bubbles: true }))
+    })
+    await dialog.getByRole('button', { name: 'Maximizar ventana de asistencia' }).click()
+    await scrollViewport.evaluate(element => { element.scrollTop = 900 })
+    await expect.poll(async () => {
+      const [viewportBox, headerBox] = await Promise.all([scrollViewport.boundingBox(), stickyHeader.boundingBox()])
+      if (!viewportBox || !headerBox) return Number.POSITIVE_INFINITY
+      return Math.abs(headerBox.y - viewportBox.y)
+    }).toBeLessThanOrEqual(4)
+
+    const sourceCard = dialog.locator('[data-attendance-participant-card="board-participant-12"]')
+    await sourceCard.scrollIntoViewIfNeeded()
+    const observationButton = sourceCard.getByRole('button', { name: 'Abrir observaciones de asistencia de Participante Kanban 12' })
+    await expect(observationButton).toContainText(/Observaciones\s*·\s*50/)
+    await expect(sourceCard.getByText(longObservation, { exact: true })).toHaveCount(0)
+    await expect(sourceCard.getByText('Responsive QA', { exact: true })).toHaveCount(0)
+    await observationButton.click()
+    await expect(page.getByRole('heading', { name: 'Observaciones de asistencia' })).toBeVisible()
+    await expect(page.getByText(longObservation, { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Cerrar observaciones' }).click()
+
+    const sourceHandle = sourceCard.getByRole('button', { name: 'Mover a Participante Kanban 12' })
+    const emptyDestination = dialog.getByRole('region', { name: 'Confirmado: 0 participantes' })
+    const emptySurface = emptyDestination.locator('[data-attendance-column-surface]')
+    const [handleBox, destinationBox, surfaceBox, viewportBox, stickyBox] = await Promise.all([
+      sourceHandle.boundingBox(),
+      emptyDestination.boundingBox(),
+      emptySurface.boundingBox(),
+      scrollViewport.boundingBox(),
+      stickyHeader.boundingBox(),
+    ])
+    expect(handleBox).not.toBeNull()
+    expect(destinationBox).not.toBeNull()
+    expect(surfaceBox).not.toBeNull()
+    expect(viewportBox).not.toBeNull()
+    expect(stickyBox).not.toBeNull()
+    const destinationY = Math.min(
+      destinationBox!.y + destinationBox!.height - 24,
+      viewportBox!.y + viewportBox!.height - 48,
+    )
+    expect(destinationY).toBeGreaterThan(surfaceBox!.y + surfaceBox!.height + 24)
+    expect(destinationY).toBeGreaterThan(stickyBox!.y + stickyBox!.height)
+    await page.mouse.move(handleBox!.x + handleBox!.width / 2, handleBox!.y + handleBox!.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(handleBox!.x + handleBox!.width / 2 + 10, handleBox!.y + handleBox!.height / 2 + 8, { steps: 3 })
+    await page.mouse.move(destinationBox!.x + destinationBox!.width / 2, destinationY, { steps: 20 })
+    await expect(emptyDestination).toHaveClass(/ring-2/)
+    await page.mouse.up()
+
+    await expect(dialog.getByRole('region', { name: 'Confirmado: 1 participante' }).locator('[data-attendance-participant-card="board-participant-12"]')).toHaveCount(1)
+    expect(attendanceWrites).toHaveLength(0)
+    await dialog.getByRole('button', { name: 'Guardar Asistencia' }).click()
+    await expect.poll(() => attendanceWrites.length).toBe(1)
+    expect(attendanceWrites[0]).toEqual({ records: [{ participant_id: 'board-participant-12', status: 'confirmed', expected_status: 'present' }] })
   })
 
   test('Asistencia permite reintentar una carga 500 y no cierra ni pierde cambios si falla el guardado', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 })
     await authenticate(page)
     let attendanceLoadAttempts = 0
-    const failedAttendanceBodies: Array<{ records: Array<{ participant_id: string; status: string }> }> = []
+    const failedAttendanceBodies: Array<{ records: Array<{ participant_id: string; status: string; expected_status: string }> }> = []
     await page.route('**/api/programs/program-1/sessions', route => route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -2540,18 +2699,17 @@ test.describe('Clarin responsive authenticated matrix', () => {
     const presentButton = dialog.getByRole('button', { name: 'Presente: Álexis Tarillo Mejio' })
     await presentButton.click()
     await expect(saveButton).toBeEnabled()
-    await presentButton.click()
-    await expect(presentButton).not.toHaveClass(/ring-2/)
     await saveButton.click()
     await expect(page.getByText('No se pudo guardar la asistencia. No se aplicaron cambios parciales.', { exact: true })).toBeVisible()
     await expect(dialog).toBeVisible()
-    expect(failedAttendanceBodies[0]).toEqual({ records: [{ participant_id: 'program-participant-1', status: '' }] })
+    expect(failedAttendanceBodies[0]).toEqual({ records: [{ participant_id: 'program-participant-1', status: 'present', expected_status: '' }] })
 
-    await presentButton.click()
-    await expect(presentButton).toHaveClass(/ring-2/)
+    const lateButton = dialog.getByRole('button', { name: 'Tarde: Álexis Tarillo Mejio' })
+    await lateButton.click()
+    await expect(lateButton).toHaveClass(/ring-2/)
     await saveButton.click()
     await expect.poll(() => failedAttendanceBodies.length).toBe(2)
-    expect(failedAttendanceBodies[1]).toEqual({ records: [{ participant_id: 'program-participant-1', status: 'present' }] })
+    expect(failedAttendanceBodies[1]).toEqual({ records: [{ participant_id: 'program-participant-1', status: 'late', expected_status: '' }] })
     await expect(dialog).toBeVisible()
     await expect(saveButton).toBeEnabled()
   })

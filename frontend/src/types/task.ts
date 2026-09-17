@@ -6,6 +6,7 @@ export type TaskViewMode = 'list' | 'board' | 'calendar' | 'gantt' | 'summary'
 export type TaskLocationViewType = 'whiteboard'
 export type TaskLocationViewScopeType = 'folder' | 'list'
 export type TaskLocationViewLifecycle = 'active' | 'location_archived' | 'trash'
+export type TaskLocationViewVisibilityMode = 'inherit' | 'restricted'
 export type TaskGroupBy = 'none' | 'status' | 'list' | 'assignee' | 'priority' | 'type' | 'due'
 export type TaskGroupDirection = 'asc' | 'desc'
 export type TaskAccessLevel = 'none' | 'view' | 'comment' | 'edit' | 'full'
@@ -391,6 +392,7 @@ export interface TaskLocationView {
   sort_order: number
   version: number
   access_revision: number
+  visibility_mode: TaskLocationViewVisibilityMode
   lifecycle: TaskLocationViewLifecycle
   created_by?: string | null
   deleted_at?: string | null
@@ -398,6 +400,37 @@ export interface TaskLocationView {
     whiteboard: TaskLocationWhiteboardSummary
   }
   capabilities: TaskLocationViewCapabilities
+}
+
+export interface TaskLocationViewVisibilityMember {
+  user_id: string
+  display_name: string
+  username: string
+  effective_access_level: TaskAccessLevel
+  eligible: boolean
+}
+
+export interface TaskLocationViewVisibilityPolicy {
+  view_id: string
+  visibility_mode: TaskLocationViewVisibilityMode
+  access_revision: number
+  members: TaskLocationViewVisibilityMember[]
+  effective_access: {
+    level: 'none' | 'view' | 'comment' | 'edit' | 'manage'
+    inherited_from: string
+    can_view: boolean
+    can_comment: boolean
+    can_edit: boolean
+    can_delete: boolean
+    can_manage_access: boolean
+  }
+}
+
+export interface TaskLocationViewVisibilityCandidate {
+  user_id: string
+  display_name: string
+  username: string
+  effective_access_level: TaskAccessLevel
 }
 
 export type ActiveTaskView =

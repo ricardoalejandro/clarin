@@ -167,6 +167,8 @@ import {
 import { WhiteboardPresentationOverlay } from './WhiteboardPresentationControls'
 import { useWhiteboardPresentation } from '@/hooks/useWhiteboardPresentation'
 import { useWhiteboardFocusMode } from '@/hooks/useWhiteboardFocusMode'
+import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider'
+import { runWhiteboardWrite, whiteboardWriteTransportAvailable } from './whiteboardOfflineTransport'
 import {
   WHITEBOARD_OVERLAY_LAYERS,
   whiteboardFocusAppStateHasTransientLayer,
@@ -416,6 +418,11 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   onLeaveGuardReady,
 }, forwardedRef) {
   const router = useRouter()
+  const { isOffline, requireOnline } = useClarinRuntime()
+  const networkOrLocal = whiteboardWriteTransportAvailable(
+    typeof navigator !== 'undefined' && navigator.onLine,
+    isOffline,
+  )
   const canonicalNameRef = useRef(canonicalName)
   canonicalNameRef.current = canonicalName
   const editorShellRef = useRef<HTMLDivElement>(null)
@@ -526,7 +533,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     ? { canEdit: false, canComment: false, viewModeEnabled: true }
     : baseEditorAccess
   const { canEdit, canComment } = editorAccess
-  const canManageAccess = !isWorkOrigin && Boolean(board?.effective_access?.can_manage_access) && !board?.archived_at
+  const canManageAccess = !isOffline && !isWorkOrigin && Boolean(board?.effective_access?.can_manage_access) && !board?.archived_at
   const backLabel = returnLabel || (hostContext === 'work' ? 'Volver a Clarin Work' : 'Volver a Pizarras')
   const showIntegratedTitle = editorLayout === 'wide' || (editorLayout === 'compact' && editorAvailableWidth >= 1_100)
   const showShareInToolbar = whiteboardToolbarShowsShare(editorAvailableWidth, canManageAccess)
@@ -613,6 +620,14 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     })
   }, [])
 
+  const openClarinLibraries = useCallback(() => {
+    if (requireOnline('Administrar bibliotecas de Pizarras')) setLibraryOpen(true)
+  }, [requireOnline])
+
+  const openWhiteboardShare = useCallback(() => {
+    if (requireOnline('Administrar el acceso de la pizarra')) setShareOpen(true)
+  }, [requireOnline])
+
   const runWithTransientSceneSuppressed = useCallback((update: () => void) => {
     transientSceneSuppressionRef.current += 1
     try {
@@ -627,7 +642,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   const presentation = useWhiteboardPresentation({
     editorAPI,
     roomRef,
-    canPresent: canEdit,
+    canPresent: canEdit && !isOffline,
     runWithTransientSceneSuppressed,
   })
 
@@ -895,7 +910,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     setError(null)
     setPermissionNotice(null)
     setRealtimeIssue(null)
-    setRealtimeConnection('connecting')
+    setRealtimeConnection(isOffline ? 'closed' : 'connecting')
     setRealtimeHasOpened(false)
     sessionLogoutStartedRef.current = false
     setCurrentUserID(null)
@@ -993,7 +1008,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     setSaveState('saved')
     setPhase('ready')
 
-    if (actor) {
+    if (actor && !isOffline) {
       void fetchLibraries(actor.id, actor.isAdmin, signal).then(async loaded => {
         if (whiteboardAsyncResultIsStale({ signal, mounted: mountedRef.current })) return
         personalLibraryRef.current = loaded.personal
@@ -1020,8 +1035,13 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
         setLibrarySaveState('error')
         setLibraryError(loadError instanceof Error ? loadError.message : 'No se pudieron cargar las bibliotecas de Pizarras.')
       })
+    } else if (isOffline) {
+      // Account-wide and public libraries are not part of one selected board.
+      // Keep the canonical editor available without pulling unrelated data.
+      setLibrarySaveState('saved')
+      setLibraryError(null)
     }
-  }, [applyLibraryComposition, boardID, fetchLibraries, hostContext])
+  }, [applyLibraryComposition, boardID, fetchLibraries, hostContext, isOffline])
 
   useEffect(() => {
     window.EXCALIDRAW_ASSET_PATH = whiteboardEditorAssetBase(window.location.origin)
@@ -1062,7 +1082,13 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     const onOnline = () => {
       if (dirtyRef.current) setSaveState('pending')
     }
-    const onOffline = () => setSaveState('offline')
+    const onOffline = () => {
+      if (isOffline) {
+        if (dirtyRef.current) setSaveState('pending')
+        return
+      }
+      setSaveState('offline')
+    }
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (!dirtyRef.current && !savingRef.current && !assetSavingRef.current && !libraryDirtyRef.current && !librarySavingRef.current && !commentsRef.current?.hasUnsavedWork()) return
       event.preventDefault()
@@ -1076,7 +1102,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
       window.removeEventListener('offline', onOffline)
       window.removeEventListener('beforeunload', beforeUnload)
     }
-  }, [])
+  }, [isOffline])
 
   const persistPersonalLibrary = useCallback(async (manual = false) => {
     if (librarySavingRef.current) {
@@ -1174,7 +1200,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   }, [applyLibraryComposition])
 
   useEffect(() => {
-    if (phase !== 'ready' || !editorAPI || !libraryMetadataReady || typeof window === 'undefined') return
+    if (isOffline || phase !== 'ready' || !editorAPI || !libraryMetadataReady || typeof window === 'undefined') return
     const importID = readWhiteboardPublicLibraryImportID(window.location.search)
     const personalLibrary = personalLibraryRef.current
     if (!importID || !personalLibrary) return
@@ -1362,6 +1388,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     boardID,
     editorAPI,
     libraryMetadataReady,
+    isOffline,
     openElementLibrary,
     persistPersonalLibrary,
     phase,
@@ -1899,7 +1926,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
       pendingSaveRef.current.automaticFailures = 0
       pendingSaveRef.current.automaticRetryBlockReason = null
     }
-    if (!navigator.onLine) {
+    if (!networkOrLocal) {
       setSaveState('offline')
       return
     }
@@ -1994,7 +2021,16 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
           nextAcknowledgedAppState = confirmed.appState
         }
       } else {
-        const response = await saveWhiteboard(boardID, pending.payload)
+        const attempt = await runWhiteboardWrite({
+          browserOnline: navigator.onLine,
+          runtimeOffline: isOffline,
+          write: () => saveWhiteboard(boardID, pending.payload),
+        })
+        if (!attempt.attempted) {
+          setSaveState('offline')
+          return
+        }
+        const response = attempt.result
         if (!response.success || !response.data?.result.scene) {
           pending.automaticFailures += 1
           const failureAction = whiteboardSaveFailureAction(response.status, pending.automaticFailures)
@@ -2048,7 +2084,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     } catch (saveError) {
       if (!mountedRef.current) return
       dirtyRef.current = true
-      setSaveState(navigator.onLine ? 'error' : 'offline')
+      setSaveState(networkOrLocal ? 'error' : 'offline')
       setError(saveError instanceof Error ? saveError.message : 'No se pudo guardar la pizarra.')
     } finally {
       savingRef.current = false
@@ -2056,7 +2092,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
         pendingSaveRef.current
         && !pendingSaveRef.current.automaticRetryBlockReason
         && dirtyRef.current
-        && navigator.onLine,
+        && networkOrLocal,
       )
       if (queuedSaveRef.current || capturedVersion !== changeVersionRef.current || retryUnacknowledged) {
         queuedSaveRef.current = false
@@ -2067,7 +2103,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
         autosaveTimerRef.current = setTimeout(() => { void flushSave('autosave') }, delay)
       }
     }
-  }, [applyCanonicalWriteConfirmation, boardID, canEdit, diagnoseWhiteboardWriteNotFound, reconcileWhiteboardWriteConflict, scheduleThumbnail, uploadPendingFiles])
+  }, [applyCanonicalWriteConfirmation, boardID, canEdit, diagnoseWhiteboardWriteNotFound, isOffline, networkOrLocal, reconcileWhiteboardWriteConflict, scheduleThumbnail, uploadPendingFiles])
 
   const onChange = useCallback((elements: readonly ExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
     const openSidebar = appState.openSidebar as { name?: string } | null
@@ -2088,10 +2124,10 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     changeVersionRef.current += 1
     dirtyRef.current = true
     const retryBlocked = Boolean(pendingSaveRef.current?.automaticRetryBlockReason)
-    setSaveState(!navigator.onLine ? 'offline' : retryBlocked ? 'error' : 'pending')
+    setSaveState(!networkOrLocal ? 'offline' : retryBlocked ? 'error' : 'pending')
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current)
     if (!retryBlocked) autosaveTimerRef.current = setTimeout(() => { void flushSave('autosave') }, WHITEBOARD_AUTOSAVE_DELAY_MS)
-  }, [canEdit, flushSave, loadLibraryAssets])
+  }, [canEdit, flushSave, loadLibraryAssets, networkOrLocal])
 
   const applySceneRecord = useCallback((record: WhiteboardSceneRecord, preserveLocalChanges = false) => {
     const api = editorAPIRef.current
@@ -2274,7 +2310,14 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   }, [boardID, hostContext])
 
   useEffect(() => {
-    if (phase !== 'ready' || historicalWorkView) return
+    if (phase !== 'ready' || historicalWorkView || isOffline) {
+      if (isOffline) {
+        setRealtimeConnection('closed')
+        setRealtimeHasOpened(false)
+        collaboratorsRef.current = new Map()
+      }
+      return
+    }
     let hasOpened = false
     const room = connectWhiteboardRoom({
       whiteboardID: boardID,
@@ -2377,7 +2420,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
             scene: event.scene,
             sequence: remoteSequence,
             scene_schema_version: 'excalidraw',
-            editor_version: '0.18.1-clarin.6',
+            editor_version: '0.18.1-clarin.7',
             updated_at: new Date().toISOString(),
           }, preserveLocalChanges)
           void hydrateReferencedAssets(event.scene.elements)
@@ -2447,7 +2490,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
       if (roomRef.current === room) roomRef.current = null
       room.close()
     }
-  }, [applyCollaboratorEvent, applySceneRecord, board?.account_id, boardID, flushSave, handleRealtimeIssue, historicalWorkView, hydrateReferencedAssets, phase, presentation.handleConnectionChange, presentation.handleRealtimeEvent, refreshMetadataForPermissionChange, reloadCanonicalForRealtime])
+  }, [applyCollaboratorEvent, applySceneRecord, board?.account_id, boardID, flushSave, handleRealtimeIssue, historicalWorkView, hydrateReferencedAssets, isOffline, phase, presentation.handleConnectionChange, presentation.handleRealtimeEvent, refreshMetadataForPermissionChange, reloadCanonicalForRealtime])
 
   const reloadCanonical = async () => {
     const response = await loadWhiteboardScene(boardID)
@@ -2751,13 +2794,13 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     </MainMenu.Group>
     <MainMenu.Separator />
     <MainMenu.Group title="Bibliotecas internas">
-      <MainMenu.Item icon={<LibraryBig className="h-4 w-4" />} onSelect={() => setLibraryOpen(true)}>Administrar Mi biblioteca</MainMenu.Item>
+      <MainMenu.Item icon={<LibraryBig className="h-4 w-4" />} onSelect={openClarinLibraries}>Administrar Mi biblioteca</MainMenu.Item>
     </MainMenu.Group>
     {(canManageAccess || board?.effective_access?.can_view) && <><MainMenu.Separator /><MainMenu.Group title="Colaboración">
-      {canManageAccess && <MainMenu.Item icon={<Share2 className="h-4 w-4" />} onSelect={() => setShareOpen(true)}>Compartir desde Clarin</MainMenu.Item>}
+      {canManageAccess && <MainMenu.Item icon={<Share2 className="h-4 w-4" />} onSelect={openWhiteboardShare}>Compartir desde Clarin</MainMenu.Item>}
       <MainMenu.Item icon={<History className="h-4 w-4" />} onSelect={() => { void openHistory() }}>Historial de Clarin</MainMenu.Item>
     </MainMenu.Group></>}
-  </MainMenu>, [backActionLabel, board?.effective_access?.can_view, canEdit, canManageAccess, flushSave, openHistory, requestBackFromWhiteboard])
+  </MainMenu>, [backActionLabel, board?.effective_access?.can_view, canEdit, canManageAccess, flushSave, openClarinLibraries, openHistory, openWhiteboardShare, requestBackFromWhiteboard])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2907,7 +2950,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
         onPointerUpdate={({ pointer, button }) => { roomRef.current?.sendCursor({ pointer, button }) }}
         langCode="es-ES"
         name={board.name}
-        isCollaborating
+        isCollaborating={!isOffline}
         viewModeEnabled={editorAccess.viewModeEnabled}
         autoFocus
         renderTopRightUI={(_isMobile, appState) => editorLayout !== 'wide' ? null : <div className="whiteboard-integrated-actions flex items-center gap-2">
@@ -2920,24 +2963,25 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
             canEdit={canEdit}
             saveState={saveState}
             moreOpen={moreOpen}
-            onShare={() => setShareOpen(true)}
+            onShare={openWhiteboardShare}
             onRetrySave={() => saveState === 'conflict' ? void reloadCanonical() : void flushSave('manual')}
             onToggleMore={toggleMoreMenu}
 			presentation={{
 			  controlState: presentation.controlState,
 			  state: presentation.state,
-			  onStart: () => { void presentation.start() },
+			  onStart: () => { if (requireOnline('Iniciar una presentación colaborativa')) void presentation.start() },
 			  onStop: () => { void presentation.stop() },
 			}}
           />
         </div>}
         aiEnabled={false}
+        mermaidEnabled
         validateEmbeddable={false}
         renderEmbeddable={renderBlockedWhiteboardEmbeddable}
         onLinkOpen={(element, event) => {
           event.preventDefault()
           const link = sanitizeWhiteboardExternalLink(element.link)
-          if (link) window.open(link, '_blank', 'noopener,noreferrer')
+          if (link && requireOnline('Abrir un enlace externo')) window.open(link, '_blank', 'noopener,noreferrer')
         }}
         showDeprecatedFonts={WHITEBOARD_SHOW_DEPRECATED_OFFICIAL_FONTS}
         enableRichText
@@ -2965,13 +3009,13 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
             canEdit={canEdit}
             saveState={saveState}
             moreOpen={moreOpen}
-            onShare={() => setShareOpen(true)}
+            onShare={openWhiteboardShare}
             onRetrySave={() => saveState === 'conflict' ? void reloadCanonical() : void flushSave('manual')}
             onToggleMore={toggleMoreMenu}
 			presentation={{
 			  controlState: presentation.controlState,
 			  state: presentation.state,
-			  onStart: () => { void presentation.start() },
+			  onStart: () => { if (requireOnline('Iniciar una presentación colaborativa')) void presentation.start() },
 			  onStop: () => { void presentation.stop() },
 			}}
           />
@@ -2996,7 +3040,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
           {canvasNoticeIsLoading && <Loader2 className="h-4 w-4 shrink-0 animate-spin" />}
           {canvasNoticeSource === 'public-error' && publicLibraryImportRetryable && <button type="button" onClick={() => setPublicLibraryImportRetryKey(current => current + 1)} className="min-h-9 rounded-lg bg-white px-3 font-black shadow-sm">Reintentar importación</button>}
           {canvasNoticeSource === 'public-error' && <button type="button" onClick={discardPublicLibraryImport} className="min-h-9 rounded-lg border border-current/20 bg-transparent px-3 font-black">{publicLibraryImportRetryable ? 'Cancelar' : 'Descartar solicitud'}</button>}
-          {canvasNoticeSource === 'library-error' && <button type="button" onClick={() => setLibraryOpen(true)} className="min-h-9 rounded-lg bg-white px-3 font-black shadow-sm">Revisar biblioteca</button>}
+          {canvasNoticeSource === 'library-error' && <button type="button" onClick={openClarinLibraries} className="min-h-9 rounded-lg bg-white px-3 font-black shadow-sm">Revisar biblioteca</button>}
           {canvasNoticeSource === 'fonts' && fontPreloadProgress.phase === 'error' && <button type="button" onClick={retryFontPreload} className="min-h-9 rounded-lg bg-white px-3 font-black shadow-sm">Reintentar fuentes</button>}
           {canvasNoticeSource === 'assets' && assetHydrationProgress.phase === 'error' && <button type="button" onClick={retryAssetHydration} className="min-h-9 rounded-lg bg-white px-3 font-black shadow-sm">Reintentar imágenes</button>}
           {canvasNoticeSource === 'realtime' && <button type="button" onClick={() => roomRef.current?.retryNow()} className="min-h-9 rounded-lg bg-white px-3 font-black shadow-sm">Reintentar ahora</button>}
@@ -3022,8 +3066,8 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
             else enterFocusMode(moreButtonRef.current)
           }}
         />
-        <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); setLibraryOpen(true) }} className="whiteboard-more-item"><LibraryBig className="h-4 w-4" />Administrar bibliotecas</button>
-        {canManageAccess && !showShareInToolbar && <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); setShareOpen(true) }} className="whiteboard-more-item"><Share2 className="h-4 w-4" />Compartir</button>}
+        <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); openClarinLibraries() }} className="whiteboard-more-item"><LibraryBig className="h-4 w-4" />Administrar bibliotecas</button>
+        {canManageAccess && !showShareInToolbar && <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); openWhiteboardShare() }} className="whiteboard-more-item"><Share2 className="h-4 w-4" />Compartir</button>}
         <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); void openHistory() }} className="whiteboard-more-item"><History className="h-4 w-4" />Historial</button>
         {canEdit && <button type="button" role="menuitem" disabled={whiteboardSaveIsBusy(saveState) || saveState === 'saved'} onClick={() => { setMoreOpen(false); void flushSave('manual') }} className="whiteboard-more-item disabled:opacity-40"><Save className="h-4 w-4" />Guardar ahora</button>}
       </div>

@@ -908,7 +908,7 @@ test.describe('Clarin Work workspace refinement', () => {
     await expect(editor).toBeVisible()
     await expect(editor.getByPlaceholder('¿Qué hay que lograr?')).toHaveValue('Borrador completo desde Calendario')
     const dateRange = editor.locator('[data-task-date-range-trigger]')
-    await expect(dateRange).toHaveAttribute('aria-label', /^Fechas de la tarea:/)
+    await expect(dateRange).toHaveAttribute('aria-label', /^Fecha de entrega:/)
     await expect(dateRange).toContainText('Todo el día')
   })
 
@@ -940,6 +940,7 @@ test.describe('Clarin Work workspace refinement', () => {
 
   test('opens an anchored calendar summary before task or event editors and keeps it inside the viewport', async ({ page }, testInfo) => {
     await installWorkspaceMock(page, { calendarItems: true })
+    await page.clock.setFixedTime(new Date('2026-08-22T12:00:00.000Z'))
     await page.setViewportSize({ width: 375, height: 740 })
     await page.goto(`${baseURL}/dashboard/tasks`)
     await page.getByRole('button', { name: 'Calendario' }).click()
@@ -1163,11 +1164,17 @@ test.describe('Clarin Work workspace refinement', () => {
     await search.fill('f')
     await search.fill('fi')
     await search.fill('finaz')
+    const finalInputCompletedAt = Date.now()
     await expect(page.locator('[data-task-search-pending]')).toBeVisible()
-    await page.waitForTimeout(450)
+    // Keep this assertion comfortably below the exact 500 ms boundary. The
+    // pending-state expectation above is asynchronous and must not consume
+    // part of the debounce window that this check is intended to observe.
+    await page.waitForTimeout(300)
     expect(mock.taskQueries.filter(query => query.search).length).toBe(0)
     await expect.poll(() => mock.taskQueries.filter(query => query.search === 'finaz').length).toBe(1)
-    expect(mock.taskQueries.filter(query => query.search && query.search !== 'finaz')).toHaveLength(0)
+    const finalQueries = mock.taskQueries.filter(query => query.search)
+    expect(finalQueries.filter(query => query.search !== 'finaz')).toHaveLength(0)
+    expect(finalQueries[0].at - finalInputCompletedAt).toBeGreaterThanOrEqual(400)
   })
 
   test('keeps an inline-created task visible by clearing active query state and deduplicating its WebSocket echo', async ({ page }) => {
@@ -1548,7 +1555,13 @@ test.describe('Clarin Work workspace refinement', () => {
     await listForm.getByLabel('Nombre').fill('Seguimiento QA')
     await listForm.getByRole('button', { name: 'Crear lista' }).click()
     await expect(structureWindow.getByText('Seguimiento QA', { exact: true })).toBeVisible({ timeout: 1_500 })
-    expect(mock.structureRefreshCompletions).toHaveLength(2)
+    // The folder creation refreshes folders plus root lists; the list creation
+    // refreshes the aggregate and root list scopes. Whether the second pair
+    // has already completed when the optimistic row appears depends on network
+    // and CPU latency, so assert the completed contract rather than racing the
+    // background requests.
+    await expect.poll(() => mock.structureRefreshCompletions.length).toBe(4)
+    expect(mock.structureRefreshCompletions.slice(2)).toEqual(['lists', 'lists'])
   })
 
   test('uses accessible property pickers and represents zero collaborators canonically', async ({ page }) => {
@@ -1879,7 +1892,7 @@ test.describe('Clarin Work workspace refinement', () => {
     await expanded.getByRole('button', { name: 'Listo' }).click()
     await expect(expanded).toBeVisible()
     await expect(expanded.getByRole('alert')).toContainText('No pudimos guardar la descripción.')
-    await expanded.getByRole('button', { name: 'Reintentar' }).click()
+    await expanded.getByRole('button', { name: 'Reintentar', exact: true }).click()
     await expect.poll(() => mock.taskWrites.filter(write => write.description === 'Borrador que sobrevive a un error temporal.').length).toBe(2)
     await expect(expanded.getByRole('alert')).toHaveCount(0)
     await expect(description).toHaveValue('Borrador que sobrevive a un error temporal.')
@@ -1937,9 +1950,9 @@ test.describe('Clarin Work workspace refinement', () => {
     await description.press('Enter')
     await description.type('Segunda línea')
     await expect(description).toHaveValue('Primera línea\nSegunda línea')
-    await expect(detail.getByText('Sin guardar', { exact: true })).toBeVisible()
+    await expect(detail.locator('[data-task-save-status="dirty"], [data-task-save-status="saving"]')).toBeVisible()
     await expect.poll(() => mock.taskWrites.filter(write => write.description === 'Primera línea\nSegunda línea').length).toBe(1)
-    await expect(detail.getByText('Guardado', { exact: true })).toBeVisible()
+    await expect(detail.locator('[data-task-save-status="saved"]')).toContainText('Guardado')
   })
 
   test('keeps one in-flow inspector mounted while navigating tasks and restores each draft', async ({ page }) => {
@@ -1977,6 +1990,7 @@ test.describe('Clarin Work workspace refinement', () => {
   test('navigates Board, Calendar and Gantt behind the same open inspector without writes', async ({ page }) => {
     const mock = await installWorkspaceMock(page, { calendarItems: true })
     mock.addAnalystTask()
+    await page.clock.setFixedTime(new Date('2026-08-22T12:00:00.000Z'))
     await page.setViewportSize({ width: 1600, height: 818 })
     await page.goto(`${baseURL}/dashboard/tasks`)
 

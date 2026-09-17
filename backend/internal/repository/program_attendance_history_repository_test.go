@@ -100,4 +100,10 @@ func TestParticipantAttendanceHistoryQueriesAreAccountScopedAndSetBased(t *testi
 	if strings.Contains(combined, "excused") {
 		t.Fatal("history queries must not expose legacy excused attendance")
 	}
+	if strings.Contains(getParticipantAttendanceHistorySummaryQuery, "confirmed") {
+		t.Fatal("confirmed must remain outside marked attendance summary counts and rates")
+	}
+	if !strings.Contains(getParticipantAttendanceHistoryPageQuery, "'confirmed', 'present', 'absent', 'late'") {
+		t.Fatal("history timeline must expose the current confirmed status")
+	}
 }

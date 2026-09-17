@@ -28,6 +28,7 @@ function view(id: string, sortOrder: number, name = id): TaskLocationView {
     sort_order: sortOrder,
     version: 1,
     access_revision: 1,
+    visibility_mode: 'inherit',
     lifecycle: 'active',
     created_by: 'user-1',
     resource: { whiteboard: { id: `board-${id}`, name, version: 1, scene_sequence: 0, updated_at: '2026-08-25T00:00:00Z' } },

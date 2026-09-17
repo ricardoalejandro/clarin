@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <title>Clarin · Modo offline</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand"><span class="brand-mark">C</span><span>Clarin</span></div>
+        <div class="offline-state"><span class="status-dot"></span><span>Modo offline protegido</span></div>
+        <div class="top-actions">
+          <button id="syncButton" class="button secondary" type="button">Sincronizar</button>
+          <button id="onlineButton" class="button primary" type="button">Volver en línea</button>
+        </div>
+      </header>
+      <div class="workspace">
+        <aside class="sidebar">
+          <div class="sidebar-heading">Cuentas autorizadas</div>
+          <nav id="accountList" aria-label="Cuentas offline"></nav>
+          <div class="security-note">Los datos se abren solo para tu usuario de Windows y durante la vigencia firmada.</div>
+        </aside>
+        <main class="main">
+          <section class="hero">
+            <div>
+              <p class="eyebrow">TRABAJO LOCAL</p>
+              <h1 id="accountTitle">Modo offline</h1>
+              <p id="leaseStatus" class="muted">Comprobando autorización local…</p>
+            </div>
+            <label class="search"><span>Buscar</span><input id="searchInput" type="search" placeholder="Tarea, contacto, programa o pizarra"></label>
+          </section>
+          <div id="notice" class="notice" hidden></div>
+          <nav id="moduleTabs" class="tabs" aria-label="Módulos"></nav>
+          <section id="content" class="content" aria-live="polite"><div class="empty">Cargando datos cifrados…</div></section>
+        </main>
+      </div>
+    </div>
+    <script src="./offline.js" defer></script>
+  </body>
+</html>

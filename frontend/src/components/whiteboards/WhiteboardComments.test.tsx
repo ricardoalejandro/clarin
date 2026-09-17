@@ -1245,7 +1245,7 @@ describe('WhiteboardCommentsPanel', () => {
     ><WhiteboardCommentsPanel /></WhiteboardCommentsProvider>)
 
     await waitFor(() => expect(commentsRef.current?.getSummary()).toEqual({ open: 7, resolved: 3, all: 10 }))
-    expect(onSummaryChange).toHaveBeenLastCalledWith({ open: 7, resolved: 3, all: 10 })
+    await waitFor(() => expect(onSummaryChange).toHaveBeenLastCalledWith({ open: 7, resolved: 3, all: 10 }))
     expect(screen.getByRole('tab', { name: 'Abiertos 7' })).toBeInTheDocument()
   })
 })

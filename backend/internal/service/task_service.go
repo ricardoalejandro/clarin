@@ -329,25 +329,35 @@ func (s *TaskService) broadcastTaskACL(ctx context.Context, accountID, taskID uu
 // recurrence rules. Completion remains successful if recurrence generation
 // cannot run; the error is logged and a later completion retry is idempotent.
 func (s *TaskService) EnsureNextOccurrence(ctx context.Context, task *domain.Task) {
+	if err := s.ensureNextOccurrenceChecked(ctx, task); err != nil {
+		log.Printf("[TASK] Failed to reconcile recurring occurrence: %v", err)
+	}
+}
+
+// The durable offline event dispatcher must retry operational failures rather
+// than acknowledging an effect whose recurrence was silently dropped.
+func (s *TaskService) ensureNextOccurrenceChecked(ctx context.Context, task *domain.Task) error {
 	if task == nil || task.DueAt == nil || strings.TrimSpace(task.RecurrenceRule) == "" {
-		return
+		return nil
 	}
 	nextDue, supported := nextRecurringDue(*task.DueAt, task.RecurrenceRule)
 	if !supported {
-		return
+		return nil
 	}
 	rootID := task.ID
 	if task.RecurrenceParentID != nil {
 		rootID = *task.RecurrenceParentID
 	}
 	exists, err := s.repos.Task.RecurringOccurrenceExists(ctx, task.AccountID, rootID, nextDue)
-	if err != nil || exists {
-		return
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
 	}
 	status, err := s.repos.TaskWork.ResolveStatus(ctx, task.AccountID, task.ListID, nil, domain.TaskStatusCategoryNotStarted)
 	if err != nil {
-		log.Printf("[TASK] Failed to resolve recurring status for %s: %v", task.ID, err)
-		return
+		return err
 	}
 	clone := *task
 	clone.ID = uuid.Nil
@@ -375,15 +385,22 @@ func (s *TaskService) EnsureNextOccurrence(ctx context.Context, task *domain.Tas
 		for _, collaborator := range collaborators {
 			clone.CollaboratorIDs = append(clone.CollaboratorIDs, collaborator.UserID)
 		}
+	} else {
+		return err
 	}
 	clone.SubtaskCount = 0
 	clone.SubtaskDone = 0
 	clone.CommentCount = 0
 	clone.AttachmentCount = 0
 	if err := s.Create(ctx, &clone); err != nil {
-		log.Printf("[TASK] Failed to create recurring occurrence for %s: %v", task.ID, err)
-		return
+		// The database's (account, recurrence parent, due_at) unique index is
+		// the race boundary, not the preflight EXISTS query.
+		if exists, lookupErr := s.repos.Task.RecurringOccurrenceExists(ctx, task.AccountID, rootID, nextDue); lookupErr == nil && exists {
+			return nil
+		}
+		return err
 	}
+	return nil
 }
 
 func nextRecurringDue(due time.Time, rule string) (time.Time, bool) {

@@ -1,0 +1,67 @@
+:root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f7fb; color: #172033; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 920px; min-height: 100vh; background: #f5f7fb; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+.app-shell { min-height: 100vh; display: flex; flex-direction: column; }
+.topbar { height: 64px; flex: none; display: flex; align-items: center; gap: 24px; padding: 0 24px; background: #fff; border-bottom: 1px solid #e4e8f0; }
+.brand { display: flex; align-items: center; gap: 10px; min-width: 220px; font-size: 18px; font-weight: 750; }
+.brand-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; background: #4f46e5; color: white; box-shadow: 0 8px 20px rgba(79,70,229,.24); }
+.offline-state { display: flex; align-items: center; gap: 8px; color: #475569; font-size: 13px; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: #f59e0b; box-shadow: 0 0 0 4px #fef3c7; }
+.top-actions { margin-left: auto; display: flex; gap: 9px; }
+.button { min-height: 38px; border-radius: 9px; padding: 0 15px; border: 1px solid transparent; font-weight: 650; }
+.button:disabled { opacity: .55; cursor: not-allowed; }
+.button.primary { color: white; background: #4f46e5; }
+.button.secondary { color: #334155; background: white; border-color: #d8dee9; }
+.button.small { min-height: 32px; padding: 0 11px; font-size: 12px; }
+.workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: 246px minmax(0,1fr); }
+.sidebar { background: #101827; color: #c7d2e3; padding: 24px 14px 18px; display: flex; flex-direction: column; }
+.sidebar-heading { padding: 0 10px 11px; color: #7f8da4; font-size: 11px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+.account-button { width: 100%; border: 0; border-radius: 10px; padding: 11px 12px; background: transparent; color: inherit; text-align: left; display: grid; gap: 3px; }
+.account-button:hover, .account-button.active { background: #1d293d; color: white; }
+.account-button strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-button span { font-size: 11px; color: #8290a7; }
+.account-button.unavailable { opacity: .6; }
+.security-note { margin-top: auto; border-top: 1px solid #263247; padding: 16px 10px 0; color: #8491a7; font-size: 11px; line-height: 1.5; }
+.main { min-width: 0; padding: 28px 32px 48px; overflow: auto; }
+.hero { display: flex; align-items: end; justify-content: space-between; gap: 28px; }
+.eyebrow { margin: 0 0 6px; color: #6366f1; font-size: 11px; font-weight: 800; letter-spacing: .11em; }
+h1 { margin: 0; font-size: 28px; letter-spacing: -.025em; }
+.muted { color: #64748b; }
+#leaseStatus { margin: 6px 0 0; font-size: 13px; }
+.search { display: grid; gap: 5px; color: #64748b; font-size: 11px; font-weight: 650; }
+.search input { width: min(340px, 35vw); height: 40px; padding: 0 12px; border: 1px solid #dbe1ea; border-radius: 9px; outline: none; background: white; }
+.search input:focus { border-color: #818cf8; box-shadow: 0 0 0 3px #e0e7ff; }
+.notice { margin-top: 18px; padding: 12px 14px; border: 1px solid #c7d2fe; background: #eef2ff; color: #3730a3; border-radius: 10px; font-size: 13px; }
+.notice.error { border-color: #fecaca; background: #fff1f2; color: #9f1239; }
+.tabs { display: flex; gap: 6px; margin: 24px 0 18px; border-bottom: 1px solid #dde3ec; }
+.tab { border: 0; background: transparent; color: #64748b; padding: 9px 12px 11px; border-bottom: 2px solid transparent; font-weight: 700; font-size: 13px; }
+.tab.active { color: #4338ca; border-color: #4f46e5; }
+.content { display: grid; gap: 14px; }
+.card { background: white; border: 1px solid #e1e6ef; border-radius: 12px; padding: 17px; box-shadow: 0 1px 2px rgba(15,23,42,.035); }
+.card-header { display: flex; align-items: start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.card h2, .card h3 { margin: 0; font-size: 15px; }
+.card p { margin: 5px 0 0; }
+.badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 8px; background: #f1f5f9; color: #475569; font-size: 11px; font-weight: 700; }
+.badge.pending { background: #fff7ed; color: #9a3412; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(290px,1fr)); gap: 12px; }
+.metric-row { display: flex; gap: 18px; color: #64748b; font-size: 12px; }
+.task-list { display: grid; gap: 7px; }
+.task { display: grid; grid-template-columns: 24px minmax(0,1fr) auto; align-items: center; gap: 9px; min-height: 42px; padding: 7px 8px; border: 1px solid #edf0f5; border-radius: 9px; }
+.task.done .task-title { color: #94a3b8; text-decoration: line-through; }
+.task-title { font-size: 13px; font-weight: 650; }
+.task-meta { color: #718096; font-size: 11px; }
+.task-check { width: 19px; height: 19px; border: 1px solid #cbd5e1; border-radius: 6px; background: white; color: #4f46e5; padding: 0; }
+.create-task { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; margin-top: 12px; }
+.create-task input { min-height: 38px; border: 1px solid #dbe1ea; border-radius: 8px; padding: 0 11px; }
+.enrollment-form { display: grid; gap: 14px; max-width: 620px; margin-top: 18px; }
+.enrollment-form label { display: grid; gap: 6px; color: #475569; font-size: 12px; font-weight: 700; }
+.enrollment-form input { min-height: 42px; border: 1px solid #dbe1ea; border-radius: 9px; padding: 0 11px; font-family: inherit; }
+.enrollment-form .button { justify-self: start; }
+.details { display: grid; grid-template-columns: 120px minmax(0,1fr); gap: 7px 12px; margin: 0; font-size: 13px; }
+.details dt { color: #64748b; }
+.details dd { margin: 0; overflow-wrap: anywhere; }
+.empty { padding: 64px 20px; border: 1px dashed #ccd4e1; border-radius: 12px; text-align: center; color: #64748b; }
+.error-title { color: #9f1239; }
+@media (max-width: 1080px) { .main { padding-inline: 22px; } .workspace { grid-template-columns: 220px minmax(0,1fr); } }

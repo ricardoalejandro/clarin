@@ -6,7 +6,7 @@
 import {
   Canvas, StaticCanvas, Rect, Ellipse, Line, FabricImage,
   Shadow, type FabricObject,
-} from 'fabric'
+} from './runtime'
 import { DynamicText } from './objects'
 import { CUSTOM_PROPS, MM_TO_PX, DYNAMIC_COLOR, GOOGLE_FONTS_URL } from './constants'
 

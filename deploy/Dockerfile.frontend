@@ -1,4 +1,4 @@
-FROM node:20-alpine AS builder
+FROM node:24.21.0-alpine@sha256:be80f76cf40ec8e42b9bec49f60a55e0660f30af58d3e5a25530785b30ea67e2 AS builder
 
 WORKDIR /app
 
@@ -19,6 +19,7 @@ ENV NEXT_PUBLIC_BUILD_VERSION=$BUILD_VERSION
 # Copy package files
 COPY package*.json ./
 COPY vendor/excalidraw-clarin ./vendor/excalidraw-clarin
+COPY vendor/sheetjs ./vendor/sheetjs
 
 # Install dependencies (use npm ci if lock exists, otherwise npm install)
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
@@ -31,7 +32,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
 # Runtime stage
-FROM node:20-alpine AS runner
+FROM node:24.21.0-alpine@sha256:be80f76cf40ec8e42b9bec49f60a55e0660f30af58d3e5a25530785b30ea67e2 AS runner
 
 WORKDIR /app
 
@@ -41,12 +42,19 @@ ENV HOSTNAME=0.0.0.0
 
 # Copy necessary files
 COPY --from=builder /app/public ./public
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder --chown=node:node /app/.next/standalone ./
+COPY --from=builder --chown=node:node /app/.next/static ./.next/static
 # Keep the complete MIT notice with the distributed editor artifact. The
 # prepare step also exposes a versioned copy beside the local editor assets.
 COPY --from=builder /app/THIRD_PARTY_EXCALIDRAW.md ./THIRD_PARTY_EXCALIDRAW.md
+COPY --from=builder /app/THIRD_PARTY_FABRIC.md ./THIRD_PARTY_FABRIC.md
+COPY --from=builder /app/node_modules/xlsx/LICENSE ./THIRD_PARTY_SHEETJS_LICENSE.txt
+# Vendored assets can originate in a private workspace (0600/0700). Keep
+# public files root-owned but readable/traversable by the non-root server.
+RUN chmod -R a+rX /app/public && \
+    chmod a+r /app/THIRD_PARTY_EXCALIDRAW.md /app/THIRD_PARTY_FABRIC.md /app/THIRD_PARTY_SHEETJS_LICENSE.txt
 
 EXPOSE 3000
 
+USER node
 CMD ["node", "server.js"]

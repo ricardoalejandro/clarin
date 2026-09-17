@@ -15,7 +15,13 @@ import {
   verifyWhiteboardFontCatalog,
 } from './whiteboard-font-catalog.mjs'
 import { buildExcalidrawFork } from './build-excalidraw-fork.mjs'
+import { buildDependencyNotices, composeEditorNotice } from './dependency-notices.mjs'
 
+const dependencyNotices = buildDependencyNotices()
+const archivedDependencyNotices = await readFile(join(process.cwd(), 'third_party/excalidraw/DEPENDENCY-LICENSES.txt'), 'utf8')
+if (archivedDependencyNotices !== dependencyNotices.text) {
+  throw new Error('Las licencias distribuidas no coinciden con las dependencias verificadas.')
+}
 await buildExcalidrawFork()
 const packageRoot = join(process.cwd(), 'node_modules', '@excalidraw', 'excalidraw')
 const packageJSON = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'))
@@ -37,7 +43,7 @@ const notice = await readFile(join(process.cwd(), 'THIRD_PARTY_EXCALIDRAW.md'), 
 const license = notice.match(/## Licencia del editor\s+([\s\S]*?)\s+Fuente:/u)?.[1]
 if (!license) throw new Error('No se pudo extraer la licencia MIT del aviso de terceros.')
 await writeFile(join(destinationRoot, 'LICENSE'), `${license.trim()}\n`)
-await writeFile(join(destinationRoot, 'NOTICE.md'), notice)
+await writeFile(join(destinationRoot, 'NOTICE.md'), composeEditorNotice(notice, dependencyNotices.text))
 for (const legalFile of ['FONT-NOTICES.md', 'OFL-1.1.txt', 'COMIC-SHANNS-MIT.txt', 'LASER-POINTER-MIT.txt']) {
   await cp(join(process.cwd(), 'third_party', 'excalidraw', legalFile), join(destinationRoot, legalFile))
 }

@@ -80,6 +80,10 @@ const whiteboardActorAccessQuery = `
 		membership.user_id IS NOT NULL,COALESCE(membership.role,''),COALESCE(role_item.permissions,'{}'::text[]),
 		COALESCE(account_user.is_super_admin,FALSE),
 		work_view.id,work_view.environment_id,work_view.folder_id,work_view.list_id,work_view.deleted_at,
+		COALESCE(work_view.visibility_mode,'inherit'),
+		EXISTS(SELECT 1 FROM task_location_view_visibility_members visibility_member
+			WHERE visibility_member.account_id=work_view.account_id
+			AND visibility_member.task_view_id=work_view.id AND visibility_member.user_id=$2),
 		environment.id,COALESCE(environment.name,''),COALESCE(environment.visibility,''),
 		COALESCE(environment.default_access_level,'none'),environment.archived_at,environment.deleted_at,
 		environment_grant.access_level,environment_grant.can_manage_access,
@@ -130,6 +134,10 @@ const whiteboardHubAccessCTE = `WITH hub_base AS (
 		COALESCE(NULLIF(updater.display_name,''),updater.username,'') AS updated_by_name,
 		work_view.id AS task_view_id,work_view.environment_id AS work_environment_id,
 		work_view.folder_id AS view_folder_id,work_view.list_id AS view_list_id,work_view.deleted_at AS view_deleted_at,
+		COALESCE(work_view.visibility_mode,'inherit') AS work_visibility_mode,
+		EXISTS(SELECT 1 FROM task_location_view_visibility_members visibility_member
+			WHERE visibility_member.account_id=work_view.account_id
+			AND visibility_member.task_view_id=work_view.id AND visibility_member.user_id=$2) AS work_visibility_member,
 		environment.id AS resolved_environment_id,COALESCE(environment.name,'') AS environment_name,
 		environment.archived_at AS environment_archived_at,environment.deleted_at AS environment_deleted_at,
 		work_folder.id AS work_folder_id,COALESCE(work_folder.name,'') AS work_folder_name,
@@ -292,11 +300,20 @@ const whiteboardHubAccessCTE = `WITH hub_base AS (
 				OR (view_list_id IS NOT NULL AND work_list_id IS NULL)
 				OR environment_deleted_at IS NOT NULL OR work_folder_deleted_at IS NOT NULL OR work_list_deleted_at IS NOT NULL
 				OR work_target_level='none' THEN 'none'
+			WHEN work_visibility_mode='restricted' AND NOT work_admin AND NOT work_target_manage
+				AND NOT work_visibility_member THEN 'none'
 			WHEN environment_archived_at IS NOT NULL OR work_folder_archived_at IS NOT NULL OR work_list_archived_at IS NOT NULL THEN 'view'
 			WHEN work_target_level='full' THEN 'manage'
 			ELSE work_target_level
 		END AS effective_level,
-		CASE WHEN task_view_id IS NULL THEN standalone_manage ELSE FALSE END AS can_manage,
+		CASE
+			WHEN task_view_id IS NULL THEN standalone_manage
+			WHEN view_deleted_at IS NOT NULL OR archived_at IS NOT NULL
+				OR environment_archived_at IS NOT NULL OR work_folder_archived_at IS NOT NULL OR work_list_archived_at IS NOT NULL THEN FALSE
+			WHEN work_visibility_mode='restricted' AND NOT work_admin AND NOT work_target_manage
+				AND NOT work_visibility_member THEN FALSE
+			ELSE work_target_manage
+		END AS can_manage,
 		CASE WHEN task_view_id IS NULL THEN standalone_source ELSE 'work_'||work_target_source END AS access_source,
 		CASE WHEN task_view_id IS NULL THEN 'standalone' ELSE 'work' END AS origin,
 		CASE
@@ -334,6 +351,8 @@ type whiteboardActorAccessState struct {
 	ViewFolderID      *uuid.UUID
 	ViewListID        *uuid.UUID
 	ViewDeletedAt     *time.Time
+	VisibilityMode    string
+	VisibilityMember  bool
 	EnvironmentName   string
 	EnvironmentMode   string
 	EnvironmentLevel  string
@@ -367,6 +386,7 @@ func scanWhiteboardActorAccessState(row pgx.Row) (*whiteboardActorAccessState, e
 		&state.Membership, &state.MembershipRole, &state.Permissions,
 		&state.UserSuperAdmin,
 		&state.TaskViewID, &state.EnvironmentID, &state.ViewFolderID, &state.ViewListID, &state.ViewDeletedAt,
+		&state.VisibilityMode, &state.VisibilityMember,
 		&environmentID, &state.EnvironmentName, &state.EnvironmentMode, &state.EnvironmentLevel,
 		&state.EnvironmentArch, &state.EnvironmentTrash, &state.EnvironmentGrant, &state.EnvironmentManage,
 		&state.FolderID, &state.FolderName, &state.FolderMode, &state.FolderArch, &state.FolderTrash,
@@ -524,13 +544,16 @@ func resolveWhiteboardActorAccessState(state *whiteboardActorAccessState, userID
 	if taskAccess == nil || !taskAccess.CanView {
 		return BuildWhiteboardEffectiveAccess(domain.WhiteboardAccessNone, false, "work_container"), location, nil
 	}
+	if state.VisibilityMode == domain.TaskLocationViewVisibilityRestricted && !admin && !taskAccess.CanManageAccess && !state.VisibilityMember {
+		return BuildWhiteboardEffectiveAccess(domain.WhiteboardAccessNone, false, "work_visibility"), location, nil
+	}
 	if capArchived && location != nil && location.Lifecycle == domain.WhiteboardWorkLifecycleArchived {
 		return BuildWhiteboardEffectiveAccess(domain.WhiteboardAccessView, false, "work_archive"), location, nil
 	}
-	// Work governs structure, so generic whiteboard access management remains
-	// disabled even for Administrar. CanDelete still follows the cumulative
-	// manage level and is used by the contextual lifecycle endpoints.
-	return BuildWhiteboardEffectiveAccess(whiteboardTaskLevel(taskAccess.Level), false, "work_"+taskAccess.InheritedFrom), location, nil
+	// Work governs the permission level. The view-specific capability only
+	// governs its audience and never enables standalone grants or public links.
+	return BuildWhiteboardEffectiveAccess(whiteboardTaskLevel(taskAccess.Level), taskAccess.CanManageAccess,
+		"work_"+taskAccess.InheritedFrom), location, nil
 }
 
 func resolveWhiteboardAccessWith(ctx context.Context, q whiteboardQuerier, accountID, userID, boardID uuid.UUID) (*domain.WhiteboardEffectiveAccess, error) {

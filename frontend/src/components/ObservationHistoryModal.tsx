@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { X, Clock, FileText, Phone, Trash2, Plus, XCircle, ChevronDown, Filter, SlidersHorizontal, CalendarCheck2 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
+import { useDialogTabTrap } from '@/components/programs/useDialogTabTrap'
 
 export interface HistoryObservation {
   id: string
@@ -96,6 +97,7 @@ export default function ObservationHistoryModal({
   const [loadingMore, setLoadingMore] = useState(false)
   const sentinelRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const modalRef = useRef<HTMLDivElement>(null)
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null)
   const modalWasOpenRef = useRef(false)
   const isOpenRef = useRef(isOpen)
@@ -118,6 +120,7 @@ export default function ObservationHistoryModal({
     viewIdentityRef.current = viewIdentity
     viewGenerationRef.current += 1
   }
+  useDialogTabTrap(isOpen, modalRef)
 
   // Sync observations when prop changes
   useEffect(() => { setObservations(initialObservations) }, [initialObservations])
@@ -143,6 +146,12 @@ export default function ObservationHistoryModal({
     const frame = window.requestAnimationFrame(() => composerTextareaRef.current?.focus())
     return () => window.cancelAnimationFrame(frame)
   }, [composerOpen])
+
+  useEffect(() => {
+    if (!isOpen) return
+    const frame = requestAnimationFrame(() => modalRef.current?.focus({ preventScroll: true }))
+    return () => cancelAnimationFrame(frame)
+  }, [isOpen])
 
   // Escape key — capture phase to prevent parent handlers from firing
   useEffect(() => {
@@ -294,7 +303,7 @@ export default function ObservationHistoryModal({
 
   return (
     <div className="app-viewport fixed inset-0 z-[90] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm animate-in fade-in duration-150 sm:items-center sm:p-4" onClick={onClose}>
-      <div className="flex h-[var(--app-height)] w-full max-w-3xl flex-col overflow-hidden rounded-none border border-slate-200/60 bg-white shadow-2xl animate-in zoom-in-95 duration-200 sm:h-auto sm:max-h-[85vh] sm:rounded-2xl" onClick={(e) => e.stopPropagation()}>
+      <div ref={modalRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="observation-history-modal-title" className="flex h-[var(--app-height)] w-full max-w-3xl flex-col overflow-hidden rounded-none border border-slate-200/60 bg-white shadow-2xl outline-none animate-in zoom-in-95 duration-200 sm:h-auto sm:max-h-[85vh] sm:rounded-2xl" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-white shrink-0">
           <div className="flex min-w-0 flex-1 items-center gap-3">
@@ -302,7 +311,7 @@ export default function ObservationHistoryModal({
               <Clock className="w-4 h-4 text-emerald-600" />
             </div>
             <div className="min-w-0">
-              <h2 className="text-sm font-semibold text-slate-900">{attendanceContext ? 'Observaciones de asistencia' : 'Historial de Observaciones'}</h2>
+              <h2 id="observation-history-modal-title" className="text-sm font-semibold text-slate-900">{attendanceContext ? 'Observaciones de asistencia' : 'Historial de Observaciones'}</h2>
               <p className="truncate text-[11px] text-slate-500">{name || 'Sin nombre'} · {observations.length} registro{observations.length !== 1 ? 's' : ''}</p>
             </div>
           </div>

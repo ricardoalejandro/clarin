@@ -146,6 +146,11 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 		},
 	}))
 
+	// Offline web JSON has a much smaller budget than ordinary file uploads.
+	// Run before authentication/handlers, while invalid requests still consume
+	// the global abuse budget above. This does not replace the ingress limit.
+	app.Use(guardOfflineV4Request)
+
 	// CORS Configuration
 	corsOrigins := "http://localhost:3000,http://localhost:8080"
 	if cfg.IsProduction() && len(cfg.CORSOrigins) > 0 {
@@ -154,7 +159,7 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     corsOrigins,
 		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS,PATCH",
-		AllowHeaders:     "Origin,Content-Type,Accept,Authorization,Upgrade,Connection",
+		AllowHeaders:     "Origin,Content-Type,Accept,Authorization,Upgrade,Connection,X-Clarin-Service-Proof",
 		AllowCredentials: true,
 	}))
 
@@ -194,6 +199,7 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 	// Version header middleware — adds X-Clarin-Version to all API responses
 	app.Use(func(c *fiber.Ctx) error {
 		c.Set("X-Clarin-Version", server.version)
+		c.Set("X-Clarin-Response", "1")
 		return c.Next()
 	})
 
@@ -202,6 +208,9 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 	server.startSurveyUploadCleanupWorker()
 	server.startTaskMediaGCWorker()
 	server.startWhiteboardRetentionGCWorker()
+	server.startOfflineMaintenance()
+	go server.runOfflineV3TaskOutbox(context.Background())
+	go server.runOfflineV4TaskOutbox(context.Background())
 	// Retention is an invariant of persisted status data, not a publishing
 	// capability. Keep cleanup running even if publication is disabled after a
 	// real-device trial, otherwise old rows and media would outlive 24 hours.
@@ -335,6 +344,37 @@ func (s *Server) setupRoutes() {
 	auth.Post("/logout", s.handleLogout)
 	auth.Post("/register", s.handleRegisterDisabled)
 
+	// Offline web v3 exposes one marker without authentication so the cached
+	// shell can distinguish a real Clarin response from Cloudflare/HTML. The
+	// data plane remains fail-closed behind its independent rollout switch.
+	api.Get("/offline/v3/runtime/availability", s.handleOfflineV3Availability)
+	offlineV3Public := api.Group("/offline/v3", s.requireOfflineV3)
+	offlineV3Public.Get("/sync-keys", s.handleOfflineV3SyncKeys)
+	offlineV3Public.Post("/sync/challenge", s.handleOfflineV3SyncChallenge)
+	offlineV3Public.Post("/sync", s.handleOfflineV3Sync)
+	api.Get("/offline/v4/runtime/availability", s.handleOfflineV4Availability)
+	offlineV4Public := api.Group("/offline/v4", s.requireOfflineV4)
+	offlineV4Public.Get("/lease-keys", s.handleOfflineV4LeaseKeys)
+	offlineV4Public.Post("/sync/challenge", limiter.New(limiter.Config{Max: 120, Expiration: time.Minute}), s.handleOfflineV4SyncChallenge)
+	offlineV4Public.Post("/sync", s.handleOfflineV4Sync)
+	api.Get("/offline/v5/runtime/availability", s.handleOfflineV5Availability)
+	offlineV5Public := api.Group("/offline/v5", s.requireOfflineV5)
+	offlineV5Public.Get("/lease-keys", s.handleOfflineV5LeaseKeys)
+	offlineV5Public.Post("/grants/status", limiter.New(limiter.Config{Max: 120, Expiration: time.Minute}), s.handleOfflineV5GrantStatus)
+	offlineV5Public.Post("/sync/challenge", limiter.New(limiter.Config{Max: 120, Expiration: time.Minute}), s.handleOfflineV5SyncChallenge)
+	offlineV5Public.Post("/sync", s.handleOfflineV5Sync)
+
+	// Device-key-authenticated terminal traffic remains outside browser JWT
+	// middleware. Each request still requires a one-use challenge, a monotonic
+	// counter, an active account grant, and an ECDSA device signature.
+	api.Post("/offline/v1/challenge", s.handleOfflineV1Retired)
+	api.Post("/offline/v1/sync", s.handleOfflineV1Retired)
+	api.Post("/offline/v2/challenge", s.handleOfflineChallengeV2)
+	api.Post("/offline/v2/activate", s.handleActivateOfflineTerminal)
+	api.Post("/offline/v2/sync", s.handleOfflineSyncV2)
+	api.Post("/offline/v2/resources/fetch", s.handleOfflineResourceFetchV2)
+	api.Post("/offline/v2/control/ack", s.handleOfflineControlAckV2)
+
 	// Kommo webhook is only registered when Kommo API communication is explicitly re-enabled.
 	if kommo.APICommunicationEnabled {
 		api.Post("/kommo/webhook/:secret", s.handleKommoWebhook)
@@ -359,6 +399,55 @@ func (s *Server) setupRoutes() {
 	protected.Post("/auth/logout", s.handleLogout)
 	protected.Post("/auth/activity", s.handleAuthActivity)
 	protected.Post("/auth/switch-account", s.handleSwitchAccount)
+	protected.All("/offline/v1/*", s.handleOfflineV1Retired)
+	offlineV2 := protected.Group("/offline/v2", s.requireOfflineControl)
+	offlineV2.Post("/enrollment-requests", s.handleRequestOfflineTerminal)
+	offlineV2.Get("/enrollment-requests/:id", s.handleUserOfflineEnrollmentStatus)
+	offlineV2.Get("/installer", s.handleOfflineInstaller)
+	offlineV2.Get("/grants", s.handleUserOfflineGrants)
+	offlineV2.Get("/grants/:grantId/selections", s.handleUserOfflineSelections)
+	offlineV2.Put("/grants/:grantId/selections", s.handleReplaceUserOfflineSelections)
+	offlineV2.Get("/grants/:grantId/resources", s.handleUserOfflineResourceCandidates)
+	offlineV2.Get("/conflicts", s.handleListOfflineConflicts)
+	offlineV2.Post("/conflicts/:id/resolve", s.handleResolveOfflineConflict)
+	offlineV3 := protected.Group("/offline/v3", s.requireOfflineV3)
+	offlineV3.Post("/enrollment/challenge", s.handleOfflineV3EnrollmentChallenge)
+	offlineV3.Post("/enrollment/requests", s.handleOfflineV3EnrollmentRequest)
+	offlineV3.Get("/enrollment/requests/:id", s.handleOfflineV3EnrollmentStatus)
+	offlineV3.Get("/installer", s.handleOfflineV3Installer)
+	offlineV3.Get("/grants", s.handleOfflineV3Grants)
+	offlineV3.Post("/grants/:grantId/challenge", s.handleOfflineV3GrantChallenge)
+	offlineV3.Post("/grants/:grantId/bootstrap", s.handleOfflineV3GrantBootstrap)
+	offlineV3.Post("/grants/:grantId/keys", s.handleOfflineV3RegisterGrantKeys)
+	offlineV3.Post("/grants/:grantId/lease", s.handleOfflineV3Lease)
+	offlineV3.Get("/grants/:grantId/resources", s.handleOfflineV3ResourceCandidates)
+	offlineV3.Get("/grants/:grantId/selection", s.handleOfflineV3Selections)
+	offlineV3.Put("/grants/:grantId/selection", s.handleOfflineV3ReplaceSelections)
+	offlineV4 := protected.Group("/offline/v4", s.requireOfflineV4)
+	offlineV4.Post("/enrollment/challenge", s.handleOfflineV4EnrollmentChallenge)
+	offlineV4.Post("/enrollment/requests", s.handleOfflineV4Enrollment)
+	offlineV4.Get("/enrollment/requests/:id", s.handleOfflineV4EnrollmentStatus)
+	offlineV4.Get("/grants", s.handleOfflineV4Grants)
+	offlineV4.Post("/grants/:grantId/challenge", s.handleOfflineV4GrantChallenge)
+	offlineV4.Post("/grants/:grantId/keys", s.handleOfflineV4RegisterKey)
+	offlineV4.Get("/grants/:grantId/resources", s.handleOfflineV4Resources)
+	offlineV4.Get("/grants/:grantId/selection", s.handleOfflineV4Selections)
+	offlineV4.Put("/grants/:grantId/selection", s.handleOfflineV4Selections)
+	offlineV5 := protected.Group("/offline/v5", s.requireOfflineV5)
+	offlineV5.Post("/enrollment/challenge", s.handleOfflineV5EnrollmentChallenge)
+	offlineV5.Post("/enrollment/requests", s.handleOfflineV5Enrollment)
+	offlineV5.Get("/enrollment/requests/:id", s.handleOfflineV5EnrollmentStatus)
+	offlineV5.Get("/grants", s.handleOfflineV5Grants)
+	offlineV5.Post("/grants/:grantId/challenge", s.handleOfflineV5GrantChallenge)
+	// Password confirmation is deliberately much tighter than the global API
+	// limiter. This route must not become a current-password oracle if an
+	// authenticated browser session is stolen.
+	offlineV5.Post("/grants/:grantId/keys", limiter.New(limiter.Config{Max: 10, Expiration: time.Minute}), s.handleOfflineV5RegisterKey)
+	offlineV5.Get("/grants/:grantId/resources", s.handleOfflineV5Resources)
+	offlineV5.Get("/grants/:grantId/selection", s.handleOfflineV5Selections)
+	offlineV5.Put("/grants/:grantId/selection", s.handleOfflineV5Selections)
+	offlineV5.Post("/grants/:grantId/prepare/challenge", s.handleOfflineV5GrantChallenge)
+	offlineV5.Post("/grants/:grantId/prepare", s.handleOfflineV5Prepare)
 
 	// Settings routes
 	protected.Get("/plans", s.handleListPlans)
@@ -829,7 +918,10 @@ func (s *Server) setupRoutes() {
 	// closes the second module boundary required by contextual whiteboards.
 	tasks.Get("/location-views", s.requirePermission(domain.PermWhiteboards), s.handleListTaskLocationViews)
 	tasks.Post("/location-views", s.requirePermission(domain.PermWhiteboards), s.requireWorkWhiteboardViewsEnabled, s.handleCreateTaskLocationView)
+	tasks.Get("/location-view-access-candidates", s.requirePermission(domain.PermWhiteboards), s.requireWorkWhiteboardViewsEnabled, s.handleListTaskLocationViewAccessCandidates)
 	tasks.Get("/location-views/:viewId", s.requirePermission(domain.PermWhiteboards), s.requireWorkWhiteboardViewsEnabled, s.handleGetTaskLocationView)
+	tasks.Get("/location-views/:viewId/access", s.requirePermission(domain.PermWhiteboards), s.requireWorkWhiteboardViewsEnabled, s.handleGetTaskLocationViewAccess)
+	tasks.Put("/location-views/:viewId/access", s.requirePermission(domain.PermWhiteboards), s.requireWorkWhiteboardViewsEnabled, s.handlePutTaskLocationViewAccess)
 	tasks.Patch("/location-views/:viewId", s.requirePermission(domain.PermWhiteboards), s.requireWorkWhiteboardViewsEnabled, s.handleUpdateTaskLocationView)
 	tasks.Post("/location-views/:viewId/duplicate", s.requirePermission(domain.PermWhiteboards), s.requireWorkWhiteboardViewsEnabled, s.handleDuplicateTaskLocationView)
 	tasks.Delete("/location-views/:viewId", s.requirePermission(domain.PermWhiteboards), s.requireWorkWhiteboardViewsEnabled, s.handleTrashTaskLocationView)
@@ -1194,6 +1286,37 @@ func (s *Server) setupRoutes() {
 	adminUsers.Patch("/:id/password", s.handleAdminResetPassword)
 	adminUsers.Delete("/:id", s.handleAdminDeleteUser)
 
+	// Offline terminal control plane. Only the global superadmin reaches this
+	// group; account administrators may resolve data conflicts but cannot issue,
+	// expand, or revoke a terminal grant.
+	adminOffline := admin.Group("/offline-terminals")
+	adminOffline.Get("/", s.handleAdminListOfflineTerminals)
+	adminOffline.Post("/:id/approve", s.handleAdminApproveOfflineTerminal)
+	adminOffline.Post("/:id/reject", s.handleAdminRejectOfflineTerminal)
+	adminOffline.Post("/:id/revoke", s.handleAdminRevokeOfflineTerminal)
+	adminOffline.Get("/audit", s.handleAdminOfflineAudit)
+	adminOfflineV3 := admin.Group("/offline-v3", s.requireOfflineV3)
+	adminOfflineV3.Get("/enrollment-requests", s.handleAdminOfflineV3EnrollmentRequests)
+	adminOfflineV3.Post("/enrollment-requests/:id/approve", s.handleAdminOfflineV3Approve)
+	adminOfflineV3.Post("/enrollment-requests/:id/reject", s.handleAdminOfflineV3Reject)
+	adminOfflineV3.Get("/grants", s.handleAdminOfflineV3Grants)
+	adminOfflineV3.Post("/controls", s.handleAdminOfflineV3Control)
+	adminOfflineV3.Post("/grants/:id/revoke", s.handleAdminOfflineV3RevokeGrant)
+	adminOfflineV4 := admin.Group("/offline-v4", s.requireOfflineV4)
+	adminOfflineV4.Get("/enrollment-requests", s.handleAdminOfflineV4Requests)
+	adminOfflineV4.Post("/enrollment-requests/:id/approve", s.handleAdminOfflineV4Approve)
+	adminOfflineV4.Post("/enrollment-requests/:id/reject", s.handleAdminOfflineV4Reject)
+	adminOfflineV4.Get("/grants", s.handleAdminOfflineV4Grants)
+	adminOfflineV4.Post("/grants/:id/revoke", s.handleAdminOfflineV4Revoke)
+	adminOfflineV4.Post("/controls", s.handleAdminOfflineV4Revoke)
+	adminOfflineV5 := admin.Group("/offline-v5", s.requireOfflineV5)
+	adminOfflineV5.Get("/enrollment-requests", s.handleAdminOfflineV5Requests)
+	adminOfflineV5.Post("/enrollment-requests/:id/approve", s.handleAdminOfflineV5Approve)
+	adminOfflineV5.Post("/enrollment-requests/:id/reject", s.handleAdminOfflineV5Reject)
+	adminOfflineV5.Get("/grants", s.handleAdminOfflineV5Grants)
+	adminOfflineV5.Post("/grants/:id/upgrade", s.handleAdminOfflineV5Upgrade)
+	adminOfflineV5.Post("/grants/:id/revoke", s.handleAdminOfflineV5Revoke)
+
 	// Global Eros management
 	adminEros := admin.Group("/eros")
 	adminEros.Get("/settings", s.handleAdminGetErosSettings)
@@ -1459,9 +1582,11 @@ func (s *Server) wsUpgrade(c *fiber.Ctx) error {
 
 func (s *Server) handleLogin(c *fiber.Ctx) error {
 	var req struct {
-		Username       string `json:"username"`
-		Password       string `json:"password"`
-		TurnstileToken string `json:"turnstile_token"`
+		Username               string     `json:"username"`
+		Password               string     `json:"password"`
+		TurnstileToken         string     `json:"turnstile_token"`
+		OfflineReauthUserID    *uuid.UUID `json:"offline_reauth_user_id"`
+		OfflineReauthAccountID *uuid.UUID `json:"offline_reauth_account_id"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
@@ -1473,10 +1598,17 @@ func (s *Server) handleLogin(c *fiber.Ctx) error {
 	if err := s.validateTurnstileLogin(c, username, req.TurnstileToken); err != nil {
 		return err
 	}
+	restrictions, restrictionErr := offlineReauthRestrictions(req.OfflineReauthUserID, req.OfflineReauthAccountID)
+	if restrictionErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "invalid_offline_reauth_context"})
+	}
 
-	token, refreshToken, user, accountCount, authorityEffect, err := s.services.Auth.Login(c.Context(), username, req.Password, s.cfg.JWTSecret)
+	token, refreshToken, user, accountCount, authorityEffect, err := s.services.Auth.Login(c.Context(), username, req.Password, s.cfg.JWTSecret, restrictions...)
 	s.notifyWhiteboardAuthorityEffect(authorityEffect)
 	if err != nil {
+		if errors.Is(err, service.ErrOfflineIdentityMismatch) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"success": false, "error": "offline_identity_mismatch", "code": "offline_identity_mismatch"})
+		}
 		if errors.Is(err, service.ErrAuthSessionUnavailable) {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 				"success": false, "error": "Authentication is temporarily unavailable", "code": "authorization_unavailable",
@@ -16403,16 +16535,39 @@ func (s *Server) adminAccountPurgeSummary(ctx context.Context, accountID uuid.UU
 		"task_attachment_preview_jobs", "task_dependencies", "task_reminders", "task_saved_views", "task_activity",
 		"task_environment_grants", "task_folder_access_grants", "task_list_access_grants", "task_access_grants", "task_access_audit",
 		"task_media_gc_jobs", "work_events", "work_event_attendees", "work_event_occurrence_overrides", "work_event_reminder_jobs",
-		"task_location_views", "task_location_whiteboard_views", "task_location_view_operations",
+		"task_location_views", "task_location_view_visibility_members", "task_location_whiteboard_views", "task_location_view_operations",
 		"kommo_connected_pipelines", "kommo_push_outbox", "integration_instance_accounts",
 	}
 	counts := fiber.Map{}
 	for _, table := range tables {
+		counts[table] = nil
+	}
+	rows, err := s.repos.DB().Query(ctx, `
+		SELECT tablename
+		FROM pg_catalog.pg_tables
+		WHERE schemaname = 'public' AND tablename = ANY($1::text[])
+	`, tables)
+	if err != nil {
+		return nil, fmt.Errorf("list account purge tables: %w", err)
+	}
+	present := make([]string, 0, len(tables))
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan account purge table: %w", err)
+		}
+		present = append(present, table)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list account purge tables: %w", err)
+	}
+	for _, table := range existingAccountPurgeTables(tables, present) {
 		var count int64
 		query := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE account_id = $1`, table)
 		if err := s.repos.DB().QueryRow(ctx, query, accountID).Scan(&count); err != nil {
-			counts[table] = nil
-			continue
+			return nil, fmt.Errorf("count account purge table %s: %w", table, err)
 		}
 		counts[table] = count
 	}
@@ -16425,6 +16580,20 @@ func (s *Server) adminAccountPurgeSummary(ctx context.Context, accountID uuid.UU
 		storageObjects = count
 	}
 	return fiber.Map{"tables": counts, "storage_objects": storageObjects}, nil
+}
+
+func existingAccountPurgeTables(requested, present []string) []string {
+	presentSet := make(map[string]struct{}, len(present))
+	for _, table := range present {
+		presentSet[table] = struct{}{}
+	}
+	existing := make([]string, 0, len(requested))
+	for _, table := range requested {
+		if _, ok := presentSet[table]; ok {
+			existing = append(existing, table)
+		}
+	}
+	return existing
 }
 
 type adminStorageOrphanItem struct {

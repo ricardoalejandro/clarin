@@ -125,7 +125,7 @@ describe('TaskDescriptionEditor', () => {
     expect(screen.getByRole('button', { name: 'Cerrar' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Copiar' }))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('Borrador inicial'))
-    expect(screen.getByText('Descripción copiada')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('Descripción copiada')).toBeInTheDocument())
 
     fireEvent.click(screen.getByRole('button', { name: 'Cerrar' }))
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Editor ampliado de descripción' })).not.toBeInTheDocument())

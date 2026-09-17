@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   apiPost,
+  apiBlob,
+  apiUpload,
   clearIdleTimeout,
   getLoginNoticeForLogoutReason,
   getLoginRedirectForLogout,
   markAuthSessionDetected,
   markAuthTokenRefreshed,
+  setSharedWebSocketOfflineSuppressed,
   subscribeWebSocket,
   tryRefreshToken,
   tryRefreshTokenOutcome,
@@ -53,6 +56,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  setSharedWebSocketOfflineSuppressed(false)
   clearIdleTimeout()
   vi.useRealTimers()
   vi.restoreAllMocks()
@@ -77,6 +81,51 @@ describe('shared general WebSocket lifecycle', () => {
     const legacyUnsubscribe = subscribeWebSocket(vi.fn())
     expect(FakeSharedWebSocket.instances.length).toBeGreaterThanOrEqual(2)
     expect(() => legacyUnsubscribe()).not.toThrow()
+  })
+
+  it('suspends existing realtime connections during local mode and reconnects the same subscriptions afterwards', () => {
+    vi.stubGlobal('WebSocket', FakeSharedWebSocket)
+    FakeSharedWebSocket.instances = []
+    localStorage.setItem('token', 'test-session')
+    const unsubscribe = subscribeWebSocket(vi.fn())
+    expect(FakeSharedWebSocket.instances).toHaveLength(1)
+    const first = FakeSharedWebSocket.instances[0]
+
+    setSharedWebSocketOfflineSuppressed(true)
+    expect(first.readyState).toBe(FakeSharedWebSocket.CLOSED)
+    subscribeWebSocket(vi.fn())()
+    expect(FakeSharedWebSocket.instances).toHaveLength(1)
+
+    setSharedWebSocketOfflineSuppressed(false)
+    expect(FakeSharedWebSocket.instances).toHaveLength(2)
+    unsubscribe()
+  })
+
+  it('keeps canonical JSON on the local interceptor and blocks binary transport while offline', async () => {
+    localStorage.setItem('token', 'cookie-session')
+    localStorage.setItem(AUTH_REFRESHED_KEY, '1749998700000')
+    localStorage.setItem(LAST_ACTIVITY_KEY, '1749990000000')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ success: true, tasks: [] }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+
+    setSharedWebSocketOfflineSuppressed(true)
+
+    await expect(apiPost('/api/tasks', { title: 'Local' })).resolves.toMatchObject({
+      success: true,
+      status: 200,
+    })
+    await expect(apiBlob('/api/tasks/export')).resolves.toMatchObject({
+      success: false,
+      status: 503,
+    })
+    await expect(apiUpload('/api/media/upload', new FormData())).resolves.toMatchObject({
+      success: false,
+      status: 503,
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/tasks')
   })
 })
 

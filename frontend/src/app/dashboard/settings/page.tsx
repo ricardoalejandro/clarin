@@ -23,6 +23,7 @@ import { useNotifications } from '@/components/NotificationProvider'
 import PipelineStageManager from '@/components/pipelines/PipelineStageManager'
 import PipelineManagementDialog from '@/components/pipelines/PipelineManagementDialog'
 import type { Pipeline } from '@/types/contact'
+import OfflineAccessPanel from '@/components/settings/OfflineAccessPanelV5'
 
 interface Account {
   id: string
@@ -106,6 +107,7 @@ function formatBytes(bytes?: number) {
 
 interface UserProfile {
   id: string
+  username: string
   email: string
   name: string
   role: string
@@ -1173,6 +1175,7 @@ export default function SettingsPage() {
         const u = meData.user
         setUser({
           id: u.id,
+          username: u.username || '',
           email: u.email,
           name: u.display_name || u.username,
           role: u.role,
@@ -2009,6 +2012,7 @@ export default function SettingsPage() {
     ...(canManageQuickReplies ? [{ id: 'quick-replies', label: 'Resp. Rápidas', icon: Zap }] : []),
     ...((user?.is_super_admin || user?.is_admin || user?.permissions?.includes('settings') || user?.permissions?.includes('*')) ? [{ id: 'custom-fields', label: 'Campos', icon: Tag }] : []),
     { id: 'notifications', label: 'Notificaciones', icon: Bell },
+    { id: 'offline', label: 'Offline', icon: HardDrive },
     ...((user?.is_super_admin || user?.is_admin) ? [{ id: 'api-keys', label: 'API Keys', icon: Key }] : []),
     { id: 'security', label: 'Seguridad', icon: Shield },
   ]
@@ -3501,6 +3505,8 @@ export default function SettingsPage() {
           {activeTab === 'api-keys' && (
             <APIKeysPanel />
           )}
+
+          {activeTab === 'offline' && <OfflineAccessPanel key={user?.id || ''} currentLogin={user?.username || ''} currentUserID={user?.id || ''} />}
 
           {/* Custom Fields Tab */}
           {activeTab === 'custom-fields' && (

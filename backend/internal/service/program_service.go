@@ -548,21 +548,43 @@ func (s *ProgramService) MarkAttendance(ctx context.Context, accountID, userID, 
 	return s.BatchMarkAttendance(ctx, accountID, userID, programID, sessionID, []*domain.ProgramAttendance{a})
 }
 
-func (s *ProgramService) BatchMarkAttendance(ctx context.Context, accountID, userID, programID, sessionID uuid.UUID, attendances []*domain.ProgramAttendance) error {
-	validStatuses := map[string]bool{"": true, domain.AttendanceStatusPresent: true, domain.AttendanceStatusAbsent: true, domain.AttendanceStatusLate: true}
+func isValidProgramAttendanceStatus(status string) bool {
+	switch status {
+	case "", domain.AttendanceStatusConfirmed, domain.AttendanceStatusPresent, domain.AttendanceStatusAbsent, domain.AttendanceStatusLate:
+		return true
+	default:
+		return false
+	}
+}
+
+func isValidProgramAttendanceFilterStatus(status string) bool {
+	return status == "unmarked" || (status != "" && isValidProgramAttendanceStatus(status))
+}
+
+func validateAttendanceBatch(sessionID uuid.UUID, attendances []*domain.ProgramAttendance) error {
 	seen := make(map[uuid.UUID]struct{}, len(attendances))
 	for _, attendance := range attendances {
 		if attendance == nil || attendance.ParticipantID == uuid.Nil {
 			return errors.New("participant_id is required")
 		}
-		if !validStatuses[attendance.Status] {
+		if !isValidProgramAttendanceStatus(attendance.Status) {
 			return fmt.Errorf("invalid attendance status: %s", attendance.Status)
+		}
+		if attendance.ExpectedStatus != nil && !isValidProgramAttendanceStatus(*attendance.ExpectedStatus) {
+			return fmt.Errorf("invalid expected attendance status: %s", *attendance.ExpectedStatus)
 		}
 		if _, exists := seen[attendance.ParticipantID]; exists {
 			return errors.New("duplicate participant in attendance batch")
 		}
 		seen[attendance.ParticipantID] = struct{}{}
 		attendance.SessionID = sessionID
+	}
+	return nil
+}
+
+func (s *ProgramService) BatchMarkAttendance(ctx context.Context, accountID, userID, programID, sessionID uuid.UUID, attendances []*domain.ProgramAttendance) error {
+	if err := validateAttendanceBatch(sessionID, attendances); err != nil {
+		return err
 	}
 	return s.repo.Program.BatchMarkAttendance(ctx, accountID, userID, programID, sessionID, attendances)
 }
@@ -619,8 +641,8 @@ func (s *ProgramService) DeleteAttendanceObservation(ctx context.Context, accoun
 }
 
 func (s *ProgramService) GetParticipantsByAttendanceStatus(ctx context.Context, accountID, programID, sessionID uuid.UUID, status string) ([]*domain.ProgramParticipant, error) {
-	if status != "unmarked" && status != domain.AttendanceStatusPresent && status != domain.AttendanceStatusAbsent && status != domain.AttendanceStatusLate {
-		return nil, programInputError("attendance status must be present, absent, late or unmarked")
+	if !isValidProgramAttendanceFilterStatus(status) {
+		return nil, programInputError("attendance status must be confirmed, present, absent, late or unmarked")
 	}
 	return s.repo.Program.GetParticipantsByAttendanceStatus(ctx, accountID, programID, sessionID, status)
 }
@@ -740,24 +762,24 @@ func (s *ProgramService) GetFolders(ctx context.Context, accountID uuid.UUID, pr
 	return s.repo.ProgramFolder.GetByAccountID(ctx, accountID, programStatus)
 }
 
-func (s *ProgramService) GetFolderByID(ctx context.Context, id uuid.UUID) (*domain.ProgramFolder, error) {
-	return s.repo.ProgramFolder.GetByID(ctx, id)
+func (s *ProgramService) GetFolderByID(ctx context.Context, accountID, id uuid.UUID) (*domain.ProgramFolder, error) {
+	return s.repo.ProgramFolder.GetByID(ctx, accountID, id)
 }
 
 func (s *ProgramService) CreateFolder(ctx context.Context, f *domain.ProgramFolder) error {
 	return s.repo.ProgramFolder.Create(ctx, f)
 }
 
-func (s *ProgramService) UpdateFolder(ctx context.Context, f *domain.ProgramFolder) error {
-	return s.repo.ProgramFolder.Update(ctx, f)
+func (s *ProgramService) UpdateFolder(ctx context.Context, accountID uuid.UUID, f *domain.ProgramFolder) error {
+	return s.repo.ProgramFolder.Update(ctx, accountID, f)
 }
 
-func (s *ProgramService) DeleteFolder(ctx context.Context, id uuid.UUID) error {
-	return s.repo.ProgramFolder.Delete(ctx, id)
+func (s *ProgramService) DeleteFolder(ctx context.Context, accountID, id uuid.UUID) error {
+	return s.repo.ProgramFolder.Delete(ctx, accountID, id)
 }
 
-func (s *ProgramService) MoveProgramToFolder(ctx context.Context, programID uuid.UUID, folderID *uuid.UUID) error {
-	return s.repo.ProgramFolder.MoveProgram(ctx, programID, folderID)
+func (s *ProgramService) MoveProgramToFolder(ctx context.Context, accountID, programID uuid.UUID, folderID *uuid.UUID) error {
+	return s.repo.ProgramFolder.MoveProgram(ctx, accountID, programID, folderID)
 }
 
 // --- Attendance Stats ---

@@ -444,7 +444,7 @@ import {
 import { getShortcutFromShortcutName } from "../actions/shortcuts";
 import { actionTextAutoResize } from "../actions/actionTextAutoResize";
 import { getVisibleSceneBounds } from "../element/bounds";
-import { isMaybeMermaidDefinition } from "../mermaid";
+import { isMaybeMermaidDefinition, isMermaidEnabled, loadMermaidParser } from "../mermaid";
 import NewElementCanvas from "./canvases/NewElementCanvas";
 import {
   FlowChartCreator,
@@ -3133,10 +3133,9 @@ class App extends React.Component<AppProps, AppState> {
           retainSeed: isPlainPaste,
         });
       } else if (data.text) {
-        if (data.text && isMaybeMermaidDefinition(data.text)) {
-          const api = await import("@excalidraw/mermaid-to-excalidraw");
-
+        if (isMermaidEnabled(this.props.mermaidEnabled) && isMaybeMermaidDefinition(data.text)) {
           try {
+            const api = await loadMermaidParser(this.props.mermaidEnabled);
             const { elements: skeletonElements, files = {} } =
               await api.parseMermaidToExcalidraw(data.text);
 

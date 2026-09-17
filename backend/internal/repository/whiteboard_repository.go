@@ -427,6 +427,9 @@ func (r *WhiteboardRepository) ListBoards(ctx context.Context, accountID, userID
 	if scope == WhiteboardScopeWork {
 		origin, scope = domain.WhiteboardOriginWork, WhiteboardScopeAll
 	}
+	if scope == WhiteboardScopeMine || scope == WhiteboardScopeRecent || scope == WhiteboardScopeShared || options.FolderID != nil {
+		origin = domain.WhiteboardOriginStandalone
+	}
 	if origin == "" {
 		origin = WhiteboardScopeAll
 	}
@@ -534,9 +537,9 @@ func (r *WhiteboardRepository) CountBoardScopes(ctx context.Context, accountID, 
 	err := r.db.QueryRow(ctx, whiteboardHubAccessCTE+`
 	SELECT
 		COUNT(*) FILTER (WHERE archived_at IS NULL AND view_deleted_at IS NULL),
-		COUNT(*) FILTER (WHERE archived_at IS NULL AND view_deleted_at IS NULL AND created_by=$2),
-		COUNT(*) FILTER (WHERE archived_at IS NULL AND view_deleted_at IS NULL AND updated_at>=NOW()-INTERVAL '30 days'),
-		COUNT(*) FILTER (WHERE archived_at IS NULL AND view_deleted_at IS NULL AND COALESCE(created_by<>$2,TRUE)),
+		COUNT(*) FILTER (WHERE archived_at IS NULL AND view_deleted_at IS NULL AND origin='standalone' AND created_by=$2),
+		COUNT(*) FILTER (WHERE archived_at IS NULL AND view_deleted_at IS NULL AND origin='standalone' AND updated_at>=NOW()-INTERVAL '30 days'),
+		COUNT(*) FILTER (WHERE archived_at IS NULL AND view_deleted_at IS NULL AND origin='standalone' AND COALESCE(created_by<>$2,TRUE)),
 		COUNT(*) FILTER (WHERE archived_at IS NOT NULL OR view_deleted_at IS NOT NULL),
 		COUNT(*) FILTER (WHERE archived_at IS NULL AND view_deleted_at IS NULL AND origin='work')
 	FROM visible WHERE effective_level<>'none' AND ($3::boolean OR origin='standalone')`, accountID, userID, includeWork).

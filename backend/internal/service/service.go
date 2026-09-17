@@ -209,7 +209,10 @@ func (s *AuthService) rotateRefreshCredential(ctx context.Context, oldRefreshTok
 	return nil
 }
 
-func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret string) (string, string, *domain.User, int, *repository.WhiteboardAuthorityMutationEffect, error) {
+func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret string, restrictions ...OfflineReauthIdentity) (string, string, *domain.User, int, *repository.WhiteboardAuthorityMutationEffect, error) {
+	if len(restrictions) > 1 {
+		return "", "", nil, 0, nil, ErrOfflineIdentityMismatch
+	}
 	if s.cache == nil {
 		return "", "", nil, 0, nil, fmt.Errorf("session service unavailable")
 	}
@@ -240,6 +243,13 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 		s.recordLoginFailure(ctx, username)
 		return "", "", nil, 0, nil, fmt.Errorf("invalid credentials")
 	}
+	// Check the requested continuation only after verifying the real password,
+	// but before account normalization, session writes or token issuance.
+	if len(restrictions) == 1 {
+		if err := restrictions[0].validateUser(user); err != nil {
+			return "", "", nil, 0, nil, err
+		}
+	}
 
 	// Clear login failures on success
 	if s.cache != nil {
@@ -258,8 +268,31 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	if err != nil || user == nil {
 		return "", "", nil, 0, authorityEffect, fmt.Errorf("failed to reload normalized user authority")
 	}
-	membership, err := s.repos.UserAccount.GetPreferredByUserID(ctx, user.ID)
+	var membership *domain.UserAccount
+	if len(restrictions) == 1 {
+		if err := restrictions[0].validateUser(user); err != nil {
+			return "", "", nil, 0, authorityEffect, err
+		}
+		membership, err = s.repos.UserAccount.GetByUserAndAccount(ctx, user.ID, restrictions[0].AccountID)
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && membership == nil {
+			return "", "", nil, 0, authorityEffect, ErrOfflineIdentityMismatch
+		}
+		if err == nil {
+			active, accountErr := s.repos.Account.IsActive(ctx, restrictions[0].AccountID)
+			if accountErr == nil && !active {
+				return "", "", nil, 0, authorityEffect, ErrOfflineIdentityMismatch
+			}
+			if accountErr != nil {
+				return "", "", nil, 0, authorityEffect, fmt.Errorf("%w: account validation failed", ErrAuthSessionUnavailable)
+			}
+		}
+	} else {
+		membership, err = s.repos.UserAccount.GetPreferredByUserID(ctx, user.ID)
+	}
 	if err != nil {
+		if len(restrictions) == 1 {
+			return "", "", nil, 0, authorityEffect, fmt.Errorf("%w: membership validation failed", ErrAuthSessionUnavailable)
+		}
 		return "", "", nil, 0, authorityEffect, fmt.Errorf("no account assignment available: %w", err)
 	}
 	accountCount, err := s.repos.UserAccount.CountByUserID(ctx, user.ID)

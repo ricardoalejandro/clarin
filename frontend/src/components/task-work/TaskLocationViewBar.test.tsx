@@ -13,6 +13,7 @@ function locationView(overrides: Partial<TaskLocationView> = {}): TaskLocationVi
     sort_order: 1,
     version: 1,
     access_revision: 1,
+    visibility_mode: 'inherit',
     lifecycle: 'active',
     created_by: 'user-1',
     resource: { whiteboard: { id: 'board-1', name: 'Mapa protegido', version: 1, scene_sequence: 0, updated_at: '' } },
@@ -29,14 +30,20 @@ function props(view = locationView()) {
     availableWidth: 1_200,
     locationLabel: 'Lista',
     locationContextKey: 'environment-1:list:list-1',
+    scopeType: 'list' as const,
+    scopeID: 'list-1',
+    parentAccessRevision: 1,
     featureEnabled: true,
     canCreate: true,
+    canManageAccess: false,
     onSelectBuiltin: vi.fn(),
     onSelectLocation: vi.fn(),
     onCreate: vi.fn(async () => null),
     onRename: vi.fn(async () => null),
     onDuplicate: vi.fn(async () => null),
     onTrash: vi.fn(async () => null),
+    onPrepareAccessChange: vi.fn(async () => null),
+    onAccessChanged: vi.fn(),
   }
 }
 

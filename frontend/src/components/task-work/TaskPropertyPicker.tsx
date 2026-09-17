@@ -42,7 +42,7 @@ const priorityDescriptions: Record<TaskPriority, string> = {
   urgent: 'Atención inmediata',
 }
 
-function usePickerPosition(open: boolean, triggerRef: React.RefObject<HTMLButtonElement>) {
+function usePickerPosition(open: boolean, triggerRef: React.RefObject<HTMLButtonElement | null>) {
   const [style, setStyle] = useState<CSSProperties>({})
   useEffect(() => {
     if (!open) return
@@ -83,7 +83,7 @@ function usePickerPosition(open: boolean, triggerRef: React.RefObject<HTMLButton
   return style
 }
 
-function PickerPortal({ label, open, style, highlighted, count, containerRef, onHighlight, onChoose, onClose, header, children }: { label: string; open: boolean; style: CSSProperties; highlighted: number; count: number; containerRef: React.RefObject<HTMLDivElement>; onHighlight: (index: number) => void; onChoose: (index: number) => void; onClose: () => void; header?: React.ReactNode; children: React.ReactNode }) {
+function PickerPortal({ label, open, style, highlighted, count, containerRef, onHighlight, onChoose, onClose, header, children }: { label: string; open: boolean; style: CSSProperties; highlighted: number; count: number; containerRef: React.RefObject<HTMLDivElement | null>; onHighlight: (index: number) => void; onChoose: (index: number) => void; onClose: () => void; header?: React.ReactNode; children: React.ReactNode }) {
   const highlightedRef = useRef(highlighted)
   useEffect(() => { highlightedRef.current = highlighted }, [highlighted])
   useLayoutEffect(() => {

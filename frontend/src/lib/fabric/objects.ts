@@ -3,7 +3,7 @@
  * Extends fabric.Textbox with isDynamic, fieldName, and visual badge
  */
 
-import { Textbox, classRegistry } from 'fabric'
+import { Textbox, classRegistry } from './runtime'
 import type { FieldFormat } from '../dynamicFieldFormat'
 
 // ─── DynamicText ──────────────────────────────────────────────────────────────

@@ -586,6 +586,8 @@ export interface ExcalidrawProps {
     appState: AppState,
   ) => JSX.Element | null;
   aiEnabled?: boolean;
+  /** Enables local Mermaid parsing independently from AI generation. */
+  mermaidEnabled?: boolean;
   showDeprecatedFonts?: boolean;
 }
 
@@ -649,6 +651,7 @@ export type AppProps = Merge<
     isCollaborating: boolean;
     children?: React.ReactNode;
     aiEnabled: boolean;
+    mermaidEnabled: boolean;
   }
 >;
 

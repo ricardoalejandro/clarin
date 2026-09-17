@@ -364,6 +364,29 @@ func (s *Storage) GetFile(ctx context.Context, objectKey string) ([]byte, error)
 	return data, nil
 }
 
+// GetFileLimited retrieves one object without permitting its actual contents
+// to exceed the caller's memory budget. Object metadata is advisory and may be
+// stale, so the byte limit is enforced while reading the body as well.
+func (s *Storage) GetFileLimited(ctx context.Context, objectKey string, maxBytes int64) ([]byte, error) {
+	if maxBytes < 0 {
+		return nil, fmt.Errorf("invalid file size limit")
+	}
+	object, err := s.client.GetObject(ctx, s.bucketForObjectKey(objectKey), objectKey, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file: %w", err)
+	}
+	defer object.Close()
+
+	data, err := io.ReadAll(io.LimitReader(object, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("file exceeds size limit")
+	}
+	return data, nil
+}
+
 // GetFileInfo retrieves file metadata (size, content-type) from storage
 func (s *Storage) GetFileInfo(ctx context.Context, objectKey string) (minio.ObjectInfo, error) {
 	return s.client.StatObject(ctx, s.bucketForObjectKey(objectKey), objectKey, minio.StatObjectOptions{})

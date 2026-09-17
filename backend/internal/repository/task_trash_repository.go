@@ -99,12 +99,24 @@ func taskTrashLocationViewCanViewSQL(locationAlias, actorExpression string) stri
 		WHERE trash_location_folder.account_id=%s.account_id AND trash_location_folder.id=%s.folder_id
 		  AND (%s)>=1)`, locationAlias, locationAlias,
 		taskActorFolderAccessRankSQL("trash_location_folder", actorExpression))
+	folderManage := fmt.Sprintf(`EXISTS(SELECT 1 FROM task_folders trash_location_folder
+		WHERE trash_location_folder.account_id=%s.account_id AND trash_location_folder.id=%s.folder_id
+		  AND (%s))`, locationAlias, locationAlias,
+		taskActorFolderCanManageSQL("trash_location_folder", actorExpression))
 	listVisible := fmt.Sprintf(`EXISTS(SELECT 1 FROM task_lists trash_location_list
 		WHERE trash_location_list.account_id=%s.account_id AND trash_location_list.id=%s.list_id
 		  AND (%s)>=1)`, locationAlias, locationAlias,
 		taskActorListAccessRankSQL("trash_location_list", actorExpression))
-	return fmt.Sprintf(`((%s.folder_id IS NOT NULL AND %s) OR (%s.list_id IS NOT NULL AND %s))`,
-		locationAlias, folderVisible, locationAlias, listVisible)
+	listManage := fmt.Sprintf(`EXISTS(SELECT 1 FROM task_lists trash_location_list
+		WHERE trash_location_list.account_id=%s.account_id AND trash_location_list.id=%s.list_id
+		  AND (%s))`, locationAlias, locationAlias,
+		taskActorListCanManageSQL("trash_location_list", actorExpression))
+	member := fmt.Sprintf(`EXISTS(SELECT 1 FROM task_location_view_visibility_members visibility_member
+		WHERE visibility_member.account_id=%s.account_id AND visibility_member.task_view_id=%s.id
+		AND visibility_member.user_id=%s)`, locationAlias, locationAlias, actorExpression)
+	return fmt.Sprintf(`(((%s.folder_id IS NOT NULL AND %s) OR (%s.list_id IS NOT NULL AND %s))
+		AND (%s.visibility_mode='inherit' OR %s OR %s OR %s))`,
+		locationAlias, folderVisible, locationAlias, listVisible, locationAlias, member, folderManage, listManage)
 }
 
 func (r *TaskWorkRepository) ListTrashContainers(ctx context.Context, accountID, actorID, environmentID uuid.UUID, now time.Time, includeWhiteboardCounts bool) ([]*domain.TaskTrashContainer, error) {

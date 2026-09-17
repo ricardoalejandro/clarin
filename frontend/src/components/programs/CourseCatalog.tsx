@@ -1,7 +1,7 @@
 'use client'
 
 import { createPortal } from 'react-dom'
-import { useCallback, useEffect, useRef, useState, type HTMLAttributes } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   AlertCircle,
@@ -675,12 +675,6 @@ function CourseCard({ course, selected, busy, compact, expanded, onToggle, onEdi
   const archivedCount = Math.max(0, (course.topic_count ?? course.topics?.length ?? 0) - activeTopicCount)
   const triggerID = `course-${course.id}-trigger`
   const panelID = `course-${course.id}-panel`
-  // React 18 treats `inert` as an unknown DOM attribute. An empty string keeps
-  // the native boolean attribute in the rendered HTML while the type cast can
-  // be removed once the runtime is upgraded to React 19.
-  const collapsedInertProps = compact && !expanded
-    ? ({ inert: '' } as unknown as HTMLAttributes<HTMLDivElement>)
-    : {}
 
   return (
     <article className={`rounded-2xl border bg-white p-4 transition ${selected ? 'border-emerald-400 ring-2 ring-emerald-500/10' : 'border-slate-200 hover:border-slate-300 hover:shadow-sm'}`}>
@@ -721,7 +715,7 @@ function CourseCard({ course, selected, busy, compact, expanded, onToggle, onEdi
       </div>
 
       <div
-        {...collapsedInertProps}
+        inert={compact && !expanded}
         id={compact ? panelID : undefined}
         role={compact ? 'region' : undefined}
         aria-labelledby={compact ? triggerID : undefined}

@@ -2341,7 +2341,8 @@ type ProgramAttendance struct {
 	ID                 uuid.UUID                       `json:"id"`
 	SessionID          uuid.UUID                       `json:"session_id"`
 	ParticipantID      uuid.UUID                       `json:"participant_id"`
-	Status             string                          `json:"status"` // present, absent, late
+	Status             string                          `json:"status"` // confirmed, present, absent, late; empty means unmarked
+	ExpectedStatus     *string                         `json:"-"`
 	Notes              *string                         `json:"notes,omitempty"`
 	ObservationCount   int                             `json:"observation_count"`
 	ObservationPreview []*ProgramAttendanceObservation `json:"observation_preview"`
@@ -2415,10 +2416,18 @@ type ProgramParticipantAttendanceHistory struct {
 
 // Attendance status constants
 const (
-	AttendanceStatusPresent = "present"
-	AttendanceStatusAbsent  = "absent"
-	AttendanceStatusLate    = "late"
+	AttendanceStatusConfirmed = "confirmed"
+	AttendanceStatusPresent   = "present"
+	AttendanceStatusAbsent    = "absent"
+	AttendanceStatusLate      = "late"
 )
+
+// ProgramAttendanceStatusConflict is returned when an attendance draft was
+// based on a status that changed before the batch could be committed.
+type ProgramAttendanceStatusConflict struct {
+	ParticipantID uuid.UUID `json:"participant_id"`
+	CurrentStatus string    `json:"current_status"`
+}
 
 // ProgramGoal stores attendance and transfer targets for a cuenta or one group.
 type ProgramGoal struct {
@@ -2481,6 +2490,7 @@ type ProgramSessionAttendanceStat struct {
 	Title     string    `json:"title"`
 	Topic     string    `json:"topic"`
 	Date      string    `json:"date"`
+	Confirmed int       `json:"confirmed"`
 	Present   int       `json:"present"`
 	Absent    int       `json:"absent"`
 	Late      int       `json:"late"`

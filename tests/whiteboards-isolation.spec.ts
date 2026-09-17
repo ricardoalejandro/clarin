@@ -439,7 +439,7 @@ class WhiteboardRealtimeHarness {
         type: 'excalidraw', version: 2, source: 'clarin', elements: clone(this.elements),
         appState: clone(this.appState), files: {},
       },
-      scene_schema_version: 'excalidraw', editor_version: '0.18.1-clarin.6', sequence: this.sequence, updated_at: now,
+      scene_schema_version: 'excalidraw', editor_version: '0.18.1-clarin.7', sequence: this.sequence, updated_at: now,
     }
   }
 }
@@ -1256,7 +1256,7 @@ async function exerciseNativeStyleAndImageExportEnhancements(
   const svg = readFileSync(svgPath!, 'utf8')
   expect(svg).toContain('Caveat')
   expect(svg).toMatch(/data:font\/woff2;base64,/u)
-  await page.keyboard.press('Escape')
+  await page.locator('.Modal__background').click({ position: { x: 4, y: 4 } })
   await expect(page.locator('.ImageExportModal')).toBeHidden()
 
   await page.getByTestId('main-menu-trigger').click()
@@ -2508,6 +2508,108 @@ test('texto enriquecido · recorre cada línea vacía con el teclado y conserva 
   }
 })
 
+test('Mermaid local · pegar un diagrama crea elementos editables sin IA ni tráfico externo', async ({ browser, browserName }, testInfo) => {
+  test.skip(browserName !== 'chromium', 'El portapapeles nativo se verifica con Chromium.')
+  test.setTimeout(120_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const explicitNavigations = new Set<string>()
+  const context = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    serviceWorkers: 'block',
+    permissions: ['clipboard-read', 'clipboard-write'],
+  })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, explicitNavigations)
+  await context.addInitScript(() => {
+    const state = window as typeof window & {
+      __clarinMermaidCSP?: Array<{ directive: string; blockedURI: string }>
+    }
+    state.__clarinMermaidCSP = []
+    document.addEventListener('securitypolicyviolation', event => {
+      state.__clarinMermaidCSP?.push({ directive: event.effectiveDirective, blockedURI: event.blockedURI })
+    })
+  })
+  const page = await context.newPage()
+  const pageErrors: string[] = []
+  const requestFailures: Array<{ url: string; error: string }> = []
+  const pastedScriptRequests: string[] = []
+  const sockets: string[] = []
+  let pasting = false
+  page.on('pageerror', error => pageErrors.push(error.message))
+  page.on('requestfailed', request => recordWhiteboardRequestFailure(requestFailures, request))
+  page.on('request', request => {
+    if (pasting && request.resourceType() === 'script') pastedScriptRequests.push(request.url())
+  })
+  page.on('websocket', socket => sockets.push(socket.url()))
+  try {
+    // El host real mantiene IA apagada y habilita Mermaid de forma independiente.
+    // Solo cuenta/API/WebSocket usan fixtures; el bundle y su CSP no se alteran.
+    await openEditor(page)
+    await expectEditorSaved(page)
+    // Production Next prefetches the dashboard's visible links after hydration.
+    // Finish that initial traffic before measuring scripts caused by paste.
+    await page.waitForTimeout(1_000)
+    const initialIDs = new Set(harness.elements.map(element => String(element.id)))
+    const canvas = page.locator('.whiteboard-editor-shell canvas.interactive').first()
+    const box = await canvas.boundingBox()
+    expect(box).not.toBeNull()
+    const pastedElements = () => harness.elements.filter(element => !initialIDs.has(String(element.id)) && !element.isDeleted)
+    const pastedText = () => pastedElements().filter(element => element.type === 'text').map(element => element.originalText)
+    pasting = true
+
+    await page.keyboard.press('Escape')
+    await page.getByTestId('toolbar-selection').check({ force: true })
+    await page.mouse.click(box!.x + box!.width * 0.68, box!.y + box!.height * 0.58)
+    await page.evaluate(value => navigator.clipboard.writeText(value), 'graph TD\n A[Inicio]-->B[Fin]')
+    await page.keyboard.press('Control+v')
+    await expect.poll(() => pastedElements().length, { timeout: 30_000 }).toBeGreaterThanOrEqual(5)
+    await expect.poll(() => new Set(pastedElements().map(element => element.type))).toEqual(
+      new Set(['arrow', 'rectangle', 'text']),
+    )
+    expect(pastedText()).toEqual(expect.arrayContaining(['Inicio', 'Fin']))
+    expect(pastedText()).not.toEqual(expect.arrayContaining(['graph TD', 'A[Inicio]-->B[Fin]']))
+    await expectEditorSaved(page)
+
+    const diagramIDs = new Set(pastedElements().map(element => String(element.id)))
+    await page.keyboard.press('Escape')
+    await page.getByTestId('toolbar-selection').check({ force: true })
+    await page.mouse.click(box!.x + box!.width * 0.68, box!.y + box!.height * 0.78)
+    await page.evaluate(value => navigator.clipboard.writeText(value), 'Nota normal de la cuenta QA')
+    await page.keyboard.press('Control+v')
+    await expect.poll(() => pastedElements()
+      .filter(element => !diagramIDs.has(String(element.id)))
+      .map(element => ({ type: element.type, text: element.originalText })), { timeout: 30_000 })
+      .toEqual([{ type: 'text', text: 'Nota normal de la cuenta QA' }])
+    await expectEditorSaved(page)
+    pasting = false
+    const cspViolations = await page.evaluate(() => (
+      window as typeof window & { __clarinMermaidCSP?: Array<{ directive: string; blockedURI: string }> }
+    ).__clarinMermaidCSP || [])
+    await testInfo.attach('whiteboard-mermaid-boundary.json', {
+      contentType: 'application/json',
+      body: Buffer.from(JSON.stringify({ pastedScriptRequests, requests: [...requests], sockets, blocked, cspViolations, pageErrors, requestFailures }, null, 2)),
+    })
+    expect(pastedScriptRequests.length, 'el parser Mermaid debe cargarse bajo demanda').toBeGreaterThan(0)
+    expect(pastedScriptRequests.every(url => new URL(url).origin === new URL(baseURL).origin), 'los chunks Mermaid deben ser same-origin').toBe(true)
+    expect(blocked, 'los intentos externos bloqueados también son fallos de aislamiento').toEqual([])
+    expect(cspViolations).toEqual([])
+    expect(explicitNavigations.size).toBe(0)
+    expect(sockets.every(url => new URL(url).host === new URL(baseURL).host)).toBe(true)
+    expect(pageErrors).toEqual([])
+    expect(requestFailures).toEqual([])
+
+    const exported = await exportEditableScene(page)
+    const exportedPaste = exported.elements.filter(element => !initialIDs.has(String(element.id)) && !element.isDeleted)
+    expect(new Set(exportedPaste.map(element => element.type))).toEqual(new Set(['arrow', 'rectangle', 'text']))
+    expect(exportedPaste.find(element => element.originalText === 'Nota normal de la cuenta QA')).toBeDefined()
+    expect(exportedPaste.some(element => element.originalText === 'graph TD')).toBe(false)
+  } finally {
+    await context.close()
+  }
+})
+
 test('texto enriquecido · Ctrl+C conserva el texto seleccionado y no lo reemplaza por el sobre del lienzo', async ({ browser, browserName }) => {
   test.skip(browserName !== 'chromium', 'La escritura asíncrona del portapapeles del sistema se valida en Chromium.')
   test.setTimeout(120_000)
@@ -3480,7 +3582,7 @@ test('integración simulada · Pizarras permanece same-origin y reconcilia ACK p
     page.on('requestfailed', request => recordWhiteboardRequestFailure(requestFailures, request))
     page.on('response', response => {
       const path = new URL(response.url()).pathname
-      if (path.startsWith('/vendor/whiteboards-editor/0.18.1-clarin.6/fonts/')) {
+      if (path.startsWith('/vendor/whiteboards-editor/0.18.1-clarin.7/fonts/')) {
         fontResponses.push({ url: response.url(), status: response.status() })
       }
       if (response.status() === 409 && /\/api\/whiteboards\/[^/]+\/scene$/.test(path)) sceneConflicts.push(response.url())

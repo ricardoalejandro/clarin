@@ -32,19 +32,19 @@ export default function OfflinePage() {
             <ClarinBrandMark className="clarin-offline-mark" />
             <div>
               <p className="clarin-offline-name">Clarin</p>
-              <p className="clarin-offline-eyebrow">Experiencia móvil</p>
+              <p className="clarin-offline-eyebrow">Acceso web</p>
             </div>
           </div>
 
           <span className="clarin-offline-state"><WifiOff /></span>
           <h1 className="clarin-offline-title">Estás sin conexión</h1>
           <p className="clarin-offline-copy">
-            Por seguridad, Clarin no guarda datos de tu cuenta para trabajar sin internet. Tu información permanece protegida; reintenta cuando vuelva la conexión.
+            No se pudo abrir una copia offline preparada en este navegador. Cuando vuelva la conexión, entra en Configuración → Offline para verificarla. No borres los datos del navegador si tienes cambios pendientes.
           </p>
         </div>
 
         <div className="clarin-offline-actions">
-          <a href="/dashboard" className="clarin-offline-retry"><RefreshCw />Reintentar</a>
+          <a href="/login?offline_fresh_login=1" className="clarin-offline-retry"><RefreshCw />Volver a iniciar sesión con conexión</a>
         </div>
       </section>
     </main>

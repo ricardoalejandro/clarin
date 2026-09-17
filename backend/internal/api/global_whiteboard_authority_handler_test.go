@@ -3,6 +3,7 @@ package api
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -101,12 +102,23 @@ func TestAdminAccountPurgeSummaryIncludesContextualWhiteboardRows(t *testing.T) 
 		"tasks",
 		"work_events",
 		"task_location_views",
+		"task_location_view_visibility_members",
 		"task_location_whiteboard_views",
 		"task_location_view_operations",
 	} {
 		if !strings.Contains(body, `"`+table+`"`) {
 			t.Fatalf("account purge preview omits contextual whiteboard table %s", table)
 		}
+	}
+}
+
+func TestExistingAccountPurgeTablesSkipsOptionalTablesWithoutReordering(t *testing.T) {
+	t.Parallel()
+	requested := []string{"contacts", "documents", "tasks", "automation_flows"}
+	present := []string{"tasks", "contacts", "unrelated"}
+	want := []string{"contacts", "tasks"}
+	if got := existingAccountPurgeTables(requested, present); !reflect.DeepEqual(got, want) {
+		t.Fatalf("existingAccountPurgeTables()=%v, want %v", got, want)
 	}
 }
 

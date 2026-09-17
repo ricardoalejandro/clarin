@@ -1177,7 +1177,7 @@ export default function ErosAssistant({ isOpenProp = false, onClose }: { isOpenP
   // Format markdown-like response (bold, lists, tables)
   const formatResponse = (text: string) => {
     const lines = text.split('\n')
-    const result: JSX.Element[] = []
+    const result: React.JSX.Element[] = []
     let i = 0
 
     while (i < lines.length) {

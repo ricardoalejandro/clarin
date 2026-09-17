@@ -1,4 +1,4 @@
-import { act, renderHook, waitFor } from '@testing-library/react'
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import useTaskWindow, {
   TASK_WINDOW_PREFERENCE_VERSION,
@@ -17,7 +17,11 @@ function viewport(width: number, height: number) {
   window.dispatchEvent(new Event('resize'))
 }
 
-afterEach(() => {
+afterEach(async () => {
+  // Vitest does not expose global hooks here, so Testing Library cannot install
+  // its automatic cleanup. Unmount before dispatching the restoration resize:
+  // otherwise React can schedule work after JSDOM has disposed window.
+  await act(async () => { cleanup() })
   localStorage.clear()
   viewport(originalWidth, originalHeight)
 })

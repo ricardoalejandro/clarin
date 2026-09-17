@@ -26,7 +26,7 @@ export interface AdminFormDialogProps {
   onClose: () => void
   children: ReactNode
   footer: ReactNode
-  initialFocusRef?: RefObject<HTMLElement>
+  initialFocusRef?: RefObject<HTMLElement | null>
   onSubmit?: FormEventHandler<HTMLFormElement>
   formId?: string
   formNoValidate?: boolean

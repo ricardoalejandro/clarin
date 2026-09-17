@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 import { sassPlugin } from 'esbuild-sass-plugin'
 
-export const EXCALIDRAW_FORK_VERSION = '0.18.1-clarin.6'
+export const EXCALIDRAW_FORK_VERSION = '0.18.1-clarin.7'
 export const EXCALIDRAW_UPSTREAM_COMMIT = 'a2ec2889babf7d2295469c6d90ebe77fae57df84'
 
 const frontendRoot = process.cwd()

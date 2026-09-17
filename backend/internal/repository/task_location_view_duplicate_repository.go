@@ -12,41 +12,44 @@ import (
 )
 
 type TaskLocationViewDuplicateInput struct {
-	ViewID              uuid.UUID
-	BoardID             uuid.UUID
-	SourceViewID        uuid.UUID
-	SourceBoardID       uuid.UUID
-	AccountID           uuid.UUID
-	ActorID             uuid.UUID
-	Name                string
-	ExpectedVersion     int64
-	Scene               json.RawMessage
-	SceneSchemaVersion  string
-	EditorVersion       string
-	OperationID         uuid.UUID
-	RequestPayloadHash  string
-	ResultSceneHash     string
-	SnapshotObjectKey   string
-	SnapshotContentHash string
-	SnapshotSizeBytes   int64
+	ViewID                 uuid.UUID
+	BoardID                uuid.UUID
+	SourceViewID           uuid.UUID
+	SourceBoardID          uuid.UUID
+	AccountID              uuid.UUID
+	ActorID                uuid.UUID
+	Name                   string
+	ExpectedVersion        int64
+	ExpectedAccessRevision int64
+	Scene                  json.RawMessage
+	SceneSchemaVersion     string
+	EditorVersion          string
+	OperationID            uuid.UUID
+	RequestPayloadHash     string
+	ResultSceneHash        string
+	SnapshotObjectKey      string
+	SnapshotContentHash    string
+	SnapshotSizeBytes      int64
 }
 
 type taskLocationViewDuplicateState struct {
-	ScopeType     string
-	ScopeID       uuid.UUID
-	EnvironmentID uuid.UUID
-	BoardID       uuid.UUID
-	Version       int64
-	Scene         json.RawMessage
-	Deleted       bool
-	BoardArchived bool
+	ScopeType      string
+	ScopeID        uuid.UUID
+	EnvironmentID  uuid.UUID
+	BoardID        uuid.UUID
+	Version        int64
+	AccessRevision int64
+	VisibilityMode string
+	Scene          json.RawMessage
+	Deleted        bool
+	BoardArchived  bool
 }
 
 func readTaskLocationViewDuplicateState(ctx context.Context, tx pgx.Tx, accountID, viewID uuid.UUID, lock bool) (*taskLocationViewDuplicateState, error) {
 	state := &taskLocationViewDuplicateState{}
 	viewQuery := `SELECT CASE WHEN view_item.folder_id IS NOT NULL THEN 'folder' ELSE 'list' END,
 		COALESCE(view_item.folder_id,view_item.list_id),view_item.environment_id,binding.whiteboard_id,
-		view_item.version,view_item.deleted_at IS NOT NULL
+		view_item.version,view_item.access_revision,view_item.visibility_mode,view_item.deleted_at IS NOT NULL
 		FROM task_location_views view_item JOIN task_location_whiteboard_views binding
 		ON binding.account_id=view_item.account_id AND binding.task_view_id=view_item.id
 		WHERE view_item.account_id=$1 AND view_item.id=$2`
@@ -54,7 +57,7 @@ func readTaskLocationViewDuplicateState(ctx context.Context, tx pgx.Tx, accountI
 		viewQuery += ` FOR UPDATE OF view_item`
 	}
 	if err := tx.QueryRow(ctx, viewQuery, accountID, viewID).Scan(&state.ScopeType, &state.ScopeID,
-		&state.EnvironmentID, &state.BoardID, &state.Version, &state.Deleted); err != nil {
+		&state.EnvironmentID, &state.BoardID, &state.Version, &state.AccessRevision, &state.VisibilityMode, &state.Deleted); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrTaskLocationViewNotFound
 		}
@@ -78,7 +81,7 @@ func readTaskLocationViewDuplicateState(ctx context.Context, tx pgx.Tx, accountI
 // standalone grant or copies public shares/history from the source board.
 func (r *TaskLocationViewRepository) Duplicate(ctx context.Context, input TaskLocationViewDuplicateInput) (*domain.TaskLocationView, bool, error) {
 	if input.ViewID == uuid.Nil || input.BoardID == uuid.Nil || input.SourceViewID == uuid.Nil || input.SourceBoardID == uuid.Nil ||
-		input.AccountID == uuid.Nil || input.ActorID == uuid.Nil || input.OperationID == uuid.Nil || input.ExpectedVersion <= 0 ||
+		input.AccountID == uuid.Nil || input.ActorID == uuid.Nil || input.OperationID == uuid.Nil || input.ExpectedVersion <= 0 || input.ExpectedAccessRevision <= 0 ||
 		input.ViewID == input.SourceViewID || input.BoardID == input.SourceBoardID || strings.TrimSpace(input.Name) == "" ||
 		len(input.Scene) == 0 || len(input.RequestPayloadHash) != 64 || input.SnapshotObjectKey == "" ||
 		input.SnapshotContentHash == "" || input.SnapshotSizeBytes <= 0 {
@@ -115,7 +118,7 @@ func (r *TaskLocationViewRepository) Duplicate(ctx context.Context, input TaskLo
 		return nil, false, err
 	}
 	if initial.BoardID != input.SourceBoardID || initial.Deleted || initial.BoardArchived ||
-		initial.Version != input.ExpectedVersion || string(initial.Scene) != string(input.Scene) {
+		initial.Version != input.ExpectedVersion || initial.AccessRevision != input.ExpectedAccessRevision || string(initial.Scene) != string(input.Scene) {
 		return nil, false, ErrTaskLocationViewConflict
 	}
 	_, lockedEnvironmentID, err := requireTaskLocationManageTx(ctx, tx, input.AccountID, input.ActorID,
@@ -130,6 +133,7 @@ func (r *TaskLocationViewRepository) Duplicate(ctx context.Context, input TaskLo
 	if current.ScopeType != initial.ScopeType || current.ScopeID != initial.ScopeID ||
 		current.EnvironmentID != initial.EnvironmentID || current.BoardID != input.SourceBoardID ||
 		current.Deleted || current.BoardArchived || current.Version != input.ExpectedVersion ||
+		current.AccessRevision != input.ExpectedAccessRevision || current.VisibilityMode != initial.VisibilityMode ||
 		string(current.Scene) != string(input.Scene) || lockedEnvironmentID != current.EnvironmentID {
 		return nil, false, ErrTaskLocationViewConflict
 	}
@@ -158,9 +162,15 @@ func (r *TaskLocationViewRepository) Duplicate(ctx context.Context, input TaskLo
 		return nil, false, ErrTaskLocationViewConflict
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO task_location_views(
-		id,account_id,environment_id,folder_id,list_id,view_type,sort_order,created_by
-	) VALUES($1,$2,$3,$4,$5,'whiteboard',$6,$7)`, input.ViewID, input.AccountID, current.EnvironmentID,
-		folderID, listID, sortOrder, input.ActorID); err != nil {
+		id,account_id,environment_id,folder_id,list_id,view_type,sort_order,visibility_mode,created_by
+	) VALUES($1,$2,$3,$4,$5,'whiteboard',$6,$7,$8)`, input.ViewID, input.AccountID, current.EnvironmentID,
+		folderID, listID, sortOrder, current.VisibilityMode, input.ActorID); err != nil {
+		return nil, false, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO task_location_view_visibility_members(
+		account_id,task_view_id,user_id,created_by,created_at,updated_at
+	) SELECT account_id,$3,user_id,$4,NOW(),NOW() FROM task_location_view_visibility_members
+		WHERE account_id=$1 AND task_view_id=$2`, input.AccountID, input.SourceViewID, input.ViewID, input.ActorID); err != nil {
 		return nil, false, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO task_location_whiteboard_views(account_id,task_view_id,whiteboard_id)
@@ -229,7 +239,7 @@ func (r *TaskLocationViewRepository) Duplicate(ctx context.Context, input TaskLo
 		AND job.media_asset_id=link.media_asset_id`, input.AccountID, input.BoardID); err != nil {
 		return nil, false, err
 	}
-	after, _ := json.Marshal(map[string]any{"access_mode": "work_inherited", "creator_id": input.ActorID,
+	after, _ := json.Marshal(map[string]any{"access_mode": "work_" + current.VisibilityMode, "creator_id": input.ActorID,
 		"source_board_id": input.SourceBoardID, "task_view_id": input.ViewID})
 	if _, err := tx.Exec(ctx, `INSERT INTO whiteboard_access_audit(
 		account_id,board_id,actor_id,action,after_state,operation_id,request_payload_hash

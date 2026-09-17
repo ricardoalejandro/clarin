@@ -1,6 +1,9 @@
-import { apiDelete, apiGet, apiPatch, apiPost } from '@/lib/api'
+import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from '@/lib/api'
 import { TASK_LOCATION_VIEW_PAGE_SIZE, taskLocationViewOperationID } from '@/lib/taskLocationViews'
-import type { TaskLocationView, TaskLocationViewScopeType } from '@/types/task'
+import type {
+  TaskLocationView, TaskLocationViewScopeType, TaskLocationViewVisibilityCandidate,
+  TaskLocationViewVisibilityMode, TaskLocationViewVisibilityPolicy,
+} from '@/types/task'
 
 export const TASK_LOCATION_VIEWS_API_ROOT = '/api/tasks/location-views'
 
@@ -102,6 +105,9 @@ export function createTaskLocationView(input: {
   scopeType: TaskLocationViewScopeType
   scopeID: string
   name: string
+  visibilityMode?: TaskLocationViewVisibilityMode
+  visibleUserIDs?: string[]
+  expectedParentAccessRevision?: number
   operationID?: string
 }) {
   return apiPost<{ success?: boolean; location_view: TaskLocationView; idempotent?: boolean }>(TASK_LOCATION_VIEWS_API_ROOT, {
@@ -109,6 +115,9 @@ export function createTaskLocationView(input: {
     scope_type: input.scopeType,
     scope_id: input.scopeID,
     name: input.name,
+    visibility_mode: input.visibilityMode || 'inherit',
+    visible_user_ids: input.visibleUserIDs || [],
+    expected_parent_access_revision: input.expectedParentAccessRevision || 0,
     operation_id: input.operationID || taskLocationViewOperationID(),
   })
 }
@@ -123,7 +132,50 @@ export function renameTaskLocationView(view: TaskLocationView, name: string, ope
 export function duplicateTaskLocationView(view: TaskLocationView, name?: string, operationID = taskLocationViewOperationID()) {
   return apiPost<{ success?: boolean; location_view: TaskLocationView; idempotent?: boolean }>(
     `${TASK_LOCATION_VIEWS_API_ROOT}/${encodeURIComponent(view.id)}/duplicate`,
-    { name, expected_version: view.version, operation_id: operationID },
+    { name, expected_version: view.version, expected_access_revision: view.access_revision, operation_id: operationID },
+  )
+}
+
+export function loadTaskLocationViewAccess(viewID: string, signal?: AbortSignal) {
+  return apiGet<{ success?: boolean; access: TaskLocationViewVisibilityPolicy }>(
+    `${TASK_LOCATION_VIEWS_API_ROOT}/${encodeURIComponent(viewID)}/access`,
+    { signal },
+  )
+}
+
+export function replaceTaskLocationViewAccess(input: {
+  viewID: string
+  visibilityMode: TaskLocationViewVisibilityMode
+  visibleUserIDs: string[]
+  expectedAccessRevision: number
+  operationID?: string
+}) {
+  return apiPut<{ success?: boolean; access: TaskLocationViewVisibilityPolicy; operation_id: string; idempotent?: boolean }>(
+    `${TASK_LOCATION_VIEWS_API_ROOT}/${encodeURIComponent(input.viewID)}/access`,
+    {
+      visibility_mode: input.visibilityMode,
+      visible_user_ids: input.visibleUserIDs,
+      expected_access_revision: input.expectedAccessRevision,
+      operation_id: input.operationID || taskLocationViewOperationID(),
+    },
+  )
+}
+
+export function searchTaskLocationViewAccessCandidates(input: {
+  scopeType: TaskLocationViewScopeType
+  scopeID: string
+  query: string
+  signal?: AbortSignal
+}) {
+  const params = new URLSearchParams({
+    scope_type: input.scopeType,
+    scope_id: input.scopeID,
+    q: input.query.trim(),
+    limit: '50',
+  })
+  return apiGet<{ success?: boolean; users: TaskLocationViewVisibilityCandidate[] }>(
+    `/api/tasks/location-view-access-candidates?${params.toString()}`,
+    { signal: input.signal },
   )
 }
 

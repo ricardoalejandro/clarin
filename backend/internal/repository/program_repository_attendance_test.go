@@ -114,22 +114,118 @@ func TestAttendanceQueryIsSingleAccountScopedLateralRead(t *testing.T) {
 }
 
 func TestAttendanceWriteRequiresAccountScopedInclusiveStartExclusiveEndWindow(t *testing.T) {
+	for _, fragment := range []string{
+		"p.account_id = $1",
+		"p.id = $2",
+		"ps.id = $3",
+		"FOR UPDATE OF ps",
+	} {
+		if !strings.Contains(lockAttendanceSessionQuery, fragment) {
+			t.Fatalf("attendance session lock query is missing %q", fragment)
+		}
+	}
 	required := []string{
 		"p.account_id = $1",
 		"pp.program_id = $2",
-		"pp.id = $3",
+		"pp.id = ANY($3::uuid[])",
 		"ps.id = $4",
 		"ps.date >= pp.enrolled_at",
 		"LEAST(pp.dropped_at, pp.completed_at) IS NULL",
 		"ps.date < LEAST(pp.dropped_at, pp.completed_at)",
+		"ORDER BY pp.id",
+		"FOR UPDATE OF pp",
 	}
 	for _, fragment := range required {
-		if !strings.Contains(participantEligibleForSessionQuery, fragment) {
+		if !strings.Contains(lockAttendanceParticipantsQuery, fragment) {
 			t.Fatalf("attendance eligibility query is missing %q", fragment)
 		}
 	}
-	if strings.Contains(participantEligibleForSessionQuery, "ps.date <= LEAST") {
+	if strings.Contains(lockAttendanceParticipantsQuery, "ps.date <= LEAST") {
 		t.Fatal("attendance eligibility must exclude the withdrawal/completion day")
+	}
+	for _, fragment := range []string{
+		"FROM program_attendance",
+		"p.account_id = $1",
+		"p.id = $2",
+		"ps.id = $3",
+		"pa.participant_id = ANY($4::uuid[])",
+		"COALESCE(pa.status, '')",
+		"ORDER BY pa.participant_id",
+	} {
+		if !strings.Contains(getCurrentAttendanceStatusesQuery, fragment) {
+			t.Fatalf("current attendance status query is missing %q", fragment)
+		}
+	}
+}
+
+func TestAttendanceBatchOrdersLocksAndReportsAllStatusConflictsBeforeWrites(t *testing.T) {
+	firstID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	secondID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+	expectedUnmarked := ""
+	expectedPresent := domain.AttendanceStatusPresent
+	unordered := []*domain.ProgramAttendance{
+		{ParticipantID: secondID, Status: domain.AttendanceStatusLate, ExpectedStatus: &expectedPresent},
+		{ParticipantID: firstID, Status: domain.AttendanceStatusConfirmed, ExpectedStatus: &expectedUnmarked},
+	}
+	ordered := orderedAttendanceBatch(unordered)
+	if ordered[0].ParticipantID != firstID || ordered[1].ParticipantID != secondID {
+		t.Fatalf("attendance batch lock order = %s, %s", ordered[0].ParticipantID, ordered[1].ParticipantID)
+	}
+	if unordered[0].ParticipantID != secondID {
+		t.Fatal("ordering mutated the caller's attendance slice")
+	}
+	conflicts := attendanceStatusConflicts(ordered, map[uuid.UUID]string{
+		firstID:  domain.AttendanceStatusConfirmed,
+		secondID: domain.AttendanceStatusAbsent,
+	})
+	if len(conflicts) != 2 || conflicts[0].ParticipantID != firstID || conflicts[0].CurrentStatus != domain.AttendanceStatusConfirmed ||
+		conflicts[1].ParticipantID != secondID || conflicts[1].CurrentStatus != domain.AttendanceStatusAbsent {
+		t.Fatalf("unexpected ordered conflicts: %#v", conflicts)
+	}
+
+	unordered[0].ExpectedStatus = nil
+	conflicts = attendanceStatusConflicts(ordered, map[uuid.UUID]string{
+		firstID:  "",
+		secondID: domain.AttendanceStatusAbsent,
+	})
+	if len(conflicts) != 0 {
+		t.Fatalf("optional expected_status must preserve compatibility, got %#v", conflicts)
+	}
+}
+
+func TestAttendanceStatusFiltersKeepConfirmedExactAndNullUnmarked(t *testing.T) {
+	for _, fragment := range []string{
+		"p.account_id = $1",
+		"s.id = $3",
+		"a.status = $4",
+	} {
+		if !strings.Contains(getParticipantsByAttendanceStatusQuery, fragment) {
+			t.Fatalf("exact status query missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"LEFT JOIN program_attendance a",
+		"s.id = $3",
+		"a.status IS NULL",
+	} {
+		if !strings.Contains(getUnmarkedParticipantsByAttendanceStatusQuery, fragment) {
+			t.Fatalf("unmarked status query missing %q", fragment)
+		}
+	}
+	if strings.Contains(getUnmarkedParticipantsByAttendanceStatusQuery, "confirmed") {
+		t.Fatal("confirmed attendance must not be included in the unmarked filter")
+	}
+}
+
+func TestConfirmedAttendanceIsAdditiveToSessionStatsAndExcludedFromMarkedDenominator(t *testing.T) {
+	if !strings.Contains(getProgramSessionAttendanceStatsQuery, "pa.status = 'confirmed'") {
+		t.Fatal("session attendance statistics must expose confirmed separately")
+	}
+	if strings.Contains(getProgramParticipantAttendanceStatsQuery, "confirmed") {
+		t.Fatal("confirmed must not enter participant attendance counters or rates")
+	}
+	if !strings.Contains(getProgramParticipantAttendanceStatsQuery, "pa.status IN ('present','absent','late')") {
+		t.Fatal("marked attendance denominator must remain exactly present/absent/late")
 	}
 }
 

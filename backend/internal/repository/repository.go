@@ -75,6 +75,10 @@ type Repositories struct {
 	Report             *ReportRepository
 	LeadIntelligence   *LeadIntelligenceReportRepository
 	WhatsAppStatus     *WhatsAppStatusRepository
+	Offline            *OfflineRepository
+	OfflineV3          *OfflineV3Repository
+	OfflineV4          *OfflineV4Repository
+	OfflineV5          *OfflineV5Repository
 }
 
 func NewRepositories(db *pgxpool.Pool) *Repositories {
@@ -135,6 +139,10 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		Report:             &ReportRepository{db: db},
 		LeadIntelligence:   &LeadIntelligenceReportRepository{db: db},
 		WhatsAppStatus:     &WhatsAppStatusRepository{db: db},
+		Offline:            &OfflineRepository{db: db},
+		OfflineV3:          &OfflineV3Repository{db: db},
+		OfflineV4:          &OfflineV4Repository{db: db},
+		OfflineV5:          &OfflineV5Repository{db: db},
 	}
 }
 

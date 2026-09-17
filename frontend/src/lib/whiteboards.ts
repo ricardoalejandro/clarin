@@ -384,7 +384,7 @@ export interface WhiteboardSavePayload {
     app_state: Record<string, unknown>
   }
   scene_schema_version: 'excalidraw'
-  editor_version: '0.18.1-clarin.6'
+  editor_version: '0.18.1-clarin.7'
 }
 
 export interface WhiteboardScenePatch {
@@ -613,7 +613,7 @@ export function buildWhiteboardSavePayload(input: {
     },
     ...(input.includePatch ? { patch: { elements: input.patchElements || input.elements, app_state: appState } } : {}),
     scene_schema_version: 'excalidraw',
-    editor_version: '0.18.1-clarin.6',
+    editor_version: '0.18.1-clarin.7',
   }
 }
 
@@ -1200,8 +1200,7 @@ export function buildWhiteboardListQuery(input: {
   limit?: number
 }) {
   const params = new URLSearchParams()
-  params.set('scope', input.scope === 'work' ? 'all' : input.scope)
-  if (input.scope === 'work') params.set('origin', 'work')
+  params.set('scope', input.scope)
   params.set('limit', String(Math.min(Math.max(input.limit || 50, 1), 200)))
   if (input.scope === 'trash') params.set('include_archived', 'true')
   if (input.folderID) params.set('folder_id', input.folderID)
@@ -1235,6 +1234,7 @@ export function reconcileWhiteboardSummary(
 ) {
   const withoutIncoming = current.filter(item => item.id !== incoming.id)
   if ((scope === 'trash') !== Boolean(incoming.archived_at)) return withoutIncoming
+  if (scope !== 'trash' && scope !== 'work' && incoming.origin === 'work') return withoutIncoming
   if (scope === 'mine' && incoming.shared) return withoutIncoming
   if (scope === 'shared' && !incoming.shared) return withoutIncoming
   if (scope === 'work' && incoming.origin !== 'work') return withoutIncoming

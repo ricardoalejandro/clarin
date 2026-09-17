@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import { buildChunkRecoveryScript } from '@/lib/chunkRecoveryScript'
+import RootServiceWorkerRuntime from '@/components/mobile-app/RootServiceWorkerRuntime'
 import './globals.css'
 
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'https://clarin.naperu.cloud'
@@ -71,6 +72,7 @@ export default function RootLayout({
         `}} />
       </head>
       <body className="h-full bg-slate-50">
+        <RootServiceWorkerRuntime />
         {children}
       </body>
     </html>

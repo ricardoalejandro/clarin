@@ -19,7 +19,7 @@ export default function WhiteboardModal({
   onClose: () => void
   children: React.ReactNode
   wide?: boolean
-  initialFocusRef?: RefObject<HTMLElement>
+  initialFocusRef?: RefObject<HTMLElement | null>
 }) {
   const dialogRef = useRef<HTMLDivElement>(null)
   useWhiteboardDialogFocus(dialogRef, onClose, initialFocusRef)

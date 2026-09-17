@@ -146,7 +146,7 @@ const getParticipantAttendanceHistoryPageQuery = `
 	       rs.date, rs.start_time, rs.end_time,
 	       COALESCE(NULLIF(BTRIM(rs.session_type), ''), 'regular') AS session_type,
 	       COALESCE(tr.topics, '[]'::jsonb) AS topics,
-	       CASE WHEN pa.status IN ('present', 'absent', 'late') THEN pa.status END AS status,
+	       CASE WHEN pa.status IN ('confirmed', 'present', 'absent', 'late') THEN pa.status END AS status,
 	       COALESCE(lo.observation_count, 0)::int AS observation_count,
 	       lo.id, lo.notes, lo.created_by, lo.created_by_name, lo.created_at, lo.source_label,
 	       NOT (

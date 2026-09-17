@@ -51,6 +51,7 @@ const ExcalidrawBase = (props: ExcalidrawProps) => {
     validateEmbeddable,
     renderEmbeddable,
     aiEnabled,
+    mermaidEnabled,
     showDeprecatedFonts,
     enableRichText = false,
   } = props;
@@ -142,6 +143,7 @@ const ExcalidrawBase = (props: ExcalidrawProps) => {
           validateEmbeddable={validateEmbeddable}
           renderEmbeddable={renderEmbeddable}
           aiEnabled={aiEnabled !== false}
+          mermaidEnabled={mermaidEnabled === true}
           showDeprecatedFonts={showDeprecatedFonts}
           enableRichText={enableRichText}
         >

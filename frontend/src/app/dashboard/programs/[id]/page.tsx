@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useParams, useRouter } from 'next/navigation';
+import { canonicalResourceID } from '@/lib/offlineCanonicalRoute';
 import {
   ArrowLeft, Users, Calendar, MessageSquare, Plus, Check, X, Clock,
   AlertCircle, Trash2, GraduationCap, MapPin, CalendarDays, Send,
@@ -30,12 +31,38 @@ import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { calendarDateKey, formatCalendarDate, limaDateInputValue, localDateInputValue } from '@/utils/calendarDate';
 import { useContainerWidth } from '@/components/responsive/useContainerWidth';
-import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue';
+import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue';
 import ProgramAcademicConfigPanel from '@/components/programs/ProgramAcademicConfigPanel';
 import ProgramSurveyPanel from '@/components/programs/ProgramSurveyPanel';
 import SessionTopicField, { normalizedSessionTopics, pendingActiveCourseTopics } from '@/components/programs/SessionTopicField';
 import SessionObservationPanel from '@/components/programs/SessionObservationPanel';
 import { ProgramSettingsDialog } from '@/components/programs/ProgramSettingsDialog';
+import ProgramAttendanceRoster from '@/components/programs/ProgramAttendanceRoster';
+import ProgramAttendanceSearchBar from '@/components/programs/ProgramAttendanceSearchBar';
+import { restoreDialogFocus, useDialogTabTrap } from '@/components/programs/useDialogTabTrap';
+import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider';
+import {
+  acceptProgramAttendanceConflicts,
+  buildProgramAttendanceBatchRecords,
+  effectiveProgramAttendanceView,
+  isProgramAttendanceSaveCurrent,
+  normalizeProgramAttendanceStatus,
+  normalizeProgramAttendanceView,
+  normalizeParticipantSearch,
+  filterProgramAttendanceParticipants,
+  programAttendanceConflictExpectedStatuses,
+  programAttendanceDirtyParticipantIDs,
+  programAttendanceViewPreferenceKey,
+  setProgramAttendanceDraftStatus,
+  createProgramAttendanceDraft,
+  PROGRAM_ATTENDANCE_BOARD_MIN_WIDTH,
+  PROGRAM_ATTENDANCE_STATUS_CATALOG,
+  type ProgramAttendanceConflict,
+  type ProgramAttendanceDraft,
+  type ProgramAttendanceStatus,
+  type ProgramAttendanceSaveIdentity,
+  type ProgramAttendanceView,
+} from '@/components/programs/programAttendance';
 import {
   getProgramTenure,
   nextProgramHealthSort,
@@ -57,6 +84,15 @@ interface Device {
   status: string;
 }
 
+interface AttendanceBatchResponse {
+  success: boolean;
+  count?: number;
+  code?: string;
+  error?: string;
+  message?: string;
+  conflicts?: Array<{ participant_id: string; current_status: string }>;
+}
+
 interface SessionFormState {
   title: string;
   date: string;
@@ -73,12 +109,6 @@ const MAX_GENERATED_SESSIONS = 500;
 const MAX_SCHEDULE_RANGE_DAYS = 732;
 type ProgramDetailTab = 'health' | 'participants' | 'sessions' | 'stats' | 'kanban' | 'academic' | 'surveys';
 type ParticipantLifecycleView = 'active' | 'history';
-
-const normalizeParticipantSearch = (value: string) => value
-  .normalize('NFD')
-  .replace(/[\u0300-\u036f]/g, '')
-  .toLocaleLowerCase('es')
-  .trim();
 
 const suggestedSessionTitle = (topics: ProgramSessionTopic[]) => topics[0]?.title?.trim() || '';
 
@@ -158,9 +188,10 @@ function ProgramParticipantHistoryList({
 }
 
 export default function ProgramDetailPage() {
-  const params = useParams();
+  const { isOffline, requireOnline } = useClarinRuntime();
+  const params = useParams<{ id?: string }>();
   const router = useRouter();
-  const programId = params.id as string;
+  const programId = canonicalResourceID(params.id, 'programs');
   const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>();
   const [coarsePointer, setCoarsePointer] = useState(false);
   const [visualViewportHeight, setVisualViewportHeight] = useState(900);
@@ -183,6 +214,8 @@ export default function ProgramDetailPage() {
   const [movingStageParticipantIDs, setMovingStageParticipantIDs] = useState<Set<string>>(() => new Set());
   const [activeTab, setActiveTab] = useState<ProgramDetailTab>('health');
   const [canUseSurveys, setCanUseSurveys] = useState(false);
+  const [currentActorID, setCurrentActorID] = useState('');
+  const [currentAccountID, setCurrentAccountID] = useState('');
   const [healthSummaryExpanded, setHealthSummaryExpanded] = useState(false);
   const [showSectionPicker, setShowSectionPicker] = useState(false);
   const [participantSearch, setParticipantSearch] = useState('');
@@ -206,11 +239,17 @@ export default function ProgramDetailPage() {
         if (!response.ok) return;
         const payload = await response.json();
         const user = payload?.user;
+        setCurrentActorID(typeof user?.id === 'string' ? user.id : '');
+        setCurrentAccountID(typeof user?.account_id === 'string' ? user.account_id : '');
         const permissions = Array.isArray(user?.permissions) ? user.permissions : [];
         const allowed = Boolean(user?.is_admin || user?.is_super_admin || permissions.includes('*') || permissions.includes('surveys'));
         setCanUseSurveys(allowed);
       } catch {
-        if (!controller.signal.aborted) setCanUseSurveys(false);
+        if (!controller.signal.aborted) {
+          setCanUseSurveys(false);
+          setCurrentActorID('');
+          setCurrentAccountID('');
+        }
       }
     };
     void loadPermissions();
@@ -235,14 +274,20 @@ export default function ProgramDetailPage() {
   const [newSession, setNewSession] = useState<SessionFormState>({ title: '', date: localDateInputValue(), topics: [], session_type: 'regular', start_time: '', end_time: '', location: '' });
   const [newSessionTitleEdited, setNewSessionTitleEdited] = useState(false);
   const [selectedSession, setSelectedSession] = useState<ProgramSession | null>(null);
-  const [attendanceData, setAttendanceData] = useState<Record<string, { status: string; observation_count: number; observation_preview: ProgramAttendanceObservation[] }>>({});
+  const [attendanceData, setAttendanceData] = useState<ProgramAttendanceDraft>({});
   const [attendanceParticipants, setAttendanceParticipants] = useState<ProgramParticipant[]>([]);
-  const [attendanceDirty, setAttendanceDirty] = useState<Record<string, boolean>>({});
+  const [attendanceSearch, setAttendanceSearch] = useState('');
+  const [debouncedAttendanceSearch, setDebouncedAttendanceSearch] = useDebouncedValue(attendanceSearch, SEARCH_DEBOUNCE_MS);
   const [attendanceLoadState, setAttendanceLoadState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [attendanceLoadError, setAttendanceLoadError] = useState('');
   const attendanceRequestRef = useRef<AbortController | null>(null);
   const attendanceRequestSequence = useRef(0);
+  const attendanceSessionGenerationRef = useRef(0);
+  const attendanceSessionIDRef = useRef('');
+  const attendanceSaveRequestRef = useRef<ProgramAttendanceSaveIdentity | null>(null);
   const [savingAttendance, setSavingAttendance] = useState(false);
+  const [attendanceSaveError, setAttendanceSaveError] = useState('');
+  const [attendanceRetryExpectedStatuses, setAttendanceRetryExpectedStatuses] = useState<Record<string, ProgramAttendanceStatus>>({});
   const [attendanceObservationParticipant, setAttendanceObservationParticipant] = useState<ProgramParticipant | null>(null);
   const [attendanceObservationHistory, setAttendanceObservationHistory] = useState<HistoryObservation[]>([]);
   const [attendanceObservationLoading, setAttendanceObservationLoading] = useState(false);
@@ -250,6 +295,71 @@ export default function ProgramDetailPage() {
   const [attendanceObservationComposerOpen, setAttendanceObservationComposerOpen] = useState(false);
   const attendanceObservationRequestRef = useRef<AbortController | null>(null);
   const attendanceObservationRequestSequence = useRef(0);
+  const [preferredAttendanceView, setPreferredAttendanceView] = useState<ProgramAttendanceView>('list');
+  const [attendanceViewPreferenceReady, setAttendanceViewPreferenceReady] = useState(false);
+  const [attendanceMaximized, setAttendanceMaximized] = useState(false);
+  const [attendanceDragging, setAttendanceDragging] = useState(false);
+  const [attendanceConflicts, setAttendanceConflicts] = useState<ProgramAttendanceConflict[]>([]);
+  const [attendanceConflictMessage, setAttendanceConflictMessage] = useState('');
+  const attendanceDialogRef = useRef<HTMLDivElement>(null);
+  const attendanceSaveButtonRef = useRef<HTMLButtonElement>(null);
+  const attendanceReturnFocusRef = useRef<HTMLElement | null>(null);
+  const attendanceObservationReturnFocusRef = useRef<HTMLElement | null>(null);
+  const attendanceConflictReturnFocusRef = useRef<HTMLElement | null>(null);
+  const attendanceConflictPrimaryRef = useRef<HTMLButtonElement>(null);
+  const attendanceConflictDialogRef = useRef<HTMLDivElement>(null);
+  const attendanceViewStorageKey = useMemo(
+    () => programAttendanceViewPreferenceKey(currentAccountID, currentActorID),
+    [currentAccountID, currentActorID],
+  );
+  const attendanceBoardAvailable = workspaceWidth >= PROGRAM_ATTENDANCE_BOARD_MIN_WIDTH;
+  const effectiveAttendanceView = effectiveProgramAttendanceView(preferredAttendanceView, workspaceWidth);
+  const dirtyAttendanceParticipantIDs = useMemo(
+    () => programAttendanceDirtyParticipantIDs(attendanceData),
+    [attendanceData],
+  );
+  const normalizedAttendanceSearch = useMemo(
+    () => normalizeParticipantSearch(debouncedAttendanceSearch),
+    [debouncedAttendanceSearch],
+  );
+  const filteredAttendanceParticipants = useMemo(
+    () => filterProgramAttendanceParticipants(attendanceParticipants, debouncedAttendanceSearch),
+    [attendanceParticipants, debouncedAttendanceSearch],
+  );
+  const attendanceSearchPending = attendanceSearch !== debouncedAttendanceSearch;
+
+  useEffect(() => {
+    if (!attendanceViewStorageKey) {
+      setPreferredAttendanceView('list');
+      setAttendanceViewPreferenceReady(false);
+      return;
+    }
+    try {
+      setPreferredAttendanceView(normalizeProgramAttendanceView(localStorage.getItem(attendanceViewStorageKey)));
+    } catch {
+      setPreferredAttendanceView('list');
+    }
+    setAttendanceViewPreferenceReady(true);
+  }, [attendanceViewStorageKey]);
+
+  const changePreferredAttendanceView = useCallback((view: ProgramAttendanceView) => {
+    if (attendanceSaveRequestRef.current) return;
+    setPreferredAttendanceView(view);
+    if (!attendanceViewPreferenceReady || !attendanceViewStorageKey) return;
+    try { localStorage.setItem(attendanceViewStorageKey, view); } catch { /* storage unavailable */ }
+  }, [attendanceViewPreferenceReady, attendanceViewStorageKey]);
+
+  useEffect(() => {
+    if (!isAttendanceOpen) return;
+    const frame = requestAnimationFrame(() => attendanceDialogRef.current?.focus({ preventScroll: true }));
+    return () => cancelAnimationFrame(frame);
+  }, [isAttendanceOpen]);
+
+  useEffect(() => {
+    if (attendanceConflicts.length === 0) return;
+    const frame = requestAnimationFrame(() => attendanceConflictPrimaryRef.current?.focus({ preventScroll: true }));
+    return () => cancelAnimationFrame(frame);
+  }, [attendanceConflicts.length]);
 
   // Edit session state
   const [editingSession, setEditingSession] = useState<ProgramSession | null>(null);
@@ -268,6 +378,26 @@ export default function ProgramDetailPage() {
 
   // Confirmation dialog state
   const [confirmAction, setConfirmAction] = useState<{ message: string; onConfirm: () => void } | null>(null);
+  const confirmDialogRef = useRef<HTMLDivElement>(null);
+  const confirmReturnFocusRef = useRef<HTMLElement | null>(null);
+  useDialogTabTrap(Boolean(isAttendanceOpen && !attendanceObservationParticipant && attendanceConflicts.length === 0 && !confirmAction), attendanceDialogRef);
+  useDialogTabTrap(attendanceConflicts.length > 0, attendanceConflictDialogRef);
+  useDialogTabTrap(Boolean(confirmAction), confirmDialogRef);
+
+  const confirmActionOpen = Boolean(confirmAction);
+  useEffect(() => {
+    if (!confirmActionOpen) return;
+    confirmReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const frame = requestAnimationFrame(() => confirmDialogRef.current?.querySelector<HTMLButtonElement>('button:not([disabled])')?.focus({ preventScroll: true }));
+    return () => {
+      cancelAnimationFrame(frame);
+      const returnFocus = confirmReturnFocusRef.current;
+      confirmReturnFocusRef.current = null;
+      window.setTimeout(() => {
+        restoreDialogFocus([returnFocus, attendanceSaveButtonRef.current, attendanceDialogRef.current]);
+      }, 0);
+    };
+  }, [confirmActionOpen]);
 
   // Edit program state
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
@@ -439,6 +569,10 @@ export default function ProgramDetailPage() {
   };
 
   const closeAttendanceModal = useCallback(() => {
+    const returnFocus = attendanceReturnFocusRef.current;
+    attendanceSessionGenerationRef.current += 1;
+    attendanceSessionIDRef.current = '';
+    attendanceSaveRequestRef.current = null;
     attendanceRequestRef.current?.abort();
     attendanceRequestRef.current = null;
     attendanceRequestSequence.current += 1;
@@ -447,22 +581,50 @@ export default function ProgramDetailPage() {
     attendanceObservationRequestSequence.current += 1;
     setIsAttendanceOpen(false);
     setSelectedSession(null);
+    setAttendanceData({});
     setAttendanceParticipants([]);
-    setAttendanceDirty({});
+    setAttendanceSearch('');
+    setDebouncedAttendanceSearch('');
     setAttendanceLoadState('idle');
     setAttendanceLoadError('');
+    setSavingAttendance(false);
+    setAttendanceSaveError('');
+    setAttendanceRetryExpectedStatuses({});
     setAttendanceObservationParticipant(null);
     setAttendanceObservationHistory([]);
     setAttendanceObservationLoading(false);
     setAttendanceObservationError('');
     setAttendanceObservationComposerOpen(false);
+    setAttendanceMaximized(false);
+    setAttendanceDragging(false);
+    setAttendanceConflicts([]);
+    setAttendanceConflictMessage('');
+    attendanceReturnFocusRef.current = null;
+    attendanceObservationReturnFocusRef.current = null;
+    attendanceConflictReturnFocusRef.current = null;
+    window.setTimeout(() => returnFocus?.focus({ preventScroll: true }), 0);
+  }, []);
+
+  const closeAttendanceConflicts = useCallback((restoreFocus = true) => {
+    if (attendanceSaveRequestRef.current) return;
+    const returnFocus = attendanceConflictReturnFocusRef.current;
+    setAttendanceConflicts([]);
+    setAttendanceConflictMessage('');
+    attendanceConflictReturnFocusRef.current = null;
+    if (!restoreFocus) return;
+    window.setTimeout(() => {
+      restoreDialogFocus([returnFocus, attendanceSaveButtonRef.current, attendanceDialogRef.current]);
+    }, 0);
   }, []);
 
   const closeAttendanceObservationHistory = useCallback(() => {
+    const returnFocus = attendanceObservationReturnFocusRef.current;
     attendanceObservationRequestRef.current?.abort();
     attendanceObservationRequestRef.current = null;
     attendanceObservationRequestSequence.current += 1;
     setAttendanceObservationParticipant(null);
+    attendanceObservationReturnFocusRef.current = null;
+    window.setTimeout(() => returnFocus?.focus({ preventScroll: true }), 0);
     setAttendanceObservationHistory([]);
     setAttendanceObservationLoading(false);
     setAttendanceObservationError('');
@@ -706,13 +868,17 @@ export default function ProgramDetailPage() {
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
+      if (confirmAction) { setConfirmAction(null); return; }
       if (showSectionPicker) { setShowSectionPicker(false); return; }
       if (showDeviceSelector || showInlineChat) { closeWhatsAppChat(); return; }
+      if (attendanceConflicts.length > 0) { closeAttendanceConflicts(); return; }
       if (attendanceObservationParticipant) { closeAttendanceObservationHistory(); return; }
       if (observationParticipant) { closeObservationHistory(); return; }
       if (outcomeParticipant) { setOutcomeParticipant(null); return; }
+      if (attendanceDragging) return;
       if (isAttendanceOpen) {
-        if (Object.keys(attendanceDirty).length > 0) {
+        if (attendanceSaveRequestRef.current) return;
+        if (dirtyAttendanceParticipantIDs.length > 0) {
           setConfirmAction({ message: 'Hay cambios de asistencia sin guardar. ¿Deseas descartarlos?', onConfirm: () => { setConfirmAction(null); closeAttendanceModal(); } });
         } else closeAttendanceModal();
         return;
@@ -727,7 +893,7 @@ export default function ProgramDetailPage() {
     };
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
-  }, [showSectionPicker, showDeviceSelector, showInlineChat, attendanceObservationParticipant, observationParticipant, outcomeParticipant, isAttendanceOpen, attendanceDirty, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, participantDetailOpen, closeParticipantDetail, closeAttendanceModal, closeAttendanceObservationHistory, closeObservationHistory, closeWhatsAppChat]);
+  }, [confirmAction, showSectionPicker, showDeviceSelector, showInlineChat, attendanceConflicts.length, attendanceObservationParticipant, observationParticipant, outcomeParticipant, attendanceDragging, isAttendanceOpen, dirtyAttendanceParticipantIDs.length, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, participantDetailOpen, closeParticipantDetail, closeAttendanceConflicts, closeAttendanceModal, closeAttendanceObservationHistory, closeObservationHistory, closeWhatsAppChat]);
 
   const fetchProgramData = async () => {
     programDataRequestRef.current?.abort();
@@ -1208,7 +1374,10 @@ export default function ProgramDetailPage() {
   }), [refreshLoadedParticipantContact]);
 
   // WhatsApp chat
-  const handleSendWhatsApp = (phone: string) => { void whatsappChat.open(phone); };
+  const handleSendWhatsApp = (phone: string) => {
+    if (!requireOnline('Abrir WhatsApp')) return;
+    void whatsappChat.open(phone);
+  };
 
   const openCreateSession = (sessionType: 'regular' | 'recovery' = 'regular') => {
     const topics: ProgramSessionTopic[] = sessionType === 'recovery' ? [{ kind: 'free', title: 'Clase de recuperación' }] : [];
@@ -1356,38 +1525,41 @@ export default function ProgramDetailPage() {
     });
   };
 
-  const openAttendance = async (session: ProgramSession) => {
+  const openAttendance = async (session: ProgramSession, trigger?: HTMLElement | null) => {
+    if (attendanceSaveRequestRef.current) return;
     attendanceRequestRef.current?.abort();
     const controller = new AbortController();
     attendanceRequestRef.current = controller;
     const requestID = ++attendanceRequestSequence.current;
+    attendanceSessionGenerationRef.current += 1;
+    attendanceSessionIDRef.current = session.id;
+    attendanceReturnFocusRef.current = trigger || attendanceReturnFocusRef.current;
     setSelectedSession(session);
     setAttendanceData({});
     setAttendanceParticipants([]);
-    setAttendanceDirty({});
+    setAttendanceSearch('');
+    setDebouncedAttendanceSearch('');
     setAttendanceLoadError('');
+    setAttendanceSaveError('');
+    setAttendanceRetryExpectedStatuses({});
     setAttendanceLoadState('loading');
+    if (trigger) setAttendanceMaximized(false);
+    setAttendanceDragging(false);
+    setAttendanceConflicts([]);
+    setAttendanceConflictMessage('');
     setIsAttendanceOpen(true);
     try {
       const response = await api<{ success: boolean; roster: ProgramSessionRosterEntry[] }>(`/api/programs/${programId}/sessions/${session.id}/roster`, { signal: controller.signal });
       if (controller.signal.aborted || requestID !== attendanceRequestSequence.current) return;
-      const attMap: Record<string, { status: string; observation_count: number; observation_preview: ProgramAttendanceObservation[] }> = {};
 
       if (response.success && response.data?.success && Array.isArray(response.data.roster)) {
         const roster = response.data.roster;
-        roster.forEach((entry) => {
-          attMap[entry.participant_id] = {
-            status: entry.attendance_status || '',
-            observation_count: entry.observation_count || 0,
-            observation_preview: Array.isArray(entry.observation_preview) ? entry.observation_preview : [],
-          };
-        });
+        setAttendanceData(createProgramAttendanceDraft(roster));
         setAttendanceParticipants(roster.map(entry => ({ id: entry.participant_id, program_id: programId, contact_id: entry.contact_id, status: entry.participation_status, enrolled_at: entry.enrolled_at, dropped_at: entry.dropped_at || undefined, completed_at: entry.completed_at || undefined, contact_name: entry.contact_name, contact_phone: entry.contact_phone || undefined, avatar_url: entry.avatar_url || null, avatar_revision: entry.avatar_revision })));
       } else {
         throw new Error(response.error || 'No se pudo cargar la asistencia');
       }
 
-      setAttendanceData(attMap);
       setAttendanceLoadState('success');
     } catch (error) {
       if (controller.signal.aborted || requestID !== attendanceRequestSequence.current) return;
@@ -1400,7 +1572,8 @@ export default function ProgramDetailPage() {
   };
 
   const requestCloseAttendance = () => {
-    if (Object.keys(attendanceDirty).length === 0) {
+    if (attendanceSaveRequestRef.current) return;
+    if (dirtyAttendanceParticipantIDs.length === 0) {
       closeAttendanceModal();
       return;
     }
@@ -1410,13 +1583,14 @@ export default function ProgramDetailPage() {
     });
   };
 
-  const loadAttendanceObservationHistory = async (participant: ProgramParticipant) => {
-    if (!selectedSession) return;
+  const loadAttendanceObservationHistory = async (participant: ProgramParticipant, trigger?: HTMLElement | null) => {
+    if (!selectedSession || attendanceSaveRequestRef.current) return;
     attendanceObservationRequestRef.current?.abort();
     const controller = new AbortController();
     attendanceObservationRequestRef.current = controller;
     const requestID = ++attendanceObservationRequestSequence.current;
     const sessionID = selectedSession.id;
+    attendanceObservationReturnFocusRef.current = trigger || attendanceObservationReturnFocusRef.current;
     setAttendanceObservationParticipant(participant);
     setAttendanceObservationComposerOpen(false);
     setAttendanceObservationLoading(true);
@@ -1445,6 +1619,7 @@ export default function ProgramDetailPage() {
         ...current,
         [participant.id]: {
           status: current[participant.id]?.status || '',
+          original_status: current[participant.id]?.original_status || '',
           observation_count: observations.length,
           observation_preview: observations.slice(0, 1),
         },
@@ -1462,33 +1637,82 @@ export default function ProgramDetailPage() {
     }
   };
 
-  const saveAttendance = async () => {
-    if (!selectedSession) return;
+  const saveAttendance = async (expectedStatusOverrides: Readonly<Record<string, ProgramAttendanceStatus>> = {}) => {
+    if (!selectedSession || attendanceSaveRequestRef.current) return;
+    const saveIdentity: ProgramAttendanceSaveIdentity = {
+      generation: attendanceSessionGenerationRef.current,
+      session_id: selectedSession.id,
+    };
+    if (!isProgramAttendanceSaveCurrent(saveIdentity, attendanceSessionGenerationRef.current, attendanceSessionIDRef.current)) return;
+    const saveReturnFocus = document.activeElement instanceof HTMLElement && attendanceDialogRef.current?.contains(document.activeElement)
+      ? document.activeElement
+      : attendanceSaveButtonRef.current;
+    attendanceSaveRequestRef.current = saveIdentity;
+    const requestIsCurrent = () => (
+      attendanceSaveRequestRef.current === saveIdentity
+      && isProgramAttendanceSaveCurrent(saveIdentity, attendanceSessionGenerationRef.current, attendanceSessionIDRef.current)
+    );
     try {
       setSavingAttendance(true);
-      const records = Object.entries(attendanceData)
-        .filter(([participantId]) => attendanceDirty[participantId])
-        .map(([participantId, data]) => ({
-          participant_id: participantId,
-          status: data.status || '',
-        }));
+      setAttendanceSaveError('');
+      setAttendanceRetryExpectedStatuses({ ...expectedStatusOverrides });
+      const records = buildProgramAttendanceBatchRecords(attendanceData, expectedStatusOverrides);
       if (records.length > 0) {
-        const result = await api<{ success: boolean; count: number }>(`/api/programs/${programId}/sessions/${selectedSession.id}/attendance/batch`, {
+        const result = await api<AttendanceBatchResponse>(`/api/programs/${programId}/sessions/${saveIdentity.session_id}/attendance/batch`, {
           method: 'POST',
           body: JSON.stringify({ records })
         });
-        if (!result.success) throw new Error(result.error || 'No se pudo guardar la asistencia');
+        if (!requestIsCurrent()) return;
+        if (!result.success && result.status === 409 && result.data?.code === 'attendance_conflict') {
+          const conflicts = (result.data.conflicts || []).flatMap(conflict => {
+            if (!attendanceData[conflict.participant_id]) return [];
+            return [{ participant_id: conflict.participant_id, current_status: normalizeProgramAttendanceStatus(conflict.current_status) }];
+          });
+          if (conflicts.length > 0) {
+            attendanceConflictReturnFocusRef.current = saveReturnFocus;
+            setAttendanceConflicts(conflicts);
+            setAttendanceConflictMessage(result.data.error || result.data.message || 'Otra sesión modificó la asistencia de algunos participantes.');
+            return;
+          }
+        }
+        if (!result.success) throw new Error(result.error || result.data?.message || 'No se pudo guardar la asistencia');
       }
       closeAttendanceModal();
       fetchProgramData();
       fetchHealth();
     } catch (error) {
+      if (!requestIsCurrent()) return;
       console.error('Error saving attendance:', error);
+      setAttendanceSaveError(error instanceof Error ? error.message : 'No se pudo guardar la asistencia.');
       showToast('No se pudo guardar la asistencia. No se aplicaron cambios parciales.', 'error');
     } finally {
-      setSavingAttendance(false);
+      if (attendanceSaveRequestRef.current === saveIdentity) {
+        attendanceSaveRequestRef.current = null;
+        if (isProgramAttendanceSaveCurrent(saveIdentity, attendanceSessionGenerationRef.current, attendanceSessionIDRef.current)) {
+          setSavingAttendance(false);
+        }
+      }
     }
   };
+
+  const acceptAttendanceServerConflicts = () => {
+    setAttendanceData(current => acceptProgramAttendanceConflicts(current, attendanceConflicts));
+    setAttendanceSaveError('');
+    setAttendanceRetryExpectedStatuses({});
+    closeAttendanceConflicts();
+  };
+
+  const retryAttendanceConflicts = () => {
+    const expected = programAttendanceConflictExpectedStatuses(attendanceConflicts);
+    closeAttendanceConflicts(false);
+    void saveAttendance(expected);
+  };
+
+  const changeAttendanceStatus = useCallback((participantID: string, status: ProgramAttendanceStatus) => {
+    if (attendanceSaveRequestRef.current) return;
+    setAttendanceSaveError('');
+    setAttendanceData(current => setProgramAttendanceDraftStatus(current, participantID, status));
+  }, []);
 
   // Kanban drag/drop handlers
   const handleStageDragStart = (e: React.DragEvent, participantID: string) => {
@@ -1625,6 +1849,7 @@ export default function ProgramDetailPage() {
   );
 
   const handleCreateCampaign = async (formResult: CampaignFormResult) => {
+    if (!requireOnline('Crear una campaña masiva')) return;
     setCreatingCampaign(true);
     let createdCampaignId: string | null = null;
     try {
@@ -1932,7 +2157,8 @@ export default function ProgramDetailPage() {
         </button>}
         {!mobileWorkspace && <div className="flex items-center gap-2">
           <button
-            onClick={() => setShowCampaignModal(true)}
+            onClick={() => { if (requireOnline('Crear una campaña masiva')) setShowCampaignModal(true); }}
+            title={isOffline ? 'El envío masivo necesita conexión' : undefined}
             disabled={participantsWithPhone.length === 0}
             className="hidden sm:flex items-center gap-2 px-4 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all shadow-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
           >
@@ -1957,7 +2183,7 @@ export default function ProgramDetailPage() {
             {showHeaderMenu && (
               <div className="absolute right-0 top-full mt-1 bg-white rounded-xl border border-slate-200 shadow-lg py-1 w-48 z-50">
                 <button
-                  onClick={() => { setShowHeaderMenu(false); setShowCampaignModal(true); }}
+                  onClick={() => { setShowHeaderMenu(false); if (requireOnline('Crear una campaña masiva')) setShowCampaignModal(true); }}
                   disabled={participantsWithPhone.length === 0}
                   className="flex min-h-11 w-full items-center gap-2.5 px-4 py-2.5 text-sm text-emerald-700 transition-colors hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50 sm:hidden"
                 >
@@ -2626,11 +2852,11 @@ export default function ProgramDetailPage() {
           onChange={setAcademicConfig}
           onToast={showToast}
           onDirtyChange={setAcademicDirty}
-          onNavigateToCatalog={() => requestProgramNavigation('/dashboard/programs/courses')}
+          onNavigateToCatalog={() => { if (requireOnline('Administrar el catálogo de cursos')) requestProgramNavigation('/dashboard/programs/courses'); }}
         />
       ) : activeTab === 'surveys' && canUseSurveys ? (
         <div className="h-full overflow-y-auto pb-3">
-          <ProgramSurveyPanel programId={programId} programName={program.name} canManageSurveys />
+          <ProgramSurveyPanel programId={programId} programName={program.name} canManageSurveys={!isOffline} />
         </div>
       ) : activeTab === 'sessions' ? (
         <div className="h-full flex flex-col gap-3">
@@ -2685,6 +2911,7 @@ export default function ProgramDetailPage() {
             <div className="space-y-3 pb-2">
               {sessions.map((session, idx) => {
                 const totalAtt = (session.attendance_stats?.present || 0) + (session.attendance_stats?.absent || 0) + (session.attendance_stats?.late || 0);
+                const confirmedAtt = session.attendance_stats?.confirmed || 0;
                 const isPast = calendarDateKey(session.date) < localDateInputValue();
                 const sessionTopics = normalizedSessionTopics(session);
                 return (
@@ -2744,8 +2971,11 @@ export default function ProgramDetailPage() {
 
                       {/* Attendance stats */}
                       <div className="hidden md:flex items-center gap-1.5 text-xs shrink-0">
-                        {totalAtt > 0 ? (
+                        {totalAtt > 0 || confirmedAtt > 0 ? (
                           <>
+                            {confirmedAtt > 0 && <div className="flex items-center gap-0.5 rounded-lg bg-blue-50 px-2 py-1 text-blue-600" title="Confirmados">
+                              <CheckCircle2 className="h-3 w-3" /> {confirmedAtt}
+                            </div>}
                             <div className="flex items-center gap-0.5 text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg" title="Presentes">
                               <Check className="w-3 h-3" /> {session.attendance_stats?.present || 0}
                             </div>
@@ -2764,7 +2994,7 @@ export default function ProgramDetailPage() {
                       {/* Actions */}
                       <div className="flex w-full shrink-0 items-center justify-end gap-1 border-t border-slate-100 pt-2 sm:w-auto sm:border-0 sm:pt-0">
                         <button
-                          onClick={() => openAttendance(session)}
+                          onClick={event => openAttendance(session, event.currentTarget)}
                           className="min-h-11 flex-1 rounded-xl bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-200 md:min-h-0 md:flex-none md:rounded-lg"
                         >
                           Asistencia
@@ -3476,27 +3706,44 @@ export default function ProgramDetailPage() {
 
       {/* Attendance Modal */}
       {isAttendanceOpen && selectedSession && (
-        <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
-          <div role="dialog" aria-modal="true" aria-labelledby="attendance-title" className="flex h-[var(--app-height)] w-full max-w-5xl flex-col rounded-none bg-white p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-2xl sm:p-6">
-            <div className="flex justify-between items-center mb-4">
-              <div>
+        <div className={`app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center ${attendanceMaximized ? 'sm:p-0' : 'sm:p-4'}`}>
+          <div ref={attendanceDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="attendance-title" className={`flex h-[var(--app-height)] w-full flex-col overflow-hidden rounded-none bg-white shadow-2xl outline-none ${attendanceMaximized ? 'sm:h-[var(--app-height)] sm:max-h-none sm:max-w-none sm:rounded-none' : 'sm:h-auto sm:max-h-[92vh] sm:max-w-5xl sm:rounded-2xl'}`}>
+            <header className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-100 px-4 py-4 sm:px-6">
+              <div className="min-w-0">
                 <h2 id="attendance-title" className="text-xl font-bold text-slate-800">Tomar asistencia</h2>
-                <p className="mt-1 text-sm leading-snug text-slate-500">
+                <p className="mt-1 truncate text-sm leading-snug text-slate-500">
                   {sessionDisplayTitle(selectedSession, `Sesión ${Math.max(1, sessions.findIndex(session => session.id === selectedSession.id) + 1)}`)} — {formatCalendarDate(selectedSession.date, "EEEE, d 'de' MMMM", { locale: es })}
                   {selectedSession.start_time && ` · ${selectedSession.start_time}`}
                 </p>
+                <div className="mt-3 max-w-xl">
+                  <ProgramAttendanceSearchBar
+                    value={attendanceSearch}
+                    pending={attendanceSearchPending}
+                    resultCount={filteredAttendanceParticipants.length}
+                    totalCount={attendanceParticipants.length}
+                    disabled={savingAttendance}
+                    onChange={setAttendanceSearch}
+                    onClear={() => { setAttendanceSearch(''); setDebouncedAttendanceSearch(''); }}
+                  />
+                </div>
               </div>
-              <button onClick={requestCloseAttendance} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" aria-label="Cerrar asistencia">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+              <div className="flex shrink-0 items-center gap-1">
+                {attendanceBoardAvailable && <button type="button" disabled={savingAttendance} onClick={() => { if (!attendanceSaveRequestRef.current) setAttendanceMaximized(value => !value); }} className="hidden h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40 md:inline-flex" aria-label={attendanceMaximized ? 'Restaurar ventana de asistencia' : 'Maximizar ventana de asistencia'} title={attendanceMaximized ? 'Restaurar' : 'Maximizar'}>
+                  {attendanceMaximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                </button>}
+                <button type="button" disabled={savingAttendance} onClick={requestCloseAttendance} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40" aria-label="Cerrar asistencia">
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+            </header>
 
-            <div className="flex-1 overflow-y-auto pr-1">
+            <div data-testid="program-attendance-scroll" className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
               <section className="mb-4 rounded-2xl border border-emerald-100 bg-emerald-50/60 p-3 sm:p-4">
                 <h3 className="flex items-center gap-2 text-sm font-bold text-emerald-900"><BookOpen className="h-4 w-4"/>Temas programados</h3>
                 {normalizedSessionTopics(selectedSession).length === 0 ? <p className="mt-2 text-xs text-emerald-800/70">No hay temas programados para esta sesión.</p> : <div className="mt-2 flex flex-wrap gap-2">{normalizedSessionTopics(selectedSession).map(topic => <span key={topic.id || topic.course_topic_id || topic.title} className="rounded-lg border border-emerald-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-emerald-800">{topic.course_name ? `${topic.course_name} · ` : ''}{topic.title}</span>)}</div>}
               </section>
-              <SessionObservationPanel programId={programId} sessionId={selectedSession.id} onChanged={() => void fetchProgramData()} />
+              <SessionObservationPanel programId={programId} sessionId={selectedSession.id} disabled={savingAttendance} onChanged={() => void fetchProgramData()} />
+              {attendanceSaveError && <div className="mb-4 flex flex-col gap-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 sm:flex-row sm:items-center" role="alert"><div className="min-w-0 flex-1"><p className="text-sm font-semibold text-red-800">No se pudo guardar la asistencia</p><p className="mt-0.5 text-xs leading-5 text-red-700">{attendanceSaveError} El borrador sigue disponible.</p></div><button type="button" disabled={savingAttendance} onClick={() => { void saveAttendance(attendanceRetryExpectedStatuses); }} className="min-h-11 shrink-0 rounded-xl border border-red-200 bg-white px-4 text-sm font-semibold text-red-700 hover:bg-red-100 disabled:opacity-40">Reintentar</button></div>}
               {attendanceLoadState === 'loading' ? (
                 <div className="flex min-h-64 items-center justify-center px-4 py-10 text-center" role="status">
                   <div><Loader2 className="mx-auto h-8 w-8 animate-spin text-emerald-600" /><p className="mt-3 text-sm font-semibold text-slate-700">Cargando asistencia…</p><p className="mt-1 text-xs text-slate-500">Puedes permanecer aquí mientras preparamos la lista.</p></div>
@@ -3506,107 +3753,69 @@ export default function ProgramDetailPage() {
                   <div><AlertCircle className="mx-auto h-9 w-9 text-red-400" /><p className="mt-3 text-sm font-semibold text-slate-800">No se pudo cargar la asistencia</p><p className="mt-1 text-xs leading-5 text-slate-500">{attendanceLoadError || 'Inténtalo nuevamente.'}</p><button type="button" onClick={() => { void openAttendance(selectedSession); }} className="mt-4 min-h-11 rounded-xl border border-red-200 bg-white px-4 text-sm font-semibold text-red-700 transition hover:bg-red-50">Reintentar</button></div>
                 </div>
               ) : (
-                <>
-              {attendanceParticipants.length === 0 && <div className="flex min-h-48 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 text-center text-sm leading-6 text-slate-500">No hay participantes cuyo periodo de incorporación incluya esta sesión.</div>}
-              <div className="space-y-3 md:hidden">
-                {attendanceParticipants.map(p => (
-                  <div key={p.id} className="rounded-xl border border-slate-200 p-3">
-                    <div className="flex items-center gap-2">
-                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-semibold text-slate-600">{(p.contact_name || '?').charAt(0).toUpperCase()}</div>
-                      <span className="min-w-0 truncate text-sm font-semibold text-slate-800">{p.contact_name || 'Sin nombre'}</span>
-                    </div>
-                    <div className="mt-3 grid grid-cols-3 gap-2">
-                      {[
-                        { key: 'present', label: 'P', color: 'emerald', title: 'Presente' },
-                        { key: 'absent', label: 'F', color: 'red', title: 'Falta' },
-                        { key: 'late', label: 'T', color: 'amber', title: 'Tarde' },
-                      ].map(opt => (
-                        <button key={opt.key} type="button" onClick={() => { setAttendanceData(current => ({ ...current, [p.id]: { status: current[p.id]?.status === opt.key ? '' : opt.key, observation_count: current[p.id]?.observation_count || 0, observation_preview: current[p.id]?.observation_preview || [] } })); setAttendanceDirty(prev => ({ ...prev, [p.id]: true })); }} aria-label={`${opt.title}: ${p.contact_name || 'participante'}`} aria-pressed={attendanceData[p.id]?.status === opt.key} title={`${opt.title}. Pulsa otra vez para dejar sin marcar.`} className={`min-h-11 rounded-xl text-xs font-bold transition-all ${attendanceData[p.id]?.status === opt.key ? opt.color === 'emerald' ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-300' : opt.color === 'red' ? 'bg-red-100 text-red-700 ring-2 ring-red-300' : 'bg-amber-100 text-amber-700 ring-2 ring-amber-300' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>{opt.label}<span className="sr-only"> {opt.title}</span></button>
-                      ))}
-                    </div>
-                    <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50/60 p-3">
-                      {attendanceData[p.id]?.observation_preview?.[0] ? <><p className="line-clamp-2 text-sm leading-5 text-slate-700">{attendanceData[p.id].observation_preview[0].notes}</p><p className="mt-1 text-[10px] text-slate-400">{attendanceData[p.id].observation_preview[0].created_by_name || 'Autor no registrado'} · {format(new Date(attendanceData[p.id].observation_preview[0].created_at), 'dd MMM, HH:mm', { locale: es })}</p></> : <p className="text-xs text-slate-400">Sin observaciones</p>}
-                      <div className="mt-2 flex justify-end"><button type="button" onClick={() => void loadAttendanceObservationHistory(p)} aria-label={`Abrir observaciones de asistencia de ${p.contact_name || 'participante'}`} className="inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-white px-3 text-xs font-semibold text-emerald-700 ring-1 ring-inset ring-emerald-200 transition hover:bg-emerald-50"><NotebookPen className="h-3.5 w-3.5" />Observaciones{(attendanceData[p.id]?.observation_count || 0) > 1 && <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px]">+{(attendanceData[p.id]?.observation_count || 0) - 1} más</span>}</button></div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <table className="hidden w-full min-w-[720px] text-left text-sm md:table">
-                <thead className="bg-slate-50 text-slate-600 sticky top-0 z-10 border-b border-slate-200">
-                  <tr>
-                    <th className="px-4 py-3 font-medium">Participante</th>
-                    <th className="px-4 py-3 font-medium">Estado</th>
-                    <th className="px-4 py-3 font-medium">Observaciones</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {attendanceParticipants.map((p) => (
-                    <tr key={p.id} className="hover:bg-slate-50 transition-colors">
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2">
-                          <div className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-slate-600 font-medium text-xs">
-                            {(p.contact_name || '?').charAt(0).toUpperCase()}
-                          </div>
-                          <span className="font-medium text-slate-800 text-sm">{p.contact_name}</span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex gap-1">
-                          {[
-                            { key: 'present', label: 'P', color: 'emerald', title: 'Presente' },
-                            { key: 'absent', label: 'F', color: 'red', title: 'Falta' },
-                            { key: 'late', label: 'T', color: 'amber', title: 'Tarde' },
-                          ].map(opt => (
-                            <button
-                              key={opt.key}
-                              type="button"
-                              onClick={() => {
-                                setAttendanceData(current => ({ ...current, [p.id]: { status: current[p.id]?.status === opt.key ? '' : opt.key, observation_count: current[p.id]?.observation_count || 0, observation_preview: current[p.id]?.observation_preview || [] } }));
-                                setAttendanceDirty(prev => ({ ...prev, [p.id]: true }));
-                              }}
-                              title={`${opt.title}. Pulsa otra vez para dejar sin marcar.`}
-                              aria-pressed={attendanceData[p.id]?.status === opt.key}
-                              className={`w-8 h-8 rounded-lg text-xs font-bold transition-all ${
-                                attendanceData[p.id]?.status === opt.key
-                                  ? opt.color === 'emerald' ? 'bg-emerald-100 text-emerald-700 ring-2 ring-emerald-300'
-                                  : opt.color === 'red' ? 'bg-red-100 text-red-700 ring-2 ring-red-300'
-                                  : 'bg-amber-100 text-amber-700 ring-2 ring-amber-300'
-                                  : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
-                              }`}
-                            >
-                              {opt.label}
-                            </button>
-                          ))}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="min-w-[260px]">
-                          {attendanceData[p.id]?.observation_preview?.[0] ? <><p className="line-clamp-2 text-xs leading-5 text-slate-700">{attendanceData[p.id].observation_preview[0].notes}</p><p className="text-[10px] text-slate-400">{attendanceData[p.id].observation_preview[0].created_by_name || 'Autor no registrado'} · {format(new Date(attendanceData[p.id].observation_preview[0].created_at), 'dd MMM, HH:mm', { locale: es })}</p></> : <span className="text-xs text-slate-400">Sin observaciones</span>}
-                          <div className="mt-1"><button type="button" onClick={() => void loadAttendanceObservationHistory(p)} aria-label={`Abrir observaciones de asistencia de ${p.contact_name || 'participante'}`} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg px-2 text-[11px] font-semibold text-emerald-700 transition hover:bg-emerald-50"><NotebookPen className="h-3.5 w-3.5" />Observaciones{(attendanceData[p.id]?.observation_count || 0) > 1 && ` · +${(attendanceData[p.id]?.observation_count || 0) - 1} más`}</button></div>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-                </>
+                <ProgramAttendanceRoster
+                  participants={filteredAttendanceParticipants}
+                  totalParticipants={attendanceParticipants.length}
+                  searchActive={Boolean(normalizedAttendanceSearch)}
+                  draft={attendanceData}
+                  preferredView={preferredAttendanceView}
+                  effectiveView={effectiveAttendanceView}
+                  boardAvailable={attendanceBoardAvailable && attendanceViewPreferenceReady}
+                  disabled={savingAttendance}
+                  onPreferredViewChange={changePreferredAttendanceView}
+                  onStatusChange={changeAttendanceStatus}
+                  onOpenObservations={(participant, trigger) => { void loadAttendanceObservationHistory(participant, trigger); }}
+                  onClearSearch={() => { setAttendanceSearch(''); setDebouncedAttendanceSearch(''); }}
+                  onDragStateChange={setAttendanceDragging}
+                />
               )}
             </div>
 
-            <div className="flex gap-3 mt-4 pt-4 border-t border-slate-100 sm:justify-end">
+            <footer className="flex shrink-0 flex-wrap items-center gap-3 border-t border-slate-100 bg-white px-4 py-3 pb-[calc(.75rem+env(safe-area-inset-bottom))] sm:justify-end sm:px-6 sm:py-4">
+              {dirtyAttendanceParticipantIDs.length > 0 && <p className="mr-auto text-xs font-medium text-slate-500" role="status">{dirtyAttendanceParticipantIDs.length} cambio{dirtyAttendanceParticipantIDs.length === 1 ? '' : 's'} sin guardar</p>}
               <button
+                type="button"
+                disabled={savingAttendance}
                 onClick={requestCloseAttendance}
-                className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 sm:flex-none"
+                className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 sm:flex-none"
               >
                 Cancelar
               </button>
-              <button onClick={saveAttendance} disabled={attendanceLoadState !== 'success' || savingAttendance || Object.keys(attendanceDirty).length === 0} className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 disabled:opacity-50 sm:flex-none">
-                <Check className="w-4 h-4" />
+              <button ref={attendanceSaveButtonRef} type="button" onClick={() => { void saveAttendance(); }} disabled={attendanceLoadState !== 'success' || savingAttendance || dirtyAttendanceParticipantIDs.length === 0} className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none">
+                {savingAttendance ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
                 {savingAttendance ? 'Guardando...' : 'Guardar Asistencia'}
               </button>
-            </div>
+            </footer>
           </div>
         </div>
+      )}
+
+      {attendanceConflicts.length > 0 && typeof document !== 'undefined' && createPortal(
+        <div className="app-viewport fixed inset-0 z-[95] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" onMouseDown={event => { if (event.target === event.currentTarget && !savingAttendance) closeAttendanceConflicts(); }}>
+          <div ref={attendanceConflictDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="attendance-conflict-title" aria-describedby="attendance-conflict-description" className="flex max-h-[min(720px,calc(var(--app-height)-2rem))] w-full max-w-xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl outline-none">
+            <header className="flex shrink-0 items-start gap-3 border-b border-slate-100 px-5 py-4">
+              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-amber-50 text-amber-700"><AlertCircle className="h-5 w-5" /></span>
+              <div className="min-w-0 flex-1"><h2 id="attendance-conflict-title" className="text-lg font-bold text-slate-900">La asistencia cambió en otra sesión</h2><p id="attendance-conflict-description" className="mt-1 text-sm leading-5 text-slate-500">{attendanceConflictMessage || 'Compara los estados antes de decidir cuál conservar.'}</p></div>
+              <button type="button" disabled={savingAttendance} onClick={() => closeAttendanceConflicts()} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-40" aria-label="Volver a revisar asistencia"><X className="h-4 w-4" /></button>
+            </header>
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+              <div className="space-y-2">
+                {attendanceConflicts.map(conflict => {
+                  const participant = attendanceParticipants.find(item => item.id === conflict.participant_id);
+                  const localStatus = PROGRAM_ATTENDANCE_STATUS_CATALOG.find(item => item.status === attendanceData[conflict.participant_id]?.status);
+                  const serverStatus = PROGRAM_ATTENDANCE_STATUS_CATALOG.find(item => item.status === conflict.current_status);
+                  return <div key={conflict.participant_id} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"><p className="truncate text-sm font-semibold text-slate-800">{participant?.contact_name || 'Participante'}</p><div className="mt-2 grid grid-cols-2 gap-2 text-xs"><div className="rounded-xl bg-white px-3 py-2 ring-1 ring-slate-200"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">Servidor</span><span className="mt-0.5 block font-semibold text-slate-700">{serverStatus?.label || 'Sin estado'}</span></div><div className="rounded-xl bg-emerald-50 px-3 py-2 ring-1 ring-emerald-200"><span className="block text-[10px] font-bold uppercase tracking-wide text-emerald-600">Mi revisión</span><span className="mt-0.5 block font-semibold text-emerald-800">{localStatus?.label || 'Sin estado'}</span></div></div></div>;
+                })}
+              </div>
+            </div>
+            <footer className="flex shrink-0 flex-col-reverse gap-2 border-t border-slate-100 px-5 py-4 sm:flex-row sm:justify-end">
+              <button type="button" disabled={savingAttendance} onClick={() => closeAttendanceConflicts()} className="min-h-11 rounded-xl px-4 text-sm font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-40">Seguir editando</button>
+              <button type="button" disabled={savingAttendance} onClick={acceptAttendanceServerConflicts} className="min-h-11 rounded-xl border border-slate-200 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">Aceptar servidor</button>
+              <button ref={attendanceConflictPrimaryRef} type="button" disabled={savingAttendance} onClick={retryAttendanceConflicts} className="flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-40">Guardar mi revisión</button>
+            </footer>
+          </div>
+        </div>,
+        document.body,
       )}
 
       <ObservationHistoryModal
@@ -3889,7 +4098,7 @@ export default function ProgramDetailPage() {
       {/* Confirmation Dialog */}
       {confirmAction && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4">
-          <div role="alertdialog" aria-modal="true" aria-label="Confirmar acción" className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl">
+          <div ref={confirmDialogRef} tabIndex={-1} role="alertdialog" aria-modal="true" aria-label="Confirmar acción" className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl outline-none">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center shrink-0">
                 <AlertCircle className="w-5 h-5 text-red-500" />

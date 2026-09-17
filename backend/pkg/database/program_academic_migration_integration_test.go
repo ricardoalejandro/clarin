@@ -133,6 +133,15 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 	if err := Migrate(db); err != nil {
 		t.Fatalf("idempotent migrate: %v", err)
 	}
+	var attendanceConstraintDefinition string
+	if err := db.QueryRow(ctx, `
+		SELECT pg_get_constraintdef(oid)
+		FROM pg_constraint
+		WHERE conname='program_attendance_status_v2_check'
+		  AND conrelid='program_attendance'::regclass
+	`).Scan(&attendanceConstraintDefinition); err != nil || !strings.Contains(attendanceConstraintDefinition, "confirmed") {
+		t.Fatalf("attendance status constraint was not upgraded idempotently: definition=%q err=%v", attendanceConstraintDefinition, err)
+	}
 	var healthViewColumns []string
 	if err := db.QueryRow(ctx, `SELECT health_view_columns FROM programs WHERE id=$1`, programID).Scan(&healthViewColumns); err != nil {
 		t.Fatalf("read default program health columns: %v", err)
@@ -359,6 +368,77 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("restore present attendance: %v", err)
 	}
+	expectedAbsent := domain.AttendanceStatusAbsent
+	expectedLate := domain.AttendanceStatusLate
+	conflictErr := repos.Program.BatchMarkAttendance(ctx, accountID, userID, programID, sessionID, []*domain.ProgramAttendance{
+		{ParticipantID: legacyParticipantID, Status: domain.AttendanceStatusAbsent, ExpectedStatus: &expectedLate},
+		{ParticipantID: participantID, Status: domain.AttendanceStatusAbsent, ExpectedStatus: &expectedAbsent},
+	})
+	var attendanceConflict *repository.ProgramAttendanceConflictError
+	if !errors.As(conflictErr, &attendanceConflict) || len(attendanceConflict.Conflicts) != 1 ||
+		attendanceConflict.Conflicts[0].ParticipantID != participantID ||
+		attendanceConflict.Conflicts[0].CurrentStatus != domain.AttendanceStatusPresent {
+		t.Fatalf("unexpected attendance conflict: %#v, err=%v", attendanceConflict, conflictErr)
+	}
+	var participantStatusAfterConflict, legacyStatusAfterConflict string
+	if err := db.QueryRow(ctx, `SELECT status FROM program_attendance WHERE session_id=$1 AND participant_id=$2`, sessionID, participantID).Scan(&participantStatusAfterConflict); err != nil {
+		t.Fatalf("read participant after attendance conflict: %v", err)
+	}
+	if err := db.QueryRow(ctx, `SELECT status FROM program_attendance WHERE session_id=$1 AND participant_id=$2`, sessionID, legacyParticipantID).Scan(&legacyStatusAfterConflict); err != nil {
+		t.Fatalf("read legacy participant after attendance conflict: %v", err)
+	}
+	if participantStatusAfterConflict != domain.AttendanceStatusPresent || legacyStatusAfterConflict != domain.AttendanceStatusLate {
+		t.Fatalf("attendance conflict partially mutated batch: participant=%q legacy=%q", participantStatusAfterConflict, legacyStatusAfterConflict)
+	}
+	concurrentSessionID := uuid.New()
+	if _, err := db.Exec(ctx, `
+		INSERT INTO program_sessions (id,account_id,program_id,title,date)
+		VALUES ($1,$2,$3,'Concurrencia de asistencia','2026-07-21')
+	`, concurrentSessionID, accountID, programID); err != nil {
+		t.Fatalf("insert concurrent attendance session: %v", err)
+	}
+	concurrentStart := make(chan struct{})
+	concurrentResults := make(chan error, 2)
+	for _, nextStatus := range []string{domain.AttendanceStatusConfirmed, domain.AttendanceStatusPresent} {
+		nextStatus := nextStatus
+		go func() {
+			<-concurrentStart
+			expected := ""
+			concurrentResults <- repos.Program.BatchMarkAttendance(ctx, accountID, userID, programID, concurrentSessionID, []*domain.ProgramAttendance{{
+				ParticipantID:  participantID,
+				Status:         nextStatus,
+				ExpectedStatus: &expected,
+			}})
+		}()
+	}
+	close(concurrentStart)
+	firstConcurrentErr, secondConcurrentErr := <-concurrentResults, <-concurrentResults
+	concurrentSuccesses, concurrentConflicts := 0, 0
+	for _, concurrentErr := range []error{firstConcurrentErr, secondConcurrentErr} {
+		switch {
+		case concurrentErr == nil:
+			concurrentSuccesses++
+		case errors.Is(concurrentErr, repository.ErrProgramAttendanceConflict):
+			concurrentConflicts++
+		default:
+			t.Fatalf("unexpected concurrent attendance error: %v", concurrentErr)
+		}
+	}
+	if concurrentSuccesses != 1 || concurrentConflicts != 1 {
+		t.Fatalf("concurrent attendance CAS = %d successes, %d conflicts", concurrentSuccesses, concurrentConflicts)
+	}
+	if err := repos.Program.BatchMarkAttendance(ctx, accountID, userID, programID, concurrentSessionID, []*domain.ProgramAttendance{{
+		ParticipantID: participantID,
+		Status:        "",
+	}}); err != nil {
+		t.Fatalf("clear concurrent attendance fixture: %v", err)
+	}
+	expectedUnmarked := ""
+	if err := repos.Program.BatchMarkAttendance(ctx, accountID, userID, programID, emptySessionID, []*domain.ProgramAttendance{{
+		ParticipantID: legacyParticipantID, Status: domain.AttendanceStatusConfirmed, ExpectedStatus: &expectedUnmarked,
+	}}); err != nil {
+		t.Fatalf("mark confirmed attendance: %v", err)
+	}
 	if _, err := db.Exec(ctx, `UPDATE program_attendance SET status='excused' WHERE session_id=$1 AND participant_id=$2`, sessionID, participantID); err == nil {
 		t.Fatal("program_attendance accepted the removed excused status")
 	}
@@ -402,15 +482,28 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list sessions with attendance stats: %v", err)
 	}
-	var listedAttendanceStats map[string]int
+	var listedAttendanceStats, listedConfirmedStats map[string]int
 	for _, listed := range listedSessions {
 		if listed.ID == sessionID {
 			listedAttendanceStats = listed.AttendanceStats
-			break
+		}
+		if listed.ID == emptySessionID {
+			listedConfirmedStats = listed.AttendanceStats
 		}
 	}
 	if listedAttendanceStats[domain.AttendanceStatusPresent] != 1 || listedAttendanceStats[domain.AttendanceStatusLate] != 1 || listedAttendanceStats[domain.AttendanceStatusAbsent] != 0 {
 		t.Fatalf("session card stats counted malformed cross-account attendance: %#v", listedAttendanceStats)
+	}
+	if listedConfirmedStats[domain.AttendanceStatusConfirmed] != 1 || listedConfirmedStats[domain.AttendanceStatusPresent] != 0 {
+		t.Fatalf("session card stats did not expose confirmed separately: %#v", listedConfirmedStats)
+	}
+	confirmedParticipants, err := repos.Program.GetParticipantsByAttendanceStatus(ctx, accountID, programID, emptySessionID, domain.AttendanceStatusConfirmed)
+	if err != nil || len(confirmedParticipants) != 1 || confirmedParticipants[0].ID != legacyParticipantID {
+		t.Fatalf("confirmed attendance filter = %#v, err=%v", confirmedParticipants, err)
+	}
+	unmarkedParticipants, err := repos.Program.GetParticipantsByAttendanceStatus(ctx, accountID, programID, emptySessionID, "unmarked")
+	if err != nil || len(unmarkedParticipants) != 1 || unmarkedParticipants[0].ID != participantID {
+		t.Fatalf("unmarked attendance filter included confirmed or lost missing row: %#v, err=%v", unmarkedParticipants, err)
 	}
 	sessionStats, participantStats, err := repos.Program.GetAttendanceStats(ctx, accountID, programID, []time.Time{
 		time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC),
@@ -428,8 +521,92 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 	if targetSessionStat == nil || targetSessionStat.Present != 1 || targetSessionStat.Late != 1 || targetSessionStat.Absent != 0 || targetSessionStat.Excused != 0 {
 		t.Fatalf("unexpected P/F/T session statistics: %#v", targetSessionStat)
 	}
+	var confirmedSessionStat *domain.ProgramSessionAttendanceStat
+	for _, stat := range sessionStats {
+		if stat.SessionID == emptySessionID {
+			confirmedSessionStat = stat
+			break
+		}
+	}
+	if confirmedSessionStat == nil || confirmedSessionStat.Confirmed != 1 || confirmedSessionStat.Present != 0 ||
+		confirmedSessionStat.Absent != 0 || confirmedSessionStat.Late != 0 {
+		t.Fatalf("confirmed session statistics polluted marked states: %#v", confirmedSessionStat)
+	}
 	if len(participantStats) != 2 {
 		t.Fatalf("attendance participant statistics leaked malformed account data: %#v", participantStats)
+	}
+	var legacyParticipantStat *domain.ProgramParticipantAttendanceStat
+	for _, stat := range participantStats {
+		if stat.ParticipantID == legacyParticipantID {
+			legacyParticipantStat = stat
+			break
+		}
+	}
+	if legacyParticipantStat == nil || legacyParticipantStat.Late != 1 || legacyParticipantStat.MarkedSessions != 1 ||
+		legacyParticipantStat.Pending != legacyParticipantStat.TotalSessions-1 {
+		t.Fatalf("confirmed attendance changed participant marked denominator: %#v", legacyParticipantStat)
+	}
+	confirmedRoster, err := repos.Program.GetSessionRoster(ctx, accountID, programID, emptySessionID)
+	if err != nil {
+		t.Fatalf("get confirmed session roster: %v", err)
+	}
+	var confirmedRosterStatus string
+	for _, entry := range confirmedRoster {
+		if entry.ParticipantID == legacyParticipantID {
+			confirmedRosterStatus = entry.AttendanceStatus
+			break
+		}
+	}
+	if confirmedRosterStatus != domain.AttendanceStatusConfirmed {
+		t.Fatalf("confirmed roster status = %q", confirmedRosterStatus)
+	}
+	legacyHistoryCounts, legacyHistoryRows, err := repos.Program.GetParticipantAttendanceHistory(
+		ctx, accountID, programID, legacyParticipantID, nil, 26,
+	)
+	if err != nil {
+		t.Fatalf("get confirmed participant history: %v", err)
+	}
+	confirmedHistoryVisible := false
+	for _, row := range legacyHistoryRows {
+		if row.SessionID == emptySessionID && row.Status != nil && *row.Status == domain.AttendanceStatusConfirmed {
+			confirmedHistoryVisible = true
+			break
+		}
+	}
+	if !confirmedHistoryVisible || legacyHistoryCounts.MarkedSessions != 1 || legacyHistoryCounts.Late != 1 {
+		t.Fatalf("confirmed history visibility/denominator mismatch: counts=%#v rows=%#v", legacyHistoryCounts, legacyHistoryRows)
+	}
+	healthAfterConfirmed, err := repos.Program.GetProgramHealth(ctx, accountID, programID)
+	if err != nil {
+		t.Fatalf("get health after confirmed attendance: %v", err)
+	}
+	if healthAfterConfirmed.AttendanceRate != 100 {
+		t.Fatalf("confirmed attendance changed program health rate: %#v", healthAfterConfirmed)
+	}
+	var confirmedParticipantHealth *domain.ProgramHealthParticipant
+	for _, participantHealth := range healthAfterConfirmed.Participants {
+		if participantHealth.ParticipantID == legacyParticipantID {
+			confirmedParticipantHealth = participantHealth
+			break
+		}
+	}
+	if confirmedParticipantHealth == nil || confirmedParticipantHealth.MarkedSessions != 1 ||
+		confirmedParticipantHealth.Late != 1 || confirmedParticipantHealth.AttendanceRate != 100 {
+		t.Fatalf("confirmed attendance changed participant health denominator: %#v", confirmedParticipantHealth)
+	}
+	dashboardAfterConfirmed, err := repos.Program.GetProgramsDashboard(ctx, accountID, nil, nil)
+	if err != nil {
+		t.Fatalf("get dashboard after confirmed attendance: %v", err)
+	}
+	var confirmedProgramDashboard *domain.ProgramDashboardGroup
+	for _, group := range dashboardAfterConfirmed.Groups {
+		if group.ProgramID == programID {
+			confirmedProgramDashboard = group
+			break
+		}
+	}
+	if confirmedProgramDashboard == nil || confirmedProgramDashboard.AttendanceRate != 100 || dashboardAfterConfirmed.AttendanceRate != 100 {
+		t.Fatalf("confirmed attendance changed dashboard rate: group=%#v summary=%#v", confirmedProgramDashboard, dashboardAfterConfirmed)
 	}
 	if isolated, err := repos.Program.GetAttendanceBySession(ctx, otherAccountID, sessionID); err != nil || len(isolated) != 0 {
 		t.Fatalf("cross-account session read leaked rows: rows=%#v err=%v", isolated, err)

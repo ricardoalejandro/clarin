@@ -43,6 +43,8 @@ export default defineConfig({
     include: [
       'vendor/excalidraw-clarin/packages/excalidraw/tests/clarinFreedrawPressure.test.ts',
       'vendor/excalidraw-clarin/packages/excalidraw/tests/clarinTextWysiwyg.test.ts',
+      'vendor/excalidraw-clarin/packages/excalidraw/tests/clarinMermaidBoundary.test.ts',
+      'vendor/excalidraw-clarin/packages/excalidraw/tests/clarinMermaidSecurity.test.ts',
     ],
     restoreMocks: true,
   },

@@ -99,7 +99,7 @@ export default function DocumentEditorPage() {
 
   // Reference to dynamically imported fabric modules
   const fabricModRef = useRef<typeof import('@/lib/fabric') | null>(null)
-  const fabricCoreRef = useRef<typeof import('fabric') | null>(null)
+  const fabricCoreRef = useRef<typeof import('@/lib/fabric/runtime') | null>(null)
 
   // ─── Custom fields (from account) ─────────────────────────────────────
   const [customFields, setCustomFields] = useState<Array<{ id: string; name: string; slug: string }>>([])
@@ -184,7 +184,7 @@ export default function DocumentEditorPage() {
     const initCanvas = async () => {
       // Dynamic import fabric (browser only)
       const fabricMod = await import('@/lib/fabric')
-      const fabricCore = await import('fabric')
+      const fabricCore = await import('@/lib/fabric/runtime')
       if (disposed) return
 
       fabricModRef.current = fabricMod
@@ -2669,7 +2669,7 @@ function PropertiesContent({
 function ShadowControl({ selectedObj, updateProp }: { selectedObj: FabricObject; updateProp: (prop: string, value: any) => void }) {
   // Dynamic import Shadow constructor
   const toggleShadow = async () => {
-    const { Shadow } = await import('fabric')
+    const { Shadow } = await import('@/lib/fabric/runtime')
     if (selectedObj.shadow) {
       updateProp('shadow', null)
     } else {
@@ -2678,7 +2678,7 @@ function ShadowControl({ selectedObj, updateProp }: { selectedObj: FabricObject;
   }
 
   const updateShadowProp = async (prop: string, value: number) => {
-    const { Shadow } = await import('fabric')
+    const { Shadow } = await import('@/lib/fabric/runtime')
     const s = selectedObj.shadow as any
     if (!s) return
     updateProp('shadow', new Shadow({
@@ -2729,7 +2729,7 @@ function DocumentProperties({
   background: { color: string; imageUrl?: string }
   handleBgColorChange: (color: string) => void
   handleBgImageUpload: (e: React.ChangeEvent<HTMLInputElement>) => void
-  bgFileInputRef: React.RefObject<HTMLInputElement>
+  bgFileInputRef: React.RefObject<HTMLInputElement | null>
   setBackground: React.Dispatch<React.SetStateAction<{ color: string; imageUrl?: string }>>
   showGrid: boolean; setShowGrid: (v: boolean) => void
   gridSize: number; setGridSize: (v: number) => void
@@ -3466,4 +3466,3 @@ function DynamicFormatSection({
     </div>
   )
 }
-

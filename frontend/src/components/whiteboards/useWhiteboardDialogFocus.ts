@@ -21,9 +21,9 @@ const WHITEBOARD_DIALOG_INITIAL_SELECTOR = [
 ].join(',')
 
 export function useWhiteboardDialogFocus(
-  dialogRef: RefObject<HTMLElement>,
+  dialogRef: RefObject<HTMLElement | null>,
   onClose: () => void,
-  initialFocusRef?: RefObject<HTMLElement>,
+  initialFocusRef?: RefObject<HTMLElement | null>,
 ) {
   const onCloseRef = useRef(onClose)
   useEffect(() => { onCloseRef.current = onClose }, [onClose])

@@ -41,35 +41,6 @@ const PwaRuntimeContext = createContext<PwaRuntimeValue>({
   closeInstructions: () => {},
 })
 
-function ServiceWorkerRegistrar() {
-  useEffect(() => {
-    if (process.env.NODE_ENV !== 'production' || !('serviceWorker' in navigator)) return
-
-    let cancelled = false
-    const register = async () => {
-      try {
-        const registration = await navigator.serviceWorker.register('/sw.js', {
-          scope: '/',
-          updateViaCache: 'none',
-        })
-        if (!cancelled) await registration.update()
-      } catch (error) {
-        console.warn('No se pudo registrar la experiencia instalable de Clarin.', error)
-      }
-    }
-
-    if (document.readyState === 'complete') void register()
-    else window.addEventListener('load', register, { once: true })
-
-    return () => {
-      cancelled = true
-      window.removeEventListener('load', register)
-    }
-  }, [])
-
-  return null
-}
-
 export function PwaRuntimeProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false)
   const [standalone, setStandalone] = useState(false)
@@ -155,7 +126,6 @@ export function PwaRuntimeProvider({ children }: { children: React.ReactNode }) 
 
   return (
     <PwaRuntimeContext.Provider value={value}>
-      <ServiceWorkerRegistrar />
       {children}
     </PwaRuntimeContext.Provider>
   )

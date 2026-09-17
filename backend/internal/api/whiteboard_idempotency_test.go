@@ -35,6 +35,24 @@ func TestWhiteboardPatchRequestHashIsStableAcrossServerRebase(t *testing.T) {
 	}
 }
 
+func TestWhiteboardEditorReleaseAndHistoricalAckVersions(t *testing.T) {
+	t.Parallel()
+	if whiteboardEditorVersion != "0.18.1-clarin.7" {
+		t.Fatal("server writes must identify the deployed editor release")
+	}
+	for _, version := range []string{"0.18.1-clarin.6", whiteboardEditorVersion} {
+		scene := &domain.WhiteboardScene{
+			BoardID: uuid.New(), Sequence: 9, EditorVersion: version,
+			SceneSchemaVersion: "excalidraw", Scene: json.RawMessage(`{"type":"excalidraw","elements":[]}`),
+		}
+		data := whiteboardRealtimePatchAckData(&domain.WhiteboardSceneWriteResult{Scene: scene, OperationSequence: 9, Idempotent: true},
+			whiteboardcore.OutgoingMessage{Data: whiteboardRealtimePatchData{BaseSequence: 8, ClientBaseSequence: 8}}, 8)
+		if data["editor_version"] != version || scene.EditorVersion != version {
+			t.Fatalf("replay relabelled an immutable %s scene: %#v", version, data["editor_version"])
+		}
+	}
+}
+
 func TestWhiteboardCopyNameKeepsSuffixWithinDatabaseLimit(t *testing.T) {
 	t.Parallel()
 	name := whiteboardCopyName("Mapa anual")

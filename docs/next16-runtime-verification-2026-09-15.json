@@ -1,0 +1,319 @@
+{
+  "checkedAt": "2026-09-15T00:13:37.049Z",
+  "version": "2026.09.14-1-235507698122867-d420a6bea1a5",
+  "endpoints": [
+    {
+      "origin": "http://127.0.0.1:8080",
+      "path": "/api/version",
+      "status": 200,
+      "bytes": 25300,
+      "headers": {
+        "cache-control": null,
+        "content-type": "application/json",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' wss: https: https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; font-src 'self' data:; frame-ancestors 'none'",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+        "service-worker-allowed": null,
+        "cf-cache-status": null
+      }
+    },
+    {
+      "origin": "http://127.0.0.1:8080",
+      "path": "/api/offline/v3/runtime/availability",
+      "status": 200,
+      "bytes": 120,
+      "headers": {
+        "cache-control": "no-store",
+        "content-type": "application/json",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' wss: https: https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; font-src 'self' data:; frame-ancestors 'none'",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+        "service-worker-allowed": null,
+        "cf-cache-status": null
+      },
+      "body": {
+        "enabled": false,
+        "minimum_client_version": "3.0.0",
+        "protocol_version": 3,
+        "signer_ready": false,
+        "task_writes_enabled": false
+      }
+    },
+    {
+      "origin": "https://clarin.naperu.cloud",
+      "path": "/api/version",
+      "status": 200,
+      "bytes": 25300,
+      "headers": {
+        "cache-control": null,
+        "content-type": "application/json",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' wss: https: https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; font-src 'self' data:; frame-ancestors 'none'",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+        "service-worker-allowed": null,
+        "cf-cache-status": null
+      }
+    },
+    {
+      "origin": "https://clarin.naperu.cloud",
+      "path": "/api/offline/v3/runtime/availability",
+      "status": 200,
+      "bytes": 120,
+      "headers": {
+        "cache-control": "no-store",
+        "content-type": "application/json",
+        "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' wss: https: https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; font-src 'self' data:; frame-ancestors 'none'",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+        "service-worker-allowed": null,
+        "cf-cache-status": null
+      },
+      "body": {
+        "enabled": false,
+        "minimum_client_version": "3.0.0",
+        "protocol_version": 3,
+        "signer_ready": false,
+        "task_writes_enabled": false
+      }
+    },
+    {
+      "origin": "http://127.0.0.1:8081",
+      "path": "/mcp",
+      "status": 401,
+      "bytes": 41,
+      "headers": {
+        "cache-control": null,
+        "content-type": "text/plain; charset=utf-8",
+        "content-security-policy": null,
+        "x-content-type-options": "nosniff",
+        "x-frame-options": null,
+        "service-worker-allowed": null,
+        "cf-cache-status": null
+      }
+    },
+    {
+      "origin": "https://clarin.naperu.cloud",
+      "path": "/mcp",
+      "status": 401,
+      "bytes": 41,
+      "headers": {
+        "cache-control": null,
+        "content-type": "text/plain; charset=utf-8",
+        "content-security-policy": null,
+        "x-content-type-options": "nosniff",
+        "x-frame-options": null,
+        "service-worker-allowed": null,
+        "cf-cache-status": null
+      }
+    },
+    {
+      "origin": "http://127.0.0.1:3001",
+      "path": "/login",
+      "status": 200,
+      "bytes": 23295,
+      "headers": {
+        "cache-control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        "content-type": "text/html; charset=utf-8",
+        "content-security-policy": null,
+        "x-content-type-options": null,
+        "x-frame-options": null,
+        "service-worker-allowed": null,
+        "cf-cache-status": null
+      }
+    },
+    {
+      "origin": "http://127.0.0.1:3001",
+      "path": "/sw.js",
+      "status": 200,
+      "bytes": 16851,
+      "headers": {
+        "cache-control": "no-cache, no-store, must-revalidate",
+        "content-type": "application/javascript; charset=utf-8",
+        "content-security-policy": null,
+        "x-content-type-options": null,
+        "x-frame-options": null,
+        "service-worker-allowed": "/",
+        "cf-cache-status": null
+      }
+    },
+    {
+      "origin": "http://127.0.0.1:3001",
+      "path": "/offline-v3/index.html",
+      "status": 200,
+      "bytes": 893,
+      "headers": {
+        "cache-control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        "content-type": "text/html; charset=UTF-8",
+        "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:17373; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self'; frame-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+        "service-worker-allowed": null,
+        "cf-cache-status": null
+      }
+    },
+    {
+      "origin": "https://clarin.naperu.cloud",
+      "path": "/login",
+      "status": 200,
+      "bytes": 23295,
+      "headers": {
+        "cache-control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        "content-type": "text/html; charset=utf-8",
+        "content-security-policy": null,
+        "x-content-type-options": null,
+        "x-frame-options": null,
+        "service-worker-allowed": null,
+        "cf-cache-status": null
+      }
+    },
+    {
+      "origin": "https://clarin.naperu.cloud",
+      "path": "/sw.js",
+      "status": 200,
+      "bytes": 16851,
+      "headers": {
+        "cache-control": "no-cache, no-store, must-revalidate",
+        "content-type": "application/javascript; charset=utf-8",
+        "content-security-policy": null,
+        "x-content-type-options": null,
+        "x-frame-options": null,
+        "service-worker-allowed": "/",
+        "cf-cache-status": null
+      }
+    },
+    {
+      "origin": "https://clarin.naperu.cloud",
+      "path": "/offline-v3/index.html",
+      "status": 200,
+      "bytes": 893,
+      "headers": {
+        "cache-control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        "content-type": "text/html; charset=UTF-8",
+        "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:17373; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self'; frame-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+        "service-worker-allowed": null,
+        "cf-cache-status": null
+      }
+    },
+    {
+      "origin": "http://127.0.0.1:3001",
+      "path": "/offline-v3/manifest.json",
+      "status": 200,
+      "bytes": 132587,
+      "headers": {
+        "cache-control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        "content-type": "application/json; charset=UTF-8",
+        "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:17373; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self'; frame-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+        "service-worker-allowed": null,
+        "cf-cache-status": null
+      }
+    },
+    {
+      "origin": "https://clarin.naperu.cloud",
+      "path": "/offline-v3/manifest.json",
+      "status": 200,
+      "bytes": 132587,
+      "headers": {
+        "cache-control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        "content-type": "application/json; charset=UTF-8",
+        "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:17373; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self'; frame-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+        "service-worker-allowed": null,
+        "cf-cache-status": null
+      }
+    },
+    {
+      "origin": "https://clarin.naperu.cloud",
+      "path": "/offline-v3/whiteboard-assets/fonts/Assistant/Assistant-Bold.woff2",
+      "status": 200,
+      "bytes": 20380,
+      "headers": {
+        "cache-control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        "content-type": "font/woff2",
+        "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:17373; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self'; frame-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+        "service-worker-allowed": null,
+        "cf-cache-status": null
+      }
+    },
+    {
+      "origin": "https://clarin.naperu.cloud",
+      "path": "/vendor/whiteboards-editor/0.18.1-clarin.7/NOTICE.md",
+      "status": 200,
+      "bytes": 312765,
+      "headers": {
+        "cache-control": "public, max-age=0",
+        "content-type": "text/markdown; charset=UTF-8",
+        "content-security-policy": null,
+        "x-content-type-options": null,
+        "x-frame-options": null,
+        "service-worker-allowed": null,
+        "cf-cache-status": null
+      }
+    }
+  ],
+  "logs": {
+    "clarin-backend": {
+      "inspectedLines": 78,
+      "errorLines": 2,
+      "warningLines": 2,
+      "classification": "Both error-word matches are WARN-level WhatsApp socket-close EOF notices, inspected separately; no fatal/panic detected in the inspected window. Not a claim that all provider sessions are connected."
+    },
+    "clarin-frontend": {
+      "inspectedLines": 5,
+      "errorLines": 0,
+      "warningLines": 0,
+      "ready": true
+    }
+  },
+  "assets": {
+    "checked": 509,
+    "bytes": 23230112,
+    "buildId": "2026.09.14-1-235507698122867-d420a6bea1a5",
+    "manifestSha256": "4e1928a73e8e87f170099f52a23b3c919cc69bb0fb63c3af972967ac1cafb826",
+    "publicManifestMatches": true,
+    "publicFontSha256Matches": true,
+    "publicNoticeBytes": 312765,
+    "publicNoticeSha256": "8f1296ad5d86f300e9d736ff7d665ba71cd88830127956b4f5f2e004d8b359ac",
+    "failures": 0,
+    "fullDependencyLicenseBundleServed": true,
+    "dependencyBundleBytes": 305734,
+    "dependencyBundleSha256": "8118dca3712a632e9fc4b035dda13f14fc81df4e4c8ac62a1134070a6f492aba"
+  },
+  "flags": {
+    "OFFLINE_V3_ENABLED": "false",
+    "OFFLINE_V3_TASK_WRITES_ENABLED": "false",
+    "OFFLINE_ENROLLMENT_ENABLED": "false"
+  },
+  "completedAt": "2026-09-15T00:13:40.137Z",
+  "runtime": {
+    "next": "16.3.5",
+    "node": "v24.21.0",
+    "uid": 1000,
+    "images": {
+      "frontend": "sha256:8e14b1a4e70a6fac1ce50b770977a1d1e3029337b36db644596418ecc90874b2",
+      "backend": "sha256:21fbdd6fed0d54fcf78989744019d9651e7bbeaebfba221c8086f7dc04dc27c0"
+    }
+  },
+  "database": {
+    "v3Tables": 20,
+    "grants": 0,
+    "enrollmentRequests": 0
+  },
+  "health": {
+    "status": "healthy",
+    "postgres": true,
+    "redis": true,
+    "whatsappConnected": 2,
+    "whatsappTotal": 4,
+    "whatsappStateUnchangedFromPredeploy": true
+  },
+  "verificationCorrection": "Initial MCP check used API port 8080 and returned 404; repository routing verified MCP on 8081, then anonymous 401 confirmed on internal 8081 and public /mcp. No runtime routing was changed.",
+  "windowsValidation": "not_run",
+  "scope": "Post-deploy public/internal web runtime checks, not a complete security certification or Windows/native end-to-end acceptance."
+}

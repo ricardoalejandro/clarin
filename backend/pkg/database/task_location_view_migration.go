@@ -39,6 +39,17 @@ func taskLocationViewMigrations() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_task_location_views_account_id
 			ON task_location_views(account_id,id)`,
+		`ALTER TABLE task_location_views ADD COLUMN IF NOT EXISTS visibility_mode VARCHAR(16) NOT NULL DEFAULT 'inherit'`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname='task_location_views_visibility_mode_check'
+				  AND conrelid='task_location_views'::regclass
+			) THEN
+				ALTER TABLE task_location_views ADD CONSTRAINT task_location_views_visibility_mode_check
+					CHECK (visibility_mode IN ('inherit','restricted'));
+			END IF;
+		END $$`,
 		`CREATE INDEX IF NOT EXISTS idx_task_location_views_folder_order
 			ON task_location_views(account_id,environment_id,folder_id,deleted_at,sort_order,id)
 			WHERE folder_id IS NOT NULL`,
@@ -67,6 +78,24 @@ func taskLocationViewMigrations() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_location_whiteboard_views_board
 			ON task_location_whiteboard_views(account_id,whiteboard_id)`,
+
+		`CREATE TABLE IF NOT EXISTS task_location_view_visibility_members (
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			task_view_id UUID NOT NULL,
+			user_id UUID NOT NULL,
+			created_by UUID,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY(account_id,task_view_id,user_id),
+			FOREIGN KEY(account_id,task_view_id) REFERENCES task_location_views(account_id,id) ON DELETE CASCADE,
+			FOREIGN KEY(account_id,user_id) REFERENCES user_accounts(account_id,user_id) ON DELETE CASCADE
+		)`,
+		`DO $$ BEGIN ALTER TABLE task_location_view_visibility_members ADD CONSTRAINT task_location_view_visibility_members_created_by_fk
+			FOREIGN KEY(account_id,created_by) REFERENCES user_accounts(account_id,user_id)
+			ON DELETE SET NULL (created_by);
+		 EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`CREATE INDEX IF NOT EXISTS idx_task_location_view_visibility_members_user
+			ON task_location_view_visibility_members(account_id,user_id,task_view_id)`,
 
 		`CREATE TABLE IF NOT EXISTS task_location_view_operations (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -108,6 +137,9 @@ func taskLocationViewMigrations() []string {
 		END $$`,
 		`CREATE INDEX IF NOT EXISTS idx_task_location_view_operations_result
 			ON task_location_view_operations(account_id,result_task_view_id,created_at DESC)`,
+		`ALTER TABLE task_location_view_operations DROP CONSTRAINT IF EXISTS task_location_view_operations_action_check`,
+		`ALTER TABLE task_location_view_operations ADD CONSTRAINT task_location_view_operations_action_check
+			CHECK (action IN ('create','update','duplicate','trash','restore','replace_visibility'))`,
 	}
 }
 

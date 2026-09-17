@@ -13,9 +13,9 @@ const FOCUSABLE_SELECTOR = [
 
 export function useAccessibleDialog(
   open: boolean,
-  containerRef: RefObject<HTMLElement>,
+  containerRef: RefObject<HTMLElement | null>,
   onEscape: () => void,
-  initialFocusRef?: RefObject<HTMLElement>,
+  initialFocusRef?: RefObject<HTMLElement | null>,
 ) {
   const onEscapeRef = useRef(onEscape)
   useEffect(() => { onEscapeRef.current = onEscape }, [onEscape])

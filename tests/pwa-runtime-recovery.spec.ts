@@ -12,6 +12,50 @@ function dispatchChunkLoadError() {
 }
 
 test.describe('PWA runtime recovery', () => {
+  test('keeps login network-first across ordinary reloads with stale offline latches', async ({ page }) => {
+    await page.goto(`${baseURL}/login`, { waitUntil: 'domcontentloaded' })
+    await page.evaluate(async () => {
+      await navigator.serviceWorker.register('/sw.js', { scope: '/' })
+      await navigator.serviceWorker.ready
+    })
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await expect.poll(() => page.evaluate(() => Boolean(navigator.serviceWorker.controller))).toBe(true)
+
+    await page.evaluate(async () => {
+      const staleMeta = {
+        enabled: false,
+        mode: 'offline',
+        online_transition: false,
+        online_transition_expires_at: 0,
+        fallback_offer: false,
+        shell_generations: [],
+        pwa_generations: [],
+      }
+      await Promise.all([
+        caches.open('clarin-offline-v4-meta-v1').then(cache => cache.put(
+          '/offline-v4/.runtime-meta.json',
+          new Response(JSON.stringify(staleMeta), { headers: { 'Content-Type': 'application/json' } }),
+        )),
+        caches.open('clarin-offline-v5-meta-v1').then(cache => cache.put(
+          '/offline-v5/.runtime-meta.json',
+          new Response(JSON.stringify(staleMeta), { headers: { 'Content-Type': 'application/json' } }),
+        )),
+      ])
+    })
+
+    for (let reload = 0; reload < 2; reload += 1) {
+      const response = await page.reload({ waitUntil: 'domcontentloaded' })
+      expect(response?.status()).toBe(200)
+      expect(response?.headers()['x-clarin-offline-route']).toBeUndefined()
+      await expect(page.getByRole('heading', { name: 'Clarin' })).toBeVisible()
+      await expect(page.getByText('Cloudflare no pudo cargar la verificación')).toHaveCount(0)
+    }
+
+    await expect.poll(() => page.evaluate(() => Boolean((window as Window & { turnstile?: unknown }).turnstile)), {
+      timeout: 30_000,
+    }).toBe(true)
+  })
+
   test('loads login resources and exposes the deployed PWA contract', async ({ page, request }) => {
     const failedSameOriginRequests: string[] = []
     const chunkErrors: string[] = []
@@ -44,8 +88,8 @@ test.describe('PWA runtime recovery', () => {
     expect(serviceWorker.headers()['cache-control']).toContain('no-store')
     const serviceWorkerSource = await serviceWorker.text()
     expect(serviceWorkerSource).toContain('STATIC_FETCH_TIMEOUT_MS = 10000')
-    expect(serviceWorkerSource).toContain("fetchWithTimeout(request, 'reload')")
-    expect(serviceWorkerSource).not.toContain('self.skipWaiting()')
+    expect(serviceWorkerSource).toContain("fetchWithTimeout(asset, 'reload')")
+    expect(serviceWorkerSource).toContain('if (await onlyLoginWindowsAreOpen()) await self.skipWaiting()')
     expect(serviceWorkerSource).not.toContain('self.clients.claim()')
 
     expect(failedSameOriginRequests).toEqual([])
