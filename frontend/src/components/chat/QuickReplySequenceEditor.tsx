@@ -64,7 +64,7 @@ export default function QuickReplySequenceEditor({ items, attachments, onChange,
   const [wide, setWide] = useState(false)
   const [preview, setPreview] = useState(false)
   useEffect(() => { if (!container.current) return; const observer = new ResizeObserver(entries => setWide(entries[0].contentRect.width >= 720)); observer.observe(container.current); return () => observer.disconnect() }, [])
-  const sensors = useSensors(useSensor(MouseSensor, { activationConstraint: { distance: 8 } }), useSensor(TouchSensor, { activationConstraint: { delay: 520, tolerance: 6 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }))
+  const sensors = useSensors(useSensor(MouseSensor, { activationConstraint: { distance: 8 } }), useSensor(TouchSensor, { activationConstraint: { delay: 520, tolerance: 6 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates, scrollBehavior: 'auto' }))
   const change = (next: QuickReplyItem[]) => onChange(next, attachments)
   return <div ref={container} className="space-y-3">
     <div className="flex items-center justify-between gap-2"><div><h4 className="text-sm font-semibold text-slate-800">Mensajes y orden de envío</h4><p className="mt-0.5 text-xs text-slate-500">Cada bloque es un mensaje. La imagen conserva su pie.</p></div>{(!wide || compact) && <button type="button" onClick={() => setPreview(!preview)} aria-pressed={preview} className="flex min-h-11 items-center gap-1.5 rounded-xl px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"><Eye className="h-4 w-4" />{preview ? 'Editar' : 'Vista previa'}</button>}</div>

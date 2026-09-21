@@ -83,7 +83,7 @@ test.describe('Chats and quick replies', () => {
       await first.getByRole('button', { name: 'Bajar mensaje' }).click()
       await expect(page.getByRole('region', { name: 'Mensaje 1', exact: true }).getByRole('textbox', { name: /Escribe el pie/ })).toContainText('Confirmado')
       if (width === 1440) {
-        await first.evaluate(element => element.scrollIntoView({ block: 'start' }))
+        await first.scrollIntoViewIfNeeded()
         const handle = page.getByRole('button', { name: 'Ordenar mensaje 1', exact: true })
         await handle.focus()
         await page.keyboard.press('Space')
@@ -98,6 +98,7 @@ test.describe('Chats and quick replies', () => {
       }
       const save = page.getByRole('button', { name: 'Guardar', exact: true })
       await expect(save).toBeInViewport()
+      await expect(page.getByRole('heading', { name: 'Editar /bienvenida', exact: true })).toBeInViewport()
       await page.screenshot({ path: `test-results/chat-quick-editor-${width}.png` })
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
       await save.click()
