@@ -68,7 +68,7 @@ async function fixture(page: Page) {
 
 test.describe('Chats and quick replies', () => {
   test.setTimeout(90_000)
-  for (const width of [320, 375, 768, 1440]) {
+  for (const width of [320, 375, 768, 1024, 1280, 1440]) {
     test(`sequence editor preserves caption, order and reachable actions at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 })
       const qa = await fixture(page)
@@ -82,6 +82,20 @@ test.describe('Chats and quick replies', () => {
       const first = page.getByRole('region', { name: 'Mensaje 1', exact: true })
       await first.getByRole('button', { name: 'Bajar mensaje' }).click()
       await expect(page.getByRole('region', { name: 'Mensaje 1', exact: true }).getByRole('textbox', { name: /Escribe el pie/ })).toContainText('Confirmado')
+      if (width === 1440) {
+        await first.evaluate(element => element.scrollIntoView({ block: 'start' }))
+        const handle = page.getByRole('button', { name: 'Ordenar mensaje 1', exact: true })
+        await handle.focus()
+        await page.keyboard.press('Space')
+        await expect(handle).toHaveAttribute('aria-pressed', 'true')
+        await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+        await page.keyboard.press('ArrowDown')
+        await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+        await page.keyboard.press('Space')
+        const moved = page.getByRole('region', { name: 'Mensaje 2', exact: true })
+        await expect(moved.getByRole('textbox', { name: /Escribe el pie/ })).toContainText('Confirmado')
+        await moved.getByRole('button', { name: 'Subir mensaje' }).click()
+      }
       const save = page.getByRole('button', { name: 'Guardar', exact: true })
       await expect(save).toBeInViewport()
       await page.screenshot({ path: `test-results/chat-quick-editor-${width}.png` })

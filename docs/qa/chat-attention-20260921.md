@@ -14,9 +14,9 @@
 - Suite Go completa con `GOCACHE=/tmp/go-build go test ./...`.
 - Integración sobre PostgreSQL 16 desechable con `CLARIN_RUN_CHAT_ATTENTION_INTEGRATION=1`: migraciones repetidas, reparación de contadores antiguos, aislamiento entre cuentas, duplicados concurrentes, fronteras de lectura y atención, revocación, autoría, eco anterior a persistencia, cursor de pendientes y recuperación idempotente tras perder una respuesta HTTP.
 - TypeScript: `npx tsc --noEmit` en el mismo entorno Linux de compilación.
-- Suite frontend general, pruebas del editor incorporado y scripts de integridad. La primera ejecución general presentó dos límites de tiempo y un valor de versión propio del entorno de compilación; las tres pruebas pasaron con `NEXT_PUBLIC_BUILD_VERSION=dev` y ejecución acotada.
+- Suite frontend general, pruebas del editor incorporado y scripts de integridad. La primera ejecución general presentó dos límites de tiempo y un valor de versión propio del entorno de compilación; las tres pruebas pasaron con `NEXT_PUBLIC_BUILD_VERSION=dev` y ejecución acotada. La pasada general final aprobó los 265 archivos y 1.436 casos.
 - Compilación completa de producción mediante `npm run build` en la etapa builder de Docker.
-- Playwright Chromium: editor a 320, 375, 768 y 1440 px, pie con formato y Unicode, orden persistido, acciones accesibles, lectura, cola estable, preparación sin envío, fallo parcial y reintento, borradores por conversación, siguiente pendiente, no requiere respuesta y autoría en Información del mensaje.
+- Playwright Chromium: editor a 320, 375, 768, 1024, 1280 y 1440 px, pie con formato y Unicode, orden persistido por botones y teclado, acciones accesibles, lectura, cola estable, preparación sin envío, fallo parcial y reintento, borradores por conversación, siguiente pendiente, no requiere respuesta y autoría en Información del mensaje.
 
 Los envíos de las pruebas usan un proveedor simulado y contactos ficticios. No se enviaron mensajes de prueba a contactos reales. Las confirmaciones de entrega y lectura continúan dependiendo del proveedor; una identidad histórica desconocida no se puede reconstruir retroactivamente.
 
