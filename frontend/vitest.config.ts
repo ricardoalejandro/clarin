@@ -14,6 +14,8 @@ export default defineConfig({
     setupFiles: ['./vitest.setup.ts'],
     include: [
       'src/proxy.test.ts',
+      'src/utils/chatInbox.test.ts',
+      'src/utils/quickReplySend.test.ts',
       'src/lib/useDebouncedValue.test.tsx',
       'src/lib/searchRequestLifecycle.test.ts',
       'src/lib/cloudChatCapabilities.test.ts',

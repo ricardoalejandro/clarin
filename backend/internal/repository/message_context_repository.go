@@ -17,7 +17,7 @@ func (r *MessageRepository) GetByReference(ctx context.Context, accountID, chatI
 		       is_from_me, is_read, status, delivered_at, read_at, COALESCE(is_edited,false), provider, template_name, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
 		       COALESCE(is_revoked,false), COALESCE(is_view_once,false), COALESCE(media_deleted,false),
-		       latitude, longitude, contact_name, contact_phone, contact_vcard
+		       latitude, longitude, contact_name, contact_phone, contact_vcard, sender
 		FROM messages
 		WHERE account_id=$1 AND chat_id=$2 AND (message_id=$3 OR id::text=$3)
 		ORDER BY CASE WHEN message_id=$3 THEN 0 ELSE 1 END
@@ -36,7 +36,7 @@ func (r *MessageRepository) GetWindowByChatID(ctx context.Context, accountID, ch
 		       is_from_me, is_read, status, delivered_at, read_at, COALESCE(is_edited,false), provider, template_name, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
 		       COALESCE(is_revoked,false), COALESCE(is_view_once,false), COALESCE(media_deleted,false),
-		       latitude, longitude, contact_name, contact_phone, contact_vcard
+		       latitude, longitude, contact_name, contact_phone, contact_vcard, sender
 		FROM (
 			SELECT * FROM messages WHERE account_id=$1 AND chat_id=$2
 			ORDER BY timestamp DESC, id DESC LIMIT $3 OFFSET $4
@@ -73,7 +73,7 @@ func scanContextMessage(scanner messageScanner) (*domain.Message, error) {
 		&message.Timestamp, &message.CreatedAt, &message.QuotedMessageID, &message.QuotedBody,
 		&message.QuotedSender, &message.QuotedIsFromMe, &message.IsRevoked, &message.IsViewOnce, &message.MediaDeleted,
 		&message.Latitude, &message.Longitude, &message.ContactName, &message.ContactPhone,
-		&message.ContactVCard,
+		&message.ContactVCard, &message.Sender,
 	); err != nil {
 		return nil, err
 	}

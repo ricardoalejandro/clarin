@@ -2,7 +2,9 @@
 
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, CheckCheck, Clock3, Info, X } from 'lucide-react'
+import { Check, CheckCheck, Clock3, Info, User, X } from 'lucide-react'
+import { messageAuthor } from '@/utils/chatInbox'
+import { renderFormattedText } from '@/lib/whatsappFormat'
 import type { Message } from '@/types/chat'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
@@ -80,6 +82,7 @@ export default function MessageInfoDialog({ message, onClose }: MessageInfoDialo
   const sentAt = formatReceiptTime(message.timestamp)
   const deliveredAt = formatReceiptTime(message.delivered_at)
   const readAt = formatReceiptTime(message.read_at)
+  const author = messageAuthor(message)
   const preview = message.body?.trim() || message.media_filename || typeLabel(message)
 
   return createPortal(
@@ -98,9 +101,10 @@ export default function MessageInfoDialog({ message, onClose }: MessageInfoDialo
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] pt-4">
           <div className="rounded-2xl bg-[#d9fdd3] px-3 py-2.5 text-sm text-slate-800 shadow-sm">
-            <p className="line-clamp-4 whitespace-pre-wrap break-words">{preview}</p>
+            <div className="line-clamp-4 whitespace-pre-wrap break-words">{renderFormattedText(preview)}</div>
           </div>
 
+          {message.is_from_me && <div className="mt-4 flex gap-3 rounded-2xl border border-slate-200 px-4 py-3.5"><User className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" /><div className="min-w-0"><p className="text-xs text-slate-500">Enviado por</p><p className="mt-1 break-words text-sm font-semibold text-slate-800">{author.name}</p><p className="mt-1 text-xs text-slate-500">{author.origin}</p></div></div>}
           <div className="mt-4 divide-y divide-slate-100 rounded-2xl border border-slate-200 bg-white">
             <div className="flex gap-3 px-4 py-3.5">
               <Clock3 className="mt-0.5 h-5 w-5 shrink-0 text-slate-500" />

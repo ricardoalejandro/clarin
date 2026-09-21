@@ -3892,6 +3892,7 @@ func Migrate(db *pgxpool.Pool) error {
 	migrations = append(migrations, normalizedRoleNameMigrations()...)
 	migrations = append(migrations, surveyTemplateInstanceMigrations()...)
 	migrations = append(migrations, surveyPublicSlugReservationMigrations()...)
+	migrations = append(migrations, chatAttentionMigrations()...)
 
 	var dataTx pgx.Tx
 	skipDataMigration := false

@@ -2865,6 +2865,9 @@ func NormalizeQuickReplyShortcut(raw string) (string, error) {
 }
 
 func prepareQuickReply(quickReply *domain.QuickReply) error {
+	if err := prepareQuickReplyItems(quickReply); err != nil {
+		return err
+	}
 	shortcut, err := NormalizeQuickReplyShortcut(quickReply.Shortcut)
 	if err != nil {
 		return err

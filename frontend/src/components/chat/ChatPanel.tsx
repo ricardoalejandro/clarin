@@ -7,13 +7,14 @@ import {
   ArrowLeft, Smile, Image as ImageIcon, FileText, X,
   Mic, Trash2, Reply, Check, CheckCheck, Download,
   CornerUpRight, Play, Pause, AlertCircle, User, EyeOff, RefreshCw,
-  ChevronUp, ChevronDown, PanelRight, Camera, Copy, Info, Keyboard,
+  ChevronUp, ChevronDown, PanelRight, Camera, Copy, Info, Keyboard, Zap,
 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
-import { Chat, Device, Message } from '@/types/chat'
+import { Chat, ChatState, Device, Message } from '@/types/chat'
 import { subscribeWebSocket } from '@/lib/api'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
+import { mergeMessageSender } from '@/utils/chatInbox'
 import { getChatDisplayName } from '@/utils/chat'
 import WhatsAppTextInput, { WhatsAppTextInputHandle } from '../WhatsAppTextInput'
 import ImageViewer from './ImageViewer'
@@ -24,6 +25,8 @@ import EmojiPicker from './EmojiPicker'
 import ContactPanel from './ContactPanel'
 import ForwardMessageModal from './ForwardMessageModal'
 import MessageInfoDialog from './MessageInfoDialog'
+import QuickReplySequenceEditor from './QuickReplySequenceEditor'
+import { freezeQuickReplySequence } from '@/utils/quickReplySend'
 import QuickReplyPicker from './QuickReplyPicker'
 import MobileComposerAccessory, { MobileComposerAccessoryTab } from './MobileComposerAccessory'
 import { useChatMobileChrome } from './ChatMobileChromeContext'
@@ -49,6 +52,21 @@ import { getMessageReactionAvailability } from '@/utils/chatCapabilities'
 import { ChatMediaType, validateChatAttachment } from '@/utils/chatAttachments'
 import { chatMediaIdentity } from '@/utils/chatMediaUrl'
 import type { ChatDocumentDescriptor } from '@/utils/chatDocuments'
+import type { PendingQuickReplyAttachment, QuickReply, QuickReplyComposerDraft, QuickReplyPage, QuickReplyRealtimePayload } from '@/types/quick-reply'
+import {
+  buildQuickReplyComposerSelection,
+  getQuickReplyItems,
+  getQuickReplyAttachments,
+  createQuickReplyComposerDraft,
+  extractQuickReplyCommand,
+  markQuickReplyAttachmentFailed,
+  markQuickReplyAttachmentSent,
+  mergeQuickReplyPages,
+  QUICK_REPLY_PAGE_SIZE,
+  reconcileQuickReplyRealtime,
+  removeQuickReplyComposerAttachment,
+  replaceQuickReplyCommand,
+} from '@/utils/quickReplies'
 import { useContainerWidth } from '../responsive/useContainerWidth'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
@@ -81,6 +99,13 @@ type RetryableMedia = {
 type ComposerFeedback = {
   kind: 'error' | 'info'
   message: string
+}
+
+type QuickReplyPickerPage = {
+  replies: QuickReply[]
+  total: number
+  hasMore: boolean
+  nextCursor: string
 }
 
 type StickerListResponse = {
@@ -172,6 +197,7 @@ function mergeFetchedMessages(
       merged[index] = {
         ...canonical,
         ...message,
+        sender: mergeMessageSender(canonical.sender, message.sender),
         reactions: mergeCanonicalReactionSnapshot(
           message.reactions,
           canonical.reactions,
@@ -207,12 +233,14 @@ interface ChatPanelProps {
   contactInfoOpen?: boolean
   onRequestDelete?: () => void
   isActive?: boolean
-  onRead?: (chatId: string, unreadCount: number) => void
+  onRead?: (chatId: string, unreadCount: number, state?: ChatState) => void
+  onNext?: () => string | void | Promise<string | void>
+  attentionMode?: boolean
 }
 
 type DeviceValidationState = 'validating' | 'ready' | 'error'
 
-export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, initialChat, onClose, className = '', readOnly = false, readOnlyReason: explicitReadOnlyReason, onContactInfoToggle, contactInfoOpen, onRequestDelete, isActive = true, onRead }: ChatPanelProps) {
+export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, initialChat, onClose, className = '', readOnly = false, readOnlyReason: explicitReadOnlyReason, onContactInfoToggle, contactInfoOpen, onRequestDelete, isActive = true, onRead, onNext, attentionMode }: ChatPanelProps) {
   const { ref: panelRef, width: panelWidth } = useContainerWidth<HTMLDivElement>()
   const { setComposerAccessoryOpen } = useChatMobileChrome()
   const compactActions = panelWidth > 0 && panelWidth < 640
@@ -329,7 +357,16 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   // Quick Reply
   const [showQuickReply, setShowQuickReply] = useState(false)
   const [quickReplyFilter, setQuickReplyFilter] = useState('')
-  const [quickRepliesData, setQuickRepliesData] = useState<any[]>([])
+  const [quickReplyPage, setQuickReplyPage] = useState<QuickReplyPickerPage>({ replies: [], total: 0, hasMore: false, nextCursor: '' })
+  const [quickReplyLoading, setQuickReplyLoading] = useState(true)
+  const [quickReplyLoadingMore, setQuickReplyLoadingMore] = useState(false)
+  const [quickReplyError, setQuickReplyError] = useState('')
+  const [quickReplyDraft, setQuickReplyDraft] = useState<QuickReplyComposerDraft | null>(null)
+  const draftCacheRef = useRef(new Map<string, { text: string; quick: QuickReplyComposerDraft | null; quote: Message | null; attachment: AttachmentDraft | null }>())
+  useEffect(() => () => {
+    if (chatId) draftCacheRef.current.set(chatId, { text: messageText, quick: quickReplyDraft, quote: replyingTo, attachment: attachmentDraft })
+  }, [chatId, messageText, quickReplyDraft, replyingTo, attachmentDraft])
+  useOperationalOverlayRegistration(showQuickReply, 'chat-quick-replies')
 
   // Typing indicator
   const [contactTyping, setContactTyping] = useState<string | null>(null) // null | 'composing' | 'recording'
@@ -369,6 +406,11 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const searchOpenRef = useRef(false)
   const inputRef = useRef<WhatsAppTextInputHandle>(null)
   const captionInputRef = useRef<WhatsAppTextInputHandle>(null)
+  const quickReplyAnchorRef = useRef<HTMLDivElement>(null)
+  const quickReplyRequestRef = useRef<AbortController | null>(null)
+  const quickReplyRequestGenerationRef = useRef(0)
+  const quickReplySettledQueryRef = useRef('')
+  const quickReplyDefaultPageRef = useRef<QuickReplyPickerPage>({ replies: [], total: 0, hasMore: false, nextCursor: '' })
   const optimisticIdRef = useRef(0)
   const previousChatIdRef = useRef<string | null>(chatId)
   const activeChatIdRef = useRef<string | null>(chatId)
@@ -390,7 +432,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   onReadRef.current = onRead
 
   const markDisplayedIncomingRead = useCallback(async (targetChatId: string, displayedMessages: Message[]) => {
-    if (!isActiveRef.current || document.visibilityState === 'hidden') return
+    if (!isActiveRef.current || !isNearBottomRef.current || activeChatIdRef.current !== targetChatId || document.visibilityState === 'hidden') return
     const incoming = displayedMessages.filter(message => !message.is_from_me && !message.is_revoked && !message.id.startsWith('optimistic-'))
     const latest = incoming.at(-1)
     if (!latest) return
@@ -415,11 +457,19 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
           || (message.timestamp === latest.timestamp && message.id <= latest.id)
         return isBeforeWatermark ? { ...message, is_read: true } : message
       }), targetChatId)
-      onReadRef.current?.(targetChatId, unreadCount)
+      onReadRef.current?.(targetChatId, unreadCount, data.chat_state)
+    } catch {
+      // Retried on visibility, scroll or the bounded active-chat reconciliation timer.
     } finally {
       if (readInFlightRef.current.get(targetChatId) === through) readInFlightRef.current.delete(targetChatId)
     }
   }, [updateMessages])
+
+  useEffect(() => {
+    if (!chatId || !isActive) return
+    const timer = window.setInterval(() => { void markDisplayedIncomingRead(chatId, messagesCacheRef.current.get(chatId)?.messages || []) }, 5000)
+    return () => window.clearInterval(timer)
+  }, [chatId, isActive, markDisplayedIncomingRead])
 
   const reconcileReactionSnapshotBaseline = useCallback((
     targetChatId: string,
@@ -1099,6 +1149,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     setShowContactPicker(false)
     setReplyingTo(null)
     setEditingMsg(null)
+    setQuickReplyDraft(null)
     if (!attachmentSendingRef.current && attachmentDraftRef.current) {
       if (attachmentDraftRef.current.previewUrl) URL.revokeObjectURL(attachmentDraftRef.current.previewUrl)
       attachmentDraftRef.current = null
@@ -1141,22 +1192,21 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   useEffect(() => {
     if (previousChatIdRef.current === chatId) return
     previousChatIdRef.current = chatId
+    const restored = chatId ? draftCacheRef.current.get(chatId) : undefined
 
     if (typingPauseTimeoutRef.current) clearTimeout(typingPauseTimeoutRef.current)
-    if (attachmentDraftRef.current?.previewUrl) {
-      URL.revokeObjectURL(attachmentDraftRef.current.previewUrl)
-    }
 
     sendPresence(false)
     lastTypingSentRef.current = 0
-    setMessageText('')
-    setReplyingTo(null)
+    setMessageText(restored?.text || '')
+    setReplyingTo(restored?.quote || null)
     setEditingMsg(null)
     setShowQuickReply(false)
     setQuickReplyFilter('')
+    setQuickReplyDraft(restored?.quick || null)
     setActivePopup(null)
     setShowAttachments(false)
-    setAttachmentDraft(null)
+    setAttachmentDraft(restored?.attachment || null)
     setSendingAttachment(false)
     setSendingMessage(false)
     setComposerFeedback(null)
@@ -1196,18 +1246,74 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     }
   }, [chatId, effectiveReadOnly, syncingHistory])
 
-  // Fetch quick replies
-  useEffect(() => {
-    const token = localStorage.getItem('token')
-    fetch('/api/quick-replies', { headers: { Authorization: `Bearer ${token}` } })
-      .then(res => res.json())
-      .then(data => {
-        if (data.success) {
-          setQuickRepliesData(data.quick_replies || [])
-        }
+  const loadQuickReplies = useCallback(async ({ query, cursor = '', append = false }: { query: string; cursor?: string; append?: boolean }) => {
+    quickReplyRequestRef.current?.abort()
+    const controller = new AbortController()
+    quickReplyRequestRef.current = controller
+    const generation = ++quickReplyRequestGenerationRef.current
+    if (append) setQuickReplyLoadingMore(true)
+    else setQuickReplyLoading(true)
+    setQuickReplyError('')
+    try {
+      const params = new URLSearchParams({ limit: String(QUICK_REPLY_PAGE_SIZE), kind: 'all' })
+      if (query) params.set('query', query)
+      if (cursor) params.set('cursor', cursor)
+      const token = localStorage.getItem('token')
+      const response = await fetch(`/api/quick-replies?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
       })
-      .catch(console.error)
+      const data = await response.json().catch(() => ({})) as Partial<QuickReplyPage>
+      if (!response.ok || !data.success) throw new Error(data.error || 'No se pudieron cargar las respuestas rápidas.')
+      if (controller.signal.aborted || generation !== quickReplyRequestGenerationRef.current) return
+      const incoming = Array.isArray(data.quick_replies) ? data.quick_replies : []
+      setQuickReplyPage(previous => {
+        const next = {
+          replies: append ? mergeQuickReplyPages(previous.replies, incoming) : mergeQuickReplyPages([], incoming),
+          total: typeof data.total === 'number' ? data.total : incoming.length,
+          hasMore: Boolean(data.has_more),
+          nextCursor: data.next_cursor || '',
+        }
+        if (!query) quickReplyDefaultPageRef.current = next
+        return next
+      })
+    } catch (error) {
+      if (controller.signal.aborted) return
+      setQuickReplyError(error instanceof Error ? error.message : 'No se pudieron cargar las respuestas rápidas.')
+    } finally {
+      if (quickReplyRequestRef.current === controller) quickReplyRequestRef.current = null
+      if (generation === quickReplyRequestGenerationRef.current) {
+        setQuickReplyLoading(false)
+        setQuickReplyLoadingMore(false)
+      }
+    }
   }, [])
+
+  useEffect(() => {
+    quickReplySettledQueryRef.current = ''
+    void loadQuickReplies({ query: '' })
+    return () => quickReplyRequestRef.current?.abort()
+  }, [loadQuickReplies])
+
+  useEffect(() => {
+    if (!showQuickReply) return
+    quickReplyRequestRef.current?.abort()
+    if (!quickReplyFilter) {
+      quickReplySettledQueryRef.current = ''
+      setQuickReplyPage(quickReplyDefaultPageRef.current)
+      setQuickReplyLoading(false)
+      setQuickReplyLoadingMore(false)
+      setQuickReplyError('')
+      return
+    }
+    setQuickReplyLoading(true)
+    setQuickReplyError('')
+    const timer = window.setTimeout(() => {
+      quickReplySettledQueryRef.current = quickReplyFilter
+      void loadQuickReplies({ query: quickReplyFilter })
+    }, SEARCH_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [loadQuickReplies, quickReplyFilter, showQuickReply])
 
   useEffect(() => {
     if (initialChat && (!chatId || initialChat.id === chatId)) {
@@ -1308,15 +1414,28 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         const payload = msg.data || msg.message
 
         if (eventType === 'quick_reply_update' && payload) {
-          setQuickRepliesData(previous => {
-            if (payload.action === 'deleted' && payload.quick_reply_id) {
-              return previous.filter(reply => reply.id !== payload.quick_reply_id)
-            }
-            const canonical = payload.quick_reply
-            if (!canonical?.id) return previous
-            const exists = previous.some(reply => reply.id === canonical.id)
-            if (!exists) return [...previous, canonical]
-            return previous.map(reply => reply.id === canonical.id ? canonical : reply)
+          const quickReplyPayload = payload as QuickReplyRealtimePayload
+          const defaultReconciled = reconcileQuickReplyRealtime(
+            quickReplyDefaultPageRef.current.replies,
+            quickReplyDefaultPageRef.current.total,
+            quickReplyPayload,
+            '',
+            'all',
+          )
+          quickReplyDefaultPageRef.current = {
+            ...quickReplyDefaultPageRef.current,
+            replies: defaultReconciled.replies,
+            total: defaultReconciled.total,
+          }
+          setQuickReplyPage(previous => {
+            const reconciled = reconcileQuickReplyRealtime(
+              previous.replies,
+              previous.total,
+              quickReplyPayload,
+              quickReplySettledQueryRef.current,
+              'all',
+            )
+            return { ...previous, replies: reconciled.replies, total: reconciled.total }
           })
         } else if (eventType === 'device_status' && payload?.device_id === deviceId) {
           const nextStatus = typeof payload.status === 'string' ? payload.status : 'disconnected'
@@ -1369,6 +1488,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                     const pending = Boolean(reactionQueuesRef.current.get(reactionQueueKey(chatId, message.message_id))?.inFlight)
                     return {
                       ...actualMessage,
+                      sender: mergeMessageSender(actualMessage.sender, message.sender),
                       reactions: mergeCanonicalReactionSnapshot(message.reactions, actualMessage.reactions, pending),
                     }
                   })
@@ -1383,6 +1503,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                   const pending = Boolean(reactionQueuesRef.current.get(reactionQueueKey(chatId, message.message_id))?.inFlight)
                   return {
                     ...actualMessage,
+                    sender: mergeMessageSender(actualMessage.sender, message.sender),
                     reactions: mergeCanonicalReactionSnapshot(message.reactions, actualMessage.reactions, pending),
                   }
                 })
@@ -1707,6 +1828,10 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }
 
   const handleSendMessage = async () => {
+    if (quickReplyDraft) {
+      await handleSendQuickReplyDraft()
+      return
+    }
     if (effectiveReadOnly || (!messageText.trim() && !forwardingMsg) || !chat || !deviceId) return
 
     const text = messageText.trim()
@@ -1779,6 +1904,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
     setMessageText('')
     setReplyingTo(null)
+    setShowQuickReply(false)
     setQuickReplyFilter('')
 
     if (inputRef.current) {
@@ -2041,70 +2167,66 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     return true
   }
 
-  const handleSendMediaUrl = async (url: string, mediaType: string, caption: string) => {
-    if (effectiveReadOnly || !chat || !deviceId || !chatId) return
+  const acknowledgeAttention = async (targetChatId: string, through: string) => {
+    if (!through) return
+    const response = await fetch(`/api/chats/${targetChatId}/attention`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
+      body: JSON.stringify({ through_message_id: through }),
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok || !data.success) throw new Error(data.error || 'No se pudo actualizar la atención. Reintenta sin reenviar los mensajes.')
+    if (activeChatIdRef.current === targetChatId) { setChat(current => current ? { ...current, ...data.chat_state, id: targetChatId } : current); setComposerFeedback({ kind: 'info', message: data.chat_state.needs_reply ? 'Hay un mensaje nuevo que aún requiere atención.' : 'Conversación atendida. Puedes pasar a la siguiente.' }) }
+    onReadRef.current?.(targetChatId, data.chat_state.unread_count, data.chat_state)
+  }
+
+  const handleSendQuickReplyDraft = async () => {
+    if (!quickReplyDraft || effectiveReadOnly || !chat || !deviceId || !chatId || activeMessageSendRef.current !== null) return
+    if (!quickReplyDraft.items?.some(item => item.type === 'media' || item.text?.trim()) && !messageText.trim()) { setComposerFeedback({ kind: 'info', message: 'Añade un mensaje antes de enviar la respuesta rápida.' }); return }
     const targetChatId = chatId
-    const targetChatJid = chat.jid
-    const targetDeviceId = deviceId
-    const quote = replyingTo
-
-    const tempId = `optimistic-${++optimisticIdRef.current}`
-
-    const optimisticMsg: Message = {
-      id: tempId,
-      message_id: tempId,
-      from_jid: '',
-      from_name: 'Me',
-      body: caption,
-      message_type: mediaType,
-      media_url: url,
-      is_from_me: true,
-      is_read: false,
-      status: 'sending',
-      timestamp: new Date().toISOString(),
-      quoted_message_id: quote?.message_id || quote?.id,
-      quoted_body: quote?.body || quote?.media_filename || (quote ? 'Mensaje citado' : undefined),
-      quoted_sender: quote?.is_from_me ? 'Me' : (quote?.from_name || quote?.from_jid),
-      quoted_is_from_me: quote?.is_from_me,
+    const sequence = ++messageSendSequenceRef.current
+    activeMessageSendRef.current = sequence
+    setSendingMessage(true)
+    const incoming = (messagesCacheRef.current.get(chatId)?.messages || []).filter(message => !message.is_from_me && !message.is_revoked).at(-1)
+    let progress = freezeQuickReplySequence(quickReplyDraft, {
+      chatId, jid: chat.jid, deviceId, through: incoming?.id || '', quote: replyingTo, trailingText: messageText,
+    })
+    const publish = (next: QuickReplyComposerDraft | null) => {
+      const cached = draftCacheRef.current.get(targetChatId)
+      draftCacheRef.current.set(targetChatId, { text: '', quick: next, quote: null, attachment: cached?.attachment || null })
+      if (activeChatIdRef.current === targetChatId) { setQuickReplyDraft(next); setMessageText(''); setReplyingTo(null) }
     }
-
-    updateMessagesForChat(targetChatId, prev => [...prev, optimisticMsg])
-    if (quote) setReplyingTo(null)
-    if (activeChatIdRef.current === targetChatId) scrollToBottom()
-
-    const token = localStorage.getItem('token')
+    publish(progress)
+    sendPresence(false)
     try {
-        const res = await fetch('/api/messages/send', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({
-                device_id: targetDeviceId,
-                chat_id: targetChatId,
-                to: targetChatJid,
-                body: caption,
-                media_url: url,
-                media_type: mediaType,
-                quoted_message_id: quote?.message_id || quote?.id,
-                quoted_body: quote?.body || quote?.media_filename,
-                quoted_sender: quote?.is_from_me ? 'Me' : (quote?.from_name || quote?.from_jid),
-                quoted_is_from_me: quote?.is_from_me,
-            })
-        })
-
-        const data = await res.json()
-        if (data.success) {
-            const realMsg = data.message
-            if (realMsg) {
-                updateMessagesForChat(targetChatId, prev => reconcileOptimisticMessage(prev, tempId, realMsg as Message))
-            } else {
-                updateMessagesForChat(targetChatId, prev => prev.map(m => m.id === tempId ? { ...m, status: 'sent' } : m))
-            }
-        } else {
-            updateMessagesForChat(targetChatId, prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+      for (let index = 0; index < (progress.items?.length || 0); index++) {
+        const item = progress.items![index]
+        if (item.sent) continue
+        if (activeChatIdRef.current !== targetChatId) return
+        const payload = item.payload!
+        const tempId = item.sendTempId || `optimistic-${item.operationId}`
+        progress = { ...progress, items: progress.items!.map(row => row.id === item.id ? { ...row, sendTempId: tempId } : row), error: undefined }
+        publish(progress)
+        const optimistic: Message = { id: tempId, message_id: tempId, is_from_me: true, is_read: false, status: 'sending', timestamp: new Date().toISOString(), body: String(payload.body || ''), message_type: String(payload.media_type || 'text'), media_url: payload.media_url as string, media_filename: payload.media_filename as string, quoted_message_id: payload.quoted_message_id as string, quoted_body: payload.quoted_body as string, quoted_sender: payload.quoted_sender as string, quoted_is_from_me: payload.quoted_is_from_me as boolean }
+        updateMessagesForChat(targetChatId, current => current.some(row => row.id === tempId) ? current.map(row => row.id === tempId ? optimistic : row) : [...current, optimistic])
+        const response = await fetch('/api/messages/send', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` }, body: JSON.stringify(payload) })
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok || !data.success || !data.message) {
+          updateMessagesForChat(targetChatId, current => current.map(row => row.id === tempId ? { ...row, status: 'failed' } : row))
+          throw new Error(data.code === 'send_outcome_pending' ? 'Estamos verificando este envío. Reintenta para consultar su resultado; no se duplicará.' : data.error || 'El envío se detuvo. Reintenta para continuar desde este mensaje.')
         }
-    } catch (err) {
-        console.error(err)
-        updateMessagesForChat(targetChatId, prev => prev.map(m => m.id === tempId ? { ...m, status: 'failed' } : m))
+        updateMessagesForChat(targetChatId, current => reconcileOptimisticMessage(current, tempId, data.message))
+        progress = { ...progress, items: progress.items!.map(row => row.id === item.id ? { ...row, sent: true } : row) }
+        publish(progress)
+      }
+      await acknowledgeAttention(targetChatId, progress.throughMessageId || '')
+      publish(null)
+      if (activeChatIdRef.current === targetChatId) { scrollToBottom(); requestAnimationFrame(() => inputRef.current?.focus()) }
+    } catch (error) {
+      progress = { ...progress, error: error instanceof Error ? error.message : 'No pudimos confirmar el envío. Reintenta para verificarlo.' }
+      publish(progress)
+    } finally {
+      if (activeMessageSendRef.current === sequence) activeMessageSendRef.current = null
+      if (activeChatIdRef.current === targetChatId) setSendingMessage(false)
     }
   }
 
@@ -2327,16 +2449,13 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
   const handleMessageChange = (text: string) => {
      setMessageText(text)
-     if (text.endsWith('/')) {
-         setQuickReplyFilter('')
-         setShowQuickReply(true)
+     const command = extractQuickReplyCommand(text)
+     if (command) {
+       setQuickReplyFilter(command.query)
+       setShowQuickReply(true)
      } else if (showQuickReply) {
-         const match = text.match(/\/(\w*)$/)
-         if (match) {
-             setQuickReplyFilter(match[1])
-         } else {
-             setShowQuickReply(false)
-         }
+       setShowQuickReply(false)
+       setQuickReplyFilter('')
      }
 
      // Send typing indicator (debounced - max once every 3 seconds)
@@ -2360,39 +2479,34 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
      }
   }
 
-  const handleQuickReplySelect = (reply: any) => {
-     const textBeforeCommand = messageText.replace(/\/[\w-]*$/, '')
-
-     // Multi-attachment support
-     if (reply.attachments && reply.attachments.length > 0) {
-         for (const att of reply.attachments) {
-             handleSendMediaUrl(att.media_url, att.media_type || 'image', att.caption || '')
-         }
-         if (reply.body) {
-             // Send body as separate text message
-             const sendText = async () => {
-                 const token = localStorage.getItem('token')
-                 if (!chat || !deviceId) return
-                 try {
-                     await fetch('/api/messages/send', {
-                         method: 'POST',
-                         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                         body: JSON.stringify({ device_id: deviceId, to: chat.jid, body: reply.body })
-                     })
-                 } catch {}
-             }
-             sendText()
-         }
-         setMessageText(textBeforeCommand.trim())
-     } else if (reply.media_url) {
-         handleSendMediaUrl(reply.media_url, reply.media_type || 'image', reply.body || '')
-         setMessageText(textBeforeCommand.trim())
-     } else {
-         setMessageText((textBeforeCommand + reply.body).trim())
-     }
-
+  const handleQuickReplySelect = (reply: QuickReply) => {
+     if (quickReplyDraft) { setComposerFeedback({ kind: 'info', message: 'Envía o quita la respuesta preparada antes de seleccionar otra.' }); setShowQuickReply(false); return }
+     const normalized = { ...reply, items: getQuickReplyItems(reply), attachments: getQuickReplyAttachments(reply) }
+     const prepared = createQuickReplyComposerDraft(normalized)
+     const prefix = replaceQuickReplyCommand(messageText, '').trim()
+     if (prepared && prefix) prepared.items!.unshift({ id: crypto.randomUUID(), operationId: crypto.randomUUID(), type: 'text', text: prefix })
+     setMessageText('')
+     setQuickReplyDraft(prepared)
      setShowQuickReply(false)
-     if (inputRef.current) inputRef.current.focus()
+     setQuickReplyFilter('')
+     setQuickReplyError('')
+     requestAnimationFrame(() => inputRef.current?.focus())
+  }
+
+  const removeQuickReplyDraftAttachment = (index: number) => {
+    if (sendingMessage) return
+    setQuickReplyDraft(previous => {
+      if (!previous) return previous
+      const next = removeQuickReplyComposerAttachment(previous, index)
+      return next || (messageText.trim() ? { ...previous, attachments: [], totalAttachments: previous.sentAttachments, error: undefined } : null)
+    })
+  }
+
+  const cancelQuickReplyDraft = () => {
+    if (sendingMessage) return
+    setQuickReplyDraft(null)
+    setComposerFeedback(null)
+    requestAnimationFrame(() => inputRef.current?.focus())
   }
 
   const isCanonicalMessage = (message: Message) => Boolean(message.message_id) && !message.id.startsWith('optimistic-') && !message.is_revoked
@@ -3067,6 +3181,11 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
            </div>
          )}
 
+              {attentionMode && <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2">
+                <button type="button" disabled={sendingMessage || loading} onClick={async () => { if (!chatId) return; const through = messages.filter(message => !message.is_from_me && !message.is_revoked).at(-1)?.id; if (!through) return; try { await acknowledgeAttention(chatId, through) } catch (error) { setComposerFeedback({ kind: 'error', message: error instanceof Error ? error.message : 'No se pudo actualizar la atención.' }) } }} className="min-h-11 rounded-xl px-3 text-xs font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-40">No requiere respuesta</button>
+                <button type="button" disabled={sendingMessage || loading} onClick={async () => { const notice = await onNext?.(); if (notice) setComposerFeedback({ kind: 'info', message: notice }) }} className="min-h-11 rounded-xl bg-emerald-50 px-4 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-40">Siguiente pendiente →</button>
+              </div>}
+
          {/* Footer / Input */}
          {effectiveReadOnly ? (
            <div className="flex shrink-0 items-center justify-center gap-2 border-t border-amber-200 bg-amber-50 px-4 py-3 text-center" role="status">
@@ -3079,23 +3198,49 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
            </div>
          ) : (
          <div className="relative z-30 flex shrink-0 items-end gap-1 border-t border-slate-200 bg-slate-50 px-2 pt-2 sm:gap-2 sm:px-3" style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' }}>
-              {editingMsg && (
-                  <div className="absolute bottom-full left-0 right-0 bg-blue-50 p-2 border-t border-blue-400 flex justify-between items-center shadow-sm">
-                      <div className="text-xs border-l-4 border-blue-500 pl-2">
-                          <p className="font-bold text-blue-700">Editando mensaje</p>
-                          <p className="line-clamp-1 text-slate-600">{editingMsg.body}</p>
+              {(editingMsg || replyingTo || quickReplyDraft) && (
+                <div className="absolute bottom-full left-0 right-0 flex max-h-[min(55dvh,32rem)] flex-col overflow-y-auto border-t border-slate-200 bg-white/95 shadow-[0_-8px_24px_rgba(15,23,42,0.08)] backdrop-blur">
+                  {editingMsg && (
+                    <div className="flex items-center justify-between gap-3 border-b border-blue-100 bg-blue-50 px-3 py-2">
+                      <div className="min-w-0 flex-1 border-l-4 border-blue-500 pl-2 text-xs">
+                        <p className="font-bold text-blue-700">Editando mensaje</p>
+                        <p className="line-clamp-1 text-slate-600">{editingMsg.body}</p>
                       </div>
-                      <button onClick={() => { setEditingMsg(null); setMessageText(''); inputRef.current?.clear() }}><X className="w-4 h-4 text-slate-500" /></button>
-                  </div>
-              )}
-              {replyingTo && (
-                  <div className="absolute bottom-full left-0 right-0 flex items-center justify-between gap-3 border-t border-emerald-300 bg-white/95 px-3 py-2 shadow-sm backdrop-blur">
+                      <button type="button" onClick={() => { setEditingMsg(null); setMessageText(''); inputRef.current?.clear() }} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-white" aria-label="Cancelar edición"><X className="h-4 w-4" /></button>
+                    </div>
+                  )}
+                  {replyingTo && (
+                    <div className="flex items-center justify-between gap-3 border-b border-emerald-100 px-3 py-2">
                       <div className="min-w-0 flex-1 border-l-4 border-emerald-500 pl-2.5 text-xs">
-                          <p className="truncate font-bold text-emerald-700">Respondiendo a {replyingTo.is_from_me ? 'ti' : (replyingTo.from_name || getChatDisplayName(chat))}</p>
-                          <p className="line-clamp-1 text-slate-600">{replyingTo.body || replyingTo.media_filename || (replyingTo.message_type === 'image' ? 'Foto' : replyingTo.message_type === 'video' ? 'Video' : replyingTo.message_type === 'gif' ? 'GIF' : replyingTo.message_type === 'audio' ? 'Audio' : 'Mensaje multimedia')}</p>
+                        <p className="truncate font-bold text-emerald-700">Respondiendo a {replyingTo.is_from_me ? 'ti' : (replyingTo.from_name || getChatDisplayName(chat))}</p>
+                        <p className="line-clamp-1 text-slate-600">{replyingTo.body || replyingTo.media_filename || (replyingTo.message_type === 'image' ? 'Foto' : replyingTo.message_type === 'video' ? 'Video' : replyingTo.message_type === 'gif' ? 'GIF' : replyingTo.message_type === 'audio' ? 'Audio' : 'Mensaje multimedia')}</p>
                       </div>
-                      <button type="button" onClick={() => setReplyingTo(null)} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cancelar respuesta"><X className="h-4 w-4" /></button>
-                  </div>
+                      <button type="button" disabled={sendingMessage} onClick={() => setReplyingTo(null)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 disabled:opacity-40" aria-label="Cancelar respuesta"><X className="h-4 w-4" /></button>
+                    </div>
+                  )}
+                  {quickReplyDraft && (
+                    <div className="border-b border-emerald-100 bg-emerald-50/70 px-3 py-2.5" aria-live="polite">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="flex flex-wrap items-center gap-2 text-xs font-black text-emerald-800">
+                            <Zap className="h-3.5 w-3.5" />
+                            /{quickReplyDraft.shortcut}
+                            <span className="font-semibold text-emerald-600">Preparada · pulsa Enviar para confirmar</span>
+                          </p>
+                          <p className="mt-1 text-[10px] font-semibold text-slate-500">
+                            {quickReplyDraft.items?.filter(item => item.sent).length || 0} de {quickReplyDraft.items?.length || 0} mensajes enviados
+                          </p>
+                        </div>
+                        <button type="button" disabled={sendingMessage} onClick={cancelQuickReplyDraft} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-white hover:text-slate-800 disabled:opacity-40" aria-label="Quitar respuesta rápida preparada"><X className="h-4 w-4" /></button>
+                      </div>
+                      <QuickReplySequenceEditor compact items={quickReplyDraft.items || []} attachments={quickReplyDraft.allAttachments || []}
+                        disabled={sendingMessage || Boolean(quickReplyDraft.started)}
+                        onChange={(items, attachments) => setQuickReplyDraft(current => current ? { ...current, allAttachments: attachments, items: items.map(item => ({ ...item, operationId: current.items?.find(row => row.id === item.id)?.operationId || crypto.randomUUID() })) } : current)}
+                        onRemoveAttachment={id => setQuickReplyDraft(current => current ? { ...current, items: current.items?.filter(item => item.attachment_id !== id), allAttachments: current.allAttachments?.filter(item => item.id !== id) } : current)} />
+                      {quickReplyDraft.error && <p role="alert" className="mt-2 flex items-start gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-2.5 py-2 text-[10px] font-bold leading-4 text-rose-700"><AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />{quickReplyDraft.error}</p>}
+                    </div>
+                  )}
+                </div>
               )}
 
               {/* Attachments Menu */}
@@ -3174,13 +3319,21 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                 </div>
               )}
 
-              <div className="relative min-w-0 flex-1">
+              <div ref={quickReplyAnchorRef} className="relative min-w-0 flex-1">
                     <QuickReplyPicker
-                      replies={quickRepliesData}
+                      replies={quickReplyPage.replies}
                       isOpen={showQuickReply}
                       filter={quickReplyFilter}
+                      loading={quickReplyLoading}
+                      error={quickReplyError}
+                      hasMore={quickReplyPage.hasMore}
+                      loadingMore={quickReplyLoadingMore}
+                      anchorRef={quickReplyAnchorRef}
+                      portalTarget={operationalPortal || undefined}
                       onSelect={handleQuickReplySelect}
-                      onClose={() => { setShowQuickReply(false); setQuickReplyFilter('') }}
+                      onClose={() => { setShowQuickReply(false); setQuickReplyFilter(''); requestAnimationFrame(() => inputRef.current?.focus()) }}
+                      onLoadMore={() => void loadQuickReplies({ query: quickReplySettledQueryRef.current, cursor: quickReplyPage.nextCursor, append: true })}
+                      onRetry={() => void loadQuickReplies({ query: quickReplySettledQueryRef.current })}
                     />
                     <WhatsAppTextInput
                       ref={inputRef}
@@ -3189,6 +3342,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                       placeholder="Escribe un mensaje…"
                       onKeyDown={handleKeyDown}
                       onPasteFiles={files => beginAttachmentDraft(files)}
+                      disabled={sendingMessage || Boolean(quickReplyDraft?.started)}
                       keyboardChromeTarget
                       formatToolbarPlacement="outside"
                       singleLine
@@ -3211,7 +3365,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                 </button>
               )}
 
-              {compactActions && !messageText.trim() && !forwardingMsg && !editingMsg && (
+              {compactActions && !messageText.trim() && !forwardingMsg && !editingMsg && !quickReplyDraft && (
                 <button
                   type="button"
                   onClick={() => {
@@ -3227,15 +3381,15 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                 </button>
               )}
 
-              {(messageText.trim() || forwardingMsg) && (
+              {(messageText.trim() || forwardingMsg || quickReplyDraft) && (
                   <button
                     type="button"
                     onClick={handleSendMessage}
                     disabled={sendingMessage}
                     className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-white shadow-md transition hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 disabled:opacity-50"
-                    aria-label={sendingMessage ? 'Enviando mensaje' : 'Enviar mensaje'}
+                    aria-label={sendingMessage ? 'Enviando mensaje' : quickReplyDraft ? 'Enviar respuesta rápida preparada' : 'Enviar mensaje'}
                   >
-                      <Send className="w-5 h-5" />
+                      {sendingMessage ? <RefreshCw className="h-5 w-5 animate-spin" /> : <Send className="w-5 h-5" />}
                   </button>
               )}
          </div>
@@ -3271,7 +3425,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
          )}
 
          {infoMessage && (
-           <MessageInfoDialog message={infoMessage} onClose={() => setInfoMessage(null)} />
+           <MessageInfoDialog message={messages.find(message => message.id === infoMessage.id || message.message_id === infoMessage.message_id) || infoMessage} onClose={() => setInfoMessage(null)} />
          )}
 
          {/* Forward Modal */}

@@ -224,6 +224,11 @@ func (p *DevicePool) SetCache(c *cache.Cache) {
 }
 
 func (p *DevicePool) invalidateChatCaches(accountID, chatID uuid.UUID) {
+	if p.hub != nil {
+		if state, err := p.repos.Chat.State(context.Background(), accountID, chatID); err == nil {
+			p.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventChatUpdate, state)
+		}
+	}
 	if p.cache == nil {
 		return
 	}
@@ -1358,6 +1363,9 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 		}
 	}
 
+	if msg.IsFromMe && msg.Sender == nil {
+		msg.Sender = &domain.MessageSender{Origin: "whatsapp_external"}
+	}
 	if err := p.repos.Message.Create(ctx, msg); err != nil {
 		log.Printf("[Message] Failed to save message: %v", err)
 		return
@@ -1437,12 +1445,11 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 
 	// Broadcast to frontend
 	p.hub.BroadcastNewMessage(instance.AccountID, map[string]interface{}{
-		"chat_id":      chat.ID.String(),
-		"message":      msg,
-		"chat_jid":     chatJID,
-		"sender_name":  senderName,
-		"is_from_me":   isFromMe,
-		"unread_count": chat.UnreadCount + 1,
+		"chat_id":     chat.ID.String(),
+		"message":     msg,
+		"chat_jid":    chatJID,
+		"sender_name": senderName,
+		"is_from_me":  isFromMe,
 	})
 
 	log.Printf("[Message] %s -> %s: %s", senderName, chatJID, truncate(body, 50))
@@ -1845,7 +1852,15 @@ func (p *DevicePool) handleReceipt(ctx context.Context, instance *DeviceInstance
 	case types.ReceiptTypeDelivered:
 		status = "delivered"
 	case types.ReceiptTypeReadSelf, types.ReceiptTypePlayedSelf:
-		return // ignore self-read/played receipts
+		identity := p.resolveMessagePeerIdentity(ctx, evt.MessageSource)
+		chat, err := p.repos.Chat.FindByJID(ctx, instance.AccountID, identity.JID.ToNonAD().String())
+		if err == nil && chat != nil {
+			for _, id := range evt.MessageIDs {
+				_, _, _ = p.repos.Chat.MarkAsRead(ctx, instance.AccountID, chat.ID, id)
+			}
+			p.invalidateChatCaches(instance.AccountID, chat.ID)
+		}
+		return
 	case types.ReceiptTypeSender:
 		return // confirmation for our other devices — ignore
 	case types.ReceiptTypeRetry:
@@ -2171,6 +2186,8 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 				IsViewOnce:    content.IsViewOnce,
 			}
 
+			msg.IsRead = true
+			msg.Sender = &domain.MessageSender{Origin: "history"}
 			if err := p.repos.Message.Create(ctx, msg); err != nil {
 				totalDuplicates++
 				// Debug: log details for small batches (ON_DEMAND, etc.)
@@ -2519,12 +2536,11 @@ func (p *DevicePool) handlePollCreation(ctx context.Context, instance *DeviceIns
 	_ = p.repos.Chat.UpdateLastMessage(ctx, instance.AccountID, chat.ID, "📊 "+question, evt.Info.Timestamp, !isFromMe)
 
 	p.hub.BroadcastNewMessage(instance.AccountID, map[string]interface{}{
-		"chat_id":      chat.ID.String(),
-		"message":      msg,
-		"chat_jid":     chatJID,
-		"sender_name":  evt.Info.PushName,
-		"is_from_me":   isFromMe,
-		"unread_count": chat.UnreadCount + 1,
+		"chat_id":     chat.ID.String(),
+		"message":     msg,
+		"chat_jid":    chatJID,
+		"sender_name": evt.Info.PushName,
+		"is_from_me":  isFromMe,
 	})
 
 	log.Printf("[Poll] %s created poll: %s (%d options)", senderJID, question, len(optionNames))

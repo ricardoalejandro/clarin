@@ -54,7 +54,7 @@ func (r *QuickReplyRepository) List(ctx context.Context, accountID uuid.UUID, fi
 		SELECT COUNT(*)
 		FROM quick_replies qr
 		WHERE qr.account_id = $1
-		  AND ($2 = '' OR qr.shortcut ILIKE '%' || $2 || '%' OR qr.title ILIKE '%' || $2 || '%' OR qr.body ILIKE '%' || $2 || '%')
+		  AND ($2 = '' OR qr.shortcut ILIKE '%' || $2 || '%' OR qr.title ILIKE '%' || $2 || '%' OR qr.body ILIKE '%' || $2 || '%' OR EXISTS (SELECT 1 FROM quick_reply_attachments a WHERE a.account_id=qr.account_id AND a.quick_reply_id=qr.id AND a.caption ILIKE '%' || $2 || '%'))
 		  AND (
 			$3 = 'all'
 			OR ($3 = 'text' AND NOT EXISTS (SELECT 1 FROM quick_reply_attachments qra WHERE qra.quick_reply_id = qr.id AND qra.account_id = qr.account_id))
@@ -66,10 +66,10 @@ func (r *QuickReplyRepository) List(ctx context.Context, accountID uuid.UUID, fi
 
 	rows, err := r.db.Query(ctx, `
 		SELECT qr.id, qr.account_id, qr.shortcut, qr.title, qr.body,
-		       qr.media_url, qr.media_type, qr.media_filename, qr.created_at, qr.updated_at
+		       qr.media_url, qr.media_type, qr.media_filename, qr.created_at, qr.updated_at, qr.items
 		FROM quick_replies qr
 		WHERE qr.account_id = $1
-		  AND ($2 = '' OR qr.shortcut ILIKE '%' || $2 || '%' OR qr.title ILIKE '%' || $2 || '%' OR qr.body ILIKE '%' || $2 || '%')
+		  AND ($2 = '' OR qr.shortcut ILIKE '%' || $2 || '%' OR qr.title ILIKE '%' || $2 || '%' OR qr.body ILIKE '%' || $2 || '%' OR EXISTS (SELECT 1 FROM quick_reply_attachments a WHERE a.account_id=qr.account_id AND a.quick_reply_id=qr.id AND a.caption ILIKE '%' || $2 || '%'))
 		  AND (
 			$3 = 'all'
 			OR ($3 = 'text' AND NOT EXISTS (SELECT 1 FROM quick_reply_attachments qra WHERE qra.quick_reply_id = qr.id AND qra.account_id = qr.account_id))
@@ -97,7 +97,7 @@ func (r *QuickReplyRepository) List(ctx context.Context, accountID uuid.UUID, fi
 			&quickReply.MediaType,
 			&quickReply.MediaFilename,
 			&quickReply.CreatedAt,
-			&quickReply.UpdatedAt,
+			&quickReply.UpdatedAt, &quickReply.Items,
 		); err != nil {
 			return nil, fmt.Errorf("scan quick reply: %w", err)
 		}
@@ -126,7 +126,7 @@ func (r *QuickReplyRepository) GetByID(ctx context.Context, accountID, id uuid.U
 	quickReply := &domain.QuickReply{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, account_id, shortcut, title, body,
-		       media_url, media_type, media_filename, created_at, updated_at
+		       media_url, media_type, media_filename, created_at, updated_at, items
 		FROM quick_replies
 		WHERE account_id = $1 AND id = $2
 	`, accountID, id).Scan(
@@ -139,7 +139,7 @@ func (r *QuickReplyRepository) GetByID(ctx context.Context, accountID, id uuid.U
 		&quickReply.MediaType,
 		&quickReply.MediaFilename,
 		&quickReply.CreatedAt,
-		&quickReply.UpdatedAt,
+		&quickReply.UpdatedAt, &quickReply.Items,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrQuickReplyNotFound
@@ -172,10 +172,10 @@ func (r *QuickReplyRepository) Create(ctx context.Context, quickReply *domain.Qu
 
 	quickReply.ID = uuid.New()
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO quick_replies (id, account_id, shortcut, title, body, media_url, media_type, media_filename)
-		VALUES ($1, $2, $3, $4, $5, '', '', '')
+		INSERT INTO quick_replies (id, account_id, shortcut, title, body, media_url, media_type, media_filename, items)
+		VALUES ($1, $2, $3, $4, $5, '', '', '',COALESCE($6::jsonb,'[]'::jsonb))
 		RETURNING created_at, updated_at
-	`, quickReply.ID, quickReply.AccountID, quickReply.Shortcut, quickReply.Title, quickReply.Body).Scan(&quickReply.CreatedAt, &quickReply.UpdatedAt); err != nil {
+	`, quickReply.ID, quickReply.AccountID, quickReply.Shortcut, quickReply.Title, quickReply.Body, quickReply.Items).Scan(&quickReply.CreatedAt, &quickReply.UpdatedAt); err != nil {
 		return nil, mapQuickReplyWriteError("insert quick reply", err)
 	}
 
@@ -203,17 +203,18 @@ func (r *QuickReplyRepository) Update(ctx context.Context, accountID uuid.UUID, 
 	defer tx.Rollback(ctx)
 
 	var currentUpdatedAt time.Time
+	var hasItems bool
 	if err := tx.QueryRow(ctx, `
-		SELECT updated_at
+		SELECT updated_at, jsonb_array_length(items)>0
 		FROM quick_replies
 		WHERE account_id = $1 AND id = $2
 		FOR UPDATE
-	`, accountID, quickReply.ID).Scan(&currentUpdatedAt); errors.Is(err, pgx.ErrNoRows) {
+	`, accountID, quickReply.ID).Scan(&currentUpdatedAt, &hasItems); errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrQuickReplyNotFound
 	} else if err != nil {
 		return nil, fmt.Errorf("lock quick reply: %w", err)
 	}
-	if !sameDatabaseTime(currentUpdatedAt, expectedUpdatedAt) {
+	if (hasItems && quickReply.Items == nil) || !sameDatabaseTime(currentUpdatedAt, expectedUpdatedAt) {
 		return nil, ErrQuickReplyConflict
 	}
 
@@ -223,9 +224,9 @@ func (r *QuickReplyRepository) Update(ctx context.Context, accountID uuid.UUID, 
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE quick_replies
-		SET shortcut = $3, title = $4, body = $5, updated_at = NOW()
+		SET shortcut = $3, title = $4, body = $5, items=COALESCE($6::jsonb,'[]'::jsonb), updated_at = NOW()
 		WHERE account_id = $1 AND id = $2
-	`, accountID, quickReply.ID, quickReply.Shortcut, quickReply.Title, quickReply.Body); err != nil {
+	`, accountID, quickReply.ID, quickReply.Shortcut, quickReply.Title, quickReply.Body, quickReply.Items); err != nil {
 		return nil, mapQuickReplyWriteError("update quick reply", err)
 	}
 

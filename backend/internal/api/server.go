@@ -508,7 +508,7 @@ func (s *Server) setupRoutes() {
 	// Chat operators need a phone-only contact lookup even when their role does
 	// not grant access to the full Contacts module.
 	chats.Get("/contacts/search", s.handleSearchChatContacts)
-	chats.Post("/new", s.handleCreateNewChat)
+	chats.Post("/new", s.messageActorMiddleware, s.handleCreateNewChat)
 	chats.Delete("/batch", s.handleDeleteChatsBatch)
 	chats.Post("/:id/contact", s.handleLinkChatContact)
 	chats.Get("/:id/opportunities/:opportunityId", s.handleGetChatOpportunity)
@@ -517,6 +517,7 @@ func (s *Server) setupRoutes() {
 	chats.Get("/:id/messages/:messageId/context", s.handleGetMessageContext)
 	chats.Get("/:id/messages", s.handleGetMessages)
 	chats.Post("/:id/read", s.handleMarkAsRead)
+	chats.Post("/:id/attention", s.handleAcknowledgeChat)
 	chats.Post("/:id/sync-history", s.handleRequestHistorySync)
 	chats.Delete("/:id", s.handleDeleteChat)
 
@@ -530,15 +531,15 @@ func (s *Server) setupRoutes() {
 	chatAPI.Get("/chats/:id/messages", s.requireChatAPIConversation, s.handleGetMessages)
 	chatAPI.Put("/chats/:id/messages/:messageId/reaction", s.requireChatAPIConversation, s.handleSetWhatsAppCloudReaction)
 	chatAPI.Post("/chats/:id/read", s.requireChatAPIConversation, s.handleMarkChatAPIRead)
-	chatAPI.Post("/messages/send", s.handleSendWhatsAppCloudMessage)
+	chatAPI.Post("/messages/send", s.messageActorMiddleware, s.handleSendWhatsAppCloudMessage)
 
 	// Message routes
 	messages := protected.Group("/messages", s.requirePermission(domain.PermChats))
-	messages.Post("/send", s.handleSendMessage)
-	messages.Post("/send-contact", s.handleSendContact)
-	messages.Post("/forward", s.handleForwardMessage)
+	messages.Post("/send", s.messageActorMiddleware, s.handleSendMessage)
+	messages.Post("/send-contact", s.messageActorMiddleware, s.handleSendContact)
+	messages.Post("/forward", s.messageActorMiddleware, s.handleForwardMessage)
 	messages.Post("/react", s.handleSendReaction)
-	messages.Post("/poll", s.handleSendPoll)
+	messages.Post("/poll", s.messageActorMiddleware, s.handleSendPoll)
 
 	messages.Post("/typing", s.handleSendTyping)
 	messages.Post("/read-receipt", s.handleSendReadReceipt)
@@ -2323,14 +2324,41 @@ func (s *Server) handleGetChatsForProvider(c *fiber.Ctx, provider string) error 
 
 	// Parse filters
 	filter := domain.ChatFilter{
-		Provider:   provider,
-		UnreadOnly: c.QueryBool("unread_only", false),
-		Archived:   c.QueryBool("archived", false),
-		Search:     c.Query("search", ""),
-		Limit:      c.QueryInt("limit", 50),
-		Offset:     c.QueryInt("offset", 0),
+		Provider:    provider,
+		UnreadOnly:  c.QueryBool("unread_only", false),
+		PendingOnly: c.QueryBool("pending_only", false),
+		Archived:    c.QueryBool("archived", false),
+		Search:      c.Query("search", ""),
+		Limit:       c.QueryInt("limit", 50),
+		Offset:      c.QueryInt("offset", 0),
 	}
 
+	if filter.Limit <= 0 {
+		filter.Limit = 50
+	}
+	if filter.Limit > 200 {
+		filter.Limit = 200
+	}
+	if filter.Offset < 0 {
+		filter.Offset = 0
+	}
+	if filter.PendingOnly && c.Query("cursor") != "" {
+		parts := strings.Split(c.Query("cursor"), "|")
+		if len(parts) != 2 {
+			return fiber.ErrBadRequest
+		}
+		at, e := time.Parse(time.RFC3339Nano, parts[0])
+		if e != nil {
+			return fiber.ErrBadRequest
+		}
+		id, e := uuid.Parse(parts[1])
+		if e != nil {
+			return fiber.ErrBadRequest
+		}
+		filter.AfterWaitingAt = &at
+		filter.AfterID = id
+		filter.Offset = 0
+	}
 	// Parse device_ids filter (supports both comma-separated and repeated params)
 	deviceIDsRaw := c.Context().QueryArgs().PeekMulti("device_ids")
 	for _, raw := range deviceIDsRaw {
@@ -2394,7 +2422,7 @@ func (s *Server) handleGetChatsForProvider(c *fiber.Ctx, provider string) error 
 	}
 
 	// Redis cache for default load (no search/filters) — 15s TTL
-	isDefaultLoad := filter.Search == "" && !filter.UnreadOnly && !filter.Archived && len(filter.DeviceIDs) == 0 && len(filter.TagIDs) == 0 && !filter.HasReaction && filter.Offset == 0
+	isDefaultLoad := !filter.PendingOnly && filter.Search == "" && !filter.UnreadOnly && !filter.Archived && len(filter.DeviceIDs) == 0 && len(filter.TagIDs) == 0 && !filter.HasReaction && filter.Offset == 0
 	cacheKey := ""
 	if isDefaultLoad && s.cache != nil {
 		cacheKey = fmt.Sprintf("chats:%s:%s:%d", accountID.String(), provider, filter.Limit)
@@ -2417,6 +2445,12 @@ func (s *Server) handleGetChatsForProvider(c *fiber.Ctx, provider string) error 
 		"offset":  filter.Offset,
 	}
 
+	if filter.PendingOnly && len(chats) == filter.Limit {
+		last := chats[len(chats)-1]
+		if last.WaitingSince != nil {
+			result["next_cursor"] = last.WaitingSince.Format(time.RFC3339Nano) + "|" + last.ID.String()
+		}
+	}
 	// Cache default load result
 	if cacheKey != "" && s.cache != nil {
 		if data, err := json.Marshal(result); err == nil {
@@ -2446,6 +2480,11 @@ func (s *Server) invalidateMessagesCache(accountID uuid.UUID, chatID *uuid.UUID)
 }
 
 func (s *Server) invalidateChatCaches(accountID uuid.UUID, chatID *uuid.UUID) {
+	if chatID != nil && s.hub != nil {
+		if state, err := s.repos.Chat.State(context.Background(), accountID, *chatID); err == nil {
+			s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventChatUpdate, state)
+		}
+	}
 	s.invalidateChatsCache(accountID)
 	s.invalidateMessagesCache(accountID, chatID)
 }
@@ -3421,9 +3460,12 @@ func (s *Server) handleMarkAsRead(c *fiber.Ctx) error {
 
 	s.invalidateChatCaches(accountID, &chatID)
 	if s.hub != nil {
-		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventChatUpdate, fiber.Map{"chat_id": chatID.String(), "unread_count": unreadCount, "read_through": readThrough})
+		if state, e := s.repos.Chat.State(c.Context(), accountID, chatID); e == nil {
+			s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventChatUpdate, state)
+		}
 	}
-	return c.JSON(fiber.Map{"success": true, "chat_id": chatID.String(), "unread_count": unreadCount, "read_through": readThrough})
+	state, _ := s.repos.Chat.State(c.Context(), accountID, chatID)
+	return c.JSON(fiber.Map{"success": true, "chat_id": chatID.String(), "unread_count": unreadCount, "read_through": readThrough, "chat_state": state})
 }
 
 func (s *Server) handleDeleteChat(c *fiber.Ctx) error {
@@ -17662,6 +17704,7 @@ type quickReplyAttachmentRequest struct {
 }
 
 type quickReplyMutationRequest struct {
+	Items             []domain.QuickReplyItem       `json:"items"`
 	Shortcut          string                        `json:"shortcut"`
 	Title             string                        `json:"title"`
 	Body              string                        `json:"body"`
@@ -17671,7 +17714,7 @@ type quickReplyMutationRequest struct {
 
 func (req quickReplyMutationRequest) quickReply(id, accountID uuid.UUID) *domain.QuickReply {
 	quickReply := &domain.QuickReply{
-		ID: id, AccountID: accountID, Shortcut: req.Shortcut, Title: req.Title, Body: req.Body,
+		ID: id, AccountID: accountID, Shortcut: req.Shortcut, Title: req.Title, Body: req.Body, Items: req.Items,
 		Attachments: make([]domain.QuickReplyAttachment, 0, len(req.Attachments)),
 	}
 	for position, attachment := range req.Attachments {
@@ -17700,14 +17743,38 @@ func writeQuickReplyError(c *fiber.Ctx, err error) error {
 
 func (s *Server) handleGetQuickReplies(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
-	replies, err := s.services.QuickReply.GetByAccountID(c.Context(), accountID)
+	filter, err := parseQuickReplyListFilter(c)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"code":    "invalid_quick_reply_filter",
+			"error":   "Los filtros o el cursor de respuestas rápidas no son válidos",
+		})
 	}
+	result, err := s.services.QuickReply.List(c.Context(), accountID, filter)
+	if err != nil {
+		log.Printf("list quick replies account=%s: %v", accountID, err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"code":    "quick_reply_failed",
+			"error":   "No se pudieron cargar las respuestas rápidas",
+		})
+	}
+	replies := result.Replies
 	if replies == nil {
 		replies = make([]*domain.QuickReply, 0)
 	}
-	return c.JSON(fiber.Map{"success": true, "quick_replies": replies})
+	nextCursor := ""
+	if result.HasMore && len(replies) > 0 {
+		nextCursor = encodeQuickReplyCursor(replies[len(replies)-1], filter)
+	}
+	return c.JSON(fiber.Map{
+		"success":       true,
+		"quick_replies": replies,
+		"total":         result.Total,
+		"has_more":      result.HasMore,
+		"next_cursor":   nextCursor,
+	})
 }
 
 func (s *Server) handleCreateQuickReply(c *fiber.Ctx) error {

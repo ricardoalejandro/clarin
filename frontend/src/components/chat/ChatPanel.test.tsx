@@ -173,7 +173,7 @@ describe('ChatPanel canonical device truth', () => {
       const url = String(input)
       if (url === '/api/chats/chat-1') return jsonResponse({ success: true, chat: { ...chat, unread_count: 1 }, device: device('connected') })
       if (url.startsWith('/api/chats/chat-1/messages')) return jsonResponse({ success: true, messages: [incoming] })
-      if (url === '/api/chats/chat-1/read') return jsonResponse({ success: true, chat_id: 'chat-1', unread_count: 0, read_through: incoming.message_id })
+      if (url === '/api/chats/chat-1/read') return jsonResponse({ success: true, chat_id: 'chat-1', unread_count: 0, chat_state: { chat_id: 'chat-1', unread_count: 0, needs_reply: true, waiting_since: incoming.timestamp, state_version: 2 }, read_through: incoming.message_id })
       if (url === '/api/stickers/saved') return jsonResponse({ success: true, stickers: [] })
       if (url === '/api/quick-replies') return jsonResponse({ success: true, quick_replies: [] })
       return jsonResponse({ success: true })
@@ -186,7 +186,7 @@ describe('ChatPanel canonical device truth', () => {
       method: 'POST',
       body: JSON.stringify({ through_message_id: 'row-incoming-1' }),
     })))
-    await waitFor(() => expect(onRead).toHaveBeenCalledWith('chat-1', 0))
+    await waitFor(() => expect(onRead).toHaveBeenCalledWith('chat-1', 0, expect.objectContaining({ state_version: 2, needs_reply: true })))
   })
 
   it('lets the conversation header menu own Escape inside a CRM workspace', async () => {

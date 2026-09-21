@@ -504,6 +504,9 @@ type ContactFilter struct {
 
 // Chat represents a conversation
 type Chat struct {
+	WaitingSince                   *time.Time `json:"waiting_since"`
+	NeedsReply                     bool       `json:"needs_reply"`
+	StateVersion                   int64      `json:"state_version"`
 	ID                             uuid.UUID  `json:"id"`
 	AccountID                      uuid.UUID  `json:"account_id"`
 	DeviceID                       *uuid.UUID `json:"device_id,omitempty"`
@@ -548,14 +551,17 @@ type Chat struct {
 
 // ChatFilter defines filter options for listing chats
 type ChatFilter struct {
-	DeviceIDs  []uuid.UUID
-	Provider   string
-	TagIDs     []uuid.UUID
-	UnreadOnly bool
-	Archived   bool
-	Search     string
-	Limit      int
-	Offset     int
+	PendingOnly    bool
+	AfterWaitingAt *time.Time
+	AfterID        uuid.UUID
+	DeviceIDs      []uuid.UUID
+	Provider       string
+	TagIDs         []uuid.UUID
+	UnreadOnly     bool
+	Archived       bool
+	Search         string
+	Limit          int
+	Offset         int
 
 	// Reaction-based filtering
 	HasReaction    bool       // when true, only chats with at least one reaction matching the criteria below
@@ -593,33 +599,38 @@ type OpportunitySummary struct {
 
 // Message represents a WhatsApp message
 type Message struct {
-	ID            uuid.UUID  `json:"id"`
-	AccountID     uuid.UUID  `json:"account_id"`
-	DeviceID      *uuid.UUID `json:"device_id,omitempty"`
-	ChatID        uuid.UUID  `json:"chat_id"`
-	MessageID     string     `json:"message_id"`
-	FromJID       *string    `json:"from_jid,omitempty"`
-	FromName      *string    `json:"from_name,omitempty"`
-	Body          *string    `json:"body,omitempty"`
-	MessageType   *string    `json:"message_type,omitempty"` // text, image, video, gif, audio, document, sticker, location, contact
-	MediaURL      *string    `json:"media_url,omitempty"`
-	MediaMimetype *string    `json:"media_mimetype,omitempty"`
-	MediaFilename *string    `json:"media_filename,omitempty"`
-	MediaSize     *int64     `json:"media_size,omitempty"`
-	MediaAssetID  *uuid.UUID `json:"media_asset_id,omitempty"`
-	MediaDeleted  bool       `json:"media_deleted"`
-	IsFromMe      bool       `json:"is_from_me"`
-	IsRead        bool       `json:"is_read"`
-	IsRevoked     bool       `json:"is_revoked"`
-	IsEdited      bool       `json:"is_edited"`
-	IsViewOnce    bool       `json:"is_view_once"`
-	Status        *string    `json:"status,omitempty"` // sent, delivered, read, failed
-	DeliveredAt   *time.Time `json:"delivered_at,omitempty"`
-	ReadAt        *time.Time `json:"read_at,omitempty"`
-	Provider      *string    `json:"provider,omitempty"`
-	TemplateName  *string    `json:"template_name,omitempty"`
-	Timestamp     time.Time  `json:"timestamp"`
-	CreatedAt     time.Time  `json:"created_at"`
+	Sender             *MessageSender `json:"sender,omitempty"`
+	AttentionThroughAt *time.Time     `json:"-"`
+	AttentionThroughID *uuid.UUID     `json:"-"`
+	DeferAttention     bool           `json:"-"`
+	SendOperationID    *uuid.UUID     `json:"-"`
+	ID                 uuid.UUID      `json:"id"`
+	AccountID          uuid.UUID      `json:"account_id"`
+	DeviceID           *uuid.UUID     `json:"device_id,omitempty"`
+	ChatID             uuid.UUID      `json:"chat_id"`
+	MessageID          string         `json:"message_id"`
+	FromJID            *string        `json:"from_jid,omitempty"`
+	FromName           *string        `json:"from_name,omitempty"`
+	Body               *string        `json:"body,omitempty"`
+	MessageType        *string        `json:"message_type,omitempty"` // text, image, video, gif, audio, document, sticker, location, contact
+	MediaURL           *string        `json:"media_url,omitempty"`
+	MediaMimetype      *string        `json:"media_mimetype,omitempty"`
+	MediaFilename      *string        `json:"media_filename,omitempty"`
+	MediaSize          *int64         `json:"media_size,omitempty"`
+	MediaAssetID       *uuid.UUID     `json:"media_asset_id,omitempty"`
+	MediaDeleted       bool           `json:"media_deleted"`
+	IsFromMe           bool           `json:"is_from_me"`
+	IsRead             bool           `json:"is_read"`
+	IsRevoked          bool           `json:"is_revoked"`
+	IsEdited           bool           `json:"is_edited"`
+	IsViewOnce         bool           `json:"is_view_once"`
+	Status             *string        `json:"status,omitempty"` // sent, delivered, read, failed
+	DeliveredAt        *time.Time     `json:"delivered_at,omitempty"`
+	ReadAt             *time.Time     `json:"read_at,omitempty"`
+	Provider           *string        `json:"provider,omitempty"`
+	TemplateName       *string        `json:"template_name,omitempty"`
+	Timestamp          time.Time      `json:"timestamp"`
+	CreatedAt          time.Time      `json:"created_at"`
 
 	// Quoted/reply fields
 	QuotedMessageID *string `json:"quoted_message_id,omitempty"`
@@ -2069,6 +2080,7 @@ type InteractionFilter struct {
 
 // QuickReply represents a canned/predefined response
 type QuickReply struct {
+	Items         []QuickReplyItem       `json:"items"`
 	ID            uuid.UUID              `json:"id"`
 	AccountID     uuid.UUID              `json:"account_id"`
 	Shortcut      string                 `json:"shortcut"`
@@ -2084,15 +2096,15 @@ type QuickReply struct {
 
 // QuickReplyAttachment represents a media attachment for a quick reply (up to 5)
 type QuickReplyAttachment struct {
-	ID            uuid.UUID `json:"id"`
-	QuickReplyID  uuid.UUID `json:"quick_reply_id"`
-	AccountID     uuid.UUID `json:"account_id"`
+	ID            uuid.UUID  `json:"id"`
+	QuickReplyID  uuid.UUID  `json:"quick_reply_id"`
+	AccountID     uuid.UUID  `json:"account_id"`
 	MediaAssetID  *uuid.UUID `json:"media_asset_id,omitempty"`
-	MediaURL      string    `json:"media_url"`
-	MediaType     string    `json:"media_type"`
-	MediaFilename string    `json:"media_filename"`
-	Caption       string    `json:"caption"`
-	Position      int       `json:"position"`
+	MediaURL      string     `json:"media_url"`
+	MediaType     string     `json:"media_type"`
+	MediaFilename string     `json:"media_filename"`
+	Caption       string     `json:"caption"`
+	Position      int        `json:"position"`
 }
 
 // Default campaign settings (anti-ban)

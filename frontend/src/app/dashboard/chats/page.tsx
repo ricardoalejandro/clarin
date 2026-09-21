@@ -13,7 +13,8 @@ import ChatPanel from '@/components/chat/ChatPanel'
 import ContactPanel from '@/components/chat/ContactPanel'
 import OwnStatusesCenter from '@/components/chat/OwnStatusesCenter'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
-import { Chat, Device, Message } from '@/types/chat'
+import { Chat, ChatState, Device, Message } from '@/types/chat'
+import { applyChatState, matchesInbox, nextPendingChat, orderInbox, reconcileInboxPage, type InboxView } from '@/utils/chatInbox'
 import { getChatDisplayName, formatPhone, isPendingChatIdentity, reconcileChatIdentity, type ChatIdentityReconciliation } from '@/utils/chat'
 import { announceChatConversationActive, useChatMobileChrome } from '@/components/chat/ChatMobileChromeContext'
 
@@ -94,7 +95,31 @@ export default function ChatsPage() {
 
   // Filters & UI State
   const [filterDevices, setFilterDevices] = useState<string[]>([])
-  const [filterUnread, setFilterUnread] = useState(false)
+  const [inboxView, setInboxViewState] = useState<InboxView>('all')
+  const viewStorageRef = useRef('')
+  const viewTouchedRef = useRef(false)
+  const setInboxView = (view: InboxView) => { viewTouchedRef.current = true; setInboxViewState(view); if (viewStorageRef.current) localStorage.setItem(viewStorageRef.current, view) }
+  useEffect(() => {
+    const controller = new AbortController()
+    void fetch('/api/me', { signal: controller.signal, headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } }).then(response => response.json()).then(data => {
+      if (controller.signal.aborted || !data.user?.account_id || !data.user?.id) return
+      const key = `clarin:inbox:${data.user.account_id}:${data.user.id}`
+      viewStorageRef.current = key
+      const stored = localStorage.getItem(key)
+      if (!viewTouchedRef.current && (stored === 'all' || stored === 'unread' || stored === 'pending')) setInboxViewState(stored)
+    }).catch(() => {})
+    return () => controller.abort()
+  }, [])
+  const filterUnread = inboxView === 'unread'
+  const filterPending = inboxView === 'pending'
+  const setFilterUnread = (value: boolean | ((previous: boolean) => boolean)) => setInboxView((typeof value === 'function' ? value(filterUnread) : value) ? 'unread' : 'all')
+  const canonicalStatesRef = useRef(new Map<string, ChatState>())
+  const inboxRevisionRef = useRef(0)
+  const queueAnchorRef = useRef<{ id: string; waiting_since: string } | undefined>(undefined)
+  const cursorRef = useRef('')
+  const chatsRef = useRef(chats)
+  chatsRef.current = chats
+  useEffect(() => { if (selectedChat?.waiting_since) queueAnchorRef.current = { id: selectedChat.id, waiting_since: selectedChat.waiting_since } }, [selectedChat?.id, selectedChat?.waiting_since])
   const [searchTerm, setSearchTerm] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [loading, setLoading] = useState(true)
@@ -126,7 +151,7 @@ export default function ChatsPage() {
   const [reactionCustomFrom, setReactionCustomFrom] = useState('')
   const [reactionCustomTo, setReactionCustomTo] = useState('')
   const [showReactionAdvanced, setShowReactionAdvanced] = useState(false)
-  const chatQueryKey = JSON.stringify([filterDevices, filterUnread, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
+  const chatQueryKey = JSON.stringify([filterDevices, filterUnread, filterPending, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
   const activeChatQueryKeyRef = useRef(chatQueryKey)
   activeChatQueryKeyRef.current = chatQueryKey
 
@@ -416,7 +441,7 @@ export default function ChatsPage() {
 
   // Foreground requests may show loading UI. WebSocket reconciliation is silent
   // and uses its own sequence so it can never cancel a user-triggered query.
-  const fetchChats = useCallback(async (reset: boolean = true, options: { silent?: boolean } = {}) => {
+  const fetchChats = useCallback(async (reset: boolean = true, options: { silent?: boolean; after?: { id: string; waiting_since: string } } = {}) => {
     const silent = Boolean(options.silent && reset)
     const sequenceRef = silent ? chatsReconcileSequenceRef : chatsRequestSequenceRef
     const abortRef = silent ? chatsReconcileAbortRef : chatsRequestAbortRef
@@ -426,7 +451,8 @@ export default function ChatsPage() {
     const requestSequence = ++sequenceRef.current
     const requestQueryKey = chatQueryKey
     const token = localStorage.getItem('token')
-    const offset = reset ? 0 : offsetRef.current
+    const requestRevision = inboxRevisionRef.current
+    const offset = reset || filterPending ? 0 : offsetRef.current
     if (reset && !silent) {
       setLoading(true)
       setLoadingMore(false)
@@ -438,6 +464,7 @@ export default function ChatsPage() {
       const params = new URLSearchParams()
       filterDevices.forEach(id => params.append('device_ids', id))
       if (filterUnread) params.append('unread_only', 'true')
+      if (filterPending) { params.set('pending_only', 'true'); if (options.after) params.set('cursor', options.after.waiting_since + '|' + options.after.id); else if (!reset && cursorRef.current) params.set('cursor', cursorRef.current) }
       if (debouncedSearch) params.append('search', debouncedSearch)
       if (filterHasReaction) {
         params.append('has_reaction', 'true')
@@ -456,7 +483,7 @@ export default function ChatsPage() {
         if (since) params.append('reaction_since', since.toISOString())
         if (until) params.append('reaction_until', until.toISOString())
       }
-      const requestLimit = silent ? Math.max(CHATS_PAGE_SIZE, offsetRef.current) : CHATS_PAGE_SIZE
+      const requestLimit = CHATS_PAGE_SIZE
       params.append('limit', String(requestLimit))
       params.append('offset', String(offset))
 
@@ -471,26 +498,28 @@ export default function ChatsPage() {
         setChatListError('')
         const newChats: Chat[] = data.chats || []
         const total: number = data.total ?? 0
-        setTotalChats(total)
+        if (requestRevision === inboxRevisionRef.current) setTotalChats(total)
 
         if (reset) {
-          setChats(current => silent ? reconcileChatSnapshots(current, newChats) : newChats)
+          setChats(current => reconcileInboxPage(current, newChats, canonicalStatesRef.current, inboxView, silent))
           const visibleIds = new Set(newChats.map(chat => chat.id))
-          setSelectedChats(current => {
+          if (!silent) setSelectedChats(current => {
             const next = new Set(Array.from(current).filter(id => visibleIds.has(id)))
             return next.size === current.size ? current : next
           })
-          offsetRef.current = newChats.length
+          if (!silent) offsetRef.current = newChats.length
         } else {
           // Append with deduplication
           setChats(prev => {
             const existingIds = new Set(prev.map(c => c.id))
             const unique = newChats.filter(c => !existingIds.has(c.id))
-            return [...prev, ...unique]
+            return reconcileInboxPage(prev, unique, canonicalStatesRef.current, inboxView, true)
           })
           offsetRef.current = offset + newChats.length
         }
-        setHasMore((offset + newChats.length) < total)
+        if (!options.after && (!silent || !cursorRef.current)) cursorRef.current = data.next_cursor || ''
+        if (!silent) setHasMore(filterPending ? Boolean(data.next_cursor) : (offset + newChats.length) < total)
+        return reconcileInboxPage([], newChats, canonicalStatesRef.current, inboxView, false)
       }
     } catch (err) {
       if (!controller.signal.aborted && requestSequence === sequenceRef.current && requestQueryKey === activeChatQueryKeyRef.current) {
@@ -507,7 +536,7 @@ export default function ChatsPage() {
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterDevices, filterUnread, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
+  }, [filterDevices, filterUnread, filterPending, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
 
   const loadMoreChats = useCallback(() => {
     if (loadingMore || !hasMore) return
@@ -614,13 +643,31 @@ export default function ChatsPage() {
     }
   }, [chats, fetchChats])
 
-  const reconcileChatUnread = useCallback((chatId: string, unreadCount: number) => {
-    setChats(current => {
-      const patched = current.map(chat => chat.id === chatId ? { ...chat, unread_count: unreadCount } : chat)
-      return filterUnread && unreadCount === 0 ? patched.filter(chat => chat.id !== chatId) : patched
-    })
-    setSelectedChat(current => current?.id === chatId ? { ...current, unread_count: unreadCount } : current)
-  }, [filterUnread])
+  const reconcileChatUnread = useCallback((chatId: string, unreadCount: number, state?: ChatState) => {
+    if (!state) return
+    const previous = canonicalStatesRef.current.get(chatId)
+    if (previous && previous.state_version >= state.state_version) return
+    canonicalStatesRef.current.set(chatId, state)
+    inboxRevisionRef.current++
+    const current = chatsRef.current.find(chat => chat.id === chatId)
+    if (current && !matchesInbox(applyChatState(current, state), inboxView)) {
+      setTotalChats(total => Math.max(0, total - 1))
+      offsetRef.current = Math.max(0, offsetRef.current - 1)
+    }
+    setChats(rows => orderInbox(rows.map(chat => applyChatState(chat, state)).filter(chat => matchesInbox(chat, inboxView)), inboxView))
+    setSelectedChat(chat => chat ? applyChatState(chat, state) : chat)
+  }, [inboxView])
+
+  const openNextPending = async () => {
+    // Reconcile the head before choosing: another advisor may have handled it.
+    let fresh = await fetchChats(true, { silent: true, after: queueAnchorRef.current })
+    if (!fresh) return 'No se pudo comprobar la cola. Reintenta.'
+    if (fresh.length === 0 && queueAnchorRef.current) fresh = await fetchChats(true, { silent: true })
+    if (!fresh) return 'No se pudo comprobar la cola. Reintenta.'
+    const candidate = nextPendingChat(fresh, selectedChatIdRef.current, queueAnchorRef.current)
+    if (candidate) { setSelectedChat(candidate); setCompactSurface('conversation') }
+    else return 'No hay más conversaciones pendientes en estos filtros.'
+  }
 
   const applyMessageToChatList = useCallback((rawPayload: unknown) => {
     const payload = (rawPayload || {}) as {
@@ -651,23 +698,18 @@ export default function ChatsPage() {
       if (index < 0) return current
       const existing = current[index]
       const timestamp = message.timestamp || existing.last_message_at
-      const unreadCount = typeof payload.unread_count === 'number'
-        ? payload.unread_count
-        : message.is_from_me || selectedChatIdRef.current === chatId
-          ? existing.unread_count
-          : existing.unread_count + 1
+      if (messageTimestampValue(timestamp) < messageTimestampValue(existing.last_message_at)) return current
       const updated: Chat = {
         ...existing,
         last_message: chatPreviewFromMessage(message),
         last_message_at: timestamp,
-        unread_count: unreadCount,
+        unread_count: existing.unread_count,
       }
       const next = current.slice()
       next[index] = updated
-      next.sort((a, b) => messageTimestampValue(b.last_message_at) - messageTimestampValue(a.last_message_at))
-      return next
+      return orderInbox(next, inboxView)
     })
-  }, [])
+  }, [inboxView])
 
   const scheduleChatReconciliation = useCallback(() => {
     if (reconcileTimerRef.current) clearTimeout(reconcileTimerRef.current)
@@ -688,7 +730,6 @@ export default function ChatsPage() {
       const eventType = msg.event || msg.type
       if (eventType === 'new_message' || eventType === 'message_sent') {
         applyMessageToChatList(msg.data || msg.message)
-        scheduleChatReconciliation()
       } else if (eventType === 'chat_identity_reconciled') {
         const reconciliation = msg.data as ChatIdentityReconciliation
         if (reconciliation?.source_chat_id && reconciliation?.canonical_chat?.id) {
@@ -710,9 +751,12 @@ export default function ChatsPage() {
           scheduleChatReconciliation()
         }
       } else if (eventType === 'chat_update') {
-        const payload = (msg.data || {}) as { chat_id?: string; unread_count?: number }
-        if (payload.chat_id && typeof payload.unread_count === 'number') reconcileChatUnread(payload.chat_id, payload.unread_count)
-        scheduleChatReconciliation()
+        const payload = (msg.data || {}) as ChatState
+        if (payload.chat_id && typeof payload.state_version === 'number') {
+          const known = chatsRef.current.some(chat => chat.id === payload.chat_id)
+          reconcileChatUnread(payload.chat_id, payload.unread_count, payload)
+          if (!known && (inboxView === 'all' || inboxView === 'unread' && payload.unread_count > 0 || inboxView === 'pending' && payload.needs_reply)) scheduleChatReconciliation()
+        } else scheduleChatReconciliation()
       } else if (eventType === 'contact_update') {
         scheduleChatReconciliation()
       } else if (eventType === 'device_status') {
@@ -720,7 +764,7 @@ export default function ChatsPage() {
       }
     })
     return () => unsubscribe()
-  }, [applyMessageToChatList, fetchDevices, reconcileChatUnread, scheduleChatReconciliation])
+  }, [applyMessageToChatList, fetchDevices, reconcileChatUnread, scheduleChatReconciliation, inboxView])
 
   const panelBounds = useCallback((panel: ResizePanel) => {
     const width = pageRef.current?.getBoundingClientRect().width || containerWidth
@@ -1031,19 +1075,13 @@ export default function ChatsPage() {
                 )}
             </div>
 
+              <div className="flex rounded-xl bg-slate-100 p-1" role="group" aria-label="Vista de la bandeja">
+                {([['all', 'Todos'], ['unread', 'No leídos'], ['pending', 'Pendientes']] as const).map(([view, label]) => <button key={view} type="button" onClick={() => setInboxView(view)} aria-pressed={inboxView === view} className={`min-h-10 flex-1 rounded-lg px-2 text-xs font-semibold transition ${inboxView === view ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}
+              </div>
+              {filterPending && <p className="text-[11px] leading-4 text-slate-500">Primero quienes esperan más tiempo. Leer no marca la conversación como atendida.</p>}
               {/* Quick filters */}
               {layoutMode !== 'compact' && <div className="flex flex-wrap items-center gap-2">
-                <button
-                    onClick={() => setFilterUnread(!filterUnread)}
-                  className={`flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg border px-3 text-xs font-medium transition-all duration-200 active:scale-[0.98] ${
-                        filterUnread
-                            ? 'bg-emerald-50 text-emerald-700 border-emerald-300 shadow-sm'
-                            : 'bg-white text-slate-500 border-slate-200 hover:border-slate-300 hover:text-slate-700'
-                    }`}
-                >
-                    <MessageCircle className="w-3.5 h-3.5" />
-                    No leídos
-                </button>
+
                 <button
                     data-testid="filter-reaction-toggle"
                     onClick={() => setFilterHasReaction(!filterHasReaction)}
@@ -1392,6 +1430,8 @@ export default function ChatsPage() {
 	                onRequestDelete={() => requestSingleChatDeletion(selectedChat)}
 	                isActive={layoutMode !== 'compact' || compactSurface === 'conversation'}
 	                onRead={reconcileChatUnread}
+                  attentionMode={filterPending}
+                  onNext={openNextPending}
 	            />
         ) : (
             <div className="flex flex-1 flex-col items-center justify-center bg-[radial-gradient(circle_at_center,rgba(16,185,129,0.08)_1px,transparent_1px)] bg-[length:22px_22px] p-8 text-center text-slate-400">

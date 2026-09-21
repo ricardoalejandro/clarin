@@ -31,16 +31,11 @@ func TestMarkAsReadUsesAccountScopedDisplayedWatermark(t *testing.T) {
 	}
 }
 
-func TestLastMessageMaintainsInboundAndOutboundActivity(t *testing.T) {
-	t.Parallel()
+func TestLegacyLastMessageDoesNotIncrementUnread(t *testing.T) {
 	source := readRepositorySource(t, "repository.go")
-	for _, invariant := range []string{
-		"WHERE account_id = $3 AND id = $4",
-		"last_inbound_at = GREATEST",
-		"last_outbound_at = GREATEST",
-	} {
-		if !strings.Contains(source, invariant) {
-			t.Fatalf("chat activity timestamp lost invariant %q", invariant)
-		}
+	start := strings.Index(source, "func (r *ChatRepository) UpdateLastMessage")
+	end := strings.Index(source[start:], "func (r *ChatRepository) MarkAsRead")
+	if strings.Contains(source[start:start+end], "SET unread_count") {
+		t.Fatal("projection must be updated exactly once by insertion")
 	}
 }

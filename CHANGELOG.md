@@ -1,5 +1,15 @@
 # Changelog — Clarin CRM
 
+## 2026-09-21
+
+### Respuestas rápidas y atención de conversaciones
+
+- Editor de respuestas rápidas por mensajes ordenables, con formato de WhatsApp, vista previa y pies de imagen que se envían junto a su archivo.
+- Preparación editable desde el chat, conservación de borradores y reintentos que no repiten bloques ya confirmados.
+- Bandejas Todos, No leídos y Pendientes. Pendientes prioriza a quienes esperan más tiempo y permite pasar al siguiente sin perder la conversación abierta.
+- Lectura compartida entre asesores, contadores reconciliados y atención limitada a los mensajes recibidos antes de responder; los mensajes nuevos siguen pendientes.
+- Información del mensaje muestra el usuario que envió la respuesta y su origen. Los mensajes históricos sin autor registrado conservan esa condición explícita.
+
 ## 2026-09-15
 
 ### Offline web v5 — mismas pantallas, edición local segura
