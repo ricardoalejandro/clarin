@@ -31,3 +31,5 @@ Una reversión al backend anterior exige retirar el trigger nuevo antes de volve
 ## Regresión detectada en la interfaz publicada
 
 La primera pasada sobre el frontend de producción detectó que un borrado imperativo del editor podía ejecutarse después de restaurar un borrador. Se retiró esa segunda fuente de estado y se añadió una prueba de cambios rápidos entre tres chats, incluidos borradores con texto idéntico. Pasaron los 21 casos focalizados de ChatPanel, cola y preparación de envíos.
+
+La revisión completa conserva los borradores en la fase de layout, mantiene el editor montado ante cambios de contadores y reserva la revalidación para cambios reales de chat/canal. El test usa el encabezado de la conversación para no confundirlo con la fila de la lista. Cinco recorridos consecutivos sobre la compilación local de producción aprobaron el flujo completo sin pausas de diagnóstico.

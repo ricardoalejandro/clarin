@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Send, Paperclip, MoreVertical, Search, Phone, Video,
@@ -363,8 +363,20 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const [quickReplyError, setQuickReplyError] = useState('')
   const [quickReplyDraft, setQuickReplyDraft] = useState<QuickReplyComposerDraft | null>(null)
   const draftCacheRef = useRef(new Map<string, { text: string; quick: QuickReplyComposerDraft | null; quote: Message | null; attachment: AttachmentDraft | null }>())
-  useEffect(() => () => {
-    if (chatId) draftCacheRef.current.set(chatId, { text: messageText, quick: quickReplyDraft, quote: replyingTo, attachment: attachmentDraft })
+  const draftOwnerRef = useRef(chatId)
+  useLayoutEffect(() => {
+    const snapshot = { text: messageText, quick: quickReplyDraft, quote: replyingTo, attachment: attachmentDraft }
+    if (draftOwnerRef.current !== chatId) {
+      if (draftOwnerRef.current) draftCacheRef.current.set(draftOwnerRef.current, snapshot)
+      const restored = chatId ? draftCacheRef.current.get(chatId) : undefined
+      draftOwnerRef.current = chatId
+      setMessageText(restored?.text || '')
+      setQuickReplyDraft(restored?.quick || null)
+      setReplyingTo(restored?.quote || null)
+      setAttachmentDraft(restored?.attachment || null)
+      return
+    }
+    if (chatId) draftCacheRef.current.set(chatId, snapshot)
   }, [chatId, messageText, quickReplyDraft, replyingTo, attachmentDraft])
   useOperationalOverlayRegistration(showQuickReply, 'chat-quick-replies')
 
@@ -414,6 +426,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const optimisticIdRef = useRef(0)
   const previousChatIdRef = useRef<string | null>(chatId)
   const activeChatIdRef = useRef<string | null>(chatId)
+  useLayoutEffect(() => { activeChatIdRef.current = chatId }, [chatId])
   const attachmentDraftRef = useRef<AttachmentDraft | null>(attachmentDraft)
   const attachmentSendingRef = useRef(false)
   const mediaRetryRef = useRef<Map<string, RetryableMedia>>(new Map())
@@ -1147,14 +1160,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     setActivePopup(null)
     setShowAttachments(false)
     setShowContactPicker(false)
-    setReplyingTo(null)
     setEditingMsg(null)
-    setQuickReplyDraft(null)
-    if (!attachmentSendingRef.current && attachmentDraftRef.current) {
-      if (attachmentDraftRef.current.previewUrl) URL.revokeObjectURL(attachmentDraftRef.current.previewUrl)
-      attachmentDraftRef.current = null
-      setAttachmentDraft(null)
-    }
+    // A temporary channel validation disables sending; it must not discard drafts.
   }, [effectiveReadOnly])
 
   useEffect(() => {
@@ -1169,9 +1176,9 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
   useEffect(() => () => {
     savedStickersRequestRef.current?.abort()
-    if (attachmentDraftRef.current?.previewUrl) {
-      URL.revokeObjectURL(attachmentDraftRef.current.previewUrl)
-    }
+    const draftURLs = new Set(Array.from(draftCacheRef.current.values()).map(draft => draft.attachment?.previewUrl).filter(Boolean))
+    if (attachmentDraftRef.current?.previewUrl) draftURLs.add(attachmentDraftRef.current.previewUrl)
+    draftURLs.forEach(url => URL.revokeObjectURL(url!))
     mediaRetryRef.current.forEach(media => {
       if (media.previewUrl) URL.revokeObjectURL(media.previewUrl)
     })
@@ -1192,21 +1199,16 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   useEffect(() => {
     if (previousChatIdRef.current === chatId) return
     previousChatIdRef.current = chatId
-    const restored = chatId ? draftCacheRef.current.get(chatId) : undefined
 
     if (typingPauseTimeoutRef.current) clearTimeout(typingPauseTimeoutRef.current)
 
     sendPresence(false)
     lastTypingSentRef.current = 0
-    setMessageText(restored?.text || '')
-    setReplyingTo(restored?.quote || null)
     setEditingMsg(null)
     setShowQuickReply(false)
     setQuickReplyFilter('')
-    setQuickReplyDraft(restored?.quick || null)
     setActivePopup(null)
     setShowAttachments(false)
-    setAttachmentDraft(restored?.attachment || null)
     setSendingAttachment(false)
     setSendingMessage(false)
     setComposerFeedback(null)
@@ -1367,7 +1369,9 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         setHasMoreMessages(true)
     }
 	return () => chatDetailsRequestRef.current?.abort()
-  }, [chatId, initialChat])
+    // Read counters and previews change initialChat often. Only a new chat or
+    // channel may restart validation and replace the active composer.
+  }, [chatId, initialDeviceId])
 
   async function refreshCanonicalDevice(targetChatId: string) {
     deviceRefreshRequestRef.current?.abort()

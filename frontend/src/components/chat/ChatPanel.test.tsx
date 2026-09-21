@@ -113,6 +113,11 @@ describe('ChatPanel canonical device truth', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'Draft test editor' }), { target: { value: 'Borrador conservado' } })
     view.rerender(panel('chat-1'))
     await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue('Borrador conservado'))
+    // Read-count reconciliation must preserve the mounted editor and its focus.
+    const editorBeforeReconciliation = screen.getByRole('textbox', { name: 'Draft test editor' })
+    view.rerender(<ChatPanel chatId="chat-1" deviceId="device-1" device={device('connected')} initialChat={{ ...chat, unread_count: 0, state_version: 2 }} />)
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue('Borrador conservado'))
+    expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toBe(editorBeforeReconciliation)
     view.rerender(panel('chat-3'))
     view.rerender(panel('chat-2'))
     await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue('Borrador conservado'))
