@@ -12,10 +12,13 @@ vi.mock('@/lib/api', () => ({
 }))
 
 vi.mock('../WhatsAppTextInput', async () => {
-  const { forwardRef } = await import('react')
+  const { forwardRef, useEffect, useImperativeHandle, useRef } = await import('react')
   return {
-    default: forwardRef<HTMLDivElement, { placeholder?: string }>(function MockWhatsAppTextInput({ placeholder }, ref) {
-      return <div ref={ref} data-testid="chat-composer">{placeholder}</div>
+    default: forwardRef<unknown, { placeholder?: string; value?: string; onChange?: (value: string) => void }>(function MockWhatsAppTextInput({ placeholder, value = '', onChange }, ref) {
+      const input = useRef<HTMLTextAreaElement>(null)
+      useImperativeHandle(ref, () => ({ focus: () => input.current?.focus(), clear: () => { if (input.current) input.current.value = '' } }), [])
+      useEffect(() => { if (input.current) input.current.value = value }, [value])
+      return <div data-testid="chat-composer">{placeholder}<textarea ref={input} aria-label="Draft test editor" onChange={event => onChange?.(event.target.value)} /></div>
     }),
   }
 })
@@ -92,6 +95,27 @@ describe('ChatPanel canonical device truth', () => {
   afterEach(() => {
     cleanup()
     vi.unstubAllGlobals()
+  })
+
+  it('restores drafts across rapid chat switches, including identical values', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const match = url.match(/^\/api\/chats\/(chat-\d)$/)
+      if (match) return Promise.resolve(jsonResponse({ success: true, chat: { ...chat, id: match[1] }, device: device('connected') }))
+      if (url.includes('/messages')) return Promise.resolve(jsonResponse({ success: true, messages: [] }))
+      return Promise.resolve(jsonResponse({ success: true, stickers: [], quick_replies: [] }))
+    }))
+    const panel = (id: string) => <ChatPanel chatId={id} deviceId="device-1" device={device('connected')} initialChat={{ ...chat, id }} />
+    const view = render(panel('chat-1'))
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Draft test editor' }), { target: { value: 'Borrador conservado' } })
+    view.rerender(panel('chat-2'))
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue(''))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Draft test editor' }), { target: { value: 'Borrador conservado' } })
+    view.rerender(panel('chat-1'))
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue('Borrador conservado'))
+    view.rerender(panel('chat-3'))
+    view.rerender(panel('chat-2'))
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue('Borrador conservado'))
   })
 
   it('fails closed while validating, then trusts GET details and reconciles device_status', async () => {

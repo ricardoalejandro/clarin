@@ -1213,8 +1213,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     attachmentSendingRef.current = false
     messageSendSequenceRef.current += 1
     activeMessageSendRef.current = null
-    inputRef.current?.clear()
-    captionInputRef.current?.clear()
+    // The restored values own the editors. Imperative clearing can run after
+    // the child's value effect and erase an otherwise preserved draft.
   }, [chatId, sendPresence])
 
   // Request history sync for current chat

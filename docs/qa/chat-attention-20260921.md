@@ -27,3 +27,7 @@ El despliegue utiliza `make deploy` desde `/root/proyect/clarin`. Antes del camb
 La verificación posterior debe comprobar contenedores, `/health`, `/api/version`, logs de backend y frontend, columnas e índices, el trigger `chat_message_insert` y la coincidencia entre contadores y mensajes no leídos.
 
 Una reversión al backend anterior exige retirar el trigger nuevo antes de volver a aceptar escrituras con ese backend: la versión anterior incrementaba el contador en otra ruta. Las columnas añadidas son compatibles y se conservan. No se restaura automáticamente un respaldo sobre mensajes que hayan llegado después del despliegue.
+
+## Regresión detectada en la interfaz publicada
+
+La primera pasada sobre el frontend de producción detectó que un borrado imperativo del editor podía ejecutarse después de restaurar un borrador. Se retiró esa segunda fuente de estado y se añadió una prueba de cambios rápidos entre tres chats, incluidos borradores con texto idéntico. Pasaron los 21 casos focalizados de ChatPanel, cola y preparación de envíos.
