@@ -1,4 +1,4 @@
-.PHONY: build build-backend build-frontend build-codex-bridge up down logs logs-backend logs-frontend logs-codex-bridge restart restart-backend migrate seed test qa-check qa clean install deploy offline-installer offline-artifact-check
+.PHONY: build build-backend build-frontend build-codex-bridge up down logs logs-backend logs-frontend logs-codex-bridge restart restart-backend migrate seed test qa-check qa release-prepare release-stage clean install deploy offline-installer offline-artifact-check
 
 # V3 is an explicit rollout, never an implicit consequence of rebuilding Clarin.
 OFFLINE_V3_ENABLED ?= false
@@ -74,6 +74,14 @@ qa-check:
 
 qa:
 	bash scripts/qa/validate.sh baseline
+
+# Build and preload the final commit before the short activation Action starts.
+release-prepare:
+	bash scripts/deploy/prepare-release.sh
+
+release-stage:
+	@test -n "$(RELEASE_DIR)" || { echo 'Set RELEASE_DIR to the prepared bundle directory.' >&2; exit 1; }
+	GITHUB_SHA=$$(git rev-parse HEAD) GITHUB_REPOSITORY=$${GITHUB_REPOSITORY:-ricardoalejandro/clarin} bash scripts/deploy/stage-release.sh "$(RELEASE_DIR)"
 
 test:
 	cd backend && go test ./...

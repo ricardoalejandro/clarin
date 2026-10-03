@@ -89,7 +89,7 @@ test('baseline preserves the former CI checks, uses workspace caches and clears 
   assert.equal(calls[1], `go|${f.root}/offline-signer|test ./...|${cache}/go-build|${cache}/go-mod|${cache}/gopath|local`);
   assert.deepEqual(calls.slice(2), [
     'npm|--prefix codex-bridge test',
-    'node|--test scripts/deploy/deploy.test.mjs scripts/qa/validate.test.mjs',
+    'node|--test scripts/deploy/*.test.mjs scripts/qa/validate.test.mjs',
     'npm|--prefix frontend run prepare:excalidraw',
     'npm|--prefix frontend run test:unit',
     'npm|--prefix frontend run typecheck',

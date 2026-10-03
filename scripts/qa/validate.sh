@@ -106,7 +106,7 @@ case "$mode" in
     (cd backend && go test ./...)
     (cd offline-signer && go test ./...)
     npm --prefix codex-bridge test
-    node --test scripts/deploy/deploy.test.mjs scripts/qa/validate.test.mjs
+    node --test scripts/deploy/*.test.mjs scripts/qa/validate.test.mjs
     npm --prefix frontend run prepare:excalidraw
     # Unit fixtures expect same-origin API paths, matching the clean CI environment.
     NEXT_PUBLIC_API_URL='' npm --prefix frontend run test:unit

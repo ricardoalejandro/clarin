@@ -10,11 +10,12 @@ permissions:
 jobs:
   # Run validation in the Clarin environment before pushing (make qa).
   # Browser scenarios are selected explicitly; they do not block this workflow.
+  # Build and preload this exact commit before pushing; Actions never builds.
   deploy:
     name: Deploy main over SSH
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 5
     concurrency:
       group: clarin-production
       cancel-in-progress: false
@@ -25,7 +26,7 @@ jobs:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       with:
         persist-credentials: false
-    - name: Deploy the requested commit and verify the running services
+    - name: Activate the prepared commit and verify the running services
       env:
         DEPLOY_HOST: ${{ vars.DEPLOY_HOST || '72.61.37.46' }}
         DEPLOY_USER: ${{ vars.DEPLOY_USER || 'root' }}
@@ -33,4 +34,5 @@ jobs:
         DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
         DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/root/proyect/clarin' }}
+        DEPLOY_PREBUILT: '1'
       run: bash scripts/deploy/deploy-ssh.sh

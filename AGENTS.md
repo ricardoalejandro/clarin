@@ -160,6 +160,7 @@ If a task touches multiple areas, read all matching skills before editing.
 ## Verification Baseline
 
 - GitHub Actions only deploys `main`. Before pushing a commit that triggers deployment, run `make qa` in the Clarin environment and the focused browser scenarios required by the affected modules. Read `docs/environment-validation.md` for preparation and commands. Repeat affected checks after any subsequent code changes; deployment health/version checks do not prove functional QA.
+- Actions activates a prepared release within a five-minute job budget. Build and preload the exact final commit with `make release-prepare` and `make release-stage` before publishing `main`. Never replace missing release artifacts with a build inside Actions; a merge or squash that creates a different SHA needs its own release preparation.
 
 - Every functional modification must include or update a unit test in the nearest stable layer. Extract pure reducers/helpers when UI behavior otherwise depends on timing, geometry, drag state, reconciliation or payload construction. TypeScript, builds and browser tests complement this rule but do not replace it.
 
