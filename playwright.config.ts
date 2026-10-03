@@ -2,6 +2,11 @@ import { defineConfig, devices } from '@playwright/test';
 
 const runLiveTests = process.env.CLARIN_E2E_LIVE === '1';
 const startLocalFrontend = process.env.PLAYWRIGHT_LOCAL_SERVER === '1';
+// Optional local Chromium provided by the managed environment. Other engines
+// continue using the browser versions installed by Playwright.
+const chromiumLaunchOptions = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+  ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH }
+  : undefined;
 const liveTestPattern = /reaction-(filter|iquitos)\.spec\.ts/;
 const standardTestIgnore = runLiveTests
   ? [/responsive-dashboard\.spec\.ts/]
@@ -44,7 +49,7 @@ export default defineConfig({
     {
       name: 'chromium',
       testIgnore: standardTestIgnore,
-      use: { ...devices['Desktop Chrome'] },
+      use: { ...devices['Desktop Chrome'], launchOptions: chromiumLaunchOptions },
     },
 
     {
@@ -62,7 +67,7 @@ export default defineConfig({
     {
       name: 'responsive-desktop',
       testMatch: /responsive-dashboard\.spec\.ts/,
-      use: { ...devices['Desktop Chrome'] },
+      use: { ...devices['Desktop Chrome'], launchOptions: chromiumLaunchOptions },
     },
     {
       name: 'responsive-firefox',
@@ -77,7 +82,7 @@ export default defineConfig({
     {
       name: 'responsive-mobile-chrome',
       testMatch: /responsive-dashboard\.spec\.ts/,
-      use: { ...devices['Pixel 5'] },
+      use: { ...devices['Pixel 5'], launchOptions: chromiumLaunchOptions },
     },
     {
       name: 'responsive-mobile-safari',

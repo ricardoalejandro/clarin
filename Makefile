@@ -1,4 +1,4 @@
-.PHONY: build build-backend build-frontend build-codex-bridge up down logs logs-backend logs-frontend logs-codex-bridge restart restart-backend migrate seed test clean install deploy offline-installer offline-artifact-check
+.PHONY: build build-backend build-frontend build-codex-bridge up down logs logs-backend logs-frontend logs-codex-bridge restart restart-backend migrate seed test qa-check qa clean install deploy offline-installer offline-artifact-check
 
 # V3 is an explicit rollout, never an implicit consequence of rebuilding Clarin.
 OFFLINE_V3_ENABLED ?= false
@@ -69,6 +69,12 @@ seed:
 	cd backend && go run ./cmd/server seed
 
 # Testing
+qa-check:
+	bash scripts/qa/validate.sh check
+
+qa:
+	bash scripts/qa/validate.sh baseline
+
 test:
 	cd backend && go test ./...
 

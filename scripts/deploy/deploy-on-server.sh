@@ -21,7 +21,7 @@ flock -w 120 9 || { echo 'Another deployment holds the server lock.' >&2; exit 1
 
 git fetch --no-tags origin main
 if [[ $(git rev-parse origin/main) != "$sha" ]]; then
-  echo 'Skipped: a newer main commit is available; only the latest tested revision may deploy.'
+  echo 'Skipped: a newer main commit is available; only the latest requested revision may deploy.'
   exit 0
 fi
 

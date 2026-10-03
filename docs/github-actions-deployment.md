@@ -1,9 +1,19 @@
 # Despliegue automático con GitHub Actions
 
-El workflow `Clarin CI and Deploy` prueba cada push y pull request hacia `main` o
-`master`. Despliega solamente los pushes a `main` y las ejecuciones manuales sobre
-`main`, después de que las pruebas del backend, signer, bridge y frontend,
-el chequeo de tipos, la compilación y Playwright terminen correctamente.
+El workflow `Clarin Deploy` se ocupa solamente del despliegue: se activa con
+pushes a `main` y ejecuciones manuales sobre `main`. No ejecuta pruebas ni se
+activa para pull requests o `master`.
+
+Las validaciones se ejecutan en el entorno de Clarín **antes del push** con
+`make qa`, que comprueba backend, signer, bridge, salvaguardas del despliegue,
+frontend, tipos y compilación. Los escenarios de navegador se seleccionan
+explícitamente según el cambio. La preparación y los comandos están en
+[Validaciones en el entorno](environment-validation.md).
+
+Actions ya no exige un resultado automático de QA. Quien publica el commit
+debe comprobar la misma revisión antes de enviarla; los chequeos de salud del
+servidor verifican que arrancó la versión solicitada, pero no sustituyen las
+pruebas funcionales.
 
 El destino predeterminado es `root@72.61.37.46:22`, en
 `/root/proyect/clarin`. El repositorio del servidor debe estar en `main`, apuntar
@@ -59,5 +69,19 @@ el servidor ni modifica `authorized_keys`.
   datos ni volúmenes; una recuperación debe considerar el esquema persistido.
 
 Para el primer despliegue, guardar `DEPLOY_SSH_KEY` y usar
-**Actions → Clarin CI and Deploy → Run workflow → main**. Después, cada push a
-`main` vuelve a ejecutar las comprobaciones y el despliegue.
+**Actions → Clarin Deploy → Run workflow → main**. Después, cada push a
+`main` ejecuta directamente el despliegue y sus comprobaciones de salud y versión.
+
+## Diagnóstico de la separación (3 de octubre de 2026)
+
+La [ejecución del 2 de octubre](https://github.com/ricardoalejandro/clarin/actions/runs/36987539296)
+pasó las pruebas de backend, signer, bridge, frontend, tipos y compilación.
+Playwright lanzó 759 instancias con un worker y hasta dos reintentos por fallo;
+consumió 84 minutos y 10 segundos antes de que el job alcanzara su límite de
+90 minutos. El despliegue quedó omitido por depender de ese job.
+
+La selección general también incluía escenarios que requieren el laboratorio
+offline y ejemplos que visitan `playwright.dev`. La matriz responsive, en cambio,
+se omitía al no configurar sesión simulada ni credenciales. Esa combinación no
+es una comprobación adecuada para cada despliegue; se conserva la batería para
+ejecutarla por escenarios en el entorno correspondiente.
