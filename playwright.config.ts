@@ -7,6 +7,11 @@ const startLocalFrontend = process.env.PLAYWRIGHT_LOCAL_SERVER === '1';
 const chromiumLaunchOptions = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
   ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH }
   : undefined;
+// Recent system Chromium versions require permission for loopback connections
+// from intercepted QA documents. Scope the grant to local system-browser tests.
+const localChromiumPermissions = startLocalFrontend && chromiumLaunchOptions
+  ? ['local-network-access']
+  : undefined;
 const liveTestPattern = /reaction-(filter|iquitos)\.spec\.ts/;
 const standardTestIgnore = runLiveTests
   ? [/responsive-dashboard\.spec\.ts/]
@@ -49,7 +54,7 @@ export default defineConfig({
     {
       name: 'chromium',
       testIgnore: standardTestIgnore,
-      use: { ...devices['Desktop Chrome'], launchOptions: chromiumLaunchOptions },
+      use: { ...devices['Desktop Chrome'], launchOptions: chromiumLaunchOptions, permissions: localChromiumPermissions },
     },
 
     {
@@ -67,7 +72,7 @@ export default defineConfig({
     {
       name: 'responsive-desktop',
       testMatch: /responsive-dashboard\.spec\.ts/,
-      use: { ...devices['Desktop Chrome'], launchOptions: chromiumLaunchOptions },
+      use: { ...devices['Desktop Chrome'], launchOptions: chromiumLaunchOptions, permissions: localChromiumPermissions },
     },
     {
       name: 'responsive-firefox',
@@ -82,7 +87,7 @@ export default defineConfig({
     {
       name: 'responsive-mobile-chrome',
       testMatch: /responsive-dashboard\.spec\.ts/,
-      use: { ...devices['Pixel 5'], launchOptions: chromiumLaunchOptions },
+      use: { ...devices['Pixel 5'], launchOptions: chromiumLaunchOptions, permissions: localChromiumPermissions },
     },
     {
       name: 'responsive-mobile-safari',
@@ -115,7 +120,7 @@ export default defineConfig({
     // The frontend uses Next.js standalone output, which cannot be served by
     // `next start`. Browser tests use the development server after the
     // production build has already been verified separately.
-    command: 'npm --prefix frontend run dev -- -p 3011',
+    command: 'npm --prefix frontend run dev -- -p 3011 --hostname 127.0.0.1',
     url: 'http://127.0.0.1:3011/login',
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

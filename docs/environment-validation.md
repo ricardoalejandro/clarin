@@ -58,7 +58,7 @@ bash scripts/qa/validate.sh browser tests/whiteboards-isolation.spec.ts tests/wo
 
 Fija el servidor local en `http://127.0.0.1:3011`, las dos variables de URL que usan los specs, `CLARIN_E2E_MOCK_AUTH=1` y `CI=1`. También fija `NEXT_PUBLIC_API_URL` vacío: las llamadas API mantienen el mismo origen para los mocks, y el rewrite de Next usa su fallback local `http://localhost:8080` en vez de heredar una API remota del entorno. Desactiva las opciones live heredadas y retira las credenciales E2E heredadas. Usa cero reintentos, dos workers, un fallo máximo y el reporter `list`; no acepta argumentos que cambien esos límites o la configuración. También acepta `--grep-invert=patrón`.
 
-Playwright levanta el servidor de desarrollo mediante la configuración existente y lo cierra al terminar. El puerto 3011 debe estar libre, ya que `CI=1` evita reutilizar silenciosamente otro servidor. Los mocks de estos specs prueban interacción y renderizado; no sustituyen las pruebas del backend ni una integración real cuando el cambio la necesita.
+Playwright levanta el servidor de desarrollo ligado a `127.0.0.1` y lo cierra al terminar. Ese hostname permite la conexión de desarrollo de Next.js usada durante la hidratación. Cuando se usa Chromium del sistema con el servidor local, la configuración concede `local-network-access` al contexto de prueba para que las páginas interceptadas puedan conectar a loopback; no se concede en ejecuciones remotas ni a otros motores. El puerto 3011 debe estar libre, ya que `CI=1` evita reutilizar silenciosamente otro servidor. Los mocks de estos specs prueban interacción y renderizado; no sustituyen las pruebas del backend ni una integración real cuando el cambio la necesita.
 
 ## Matrices y laboratorios separados
 
