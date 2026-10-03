@@ -29,6 +29,8 @@ fi
 chmod 600 "$key_directory/key" "$key_directory/known_hosts"
 ssh-keygen -y -P '' -f "$key_directory/key" > /dev/null
 printf -v remote_command 'bash -s -- %q %q %q' "$directory" "$GITHUB_SHA" "$GITHUB_REPOSITORY"
+# Allow slower builds while bounding remote work even if the SSH client exits.
+remote_command="timeout --signal=TERM --kill-after=5s 900s $remote_command"
 ssh -T -p "$port" -i "$key_directory/key" \
   -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
   -o "UserKnownHostsFile=$key_directory/known_hosts" \

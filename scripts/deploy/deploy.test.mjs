@@ -168,7 +168,7 @@ test('unsafe SSH destinations, ports and commit arguments are rejected before co
   }
 })
 
-test('SSH uses the pinned host identity, transfers the verified script and deletes its temporary key', t => {
+test('SSH bounds remote deployment, pins host identity and deletes its temporary key', t => {
   const f = fixture(t)
   const env = { ...f.env, DEPLOY_HOST: '72.61.37.46', DEPLOY_USER: 'root', DEPLOY_SSH_KEY: 'test-only-key', GITHUB_SHA: sha, GITHUB_REPOSITORY: repository }
   const result = spawnSync('bash', [sshScript], { env, encoding: 'utf8' })
@@ -176,6 +176,7 @@ test('SSH uses the pinned host identity, transfers the verified script and delet
   const args = readFileSync(join(f.root, 'ssh-arguments'), 'utf8')
   assert.match(args, /StrictHostKeyChecking=yes/)
   assert.match(args, /BatchMode=yes/)
+  assert.match(args, /timeout --signal=TERM --kill-after=5s 900s bash -s --/)
   assert.match(args, /root@72\.61\.37\.46/)
   assert.equal(readFileSync(join(f.root, 'remote-script'), 'utf8'), readFileSync(serverScript, 'utf8'))
   const keyPath = readFileSync(join(f.root, 'key-path'), 'utf8').trim()

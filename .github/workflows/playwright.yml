@@ -1,91 +1,21 @@
-name: Clarin CI and Deploy
+name: Clarin Deploy
 on:
   push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  backend:
-    name: Backend and deployment tests
-    timeout-minutes: 20
-    runs-on: ubuntu-24.04
-    steps:
-    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      with:
-        persist-credentials: false
-    - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-      with:
-        go-version-file: backend/go.mod
-        cache-dependency-path: |
-          backend/go.sum
-          offline-signer/go.sum
-    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-      with:
-        node-version: '24'
-    - name: Test backend
-      working-directory: backend
-      run: go test ./...
-    - name: Test isolated offline signer
-      working-directory: offline-signer
-      run: go test ./...
-    - name: Test Codex bridge
-      run: npm --prefix codex-bridge test
-    - name: Test deployment safeguards
-      run: node --test scripts/deploy/deploy.test.mjs
-
-  test:
-    name: Frontend and browser tests
-    timeout-minutes: 90
-    runs-on: ubuntu-24.04
-    steps:
-    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      with:
-        persist-credentials: false
-    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-      with:
-        node-version: '24'
-        cache: npm
-        cache-dependency-path: |
-          package-lock.json
-          frontend/package-lock.json
-    - name: Install dependencies
-      run: npm ci
-    - name: Install frontend dependencies
-      run: npm --prefix frontend ci
-    - name: Prepare the local whiteboard editor before tests
-      run: npm --prefix frontend run prepare:excalidraw
-    - name: Install Playwright Browsers
-      run: npx playwright install --with-deps
-    - name: Run frontend unit tests
-      run: npm --prefix frontend run test:unit
-    - name: Check frontend types
-      run: npm --prefix frontend run typecheck
-    - name: Build frontend
-      run: npm --prefix frontend run build
-    - name: Run Playwright tests
-      run: npx playwright test
-      env:
-        PLAYWRIGHT_BASE_URL: http://127.0.0.1:3011
-        PLAYWRIGHT_LOCAL_SERVER: '1'
-        CLARIN_E2E_BASE_URL: http://127.0.0.1:3011
-    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-      if: ${{ !cancelled() }}
-      with:
-        name: playwright-report
-        path: playwright-report/
-        retention-days: 30
-
+  # Run validation in the Clarin environment before pushing (make qa).
+  # Browser scenarios are selected explicitly; they do not block this workflow.
+  # Five minutes is a normal-duration target; allow slower container builds.
   deploy:
     name: Deploy main over SSH
-    needs: [backend, test]
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 20
     concurrency:
       group: clarin-production
       cancel-in-progress: false
@@ -96,7 +26,7 @@ jobs:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       with:
         persist-credentials: false
-    - name: Deploy the tested commit and verify the running services
+    - name: Deploy the requested commit and verify the running services
       env:
         DEPLOY_HOST: ${{ vars.DEPLOY_HOST || '72.61.37.46' }}
         DEPLOY_USER: ${{ vars.DEPLOY_USER || 'root' }}

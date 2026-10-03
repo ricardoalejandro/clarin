@@ -1,20 +1,7 @@
+# syntax=docker/dockerfile:1
 FROM node:24.21.0-alpine@sha256:be80f76cf40ec8e42b9bec49f60a55e0660f30af58d3e5a25530785b30ea67e2 AS builder
 
 WORKDIR /app
-
-# Build arguments for API URLs
-ARG NEXT_PUBLIC_API_URL=http://localhost:8080
-ARG NEXT_PUBLIC_WS_URL=ws://localhost:8080
-ARG NEXT_PUBLIC_APP_URL=http://localhost:3000
-ARG NEXT_PUBLIC_MARKETING_URL=http://localhost:3000
-ARG BUILD_VERSION=dev
-
-# Set as environment variables for build
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
-ENV NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL
-ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
-ENV NEXT_PUBLIC_MARKETING_URL=$NEXT_PUBLIC_MARKETING_URL
-ENV NEXT_PUBLIC_BUILD_VERSION=$BUILD_VERSION
 
 # Copy package files
 COPY package*.json ./
@@ -22,12 +9,27 @@ COPY vendor/excalidraw-clarin ./vendor/excalidraw-clarin
 COPY vendor/sheetjs ./vendor/sheetjs
 
 # Install dependencies (use npm ci if lock exists, otherwise npm install)
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+# Session proxy trust is optional and never becomes part of an image layer.
+RUN --mount=type=cache,id=clarin-frontend-npm,target=/root/.npm,sharing=locked \
+    --mount=type=secret,id=proxy_ca,required=false \
+    set -eu; \
+    if [ -f /run/secrets/proxy_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/proxy_ca; fi; \
+    if [ -f package-lock.json ]; then npm ci --strict-ssl=true; else npm install --strict-ssl=true; fi
 
 # Copy source code
 COPY . .
 
-# Build
+# Keep deployment identity and public URLs out of the dependency-install layer.
+ARG NEXT_PUBLIC_API_URL=http://localhost:8080
+ARG NEXT_PUBLIC_WS_URL=ws://localhost:8080
+ARG NEXT_PUBLIC_APP_URL=http://localhost:3000
+ARG NEXT_PUBLIC_MARKETING_URL=http://localhost:3000
+ARG BUILD_VERSION=dev
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL
+ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
+ENV NEXT_PUBLIC_MARKETING_URL=$NEXT_PUBLIC_MARKETING_URL
+ENV NEXT_PUBLIC_BUILD_VERSION=$BUILD_VERSION
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 

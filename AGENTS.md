@@ -159,6 +159,9 @@ If a task touches multiple areas, read all matching skills before editing.
 
 ## Verification Baseline
 
+- GitHub Actions only deploys `main`. Before pushing a commit that triggers deployment, run `make qa` in the Clarin environment and the focused browser scenarios required by the affected modules. Read `docs/environment-validation.md` for preparation and commands. Repeat affected checks after any subsequent code changes; deployment health/version checks do not prove functional QA.
+- About five minutes is the normal deployment target with warm Docker caches, not a hard deadline. The Action allows 20 minutes and the remote deployment allows 15 minutes for slower builds. Keep QA in the environment and deploy with the existing SSH/make flow.
+
 - Every functional modification must include or update a unit test in the nearest stable layer. Extract pure reducers/helpers when UI behavior otherwise depends on timing, geometry, drag state, reconciliation or payload construction. TypeScript, builds and browser tests complement this rule but do not replace it.
 
 - Backend changes: run `GOCACHE=/tmp/go-build go test ./...` from `backend`. Add `go build` or Docker build when the change affects startup, compile-time wiring, generated assets, or deployment behavior.
