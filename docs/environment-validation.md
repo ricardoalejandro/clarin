@@ -1,6 +1,6 @@
 # Validación de Clarin en el entorno
 
-GitHub Actions activa por SSH las imágenes ya preparadas del commit seleccionado y verifica los servicios desplegados. Las pruebas, el build de verificación, la construcción Docker y la carga de imágenes en el servidor se ejecutan antes, desde el entorno. El job de activación tiene un límite de cinco minutos; ese límite no incluye la preparación ni la cola de GitHub.
+GitHub Actions despliega por SSH el commit seleccionado y verifica los servicios desplegados. Las pruebas y el build de verificación se ejecutan en el entorno antes de enviar cambios. El servidor conserva la construcción Docker necesaria para producción, con cachés de dependencias y compilación. El objetivo habitual es aproximadamente cinco minutos con cachés calientes; Actions permite 20 minutos y el comando remoto 15 minutos para dar margen a ejecuciones más lentas.
 
 El workflow de despliegue ya no espera jobs de QA ni comprueba un historial de validaciones. Quien prepara el cambio debe validar el mismo commit que va a enviar. Si cambia el código después de validar, debe repetir las comprobaciones afectadas. Estos comandos no emiten certificados ni crean una configuración cloud persistente.
 
@@ -44,25 +44,6 @@ Equivale a `bash scripts/qa/validate.sh baseline` y conserva las comprobaciones 
 El baseline se detiene ante el primer error. No instala dependencias, inicia servicios ni despliega. Retira los opt-ins heredados `CLARIN_RUN_*`, `CLARIN_LIVE_REPORT_TEST`, `CLARIN_TEST_OFFICIAL_EXCALIDRAW_LIBRARY` y las URLs de bases de datos de test `OFFLINE_V{3,4,5}_TEST_DATABASE_URL`, para que un entorno persistente no active pruebas live o de integración adicionales que CI no ejecutaba. Esas integraciones se ejecutan deliberadamente por separado. Las cachés de Go quedan en `work/clarin-qa/` del directorio padre del repositorio (`/workspace/work/clarin-qa/` en este entorno), fuera del home y del código versionado. El build sí genera los archivos de trabajo y assets que genera normalmente el frontend.
 
 Antes de enviar el commit, completar también la cobertura de navegador del módulo afectado. `make qa` no ejecuta toda la matriz Playwright: la selección depende del cambio, y el baseline por sí solo no demuestra cobertura de todas las interfaces.
-
-## Preparación de la release antes de publicar main
-
-Después de validar y guardar el commit final, el checkout debe estar limpio. Preparar las imágenes desde ese commit:
-
-```bash
-make release-prepare
-make release-stage RELEASE_DIR="$PWD/../work/clarin-releases/$(git rev-parse HEAD)"
-```
-
-El entorno debe permitir HTTPS hacia los registries y repositorios de paquetes que usan los Dockerfiles, incluido `dl-cdn.alpinelinux.org` para Alpine. En un entorno con proxy, el builder conserva los proxies configurados por Docker y monta el CA de sesión solo durante los pasos de red, manteniendo TLS. No sustituirlos por el hostname del proxy del contenedor exterior.
-
-`release-prepare` construye cuatro imágenes para los cinco servicios de aplicación; backend y task-preview-worker comparten imagen. Usa un `git archive` del SHA para excluir `.env`, credenciales y archivos locales ignorados. Genera una versión una sola vez y guarda `images.tar` y un manifest con SHA, checksum, versión, plataforma e IDs de imagen. No inicia contenedores ni conecta al servidor. Los metadatos Buildx usan `work/clarin-qa/buildx`, respetando `BUILDX_CONFIG` explícito; no se sustituye `DOCKER_CONFIG` ni se copian credenciales de registry.
-
-`release-stage` requiere en este entorno las credenciales SSH `DEPLOY_*` descritas en [la guía de despliegue](github-actions-deployment.md). Comprueba el checksum, transmite el bundle por SSH con identidad del host fijada, carga las imágenes y publica el manifest completo en el servidor. No hace checkout, no arranca servicios y no cambia volúmenes. Una release incompatible para el mismo SHA se conserva y se rechaza el reemplazo. La transferencia y `docker load` ocurren fuera del límite de cinco minutos de Actions.
-
-Publicar en `main` únicamente después de preparar su SHA exacto. Un merge o squash en GitHub puede generar un SHA nuevo: las imágenes del head anterior no sirven como release de ese commit. En ese caso, preparar el nuevo commit y ejecutar manualmente el workflow sobre `main`; el primer intento sin release falla antes de activar servicios. Para evitar ese intento, preparar previamente el commit de merge local que se publicará.
-
-Este flujo rápido requiere una instalación existente con sus servicios de datos y Docker preparados. El piloto nativo offline V3 tiene artefactos firmados independientes y conserva su flujo de despliegue específico; el runner rápido lo rechaza si está habilitado para evitar omitirlos. Las versiones browser V4/V5 siguen incluidas en el frontend construido. La preparación y la activación necesitan validación real en el servidor antes de afirmar un tiempo de despliegue exitoso.
 
 ## Browser focal por módulo
 

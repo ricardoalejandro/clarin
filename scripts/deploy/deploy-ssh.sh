@@ -17,10 +17,6 @@ directory=${DEPLOY_PATH:-/root/proyect/clarin}
 [[ $GITHUB_REPOSITORY =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'Invalid repository.' >&2; exit 1; }
 
 script_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-remote_script="$script_directory/deploy-on-server.sh"
-if [[ ${DEPLOY_PREBUILT:-0} == 1 ]]; then
-  remote_script="$script_directory/activate-on-server.sh"
-fi
 key_directory=$(mktemp -d)
 trap 'rm -rf "$key_directory"' EXIT
 chmod 700 "$key_directory"
@@ -33,11 +29,10 @@ fi
 chmod 600 "$key_directory/key" "$key_directory/known_hosts"
 ssh-keygen -y -P '' -f "$key_directory/key" > /dev/null
 printf -v remote_command 'bash -s -- %q %q %q' "$directory" "$GITHUB_SHA" "$GITHUB_REPOSITORY"
-if [[ ${DEPLOY_PREBUILT:-0} == 1 ]]; then
-  remote_command="timeout --signal=TERM --kill-after=5s 210s $remote_command"
-fi
+# Allow slower builds while bounding remote work even if the SSH client exits.
+remote_command="timeout --signal=TERM --kill-after=5s 900s $remote_command"
 ssh -T -p "$port" -i "$key_directory/key" \
   -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
   -o "UserKnownHostsFile=$key_directory/known_hosts" \
   -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=8 \
-  "$DEPLOY_USER@$DEPLOY_HOST" "$remote_command" < "$remote_script"
+  "$DEPLOY_USER@$DEPLOY_HOST" "$remote_command" < "$script_directory/deploy-on-server.sh"

@@ -1,9 +1,14 @@
 # Despliegue automático con GitHub Actions
 
-El workflow `Clarin Deploy` activa una release ya preparada: se activa con
+El workflow `Clarin Deploy` se ocupa solamente del despliegue: se activa con
 pushes a `main` y ejecuciones manuales sobre `main`. No ejecuta pruebas ni se
-activa para pull requests o `master`. Su job tiene un límite de cinco minutos.
-La cola de GitHub y la preparación previa de imágenes quedan fuera de ese límite.
+activa para pull requests o `master`.
+
+El objetivo habitual es aproximadamente cinco minutos con las cachés Docker
+calientes. El job permite 20 minutos y el comando remoto 15 minutos, más cinco
+segundos de terminación, para dar margen a compilaciones más lentas. La cola de
+GitHub se cuenta por separado. Una primera compilación o cambios de dependencias
+pueden tardar más; cinco minutos no es una duración garantizada.
 
 Las validaciones se ejecutan en el entorno de Clarín **antes del push** con
 `make qa`, que comprueba backend, signer, bridge, salvaguardas del despliegue,
@@ -12,15 +17,15 @@ explícitamente según el cambio. La preparación y los comandos están en
 [Validaciones en el entorno](environment-validation.md).
 
 Actions ya no exige un resultado automático de QA. Quien publica el commit
-debe comprobar y precargar las imágenes de la misma revisión antes de enviarla;
-los chequeos de salud del servidor verifican que arrancó la versión solicitada, pero no sustituyen las
+debe comprobar la misma revisión antes de enviarla; los chequeos de salud del
+servidor verifican que arrancó la versión solicitada, pero no sustituyen las
 pruebas funcionales.
 
 El destino predeterminado es `root@72.61.37.46:22`, en
 `/root/proyect/clarin`. El repositorio del servidor debe estar en `main`, apuntar
 a `ricardoalejandro/clarin` y poder hacer `git fetch origin main`.
 
-## Credenciales de GitHub y del entorno
+## Configuración de GitHub
 
 En **Settings → Secrets and variables → Actions → New repository secret**, crear:
 
@@ -37,15 +42,6 @@ Para otro destino, configurar las variables `DEPLOY_HOST`, `DEPLOY_USER`,
 reemplazar el archivo fijado. Para puertos diferentes de 22, las entradas usan
 el formato `[host]:puerto`.
 
-Para preparar las imágenes desde el entorno de Clarín y cargarlas antes del
-push, el entorno necesita también `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`
-y acceso TCP al puerto SSH del servidor. Usar los mismos valores/identidad
-fijada del destino de Actions. Los secrets de GitHub no se copian al entorno
-automáticamente; configurarlos mediante su mecanismo de credenciales, sin
-guardarlos en el repositorio. `DEPLOY_PORT`, `DEPLOY_PATH` y
-`DEPLOY_KNOWN_HOSTS` siguen siendo opcionales. No se necesita un registry nuevo: las
-imágenes viajan por SSH y quedan cargadas antes del Action.
-
 El entorno GitHub `production` registra cada despliegue. Si se configuran
 revisores obligatorios en ese entorno, GitHub esperará su aprobación;
 para despliegue automático debe permitir ejecutar `main` sin esa aprobación.
@@ -57,30 +53,10 @@ Codex. Las variables configuradas en el entorno de Codex no se transfieren a
 GitHub ni al servidor. `docker compose config` debe resolver las credenciales
 de producción; el workflow comprueba las obligatorias sin imprimir sus valores.
 
-El host requiere Bash, Git, Node.js, Docker con Compose, curl, flock, timeout,
-tar y sha256sum. Para staging se necesita también realpath. El usuario SSH
-necesita cargar imágenes y actualizar las rutas de Traefik/Dokploy. El flujo
-rápido requiere una instalación ya preparada con sus servicios de datos.
-El workflow no instala dependencias en el servidor ni modifica `authorized_keys`.
-
-## Preparación y activación
-
-Validar el commit final, guardarlo y preparar sus imágenes con `make release-prepare`.
-Después, ejecutar `make release-stage RELEASE_DIR="ruta-del-bundle"` desde el
-entorno configurado para SSH. Los comandos están documentados en
-[Validaciones en el entorno](environment-validation.md).
-
-La preparación construye cuatro imágenes para cinco servicios, fija una sola
-versión y registra SHA/checksum/IDs de imagen. Staging verifica el bundle, carga
-las imágenes sin arrancarlas y publica la release completa por SHA. Estos pasos
-ocurren antes de publicar el commit que desplegará Actions.
-
-Un merge o squash que genere otro SHA requiere preparar ese nuevo commit. No se
-aceptan imágenes de una revisión distinta. Si ya se publicó en main sin release,
-prepararla y repetir manualmente el workflow; ese primer intento falla antes de
-reemplazar servicios. Preparar el commit de merge local antes del push evita ese
-intento. El piloto nativo offline V3 conserva su preparación de instalador firmado
-por separado; la activación rápida lo rechaza si está habilitado.
+El host requiere Bash, Git, Make, Node.js, Docker con Compose, curl, flock y timeout.
+El usuario SSH necesita ejecutar el flujo existente `make deploy`, incluido el
+actualizador de rutas de Traefik/Dokploy. El workflow no instala dependencias en
+el servidor ni modifica `authorized_keys`.
 
 ## Comportamiento del despliegue
 
@@ -89,32 +65,30 @@ por separado; la activación rápida lo rechaza si está habilitado.
 - El checkout avanza exclusivamente mediante fast-forward al SHA comprobado.
   Los cambios locales de archivos versionados bloquean el despliegue.
 - El archivo `backend/CHANGELOG.md` copiado por `make deploy` vuelve a su estado
-  anterior después del build en el flujo manual original. Antes de actualizar,
-  solo se recupera una copia
-  generada cuyo contenido coincide exactamente con el changelog raíz. El flujo
-  rápido construye desde un archivo del commit y no copia archivos en el checkout.
-- Se exige `.runtime/deploy/releases/<SHA>/ready` y el manifest exacto. Se
-  comprueban las cuatro imágenes cargadas, sus labels, versión y plataforma
-  antes de hacer fast-forward. No hay fallback a compilación ni descargas.
-- Se actualizan las rutas del proxy y se ejecuta Compose con IDs de imagen
-  inmutables, `--no-build` y `--pull never`. Se comprueban salud del backend,
-  login del frontend, versión completa y las imágenes reales de los cinco
-  servicios. Se revisan logs sin publicarlos completos. El último SHA verificado
-  queda en `.runtime/deploy/last-successful.sha`.
-- El cliente SSH impone un timeout remoto de 210 segundos, con terminación de
-  cinco segundos adicional; Compose tiene un presupuesto de 120 segundos y las
-  comprobaciones de salud 60 segundos. El job tiene un límite de cinco minutos.
-  Un timeout se informa como fallo, no como despliegue exitoso. Una activación
-  parcial requiere revisar el estado real de los servicios antes de recuperar.
+  anterior después del build. Antes de actualizar, solo se recupera una copia
+  generada cuyo contenido coincide exactamente con el changelog raíz.
+- Se ejecuta `make deploy`, se comprueban la salud del backend, el login del
+  frontend y el SHA de la versión publicada, y se revisan los logs recientes
+  sin publicarlos completos. El último SHA verificado queda en
+  `.runtime/deploy/last-successful.sha`.
 - Los fallos detienen el workflow. No se revierten automáticamente migraciones,
   datos ni volúmenes; una recuperación debe considerar el esquema persistido.
 
-Antes de activar este workflow, configurar SSH en GitHub y en el entorno,
-preparar y precargar la release del SHA exacto de `main`. Usar
-**Actions → Clarin Deploy → Run workflow → main** para medir la primera
-activación real. Después, cada push preparado a `main` ejecuta directamente la
-activación y las comprobaciones. El flujo manual original `make deploy` conserva
-la compilación en el servidor para bootstrap o mantenimiento fuera de este job.
+Para el primer despliegue, guardar `DEPLOY_SSH_KEY` y usar
+**Actions → Clarin Deploy → Run workflow → main**. Después, cada push a
+`main` ejecuta directamente el despliegue y sus comprobaciones de salud y versión.
+
+## Cachés del build
+
+Los Dockerfiles instalan dependencias antes de declarar la versión que cambia
+en cada despliegue. Un cambio de versión no obliga a repetir `npm ci` ni a
+instalar paquetes del sistema. BuildKit conserva cachés npm, módulos Go y
+compilación Go; los manifests Go se usan con `-mod=readonly`.
+
+El frontend conserva su versión para PWA y los bundles offline. La compilación
+sigue siendo necesaria cuando cambia el código. En el entorno gestionado, una
+verificación Docker local requiere permitir `dl-cdn.alpinelinux.org` para las
+descargas Alpine; eso no cambia la configuración de red del servidor.
 
 ## Diagnóstico de la separación (3 de octubre de 2026)
 
