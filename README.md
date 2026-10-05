@@ -163,6 +163,10 @@ make test           # go test ./...
 make deploy         # Build con version y despliegue backend/frontend
 ```
 
+El despliegue se inicia manualmente desde la máquina local conectando por SSH
+al servidor. El procedimiento de actualización, `make deploy` y verificación
+está en [Despliegue manual por SSH](docs/manual-deployment.md).
+
 ## Estructura del Proyecto
 
 ```
