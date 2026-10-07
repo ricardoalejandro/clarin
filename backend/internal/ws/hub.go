@@ -44,6 +44,7 @@ const (
 	EventInteractionUpdate      = "interaction_update"
 	EventMessageRevoked         = "message_revoked"
 	EventMessageEdited          = "message_edited"
+	EventMessageUpdated         = "message_updated"
 	EventEventParticipantUpdate = "event_participant_update"
 	EventHistorySyncComplete    = "history_sync_complete"
 	EventLogbookUpdate          = "logbook_update"

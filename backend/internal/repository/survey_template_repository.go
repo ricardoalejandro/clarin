@@ -16,13 +16,14 @@ import (
 )
 
 var (
-	ErrSurveyTemplateNotFound        = errors.New("survey template not found")
-	ErrSurveyInstanceNotFound        = errors.New("survey instance not found")
-	ErrSurveyRecipientInvalid        = errors.New("survey recipient is invalid")
-	ErrSurveyProgramUnavailable      = errors.New("survey program is unavailable")
-	ErrSurveyProgramNoParticipants   = errors.New("survey program has no active participants")
-	ErrSurveyTemplateEmpty           = errors.New("survey template has no active questions")
-	ErrSurveyMeasurementIncompatible = errors.New("las aplicaciones seleccionadas no tienen una medición compatible")
+	ErrSurveyTemplateNotFound         = errors.New("survey template not found")
+	ErrSurveyInstanceNotFound         = errors.New("survey instance not found")
+	ErrSurveyRecipientInvalid         = errors.New("survey recipient is invalid")
+	ErrSurveyProgramUnavailable       = errors.New("survey program is unavailable")
+	ErrSurveyProgramNoParticipants    = errors.New("survey program has no active participants")
+	ErrSurveyTemplateEmpty            = errors.New("survey template has no active questions")
+	ErrSurveyTemplateRevisionConflict = errors.New("survey template changed while creating its application")
+	ErrSurveyMeasurementIncompatible  = errors.New("las aplicaciones seleccionadas no tienen una medición compatible")
 )
 
 type SurveyInstanceNameConflictError struct {
@@ -693,6 +694,9 @@ func (r *SurveyTemplateRepository) CreateInstance(ctx context.Context, input dom
 	}
 	if template.Status != "active" {
 		return nil, errors.New("archived survey templates cannot be applied")
+	}
+	if input.ExpectedTemplateRevision <= 0 || input.ExpectedTemplateRevision != template.Revision {
+		return nil, ErrSurveyTemplateRevisionConflict
 	}
 	originType, originLabel := "standalone", "Aplicación independiente"
 	if input.ProgramID != nil {

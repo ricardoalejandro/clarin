@@ -54,6 +54,11 @@ func groupParticipantCount(info *types.GroupInfo) int {
 }
 
 func (p *DevicePool) ListJoinedGroupOptions(ctx context.Context, accountID, deviceID uuid.UUID) ([]domain.WhatsAppGroupOption, error) {
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, accountID, deviceID)
+	if lifecycleErr != nil {
+		return nil, lifecycleErr
+	}
+	defer release()
 	instance, err := p.reportDevice(accountID, deviceID)
 	if err != nil {
 		return nil, err
@@ -86,6 +91,11 @@ func (p *DevicePool) ListJoinedGroupOptions(ctx context.Context, accountID, devi
 }
 
 func (p *DevicePool) LoadGroupSnapshot(ctx context.Context, accountID, deviceID uuid.UUID, groupID string) (*domain.WhatsAppGroupSnapshot, error) {
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, accountID, deviceID)
+	if lifecycleErr != nil {
+		return nil, lifecycleErr
+	}
+	defer release()
 	instance, err := p.reportDevice(accountID, deviceID)
 	if err != nil {
 		return nil, err

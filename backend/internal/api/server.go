@@ -2177,12 +2177,15 @@ func (s *Server) handleConnectDevice(c *fiber.Ctx) error {
 	if dev == nil || dev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
+	if dev.Deletion != nil {
+		return deviceActionFailure(c, repository.ErrDeviceDeleting)
+	}
 	if isCloudAPIDevice(dev) {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Este canal usa WhatsApp API Oficial y no se conecta por QR"})
 	}
 
 	if err := s.services.Device.Connect(c.Context(), deviceID); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return deviceActionFailure(c, err)
 	}
 
 	return c.JSON(fiber.Map{"success": true, "message": "Connecting device..."})
@@ -2198,12 +2201,15 @@ func (s *Server) handleDisconnectDevice(c *fiber.Ctx) error {
 	if dev == nil || dev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
+	if dev.Deletion != nil {
+		return deviceActionFailure(c, repository.ErrDeviceDeleting)
+	}
 	if isCloudAPIDevice(dev) {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Este canal usa WhatsApp API Oficial y no usa desconexión QR"})
 	}
 
 	if err := s.services.Device.Disconnect(c.Context(), deviceID); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return deviceActionFailure(c, err)
 	}
 
 	return c.JSON(fiber.Map{"success": true, "message": "Device disconnected"})
@@ -2219,12 +2225,15 @@ func (s *Server) handleResetDevice(c *fiber.Ctx) error {
 	if dev == nil || dev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
+	if dev.Deletion != nil {
+		return deviceActionFailure(c, repository.ErrDeviceDeleting)
+	}
 	if isCloudAPIDevice(dev) {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Este canal usa WhatsApp API Oficial y no se re-vincula por QR"})
 	}
 
 	if err := s.services.Device.Reset(c.Context(), deviceID); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return deviceActionFailure(c, err)
 	}
 
 	return c.JSON(fiber.Map{"success": true, "message": "Device reset. Reconnect to generate QR code for re-pairing."})
@@ -2248,11 +2257,23 @@ func (s *Server) handleDeleteDevice(c *fiber.Ctx) error {
 		})
 	}
 
-	if err := s.services.Device.Delete(c.Context(), deviceID); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	result, err := s.services.Device.Delete(c.Context(), accountID, deviceID)
+	if err != nil {
+		if errors.Is(err, repository.ErrDeviceNotFound) {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Dispositivo no encontrado"})
+		}
+		if errors.Is(err, repository.ErrDeviceSessionConflict) {
+			return c.Status(409).JSON(fiber.Map{"success": false, "error": "La sesión cambió o pertenece a otro dispositivo; no se realizó la baja", "code": "device_session_identity_conflict"})
+		}
+		log.Printf("[DeviceDelete] persistence failed account=%s device=%s", accountID, deviceID)
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo confirmar la solicitud de baja; recarga el estado del dispositivo antes de reintentar", "code": "device_delete_persistence_failed"})
 	}
 
-	return c.JSON(fiber.Map{"success": true, "message": "Device deleted"})
+	status := fiber.StatusAccepted
+	if result.DeletionStatus == "completed" {
+		status = fiber.StatusOK
+	}
+	return c.Status(status).JSON(fiber.Map{"success": true, "device_id": result.DeviceID, "operation_id": result.OperationID, "deletion_status": result.DeletionStatus, "next_retry_at": result.NextRetryAt, "error_code": result.ErrorCode, "devices_total": result.DevicesTotal, "devices_available": result.DevicesAvailable, "contacts_detached": result.ContactsDetached, "chats_detached": result.ChatsDetached})
 }
 
 func (s *Server) handleUpdateDevice(c *fiber.Ctx) error {
@@ -2264,6 +2285,9 @@ func (s *Server) handleUpdateDevice(c *fiber.Ctx) error {
 	dev, _ := s.services.Device.GetByID(c.Context(), deviceID)
 	if dev == nil || dev.AccountID != accountID {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
+	}
+	if dev.Deletion != nil {
+		return deviceActionFailure(c, repository.ErrDeviceDeleting)
 	}
 	var req struct {
 		Name                *string `json:"name"`
@@ -2293,12 +2317,12 @@ func (s *Server) handleUpdateDevice(c *fiber.Ctx) error {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": "El nombre del dispositivo es obligatorio"})
 		}
 		if err := s.repos.Device.UpdateName(c.Context(), deviceID, name); err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+			return deviceActionFailure(c, err)
 		}
 	}
 	if req.ReceiveMessages != nil {
 		if err := s.repos.Device.UpdateReceiveMessages(c.Context(), deviceID, *req.ReceiveMessages); err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+			return deviceActionFailure(c, err)
 		}
 		// Update in-memory flag in device pool so it takes effect immediately
 		if s.pool != nil && !isCloudAPIDevice(dev) {
@@ -3037,6 +3061,9 @@ func (s *Server) requireManualDeviceForAccount(ctx context.Context, accountID, d
 	device, err := s.requireDeviceForAccount(ctx, accountID, deviceID)
 	if err != nil {
 		return nil, err
+	}
+	if device.Deletion != nil {
+		return nil, fiber.NewError(fiber.StatusConflict, "El dispositivo se está eliminando")
 	}
 	if !deviceCanSendManual(device) {
 		return nil, fiber.NewError(fiber.StatusBadRequest, "Dispositivo no conectado o no disponible para envio manual")
@@ -10531,12 +10558,32 @@ func (s *Server) handleSyncDeviceContacts(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid device id"})
 	}
 	accountID := c.Locals("account_id").(uuid.UUID)
+	device, err := s.requireDeviceForAccount(c.Context(), accountID, id)
+	if err != nil {
+		var resourceErr *fiber.Error
+		if errors.As(err, &resourceErr) && resourceErr.Code == fiber.StatusNotFound {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Dispositivo no encontrado"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo verificar el dispositivo"})
+	}
+	if device.Deletion != nil {
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "El dispositivo se está eliminando", "code": "device_deleting"})
+	}
+	if isCloudAPIDevice(device) {
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Este proveedor no admite sincronizar contactos", "code": "device_sync_unsupported"})
+	}
 	if err := s.enforcePlanLimit(c.Context(), accountID, "max_contacts", 1); err != nil {
 		return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_contacts"})
 	}
 
-	if err := s.services.Contact.SyncDevice(c.Context(), id); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	if err := s.services.Contact.SyncDevice(c.Context(), accountID, id); err != nil {
+		if errors.Is(err, repository.ErrDeviceNotFound) {
+			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Dispositivo no encontrado"})
+		}
+		if errors.Is(err, repository.ErrDeviceDeleting) || errors.Is(err, whatsapp.ErrDeviceDisconnected) {
+			return c.Status(409).JSON(fiber.Map{"success": false, "error": "Dispositivo desconectado o en proceso de baja", "code": "device_sync_unavailable"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo iniciar la sincronización"})
 	}
 	return c.JSON(fiber.Map{"success": true, "message": "sync started"})
 }

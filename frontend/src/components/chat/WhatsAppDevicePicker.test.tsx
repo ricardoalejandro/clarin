@@ -49,6 +49,11 @@ function PickerHarness({ onSelect = vi.fn() }: { onSelect?: (value: WhatsAppDevi
 }
 
 describe('WhatsAppDevicePicker', () => {
+  it('excludes deleting devices even when a stale snapshot says connected', () => {
+    render(<WhatsAppDevicePicker open idPrefix="deletion" phone="51999999999" devices={[{ ...device, deletion: { operation_id: 'pending-operation', phase: 'pending', attempts: 0 } }]} onSelect={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.queryByRole('button', { name: /Usar WhatsApp principal/ })).toBeNull()
+    expect(screen.getByText('No hay dispositivos conectados')).toBeVisible()
+  })
   it('portals into the operational boundary, closes with Escape and restores focus', async () => {
     const host = document.createElement('div')
     host.dataset.testOverlayHost = ''

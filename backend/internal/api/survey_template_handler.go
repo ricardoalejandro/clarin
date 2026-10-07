@@ -181,6 +181,8 @@ func surveyTemplateError(c *fiber.Ctx, err error) error {
 		})
 	}
 	switch {
+	case errors.Is(err, repository.ErrSurveyTemplateRevisionConflict):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"code": "survey_template_revision_conflict", "error": "La plantilla cambió mientras creabas la aplicación. Revisa sus datos y vuelve a intentarlo."})
 	case errors.Is(err, repository.ErrSurveyTemplateNotFound), errors.Is(err, repository.ErrSurveyInstanceNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Recurso no encontrado"})
 	case errors.Is(err, repository.ErrSurveyProgramUnavailable):

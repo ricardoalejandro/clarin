@@ -172,12 +172,17 @@ func (p *DevicePool) reconcilePendingChatIdentities(ctx context.Context, instanc
 		if pending.Name != nil {
 			name = strings.TrimSpace(*pending.Name)
 		}
-		_, _, _ = p.getOrCreateMessageChat(ctx, instance, types.MessageSource{
+		operationCtx, release, lifecycleErr := p.retainDeviceOperation(ctx, instance.AccountID, instance.ID)
+		if lifecycleErr != nil {
+			return
+		}
+		_, _, _ = p.getOrCreateMessageChat(operationCtx, instance, types.MessageSource{
 			Chat:      lidJID.ToNonAD(),
 			Sender:    lidJID.ToNonAD(),
 			SenderAlt: phoneJID.ToNonAD(),
 			IsFromMe:  false,
 		}, name)
+		release()
 	}
 }
 

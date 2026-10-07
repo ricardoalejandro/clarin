@@ -1,0 +1,75 @@
+name: clarin-integrity-qa-20261007
+services:
+  backend:
+    image: clarin-integrity-qa-backend:20261007
+    environment:
+      DATABASE_URL: postgres://qa:${QA_POSTGRES_PASSWORD}@postgres:5432/program_survey_integrity_test?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${QA_JWT_SECRET:?Generate QA auth credentials first}
+      ADMIN_USER: integrity-admin
+      ADMIN_PASSWORD: ${QA_ADMIN_PASSWORD:?Generate QA auth credentials first}
+      ADMIN_EMAIL: integrity-admin@qa.invalid
+      ENV: development
+      PORT: 8080
+      CORS_ORIGINS: http://127.0.0.1:13011,http://127.0.0.1:18091
+      PUBLIC_URL: http://127.0.0.1:13011
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: integrityqa
+      MINIO_SECRET_KEY: ${QA_MINIO_PASSWORD}
+      MINIO_BUCKET: clarin-integrity-qa
+      MINIO_USE_SSL: "false"
+      MINIO_PUBLIC_URL: http://127.0.0.1:19001
+      EROS_ENABLED: "false"
+    ports: ["127.0.0.1:18091:8080"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 2s
+      timeout: 3s
+      start_period: 10s
+      retries: 60
+    volumes: ["sessions:/app/sessions"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: qa
+      POSTGRES_PASSWORD: ${QA_POSTGRES_PASSWORD:?Generate private QA credentials first}
+      POSTGRES_DB: program_survey_integrity_test
+    ports: ["127.0.0.1:15439:5432"]
+    volumes: ["postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qa -d program_survey_integrity_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports: ["127.0.0.1:16389:6379"]
+    volumes: ["redis:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: integrityqa
+      MINIO_ROOT_PASSWORD: ${QA_MINIO_PASSWORD:?Generate private QA credentials first}
+    ports: ["127.0.0.1:19001:9000", "127.0.0.1:19002:9001"]
+    volumes: ["minio:/data"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  sessions:
+  postgres:
+  redis:
+  minio:

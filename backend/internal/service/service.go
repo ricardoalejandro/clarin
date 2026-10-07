@@ -1054,8 +1054,8 @@ func (s *DeviceService) Reset(ctx context.Context, deviceID uuid.UUID) error {
 	return s.pool.ResetDevice(ctx, deviceID)
 }
 
-func (s *DeviceService) Delete(ctx context.Context, deviceID uuid.UUID) error {
-	return s.pool.DeleteDevice(ctx, deviceID)
+func (s *DeviceService) Delete(ctx context.Context, accountID, deviceID uuid.UUID) (*domain.DeviceDeletionResult, error) {
+	return s.pool.DeleteDevice(ctx, accountID, deviceID)
 }
 
 func (s *DeviceService) GetByAccountID(ctx context.Context, accountID uuid.UUID) ([]*domain.Device, error) {
@@ -1066,6 +1066,10 @@ func (s *DeviceService) GetByAccountID(ctx context.Context, accountID uuid.UUID)
 
 	// Add live status from pool
 	for _, device := range devices {
+		if device.Deletion != nil {
+			device.HydrateDeletion()
+			continue
+		}
 		if device.Provider != nil && *device.Provider == domain.DeviceProviderWhatsAppCloudAPI {
 			device.RuntimeCapabilities = &domain.DeviceRuntimeCapabilities{}
 			continue
@@ -1095,6 +1099,10 @@ func (s *DeviceService) GetByID(ctx context.Context, deviceID uuid.UUID) (*domai
 	device, err := s.repos.Device.GetByID(ctx, deviceID)
 	if err != nil || device == nil {
 		return nil, err
+	}
+	if device.Deletion != nil {
+		device.HydrateDeletion()
+		return device, nil
 	}
 	if device.Provider != nil && *device.Provider == domain.DeviceProviderWhatsAppCloudAPI {
 		device.RuntimeCapabilities = &domain.DeviceRuntimeCapabilities{}
@@ -1593,8 +1601,8 @@ func (s *ContactService) ResetFromDevice(ctx context.Context, contactID uuid.UUI
 	return s.repos.Contact.Update(ctx, contact)
 }
 
-func (s *ContactService) SyncDevice(ctx context.Context, deviceID uuid.UUID) error {
-	return s.pool.SyncDeviceContacts(ctx, deviceID)
+func (s *ContactService) SyncDevice(ctx context.Context, accountID, deviceID uuid.UUID) error {
+	return s.pool.SyncDeviceContacts(ctx, accountID, deviceID)
 }
 
 // LeadService handles lead operations

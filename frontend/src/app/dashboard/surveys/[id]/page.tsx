@@ -10,12 +10,14 @@ import DuplicateSurveyTemplateDialog from '@/components/surveys/DuplicateSurveyT
 import ArchiveSurveyTemplateDialog from '@/components/surveys/ArchiveSurveyTemplateDialog';
 import SurveyDesignEditor, { type DesignMediaDraft } from '@/components/surveys/SurveyDesignEditor';
 import SurveyTextAnswersPanel from '@/components/surveys/SurveyTextAnswersPanel';
+import SurveyResponsePagination from '@/components/surveys/SurveyResponsePagination';
 import SurveyApplicationLifecycleActions from '@/components/surveys/SurveyApplicationLifecycleActions';
 import SurveyApplicationsBrowser from '@/components/surveys/SurveyApplicationsBrowser';
 import { formatSurveyDuration } from '@/lib/surveyAnalytics';
 import { surveyNonChartAnswerLabel } from '@/lib/surveyQuestionAnswerLabel';
 import { buildSurveyResultsExportPayload, createSurveyResultsExportSingleFlight, saveSurveyResultsBlob } from '@/lib/surveyResultsExport';
 import { createSurveySlugAvailabilityController, type SurveySlugAvailabilityController } from '@/lib/surveySlugAvailability';
+import { changeSurveyApplicationStatus, emptySurveyResultsState, surveyResultsReducer, type SurveyResultsState } from '@/lib/surveyApplicationState';
 import {
   ArrowLeft, Save, Plus, Trash2, GripVertical, Eye, Share2, BarChart3,
   Type, AlignLeft, CircleDot, CheckSquare, Star, SlidersHorizontal,
@@ -51,28 +53,6 @@ const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; i
 };
 
 type Tab = 'builder' | 'design' | 'share' | 'analytics';
-
-type SurveyResultsState = {
-  ownerSurveyId: string;
-  analytics: SurveyAnalytics | null;
-  responses: SurveyResponse[];
-  responsesTotal: number;
-  loadingAnalytics: boolean;
-  selectedResponse: SurveyResponse | null;
-  responsePage: number;
-};
-
-function emptySurveyResultsState(ownerSurveyId: string): SurveyResultsState {
-  return {
-    ownerSurveyId,
-    analytics: null,
-    responses: [],
-    responsesTotal: 0,
-    loadingAnalytics: false,
-    selectedResponse: null,
-    responsePage: 0,
-  };
-}
 
 function isImmutableSurveyApplication(survey: Survey | null): boolean {
   if (!survey) return false;
@@ -511,6 +491,11 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
 
   // Analytics tab
   const [resultsState, setResultsState] = useState<SurveyResultsState>(() => emptySurveyResultsState(surveyId));
+  const [analyticsReload, setAnalyticsReload] = useState(0);
+  const [responsesReload, setResponsesReload] = useState(0);
+  const [statusPending, setStatusPending] = useState(false);
+  const [statusError, setStatusError] = useState('');
+  const statusRequestRef = useRef<AbortController | null>(null);
   const surveyRequestSequence = useRef(0);
   const surveyRequestRef = useRef<AbortController | null>(null);
   const analyticsRequestSequence = useRef(0);
@@ -523,7 +508,14 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
     responses,
     responsesTotal,
     loadingAnalytics,
+    loadingResponses,
+    analyticsError,
+    responsesError,
+    responsesLoaded,
     selectedResponse,
+    responseDetailId,
+    loadingResponseDetail,
+    responseDetailError,
     responsePage,
   } = resultsState;
 
@@ -547,9 +539,13 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
     responseDetailRequestRef.current?.abort();
     responseDetailRequestSequence.current += 1;
     setResultsState(emptySurveyResultsState(surveyId));
+    setStatusError('');
+    setStatusPending(false);
 
     return () => {
       responseDetailRequestRef.current?.abort();
+      statusRequestRef.current?.abort();
+      statusRequestRef.current = null;
       responseDetailRequestSequence.current += 1;
     };
   }, [surveyId]);
@@ -569,9 +565,7 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
 
     const controller = new AbortController();
     const requestSequence = ++analyticsRequestSequence.current;
-    setResultsState(current => current.ownerSurveyId === surveyId
-      ? { ...current, loadingAnalytics: true }
-      : current);
+    setResultsState(current => surveyResultsReducer(current, { ownerSurveyId: surveyId, type: 'analyticsStart' }));
 
     void (async () => {
       try {
@@ -580,28 +574,27 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
         });
         if (controller.signal.aborted || requestSequence !== analyticsRequestSequence.current) return;
         if (response.success) {
-          setResultsState(current => current.ownerSurveyId === surveyId
-            ? { ...current, analytics: response.data || null }
-            : current);
+          setResultsState(current => surveyResultsReducer(current, { ownerSurveyId: surveyId, type: 'analyticsSuccess', analytics: response.data || null }));
+        } else {
+          setResultsState(current => surveyResultsReducer(current, { ownerSurveyId: surveyId, type: 'analyticsFailure', error: response.error || 'No se pudieron cargar las estadísticas.' }));
         }
       } finally {
         if (!controller.signal.aborted && requestSequence === analyticsRequestSequence.current) {
-          setResultsState(current => current.ownerSurveyId === surveyId
-            ? { ...current, loadingAnalytics: false }
-            : current);
+          setResultsState(current => surveyResultsReducer(current, { ownerSurveyId: surveyId, type: 'analyticsFinish' }));
         }
       }
     })();
 
     return () => controller.abort();
-  }, [effectiveActiveTab, resultsState.ownerSurveyId, surveyId]);
+  }, [effectiveActiveTab, resultsState.ownerSurveyId, surveyId, analyticsReload]);
 
   useEffect(() => {
     if (effectiveActiveTab !== 'analytics' || resultsState.ownerSurveyId !== surveyId) return;
 
     const controller = new AbortController();
     const requestSequence = ++responsesRequestSequence.current;
-    const requestedPage = resultsState.responsePage;
+    const requestedPage = resultsState.requestedResponsePage;
+    setResultsState(current => surveyResultsReducer(current, { ownerSurveyId: surveyId, type: 'responsesStart' }));
 
     void (async () => {
       const response = await api<{ responses: SurveyResponse[]; total: number }>(
@@ -610,18 +603,15 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
       );
       if (controller.signal.aborted || requestSequence !== responsesRequestSequence.current) return;
       if (response.success && response.data) {
-        setResultsState(current => current.ownerSurveyId === surveyId && current.responsePage === requestedPage
-          ? {
-              ...current,
-              responses: response.data?.responses || [],
-              responsesTotal: response.data?.total || 0,
-            }
-          : current);
+        setResultsState(current => surveyResultsReducer(current, { ownerSurveyId: surveyId, type: 'responsesSuccess', page: requestedPage, responses: response.data?.responses || [], total: response.data?.total || 0 }));
+      } else {
+        setResultsState(current => surveyResultsReducer(current, { ownerSurveyId: surveyId, type: 'responsesFailure', error: response.error || 'No se pudieron cargar las respuestas.' }));
       }
+      setResultsState(current => surveyResultsReducer(current, { ownerSurveyId: surveyId, type: 'responsesFinish' }));
     })();
 
     return () => controller.abort();
-  }, [effectiveActiveTab, resultsState.ownerSurveyId, resultsState.responsePage, surveyId]);
+  }, [effectiveActiveTab, resultsState.ownerSurveyId, resultsState.requestedResponsePage, surveyId, responsesReload]);
 
   const fetchSurvey = async (resetForSurveyChange = false) => {
     surveyRequestRef.current?.abort();
@@ -629,7 +619,7 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
     surveyRequestRef.current = controller;
     const requestSequence = ++surveyRequestSequence.current;
     try {
-      setLoading(true);
+      if (resetForSurveyChange || !survey) setLoading(true);
       setLoadError('');
       if (resetForSurveyChange) {
         setSurvey(null);
@@ -676,9 +666,11 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
   };
 
   const handleResponsePageChange = useCallback((newPage: number) => {
-    setResultsState(current => current.ownerSurveyId === surveyId
-      ? { ...current, responsePage: Math.max(0, newPage), responses: [], selectedResponse: null }
-      : current);
+    responseDetailRequestRef.current?.abort();
+    responseDetailRequestSequence.current += 1;
+    setResultsState(current => surveyResultsReducer(current, { ownerSurveyId: surveyId, type: 'detailClose' }));
+    setResultsState(current => surveyResultsReducer(current, { ownerSurveyId: surveyId, type: 'responsesRequest', page: newPage }));
+    setResponsesReload(value => value + 1);
   }, [surveyId]);
 
   const handleSaveQuestions = async () => {
@@ -778,14 +770,24 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
   };
 
   const handleStatusChange = async (newStatus: string) => {
+    if (statusRequestRef.current) return;
+    const controller = new AbortController();
+    statusRequestRef.current = controller;
+    setStatusPending(true);
+    setStatusError('');
     try {
-      await api(`/api/surveys/${surveyId}/status`, {
+      await changeSurveyApplicationStatus(() => api(`/api/surveys/${surveyId}/status`, {
         method: 'PATCH',
         body: JSON.stringify({ status: newStatus }),
-      });
-      void fetchSurvey();
+        signal: controller.signal,
+      }), async () => { if (!controller.signal.aborted) await fetchSurvey(); });
     } catch (e) {
-      console.error(e);
+      if (!controller.signal.aborted) setStatusError(e instanceof Error ? e.message : 'No se pudo cambiar el estado de la encuesta.');
+    } finally {
+      if (statusRequestRef.current === controller) {
+        statusRequestRef.current = null;
+        setStatusPending(false);
+      }
     }
   };
 
@@ -846,9 +848,9 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
       responseDetailRequestRef.current?.abort();
       responseDetailRequestSequence.current += 1;
     }
-    setResultsState(current => current.ownerSurveyId === surveyId
-      ? { ...current, selectedResponse: response }
-      : current);
+    setResultsState(current => response
+      ? current.ownerSurveyId === surveyId ? { ...current, selectedResponse: response } : current
+      : surveyResultsReducer(current, { ownerSurveyId: surveyId, type: 'detailClose' }));
   }, [surveyId]);
 
   const handleViewResponse = useCallback(async (responseId: string) => {
@@ -856,18 +858,20 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
     const controller = new AbortController();
     responseDetailRequestRef.current = controller;
     const requestSequence = ++responseDetailRequestSequence.current;
-    setResultsState(current => current.ownerSurveyId === surveyId
-      ? { ...current, selectedResponse: null }
-      : current);
-
-    const response = await api<SurveyResponse>(`/api/surveys/${surveyId}/responses/${responseId}`, {
-      signal: controller.signal,
-    });
-    if (controller.signal.aborted || requestSequence !== responseDetailRequestSequence.current) return;
-    if (response.success && response.data) {
-      setResultsState(current => current.ownerSurveyId === surveyId
-        ? { ...current, selectedResponse: response.data || null }
-        : current);
+    setResultsState(current => surveyResultsReducer(current, { ownerSurveyId: surveyId, type: 'detailStart', responseId }));
+    try {
+      const response = await api<SurveyResponse>(`/api/surveys/${surveyId}/responses/${responseId}`, { signal: controller.signal });
+      if (controller.signal.aborted || requestSequence !== responseDetailRequestSequence.current) return;
+      if (!response.success || !response.data) throw new Error(response.error || 'No se pudo cargar el detalle de la respuesta.');
+      setResultsState(current => surveyResultsReducer(current, { ownerSurveyId: surveyId, type: 'detailSuccess', responseId, response: response.data! }));
+    } catch (error) {
+      if (controller.signal.aborted || requestSequence !== responseDetailRequestSequence.current) return;
+      setResultsState(current => surveyResultsReducer(current, { ownerSurveyId: surveyId, type: 'detailFailure', responseId,
+        error: error instanceof Error ? error.message : 'No se pudo cargar el detalle de la respuesta.' }));
+    } finally {
+      if (!controller.signal.aborted && requestSequence === responseDetailRequestSequence.current) {
+        setResultsState(current => surveyResultsReducer(current, { ownerSurveyId: surveyId, type: 'detailFinish', responseId }));
+      }
     }
   }, [surveyId]);
 
@@ -879,7 +883,7 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
     );
   }
 
-  if (loadError) {
+  if (loadError && !survey) {
     return (
       <div className="flex h-full items-center justify-center bg-slate-50 p-4 sm:p-6">
         <div role="alert" className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-5 text-center shadow-sm">
@@ -961,12 +965,13 @@ function SurveyBuilderPage({ requestedTab }: { requestedTab?: Tab }) {
       </div>
 
       {/* Content area */}
+      {loadError && <div role="alert" className="shrink-0 border-b border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"><p>{loadError}</p><button type="button" onClick={() => void fetchSurvey()} className="mt-1 min-h-11 font-semibold underline">Reintentar actualización</button></div>}
       {survey.archived_at && <div className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-xs font-medium text-amber-800">Aplicación archivada: conserva resultados, pero su enlace público responde como archivado y no admite nuevas respuestas.</div>}
       <div className="flex-1 overflow-hidden">
         {effectiveActiveTab === 'builder' && (immutableInstance ? <PublishedQuestionsView survey={survey} questions={questions} /> : <BuilderTab questions={questions} selectedQ={selectedQ} setSelectedQ={setSelectedQ} addQuestion={addQuestion} removeQuestion={removeQuestion} updateQuestion={updateQuestion} moveQuestion={moveQuestion} allQuestions={questions} />)}
         {effectiveActiveTab === 'design' && <DesignTab survey={survey} onSave={(branding) => handleSaveBranding(branding)} saving={saving} />}
-        {effectiveActiveTab === 'share' && <ShareTab survey={survey} publicUrl={publicUrl} slugInput={slugInput} setSlugInput={setSlugInput} slugAvailable={slugAvailable} slugCheckError={slugCheckError} checkSlug={checkSlug} handleStatusChange={handleStatusChange} handleSaveSurvey={handleSaveSurvey} saving={saving} />}
-        {effectiveActiveTab === 'analytics' && <AnalyticsTab survey={survey} analytics={analytics} responses={responses} responsesTotal={responsesTotal} programAudience={survey.audience_mode === 'program_participants'} loading={loadingAnalytics} selectedResponse={selectedResponse} setSelectedResponse={setSelectedResponse} handleViewResponse={handleViewResponse} questions={questions} responsePage={responsePage} handleResponsePageChange={handleResponsePageChange} />}
+        {effectiveActiveTab === 'share' && <ShareTab survey={survey} publicUrl={publicUrl} slugInput={slugInput} setSlugInput={setSlugInput} slugAvailable={slugAvailable} slugCheckError={slugCheckError} checkSlug={checkSlug} handleStatusChange={handleStatusChange} handleSaveSurvey={handleSaveSurvey} saving={saving} statusPending={statusPending} statusError={statusError} />}
+        {effectiveActiveTab === 'analytics' && <AnalyticsTab survey={survey} analytics={analytics} responses={responses} responsesTotal={responsesTotal} programAudience={survey.audience_mode === 'program_participants'} loading={loadingAnalytics} loadingResponses={loadingResponses} responsesLoaded={responsesLoaded} analyticsError={analyticsError} responsesError={responsesError} retryAnalytics={() => setAnalyticsReload(value => value + 1)} retryResponses={() => setResponsesReload(value => value + 1)} selectedResponse={selectedResponse} setSelectedResponse={setSelectedResponse} handleViewResponse={handleViewResponse} responseDetailId={responseDetailId} loadingResponseDetail={loadingResponseDetail} responseDetailError={responseDetailError} questions={questions} responsePage={responsePage} handleResponsePageChange={handleResponsePageChange} />}
       </div>
 
       {/* Save message toast */}
@@ -1680,10 +1685,11 @@ function DesignTab({ survey, onSave, onDirtyChange, saving }: {
 
 // ─── Share Tab ──────────────────────────────────────────────────────────────
 
-function ShareTab({ survey, publicUrl, slugInput, setSlugInput, slugAvailable, slugCheckError, checkSlug, handleStatusChange, handleSaveSurvey, saving }: {
+function ShareTab({ survey, publicUrl, slugInput, setSlugInput, slugAvailable, slugCheckError, checkSlug, handleStatusChange, handleSaveSurvey, saving, statusPending, statusError }: {
   survey: Survey; publicUrl: string; slugInput: string; setSlugInput: (s: string) => void;
   slugAvailable: boolean | null; slugCheckError: string; checkSlug: (s: string) => void;
   handleStatusChange: (s: string) => void; handleSaveSurvey: () => void; saving: boolean;
+  statusPending: boolean; statusError: string;
 }) {
   const immutableInstance = isImmutableSurveyApplication(survey);
   const programAudience = survey.audience_mode === 'program_participants';
@@ -1701,7 +1707,8 @@ function ShareTab({ survey, publicUrl, slugInput, setSlugInput, slugAvailable, s
                 <button
                   key={s}
                   onClick={() => handleStatusChange(s)}
-                  disabled={Boolean(survey.archived_at)}
+                  aria-pressed={survey.status === s}
+                  disabled={Boolean(survey.archived_at) || statusPending}
                   className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl border-2 text-sm font-medium transition-all ${
                     survey.status === s ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-500 hover:border-slate-300'
                   } disabled:cursor-not-allowed disabled:opacity-50`}
@@ -1711,6 +1718,8 @@ function ShareTab({ survey, publicUrl, slugInput, setSlugInput, slugAvailable, s
               );
             })}
           </div>
+          {statusPending && <p role="status" className="mt-3 flex items-center gap-2 text-xs text-slate-500"><Loader2 className="h-4 w-4 animate-spin" />Guardando estado…</p>}
+          {statusError && <p role="alert" className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{statusError} Puedes volver a elegir el estado para reintentar.</p>}
           {survey.archived_at ? <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">Restáurala antes de cambiar su estado. Al restaurar permanecerá cerrada.</p> : survey.status !== 'active' && (
             <p className="text-xs text-amber-600 mt-3 bg-amber-50 px-3 py-2 rounded-lg">
               La encuesta debe estar activa para recibir respuestas.
@@ -1940,13 +1949,16 @@ function QuestionChart({ stat, chartType }: { stat: { question_id: string; quest
   );
 }
 
-function AnalyticsTab({ survey, analytics, responses, responsesTotal, programAudience, loading, selectedResponse, setSelectedResponse, handleViewResponse, questions, responsePage, handleResponsePageChange }: {
+function AnalyticsTab({ survey, analytics, responses, responsesTotal, programAudience, loading, loadingResponses, responsesLoaded, analyticsError, responsesError, retryAnalytics, retryResponses, selectedResponse, setSelectedResponse, handleViewResponse, responseDetailId, loadingResponseDetail, responseDetailError, questions, responsePage, handleResponsePageChange }: {
   survey: Survey;
   analytics: SurveyAnalytics | null; responses: SurveyResponse[]; responsesTotal: number;
   programAudience: boolean;
   loading: boolean; selectedResponse: SurveyResponse | null; setSelectedResponse: (r: SurveyResponse | null) => void;
   handleViewResponse: (rid: string) => void; questions: SurveyQuestion[];
   responsePage: number; handleResponsePageChange: (page: number) => void;
+  loadingResponses: boolean; responsesLoaded: boolean; analyticsError: string; responsesError: string;
+  retryAnalytics: () => void; retryResponses: () => void;
+  responseDetailId: string | null; loadingResponseDetail: boolean; responseDetailError: string;
 }) {
   const [chartTypes, setChartTypes] = useState<Record<string, ChartType>>({});
   const [measurementSeries, setMeasurementSeries] = useState<SurveyMeasurementSeries | null>(null);
@@ -1987,10 +1999,6 @@ function AnalyticsTab({ survey, analytics, responses, responsesTotal, programAud
     }).finally(() => { if (!controller.signal.aborted) setMeasurementSeriesLoading(false); });
     return () => controller.abort();
   }, [baselineId, followupId, survey.id, survey.measurement_signature, survey.program_id, survey.template_id]);
-
-  if (loading) {
-    return <div className="h-full flex items-center justify-center"><Loader2 className="w-6 h-6 text-emerald-600 animate-spin" /></div>;
-  }
 
   const qMap = new Map(questions.map(q => [q.id, q]));
 
@@ -2047,6 +2055,8 @@ function AnalyticsTab({ survey, analytics, responses, responsesTotal, programAud
           )}
         </section>
         {/* Reliable observed funnel */}
+        {loading && <p role="status" className="flex items-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" />Actualizando estadísticas…</p>}
+        {analyticsError && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700"><p>{analyticsError}</p><button type="button" onClick={retryAnalytics} disabled={loading} className="mt-2 min-h-11 rounded-lg bg-white px-3 font-semibold disabled:opacity-50">Reintentar estadísticas</button></div>}
         {analytics && (
           <section className="space-y-3">
           <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between"><div><h3 className="font-semibold text-slate-900">Embudo observado</h3><p className="text-xs text-slate-500">Disponible desde {format(new Date(analytics.funnel.tracking_started_at), "d MMM yyyy, HH:mm", { locale: es })}. Los históricos anteriores no se estiman.</p></div>{analytics.funnel.median_completion_seconds !== undefined && <p className="text-xs text-slate-500">Mediana de finalización: <span className="font-semibold text-slate-700">{formatSurveyDuration(analytics.funnel.median_completion_seconds)}</span></p>}</div>
@@ -2162,7 +2172,11 @@ function AnalyticsTab({ survey, analytics, responses, responsesTotal, programAud
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <h3 className="font-semibold text-slate-900">Respuestas individuales ({responsesTotal})</h3>
           </div>
-          {responses.length === 0 ? (
+          {loadingResponses && <p role="status" className="mb-3 flex items-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" />Cargando respuestas…</p>}
+          {loadingResponseDetail && <p role="status" className="mb-3 flex items-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" />Cargando detalle de respuesta…</p>}
+          {responseDetailError && <div role="alert" className="mb-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700"><p>{responseDetailError}</p><button type="button" onClick={() => responseDetailId && handleViewResponse(responseDetailId)} disabled={loadingResponseDetail} className="mt-2 min-h-11 rounded-lg bg-white px-3 font-semibold disabled:opacity-50">Reintentar detalle</button></div>}
+          {responsesError && <div role="alert" className="mb-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700"><p>{responsesError}</p><button type="button" onClick={retryResponses} disabled={loadingResponses} className="mt-2 min-h-11 rounded-lg bg-white px-3 font-semibold disabled:opacity-50">Reintentar respuestas</button></div>}
+          {responses.length === 0 && responsesLoaded && !loadingResponses && !responsesError ? (
             <p className="text-sm text-slate-400 text-center py-8">No hay respuestas aún</p>
           ) : (
             <div className="divide-y divide-slate-100">
@@ -2181,7 +2195,8 @@ function AnalyticsTab({ survey, analytics, responses, responsesTotal, programAud
                   <div className="flex shrink-0 items-center gap-2 self-end sm:self-auto">
                     <button
                       onClick={() => handleViewResponse(r.id)}
-                      className="text-xs text-emerald-600 hover:text-emerald-700 font-medium"
+                      disabled={loadingResponseDetail && responseDetailId === r.id}
+                      className="min-h-11 px-2 text-xs text-emerald-600 hover:text-emerald-700 font-medium disabled:cursor-wait disabled:opacity-50"
                     >
                       Ver detalle
                     </button>
@@ -2191,32 +2206,7 @@ function AnalyticsTab({ survey, analytics, responses, responsesTotal, programAud
             </div>
           )}
           {/* Pagination */}
-          {responsesTotal > 50 && (
-            <div className="flex items-center justify-between pt-4 mt-4 border-t border-slate-100">
-              <p className="text-xs text-slate-400">
-                Mostrando {responsePage * 50 + 1}-{Math.min((responsePage + 1) * 50, responsesTotal)} de {responsesTotal}
-              </p>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => handleResponsePageChange(responsePage - 1)}
-                  disabled={responsePage === 0}
-                  className="px-3 py-1.5 text-xs font-medium text-slate-600 bg-slate-100 rounded-lg hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                >
-                  Anterior
-                </button>
-                <span className="text-xs text-slate-500">
-                  Página {responsePage + 1} de {Math.ceil(responsesTotal / 50)}
-                </span>
-                <button
-                  onClick={() => handleResponsePageChange(responsePage + 1)}
-                  disabled={(responsePage + 1) * 50 >= responsesTotal}
-                  className="px-3 py-1.5 text-xs font-medium text-slate-600 bg-slate-100 rounded-lg hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                >
-                  Siguiente
-                </button>
-              </div>
-            </div>
-          )}
+          <SurveyResponsePagination page={responsePage} total={responsesTotal} loading={loadingResponses} onPageChange={handleResponsePageChange} />
         </div>
       </div>
 

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Lead, PipelineStage } from '@/types/contact'
 import LeadContextPanel, { crmStagePickerPlacement } from './LeadContextPanel'
@@ -16,7 +16,7 @@ const lead = {
   archived_at: null, is_blocked: false, blocked_at: null, block_reason: '', kommo_deleted_at: null, assigned_to: '', created_at: '', updated_at: '',
 } satisfies Lead
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals() })
 
 describe('LeadContextPanel stage picker', () => {
   it('selects current-pipeline stages and canonical Sin etapa with mouse', async () => {
@@ -64,6 +64,61 @@ describe('LeadContextPanel stage picker', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Se restauró el valor anterior')
     expect(screen.getByRole('combobox', { name: 'Etapa actual: Seguimiento' })).toBeEnabled()
     expect(screen.getByText('Seguimiento')).toBeInTheDocument()
+  })
+
+  it('restores focus after a slow stage mutation and parent saving finish', async () => {
+    vi.useFakeTimers()
+    let resolveChange!: (value: boolean) => void
+    const onStageChange = vi.fn(() => new Promise<boolean>(resolve => { resolveChange = resolve }))
+    const view = render(<LeadContextPanel lead={lead} stages={stages} onStageChange={onStageChange} />)
+    const trigger = screen.getByRole('combobox')
+    trigger.focus()
+    fireEvent.click(trigger)
+    act(() => { vi.advanceTimersByTime(32) })
+    const listbox = screen.getByRole('listbox')
+    expect(listbox).toHaveFocus()
+    fireEvent.keyDown(listbox, { key: 'ArrowDown' })
+    fireEvent.keyDown(listbox, { key: 'Enter' })
+    expect(trigger).toBeDisabled()
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    // Let every close/open RAF finish while the actual provider stays pending.
+    act(() => { vi.advanceTimersByTime(250) })
+    view.rerender(<LeadContextPanel lead={lead} stages={stages} saving onStageChange={onStageChange} />)
+    await act(async () => { resolveChange(true) })
+    expect(trigger).toBeDisabled()
+    view.rerender(<LeadContextPanel lead={lead} stages={stages} onStageChange={onStageChange} />)
+    expect(trigger).toBeEnabled()
+    expect(trigger).toHaveFocus()
+  })
+
+  it('cancels queued listbox focus when Escape closes before the next frame', () => {
+    let nextId = 0
+    const frames = new Map<number, FrameRequestCallback>()
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++nextId, callback); return nextId })
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => { frames.delete(id) })
+    render(<LeadContextPanel lead={lead} stages={stages} onStageChange={vi.fn()} />)
+    const trigger = screen.getByRole('combobox')
+    fireEvent.click(trigger)
+    expect(frames.size).toBe(2)
+    fireEvent.keyDown(screen.getByRole('listbox'), { key: 'Escape' })
+    expect(frames.size).toBe(0)
+    expect(trigger).toHaveFocus()
+  })
+
+  it('keeps focus on another action chosen while the provider is pending', async () => {
+    vi.useFakeTimers()
+    let resolveChange!: (value: boolean) => void
+    const onStageChange = vi.fn(() => new Promise<boolean>(resolve => { resolveChange = resolve }))
+    render(<><LeadContextPanel lead={lead} stages={stages} onStageChange={onStageChange} /><button>Otra acción</button></>)
+    fireEvent.click(screen.getByRole('combobox'))
+    act(() => { vi.advanceTimersByTime(32) })
+    fireEvent.click(screen.getByRole('option', { name: 'Ganada' }))
+    const otherAction = screen.getByRole('button', { name: 'Otra acción' })
+    otherAction.focus()
+    act(() => { vi.advanceTimersByTime(250) })
+    await act(async () => { resolveChange(true) })
+    expect(screen.getByRole('combobox')).toBeEnabled()
+    expect(otherAction).toHaveFocus()
   })
 
   it('places the portal above when the trigger is near the viewport bottom', () => {

@@ -1,4 +1,6 @@
 // API helper for Clarin frontend
+import { beginAuthIdentityChange, completeAuthIdentityChange, getAuthScope, isAuthIdentityChanging, isAuthScopeSynchronized } from '@/lib/authScope'
+import { fetchAuthCookie } from '@/lib/authCookieLock'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || ''
 const SESSION_MARKER = 'cookie-session'
@@ -10,6 +12,19 @@ const SESSION_MARKER = 'cookie-session'
 export type AuthRefreshOutcome = 'refreshed' | 'expired' | 'unavailable'
 
 let _refreshPromise: Promise<AuthRefreshOutcome> | null = null
+let _refreshScope: string | null = null
+let _expiredRefreshScope: { request: string; cleared: string } | null = null
+
+function requestIsCurrent(scope: string, signal?: AbortSignal | null) {
+  return !signal?.aborted && getAuthScope() === scope
+}
+
+function scopeAfterRefresh(scope: string, outcome: AuthRefreshOutcome) {
+  return outcome === 'expired' && _expiredRefreshScope?.request === scope
+    ? _expiredRefreshScope.cleared : scope
+}
+
+const cancelledRequest = () => ({ success: false as const, error: 'Solicitud cancelada' })
 // Set only while the canonical UI is backed by the encrypted browser copy.
 // Authentication, WebSockets and binary transfers must not bypass the v5
 // interceptor during that window.
@@ -52,17 +67,31 @@ export function clearAuthState() {
 
 export async function invalidateOfflineBeforeIdentityChange() {
   if (typeof window === 'undefined') return
+  const transitionScope = beginAuthIdentityChange()
   // Both browser-only generations may still exist while v5 replaces the
   // former recovery shell. Invalidate them before any online identity switch
   // so a delayed worker response can never write under the prior actor.
-  const [v4, v5] = await Promise.all([
-    import('@/offline-v4/client'),
-    import('@/offline-v5/client'),
-  ])
-  await Promise.all([
-    v4.invalidateActiveOfflineSession(),
-    v5.invalidateActiveOfflineV5Session(),
-  ])
+  try {
+    if (!isAuthScopeSynchronized()) throw new Error('No se pudo coordinar el cambio de sesión entre pestañas. Libera almacenamiento del navegador y vuelve a intentarlo.')
+    const [v4, v5] = await Promise.all([
+      import('@/offline-v4/client'),
+      import('@/offline-v5/client'),
+    ])
+    await Promise.all([
+      v4.invalidateActiveOfflineSession(),
+      v5.invalidateActiveOfflineV5Session(),
+      // A refresh already sent may still set its cookie. Complete it before
+      // sending the new identity so the new cookie is the final write.
+      _refreshPromise,
+    ])
+    if (getAuthScope() !== transitionScope) throw new DOMException('La sesión cambió durante la operación.', 'AbortError')
+    return transitionScope
+  } catch (error) {
+    // A refused offline barrier precedes every server identity mutation. Keep
+    // the still-valid online identity usable; an expiry has already cleared it.
+    if (getAuthScope() === transitionScope && localStorage.getItem('token')) completeAuthIdentityChange()
+    throw error
+  }
 }
 
 export function markAuthActivity(force = false) {
@@ -100,15 +129,20 @@ export async function logoutFromBrowser(
 ) {
   if (typeof window === 'undefined') return
   clearIdleTimeout()
-  await invalidateOfflineBeforeIdentityChange()
+  const transitionScope = await invalidateOfflineBeforeIdentityChange()
   try {
-    await fetch(`${API_BASE}/api/auth/logout`, {
+    await fetchAuthCookie(`${API_BASE}/api/auth/logout`, {
       method: 'POST',
       credentials: 'include',
-    })
-  } catch {
+    }, transitionScope || getAuthScope())
+  } catch (error) {
+    if ((error as { code?: string })?.code === 'auth_cookie_lock_unavailable') {
+      if (getAuthScope() === transitionScope) completeAuthIdentityChange()
+      throw error
+    }
     // The local state still needs to be cleared even if the network is gone.
   }
+  if (getAuthScope() !== transitionScope) return
   clearAuthState()
   localStorage.setItem(LOGOUT_EVENT_KEY, `${Date.now()}:${reason}`)
   if (options.redirect !== false) window.location.href = getLoginRedirectForLogout(reason)
@@ -117,6 +151,8 @@ export async function logoutFromBrowser(
 export async function tryRefreshTokenOutcome(
   options: { redirectOnIdle?: boolean } = {},
 ): Promise<AuthRefreshOutcome> {
+  const scope = getAuthScope()
+  if (isAuthIdentityChanging(scope)) return 'unavailable'
   if (isAuthIdleExpired()) {
     // Some credential-preserving callbacks own their allow-listed return path.
     // They still revoke the idle session and clear local auth state, but must
@@ -125,22 +161,28 @@ export async function tryRefreshTokenOutcome(
     return 'expired'
   }
   // Deduplicate concurrent refresh attempts
-  if (_refreshPromise) return _refreshPromise
+  if (_refreshPromise) return _refreshScope === scope ? _refreshPromise : 'unavailable'
+
+  _refreshScope = scope
+  _expiredRefreshScope = null
 
   _refreshPromise = (async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/auth/refresh`, {
+      const res = await fetchAuthCookie(`${API_BASE}/api/auth/refresh`, {
         method: 'POST',
         credentials: 'include', // sends httpOnly refresh-token cookie
-      })
+      }, scope)
+      if (!requestIsCurrent(scope)) return 'unavailable'
       if (!res.ok) {
         if (res.status === 401 || res.status === 403) {
           clearAuthState()
+          _expiredRefreshScope = { request: scope, cleared: getAuthScope() }
           return 'expired'
         }
         return 'unavailable'
       }
       const data = await res.json().catch(() => undefined) as { success?: boolean } | undefined
+      if (!requestIsCurrent(scope)) return 'unavailable'
       if (data?.success) {
         markAuthTokenRefreshed()
         return 'refreshed'
@@ -152,6 +194,7 @@ export async function tryRefreshTokenOutcome(
       return 'unavailable'
     } finally {
       _refreshPromise = null
+      _refreshScope = null
     }
   })()
 
@@ -206,11 +249,15 @@ async function sendActivityHeartbeat() {
   if (typeof window === 'undefined') return
   if (_offlineRuntimeActive) return
   if (!localStorage.getItem('token')) return
+  let requestScope = getAuthScope()
+  if (isAuthIdentityChanging(requestScope)) return
   if (isAuthIdleExpired()) {
     await logoutFromBrowser('idle')
     return
   }
   const refreshOutcome = await refreshAccessTokenIfStale()
+  requestScope = scopeAfterRefresh(requestScope, refreshOutcome)
+  if (!requestIsCurrent(requestScope)) return
   if (refreshOutcome === 'expired') {
     await logoutFromBrowser('expired')
     return
@@ -221,8 +268,11 @@ async function sendActivityHeartbeat() {
       method: 'POST',
       credentials: 'include',
     })
+    if (!requestIsCurrent(requestScope)) return
     if (res.status === 401) {
       const outcome = await tryRefreshTokenOutcome()
+      requestScope = scopeAfterRefresh(requestScope, outcome)
+      if (!requestIsCurrent(requestScope)) return
       if (outcome === 'expired') await logoutFromBrowser('expired')
     }
   } catch {
@@ -309,21 +359,31 @@ export async function api<T>(
 ): Promise<{ success: boolean; data?: T; error?: string; status?: number }> {
   const { skipAuth = false, authMode = 'active', ...fetchOptions } = options
   const activeAuth = !skipAuth && authMode === 'active'
+  let requestScope = getAuthScope()
+  const isCurrent = () => requestIsCurrent(requestScope, fetchOptions.signal)
+  if (!isCurrent() || (activeAuth && isAuthIdentityChanging(requestScope))) return cancelledRequest()
 
-  if (activeAuth && !_offlineRuntimeActive && isAuthIdleExpired()) {
-    await logoutFromBrowser('idle')
-    return { success: false, error: 'Sesión expirada por inactividad', status: 401 }
-  }
+  try {
+    if (activeAuth && !_offlineRuntimeActive && isAuthIdleExpired()) {
+      await logoutFromBrowser('idle')
+      return { success: false, error: 'Sesión expirada por inactividad', status: 401 }
+    }
 
-  if (activeAuth && !_offlineRuntimeActive) {
-    const refreshOutcome = await refreshAccessTokenIfStale()
-    if (refreshOutcome === 'expired') {
-      await logoutFromBrowser('expired')
-      return { success: false, error: 'Sesión expirada', status: 401 }
+    if (activeAuth && !_offlineRuntimeActive) {
+      const refreshOutcome = await refreshAccessTokenIfStale()
+      requestScope = scopeAfterRefresh(requestScope, refreshOutcome)
+      if (!isCurrent()) return cancelledRequest()
+      if (refreshOutcome === 'expired') {
+        await logoutFromBrowser('expired')
+        return { success: false, error: 'Sesión expirada', status: 401 }
+      }
+      if (refreshOutcome === 'unavailable') {
+        return { success: false, error: 'No se pudo verificar la sesión temporalmente', status: 503 }
+      }
     }
-    if (refreshOutcome === 'unavailable') {
-      return { success: false, error: 'No se pudo verificar la sesión temporalmente', status: 503 }
-    }
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') return cancelledRequest()
+    return { success: false, error: 'No se pudo verificar la sesión temporalmente', status: 503 }
   }
 
   const headers = new Headers(fetchOptions.headers)
@@ -337,6 +397,7 @@ export async function api<T>(
       headers,
       credentials: fetchOptions.credentials ?? 'include',
     })
+    if (!isCurrent()) return cancelledRequest()
 
     // Check for server version changes
     checkVersionHeader(res)
@@ -349,7 +410,9 @@ export async function api<T>(
     let data: any
     try {
       data = await res.json()
+      if (!isCurrent()) return cancelledRequest()
     } catch {
+      if (!isCurrent()) return cancelledRequest()
       // Response body is not JSON (empty or non-JSON)
       if (res.ok) return { success: true, data: undefined as unknown as T, status: res.status }
       return { success: false, error: `Error ${res.status}`, status: res.status }
@@ -359,18 +422,22 @@ export async function api<T>(
       // Handle 401 - try to refresh token before giving up
       if (res.status === 401 && typeof window !== 'undefined' && activeAuth && !_offlineRuntimeActive) {
         const refreshOutcome = await tryRefreshTokenOutcome()
+        requestScope = scopeAfterRefresh(requestScope, refreshOutcome)
+        if (!isCurrent()) return cancelledRequest()
         if (refreshOutcome === 'refreshed') {
           const retryRes = await fetch(`${API_BASE}${endpoint}`, {
             ...fetchOptions,
             headers,
             credentials: fetchOptions.credentials ?? 'include',
           })
+          if (!isCurrent()) return cancelledRequest()
           checkVersionHeader(retryRes)
           if (retryRes.status === 204 || retryRes.headers.get('content-length') === '0') {
             markAuthActivity()
             return { success: true, data: undefined as unknown as T, status: retryRes.status }
           }
           const retryData = await retryRes.json().catch(() => undefined) as T & { error?: string } | undefined
+          if (!isCurrent()) return cancelledRequest()
           if (retryRes.ok) {
             markAuthActivity()
             return { success: true, data: retryData as T, status: retryRes.status }
@@ -396,7 +463,7 @@ export async function api<T>(
     if (activeAuth && !_offlineRuntimeActive) markAuthActivity()
     return { success: true, data: data as T, status: res.status }
   } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
+    if (!isCurrent() || (err instanceof Error && err.name === 'AbortError')) {
       return { success: false, error: 'Solicitud cancelada' }
     }
     console.error('API Error:', err)
@@ -435,13 +502,19 @@ export async function apiBlob(endpoint: string, options: { signal?: AbortSignal;
   if (_offlineRuntimeActive) {
     return { success: false, error: 'Este archivo no forma parte de la copia offline preparada.', status: 503 }
   }
+  let requestScope = getAuthScope()
+  const isCurrent = () => requestIsCurrent(requestScope, options.signal)
+  if (!isCurrent() || isAuthIdentityChanging(requestScope)) return cancelledRequest()
   const request = () => fetch(`${API_BASE}${endpoint}`, {
     credentials: 'include', signal: options.signal, method: options.method, body: options.body, headers: options.headers,
   })
   try {
     let response = await request()
+    if (!isCurrent()) return cancelledRequest()
     if (response.status === 401 && !options.signal?.aborted) {
       const refreshOutcome = await tryRefreshTokenOutcome()
+      requestScope = scopeAfterRefresh(requestScope, refreshOutcome)
+      if (!isCurrent()) return cancelledRequest()
       if (refreshOutcome === 'unavailable') {
         return { success: false, error: 'No se pudo verificar la sesión temporalmente', status: 503 }
       }
@@ -450,6 +523,7 @@ export async function apiBlob(endpoint: string, options: { signal?: AbortSignal;
         return { success: false, error: 'Sesión expirada', status: 401 }
       }
       response = await request()
+      if (!isCurrent()) return cancelledRequest()
       if (response.status === 401) {
         await logoutFromBrowser('expired')
         return { success: false, error: 'Sesión expirada', status: 401 }
@@ -457,14 +531,17 @@ export async function apiBlob(endpoint: string, options: { signal?: AbortSignal;
     }
     if (!response.ok) {
       const payload = await response.json().catch(() => undefined) as { error?: string } | undefined
+      if (!isCurrent()) return cancelledRequest()
       return { success: false, error: payload?.error || `No se pudo abrir el archivo (${response.status})`, status: response.status }
     }
     markAuthActivity()
     const disposition = response.headers.get('content-disposition') || ''
     const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1]
-    return { success: true, blob: await response.blob(), filename, status: response.status }
+    const blob = await response.blob()
+    if (!isCurrent()) return cancelledRequest()
+    return { success: true, blob, filename, status: response.status }
   } catch (error) {
-    if ((error instanceof Error && error.name === 'AbortError') || options.signal?.aborted) {
+    if (!isCurrent() || (error instanceof Error && error.name === 'AbortError') || options.signal?.aborted) {
       return { success: false, error: 'Solicitud cancelada' }
     }
     return { success: false, error: 'No se pudo descargar la vista previa' }
@@ -475,8 +552,15 @@ export async function apiUpload<T = any>(endpoint: string, formData: FormData, o
   if (_offlineRuntimeActive) {
     return { success: false, error: 'Los archivos requieren conexión y no se guardaron.', status: 503 }
   }
+  let requestScope = getAuthScope()
+  const isCurrent = () => requestIsCurrent(requestScope, options.signal)
+  if (!isCurrent() || isAuthIdentityChanging(requestScope)) return cancelledRequest()
   if (isAuthIdleExpired()) {
-    await logoutFromBrowser('idle')
+    try { await logoutFromBrowser('idle') }
+    catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') return cancelledRequest()
+      return { success: false, error: 'No se pudo verificar la sesión temporalmente', status: 503 }
+    }
     return { success: false, error: 'Sesión expirada por inactividad' }
   }
 
@@ -491,10 +575,14 @@ export async function apiUpload<T = any>(endpoint: string, formData: FormData, o
 
   try {
     let res = await doFetch()
+    if (!isCurrent()) return cancelledRequest()
     if (res.status === 401 && typeof window !== 'undefined') {
       const refreshOutcome = await tryRefreshTokenOutcome()
+      requestScope = scopeAfterRefresh(requestScope, refreshOutcome)
+      if (!isCurrent()) return cancelledRequest()
       if (refreshOutcome === 'refreshed') {
         res = await doFetch()
+        if (!isCurrent()) return cancelledRequest()
         if (res.status === 401) {
           await logoutFromBrowser('expired')
           return { success: false, error: 'Sesión expirada', status: 401 }
@@ -507,11 +595,12 @@ export async function apiUpload<T = any>(endpoint: string, formData: FormData, o
       }
     }
     const data = await res.json().catch(() => undefined)
+    if (!isCurrent()) return cancelledRequest()
     if (!res.ok) return { success: false, error: (data as any)?.error || `Error ${res.status}`, status: res.status }
     markAuthActivity()
     return { success: true, data: data as T, status: res.status }
   } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
+    if (!isCurrent() || (err instanceof Error && err.name === 'AbortError')) {
       return { success: false, error: 'Solicitud cancelada' }
     }
     console.error('Upload Error:', err)

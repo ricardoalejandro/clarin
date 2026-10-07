@@ -222,7 +222,7 @@ function CreateSurveyDialog({ programId, templates, loading, selectedId, setSele
   );
 }
 
-function RecipientLinksDialog({ programId, instance, onClose }: { programId: string; instance: SurveyInstanceSummary; onClose: () => void }) {
+export function RecipientLinksDialog({ programId, instance, onClose }: { programId: string; instance: SurveyInstanceSummary; onClose: () => void }) {
   const [query, setQuery] = useState('');
   const [appliedQuery, setAppliedQuery] = useState('');
   const [recipients, setRecipients] = useState<SurveyInstanceRecipient[]>([]);
@@ -233,15 +233,17 @@ function RecipientLinksDialog({ programId, instance, onClose }: { programId: str
   const [copiedId, setCopiedId] = useState('');
   const requestRef = useRef<AbortController | null>(null);
   const requestSequenceRef = useRef(0);
+  const [requestRevision, setRequestRevision] = useState(0);
 
   const updateQuery = (value: string) => {
     requestRef.current?.abort();
     requestSequenceRef.current += 1;
     setLoading(false);
     setQuery(value);
-    if (!value) {
+    if (!value.trim()) {
       setAppliedQuery('');
       setOffset(0);
+      setRequestRevision(current => current + 1);
     }
   };
 
@@ -250,6 +252,7 @@ function RecipientLinksDialog({ programId, instance, onClose }: { programId: str
     const timer = window.setTimeout(() => {
       setAppliedQuery(query.trim());
       setOffset(0);
+      setRequestRevision(current => current + 1);
     }, SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [query]);
@@ -285,7 +288,7 @@ function RecipientLinksDialog({ programId, instance, onClose }: { programId: str
     };
     void load();
     return () => controller.abort();
-  }, [appliedQuery, instance.id, offset, programId]);
+  }, [appliedQuery, instance.id, offset, programId, requestRevision]);
 
   const searchPending = query.trim() !== appliedQuery;
 
@@ -306,7 +309,7 @@ function RecipientLinksDialog({ programId, instance, onClose }: { programId: str
           <div className="relative"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={query} onChange={event => updateQuery(event.target.value)} placeholder="Buscar por nombre o teléfono" aria-busy={searchPending || loading} className="min-h-11 w-full rounded-xl border border-slate-200 pl-10 pr-16 text-sm outline-none focus:border-emerald-500" />{searchPending && <Loader2 aria-label="Esperando para buscar destinatarios" className="absolute right-10 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" />}{query && <button type="button" onClick={() => updateQuery('')} aria-label="Limpiar búsqueda de destinatarios" className="absolute right-1 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}</div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
-          {loading && offset === 0 ? <div className="flex min-h-40 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-emerald-600" /></div> : error ? <p className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{error}</p> : recipients.length === 0 ? <p className="p-8 text-center text-sm text-slate-500">No hay destinatarios para esta búsqueda.</p> : (
+          {loading && offset === 0 && recipients.length === 0 ? <div className="flex min-h-40 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-emerald-600" /></div> : error ? <div role="alert" className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700"><p>{error}</p><button type="button" onClick={() => setRequestRevision(current => current + 1)} className="mt-2 min-h-11 rounded-lg bg-white px-3 font-semibold">Reintentar</button></div> : recipients.length === 0 ? <p className="p-8 text-center text-sm text-slate-500">No hay destinatarios para esta búsqueda.</p> : (
             <div className="space-y-1">
               {recipients.map(recipient => <div key={recipient.id} className="flex min-h-14 items-center gap-3 rounded-xl px-3 hover:bg-slate-50"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-emerald-700"><Users className="h-4 w-4" /></span><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium text-slate-800">{recipient.contact_name}</p><p className="text-xs text-slate-500">{recipient.status === 'completed' ? 'Respondida' : recipient.status === 'opened' ? 'Abierta' : 'Pendiente'}</p></div><button type="button" onClick={() => void copy(recipient)} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-600" aria-label={`Copiar enlace para ${recipient.contact_name}`}>{copiedId === recipient.id ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}</button></div>)}
               {recipients.length < total && <button type="button" disabled={loading} onClick={() => setOffset(recipients.length)} className="mt-2 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700 disabled:opacity-50">{loading && <Loader2 className="h-4 w-4 animate-spin" />}Cargar más</button>}

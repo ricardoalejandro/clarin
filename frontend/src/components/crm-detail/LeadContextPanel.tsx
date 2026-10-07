@@ -69,6 +69,8 @@ function viewportRect(): ViewportRect {
 export default function LeadContextPanel({ lead, stages = [], disabled = false, saving = false, embedded = false, onStageChange }: Props) {
   const triggerRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const menuFocusFrameRef = useRef<number | null>(null)
+  const restoreFocusLeadRef = useRef<string | null>(null)
   const listboxId = useId()
   const overlayId = useId()
   const overlayPortal = useOperationalOverlayPortal()
@@ -91,9 +93,23 @@ export default function LeadContextPanel({ lead, stages = [], disabled = false, 
   useOperationalOverlayRegistration(open, `crm-stage-picker-${overlayId}`)
 
   const close = (restoreFocus = false) => {
+    if (menuFocusFrameRef.current !== null) {
+      cancelAnimationFrame(menuFocusFrameRef.current)
+      menuFocusFrameRef.current = null
+    }
+    restoreFocusLeadRef.current = restoreFocus ? lead.id : null
     setOpen(false)
-    if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus())
   }
+
+  useLayoutEffect(() => {
+    if (restoreFocusLeadRef.current !== lead.id) restoreFocusLeadRef.current = null
+    if (open || isDisabled || !restoreFocusLeadRef.current) return
+    restoreFocusLeadRef.current = null
+    const trigger = triggerRef.current
+    const active = document.activeElement
+    // Completing a slow save must not steal focus from another user action.
+    if (trigger && (active === document.body || active === trigger)) trigger.focus()
+  }, [isDisabled, lead.id, open])
 
   useLayoutEffect(() => {
     if (!open) return
@@ -123,14 +139,23 @@ export default function LeadContextPanel({ lead, stages = [], disabled = false, 
     if (!open) return
     const selectedIndex = Math.max(0, options.findIndex(option => option.id === currentStageId))
     setActiveIndex(selectedIndex)
-    requestAnimationFrame(() => menuRef.current?.focus())
+    menuFocusFrameRef.current = requestAnimationFrame(() => {
+      menuFocusFrameRef.current = null
+      menuRef.current?.focus()
+    })
     const dismiss = (event: MouseEvent) => {
       const target = event.target as Node
       if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) return
       close(false)
     }
     document.addEventListener('mousedown', dismiss)
-    return () => document.removeEventListener('mousedown', dismiss)
+    return () => {
+      if (menuFocusFrameRef.current !== null) {
+        cancelAnimationFrame(menuFocusFrameRef.current)
+        menuFocusFrameRef.current = null
+      }
+      document.removeEventListener('mousedown', dismiss)
+    }
   }, [currentStageId, open, options])
 
   useEffect(() => {
@@ -241,10 +266,15 @@ export default function LeadContextPanel({ lead, stages = [], disabled = false, 
         aria-controls={open ? listboxId : undefined}
         aria-haspopup="listbox"
         disabled={isDisabled}
-        onClick={() => { setError(''); setOpen(current => !current) }}
+        onClick={() => {
+          setError('')
+          if (open) close(false)
+          else { restoreFocusLeadRef.current = null; setOpen(true) }
+        }}
         onKeyDown={event => {
           if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
             event.preventDefault()
+            restoreFocusLeadRef.current = null
             setOpen(true)
           }
         }}

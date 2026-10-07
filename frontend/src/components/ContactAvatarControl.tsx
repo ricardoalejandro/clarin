@@ -1,12 +1,14 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Camera, Check, ChevronDown, Contrast, FlipHorizontal2, FlipVertical2,
   ImagePlus, Loader2, Maximize2, RefreshCw, RotateCw, SlidersHorizontal, Trash2, Undo2, X,
 } from 'lucide-react'
 import { api, apiUpload } from '@/lib/api'
+import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
+import { encodeAvatarCanvas } from '@/lib/avatarImageExport'
 import {
   OPERATIONAL_OVERLAY_LAYERS,
   useOperationalOverlayPortal,
@@ -178,6 +180,8 @@ export default function ContactAvatarControl({
   const menuRef = useRef<HTMLDivElement>(null)
   const menuTriggerRef = useRef<HTMLButtonElement>(null)
   const menuPopupRef = useRef<HTMLDivElement>(null)
+  const menuFramesRef = useRef(new Set<number>())
+  const menuEntryFocusedRef = useRef(false)
   const dialogRef = useRef<HTMLDivElement>(null)
   const dialogReturnFocusRef = useRef<HTMLElement | null>(null)
   const metadataRequestRef = useRef(0)
@@ -185,8 +189,10 @@ export default function ContactAvatarControl({
   const operationControllerRef = useRef<AbortController | null>(null)
   const filePickerIdentityRef = useRef('')
   const busyRef = useRef(false)
-  const identityKey = `${contactId}:${contextType}:${contextId}`
+  const authScope = useSyncExternalStore(subscribeAuthScope, getAuthScope, () => 'server')
+  const identityKey = `${authScope}:${contactId}:${contextType}:${contextId}`
   const identityRef = useRef(identityKey)
+  identityRef.current = identityKey
   const operationalPortal = useOperationalOverlayPortal()
   const overlayTarget = operationalPortal ?? (typeof document !== 'undefined' ? document.body : null)
   const dialogOpen = dialog !== 'none'
@@ -196,6 +202,11 @@ export default function ContactAvatarControl({
   const updateBusy = useCallback((value: boolean) => {
     busyRef.current = value
     setBusy(value)
+  }, [])
+
+  const cancelMenuFrames = useCallback(() => {
+    menuFramesRef.current.forEach(frame => cancelAnimationFrame(frame))
+    menuFramesRef.current.clear()
   }, [])
 
   const currentURL = avatar.avatar_url ?? ''
@@ -213,10 +224,10 @@ export default function ContactAvatarControl({
     onChange?.(next)
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('clarin:contact-avatar-updated', {
-        detail: { contactId, avatar: next },
+        detail: { contactId, avatar: next, authScope },
       }))
     }
-  }, [contactId, onChange])
+  }, [contactId, onChange, authScope])
 
   const beginOperation = useCallback(() => {
     operationControllerRef.current?.abort()
@@ -231,6 +242,7 @@ export default function ContactAvatarControl({
 
   const operationIsCurrent = useCallback((operation: { id: number; identity: string }) => (
     operation.id === operationRequestRef.current && operation.identity === identityRef.current
+      && operation.identity.startsWith(`${getAuthScope()}:`) && !isAuthIdentityChanging()
   ), [])
 
   useEffect(() => {
@@ -244,6 +256,8 @@ export default function ContactAvatarControl({
     setDevices([])
     setMenuOpen(false)
     setMenuPosition(null)
+    cancelMenuFrames()
+    menuEntryFocusedRef.current = false
     setDialog('none')
     updateBusy(false)
     setError('')
@@ -256,11 +270,13 @@ export default function ContactAvatarControl({
     setTransform(initialTransform)
     setHistory([])
     setDragging(false)
+    if (isAuthIdentityChanging(authScope)) return () => controller.abort()
     void api<AvatarMetadataResponse>(`/api/contact-avatars/${contactId}?${contextQuery}`, {
       signal: controller.signal,
     }).then(result => {
-      if (requestID !== metadataRequestRef.current || identityKey !== identityRef.current || !result.success || !result.data) return
-      setAvatar(result.data.avatar || { avatar_url: avatarUrl, revision: 0 })
+      if (requestID !== metadataRequestRef.current || identityKey !== identityRef.current || authScope !== getAuthScope() || !result.success || !result.data) return
+      const incoming = result.data.avatar || { avatar_url: avatarUrl, revision: 0 }
+      setAvatar(previous => incoming.revision < previous.revision ? previous : incoming)
       setDevices(result.data.devices || [])
     })
     return () => {
@@ -268,13 +284,20 @@ export default function ContactAvatarControl({
       metadataRequestRef.current++
       operationRequestRef.current++
       operationControllerRef.current?.abort()
+      cancelMenuFrames()
     }
-  }, [avatarUrl, contactId, contextQuery, identityKey, updateBusy])
+  }, [contactId, contextQuery, identityKey, updateBusy, authScope, cancelMenuFrames])
+
+  useEffect(() => {
+    setAvatar(previous => previous.avatar_url === avatarUrl ? previous : { ...previous, avatar_url: avatarUrl })
+  }, [avatarUrl])
 
   useEffect(() => {
     const syncAvatar = (event: Event) => {
-      const detail = (event as CustomEvent<{ contactId?: string; avatar?: ContactAvatarInfo }>).detail
-      if (detail?.contactId === contactId && detail.avatar) setAvatar(detail.avatar)
+      const detail = (event as CustomEvent<{ contactId?: string; avatar?: ContactAvatarInfo; authScope?: string }>).detail
+      if (detail?.contactId === contactId && detail.avatar && detail.authScope === getAuthScope() && !isAuthIdentityChanging()) {
+        setAvatar(previous => detail.avatar!.revision >= previous.revision ? detail.avatar! : previous)
+      }
     }
     window.addEventListener('clarin:contact-avatar-updated', syncAvatar)
     return () => window.removeEventListener('clarin:contact-avatar-updated', syncAvatar)
@@ -319,13 +342,19 @@ export default function ContactAvatarControl({
       event.stopImmediatePropagation()
       setMenuOpen(false)
       setMenuPosition(null)
-      requestAnimationFrame(() => menuTriggerRef.current?.focus())
+      cancelMenuFrames()
+      requestAnimationFrame(() => {
+        if (identityKey === identityRef.current && authScope === getAuthScope()) menuTriggerRef.current?.focus()
+      })
     }
-    const reposition = () => requestAnimationFrame(positionMenu)
-    const frame = requestAnimationFrame(() => {
-      positionMenu()
-      menuPopupRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus()
-    })
+    const reposition = () => {
+      const frame = requestAnimationFrame(() => {
+        menuFramesRef.current.delete(frame)
+        if (identityKey === identityRef.current && authScope === getAuthScope()) positionMenu()
+      })
+      menuFramesRef.current.add(frame)
+    }
+    reposition()
     document.addEventListener('mousedown', close)
     document.addEventListener('keydown', escape, true)
     window.addEventListener('resize', reposition)
@@ -333,7 +362,7 @@ export default function ContactAvatarControl({
     window.visualViewport?.addEventListener('resize', reposition)
     window.visualViewport?.addEventListener('scroll', reposition)
     return () => {
-      cancelAnimationFrame(frame)
+      cancelMenuFrames()
       document.removeEventListener('mousedown', close)
       document.removeEventListener('keydown', escape, true)
       window.removeEventListener('resize', reposition)
@@ -341,7 +370,18 @@ export default function ContactAvatarControl({
       window.visualViewport?.removeEventListener('resize', reposition)
       window.visualViewport?.removeEventListener('scroll', reposition)
     }
-  }, [menuOpen, positionMenu])
+  }, [menuOpen, positionMenu, identityKey, authScope, cancelMenuFrames])
+
+  useLayoutEffect(() => {
+    if (!menuOpen) { menuEntryFocusedRef.current = false; return }
+    if (!menuPosition || menuEntryFocusedRef.current || isAuthIdentityChanging(authScope) || authScope !== getAuthScope()) return
+    const popup = menuPopupRef.current
+    if (!popup || popup.style.visibility !== 'visible') return
+    // Focus after React commits the visible portal, never in the positioning RAF.
+    // Repositioning must preserve the user's current keyboard selection.
+    menuEntryFocusedRef.current = true
+    popup.querySelector<HTMLButtonElement>('[role="menuitem"]:not([disabled])')?.focus({ preventScroll: true })
+  }, [menuOpen, menuPosition, authScope])
 
   useEffect(() => {
     return () => {
@@ -580,13 +620,13 @@ export default function ContactAvatarControl({
     setTransform(previous => ({ ...previous, offsetX: dragRef.current.startX + deltaX, offsetY: dragRef.current.startY + deltaY }))
   }
 
-  const exportEditorBlob = async (): Promise<Blob | null> => {
+  const exportEditorBlob = async (signal: AbortSignal): Promise<Blob | null> => {
     const canvas = canvasRef.current
     if (!canvas) return null
     let quality = 0.86
     let blob: Blob | null = null
     while (quality >= 0.7) {
-      blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality))
+      blob = await encodeAvatarCanvas(canvas, quality, signal)
       if (!blob || blob.size <= targetAvatarBytes) break
       quality -= 0.04
     }
@@ -594,32 +634,38 @@ export default function ContactAvatarControl({
   }
 
   const saveManualAvatar = async () => {
-    if (!editorImage) return
+    if (!editorImage || busyRef.current || isAuthIdentityChanging()) return
     const operation = beginOperation()
     updateBusy(true)
     setError('')
-    const blob = await exportEditorBlob()
-    if (!operationIsCurrent(operation)) return
-    if (!blob) {
+    try {
+      const blob = await exportEditorBlob(operation.signal)
+      if (!operationIsCurrent(operation)) return
+      if (!blob) {
+        updateBusy(false)
+        setError('No se pudo preparar la imagen')
+        return
+      }
+      const form = new FormData()
+      form.append('image', blob, 'contact-avatar.jpg')
+      form.append('context_type', contextType)
+      form.append('context_id', contextId)
+      const result = await apiUpload<{ success: boolean; avatar: ContactAvatarInfo }>(`/api/contact-avatars/${contactId}/upload`, form, {
+        signal: operation.signal,
+      })
+      if (!operationIsCurrent(operation)) return
       updateBusy(false)
-      setError('No se pudo preparar la imagen')
-      return
+      if (!result.success || !result.data?.avatar) {
+        setError(result.error || 'No se pudo guardar la foto')
+        return
+      }
+      publishAvatar(result.data.avatar)
+      setDialog('none')
+    } catch (failure) {
+      if (operationIsCurrent(operation)) setError(failure instanceof Error ? failure.message : 'No se pudo preparar la imagen. Vuelve a intentarlo.')
+    } finally {
+      if (operationIsCurrent(operation)) updateBusy(false)
     }
-    const form = new FormData()
-    form.append('image', blob, 'contact-avatar.jpg')
-    form.append('context_type', contextType)
-    form.append('context_id', contextId)
-    const result = await apiUpload<{ success: boolean; avatar: ContactAvatarInfo }>(`/api/contact-avatars/${contactId}/upload`, form, {
-      signal: operation.signal,
-    })
-    if (!operationIsCurrent(operation)) return
-    updateBusy(false)
-    if (!result.success || !result.data?.avatar) {
-      setError(result.error || 'No se pudo guardar la foto')
-      return
-    }
-    publishAvatar(result.data.avatar)
-    setDialog('none')
   }
 
   const removeAvatar = async () => {
@@ -645,6 +691,8 @@ export default function ContactAvatarControl({
     const items = Array.from(menuPopupRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not([disabled])') || [])
     if (items.length === 0) return
     event.preventDefault()
+    cancelMenuFrames()
+    menuEntryFocusedRef.current = true
     const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement)
     const nextIndex = event.key === 'Home'
       ? 0

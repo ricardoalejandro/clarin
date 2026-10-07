@@ -13,6 +13,9 @@ import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { Chat, ChatState, Device, Message } from '@/types/chat'
 import { subscribeWebSocket } from '@/lib/api'
+import { messageBelongsToChat } from './chatEventScope'
+import { applyDeviceDeletionResult, isDeviceDeleting } from '@/components/settings/deviceLifecycle'
+import type { DeviceDeletionResult } from '@/types/chat'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import { mergeMessageSender } from '@/utils/chatInbox'
 import { getChatDisplayName } from '@/utils/chat'
@@ -197,6 +200,10 @@ function mergeFetchedMessages(
       merged[index] = {
         ...canonical,
         ...message,
+        quoted_message_id: canonical.quoted_message_id ?? message.quoted_message_id,
+        quoted_body: canonical.quoted_body ?? message.quoted_body,
+        quoted_sender: canonical.quoted_sender ?? message.quoted_sender,
+        quoted_is_from_me: canonical.quoted_is_from_me ?? message.quoted_is_from_me,
         sender: mergeMessageSender(canonical.sender, message.sender),
         reactions: mergeCanonicalReactionSnapshot(
           message.reactions,
@@ -253,7 +260,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     : deviceValidationState
   const deviceId = activeDeviceValidationState === 'ready' ? canonicalDevice?.id : undefined
   const deviceProvider = canonicalDevice?.provider || 'whatsapp_web'
-  const deviceUnavailable = Boolean(canonicalDevice && (canonicalDevice.status !== 'connected' || deviceProvider !== 'whatsapp_web'))
+  const deviceUnavailable = Boolean(canonicalDevice && (isDeviceDeleting(canonicalDevice) || canonicalDevice.status !== 'connected' || deviceProvider !== 'whatsapp_web'))
   const effectiveReadOnly = readOnly || activeDeviceValidationState !== 'ready' || !deviceId || deviceUnavailable
   const canSendStickers = !effectiveReadOnly && (
     canonicalDevice?.runtime_capabilities?.can_send_sticker === true
@@ -266,6 +273,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         ? 'No se pudo validar el canal de WhatsApp. Vuelve a abrir el chat para reintentar.'
         : !deviceId
           ? 'Esta conversación no tiene un dispositivo asociado.'
+          : isDeviceDeleting(canonicalDevice)
+            ? 'Este dispositivo se está eliminando. Puedes consultar el historial en solo lectura.'
           : deviceProvider === 'whatsapp_cloud_api'
             ? 'Este chat usa Cloud API y no admite acciones manuales desde esta vista.'
             : canonicalDevice && canonicalDevice.status !== 'connected'
@@ -1441,6 +1450,10 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
             )
             return { ...previous, replies: reconciled.replies, total: reconciled.total }
           })
+        } else if (eventType === 'device_deletion' && payload?.device_id === canonicalDevice?.id) {
+          const deletion = payload as DeviceDeletionResult
+          setCanonicalDevice(previous => previous ? applyDeviceDeletionResult([previous], deletion)[0] || null : null)
+          void fetchChatDetails()
         } else if (eventType === 'device_status' && payload?.device_id === deviceId) {
           const nextStatus = typeof payload.status === 'string' ? payload.status : 'disconnected'
           if (nextStatus !== 'connected') {
@@ -1468,10 +1481,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         } else if ((eventType === 'new_message' || eventType === 'message_sent') && payload) {
           // The actual message object is nested inside payload.message
           const actualMsg = payload.message || payload
-          const matchChatId = payload.chat_id || actualMsg.chat_id
-          if (matchChatId === chatId ||
-              (chat && actualMsg.from_jid === chat?.jid) ||
-              (chat && actualMsg.to === chat?.jid)) {
+          if (messageBelongsToChat({ chatId, jid: chat?.jid, deviceId, provider: canonicalDevice?.provider }, payload, actualMsg)) {
             const actualMessage = actualMsg as Message
             reconcileReactionSnapshotBaseline(chatId, actualMessage.message_id, actualMessage.reactions)
             const shouldFollowMessage = isNearBottomRef.current
@@ -1519,15 +1529,18 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
             if (shouldFollowMessage) scrollToBottom()
             else if (!alreadyKnown) setPendingLatestMessages(current => current + 1)
           }
-        } else if ((eventType === 'message_update') && payload) {
+        } else if ((eventType === 'message_update' || eventType === 'message_updated') && payload) {
           const actualMsg = payload.message || payload
           const canonicalMessage = actualMsg as Message
+          if (!messageBelongsToChat({ chatId, jid: chat?.jid, deviceId, provider: canonicalDevice?.provider }, payload, canonicalMessage)) return
           reconcileReactionSnapshotBaseline(chatId, canonicalMessage.message_id, canonicalMessage.reactions)
           updateMessages(prev => prev.map(m => {
             if (m.id !== actualMsg.id) return m
             const pending = Boolean(reactionQueuesRef.current.get(reactionQueueKey(chatId, m.message_id))?.inFlight)
             return {
+              ...m,
               ...canonicalMessage,
+              sender: mergeMessageSender(canonicalMessage.sender, m.sender),
               reactions: mergeCanonicalReactionSnapshot(m.reactions, canonicalMessage.reactions, pending),
             }
           }))
@@ -1596,13 +1609,14 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
           }
           setSyncingHistory(!finished)
           const saved = Number(payload.messages_saved ?? payload.saved ?? 0)
+          const hydrated = Number(payload.quotes_hydrated ?? 0)
           if (payload.error) {
             setHistorySyncFeedback({ kind: 'error', message: String(payload.error) })
           } else if (!finished) {
             setHistorySyncFeedback({ kind: 'info', message: `Se recuperaron ${saved} mensaje${saved === 1 ? '' : 's'}; WhatsApp continúa buscando mensajes anteriores…` })
             fetchChatDetails()
-          } else if (saved > 0) {
-            setHistorySyncFeedback({ kind: 'info', message: `Se recuperaron ${saved} mensaje${saved === 1 ? '' : 's'} anterior${saved === 1 ? '' : 'es'}.` })
+          } else if (saved > 0 || hydrated > 0) {
+            setHistorySyncFeedback({ kind: 'info', message: saved > 0 ? `Se recuperaron ${saved} mensaje${saved === 1 ? '' : 's'} anterior${saved === 1 ? '' : 'es'}.` : `Se actualizaron ${hydrated} respuesta${hydrated === 1 ? '' : 's'} del historial.` })
             fetchChatDetails()
           } else {
             setHistorySyncFeedback({ kind: 'info', message: 'No se encontraron mensajes anteriores nuevos.' })
@@ -1663,7 +1677,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     return () => {
       unsubscribe()
     }
-  }, [chatId, deviceId, chat, markDisplayedIncomingRead, reconcileReactionSnapshotBaseline, updateReactionProjectionsForChat])
+  }, [chatId, deviceId, chat, canonicalDevice?.provider, markDisplayedIncomingRead, reconcileReactionSnapshotBaseline, updateReactionProjectionsForChat])
 
   const fetchChatDetails = async (targetChatId: string | null = chatId) => {
     if (!targetChatId) return

@@ -201,19 +201,19 @@ func (s *Server) handleGetContactProfile(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "Contacto no encontrado")
 	}
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo cargar el contacto"})
+		return contactFailure(c, "profile_read", "No se pudo cargar el contacto", err)
 	}
 	definitions, err := s.loadContactProfileFieldDefinitions(c.Context(), accountID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudieron cargar los campos del contacto"})
+		return contactFailure(c, "profile_fields", "No se pudieron cargar los campos del contacto", err)
 	}
 	observationCount, err := s.services.ContactProfile.CountObservations(c.Context(), accountID, contactID)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo cargar el resumen del historial"})
+		return contactFailure(c, "profile_history_count", "No se pudo cargar el resumen del historial", err)
 	}
 	pinnedCount, err := s.services.ContactProfile.CountPinnedObservations(c.Context(), accountID, contactID)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo cargar el resumen de fijados"})
+		return contactFailure(c, "profile_pinned_count", "No se pudo cargar el resumen de fijados", err)
 	}
 	return c.JSON(contactProfileResponse(contact, profileContext, definitions, observationCount, pinnedCount, s.contactAvatarCallerHasPermission(c, domain.PermTags)))
 }
@@ -558,24 +558,28 @@ func (s *Server) afterCanonicalContactProfileChange(accountID uuid.UUID, contact
 }
 
 func (s *Server) handleListContactProfileObservations(c *fiber.Ctx) error {
-	contactID, _, err := s.resolveContactProfileRequest(c)
+	contactID, profileContext, err := s.resolveContactProfileRequest(c)
 	if err != nil {
 		return err
 	}
 	accountID := c.Locals("account_id").(uuid.UUID)
 	userID := c.Locals("user_id").(uuid.UUID)
-	observations, err := s.services.ContactProfile.ListObservations(c.Context(), accountID, contactID, userID, s.isAccountAdmin(c, accountID, userID), c.QueryInt("limit", 50), c.QueryInt("offset", 0))
+	page, err := s.services.ContactProfile.ListObservationPage(c.Context(), accountID, contactID, userID, s.isAccountAdmin(c, accountID, userID), c.QueryInt("limit", 50), c.QueryInt("offset", 0), c.Query("cursor"), profileContext.Type+":"+profileContext.ID.String())
+	if errors.Is(err, repository.ErrContactObservationCursor) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "El historial cambió de contexto; vuelve a cargarlo", "code": "contact_history_cursor_invalid"})
+	}
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudieron cargar las observaciones"})
-	}
-	if observations == nil {
-		observations = make([]*domain.Interaction, 0)
 	}
 	total, err := s.services.ContactProfile.CountObservations(c.Context(), accountID, contactID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo cargar el total del historial"})
 	}
-	return c.JSON(fiber.Map{"success": true, "observations": observations, "total": total})
+	pinned, err := s.services.ContactProfile.CountPinnedObservations(c.Context(), accountID, contactID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo cargar el total de notas fijadas"})
+	}
+	return c.JSON(fiber.Map{"success": true, "observations": page.Observations, "total": total, "pinned_total": pinned, "next_cursor": page.NextCursor, "has_more": page.HasMore})
 }
 
 func (s *Server) handleCreateContactProfileObservation(c *fiber.Ctx) error {
@@ -634,6 +638,7 @@ func (s *Server) handleCreateContactProfileObservation(c *fiber.Ctx) error {
 	if total >= 0 {
 		response["total"] = total
 	}
+	s.addObservationPinnedTotal(c, accountID, contactID, response)
 	return c.Status(fiber.StatusCreated).JSON(response)
 }
 
@@ -679,10 +684,11 @@ func (s *Server) handleDeleteContactProfileObservation(c *fiber.Ctx) error {
 		total = -1
 	}
 	s.afterContactProfileObservationChange(accountID, contactID, "deleted", observationID)
-	response := fiber.Map{"success": true}
+	response := fiber.Map{"success": true, "observation_id": observationID}
 	if total >= 0 {
 		response["total"] = total
 	}
+	s.addObservationPinnedTotal(c, accountID, contactID, response)
 	return c.JSON(response)
 }
 
@@ -728,7 +734,7 @@ func (s *Server) handleUpdateContactProfileObservation(c *fiber.Ctx) error {
 		return contactObservationMutationError(c, err)
 	}
 	s.afterContactProfileObservationChange(a, contactID, "updated", oid)
-	return c.JSON(fiber.Map{"success": true, "observation": item})
+	return c.JSON(s.observationMutationResponse(c, a, contactID, item))
 }
 func (s *Server) handlePinContactProfileObservation(c *fiber.Ctx) error {
 	contactID, _, err := s.resolveContactProfileRequest(c)
@@ -752,7 +758,24 @@ func (s *Server) handlePinContactProfileObservation(c *fiber.Ctx) error {
 		return contactObservationMutationError(c, err)
 	}
 	s.afterContactProfileObservationChange(a, contactID, "pinned", oid)
-	return c.JSON(fiber.Map{"success": true, "observation": item})
+	return c.JSON(s.observationMutationResponse(c, a, contactID, item))
+}
+
+func (s *Server) addObservationPinnedTotal(c *fiber.Ctx, accountID, contactID uuid.UUID, response fiber.Map) {
+	if pinned, err := s.services.ContactProfile.CountPinnedObservations(c.Context(), accountID, contactID); err == nil {
+		response["pinned_total"] = pinned
+	} else {
+		log.Printf("contact observation count failed account=%s contact=%s error_type=%T", accountID, contactID, err)
+	}
+}
+
+func (s *Server) observationMutationResponse(c *fiber.Ctx, accountID, contactID uuid.UUID, item *domain.Interaction) fiber.Map {
+	response := fiber.Map{"success": true, "observation": item}
+	if total, err := s.services.ContactProfile.CountObservations(c.Context(), accountID, contactID); err == nil {
+		response["total"] = total
+	}
+	s.addObservationPinnedTotal(c, accountID, contactID, response)
+	return response
 }
 
 func (s *Server) afterContactProfileObservationChange(accountID, contactID uuid.UUID, action string, observationID uuid.UUID) {

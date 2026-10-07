@@ -4,7 +4,7 @@ import { createRef, type ReactNode } from 'react'
 import type { ContactProfileContact } from '@/types/contact-profile'
 import ContactDetailSurface, { type ContactDetailSurfaceHandle } from './ContactDetailSurface'
 
-const mocks = vi.hoisted(() => ({ updateContact: vi.fn(), refreshObservations: vi.fn(), googleSync: vi.fn() }))
+const mocks = vi.hoisted(() => ({ updateContact: vi.fn(), refreshObservations: vi.fn(), googleSync: vi.fn(), createObservation: vi.fn(), loadMoreObservations: vi.fn(), profileOverrides: {} as Record<string, unknown> }))
 
 function EmbeddedPanel({ children }: { embedded?: boolean; onCountChange?: (count: number) => void; children: ReactNode }) {
   return <div>{children}</div>
@@ -51,10 +51,12 @@ vi.mock('./useContactProfile', () => ({
     updateContact: mocks.updateContact,
     updateAvatarLocally: vi.fn(),
     updateGoogleSyncLocally: vi.fn(),
-    createObservation: vi.fn(),
+    createObservation: mocks.createObservation,
+    loadMoreObservations: mocks.loadMoreObservations,
     deleteObservation: vi.fn(),
     updateObservation: vi.fn(),
     setObservationPinned: vi.fn(),
+    ...mocks.profileOverrides,
   }),
 }))
 
@@ -67,6 +69,9 @@ vi.mock('@/components/ContactAvatarControl', () => ({ default: () => <div data-t
 afterEach(cleanup)
 
 beforeEach(() => {
+  mocks.profileOverrides = {}
+  mocks.createObservation.mockReset().mockResolvedValue({ success: true })
+  mocks.loadMoreObservations.mockReset().mockResolvedValue(undefined)
   mocks.updateContact.mockReset().mockResolvedValue({ success: true, contact })
   mocks.refreshObservations.mockReset().mockResolvedValue(undefined)
   mocks.googleSync.mockReset().mockReturnValue({
@@ -85,6 +90,50 @@ beforeEach(() => {
 })
 
 describe('ContactDetailSurface date editing', () => {
+  it('opens the general composer from the primary action while history stays collapsed, including errors', async () => {
+    mocks.createObservation.mockResolvedValue({ success: false, error: 'Fallo controlado de guardado' })
+    render(<ContactDetailSurface contactId="contact-1" context={{ type: 'chat', id: 'chat-1' }} initialContact={contact} onClose={vi.fn()} />)
+    const history = screen.getByRole('button', { name: /Historial general del contacto/ })
+    expect(history).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('button', { name: 'Añadir nota general' })).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: /^Observación$/ }))
+    fireEvent.change(screen.getByPlaceholderText(/Nota transversal/), { target: { value: 'Nueva nota' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar nota' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Fallo controlado de guardado')
+    expect(history).toHaveAttribute('aria-expanded', 'false')
+    expect(mocks.refreshObservations).not.toHaveBeenCalled()
+    expect(screen.getByPlaceholderText(/Nota transversal/)).toHaveValue('Nueva nota')
+  })
+
+  it('gates pin by the note permission and disables every note control while pending', () => {
+    mocks.profileOverrides = { observations: [
+      { id: 'other-note', type: 'note', notes: 'Otra autora', created_at: '2026-01-01T00:00:00Z', can_pin: false, can_edit: false, can_delete: false },
+      { id: 'owned-note', type: 'note', notes: 'Propia', created_at: '2026-01-02T00:00:00Z', can_pin: true, can_edit: true, can_delete: true },
+    ], pendingObservationIds: new Set(['owned-note']), observationsLoaded: true }
+    render(<ContactDetailSurface contactId="contact-1" context={{ type: 'contact', id: 'contact-1' }} initialContact={contact} onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: /Historial general del contacto/ }))
+    expect(screen.getAllByRole('button', { name: 'Fijar nota' })).toHaveLength(1)
+    expect(screen.getByRole('button', { name: 'Fijar nota' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Editar nota' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Eliminar nota' })).toBeDisabled()
+  })
+
+  it('requests another history page at the end of the local window', async () => {
+    mocks.profileOverrides = { observations: Array.from({ length: 50 }, (_, index) => ({ id: `note-${index}`, type: 'note', notes: `Fila ${index}`, created_at: '2026-01-01T00:00:00Z' })), observationsLoaded: true, observationsHasMore: true }
+    render(<ContactDetailSurface contactId="contact-1" context={{ type: 'contact', id: 'contact-1' }} initialContact={contact} onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: /Historial general del contacto/ }))
+    for (let index = 0; index < 5; index++) { fireEvent.click(screen.getByRole('button', { name: 'Mostrar más' })); await waitFor(() => expect(screen.getByText(`Fila ${Math.min(14 + index * 10, 49)}`, { exact: true })).toBeVisible()) }
+    expect(mocks.loadMoreObservations).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers a retry when the initial history request failed', () => {
+    mocks.profileOverrides = { observationsError: 'Fallo temporal del historial', observationsLoaded: false }
+    render(<ContactDetailSurface contactId="contact-1" context={{ type: 'contact', id: 'contact-1' }} initialContact={contact} onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: /Historial general del contacto/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar historial' }))
+    expect(mocks.refreshObservations).toHaveBeenCalledTimes(2)
+  })
+
   it('keeps integrations collapsed and exposes accessible Google Contacts actions when opened', () => {
     mocks.googleSync.mockReturnValue({
       statusLoading: false,

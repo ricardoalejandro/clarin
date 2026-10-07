@@ -1,9 +1,12 @@
-import { act, renderHook, waitFor } from '@testing-library/react'
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import useWhatsAppChatLauncher, {
   whatsappLauncherCrmPhase,
   whatsappLauncherIsPending,
 } from '@/hooks/useWhatsAppChatLauncher'
+import { beginAuthIdentityChange, completeAuthIdentityChange } from '@/lib/authScope'
+const ws = vi.hoisted(() => ({ listeners: new Set<(event: unknown) => void>() }))
+vi.mock('@/lib/api', () => ({ subscribeWebSocket: (listener: (event: unknown) => void) => { ws.listeners.add(listener); return () => ws.listeners.delete(listener) } }))
 
 function response(body: unknown, status = 200) {
   return Promise.resolve(new Response(JSON.stringify(body), {
@@ -41,8 +44,35 @@ describe('useWhatsAppChatLauncher', () => {
   })
 
   afterEach(() => {
+    cleanup()
+    ws.listeners.clear()
     vi.unstubAllGlobals()
     localStorage.clear()
+  })
+
+  it('removes a pending channel from selection and preserves an open chat as read-only', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input).startsWith('/api/chats/resolve-whatsapp') ? response({ success: true, phone: '51911111111', jid: '51911111111@s.whatsapp.net', devices: [connectedDevice], mode: 'open_direct' }) : response({ success: true, chat: { id: 'chat-1', jid: '51911111111@s.whatsapp.net', name: 'Synthetic Contact', device_id: connectedDevice.id } })))
+    const { result } = renderHook(() => useWhatsAppChatLauncher({ sessionKey: 'contact-1', contactId: 'contact-1' }))
+    await act(async () => { await result.current.open('51911111111') })
+    expect(result.current.phase).toBe('chat')
+    act(() => { ws.listeners.forEach(listener => listener({ event: 'device_deletion', data: { device_id: connectedDevice.id, operation_id: 'deletion-1', deletion_status: 'pending' } })) })
+    expect(result.current.phase).toBe('read_only')
+    expect(result.current.chat?.id).toBe('chat-1')
+    expect(result.current.device).toBeNull()
+  })
+
+  it('rejects a resolver completion from the previous account', async () => {
+    const stale = deferredResponse()
+    vi.stubGlobal('fetch', vi.fn(() => stale.promise))
+    const { result } = renderHook(() => useWhatsAppChatLauncher({ sessionKey: 'contact-1', contactId: 'contact-1' }))
+    let request!: Promise<void>
+    act(() => { request = result.current.open('51911111111') })
+    act(() => { beginAuthIdentityChange() })
+    expect(result.current.phase).toBe('idle')
+    await act(async () => { stale.resolve(new Response(JSON.stringify({ success: true, phone: '51911111111', jid: '51911111111@s.whatsapp.net', devices: [connectedDevice], mode: 'choose_device' }))); await request })
+    expect(result.current.devices).toEqual([])
+    act(() => { completeAuthIdentityChange() })
+    expect(result.current.phase).toBe('idle')
   })
 
   it('maps its detailed phases to the operational CRM contract', () => {

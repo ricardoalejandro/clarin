@@ -6,6 +6,8 @@ import Script from 'next/script'
 import { ArrowRight, Eye, EyeOff, Lock, ShieldCheck, User, WifiOff } from 'lucide-react'
 import ClarinBrandMark from '@/components/branding/ClarinBrandMark'
 import { getLoginNoticeForLogoutReason, invalidateOfflineBeforeIdentityChange, markAuthTokenRefreshed } from '@/lib/api'
+import { completeAuthIdentityChange, getAuthScope, isAuthIdentityChanging } from '@/lib/authScope'
+import { fetchAuthCookie } from '@/lib/authCookieLock'
 import { WHITEBOARD_PUBLIC_LIBRARY_CALLBACK_PATH } from '@/lib/whiteboardPublicLibraries'
 import { classifyRemoteResponse } from '@/offline-v3/availability'
 import {
@@ -341,7 +343,10 @@ export default function LoginScreen() {
       }
     }
 
+    let identityScope = getAuthScope()
     const cancelFailedTransition = async () => {
+      if (getAuthScope() !== identityScope) return
+      if (isAuthIdentityChanging(identityScope)) completeAuthIdentityChange()
       if (!transitionKind) return
       await cancelOfflineV5OnlineTransition().catch(() => undefined)
     }
@@ -391,7 +396,7 @@ export default function LoginScreen() {
     }
     if (transitionKind !== 'reauth') {
       try {
-        await invalidateOfflineBeforeIdentityChange()
+        identityScope = await invalidateOfflineBeforeIdentityChange() || identityScope
       } catch {
         await cancelFailedTransition()
         setError('No se pudo bloquear la sesión offline anterior. Cierra las otras pestañas de Clarin y vuelve a intentarlo antes de cambiar de usuario.')
@@ -401,7 +406,8 @@ export default function LoginScreen() {
       }
     }
     try {
-      const res = await fetch('/api/auth/login', {
+      if (getAuthScope() !== identityScope) throw new DOMException('La sesión cambió durante la operación.', 'AbortError')
+      const res = await fetchAuthCookie('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -414,9 +420,13 @@ export default function LoginScreen() {
           } : {}),
         }),
         credentials: 'include',
-      })
+      }, identityScope)
       const contentType = res.headers.get('content-type') || ''
       const data = contentType.includes('application/json') ? await res.json().catch(() => ({})) : {}
+      if (getAuthScope() !== identityScope) {
+        setError('La sesión cambió durante la operación. Revisa la cuenta actual.')
+        return
+      }
       const trustedClarinResponse = contentType.includes('application/json') && res.headers.get('X-Clarin-Response') === '1'
       if (!trustedClarinResponse) {
         await cancelFailedTransition()
@@ -440,7 +450,7 @@ export default function LoginScreen() {
         return
       }
       if (reauthExpectation && (data.user?.id !== reauthExpectation.user_id || data.user?.account_id !== reauthExpectation.account_id)) {
-        await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => null)
+        await fetchAuthCookie('/api/auth/logout', { method: 'POST', credentials: 'include' }, identityScope).catch(() => null)
         await cancelFailedTransition()
         setError('Clarin no pudo confirmar la misma identidad y cuenta. La sesión online fue descartada.')
         setPassword('')
@@ -451,7 +461,7 @@ export default function LoginScreen() {
         try {
           await completeOfflineV5OnlineTransition()
         } catch {
-          await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => null)
+          await fetchAuthCookie('/api/auth/logout', { method: 'POST', credentials: 'include' }, identityScope).catch(() => null)
           await cancelFailedTransition()
           setError('La identidad fue validada, pero el navegador no pudo cerrar el modo offline de forma segura. Tu copia local continúa disponible.')
           setPassword('')
@@ -460,7 +470,9 @@ export default function LoginScreen() {
         }
       }
       if (reauthExpectation) clearOfflineReauthExpectation(window.sessionStorage)
+      if (getAuthScope() !== identityScope) return
       markAuthTokenRefreshed()
+      completeAuthIdentityChange()
       const next = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('next') : ''
       const safeNext = next && (
         next === WHITEBOARD_PUBLIC_LIBRARY_CALLBACK_PATH

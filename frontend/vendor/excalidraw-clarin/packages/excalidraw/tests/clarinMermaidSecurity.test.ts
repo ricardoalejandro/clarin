@@ -2,8 +2,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { loadMermaidParser } from "../mermaid";
 
 const originalGetBBox = SVGElement.prototype.getBBox;
+let parser: Awaited<ReturnType<typeof loadMermaidParser>>;
 
-beforeAll(() => {
+beforeAll(async () => {
   Object.defineProperty(SVGElement.prototype, "getBBox", {
     configurable: true,
     value() {
@@ -11,7 +12,17 @@ beforeAll(() => {
       return { x: 0, y: 0, width: Math.max(8, text.length * 8), height: 18 };
     },
   });
-});
+  const fetcher = vi.fn();
+  vi.stubGlobal("fetch", fetcher);
+  try {
+    // The cold Vite import graph can exceed the conversion's 5 s budget.
+    // Initialize once with a bounded setup budget and preserve its network gate.
+    parser = await loadMermaidParser(true);
+    expect(fetcher).not.toHaveBeenCalled();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+}, 20_000);
 
 afterAll(() => {
   Object.defineProperty(SVGElement.prototype, "getBBox", {
@@ -24,7 +35,6 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("Clarin Mermaid local conversion security", () => {
   const parse = async (definition: string) => {
-    const parser = await loadMermaidParser(true);
     return parser.parseMermaidToExcalidraw(definition);
   };
 

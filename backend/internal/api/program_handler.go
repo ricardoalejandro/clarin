@@ -410,17 +410,27 @@ func (s *Server) handleDeleteProgram(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Program.DeleteProgram(c.Context(), accountID, id); err != nil {
-		if errors.Is(err, service.ErrProgramInput) {
-			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-				"code":  "LEGACY_EVENT_PROGRAM_PROTECTED",
-				"error": "El registro histórico del evento se conserva para auditoría y no puede eliminarse desde Programas.",
-			})
-		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return programDeletionError(c, err)
 	}
 
 	s.invalidateProgramsCache(accountID)
 	return c.SendStatus(fiber.StatusNoContent)
+}
+
+func programDeletionError(c *fiber.Ctx, err error) error {
+	if errors.Is(err, repository.ErrProgramHasDependencies) {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"code":  "PROGRAM_HAS_DEPENDENCIES",
+			"error": "Este programa contiene datos o actividad. Archívalo para conservar su historial.",
+		})
+	}
+	if errors.Is(err, service.ErrProgramInput) || errors.Is(err, repository.ErrProgramLegacyProtected) {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"code":  "LEGACY_EVENT_PROGRAM_PROTECTED",
+			"error": "El registro histórico del evento se conserva para auditoría y no puede eliminarse desde Programas.",
+		})
+	}
+	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "No se pudo eliminar el programa."})
 }
 
 // --- Participants ---

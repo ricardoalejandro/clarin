@@ -4,6 +4,7 @@ import { useMemo, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Eye, Loader2, Phone, X } from 'lucide-react'
 import type { Chat } from '@/types/chat'
+import { isDeviceDeleting } from '@/components/settings/deviceLifecycle'
 import {
   deviceDisplayPhone,
   relationClassName,
@@ -48,7 +49,7 @@ export default function WhatsAppDevicePicker({
   useOperationalOverlayRegistration(open, `${idPrefix}-whatsapp-device-picker`)
   useAccessibleDialog(open, dialogRef, onCancel, cancelRef)
 
-  const sortedDevices = useMemo(() => [...devices].sort((a, b) => {
+  const sortedDevices = useMemo(() => devices.filter(device => !isDeviceDeleting(device)).sort((a, b) => {
     if (existingChat?.device_id === a.id || a.matches_historical) return -1
     if (existingChat?.device_id === b.id || b.matches_historical) return 1
     return (a.name || '').localeCompare(b.name || '', 'es')

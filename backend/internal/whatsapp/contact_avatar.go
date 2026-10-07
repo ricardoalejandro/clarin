@@ -87,6 +87,11 @@ func (p *DevicePool) ConnectedAvatarDeviceIDs(accountID uuid.UUID) []uuid.UUID {
 // persisting it. The API uses this to provide an explicit compare-and-confirm
 // step before replacing the Contact photo.
 func (p *DevicePool) FetchProfilePicture(ctx context.Context, accountID, deviceID uuid.UUID, contactJID string) ([]byte, error) {
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, accountID, deviceID)
+	if lifecycleErr != nil {
+		return nil, profilePictureError("device_unavailable", "El dispositivo no está disponible")
+	}
+	defer release()
 	instance := p.GetDevice(deviceID)
 	if instance == nil || instance.AccountID != accountID {
 		return nil, profilePictureError("device_not_found", "El dispositivo no pertenece a esta cuenta")

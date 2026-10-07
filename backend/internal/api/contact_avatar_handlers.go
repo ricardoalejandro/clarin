@@ -463,7 +463,7 @@ func (s *Server) contactAvatarSaveError(c *fiber.Ctx, err error) error {
 	if errors.Is(err, repository.ErrAvatarStorageLimit) {
 		return c.Status(fiber.StatusInsufficientStorage).JSON(fiber.Map{"success": false, "error": "La cuenta alcanzó su límite de almacenamiento", "code": "storage_quota"})
 	}
-	return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo guardar la foto"})
+	return contactFailure(c, "avatar_save", "No se pudo guardar la foto", err)
 }
 
 func (s *Server) afterContactAvatarChange(accountID, contactID uuid.UUID, record *repository.ContactAvatarRecord, action string) {

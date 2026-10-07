@@ -41,6 +41,8 @@ var (
 	ErrProgramAttendanceConflict             = errors.New("program attendance changed")
 	ErrProgramFolderNotFound                 = errors.New("program folder not found")
 	ErrProgramFolderDestinationInvalid       = errors.New("program folder destination invalid")
+	ErrProgramHasDependencies                = errors.New("program contains retained data")
+	ErrProgramLegacyProtected                = errors.New("legacy event program is protected")
 )
 
 type ProgramAttendanceConflictError struct {
@@ -243,9 +245,59 @@ func (r *ProgramRepository) updateWith(ctx context.Context, q interface {
 	return err
 }
 
+const programHasDependenciesQuery = `
+	SELECT
+		EXISTS(SELECT 1 FROM program_participants WHERE program_id=$2)
+		OR EXISTS(SELECT 1 FROM program_sessions WHERE account_id=$1 AND program_id=$2)
+		OR EXISTS(SELECT 1 FROM program_participant_notes WHERE account_id=$1 AND program_id=$2)
+		OR EXISTS(SELECT 1 FROM program_courses WHERE account_id=$1 AND program_id=$2)
+		OR EXISTS(SELECT 1 FROM program_instructors WHERE account_id=$1 AND program_id=$2)
+		OR EXISTS(SELECT 1 FROM program_goals WHERE account_id=$1 AND program_id=$2)
+		OR EXISTS(SELECT 1 FROM program_event_retirements WHERE account_id=$1 AND program_id=$2)
+		OR EXISTS(SELECT 1 FROM surveys WHERE account_id=$1 AND program_id=$2)
+		OR EXISTS(SELECT 1 FROM survey_instance_recipients WHERE account_id=$1 AND program_id=$2)
+		OR EXISTS(SELECT 1 FROM survey_responses WHERE account_id=$1 AND program_id=$2)
+		OR EXISTS(SELECT 1 FROM tasks WHERE account_id=$1 AND program_id=$2)
+		OR EXISTS(SELECT 1 FROM interactions WHERE account_id=$1 AND program_id=$2)
+`
+
+// Delete annuls only a proven empty program. The parent lock conflicts with
+// child FK checks and existing session/configuration/survey writers. A separate
+// READ COMMITTED statement after that lock sees writers committed while waiting.
 func (r *ProgramRepository) Delete(ctx context.Context, accountID, id uuid.UUID) error {
-	_, err := r.db.Exec(ctx, "DELETE FROM programs WHERE id = $1 AND account_id = $2", id, accountID)
-	return err
+	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := deleteEmptyProgramTx(ctx, tx, accountID, id); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func deleteEmptyProgramTx(ctx context.Context, tx pgx.Tx, accountID, id uuid.UUID) error {
+	var programType string
+	if err := tx.QueryRow(ctx, `SELECT type FROM programs WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, id).Scan(&programType); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil // Preserve the idempotent DELETE contract.
+		}
+		return err
+	}
+	if programType != "course" {
+		return ErrProgramLegacyProtected
+	}
+	var hasDependencies bool
+	if err := tx.QueryRow(ctx, programHasDependenciesQuery, accountID, id).Scan(&hasDependencies); err != nil {
+		return err
+	}
+	if hasDependencies {
+		return ErrProgramHasDependencies
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM programs WHERE account_id=$1 AND id=$2`, accountID, id); err != nil {
+		return err
+	}
+	return nil
 }
 
 // --- Participants ---

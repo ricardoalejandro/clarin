@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  apiGet,
   apiPost,
   apiBlob,
   apiUpload,
@@ -13,6 +14,10 @@ import {
   tryRefreshToken,
   tryRefreshTokenOutcome,
 } from './api'
+import { completeAuthIdentityChange } from './authScope'
+// JSDOM has no Web Locks. Cross-tab cookie serialization is exercised against
+// a shared lock manager in authCookieLock.test.ts; these tests own API leases.
+vi.mock('./authCookieLock', () => ({ fetchAuthCookie: (url: string, init: RequestInit) => fetch(url, init) }))
 
 class FakeSharedWebSocket {
   static readonly CONNECTING = 0
@@ -146,6 +151,46 @@ describe('logout navigation', () => {
 })
 
 describe('auth session evidence', () => {
+  it.each(['json', 'blob', 'upload'] as const)('ignores a late 401 from the previous account for %s requests', async kind => {
+    localStorage.setItem('token', 'cookie-session')
+    localStorage.setItem(AUTH_REFRESHED_KEY, String(Date.now()))
+    let release!: (response: Response) => void
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    const pending = kind === 'json' ? apiGet('/api/synthetic/contact')
+      : kind === 'blob' ? apiBlob('/api/synthetic/photo') : apiUpload('/api/synthetic/photo', new FormData())
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    completeAuthIdentityChange()
+    release(new Response('{"error":"expired"}', { status: 401 }))
+    await expect(pending).resolves.toEqual({ success: false, error: 'Solicitud cancelada' })
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(localStorage.getItem('token')).toBe('cookie-session')
+  })
+
+  it('preserves the current account when a previous refresh returns a rejection', async () => {
+    localStorage.setItem('token', 'cookie-session')
+    let release!: (response: Response) => void
+    vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    const pending = tryRefreshTokenOutcome()
+    completeAuthIdentityChange()
+    release(new Response('{}', { status: 401 }))
+    await expect(pending).resolves.toBe('unavailable')
+    expect(localStorage.getItem('token')).toBe('cookie-session')
+    expect(localStorage.getItem(AUTH_REFRESHED_KEY)).toBeNull()
+  })
+
+  it('does not send a cancelled request after its shared proactive refresh finishes', async () => {
+    localStorage.setItem('token', 'cookie-session')
+    const controller = new AbortController()
+    let release!: (response: Response) => void
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    const pending = apiGet('/api/synthetic/contact', { signal: controller.signal })
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    controller.abort()
+    release(new Response('{"success":true}', { status: 200 }))
+    await expect(pending).resolves.toEqual({ success: false, error: 'Solicitud cancelada' })
+    expect(fetchMock.mock.calls.map(call => call[0])).toEqual(['/api/auth/refresh'])
+  })
+
   it('records a detected cookie session without pretending the access token was refreshed', () => {
     localStorage.setItem(AUTH_REFRESHED_KEY, '1749999999000')
 

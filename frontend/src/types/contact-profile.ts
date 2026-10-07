@@ -130,6 +130,9 @@ export interface ContactProfileObservationsResponse {
   success: boolean
   observations: Observation[]
   total?: number
+  pinned_total?: number
+  next_cursor?: string
+  has_more?: boolean
 }
 
 export interface ContactProfileTagSearchResponse {
@@ -142,6 +145,7 @@ export interface ContactProfileObservationResponse {
   success: boolean
   observation: Observation
   total?: number
+  pinned_total?: number
 }
 
 export type ContactProfileEditableField =

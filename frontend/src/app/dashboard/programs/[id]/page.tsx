@@ -24,6 +24,7 @@ import CrmDetailWorkspace from '@/components/crm-detail/CrmDetailWorkspace';
 import OperationalOverlayBoundary from '@/components/operational-window/OperationalOverlayBoundary';
 import useWhatsAppChatLauncher from '@/hooks/useWhatsAppChatLauncher';
 import ProgramParticipantAttendanceSection from '@/components/programs/ProgramParticipantAttendanceSection';
+import { programArchivePayload, PROGRAM_DELETE_CONFIRMATION } from '@/lib/programLifecycle';
 import ProgramParticipantEnrollmentDate from '@/components/programs/ProgramParticipantEnrollmentDate';
 import ProgramParticipantOutcomeDate from '@/components/programs/ProgramParticipantOutcomeDate';
 import type { ContactProfileContact, ContactProfileResponse } from '@/types/contact-profile';
@@ -402,6 +403,8 @@ export default function ProgramDetailPage() {
   // Edit program state
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [showHeaderMenu, setShowHeaderMenu] = useState(false);
+  const programLifecycleRequest = useRef(false);
+  const [programLifecyclePending, setProgramLifecyclePending] = useState(false);
 
   // Participant detail panel
   const [loadingLead, setLoadingLead] = useState(false);
@@ -1213,43 +1216,55 @@ export default function ProgramDetailPage() {
   const handleDeleteProgram = async () => {
     setShowHeaderMenu(false);
     setConfirmAction({
-      message: '¿Estás seguro de eliminar este programa? Se eliminarán también todos sus participantes, sesiones y asistencia.',
+      message: PROGRAM_DELETE_CONFIRMATION,
       onConfirm: async () => {
         setConfirmAction(null);
+        if (programLifecycleRequest.current) return;
+        programLifecycleRequest.current = true;
+        setProgramLifecyclePending(true);
         try {
           const res = await api(`/api/programs/${programId}`, { method: 'DELETE' });
           if (res.success) {
             showToast('Programa eliminado', 'success');
             router.push('/dashboard/programs');
           } else {
-            showToast('Error al eliminar programa', 'error');
+            showToast(res.error || 'Error al eliminar programa', 'error');
           }
         } catch (error) {
           console.error('Error deleting program:', error);
           showToast('Error al eliminar programa', 'error');
+        } finally {
+          programLifecycleRequest.current = false;
+          setProgramLifecyclePending(false);
         }
       },
     });
   };
 
   const handleArchiveProgram = async () => {
-    if (!program) return;
+    if (!program || programLifecycleRequest.current) return;
+    programLifecycleRequest.current = true;
+    setProgramLifecyclePending(true);
     const newStatus = program.status === 'archived' ? 'active' : 'archived';
     try {
       const res = await api(`/api/programs/${programId}`, {
         method: 'PUT',
-        body: JSON.stringify({ ...program, status: newStatus, description: program.description || '' })
+        body: JSON.stringify(programArchivePayload(program))
       });
       if (res.success) {
         showToast(newStatus === 'archived' ? 'Programa archivado' : 'Programa desarchivado', 'success');
-        fetchProgramData();
+        await fetchProgramData();
       } else {
-        showToast('Error al cambiar estado del programa', 'error');
+        showToast(res.error || 'Error al cambiar estado del programa', 'error');
+        if (res.status === 409) await fetchProgramData();
       }
       setShowHeaderMenu(false);
     } catch (error) {
       console.error('Error archiving program:', error);
       showToast('Error al cambiar estado del programa', 'error');
+    } finally {
+      programLifecycleRequest.current = false;
+      setProgramLifecyclePending(false);
     }
   };
 
@@ -2192,6 +2207,7 @@ export default function ProgramDetailPage() {
                 </button>
                 <button
                   onClick={handleArchiveProgram}
+                  disabled={programLifecyclePending}
                   className="flex min-h-11 w-full items-center gap-2.5 px-4 py-2.5 text-sm text-slate-700 transition-colors hover:bg-slate-50"
                 >
                   <Archive className="w-4 h-4" />
@@ -2199,6 +2215,7 @@ export default function ProgramDetailPage() {
                 </button>
                 <button
                   onClick={handleDeleteProgram}
+                  disabled={programLifecyclePending}
                   className="flex min-h-11 w-full items-center gap-2.5 px-4 py-2.5 text-sm text-red-600 transition-colors hover:bg-red-50"
                 >
                   <Trash2 className="w-4 h-4" />
@@ -4055,6 +4072,9 @@ export default function ProgramDetailPage() {
                           participantId={selectedParticipantID}
                           participantName={selectedProgramParticipant?.contact_name || selectedContact.custom_name || selectedContact.name || selectedContact.phone || 'Participante'}
                           enrolledAt={selectedProgramParticipant?.enrolled_at || ''}
+                          droppedAt={selectedProgramParticipant?.dropped_at}
+                          completedAt={selectedProgramParticipant?.completed_at}
+                          participationStatus={selectedProgramParticipant?.status}
                         />
                       </div>
                     </div>

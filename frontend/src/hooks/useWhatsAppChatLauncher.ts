@@ -1,6 +1,9 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { subscribeWebSocket } from '@/lib/api'
+import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
+import { isDeviceDeleting } from '@/components/settings/deviceLifecycle'
 import type { Chat, Device } from '@/types/chat'
 import {
   chatDeviceFromOption,
@@ -70,8 +73,13 @@ export function whatsappLauncherIsPending(phase: WhatsAppChatLauncherPhase) {
 }
 
 export default function useWhatsAppChatLauncher({ sessionKey, contactId, onError }: UseWhatsAppChatLauncherOptions) {
+  const authScope = useSyncExternalStore(subscribeAuthScope, getAuthScope, () => 'server')
   const [state, setState] = useState<WhatsAppChatLauncherState>(INITIAL_STATE)
-  const requestRef = useRef<{ generation: number; controller: AbortController | null }>({ generation: 0, controller: null })
+  const requestRef = useRef<{ generation: number; controller: AbortController | null; authScope: string }>({ generation: 0, controller: null, authScope })
+  const stateScopeRef = useRef(authScope)
+  const stateRef = useRef(state)
+  stateRef.current = state
+  const deletingDeviceIdsRef = useRef(new Set<string>())
   const sessionKeyRef = useRef(sessionKey)
   const contactIdRef = useRef(contactId)
   const invokerRef = useRef<HTMLElement | null>(null)
@@ -82,7 +90,7 @@ export default function useWhatsAppChatLauncher({ sessionKey, contactId, onError
 
   const invalidate = useCallback(() => {
     requestRef.current.controller?.abort()
-    requestRef.current = { generation: requestRef.current.generation + 1, controller: null }
+    requestRef.current = { generation: requestRef.current.generation + 1, controller: null, authScope: getAuthScope() }
     return requestRef.current.generation
   }, [])
 
@@ -94,7 +102,7 @@ export default function useWhatsAppChatLauncher({ sessionKey, contactId, onError
   }, [invalidate])
 
   const isCurrent = useCallback((generation: number, expectedSessionKey: string | null | undefined) => (
-    requestRef.current.generation === generation && sessionKeyRef.current === expectedSessionKey
+    requestRef.current.generation === generation && sessionKeyRef.current === expectedSessionKey && requestRef.current.authScope === getAuthScope() && !isAuthIdentityChanging()
   ), [])
 
   const reportError = useCallback((generation: number, expectedSessionKey: string | null | undefined, message: string) => {
@@ -118,6 +126,7 @@ export default function useWhatsAppChatLauncher({ sessionKey, contactId, onError
     phone: string,
     request?: ReturnType<typeof beginRequest>,
   ) => {
+    if (isAuthIdentityChanging() || isDeviceDeleting(deviceOption) || deletingDeviceIdsRef.current.has(deviceOption.id)) return
     const activeRequest = request || beginRequest()
     setState(current => ({
       ...current,
@@ -152,6 +161,7 @@ export default function useWhatsAppChatLauncher({ sessionKey, contactId, onError
   }, [beginRequest, isCurrent, reportError])
 
   const open = useCallback(async (rawPhone: string, options: OpenWhatsAppChatOptions = {}) => {
+    if (isAuthIdentityChanging()) return
     if (options.sessionKey !== undefined) sessionKeyRef.current = options.sessionKey
     if (options.contactId !== undefined) contactIdRef.current = options.contactId
     invokerRef.current = options.invoker || (document.activeElement instanceof HTMLElement ? document.activeElement : null)
@@ -174,6 +184,8 @@ export default function useWhatsAppChatLauncher({ sessionKey, contactId, onError
         reportError(request.generation, request.sessionKey, resolution.error || 'No se pudo resolver la conversación')
         return
       }
+      resolution.devices = resolution.devices.filter(device => !deletingDeviceIdsRef.current.has(device.id))
+      if (!resolution.devices.length && resolution.mode !== 'read_only') resolution.mode = resolution.chat ? 'read_only' : 'no_device'
       const base = {
         phone,
         chat: resolution.chat || null,
@@ -231,6 +243,31 @@ export default function useWhatsAppChatLauncher({ sessionKey, contactId, onError
     reset(false)
   }, [reset, sessionKey])
 
+  useEffect(() => {
+    stateScopeRef.current = authScope
+    deletingDeviceIdsRef.current.clear()
+    reset(false)
+    if (isAuthIdentityChanging(authScope)) return
+    return subscribeWebSocket(value => {
+      if (authScope !== getAuthScope()) return
+      const event = value as { event?: string; data?: { device_id?: string } }
+      if (event.event !== 'device_deletion' || !event.data?.device_id) return
+      const id = event.data.device_id
+      deletingDeviceIdsRef.current.add(id)
+      const current = stateRef.current
+      if (current.device?.id !== id && !current.devices.some(device => device.id === id)) return
+      invalidate()
+      setState(previous => {
+        const devices = previous.devices.filter(device => device.id !== id)
+        if (previous.device?.id === id && previous.chat) return { ...previous, device: null, devices, phase: 'read_only', readOnlyReason: 'Este dispositivo se está eliminando. El historial sigue disponible en solo lectura.' }
+        if (devices.length === 0) return previous.chat
+          ? { ...previous, devices, device: null, phase: 'read_only', readOnlyReason: 'El dispositivo de este historial no está disponible.' }
+          : { ...previous, devices, device: null, phase: 'error', error: 'No hay dispositivos disponibles para enviar.' }
+        return { ...previous, devices, device: null, phase: 'choosing_device' }
+      })
+    })
+  }, [authScope, reset, invalidate])
+
   useEffect(() => () => requestRef.current.controller?.abort(), [])
 
   const close = useCallback(() => reset(true), [reset])
@@ -240,13 +277,14 @@ export default function useWhatsAppChatLauncher({ sessionKey, contactId, onError
     void open(state.phone, { sessionKey: sessionKeyRef.current, contactId: contactIdRef.current })
   }, [open, state.phone])
 
+  const visibleState = stateScopeRef.current === authScope && !isAuthIdentityChanging(authScope) ? state : INITIAL_STATE
   return {
-    ...state,
-    chatOpen: (state.phase === 'chat' || state.phase === 'read_only') && Boolean(state.chat),
-    readOnly: state.phase === 'read_only',
-    pending: whatsappLauncherIsPending(state.phase),
-    showDeviceSelector: state.phase === 'choosing_device',
-    crmPhase: whatsappLauncherCrmPhase(state.phase),
+    ...visibleState,
+    chatOpen: (visibleState.phase === 'chat' || visibleState.phase === 'read_only') && Boolean(visibleState.chat),
+    readOnly: visibleState.phase === 'read_only',
+    pending: whatsappLauncherIsPending(visibleState.phase),
+    showDeviceSelector: visibleState.phase === 'choosing_device',
+    crmPhase: whatsappLauncherCrmPhase(visibleState.phase),
     open,
     selectDevice,
     openHistorical,

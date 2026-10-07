@@ -15,7 +15,9 @@ func adminUserErrorResponse(t *testing.T, err error) (int, map[string]any) {
 	t.Helper()
 	app := fiber.New()
 	app.Get("/", func(c *fiber.Ctx) error { return writeAdminUserMutationError(c, err) })
-	response, requestErr := app.Test(httptest.NewRequest("GET", "/", nil))
+	// Fiber's default 1s budget includes scheduler delays on shared QA hosts.
+	// Keep all response assertions and bound the harness independently of them.
+	response, requestErr := app.Test(httptest.NewRequest("GET", "/", nil), 5000)
 	if requestErr != nil {
 		t.Fatalf("request failed: %v", requestErr)
 	}

@@ -1,4 +1,5 @@
 import type { Chat, Device } from '@/types/chat'
+import { isDeviceDeleting } from '@/components/settings/deviceLifecycle'
 
 export interface WhatsAppDeviceOption {
   id: string
@@ -8,6 +9,7 @@ export interface WhatsAppDeviceOption {
   status?: string | null
   provider?: Device['provider']
   runtime_capabilities?: Device['runtime_capabilities']
+  deletion?: Device['deletion']
   normalized_phone?: string
   historical_relation?: 'same_historical_number' | 'different_number' | 'history_unknown' | 'new_chat'
   matches_historical?: boolean
@@ -59,7 +61,12 @@ export async function resolveWhatsAppChat(phone: string, options: WhatsAppChatRe
       error: data.error || 'No se pudo resolver la conversación',
     }
   }
-  return data as WhatsAppChatResolution
+  const resolution = data as WhatsAppChatResolution
+  const devices = (resolution.devices || []).filter(device => !isDeviceDeleting(device))
+  return {
+    ...resolution, devices,
+    mode: devices.length === 0 && resolution.mode !== 'read_only' ? (resolution.chat ? 'read_only' : 'no_device') : resolution.mode,
+  }
 }
 
 export async function createWhatsAppChat(deviceID: string, phone: string, options: WhatsAppChatRequestOptions = {}): Promise<{ success: boolean; chat?: Chat; error?: string }> {
@@ -86,6 +93,7 @@ export function chatDeviceFromOption(device: WhatsAppDeviceOption): Device {
     status: device.status || 'disconnected',
     provider: device.provider || 'whatsapp_web',
     runtime_capabilities: device.runtime_capabilities,
+    deletion: device.deletion,
   }
 }
 

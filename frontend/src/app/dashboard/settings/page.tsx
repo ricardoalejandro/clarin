@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { User, Building, Bell, Shield, LogOut, Save, Loader2, Volume2, VolumeX, BellRing, BellOff, Eye, EyeOff, Play, Zap, Plus, Pencil, Trash2, X, Link2, RefreshCw, CheckCircle2, XCircle, Power, Activity, Inbox, Paperclip, Image, Video, File, ChevronDown, ChevronRight, GripVertical, Smartphone, Wifi, WifiOff, Signal, QrCode, Edit, Key, Copy, ExternalLink, Settings, ArrowLeft, Users, Globe, Hash, Calendar, ToggleLeft, Mail, Phone, Link, DollarSign, Type, Tag, List, AlertCircle, HardDrive } from 'lucide-react'
@@ -25,6 +25,10 @@ import PipelineManagementDialog from '@/components/pipelines/PipelineManagementD
 import type { Pipeline } from '@/types/contact'
 import OfflineAccessPanel from '@/components/settings/OfflineAccessPanelV5'
 import QuickRepliesSettings from '@/components/settings/QuickRepliesSettings'
+import type { Device } from '@/types/chat'
+import { getAuthScope, isAuthIdentityChanging } from '@/lib/authScope'
+import { useDeviceAdministration } from '@/components/settings/useDeviceAdministration'
+import { deviceDeletionMessage, isDeviceDeleting } from '@/components/settings/deviceLifecycle'
 
 interface Account {
   id: string
@@ -1083,13 +1087,16 @@ export default function SettingsPage() {
 
   // Devices state
   type DeviceProvider = 'whatsapp_web' | 'whatsapp_cloud_api'
-  interface DeviceItem {
+  interface DeviceItem extends Device {
     id: string; name: string; phone: string; jid: string; status: string; qr_code: string; last_seen_at: string; receive_messages: boolean
     provider?: DeviceProvider; waba_id?: string; phone_number_id?: string; api_display_phone?: string; api_webhook_status?: string; api_billing_status?: string; api_sending_enabled?: boolean; api_templates_enabled?: boolean; capabilities?: string[]
   }
-  const [devDevices, setDevDevices] = useState<DeviceItem[]>([])
-  const [devLoading, setDevLoading] = useState(true)
-  const [devError, setDevError] = useState('')
+  const { devices: devDevices, setDevices: setDevDevices, loading: devLoading, setLoading: setDevLoading, error: devError, refreshDevices: fetchDevicesForSettings, deleteDevice, pendingIds: devDeletingIds, total: devTotal, available: devAvailable, scope: devAuthScope } = useDeviceAdministration<DeviceItem>(activeTab === 'devices')
+  const devFormScopeRef = useRef(devAuthScope)
+  const devFormsCurrent = devFormScopeRef.current === devAuthScope && !isAuthIdentityChanging(devAuthScope)
+  const devDevicesRef = useRef(devDevices)
+  devDevicesRef.current = devDevices
+  const canMutateDevice = (id: string) => !isAuthIdentityChanging() && !devDeletingIds.has(id) && !isDeviceDeleting(devDevicesRef.current.find(device => device.id === id))
   const [devShowCreate, setDevShowCreate] = useState(false)
   const [devCreateProvider, setDevCreateProvider] = useState<DeviceProvider>('whatsapp_web')
   const [devNewName, setDevNewName] = useState('')
@@ -1562,29 +1569,6 @@ export default function SettingsPage() {
   }
 
   // ─── Device Functions ───
-  const fetchDevicesForSettings = useCallback(async () => {
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch('/api/devices', { headers: { Authorization: `Bearer ${token}` } })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok || !data.success) throw new Error(data.error || 'No se pudieron cargar los dispositivos')
-      setDevDevices(data.devices || [])
-      setDevError('')
-    } catch (err) {
-      console.error('Failed to fetch devices:', err)
-      setDevError(err instanceof Error ? err.message : 'No se pudieron cargar los dispositivos')
-    }
-    finally { setDevLoading(false) }
-  }, [])
-
-  useEffect(() => {
-    if (activeTab === 'devices') {
-      fetchDevicesForSettings()
-      const interval = setInterval(fetchDevicesForSettings, 5000)
-      return () => clearInterval(interval)
-    }
-  }, [activeTab, fetchDevicesForSettings])
-
   useEffect(() => {
     const compactMedia = window.matchMedia('(max-width: 767px)')
     const phoneMedia = window.matchMedia('(max-width: 767px) and (hover: none) and (pointer: coarse)')
@@ -1613,24 +1597,17 @@ export default function SettingsPage() {
   }, [isPhoneDeviceView, devSelected])
 
   useEffect(() => {
-    if (activeTab !== 'devices') return
-    const unsubscribe = subscribeWebSocket((data: unknown) => {
-      const msg = data as { event?: string; data?: { status?: string; device_id?: string } }
-      if (msg.event === 'device_status') {
-        if (msg.data?.status === 'connected' && devSelected?.id === msg.data?.device_id) setDevSelected(null)
-        fetchDevicesForSettings()
-      } else if (msg.event === 'qr_code') fetchDevicesForSettings()
-    })
-    return () => unsubscribe()
-  }, [activeTab, fetchDevicesForSettings, devSelected])
-
-  useEffect(() => {
     if (devSelected) {
       const upd = devDevices.find(d => d.id === devSelected.id)
-      if (upd && upd.status === 'connected') setDevSelected(null)
+      if (!upd || isDeviceDeleting(upd) || upd.status === 'connected') setDevSelected(null)
       else if (upd && upd.qr_code !== devSelected.qr_code) setDevSelected(upd)
     }
   }, [devDevices, devSelected])
+
+  useEffect(() => {
+    if (devEditing && !canMutateDevice(devEditing.id)) setDevEditing(null)
+    if (devActionDevice && !canMutateDevice(devActionDevice.id)) setDevActionDevice(null)
+  }, [devDevices, devDeletingIds, devEditing, devActionDevice])
 
   const getDeviceProvider = (device?: DeviceItem | null): DeviceProvider => device?.provider || 'whatsapp_web'
   const isApiDevice = (device?: DeviceItem | null) => getDeviceProvider(device) === 'whatsapp_cloud_api'
@@ -1642,6 +1619,17 @@ export default function SettingsPage() {
     setDevNewApiPhoneNumberID('')
     setDevNewApiWabaID('')
   }, [])
+
+  useEffect(() => {
+    devFormScopeRef.current = devAuthScope
+    setDevShowCreate(false)
+    resetDevCreateForm()
+    setDevSelected(null)
+    setDevEditing(null)
+    setDevActionDevice(null)
+    setDevCreating(false)
+    setDevSaving(false)
+  }, [devAuthScope, resetDevCreateForm])
 
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
@@ -1657,6 +1645,7 @@ export default function SettingsPage() {
   }, [devActionDevice, devEditing, devSelected, devShowCreate, devShowMobileLinkNotice, resetDevCreateForm])
 
   const openDevEdit = (device: DeviceItem) => {
+    if (!canMutateDevice(device.id)) return
     setDevEditing(device)
     setDevEditName(device.name || '')
     setDevEditApiDisplayPhone(device.api_display_phone || device.phone || '')
@@ -1665,7 +1654,8 @@ export default function SettingsPage() {
   }
 
   const handleDevCreate = async () => {
-    if (!devNewName.trim()) return
+    if (!devNewName.trim() || !devFormsCurrent) return
+    const scope = getAuthScope()
     setDevCreating(true)
     const token = localStorage.getItem('token')
     try {
@@ -1680,7 +1670,8 @@ export default function SettingsPage() {
         : { name: devNewName.trim(), provider: devCreateProvider }
       const res = await fetch('/api/devices', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) })
       const data = await res.json()
-      if (data.success) {
+      if (scope !== getAuthScope()) return
+      if (res.ok && data.success) {
         resetDevCreateForm()
         setDevShowCreate(false)
         fetchDevicesForSettings()
@@ -1689,15 +1680,20 @@ export default function SettingsPage() {
       } else {
         showMessage('error', data.error || 'Error al crear dispositivo')
       }
-    } catch (err) { console.error('Failed to create device:', err) }
-    finally { setDevCreating(false) }
+    } catch {
+      if (scope === getAuthScope()) showMessage('error', 'No se pudo crear el dispositivo. Comprueba la conexión e inténtalo de nuevo.')
+    }
+    finally { if (scope === getAuthScope()) setDevCreating(false) }
   }
 
   const handleDevConnect = async (deviceId: string) => {
+    if (!canMutateDevice(deviceId)) return false
+    const scope = getAuthScope()
     const token = localStorage.getItem('token')
     try {
       const res = await fetch(`/api/devices/${deviceId}/connect`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
       const data = await res.json().catch(() => ({}))
+      if (scope !== getAuthScope() || !canMutateDevice(deviceId)) return false
       if (!res.ok || !data.success) {
         showMessage('error', data.error || 'No se pudo iniciar la reconexión')
         return false
@@ -1705,64 +1701,72 @@ export default function SettingsPage() {
       await fetchDevicesForSettings()
       return true
     } catch (err) {
-      console.error('Failed to connect device:', err)
-      showMessage('error', 'No se pudo iniciar la reconexión')
+      if (scope === getAuthScope()) showMessage('error', 'No se pudo iniciar la reconexión')
       return false
     }
   }
 
   const handleDevDisconnect = async (deviceId: string) => {
+    if (!canMutateDevice(deviceId)) return
+    const scope = getAuthScope()
     const token = localStorage.getItem('token')
-    try { await fetch(`/api/devices/${deviceId}/disconnect`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); fetchDevicesForSettings() }
-    catch (err) { console.error('Failed to disconnect device:', err) }
+    try {
+      const response = await fetch(`/api/devices/${deviceId}/disconnect`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+      const data = await response.json().catch(() => ({}))
+      if (scope !== getAuthScope()) return
+      if (!response.ok || !data.success) { showMessage('error', data.error || 'No se pudo desconectar el dispositivo'); return }
+      void fetchDevicesForSettings()
+    }
+    catch { if (scope === getAuthScope()) showMessage('error', 'No se pudo desconectar el dispositivo. Inténtalo de nuevo.') }
   }
 
   const handleDevReset = async (deviceId: string) => {
+    if (!canMutateDevice(deviceId)) return
     if (!confirm('¿Re-vincular este dispositivo? Se desconectará de WhatsApp y necesitarás escanear un nuevo código QR. Esto sincronizará todo el historial de mensajes.')) return
     const token = localStorage.getItem('token')
+    const scope = getAuthScope()
     try {
-      await fetch(`/api/devices/${deviceId}/reset`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
-      fetchDevicesForSettings()
-      // Auto-reconnect to generate QR code
-      setTimeout(async () => {
-        await fetch(`/api/devices/${deviceId}/connect`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
-        fetchDevicesForSettings()
-        const dev = devDevices.find((d: any) => d.id === deviceId)
-        if (dev) setDevSelected(dev)
-      }, 1000)
-    } catch (err) { console.error('Failed to reset device:', err) }
+      const response = await fetch(`/api/devices/${deviceId}/reset`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+      const data = await response.json().catch(() => ({}))
+      if (scope !== getAuthScope() || !canMutateDevice(deviceId)) return
+      if (!response.ok || !data.success) { showMessage('error', data.error || 'No se pudo re-vincular el dispositivo'); return }
+      const connected = await handleDevConnect(deviceId)
+      if (!connected || scope !== getAuthScope() || !canMutateDevice(deviceId)) return
+      const dev = devDevicesRef.current.find(device => device.id === deviceId)
+      if (dev) setDevSelected(dev)
+    } catch { if (scope === getAuthScope()) showMessage('error', 'No se pudo re-vincular el dispositivo. Inténtalo de nuevo.') }
   }
 
   const handleDevDelete = async (deviceId: string) => {
+    if (!canMutateDevice(deviceId)) return
     if (!confirm('¿Estás seguro de eliminar este dispositivo?')) return
-    const token = localStorage.getItem('token')
-    try { await fetch(`/api/devices/${deviceId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }); fetchDevicesForSettings(); if (devSelected?.id === deviceId) setDevSelected(null) }
-    catch (err) { console.error('Failed to delete device:', err) }
+    const scope = getAuthScope()
+    const accepted = await deleteDevice(deviceId)
+    if (accepted && scope === getAuthScope()) {
+      if (devSelected?.id === deviceId) setDevSelected(null)
+      showMessage('success', 'Eliminación iniciada. El servidor completará la desvinculación y reintentará automáticamente si hace falta.')
+    }
   }
 
   const handleDevUpdate = async () => {
     if (!devEditing || !devEditName.trim()) return
+    if (!canMutateDevice(devEditing.id)) return
+    const scope = getAuthScope()
     setDevSaving(true)
     const token = localStorage.getItem('token')
     try {
-      const payload = isApiDevice(devEditing)
-        ? {
-            name: devEditName.trim(),
-            api_display_phone: devEditApiDisplayPhone.trim(),
-            phone_number_id: devEditApiPhoneNumberID.trim(),
-            waba_id: devEditApiWabaID.trim(),
-            api_sending_enabled: false,
-            api_templates_enabled: false,
-          }
-        : { name: devEditName.trim() }
+      const payload = { name: devEditName.trim() }
       const res = await fetch(`/api/devices/${devEditing.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) })
       const data = await res.json()
-      if (data.success) { setDevEditing(null); fetchDevicesForSettings() } else alert(data.error || 'Error al actualizar')
-    } catch (err) { console.error('Failed to update device:', err) }
-    finally { setDevSaving(false) }
+      if (scope !== getAuthScope() || !canMutateDevice(devEditing.id)) return
+      if (res.ok && data.success) { setDevEditing(null); fetchDevicesForSettings() } else showMessage('error', data.error || 'Error al actualizar el dispositivo')
+    } catch { if (scope === getAuthScope()) showMessage('error', 'No se pudo guardar el dispositivo. Inténtalo de nuevo.') }
+    finally { if (scope === getAuthScope()) setDevSaving(false) }
   }
 
   const handleToggleReceiveMessages = async (device: DeviceItem) => {
+    if (!canMutateDevice(device.id)) return
+    const scope = getAuthScope()
     const token = localStorage.getItem('token')
     const newValue = !device.receive_messages
     // Optimistic update
@@ -1770,17 +1774,19 @@ export default function SettingsPage() {
     try {
       const res = await fetch(`/api/devices/${device.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ receive_messages: newValue }) })
       const data = await res.json()
+      if (scope !== getAuthScope() || !canMutateDevice(device.id)) return
       if (!data.success) {
         // Revert on failure
         setDevDevices(prev => prev.map(d => d.id === device.id ? { ...d, receive_messages: !newValue } : d))
       }
     } catch {
-      setDevDevices(prev => prev.map(d => d.id === device.id ? { ...d, receive_messages: !newValue } : d))
+      if (scope === getAuthScope() && canMutateDevice(device.id)) setDevDevices(prev => prev.map(d => d.id === device.id ? { ...d, receive_messages: !newValue } : d))
     }
   }
 
   const getDevStatusBadge = (status: string) => {
     switch (status) {
+      case 'deleting': return <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs bg-amber-50 text-amber-700"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Eliminando</span>
       case 'connected': return <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs bg-emerald-50 text-emerald-700"><Wifi className="w-3.5 h-3.5" /> Conectado</span>
       case 'connecting': return <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs bg-amber-50 text-amber-700"><Signal className="w-3.5 h-3.5 animate-pulse" /> Conectando</span>
       default: return <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-500"><WifiOff className="w-3.5 h-3.5" /> Desconectado</span>
@@ -2548,7 +2554,7 @@ export default function SettingsPage() {
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <h3 className="text-sm font-medium text-slate-900">Dispositivos WhatsApp</h3>
-                  <p className="text-xs text-slate-500 mt-0.5">Gestiona tus conexiones de WhatsApp</p>
+                  <p className="text-xs text-slate-500 mt-0.5">{devAvailable} disponibles · {devTotal} en la cuenta. Las eliminaciones pendientes siguen ocupando su plaza.</p>
                 </div>
                 <button onClick={() => setDevShowCreate(true)} className="flex min-h-11 shrink-0 items-center gap-1.5 rounded-xl bg-emerald-600 px-3 text-xs font-medium text-white shadow-sm transition hover:bg-emerald-700">
                   <Plus className="w-3.5 h-3.5" /> Agregar
@@ -2588,6 +2594,7 @@ export default function SettingsPage() {
                           </div>
                           <p className="mt-1 break-all text-xs text-slate-500 md:mt-0 md:truncate">{device.api_display_phone || device.phone || device.phone_number_id || device.jid || 'Sin número'}</p>
                           {getApiGuardBadges(device)}
+                          {isDeviceDeleting(device) && <p className="mt-2 max-w-lg text-xs leading-relaxed text-amber-800" role="status">{deviceDeletionMessage(device)}{device.deletion?.error_code && <span className="block mt-1 text-amber-700">La limpieza necesita un reintento del servidor.</span>}</p>}
                           {!isApiDevice(device) && isCompactDeviceView && <div className="mt-2">{getDevStatusBadge(device.status)}</div>}
                         </div>
                       </div>
@@ -2597,6 +2604,7 @@ export default function SettingsPage() {
                           <span className="text-[10px] text-slate-400 hidden sm:inline">{device.receive_messages ? 'Recibe' : 'No recibe'}</span>
                           <button
                             onClick={() => handleToggleReceiveMessages(device)}
+                            disabled={!canMutateDevice(device.id)}
                             className="inline-flex h-11 w-11 items-center justify-center rounded-xl transition hover:bg-slate-100"
                             title={device.receive_messages ? 'Recepción activa — clic para desactivar' : 'Recepción desactivada — clic para activar'}
                             aria-pressed={device.receive_messages}
@@ -2604,24 +2612,25 @@ export default function SettingsPage() {
                             <span className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${device.receive_messages ? 'bg-emerald-500' : 'bg-slate-300'}`}><span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm transition-transform ${device.receive_messages ? 'translate-x-[18px]' : 'translate-x-[3px]'}`} /></span>
                           </button>
                         </div>
-                        <button onClick={() => openDevEdit(device)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-blue-50 hover:text-blue-600" title="Editar"><Edit className="w-3.5 h-3.5" /></button>
-                        {isApiDevice(device) ? null : device.status === 'connected' ? (
+                        <button disabled={!canMutateDevice(device.id)} onClick={() => openDevEdit(device)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-blue-50 hover:text-blue-600 disabled:opacity-40" title="Editar"><Edit className="w-3.5 h-3.5" /></button>
+                        {isApiDevice(device) || isDeviceDeleting(device) ? null : device.status === 'connected' ? (
                           <>
-                            <button onClick={() => handleDevReset(device.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-purple-50 hover:text-purple-600" title="Re-vincular (sincronizar historial completo)"><RefreshCw className="w-3.5 h-3.5" /></button>
-                            <button onClick={() => handleDevDisconnect(device.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-orange-50 hover:text-orange-600" title="Desconectar"><Power className="w-3.5 h-3.5" /></button>
+                            <button disabled={!canMutateDevice(device.id)} onClick={() => handleDevReset(device.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-purple-50 hover:text-purple-600 disabled:opacity-40" title="Re-vincular (sincronizar historial completo)"><RefreshCw className="w-3.5 h-3.5" /></button>
+                            <button disabled={!canMutateDevice(device.id)} onClick={() => handleDevDisconnect(device.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-orange-50 hover:text-orange-600 disabled:opacity-40" title="Desconectar"><Power className="w-3.5 h-3.5" /></button>
                           </>
                         ) : device.status === 'connecting' ? (
-                          <button onClick={() => setDevSelected(device)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-emerald-600 transition hover:bg-emerald-50" title="Ver QR"><QrCode className="w-3.5 h-3.5" /></button>
+                          <button disabled={!canMutateDevice(device.id)} onClick={() => setDevSelected(device)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-emerald-600 transition hover:bg-emerald-50 disabled:opacity-40" title="Ver QR"><QrCode className="w-3.5 h-3.5" /></button>
                         ) : (
-                          <button onClick={() => { handleDevConnect(device.id); setDevSelected(device) }} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600" title="Conectar"><Power className="w-3.5 h-3.5" /></button>
+                          <button disabled={!canMutateDevice(device.id)} onClick={() => { void handleDevConnect(device.id).then(started => { if (started && canMutateDevice(device.id)) setDevSelected(device) }) }} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600 disabled:opacity-40" title="Conectar"><Power className="w-3.5 h-3.5" /></button>
                         )}
-                        <button onClick={() => handleDevDelete(device.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600" title="Eliminar"><Trash2 className="w-3.5 h-3.5" /></button>
+                        <button disabled={!canMutateDevice(device.id)} onClick={() => handleDevDelete(device.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600 disabled:opacity-40" title={isDeviceDeleting(device) ? 'Eliminación en curso' : 'Eliminar'}>{devDeletingIds.has(device.id) ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}</button>
                       </div>}
                       {isCompactDeviceView && <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-100 pt-3">
                         <div className="flex min-w-0 items-center gap-2">
                           <button
                             type="button"
                             onClick={() => handleToggleReceiveMessages(device)}
+                            disabled={!canMutateDevice(device.id)}
                             className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl hover:bg-slate-100"
                             aria-pressed={device.receive_messages}
                             aria-label={device.receive_messages ? 'Desactivar recepción de mensajes' : 'Activar recepción de mensajes'}
@@ -2630,7 +2639,7 @@ export default function SettingsPage() {
                           </button>
                           <span className="truncate text-xs text-slate-500">{device.receive_messages ? 'Recibe mensajes' : 'Recepción desactivada'}</span>
                         </div>
-                        <button type="button" onClick={() => setDevActionDevice(device)} className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-semibold text-slate-700" aria-label={`Acciones de ${device.name || 'dispositivo'}`}>
+                        <button type="button" disabled={!canMutateDevice(device.id)} onClick={() => setDevActionDevice(device)} className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-slate-200 px-3 text-xs font-semibold text-slate-700 disabled:opacity-40" aria-label={`Acciones de ${device.name || 'dispositivo'}`}>
                           <Settings className="h-4 w-4" /> Acciones
                         </button>
                       </div>}
@@ -2639,7 +2648,7 @@ export default function SettingsPage() {
                 </div>
               ) : null}
 
-              {typeof document !== 'undefined' && devActionDevice && createPortal(
+              {typeof document !== 'undefined' && devFormsCurrent && devActionDevice && createPortal(
                 <div className="app-viewport fixed inset-0 z-[90] flex items-end bg-slate-950/40" onMouseDown={() => setDevActionDevice(null)}>
                   <div role="dialog" aria-modal="true" aria-label={`Acciones de ${devActionDevice.name || 'dispositivo'}`} className="w-full rounded-t-3xl bg-white px-3 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
                     <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-300" />
@@ -2723,7 +2732,7 @@ export default function SettingsPage() {
               )}
 
               {/* Create device modal */}
-              {devShowCreate && (
+              {devFormsCurrent && devShowCreate && (
                 <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/40 backdrop-blur-sm sm:items-center sm:p-4">
                   <div className="flex h-full w-full max-w-lg flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[min(90dvh,760px)] sm:rounded-2xl sm:border sm:border-slate-100">
                     <header className="flex shrink-0 items-center justify-between border-b border-slate-100 px-4 py-3 sm:border-0 sm:px-6 sm:pb-0 sm:pt-6">
@@ -2807,7 +2816,7 @@ export default function SettingsPage() {
               )}
 
               {/* QR modal */}
-              {!isPhoneDeviceView && devSelected && devSelected.status === 'connecting' && devSelected.qr_code && (
+              {devFormsCurrent && !isPhoneDeviceView && devSelected && devSelected.status === 'connecting' && devSelected.qr_code && (
                 <div className="app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-sm">
                   <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4 text-center border border-slate-100">
                     <div className="flex items-center justify-center gap-2 mb-3"><QrCode className="w-5 h-5 text-emerald-600" /><h2 className="text-lg font-semibold text-slate-900">Escanea el código QR</h2></div>
@@ -2820,7 +2829,7 @@ export default function SettingsPage() {
               )}
 
               {/* Edit device modal */}
-              {devEditing && (
+              {devFormsCurrent && devEditing && (
                 <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/40 backdrop-blur-sm sm:items-center sm:p-4">
                   <div className="flex h-full w-full max-w-md flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[min(90dvh,760px)] sm:rounded-2xl sm:border sm:border-slate-100">
                     <header className="flex shrink-0 items-center justify-between gap-2 border-b border-slate-100 px-4 py-3 sm:px-6 sm:pt-5">
@@ -2832,10 +2841,11 @@ export default function SettingsPage() {
                       {isApiDevice(devEditing) ? (
                         <>
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            <div><label className="block text-xs font-medium text-slate-600 mb-1">Telefono visible</label><input type="text" value={devEditApiDisplayPhone} onChange={(e) => setDevEditApiDisplayPhone(e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-transparent text-sm text-slate-900" /></div>
-                            <div><label className="block text-xs font-medium text-slate-600 mb-1">Phone Number ID</label><input type="text" value={devEditApiPhoneNumberID} onChange={(e) => setDevEditApiPhoneNumberID(e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-transparent text-sm text-slate-900" /></div>
+                            <div><label className="block text-xs font-medium text-slate-600 mb-1">Teléfono visible</label><input type="text" value={devEditApiDisplayPhone} readOnly aria-label="Teléfono visible administrado por Meta" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl bg-slate-50 text-sm text-slate-600" /></div>
+                            <div><label className="block text-xs font-medium text-slate-600 mb-1">Phone Number ID</label><input type="text" value={devEditApiPhoneNumberID} readOnly aria-label="Phone Number ID administrado por Meta" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl bg-slate-50 text-sm text-slate-600" /></div>
                           </div>
-                          <div><label className="block text-xs font-medium text-slate-600 mb-1">WABA ID</label><input type="text" value={devEditApiWabaID} onChange={(e) => setDevEditApiWabaID(e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-transparent text-sm text-slate-900" /></div>
+                          <div><label className="block text-xs font-medium text-slate-600 mb-1">WABA ID</label><input type="text" value={devEditApiWabaID} readOnly aria-label="WABA ID administrado por Meta" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl bg-slate-50 text-sm text-slate-600" /></div>
+                          <p className="text-xs text-slate-500">Los identificadores de este canal se administran en Meta. Aquí puedes cambiar su nombre.</p>
                           <div className="grid grid-cols-2 gap-2 text-xs">
                             <div className="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2">
                               <p className="text-slate-400">Webhook</p>

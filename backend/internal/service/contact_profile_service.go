@@ -31,6 +31,9 @@ func (s *ContactProfileService) Update(ctx context.Context, accountID, contactID
 func (s *ContactProfileService) ListObservations(ctx context.Context, accountID, contactID, userID uuid.UUID, isAdmin bool, limit, offset int) ([]*domain.Interaction, error) {
 	return s.repos.ContactProfile.ListObservations(ctx, accountID, contactID, userID, isAdmin, limit, offset)
 }
+func (s *ContactProfileService) ListObservationPage(ctx context.Context, accountID, contactID, userID uuid.UUID, isAdmin bool, limit, offset int, cursor, scope string) (*repository.ContactObservationPage, error) {
+	return s.repos.ContactProfile.ListObservationPage(ctx, accountID, contactID, userID, isAdmin, limit, offset, cursor, scope)
+}
 func (s *ContactProfileService) CountPinnedObservations(ctx context.Context, accountID, contactID uuid.UUID) (int, error) {
 	return s.repos.ContactProfile.CountPinnedObservations(ctx, accountID, contactID)
 }

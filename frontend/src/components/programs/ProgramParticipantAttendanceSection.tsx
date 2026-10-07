@@ -15,6 +15,9 @@ interface ProgramParticipantAttendanceSectionProps {
   participantId: string
   participantName: string
   enrolledAt: string
+  droppedAt?: string | null
+  completedAt?: string | null
+  participationStatus?: string
 }
 
 const EMPTY_SUMMARY: ProgramParticipantAttendanceHistorySummary = {
@@ -64,6 +67,9 @@ export default function ProgramParticipantAttendanceSection({
   participantId,
   participantName,
   enrolledAt,
+  droppedAt,
+  completedAt,
+  participationStatus,
 }: ProgramParticipantAttendanceSectionProps) {
   const [summary, setSummary] = useState(EMPTY_SUMMARY)
   const [sessions, setSessions] = useState<ProgramParticipantAttendanceHistorySession[]>([])
@@ -71,11 +77,14 @@ export default function ProgramParticipantAttendanceSection({
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
   const [pageError, setPageError] = useState('')
   const [historicalOpen, setHistoricalOpen] = useState(false)
   const requestRef = useRef<AbortController | null>(null)
   const requestSequence = useRef(0)
+  const loadedIdentity = useRef('')
+  const retryReset = useRef(false)
 
   const [selectedSession, setSelectedSession] = useState<ProgramParticipantAttendanceHistorySession | null>(null)
   const [observations, setObservations] = useState<HistoryObservation[]>([])
@@ -92,7 +101,8 @@ export default function ProgramParticipantAttendanceSection({
     requestRef.current = controller
     const sequence = ++requestSequence.current
     if (reset) {
-      if (silent) setPageError('')
+      setError('')
+      if (silent) { setPageError(''); setRefreshing(true) }
       else {
         setLoading(true)
         setError('')
@@ -124,27 +134,36 @@ export default function ProgramParticipantAttendanceSection({
       if (controller.signal.aborted || sequence !== requestSequence.current) return
       const message = caught instanceof Error ? caught.message : 'No se pudo cargar la asistencia del participante.'
       if (reset && !silent) setError(message)
-      else setPageError(message)
+      else { retryReset.current = reset; setPageError(message) }
     } finally {
       if (!controller.signal.aborted && sequence === requestSequence.current) {
         setLoading(false)
         setLoadingMore(false)
+        setRefreshing(false)
       }
     }
   }, [nextCursor, participantId, programId])
 
   useEffect(() => {
-    setSummary(EMPTY_SUMMARY)
-    setSessions([])
-    setHistoricalSessions([])
-    setNextCursor(null)
-    setHistoricalOpen(false)
-    setSelectedSession(null)
-    void loadHistory(true)
+    const identity = `${programId}:${participantId}`
+    const changedParticipant = loadedIdentity.current !== identity
+    loadedIdentity.current = identity
+    if (changedParticipant) {
+      setSummary(EMPTY_SUMMARY)
+      setSessions([])
+      setHistoricalSessions([])
+      setNextCursor(null)
+      setHistoricalOpen(false)
+      setSelectedSession(null)
+      observationRequestRef.current?.abort()
+      observationSequence.current += 1
+      setObservations([])
+    }
+    void loadHistory(true, !changedParticipant)
     return () => requestRef.current?.abort()
     // `nextCursor` is deliberately excluded: changing pages must not restart the history.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enrolledAt, participantId, programId])
+  }, [enrolledAt, droppedAt, completedAt, participationStatus, participantId, programId])
 
   const loadObservations = useCallback(async (session: ProgramParticipantAttendanceHistorySession) => {
     observationRequestRef.current?.abort()
@@ -270,6 +289,8 @@ export default function ProgramParticipantAttendanceSection({
         {summary.punctuality_rate != null && <p className="mt-2 text-[11px] text-slate-500">Puntualidad: <span className="font-semibold text-slate-700">{Math.round(summary.punctuality_rate)}%</span></p>}
       </div>
 
+      {refreshing && <p role="status" className="mt-3 flex items-center gap-2 text-xs text-slate-500"><Loader2 className="h-4 w-4 animate-spin" />Actualizando el periodo de asistencia…</p>}
+
       <div className="mt-3 grid grid-cols-4 gap-1.5 text-center">
         {[['P', summary.present, 'text-emerald-700 bg-emerald-50'], ['F', summary.absent, 'text-red-700 bg-red-50'], ['T', summary.late, 'text-amber-800 bg-amber-50'], ['Pend.', summary.pending, 'text-slate-600 bg-slate-100']].map(([label, value, style]) => <div key={String(label)} className={`min-w-0 rounded-xl px-1 py-2 ${style}`}><p className="text-base font-black">{value}</p><p className="truncate text-[10px] font-bold">{label}</p></div>)}
       </div>
@@ -277,7 +298,7 @@ export default function ProgramParticipantAttendanceSection({
       {sessions.length === 0 ? <div className="mt-5 rounded-2xl bg-slate-50 px-4 py-8 text-center"><History className="mx-auto h-7 w-7 text-slate-300" /><p className="mt-2 text-sm font-medium text-slate-600">No hay sesiones dentro de su periodo</p><p className="mt-1 text-xs leading-relaxed text-slate-400">{historicalSessions.length > 0 ? `${historicalSessions.length} registro${historicalSessions.length === 1 ? '' : 's'} de asistencia anterior${historicalSessions.length === 1 ? '' : 'es'} a la incorporación se conserva${historicalSessions.length === 1 ? '' : 'n'} abajo.` : 'Las sesiones se contabilizarán desde la fecha de incorporación.'}</p></div>
       : <div className="relative mt-5 space-y-3 before:absolute before:bottom-5 before:left-[10px] before:top-5 before:w-px before:bg-slate-200">{sessions.map(session => renderSession(session))}</div>}
 
-      {pageError && <div className="mt-3 rounded-xl border border-red-100 bg-red-50 p-3 text-xs text-red-700"><p>{pageError}</p><button type="button" onClick={() => void loadHistory(false)} className="mt-2 min-h-10 rounded-lg px-2 font-semibold hover:bg-red-100">Reintentar</button></div>}
+      {pageError && <div role="alert" className="mt-3 rounded-xl border border-red-100 bg-red-50 p-3 text-xs text-red-700"><p>{pageError}</p><button type="button" onClick={() => void loadHistory(retryReset.current, retryReset.current)} className="mt-2 min-h-10 rounded-lg px-2 font-semibold hover:bg-red-100">Reintentar</button></div>}
       {nextCursor && !pageError && <button type="button" onClick={() => void loadHistory(false)} disabled={loadingMore} className="mt-4 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60">{loadingMore ? <Loader2 className="h-4 w-4 animate-spin" /> : <History className="h-4 w-4" />}Ver sesiones anteriores</button>}
 
       {historicalSessions.length > 0 && <div className="mt-5 border-t border-slate-100 pt-4">

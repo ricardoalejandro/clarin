@@ -289,6 +289,12 @@ type Device struct {
 	LastSeenAt          *time.Time                 `json:"last_seen_at,omitempty"`
 	CreatedAt           time.Time                  `json:"created_at"`
 	UpdatedAt           time.Time                  `json:"updated_at"`
+	Deletion            *DeviceDeletionStatus      `json:"deletion,omitempty"`
+	DeletionOperationID *uuid.UUID                 `json:"-"`
+	DeletionPhase       *string                    `json:"-"`
+	DeletionAttempts    int                        `json:"-"`
+	DeletionNextRetryAt *time.Time                 `json:"-"`
+	DeletionErrorCode   *string                    `json:"-"`
 }
 
 // DeviceRuntimeCapabilities exposes actions that are actually available for

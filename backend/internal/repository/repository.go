@@ -1039,7 +1039,8 @@ func (r *DeviceRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.D
 	err := r.db.QueryRow(ctx, `
 		SELECT id, account_id, name, phone, jid, status, qr_code, receive_messages, provider, waba_id,
 			phone_number_id, api_display_phone, api_webhook_status, api_billing_status, api_sending_enabled,
-			api_templates_enabled, capabilities, last_seen_at, created_at, updated_at
+			api_templates_enabled, capabilities, last_seen_at, created_at, updated_at,
+			delete_operation_id,delete_phase,delete_attempts,delete_next_attempt_at,delete_last_error_code
 		FROM devices WHERE id = $1
 	`, id).Scan(
 		&device.ID, &device.AccountID, &device.Name, &device.Phone, &device.JID,
@@ -1047,10 +1048,12 @@ func (r *DeviceRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.D
 		&device.PhoneNumberID, &device.APIDisplayPhone, &device.APIWebhookStatus, &device.APIBillingStatus,
 		&device.APISendingEnabled, &device.APITemplatesEnabled, &device.Capabilities, &device.LastSeenAt,
 		&device.CreatedAt, &device.UpdatedAt,
+		&device.DeletionOperationID, &device.DeletionPhase, &device.DeletionAttempts, &device.DeletionNextRetryAt, &device.DeletionErrorCode,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
+	device.HydrateDeletion()
 	return device, err
 }
 
@@ -1058,7 +1061,8 @@ func (r *DeviceRepository) GetByAccountID(ctx context.Context, accountID uuid.UU
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, name, phone, jid, status, qr_code, receive_messages, provider, waba_id,
 			phone_number_id, api_display_phone, api_webhook_status, api_billing_status, api_sending_enabled,
-			api_templates_enabled, capabilities, last_seen_at, created_at, updated_at
+			api_templates_enabled, capabilities, last_seen_at, created_at, updated_at,
+			delete_operation_id,delete_phase,delete_attempts,delete_next_attempt_at,delete_last_error_code
 		FROM devices WHERE account_id = $1 ORDER BY created_at DESC
 	`, accountID)
 	if err != nil {
@@ -1075,9 +1079,11 @@ func (r *DeviceRepository) GetByAccountID(ctx context.Context, accountID uuid.UU
 			&device.PhoneNumberID, &device.APIDisplayPhone, &device.APIWebhookStatus, &device.APIBillingStatus,
 			&device.APISendingEnabled, &device.APITemplatesEnabled, &device.Capabilities, &device.LastSeenAt,
 			&device.CreatedAt, &device.UpdatedAt,
+			&device.DeletionOperationID, &device.DeletionPhase, &device.DeletionAttempts, &device.DeletionNextRetryAt, &device.DeletionErrorCode,
 		); err != nil {
 			return nil, err
 		}
+		device.HydrateDeletion()
 		devices = append(devices, device)
 	}
 	return devices, nil
@@ -1087,7 +1093,8 @@ func (r *DeviceRepository) GetAll(ctx context.Context) ([]*domain.Device, error)
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, name, phone, jid, status, qr_code, receive_messages, provider, waba_id,
 			phone_number_id, api_display_phone, api_webhook_status, api_billing_status, api_sending_enabled,
-			api_templates_enabled, capabilities, last_seen_at, created_at, updated_at
+			api_templates_enabled, capabilities, last_seen_at, created_at, updated_at,
+			delete_operation_id,delete_phase,delete_attempts,delete_next_attempt_at,delete_last_error_code
 		FROM devices ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -1104,37 +1111,42 @@ func (r *DeviceRepository) GetAll(ctx context.Context) ([]*domain.Device, error)
 			&device.PhoneNumberID, &device.APIDisplayPhone, &device.APIWebhookStatus, &device.APIBillingStatus,
 			&device.APISendingEnabled, &device.APITemplatesEnabled, &device.Capabilities, &device.LastSeenAt,
 			&device.CreatedAt, &device.UpdatedAt,
+			&device.DeletionOperationID, &device.DeletionPhase, &device.DeletionAttempts, &device.DeletionNextRetryAt, &device.DeletionErrorCode,
 		); err != nil {
 			return nil, err
 		}
+		device.HydrateDeletion()
 		devices = append(devices, device)
 	}
 	return devices, nil
 }
 
 func (r *DeviceRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
-	query := `UPDATE devices SET status = $1, qr_code = NULL, updated_at = NOW() WHERE id = $2`
+	query := `UPDATE devices SET status = $1, qr_code = NULL, updated_at = NOW() WHERE id = $2 AND delete_operation_id IS NULL`
 	if status == domain.DeviceStatusConnecting {
-		query = `UPDATE devices SET status = $1, updated_at = NOW() WHERE id = $2`
+		query = `UPDATE devices SET status = $1, updated_at = NOW() WHERE id = $2 AND delete_operation_id IS NULL`
 	}
 	_, err := r.db.Exec(ctx, query, status, id)
 	return err
 }
 
 func (r *DeviceRepository) UpdateJID(ctx context.Context, id uuid.UUID, jid, phone string) error {
-	_, err := r.db.Exec(ctx, `
-		UPDATE devices SET jid = $1, phone = $2, status = $3, qr_code = NULL, last_seen_at = NOW(), updated_at = NOW() WHERE id = $4
-	`, jid, phone, domain.DeviceStatusConnected, id)
-	return err
+	return r.BindSession(ctx, id, jid, phone)
 }
 
 func (r *DeviceRepository) UpdateName(ctx context.Context, id uuid.UUID, name string) error {
-	_, err := r.db.Exec(ctx, `UPDATE devices SET name = $1, updated_at = NOW() WHERE id = $2`, name, id)
+	ct, err := r.db.Exec(ctx, `UPDATE devices SET name = $1, updated_at = NOW() WHERE id = $2 AND delete_operation_id IS NULL`, name, id)
+	if err == nil && ct.RowsAffected() == 0 {
+		return r.Active(ctx, uuid.Nil, id)
+	}
 	return err
 }
 
 func (r *DeviceRepository) UpdateReceiveMessages(ctx context.Context, id uuid.UUID, receive bool) error {
-	_, err := r.db.Exec(ctx, `UPDATE devices SET receive_messages = $1, updated_at = NOW() WHERE id = $2`, receive, id)
+	ct, err := r.db.Exec(ctx, `UPDATE devices SET receive_messages = $1, updated_at = NOW() WHERE id = $2 AND delete_operation_id IS NULL`, receive, id)
+	if err == nil && ct.RowsAffected() == 0 {
+		return r.Active(ctx, uuid.Nil, id)
+	}
 	return err
 }
 
@@ -1161,54 +1173,9 @@ func (r *DeviceRepository) UpdateCloudAPIConfig(ctx context.Context, id uuid.UUI
 
 func (r *DeviceRepository) UpdateQRCode(ctx context.Context, id uuid.UUID, qrCode string) error {
 	_, err := r.db.Exec(ctx, `
-		UPDATE devices SET qr_code = $1, status = $2, updated_at = NOW() WHERE id = $3
+		UPDATE devices SET qr_code = $1, status = $2, updated_at = NOW() WHERE id = $3 AND delete_operation_id IS NULL
 	`, qrCode, domain.DeviceStatusConnecting, id)
 	return err
-}
-
-func (r *DeviceRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `
-		SELECT DISTINCT ws.account_id, ws.media_asset_id
-		FROM whatsapp_statuses ws
-		WHERE ws.device_id=$1 AND ws.media_asset_id IS NOT NULL
-	`, id)
-	if err != nil {
-		return err
-	}
-	type statusAsset struct {
-		accountID uuid.UUID
-		assetID   uuid.UUID
-	}
-	assets := make([]statusAsset, 0)
-	for rows.Next() {
-		var asset statusAsset
-		if err := rows.Scan(&asset.accountID, &asset.assetID); err != nil {
-			rows.Close()
-			return err
-		}
-		assets = append(assets, asset)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	if _, err := tx.Exec(ctx, `DELETE FROM devices WHERE id=$1`, id); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
-	statusRepo := &WhatsAppStatusRepository{db: r.db}
-	for _, asset := range assets {
-		_, _ = statusRepo.ScheduleMediaCleanup(ctx, asset.accountID, asset.assetID, time.Now())
-	}
-	return nil
 }
 
 // ChatRepository handles chat data access
@@ -4420,7 +4387,9 @@ type ContactDeviceNameRepository struct {
 func (r *ContactDeviceNameRepository) Upsert(ctx context.Context, cdn *domain.ContactDeviceName) error {
 	return r.db.QueryRow(ctx, `
 		INSERT INTO contact_device_names (contact_id, device_id, name, push_name, business_name)
-		VALUES ($1, $2, $3, $4, $5)
+		SELECT c.id,d.id,$3::varchar,$4::varchar,$5::varchar
+		FROM contacts c JOIN devices d ON d.id=$2 AND d.account_id=c.account_id AND d.delete_operation_id IS NULL
+		WHERE c.id=$1 FOR KEY SHARE OF d
 		ON CONFLICT (contact_id, device_id) DO UPDATE SET
 			name = COALESCE(EXCLUDED.name, contact_device_names.name),
 			push_name = COALESCE(EXCLUDED.push_name, contact_device_names.push_name),
@@ -4435,7 +4404,7 @@ func (r *ContactDeviceNameRepository) GetByContactID(ctx context.Context, contac
 		SELECT cdn.id, cdn.contact_id, cdn.device_id, cdn.name, cdn.push_name, cdn.business_name, cdn.synced_at,
 		       d.name as device_name
 		FROM contact_device_names cdn
-		LEFT JOIN devices d ON d.id = cdn.device_id
+		JOIN devices d ON d.id = cdn.device_id AND d.delete_operation_id IS NULL
 		WHERE cdn.contact_id = $1
 		ORDER BY cdn.synced_at DESC
 	`, contactID)

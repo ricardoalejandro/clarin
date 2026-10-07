@@ -2,13 +2,8 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { ChevronDown, Smartphone, Check } from 'lucide-react'
-
-interface Device {
-  id: string
-  name: string
-  phone?: string
-  status: string
-}
+import type { Device } from '@/types/chat'
+import { isDeviceDeleting } from '@/components/settings/deviceLifecycle'
 
 interface DeviceSelectorProps {
   devices: Device[]
@@ -45,7 +40,7 @@ export default function DeviceSelector({
     }
   }, [])
 
-  const connectedDevices = devices.filter(d => d.status === 'connected')
+  const connectedDevices = devices.filter(d => d.status === 'connected' && !isDeviceDeleting(d))
 
   const handleToggle = (deviceId: string) => {
     if (mode === 'single') {

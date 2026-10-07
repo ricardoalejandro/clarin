@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { useEffect, useState, useCallback, useRef, useMemo, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { useRouter } from 'next/navigation'
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -31,6 +31,9 @@ import BulkGenerateDocumentModal from '@/components/BulkGenerateDocumentModal'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 import { subscribeWebSocket } from '@/lib/api'
+import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
+import { contactFilterCount, contactFilterParams, emptyContactListFilters, type ContactListFilters } from '@/components/contact-details/contactListFilters'
+import { fetchContactExportPages } from '@/components/contact-details/contactExportPages'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider'
 import type { Lead } from '@/types/contact'
@@ -320,12 +323,20 @@ export default function ContactsPage() {
   const isCompactWorkspace = workspaceWidth > 0 && workspaceWidth < 1024
   const kommoEnabled = typeof window !== 'undefined' && localStorage.getItem('kommo_enabled') === 'true'
   const [contacts, setContacts] = useState<Contact[]>([])
+  const [contactsInitialized, setContactsInitialized] = useState(false)
   const [devices, setDevices] = useState<Device[]>([])
   const [loading, setLoading] = useState(true)
   const [contactsError, setContactsError] = useState('')
   const [total, setTotal] = useState(0)
   const [searchTerm, setSearchTerm] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
+  const [searchEditRevision, setSearchEditRevision] = useState(0)
+  const [settledSearchRevision, setSettledSearchRevision] = useState(0)
+  const authScope = useSyncExternalStore(subscribeAuthScope, getAuthScope, () => 'server')
+  const contactsScopeRef = useRef(authScope)
+  const [appliedFilters, setAppliedFilters] = useState<ContactListFilters>(emptyContactListFilters)
+  const [draftSortBy, setDraftSortBy] = useState('')
+  const [draftSortOrder, setDraftSortOrder] = useState<'asc' | 'desc'>('asc')
   const [filterDevice, setFilterDevice] = useState('')
   const [allTags, setAllTags] = useState<StructuredTag[]>([])
 
@@ -353,6 +364,7 @@ export default function ContactsPage() {
   const offsetRef = useRef(0)
   const contactsRequestRef = useRef(0)
   const contactsAbortRef = useRef<AbortController | null>(null)
+  const exportAbortRef = useRef<AbortController | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   // Selection
@@ -394,11 +406,12 @@ export default function ContactsPage() {
   const [showMoreMenu, setShowMoreMenu] = useState(false)
   const [showMobileBulkMenu, setShowMobileBulkMenu] = useState(false)
   const moreMenuRef = useRef<HTMLDivElement>(null)
+  const moreMenuPortalRef = useRef<HTMLDivElement>(null)
 
   // Close dropdown on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) {
+      if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node) && !moreMenuPortalRef.current?.contains(e.target as Node)) {
         setShowMoreMenu(false)
       }
       if (actionsMenuRef.current && !actionsMenuRef.current.contains(e.target as Node)) {
@@ -448,6 +461,7 @@ export default function ContactsPage() {
   // Send message / Inline chat
   const activeContactIdRef = useRef<string | null>(null)
   const contactDetailRequestRef = useRef(0)
+  const contactDetailAbortRef = useRef<AbortController | null>(null)
   const whatsappChat = useWhatsAppChatLauncher({
     sessionKey: selectedContact?.id || null,
     contactId: selectedContact?.id || null,
@@ -510,6 +524,45 @@ export default function ContactsPage() {
   const [cfFilters, setCfFilters] = useState<CustomFieldFilter[]>([])
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+  const filterQuery = useMemo(() => contactFilterParams(appliedFilters, debouncedSearch).toString(), [appliedFilters, debouncedSearch])
+  const contactQuery = useMemo(() => {
+    const params = new URLSearchParams(filterQuery)
+    if (cfVisibleIds.size) params.set('include_custom_fields', 'true')
+    if (sortBy) { params.set('sort_by', sortBy); params.set('sort_order', sortOrder) }
+    return params.toString()
+  }, [filterQuery, cfVisibleIds.size > 0, sortBy, sortOrder])
+  const queryKey = `${authScope}:${contactQuery}:${settledSearchRevision}`
+  const queryKeyRef = useRef(queryKey)
+  queryKeyRef.current = queryKey
+  const searchPending = searchTerm !== debouncedSearch || searchEditRevision !== settledSearchRevision
+  const invalidateContactQuery = () => { contactsAbortRef.current?.abort(); contactsRequestRef.current += 1; setLoading(false); setLoadingMore(false) }
+  const restoreFilterDraft = () => {
+    setFilterDevice(appliedFilters.deviceId)
+    setFilterTagNames(new Set(appliedFilters.tagNames))
+    setExcludeFilterTagNames(new Set(appliedFilters.excludedTagNames))
+    setTagFilterMode(appliedFilters.tagMode)
+    setLeadFormulaType(appliedFilters.formulaType)
+    setLeadFormulaText(appliedFilters.formulaText)
+    setLeadFormulaIsValid(true)
+    setFilterDateField(appliedFilters.dateField)
+    setFilterDatePreset(appliedFilters.datePreset)
+    setFilterDateFrom(appliedFilters.dateFrom)
+    setFilterDateTo(appliedFilters.dateTo)
+    setCfFilters(structuredClone(appliedFilters.customFields))
+    setDraftSortBy(sortBy)
+    setDraftSortOrder(sortOrder)
+  }
+  const openContactFilters = () => { restoreFilterDraft(); setShowFilterDropdown(true) }
+  const applyContactFilters = () => {
+    const resolved = resolveDatePreset(filterDatePreset, filterDateFrom, filterDateTo)
+    invalidateContactQuery()
+    setAppliedFilters({ deviceId: filterDevice, tagNames: [...filterTagNames], excludedTagNames: [...excludeFilterTagNames], tagMode: tagFilterMode, formulaType: leadFormulaType, formulaText: leadFormulaType === 'advanced' ? leadFormulaText : '', dateField: filterDateField, datePreset: filterDatePreset, dateFrom: resolved?.from || '', dateTo: resolved?.to || '', customFields: structuredClone(cfFilters) })
+    setAppliedFormulaType(leadFormulaType)
+    setAppliedFormulaText(leadFormulaType === 'advanced' ? leadFormulaText : '')
+    setSortBy(draftSortBy)
+    setSortOrder(draftSortOrder)
+    setShowFilterDropdown(false)
+  }
 
   const loadDetailOpportunities = useCallback(async (contactId: string) => {
     const requestId = ++detailOpportunitiesRequestRef.current
@@ -547,6 +600,7 @@ export default function ContactsPage() {
 
   const closeDetailPanel = useCallback(() => {
     contactDetailRequestRef.current += 1
+    contactDetailAbortRef.current?.abort()
     detailOpportunitiesRequestRef.current += 1
     detailOpportunitiesAbortRef.current?.abort()
     activeContactIdRef.current = null
@@ -575,8 +629,10 @@ export default function ContactsPage() {
   })
 
   const fetchContacts = useCallback(async (reset: boolean = true) => {
-    if (!token) return
-    if (reset && searchTerm !== debouncedSearch) return
+    if (!token || isAuthIdentityChanging(authScope) || searchPending) return
+    const requestScope = getAuthScope()
+    const requestKey = queryKey
+    if (requestScope !== authScope) return
     contactsAbortRef.current?.abort()
     const controller = new AbortController()
     contactsAbortRef.current = controller
@@ -589,49 +645,17 @@ export default function ContactsPage() {
     const requestId = ++contactsRequestRef.current
     if (reset) setContactsError('')
     try {
-      const params = new URLSearchParams()
-      if (debouncedSearch) params.set('search', debouncedSearch)
-      if (filterDevice) params.set('device_id', filterDevice)
-
-      // Advanced filter: formula or simple tag filter
-      if (appliedFormulaType === 'advanced' && appliedFormulaText) {
-        params.set('tag_formula', appliedFormulaText)
-      } else {
-        if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
-        if (excludeFilterTagNames.size > 0) params.set('exclude_tag_names', Array.from(excludeFilterTagNames).join(','))
-        if (filterTagNames.size > 0 || excludeFilterTagNames.size > 0) params.set('tag_mode', tagFilterMode)
-      }
-
-      // Date filter
-      if (filterDatePreset) {
-        const resolved = resolveDatePreset(filterDatePreset, filterDateFrom, filterDateTo)
-        if (resolved) {
-          params.set('date_field', filterDateField)
-          if (resolved.from) params.set('date_from', resolved.from)
-          if (resolved.to) params.set('date_to', resolved.to)
-        }
-      }
-
+      const params = new URLSearchParams(contactQuery)
       params.set('limit', String(CONTACTS_PAGE_SIZE))
       params.set('offset', String(offset))
       params.set('has_phone', 'false')
-      if (sortBy) {
-        params.set('sort_by', sortBy)
-        params.set('sort_order', sortOrder)
-      }
-      if (cfVisibleIds.size > 0) {
-        params.set('include_custom_fields', 'true')
-      }
-      if (cfFilters.length > 0) {
-        params.set('cf_filter', JSON.stringify(cfFilters))
-      }
 
       const res = await fetch(`/api/contacts?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal,
       })
       const data = await res.json().catch(() => ({}))
-      if (requestId !== contactsRequestRef.current || controller.signal.aborted) return
+      if (requestId !== contactsRequestRef.current || controller.signal.aborted || requestKey !== queryKeyRef.current || requestScope !== getAuthScope()) return
       if (!res.ok || !data.success) throw new Error(data.error || 'No se pudieron cargar los contactos')
       if (data.success) {
         const newContacts: Contact[] = data.contacts || []
@@ -653,17 +677,18 @@ export default function ContactsPage() {
         setContactsError('')
       }
     } catch (err) {
-      if (requestId !== contactsRequestRef.current || controller.signal.aborted) return
+      if (requestId !== contactsRequestRef.current || controller.signal.aborted || requestKey !== queryKeyRef.current || requestScope !== getAuthScope()) return
       console.error('Failed to fetch contacts:', err)
       setContactsError(err instanceof Error ? err.message : 'No se pudieron cargar los contactos')
     } finally {
-      if (requestId === contactsRequestRef.current) {
+      if (requestId === contactsRequestRef.current && requestKey === queryKeyRef.current && requestScope === getAuthScope()) {
         setLoading(false)
         setLoadingMore(false)
+        setContactsInitialized(true)
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, searchTerm, debouncedSearch, filterDevice, appliedFormulaType, appliedFormulaText, filterTagNames, excludeFilterTagNames, tagFilterMode, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, sortBy, sortOrder, cfVisibleIds, cfFilters])
+  }, [token, authScope, searchPending, contactQuery, queryKey])
 
   const loadMoreContacts = useCallback(() => {
     if (loadingMore || !hasMore) return
@@ -679,44 +704,46 @@ export default function ContactsPage() {
   }, [hasMore, loadingMore, loadMoreContacts])
 
   const fetchDevices = useCallback(async () => {
-    if (!token) return
+    if (!token || isAuthIdentityChanging(authScope) || authScope !== getAuthScope()) return
     try {
       const res = await fetch('/api/devices', {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
-      if (data.success) {
+      if (data.success && authScope === getAuthScope()) {
         setDevices(data.devices || [])
       }
     } catch (err) {
       console.error('Failed to fetch devices:', err)
     }
-  }, [token])
+  }, [token, authScope])
 
   const fetchAllTags = useCallback(async () => {
-    if (!token) return
+    if (!token || isAuthIdentityChanging(authScope) || authScope !== getAuthScope()) return
     try {
       const res = await fetch('/api/tags', {
         headers: { Authorization: `Bearer ${token}` },
       })
       const data = await res.json()
-      if (data.success) {
+      if (data.success && authScope === getAuthScope()) {
         setAllTags(data.tags || [])
       }
     } catch (err) {
       console.error('Failed to fetch tags:', err)
     }
-  }, [token])
+  }, [token, authScope])
 
   useEffect(() => {
+    if (isAuthIdentityChanging(authScope)) return
+    const controller = new AbortController()
     fetchDevices()
     fetchAllTags()
     // Fetch custom field definitions
     if (token) {
-      fetch('/api/custom-fields', { headers: { Authorization: `Bearer ${token}` } })
+      fetch('/api/custom-fields', { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
         .then(r => r.json())
         .then(d => {
-          if (d.success) {
+          if (d.success && !controller.signal.aborted && authScope === getAuthScope()) {
             const defs: CustomFieldDefinition[] = d.definitions || []
             setCfDefs(defs)
             // Restore visible columns from localStorage
@@ -734,12 +761,13 @@ export default function ContactsPage() {
     }
     if (token) {
       // Check Google Contacts status
-      fetch('/api/google/status', { headers: { Authorization: `Bearer ${token}` } })
+      fetch('/api/google/status', { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
         .then(r => r.json())
-        .then(d => { if (d.success) setGoogleConnected(d.connected || false) })
+        .then(d => { if (d.success && !controller.signal.aborted && authScope === getAuthScope()) setGoogleConnected(d.connected || false) })
         .catch(() => {})
     }
-  }, [fetchDevices, fetchAllTags])
+    return () => controller.abort()
+  }, [fetchDevices, fetchAllTags, authScope, token])
 
   // Custom field column toggle
   const toggleCfColumn = useCallback((fieldId: string) => {
@@ -792,87 +820,121 @@ export default function ContactsPage() {
   // WebSocket listener for custom field definition updates
   useEffect(() => {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
+      if (authScope !== getAuthScope() || isAuthIdentityChanging(authScope)) return
       const msg = data as { event?: string }
-      if (msg.event === 'contact_update') {
+      if (msg.event === 'contact_update' || msg.event === 'device_deletion') {
         void fetchContacts(true)
       } else if (msg.event === 'custom_field_def_update') {
         if (token) {
           fetch('/api/custom-fields', { headers: { Authorization: `Bearer ${token}` } })
             .then(r => r.json())
-            .then(d => { if (d.success) setCfDefs(d.definitions || []) })
+            .then(d => { if (d.success && authScope === getAuthScope()) setCfDefs(d.definitions || []) })
             .catch(() => {})
         }
       }
     })
     return () => unsubscribe()
-  }, [fetchContacts, token])
+  }, [fetchContacts, token, authScope])
 
   // Debounced fetch: resets scroll to top on filter/search change
   useEffect(() => {
-    const timer = setTimeout(() => setDebouncedSearch(searchTerm), SEARCH_DEBOUNCE_MS)
+    const timer = setTimeout(() => { setDebouncedSearch(searchTerm); setSettledSearchRevision(searchEditRevision) }, SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(timer)
-  }, [searchTerm])
+  }, [searchTerm, searchEditRevision])
 
   useEffect(() => () => contactsAbortRef.current?.abort(), [])
 
-  const searchPending = searchTerm.trim() !== debouncedSearch
-
   const updateSearchTerm = (value: string) => {
-    contactsAbortRef.current?.abort()
-    contactsRequestRef.current += 1
-    setLoading(false)
-    setLoadingMore(false)
+    invalidateContactQuery()
+    const revision = searchEditRevision + 1
+    setSearchEditRevision(revision)
     setSearchTerm(value)
-    if (!value) setDebouncedSearch('')
+    if (!value) { setDebouncedSearch(''); setSettledSearchRevision(revision) }
   }
 
-  // Debounce tag filter changes to prevent flickering
-  const [debouncedTagNames, setDebouncedTagNames] = useState<Set<string>>(new Set())
-  const [debouncedExcludeTagNames, setDebouncedExcludeTagNames] = useState<Set<string>>(new Set())
-  const [debouncedTagMode, setDebouncedTagMode] = useState<'OR' | 'AND'>('OR')
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedTagNames(filterTagNames)
-      setDebouncedExcludeTagNames(excludeFilterTagNames)
-      setDebouncedTagMode(tagFilterMode)
-    }, SEARCH_DEBOUNCE_MS)
-    return () => clearTimeout(timer)
-  }, [filterTagNames, excludeFilterTagNames, tagFilterMode])
+    contactsScopeRef.current = authScope
+    contactsAbortRef.current?.abort()
+    contactsRequestRef.current += 1
+    contactDetailAbortRef.current?.abort()
+    contactDetailRequestRef.current += 1
+    detailOpportunitiesAbortRef.current?.abort()
+    detailOpportunitiesRequestRef.current += 1
+    activeContactIdRef.current = null
+    setContacts([])
+    setContactsInitialized(false)
+    setDevices([])
+    setAllTags([])
+    setCfDefs([])
+    setCfVisibleIds(new Set())
+    setGoogleConnected(false)
+    setTotal(0)
+    setHasMore(false)
+    setSelectedContact(null)
+    setShowDetailPanel(false)
+    setShowFilterDropdown(false)
+    setShowExportModal(false)
+    setShowContactLeads(false)
+    setContactLeads([])
+    setContactLeadsTarget(null)
+    setShowDuplicates(false)
+    setDuplicateGroups([])
+    setSelectedIds(new Set())
+    setAppliedFilters(emptyContactListFilters())
+    resetInlineChatState()
+    return () => { contactsAbortRef.current?.abort(); contactsRequestRef.current += 1 }
+  }, [authScope, resetInlineChatState])
+
+  useEffect(() => {
+    exportAbortRef.current?.abort()
+    setExporting(false)
+    return () => exportAbortRef.current?.abort()
+  }, [queryKey])
 
   useEffect(() => {
     offsetRef.current = 0
-    fetchContacts(true)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedSearch, filterDevice, appliedFormulaType, appliedFormulaText, debouncedTagNames, debouncedExcludeTagNames, debouncedTagMode, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, sortBy, sortOrder])
+    void fetchContacts(true)
+  }, [fetchContacts])
 
   // Auto-open contact detail from URL params (e.g. ?contact_id=UUID&scroll=tasks)
   useEffect(() => {
+    if (!token || isAuthIdentityChanging(authScope) || authScope !== getAuthScope()) return
     const params = new URLSearchParams(window.location.search)
     const cId = params.get('contact_id')
     if (!cId) return
-
-    // Clear URL params to avoid re-triggering
-    window.history.replaceState({}, '', window.location.pathname)
-
+    const controller = new AbortController()
+    contactDetailAbortRef.current?.abort()
+    contactDetailAbortRef.current = controller
+    const requestId = ++contactDetailRequestRef.current
+    const current = () => !controller.signal.aborted && requestId === contactDetailRequestRef.current && activeContactIdRef.current === cId && authScope === getAuthScope()
     const fetchAndOpenContact = async () => {
-      const requestId = ++contactDetailRequestRef.current
       activeContactIdRef.current = cId
       resetInlineChatState()
       void loadDetailOpportunities(cId)
       try {
-        const token = localStorage.getItem('token')
         const res = await fetch(`/api/contacts/${cId}`, {
           headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
         })
         const data = await res.json()
-        if (requestId === contactDetailRequestRef.current && activeContactIdRef.current === cId && data.success && data.contact) {
+        if (current() && res.ok && data.success && data.contact?.id === cId) {
           setSelectedContact(data.contact)
           setShowDetailPanel(true)
+          // Consume only the completed intent. Hydration and identity changes may
+          // cancel an earlier request, so its URL must remain available to retry.
+          const currentParams = new URLSearchParams(window.location.search)
+          if (currentParams.get('contact_id') === cId) {
+            currentParams.delete('contact_id')
+            currentParams.delete('scroll')
+            const remainingQuery = currentParams.toString()
+            window.history.replaceState(window.history.state, '', `${window.location.pathname}${remainingQuery ? `?${remainingQuery}` : ''}${window.location.hash}`)
+          }
         }
       } catch { /* ignore */ }
     }
-    fetchAndOpenContact()
-  }, [loadDetailOpportunities, resetInlineChatState])
+    void fetchAndOpenContact()
+    return () => controller.abort()
+  }, [authScope, token, loadDetailOpportunities, resetInlineChatState])
 
   // Close modals on Escape (topmost first)
   useEffect(() => {
@@ -892,6 +954,7 @@ export default function ContactsPage() {
     if (showDetailPanel && selectedContact?.id !== contact.id && !requestCloseDetailPanel()) return
     resetInlineChatState()
     contactDetailRequestRef.current += 1
+    contactDetailAbortRef.current?.abort()
     activeContactIdRef.current = contact.id
     setSelectedContact(contact)
     setShowDetailPanel(true)
@@ -1125,31 +1188,10 @@ export default function ContactsPage() {
   }
 
   // Active filter count
-  const activeFilterCount = filterTagNames.size + excludeFilterTagNames.size + (filterDevice ? 1 : 0) + (appliedFormulaType === 'advanced' && appliedFormulaText ? 1 : 0) + (filterDatePreset ? 1 : 0) + cfFilters.length
+  const activeFilterCount = contactFilterCount(appliedFilters)
   const mobileFilterAdjustmentCount = activeFilterCount + (sortBy ? 1 : 0)
 
-  const buildBroadcastContactFilters = () => {
-    const params = new URLSearchParams()
-    if (debouncedSearch) params.set('search', debouncedSearch)
-    if (filterDevice) params.set('device_id', filterDevice)
-    if (appliedFormulaType === 'advanced' && appliedFormulaText) {
-      params.set('tag_formula', appliedFormulaText)
-    } else {
-      if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
-      if (excludeFilterTagNames.size > 0) params.set('exclude_tag_names', Array.from(excludeFilterTagNames).join(','))
-      if (filterTagNames.size > 0 || excludeFilterTagNames.size > 0) params.set('tag_mode', tagFilterMode)
-    }
-    if (filterDatePreset) {
-      const resolved = resolveDatePreset(filterDatePreset, filterDateFrom, filterDateTo)
-      if (resolved) {
-        params.set('date_field', filterDateField)
-        if (resolved.from) params.set('date_from', resolved.from)
-        if (resolved.to) params.set('date_to', resolved.to)
-      }
-    }
-    if (cfFilters.length > 0) params.set('cf_filter', JSON.stringify(cfFilters))
-    return params
-  }
+  const buildBroadcastContactFilters = () => new URLSearchParams(filterQuery)
 
   // Filtered tags for tag browser
   const filteredTags = allTags.filter(t =>
@@ -1179,40 +1221,24 @@ export default function ContactsPage() {
 
   // Export contacts
   const handleExportContacts = async () => {
+    if (exporting || searchPending || isAuthIdentityChanging(authScope)) return
+    exportAbortRef.current?.abort()
+    const controller = new AbortController()
+    exportAbortRef.current = controller
+    const requestScope = getAuthScope()
+    const requestKey = queryKey
+    const isCurrent = () => !controller.signal.aborted && requestScope === getAuthScope() && requestKey === queryKeyRef.current
     setExporting(true)
     try {
-      const params = new URLSearchParams()
-      if (exportScope === 'filtered') {
-        if (searchTerm) params.set('search', searchTerm)
-        if (filterDevice) params.set('device_id', filterDevice)
-        if (appliedFormulaType === 'advanced' && appliedFormulaText) {
-          params.set('tag_formula', appliedFormulaText)
-        } else {
-          if (filterTagNames.size > 0) params.set('tag_names', Array.from(filterTagNames).join(','))
-          if (excludeFilterTagNames.size > 0) params.set('exclude_tag_names', Array.from(excludeFilterTagNames).join(','))
-          if (filterTagNames.size > 0 || excludeFilterTagNames.size > 0) params.set('tag_mode', tagFilterMode)
-        }
-        if (filterDatePreset) {
-          const resolved = resolveDatePreset(filterDatePreset, filterDateFrom, filterDateTo)
-          if (resolved) {
-            params.set('date_field', filterDateField)
-            if (resolved.from) params.set('date_from', resolved.from)
-            if (resolved.to) params.set('date_to', resolved.to)
-          }
-        }
-      }
-      params.set('limit', '50000')
-      params.set('offset', '0')
-      params.set('has_phone', 'false')
-
-      const res = await fetch(`/api/contacts?${params.toString()}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (!data.success) return
-
-      const allContacts: Contact[] = data.contacts || []
+      const allContacts = await fetchContactExportPages<Contact>(exportScope === 'filtered' ? contactQuery : '', async query => {
+        const res = await fetch(`/api/contacts?${query}`, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo exportar la lista de contactos')
+        return { contacts: Array.isArray(data.contacts) ? data.contacts : [], total: Number(data.total || 0) }
+      }, isCurrent)
+      if (!allContacts || !isCurrent()) return
       const { utils, writeFile } = await import('xlsx')
+      if (!isCurrent()) return
       const rows = allContacts.map(c => {
         const row: Record<string, string> = {
           'telefono': c.phone || '',
@@ -1249,10 +1275,11 @@ export default function ContactsPage() {
       }
       setShowExportModal(false)
     } catch (err) {
+      if (!isCurrent()) return
       console.error('Export failed:', err)
-      alert('Error al exportar contactos')
+      alert(err instanceof Error ? err.message : 'Error al exportar contactos')
     } finally {
-      setExporting(false)
+      if (exportAbortRef.current === controller) setExporting(false)
     }
   }
 
@@ -1352,7 +1379,7 @@ export default function ContactsPage() {
   const selectedDuplicateGroup = duplicateGroups.find(g => g.group_key === selectedDuplicateKey) || duplicateGroups[0] || null
   const mobileActionContact = actionsMenuId ? contacts.find(contact => contact.id === actionsMenuId) || null : null
 
-  if (loading && contacts.length === 0) {
+  if (isAuthIdentityChanging(authScope) || contactsScopeRef.current !== authScope || loading && !contactsInitialized) {
     return (
       <div ref={workspaceRef} className="flex h-full min-h-0 items-center justify-center">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-emerald-600" />
@@ -1376,7 +1403,7 @@ export default function ContactsPage() {
             value={searchTerm}
             onChange={(e) => updateSearchTerm(e.target.value)}
             onFocus={() => {
-              if (!isCompactWorkspace) setShowFilterDropdown(true)
+              if (!isCompactWorkspace) openContactFilters()
             }}
             placeholder="Buscar por nombre, teléfono, email..."
             aria-busy={searchPending || loading}
@@ -1390,7 +1417,7 @@ export default function ContactsPage() {
           {isCompactWorkspace && <button
             type="button"
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() => setShowFilterDropdown(true)}
+            onClick={openContactFilters}
             className="absolute right-0 top-0 inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
             aria-label={`Abrir filtros y orden${mobileFilterAdjustmentCount > 0 ? `, ${mobileFilterAdjustmentCount} ajustes activos` : ''}`}
           >
@@ -1413,7 +1440,7 @@ export default function ContactsPage() {
                 <div className="flex items-center gap-2">
                   {activeFilterCount > 0 && (
                     <button
-                      onClick={() => { setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setLeadFormulaType('simple'); setLeadFormulaText(''); setLeadFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setFilterDevice(''); setCfFilters([]) }}
+                      onClick={() => { setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setLeadFormulaType('simple'); setLeadFormulaText(''); setLeadFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setFilterDevice(''); setCfFilters([]); invalidateContactQuery(); setAppliedFilters(emptyContactListFilters()) }}
                       className="text-[11px] text-red-400 hover:text-red-600 font-medium transition-colors"
                     >
                       Limpiar todo
@@ -1840,11 +1867,11 @@ export default function ContactsPage() {
                     <label htmlFor="contacts-mobile-sort" className="sr-only">Criterio de orden</label>
                     <select
                       id="contacts-mobile-sort"
-                      value={sortBy}
+                      value={draftSortBy}
                       onChange={(event) => {
                         const value = event.target.value
-                        setSortBy(value)
-                        setSortOrder(value === 'name' ? 'asc' : 'desc')
+                        setDraftSortBy(value)
+                        setDraftSortOrder(value === 'name' ? 'asc' : 'desc')
                       }}
                       className="h-11 min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                     >
@@ -1853,9 +1880,9 @@ export default function ContactsPage() {
                       <option value="lead_count">Oportunidades</option>
                       <option value="created_at">Creación</option>
                     </select>
-                    <button type="button" onClick={() => setSortOrder(order => order === 'asc' ? 'desc' : 'asc')} disabled={!sortBy} className="inline-flex h-11 min-w-11 items-center justify-center rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 disabled:opacity-40" aria-label={sortOrder === 'asc' ? 'Orden ascendente; cambiar a descendente' : 'Orden descendente; cambiar a ascendente'}>
-                      <ChevronUp className={`mr-1 h-4 w-4 transition-transform ${sortOrder === 'desc' ? 'rotate-180' : ''}`} />
-                      {sortOrder === 'asc' ? 'Asc.' : 'Desc.'}
+                    <button type="button" onClick={() => setDraftSortOrder(order => order === 'asc' ? 'desc' : 'asc')} disabled={!draftSortBy} className="inline-flex h-11 min-w-11 items-center justify-center rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 disabled:opacity-40" aria-label={draftSortOrder === 'asc' ? 'Orden ascendente; cambiar a descendente' : 'Orden descendente; cambiar a ascendente'}>
+                      <ChevronUp className={`mr-1 h-4 w-4 transition-transform ${draftSortOrder === 'desc' ? 'rotate-180' : ''}`} />
+                      {draftSortOrder === 'asc' ? 'Asc.' : 'Desc.'}
                     </button>
                   </div>
                 </div>
@@ -1865,9 +1892,7 @@ export default function ContactsPage() {
               <div className="px-4 py-3 border-t border-slate-100 shrink-0">
                 <button
                   onClick={() => {
-                    setAppliedFormulaType(leadFormulaType)
-                    setAppliedFormulaText(leadFormulaType === 'advanced' ? leadFormulaText : '')
-                    setShowFilterDropdown(false)
+                    applyContactFilters()
                   }}
                   disabled={leadFormulaType === 'advanced' && !leadFormulaIsValid}
                   className="w-full px-4 py-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 active:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all text-sm font-semibold shadow-sm shadow-emerald-200 hover:shadow-md hover:shadow-emerald-200"
@@ -2388,6 +2413,7 @@ export default function ContactsPage() {
       {typeof document !== 'undefined' && isCompactWorkspace && showMoreMenu && createPortal(
         <div className="app-viewport fixed inset-0 z-[90] flex flex-col bg-white">
           <div
+            ref={moreMenuPortalRef}
             role="dialog"
             aria-modal="true"
             aria-label="Más acciones de contactos"

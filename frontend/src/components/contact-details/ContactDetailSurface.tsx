@@ -275,6 +275,12 @@ function ContactDetailSurfaceImpl({
   className = '',
 }: ContactDetailSurfaceProps, forwardedRef: ForwardedRef<ContactDetailSurfaceHandle>) {
   const profile = useContactProfile({ contactId, context, initialContact, onContactChange })
+  const surfaceSessionKey = profile.sessionKey || `${contactId}:${context.type}:${context.id}`
+  const surfaceKeyRef = useRef(surfaceSessionKey)
+  surfaceKeyRef.current = surfaceSessionKey
+  const surfaceGenerationRef = useRef(0)
+  const surfaceLease = () => ({ key: surfaceSessionKey, generation: surfaceGenerationRef.current })
+  const isCurrentSurface = (session: ReturnType<typeof surfaceLease>) => session.key === surfaceKeyRef.current && session.generation === surfaceGenerationRef.current
   const googleSync = useGoogleContactSync({
     contactId,
     context,
@@ -308,6 +314,7 @@ function ContactDetailSurfaceImpl({
   const quickTagRequestRef = useRef(0)
 
   useEffect(() => {
+    surfaceGenerationRef.current += 1
     setShowObservationComposer(false)
     setHistoryOpen(false)
     setNewObservation('')
@@ -331,7 +338,8 @@ function ContactDetailSurfaceImpl({
     setContactDataExpanded(false)
     setContextActivityCount(0)
     setRelatedTaskCount(0)
-  }, [contactId, context.id, context.type])
+    return () => { surfaceGenerationRef.current += 1 }
+  }, [surfaceSessionKey])
 
   useEffect(() => {
     setQuickTagDraft(profile.contact?.structured_tags || [])
@@ -407,6 +415,7 @@ function ContactDetailSurfaceImpl({
 
   const saveCompleteContact = async () => {
     if (!editDraft || !profile.contact) return
+    const session = surfaceLease()
     const ageText = editDraft.age.trim()
     const age = ageText ? Number(ageText) : null
     if (age !== null && (!Number.isInteger(age) || age < 1 || age > 150)) {
@@ -471,9 +480,11 @@ function ContactDetailSurfaceImpl({
         custom_field_values: customFieldValues,
       })
     } catch (error) {
+      if (!isCurrentSurface(session)) return
       setCollectionError(error instanceof Error ? error.message : 'Revisa los campos personalizados.')
       return
     }
+    if (!isCurrentSurface(session)) return
     if (!result.success) {
       setCollectionError(result.error || 'No se pudo guardar el contacto.')
       return
@@ -507,8 +518,10 @@ function ContactDetailSurfaceImpl({
   }, [editDirty, editMode])
 
   const addObservation = async () => {
+    const session = surfaceLease()
     setObservationActionError('')
     const result = await profile.createObservation(newObservation)
+    if (!isCurrentSurface(session)) return
     if (!result.success) {
       setObservationActionError(result.error || 'No se pudo añadir la observación.')
       return
@@ -520,25 +533,32 @@ function ContactDetailSurfaceImpl({
   }
 
   const removeObservation = async (observation: Observation) => {
-    if (observation.type !== 'note') return
+    if (observation.type !== 'note' || !observation.can_delete || readOnly || profile.pendingObservationIds?.has(observation.id)) return
+    const session = surfaceLease()
     if (!window.confirm('¿Eliminar esta observación? Esta acción no se puede deshacer.')) return
     setObservationActionError('')
     const result = await profile.deleteObservation(observation.id)
+    if (!isCurrentSurface(session)) return
     if (!result.success) setObservationActionError(result.error || 'No se pudo eliminar la observación.')
     else onObservationChange?.()
   }
 
   const saveObservationEdit = async () => {
-    if (!editingObservation) return
+    if (!editingObservation || !editingObservation.can_edit || readOnly || profile.pendingObservationIds?.has(editingObservation.id)) return
+    const session = surfaceLease()
     setObservationActionError('')
     const result = await profile.updateObservation(editingObservation, editingObservationDraft)
+    if (!isCurrentSurface(session)) return
     if (!result.success) return setObservationActionError(result.error || 'No se pudo editar la nota.')
     setEditingObservation(null); setEditingObservationDraft(''); onObservationChange?.()
   }
 
   const toggleObservationPin = async (observation: Observation) => {
+    if (!observation.can_pin || readOnly || profile.pendingObservationIds?.has(observation.id)) return
+    const session = surfaceLease()
     setObservationActionError('')
     const result = await profile.setObservationPinned(observation, !observation.is_pinned)
+    if (!isCurrentSurface(session)) return
     if (!result.success) return setObservationActionError(result.error || 'No se pudo cambiar el fijado.')
     onObservationChange?.()
   }
@@ -550,6 +570,7 @@ function ContactDetailSurfaceImpl({
 
   const updateQuickTags = async (next: ContactProfileAvailableTag[]) => {
     if (!profile.contact || !canEdit || profile.saving || quickTagPendingId) return
+    const session = surfaceLease()
     const previous = quickTagDraft
     const mutation = beginQuickTagMutation(previous, next)
     const request = ++quickTagRequestRef.current
@@ -558,7 +579,7 @@ function ContactDetailSurfaceImpl({
     setQuickTagRetry(null)
     setQuickTagPendingId(mutation.pendingId)
     const result = await profile.updateContact({ tag_ids: next.map(tag => tag.id) })
-    if (request !== quickTagRequestRef.current) return
+    if (request !== quickTagRequestRef.current || !isCurrentSurface(session)) return
     setQuickTagPendingId(null)
     if (!result.success) {
       const rollback = rollbackQuickTagMutation(mutation)
@@ -692,7 +713,7 @@ function ContactDetailSurfaceImpl({
                     </div>
                     {profile.contact.do_not_contact && <div className="mt-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"><span className="font-bold">No contactar.</span>{profile.contact.do_not_contact_reason ? ` ${profile.contact.do_not_contact_reason}` : ''}</div>}
                     <div className="mt-3 grid grid-cols-3 gap-2" aria-label="Acciones prioritarias">
-                      <button type="button" disabled={!contextActivity || contextActionsDisabled} onClick={() => openContextAction('activity', '[data-crm-activity-add]')} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50/70 px-2 text-xs font-bold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-45"><MessageSquarePlus className="h-4 w-4" />Observación</button>
+                      <button type="button" disabled={contextActivity ? contextActionsDisabled : !canManageObservations} onClick={() => { if (contextActivity) openContextAction('activity', '[data-crm-activity-add]'); else { setShowObservationComposer(true); setObservationActionError('') } }} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50/70 px-2 text-xs font-bold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-45"><MessageSquarePlus className="h-4 w-4" />Observación</button>
                       <button data-crm-message-action type="button" onClick={() => profile.contact?.phone && onSendMessage?.(profile.contact.phone)} disabled={!onSendMessage || !profile.contact.phone || sendingMessage} aria-label={`Enviar mensaje a ${displayName(profile.contact)}`} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-2 text-xs font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45">{sendingMessage ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}{sendingMessage ? 'Abriendo…' : 'Mensaje'}</button>
                       <button type="button" onClick={enterEditMode} disabled={!canEdit} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2 text-xs font-bold text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"><Edit2 className="h-4 w-4" />Editar</button>
                     </div>
@@ -731,12 +752,13 @@ function ContactDetailSurfaceImpl({
 
                     {contextActivity && <CrmDetailAccordion id="crm-context-activity" title={context.type === 'event_participant' ? 'Observaciones de esta participación' : 'Observaciones de esta oportunidad'} summary={`${contextActivityCount} registro${contextActivityCount === 1 ? '' : 's'} · separado del historial general`} icon={MessageSquarePlus} tone="amber" open={accordionOpen.activity} onToggle={() => setSectionOpen('activity', !accordionOpen.activity)}>{embeddedContextActivity}</CrmDetailAccordion>}
 
+                    {canManageObservations && <button type="button" onClick={() => { setShowObservationComposer(value => !value); setObservationActionError('') }} aria-expanded={showObservationComposer} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-700 hover:bg-slate-50"><Plus className="h-4 w-4" />{showObservationComposer ? 'Cerrar formulario' : 'Añadir nota general'}</button>}
+                    {showObservationComposer && <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 p-3"><textarea autoFocus rows={3} maxLength={4000} value={newObservation} onChange={event => { setNewObservation(event.target.value); setObservationActionError('') }} onKeyDown={event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && newObservation.trim()) { event.preventDefault(); void addObservation() } }} placeholder="Nota transversal del contacto… (Ctrl/Cmd + Enter)" className="w-full resize-y rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-100" /><div className="mt-2 flex justify-end"><button type="button" onClick={() => void addObservation()} disabled={!newObservation.trim() || profile.savingObservation} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-bold text-white disabled:opacity-45">{profile.savingObservation ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}Guardar nota</button></div></div>}
+                      {observationActionError && <div className="mt-3 flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700" role="alert"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1">{observationActionError}</span></div>}
                     <CrmDetailAccordion id="crm-contact-history" title="Historial general del contacto" summary={`${profile.observationCount} registro${profile.observationCount === 1 ? '' : 's'} transversal${profile.observationCount === 1 ? '' : 'es'}`} icon={Clock3} tone="slate" open={accordionOpen.history} onToggle={() => { const next = !accordionOpen.history; setSectionOpen('history', next); setHistoryOpen(next); if (next && !profile.observationsLoaded) void profile.refreshObservations() }}>
-                      {canManageObservations && <button type="button" onClick={() => { setShowObservationComposer(value => !value); setObservationActionError('') }} aria-expanded={showObservationComposer} className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-700 hover:bg-slate-50"><Plus className="h-4 w-4" />{showObservationComposer ? 'Cerrar formulario' : 'Añadir nota general'}</button>}
-                      {showObservationComposer && <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 p-3"><textarea autoFocus rows={3} maxLength={4000} value={newObservation} onChange={event => { setNewObservation(event.target.value); setObservationActionError('') }} onKeyDown={event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && newObservation.trim()) { event.preventDefault(); void addObservation() } }} placeholder="Nota transversal del contacto… (Ctrl/Cmd + Enter)" className="w-full resize-y rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-100" /><div className="mt-2 flex justify-end"><button type="button" onClick={() => void addObservation()} disabled={!newObservation.trim() || profile.savingObservation} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-bold text-white disabled:opacity-45">{profile.savingObservation ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}Guardar nota</button></div></div>}
-                      {(observationActionError || profile.observationsError) && <div className="mt-3 flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700" role="alert"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1">{observationActionError || profile.observationsError}</span></div>}
-                      {profile.observationsLoading ? <div className="flex min-h-24 items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-slate-500" /></div> : profile.observations.length === 0 ? <p className="mt-3 rounded-xl border border-dashed border-slate-200 px-3 py-6 text-center text-xs text-slate-400">No hay registros generales.</p> : <div className="mt-3 space-y-2">{profile.observations.slice(0, visibleObservations).map(observation => <article key={observation.id} className={`group rounded-xl border bg-white p-3 ${observation.is_pinned ? 'border-amber-200' : 'border-slate-200'}`}>{editingObservation?.id === observation.id ? <><textarea autoFocus rows={3} value={editingObservationDraft} onChange={event => setEditingObservationDraft(event.target.value)} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" /><div className="mt-2 flex justify-end gap-2"><button type="button" onClick={() => setEditingObservation(null)} className="min-h-10 px-3 text-xs font-bold text-slate-600">Cancelar</button><button type="button" onClick={() => void saveObservationEdit()} className="min-h-10 rounded-lg bg-slate-900 px-3 text-xs font-bold text-white">Guardar</button></div></> : <div className="flex items-start justify-between gap-3"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold ${observationTypeClass(observation.type)}`}>{observationTypeLabel(observation.type)}</span><time className="text-[10px] text-slate-400">{observationDate(observation.created_at)}</time></div><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">{cleanText(observation.notes) || '(sin contenido)'}</p><p className="mt-2 text-[11px] font-semibold text-slate-500">Registrado por {activityAuthorLabel(observation)}</p></div>{observation.type === 'note' && <div className="flex shrink-0"><button type="button" onClick={() => void toggleObservationPin(observation)} className="h-10 w-10 text-slate-400" aria-label={observation.is_pinned ? 'Desfijar nota' : 'Fijar nota'}><Pin className="mx-auto h-4 w-4" /></button>{observation.can_edit && <button type="button" onClick={() => { setEditingObservation(observation); setEditingObservationDraft(observation.notes || '') }} className="h-10 w-10 text-slate-400" aria-label="Editar nota"><Edit2 className="mx-auto h-4 w-4" /></button>}{observation.can_delete && <button type="button" onClick={() => void removeObservation(observation)} className="h-10 w-10 text-slate-400 hover:text-red-600" aria-label="Eliminar nota"><Trash2 className="mx-auto h-4 w-4" /></button>}</div>}</div>}</article>)}</div>}
-                      {profile.observations.length > visibleObservations && <button type="button" onClick={() => setVisibleObservations(value => value + 10)} className="mt-2 min-h-10 w-full text-xs font-bold text-slate-600">Mostrar más</button>}
+                      {profile.observationsError && <div className="mt-3 flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700" role="alert"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1">{profile.observationsError}</span><button type="button" disabled={profile.observationsLoading || profile.observationsLoadingMore} onClick={() => void profile.refreshObservations()} className="min-h-10 shrink-0 rounded-lg border border-red-200 bg-white px-2 font-semibold">Reintentar historial</button></div>}
+                      {profile.observationsLoading ? <div className="flex min-h-24 items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-slate-500" /></div> : profile.observations.length === 0 ? <p className="mt-3 rounded-xl border border-dashed border-slate-200 px-3 py-6 text-center text-xs text-slate-400">No hay registros generales.</p> : <div className="mt-3 space-y-2">{profile.observations.slice(0, visibleObservations).map(observation => <article key={observation.id} className={`group rounded-xl border bg-white p-3 ${observation.is_pinned ? 'border-amber-200' : 'border-slate-200'}`}>{editingObservation?.id === observation.id ? <><textarea autoFocus rows={3} value={editingObservationDraft} onChange={event => setEditingObservationDraft(event.target.value)} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" /><div className="mt-2 flex justify-end gap-2"><button type="button" onClick={() => setEditingObservation(null)} className="min-h-10 px-3 text-xs font-bold text-slate-600">Cancelar</button><button type="button" disabled={readOnly || profile.pendingObservationIds?.has(observation.id)} onClick={() => void saveObservationEdit()} className="min-h-10 rounded-lg bg-slate-900 px-3 text-xs font-bold text-white">Guardar</button></div></> : <div className="flex items-start justify-between gap-3"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold ${observationTypeClass(observation.type)}`}>{observationTypeLabel(observation.type)}</span><time className="text-[10px] text-slate-400">{observationDate(observation.created_at)}</time></div><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">{cleanText(observation.notes) || '(sin contenido)'}</p><p className="mt-2 text-[11px] font-semibold text-slate-500">Registrado por {activityAuthorLabel(observation)}</p></div>{observation.type === 'note' && !readOnly && <div className="flex shrink-0">{observation.can_pin && <button type="button" disabled={profile.pendingObservationIds?.has(observation.id)} aria-busy={profile.pendingObservationIds?.has(observation.id)} onClick={() => void toggleObservationPin(observation)} className="h-10 w-10 text-slate-400" aria-label={observation.is_pinned ? 'Desfijar nota' : 'Fijar nota'}><Pin className="mx-auto h-4 w-4" /></button>}{observation.can_edit && <button type="button" disabled={profile.pendingObservationIds?.has(observation.id)} onClick={() => { setEditingObservation(observation); setEditingObservationDraft(observation.notes || '') }} className="h-10 w-10 text-slate-400" aria-label="Editar nota"><Edit2 className="mx-auto h-4 w-4" /></button>}{observation.can_delete && <button type="button" disabled={profile.pendingObservationIds?.has(observation.id)} onClick={() => void removeObservation(observation)} className="h-10 w-10 text-slate-400 hover:text-red-600" aria-label="Eliminar nota"><Trash2 className="mx-auto h-4 w-4" /></button>}</div>}</div>}</article>)}</div>}
+                      {(profile.observations.length > visibleObservations || profile.observationsHasMore) && <button type="button" disabled={profile.observationsLoadingMore} onClick={async () => { const session = surfaceLease(); const target = visibleObservations + 10; if (target > profile.observations.length && profile.observationsHasMore) await profile.loadMoreObservations(); if (isCurrentSurface(session)) setVisibleObservations(target) }} className="mt-2 min-h-10 w-full text-xs font-bold text-slate-600 disabled:opacity-50">{profile.observationsLoadingMore ? 'Cargando…' : 'Mostrar más'}</button>}
                     </CrmDetailAccordion>
 
                     {(contextSummary || contextDetails) && <CrmDetailAccordion id="crm-context" title={context.type === 'event_participant' ? 'Contexto del evento' : 'Contexto de la oportunidad'} summary={context.type === 'event_participant' ? 'Etapa, estado y oportunidades relacionadas' : 'Pipeline, etapa y datos comerciales'} icon={context.type === 'event_participant' ? Clock3 : Briefcase} tone="violet" open={accordionOpen.context} onToggle={() => setSectionOpen('context', !accordionOpen.context)} contentClassName="p-0"><div className="space-y-3 p-3 sm:p-4">{contextSummary}{contextDetails}</div></CrmDetailAccordion>}

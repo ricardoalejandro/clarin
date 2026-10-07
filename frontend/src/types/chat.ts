@@ -9,6 +9,26 @@ export interface DeviceRuntimeCapabilities {
   can_sync_own_status: boolean
 }
 
+export interface DeviceDeletionStatus {
+  operation_id: string
+  phase: 'pending' | 'remote_unlinked'
+  attempts: number
+  next_retry_at?: string | null
+  error_code?: string | null
+}
+
+export interface DeviceDeletionResult {
+  device_id: string
+  operation_id: string
+  deletion_status: 'pending' | 'completed'
+  next_retry_at?: string | null
+  error_code?: string | null
+  devices_total: number
+  devices_available: number
+  contacts_detached: number
+  chats_detached: number
+}
+
 export interface Device {
   id: string
   name: string
@@ -16,6 +36,7 @@ export interface Device {
   status: string
   provider?: 'whatsapp_web' | 'whatsapp_cloud_api'
   runtime_capabilities?: DeviceRuntimeCapabilities
+  deletion?: DeviceDeletionStatus | null
 }
 
 export interface Reaction {

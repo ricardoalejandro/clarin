@@ -104,6 +104,19 @@ func Migrate(db *pgxpool.Pool) error {
 		)`,
 
 		// Contacts table
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS delete_operation_id UUID`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS delete_phase TEXT`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS delete_requested_at TIMESTAMPTZ`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS delete_session_fingerprint TEXT`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS delete_attempts INT NOT NULL DEFAULT 0`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS delete_next_attempt_at TIMESTAMPTZ`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS delete_lease_token UUID`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS delete_lease_until TIMESTAMPTZ`,
+		`ALTER TABLE devices ADD COLUMN IF NOT EXISTS delete_last_error_code TEXT`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_delete_operation ON devices(delete_operation_id) WHERE delete_operation_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_devices_delete_due ON devices(delete_next_attempt_at, delete_lease_until) WHERE delete_operation_id IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_delete_session ON devices(jid) WHERE delete_operation_id IS NOT NULL AND COALESCE(jid,'')<>''`,
+
 		`CREATE TABLE IF NOT EXISTS contacts (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -1901,21 +1914,44 @@ func Migrate(db *pgxpool.Pool) error {
 			WHERE current_contact.id=ch.contact_id AND current_contact.account_id=ch.account_id
 		   )`,
 		`DO $$ BEGIN
+			IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='contacts_account_device_fkey' AND conrelid='contacts'::regclass AND (confdeltype<>'n' OR confdelsetcols IS DISTINCT FROM ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='contacts'::regclass AND attname='device_id')]::smallint[])) THEN
+				ALTER TABLE contacts DROP CONSTRAINT contacts_account_device_fkey;
+			END IF;
 			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='contacts_account_device_fkey' AND conrelid='contacts'::regclass) THEN
 				ALTER TABLE contacts
 				ADD CONSTRAINT contacts_account_device_fkey
-				FOREIGN KEY (account_id, device_id) REFERENCES devices(account_id, id) NOT VALID;
+				FOREIGN KEY (account_id, device_id) REFERENCES devices(account_id, id) ON DELETE SET NULL (device_id) NOT VALID;
 			END IF;
 		END $$`,
 		`ALTER TABLE contacts VALIDATE CONSTRAINT contacts_account_device_fkey`,
 		`DO $$ BEGIN
+			IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='chats_account_device_fkey' AND conrelid='chats'::regclass AND (confdeltype<>'n' OR confdelsetcols IS DISTINCT FROM ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='chats'::regclass AND attname='device_id')]::smallint[])) THEN
+				ALTER TABLE chats DROP CONSTRAINT chats_account_device_fkey;
+			END IF;
 			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='chats_account_device_fkey' AND conrelid='chats'::regclass) THEN
 				ALTER TABLE chats
 				ADD CONSTRAINT chats_account_device_fkey
-				FOREIGN KEY (account_id, device_id) REFERENCES devices(account_id, id) NOT VALID;
+				FOREIGN KEY (account_id, device_id) REFERENCES devices(account_id, id) ON DELETE SET NULL (device_id) NOT VALID;
 			END IF;
 		END $$`,
 		`ALTER TABLE chats VALIDATE CONSTRAINT chats_account_device_fkey`,
+		// A tombstone retains its device row until remote cleanup completes.
+		// FKs alone therefore cannot prevent a stale worker from reattaching it.
+		`CREATE OR REPLACE FUNCTION clarin_active_device_reference() RETURNS trigger LANGUAGE plpgsql AS $$
+		 BEGIN
+		   IF NEW.device_id IS NOT NULL THEN
+		     PERFORM 1 FROM devices WHERE id=NEW.device_id AND account_id=NEW.account_id AND delete_operation_id IS NULL FOR KEY SHARE;
+		     IF NOT FOUND THEN RAISE EXCEPTION 'device unavailable for account' USING ERRCODE='55000'; END IF;
+		   END IF;
+		   RETURN NEW;
+		 END $$`,
+		`DO $$ DECLARE target TEXT; BEGIN
+		 FOREACH target IN ARRAY ARRAY['contacts','chats','messages'] LOOP
+		   IF NOT EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='clarin_active_device_reference' AND tgrelid=target::regclass) THEN
+		     EXECUTE format('CREATE TRIGGER clarin_active_device_reference BEFORE INSERT OR UPDATE OF device_id,account_id ON %I FOR EACH ROW EXECUTE FUNCTION clarin_active_device_reference()',target);
+		   END IF;
+		 END LOOP;
+		 END $$`,
 		`DO $$ BEGIN
 			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='chats_account_contact_fkey' AND conrelid='chats'::regclass) THEN
 				ALTER TABLE chats

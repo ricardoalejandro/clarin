@@ -23,6 +23,8 @@ import {
 import { PwaInstallExperience, PwaInstallMenuAction, PwaRuntimeProvider, usePwaRuntime } from '@/components/mobile-app/PwaRuntime'
 import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshTokenOutcome, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthSessionDetected, markAuthTokenRefreshed, invalidateOfflineBeforeIdentityChange } from '@/lib/api'
 import { dashboardSidebarHeaderState } from '@/lib/dashboardSidebarState'
+import { completeAuthIdentityChange, getAuthScope } from '@/lib/authScope'
+import { fetchAuthCookie } from '@/lib/authCookieLock'
 import { browserOfflineV5Client } from '@/offline-v5/client'
 import { shouldToggleErosFromKeyboard } from '@/lib/dashboardKeyboard'
 import {
@@ -503,25 +505,30 @@ function DashboardLayoutContent({
 
   const handleSwitchAccount = async (accountId: string): Promise<string | null> => {
     if (isOffline) return 'Para proteger la separación entre cuentas, cierra esta sesión offline e ingresa de nuevo para elegir otra cuenta autorizada.'
+    let transitionScope: string | undefined
     try {
-      await invalidateOfflineBeforeIdentityChange()
-      const res = await fetch('/api/auth/switch-account', {
+      transitionScope = await invalidateOfflineBeforeIdentityChange()
+      const res = await fetchAuthCookie('/api/auth/switch-account', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ account_id: accountId }),
         credentials: 'include',
-      })
+      }, transitionScope || getAuthScope())
       const data = await res.json()
+      if (getAuthScope() !== transitionScope) return 'La sesión cambió durante la operación. Revisa la cuenta actual.'
       if (data.success) {
         markAuthTokenRefreshed()
+        completeAuthIdentityChange()
         localStorage.setItem('kommo_enabled', String(data.user.kommo_enabled || false))
         setUser(data.user)
         window.location.href = '/dashboard'
         return null
       }
+      if (getAuthScope() === transitionScope) completeAuthIdentityChange()
       return data.error || 'No se pudo cambiar de cuenta.'
     } catch (e) {
       console.error('Failed to switch account:', e)
+      if (getAuthScope() === transitionScope) completeAuthIdentityChange()
       return 'No se pudo cambiar de cuenta. Revisa tu conexión e inténtalo de nuevo.'
     }
   }

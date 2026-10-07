@@ -33,6 +33,9 @@ vi.mock('@/lib/api', () => ({
   invalidateOfflineBeforeIdentityChange: mocks.invalidate,
   markAuthTokenRefreshed: vi.fn(),
 }))
+// Cookie ordering is covered against a shared LockManager in authCookieLock.test.ts.
+// These component tests simulate the HTTP result and the offline transition.
+vi.mock('@/lib/authCookieLock', () => ({ fetchAuthCookie: (url: string, init: RequestInit) => fetch(url, init) }))
 vi.mock('@/offline-v3/offlineReauth', () => ({
   clearOfflineReauthExpectation: vi.fn(),
   readOfflineReauthExpectation: () => mocks.expectation,

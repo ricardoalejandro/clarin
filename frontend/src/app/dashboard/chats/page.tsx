@@ -17,6 +17,7 @@ import { Chat, ChatState, Device, Message } from '@/types/chat'
 import { applyChatState, matchesInbox, nextPendingChat, orderInbox, reconcileInboxPage, type InboxView } from '@/utils/chatInbox'
 import { getChatDisplayName, formatPhone, isPendingChatIdentity, reconcileChatIdentity, type ChatIdentityReconciliation } from '@/utils/chat'
 import { announceChatConversationActive, useChatMobileChrome } from '@/components/chat/ChatMobileChromeContext'
+import { reconcileChatDeviceFilters } from '@/components/chat/deviceFilters'
 
 const LEFT_PANEL_DEFAULT = 360
 const LEFT_PANEL_MIN = 320
@@ -557,7 +558,11 @@ export default function ChatsPage() {
     try {
       const res = await fetch('/api/devices', { headers: { Authorization: `Bearer ${token}` } })
       const data = await res.json()
-      if (requestSequence === devicesRequestSequenceRef.current && data.success) setDevices(data.devices || [])
+      if (requestSequence === devicesRequestSequenceRef.current && res.ok && data.success) {
+        const snapshot: Device[] = data.devices || []
+        setDevices(snapshot)
+        setFilterDevices(current => reconcileChatDeviceFilters(current, snapshot))
+      }
     } catch {}
   }, [])
 
@@ -759,8 +764,9 @@ export default function ChatsPage() {
         } else scheduleChatReconciliation()
       } else if (eventType === 'contact_update') {
         scheduleChatReconciliation()
-      } else if (eventType === 'device_status') {
+      } else if (eventType === 'device_status' || eventType === 'device_deletion') {
         fetchDevices()
+        if (eventType === 'device_deletion') scheduleChatReconciliation()
       }
     })
     return () => unsubscribe()

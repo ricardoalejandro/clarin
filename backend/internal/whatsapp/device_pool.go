@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver for whatsmeow sqlstore
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/repository"
@@ -182,6 +183,11 @@ type DevicePool struct {
 	mu                  sync.RWMutex
 	startTime           time.Time
 	onDemandSyncTargets map[uuid.UUID]*onDemandSyncTarget // one active request per device
+	lifecycleLocks      sync.Map
+	deletionOnce        sync.Once
+	deletionCancel      context.CancelFunc
+	deletionWG          sync.WaitGroup
+	shuttingDown        bool
 }
 
 // NewDevicePool creates a new device pool
@@ -257,6 +263,7 @@ func (p *DevicePool) SetReceiveMessages(deviceID uuid.UUID, value bool) {
 
 // LoadExistingDevices loads all existing devices and connects them
 func (p *DevicePool) LoadExistingDevices(ctx context.Context) error {
+	p.startDeletionWorkers()
 	// Reconcile proven legacy LID Contact duplicates independently of device
 	// connectivity. This also covers dormant devices without reconnecting them.
 	go p.reconcileAllMappedLIDContacts(context.Background())
@@ -267,6 +274,12 @@ func (p *DevicePool) LoadExistingDevices(ctx context.Context) error {
 	}
 
 	for _, device := range devices {
+		if device.Deletion != nil {
+			continue
+		}
+		if device.Provider != nil && *device.Provider == domain.DeviceProviderWhatsAppCloudAPI {
+			continue
+		}
 		if device.JID != nil && *device.JID != "" {
 			// Device was previously connected, try to reconnect
 			go func(d *domain.Device) {
@@ -298,6 +311,11 @@ func (p *DevicePool) CreateDevice(ctx context.Context, accountID uuid.UUID, name
 
 // ConnectDevice initializes and connects a WhatsApp client for a device
 func (p *DevicePool) ConnectDevice(ctx context.Context, deviceID uuid.UUID) error {
+	release, err := p.acquireDeviceOperation(ctx, uuid.Nil, deviceID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -315,6 +333,9 @@ func (p *DevicePool) ConnectDevice(ctx context.Context, deviceID uuid.UUID) erro
 	}
 	if device == nil {
 		return fmt.Errorf("device not found: %s", deviceID)
+	}
+	if device.Provider != nil && *device.Provider == domain.DeviceProviderWhatsAppCloudAPI {
+		return repository.ErrDeviceDeletionUnsupported
 	}
 
 	// Update status to connecting
@@ -345,6 +366,7 @@ func (p *DevicePool) ConnectDevice(ctx context.Context, deviceID uuid.UUID) erro
 
 	// Create client
 	clientLog := waLog.Stdout("Client", "INFO", true)
+	waDevice.Container = &activeDeviceContainer{DeviceContainer: waDevice.Container, pool: p, accountID: device.AccountID, deviceID: deviceID}
 	client := whatsmeow.NewClient(waDevice, clientLog)
 	client.EnableAutoReconnect = true
 	client.AutoTrustIdentity = true
@@ -420,6 +442,9 @@ func (p *DevicePool) ConnectDevice(ctx context.Context, deviceID uuid.UUID) erro
 // handleQRChannel handles QR code events
 func (p *DevicePool) handleQRChannel(ctx context.Context, instance *DeviceInstance, qrChan <-chan whatsmeow.QRChannelItem) {
 	for evt := range qrChan {
+		if err := p.repos.Device.Active(ctx, instance.AccountID, instance.ID); err != nil {
+			return
+		}
 		switch evt.Event {
 		case whatsmeow.QRChannelEventCode:
 			// Generate QR code image as base64
@@ -505,6 +530,11 @@ func (p *DevicePool) failUnsupportedPairing(ctx context.Context, instance *Devic
 
 // handleEvent processes WhatsApp events
 func (p *DevicePool) handleEvent(ctx context.Context, instance *DeviceInstance, rawEvt interface{}) {
+	ctx, release, err := p.retainDeviceOperation(ctx, instance.AccountID, instance.ID)
+	if err != nil {
+		return
+	}
+	defer release()
 	switch evt := rawEvt.(type) {
 	case *events.Connected:
 		p.handleConnected(ctx, instance)
@@ -574,7 +604,11 @@ func (p *DevicePool) handleConnected(ctx context.Context, instance *DeviceInstan
 	instance.mu.Unlock()
 
 	// Update database
-	_ = p.repos.Device.UpdateJID(ctx, instance.ID, jid, phone)
+	if err := p.repos.Device.UpdateJID(ctx, instance.ID, jid, phone); err != nil {
+		instance.Client.EnableAutoReconnect = false
+		instance.Client.Disconnect()
+		return
+	}
 
 	// Broadcast status
 	p.hub.BroadcastDeviceStatus(instance.AccountID, instance.ID, domain.DeviceStatusConnected, "")
@@ -1161,84 +1195,8 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 		senderJID = identity.JID.ToNonAD().String()
 	}
 
-	// Extract quoted/reply context from incoming message
-	var quotedMessageID, quotedBody, quotedSender *string
-	var quotedIsFromMe *bool
-	// Check ContextInfo from various message types
-	var contextInfo *waE2E.ContextInfo
-	if ext := evt.Message.GetExtendedTextMessage(); ext != nil && ext.GetContextInfo() != nil {
-		contextInfo = ext.GetContextInfo()
-	} else if img := evt.Message.GetImageMessage(); img != nil && img.GetContextInfo() != nil {
-		contextInfo = img.GetContextInfo()
-	} else if vid := evt.Message.GetVideoMessage(); vid != nil && vid.GetContextInfo() != nil {
-		contextInfo = vid.GetContextInfo()
-	} else if aud := evt.Message.GetAudioMessage(); aud != nil && aud.GetContextInfo() != nil {
-		contextInfo = aud.GetContextInfo()
-	} else if doc := evt.Message.GetDocumentMessage(); doc != nil && doc.GetContextInfo() != nil {
-		contextInfo = doc.GetContextInfo()
-	} else if stk := evt.Message.GetStickerMessage(); stk != nil && stk.GetContextInfo() != nil {
-		contextInfo = stk.GetContextInfo()
-	}
-	if contextInfo != nil && contextInfo.GetStanzaID() != "" {
-		quotedMessageID = strPtr(contextInfo.GetStanzaID())
-		quotedSender = strPtr(contextInfo.GetParticipant())
-		// Extract quoted message body
-		if qm := contextInfo.GetQuotedMessage(); qm != nil {
-			if qm.GetConversation() != "" {
-				quotedBody = strPtr(qm.GetConversation())
-			} else if qm.GetExtendedTextMessage() != nil {
-				quotedBody = strPtr(qm.GetExtendedTextMessage().GetText())
-			} else if qm.GetImageMessage() != nil && qm.GetImageMessage().GetCaption() != "" {
-				quotedBody = strPtr(qm.GetImageMessage().GetCaption())
-			} else if qm.GetVideoMessage() != nil && qm.GetVideoMessage().GetCaption() != "" {
-				quotedBody = strPtr(qm.GetVideoMessage().GetCaption())
-			} else if qm.GetDocumentMessage() != nil {
-				quotedBody = strPtr(qm.GetDocumentMessage().GetFileName())
-			} else {
-				quotedBody = strPtr("[media]")
-			}
-		}
-		// Prefer the already-persisted original message. This is account/chat
-		// scoped and gives both an exact author direction and a better preview
-		// than the abbreviated protobuf quote supplied by WhatsApp.
-		if original, lookupErr := p.repos.Message.GetByReference(ctx, instance.AccountID, chat.ID, contextInfo.GetStanzaID()); lookupErr == nil && original != nil {
-			quotedIsFromMe = boolPtr(original.IsFromMe)
-			if original.FromJID != nil && strings.TrimSpace(*original.FromJID) != "" {
-				quotedSender = strPtr(*original.FromJID)
-			} else if original.FromName != nil && strings.TrimSpace(*original.FromName) != "" {
-				quotedSender = strPtr(*original.FromName)
-			}
-			preview := ""
-			if original.Body != nil {
-				preview = strings.TrimSpace(*original.Body)
-			}
-			if preview == "" && original.MediaFilename != nil {
-				preview = strings.TrimSpace(*original.MediaFilename)
-			}
-			if preview == "" && original.MessageType != nil {
-				preview = map[string]string{
-					domain.MessageTypeImage: "📷 Imagen", domain.MessageTypeVideo: "🎥 Video", domain.MessageTypeGIF: "GIF",
-					domain.MessageTypeAudio: "🎵 Audio", domain.MessageTypeDocument: "📄 Documento",
-					domain.MessageTypeSticker: "Sticker",
-				}[*original.MessageType]
-			}
-			if preview != "" {
-				quotedBody = strPtr(preview)
-			}
-		} else if participant := strings.TrimSpace(contextInfo.GetParticipant()); participant != "" {
-			// History may not contain the quoted stanza yet. Participant is still a
-			// useful exact signal when it identifies this connected account.
-			if participantJID, parseErr := types.ParseJID(participant); parseErr == nil && instance.Client.Store.ID != nil {
-				isOwn := participantJID.ToNonAD().String() == instance.Client.Store.ID.ToNonAD().String()
-				if !isOwn {
-					if ownJID, ownErr := types.ParseJID(instance.JID); ownErr == nil {
-						isOwn = participantJID.ToNonAD().String() == ownJID.ToNonAD().String()
-					}
-				}
-				quotedIsFromMe = boolPtr(isOwn)
-			}
-		}
-	}
+	quote := p.extractMessageQuote(ctx, instance, chat.ID, evt.Message)
+	quotedMessageID, quotedBody, quotedSender, quotedIsFromMe := quote.MessageID, quote.Body, quote.Sender, quote.IsFromMe
 
 	// Create message
 	msg := &domain.Message{
@@ -1367,6 +1325,9 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 		msg.Sender = &domain.MessageSender{Origin: "whatsapp_external"}
 	}
 	if err := p.repos.Message.Create(ctx, msg); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			p.hydrateMessageQuote(ctx, instance.AccountID, chat.ID, msg.MessageID, quote)
+		}
 		log.Printf("[Message] Failed to save message: %v", err)
 		return
 	}
@@ -2049,6 +2010,7 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 
 	totalSaved := 0
 	totalDuplicates := 0
+	totalQuotesHydrated := 0
 	totalGroups := 0
 	totalLIDFail := 0
 	totalEmpty := 0
@@ -2186,10 +2148,15 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 				IsViewOnce:    content.IsViewOnce,
 			}
 
+			quote := p.extractMessageQuote(ctx, instance, chat.ID, parsedEvt.Message)
+			quote.Apply(msg)
 			msg.IsRead = true
 			msg.Sender = &domain.MessageSender{Origin: "history"}
 			if err := p.repos.Message.Create(ctx, msg); err != nil {
 				totalDuplicates++
+				if errors.Is(err, pgx.ErrNoRows) && p.hydrateMessageQuote(ctx, instance.AccountID, chat.ID, msg.MessageID, quote) {
+					totalQuotesHydrated++
+				}
 				// Debug: log details for small batches (ON_DEMAND, etc.)
 				if totalConversations <= 5 {
 					log.Printf("[HistorySync] SKIP msgID=%s ts=%s fromMe=%v type=%s err=%v",
@@ -2219,7 +2186,7 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 	log.Printf("[HistorySync] Complete: saved=%d duplicates=%d groups=%d lidFail=%d empty=%d protocol=%d parseErr=%d conversations=%d",
 		totalSaved, totalDuplicates, totalGroups, totalLIDFail, totalEmpty, totalProtocol, totalParseErr, totalConversations)
 
-	if totalSaved > 0 {
+	if totalSaved > 0 || totalQuotesHydrated > 0 {
 		if p.cache != nil {
 			_ = p.cache.DelPattern(context.Background(), "chats:"+instance.AccountID.String()+":*")
 		}
@@ -2244,14 +2211,15 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 			p.mu.Unlock()
 			finished := totalSaved == 0
 			p.hub.BroadcastToAccountWithPermission(target.AccountID, domain.PermChats, ws.EventHistorySyncComplete, map[string]interface{}{
-				"account_id":     target.AccountID.String(),
-				"device_id":      target.DeviceID.String(),
-				"chat_id":        target.ChatID.String(),
-				"request_id":     target.RequestID.String(),
-				"messages_saved": target.Saved,
-				"batch_saved":    totalSaved,
-				"duplicates":     totalDuplicates,
-				"finished":       finished,
+				"account_id":      target.AccountID.String(),
+				"device_id":       target.DeviceID.String(),
+				"chat_id":         target.ChatID.String(),
+				"request_id":      target.RequestID.String(),
+				"messages_saved":  target.Saved,
+				"batch_saved":     totalSaved,
+				"duplicates":      totalDuplicates,
+				"quotes_hydrated": totalQuotesHydrated,
+				"finished":        finished,
 			})
 			if totalSaved > 0 {
 				log.Printf("[HistorySync] Auto-chaining: requesting more messages for %s (saved %d in this batch)", target.ChatJID, totalSaved)
@@ -2292,6 +2260,11 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 // It finds the oldest message timestamp and requests messages before that point.
 // deviceID specifies which device to use (must be the device that owns the chat).
 func (p *DevicePool) RequestHistorySync(ctx context.Context, accountID uuid.UUID, deviceID uuid.UUID, chatID uuid.UUID, chatJID string) error {
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, accountID, deviceID)
+	if lifecycleErr != nil {
+		return lifecycleErr
+	}
+	defer release()
 	// Find the specific device for this chat
 	p.mu.RLock()
 	var instance *DeviceInstance
@@ -2627,6 +2600,9 @@ func (p *DevicePool) handlePollUpdate(ctx context.Context, instance *DeviceInsta
 
 // syncContacts syncs all contacts from a WhatsApp device
 func (p *DevicePool) syncContacts(ctx context.Context, instance *DeviceInstance) {
+	if err := p.repos.Device.Active(ctx, instance.AccountID, instance.ID); err != nil {
+		return
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[ContactSync] Panic for device %s: %v", instance.ID, r)
@@ -2678,27 +2654,39 @@ func (p *DevicePool) syncContacts(ctx context.Context, instance *DeviceInstance)
 		}
 		pushName := info.PushName
 
-		// Get or create the contact
-		contact, err := p.repos.Contact.GetOrCreate(ctx, instance.AccountID, &instance.ID, normalizedJID, phone, name, pushName, false)
-		if err != nil {
-			log.Printf("[ContactSync] Failed to upsert contact %s: %v", normalizedJID, err)
-			continue
-		}
-		contact = p.reconcileMappedLIDContact(ctx, instance.AccountID, lidJID, contact)
+		blocked := false
+		func() {
+			release, err := p.acquireDeviceOperation(ctx, instance.AccountID, instance.ID)
+			if err != nil {
+				blocked = true
+				return
+			}
+			defer release()
+			// Get or create the contact
+			contact, err := p.repos.Contact.GetOrCreate(ctx, instance.AccountID, &instance.ID, normalizedJID, phone, name, pushName, false)
+			if err != nil {
+				log.Printf("[ContactSync] Failed to upsert contact %s: %v", normalizedJID, err)
+				return
+			}
+			contact = p.reconcileMappedLIDContact(ctx, instance.AccountID, lidJID, contact)
 
-		// Upsert the per-device name
-		cdn := &domain.ContactDeviceName{
-			ContactID: contact.ID,
-			DeviceID:  instance.ID,
-			Name:      strPtr(name),
-			PushName:  strPtr(pushName),
-		}
-		if info.BusinessName != "" {
-			cdn.BusinessName = strPtr(info.BusinessName)
-		}
-		_ = p.repos.ContactDeviceName.Upsert(ctx, cdn)
+			// Upsert the per-device name
+			cdn := &domain.ContactDeviceName{
+				ContactID: contact.ID,
+				DeviceID:  instance.ID,
+				Name:      strPtr(name),
+				PushName:  strPtr(pushName),
+			}
+			if info.BusinessName != "" {
+				cdn.BusinessName = strPtr(info.BusinessName)
+			}
+			_ = p.repos.ContactDeviceName.Upsert(ctx, cdn)
 
-		synced++
+			synced++
+		}()
+		if blocked {
+			return
+		}
 	}
 
 	log.Printf("[ContactSync] Device %s: synced %d contacts", instance.ID, synced)
@@ -2711,21 +2699,36 @@ func (p *DevicePool) syncContacts(ctx context.Context, instance *DeviceInstance)
 }
 
 // SyncDeviceContacts is a public method to trigger contact sync for a device
-func (p *DevicePool) SyncDeviceContacts(ctx context.Context, deviceID uuid.UUID) error {
+func (p *DevicePool) SyncDeviceContacts(ctx context.Context, accountID, deviceID uuid.UUID) error {
+	if err := p.repos.Device.Active(ctx, accountID, deviceID); err != nil {
+		return err
+	}
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
 
+	if exists && instance.AccountID != accountID {
+		return repository.ErrDeviceNotFound
+	}
 	if !exists || instance.Client == nil || !instance.Client.IsConnected() {
-		return fmt.Errorf("device not connected: %s", deviceID)
+		return ErrDeviceDisconnected
 	}
 
-	go p.syncContacts(ctx, instance)
+	go func() {
+		syncCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		p.syncContacts(syncCtx, instance)
+	}()
 	return nil
 }
 
 // SendChatPresence sends a typing or recording indicator to a chat
 func (p *DevicePool) SendChatPresence(ctx context.Context, deviceID uuid.UUID, to string, composing bool, media string) error {
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, uuid.Nil, deviceID)
+	if lifecycleErr != nil {
+		return lifecycleErr
+	}
+	defer release()
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -2763,6 +2766,11 @@ func (p *DevicePool) SendChatPresence(ctx context.Context, deviceID uuid.UUID, t
 
 // SendReadReceipt sends read receipts (blue ticks) for messages in a chat
 func (p *DevicePool) SendReadReceipt(ctx context.Context, deviceID uuid.UUID, chatJID string, senderJID string, messageIDs []string) error {
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, uuid.Nil, deviceID)
+	if lifecycleErr != nil {
+		return lifecycleErr
+	}
+	defer release()
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -2804,6 +2812,11 @@ func (p *DevicePool) SendReadReceipt(ctx context.Context, deviceID uuid.UUID, ch
 
 // IsOnWhatsApp checks if phone numbers are registered on WhatsApp
 func (p *DevicePool) IsOnWhatsApp(ctx context.Context, deviceID uuid.UUID, phones []string) ([]domain.WhatsAppCheckResult, error) {
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, uuid.Nil, deviceID)
+	if lifecycleErr != nil {
+		return nil, lifecycleErr
+	}
+	defer release()
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -2836,6 +2849,11 @@ func (p *DevicePool) IsOnWhatsApp(ctx context.Context, deviceID uuid.UUID, phone
 
 // RevokeMessage deletes/revokes a message for everyone
 func (p *DevicePool) RevokeMessage(ctx context.Context, deviceID uuid.UUID, chatJID string, senderJID string, messageID string, isFromMe bool) error {
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, uuid.Nil, deviceID)
+	if lifecycleErr != nil {
+		return lifecycleErr
+	}
+	defer release()
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -2866,6 +2884,11 @@ func (p *DevicePool) RevokeMessage(ctx context.Context, deviceID uuid.UUID, chat
 
 // EditMessage edits a previously sent text message
 func (p *DevicePool) EditMessage(ctx context.Context, deviceID uuid.UUID, chatJID string, messageID string, newBody string) error {
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, uuid.Nil, deviceID)
+	if lifecycleErr != nil {
+		return lifecycleErr
+	}
+	defer release()
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -2904,6 +2927,11 @@ func (p *DevicePool) EditMessage(ctx context.Context, deviceID uuid.UUID, chatJI
 
 // SendMessage sends a text message
 func (p *DevicePool) SendMessage(ctx context.Context, deviceID uuid.UUID, to, body string) (*domain.Message, error) {
+	ctx, release, lifecycleErr := p.retainDeviceOperation(ctx, uuid.Nil, deviceID)
+	if lifecycleErr != nil {
+		return nil, lifecycleErr
+	}
+	defer release()
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -2990,6 +3018,11 @@ func (p *DevicePool) SendMessage(ctx context.Context, deviceID uuid.UUID, to, bo
 }
 
 func (p *DevicePool) sendMessageWithLIDFallback(ctx context.Context, instance *DeviceInstance, jid types.JID, msg *waE2E.Message, label string) (whatsmeow.SendResponse, types.JID, error) {
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, instance.AccountID, instance.ID)
+	if lifecycleErr != nil {
+		return whatsmeow.SendResponse{}, types.EmptyJID, lifecycleErr
+	}
+	defer release()
 	if err := p.ensureOutboundAllowed(ctx, instance, jid); err != nil {
 		return whatsmeow.SendResponse{}, jid, err
 	}
@@ -3053,6 +3086,11 @@ func (p *DevicePool) ensureOutboundAllowed(ctx context.Context, instance *Device
 
 // SendReplyMessage sends a text message as a reply to another message
 func (p *DevicePool) SendReplyMessage(ctx context.Context, deviceID uuid.UUID, to, body, quotedID, quotedBody, quotedSender string, quotedIsFromMe bool) (*domain.Message, error) {
+	ctx, release, lifecycleErr := p.retainDeviceOperation(ctx, uuid.Nil, deviceID)
+	if lifecycleErr != nil {
+		return nil, lifecycleErr
+	}
+	defer release()
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -3174,6 +3212,11 @@ func (p *DevicePool) ForwardMessage(ctx context.Context, deviceID uuid.UUID, to 
 
 // SendReaction sends a reaction emoji to a message
 func (p *DevicePool) SendReaction(ctx context.Context, deviceID, chatID uuid.UUID, to, targetMessageID, targetSenderJID, emoji string, targetFromMe bool, operationID string) (*domain.MessageReactionMutation, error) {
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, uuid.Nil, deviceID)
+	if lifecycleErr != nil {
+		return nil, lifecycleErr
+	}
+	defer release()
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -3259,6 +3302,11 @@ func (p *DevicePool) SendReaction(ctx context.Context, deviceID, chatID uuid.UUI
 
 // SendPoll sends a poll creation message
 func (p *DevicePool) SendPoll(ctx context.Context, deviceID uuid.UUID, to, question string, options []string, maxSelections int) (*domain.Message, error) {
+	ctx, release, lifecycleErr := p.retainDeviceOperation(ctx, uuid.Nil, deviceID)
+	if lifecycleErr != nil {
+		return nil, lifecycleErr
+	}
+	defer release()
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -3416,6 +3464,11 @@ type StatusPublishResult struct {
 // GetStatusPrivacy returns a human-readable summary of the privacy configured
 // on WhatsApp. Clarin deliberately does not override that audience.
 func (p *DevicePool) GetStatusPrivacy(ctx context.Context, deviceID uuid.UUID) (string, error) {
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, uuid.Nil, deviceID)
+	if lifecycleErr != nil {
+		return "", lifecycleErr
+	}
+	defer release()
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -3435,6 +3488,11 @@ func (p *DevicePool) GetStatusPrivacy(ctx context.Context, deviceID uuid.UUID) (
 // StatusReadReceiptsEnabled reports whether WhatsApp can report who viewed
 // statuses. When disabled, the viewer list is necessarily incomplete.
 func (p *DevicePool) StatusReadReceiptsEnabled(ctx context.Context, deviceID uuid.UUID) (bool, error) {
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, uuid.Nil, deviceID)
+	if lifecycleErr != nil {
+		return false, lifecycleErr
+	}
+	defer release()
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -3451,6 +3509,11 @@ func (p *DevicePool) StatusReadReceiptsEnabled(ctx context.Context, deviceID uui
 // RevokeStatus removes a previously published own status from WhatsApp. Local
 // metadata is deleted separately after the server acknowledges this revoke.
 func (p *DevicePool) RevokeStatus(ctx context.Context, deviceID uuid.UUID, messageID string) error {
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, uuid.Nil, deviceID)
+	if lifecycleErr != nil {
+		return lifecycleErr
+	}
+	defer release()
 	messageID = strings.TrimSpace(messageID)
 	if messageID == "" {
 		return fmt.Errorf("status message ID is required")
@@ -3544,6 +3607,11 @@ func (p *DevicePool) PublishStatus(ctx context.Context, deviceID uuid.UUID, req 
 		return nil, fmt.Errorf("unsupported status kind: %s", req.Kind)
 	}
 
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, instance.AccountID, instance.ID)
+	if lifecycleErr != nil {
+		return nil, lifecycleErr
+	}
+	defer release()
 	response, err := instance.Client.SendMessage(ctx, types.StatusBroadcastJID, message)
 	if err != nil {
 		return nil, fmt.Errorf("failed to publish WhatsApp status: %w", err)
@@ -3579,6 +3647,11 @@ func mediaDisplayFilename(preferred, rawURL string) string {
 // UploadMedia downloads a file from storage/URL and uploads it to WhatsApp ONCE.
 // Returns a PreUploadedMedia that can be reused with SendPreUploadedMediaMessage for many recipients.
 func (p *DevicePool) UploadMedia(ctx context.Context, deviceID uuid.UUID, mediaURL, mediaType string) (*PreUploadedMedia, error) {
+	release, lifecycleErr := p.acquireDeviceOperation(ctx, uuid.Nil, deviceID)
+	if lifecycleErr != nil {
+		return nil, lifecycleErr
+	}
+	defer release()
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -3692,6 +3765,11 @@ func (p *DevicePool) SendPreUploadedMediaReplyMessage(ctx context.Context, devic
 }
 
 func (p *DevicePool) sendPreUploadedMediaMessage(ctx context.Context, deviceID uuid.UUID, to, caption string, media *PreUploadedMedia, quote *outboundMediaQuote) (*domain.Message, error) {
+	ctx, release, lifecycleErr := p.retainDeviceOperation(ctx, uuid.Nil, deviceID)
+	if lifecycleErr != nil {
+		return nil, lifecycleErr
+	}
+	defer release()
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -3908,6 +3986,11 @@ func (p *DevicePool) SendMediaReplyMessageWithFilename(ctx context.Context, devi
 
 // SendContactMessage sends a contact vCard message
 func (p *DevicePool) SendContactMessage(ctx context.Context, deviceID uuid.UUID, to, contactName, contactPhone string) (*domain.Message, error) {
+	ctx, release, lifecycleErr := p.retainDeviceOperation(ctx, uuid.Nil, deviceID)
+	if lifecycleErr != nil {
+		return nil, lifecycleErr
+	}
+	defer release()
 	p.mu.RLock()
 	instance, exists := p.devices[deviceID]
 	p.mu.RUnlock()
@@ -4042,6 +4125,11 @@ func (p *DevicePool) GetQRCode(deviceID uuid.UUID) string {
 
 // DisconnectDevice disconnects a device
 func (p *DevicePool) DisconnectDevice(ctx context.Context, deviceID uuid.UUID) error {
+	release, err := p.acquireDeviceOperation(ctx, uuid.Nil, deviceID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -4068,12 +4156,20 @@ func (p *DevicePool) DisconnectDevice(ctx context.Context, deviceID uuid.UUID) e
 // This is needed when DeviceProps change (e.g. enabling OnDemandReady, RequireFullSync)
 // since those are only sent during the initial pairing handshake.
 func (p *DevicePool) ResetDevice(ctx context.Context, deviceID uuid.UUID) error {
+	release, err := p.acquireDeviceOperation(ctx, uuid.Nil, deviceID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx = context.WithValue(ctx, deviceLifecycleContextKey{}, deviceID)
 	p.mu.Lock()
 	instance, exists := p.devices[deviceID]
 	p.mu.Unlock()
 
 	if exists && instance.Client != nil {
-		p.logoutAndDeleteClientStore(ctx, instance.Client, fmt.Sprintf("device %s reset", deviceID))
+		if err := p.logoutAndDeleteClientStore(ctx, instance.Client, fmt.Sprintf("device %s reset", deviceID)); err != nil {
+			return err
+		}
 
 		// Remove from pool
 		p.mu.Lock()
@@ -4089,81 +4185,32 @@ func (p *DevicePool) ResetDevice(ctx context.Context, deviceID uuid.UUID) error 
 	return nil
 }
 
-// DeleteDevice removes a device completely
-func (p *DevicePool) DeleteDevice(ctx context.Context, deviceID uuid.UUID) error {
-	device, _ := p.repos.Device.GetByID(ctx, deviceID)
-	var savedJID string
-	if device != nil && device.JID != nil {
-		savedJID = strings.TrimSpace(*device.JID)
-	}
-
-	p.mu.Lock()
-	instance, exists := p.devices[deviceID]
-	if exists {
-		if instance.Client != nil {
-			p.logoutAndDeleteClientStore(ctx, instance.Client, fmt.Sprintf("device %s delete", deviceID))
-		}
-		delete(p.devices, deviceID)
-	}
-	p.mu.Unlock()
-
-	if !exists && savedJID != "" {
-		p.deleteStoredWhatsAppDevice(ctx, savedJID, fmt.Sprintf("device %s delete", deviceID))
-	}
-
-	// Delete from database
-	return p.repos.Device.Delete(ctx, deviceID)
-}
-
-func (p *DevicePool) logoutAndDeleteClientStore(ctx context.Context, client *whatsmeow.Client, label string) {
+func (p *DevicePool) logoutAndDeleteClientStore(ctx context.Context, client *whatsmeow.Client, label string) error {
 	if client == nil {
-		return
+		return nil
 	}
 	if client.Store == nil || client.Store.ID == nil {
 		client.Disconnect()
-		return
+		return nil
 	}
-
-	waStore := client.Store
-	jid := waStore.ID.String()
 	if err := client.Logout(ctx); err != nil {
-		log.Printf("[DevicePool] WhatsApp logout failed for %s (%s), forcing local store cleanup: %v", label, jid, err)
 		client.Disconnect()
-		if waStore.ID != nil {
-			if deleteErr := waStore.Delete(ctx); deleteErr != nil {
-				log.Printf("[DevicePool] Failed to force-delete WhatsApp store for %s (%s): %v", label, jid, deleteErr)
-			} else {
-				log.Printf("[DevicePool] Force-deleted WhatsApp store for %s (%s)", label, jid)
-			}
-		}
-		return
+		return err
 	}
-	log.Printf("[DevicePool] Logged out and deleted WhatsApp store for %s (%s)", label, jid)
-}
-
-func (p *DevicePool) deleteStoredWhatsAppDevice(ctx context.Context, jid string, label string) {
-	parsed, err := types.ParseJID(jid)
-	if err != nil {
-		log.Printf("[DevicePool] Cannot clean WhatsApp store for %s: invalid JID %q: %v", label, jid, err)
-		return
-	}
-	waDevice, err := p.store.GetDevice(ctx, parsed)
-	if err != nil {
-		log.Printf("[DevicePool] Failed to load WhatsApp store for cleanup %s (%s): %v", label, jid, err)
-		return
-	}
-	if waDevice == nil {
-		return
-	}
-	if err := waDevice.Delete(ctx); err != nil {
-		log.Printf("[DevicePool] Failed to delete WhatsApp store for %s (%s): %v", label, jid, err)
-		return
-	}
-	log.Printf("[DevicePool] Deleted stored WhatsApp device for %s (%s)", label, jid)
+	log.Printf("[DevicePool] Session cleanup completed for %s", label)
+	return nil
 }
 
 // Shutdown closes all connections gracefully
 func (p *DevicePool) Shutdown() {
+	p.mu.Lock()
+	p.shuttingDown = true
+	cancelDeletion := p.deletionCancel
+	p.mu.Unlock()
+	if cancelDeletion != nil {
+		cancelDeletion()
+	}
+	p.deletionWG.Wait()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 

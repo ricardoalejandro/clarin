@@ -434,6 +434,24 @@ func questionPointers(questions []domain.SurveyTemplateQuestion) []*domain.Surve
 }
 
 func (s *SurveyTemplateService) CreateInstance(ctx context.Context, input domain.CreateSurveyInstanceInput) (*domain.SurveyInstanceSummary, error) {
+	return retrySurveyTemplateSnapshot(func() (*domain.SurveyInstanceSummary, error) {
+		return s.createInstanceFromSnapshot(ctx, input)
+	})
+}
+
+// A revision conflict invalidates every source read, including the measurement
+// signature. Rerun the entire snapshot rather than retrying stale input.
+func retrySurveyTemplateSnapshot(create func() (*domain.SurveyInstanceSummary, error)) (*domain.SurveyInstanceSummary, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		instance, err := create()
+		if !errors.Is(err, repository.ErrSurveyTemplateRevisionConflict) {
+			return instance, err
+		}
+	}
+	return nil, repository.ErrSurveyTemplateRevisionConflict
+}
+
+func (s *SurveyTemplateService) createInstanceFromSnapshot(ctx context.Context, input domain.CreateSurveyInstanceInput) (*domain.SurveyInstanceSummary, error) {
 	template, err := s.repos.SurveyTemplate.Get(ctx, input.AccountID, input.TemplateID)
 	if err != nil {
 		return nil, err
@@ -455,6 +473,7 @@ func (s *SurveyTemplateService) CreateInstance(ctx context.Context, input domain
 		return nil, fmt.Errorf("la plantilla contiene lógica condicional inválida: %w", err)
 	}
 	input.MeasurementConfig = template.MeasurementConfig
+	input.ExpectedTemplateRevision = template.Revision
 	input.MeasurementSignature, err = surveyMeasurementSignature(template.MeasurementConfig, snapshotQuestions)
 	if err != nil {
 		return nil, err

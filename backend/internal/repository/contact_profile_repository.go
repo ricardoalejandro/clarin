@@ -226,7 +226,7 @@ func (r *ContactProfileRepository) hydrate(ctx context.Context, querier contactP
 		SELECT cdn.id,cdn.contact_id,cdn.device_id,cdn.name,cdn.push_name,cdn.business_name,cdn.synced_at,d.name
 		FROM contact_device_names cdn
 		JOIN contacts c ON c.id=cdn.contact_id AND c.account_id=$1
-		JOIN devices d ON d.id=cdn.device_id AND d.account_id=c.account_id
+		JOIN devices d ON d.id=cdn.device_id AND d.account_id=c.account_id AND d.delete_operation_id IS NULL
 		WHERE cdn.contact_id=$2
 		ORDER BY cdn.synced_at DESC,cdn.id
 	`, accountID, contact.ID)
@@ -1141,21 +1141,14 @@ func (r *ContactProfileRepository) UpdateObservation(ctx context.Context, accoun
 	if command.RowsAffected() == 0 {
 		return nil, r.classifyContactObservationMutation(ctx, accountID, contactID, observationID, userID, isAdmin, &expected)
 	}
-	items, err := r.ListObservations(ctx, accountID, contactID, userID, isAdmin, 200, 0)
-	if err != nil {
-		return nil, err
-	}
-	for _, i := range items {
-		if i.ID == observationID {
-			return i, nil
-		}
-	}
-	return nil, ErrContactProfileObservationMissing
+	return r.GetObservation(ctx, accountID, contactID, observationID, userID, isAdmin)
 }
 
 func (r *ContactProfileRepository) PinObservation(ctx context.Context, accountID, contactID, observationID, userID uuid.UUID, isAdmin, pinned bool) (*domain.Interaction, error) {
 	command, err := r.db.Exec(ctx, `
-	 UPDATE interactions i SET is_pinned=$6,pinned_at=CASE WHEN $6 THEN NOW() ELSE NULL END,pinned_by=CASE WHEN $6 THEN $4 ELSE NULL END
+	 UPDATE interactions i SET is_pinned=$6,
+	 pinned_at=CASE WHEN $6 THEN CASE WHEN i.is_pinned THEN i.pinned_at ELSE NOW() END ELSE NULL END,
+	 pinned_by=CASE WHEN $6 THEN CASE WHEN i.is_pinned THEN i.pinned_by ELSE $4 END ELSE NULL END
 	 WHERE i.account_id=$1 AND i.id=$3 AND i.type='note' AND ($5 OR i.created_by=$4) AND (
 	 i.contact_id=$2 OR EXISTS(SELECT 1 FROM leads l WHERE l.account_id=$1 AND l.contact_id=$2 AND l.id=i.lead_id)
 	 OR EXISTS(SELECT 1 FROM event_participants ep JOIN events ev ON ev.id=ep.event_id AND ev.account_id=$1 LEFT JOIN leads l ON l.id=ep.lead_id AND l.account_id=ev.account_id WHERE COALESCE(ep.contact_id,l.contact_id)=$2 AND ep.id=i.participant_id)
@@ -1166,23 +1159,14 @@ func (r *ContactProfileRepository) PinObservation(ctx context.Context, accountID
 	if command.RowsAffected() == 0 {
 		return nil, r.classifyContactObservationMutation(ctx, accountID, contactID, observationID, userID, isAdmin, nil)
 	}
-	items, err := r.ListObservations(ctx, accountID, contactID, userID, isAdmin, 200, 0)
-	if err != nil {
-		return nil, err
-	}
-	for _, i := range items {
-		if i.ID == observationID {
-			return i, nil
-		}
-	}
-	return nil, ErrContactProfileObservationMissing
+	return r.GetObservation(ctx, accountID, contactID, observationID, userID, isAdmin)
 }
 
 func (r *ContactProfileRepository) classifyContactObservationMutation(ctx context.Context, accountID, contactID, observationID, userID uuid.UUID, isAdmin bool, expected *time.Time) error {
 	var typ string
 	var creator *uuid.UUID
 	var updated time.Time
-	err := r.db.QueryRow(ctx, `SELECT i.type,i.created_by,i.updated_at FROM interactions i WHERE i.account_id=$1 AND i.id=$3 AND (i.contact_id=$2 OR EXISTS(SELECT 1 FROM leads l WHERE l.account_id=$1 AND l.contact_id=$2 AND l.id=i.lead_id) OR EXISTS(SELECT 1 FROM program_participants pp JOIN programs p ON p.id=pp.program_id AND p.account_id=$1 WHERE pp.contact_id=$2 AND pp.id=i.program_participant_id))`, accountID, contactID, observationID).Scan(&typ, &creator, &updated)
+	err := r.db.QueryRow(ctx, `SELECT i.type,i.created_by,i.updated_at FROM interactions i WHERE `+observationMembershipSQL+` AND i.id=$3`, accountID, contactID, observationID).Scan(&typ, &creator, &updated)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrContactProfileObservationMissing
 	}

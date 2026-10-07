@@ -178,6 +178,8 @@ type CreateSurveyInstanceInput struct {
 	CreatedBy            *uuid.UUID
 	MeasurementConfig    SurveyMeasurementConfig
 	MeasurementSignature string
+	// Filled by the service from its source snapshot, never trusted from HTTP.
+	ExpectedTemplateRevision int
 }
 
 type SurveyInstanceRecipient struct {

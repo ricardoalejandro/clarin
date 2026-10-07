@@ -11,6 +11,7 @@ import { useContainerWidth } from '@/components/responsive/useContainerWidth';
 import { useDebouncedValue } from '@/lib/useDebouncedValue';
 import { ProgramSettingsDialog } from '@/components/programs/ProgramSettingsDialog';
 import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider';
+import { programScopeUrls, PROGRAM_DELETE_CONFIRMATION, type ProgramStatusScope } from '@/lib/programLifecycle';
 
 const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; icon: React.ReactNode }> = {
   active: { label: 'Activo', bg: 'bg-emerald-50', text: 'text-emerald-700', icon: <CheckCircle2 className="w-3 h-3" /> },
@@ -23,6 +24,7 @@ const FOLDER_ICONS = ['📁', '📂', '🎓', '🎉', '🏋️', '📊', '📝',
 const FOLDER_COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#f97316', '#14b8a6', '#6366f1'];
 
 export default function ProgramsPage() {
+  const [statusScope, setStatusScope] = useState<ProgramStatusScope>('active');
   const { isOffline, requireOnline } = useClarinRuntime();
   const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>();
   const measuredWorkspaceWidth = workspaceWidth || 320;
@@ -118,12 +120,12 @@ export default function ProgramsPage() {
     return () => {
       programsRequestRef.current?.abort();
       foldersRequestRef.current?.abort();
-      dashboardRequestRef.current?.abort();
     };
-  }, []);
+  }, [statusScope]);
 
   useEffect(() => {
     void fetchDashboard();
+    return () => dashboardRequestRef.current?.abort();
   }, [dateFrom, dateTo]);
 
   useEffect(() => {
@@ -163,7 +165,7 @@ export default function ProgramsPage() {
     if (!programsLoaded) setLoading(true);
     setProgramsError('');
 
-    const response = await api<Program[]>('/api/programs?status=active', { signal: controller.signal });
+    const response = await api<Program[]>(programScopeUrls(statusScope).programs, { signal: controller.signal });
     if (controller.signal.aborted || requestID !== programsRequestSequence.current) return;
 
     if (!response.success || !Array.isArray(response.data)) {
@@ -235,7 +237,7 @@ export default function ProgramsPage() {
     setFoldersLoading(previous => foldersLoaded ? previous : true);
     setFoldersError('');
 
-    const response = await api<{ success: boolean; folders: ProgramFolder[] }>('/api/programs/folders?status=active', { signal: controller.signal });
+    const response = await api<{ success: boolean; folders: ProgramFolder[] }>(programScopeUrls(statusScope).folders, { signal: controller.signal });
     if (controller.signal.aborted || requestID !== foldersRequestSequence.current) return;
 
     const data = response.data;
@@ -246,7 +248,16 @@ export default function ProgramsPage() {
       setFoldersLoaded(true);
     }
     setFoldersLoading(false);
-  }, [foldersLoaded]);
+  }, [foldersLoaded, statusScope]);
+
+  const changeStatusScope = (scope: ProgramStatusScope) => {
+    if (scope === statusScope) return;
+    programsRequestRef.current?.abort(); programsRequestSequence.current += 1;
+    foldersRequestRef.current?.abort(); foldersRequestSequence.current += 1;
+    setPrograms([]); setFolders([]); setProgramsLoaded(false); setFoldersLoaded(false);
+    setCurrentFolderID(null); setFolderPath([]); setMenuID(null);
+    setStatusScope(scope);
+  };
 
   const handleCreateProgram = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -266,7 +277,12 @@ export default function ProgramsPage() {
       if (response.success) {
         setIsCreateModalOpen(false);
         setNewProgram({ name: '', description: '', color: '#10b981' });
-        fetchPrograms();
+        if (statusScope === 'active') {
+          void fetchPrograms();
+          void fetchFolders();
+        } else {
+          changeStatusScope('active');
+        }
       } else {
         showToast((response as any).error || 'Error al crear programa', 'error');
       }
@@ -281,7 +297,7 @@ export default function ProgramsPage() {
     e.stopPropagation();
     setMenuID(null);
     setConfirmAction({
-      message: '¿Estás seguro de eliminar este programa? Se eliminarán también todos sus participantes, sesiones y asistencia.',
+      message: PROGRAM_DELETE_CONFIRMATION,
       onConfirm: async () => {
         setConfirmAction(null);
         setDeleting(id);
@@ -291,7 +307,7 @@ export default function ProgramsPage() {
             showToast('Programa eliminado', 'success');
             fetchPrograms();
           } else {
-            showToast('Error al eliminar programa', 'error');
+            showToast(res.error || 'Error al eliminar programa', 'error');
           }
         } catch (error) {
           console.error('Error deleting program:', error);
@@ -865,6 +881,9 @@ export default function ProgramsPage() {
           {searchPending && <Loader2 aria-label="Buscando programas" className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" />}
         </div>
 
+        <select aria-label="Estado de programas" value={statusScope} onChange={event => changeStatusScope(event.target.value as ProgramStatusScope)} className="min-h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 outline-none focus:border-emerald-500">
+          <option value="active">Activos</option><option value="completed">Completados</option><option value="archived">Archivados</option>
+        </select>
         {/* View mode toggle */}
         {!mobileWorkspace && <div className="flex bg-slate-100 rounded-xl p-1 shrink-0">
           <button onClick={() => setViewMode('grid')} title="Cuadrícula" className={`flex h-11 flex-1 items-center justify-center rounded-lg transition-colors sm:h-8 sm:w-8 sm:flex-none ${viewMode === 'grid' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>
