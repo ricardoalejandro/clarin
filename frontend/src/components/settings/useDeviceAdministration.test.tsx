@@ -13,6 +13,45 @@ beforeEach(() => { localStorage.clear(); localStorage.setItem('token', 'syntheti
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); ws.listeners.clear() })
 
 describe('device administration canonical state', () => {
+  it('replaces a stale read after a mutation while ordinary polling joins it', async () => {
+    const reads: ((response: Response) => void)[] = []
+    const fetchMock = vi.fn(() => new Promise<Response>(resolve => { reads.push(resolve) }))
+    vi.stubGlobal('fetch', fetchMock)
+    const view = renderHook(() => useDeviceAdministration<Device>(true))
+    act(() => { void view.result.current.refreshDevices() })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    act(() => { void view.result.current.refreshDevices(true) })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await act(async () => { reads[1](json({ success: true, devices: [{ ...device, name: 'Canonical new name' }] })) })
+    await act(async () => { reads[0](json({ success: true, devices: [device] })) })
+    expect(view.result.current.devices[0]?.name).toBe('Canonical new name')
+  })
+  it('allows a six-second initial response to finish without polling cancellation', async () => {
+    vi.useFakeTimers()
+    let aborts = 0
+    const fetchMock = vi.fn((_: RequestInfo | URL, options: RequestInit = {}) => new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(json({ success: true, devices: [device] })), 6000)
+      options.signal?.addEventListener('abort', () => { aborts++; clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')) })
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const view = renderHook(() => useDeviceAdministration<Device>(true))
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000) })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(aborts).toBe(0)
+    expect(view.result.current.devices).toEqual([device])
+    expect(view.result.current.loading).toBe(false)
+  })
+
+  it('ends initial loading with an actionable timeout instead of an endless spinner', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn((_: RequestInfo | URL, options: RequestInit = {}) => new Promise<Response>((_, reject) => {
+      options.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+    })))
+    const view = renderHook(() => useDeviceAdministration<Device>(true))
+    await act(async () => { await vi.advanceTimersByTimeAsync(20000) })
+    expect(view.result.current.loading).toBe(false)
+    expect(view.result.current.error).toContain('Reintentar')
+  })
   it('preserves a failed delete, single-flights a request, polls retries, and removes only on completion', async () => {
     let rows: Device[] = [device]
     let fail = true
@@ -79,7 +118,7 @@ describe('device administration canonical state', () => {
 
     rows = []
     await act(async () => {
-      ws.listeners.forEach(listener => listener({ event: 'device_deletion', data: { ...pending, deletion_status: 'completed', devices_total: 0, devices_available: 0 } }))
+      ws.listeners.forEach(listener => listener({ event: 'device_deletion', data: { ...pending, deletion_status: 'completed', cleanup_scope: 'local', devices_total: 0, devices_available: 0 } }))
     })
     await waitFor(() => expect(view.result.current.devices).toEqual([]))
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method !== 'DELETE')).toHaveLength(2)
@@ -96,6 +135,7 @@ describe('device administration canonical state', () => {
     expect(view.result.current.available).toBe(0)
     expect(view.result.current.pendingIds.size).toBe(0)
     expect(view.result.current.error).toBe('')
+    expect(view.result.current.lastDeletion?.cleanup_scope).toBe('local')
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'DELETE')).toHaveLength(1)
   })
 })

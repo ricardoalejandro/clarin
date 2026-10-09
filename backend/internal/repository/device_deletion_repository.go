@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/naperu/clarin/internal/domain"
 )
 
@@ -159,10 +160,11 @@ func (r *DeviceRepository) BindSession(ctx context.Context, id uuid.UUID, jid, p
 func (r *DeviceRepository) PendingDeletion(ctx context.Context, accountID, deviceID uuid.UUID) (*domain.DeviceDeletionResult, error) {
 	result := &domain.DeviceDeletionResult{DeletionStatus: "pending"}
 	var operationID *uuid.UUID
-	err := r.db.QueryRow(ctx, `SELECT d.id,d.delete_operation_id,d.delete_next_attempt_at,d.delete_last_error_code,
+	var phase *string
+	err := r.db.QueryRow(ctx, `SELECT d.id,d.delete_operation_id,d.delete_next_attempt_at,d.delete_last_error_code,d.delete_phase,
 	 (SELECT COUNT(*) FROM devices WHERE account_id=$1),
 	 (SELECT COUNT(*) FROM devices WHERE account_id=$1 AND delete_operation_id IS NULL)
-	 FROM devices d WHERE d.account_id=$1 AND d.id=$2`, accountID, deviceID).Scan(&result.DeviceID, &operationID, &result.NextRetryAt, &result.ErrorCode, &result.DevicesTotal, &result.DevicesAvailable)
+	 FROM devices d WHERE d.account_id=$1 AND d.id=$2`, accountID, deviceID).Scan(&result.DeviceID, &operationID, &result.NextRetryAt, &result.ErrorCode, &phase, &result.DevicesTotal, &result.DevicesAvailable)
 	if err == pgx.ErrNoRows {
 		return nil, ErrDeviceNotFound
 	}
@@ -173,6 +175,9 @@ func (r *DeviceRepository) PendingDeletion(ctx context.Context, accountID, devic
 		return nil, nil
 	}
 	result.OperationID = *operationID
+	if phase != nil && *phase == "local_detached" {
+		result.CleanupScope = "local"
+	}
 	return result, nil
 }
 
@@ -222,7 +227,9 @@ func (r *DeviceRepository) BeginDeletion(ctx context.Context, accountID, deviceI
 	}
 	result.OperationID = uuid.New()
 	phase := "pending"
-	if jid == "" || status == domain.DeviceStatusLoggedOut {
+	if jid == "" {
+		phase = "local_detached"
+	} else if status == domain.DeviceStatusLoggedOut {
 		phase = "remote_unlinked"
 	}
 	if _, err = tx.Exec(ctx, `UPDATE devices SET status='deleting',qr_code=NULL,receive_messages=false,delete_operation_id=$1,delete_phase=$2::text,delete_requested_at=NOW(),delete_session_fingerprint=$3::text,delete_attempts=0,delete_next_attempt_at=NOW(),delete_last_error_code=NULL,updated_at=NOW() WHERE account_id=$4 AND id=$5`, result.OperationID, phase, fingerprint, accountID, deviceID); err != nil {
@@ -284,6 +291,36 @@ func (r *DeviceRepository) CheckpointUnlinked(ctx context.Context, job *DeviceDe
 	return nil
 }
 
+// CheckpointLocalDetachment records local-only cleanup, never remote logout.
+// The worker supplies its reserved connection so the same full companion-JID
+// fence remains held across the store read, this proof and finalization.
+func (r *DeviceRepository) CheckpointLocalDetachment(ctx context.Context, job *DeviceDeletion, conn *pgxpool.Conn) error {
+	if conn == nil || job.JID == "" {
+		return ErrDeviceSessionConflict
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = lockDeviceSession(ctx, tx, job.JID); err != nil {
+		return err
+	}
+	ct, err := tx.Exec(ctx, `UPDATE devices d SET delete_phase='local_detached',delete_last_error_code=NULL
+	 WHERE d.account_id=$1 AND d.id=$2 AND d.delete_operation_id=$3 AND d.delete_lease_token=$4 AND d.delete_lease_until>NOW()
+	 AND COALESCE(d.jid,'')=$5::text AND COALESCE(d.delete_session_fingerprint,'')=$6::text
+	 AND d.delete_phase IN ('pending','local_detached')
+	 AND NOT EXISTS(SELECT 1 FROM devices other WHERE other.id<>d.id AND other.jid=d.jid)
+	 AND NOT EXISTS(SELECT 1 FROM whatsmeow_device session WHERE session.jid=$5::text)`, job.AccountID, job.DeviceID, job.OperationID, job.LeaseToken, job.JID, job.Fingerprint)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() != 1 {
+		return ErrDeviceSessionConflict
+	}
+	return tx.Commit(ctx)
+}
+
 func (r *DeviceRepository) Unlinked(ctx context.Context, job *DeviceDeletion) error {
 	var unlinked bool
 	if err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM devices WHERE account_id=$1 AND id=$2 AND delete_operation_id=$3 AND delete_lease_token=$4 AND delete_phase='remote_unlinked' AND delete_lease_until>NOW())`, job.AccountID, job.DeviceID, job.OperationID, job.LeaseToken).Scan(&unlinked); err != nil {
@@ -301,16 +338,53 @@ func (r *DeviceRepository) RetryDeletion(ctx context.Context, job *DeviceDeletio
 }
 
 func (r *DeviceRepository) FinishDeletion(ctx context.Context, job *DeviceDeletion) (*domain.DeviceDeletionResult, error) {
-	tx, err := r.db.Begin(ctx)
+	return r.finishDeletion(ctx, job, nil)
+}
+
+func (r *DeviceRepository) FinishLocalDeletion(ctx context.Context, job *DeviceDeletion, conn *pgxpool.Conn) (*domain.DeviceDeletionResult, error) {
+	if conn == nil {
+		return nil, ErrDeviceSessionConflict
+	}
+	return r.finishDeletion(ctx, job, conn)
+}
+
+func (r *DeviceRepository) finishDeletion(ctx context.Context, job *DeviceDeletion, reserved *pgxpool.Conn) (*domain.DeviceDeletionResult, error) {
+	var tx pgx.Tx
+	var err error
+	if reserved == nil {
+		tx, err = r.db.Begin(ctx)
+	} else {
+		tx, err = reserved.Begin(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if reserved != nil {
+		if err = lockDeviceSession(ctx, tx, job.JID); err != nil {
+			return nil, err
+		}
+	}
 	var found uuid.UUID
-	if err = tx.QueryRow(ctx, `SELECT id FROM devices WHERE account_id=$1 AND id=$2 AND delete_operation_id=$3 AND delete_lease_token=$4 AND delete_phase='remote_unlinked' AND delete_lease_until>NOW() FOR UPDATE`, job.AccountID, job.DeviceID, job.OperationID, job.LeaseToken).Scan(&found); err == pgx.ErrNoRows {
+	var phase string
+	if err = tx.QueryRow(ctx, `SELECT id,delete_phase FROM devices WHERE account_id=$1 AND id=$2 AND delete_operation_id=$3 AND delete_lease_token=$4 AND delete_phase IN ('remote_unlinked','local_detached') AND delete_lease_until>NOW() AND COALESCE(jid,'')=$5::text AND COALESCE(delete_session_fingerprint,'')=$6::text AND NOT EXISTS(SELECT 1 FROM devices other WHERE other.id<>devices.id AND other.jid=devices.jid AND COALESCE(devices.jid,'')<>'') FOR UPDATE`, job.AccountID, job.DeviceID, job.OperationID, job.LeaseToken, job.JID, job.Fingerprint).Scan(&found, &phase); err == pgx.ErrNoRows {
 		return nil, ErrDeviceDeletionLeaseLost
 	} else if err != nil {
 		return nil, err
+	}
+	if phase == "local_detached" {
+		if reserved == nil {
+			return nil, ErrDeviceSessionConflict
+		}
+		if job.JID != "" {
+			var exists bool
+			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM whatsmeow_device WHERE jid=$1::text)`, job.JID).Scan(&exists); err != nil {
+				return nil, err
+			}
+			if exists {
+				return nil, ErrDeviceSessionConflict
+			}
+		}
 	}
 	// Status inventory is reconciled by the existing durable periodic media GC;
 	// Contact/chat/message objects are preserved and never deleted here.
@@ -318,6 +392,10 @@ func (r *DeviceRepository) FinishDeletion(ctx context.Context, job *DeviceDeleti
 		return nil, err
 	}
 	result := &domain.DeviceDeletionResult{DeviceID: job.DeviceID, OperationID: job.OperationID, DeletionStatus: "completed"}
+	result.CleanupScope = "remote"
+	if phase == "local_detached" || job.JID == "" {
+		result.CleanupScope = "local"
+	}
 	if err = deviceDeletionCounts(ctx, tx, job.AccountID, result); err != nil {
 		return nil, err
 	}

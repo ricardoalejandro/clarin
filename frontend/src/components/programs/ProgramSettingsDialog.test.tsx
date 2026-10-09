@@ -118,6 +118,13 @@ describe('ProgramSettingsDialog', () => {
     expect(screen.getByRole('checkbox', { name: 'Antigüedad' })).toBeChecked();
     expect(onSaved).not.toHaveBeenCalled();
 
+    expect(screen.getByRole('button', { name: 'Guardar cambios' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Fecha de incorporación' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Nombre' }), { target: { value: 'Borrador aún pendiente' } });
+    expect(screen.getByRole('button', { name: 'Guardar cambios' })).toBeDisabled();
+    fireEvent.submit(screen.getByRole('textbox', { name: 'Nombre' }).closest('form')!);
+    expect(mockedAPI).toHaveBeenCalledOnce();
+
     fireEvent.click(screen.getByRole('button', { name: 'Recargar versión actual' }));
     await waitFor(() => expect(onCanonicalReload).toHaveBeenCalledWith(conflictProgram));
     expect(screen.getByRole('textbox', { name: 'Nombre' })).toHaveValue('Nombre canónico');

@@ -11,7 +11,7 @@ export interface DeviceRuntimeCapabilities {
 
 export interface DeviceDeletionStatus {
   operation_id: string
-  phase: 'pending' | 'remote_unlinked'
+  phase: 'pending' | 'remote_unlinked' | 'local_detached'
   attempts: number
   next_retry_at?: string | null
   error_code?: string | null
@@ -21,6 +21,7 @@ export interface DeviceDeletionResult {
   device_id: string
   operation_id: string
   deletion_status: 'pending' | 'completed'
+  cleanup_scope?: 'local' | 'remote'
   next_retry_at?: string | null
   error_code?: string | null
   devices_total: number

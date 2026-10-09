@@ -818,7 +818,7 @@ SELECT EXISTS(
 	var req struct {
 		ParticipantID uuid.UUID `json:"participant_id"`
 		Status        string    `json:"status"`
-		Notes         string    `json:"notes"`
+		Notes         *string   `json:"notes"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
@@ -828,7 +828,7 @@ SELECT EXISTS(
 		SessionID:     sessionID,
 		ParticipantID: req.ParticipantID,
 		Status:        req.Status,
-		Notes:         &req.Notes,
+		Notes:         req.Notes,
 	}
 
 	if err := s.services.Program.MarkAttendance(c.Context(), accountID, userID, programID, sessionID, attendance); err != nil {
@@ -868,7 +868,7 @@ SELECT EXISTS(
 			ParticipantID  uuid.UUID `json:"participant_id"`
 			Status         string    `json:"status"`
 			ExpectedStatus *string   `json:"expected_status"`
-			Notes          string    `json:"notes"`
+			Notes          *string   `json:"notes"`
 		} `json:"records"`
 	}
 	if err := c.BodyParser(&req); err != nil {
@@ -880,13 +880,12 @@ SELECT EXISTS(
 
 	var attendances []*domain.ProgramAttendance
 	for _, r := range req.Records {
-		notes := r.Notes
 		attendances = append(attendances, &domain.ProgramAttendance{
 			SessionID:      sessionID,
 			ParticipantID:  r.ParticipantID,
 			Status:         r.Status,
 			ExpectedStatus: r.ExpectedStatus,
-			Notes:          &notes,
+			Notes:          r.Notes,
 		})
 	}
 

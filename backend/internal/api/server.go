@@ -611,8 +611,13 @@ func (s *Server) setupRoutes() {
 	pipelines.Delete("/:id/stages/:stageId", s.handleDeletePipelineStageSafe)
 
 	// Tag routes
+	protected.Get("/tags", func(c *fiber.Ctx) error {
+		if s.contactAvatarCallerHasPermission(c, domain.PermContacts) || s.contactAvatarCallerHasPermission(c, domain.PermTags) {
+			return c.Next()
+		}
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"success": false, "error": "No tienes permiso para consultar etiquetas"})
+	}, s.handleGetTags)
 	tags := protected.Group("/tags", s.requirePermission(domain.PermTags))
-	tags.Get("/", s.handleGetTags)
 	tags.Post("/", s.handleCreateTag)
 	tags.Put("/:id", s.handleUpdateTag)
 	tags.Delete("/batch", s.handleDeleteTagsBatch)
@@ -2118,6 +2123,9 @@ func (s *Server) handleCreateDevice(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
 	req.Name = strings.TrimSpace(req.Name)
+	if deviceNameTooLong(req.Name) {
+		return c.Status(422).JSON(fiber.Map{"success": false, "code": "device_name_too_long", "error": "El nombre admite como máximo 255 caracteres"})
+	}
 	if req.Name == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "El nombre del dispositivo es obligatorio"})
 	}
@@ -2143,7 +2151,7 @@ func (s *Server) handleCreateDevice(c *fiber.Ctx) error {
 	}
 	device, err := s.services.Device.Create(c.Context(), accountID, req.Name)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo crear el dispositivo"})
 	}
 	return c.Status(201).JSON(fiber.Map{"success": true, "device": device})
 }
@@ -2273,7 +2281,7 @@ func (s *Server) handleDeleteDevice(c *fiber.Ctx) error {
 	if result.DeletionStatus == "completed" {
 		status = fiber.StatusOK
 	}
-	return c.Status(status).JSON(fiber.Map{"success": true, "device_id": result.DeviceID, "operation_id": result.OperationID, "deletion_status": result.DeletionStatus, "next_retry_at": result.NextRetryAt, "error_code": result.ErrorCode, "devices_total": result.DevicesTotal, "devices_available": result.DevicesAvailable, "contacts_detached": result.ContactsDetached, "chats_detached": result.ChatsDetached})
+	return c.Status(status).JSON(fiber.Map{"success": true, "device_id": result.DeviceID, "operation_id": result.OperationID, "deletion_status": result.DeletionStatus, "next_retry_at": result.NextRetryAt, "error_code": result.ErrorCode, "devices_total": result.DevicesTotal, "devices_available": result.DevicesAvailable, "contacts_detached": result.ContactsDetached, "chats_detached": result.ChatsDetached, "cleanup_scope": result.CleanupScope})
 }
 
 func (s *Server) handleUpdateDevice(c *fiber.Ctx) error {
@@ -2313,6 +2321,9 @@ func (s *Server) handleUpdateDevice(c *fiber.Ctx) error {
 	}
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
+		if deviceNameTooLong(name) {
+			return c.Status(422).JSON(fiber.Map{"success": false, "code": "device_name_too_long", "error": "El nombre admite como máximo 255 caracteres"})
+		}
 		if name == "" {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": "El nombre del dispositivo es obligatorio"})
 		}
@@ -3370,8 +3381,7 @@ func (s *Server) handleGetMessages(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid chat ID"})
 	}
 
-	limit := c.QueryInt("limit", 50)
-	offset := c.QueryInt("offset", 0)
+	limit, offset := service.NormalizeMessagePagination(c.QueryInt("limit", 50), c.QueryInt("offset", 0))
 
 	chat, err := s.services.Chat.GetByID(c.Context(), chatID)
 	if err != nil {
@@ -3510,6 +3520,9 @@ func (s *Server) handleDeleteChat(c *fiber.Ctx) error {
 	}
 
 	s.invalidateChatCaches(accountID, &chatID)
+	if s.hub != nil {
+		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, "chat_deleted", fiber.Map{"chat_ids": []uuid.UUID{chatID}})
+	}
 	return c.JSON(fiber.Map{"success": true, "message": "Chat deleted"})
 }
 
@@ -3559,6 +3572,9 @@ func (s *Server) handleDeleteChatsBatch(c *fiber.Ctx) error {
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
 		s.invalidateChatCaches(accountID, nil)
+		if s.hub != nil {
+			s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, "chat_deleted", fiber.Map{"all": true})
+		}
 		return c.JSON(fiber.Map{"success": true, "message": "All chats deleted"})
 	}
 
@@ -3592,6 +3608,9 @@ func (s *Server) handleDeleteChatsBatch(c *fiber.Ctx) error {
 	}
 
 	s.invalidateChatCaches(accountID, nil)
+	if s.hub != nil {
+		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, "chat_deleted", fiber.Map{"chat_ids": uuids})
+	}
 	return c.JSON(fiber.Map{"success": true, "message": fmt.Sprintf("%d chats deleted", len(uuids))})
 }
 
@@ -10057,10 +10076,10 @@ func (s *Server) handleGetContacts(c *fiber.Ctx) error {
 	}
 
 	// Redis cache for default load (no complex filters) — 30s TTL
-	isDefaultContactsLoad := filter.Search == "" && len(filter.Tags) == 0 && len(filter.TagIDs) == 0 && len(filter.TagNames) == 0 && len(filter.MatchingContactIDs) == 0 && len(filter.CfFilterContactIDs) == 0 && filter.DeviceID == nil && filter.DateField == "" && !filter.HasPhone && !filter.WithoutActiveLead
+	isDefaultContactsLoad := defaultContactsCacheEligible(filter, c.QueryBool("include_custom_fields", false))
 	contactsCacheKey := ""
 	if isDefaultContactsLoad && s.cache != nil {
-		contactsCacheKey = fmt.Sprintf("contacts:%s:%d:%d", accountID.String(), filter.Limit, filter.Offset)
+		contactsCacheKey = fmt.Sprintf("contacts:%s:v2:%d:%d", accountID.String(), filter.Limit, filter.Offset)
 		if cached, err := s.cache.Get(c.Context(), contactsCacheKey); err == nil && cached != nil {
 			c.Set("Content-Type", "application/json")
 			return c.Send(cached)
@@ -10241,36 +10260,17 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 			patch.BirthDate = &parsed
 		}
 	}
-	if body.Tags != nil {
-		patch.TagIDsSet = true
-		seenTagIDs := make(map[uuid.UUID]struct{}, len(body.Tags))
-		for _, rawName := range body.Tags {
-			name := strings.TrimSpace(rawName)
-			if name == "" {
-				continue
-			}
-			var tagID uuid.UUID
-			resolveErr := s.repos.DB().QueryRow(c.Context(), `
-				INSERT INTO tags (id,account_id,name,color,created_at,updated_at)
-				VALUES ($1,$2,$3,'#6366f1',NOW(),NOW())
-				ON CONFLICT (account_id,name) DO UPDATE SET name=EXCLUDED.name
-				RETURNING id
-			`, uuid.New(), accountID, name).Scan(&tagID)
-			if resolveErr != nil {
-				return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "No se pudieron resolver las etiquetas"})
-			}
-			if _, duplicate := seenTagIDs[tagID]; !duplicate {
-				patch.TagIDs = append(patch.TagIDs, tagID)
-				seenTagIDs[tagID] = struct{}{}
-			}
-		}
-	}
+	patch.TagIDsSet = body.Tags != nil
+
 	hasPersonalPatch := patch.CustomNameSet || patch.LastNameSet || patch.ShortNameSet || patch.PhoneSet ||
 		patch.EmailSet || patch.CompanySet || patch.AgeSet || patch.DNISet || patch.BirthDateSet ||
 		patch.AddressSet || patch.DistritoSet || patch.OcupacionSet || patch.NotesSet
 	hasCanonicalPatch := hasPersonalPatch || patch.TagIDsSet
 	if hasCanonicalPatch {
-		updated, updateErr := s.services.ContactProfile.Update(c.Context(), accountID, id, patch)
+		updated, updateErr := s.repos.ContactProfile.UpdateWithTagNames(c.Context(), accountID, id, patch, body.Tags, s.contactAvatarCallerHasPermission(c, domain.PermTags))
+		if errors.Is(updateErr, repository.ErrGlobalTagCreationForbidden) {
+			return c.Status(403).JSON(fiber.Map{"success": false, "code": "tag_creation_forbidden", "error": "Puedes asignar etiquetas existentes; crear nuevas requiere permiso de Etiquetas"})
+		}
 		if errors.Is(updateErr, repository.ErrContactProfileNotFound) {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "contact not found"})
 		}
@@ -10287,14 +10287,12 @@ func (s *Server) handleUpdateContact(c *fiber.Ctx) error {
 	// auto-membership remains a contextual follow-up and cannot partially roll
 	// back the canonical Contact profile.
 	if body.Tags != nil {
+		s.invalidateTagsCache(accountID)
 		if _, err := s.services.Event.ReconcileContactEventMembership(c.Context(), contact.AccountID, contact.ID); err != nil {
 			log.Printf("[EVENT-SYNC] Immediate contact update reconciliation failed for contact %s: %v", contact.ID, err)
 		} else {
 			s.invalidateEventsCache(contact.AccountID)
 		}
-		// Preserve the legacy flat field in this compatibility response; the
-		// canonical relation remains structured_tags/contact_tags.
-		contact.Tags = append([]string(nil), body.Tags...)
 	}
 
 	if body.CustomName != nil || body.LastName != nil || body.ShortName != nil || body.Age != nil || body.DNI != nil || body.BirthDate != nil || body.Ocupacion != nil {
@@ -10588,252 +10586,139 @@ func (s *Server) handleSyncDeviceContacts(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "message": "sync started"})
 }
 
+func writeManualContactError(c *fiber.Ctx, err error) error {
+	if errors.Is(err, repository.ErrGlobalTagCreationForbidden) {
+		return c.Status(403).JSON(fiber.Map{"success": false, "code": "tag_creation_forbidden", "error": "Puedes asignar etiquetas existentes; crear nuevas requiere permiso de Etiquetas"})
+	}
+	if errors.Is(err, repository.ErrContactIdentityConflict) {
+		return c.Status(409).JSON(fiber.Map{"success": false, "code": "contact_identity_conflict", "error": "El teléfono o identidad ya pertenece a otro contacto"})
+	}
+	return c.Status(422).JSON(fiber.Map{"success": false, "error": "No se pudo guardar el contacto con todos sus datos"})
+}
+
 func (s *Server) handleCreateContact(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
-
-	var body struct {
-		Phone     string   `json:"phone"`
-		Name      string   `json:"name"`
-		LastName  string   `json:"last_name"`
-		Email     string   `json:"email"`
-		Company   string   `json:"company"`
-		Notes     string   `json:"notes"`
-		DNI       string   `json:"dni"`
-		BirthDate string   `json:"birth_date"`
-		Address   string   `json:"address"`
-		Distrito  string   `json:"distrito"`
-		Ocupacion string   `json:"ocupacion"`
-		Tags      []string `json:"tags"`
-	}
+	var body manualContactRequest
 	if err := c.BodyParser(&body); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid body"})
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	if err := s.enforcePlanLimit(c.Context(), accountID, "max_contacts", 1); err != nil {
-		return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_contacts"})
+	patch, err := body.profilePatch()
+	if err != nil {
+		return c.Status(422).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-
 	normalizedPhone := kommo.NormalizePhone(body.Phone)
-	jid := ""
-	if normalizedPhone != "" {
-		jid = normalizedPhone + "@s.whatsapp.net"
-	} else {
-		// Contacts without phone — require at least a name
+	jid := normalizedPhone + "@s.whatsapp.net"
+	if normalizedPhone == "" {
 		if strings.TrimSpace(body.Name) == "" {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Se requiere teléfono o nombre"})
 		}
-		jid = fmt.Sprintf("manual_%s@clarin.contact", uuid.New().String()[:8])
+		jid = "manual_" + uuid.NewString() + "@clarin.contact"
+	} else {
+		patch.PhoneSet = true
+		patch.Phone = &normalizedPhone
 	}
-
-	contact, err := s.services.Contact.GetOrCreate(c.Context(), accountID, nil, jid, normalizedPhone, body.Name, "", false)
+	if err := s.enforcePlanLimit(c.Context(), accountID, "max_contacts", 1); err != nil {
+		return c.Status(402).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_contacts"})
+	}
+	contact, err := s.repos.ContactProfile.CreateManual(c.Context(), accountID, jid, normalizedPhone, patch, body.Tags, s.contactAvatarCallerHasPermission(c, domain.PermTags))
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return writeManualContactError(c, err)
 	}
-
-	updated := false
-	// Set source to manual for manually created contacts
-	src := "manual"
-	contact.Source = &src
-	updated = true
-	// When manually creating, set custom_name from the provided name
-	if body.Name != "" {
-		contact.CustomName = &body.Name
-		updated = true
-	}
-	if body.LastName != "" {
-		contact.LastName = &body.LastName
-		updated = true
-	}
-	if body.Email != "" {
-		contact.Email = &body.Email
-		updated = true
-	}
-	if body.Company != "" {
-		contact.Company = &body.Company
-		updated = true
-	}
-	if body.Notes != "" {
-		contact.Notes = &body.Notes
-		updated = true
-	}
-	if len(body.Tags) > 0 {
-		contact.Tags = body.Tags
-		updated = true
-	}
-	if body.DNI != "" {
-		contact.DNI = &body.DNI
-		updated = true
-	}
-	if body.BirthDate != "" {
-		if t, err := time.Parse("2006-01-02", body.BirthDate); err == nil {
-			contact.BirthDate = &t
-			updated = true
-		}
-	}
-	if body.Address != "" {
-		contact.Address = &body.Address
-		updated = true
-	}
-	if body.Distrito != "" {
-		contact.Distrito = &body.Distrito
-		updated = true
-	}
-	if body.Ocupacion != "" {
-		contact.Ocupacion = &body.Ocupacion
-		updated = true
-	}
-	if updated {
-		_ = s.services.Contact.Update(c.Context(), contact)
-	}
-
-	// Sync tags to contact_tags table
-	if len(body.Tags) > 0 {
-		if err := s.repos.Tag.SyncContactTagsByNames(c.Context(), accountID, contact.ID, body.Tags); err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudieron guardar las etiquetas"})
-		}
+	if patch.TagIDsSet {
+		s.invalidateTagsCache(accountID)
 		if _, err := s.services.Event.ReconcileContactEventMembership(c.Context(), accountID, contact.ID); err != nil {
-			log.Printf("[EVENT-SYNC] Immediate contact creation reconciliation failed for contact %s: %v", contact.ID, err)
+			log.Printf("[EVENT-SYNC] Contact creation reconciliation failed contact=%s", contact.ID)
 		} else {
 			s.invalidateEventsCache(accountID)
 		}
 	}
-
-	tags, _ := s.services.Tag.GetByEntity(c.Context(), "contact", contact.ID)
-	contact.StructuredTags = tags
-
-	s.invalidateContactsCache(accountID)
+	s.afterCanonicalContactProfileChange(accountID, contact)
 	return c.Status(201).JSON(fiber.Map{"success": true, "contact": contact})
 }
 
 func (s *Server) handleCreateContactsBulk(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
-
 	var body struct {
-		Contacts []struct {
-			Phone     string   `json:"phone"`
-			Name      string   `json:"name"`
-			LastName  string   `json:"last_name"`
-			Email     string   `json:"email"`
-			Company   string   `json:"company"`
-			Notes     string   `json:"notes"`
-			DNI       string   `json:"dni"`
-			BirthDate string   `json:"birth_date"`
-			Address   string   `json:"address"`
-			Tags      []string `json:"tags"`
-		} `json:"contacts"`
+		Contacts []manualContactRequest `json:"contacts"`
 	}
 	if err := c.BodyParser(&body); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "invalid body"})
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
 	if len(body.Contacts) == 0 {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "contacts array is empty"})
 	}
 	if err := s.enforcePlanLimit(c.Context(), accountID, "max_contacts", len(body.Contacts)); err != nil {
-		return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_contacts"})
+		return c.Status(402).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_contacts"})
 	}
-
-	created := 0
-	skipped := 0
-	eventParticipantsAdded := 0
-	reconcileContactIDs := make([]uuid.UUID, 0, len(body.Contacts))
-	var importErrors []string
-
+	created, skipped, eventParticipantsAdded := 0, 0, 0
+	reconcileIDs := make([]uuid.UUID, 0, len(body.Contacts))
+	importErrors := make([]string, 0)
+	canCreateTags := s.contactAvatarCallerHasPermission(c, domain.PermTags)
 	for i, row := range body.Contacts {
-		normalizedPhone := kommo.NormalizePhone(row.Phone)
-		if normalizedPhone == "" {
-			skipped++
-			importErrors = append(importErrors, fmt.Sprintf("fila %d: teléfono inválido (%q)", i+1, row.Phone))
-			continue
-		}
-
-		jid := normalizedPhone + "@s.whatsapp.net"
-		contact, err := s.services.Contact.GetOrCreate(c.Context(), accountID, nil, jid, normalizedPhone, row.Name, "", false)
+		patch, err := row.profilePatch()
 		if err != nil {
 			skipped++
 			importErrors = append(importErrors, fmt.Sprintf("fila %d: %s", i+1, err.Error()))
 			continue
 		}
-
-		updated := false
-		if row.LastName != "" {
-			contact.LastName = &row.LastName
-			updated = true
+		phone := kommo.NormalizePhone(row.Phone)
+		if phone == "" {
+			skipped++
+			importErrors = append(importErrors, fmt.Sprintf("fila %d: teléfono inválido", i+1))
+			continue
 		}
-		if row.Email != "" {
-			contact.Email = &row.Email
-			updated = true
-		}
-		if row.Company != "" {
-			contact.Company = &row.Company
-			updated = true
-		}
-		if row.Notes != "" {
-			contact.Notes = &row.Notes
-			updated = true
-		}
-		if len(row.Tags) > 0 {
-			contact.Tags = row.Tags
-			updated = true
-		}
-		if row.DNI != "" {
-			contact.DNI = &row.DNI
-			updated = true
-		}
-		if row.BirthDate != "" {
-			if t, err := time.Parse("2006-01-02", row.BirthDate); err == nil {
-				contact.BirthDate = &t
-				updated = true
+		patch.PhoneSet = true
+		patch.Phone = &phone
+		contact, err := s.repos.ContactProfile.CreateManual(c.Context(), accountID, phone+"@s.whatsapp.net", phone, patch, row.Tags, canCreateTags)
+		if err != nil {
+			skipped++
+			message := "no se pudo guardar el contacto con todos sus datos"
+			if errors.Is(err, repository.ErrGlobalTagCreationForbidden) {
+				message = "crear etiquetas requiere permiso de Etiquetas"
 			}
-		}
-		if row.Address != "" {
-			contact.Address = &row.Address
-			updated = true
-		}
-		// Bulk import = manual source
-		src := "manual"
-		contact.Source = &src
-		updated = true
-		if updated {
-			_ = s.services.Contact.Update(c.Context(), contact)
-		}
-		// Sync tags to contact_tags table
-		if len(row.Tags) > 0 {
-			if err := s.repos.Tag.SyncContactTagsByNames(c.Context(), accountID, contact.ID, row.Tags); err != nil {
-				skipped++
-				importErrors = append(importErrors, fmt.Sprintf("fila %d: no se pudieron guardar las etiquetas", i+1))
-				continue
+			if errors.Is(err, repository.ErrContactIdentityConflict) {
+				message = "la identidad pertenece a otro contacto"
 			}
-			reconcileContactIDs = append(reconcileContactIDs, contact.ID)
+			importErrors = append(importErrors, fmt.Sprintf("fila %d: %s", i+1, message))
+			continue
 		}
+		if patch.TagIDsSet {
+			reconcileIDs = append(reconcileIDs, contact.ID)
+		}
+		s.afterCanonicalContactProfileChange(accountID, contact)
 		created++
 	}
-	if len(reconcileContactIDs) > 0 {
-		added, reconcileErr := s.services.Event.ReconcileContactsEventMembership(c.Context(), accountID, reconcileContactIDs)
-		if reconcileErr != nil {
-			log.Printf("[EVENT-SYNC] Immediate bulk contact reconciliation failed: %v", reconcileErr)
+	if len(reconcileIDs) > 0 {
+		s.invalidateTagsCache(accountID)
+		added, err := s.services.Event.ReconcileContactsEventMembership(c.Context(), accountID, reconcileIDs)
+		if err != nil {
+			log.Printf("[EVENT-SYNC] Bulk contact reconciliation failed account=%s", accountID)
 		} else {
 			eventParticipantsAdded = added
+			s.invalidateEventsCache(accountID)
 		}
 	}
-
 	s.invalidateContactsCache(accountID)
-	return c.JSON(fiber.Map{
-		"success":                  true,
-		"created":                  created,
-		"skipped":                  skipped,
-		"errors":                   importErrors,
-		"event_participants_added": eventParticipantsAdded,
-	})
+	return c.JSON(fiber.Map{"success": true, "created": created, "skipped": skipped, "errors": importErrors, "event_participants_added": eventParticipantsAdded})
 }
 
 // --- Tag Handlers ---
 
 func (s *Server) handleGetTags(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	canCreate := s.contactAvatarCallerHasPermission(c, domain.PermTags)
+	sendCached := func(cached []byte) error {
+		var result fiber.Map
+		if err := json.Unmarshal(cached, &result); err != nil {
+			return fiber.NewError(500, "No se pudieron cargar las etiquetas")
+		}
+		result["can_create"] = canCreate
+		return c.JSON(result)
+	}
 
 	// If limit param is present, use paginated query
 	if c.Query("limit") != "" {
-		limit := c.QueryInt("limit", 50)
-		offset := c.QueryInt("offset", 0)
+		limit, offset := service.NormalizeMessagePagination(c.QueryInt("limit", 50), c.QueryInt("offset", 0))
 		search := c.Query("search", "")
 
 		// Redis cache for default paginated load — 30s TTL
@@ -10841,8 +10726,7 @@ func (s *Server) handleGetTags(c *fiber.Ctx) error {
 		if search == "" && s.cache != nil {
 			tagsCacheKey = fmt.Sprintf("tags:%s:%d:%d", accountID.String(), limit, offset)
 			if cached, err := s.cache.Get(c.Context(), tagsCacheKey); err == nil && cached != nil {
-				c.Set("Content-Type", "application/json")
-				return c.Send(cached)
+				return sendCached(cached)
 			}
 		}
 
@@ -10861,6 +10745,7 @@ func (s *Server) handleGetTags(c *fiber.Ctx) error {
 			}
 		}
 
+		result["can_create"] = canCreate
 		return c.JSON(result)
 	}
 
@@ -10869,8 +10754,7 @@ func (s *Server) handleGetTags(c *fiber.Ctx) error {
 	if s.cache != nil {
 		tagsCacheKeyAll = fmt.Sprintf("tags:%s:all", accountID.String())
 		if cached, err := s.cache.Get(c.Context(), tagsCacheKeyAll); err == nil && cached != nil {
-			c.Set("Content-Type", "application/json")
-			return c.Send(cached)
+			return sendCached(cached)
 		}
 	}
 
@@ -10889,6 +10773,7 @@ func (s *Server) handleGetTags(c *fiber.Ctx) error {
 		}
 	}
 
+	result["can_create"] = canCreate
 	return c.JSON(result)
 }
 
@@ -12303,12 +12188,23 @@ func (s *Server) handleCreateEvent(c *fiber.Ctx) error {
 		Color       string     `json:"color"`
 		Status      string     `json:"status"`
 		PipelineID  *string    `json:"pipeline_id"`
+		FolderID    *uuid.UUID `json:"folder_id"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
+	}
+	if !validEventDateRange(req.EventDate, req.EventEnd) {
+		return c.Status(422).JSON(fiber.Map{"success": false, "code": "EVENT_DATE_RANGE_INVALID", "error": "La fecha final no puede ser anterior al inicio"})
+	}
+	if req.FolderID != nil {
+		folder, err := s.repos.EventFolder.GetByID(c.Context(), *req.FolderID)
+		if err != nil || folder == nil || folder.AccountID != accountID {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "La carpeta no pertenece a esta cuenta"})
+		}
 	}
 	status := strings.ToLower(strings.TrimSpace(req.Status))
 	if status == "" {
@@ -12319,6 +12215,7 @@ func (s *Server) handleCreateEvent(c *fiber.Ctx) error {
 	}
 	event := &domain.Event{
 		AccountID:   accountID,
+		FolderID:    req.FolderID,
 		Name:        req.Name,
 		Description: req.Description,
 		EventDate:   req.EventDate,
@@ -12387,6 +12284,9 @@ func (s *Server) handleUpdateEvent(c *fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
 	}
 	originalStatus := event.Status
+	if eventMembershipFrozen(originalStatus) {
+		return writeEventMembershipError(c, repository.ErrEventMembershipFrozen)
+	}
 	var req struct {
 		Name        *string    `json:"name"`
 		Description *string    `json:"description"`
@@ -12400,19 +12300,23 @@ func (s *Server) handleUpdateEvent(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	var supplied map[string]json.RawMessage
+	if err := json.Unmarshal(c.Body(), &supplied); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
+	}
 	if req.Name != nil {
 		event.Name = *req.Name
 	}
-	if req.Description != nil {
+	if _, present := supplied["description"]; present {
 		event.Description = req.Description
 	}
-	if req.EventDate != nil {
+	if _, present := supplied["event_date"]; present {
 		event.EventDate = req.EventDate
 	}
-	if req.EventEnd != nil {
+	if _, present := supplied["event_end"]; present {
 		event.EventEnd = req.EventEnd
 	}
-	if req.Location != nil {
+	if _, present := supplied["location"]; present {
 		event.Location = req.Location
 	}
 	if req.Color != nil {
@@ -12438,6 +12342,9 @@ func (s *Server) handleUpdateEvent(c *fiber.Ctx) error {
 			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Pipeline does not belong to this account"})
 		}
 		event.PipelineID = &pid
+	}
+	if !validEventDateRange(event.EventDate, event.EventEnd) {
+		return c.Status(422).JSON(fiber.Map{"success": false, "code": "EVENT_DATE_RANGE_INVALID", "error": "La fecha final no puede ser anterior al inicio"})
 	}
 	var membershipImpact *repository.EventMembershipImpact
 	if originalStatus == domain.EventStatusDraft && event.Status == domain.EventStatusActive {

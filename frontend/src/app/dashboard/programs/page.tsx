@@ -498,13 +498,15 @@ export default function ProgramsPage() {
     return inFolder && matchesSearch;
   });
 
-  const formatPct = (value?: number) => `${Math.round(value || 0)}%`;
+  const formatPct = (value?: number | null) => value == null ? '—' : `${Math.round(value)}%`;
   const healthClass = (health?: string) => {
+    if (!health || health === 'no_data') return 'bg-slate-50 text-slate-600 border-slate-200';
     if (health === 'critical') return 'bg-red-50 text-red-700 border-red-100';
     if (health === 'watch') return 'bg-amber-50 text-amber-700 border-amber-100';
     return 'bg-emerald-50 text-emerald-700 border-emerald-100';
   };
   const healthLabel = (health?: string) => {
+    if (!health || health === 'no_data') return 'Sin datos';
     if (health === 'critical') return 'Crítico';
     if (health === 'watch') return 'Observar';
     return 'Saludable';
@@ -757,7 +759,7 @@ export default function ProgramsPage() {
           <span className="text-sm font-semibold text-slate-800">Salud general</span>
           {dashboard && (
             <>
-              <span className={`text-xs font-semibold ${dashboard.attendance_rate >= dashboard.attendance_goal_percent ? 'text-emerald-700' : 'text-amber-700'}`}>
+              <span className={`text-xs font-semibold ${dashboard.attendance_rate == null ? 'text-slate-500' : dashboard.attendance_rate >= dashboard.attendance_goal_percent ? 'text-emerald-700' : 'text-amber-700'}`}>
                 Asistencia {formatPct(dashboard.attendance_rate)} / {dashboard.attendance_goal_percent}%
               </span>
               <span className="hidden sm:inline text-slate-300">·</span>
@@ -814,7 +816,7 @@ export default function ProgramsPage() {
                         <span className={`inline-flex shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium ${healthClass(group.health)}`}>{healthLabel(group.health)}</span>
                       </div>
                       <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-                        <div><span className="block text-slate-400">Asistencia</span><span className={group.attendance_rate >= group.attendance_goal_percent ? 'font-semibold text-emerald-700' : 'font-semibold text-amber-700'}>{formatPct(group.attendance_rate)} / {group.attendance_goal_percent}%</span></div>
+                        <div><span className="block text-slate-400">Asistencia</span><span className={group.attendance_rate == null ? 'text-slate-500' : group.attendance_rate >= group.attendance_goal_percent ? 'font-semibold text-emerald-700' : 'font-semibold text-amber-700'}>{formatPct(group.attendance_rate)} / {group.attendance_goal_percent}%</span></div>
                         <div><span className="block text-slate-400">Traspaso</span><span className={group.transfer_rate >= group.transfer_goal_percent ? 'font-semibold text-emerald-700' : 'font-semibold text-amber-700'}>{formatPct(group.transfer_rate)} / {group.transfer_goal_percent}%</span></div>
                         <div className="text-right"><span className="block text-slate-400">Riesgo</span><span className="font-semibold text-slate-700">{group.at_risk_count}</span></div>
                       </div>
@@ -829,7 +831,7 @@ export default function ProgramsPage() {
                       <tr key={group.program_id} className="hover:bg-slate-50">
                         <td className="py-2 pr-3"><Link href={`/dashboard/programs/${group.program_id}`} className="flex items-center gap-2 min-w-0"><span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: group.color || '#10b981' }} /><span className="font-medium text-slate-800 truncate">{group.name}</span></Link></td>
                         <td className="py-2 pr-3"><span className={`inline-flex px-2 py-0.5 rounded-full border text-xs font-medium ${healthClass(group.health)}`}>{healthLabel(group.health)}</span></td>
-                        <td className="py-2 pr-3 text-xs"><span className={group.attendance_rate >= group.attendance_goal_percent ? 'text-emerald-700 font-semibold' : 'text-amber-700 font-semibold'}>{formatPct(group.attendance_rate)}</span><span className="text-slate-400 ml-1">/ {group.attendance_goal_percent}%</span></td>
+                        <td className="py-2 pr-3 text-xs"><span className={group.attendance_rate == null ? 'text-slate-500' : group.attendance_rate >= group.attendance_goal_percent ? 'text-emerald-700 font-semibold' : 'text-amber-700 font-semibold'}>{formatPct(group.attendance_rate)}</span><span className="text-slate-400 ml-1">/ {group.attendance_goal_percent}%</span></td>
                         <td className="py-2 pr-3 text-xs"><span className={group.transfer_rate >= group.transfer_goal_percent ? 'text-emerald-700 font-semibold' : 'text-amber-700 font-semibold'}>{formatPct(group.transfer_rate)}</span><span className="text-slate-400 ml-1">/ {group.transfer_goal_percent}%</span></td>
                         <td className="py-2 text-right text-xs text-slate-600">{group.at_risk_count}</td>
                       </tr>

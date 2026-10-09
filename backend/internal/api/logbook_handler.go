@@ -2,18 +2,42 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/ws"
 )
 
 // ── Logbook Handlers ──────────────────────────────────────────────────
+
+func writeLogbookError(c *fiber.Ctx, err error) error {
+	var postgresError *pgconn.PgError
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return c.Status(404).JSON(fiber.Map{"error": "Bitácora o entrada no encontrada"})
+	case errors.Is(err, repository.ErrEventMembershipFrozen):
+		return writeEventMembershipError(c, err)
+	case errors.Is(err, repository.ErrLogbookNotesOutsideSnapshot):
+		return c.Status(409).JSON(fiber.Map{"code": "LOGBOOK_NOTES_OUTSIDE_SNAPSHOT", "error": "No se aplicó la recaptura: hay notas en participantes fuera de la nueva selección. Conserva esos participantes o sus notas antes de volver a capturar."})
+	case errors.Is(err, repository.ErrLogbookInvalid):
+		return c.Status(422).JSON(fiber.Map{"error": "La fecha o el estado de la bitácora no es válido"})
+	case errors.As(err, &postgresError) && postgresError.Code == "23505":
+		return c.Status(409).JSON(fiber.Map{"error": "Ya existe una bitácora para esta fecha"})
+	default:
+		return c.Status(500).JSON(fiber.Map{"error": "No se pudo guardar la bitácora"})
+	}
+}
+
+func logbookEventID(c *fiber.Ctx) (uuid.UUID, error) {
+	return uuid.Parse(c.Params("id"))
+}
 
 // handleGetEventLogbooks returns all logbooks for an event.
 func (s *Server) handleGetEventLogbooks(c *fiber.Ctx) error {
@@ -26,7 +50,7 @@ func (s *Server) handleGetEventLogbooks(c *fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"error": "event not found"})
 	}
 
-	logbooks, err := s.repos.Logbook.GetByEventID(c.Context(), eventID)
+	logbooks, err := s.repos.Logbook.GetByEventIDForAccount(c.Context(), accountID, eventID)
 	if err != nil {
 		log.Printf("[API] Error getting logbooks for event %s: %v", eventID, err)
 		return c.Status(500).JSON(fiber.Map{"error": "internal error"})
@@ -50,10 +74,10 @@ func (s *Server) handleCreateEventLogbook(c *fiber.Ctx) error {
 	}
 
 	var body struct {
-		Date            string   `json:"date"`            // "2006-01-02"
-		Title           string   `json:"title"`
-		GeneralNotes    string   `json:"general_notes"`
-		CaptureNow      bool     `json:"capture_now"`     // if true, immediately capture snapshot
+		Date         string `json:"date"` // "2006-01-02"
+		Title        string `json:"title"`
+		GeneralNotes string `json:"general_notes"`
+		CaptureNow   bool   `json:"capture_now"` // if true, immediately capture snapshot
 		// Filter params (only used when capture_now=true)
 		StageIDs        string   `json:"stage_ids"`
 		TagNames        []string `json:"tag_names"`
@@ -116,15 +140,12 @@ func (s *Server) handleCreateEventLogbook(c *fiber.Ctx) error {
 
 	if err := s.repos.Logbook.Create(c.Context(), lb); err != nil {
 		log.Printf("[API] Error creating logbook for event %s: %v", eventID, err)
-		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "23505") {
-			return c.Status(409).JSON(fiber.Map{"error": "Ya existe una bitácora para esta fecha"})
-		}
-		return c.Status(500).JSON(fiber.Map{"error": "could not create logbook"})
+		return writeLogbookError(c, err)
 	}
 
 	// If capture_now, immediately take snapshot
 	if body.CaptureNow {
-		captured, err := s.repos.Logbook.CaptureSnapshot(c.Context(), lb.ID, filter)
+		captured, err := s.repos.Logbook.CaptureSnapshot(c.Context(), accountID, eventID, lb.ID, filter)
 		if err != nil {
 			log.Printf("[API] Error capturing snapshot for logbook %s: %v", lb.ID, err)
 			// Return the pending logbook anyway
@@ -147,13 +168,17 @@ func (s *Server) handleCreateEventLogbook(c *fiber.Ctx) error {
 // handleGetEventLogbook returns a single logbook with entries.
 func (s *Server) handleGetEventLogbook(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	eventID, err := logbookEventID(c)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "invalid event id"})
+	}
 	logbookID, err := uuid.Parse(c.Params("lid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid logbook id"})
 	}
 
-	lb, err := s.repos.Logbook.GetByID(c.Context(), logbookID)
-	if err != nil || lb == nil || lb.AccountID != accountID {
+	lb, err := s.repos.Logbook.GetByIDForEvent(c.Context(), accountID, eventID, logbookID)
+	if err != nil || lb == nil {
 		return c.Status(404).JSON(fiber.Map{"error": "logbook not found"})
 	}
 	return c.JSON(lb)
@@ -161,50 +186,54 @@ func (s *Server) handleGetEventLogbook(c *fiber.Ctx) error {
 
 // handleUpdateEventLogbook updates a logbook's title, notes, etc.
 func (s *Server) handleUpdateEventLogbook(c *fiber.Ctx) error {
+	eventID, err := logbookEventID(c)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "invalid event id"})
+	}
 	logbookID, err := uuid.Parse(c.Params("lid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid logbook id"})
 	}
 	accountID := c.Locals("account_id").(uuid.UUID)
 
-	lb, err := s.repos.Logbook.GetByID(c.Context(), logbookID)
-	if err != nil || lb == nil || lb.AccountID != accountID {
-		return c.Status(404).JSON(fiber.Map{"error": "logbook not found"})
-	}
-
 	var body struct {
-		Title        *string          `json:"title"`
-		GeneralNotes *string          `json:"general_notes"`
-		Date         *string          `json:"date"`
-		SavedFilter  *json.RawMessage `json:"saved_filter"`
-		Status       *string          `json:"status"` // pending, active, completed
+		Title        *string         `json:"title"`
+		GeneralNotes *string         `json:"general_notes"`
+		Date         *string         `json:"date"`
+		SavedFilter  json.RawMessage `json:"saved_filter"`
+		Status       *string         `json:"status"` // pending, active, completed
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
 	}
-
-	if body.Title != nil {
-		lb.Title = *body.Title
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(c.Body(), &fields); err != nil || fields == nil {
+		return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
 	}
-	if body.GeneralNotes != nil {
-		lb.GeneralNotes = *body.GeneralNotes
-	}
-	if body.Date != nil {
-		d, err := time.Parse("2006-01-02", *body.Date)
-		if err == nil {
-			lb.Date = d
+	for _, field := range []string{"title", "general_notes", "date", "status"} {
+		if value, supplied := fields[field]; supplied && string(value) == "null" {
+			return c.Status(400).JSON(fiber.Map{"error": "La fecha, el estado, el título y las notas deben tener un valor válido"})
 		}
 	}
-	if body.SavedFilter != nil {
-		lb.SavedFilter = *body.SavedFilter
+	patch := repository.LogbookPatch{Title: body.Title, GeneralNotes: body.GeneralNotes, Status: body.Status}
+	if body.Date != nil {
+		d, err := time.Parse("2006-01-02", *body.Date)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "Fecha inválida; usa YYYY-MM-DD"})
+		}
+		patch.Date = &d
 	}
-	if body.Status != nil {
-		lb.Status = *body.Status
+	if body.SavedFilter != nil {
+		patch.SavedFilterPresent = true
+		if string(body.SavedFilter) != "null" {
+			patch.SavedFilter = body.SavedFilter
+		}
 	}
 
-	if err := s.repos.Logbook.Update(c.Context(), lb); err != nil {
+	lb, err := s.repos.Logbook.Update(c.Context(), accountID, eventID, logbookID, patch)
+	if err != nil {
 		log.Printf("[API] Error updating logbook %s: %v", logbookID, err)
-		return c.Status(500).JSON(fiber.Map{"error": "internal error"})
+		return writeLogbookError(c, err)
 	}
 
 	if s.hub != nil {
@@ -219,20 +248,24 @@ func (s *Server) handleUpdateEventLogbook(c *fiber.Ctx) error {
 
 // handleDeleteEventLogbook deletes a logbook and its entries.
 func (s *Server) handleDeleteEventLogbook(c *fiber.Ctx) error {
+	eventID, err := logbookEventID(c)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "invalid event id"})
+	}
 	logbookID, err := uuid.Parse(c.Params("lid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid logbook id"})
 	}
 	accountID := c.Locals("account_id").(uuid.UUID)
 
-	lb, err := s.repos.Logbook.GetByID(c.Context(), logbookID)
-	if err != nil || lb == nil || lb.AccountID != accountID {
+	lb, err := s.repos.Logbook.GetByIDForEvent(c.Context(), accountID, eventID, logbookID)
+	if err != nil || lb == nil {
 		return c.Status(404).JSON(fiber.Map{"error": "logbook not found"})
 	}
 
-	if err := s.repos.Logbook.Delete(c.Context(), logbookID); err != nil {
+	if err := s.repos.Logbook.Delete(c.Context(), accountID, eventID, logbookID); err != nil {
 		log.Printf("[API] Error deleting logbook %s: %v", logbookID, err)
-		return c.Status(500).JSON(fiber.Map{"error": "internal error"})
+		return writeLogbookError(c, err)
 	}
 
 	if s.hub != nil {
@@ -248,12 +281,16 @@ func (s *Server) handleDeleteEventLogbook(c *fiber.Ctx) error {
 // handleCaptureLogbookSnapshot takes a snapshot of participants' current state.
 // Accepts optional filter params in the JSON body to capture only filtered participants.
 func (s *Server) handleCaptureLogbookSnapshot(c *fiber.Ctx) error {
+	eventID, err := logbookEventID(c)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "invalid event id"})
+	}
 	logbookID, err := uuid.Parse(c.Params("lid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid logbook id"})
 	}
 	accountID := c.Locals("account_id").(uuid.UUID)
-	if lbCheck, _ := s.repos.Logbook.GetByID(c.Context(), logbookID); lbCheck == nil || lbCheck.AccountID != accountID {
+	if lbCheck, _ := s.repos.Logbook.GetByIDForEvent(c.Context(), accountID, eventID, logbookID); lbCheck == nil {
 		return c.Status(404).JSON(fiber.Map{"error": "logbook not found"})
 	}
 
@@ -290,7 +327,7 @@ func (s *Server) handleCaptureLogbookSnapshot(c *fiber.Ctx) error {
 
 	// If no filter provided in body, fall back to logbook's saved_filter
 	if filter == nil {
-		lb, err := s.repos.Logbook.GetByID(c.Context(), logbookID)
+		lb, err := s.repos.Logbook.GetByIDForEvent(c.Context(), accountID, eventID, logbookID)
 		if err == nil && lb.SavedFilter != nil && len(lb.SavedFilter) > 2 {
 			var sf repository.SnapshotFilter
 			if err := json.Unmarshal(lb.SavedFilter, &sf); err == nil {
@@ -301,10 +338,10 @@ func (s *Server) handleCaptureLogbookSnapshot(c *fiber.Ctx) error {
 		}
 	}
 
-	lb, err := s.repos.Logbook.CaptureSnapshot(c.Context(), logbookID, filter)
+	lb, err := s.repos.Logbook.CaptureSnapshot(c.Context(), accountID, eventID, logbookID, filter)
 	if err != nil {
 		log.Printf("[API] Error capturing snapshot for logbook %s: %v", logbookID, err)
-		return c.Status(500).JSON(fiber.Map{"error": "could not capture snapshot"})
+		return writeLogbookError(c, err)
 	}
 
 	if s.hub != nil {
@@ -324,9 +361,13 @@ func (s *Server) handleUpdateLogbookEntry(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid entry id"})
 	}
 	accountID := c.Locals("account_id").(uuid.UUID)
-	eventID, _ := uuid.Parse(c.Params("id"))
-	if ev, _ := s.services.Event.GetByID(c.Context(), eventID); ev == nil || ev.AccountID != accountID {
-		return c.Status(404).JSON(fiber.Map{"error": "event not found"})
+	eventID, err := logbookEventID(c)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "invalid event id"})
+	}
+	logbookID, err := uuid.Parse(c.Params("lid"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "invalid logbook id"})
 	}
 
 	var body struct {
@@ -336,9 +377,9 @@ func (s *Server) handleUpdateLogbookEntry(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
 	}
 
-	if err := s.repos.Logbook.UpdateEntryNotes(c.Context(), entryID, body.Notes); err != nil {
+	if err := s.repos.Logbook.UpdateEntryNotes(c.Context(), accountID, eventID, logbookID, entryID, body.Notes); err != nil {
 		log.Printf("[API] Error updating logbook entry %s: %v", entryID, err)
-		return c.Status(500).JSON(fiber.Map{"error": "internal error"})
+		return writeLogbookError(c, err)
 	}
 
 	if s.hub != nil {
@@ -378,7 +419,7 @@ func (s *Server) handleAutoCreateLogbooks(c *fiber.Ctx) error {
 	created, err := s.repos.Logbook.AutoCreateFromDateRange(c.Context(), eventID, accountID, *event.EventDate, *endDate, &userID)
 	if err != nil {
 		log.Printf("[API] Error auto-creating logbooks for event %s: %v", eventID, err)
-		return c.Status(500).JSON(fiber.Map{"error": "could not auto-create logbooks"})
+		return writeLogbookError(c, err)
 	}
 
 	if s.hub != nil {
@@ -389,7 +430,7 @@ func (s *Server) handleAutoCreateLogbooks(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{
-		"created": len(created),
+		"created":  len(created),
 		"logbooks": created,
 	})
 }
@@ -397,13 +438,17 @@ func (s *Server) handleAutoCreateLogbooks(c *fiber.Ctx) error {
 // handleLogbookPreview returns a dynamic preview of participants matching the saved filter.
 func (s *Server) handleLogbookPreview(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	eventID, err := logbookEventID(c)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "invalid event id"})
+	}
 	logbookID, err := uuid.Parse(c.Params("lid"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "invalid logbook id"})
 	}
 
-	lb, err := s.repos.Logbook.GetByID(c.Context(), logbookID)
-	if err != nil || lb == nil || lb.AccountID != accountID {
+	lb, err := s.repos.Logbook.GetByIDForEvent(c.Context(), accountID, eventID, logbookID)
+	if err != nil || lb == nil {
 		return c.Status(404).JSON(fiber.Map{"error": "logbook not found"})
 	}
 	if lb.Status != domain.LogbookStatusPending {
@@ -413,7 +458,7 @@ func (s *Server) handleLogbookPreview(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"participants": []interface{}{}, "total": 0})
 	}
 
-	participants, err := s.repos.Logbook.PreviewParticipants(c.Context(), logbookID)
+	participants, err := s.repos.Logbook.PreviewParticipants(c.Context(), accountID, eventID, logbookID)
 	if err != nil {
 		log.Printf("[API] Error previewing logbook %s: %v", logbookID, err)
 		return c.Status(500).JSON(fiber.Map{"error": "could not preview participants"})

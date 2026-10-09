@@ -22,6 +22,7 @@ type DeviceDeletionResult struct {
 	DeviceID         uuid.UUID  `json:"device_id"`
 	OperationID      uuid.UUID  `json:"operation_id"`
 	DeletionStatus   string     `json:"deletion_status"`
+	CleanupScope     string     `json:"cleanup_scope,omitempty"`
 	NextRetryAt      *time.Time `json:"next_retry_at,omitempty"`
 	ErrorCode        *string    `json:"error_code,omitempty"`
 	DevicesTotal     int        `json:"devices_total"`

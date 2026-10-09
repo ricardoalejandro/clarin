@@ -2001,19 +2001,24 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE contacts VALIDATE CONSTRAINT contacts_avatar_source_check`,
 		`CREATE OR REPLACE FUNCTION schedule_deleted_contact_avatar_gc() RETURNS TRIGGER AS $$
 		BEGIN
-			IF OLD.avatar_media_asset_id IS NOT NULL AND NOT EXISTS (
+			IF OLD.avatar_media_asset_id IS NOT NULL THEN
+                -- Match attachment and GC workers: wait for the asset lock,
+                -- then inspect references in a fresh statement snapshot.
+                PERFORM 1 FROM media_assets WHERE account_id=OLD.account_id AND id=OLD.avatar_media_asset_id FOR UPDATE;
+                IF NOT EXISTS (
 				SELECT 1 FROM contacts c
 				WHERE c.account_id=OLD.account_id AND c.avatar_media_asset_id=OLD.avatar_media_asset_id
 			) THEN
 				UPDATE media_assets SET status='avatar_gc_pending',updated_at=NOW()
 				WHERE id=OLD.avatar_media_asset_id AND account_id=OLD.account_id
-				  AND content_hash LIKE 'contact_avatar:%';
+				  AND content_hash LIKE 'contact_avatar:%' AND status NOT IN ('deleted','avatar_gc_deleting');
 				UPDATE storage_objects so SET status='avatar_gc_pending',next_delete_at=NOW(),delete_error='',updated_at=NOW()
 				WHERE so.account_id=OLD.account_id AND EXISTS (
 					SELECT 1 FROM media_assets ma WHERE ma.id=OLD.avatar_media_asset_id
 					  AND ma.account_id=OLD.account_id AND ma.object_key=so.object_key
 					  AND ma.status='avatar_gc_pending'
 				);
+                END IF;
 			END IF;
 			RETURN OLD;
 		END;
@@ -4035,6 +4040,9 @@ func Migrate(db *pgxpool.Pool) error {
 		return err
 	}
 
+	if err := migrateProgramFolderIntegrity(ctx, db); err != nil {
+		return err
+	}
 	return nil
 }
 

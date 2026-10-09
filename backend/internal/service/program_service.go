@@ -92,12 +92,24 @@ func normalizeCourseProgramEventFields(p *domain.Program) error {
 	return nil
 }
 
+func validateProgramStatus(status string) error {
+	switch status {
+	case "active", "completed", "archived":
+		return nil
+	default:
+		return programInputError("program status must be active, completed or archived")
+	}
+}
+
 func (s *ProgramService) CreateProgram(ctx context.Context, p *domain.Program) error {
 	if p.Name == "" {
 		return errors.New("program name is required")
 	}
 	if p.Status == "" {
 		p.Status = "active"
+	}
+	if err := validateProgramStatus(p.Status); err != nil {
+		return err
 	}
 	if p.Type == "" {
 		p.Type = "course"
@@ -125,6 +137,9 @@ func (s *ProgramService) ListPrograms(ctx context.Context, accountID uuid.UUID, 
 }
 
 func (s *ProgramService) UpdateProgram(ctx context.Context, p *domain.Program) error {
+	if err := validateProgramStatus(p.Status); err != nil {
+		return err
+	}
 	if p.Name == "" {
 		return errors.New("program name is required")
 	}
@@ -572,6 +587,13 @@ func validateAttendanceBatch(sessionID uuid.UUID, attendances []*domain.ProgramA
 		}
 		if attendance.ExpectedStatus != nil && !isValidProgramAttendanceStatus(*attendance.ExpectedStatus) {
 			return fmt.Errorf("invalid expected attendance status: %s", *attendance.ExpectedStatus)
+		}
+		if attendance.Notes != nil {
+			notes := strings.TrimSpace(*attendance.Notes)
+			if len([]rune(notes)) > 4000 {
+				return programInputError("attendance observation must be 4000 characters or fewer")
+			}
+			attendance.Notes = &notes
 		}
 		if _, exists := seen[attendance.ParticipantID]; exists {
 			return errors.New("duplicate participant in attendance batch")

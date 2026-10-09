@@ -761,16 +761,17 @@ function programDashboard(snapshots: OfflineV5Snapshot[]): JsonObject {
       dropped_count: Number(health.dropped_count) || 0,
       transferred_count: Number(health.transferred_count) || 0,
       session_count: Number(health.session_count) || 0,
-      attendance_rate: Number(health.attendance_rate) || 0,
+      attendance_rate: health.attendance_rate == null ? null : Number(health.attendance_rate),
       transfer_rate: Number(health.transfer_rate) || 0,
       attendance_goal_percent: Number(health.attendance_goal_percent ?? goals?.attendance_goal_percent) || 80,
       transfer_goal_percent: Number(health.transfer_goal_percent ?? goals?.transfer_goal_percent) || 70,
       at_risk_count: participants.filter(value => value.health === 'critical' || value.health === 'watch').length,
-      health: health.health || 'healthy',
+      health: health.attendance_rate == null ? 'no_data' : health.health || 'healthy',
     }]
   })
   const total = (name: string) => groups.reduce((sum, value) => sum + Number(value[name] || 0), 0)
   const average = (name: string) => groups.length ? groups.reduce((sum, value) => sum + Number(value[name] || 0), 0) / groups.length : 0
+  const measuredGroups = groups.filter(value => value.attendance_rate != null)
   return {
     attendance_goal_percent: average('attendance_goal_percent') || 80,
     transfer_goal_percent: average('transfer_goal_percent') || 70,
@@ -780,9 +781,9 @@ function programDashboard(snapshots: OfflineV5Snapshot[]): JsonObject {
     completed_count: total('completed_count'),
     dropped_count: total('dropped_count'),
     transferred_count: total('transferred_count'),
-    attendance_rate: average('attendance_rate'),
+    attendance_rate: measuredGroups.length ? measuredGroups.reduce((sum, value) => sum + Number(value.attendance_rate), 0) / measuredGroups.length : null,
     transfer_rate: average('transfer_rate'),
-    groups_below_goal: groups.filter(value => Number(value.attendance_rate) < Number(value.attendance_goal_percent)).length,
+    groups_below_goal: groups.filter(value => value.attendance_rate != null && Number(value.attendance_rate) < Number(value.attendance_goal_percent)).length,
     critical_participants: total('at_risk_count'),
     groups,
   }

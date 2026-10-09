@@ -2488,7 +2488,7 @@ type ProgramHealthParticipant struct {
 	Status             string     `json:"status"`
 	EnrolledAt         string     `json:"enrolled_at"`
 	Health             string     `json:"health"`
-	AttendanceRate     float64    `json:"attendance_rate"`
+	AttendanceRate     *float64   `json:"attendance_rate"`
 	Present            int        `json:"present"`
 	Late               int        `json:"late"`
 	Absent             int        `json:"absent"`
@@ -2525,7 +2525,7 @@ type ProgramParticipantAttendanceStat struct {
 	TotalSessions  int       `json:"total_sessions"`
 	MarkedSessions int       `json:"marked_sessions"`
 	Pending        int       `json:"pending"`
-	Rate           float64   `json:"rate"`
+	Rate           *float64  `json:"rate"`
 }
 
 type ProgramHealthSummary struct {
@@ -2540,7 +2540,7 @@ type ProgramHealthSummary struct {
 	TransferredCount      int                         `json:"transferred_count"`
 	SessionCount          int                         `json:"session_count"`
 	RecoverySessionCount  int                         `json:"recovery_session_count"`
-	AttendanceRate        float64                     `json:"attendance_rate"`
+	AttendanceRate        *float64                    `json:"attendance_rate"`
 	TransferRate          float64                     `json:"transfer_rate"`
 	Health                string                      `json:"health"`
 	Reasons               []string                    `json:"reasons"`
@@ -2558,7 +2558,7 @@ type ProgramDashboardGroup struct {
 	DroppedCount          int       `json:"dropped_count"`
 	TransferredCount      int       `json:"transferred_count"`
 	SessionCount          int       `json:"session_count"`
-	AttendanceRate        float64   `json:"attendance_rate"`
+	AttendanceRate        *float64  `json:"attendance_rate"`
 	TransferRate          float64   `json:"transfer_rate"`
 	AttendanceGoalPercent int       `json:"attendance_goal_percent"`
 	TransferGoalPercent   int       `json:"transfer_goal_percent"`
@@ -2577,7 +2577,7 @@ type ProgramDashboardSummary struct {
 	CompletedCount        int                      `json:"completed_count"`
 	DroppedCount          int                      `json:"dropped_count"`
 	TransferredCount      int                      `json:"transferred_count"`
-	AttendanceRate        float64                  `json:"attendance_rate"`
+	AttendanceRate        *float64                 `json:"attendance_rate"`
 	TransferRate          float64                  `json:"transfer_rate"`
 	GroupsBelowGoal       int                      `json:"groups_below_goal"`
 	CriticalParticipants  int                      `json:"critical_participants"`

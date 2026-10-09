@@ -900,20 +900,27 @@ func offlineV5ProgramHealth(ctx context.Context, tx pgx.Tx, accountID, programID
 			item.Pending = 0
 		}
 		if item.MarkedSessions > 0 {
-			item.AttendanceRate = float64(item.Present+item.Late) / float64(item.MarkedSessions) * 100
+			item.AttendanceRate = programAttendancePercent(item.Present+item.Late, item.MarkedSessions)
 		}
 		unresolved := item.Absent - item.RecoverySessions
 		item.Health = "healthy"
+		if item.MarkedSessions == 0 {
+			item.Health = "no_data"
+		}
 		if unresolved >= 2 {
 			item.Health, item.Reasons = "critical", append(item.Reasons, fmt.Sprintf("%d faltas no regularizadas", unresolved))
 		} else if unresolved == 1 {
 			item.Health, item.Reasons = "watch", append(item.Reasons, "una falta pendiente")
 		}
-		if item.MarkedSessions > 0 && item.AttendanceRate < float64(goal.AttendanceGoalPercent) && item.Health == "healthy" {
+		if item.AttendanceRate != nil && *item.AttendanceRate < float64(goal.AttendanceGoalPercent) && item.Health == "healthy" {
 			item.Health, item.Reasons = "watch", append(item.Reasons, "asistencia bajo la meta")
 		}
 		if len(item.Reasons) == 0 {
-			item.Reasons = append(item.Reasons, "sin alertas")
+			if item.MarkedSessions == 0 {
+				item.Reasons = append(item.Reasons, "sin asistencia registrada")
+			} else {
+				item.Reasons = append(item.Reasons, "sin alertas")
+			}
 		}
 		totalPresent, totalLate, totalAbsent = totalPresent+item.Present, totalLate+item.Late, totalAbsent+item.Absent
 		summary.Participants = append(summary.Participants, item)
@@ -928,10 +935,13 @@ func offlineV5ProgramHealth(ctx context.Context, tx pgx.Tx, accountID, programID
 	}
 	marked := totalPresent + totalLate + totalAbsent
 	if marked > 0 {
-		summary.AttendanceRate = float64(totalPresent+totalLate) / float64(marked) * 100
+		summary.AttendanceRate = programAttendancePercent(totalPresent+totalLate, marked)
 	}
 	if completedCount > 0 {
 		summary.TransferRate = float64(transferredCount) / float64(completedCount) * 100
+	}
+	if marked == 0 {
+		summary.Health = "no_data"
 	}
 	for _, item := range summary.Participants {
 		if item.Health == "critical" {
@@ -942,14 +952,18 @@ func offlineV5ProgramHealth(ctx context.Context, tx pgx.Tx, accountID, programID
 			summary.Health = "watch"
 		}
 	}
-	if summary.AttendanceRate < float64(goal.AttendanceGoalPercent) && marked > 0 {
+	if summary.AttendanceRate != nil && *summary.AttendanceRate < float64(goal.AttendanceGoalPercent) {
 		summary.Reasons = append(summary.Reasons, "asistencia grupal bajo la meta")
 		if summary.Health == "healthy" {
 			summary.Health = "watch"
 		}
 	}
 	if len(summary.Reasons) == 0 {
-		summary.Reasons = append(summary.Reasons, "grupo estable")
+		if marked == 0 {
+			summary.Reasons = append(summary.Reasons, "sin asistencia registrada")
+		} else {
+			summary.Reasons = append(summary.Reasons, "grupo estable")
+		}
 	}
 	return summary, nil
 }

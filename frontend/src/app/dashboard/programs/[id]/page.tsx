@@ -65,6 +65,7 @@ import {
   type ProgramAttendanceView,
 } from '@/components/programs/programAttendance';
 import {
+  formatProgramAttendanceRate,
   getProgramTenure,
   nextProgramHealthSort,
   normalizeProgramHealthViewColumns,
@@ -189,7 +190,7 @@ function ProgramParticipantHistoryList({
 }
 
 export default function ProgramDetailPage() {
-  const { isOffline, requireOnline } = useClarinRuntime();
+  const { isOffline, requireOnline, snapshot: runtimeSnapshot } = useClarinRuntime();
   const params = useParams<{ id?: string }>();
   const router = useRouter();
   const programId = canonicalResourceID(params.id, 'programs');
@@ -217,6 +218,9 @@ export default function ProgramDetailPage() {
   const [canUseSurveys, setCanUseSurveys] = useState(false);
   const [currentActorID, setCurrentActorID] = useState('');
   const [currentAccountID, setCurrentAccountID] = useState('');
+  const effectiveAccountID = runtimeSnapshot?.accountId || currentAccountID;
+  const programIdentityRef = useRef('');
+  programIdentityRef.current = `${effectiveAccountID}:${programId}`;
   const [healthSummaryExpanded, setHealthSummaryExpanded] = useState(false);
   const [showSectionPicker, setShowSectionPicker] = useState(false);
   const [participantSearch, setParticipantSearch] = useState('');
@@ -239,6 +243,7 @@ export default function ProgramDetailPage() {
         const response = await fetch('/api/me', { credentials: 'include', signal: controller.signal });
         if (!response.ok) return;
         const payload = await response.json();
+        if (controller.signal.aborted) return;
         const user = payload?.user;
         setCurrentActorID(typeof user?.id === 'string' ? user.id : '');
         setCurrentAccountID(typeof user?.account_id === 'string' ? user.account_id : '');
@@ -255,7 +260,7 @@ export default function ProgramDetailPage() {
     };
     void loadPermissions();
     return () => controller.abort();
-  }, []);
+  }, [runtimeSnapshot?.accountId, runtimeSnapshot?.userId]);
 
   useEffect(() => {
     if (!canUseSurveys && activeTab === 'surveys') setActiveTab('health');
@@ -418,6 +423,7 @@ export default function ProgramDetailPage() {
   const participantDetailReturnFocusRef = useRef<HTMLElement | null>(null);
   const participantContextByContactRef = useRef(new Map<string, string>());
   const contactRefreshSequenceRef = useRef(new Map<string, number>());
+  const contactRefreshControllersRef = useRef(new Map<string, AbortController>());
 
   // Column visibility (persisted in localStorage)
   const PARTICIPANT_COLUMNS: { id: string; label: string; always?: boolean }[] = [
@@ -819,15 +825,135 @@ export default function ProgramDetailPage() {
     }
   }, [programId]);
 
+  const fetchProgramData = useCallback(async () => {
+    const identity = `${effectiveAccountID}:${programId}`;
+    programDataRequestRef.current?.abort();
+    const controller = new AbortController();
+    programDataRequestRef.current = controller;
+    const requestID = ++programDataRequestSequence.current;
+    if (!programSnapshotRef.current) setLoading(true);
+    setLoadingHealth(programSnapshotRef.current);
+    setDetailError('');
+
+    const [progRes, partsRes, sessRes, healthRes, goalsRes] = await Promise.all([
+      api<Program>(`/api/programs/${programId}`, { signal: controller.signal }),
+      api<ProgramParticipant[]>(`/api/programs/${programId}/participants`, { signal: controller.signal }),
+      api<ProgramSession[]>(`/api/programs/${programId}/sessions`, { signal: controller.signal }),
+      api<{ success: boolean; health: ProgramHealthSummary; error?: string }>(`/api/programs/${programId}/health`, { signal: controller.signal }),
+      api<{ success: boolean; goals: ProgramGoal; error?: string }>(`/api/programs/${programId}/goals`, { signal: controller.signal })
+    ]);
+
+    if (controller.signal.aborted || requestID !== programDataRequestSequence.current || identity !== programIdentityRef.current) return;
+
+    const confirmedMissing = !progRes.success && progRes.error === 'Program not found';
+    if (confirmedMissing) {
+      setProgram(null);
+      setProgramNotFound(true);
+      setDetailError('');
+      programSnapshotRef.current = false;
+      setLoading(false);
+      setLoadingHealth(false);
+      return;
+    }
+
+    const nextProgram = progRes.data;
+    if (nextProgram && (nextProgram.id !== programId || (effectiveAccountID && nextProgram.account_id !== effectiveAccountID))) {
+      setDetailError('No se pudo cargar el programa en la cuenta actual.');
+      setLoading(false);
+      setLoadingHealth(false);
+      return;
+    }
+    if (!progRes.success || !nextProgram) {
+      setDetailError(progRes.error || 'No se pudo cargar el programa.');
+      setProgramNotFound(false);
+      setLoading(false);
+      setLoadingHealth(false);
+      return;
+    }
+
+    // Legacy event-shaped Programs are preserved as an auditable source, but
+    // their operational home is now the complete Events module. Redirect only
+    // after the lossless migration has produced a verified destination.
+    if (nextProgram.event_retirement_status === 'migrated' && nextProgram.migrated_event_id) {
+      programSnapshotRef.current = false;
+      setLoading(true);
+      router.replace(`/dashboard/events/${nextProgram.migrated_event_id}`);
+      return;
+    }
+
+    // Older backends serialize nil Go slices as JSON null for empty programs.
+    // Treat successful null responses as empty arrays at the UI boundary.
+    const participantsAvailable = partsRes.success && (partsRes.data == null || Array.isArray(partsRes.data));
+    const sessionsAvailable = sessRes.success && (sessRes.data == null || Array.isArray(sessRes.data));
+    const healthAvailable = healthRes.success && healthRes.data?.success && healthRes.data.health?.program_id === programId && Array.isArray(healthRes.data.health.participants);
+    const nextParticipants = Array.isArray(partsRes.data) ? partsRes.data : [];
+    const activeParticipantIDs = new Set(nextParticipants.filter(participant => participant.status === 'active').map(participant => participant.id));
+    const nextHealthParticipants = healthRes.data?.health?.participants || [];
+    const rosterConsistent = healthAvailable && nextHealthParticipants.length === activeParticipantIDs.size && nextHealthParticipants.every(participant => activeParticipantIDs.has(participant.participant_id));
+    const goalsAvailable = goalsRes.success && goalsRes.data?.success && !!goalsRes.data.goals;
+    const failures = [
+      !participantsAvailable ? (partsRes.error || 'No se pudieron cargar los participantes.') : '',
+      !sessionsAvailable ? (sessRes.error || 'No se pudieron cargar las sesiones.') : '',
+      !healthAvailable ? (healthRes.error || healthRes.data?.error || 'No se pudo cargar la salud del programa.') : '',
+      !goalsAvailable ? (goalsRes.error || goalsRes.data?.error || 'No se pudieron cargar las metas del programa.') : '',
+      participantsAvailable && healthAvailable && !rosterConsistent ? 'Los participantes cambiaron durante la actualización. Reintenta para cargar la lista actual.' : '',
+    ].filter(Boolean);
+
+    let nextStages: Array<{ id: string; name: string; color: string; position: number }> = [];
+    let stagesAvailable = nextProgram.type !== 'event' || !nextProgram.pipeline_id;
+    if (nextProgram.type === 'event' && nextProgram.pipeline_id) {
+      const pipelineResponse = await api<{ success: boolean; pipeline?: { stages?: Array<{ id: string; name: string; color: string; position: number }> }; error?: string }>(`/api/events/pipelines/${nextProgram.pipeline_id}`, { signal: controller.signal });
+      if (controller.signal.aborted || requestID !== programDataRequestSequence.current || identity !== programIdentityRef.current) return;
+      if (!pipelineResponse.success || !pipelineResponse.data?.success || !Array.isArray(pipelineResponse.data.pipeline?.stages)) {
+        failures.push(pipelineResponse.error || pipelineResponse.data?.error || 'No se pudieron cargar las etapas del evento.');
+      } else {
+        stagesAvailable = true;
+        nextStages = pipelineResponse.data.pipeline.stages.map(stage => ({
+          id: stage.id,
+          name: stage.name,
+          color: stage.color,
+          position: stage.position,
+        }));
+      }
+    }
+
+    setProgram(nextProgram);
+    // Publish the roster and its metrics together so counts and actions always
+    // refer to the participants shown, including partial errors/concurrent enrollment.
+    if (participantsAvailable && rosterConsistent) {
+      setParticipants(nextParticipants);
+      setHealth(healthRes.data!.health);
+    }
+    if (sessionsAvailable) setSessions(Array.isArray(sessRes.data) ? sessRes.data : []);
+    if (goalsAvailable) setProgramGoals(goalsRes.data!.goals);
+    if (stagesAvailable) setStages(nextStages);
+    setDetailError(Array.from(new Set(failures)).join(' '));
+    setProgramNotFound(false);
+    programSnapshotRef.current = true;
+    if (nextProgram.type === 'event') {
+      setActiveTab(prev => (prev === 'sessions' || prev === 'stats' || prev === 'health' || prev === 'academic' || prev === 'surveys') ? 'kanban' : prev);
+    } else {
+      setActiveTab(prev => (prev === 'kanban' || prev === 'participants') ? 'health' : prev);
+    }
+    setLoading(false);
+    setLoadingHealth(false);
+  }, [effectiveAccountID, programId, router]);
+
   useEffect(() => {
     if (programId) {
       programDataRequestRef.current?.abort();
+      contactRefreshControllersRef.current.forEach(controller => controller.abort());
+      contactRefreshControllersRef.current.clear();
+      contactRefreshSequenceRef.current.clear();
+      participantContextByContactRef.current.clear();
       attendanceRequestRef.current?.abort();
       attendanceRequestSequence.current += 1;
       programSnapshotRef.current = false;
       setProgram(null);
       setParticipants([]);
       setSessions([]);
+      setHealth(null);
+      setLoadingHealth(false);
       setAcademicConfig(null);
       setAcademicError('');
       setAcademicDirty(false);
@@ -847,13 +973,15 @@ export default function ProgramDetailPage() {
       void fetchDevices();
     }
     return () => {
+      contactRefreshControllersRef.current.forEach(controller => controller.abort());
+      contactRefreshControllersRef.current.clear();
       programDataRequestRef.current?.abort();
       academicRequestRef.current?.abort();
       attendanceRequestRef.current?.abort();
       attendanceObservationRequestRef.current?.abort();
       observationHistoryRequestRef.current?.abort();
     };
-  }, [programId]);
+  }, [programId, effectiveAccountID, fetchProgramData]);
 
   useEffect(() => {
     if (!program || program.type === 'event') {
@@ -898,111 +1026,7 @@ export default function ProgramDetailPage() {
     return () => window.removeEventListener('keydown', handleEscape);
   }, [confirmAction, showSectionPicker, showDeviceSelector, showInlineChat, attendanceConflicts.length, attendanceObservationParticipant, observationParticipant, outcomeParticipant, attendanceDragging, isAttendanceOpen, dirtyAttendanceParticipantIDs.length, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, participantDetailOpen, closeParticipantDetail, closeAttendanceConflicts, closeAttendanceModal, closeAttendanceObservationHistory, closeObservationHistory, closeWhatsAppChat]);
 
-  const fetchProgramData = async () => {
-    programDataRequestRef.current?.abort();
-    const controller = new AbortController();
-    programDataRequestRef.current = controller;
-    const requestID = ++programDataRequestSequence.current;
-    if (!programSnapshotRef.current) setLoading(true);
-    setDetailError('');
-
-    const [progRes, partsRes, sessRes, healthRes, goalsRes] = await Promise.all([
-      api<Program>(`/api/programs/${programId}`, { signal: controller.signal }),
-      api<ProgramParticipant[]>(`/api/programs/${programId}/participants`, { signal: controller.signal }),
-      api<ProgramSession[]>(`/api/programs/${programId}/sessions`, { signal: controller.signal }),
-      api<{ success: boolean; health: ProgramHealthSummary; error?: string }>(`/api/programs/${programId}/health`, { signal: controller.signal }),
-      api<{ success: boolean; goals: ProgramGoal; error?: string }>(`/api/programs/${programId}/goals`, { signal: controller.signal })
-    ]);
-
-    if (controller.signal.aborted || requestID !== programDataRequestSequence.current) return;
-
-    const confirmedMissing = !progRes.success && progRes.error === 'Program not found';
-    if (confirmedMissing) {
-      setProgram(null);
-      setProgramNotFound(true);
-      setDetailError('');
-      programSnapshotRef.current = false;
-      setLoading(false);
-      return;
-    }
-
-    const nextProgram = progRes.data;
-    if (!progRes.success || !nextProgram) {
-      setDetailError(progRes.error || 'No se pudo cargar el programa.');
-      setProgramNotFound(false);
-      setLoading(false);
-      return;
-    }
-
-    // Legacy event-shaped Programs are preserved as an auditable source, but
-    // their operational home is now the complete Events module. Redirect only
-    // after the lossless migration has produced a verified destination.
-    if (nextProgram.event_retirement_status === 'migrated' && nextProgram.migrated_event_id) {
-      programSnapshotRef.current = false;
-      setLoading(true);
-      router.replace(`/dashboard/events/${nextProgram.migrated_event_id}`);
-      return;
-    }
-
-    // Older backends serialize nil Go slices as JSON null for empty programs.
-    // Treat successful null responses as empty arrays at the UI boundary.
-    const participantsAvailable = partsRes.success && (partsRes.data == null || Array.isArray(partsRes.data));
-    const sessionsAvailable = sessRes.success && (sessRes.data == null || Array.isArray(sessRes.data));
-    const healthAvailable = healthRes.success && healthRes.data?.success && !!healthRes.data.health;
-    const goalsAvailable = goalsRes.success && goalsRes.data?.success && !!goalsRes.data.goals;
-    const failures = [
-      !participantsAvailable ? (partsRes.error || 'No se pudieron cargar los participantes.') : '',
-      !sessionsAvailable ? (sessRes.error || 'No se pudieron cargar las sesiones.') : '',
-      !healthAvailable ? (healthRes.error || healthRes.data?.error || 'No se pudo cargar la salud del programa.') : '',
-      !goalsAvailable ? (goalsRes.error || goalsRes.data?.error || 'No se pudieron cargar las metas del programa.') : '',
-    ].filter(Boolean);
-
-    let nextStages: Array<{ id: string; name: string; color: string; position: number }> = [];
-    let stagesAvailable = nextProgram.type !== 'event' || !nextProgram.pipeline_id;
-    if (nextProgram.type === 'event' && nextProgram.pipeline_id) {
-      const pipelineResponse = await api<{ success: boolean; pipeline?: { stages?: Array<{ id: string; name: string; color: string; position: number }> }; error?: string }>(`/api/events/pipelines/${nextProgram.pipeline_id}`, { signal: controller.signal });
-      if (controller.signal.aborted || requestID !== programDataRequestSequence.current) return;
-      if (!pipelineResponse.success || !pipelineResponse.data?.success || !Array.isArray(pipelineResponse.data.pipeline?.stages)) {
-        failures.push(pipelineResponse.error || pipelineResponse.data?.error || 'No se pudieron cargar las etapas del evento.');
-      } else {
-        stagesAvailable = true;
-        nextStages = pipelineResponse.data.pipeline.stages.map(stage => ({
-          id: stage.id,
-          name: stage.name,
-          color: stage.color,
-          position: stage.position,
-        }));
-      }
-    }
-
-    setProgram(nextProgram);
-    if (participantsAvailable) setParticipants(Array.isArray(partsRes.data) ? partsRes.data : []);
-    if (sessionsAvailable) setSessions(Array.isArray(sessRes.data) ? sessRes.data : []);
-    if (healthAvailable) setHealth(healthRes.data!.health);
-    if (goalsAvailable) setProgramGoals(goalsRes.data!.goals);
-    if (stagesAvailable) setStages(nextStages);
-    setDetailError(Array.from(new Set(failures)).join(' '));
-    setProgramNotFound(false);
-    programSnapshotRef.current = true;
-    if (nextProgram.type === 'event') {
-      setActiveTab(prev => (prev === 'sessions' || prev === 'stats' || prev === 'health' || prev === 'academic' || prev === 'surveys') ? 'kanban' : prev);
-    } else {
-      setActiveTab(prev => (prev === 'kanban' || prev === 'participants') ? 'health' : prev);
-    }
-    setLoading(false);
-  };
-
-  const fetchHealth = useCallback(async () => {
-    setLoadingHealth(true);
-    try {
-      const res = await api<{ success: boolean; health: ProgramHealthSummary }>(`/api/programs/${programId}/health`);
-      if (res.success && res.data?.success) setHealth(res.data.health);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoadingHealth(false);
-    }
-  }, [programId]);
+  const fetchHealth = useCallback(() => fetchProgramData(), [fetchProgramData]);
 
   const saveProgramGoals = async () => {
     setSavingGoals(true);
@@ -1357,7 +1381,6 @@ export default function ProgramDetailPage() {
     }));
     showToast('Fecha de cierre actualizada; el periodo y las métricas fueron recalculados.', 'success');
     void fetchProgramData();
-    void fetchHealth();
     if (activeTab === 'stats') void fetchStats(selectedMonthsKey ? selectedMonthsKey.split(',') : []);
   };
 
@@ -1373,20 +1396,29 @@ export default function ProgramDetailPage() {
   }, [health?.participants, participants]);
 
   const refreshLoadedParticipantContact = useCallback(async (contactID: string) => {
+    const identity = `${effectiveAccountID}:${programId}`;
     const participantID = participantContextByContactRef.current.get(contactID);
     if (!participantID) return;
+    contactRefreshControllersRef.current.get(contactID)?.abort();
+    const controller = new AbortController();
+    contactRefreshControllersRef.current.set(contactID, controller);
     const sequence = (contactRefreshSequenceRef.current.get(contactID) || 0) + 1;
     contactRefreshSequenceRef.current.set(contactID, sequence);
-    const result = await api<ContactProfileResponse>(`/api/contact-profiles/${contactID}?context_type=program_participant&context_id=${participantID}`);
-    if (contactRefreshSequenceRef.current.get(contactID) !== sequence) return;
-    if (result.success && result.data?.success && result.data.contact) reconcileProgramContact(result.data.contact);
-  }, [reconcileProgramContact]);
+    const result = await api<ContactProfileResponse>(`/api/contact-profiles/${contactID}?context_type=program_participant&context_id=${participantID}`, { signal: controller.signal });
+    if (contactRefreshControllersRef.current.get(contactID) === controller) contactRefreshControllersRef.current.delete(contactID);
+    if (controller.signal.aborted || identity !== programIdentityRef.current || contactRefreshSequenceRef.current.get(contactID) !== sequence || participantContextByContactRef.current.get(contactID) !== participantID) return;
+    const contact = result.data?.contact;
+    if (result.success && result.data?.success && contact && contact.id === contactID && (!contact.account_id || !effectiveAccountID || contact.account_id === effectiveAccountID)) reconcileProgramContact(contact);
+  }, [effectiveAccountID, programId, reconcileProgramContact]);
 
   useEffect(() => subscribeWebSocket(message => {
     if (!message || typeof message !== 'object' || (message as { event?: string }).event !== 'contact_update') return;
+    const event = message as { account_id?: string; data?: { account_id?: string } };
+    const eventAccountID = event.data?.account_id || event.account_id;
+    if (eventAccountID && effectiveAccountID && eventAccountID !== effectiveAccountID) return;
     const contactID = contactIdFromRealtimeEvent(message);
     if (contactID) void refreshLoadedParticipantContact(contactID);
-  }), [refreshLoadedParticipantContact]);
+  }), [effectiveAccountID, refreshLoadedParticipantContact]);
 
   // WhatsApp chat
   const handleSendWhatsApp = (phone: string) => {
@@ -1694,7 +1726,6 @@ export default function ProgramDetailPage() {
       }
       closeAttendanceModal();
       fetchProgramData();
-      fetchHealth();
     } catch (error) {
       if (!requestIsCurrent()) return;
       console.error('Error saving attendance:', error);
@@ -2043,13 +2074,15 @@ export default function ProgramDetailPage() {
     ? participants.find(participant => participant.id === selectedParticipantID) || null
     : null;
 
-  const formatPct = (value?: number) => `${Math.round(value || 0)}%`;
+  const formatPct = formatProgramAttendanceRate;
   const healthClass = (value?: string) => {
+    if (!value || value === 'no_data') return 'bg-slate-50 text-slate-600 border-slate-200';
     if (value === 'critical') return 'bg-red-50 text-red-700 border-red-100';
     if (value === 'watch') return 'bg-amber-50 text-amber-700 border-amber-100';
     return 'bg-emerald-50 text-emerald-700 border-emerald-100';
   };
   const healthLabel = (value?: string) => {
+    if (!value || value === 'no_data') return 'Sin datos';
     if (value === 'critical') return 'Crítico';
     if (value === 'watch') return 'Observar';
     return 'Saludable';
@@ -2352,12 +2385,10 @@ export default function ProgramDetailPage() {
       <div className="flex-1 min-h-0 overflow-hidden">
       {activeTab === 'health' ? (
         <div className="h-full overflow-y-auto space-y-4 pb-3">
-          {loadingHealth ? (
-            <div className="flex items-center justify-center py-20">
-              <div className="w-8 h-8 border-4 border-emerald-200 border-t-emerald-600 rounded-full animate-spin" />
-            </div>
-          ) : (
-            <>
+          {loadingHealth && <div role="status" className="flex items-center gap-2 px-1 text-xs text-slate-500">
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> Actualizando programa…
+          </div>}
+          <>
               {!mobileWorkspace && <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
                 <button type="button" onClick={() => setHealthSummaryExpanded(value => !value)} aria-expanded={healthSummaryExpanded} className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-50 transition-colors">
                   <HeartPulse className="w-4 h-4 text-emerald-600 shrink-0" />
@@ -2381,7 +2412,7 @@ export default function ProgramDetailPage() {
               {!mobileWorkspace && healthSummaryExpanded && <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
                 <div className="bg-white rounded-xl border border-slate-200 p-4">
                   <p className="text-xs text-slate-500">Asistencia</p>
-                  <p className={`text-2xl font-bold mt-1 ${(health?.attendance_rate || 0) >= (health?.attendance_goal_percent || 80) ? 'text-emerald-600' : 'text-amber-600'}`}>{formatPct(health?.attendance_rate)}</p>
+                  <p className={`text-2xl font-bold mt-1 ${health?.attendance_rate == null ? 'text-slate-500' : health.attendance_rate >= (health?.attendance_goal_percent || 80) ? 'text-emerald-600' : 'text-amber-600'}`}>{formatPct(health?.attendance_rate)}</p>
                   <p className="text-[11px] text-slate-400">meta {health?.attendance_goal_percent || 80}%</p>
                 </div>
                 <div className="bg-white rounded-xl border border-slate-200 p-4">
@@ -2418,7 +2449,7 @@ export default function ProgramDetailPage() {
                 {!mobileWorkspace && <div className="px-4 py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
                   <h3 className="text-sm font-semibold text-slate-800">Participantes</h3>
                   <div className="flex items-center gap-2">
-                    <button onClick={fetchHealth} className="min-h-11 rounded-lg px-2 text-xs text-emerald-600 hover:bg-emerald-50 hover:underline">Actualizar</button>
+                    <button onClick={fetchHealth} disabled={loadingHealth} className="min-h-11 rounded-lg px-2 text-xs text-emerald-600 hover:bg-emerald-50 hover:underline">Actualizar</button>
                     <button onClick={() => setIsAddParticipantOpen(true)} disabled={program?.status !== 'active'} className="inline-flex min-h-11 items-center gap-1.5 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"><Plus className="w-3.5 h-3.5" /> Agregar</button>
                   </div>
                 </div>}
@@ -2517,8 +2548,7 @@ export default function ProgramDetailPage() {
                   </div>}
                 </div>
               </div>}
-            </>
-          )}
+          </>
         </div>
       ) : activeTab === 'participants' ? (
         <div className="h-full flex flex-col gap-3">
@@ -3143,12 +3173,12 @@ export default function ProgramDetailPage() {
                 const totalAbsent = statsData.session_stats.reduce((s, ss) => s + (ss.absent || 0), 0);
                 const totalLate = statsData.session_stats.reduce((s, ss) => s + (ss.late || 0), 0);
                 const totalAll = totalPresent + totalAbsent + totalLate;
-                const avgRate = totalAll > 0 ? Math.round(((totalPresent + totalLate) / totalAll) * 100) : 0;
+                const avgRate = totalAll > 0 ? ((totalPresent + totalLate) / totalAll) * 100 : null;
                 return (
                   <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                     <div className="bg-white rounded-xl border border-slate-200 p-4">
                       <p className="text-xs text-slate-500 mb-1">Tasa promedio</p>
-                      <p className="text-2xl font-bold text-emerald-600">{avgRate}%</p>
+                      <p className="text-2xl font-bold text-emerald-600">{formatPct(avgRate)}</p>
                     </div>
                     <div className="bg-white rounded-xl border border-slate-200 p-4">
                       <p className="text-xs text-slate-500 mb-1">Presentes</p>
@@ -3180,7 +3210,7 @@ export default function ProgramDetailPage() {
                       <div key={ss.session_id || i}>
                         <div className="flex items-center justify-between mb-1">
                           <span className="text-xs text-slate-600 font-medium truncate max-w-[200px]">{label}</span>
-                          <span className="text-xs text-slate-400">{Math.round(pPct + lPct)}% asistencia</span>
+                          <span className="text-xs text-slate-400">{total > 0 ? `${Math.round(pPct + lPct)}% asistencia` : 'Sin registros'}</span>
                         </div>
                         <div className="flex h-5 rounded-lg overflow-hidden bg-slate-100">
                           {pPct > 0 && <div className="bg-emerald-500 transition-all" style={{ width: `${pPct}%` }} title={`Presentes: ${ss.present}`} />}
@@ -3214,10 +3244,10 @@ export default function ProgramDetailPage() {
                         const label = ss.title || ss.topic || (ss.date ? formatCalendarDate(ss.date, 'dd/MM', { locale: es }) : `S${i + 1}`);
                         return (
                           <div key={ss.session_id || i} className="flex flex-col items-center gap-1 w-[44px] shrink-0">
-                            <span className="text-[10px] font-semibold text-slate-700">{rate}%</span>
+                            <span className="text-[10px] font-semibold text-slate-700">{total > 0 ? `${rate}%` : '—'}</span>
                             <div className="w-8 rounded-t-lg transition-all" style={{
                               height: `${Math.max(rate * 1.6, 4)}px`,
-                              backgroundColor: rate >= 80 ? '#10b981' : rate >= 50 ? '#f59e0b' : '#ef4444'
+                              backgroundColor: total === 0 ? '#cbd5e1' : rate >= 80 ? '#10b981' : rate >= 50 ? '#f59e0b' : '#ef4444'
                             }} />
                             <span className="text-[9px] text-slate-400 truncate w-[44px] text-center">{label}</span>
                           </div>
@@ -3235,7 +3265,7 @@ export default function ProgramDetailPage() {
                   <p className="mb-4 text-xs text-slate-500">Las sesiones pendientes se informan, pero no reducen el porcentaje.</p>
                   <div className="space-y-2">
                     {[...statsData.participant_stats]
-                      .sort((a, b) => (b.rate || 0) - (a.rate || 0))
+                      .sort((a, b) => a.rate == null ? (b.rate == null ? 0 : 1) : b.rate == null ? -1 : b.rate - a.rate)
                       .map((ps, i) => {
                         const rate = ps.rate || 0;
                         const hasMarkedAttendance = (ps.marked_sessions || 0) > 0;

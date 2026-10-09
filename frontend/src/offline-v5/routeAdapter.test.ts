@@ -168,6 +168,17 @@ function programHarness() {
 }
 
 describe('Offline v5 canonical Program adapters', () => {
+  it('preserves missing attendance in dashboards instead of counting it below the goal', async () => {
+    const { adapter, fake } = programHarness()
+    const original = fake.aggregates
+    fake.aggregates = async (port, generation, module) => (await original(port, generation, module)).map(snapshot => {
+      if (snapshot.module !== 'programs') return snapshot
+      return { ...snapshot, payload: { ...snapshot.payload, health: { ...(snapshot.payload.health as object), attendance_rate: null, health: 'no_data' } } }
+    })
+    const dashboard = await adapter.request('port', 1, { method: 'GET', headers: [], url: 'https://clarin.test/api/programs/dashboard' })
+    expect(parse(dashboard)).toMatchObject({ success: true, dashboard: { attendance_rate: null, groups_below_goal: 0, groups: [{ attendance_rate: null, health: 'no_data' }] } })
+  })
+
   it('loads the canonical Program detail contracts and derives a selected-only roster', async () => {
     const { adapter } = programHarness()
     const detail = await adapter.request('port', 1, { method: 'GET', headers: [], url: 'https://clarin.test/api/programs/program-a' })

@@ -47,6 +47,7 @@ export default defineConfig({
       'src/lib/offlineV4*.test.{ts,tsx}',
       'src/lib/offlineV5*.test.{ts,tsx}',
       'src/app/dashboard/admin/**/*.test.{ts,tsx}',
+      'src/app/dashboard/events/**/*.test.{ts,tsx}',
       'src/components/TagInput.test.tsx',
       'src/components/AccountSwitcher.test.tsx',
       'src/components/ContactAvatarControl.test.tsx',

@@ -580,7 +580,7 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get health after confirmed attendance: %v", err)
 	}
-	if healthAfterConfirmed.AttendanceRate != 100 {
+	if healthAfterConfirmed.AttendanceRate == nil || *healthAfterConfirmed.AttendanceRate != 100 {
 		t.Fatalf("confirmed attendance changed program health rate: %#v", healthAfterConfirmed)
 	}
 	var confirmedParticipantHealth *domain.ProgramHealthParticipant
@@ -591,7 +591,7 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 		}
 	}
 	if confirmedParticipantHealth == nil || confirmedParticipantHealth.MarkedSessions != 1 ||
-		confirmedParticipantHealth.Late != 1 || confirmedParticipantHealth.AttendanceRate != 100 {
+		confirmedParticipantHealth.Late != 1 || (confirmedParticipantHealth.AttendanceRate == nil || *confirmedParticipantHealth.AttendanceRate != 100) {
 		t.Fatalf("confirmed attendance changed participant health denominator: %#v", confirmedParticipantHealth)
 	}
 	dashboardAfterConfirmed, err := repos.Program.GetProgramsDashboard(ctx, accountID, nil, nil)
@@ -605,7 +605,7 @@ func TestProgramAcademicMigrationAndAttendance(t *testing.T) {
 			break
 		}
 	}
-	if confirmedProgramDashboard == nil || confirmedProgramDashboard.AttendanceRate != 100 || dashboardAfterConfirmed.AttendanceRate != 100 {
+	if confirmedProgramDashboard == nil || (confirmedProgramDashboard.AttendanceRate == nil || *confirmedProgramDashboard.AttendanceRate != 100) || (dashboardAfterConfirmed.AttendanceRate == nil || *dashboardAfterConfirmed.AttendanceRate != 100) {
 		t.Fatalf("confirmed attendance changed dashboard rate: group=%#v summary=%#v", confirmedProgramDashboard, dashboardAfterConfirmed)
 	}
 	if isolated, err := repos.Program.GetAttendanceBySession(ctx, otherAccountID, sessionID); err != nil || len(isolated) != 0 {

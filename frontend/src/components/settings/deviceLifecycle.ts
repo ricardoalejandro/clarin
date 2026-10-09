@@ -33,10 +33,13 @@ export function applyDeviceDeletionResult<T extends Device>(devices: T[], result
 export function deviceDeletionMessage(device: { deletion?: DeviceDeletionStatus | null }, now = Date.now()) {
   const deletion = device.deletion
   if (!deletion) return 'Se está eliminando el dispositivo. Conservamos sus contactos y chats.'
+  if (deletion.phase === 'local_detached') return 'Retirando el registro local de Clarin. No se desvinculó WhatsApp; revisa Dispositivos vinculados en tu teléfono. Conservamos los contactos y chats.'
   if (deletion.phase === 'remote_unlinked') return 'WhatsApp ya se desvinculó. Completando la limpieza del dispositivo.'
+  if (deletion.error_code === 'whatsapp_session_missing') return 'La sesión local de WhatsApp no está disponible. El servidor comprobará si puede retirar únicamente el registro de Clarin, conservando los contactos y chats.'
+  if (deletion.error_code === 'whatsapp_session_identity_conflict') return 'La identidad de la sesión cambió o está en uso. No se eliminará una sesión ajena; el servidor volverá a comprobarla.'
   if (deletion.error_code && deletion.next_retry_at) {
     const date = new Date(deletion.next_retry_at)
     if (Number.isFinite(date.getTime()) && date.getTime() > now) return `El servidor reintentará automáticamente el ${date.toLocaleString('es-PE')}. Conservamos los contactos y chats.`
   }
-  return 'Eliminando el dispositivo y desvinculando WhatsApp. Conservamos los contactos y chats.'
+  return 'Eliminando el dispositivo. El servidor comprobará la sesión disponible para completar la baja. Conservamos los contactos y chats.'
 }

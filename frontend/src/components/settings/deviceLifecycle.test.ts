@@ -29,4 +29,14 @@ describe('device deletion lifecycle', () => {
     expect(deviceDeletionMessage(retry, Date.parse('2026-10-07T02:00:00Z'))).toContain('automáticamente')
     expect(deviceDeletionMessage(retry, Date.parse('2026-10-07T04:00:00Z'))).toContain('Eliminando')
   })
+  it('distinguishes local detachment and a missing or conflicting session from remote logout', () => {
+    const local = { deletion: { operation_id: 'operation-1', phase: 'local_detached' as const, attempts: 1 } }
+    const pendingMessage = deviceDeletionMessage({ deletion: { ...local.deletion, phase: 'pending' } })
+    expect(pendingMessage).toContain('comprobará la sesión disponible')
+    expect(pendingMessage).not.toContain('desvinculando WhatsApp')
+    expect(deviceDeletionMessage(local)).toContain('No se desvinculó WhatsApp')
+    expect(deviceDeletionMessage(local)).not.toContain('WhatsApp ya se desvinculó')
+    expect(deviceDeletionMessage({ deletion: { ...local.deletion, phase: 'pending', error_code: 'whatsapp_session_missing' } })).toContain('únicamente el registro de Clarin')
+    expect(deviceDeletionMessage({ deletion: { ...local.deletion, phase: 'pending', error_code: 'whatsapp_session_identity_conflict' } })).toContain('No se eliminará una sesión ajena')
+  })
 })

@@ -29,6 +29,7 @@ import type { Device } from '@/types/chat'
 import { getAuthScope, isAuthIdentityChanging } from '@/lib/authScope'
 import { useDeviceAdministration } from '@/components/settings/useDeviceAdministration'
 import { deviceDeletionMessage, isDeviceDeleting } from '@/components/settings/deviceLifecycle'
+import { cloudDeviceBadges, CLOUD_DELETION_UNAVAILABLE, DEVICE_DELETION_CONFIRMATION, DEVICE_NAME_MAX_LENGTH, deviceNameError, LOCAL_DEVICE_DELETION_MESSAGE } from '@/components/settings/deviceAdministration'
 
 interface Account {
   id: string
@@ -1091,26 +1092,27 @@ export default function SettingsPage() {
     id: string; name: string; phone: string; jid: string; status: string; qr_code: string; last_seen_at: string; receive_messages: boolean
     provider?: DeviceProvider; waba_id?: string; phone_number_id?: string; api_display_phone?: string; api_webhook_status?: string; api_billing_status?: string; api_sending_enabled?: boolean; api_templates_enabled?: boolean; capabilities?: string[]
   }
-  const { devices: devDevices, setDevices: setDevDevices, loading: devLoading, setLoading: setDevLoading, error: devError, refreshDevices: fetchDevicesForSettings, deleteDevice, pendingIds: devDeletingIds, total: devTotal, available: devAvailable, scope: devAuthScope } = useDeviceAdministration<DeviceItem>(activeTab === 'devices')
+  const { devices: devDevices, setDevices: setDevDevices, loading: devLoading, setLoading: setDevLoading, error: devError, refreshDevices: fetchDevicesForSettings, deleteDevice, pendingIds: devDeletingIds, total: devTotal, available: devAvailable, scope: devAuthScope, lastDeletion: devLastDeletion } = useDeviceAdministration<DeviceItem>(activeTab === 'devices')
   const devFormScopeRef = useRef(devAuthScope)
   const devFormsCurrent = devFormScopeRef.current === devAuthScope && !isAuthIdentityChanging(devAuthScope)
   const devDevicesRef = useRef(devDevices)
   devDevicesRef.current = devDevices
   const canMutateDevice = (id: string) => !isAuthIdentityChanging() && !devDeletingIds.has(id) && !isDeviceDeleting(devDevicesRef.current.find(device => device.id === id))
   const [devShowCreate, setDevShowCreate] = useState(false)
-  const [devCreateProvider, setDevCreateProvider] = useState<DeviceProvider>('whatsapp_web')
   const [devNewName, setDevNewName] = useState('')
-  const [devNewApiDisplayPhone, setDevNewApiDisplayPhone] = useState('')
-  const [devNewApiPhoneNumberID, setDevNewApiPhoneNumberID] = useState('')
-  const [devNewApiWabaID, setDevNewApiWabaID] = useState('')
   const [devCreating, setDevCreating] = useState(false)
+  const devCreatingRef = useRef(false)
   const [devSelected, setDevSelected] = useState<DeviceItem | null>(null)
   const [devEditing, setDevEditing] = useState<DeviceItem | null>(null)
   const [devEditName, setDevEditName] = useState('')
+  const [devEditReceiveMessages, setDevEditReceiveMessages] = useState(true)
   const [devEditApiDisplayPhone, setDevEditApiDisplayPhone] = useState('')
   const [devEditApiPhoneNumberID, setDevEditApiPhoneNumberID] = useState('')
   const [devEditApiWabaID, setDevEditApiWabaID] = useState('')
   const [devSaving, setDevSaving] = useState(false)
+  const devSavingRef = useRef(false)
+  const devReceiveControllers = useRef(new Map<string, AbortController>())
+  const [devReceivePendingIds, setDevReceivePendingIds] = useState<Set<string>>(new Set())
   const [devActionDevice, setDevActionDevice] = useState<DeviceItem | null>(null)
   const [devShowMobileLinkNotice, setDevShowMobileLinkNotice] = useState(false)
   // Keep layout density width-based and separate from the capability decision,
@@ -1613,11 +1615,7 @@ export default function SettingsPage() {
   const isApiDevice = (device?: DeviceItem | null) => getDeviceProvider(device) === 'whatsapp_cloud_api'
 
   const resetDevCreateForm = useCallback(() => {
-    setDevCreateProvider('whatsapp_web')
     setDevNewName('')
-    setDevNewApiDisplayPhone('')
-    setDevNewApiPhoneNumberID('')
-    setDevNewApiWabaID('')
   }, [])
 
   useEffect(() => {
@@ -1629,6 +1627,12 @@ export default function SettingsPage() {
     setDevActionDevice(null)
     setDevCreating(false)
     setDevSaving(false)
+    devCreatingRef.current = false
+    devSavingRef.current = false
+    devReceiveControllers.current.forEach(controller => controller.abort())
+    devReceiveControllers.current.clear()
+    setDevReceivePendingIds(new Set())
+    return () => { devReceiveControllers.current.forEach(controller => controller.abort()); devReceiveControllers.current.clear() }
   }, [devAuthScope, resetDevCreateForm])
 
   useEffect(() => {
@@ -1636,9 +1640,9 @@ export default function SettingsPage() {
       if (event.key !== 'Escape') return
       if (devShowMobileLinkNotice) { setDevShowMobileLinkNotice(false); return }
       if (devActionDevice) { setDevActionDevice(null); return }
-      if (devEditing) { setDevEditing(null); return }
+      if (devEditing) { if (!devSavingRef.current) setDevEditing(null); return }
       if (devSelected) { setDevSelected(null); return }
-      if (devShowCreate) { setDevShowCreate(false); resetDevCreateForm() }
+      if (devShowCreate && !devCreatingRef.current) { setDevShowCreate(false); resetDevCreateForm() }
     }
     document.addEventListener('keydown', handleEscape)
     return () => document.removeEventListener('keydown', handleEscape)
@@ -1648,42 +1652,41 @@ export default function SettingsPage() {
     if (!canMutateDevice(device.id)) return
     setDevEditing(device)
     setDevEditName(device.name || '')
+    setDevEditReceiveMessages(device.receive_messages)
     setDevEditApiDisplayPhone(device.api_display_phone || device.phone || '')
     setDevEditApiPhoneNumberID(device.phone_number_id || '')
     setDevEditApiWabaID(device.waba_id || '')
   }
 
   const handleDevCreate = async () => {
-    if (!devNewName.trim() || !devFormsCurrent) return
+    if (!devFormsCurrent || devCreatingRef.current) return
+    const validationError = deviceNameError(devNewName)
+    if (validationError) { showMessage('error', validationError); return }
     const scope = getAuthScope()
+    devCreatingRef.current = true
     setDevCreating(true)
     const token = localStorage.getItem('token')
     try {
-      const payload = devCreateProvider === 'whatsapp_cloud_api'
-        ? {
-            name: devNewName.trim(),
-            provider: devCreateProvider,
-            api_display_phone: devNewApiDisplayPhone.trim() || undefined,
-            phone_number_id: devNewApiPhoneNumberID.trim() || undefined,
-            waba_id: devNewApiWabaID.trim() || undefined,
-          }
-        : { name: devNewName.trim(), provider: devCreateProvider }
+      const payload = { name: devNewName.trim(), provider: 'whatsapp_web' }
       const res = await fetch('/api/devices', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) })
       const data = await res.json()
       if (scope !== getAuthScope()) return
       if (res.ok && data.success) {
         resetDevCreateForm()
         setDevShowCreate(false)
-        fetchDevicesForSettings()
-        if (devCreateProvider === 'whatsapp_web') await handleDevConnect(data.device.id)
-        else showMessage('success', 'Canal API Oficial creado en modo configuración')
+        fetchDevicesForSettings(true)
+        const started = await handleDevConnect(data.device.id)
+        if (started && scope === getAuthScope()) {
+          const current = devDevicesRef.current.find(device => device.id === data.device.id)
+          if (current) setDevSelected(current)
+        }
       } else {
         showMessage('error', data.error || 'Error al crear dispositivo')
       }
     } catch {
       if (scope === getAuthScope()) showMessage('error', 'No se pudo crear el dispositivo. Comprueba la conexión e inténtalo de nuevo.')
     }
-    finally { if (scope === getAuthScope()) setDevCreating(false) }
+    finally { if (scope === getAuthScope()) { devCreatingRef.current = false; setDevCreating(false) } }
   }
 
   const handleDevConnect = async (deviceId: string) => {
@@ -1698,7 +1701,7 @@ export default function SettingsPage() {
         showMessage('error', data.error || 'No se pudo iniciar la reconexión')
         return false
       }
-      await fetchDevicesForSettings()
+      await fetchDevicesForSettings(true)
       return true
     } catch (err) {
       if (scope === getAuthScope()) showMessage('error', 'No se pudo iniciar la reconexión')
@@ -1715,7 +1718,7 @@ export default function SettingsPage() {
       const data = await response.json().catch(() => ({}))
       if (scope !== getAuthScope()) return
       if (!response.ok || !data.success) { showMessage('error', data.error || 'No se pudo desconectar el dispositivo'); return }
-      void fetchDevicesForSettings()
+      void fetchDevicesForSettings(true)
     }
     catch { if (scope === getAuthScope()) showMessage('error', 'No se pudo desconectar el dispositivo. Inténtalo de nuevo.') }
   }
@@ -1739,48 +1742,62 @@ export default function SettingsPage() {
 
   const handleDevDelete = async (deviceId: string) => {
     if (!canMutateDevice(deviceId)) return
-    if (!confirm('¿Estás seguro de eliminar este dispositivo?')) return
+    if (isApiDevice(devDevicesRef.current.find(device => device.id === deviceId))) { showMessage('error', CLOUD_DELETION_UNAVAILABLE); return }
+    if (!confirm(DEVICE_DELETION_CONFIRMATION)) return
     const scope = getAuthScope()
     const accepted = await deleteDevice(deviceId)
     if (accepted && scope === getAuthScope()) {
       if (devSelected?.id === deviceId) setDevSelected(null)
-      showMessage('success', 'Eliminación iniciada. El servidor completará la desvinculación y reintentará automáticamente si hace falta.')
+      showMessage('success', 'Eliminación iniciada. Conservamos los contactos y chats; el servidor comprobará la sesión disponible para completar la baja.')
     }
   }
 
   const handleDevUpdate = async () => {
-    if (!devEditing || !devEditName.trim()) return
+    if (!devEditing || devSavingRef.current) return
+    const validationError = deviceNameError(devEditName)
+    if (validationError) { showMessage('error', validationError); return }
     if (!canMutateDevice(devEditing.id)) return
     const scope = getAuthScope()
+    devSavingRef.current = true
     setDevSaving(true)
     const token = localStorage.getItem('token')
     try {
-      const payload = { name: devEditName.trim() }
+      const payload = { name: devEditName.trim(), ...(devEditReceiveMessages !== devEditing.receive_messages ? { receive_messages: devEditReceiveMessages } : {}) }
       const res = await fetch(`/api/devices/${devEditing.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) })
       const data = await res.json()
       if (scope !== getAuthScope() || !canMutateDevice(devEditing.id)) return
-      if (res.ok && data.success) { setDevEditing(null); fetchDevicesForSettings() } else showMessage('error', data.error || 'Error al actualizar el dispositivo')
+      if (res.ok && data.success) { setDevEditing(null); fetchDevicesForSettings(true) } else showMessage('error', data.error || 'Error al actualizar el dispositivo')
     } catch { if (scope === getAuthScope()) showMessage('error', 'No se pudo guardar el dispositivo. Inténtalo de nuevo.') }
-    finally { if (scope === getAuthScope()) setDevSaving(false) }
+    finally { if (scope === getAuthScope()) { devSavingRef.current = false; setDevSaving(false) } }
   }
 
   const handleToggleReceiveMessages = async (device: DeviceItem) => {
-    if (!canMutateDevice(device.id)) return
+    if (!canMutateDevice(device.id) || devReceiveControllers.current.has(device.id)) return
+    const controller = new AbortController()
+    devReceiveControllers.current.set(device.id, controller)
+    setDevReceivePendingIds(new Set(devReceiveControllers.current.keys()))
     const scope = getAuthScope()
+    const current = () => !controller.signal.aborted && scope === getAuthScope() && canMutateDevice(device.id)
     const token = localStorage.getItem('token')
     const newValue = !device.receive_messages
     // Optimistic update
     setDevDevices(prev => prev.map(d => d.id === device.id ? { ...d, receive_messages: newValue } : d))
     try {
-      const res = await fetch(`/api/devices/${device.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ receive_messages: newValue }) })
+      const res = await fetch(`/api/devices/${device.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ receive_messages: newValue }), signal: controller.signal })
       const data = await res.json()
-      if (scope !== getAuthScope() || !canMutateDevice(device.id)) return
-      if (!data.success) {
-        // Revert on failure
-        setDevDevices(prev => prev.map(d => d.id === device.id ? { ...d, receive_messages: !newValue } : d))
+      if (!current()) return
+      if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo cambiar la recepción de mensajes')
+      const savedValue = typeof data.device?.receive_messages === 'boolean' ? data.device.receive_messages : newValue
+      setDevDevices(prev => prev.map(d => d.id === device.id ? { ...d, receive_messages: savedValue } : d))
+      void fetchDevicesForSettings(true)
+    } catch (reason) {
+      if (current()) {
+        setDevDevices(prev => prev.map(d => d.id === device.id ? { ...d, receive_messages: device.receive_messages } : d))
+        showMessage('error', reason instanceof Error ? reason.message : 'No se pudo cambiar la recepción de mensajes. Inténtalo de nuevo.')
       }
-    } catch {
-      if (scope === getAuthScope() && canMutateDevice(device.id)) setDevDevices(prev => prev.map(d => d.id === device.id ? { ...d, receive_messages: !newValue } : d))
+    } finally {
+      if (devReceiveControllers.current.get(device.id) === controller) devReceiveControllers.current.delete(device.id)
+      if (scope === getAuthScope()) setDevReceivePendingIds(new Set(devReceiveControllers.current.keys()))
     }
   }
 
@@ -1802,10 +1819,11 @@ export default function SettingsPage() {
 
   const getApiGuardBadges = (device: DeviceItem) => {
     if (!isApiDevice(device)) return null
+    const badges = cloudDeviceBadges(device)
     return (
       <div className="flex flex-wrap gap-1.5">
-        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] bg-slate-100 text-slate-600"><Power className="w-3 h-3" /> Envio bloqueado</span>
-        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] bg-amber-50 text-amber-700"><DollarSign className="w-3 h-3" /> Pago no configurado</span>
+        <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] ${badges.sending.enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}><Power className="w-3 h-3" />{badges.sending.label}</span>
+        <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] ${badges.billing.enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}><DollarSign className="w-3 h-3" />{badges.billing.label}</span>
       </div>
     )
   }
@@ -1853,7 +1871,7 @@ export default function SettingsPage() {
 
       {/* Message */}
       {message && (
-        <div className={`px-3 py-2 rounded-xl text-xs shrink-0 ${message.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : 'bg-red-50 text-red-700 border border-red-100'}`}>
+        <div role={message.type === 'error' ? 'alert' : 'status'} className={`px-3 py-2 rounded-xl text-xs shrink-0 ${message.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : 'bg-red-50 text-red-700 border border-red-100'}`}>
           {message.text}
         </div>
       )}
@@ -2561,10 +2579,14 @@ export default function SettingsPage() {
                 </button>
               </div>
 
+              {devLastDeletion?.deletion_status === 'completed' && devLastDeletion.cleanup_scope === 'local' && (
+                <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">{LOCAL_DEVICE_DELETION_MESSAGE}</div>
+              )}
+
               {devError && (
                 <div className="mb-3 flex flex-col gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 sm:flex-row sm:items-center sm:justify-between" role="alert">
                   <span>{devError}. Conservamos la última lista disponible.</span>
-                  <button type="button" onClick={() => { setDevLoading(devDevices.length === 0); void fetchDevicesForSettings() }} className="min-h-11 shrink-0 rounded-lg border border-red-300 bg-white px-4 font-semibold text-red-700 hover:bg-red-100">Reintentar</button>
+                  <button type="button" onClick={() => { setDevLoading(devDevices.length === 0); void fetchDevicesForSettings(true) }} className="min-h-11 shrink-0 rounded-lg border border-red-300 bg-white px-4 font-semibold text-red-700 hover:bg-red-100">Reintentar</button>
                 </div>
               )}
 
@@ -2593,8 +2615,8 @@ export default function SettingsPage() {
                             {getDevProviderBadge(device)}
                           </div>
                           <p className="mt-1 break-all text-xs text-slate-500 md:mt-0 md:truncate">{device.api_display_phone || device.phone || device.phone_number_id || device.jid || 'Sin número'}</p>
-                          {getApiGuardBadges(device)}
-                          {isDeviceDeleting(device) && <p className="mt-2 max-w-lg text-xs leading-relaxed text-amber-800" role="status">{deviceDeletionMessage(device)}{device.deletion?.error_code && <span className="block mt-1 text-amber-700">La limpieza necesita un reintento del servidor.</span>}</p>}
+                          {getApiGuardBadges(device)}{isApiDevice(device) && <p className="mt-2 max-w-lg text-xs text-slate-500">{CLOUD_DELETION_UNAVAILABLE}</p>}
+                          {isDeviceDeleting(device) && <p className="mt-2 max-w-lg text-xs leading-relaxed text-amber-800" role="status">{deviceDeletionMessage(device)}</p>}
                           {!isApiDevice(device) && isCompactDeviceView && <div className="mt-2">{getDevStatusBadge(device.status)}</div>}
                         </div>
                       </div>
@@ -2604,7 +2626,7 @@ export default function SettingsPage() {
                           <span className="text-[10px] text-slate-400 hidden sm:inline">{device.receive_messages ? 'Recibe' : 'No recibe'}</span>
                           <button
                             onClick={() => handleToggleReceiveMessages(device)}
-                            disabled={!canMutateDevice(device.id)}
+                            disabled={!canMutateDevice(device.id) || devReceivePendingIds.has(device.id)}
                             className="inline-flex h-11 w-11 items-center justify-center rounded-xl transition hover:bg-slate-100"
                             title={device.receive_messages ? 'Recepción activa — clic para desactivar' : 'Recepción desactivada — clic para activar'}
                             aria-pressed={device.receive_messages}
@@ -2623,14 +2645,14 @@ export default function SettingsPage() {
                         ) : (
                           <button disabled={!canMutateDevice(device.id)} onClick={() => { void handleDevConnect(device.id).then(started => { if (started && canMutateDevice(device.id)) setDevSelected(device) }) }} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600 disabled:opacity-40" title="Conectar"><Power className="w-3.5 h-3.5" /></button>
                         )}
-                        <button disabled={!canMutateDevice(device.id)} onClick={() => handleDevDelete(device.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600 disabled:opacity-40" title={isDeviceDeleting(device) ? 'Eliminación en curso' : 'Eliminar'}>{devDeletingIds.has(device.id) ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}</button>
+                        <button disabled={!canMutateDevice(device.id) || isApiDevice(device)} onClick={() => handleDevDelete(device.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600 disabled:opacity-40" title={isApiDevice(device) ? CLOUD_DELETION_UNAVAILABLE : isDeviceDeleting(device) ? 'Eliminación en curso' : 'Eliminar'}>{devDeletingIds.has(device.id) ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}</button>
                       </div>}
                       {isCompactDeviceView && <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-100 pt-3">
                         <div className="flex min-w-0 items-center gap-2">
                           <button
                             type="button"
                             onClick={() => handleToggleReceiveMessages(device)}
-                            disabled={!canMutateDevice(device.id)}
+                            disabled={!canMutateDevice(device.id) || devReceivePendingIds.has(device.id)}
                             className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl hover:bg-slate-100"
                             aria-pressed={device.receive_messages}
                             aria-label={device.receive_messages ? 'Desactivar recepción de mensajes' : 'Activar recepción de mensajes'}
@@ -2712,7 +2734,7 @@ export default function SettingsPage() {
                           : (devActionDevice.status === 'connecting' ? 'Ver código QR' : 'Conectar y mostrar QR')}
                       </button>
                     )}
-                    <button type="button" onClick={() => { const id = devActionDevice.id; setDevActionDevice(null); handleDevDelete(id) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-red-600 hover:bg-red-50"><Trash2 className="h-5 w-5" />Eliminar</button>
+                    <button type="button" disabled={isApiDevice(devActionDevice)} title={isApiDevice(devActionDevice) ? CLOUD_DELETION_UNAVAILABLE : undefined} onClick={() => { const id = devActionDevice.id; setDevActionDevice(null); handleDevDelete(id) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-red-600 hover:bg-red-50 disabled:opacity-40"><Trash2 className="h-5 w-5" />Eliminar</button>
                     <button type="button" onClick={() => setDevActionDevice(null)} className="mt-2 min-h-12 w-full rounded-xl border border-slate-200 text-sm font-semibold text-slate-600">Cancelar</button>
                   </div>
                 </div>,
@@ -2734,82 +2756,33 @@ export default function SettingsPage() {
               {/* Create device modal */}
               {devFormsCurrent && devShowCreate && (
                 <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/40 backdrop-blur-sm sm:items-center sm:p-4">
-                  <div className="flex h-full w-full max-w-lg flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[min(90dvh,760px)] sm:rounded-2xl sm:border sm:border-slate-100">
+                  <div role="dialog" aria-modal="true" aria-labelledby="new-whatsapp-channel-title" className="flex h-full w-full max-w-lg flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[min(90dvh,760px)] sm:rounded-2xl sm:border sm:border-slate-100">
                     <header className="flex shrink-0 items-center justify-between border-b border-slate-100 px-4 py-3 sm:border-0 sm:px-6 sm:pb-0 sm:pt-6">
-                      <h2 className="text-lg font-semibold text-slate-900">Nuevo Canal WhatsApp</h2>
-                      <button type="button" onClick={() => { setDevShowCreate(false); resetDevCreateForm() }} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 sm:h-9 sm:w-9" aria-label="Cerrar"><X className="h-5 w-5" /></button>
+                      <h2 id="new-whatsapp-channel-title" className="text-lg font-semibold text-slate-900">Nuevo Canal WhatsApp</h2>
+                      <button type="button" disabled={devCreating} onClick={() => { setDevShowCreate(false); resetDevCreateForm() }} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 sm:h-9 sm:w-9 disabled:opacity-50" aria-label="Cerrar"><X className="h-5 w-5" /></button>
                     </header>
                     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
-                    <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      <button
-                        type="button"
-                        onClick={() => setDevCreateProvider('whatsapp_web')}
-                        className={`flex min-h-11 items-center gap-2 rounded-xl border px-3 text-sm transition ${devCreateProvider === 'whatsapp_web' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
-                      >
-                        <QrCode className="w-4 h-4" /> QR WhatsApp Web
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setDevCreateProvider('whatsapp_cloud_api')}
-                        className={`flex min-h-11 items-center gap-2 rounded-xl border px-3 text-sm transition ${devCreateProvider === 'whatsapp_cloud_api' ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
-                      >
-                        <Globe className="w-4 h-4" /> API Oficial
-                      </button>
-                    </div>
-
-                    <div className="space-y-3">
-                      {devCreateProvider === 'whatsapp_web' && isPhoneDeviceView && (
+                      <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <div className="flex min-h-11 items-center gap-2 rounded-xl border border-emerald-500 bg-emerald-50 px-3 text-sm text-emerald-700"><QrCode className="w-4 h-4" /> QR WhatsApp Web</div>
+                        <button type="button" disabled={devCreating} onClick={() => { setDevShowCreate(false); resetDevCreateForm(); setActiveTab('whatsapp-api'); router.push('/dashboard/settings?tab=whatsapp-api') }} className="flex min-h-11 items-center gap-2 rounded-xl border border-slate-200 px-3 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50"><Globe className="w-4 h-4" /> Conectar con Meta</button>
+                      </div>
+                      <p className="mb-4 text-xs text-slate-500">Los canales oficiales se vinculan con Meta desde WhatsApp API.</p>
+                      {isPhoneDeviceView ? (
                         <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
-                          <div className="flex items-start gap-3">
-                            <Smartphone className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
-                            <div>
-                              <p className="text-sm font-semibold text-amber-900">La vinculación requiere una computadora</p>
-                              <p className="mt-1 text-xs leading-relaxed text-amber-800">La vinculación de un dispositivo nuevo requiere abrir Clarin en una computadora. Allí podrás mostrar el código QR y escanearlo con tu teléfono.</p>
-                            </div>
-                          </div>
+                          <div className="flex items-start gap-3"><Smartphone className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" /><div><p className="text-sm font-semibold text-amber-900">La vinculación requiere una computadora</p><p className="mt-1 text-xs leading-relaxed text-amber-800">Abre Clarin en una computadora para mostrar el código QR y escanearlo con tu teléfono.</p></div></div>
+                        </div>
+                      ) : (
+                        <div>
+                          <label htmlFor="device-create-name" className="block text-xs font-medium text-slate-600 mb-1">Nombre</label>
+                          <input id="device-create-name" type="text" value={devNewName} disabled={devCreating} maxLength={DEVICE_NAME_MAX_LENGTH * 2} onChange={(e) => setDevNewName(e.target.value)} placeholder="Nombre del canal" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400 disabled:opacity-50" autoFocus onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void handleDevCreate() } }} />
+                          <p className="mt-1 text-xs text-slate-500">Hasta {DEVICE_NAME_MAX_LENGTH} caracteres.</p>
+                          {devNewName && deviceNameError(devNewName) && <p role="alert" className="mt-1 text-xs text-red-700">{deviceNameError(devNewName)}</p>}
                         </div>
                       )}
-                      <div className={devCreateProvider === 'whatsapp_web' && isPhoneDeviceView ? 'hidden' : ''}>
-                        <label className="block text-xs font-medium text-slate-600 mb-1">Nombre</label>
-                        <input type="text" value={devNewName} onChange={(e) => setDevNewName(e.target.value)} placeholder="Nombre del canal" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400" autoFocus onKeyDown={(e) => { if (e.key === 'Enter' && devCreateProvider === 'whatsapp_web') handleDevCreate() }} />
-                      </div>
-
-                      {devCreateProvider === 'whatsapp_cloud_api' && (
-                        <>
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            <div>
-                              <label className="block text-xs font-medium text-slate-600 mb-1">Telefono visible</label>
-                              <input type="text" value={devNewApiDisplayPhone} onChange={(e) => setDevNewApiDisplayPhone(e.target.value)} placeholder="+51..." className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400" />
-                            </div>
-                            <div>
-                              <label className="block text-xs font-medium text-slate-600 mb-1">Phone Number ID</label>
-                              <input type="text" value={devNewApiPhoneNumberID} onChange={(e) => setDevNewApiPhoneNumberID(e.target.value)} placeholder="Meta phone ID" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400" />
-                            </div>
-                          </div>
-                          <div>
-                            <label className="block text-xs font-medium text-slate-600 mb-1">WABA ID</label>
-                            <input type="text" value={devNewApiWabaID} onChange={(e) => setDevNewApiWabaID(e.target.value)} placeholder="WhatsApp Business Account ID" className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-transparent text-sm text-slate-900 placeholder:text-slate-400" />
-                          </div>
-                          <div className="flex items-start gap-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-700">
-                            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                            <span>El canal queda guardado para configuracion. Envio API y plantillas permanecen bloqueados.</span>
-                          </div>
-                        </>
-                      )}
                     </div>
-                    </div>
-
                     <div className="flex shrink-0 gap-3 border-t border-slate-100 bg-white px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:px-6 sm:pb-6">
-                      <button onClick={() => { setDevShowCreate(false); resetDevCreateForm() }} className="min-h-11 flex-1 px-4 border border-slate-200 rounded-xl hover:bg-slate-50 text-sm text-slate-600">Cancelar</button>
-                      {devCreateProvider === 'whatsapp_web' ? (
-                        <>
-                          {isPhoneDeviceView
-                            ? <button type="button" disabled className="min-h-11 flex-1 rounded-xl bg-slate-200 px-3 text-sm font-medium text-slate-500">Requiere computadora</button>
-                            : <button onClick={handleDevCreate} disabled={devCreating || !devNewName.trim()} className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50">{devCreating ? 'Creando...' : 'Crear y Conectar'}</button>}
-                        </>
-                      ) : (
-                        <button onClick={handleDevCreate} disabled={devCreating || !devNewName.trim()} className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50">{devCreating ? 'Creando...' : 'Crear Canal'}</button>
-                      )}
+                      <button disabled={devCreating} onClick={() => { setDevShowCreate(false); resetDevCreateForm() }} className="min-h-11 flex-1 px-4 border border-slate-200 rounded-xl hover:bg-slate-50 text-sm text-slate-600 disabled:opacity-50">Cancelar</button>
+                      {isPhoneDeviceView ? <button type="button" disabled className="min-h-11 flex-1 rounded-xl bg-slate-200 px-3 text-sm font-medium text-slate-500">Requiere computadora</button> : <button onClick={handleDevCreate} disabled={devCreating || Boolean(deviceNameError(devNewName))} className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50">{devCreating ? 'Creando...' : 'Crear y Conectar'}</button>}
                     </div>
                   </div>
                 </div>
@@ -2834,10 +2807,10 @@ export default function SettingsPage() {
                   <div className="flex h-full w-full max-w-md flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[min(90dvh,760px)] sm:rounded-2xl sm:border sm:border-slate-100">
                     <header className="flex shrink-0 items-center justify-between gap-2 border-b border-slate-100 px-4 py-3 sm:px-6 sm:pt-5">
                       <div className="flex min-w-0 items-center gap-2"><h2 className="truncate text-lg font-semibold text-slate-900">Editar Canal</h2>{getDevProviderBadge(devEditing)}</div>
-                      <button type="button" onClick={() => setDevEditing(null)} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 sm:h-9 sm:w-9" aria-label="Cerrar"><X className="h-5 w-5" /></button>
+                      <button type="button" disabled={devSaving} onClick={() => setDevEditing(null)} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 sm:h-9 sm:w-9" aria-label="Cerrar"><X className="h-5 w-5" /></button>
                     </header>
                     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-6">
-                      <div><label className="block text-xs font-medium text-slate-600 mb-1">Nombre</label><input type="text" value={devEditName} onChange={(e) => setDevEditName(e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900" autoFocus onKeyDown={(e) => { if (e.key === 'Enter') handleDevUpdate() }} /></div>
+                      <div><label className="block text-xs font-medium text-slate-600 mb-1">Nombre</label><input type="text" value={devEditName} maxLength={DEVICE_NAME_MAX_LENGTH * 2} disabled={devSaving} onChange={(e) => setDevEditName(e.target.value)} className="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-sm text-slate-900" autoFocus onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void handleDevUpdate() } }} /></div>
                       {isApiDevice(devEditing) ? (
                         <>
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2867,20 +2840,21 @@ export default function SettingsPage() {
                       <div className="flex items-center justify-between gap-3">
                         <div>
                           <label className="block text-xs font-medium text-slate-600">Recibir mensajes</label>
-                          <p className="text-[10px] text-slate-400 mt-0.5">Si se desactiva, los mensajes entrantes se ignoran silenciosamente</p>
+                          <p className="text-[10px] text-slate-400 mt-0.5">Los cambios se guardan al pulsar Guardar. Si se desactiva, se ignoran los mensajes entrantes</p>
                         </div>
                         <button
-                          onClick={() => { handleToggleReceiveMessages(devEditing); setDevEditing({ ...devEditing, receive_messages: !devEditing.receive_messages }) }}
+                          onClick={() => setDevEditReceiveMessages(previous => !previous)}
+                          disabled={devSaving}
                           className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl hover:bg-slate-100"
-                          aria-pressed={devEditing.receive_messages}
+                          aria-pressed={devEditReceiveMessages}
                         >
-                          <span className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${devEditing.receive_messages ? 'bg-emerald-500' : 'bg-slate-300'}`}><span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm transition-transform ${devEditing.receive_messages ? 'translate-x-[18px]' : 'translate-x-[3px]'}`} /></span>
+                          <span className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${devEditReceiveMessages ? 'bg-emerald-500' : 'bg-slate-300'}`}><span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm transition-transform ${devEditReceiveMessages ? 'translate-x-[18px]' : 'translate-x-[3px]'}`} /></span>
                         </button>
                       </div>
                     </div>
                     <div className="flex shrink-0 gap-3 border-t border-slate-100 bg-white px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:px-6 sm:pb-6">
-                      <button onClick={() => setDevEditing(null)} className="min-h-11 flex-1 px-4 border border-slate-200 rounded-xl hover:bg-slate-50 text-sm text-slate-600">Cancelar</button>
-                      <button onClick={handleDevUpdate} disabled={devSaving || !devEditName.trim()} className="min-h-11 flex-1 px-4 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm">{devSaving ? 'Guardando...' : 'Guardar'}</button>
+                      <button disabled={devSaving} onClick={() => setDevEditing(null)} className="min-h-11 flex-1 px-4 border border-slate-200 rounded-xl hover:bg-slate-50 text-sm text-slate-600">Cancelar</button>
+                      <button onClick={handleDevUpdate} disabled={devSaving || Boolean(deviceNameError(devEditName))} className="min-h-11 flex-1 px-4 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium shadow-sm">{devSaving ? 'Guardando...' : 'Guardar'}</button>
                     </div>
                   </div>
                 </div>

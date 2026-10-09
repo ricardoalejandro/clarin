@@ -1,8 +1,12 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { X, UserPlus, Phone, Tag, Loader2, Plus } from 'lucide-react'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
+import { api } from '@/lib/api'
+import { SearchRequestLifecycle } from '@/lib/searchRequestLifecycle'
+import { subscribeAuthScope } from '@/lib/authScope'
+import { canAddContactCreationTag, contactCreationLimits, findContactCreationTag, validateContactCreation } from './contact-details/contactCreation'
 
 interface StructuredTag {
   id: string
@@ -36,17 +40,58 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
   const [tagInput, setTagInput] = useState('')
   const [debouncedTagInput, setDebouncedTagInput] = useDebouncedValue(tagInput, SEARCH_DEBOUNCE_MS)
   const [loadingTags, setLoadingTags] = useState(false)
+  const [canCreateTags, setCanCreateTags] = useState(false)
+  const [tagError, setTagError] = useState('')
+  const tagRequests = useRef(new SearchRequestLifecycle())
+  const selectedTagIdsRef = useRef(selectedTagIds)
+  selectedTagIdsRef.current = selectedTagIds
 
   useEffect(() => {
-    if (!open) return
+    if (!open) {
+      tagRequests.current.invalidate()
+      setCanCreateTags(false)
+      return
+    }
+    const lifecycle = tagRequests.current
+    const lease = lifecycle.begin()
     setLoadingTags(true)
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
-    fetch('/api/tags', { headers: token ? { Authorization: `Bearer ${token}` } : {} })
-      .then(r => r.json())
-      .then(d => { if (d.success) setAllTags(d.tags || []) })
-      .catch(() => {})
-      .finally(() => setLoadingTags(false))
-  }, [open])
+    setTagError('')
+    const params = new URLSearchParams({ limit: '20', search: debouncedTagInput.trim() })
+    void api<{ success: boolean; tags: StructuredTag[]; can_create: boolean }>(`/api/tags?${params}`, { signal: lease.signal })
+      .then(result => {
+        if (!lifecycle.isCurrent(lease)) return
+        if (!result.success || !result.data?.success) {
+          setCanCreateTags(false)
+          setTagError(result.error || 'No se pudieron buscar las etiquetas.')
+          setAllTags(previous => previous.filter(tag => selectedTagIdsRef.current.includes(tag.id)))
+        } else {
+          setCanCreateTags(result.data.can_create === true)
+          const results = Array.isArray(result.data.tags) ? result.data.tags.slice(0, 20) : []
+          setAllTags(previous => {
+            const selected = previous.filter(tag => selectedTagIdsRef.current.includes(tag.id))
+            return [...selected, ...results.filter(tag => !selected.some(item => item.id === tag.id))]
+          })
+        }
+        setLoadingTags(false)
+      })
+      .catch(() => {
+        if (!lifecycle.isCurrent(lease)) return
+        setCanCreateTags(false)
+        setLoadingTags(false)
+        setTagError('No se pudieron buscar las etiquetas.')
+      })
+    return () => lifecycle.invalidate()
+  }, [open, debouncedTagInput])
+
+  useEffect(() => subscribeAuthScope(() => {
+    tagRequests.current.invalidate()
+    setCanCreateTags(false)
+    setAllTags([])
+    setSelectedTagIds([])
+    setTagInput('')
+    setDebouncedTagInput('')
+    setTagError('La sesión cambió. Vuelve a abrir el formulario para buscar etiquetas.')
+  }), [setDebouncedTagInput])
 
   const handleChange = (field: string, value: string) => {
     setForm(prev => ({ ...prev, [field]: value }))
@@ -61,8 +106,8 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
 
   const addCustomTag = () => {
     const name = tagInput.trim()
-    if (!name) return
-    const existing = allTags.find(t => t.name.toLowerCase() === name.toLowerCase())
+    if (!canAddContactCreationTag(name, allTags, canCreateTags) || loadingTags || tagInput !== debouncedTagInput) return
+    const existing = findContactCreationTag(name, allTags)
     if (existing) {
       if (!selectedTagIds.includes(existing.id)) {
         setSelectedTagIds(prev => [...prev, existing.id])
@@ -85,9 +130,15 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
   }
 
   const handleSubmit = async () => {
+    if (loading) return
     const phone = form.phone.trim()
-    if (!phone && !form.name.trim()) {
-      setError('Se requiere teléfono o nombre')
+    const validationError = validateContactCreation(form)
+    if (validationError) {
+      setError(validationError)
+      return
+    }
+    if (!canCreateTags && selectedTagIds.some(id => id.startsWith('__custom__'))) {
+      setError('No tienes permiso para crear etiquetas. Quita las etiquetas nuevas antes de guardar.')
       return
     }
 
@@ -186,6 +237,7 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
                   <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                   <input
                     type="tel"
+                    maxLength={contactCreationLimits.phone * 2}
                     placeholder="9XXXXXXXX o 519XXXXXXXX"
                     value={form.phone}
                     onChange={e => handleChange('phone', e.target.value)}
@@ -198,23 +250,23 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1.5">Nombre</label>
-                <input type="text" placeholder="Juan" value={form.name} onChange={e => handleChange('name', e.target.value)} className={inputCls} />
+                <input type="text" maxLength={contactCreationLimits.name * 2} placeholder="Juan" value={form.name} onChange={e => handleChange('name', e.target.value)} className={inputCls} />
                 <p className="text-[10px] text-slate-400 mt-0.5">Se guarda como nombre personalizado</p>
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1.5">Apellido</label>
-                <input type="text" placeholder="Pérez" value={form.last_name} onChange={e => handleChange('last_name', e.target.value)} className={inputCls} />
+                <input type="text" maxLength={contactCreationLimits.last_name * 2} placeholder="Pérez" value={form.last_name} onChange={e => handleChange('last_name', e.target.value)} className={inputCls} />
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1.5">Correo</label>
-                <input type="email" placeholder="email@ejemplo.com" value={form.email} onChange={e => handleChange('email', e.target.value)} className={inputCls} />
+                <input type="email" maxLength={contactCreationLimits.email * 2} placeholder="email@ejemplo.com" value={form.email} onChange={e => handleChange('email', e.target.value)} className={inputCls} />
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1.5">Empresa</label>
-                <input type="text" placeholder="Empresa S.A." value={form.company} onChange={e => handleChange('company', e.target.value)} className={inputCls} />
+                <input type="text" maxLength={contactCreationLimits.company * 2} placeholder="Empresa S.A." value={form.company} onChange={e => handleChange('company', e.target.value)} className={inputCls} />
               </div>
             </div>
 
@@ -222,7 +274,7 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
             <div className="space-y-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1.5">DNI</label>
-                <input type="text" placeholder="12345678" value={form.dni} onChange={e => handleChange('dni', e.target.value)} className={inputCls} />
+                <input type="text" maxLength={contactCreationLimits.dni * 2} placeholder="12345678" value={form.dni} onChange={e => handleChange('dni', e.target.value)} className={inputCls} />
               </div>
 
               <div>
@@ -256,26 +308,29 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
                 <div className="relative">
                   <input
                     type="text"
-                    placeholder={loadingTags ? 'Cargando etiquetas...' : 'Buscar o crear etiqueta...'}
+                    placeholder={canCreateTags ? 'Buscar o crear etiqueta...' : 'Buscar etiquetas...'}
                     value={tagInput}
                     onChange={e => {
                       const next = e.target.value
+                      tagRequests.current.invalidate()
+                      setLoadingTags(false)
+                      setAllTags(previous => previous.filter(tag => selectedTagIds.includes(tag.id)))
                       setTagInput(next)
                       if (!next) setDebouncedTagInput('')
                     }}
                     onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomTag() } }}
-                    disabled={loadingTags}
                     className={`${inputCls} pr-16 disabled:opacity-50`}
                   />
                   <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1.5">
                     {tagSearchPending && <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" aria-label="Buscando etiquetas" />}
-                    {tagInput.trim() && (
+                    {canAddContactCreationTag(tagInput, allTags, canCreateTags) && !loadingTags && !tagSearchPending && (
                       <button onClick={addCustomTag} className="flex h-6 w-6 items-center justify-center rounded-md bg-emerald-600 text-white transition-colors hover:bg-emerald-500" title="Añadir etiqueta">
                         <Plus className="h-3.5 w-3.5" />
                       </button>
                     )}
                   </div>
                 </div>
+                {tagError && <p role="alert" className="mt-1.5 text-xs text-red-600">{tagError}</p>}
                 {!loadingTags && filteredUnselected.length > 0 && (
                   <div className="mt-1.5 flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
                     {filteredUnselected.slice(0, 20).map(tag => (
