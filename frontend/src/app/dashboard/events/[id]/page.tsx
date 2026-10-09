@@ -41,6 +41,8 @@ import { subscribeWebSocket } from '@/lib/api'
 import { useKanbanPan } from '@/lib/useKanbanPan'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
+import { isEventContextReadOnly, logbookSettingsPatch, readLogbookMutation } from '../eventForm'
+import { LogbookSession } from '../logbookSession'
 
 const getToken = () => typeof window !== 'undefined' ? localStorage.getItem('token') || '' : ''
 
@@ -536,6 +538,11 @@ export default function EventDetailPage() {
   const searchParams = useSearchParams()
   const { ref: pageRef, width: pageWidth } = useContainerWidth<HTMLDivElement>()
   const eventId = params.id as string
+  const logbookSession = useMemo(() => new LogbookSession(), [eventId])
+  useEffect(() => {
+    logbookSession.activate()
+    return () => logbookSession.dispose()
+  }, [logbookSession])
   const crmWindowStorageScope = useCrmWindowStorageScope('events')
   const folderParam = searchParams.get('folder')
 
@@ -691,6 +698,7 @@ export default function EventDetailPage() {
   }, [setDebouncedSearch])
 
   // ── Logbook (Bitácora) state ──
+  const [logbookError, setLogbookError] = useState('')
   interface Logbook {
     id: string; event_id: string; account_id: string; date: string; title: string
     status: string; general_notes: string; stage_snapshot: Record<string, { name: string; color: string; count: number }>
@@ -720,6 +728,7 @@ export default function EventDetailPage() {
   const [logbookSettingsTitle, setLogbookSettingsTitle] = useState('')
   const [logbookSettingsDate, setLogbookSettingsDate] = useState('')
   const [logbookSettingsStatus, setLogbookSettingsStatus] = useState('pending')
+  const [logbookSettingsInitial, setLogbookSettingsInitial] = useState<{ title: string; date: string; status: string } | null>(null)
   const [logbookSettingsUpdating, setLogbookSettingsUpdating] = useState(false)
   const [newLogbookDate, setNewLogbookDate] = useState('')
   const [newLogbookTitle, setNewLogbookTitle] = useState('')
@@ -1053,7 +1062,7 @@ export default function EventDetailPage() {
     [stageData, unassignedData]
   )
   const eventHasMembershipRules = event?.has_membership_rules ?? Boolean(event?.tag_formula?.trim())
-  const eventIsReadOnly = event?.status === 'completed' || event?.status === 'cancelled'
+  const eventIsReadOnly = isEventContextReadOnly(event?.status)
   const isCompactLayout = pageWidth > 0 && pageWidth < 768
   const activeDraftStages = useMemo(() => (
     draftStages
@@ -1920,33 +1929,65 @@ export default function EventDetailPage() {
   }
 
   // ─── Logbook Functions ──────────────────────────────────────────────────────
+  const resetLogbookEditors = useCallback(() => {
+    setEditingLogbookNotes(false)
+    setEditingEntryId(null)
+    setEditingLogbookTitle(false)
+    setEditingLogbookDate(false)
+    setShowLogbookSettingsModal(false)
+    setLogbookSettingsInitial(null)
+    setLogbookError('')
+  }, [])
+
+  const closeLogbook = useCallback(() => {
+    logbookSession.select(null)
+    setSelectedLogbook(null)
+    setSelectedLogbookLoading(false)
+    setPreviewLoading(false)
+    setPreviewParticipants([])
+    resetLogbookEditors()
+  }, [logbookSession, resetLogbookEditors])
+
   const fetchLogbooks = useCallback(async () => {
+    if (!logbookSession.isActive()) return
+    const request = logbookSession.begin('list')
     setLogbooksLoading(true)
     try {
-      const res = await fetch(`/api/events/${eventId}/logbooks`, { headers: { Authorization: `Bearer ${getToken()}` } })
-      const data = await res.json()
-      if (Array.isArray(data)) setLogbooks(data)
-    } catch (e) { console.error('[Logbooks] fetch error:', e) }
-    finally { setLogbooksLoading(false) }
-  }, [eventId])
+      const res = await fetch(`/api/events/${eventId}/logbooks`, { headers: { Authorization: `Bearer ${getToken()}` }, signal: request.signal })
+      const data = await readLogbookMutation<Logbook[]>(res)
+      if (!Array.isArray(data)) throw new Error('No se pudieron cargar las bitácoras')
+      if (logbookSession.isCurrent('list', request) && Array.isArray(data)) setLogbooks(data)
+    } catch (e) { if (logbookSession.isCurrent('list', request)) setLogbookError(e instanceof Error ? e.message : 'No se pudieron cargar las bitácoras') }
+    finally { if (logbookSession.isCurrent('list', request)) setLogbooksLoading(false) }
+  }, [eventId, logbookSession])
 
   const fetchLogbookPreview = useCallback(async (lid: string) => {
+    if (!logbookSession.isActive() || logbookSession.selectedId() !== lid) return
+    const request = logbookSession.begin('preview')
     setPreviewLoading(true)
     try {
-      const res = await fetch(`/api/events/${eventId}/logbooks/${lid}/preview`, { headers: { Authorization: `Bearer ${getToken()}` } })
-      const data = await res.json()
-      setPreviewParticipants(data.participants || [])
-    } catch (e) { console.error('[Logbook] preview error:', e); setPreviewParticipants([]) }
-    finally { setPreviewLoading(false) }
-  }, [eventId])
+      const res = await fetch(`/api/events/${eventId}/logbooks/${lid}/preview`, { headers: { Authorization: `Bearer ${getToken()}` }, signal: request.signal })
+      const data = await readLogbookMutation<{ participants: typeof previewParticipants }>(res)
+      if (logbookSession.isCurrent('preview', request)) setPreviewParticipants(data.participants || [])
+    } catch (e) { if (logbookSession.isCurrent('preview', request)) { setPreviewParticipants([]); setLogbookError(e instanceof Error ? e.message : 'No se pudo cargar la selección') } }
+    finally { if (logbookSession.isCurrent('preview', request)) setPreviewLoading(false) }
+  }, [eventId, logbookSession])
 
   const fetchLogbookDetail = useCallback(async (lid: string) => {
+    if (!logbookSession.isActive()) return
+    if (logbookSession.selectedId() !== lid) {
+      resetLogbookEditors()
+      setSelectedLogbook(current => current?.id === lid ? current : null)
+    }
+    logbookSession.select(lid)
+    const request = logbookSession.begin('detail')
     setSelectedLogbookLoading(true)
     setPreviewParticipants([])
+    setPreviewLoading(false)
     try {
-      const res = await fetch(`/api/events/${eventId}/logbooks/${lid}`, { headers: { Authorization: `Bearer ${getToken()}` } })
-      const data = await res.json()
-      if (data.id) {
+      const res = await fetch(`/api/events/${eventId}/logbooks/${lid}`, { headers: { Authorization: `Bearer ${getToken()}` }, signal: request.signal })
+      const data = await readLogbookMutation<Logbook>(res)
+      if (logbookSession.isCurrent('detail', request) && data.id === lid) {
         setSelectedLogbook(data)
         setLogbookNotesText(data.general_notes || '')
         // Auto-fetch preview for pending logbooks with saved filter
@@ -1954,23 +1995,26 @@ export default function EventDetailPage() {
           fetchLogbookPreview(lid)
         }
       }
-    } catch (e) { console.error('[Logbook] detail error:', e) }
-    finally { setSelectedLogbookLoading(false) }
-  }, [eventId, fetchLogbookPreview])
+    } catch (e) { if (logbookSession.isCurrent('detail', request)) setLogbookError(e instanceof Error ? e.message : 'No se pudo cargar la bitácora') }
+    finally { if (logbookSession.isCurrent('detail', request)) setSelectedLogbookLoading(false) }
+  }, [eventId, fetchLogbookPreview, logbookSession, resetLogbookEditors])
 
   const handleUpdateLogbookSettings = async (updateFilter: boolean = false) => {
-    if (!selectedLogbook || !logbookSettingsDate || !logbookSettingsTitle.trim()) return
+    if (!logbookSession.isActive() || eventIsReadOnly || !selectedLogbook || !logbookSettingsInitial || !logbookSettingsDate || !logbookSettingsTitle.trim()) return
+    const selection = logbookSession.selection()
+    const lid = selectedLogbook.id
+    setLogbookError('')
     setLogbookSettingsUpdating(true)
     try {
-      const body: any = {
-        title: logbookSettingsTitle.trim(),
-        date: logbookSettingsDate,
-        status: logbookSettingsStatus
-      }
+      const body: Record<string, unknown> = logbookSettingsPatch({ title: logbookSettingsTitle, date: logbookSettingsDate, status: logbookSettingsStatus }, logbookSettingsInitial)
       if (updateFilter) {
         body.saved_filter = getSnapshotFilterBody()
       }
-      const res = await fetch(`/api/events/${eventId}/logbooks/${selectedLogbook.id}`, {
+      if (Object.keys(body).length === 0) {
+        setShowLogbookSettingsModal(false)
+        return
+      }
+      const res = await fetch(`/api/events/${eventId}/logbooks/${lid}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -1978,20 +2022,21 @@ export default function EventDetailPage() {
         },
         body: JSON.stringify(body)
       })
-      if (!res.ok) throw new Error('Error updating')
-      const updated = await res.json()
-      setSelectedLogbook(updated)
-      setShowLogbookSettingsModal(false)
+      const updated = await readLogbookMutation<typeof selectedLogbook>(res)
+      if (logbookSession.isSelected(selection)) {
+        setSelectedLogbook(current => current?.id === lid ? updated : current)
+        setShowLogbookSettingsModal(false)
+      }
       fetchLogbooks()
     } catch (e) {
-      console.error('Error al guardar configuración', e)
+      if (logbookSession.isSelected(selection)) setLogbookError(e instanceof Error ? e.message : 'No se pudo guardar la configuración')
     } finally {
-      setLogbookSettingsUpdating(false)
+      if (logbookSession.isActive()) setLogbookSettingsUpdating(false)
     }
   }
 
   const handleCreateLogbook = async () => {
-    if (!newLogbookDate) return
+    if (!logbookSession.isActive() || eventIsReadOnly || !newLogbookDate) return
     // If capture_now is checked AND filters are active, show confirmation first
     if (newLogbookCaptureNow && activeFilterCount > 0) {
       setFilterConfirmAction(() => () => doCreateLogbook())
@@ -2025,7 +2070,9 @@ export default function EventDetailPage() {
   }
 
   const doCreateLogbook = async () => {
-    if (!newLogbookDate) return
+    if (!logbookSession.isActive() || eventIsReadOnly || !newLogbookDate) return
+    const selection = logbookSession.selection()
+    setLogbookError('')
     setShowFilterConfirmDialog(false)
     setCreatingLogbook(true)
     try {
@@ -2035,22 +2082,25 @@ export default function EventDetailPage() {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
         body: JSON.stringify({ date: newLogbookDate, title: newLogbookTitle, capture_now: newLogbookCaptureNow, ...filterBody }),
       })
-      const data = await res.json()
+      const data = await readLogbookMutation<NonNullable<typeof selectedLogbook>>(res)
       if (data.id) {
         await fetchLogbooks()
-        setSelectedLogbook(data)
-        setShowNewLogbookModal(false)
-        setNewLogbookDate('')
-        setNewLogbookTitle('')
-        setNewLogbookCaptureNow(false)
-      } else if (data.error) {
-        alert(data.error)
+        if (logbookSession.isSelected(selection)) {
+          resetLogbookEditors()
+          logbookSession.select(data.id)
+          setSelectedLogbook(data)
+          setShowNewLogbookModal(false)
+          setNewLogbookDate('')
+          setNewLogbookTitle('')
+          setNewLogbookCaptureNow(false)
+        }
       }
-    } catch (e) { console.error('[Logbook] create error:', e) }
-    finally { setCreatingLogbook(false) }
+    } catch (e) { if (logbookSession.isSelected(selection)) setLogbookError(e instanceof Error ? e.message : 'No se pudo crear la bitácora') }
+    finally { if (logbookSession.isActive()) setCreatingLogbook(false) }
   }
 
   const handleCaptureSnapshot = async (lid: string) => {
+    if (!logbookSession.isActive() || eventIsReadOnly) return
     // If filters are active, show confirmation dialog
     if (activeFilterCount > 0) {
       setFilterConfirmAction(() => () => doCaptureSnapshot(lid))
@@ -2061,6 +2111,9 @@ export default function EventDetailPage() {
   }
 
   const doCaptureSnapshot = async (lid: string) => {
+    if (!logbookSession.isActive() || eventIsReadOnly || logbookSession.selectedId() !== lid) return
+    const selection = logbookSession.selection()
+    setLogbookError('')
     setShowFilterConfirmDialog(false)
     setCapturingSnapshot(true)
     try {
@@ -2077,75 +2130,110 @@ export default function EventDetailPage() {
         headers: { ...(sendBody ? { 'Content-Type': 'application/json' } : {}), Authorization: `Bearer ${getToken()}` },
         ...(sendBody ? { body: JSON.stringify(bodyToSend) } : {}),
       })
-      const data = await res.json()
+      const data = await readLogbookMutation<NonNullable<typeof selectedLogbook>>(res)
       if (data.id) {
-        setSelectedLogbook(data)
+        if (logbookSession.isSelected(selection)) setSelectedLogbook(current => current?.id === lid ? data : current)
         await fetchLogbooks()
       }
-    } catch (e) { console.error('[Logbook] capture error:', e) }
-    finally { setCapturingSnapshot(false) }
+    } catch (e) { if (logbookSession.isSelected(selection)) setLogbookError(e instanceof Error ? e.message : 'No se aplicó la recaptura') }
+    finally { if (logbookSession.isActive()) setCapturingSnapshot(false) }
   }
 
   const handleAutoCreateLogbooks = async () => {
+    if (!logbookSession.isActive() || eventIsReadOnly) return
+    setLogbookError('')
     setAutoCreating(true)
     try {
       const res = await fetch(`/api/events/${eventId}/logbooks/auto-create`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${getToken()}` },
       })
-      const data = await res.json()
+      const data = await readLogbookMutation<{ created: number }>(res)
       if (data.created > 0) {
         await fetchLogbooks()
       }
-    } catch (e) { console.error('[Logbook] auto-create error:', e) }
-    finally { setAutoCreating(false) }
+    } catch (e) { if (logbookSession.isActive()) setLogbookError(e instanceof Error ? e.message : 'No se pudieron crear las bitácoras') }
+    finally { if (logbookSession.isActive()) setAutoCreating(false) }
   }
 
   const handleSaveLogbookNotes = async () => {
-    if (!selectedLogbook) return
+    if (!logbookSession.isActive() || eventIsReadOnly || !selectedLogbook) return
+    const selection = logbookSession.selection()
+    const lid = selectedLogbook.id
+    setLogbookError('')
     setSavingLogbookNotes(true)
     try {
-      await fetch(`/api/events/${eventId}/logbooks/${selectedLogbook.id}`, {
+      const response = await fetch(`/api/events/${eventId}/logbooks/${lid}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
         body: JSON.stringify({ general_notes: logbookNotesText }),
       })
-      setSelectedLogbook(prev => prev ? { ...prev, general_notes: logbookNotesText } : null)
-      setEditingLogbookNotes(false)
-    } catch (e) { console.error('[Logbook] save notes error:', e) }
-    finally { setSavingLogbookNotes(false) }
+      const canonical = await readLogbookMutation<typeof selectedLogbook>(response)
+      if (logbookSession.isSelected(selection)) {
+        setSelectedLogbook(current => current?.id === lid ? canonical : current)
+        setEditingLogbookNotes(false)
+      }
+      fetchLogbooks()
+    } catch (e) { if (logbookSession.isSelected(selection)) setLogbookError(e instanceof Error ? e.message : 'No se pudo guardar la nota') }
+    finally { if (logbookSession.isActive()) setSavingLogbookNotes(false) }
   }
 
   const handleSaveEntryNotes = async (entryId: string) => {
+    if (!logbookSession.isActive() || eventIsReadOnly || !selectedLogbook) return
+    const selection = logbookSession.selection()
+    const lid = selectedLogbook.id
+    const notes = entryNotesText
+    setLogbookError('')
     setSavingEntryNotes(true)
     try {
-      await fetch(`/api/events/${eventId}/logbooks/${selectedLogbook?.id}/entries/${entryId}`, {
+      const response = await fetch(`/api/events/${eventId}/logbooks/${lid}/entries/${entryId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-        body: JSON.stringify({ notes: entryNotesText }),
+        body: JSON.stringify({ notes }),
       })
-      setSelectedLogbook(prev => {
-        if (!prev || !prev.entries) return prev
-        return { ...prev, entries: prev.entries.map(e => e.id === entryId ? { ...e, notes: entryNotesText } : e) }
-      })
-      setEditingEntryId(null)
-    } catch (e) { console.error('[Logbook] save entry notes error:', e) }
-    finally { setSavingEntryNotes(false) }
+      await readLogbookMutation(response)
+      if (logbookSession.isSelected(selection)) {
+        setSelectedLogbook(prev => {
+          if (!prev || prev.id !== lid || !prev.entries) return prev
+          return { ...prev, entries: prev.entries.map(e => e.id === entryId ? { ...e, notes } : e) }
+        })
+        setEditingEntryId(current => current === entryId ? null : current)
+      }
+    } catch (e) { if (logbookSession.isSelected(selection)) setLogbookError(e instanceof Error ? e.message : 'No se pudo guardar la nota') }
+    finally { if (logbookSession.isActive()) setSavingEntryNotes(false) }
   }
 
   const handleDeleteLogbook = async (lid: string) => {
+    if (!logbookSession.isActive() || eventIsReadOnly) return
+    setLogbookError('')
     if (!confirm('¿Eliminar esta bitácora? Se perderán las notas y el snapshot.')) return
     try {
-      await fetch(`/api/events/${eventId}/logbooks/${lid}`, {
+      const response = await fetch(`/api/events/${eventId}/logbooks/${lid}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${getToken()}` },
       })
-      if (selectedLogbook?.id === lid) setSelectedLogbook(null)
+      if (!response.ok) await readLogbookMutation(response)
+      if (logbookSession.isActive() && logbookSession.selectedId() === lid) closeLogbook()
       await fetchLogbooks()
-    } catch (e) { console.error('[Logbook] delete error:', e) }
+    } catch (e) { if (logbookSession.isActive()) setLogbookError(e instanceof Error ? e.message : 'No se pudo eliminar la bitácora') }
   }
 
   // ─── Effects ───────────────────────────────────────────────────────────────
+  useEffect(() => {
+    closeLogbook()
+    setLogbooks([])
+    setLogbooksLoading(false)
+    setCreatingLogbook(false)
+    setCapturingSnapshot(false)
+    setSavingLogbookNotes(false)
+    setSavingEntryNotes(false)
+    setAutoCreating(false)
+    setLogbookSettingsUpdating(false)
+    setShowNewLogbookModal(false)
+    setShowFilterConfirmDialog(false)
+    setFilterConfirmAction(null)
+  }, [closeLogbook])
+
   useEffect(() => {
     Promise.all([fetchEvent(), fetchDevices()]).then(() => {})
   }, [fetchEvent, fetchDevices])
@@ -2304,7 +2392,7 @@ export default function EventDetailPage() {
       if (editingLogbookDate) { closeLayer(() => setEditingLogbookDate(false)); return }
       if (showDetailPanel) { closeLayer(() => { setShowDetailPanel(false); resetInlineChatState() }); return }
       if (selectionMode) { closeLayer(() => { setSelectionMode(false); setSelectedIds(new Set()) }); return }
-      if (selectedLogbook) { closeLayer(() => setSelectedLogbook(null)); return }
+      if (selectedLogbook) { closeLayer(closeLogbook); return }
       // If in logbook mode, return to kanban view instead of leaving the event
       if (viewMode === 'logbook') { closeLayer(() => setViewMode('kanban')); return }
       // No modals open — go back to events list (preserves folder state)
@@ -2321,7 +2409,7 @@ export default function EventDetailPage() {
     cancelStageEditMode, showMoreMenu, showFilterDropdown, editingEventName,
     editingEntryId, editingLogbookNotes, editingLogbookTitle, editingLogbookDate,
     showDetailPanel, selectionMode, selectedLogbook, viewMode, router, folderParam,
-    closeInlineChatAndRestoreFocus, resetInlineChatState,
+    closeInlineChatAndRestoreFocus, resetInlineChatState, closeLogbook,
   ])
 
   // Close more menu on outside click
@@ -2461,7 +2549,7 @@ export default function EventDetailPage() {
       {/* Event Header — single compact row */}
       <div className="flex flex-wrap items-center gap-2 sm:gap-3 py-2 shrink-0">
         <button onClick={() => {
-          if (viewMode === 'logbook') { setViewMode('kanban'); setSelectedLogbook(null) }
+          if (viewMode === 'logbook') { setViewMode('kanban'); closeLogbook() }
           else router.push('/dashboard/events' + (folderParam ? `?folder=${folderParam}` : ''))
         }} className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label={viewMode === 'logbook' ? 'Volver al evento' : 'Volver a eventos'}>
           <ArrowLeft className="w-5 h-5" />
@@ -3254,6 +3342,9 @@ export default function EventDetailPage() {
       )}
 
       {/* ═══ Logbook (Bitácora) View ═══ */}
+      {viewMode === 'logbook' && logbookError && (
+        <div role="alert" className="border-b border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{logbookError}</div>
+      )}
       {viewMode === 'logbook' && (
         <div className="flex-1 min-h-0 flex min-w-0 animate-view-enter">
           {/* Left Panel — Logbook list */}
@@ -3262,12 +3353,12 @@ export default function EventDetailPage() {
               <h3 className="text-sm font-semibold text-slate-700">Bitácoras</h3>
               <div className="flex items-center gap-1">
                 {event?.event_date && (
-                  <button onClick={handleAutoCreateLogbooks} disabled={autoCreating}
+                  <button onClick={handleAutoCreateLogbooks} disabled={autoCreating || eventIsReadOnly}
                     className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition disabled:opacity-50 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" title="Auto-crear desde rango de fechas">
                     {autoCreating ? <Loader2 className="w-4 h-4 animate-spin" /> : <CalendarDays className="w-4 h-4" />}
                   </button>
                 )}
-                <button onClick={() => setShowNewLogbookModal(true)}
+                <button onClick={() => setShowNewLogbookModal(true)} disabled={eventIsReadOnly}
                   className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" title="Nueva bitácora">
                   <Plus className="w-4 h-4" />
                 </button>
@@ -3284,7 +3375,7 @@ export default function EventDetailPage() {
                   <p className="text-sm text-slate-500 font-medium">Sin bitácoras</p>
                   <p className="text-xs text-slate-400 mt-1">Crea una bitácora para registrar el estado de los participantes en una fecha</p>
                   {event?.event_date && (
-                    <button onClick={handleAutoCreateLogbooks} disabled={autoCreating}
+                    <button onClick={handleAutoCreateLogbooks} disabled={autoCreating || eventIsReadOnly}
                       className="mt-4 flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50">
                       {autoCreating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CalendarDays className="w-3.5 h-3.5" />}
                       Crear desde fechas del evento
@@ -3316,7 +3407,7 @@ export default function EventDetailPage() {
                           <div className={`w-2 h-2 rounded-full flex-shrink-0 ${lb.status === 'completed' ? 'bg-emerald-500' : 'bg-amber-400'}`} />
                           <span className="text-sm font-medium text-slate-800 truncate">{lb.title || format(parseLogbookDate(lb.date), 'dd/MM/yyyy')}</span>
                         </div>
-                        <button onClick={(e) => { e.stopPropagation(); handleDeleteLogbook(lb.id) }}
+                        <button onClick={(e) => { e.stopPropagation(); handleDeleteLogbook(lb.id) }} disabled={eventIsReadOnly}
                           className={`p-1 text-slate-300 hover:text-red-500 transition-opacity ${isCompactLayout ? 'opacity-100 min-h-11 min-w-11 flex items-center justify-center' : 'opacity-0 group-hover:opacity-100'}`} aria-label="Eliminar bitácora">
                           <Trash2 className="w-3 h-3" />
                         </button>
@@ -3351,7 +3442,7 @@ export default function EventDetailPage() {
                     {isCompactLayout && (
                       <button
                         type="button"
-                        onClick={() => { setSelectedLogbook(null); setEditingLogbookTitle(false); setEditingLogbookDate(false); setEditingEntryId(null) }}
+                        onClick={closeLogbook}
                         className="min-h-11 min-w-11 -ml-2 flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100"
                         aria-label="Volver a la lista de bitácoras"
                       >
@@ -3365,19 +3456,25 @@ export default function EventDetailPage() {
                             value={editLogbookTitleValue}
                             onChange={e => setEditLogbookTitleValue(e.target.value)}
                             onBlur={async () => {
+                              const selection = logbookSession.selection()
+                              const lid = selectedLogbook.id
                               const v = editLogbookTitleValue.trim()
-                              if (v && v !== selectedLogbook.title) {
+                              if (!eventIsReadOnly && v && v !== selectedLogbook.title) {
+                                setLogbookError('')
                                 try {
-                                  const res = await fetch(`/api/events/${eventId}/logbooks/${selectedLogbook.id}`, {
+                                  const res = await fetch(`/api/events/${eventId}/logbooks/${lid}`, {
                                     method: 'PUT',
                                     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
                                     body: JSON.stringify({ title: v }),
                                   })
-                                  const data = await res.json()
-                                  if (data.id) { setSelectedLogbook(data); fetchLogbooks() }
-                                } catch (e) { console.error('[Logbook] rename error:', e) }
+                                  const data = await readLogbookMutation<NonNullable<typeof selectedLogbook>>(res)
+                                  if (data.id) {
+                                    if (logbookSession.isSelected(selection)) setSelectedLogbook(current => current?.id === lid ? data : current)
+                                    fetchLogbooks()
+                                  }
+                                } catch (e) { if (logbookSession.isSelected(selection)) setLogbookError(e instanceof Error ? e.message : 'No se pudo cambiar el título'); return }
                               }
-                              setEditingLogbookTitle(false)
+                              if (logbookSession.isSelected(selection)) setEditingLogbookTitle(false)
                             }}
                             onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setEditingLogbookTitle(false) }}
                             className="text-lg font-semibold text-slate-900 bg-transparent border-b-2 border-emerald-500 outline-none px-0"
@@ -3385,12 +3482,12 @@ export default function EventDetailPage() {
                           />
                         ) : (
                           <h3
-                            className="text-lg font-semibold text-slate-900 cursor-text hover:bg-slate-100 hover:px-1.5 hover:rounded transition break-words"
-                            onClick={() => { setEditLogbookTitleValue(selectedLogbook.title || format(parseLogbookDate(selectedLogbook.date), 'dd/MM/yyyy')); setEditingLogbookTitle(true) }}
-                            title="Click para editar"
+                            className={`text-lg font-semibold text-slate-900 transition break-words ${eventIsReadOnly ? 'cursor-default' : 'cursor-text hover:bg-slate-100 hover:px-1.5 hover:rounded'}`}
+                            onClick={() => { if (!eventIsReadOnly) { setEditLogbookTitleValue(selectedLogbook.title || format(parseLogbookDate(selectedLogbook.date), 'dd/MM/yyyy')); setEditingLogbookTitle(true) } }}
+                            title={eventIsReadOnly ? 'El evento está cerrado' : 'Click para editar'}
                           >{selectedLogbook.title || format(parseLogbookDate(selectedLogbook.date), 'dd/MM/yyyy')}</h3>
                         )}
-                        {!editingLogbookTitle && (
+                        {!editingLogbookTitle && !eventIsReadOnly && (
                           <button onClick={() => { setEditLogbookTitleValue(selectedLogbook.title || format(parseLogbookDate(selectedLogbook.date), 'dd/MM/yyyy')); setEditingLogbookTitle(true) }}
                             className="opacity-0 group-hover/lbtitle:opacity-100 p-1 text-slate-400 hover:text-emerald-600 rounded transition max-sm:opacity-100 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center">
                             <Edit3 className="w-3 h-3" />
@@ -3411,27 +3508,33 @@ export default function EventDetailPage() {
                             value={editLogbookDateValue}
                             onChange={e => setEditLogbookDateValue(e.target.value)}
                             onBlur={async () => {
-                              if (editLogbookDateValue && editLogbookDateValue !== selectedLogbook.date.slice(0, 10)) {
+                              const selection = logbookSession.selection()
+                              const lid = selectedLogbook.id
+                              if (!eventIsReadOnly && editLogbookDateValue && editLogbookDateValue !== selectedLogbook.date.slice(0, 10)) {
+                                setLogbookError('')
                                 try {
-                                  const res = await fetch(`/api/events/${eventId}/logbooks/${selectedLogbook.id}`, {
+                                  const res = await fetch(`/api/events/${eventId}/logbooks/${lid}`, {
                                     method: 'PUT',
                                     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
                                     body: JSON.stringify({ date: editLogbookDateValue }),
                                   })
-                                  const data = await res.json()
-                                  if (data.id) { setSelectedLogbook(data); fetchLogbooks() }
-                                } catch (e) { console.error('[Logbook] date error:', e) }
+                                  const data = await readLogbookMutation<NonNullable<typeof selectedLogbook>>(res)
+                                  if (data.id) {
+                                    if (logbookSession.isSelected(selection)) setSelectedLogbook(current => current?.id === lid ? data : current)
+                                    fetchLogbooks()
+                                  }
+                                } catch (e) { if (logbookSession.isSelected(selection)) setLogbookError(e instanceof Error ? e.message : 'No se pudo cambiar la fecha'); return }
                               }
-                              setEditingLogbookDate(false)
+                              if (logbookSession.isSelected(selection)) setEditingLogbookDate(false)
                             }}
                             onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setEditingLogbookDate(false) }}
                             className="text-xs text-slate-500 bg-transparent border-b border-emerald-500 outline-none"
                             autoFocus
                           />
                         ) : (
-                          <p className="text-xs text-slate-400 cursor-pointer hover:text-emerald-600 transition"
-                            onClick={() => { setEditLogbookDateValue(selectedLogbook.date.slice(0, 10)); setEditingLogbookDate(true) }}
-                            title="Click para cambiar fecha">
+                          <p className={`text-xs text-slate-400 transition ${eventIsReadOnly ? 'cursor-default' : 'cursor-pointer hover:text-emerald-600'}`}
+                            onClick={() => { if (!eventIsReadOnly) { setEditLogbookDateValue(selectedLogbook.date.slice(0, 10)); setEditingLogbookDate(true) } }}
+                            title={eventIsReadOnly ? 'El evento está cerrado' : 'Click para cambiar fecha'}>
                             {format(parseLogbookDate(selectedLogbook.date), "EEEE, d 'de' MMMM yyyy", { locale: es })}
                           </p>
                         )}
@@ -3441,17 +3544,18 @@ export default function EventDetailPage() {
                       </div>
                     </div>
                     <div className={`${isCompactLayout ? 'w-full justify-end' : ''} flex items-center gap-2`}>
-                      <button onClick={() => {
+                      <button disabled={eventIsReadOnly} onClick={() => {
                         setLogbookSettingsTitle(selectedLogbook.title)
                         setLogbookSettingsDate(selectedLogbook.date.split('T')[0])
                         setLogbookSettingsStatus(selectedLogbook.status)
+                        setLogbookSettingsInitial({ title: selectedLogbook.title, date: selectedLogbook.date.split('T')[0], status: selectedLogbook.status })
                         setShowLogbookSettingsModal(true)
                       }} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" title="Configurar bitácora">
                         <Settings className="w-4 h-4" />
                       </button>
                       <button
                         onClick={() => handleCaptureSnapshot(selectedLogbook.id)}
-                        disabled={capturingSnapshot || selectedLogbook.status === 'completed'}
+                        disabled={eventIsReadOnly || capturingSnapshot || selectedLogbook.status === 'completed'}
                         className={`flex min-h-11 items-center gap-1.5 px-3 py-2 text-white rounded-lg text-xs font-medium transition shadow-sm disabled:opacity-50 ${selectedLogbook.status === 'completed' ? 'bg-slate-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
                         {capturingSnapshot ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> :
                            selectedLogbook.status === 'completed' ? <Lock className="w-3.5 h-3.5" /> : <Camera className="w-3.5 h-3.5" />}
@@ -3482,7 +3586,7 @@ export default function EventDetailPage() {
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">Observaciones generales</span>
                     {!editingLogbookNotes ? (
-                      <button onClick={() => { setLogbookNotesText(selectedLogbook.general_notes || ''); setEditingLogbookNotes(true) }}
+                      <button disabled={eventIsReadOnly} onClick={() => { setLogbookNotesText(selectedLogbook.general_notes || ''); setEditingLogbookNotes(true) }}
                         className="p-1 text-slate-400 hover:text-emerald-600 rounded transition max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label="Editar observaciones generales">
                         <PenLine className="w-3.5 h-3.5" />
                       </button>
@@ -3491,7 +3595,7 @@ export default function EventDetailPage() {
                         <button onClick={() => setEditingLogbookNotes(false)} className="p-1 text-slate-400 hover:text-slate-600 rounded transition max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label="Cancelar edición">
                           <X className="w-3.5 h-3.5" />
                         </button>
-                        <button onClick={handleSaveLogbookNotes} disabled={savingLogbookNotes}
+                        <button onClick={handleSaveLogbookNotes} disabled={savingLogbookNotes || eventIsReadOnly}
                           className="p-1 text-emerald-600 hover:text-emerald-700 rounded transition disabled:opacity-50 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label="Guardar observaciones">
                           {savingLogbookNotes ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
                         </button>
@@ -3554,7 +3658,7 @@ export default function EventDetailPage() {
                             <span className="text-[10px] text-amber-500 bg-amber-100 px-1.5 py-0.5 rounded">Con filtro guardado</span>
                           )}
                         </div>
-                        <button onClick={() => handleCaptureSnapshot(selectedLogbook.id)} disabled={capturingSnapshot}
+                        <button onClick={() => handleCaptureSnapshot(selectedLogbook.id)} disabled={capturingSnapshot || eventIsReadOnly}
                           className="flex min-h-11 items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50 flex-shrink-0">
                           {capturingSnapshot ? <Loader2 className="w-3 h-3 animate-spin" /> : <Camera className="w-3 h-3" />}
                           Capturar Snapshot
@@ -3610,7 +3714,7 @@ export default function EventDetailPage() {
                                 : 'Captura un snapshot para registrar el estado actual de todos los participantes en esta fecha'}
                           </p>
                           {!selectedLogbook.saved_filter && (
-                            <button onClick={() => handleCaptureSnapshot(selectedLogbook.id)} disabled={capturingSnapshot}
+                            <button onClick={() => handleCaptureSnapshot(selectedLogbook.id)} disabled={capturingSnapshot || eventIsReadOnly}
                               className="mt-4 flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50">
                               {capturingSnapshot ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
                               {activeFilterCount > 0 ? `Capturar (${totalParticipantCount} filtrados)` : 'Capturar Snapshot'}
@@ -3661,7 +3765,7 @@ export default function EventDetailPage() {
                                     autoFocus
                                     onKeyDown={e => { if (e.key === 'Enter') handleSaveEntryNotes(entry.id); if (e.key === 'Escape') setEditingEntryId(null) }}
                                   />
-                                  <button onClick={() => handleSaveEntryNotes(entry.id)} disabled={savingEntryNotes}
+                                  <button onClick={() => handleSaveEntryNotes(entry.id)} disabled={savingEntryNotes || eventIsReadOnly}
                                     className="p-1 text-emerald-600 hover:text-emerald-700 disabled:opacity-50 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label="Guardar nota">
                                     {savingEntryNotes ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
                                   </button>
@@ -3671,13 +3775,13 @@ export default function EventDetailPage() {
                                 </div>
                               ) : (
                                 <div className="flex items-center gap-1 group/notes cursor-pointer"
-                                  onClick={() => { setEditingEntryId(entry.id); setEntryNotesText(entry.notes || '') }}>
+                                  onClick={() => { if (!eventIsReadOnly) { setEditingEntryId(entry.id); setEntryNotesText(entry.notes || '') } }}>
                                   {entry.notes ? (
                                     <span className="text-sm text-slate-600">{entry.notes}</span>
                                   ) : (
-                                    <span className="text-xs text-slate-300 italic">Agregar nota...</span>
+                                    <span className="text-xs text-slate-300 italic">{eventIsReadOnly ? 'Sin notas' : 'Agregar nota...'}</span>
                                   )}
-                                  <PenLine className="w-3 h-3 text-slate-300 opacity-0 group-hover/notes:opacity-100 transition-opacity max-sm:opacity-100" />
+                                  {!eventIsReadOnly && <PenLine className="w-3 h-3 text-slate-300 opacity-0 group-hover/notes:opacity-100 transition-opacity max-sm:opacity-100" />}
                                 </div>
                               )}
                             </td>
@@ -3755,7 +3859,7 @@ export default function EventDetailPage() {
                                                 autoFocus
                                                 onKeyDown={e => { if (e.key === 'Enter') handleSaveEntryNotes(entry.id); if (e.key === 'Escape') setEditingEntryId(null) }}
                                               />
-                                              <button onClick={() => handleSaveEntryNotes(entry.id)} disabled={savingEntryNotes}
+                                              <button onClick={() => handleSaveEntryNotes(entry.id)} disabled={savingEntryNotes || eventIsReadOnly}
                                                 className="p-0.5 text-emerald-600 hover:text-emerald-700 disabled:opacity-50">
                                                 {savingEntryNotes ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
                                               </button>
@@ -3765,13 +3869,13 @@ export default function EventDetailPage() {
                                             </div>
                                           ) : (
                                             <div className="flex items-center gap-1 cursor-pointer group/cnotes"
-                                              onClick={() => { setEditingEntryId(entry.id); setEntryNotesText(entry.notes || '') }}>
+                                              onClick={() => { if (!eventIsReadOnly) { setEditingEntryId(entry.id); setEntryNotesText(entry.notes || '') } }}>
                                               {entry.notes ? (
                                                 <p className="text-[11px] text-slate-500 leading-snug line-clamp-2">{entry.notes}</p>
                                               ) : (
-                                                <p className="text-[10px] text-slate-300 italic opacity-0 group-hover/card:opacity-100 transition-opacity">+ nota</p>
+                                                <p className="text-[10px] text-slate-300 italic opacity-0 group-hover/card:opacity-100 transition-opacity">{eventIsReadOnly ? 'Sin notas' : '+ nota'}</p>
                                               )}
-                                              <PenLine className="w-2.5 h-2.5 text-slate-300 opacity-0 group-hover/cnotes:opacity-100 transition-opacity flex-shrink-0" />
+                                              {!eventIsReadOnly && <PenLine className="w-2.5 h-2.5 text-slate-300 opacity-0 group-hover/cnotes:opacity-100 transition-opacity flex-shrink-0" />}
                                             </div>
                                           )}
                                         </div>
@@ -4082,6 +4186,7 @@ export default function EventDetailPage() {
               </button>
             </div>
             <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-4">
+              {logbookError && <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{logbookError}</p>}
               <div>
                 <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-1.5">Fecha *</label>
                 <input type="date" value={newLogbookDate} onChange={e => setNewLogbookDate(e.target.value)}
@@ -4101,7 +4206,7 @@ export default function EventDetailPage() {
             </div>
             <div className="px-4 sm:px-6 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-slate-100 flex justify-end gap-3">
               <button onClick={() => setShowNewLogbookModal(false)} className="min-h-11 px-4 py-2 text-sm text-slate-500 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition">Cancelar</button>
-              <button onClick={handleCreateLogbook} disabled={!newLogbookDate || creatingLogbook}
+              <button onClick={handleCreateLogbook} disabled={eventIsReadOnly || !newLogbookDate || creatingLogbook}
                 className="flex min-h-11 items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50">
                 {creatingLogbook ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
                 Crear
@@ -4153,6 +4258,7 @@ export default function EventDetailPage() {
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
+              {logbookError && <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{logbookError}</p>}
               <div>
                 <label className="block text-[13px] font-medium text-slate-700 mb-1">Título</label>
                 <input
@@ -4201,7 +4307,7 @@ export default function EventDetailPage() {
 
                 <button
                   onClick={() => handleUpdateLogbookSettings(true)}
-                  disabled={logbookSettingsUpdating}
+                  disabled={eventIsReadOnly || logbookSettingsUpdating}
                   className="mt-1 flex min-h-11 items-center justify-center gap-1.5 w-full px-3 py-2 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium hover:bg-slate-200 transition"
                   title="Actualizar el filtro guardado con el filtro aplicado actualmente en la pantalla"
                 >
@@ -4218,7 +4324,7 @@ export default function EventDetailPage() {
               </button>
               <button
                 onClick={() => handleUpdateLogbookSettings(false)}
-                disabled={logbookSettingsUpdating}
+                disabled={eventIsReadOnly || logbookSettingsUpdating}
                 className="flex-1 min-h-11 flex justify-center items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition shadow-sm disabled:opacity-50">
                 {logbookSettingsUpdating && <Loader2 className="w-4 h-4 animate-spin" />}
                 Guardar

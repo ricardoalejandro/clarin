@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ProgramHealthParticipant } from '@/types/program';
 import {
   actionableProgramSignalCount,
+  formatProgramAttendanceRate,
   getProgramTenure,
   nextProgramHealthSort,
   normalizeProgramHealthViewColumns,
@@ -93,5 +94,24 @@ describe('program health sorting', () => {
     const source = [...rows];
     sortProgramHealthParticipants(source, { key: 'attendance', direction: 'ascending' }, asOfDate);
     expect(source.map(row => row.participant_id)).toEqual(rows.map(row => row.participant_id));
+  });
+});
+
+describe('attendance without records', () => {
+  it('keeps missing measurements distinct from an actual zero percent', () => {
+    expect(formatProgramAttendanceRate(null)).toBe('—');
+    expect(formatProgramAttendanceRate(undefined)).toBe('—');
+    expect(formatProgramAttendanceRate(0)).toBe('0%');
+    expect(formatProgramAttendanceRate(66.66)).toBe('67%');
+  });
+
+  it.each(['ascending', 'descending'] as const)('keeps missing attendance last while sorting %s', direction => {
+    const rows = [
+      participant({ participant_id: 'none', name: 'Ana', health: 'no_data', attendance_rate: null, marked_sessions: 0 }),
+      participant({ participant_id: 'zero', name: 'Berta', attendance_rate: 0 }),
+      participant({ participant_id: 'full', name: 'Celia', attendance_rate: 100 }),
+    ];
+    expect(sortProgramHealthParticipants(rows, { key: 'attendance', direction }, '2026-10-01').map(row => row.participant_id))
+      .toEqual(direction === 'ascending' ? ['zero', 'full', 'none'] : ['full', 'zero', 'none']);
   });
 });

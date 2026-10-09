@@ -115,6 +115,7 @@ export default function ChatsPage() {
   const filterPending = inboxView === 'pending'
   const setFilterUnread = (value: boolean | ((previous: boolean) => boolean)) => setInboxView((typeof value === 'function' ? value(filterUnread) : value) ? 'unread' : 'all')
   const canonicalStatesRef = useRef(new Map<string, ChatState>())
+  const deletedChatIdsRef = useRef(new Set<string>())
   const inboxRevisionRef = useRef(0)
   const queueAnchorRef = useRef<{ id: string; waiting_since: string } | undefined>(undefined)
   const cursorRef = useRef('')
@@ -497,18 +498,41 @@ export default function ChatsPage() {
       if (controller.signal.aborted || requestSequence !== sequenceRef.current || requestQueryKey !== activeChatQueryKeyRef.current) return
       if (data.success) {
         setChatListError('')
-        const newChats: Chat[] = data.chats || []
+        let newChats: Chat[] = data.chats || []
         const total: number = data.total ?? 0
+        let serverOffset = offset + newChats.length
+        let nextCursor = data.next_cursor || ''
+        // Revalidate the whole loaded window, in bounded pages. Keeping omitted
+        // rows blindly would retain chats that no longer match search/reactions.
+        if (silent && !options.after) {
+          const loadedCount = Math.max(CHATS_PAGE_SIZE, chatsRef.current.length)
+          while (newChats.length < loadedCount && serverOffset < total && (!filterPending || nextCursor)) {
+            const pageParams = new URLSearchParams(params)
+            pageParams.set('offset', String(filterPending ? 0 : serverOffset))
+            if (filterPending) pageParams.set('cursor', nextCursor)
+            const pageResponse = await fetch(`/api/chats?${pageParams}`, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
+            const page = await pageResponse.json().catch(() => null)
+            if (!pageResponse.ok || !page?.success || !Array.isArray(page.chats)) throw new Error(page?.error || 'No se pudieron actualizar las conversaciones.')
+            if (controller.signal.aborted || requestSequence !== sequenceRef.current || requestQueryKey !== activeChatQueryKeyRef.current) return
+            serverOffset += page.chats.length
+            nextCursor = page.next_cursor || ''
+            const known = new Set(newChats.map(chat => chat.id))
+            const unique = (page.chats as Chat[]).filter(chat => !known.has(chat.id))
+            newChats = [...newChats, ...unique]
+            if (!page.chats.length || !unique.length) break
+          }
+        }
+        newChats = newChats.filter(chat => !deletedChatIdsRef.current.has(chat.id))
         if (requestRevision === inboxRevisionRef.current) setTotalChats(total)
 
         if (reset) {
-          setChats(current => reconcileInboxPage(current, newChats, canonicalStatesRef.current, inboxView, silent))
+          setChats(current => reconcileInboxPage(current, newChats, canonicalStatesRef.current, inboxView, Boolean(options.after)))
           const visibleIds = new Set(newChats.map(chat => chat.id))
-          if (!silent) setSelectedChats(current => {
+          if (!options.after) setSelectedChats(current => {
             const next = new Set(Array.from(current).filter(id => visibleIds.has(id)))
             return next.size === current.size ? current : next
           })
-          if (!silent) offsetRef.current = newChats.length
+          if (!options.after) offsetRef.current = serverOffset
         } else {
           // Append with deduplication
           setChats(prev => {
@@ -518,8 +542,10 @@ export default function ChatsPage() {
           })
           offsetRef.current = offset + newChats.length
         }
-        if (!options.after && (!silent || !cursorRef.current)) cursorRef.current = data.next_cursor || ''
-        if (!silent) setHasMore(filterPending ? Boolean(data.next_cursor) : (offset + newChats.length) < total)
+        if (!options.after) {
+          cursorRef.current = nextCursor
+          setHasMore(filterPending ? Boolean(nextCursor) : serverOffset < total)
+        }
         return reconcileInboxPage([], newChats, canonicalStatesRef.current, inboxView, false)
       }
     } catch (err) {
@@ -733,7 +759,34 @@ export default function ChatsPage() {
     const unsubscribe = subscribeWebSocket((data: unknown) => {
       const msg = data as { event?: string; type?: string; data?: unknown; message?: unknown }
       const eventType = msg.event || msg.type
-      if (eventType === 'new_message' || eventType === 'message_sent') {
+      if (eventType === 'chat_deleted') {
+        const payload = msg.data as { chat_ids?: unknown; all?: unknown }
+        const all = payload?.all === true
+        if (!all && !Array.isArray(payload?.chat_ids)) return
+        const rawIds = all ? [...chatsRef.current.map(chat => chat.id), selectedChatIdRef.current] : payload.chat_ids as unknown[]
+        const ids = new Set(rawIds.filter((id): id is string => typeof id === 'string' && !deletedChatIdsRef.current.has(id)))
+        if (!all && !ids.size) return
+        for (const id of ids) deletedChatIdsRef.current.add(id)
+        chatsRequestAbortRef.current?.abort()
+        chatsReconcileAbortRef.current?.abort()
+        chatsRequestSequenceRef.current++
+        chatsReconcileSequenceRef.current++
+        setLoading(false)
+        setLoadingMore(false)
+        inboxRevisionRef.current++
+        const removed = chatsRef.current.filter(chat => ids.has(chat.id)).length
+        setChats(current => current.filter(chat => !ids.has(chat.id)))
+        setTotalChats(total => all ? 0 : Math.max(0, total - removed))
+        offsetRef.current = Math.max(0, offsetRef.current - removed)
+        setSelectedChats(current => new Set([...current].filter(id => !ids.has(id))))
+        if (all || ids.has(selectedChatIdRef.current || '')) {
+          setShowContactInfo(false)
+          setCompactSurface('list')
+        }
+        setSelectedChat(current => current && (all || ids.has(current.id)) ? null : current)
+        closeRowMenu()
+        scheduleChatReconciliation()
+      } else if (eventType === 'new_message' || eventType === 'message_sent') {
         applyMessageToChatList(msg.data || msg.message)
       } else if (eventType === 'chat_identity_reconciled') {
         const reconciliation = msg.data as ChatIdentityReconciliation
@@ -762,6 +815,8 @@ export default function ChatsPage() {
           reconcileChatUnread(payload.chat_id, payload.unread_count, payload)
           if (!known && (inboxView === 'all' || inboxView === 'unread' && payload.unread_count > 0 || inboxView === 'pending' && payload.needs_reply)) scheduleChatReconciliation()
         } else scheduleChatReconciliation()
+      } else if (eventType === 'message_reaction' && filterHasReaction) {
+        scheduleChatReconciliation()
       } else if (eventType === 'contact_update') {
         scheduleChatReconciliation()
       } else if (eventType === 'device_status' || eventType === 'device_deletion') {
@@ -770,7 +825,7 @@ export default function ChatsPage() {
       }
     })
     return () => unsubscribe()
-  }, [applyMessageToChatList, fetchDevices, reconcileChatUnread, scheduleChatReconciliation, inboxView])
+  }, [applyMessageToChatList, closeRowMenu, fetchDevices, filterHasReaction, reconcileChatUnread, scheduleChatReconciliation, inboxView])
 
   const panelBounds = useCallback((panel: ResizePanel) => {
     const width = pageRef.current?.getBoundingClientRect().width || containerWidth

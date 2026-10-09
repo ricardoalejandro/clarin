@@ -192,7 +192,7 @@ function compareProgramHealthPrimary(
     case 'participant':
       return spanishCollator.compare(left.name || '', right.name || '');
     case 'health': {
-      const rank = { critical: 0, watch: 1, healthy: 2 } as const;
+      const rank = { critical: 0, watch: 1, healthy: 2, no_data: 3 } as const;
       return compareNumbers(rank[left.health], rank[right.health]);
     }
     case 'attendance':
@@ -221,7 +221,15 @@ export function sortProgramHealthParticipants(
   if (!sort) return [...participants];
   const direction = sort.direction === 'ascending' ? 1 : -1;
   return [...participants].sort((left, right) => {
+    // Missing attendance has no numeric rank, and stays last in both directions.
+    if (sort.key === 'attendance' && (left.attendance_rate == null) !== (right.attendance_rate == null)) {
+      return left.attendance_rate == null ? 1 : -1;
+    }
     const primary = compareProgramHealthPrimary(left, right, sort.key, asOfDate);
     return primary === 0 ? compareStableIdentity(left, right) : primary * direction;
   });
+}
+
+export function formatProgramAttendanceRate(value?: number | null): string {
+  return value == null ? '—' : `${Math.round(value)}%`;
 }

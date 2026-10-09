@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/minio/minio-go/v7"
 	"github.com/naperu/clarin/internal/storage"
 )
 
@@ -97,7 +98,7 @@ func (r *ContactAvatarRepository) MarkWhatsAppCheck(ctx context.Context, account
 	return err
 }
 
-func (r *ContactAvatarRepository) Save(ctx context.Context, store *storage.Storage, accountID, contactID uuid.UUID, source string, jpegBytes []byte, options SaveContactAvatarOptions) (*ContactAvatarRecord, error) {
+func (r *ContactAvatarRepository) Save(ctx context.Context, store *storage.Storage, accountID, contactID uuid.UUID, source string, jpegBytes []byte, options SaveContactAvatarOptions) (saved *ContactAvatarRecord, saveErr error) {
 	if store == nil {
 		return nil, fmt.Errorf("storage not configured")
 	}
@@ -110,23 +111,6 @@ func (r *ContactAvatarRepository) Save(ctx context.Context, store *storage.Stora
 
 	hashBytes := sha256.Sum256(jpegBytes)
 	contentHash := contactAvatarHashPrefix + fmt.Sprintf("%x", hashBytes[:])
-	assetID, objectKey, uploadedKey, err := r.ensureAsset(ctx, store, accountID, contactID, contentHash, jpegBytes)
-	if err != nil {
-		return nil, err
-	}
-	if uploadedKey != "" && uploadedKey != objectKey {
-		_ = store.DeleteFile(ctx, uploadedKey)
-	}
-	assetAttached := false
-	defer func() {
-		if assetAttached {
-			return
-		}
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = r.ScheduleAssetGC(cleanupCtx, accountID, assetID)
-	}()
-
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -146,10 +130,37 @@ func (r *ContactAvatarRepository) Save(ctx context.Context, store *storage.Stora
 		}
 		return r.Get(ctx, accountID, contactID)
 	}
+	// The Contact and asset locks remain owned by the same transaction until
+	// attachment commits. In particular, a request waiting for the Contact must
+	// not keep an earlier, unlocked observation of an active shared asset.
+	assetID, _, uploadedKey, restored, err := r.ensureAsset(ctx, tx, store, accountID, contactID, contentHash, jpegBytes)
+	attached := false
+	defer func() {
+		if attached {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = tx.Rollback(cleanupCtx)
+		if uploadedKey != "" {
+			// A failed attachment still has a durable, reference-checked GC path;
+			// never delete an object on an ambiguous transaction commit result.
+			if cleanupErr := r.trackUnattachedUpload(cleanupCtx, accountID, uploadedKey, contentHash, int64(len(jpegBytes))); cleanupErr != nil {
+				saveErr = errors.Join(saveErr, fmt.Errorf("register unattached avatar cleanup: %w", cleanupErr))
+			}
+		} else if assetID != uuid.Nil {
+			_ = r.ScheduleAssetGC(cleanupCtx, accountID, assetID)
+		}
+	}()
+	if err != nil {
+		return nil, err
+	}
 
-	changed := oldAssetID == nil || *oldAssetID != assetID
+	// A previously broken attachment needs a new content URL even when its
+	// deduplicated ID stayed the same: mounted/cached failed images must reload.
+	changed := oldAssetID == nil || *oldAssetID != assetID || restored
 	var revision int64
-	err = tx.QueryRow(ctx, contactAvatarUpdateSQL, accountID, contactID, assetID, source).Scan(&revision)
+	err = tx.QueryRow(ctx, contactAvatarUpdateSQL, accountID, contactID, assetID, source, restored).Scan(&revision)
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +171,7 @@ func (r *ContactAvatarRepository) Save(ctx context.Context, store *storage.Stora
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	assetAttached = true
+	attached = true
 
 	if changed && oldAssetID != nil && *oldAssetID != assetID {
 		_ = r.ScheduleAssetGC(ctx, accountID, *oldAssetID)
@@ -175,86 +186,81 @@ const contactAvatarUpdateSQL = `
 		UPDATE contacts
 		SET avatar_media_asset_id=$3,
 		    avatar_source=$4::VARCHAR(20),
-		    avatar_revision=CASE WHEN avatar_media_asset_id IS DISTINCT FROM $3 THEN COALESCE(avatar_revision,0)+1 ELSE COALESCE(avatar_revision,0) END,
-		    avatar_updated_at=CASE WHEN avatar_media_asset_id IS DISTINCT FROM $3 THEN NOW() ELSE COALESCE(avatar_updated_at,NOW()) END,
+		    avatar_revision=CASE WHEN avatar_media_asset_id IS DISTINCT FROM $3 OR $5::BOOLEAN THEN COALESCE(avatar_revision,0)+1 ELSE COALESCE(avatar_revision,0) END,
+		    avatar_updated_at=CASE WHEN avatar_media_asset_id IS DISTINCT FROM $3 OR $5::BOOLEAN THEN NOW() ELSE COALESCE(avatar_updated_at,NOW()) END,
 		    avatar_whatsapp_checked_at=CASE WHEN $4::VARCHAR(20)='whatsapp' THEN NOW() ELSE avatar_whatsapp_checked_at END,
 		    avatar_whatsapp_check_error=CASE WHEN $4::VARCHAR(20)='whatsapp' THEN NULL ELSE avatar_whatsapp_check_error END,
 		    avatar_checked_at=CASE WHEN $4::VARCHAR(20)='whatsapp' THEN NOW() ELSE avatar_checked_at END,
-		    updated_at=CASE WHEN avatar_media_asset_id IS DISTINCT FROM $3 THEN NOW() ELSE updated_at END
+		    updated_at=CASE WHEN avatar_media_asset_id IS DISTINCT FROM $3 OR $5::BOOLEAN THEN NOW() ELSE updated_at END
 		WHERE account_id=$1 AND id=$2
 		RETURNING avatar_revision
 `
 
-func (r *ContactAvatarRepository) ensureAsset(ctx context.Context, store *storage.Storage, accountID, contactID uuid.UUID, contentHash string, data []byte) (uuid.UUID, string, string, error) {
-	var existingID uuid.UUID
-	var existingKey string
-	err := r.db.QueryRow(ctx, `
-		SELECT id,object_key FROM media_assets
-		WHERE account_id=$1 AND content_hash=$2 AND status='active'
-	`, accountID, contentHash).Scan(&existingID, &existingKey)
-	if err == nil {
-		return existingID, existingKey, "", nil
-	}
-	if err != pgx.ErrNoRows {
-		return uuid.Nil, "", "", err
-	}
-
-	var storageLimit int64
-	if err := r.db.QueryRow(ctx, `SELECT storage_limit_bytes FROM accounts WHERE id=$1`, accountID).Scan(&storageLimit); err != nil {
-		return uuid.Nil, "", "", err
-	}
-	if storageLimit > 0 {
-		used, _, usageErr := store.UsagePrefix(ctx, accountID.String()+"/")
-		if usageErr != nil {
-			return uuid.Nil, "", "", usageErr
-		}
-		if used+int64(len(data)) > storageLimit {
-			return uuid.Nil, "", "", ErrAvatarStorageLimit
-		}
-	}
-
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return uuid.Nil, "", "", err
-	}
-	defer tx.Rollback(ctx)
-	// Serialize the short upload window by account and content. Without this
-	// lock, two requests could upload the same hash and leave a loser object.
+func (r *ContactAvatarRepository) ensureAsset(ctx context.Context, tx pgx.Tx, store *storage.Storage, accountID, contactID uuid.UUID, contentHash string, data []byte) (uuid.UUID, string, string, bool, error) {
+	// Serialize new rows for this content; existing rows also stay locked while
+	// the file is restored and attached. GC holds this same row during deletion.
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, accountID.String()+":"+contentHash); err != nil {
-		return uuid.Nil, "", "", err
+		return uuid.Nil, "", "", false, err
 	}
-	if err := tx.QueryRow(ctx, `SELECT id,object_key FROM media_assets
-		WHERE account_id=$1 AND content_hash=$2 AND status='active'`, accountID, contentHash).Scan(&existingID, &existingKey); err == nil {
-		if err := tx.Commit(ctx); err != nil {
-			return uuid.Nil, "", "", err
+	var existingID uuid.UUID
+	var existingKey, existingStatus, filename string
+	err := tx.QueryRow(ctx, `
+		SELECT id,object_key,status,filename FROM media_assets
+		WHERE account_id=$1 AND content_hash=$2 FOR UPDATE
+	`, accountID, contentHash).Scan(&existingID, &existingKey, &existingStatus, &filename)
+	if err != nil && err != pgx.ErrNoRows {
+		return uuid.Nil, "", "", false, err
+	}
+	newAsset := err == pgx.ErrNoRows
+	objectKey := existingKey
+	uploadedKey := ""
+	if newAsset || existingStatus != "active" {
+		alreadyStored := int64(0)
+		if !newAsset {
+			info, infoErr := store.GetFileInfo(ctx, objectKey)
+			if infoErr == nil {
+				alreadyStored = info.Size
+			} else if code := minio.ToErrorResponse(infoErr).Code; code != "NoSuchKey" && code != "NoSuchObject" {
+				return existingID, objectKey, "", false, infoErr
+			}
 		}
-		return existingID, existingKey, "", nil
-	} else if err != pgx.ErrNoRows {
-		return uuid.Nil, "", "", err
-	}
-
-	filename := uuid.NewString() + ".jpg"
-	uploadedKey := storage.PrivateObjectKey(accountID, "avatars", contactID.String(), filename)
-	if _, err := store.UploadObject(ctx, uploadedKey, data, "image/jpeg"); err != nil {
-		return uuid.Nil, "", "", err
-	}
-
-	var assetID uuid.UUID
-	var canonicalKey string
-	err = tx.QueryRow(ctx, `
-		INSERT INTO media_assets (account_id,content_hash,object_key,media_type,content_type,filename,size_bytes,status,updated_at)
-		VALUES ($1,$2,$3,'avatar','image/jpeg',$4,$5,'active',NOW())
-		ON CONFLICT (account_id,content_hash) DO UPDATE
-		SET object_key=CASE WHEN media_assets.status='active' THEN media_assets.object_key ELSE EXCLUDED.object_key END,
-		    media_type='avatar',content_type='image/jpeg',
-		    filename=CASE WHEN media_assets.status='active' THEN media_assets.filename ELSE EXCLUDED.filename END,
-		    size_bytes=CASE WHEN media_assets.status='active' THEN media_assets.size_bytes ELSE EXCLUDED.size_bytes END,
-		    status='active',deleted_at=NULL,updated_at=NOW()
-		RETURNING id,object_key
-	`, accountID, contentHash, uploadedKey, filename, len(data)).Scan(&assetID, &canonicalKey)
-	if err != nil {
-		_ = store.DeleteFile(ctx, uploadedKey)
-		return uuid.Nil, "", "", err
+		var storageLimit int64
+		if err := tx.QueryRow(ctx, `SELECT storage_limit_bytes FROM accounts WHERE id=$1`, accountID).Scan(&storageLimit); err != nil {
+			return existingID, objectKey, "", false, err
+		}
+		if storageLimit > 0 {
+			used, _, usageErr := store.UsagePrefix(ctx, accountID.String()+"/")
+			if usageErr != nil {
+				return existingID, objectKey, "", false, usageErr
+			}
+			if used-alreadyStored+int64(len(data)) > storageLimit {
+				return existingID, objectKey, "", false, ErrAvatarStorageLimit
+			}
+		}
+		if newAsset {
+			filename = uuid.NewString() + ".jpg"
+			objectKey = storage.PrivateObjectKey(accountID, "avatars", contactID.String(), filename)
+		}
+		// Reuse the existing key when restoring pending/deleted content, avoiding
+		// an orphaned old inventory row on each same-photo replacement.
+		if _, err := store.UploadObject(ctx, objectKey, data, "image/jpeg"); err != nil {
+			return existingID, objectKey, "", false, err
+		}
+		// Restoring a deleted asset also writes physical bytes. If attachment
+		// rolls back, its old deleted inventory must enter reference-safe GC.
+		uploadedKey = objectKey
+		if newAsset {
+			err = tx.QueryRow(ctx, `
+				INSERT INTO media_assets (account_id,content_hash,object_key,media_type,content_type,filename,size_bytes,status,updated_at)
+				VALUES ($1,$2,$3,'avatar','image/jpeg',$4,$5,'active',NOW()) RETURNING id
+			`, accountID, contentHash, objectKey, filename, len(data)).Scan(&existingID)
+		} else {
+			_, err = tx.Exec(ctx, `UPDATE media_assets SET status='active',deleted_at=NULL,updated_at=NOW()
+				WHERE id=$1 AND account_id=$2`, existingID, accountID)
+		}
+		if err != nil {
+			return existingID, objectKey, uploadedKey, false, err
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO storage_objects (account_id,object_key,media_type,content_type,filename,size_bytes,source,status,updated_at)
@@ -264,15 +270,36 @@ func (r *ContactAvatarRepository) ensureAsset(ctx context.Context, store *storag
 		SET media_type='avatar',content_type=EXCLUDED.content_type,filename=EXCLUDED.filename,
 		    size_bytes=EXCLUDED.size_bytes,source='contact_avatar',status='active',deleted_at=NULL,
 		    delete_error='',next_delete_at=NULL,updated_at=NOW()
-	`, assetID, accountID); err != nil {
-		_ = store.DeleteFile(ctx, uploadedKey)
-		return uuid.Nil, "", "", err
+	`, existingID, accountID); err != nil {
+		return existingID, objectKey, uploadedKey, false, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		_ = store.DeleteFile(ctx, uploadedKey)
-		return uuid.Nil, "", "", err
+	return existingID, objectKey, uploadedKey, !newAsset && existingStatus != "active", nil
+}
+
+// Keep failed uploads in both inventories for the ordinary worker. A dedicated
+// orphan hash cannot compete with another request creating the canonical hash.
+func (r *ContactAvatarRepository) trackUnattachedUpload(ctx context.Context, accountID uuid.UUID, key, hash string, size int64) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
 	}
-	return assetID, canonicalKey, uploadedKey, nil
+	defer tx.Rollback(ctx)
+	var assetID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT id FROM media_assets WHERE account_id=$1 AND object_key=$2 FOR UPDATE`, accountID, key).Scan(&assetID)
+	if err == pgx.ErrNoRows {
+		filename := key[strings.LastIndex(key, "/")+1:]
+		err = tx.QueryRow(ctx, `INSERT INTO media_assets
+			(account_id,content_hash,object_key,media_type,content_type,filename,size_bytes,status,updated_at)
+			VALUES ($1,$2,$3,'avatar','image/jpeg',$4,$5,'avatar_gc_pending',NOW()) RETURNING id`,
+			accountID, hash+":orphan:"+uuid.NewString(), key, filename, size).Scan(&assetID)
+	}
+	if err != nil {
+		return err
+	}
+	if err := scheduleLockedAvatarGC(ctx, tx, accountID, assetID, key); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *ContactAvatarRepository) Remove(ctx context.Context, accountID, contactID uuid.UUID) (*ContactAvatarRecord, error) {
@@ -305,30 +332,46 @@ func (r *ContactAvatarRepository) Remove(ctx context.Context, accountID, contact
 }
 
 // ScheduleAssetGC only transitions an object when no Contact in the same
-// account references it. The worker repeats the check immediately before the
-// physical delete, making replacement and deduplication race-safe.
+// account references it. Lock first, then check references in a new statement
+// so an attachment committed while waiting is visible in READ COMMITTED.
 func (r *ContactAvatarRepository) ScheduleAssetGC(ctx context.Context, accountID, assetID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `
-		WITH candidate AS (
-			SELECT ma.id,ma.object_key FROM media_assets ma
-			WHERE ma.account_id=$1 AND ma.id=$2
-			  AND ma.content_hash LIKE $3 || '%'
-			  AND NOT EXISTS (SELECT 1 FROM contacts c WHERE c.account_id=$1 AND c.avatar_media_asset_id=ma.id)
-		)
-		UPDATE media_assets ma SET status='avatar_gc_pending',updated_at=NOW()
-		FROM candidate c WHERE ma.id=c.id
-	`, accountID, assetID, contactAvatarHashPrefix)
+	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	_, err = r.db.Exec(ctx, `
-		UPDATE storage_objects so
-		SET status='avatar_gc_pending',next_delete_at=NOW(),delete_error='',updated_at=NOW()
-		WHERE so.account_id=$1 AND EXISTS (
-			SELECT 1 FROM media_assets ma WHERE ma.id=$2 AND ma.account_id=$1
-			  AND ma.object_key=so.object_key AND ma.status='avatar_gc_pending'
-		)
-	`, accountID, assetID)
+	defer tx.Rollback(ctx)
+	var key string
+	err = tx.QueryRow(ctx, `SELECT object_key FROM media_assets
+		WHERE account_id=$1 AND id=$2 AND content_hash LIKE $3 || '%'
+		AND status NOT IN ('deleted','avatar_gc_deleting') FOR UPDATE`, accountID, assetID, contactAvatarHashPrefix).Scan(&key)
+	if err == pgx.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := scheduleLockedAvatarGC(ctx, tx, accountID, assetID, key); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func scheduleLockedAvatarGC(ctx context.Context, tx pgx.Tx, accountID, assetID uuid.UUID, key string) error {
+	var referenced bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM contacts WHERE account_id=$1 AND avatar_media_asset_id=$2)`, accountID, assetID).Scan(&referenced); err != nil {
+		return err
+	}
+	if referenced {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `UPDATE media_assets SET status='avatar_gc_pending',updated_at=NOW() WHERE id=$1 AND account_id=$2`, assetID, accountID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO storage_objects
+		(account_id,object_key,media_type,content_type,filename,size_bytes,source,status,next_delete_at,updated_at)
+		SELECT account_id,object_key,'avatar',content_type,filename,size_bytes,'contact_avatar','avatar_gc_pending',NOW(),NOW()
+		FROM media_assets WHERE id=$1 AND account_id=$2 AND object_key=$3
+		ON CONFLICT(account_id,object_key) DO UPDATE SET status='avatar_gc_pending',next_delete_at=NOW(),delete_error='',updated_at=NOW()`, assetID, accountID, key)
 	return err
 }
 
@@ -364,50 +407,62 @@ func (r *ContactAvatarRepository) DrainGC(ctx context.Context, store *storage.St
 		items = append(items, value)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
 
 	deleted := 0
 	for _, value := range items {
-		var claimed bool
-		err := r.db.QueryRow(ctx, `
-			WITH claimed AS (
-				UPDATE media_assets ma SET status='avatar_gc_deleting',updated_at=NOW()
-				WHERE ma.id=$1 AND ma.account_id=$2 AND ma.status='avatar_gc_pending'
-				  AND ma.object_key=$3
-				  AND NOT EXISTS (SELECT 1 FROM contacts c WHERE c.account_id=$2 AND c.avatar_media_asset_id=ma.id)
-				RETURNING ma.id
-			)
-			UPDATE storage_objects so SET status='avatar_gc_deleting',updated_at=NOW()
-			WHERE so.account_id=$2 AND so.object_key=$3 AND so.status='avatar_gc_pending'
-			  AND EXISTS (SELECT 1 FROM claimed)
-			RETURNING TRUE
-		`, value.id, value.accountID, value.key).Scan(&claimed)
-		if err == pgx.ErrNoRows {
-			continue
-		}
+		removed, err := r.deleteUnreferencedAvatar(ctx, store, value.accountID, value.id, value.key)
 		if err != nil {
 			return deleted, err
 		}
-		if !claimed {
-			continue
+		if removed {
+			deleted++
 		}
-		if err := store.DeleteFile(ctx, value.key); err != nil {
-			_, _ = r.db.Exec(ctx, `UPDATE media_assets SET status='avatar_gc_pending',updated_at=NOW()
-				WHERE id=$1 AND account_id=$2 AND status='avatar_gc_deleting'`, value.id, value.accountID)
-			_, _ = r.db.Exec(ctx, `UPDATE storage_objects SET status='avatar_gc_pending',delete_attempts=delete_attempts+1,
-				delete_error=$3,next_delete_at=NOW()+INTERVAL '15 minutes',updated_at=NOW()
-				WHERE account_id=$1 AND object_key=$2 AND status='avatar_gc_deleting'`, value.accountID, value.key, err.Error())
-			continue
-		}
-		_, err = r.db.Exec(ctx, `UPDATE media_assets SET status='deleted',deleted_at=NOW(),updated_at=NOW()
-			WHERE id=$1 AND account_id=$2 AND status='avatar_gc_deleting'`, value.id, value.accountID)
-		if err != nil {
-			return deleted, err
-		}
-		if _, err = r.db.Exec(ctx, `UPDATE storage_objects SET status='deleted',deleted_at=NOW(),delete_error='',next_delete_at=NULL,updated_at=NOW()
-			WHERE account_id=$1 AND object_key=$2 AND status='avatar_gc_deleting'`, value.accountID, value.key); err != nil {
-			return deleted, err
-		}
-		deleted++
 	}
 	return deleted, nil
+}
+
+func (r *ContactAvatarRepository) deleteUnreferencedAvatar(ctx context.Context, store *storage.Storage, accountID, assetID uuid.UUID, key string) (bool, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	var status string
+	if err := tx.QueryRow(ctx, `SELECT status FROM media_assets WHERE id=$1 AND account_id=$2 AND object_key=$3 FOR UPDATE`, assetID, accountID, key).Scan(&status); err != nil {
+		if err == pgx.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	if status != "avatar_gc_pending" {
+		return false, nil
+	}
+	var referenced bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM contacts WHERE account_id=$1 AND avatar_media_asset_id=$2)`, accountID, assetID).Scan(&referenced); err != nil {
+		return false, err
+	}
+	if referenced {
+		return false, nil
+	}
+	// Do not release the asset lock between this reference check and S3 deletion:
+	// a concurrent Save cannot attach it until deletion and inventory commit.
+	if err := store.DeleteFile(ctx, key); err != nil {
+		if _, dbErr := tx.Exec(ctx, `UPDATE storage_objects SET delete_attempts=delete_attempts+1,
+			delete_error=$3,next_delete_at=NOW()+INTERVAL '15 minutes',updated_at=NOW()
+			WHERE account_id=$1 AND object_key=$2`, accountID, key, err.Error()); dbErr != nil {
+			return false, dbErr
+		}
+		return false, tx.Commit(ctx)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE media_assets SET status='deleted',deleted_at=NOW(),updated_at=NOW() WHERE id=$1 AND account_id=$2`, assetID, accountID); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE storage_objects SET status='deleted',deleted_at=NOW(),delete_error='',next_delete_at=NULL,updated_at=NOW()
+		WHERE account_id=$1 AND object_key=$2`, accountID, key); err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
 }

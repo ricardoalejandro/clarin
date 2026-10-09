@@ -13,22 +13,37 @@ export function useDeviceAdministration<T extends Device>(enabled: boolean) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [mutationError, setMutationError] = useState('')
+  const [lastDeletion, setLastDeletion] = useState<DeviceDeletionResult | null>(null)
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set())
   const stateScope = useRef(scope)
   const generation = useRef(0)
   const fetchSequence = useRef(0)
   const fetchController = useRef<AbortController | null>(null)
+  const fetchPromise = useRef<Promise<void> | null>(null)
   const deleteControllers = useRef(new Map<string, AbortController>())
 
-  const refreshDevices = useCallback(async () => {
+  const refreshDevices = useCallback(async (fresh = false) => {
     if (!ready || scope !== getAuthScope()) return
-    fetchController.current?.abort()
+    // Polling joins a running read. Cancelling it every five seconds would
+    // prevent a valid slow response from ever finishing.
+    if (fresh) fetchController.current?.abort()
+    if (fetchController.current && !fetchController.current.signal.aborted && fetchPromise.current) return fetchPromise.current
     const controller = new AbortController()
     fetchController.current = controller
     const sequence = ++fetchSequence.current
     const session = generation.current
-    const current = () => !controller.signal.aborted && sequence === fetchSequence.current && session === generation.current && scope === getAuthScope()
-    try {
+    const sameSession = () => sequence === fetchSequence.current && session === generation.current && scope === getAuthScope()
+    const current = () => !controller.signal.aborted && sameSession()
+    let timedOut = false
+    const timeout = window.setTimeout(() => {
+      timedOut = true
+      controller.abort()
+      if (sameSession()) {
+        setError('La carga de dispositivos tardó demasiado. Comprueba la conexión y pulsa Reintentar')
+        setLoading(false)
+      }
+    }, 20000)
+    const operation = (async () => { try {
       const response = await fetch('/api/devices', { headers: { Authorization: `Bearer ${localStorage.getItem('token') || ''}` }, signal: controller.signal })
       const data = await response.json().catch(() => ({}))
       if (!current()) return
@@ -36,10 +51,17 @@ export function useDeviceAdministration<T extends Device>(enabled: boolean) {
       setDevices(Array.isArray(data.devices) ? data.devices : [])
       setError('')
     } catch (reason) {
-      if (current()) setError(reason instanceof Error ? reason.message : 'No se pudieron cargar los dispositivos')
+      if (current() && !timedOut) setError(reason instanceof Error ? reason.message : 'No se pudieron cargar los dispositivos')
     } finally {
-      if (current()) setLoading(false)
-    }
+      window.clearTimeout(timeout)
+      if (sameSession()) setLoading(false)
+      if (fetchController.current === controller) {
+        fetchController.current = null
+        fetchPromise.current = null
+      }
+    } })()
+    fetchPromise.current = operation
+    return operation
   }, [ready, scope])
 
   useEffect(() => {
@@ -49,6 +71,7 @@ export function useDeviceAdministration<T extends Device>(enabled: boolean) {
     setPendingIds(new Set())
     setError('')
     setMutationError('')
+    setLastDeletion(null)
     setLoading(ready)
     if (ready) void refreshDevices()
     return () => {
@@ -68,6 +91,7 @@ export function useDeviceAdministration<T extends Device>(enabled: boolean) {
       if (event.event === 'device_deletion' && event.data?.device_id && event.data.operation_id && ['pending', 'completed'].includes(event.data.deletion_status)) {
         const result = event.data
         setDevices(previous => applyDeviceDeletionResult(previous, result))
+        if (result.deletion_status === 'completed') setLastDeletion(result)
         // GET also confirms unknown operations and contains retry/phase checkpoints.
         fetchController.current?.abort()
         void refreshDevices()
@@ -95,7 +119,8 @@ export function useDeviceAdministration<T extends Device>(enabled: boolean) {
       const result = data as DeviceDeletionResult
       if (result.device_id !== id || !result.operation_id || !['pending', 'completed'].includes(result.deletion_status)) throw new Error('No se pudo confirmar el estado de eliminación')
       setDevices(previous => applyDeviceDeletionResult(previous, result, true))
-      void refreshDevices()
+      setLastDeletion(previous => previous?.operation_id === result.operation_id && previous.deletion_status === 'completed' ? previous : result)
+      void refreshDevices(true)
       return true
     } catch (reason) {
       if (current()) setMutationError(reason instanceof Error ? reason.message : 'No se pudo eliminar el dispositivo')
@@ -110,6 +135,7 @@ export function useDeviceAdministration<T extends Device>(enabled: boolean) {
     scope,
     devices: visible ? devices : [], setDevices, loading: visible && loading, setLoading, error: visible ? mutationError || error : '',
     pendingIds: visible ? pendingIds : new Set<string>(), refreshDevices, deleteDevice,
+    lastDeletion: visible ? lastDeletion : null,
     total: visible ? devices.length : 0, available: visible ? devices.filter(device => !isDeviceDeleting(device)).length : 0,
   }
 }

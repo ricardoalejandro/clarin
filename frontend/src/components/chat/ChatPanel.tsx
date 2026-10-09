@@ -14,10 +14,10 @@ import { es } from 'date-fns/locale'
 import { Chat, ChatState, Device, Message } from '@/types/chat'
 import { subscribeWebSocket } from '@/lib/api'
 import { messageBelongsToChat } from './chatEventScope'
+import { hasSameMessageIdentity, mergeCanonicalMessage, mergeFetchedMessages, orderChatMessages, reconcileOptimisticMessage } from './messageState'
 import { applyDeviceDeletionResult, isDeviceDeleting } from '@/components/settings/deviceLifecycle'
 import type { DeviceDeletionResult } from '@/types/chat'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
-import { mergeMessageSender } from '@/utils/chatInbox'
 import { getChatDisplayName } from '@/utils/chat'
 import WhatsAppTextInput, { WhatsAppTextInputHandle } from '../WhatsAppTextInput'
 import ImageViewer from './ImageViewer'
@@ -126,10 +126,6 @@ function normalizeStickerUrls(value: unknown): string[] {
   ))
 }
 
-function hasSameMessageIdentity(message: Message, candidate: Message): boolean {
-  return message.id === candidate.id || (!!candidate.message_id && message.message_id === candidate.message_id)
-}
-
 function isCompatibleOptimisticMessage(message: Message, actualMessage: Message): boolean {
   if (!message.is_from_me || !message.id.startsWith('optimistic-')) return false
   if (message.status !== 'sending' && message.status !== 'sent') return false
@@ -157,68 +153,6 @@ function findCompatibleOptimisticIndex(messages: Message[], actualMessage: Messa
 
 function reactionQueueKey(chatId: string, messageId: string): string {
   return `${chatId}:${messageId}`
-}
-
-function reconcileOptimisticMessage(messages: Message[], tempId: string, realMessage: Message): Message[] {
-  const optimisticMessage = messages.find(message => message.id === tempId)
-  const normalizedMessage: Message = {
-    ...realMessage,
-    is_from_me: true,
-    quoted_message_id: realMessage.quoted_message_id || optimisticMessage?.quoted_message_id,
-    quoted_body: realMessage.quoted_body || optimisticMessage?.quoted_body,
-    quoted_sender: realMessage.quoted_sender || optimisticMessage?.quoted_sender,
-    quoted_is_from_me: realMessage.quoted_is_from_me ?? optimisticMessage?.quoted_is_from_me,
-  }
-  const realAlreadyExists = messages.some(message => hasSameMessageIdentity(message, normalizedMessage))
-
-  if (realAlreadyExists) {
-    return messages
-      .filter(message => message.id !== tempId)
-      .map(message => hasSameMessageIdentity(message, normalizedMessage) ? normalizedMessage : message)
-  }
-
-  const tempExists = messages.some(message => message.id === tempId)
-  if (tempExists) {
-    return messages.map(message => message.id === tempId ? normalizedMessage : message)
-  }
-
-  return [...messages, normalizedMessage]
-}
-
-function mergeFetchedMessages(
-  current: Message[],
-  fetched: Message[],
-  hasPendingOwnReaction: (messageId: string) => boolean = () => false,
-): Message[] {
-  const merged = [...fetched]
-  for (const message of current) {
-    const index = merged.findIndex(candidate => hasSameMessageIdentity(candidate, message))
-    if (index >= 0) {
-      // Preserve live-only state (optimistic status, reactions, local media
-      // preview) while accepting any fields newly returned by the server.
-      const canonical = merged[index]
-      merged[index] = {
-        ...canonical,
-        ...message,
-        quoted_message_id: canonical.quoted_message_id ?? message.quoted_message_id,
-        quoted_body: canonical.quoted_body ?? message.quoted_body,
-        quoted_sender: canonical.quoted_sender ?? message.quoted_sender,
-        quoted_is_from_me: canonical.quoted_is_from_me ?? message.quoted_is_from_me,
-        sender: mergeMessageSender(canonical.sender, message.sender),
-        reactions: mergeCanonicalReactionSnapshot(
-          message.reactions,
-          canonical.reactions,
-          hasPendingOwnReaction(message.message_id),
-        ),
-      }
-    } else {
-      merged.push(message)
-    }
-  }
-  return merged.sort((left, right) => {
-    const timestampDelta = new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime()
-    return timestampDelta || left.id.localeCompare(right.id)
-  })
 }
 
 function useStableCallback<T extends (...args: any[]) => any>(callback: T): T {
@@ -288,6 +222,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const [pendingLatestMessages, setPendingLatestMessages] = useState(0)
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
+  const [historyError, setHistoryError] = useState('')
+  const [historyRetryMode, setHistoryRetryMode] = useState<'initial' | 'older'>('initial')
   const loadingMoreRef = useRef(false)
   const [hasMoreMessages, setHasMoreMessages] = useState(true)
   const [messageText, setMessageText] = useState('')
@@ -409,7 +345,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
   const updateMessages = useCallback((updater: Message[] | ((prev: Message[]) => Message[]), targetChatId = chatId) => {
     setMessages(prev => {
-      const nextMessages = typeof updater === 'function' ? updater(prev) : updater
+      const nextMessages = orderChatMessages(typeof updater === 'function' ? updater(prev) : updater)
       cacheMessages(targetChatId, nextMessages)
       return nextMessages
     })
@@ -1056,7 +992,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     if (!cached) return
     messagesCacheRef.current.set(targetChatId, {
       ...cached,
-      messages: updater(cached.messages),
+      messages: orderChatMessages(updater(cached.messages)),
     })
   }, [updateMessages])
 
@@ -1342,6 +1278,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
   useEffect(() => {
     activeChatIdRef.current = chatId
+    setHistoryError('')
     chatDetailsRequestRef.current?.abort()
     chatDetailsRequestSequenceRef.current += 1
     deviceRefreshRequestRef.current?.abort()
@@ -1417,7 +1354,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }
 
   useEffect(() => {
-    if (!chatId || !deviceId) return
+    if (!chatId) return
 
     const unsubscribe = subscribeWebSocket(
       (data: unknown) => {
@@ -1426,7 +1363,17 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         const eventType = msg.type || msg.event
         const payload = msg.data || msg.message
 
-        if (eventType === 'quick_reply_update' && payload) {
+        if (eventType === 'chat_deleted' && (payload?.all === true || Array.isArray(payload?.chat_ids) && payload.chat_ids.includes(chatId))) {
+          activeChatIdRef.current = null
+          chatDetailsRequestRef.current?.abort()
+          deviceRefreshRequestRef.current?.abort()
+          messagesCacheRef.current.delete(chatId)
+          draftCacheRef.current.delete(chatId)
+          setMessages([])
+          setChat(null)
+          setLoading(false)
+          onClose?.()
+        } else if (eventType === 'quick_reply_update' && payload) {
           const quickReplyPayload = payload as QuickReplyRealtimePayload
           const defaultReconciled = reconcileQuickReplyRealtime(
             quickReplyDefaultPageRef.current.replies,
@@ -1500,11 +1447,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                   return prev.map(message => {
                     if (!hasSameMessageIdentity(message, actualMessage)) return message
                     const pending = Boolean(reactionQueuesRef.current.get(reactionQueueKey(chatId, message.message_id))?.inFlight)
-                    return {
-                      ...actualMessage,
-                      sender: mergeMessageSender(actualMessage.sender, message.sender),
-                      reactions: mergeCanonicalReactionSnapshot(message.reactions, actualMessage.reactions, pending),
-                    }
+                    return mergeCanonicalMessage(message, actualMessage, pending)
                   })
                 }
                 // No optimistic message pending → safe to add (e.g. sent from another device)
@@ -1515,11 +1458,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                 return prev.map(message => {
                   if (!hasSameMessageIdentity(message, actualMessage)) return message
                   const pending = Boolean(reactionQueuesRef.current.get(reactionQueueKey(chatId, message.message_id))?.inFlight)
-                  return {
-                    ...actualMessage,
-                    sender: mergeMessageSender(actualMessage.sender, message.sender),
-                    reactions: mergeCanonicalReactionSnapshot(message.reactions, actualMessage.reactions, pending),
-                  }
+                  return mergeCanonicalMessage(message, actualMessage, pending)
                 })
               }
               // Incoming message → always add
@@ -1537,12 +1476,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
           updateMessages(prev => prev.map(m => {
             if (m.id !== actualMsg.id) return m
             const pending = Boolean(reactionQueuesRef.current.get(reactionQueueKey(chatId, m.message_id))?.inFlight)
-            return {
-              ...m,
-              ...canonicalMessage,
-              sender: mergeMessageSender(canonicalMessage.sender, m.sender),
-              reactions: mergeCanonicalReactionSnapshot(m.reactions, canonicalMessage.reactions, pending),
-            }
+            return mergeCanonicalMessage(m, canonicalMessage, pending)
           }))
         } else if (eventType === 'message_status' && payload) {
           // Update message delivery/read status (only upgrade, never downgrade)
@@ -1687,6 +1621,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 	const requestSequence = ++chatDetailsRequestSequenceRef.current
     const hasCachedMessages = messagesCacheRef.current.has(targetChatId)
     setLoading(!hasCachedMessages)
+    setHistoryError('')
+    setHistoryRetryMode('initial')
     const token = localStorage.getItem('token')
     let deviceWasValidated = false
     try {
@@ -1715,6 +1651,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       })
       const msgData = await msgRes.json()
 	  if (controller.signal.aborted || requestSequence !== chatDetailsRequestSequenceRef.current || activeChatIdRef.current !== targetChatId) return
+      if (!msgRes.ok || !msgData.success || !Array.isArray(msgData.messages)) throw new Error(msgData.error || 'No se pudo cargar el historial de mensajes.')
       if (msgData.success && msgData.messages) {
         const authoritativeMessages = reconcileAuthoritativeMessages(targetChatId, msgData.messages as Message[])
         const nextHasMore = authoritativeMessages.length >= 50
@@ -1755,6 +1692,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     } catch (error) {
 	  if (!controller.signal.aborted) {
         console.error('Failed to fetch chat', error)
+        if (activeChatIdRef.current === targetChatId) setHistoryError(error instanceof Error ? error.message : 'No se pudo cargar el historial de mensajes.')
         if (!deviceWasValidated && activeChatIdRef.current === targetChatId) {
           setCanonicalDevice(null)
           setValidatedDeviceChatId(targetChatId)
@@ -1788,6 +1726,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     const offset = targetMessages.filter(message => !message.id.startsWith('optimistic-')).length
     loadingMoreRef.current = true
     setLoadingMore(true)
+    setHistoryError('')
+    setHistoryRetryMode('older')
     const token = localStorage.getItem('token')
     try {
       const res = await fetch(`/api/chats/${targetChatId}/messages?limit=50&offset=${offset}`, {
@@ -1795,6 +1735,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       })
       const data = await res.json()
       if (activeChatIdRef.current !== targetChatId) return
+      if (!res.ok || !data.success || !Array.isArray(data.messages)) throw new Error(data.error || 'No se pudieron cargar los mensajes anteriores.')
       if (data.success && data.messages) {
         const authoritativeMessages = reconcileAuthoritativeMessages(targetChatId, data.messages as Message[])
         if (authoritativeMessages.length === 0) {
@@ -1824,6 +1765,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       }
     } catch (err) {
       console.error('Failed to load older messages', err)
+      if (activeChatIdRef.current === targetChatId) setHistoryError(err instanceof Error ? err.message : 'No se pudieron cargar los mensajes anteriores.')
     } finally {
       if (activeChatIdRef.current === targetChatId) {
         loadingMoreRef.current = false
@@ -1840,7 +1782,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     isNearBottomRef.current = nearBottom
     setIsFollowingLatest(current => current === nearBottom ? current : nearBottom)
     if (nearBottom) setPendingLatestMessages(0)
-    if (container.scrollTop < 80 && hasMoreMessages && !loadingMore && !loadingMoreRef.current) {
+    if (container.scrollTop < 80 && hasMoreMessages && !historyError && !loadingMore && !loadingMoreRef.current) {
       loadOlderMessages()
     }
   }
@@ -2081,7 +2023,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       return
     }
 
-    if (failedMsg.message_type && failedMsg.message_type !== 'text') {
+    const savedSticker = failedMsg.message_type === 'sticker' && Boolean(failedMsg.media_url)
+    if (failedMsg.message_type && failedMsg.message_type !== 'text' && !savedSticker) {
       setComposerFeedback({ kind: 'error', message: 'El archivo original ya no está disponible. Vuelve a adjuntarlo.' })
       return
     }
@@ -2101,6 +2044,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
           chat_id: targetChatId,
           to: targetChatJid,
           body: failedMsg.body,
+          media_url: savedSticker ? failedMsg.media_url : undefined,
+          media_type: savedSticker ? 'sticker' : undefined,
           quoted_message_id: failedMsg.quoted_message_id,
           quoted_body: failedMsg.quoted_body,
           quoted_sender: failedMsg.quoted_sender,
@@ -2791,8 +2736,9 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
   if (!chat) {
       return (
-          <div className={`flex items-center justify-center bg-slate-50 h-full ${className}`}>
-             <p className="text-slate-500">Chat no encontrado</p>
+          <div className={`flex flex-col items-center justify-center gap-3 bg-slate-50 h-full ${className}`}>
+             <p className="text-slate-500" role={historyError ? 'alert' : undefined}>{historyError || 'Chat no encontrado'}</p>
+             {historyError && <button type="button" onClick={() => void fetchChatDetails()} className="min-h-11 rounded-xl px-4 text-sm font-semibold text-emerald-700 hover:bg-emerald-50">Reintentar historial</button>}
           </div>
       )
   }
@@ -2976,7 +2922,15 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 	           </div>
 	         )}
 
-	         {historySyncFeedback && (
+         {historyError && (
+           <div role="alert" className="flex shrink-0 items-center gap-2 border-b border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+             <AlertCircle className="h-4 w-4 shrink-0" />
+             <span className="min-w-0 flex-1">{historyError}</span>
+             <button type="button" disabled={loading || loadingMore} onClick={() => void (historyRetryMode === 'older' ? loadOlderMessages() : fetchChatDetails())} className="min-h-11 shrink-0 rounded-lg px-3 font-semibold hover:bg-red-100 disabled:opacity-50">Reintentar historial</button>
+           </div>
+         )}
+
+         {historySyncFeedback && (
 	           <div role={historySyncFeedback.kind === 'error' ? 'alert' : 'status'} className={`flex shrink-0 items-center gap-2 border-b px-3 py-2 text-xs ${historySyncFeedback.kind === 'error' ? 'border-red-200 bg-red-50 text-red-700' : 'border-blue-200 bg-blue-50 text-blue-700'}`}>
 	             {syncingHistory ? <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin" /> : historySyncFeedback.kind === 'error' ? <AlertCircle className="h-3.5 w-3.5 shrink-0" /> : <Check className="h-3.5 w-3.5 shrink-0" />}
 	             <span className="min-w-0 flex-1">{historySyncFeedback.message}</span>

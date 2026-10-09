@@ -117,6 +117,19 @@ export interface ContactAvatarMenuPosition {
   maxHeight: number
 }
 
+export function contactAvatarCanvasDisplacement(
+  delta: { x: number; y: number },
+  canvas: { width: number; height: number },
+  displayed: { width: number; height: number },
+): { x: number; y: number } | null {
+  if (![delta.x, delta.y, canvas.width, canvas.height, displayed.width, displayed.height].every(Number.isFinite)
+    || canvas.width <= 0 || canvas.height <= 0 || displayed.width <= 0 || displayed.height <= 0) return null
+  return {
+    x: delta.x * canvas.width / displayed.width,
+    y: delta.y * canvas.height / displayed.height,
+  }
+}
+
 export function contactAvatarMenuPosition(
   anchor: ContactAvatarMenuAnchor,
   measuredHeight: number,
@@ -169,8 +182,8 @@ export default function ContactAvatarControl({
   const [candidate, setCandidate] = useState<AvatarCandidate | null>(null)
   const [previewEmpty, setPreviewEmpty] = useState<{ code?: string; message: string } | null>(null)
   const [selectedDevice, setSelectedDevice] = useState('')
-  const [editorURL, setEditorURL] = useState('')
   const [editorImage, setEditorImage] = useState<HTMLImageElement | null>(null)
+  const [editorLoading, setEditorLoading] = useState(false)
   const [transform, setTransform] = useState<ImageTransform>(initialTransform)
   const [history, setHistory] = useState<ImageTransform[]>([])
   const [dragging, setDragging] = useState(false)
@@ -188,6 +201,8 @@ export default function ContactAvatarControl({
   const operationRequestRef = useRef(0)
   const operationControllerRef = useRef<AbortController | null>(null)
   const filePickerIdentityRef = useRef('')
+  const editorLoadGenerationRef = useRef(0)
+  const editorResourceRef = useRef<{ image: HTMLImageElement; url: string } | null>(null)
   const busyRef = useRef(false)
   const authScope = useSyncExternalStore(subscribeAuthScope, getAuthScope, () => 'server')
   const identityKey = `${authScope}:${contactId}:${contextType}:${contextId}`
@@ -245,6 +260,29 @@ export default function ContactAvatarControl({
       && operation.identity.startsWith(`${getAuthScope()}:`) && !isAuthIdentityChanging()
   ), [])
 
+  const releaseEditorResource = useCallback(() => {
+    editorLoadGenerationRef.current++
+    const resource = editorResourceRef.current
+    editorResourceRef.current = null
+    if (resource) {
+      resource.image.onload = null
+      resource.image.onerror = null
+      resource.image.src = ''
+      URL.revokeObjectURL(resource.url)
+    }
+    const canvas = canvasRef.current
+    if (canvas) canvas.width = canvas.width
+  }, [])
+
+  const resetEditor = useCallback(() => {
+    releaseEditorResource()
+    setEditorImage(null)
+    setEditorLoading(false)
+    setTransform(initialTransform)
+    setHistory([])
+    setDragging(false)
+  }, [releaseEditorResource])
+
   useEffect(() => {
     identityRef.current = identityKey
     operationRequestRef.current++
@@ -265,11 +303,7 @@ export default function ContactAvatarControl({
     setPreviewEmpty(null)
     setSelectedDevice('')
     filePickerIdentityRef.current = ''
-    setEditorImage(null)
-    setEditorURL('')
-    setTransform(initialTransform)
-    setHistory([])
-    setDragging(false)
+    resetEditor()
     if (isAuthIdentityChanging(authScope)) return () => controller.abort()
     void api<AvatarMetadataResponse>(`/api/contact-avatars/${contactId}?${contextQuery}`, {
       signal: controller.signal,
@@ -285,8 +319,9 @@ export default function ContactAvatarControl({
       operationRequestRef.current++
       operationControllerRef.current?.abort()
       cancelMenuFrames()
+      releaseEditorResource()
     }
-  }, [contactId, contextQuery, identityKey, updateBusy, authScope, cancelMenuFrames])
+  }, [contactId, contextQuery, identityKey, updateBusy, authScope, cancelMenuFrames, resetEditor, releaseEditorResource])
 
   useEffect(() => {
     setAvatar(previous => previous.avatar_url === avatarUrl ? previous : { ...previous, avatar_url: avatarUrl })
@@ -383,20 +418,14 @@ export default function ContactAvatarControl({
     popup.querySelector<HTMLButtonElement>('[role="menuitem"]:not([disabled])')?.focus({ preventScroll: true })
   }, [menuOpen, menuPosition, authScope])
 
-  useEffect(() => {
-    return () => {
-      if (editorURL.startsWith('blob:')) URL.revokeObjectURL(editorURL)
-    }
-  }, [editorURL])
-
   const closeDialog = useCallback(() => {
     if (busyRef.current) return
+    resetEditor()
     setDialog('none')
     setCandidate(null)
     setPreviewEmpty(null)
     setError('')
-    setDragging(false)
-  }, [])
+  }, [resetEditor])
 
   useEffect(() => {
     if (!dialogOpen) return
@@ -530,23 +559,25 @@ export default function ContactAvatarControl({
   }
 
   const loadEditorFile = (file: File) => {
-    if (filePickerIdentityRef.current !== identityRef.current) return
+    if (filePickerIdentityRef.current !== identityRef.current || busyRef.current || isAuthIdentityChanging()) return
+    resetEditor()
+    setError('')
+    setDialog('editor')
     if (!['image/jpeg', 'image/png'].includes(file.type) || file.size > 8 * 1024 * 1024) {
-      setEditorImage(null)
       setError('Usa una imagen JPEG o PNG de hasta 8 MB')
-      setDialog('editor')
       return
     }
     const operation = beginOperation()
-    if (editorURL.startsWith('blob:')) URL.revokeObjectURL(editorURL)
+    const generation = editorLoadGenerationRef.current
     const objectURL = URL.createObjectURL(file)
     const image = new Image()
+    editorResourceRef.current = { image, url: objectURL }
+    setEditorLoading(true)
+    const loadIsCurrent = () => generation === editorLoadGenerationRef.current
+      && editorResourceRef.current?.image === image && operationIsCurrent(operation)
     image.onload = () => {
-      if (!operationIsCurrent(operation)) {
-        URL.revokeObjectURL(objectURL)
-        return
-      }
-      setEditorURL(objectURL)
+      if (!loadIsCurrent()) return
+      setEditorLoading(false)
       setEditorImage(image)
       setTransform(initialTransform)
       setHistory([])
@@ -554,10 +585,9 @@ export default function ContactAvatarControl({
       setDialog('editor')
     }
     image.onerror = () => {
-      URL.revokeObjectURL(objectURL)
-      if (!operationIsCurrent(operation)) return
+      if (!loadIsCurrent()) return
+      resetEditor()
       setError('No se pudo leer la imagen')
-      setDialog('editor')
     }
     image.src = objectURL
   }
@@ -586,7 +616,7 @@ export default function ContactAvatarControl({
     context.restore()
   }, [editorImage, transform])
 
-  useEffect(() => drawEditor(), [drawEditor])
+  useEffect(() => { if (dialog === 'editor') drawEditor() }, [dialog, drawEditor])
 
   const rememberAndSet = (next: ImageTransform) => {
     setHistory(previous => [...previous.slice(-9), transform])
@@ -615,9 +645,13 @@ export default function ContactAvatarControl({
 
   const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (!dragging) return
-    const deltaX = event.clientX - dragRef.current.x
-    const deltaY = event.clientY - dragRef.current.y
-    setTransform(previous => ({ ...previous, offsetX: dragRef.current.startX + deltaX, offsetY: dragRef.current.startY + deltaY }))
+    const delta = contactAvatarCanvasDisplacement(
+      { x: event.clientX - dragRef.current.x, y: event.clientY - dragRef.current.y },
+      event.currentTarget,
+      event.currentTarget.getBoundingClientRect(),
+    )
+    if (!delta) return
+    setTransform(previous => ({ ...previous, offsetX: dragRef.current.startX + delta.x, offsetY: dragRef.current.startY + delta.y }))
   }
 
   const exportEditorBlob = async (signal: AbortSignal): Promise<Blob | null> => {
@@ -660,7 +694,7 @@ export default function ContactAvatarControl({
         return
       }
       publishAvatar(result.data.avatar)
-      setDialog('none')
+      closeDialog()
     } catch (failure) {
       if (operationIsCurrent(operation)) setError(failure instanceof Error ? failure.message : 'No se pudo preparar la imagen. Vuelve a intentarlo.')
     } finally {
@@ -816,6 +850,8 @@ export default function ContactAvatarControl({
               </button>
             </div>
 
+            {error && <div role="alert" className="mx-5 mt-4 shrink-0 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-700">{error}</div>}
+
             <div className="overflow-y-auto p-5">
               {dialog === 'device' && (
                 <div className="space-y-3">
@@ -884,6 +920,7 @@ export default function ContactAvatarControl({
                         onPointerCancel={() => setDragging(false)}
                         className={`h-full w-full touch-none ${dragging ? 'cursor-grabbing' : 'cursor-grab'}`}
                       />
+                      {editorLoading && <div role="status" className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 bg-slate-200 text-sm text-slate-600"><Loader2 className="h-5 w-5 animate-spin" /> Preparando imagen…</div>}
                       <div className="pointer-events-none absolute inset-[7%] rounded-full border-2 border-white/90 shadow-[0_0_0_999px_rgba(15,23,42,0.32)]" />
                     </div>
                     <p className="mt-2 text-center text-xs text-slate-500">Arrastra para encuadrar. La guía circular muestra cómo se verá en las listas.</p>
@@ -909,7 +946,6 @@ export default function ContactAvatarControl({
                 </div>
               )}
 
-              {error && <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-700">{error}</div>}
             </div>
 
             <div className="flex min-h-16 items-center justify-end gap-2 border-t border-slate-200 bg-slate-50/70 px-5">

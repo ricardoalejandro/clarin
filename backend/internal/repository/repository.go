@@ -1660,7 +1660,11 @@ func setChatIdentityState(chat *domain.Chat) {
 	chat.IdentityPending = strings.HasSuffix(strings.ToLower(strings.TrimSpace(chat.JID)), "@lid")
 }
 
-func findContactAliasID(ctx context.Context, db *pgxpool.Pool, accountID uuid.UUID, jid, phone string) (*uuid.UUID, error) {
+type contactIdentityQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func findContactAliasID(ctx context.Context, db contactIdentityQuerier, accountID uuid.UUID, jid, phone string) (*uuid.UUID, error) {
 	normalizedJID := strings.ToLower(strings.TrimSpace(jid))
 	normalizedPhone := normalizeAliasValue("phone", firstNonEmptyPlain(phone, phoneFromJID(jid)))
 	if normalizedJID == "" && normalizedPhone == "" {
@@ -1687,7 +1691,7 @@ func findContactAliasID(ctx context.Context, db *pgxpool.Pool, accountID uuid.UU
 	return &contactID, nil
 }
 
-func contactIdentityConflictsWithOwner(ctx context.Context, db *pgxpool.Pool, accountID, ownerID uuid.UUID, jid, phone string) (bool, error) {
+func contactIdentityConflictsWithOwner(ctx context.Context, db contactIdentityQuerier, accountID, ownerID uuid.UUID, jid, phone string) (bool, error) {
 	normalizedJID := strings.ToLower(strings.TrimSpace(jid))
 	normalizedPhone := normalizeAliasValue("phone", firstNonEmptyPlain(phone, phoneFromJID(jid)))
 	if normalizedJID == "" && normalizedPhone == "" {
@@ -2858,7 +2862,7 @@ func (r *ContactRepository) GetByAccountIDWithFilters(ctx context.Context, accou
 		if filter.SortOrder == "desc" {
 			ord = "DESC"
 		}
-		selectQuery += " ORDER BY COALESCE(NULLIF(c.push_name,''), c.jid) " + ord + ", c.updated_at DESC"
+		selectQuery += " ORDER BY LOWER(COALESCE(NULLIF(BTRIM(c.custom_name),''), NULLIF(BTRIM(c.name),''), NULLIF(BTRIM(c.push_name),''), NULLIF(BTRIM(c.phone),''), c.jid)) " + ord + ", c.id ASC"
 	case "lead_count":
 		ord := "DESC"
 		if filter.SortOrder == "asc" {

@@ -15,6 +15,7 @@ import FormulaEditor from '@/components/FormulaEditor'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 import { resolveEventsResponsiveLayout, type EventsViewMode } from '@/lib/eventsResponsive'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
+import { eventDetailPayload, eventLocalDateTime, isEventContextReadOnly } from './eventForm'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -537,6 +538,7 @@ export default function EventsPage() {
   }
 
   const openEditEvent = async (ev: Event) => {
+    if (isEventContextReadOnly(ev.status)) return
     // Fetch tags for this event
     let includeIds: string[] = []
     let excludeIds: string[] = []
@@ -568,8 +570,8 @@ export default function EventsPage() {
     setFormData({
       name: ev.name,
       description: ev.description || '',
-      event_date: ev.event_date ? new Date(ev.event_date).toISOString().slice(0, 16) : '',
-      event_end: ev.event_end ? new Date(ev.event_end).toISOString().slice(0, 16) : '',
+      event_date: eventLocalDateTime(ev.event_date),
+      event_end: eventLocalDateTime(ev.event_end),
       location: ev.location || '',
       color: ev.color,
       status: ev.status,
@@ -644,12 +646,7 @@ export default function EventsPage() {
     delete body.exclude_tag_ids
     delete body.tag_formula
     delete body.tag_formula_type
-    if (formData.event_date) body.event_date = new Date(formData.event_date).toISOString()
-    else delete body.event_date
-    if (formData.event_end) body.event_end = new Date(formData.event_end).toISOString()
-    else delete body.event_end
-    if (!formData.description) delete body.description
-    if (!formData.location) delete body.location
+    Object.assign(body, eventDetailPayload(formData))
     if (currentFolderID) body.folder_id = currentFolderID
     // Build rule-governed active events as draft -> saved rule -> active. This
     // prevents an observable interval where the event is active without the
@@ -712,10 +709,10 @@ export default function EventsPage() {
     if (!editEvent || savingEvent) return
     setSavingEvent(true)
     try {
-    const frozen = editEvent.status === 'completed' || editEvent.status === 'cancelled'
-    if (frozen && formData.status !== editEvent.status) {
-      throw new Error('Los eventos completados o cancelados son definitivos y no se pueden reabrir.')
-    }
+    const frozen = isEventContextReadOnly(editEvent.status)
+    if (frozen) throw new Error('El evento está cerrado y conserva su historial de solo lectura.')
+    // Validate the complete draft before rule previews or any mutation.
+    const detailPayload = eventDetailPayload(formData, editEvent)
     const activatesDraft = editEvent.status === 'draft' && formData.status === 'active'
     const closesEvent = !frozen && (formData.status === 'completed' || formData.status === 'cancelled')
     const impact = frozen ? null : await previewRuleChange(editEvent.id)
@@ -734,12 +731,7 @@ export default function EventsPage() {
     delete body.exclude_tag_ids
     delete body.tag_formula
     delete body.tag_formula_type
-    if (formData.event_date) body.event_date = new Date(formData.event_date).toISOString()
-    else delete body.event_date
-    if (formData.event_end) body.event_end = new Date(formData.event_end).toISOString()
-    else delete body.event_end
-    if (!formData.description) delete body.description
-    if (!formData.location) delete body.location
+    Object.assign(body, detailPayload)
 
     const res = await fetch(`/api/events/${editEvent.id}`, {
       method: 'PUT',
@@ -1581,7 +1573,7 @@ export default function EventsPage() {
                         {menuEventID === ev.id && (
                           <div role="menu" className="fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[70] max-h-[75vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl">
                             <button type="button" onClick={() => { router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Eye className="h-4 w-4" />Ver detalle</button>
-                            <button type="button" onClick={() => { openEditEvent(ev); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Edit2 className="h-4 w-4" />Editar</button>
+                            <button type="button" disabled={isEventContextReadOnly(ev.status)} title={isEventContextReadOnly(ev.status) ? 'Evento cerrado: solo lectura' : 'Editar'} onClick={() => { openEditEvent(ev); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Edit2 className="h-4 w-4" />Editar</button>
                             <button type="button" onClick={() => { void handleDuplicateEvent(ev.id); setMenuEventID(null) }} disabled={duplicatingEventID === ev.id} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"><Copy className="h-4 w-4" />Duplicar</button>
                             <p className="mt-1 border-t border-slate-100 px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Mover a carpeta</p>
                             {ev.folder_id && <button type="button" onClick={() => { void moveEventToFolder(ev.id, null); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Home className="h-4 w-4" />Sin carpeta</button>}
@@ -1695,7 +1687,7 @@ export default function EventsPage() {
                             </div>
                           )}
                         </div>
-                        <button onClick={e => { e.stopPropagation(); openEditEvent(ev) }}
+                        <button disabled={isEventContextReadOnly(ev.status)} title={isEventContextReadOnly(ev.status) ? 'Evento cerrado: solo lectura' : 'Editar'} onClick={e => { e.stopPropagation(); openEditEvent(ev) }}
                           className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" aria-label={`Editar ${ev.name}`}>
                           <Edit2 className="w-4 h-4" />
                         </button>
@@ -1735,7 +1727,7 @@ export default function EventsPage() {
                 <div className="p-3.5">
                   <div className="flex items-start justify-between gap-1">
                     <p className="text-sm font-semibold text-slate-800 leading-snug line-clamp-2 flex-1">{ev.name}</p>
-                    <button onClick={e => { e.stopPropagation(); openEditEvent(ev) }}
+                    <button disabled={isEventContextReadOnly(ev.status)} title={isEventContextReadOnly(ev.status) ? 'Evento cerrado: solo lectura' : 'Editar'} onClick={e => { e.stopPropagation(); openEditEvent(ev) }}
                       className="touch-menu-hidden opacity-0 group-hover:opacity-100 flex-shrink-0 p-0.5 text-slate-400 hover:text-slate-600 rounded">
                       <Edit2 className="w-3.5 h-3.5" />
                     </button>
@@ -1772,7 +1764,7 @@ export default function EventsPage() {
                       {menuEventID === ev.id && (
                         <div role="menu" className="fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[70] max-h-[75vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl" onClick={e => e.stopPropagation()}>
                           <button type="button" onClick={() => { router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Eye className="h-4 w-4" />Ver detalle</button>
-                          <button type="button" onClick={() => { openEditEvent(ev); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Edit2 className="h-4 w-4" />Editar</button>
+                          <button type="button" disabled={isEventContextReadOnly(ev.status)} title={isEventContextReadOnly(ev.status) ? 'Evento cerrado: solo lectura' : 'Editar'} onClick={() => { openEditEvent(ev); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Edit2 className="h-4 w-4" />Editar</button>
                           <button type="button" onClick={() => { void handleDuplicateEvent(ev.id); setMenuEventID(null) }} disabled={duplicatingEventID === ev.id} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"><Copy className="h-4 w-4" />Duplicar</button>
                           <p className="mt-1 border-t border-slate-100 px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Mover a carpeta</p>
                           {ev.folder_id && <button type="button" onClick={() => { void moveEventToFolder(ev.id, null); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Home className="h-4 w-4" />Sin carpeta</button>}
@@ -1853,7 +1845,7 @@ export default function EventsPage() {
                               className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
                               <Eye className="w-3.5 h-3.5" /> Ver detalle
                             </button>
-                            <button onClick={() => { openEditEvent(ev); setMenuEventID(null) }}
+                            <button disabled={isEventContextReadOnly(ev.status)} title={isEventContextReadOnly(ev.status) ? 'Evento cerrado: solo lectura' : 'Editar'} onClick={() => { openEditEvent(ev); setMenuEventID(null) }}
                               className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
                               <Edit2 className="w-3.5 h-3.5" /> Editar
                             </button>
@@ -1937,7 +1929,7 @@ export default function EventsPage() {
                       <Eye className="w-3.5 h-3.5" />
                       Ver detalle
                     </button>
-                    <button onClick={() => openEditEvent(ev)}
+                    <button disabled={isEventContextReadOnly(ev.status)} title={isEventContextReadOnly(ev.status) ? 'Evento cerrado: solo lectura' : 'Editar'} onClick={() => openEditEvent(ev)}
                       className="flex h-11 w-11 items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors" aria-label={`Editar ${ev.name}`}>
                       <Edit2 className="w-4 h-4" />
                     </button>

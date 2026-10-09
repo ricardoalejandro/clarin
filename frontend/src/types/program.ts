@@ -273,8 +273,8 @@ export interface ProgramHealthParticipant {
   avatar_revision?: number;
   status: 'active' | 'dropped' | 'completed';
   enrolled_at?: string;
-  health: 'healthy' | 'watch' | 'critical';
-  attendance_rate: number;
+  health: 'healthy' | 'watch' | 'critical' | 'no_data';
+  attendance_rate: number | null;
   present: number;
   late: number;
   absent: number;
@@ -311,7 +311,7 @@ export interface ProgramParticipantAttendanceStat {
   total_sessions: number;
   marked_sessions: number;
   pending: number;
-  rate: number;
+  rate: number | null;
 }
 
 export interface ProgramAttendanceStatsResponse {
@@ -333,9 +333,9 @@ export interface ProgramHealthSummary {
   transferred_count: number;
   session_count: number;
   recovery_session_count: number;
-  attendance_rate: number;
+  attendance_rate: number | null;
   transfer_rate: number;
-  health: 'healthy' | 'watch' | 'critical';
+  health: 'healthy' | 'watch' | 'critical' | 'no_data';
   reasons: string[];
   participants: ProgramHealthParticipant[];
 }
@@ -351,12 +351,12 @@ export interface ProgramDashboardGroup {
   dropped_count: number;
   transferred_count: number;
   session_count: number;
-  attendance_rate: number;
+  attendance_rate: number | null;
   transfer_rate: number;
   attendance_goal_percent: number;
   transfer_goal_percent: number;
   at_risk_count: number;
-  health: 'healthy' | 'watch' | 'critical';
+  health: 'healthy' | 'watch' | 'critical' | 'no_data';
 }
 
 export interface ProgramDashboardSummary {
@@ -370,7 +370,7 @@ export interface ProgramDashboardSummary {
   completed_count: number;
   dropped_count: number;
   transferred_count: number;
-  attendance_rate: number;
+  attendance_rate: number | null;
   transfer_rate: number;
   groups_below_goal: number;
   critical_participants: number;

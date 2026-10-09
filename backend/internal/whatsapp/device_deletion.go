@@ -131,6 +131,9 @@ func (p *DevicePool) DeleteDevice(ctx context.Context, accountID, deviceID uuid.
 		if readErr != nil {
 			return nil, readErr
 		}
+		if waDevice == nil && p.hasAvailableSession(jid) {
+			return nil, repository.ErrDeviceSessionConflict
+		}
 		fingerprint = deviceSessionFingerprint(waDevice)
 	}
 	result, err := p.repos.Device.BeginDeletion(ctx, accountID, deviceID, jid, fingerprint)
@@ -141,6 +144,36 @@ func (p *DevicePool) DeleteDevice(ctx context.Context, accountID, deviceID uuid.
 	p.broadcastDeviceDeletion(accountID, result)
 	p.startDeletionWorkers()
 	return result, nil
+}
+
+// A database store can be missing while a client still retains session keys.
+// Local-only cleanup must never discard or take ownership of that session.
+func (p *DevicePool) hasAvailableSession(jid string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, instance := range p.devices {
+		instance.mu.RLock()
+		client := instance.Client
+		available := client != nil && client.Store != nil && client.Store.ID != nil && client.Store.ID.String() == jid
+		instance.mu.RUnlock()
+		if available {
+			return true
+		}
+	}
+	return false
+}
+
+func finishMissingDeviceSession(job *repository.DeviceDeletion, available bool, checkpoint func() error, finish func() (*domain.DeviceDeletionResult, error)) (*domain.DeviceDeletionResult, error) {
+	if available {
+		return nil, repository.ErrDeviceSessionConflict
+	}
+	if job.Phase != "remote_unlinked" {
+		if err := checkpoint(); err != nil {
+			return nil, err
+		}
+		job.Phase = "local_detached"
+	}
+	return finish()
 }
 
 func (p *DevicePool) suspendDeletedDevice(deviceID uuid.UUID) {
@@ -315,7 +348,7 @@ func (p *DevicePool) cleanupDeletedDevice(ctx context.Context, job *repository.D
 		return nil, err
 	}
 	if job.JID == "" {
-		return p.repos.Device.FinishDeletion(ctx, job)
+		return p.repos.Device.FinishLocalDeletion(ctx, job, conn)
 	}
 	jid, err := types.ParseJID(job.JID)
 	if err != nil {
@@ -326,10 +359,17 @@ func (p *DevicePool) cleanupDeletedDevice(ctx context.Context, job *repository.D
 		return nil, err
 	}
 	if waDevice == nil {
-		if job.Phase != "remote_unlinked" {
-			return nil, errDeletionSessionMissing
-		}
-		return p.repos.Device.FinishDeletion(ctx, job)
+		return finishMissingDeviceSession(job, p.hasAvailableSession(job.JID), func() error {
+			return p.repos.Device.CheckpointLocalDetachment(ctx, job, conn)
+		}, func() (*domain.DeviceDeletionResult, error) {
+			if job.Phase == "local_detached" {
+				return p.repos.Device.FinishLocalDeletion(ctx, job, conn)
+			}
+			return p.repos.Device.FinishDeletion(ctx, job)
+		})
+	}
+	if job.Phase == "local_detached" {
+		return nil, repository.ErrDeviceSessionConflict
 	}
 	if job.Fingerprint == "" || deviceSessionFingerprint(waDevice) != job.Fingerprint {
 		return nil, repository.ErrDeviceSessionConflict

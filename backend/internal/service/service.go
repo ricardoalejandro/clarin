@@ -1269,9 +1269,7 @@ func (s *ChatService) CreateAndLinkContact(ctx context.Context, accountID, chatI
 }
 
 func (s *ChatService) GetMessages(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*domain.Message, error) {
-	if limit <= 0 {
-		limit = 50
-	}
+	limit, offset = NormalizeMessagePagination(limit, offset)
 	return s.repos.Message.GetByChatID(ctx, chatID, limit, offset)
 }
 

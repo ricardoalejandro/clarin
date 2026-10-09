@@ -108,8 +108,7 @@ export function ProgramSettingsDialog({
   if (!open || !program || !draft || !canonicalProgram || typeof document === 'undefined') return null;
 
   const toggleColumn = (column: ProgramHealthViewColumn) => {
-    setError('');
-    setConflict(false);
+    if (!conflict) setError('');
     setDraft(current => {
       if (!current) return current;
       const selected = current.healthViewColumns.includes(column)
@@ -141,7 +140,7 @@ export function ProgramSettingsDialog({
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
-    if (!draft.name.trim() || saving) return;
+    if (!draft.name.trim() || saving || reloading || conflict) return;
     setSaving(true);
     setError('');
     setConflict(false);
@@ -322,7 +321,7 @@ export function ProgramSettingsDialog({
 
           <footer className="flex shrink-0 gap-3 border-t border-slate-200 bg-white px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-4 sm:justify-end sm:px-6 sm:pb-4">
             <button type="button" onClick={requestClose} disabled={saving || reloading} className="min-h-11 flex-1 rounded-xl px-4 font-medium text-slate-700 transition hover:bg-slate-100 disabled:opacity-50 sm:flex-none">Cancelar</button>
-            <button type="submit" disabled={saving || reloading || !draft.name.trim() || !dirty} className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 font-medium text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none">
+            <button type="submit" disabled={saving || reloading || conflict || !draft.name.trim() || !dirty} className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 font-medium text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none">
               {saving && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
               {saving ? 'Guardando…' : 'Guardar cambios'}
             </button>

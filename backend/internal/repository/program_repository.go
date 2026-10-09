@@ -77,12 +77,18 @@ func (r *ProgramRepository) Create(ctx context.Context, p *domain.Program) error
 	INSERT INTO programs (account_id, type, name, description, status, color, created_by, folder_id,
 	schedule_start_date, schedule_end_date, schedule_days, schedule_start_time, schedule_end_time,
 	pipeline_id, tag_formula, tag_formula_mode, tag_formula_type, event_date, event_end, location, health_view_columns)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+	SELECT $1, $2, $3, $4, $5, $6, $7, $8::uuid, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+	WHERE $8::uuid IS NULL OR EXISTS (
+		SELECT 1 FROM program_folders WHERE account_id = $1 AND id = $8::uuid
+	)
 	RETURNING id, created_at, updated_at
 `, p.AccountID, p.Type, p.Name, p.Description, p.Status, p.Color, p.CreatedBy, p.FolderID,
 		p.ScheduleStartDate, p.ScheduleEndDate, p.ScheduleDays, p.ScheduleStartTime, p.ScheduleEndTime,
 		p.PipelineID, p.TagFormula, p.TagFormulaMode, p.TagFormulaType, p.EventDate, p.EventEnd, p.Location, p.HealthViewColumns,
 	).Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrProgramFolderDestinationInvalid
+	}
 	return err
 }
 
@@ -932,7 +938,7 @@ func orderedAttendanceBatch(attendances []*domain.ProgramAttendance) []*domain.P
 	return ordered
 }
 
-func (r *ProgramRepository) BatchMarkAttendance(ctx context.Context, accountID, _ uuid.UUID, programID, sessionID uuid.UUID, attendances []*domain.ProgramAttendance) error {
+func (r *ProgramRepository) BatchMarkAttendance(ctx context.Context, accountID, userID uuid.UUID, programID, sessionID uuid.UUID, attendances []*domain.ProgramAttendance) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -1005,6 +1011,13 @@ func (r *ProgramRepository) BatchMarkAttendance(ctx context.Context, accountID, 
 	}
 
 	for _, a := range orderedAttendances {
+		// The legacy notes payload is an observation too. Persist it alongside
+		// status in this transaction; omitted/empty notes never erase history.
+		if a.Notes != nil && strings.TrimSpace(*a.Notes) != "" {
+			if err := persistLegacyAttendanceNote(ctx, tx, accountID, userID, programID, sessionID, a.ParticipantID, *a.Notes); err != nil {
+				return err
+			}
+		}
 		if a.Status == "" {
 			var hasObservations bool
 			if err := tx.QueryRow(ctx, `
@@ -1044,6 +1057,36 @@ func (r *ProgramRepository) BatchMarkAttendance(ctx context.Context, accountID, 
 	}
 
 	return tx.Commit(ctx)
+}
+
+// The latest canonical observation makes retries of the legacy snapshot
+// idempotent without changing the append-only observation API.
+func persistLegacyAttendanceNote(ctx context.Context, tx pgx.Tx, accountID, userID, programID, sessionID, participantID uuid.UUID, notes string) error {
+	notes = strings.TrimSpace(notes)
+	var previous *string
+	err := tx.QueryRow(ctx, `SELECT notes FROM interactions
+		WHERE account_id=$1 AND type='attendance' AND program_id=$2
+		  AND program_session_id=$3 AND program_participant_id=$4
+		ORDER BY created_at DESC, id DESC LIMIT 1`, accountID, programID, sessionID, participantID).Scan(&previous)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if previous == nil || *previous != notes {
+		contactID, sourceLabel, err := attendanceObservationContext(ctx, tx, accountID, programID, sessionID, participantID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO interactions (
+			account_id, contact_id, type, notes, created_by,
+			program_id, program_session_id, program_participant_id, source_label
+		) VALUES ($1,$2,'attendance',$3,$4,$5,$6,$7,$8)`, accountID, contactID, notes, userID, programID, sessionID, participantID, sourceLabel); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO program_attendance (session_id,participant_id,status,notes)
+		VALUES($1,$2,NULL,$3) ON CONFLICT(session_id,participant_id) DO UPDATE
+		SET notes=EXCLUDED.notes, updated_at=NOW()`, sessionID, participantID, notes)
+	return err
 }
 
 func (r *ProgramRepository) GetSessionRoster(ctx context.Context, accountID, programID, sessionID uuid.UUID) ([]*domain.ProgramSessionRosterEntry, error) {
@@ -2243,7 +2286,7 @@ func (r *ProgramRepository) GetAttendanceStats(ctx context.Context, accountID, p
 			stat.Pending = 0
 		}
 		if stat.MarkedSessions > 0 {
-			stat.Rate = float64(stat.Present+stat.Late) / float64(stat.MarkedSessions) * 100
+			stat.Rate = programAttendancePercent(stat.Present+stat.Late, stat.MarkedSessions)
 		}
 		participantStats = append(participantStats, stat)
 	}
@@ -2627,13 +2670,16 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 			p.Pending = 0
 		}
 		if p.MarkedSessions > 0 {
-			p.AttendanceRate = float64(p.Present+p.Late) / float64(p.MarkedSessions) * 100
+			p.AttendanceRate = programAttendancePercent(p.Present+p.Late, p.MarkedSessions)
 		}
 		unresolvedAbsences := p.Absent - p.RecoverySessions
 		if unresolvedAbsences < 0 {
 			unresolvedAbsences = 0
 		}
 		p.Health = "healthy"
+		if p.MarkedSessions == 0 {
+			p.Health = "no_data"
+		}
 		if unresolvedAbsences >= 2 {
 			p.Health = "critical"
 			p.Reasons = append(p.Reasons, fmt.Sprintf("%d faltas no regularizadas", unresolvedAbsences))
@@ -2641,7 +2687,7 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 			p.Health = "watch"
 			p.Reasons = append(p.Reasons, "una falta pendiente")
 		}
-		if p.MarkedSessions > 0 && p.AttendanceRate < float64(goal.AttendanceGoalPercent) && p.Health == "healthy" {
+		if p.AttendanceRate != nil && *p.AttendanceRate < float64(goal.AttendanceGoalPercent) && p.Health == "healthy" {
 			p.Health = "watch"
 			p.Reasons = append(p.Reasons, "asistencia bajo la meta")
 		}
@@ -2655,7 +2701,11 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 			if p.Pending > 0 {
 				p.Reasons = append(p.Reasons, fmt.Sprintf("%d sesiones pendientes de registrar", p.Pending))
 			} else {
-				p.Reasons = append(p.Reasons, "sin alertas")
+				if p.MarkedSessions == 0 {
+					p.Reasons = append(p.Reasons, "sin asistencia registrada")
+				} else {
+					p.Reasons = append(p.Reasons, "sin alertas")
+				}
 			}
 		}
 		presentTotal += p.Present
@@ -2669,12 +2719,15 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 	summary.ParticipantCount = activeCount
 	markedTotal := presentTotal + lateTotal + absentTotal
 	if markedTotal > 0 {
-		summary.AttendanceRate = float64(presentTotal+lateTotal) / float64(markedTotal) * 100
+		summary.AttendanceRate = programAttendancePercent(presentTotal+lateTotal, markedTotal)
 	}
 	if summary.CompletedCount > 0 {
 		summary.TransferRate = float64(summary.TransferredCount) / float64(summary.CompletedCount) * 100
 	}
 	summary.Health = "healthy"
+	if markedTotal == 0 {
+		summary.Health = "no_data"
+	}
 	for _, p := range summary.Participants {
 		if p.Health == "critical" {
 			summary.Health = "critical"
@@ -2684,7 +2737,7 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 			summary.Health = "watch"
 		}
 	}
-	if summary.AttendanceRate < float64(goal.AttendanceGoalPercent) && markedTotal > 0 {
+	if summary.AttendanceRate != nil && *summary.AttendanceRate < float64(goal.AttendanceGoalPercent) {
 		summary.Reasons = append(summary.Reasons, "asistencia grupal bajo la meta")
 		if summary.Health == "healthy" {
 			summary.Health = "watch"
@@ -2694,7 +2747,11 @@ func (r *ProgramRepository) GetProgramHealth(ctx context.Context, accountID, pro
 		summary.Reasons = append(summary.Reasons, "traspaso bajo la meta")
 	}
 	if len(summary.Reasons) == 0 {
-		summary.Reasons = append(summary.Reasons, "grupo estable")
+		if markedTotal == 0 {
+			summary.Reasons = append(summary.Reasons, "sin asistencia registrada")
+		} else {
+			summary.Reasons = append(summary.Reasons, "grupo estable")
+		}
 	}
 	return summary, nil
 }
@@ -2803,20 +2860,23 @@ func (r *ProgramRepository) GetProgramsDashboard(ctx context.Context, accountID 
 			return nil, err
 		}
 		if marked > 0 {
-			g.AttendanceRate = float64(present+late) / float64(marked) * 100
+			g.AttendanceRate = programAttendancePercent(present+late, marked)
 		}
 		if g.CompletedCount > 0 {
 			g.TransferRate = float64(g.TransferredCount) / float64(g.CompletedCount) * 100
 		}
 		g.AtRiskCount = absentPeople
 		g.Health = "healthy"
-		if g.AtRiskCount > 0 || (marked > 0 && g.AttendanceRate < float64(g.AttendanceGoalPercent)) {
+		if marked == 0 {
+			g.Health = "no_data"
+		}
+		if g.AtRiskCount > 0 || (g.AttendanceRate != nil && *g.AttendanceRate < float64(g.AttendanceGoalPercent)) {
 			g.Health = "watch"
 		}
-		if criticalPeople > 0 || (marked > 0 && g.AttendanceRate < float64(g.AttendanceGoalPercent-10)) {
+		if criticalPeople > 0 || (g.AttendanceRate != nil && *g.AttendanceRate < float64(g.AttendanceGoalPercent-10)) {
 			g.Health = "critical"
 		}
-		if marked > 0 && g.AttendanceRate < float64(g.AttendanceGoalPercent) {
+		if g.AttendanceRate != nil && *g.AttendanceRate < float64(g.AttendanceGoalPercent) {
 			summary.GroupsBelowGoal++
 		}
 		summary.ProgramCount++
@@ -2836,10 +2896,19 @@ func (r *ProgramRepository) GetProgramsDashboard(ctx context.Context, accountID 
 		return nil, err
 	}
 	if totalMarked > 0 {
-		summary.AttendanceRate = float64(totalAttended) / float64(totalMarked) * 100
+		summary.AttendanceRate = programAttendancePercent(totalAttended, totalMarked)
 	}
 	if summary.CompletedCount > 0 {
 		summary.TransferRate = float64(summary.TransferredCount) / float64(summary.CompletedCount) * 100
 	}
 	return summary, nil
+}
+
+// Nil represents no recorded attendance; a measured zero remains a real 0%.
+func programAttendancePercent(attended, marked int) *float64 {
+	if marked <= 0 {
+		return nil
+	}
+	rate := float64(attended) / float64(marked) * 100
+	return &rate
 }
