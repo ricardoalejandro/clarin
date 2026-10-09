@@ -82,6 +82,7 @@ func (s *Server) handleCreateProgram(c *fiber.Ctx) error {
 	var req struct {
 		Name              string     `json:"name"`
 		Description       string     `json:"description"`
+		Status            string     `json:"status"`
 		Color             string     `json:"color"`
 		Type              string     `json:"type"`
 		ScheduleStartDate *string    `json:"schedule_start_date"`
@@ -113,6 +114,7 @@ func (s *Server) handleCreateProgram(c *fiber.Ctx) error {
 		AccountID:         accountID,
 		Type:              "course",
 		Name:              req.Name,
+		Status:            req.Status,
 		Description:       &req.Description,
 		Color:             req.Color,
 		CreatedBy:         &userID,

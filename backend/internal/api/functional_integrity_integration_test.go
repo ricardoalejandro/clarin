@@ -50,6 +50,7 @@ func TestFunctionalIntegrityAPIIntegration(t *testing.T) {
 	app.Get("/tags", s.handleGetTags)
 	app.Post("/contacts", s.handleCreateContact)
 	app.Put("/contacts/:id", s.handleUpdateContact)
+	app.Post("/programs", s.handleCreateProgram)
 	call := func(method, path string, body any, admin bool) (int, map[string]any) {
 		t.Helper()
 		raw, _ := json.Marshal(body)
@@ -69,6 +70,36 @@ func TestFunctionalIntegrityAPIIntegration(t *testing.T) {
 		}
 		return response.StatusCode, result
 	}
+	t.Run("program create validates requested lifecycle before persistence", func(t *testing.T) {
+		for _, state := range []string{"invalid", "ACTIVE", " active ", "deleted"} {
+			status, r := call("POST", "/programs", map[string]any{"name": "Invalid lifecycle", "status": state}, true)
+			if status != fiber.StatusBadRequest {
+				t.Fatalf("invalid create lifecycle %q accepted: %d %v", state, status, r)
+			}
+		}
+		var count int
+		if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM programs WHERE account_id=$1`, account).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("rejected creates left programs: %d, %v", count, err)
+		}
+		for _, state := range []string{"", "active", "completed", "archived"} {
+			payload := map[string]any{"name": "Valid lifecycle"}
+			if state != "" {
+				payload["status"] = state
+			}
+			status, r := call("POST", "/programs", payload, true)
+			if status != fiber.StatusCreated {
+				t.Fatalf("valid create lifecycle %q rejected: %d %v", state, status, r)
+			}
+			want := state
+			if want == "" {
+				want = "active"
+			}
+			var persisted string
+			if err := db.QueryRow(ctx, `SELECT status FROM programs WHERE account_id=$1 AND id=$2`, account, r["id"]).Scan(&persisted); err != nil || persisted != want || r["status"] != want {
+				t.Fatalf("create lifecycle lost: requested %q, response %v, persisted %q, error %v", state, r["status"], persisted, err)
+			}
+		}
+	})
 	t.Run("event folder dates and explicit clears persist", func(t *testing.T) {
 		status, r := call("POST", "/events", map[string]any{"name": "Synthetic", "folder_id": folder, "description": "Description", "location": "Here", "event_date": "2026-10-10T14:00:00Z", "event_end": "2026-10-10T16:00:00Z"}, true)
 		if status != 201 {
