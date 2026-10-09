@@ -2,6 +2,11 @@
 
 Fecha: 2026-10-09. Base de la revisión: `0c1107a`.
 
+Reverificación para el informe Word: frontend y capturas sobre `943d74f`;
+backend final sobre `bfce3e1`. Este último sólo añade el paso del estado solicitado
+de alta a la validación existente y su regresión HTTP/PostgreSQL. El frontend
+es idéntico entre ambas versiones.
+
 La auditoría se reprodujo en el laboratorio local. Este cambio corrige sus
 incidencias y añade regresiones nativas; las pruebas de caracterización de la
 conducta anterior no se usan como evidencia de corrección. Contact sigue siendo
@@ -49,7 +54,7 @@ la identidad canónica y se conserva la separación por cuenta.
 | PRG02 | Un 409 de versión exige recargar antes de volver a guardar un borrador viejo. |
 | PRG03 | Refrescar publica participantes y Salud juntos; falla de manera recuperable conservando la pareja anterior. |
 | PRG04 | Carpeta ajena/inexistente se rechaza en repositorio y FK compuesta. La migración repetible desvincula sólo referencias ajenas, conserva programas/historia y account_id. |
-| PRG05 | Alta/edición valida el catálogo active/completed/archived. |
+| PRG05 | Alta/edición valida el catálogo active/completed/archived. El DTO de alta transmite el estado solicitado; uno inválido devuelve 400 sin crear filas, en lugar de ignorarlo y crear active. Omitirlo conserva el valor predeterminado active. |
 | PRG06 | Notes legacy de asistencia persisten como observaciones canónicas y proyección en la misma transacción; reintento idempotente, omisión/limpiar marca conserva historia. |
 | PRG07 | Sin marcas se devuelve null/no_data, distinto de un 0 % medido; UI, dashboard y consumidores offline preservan esa diferencia. |
 
@@ -89,23 +94,26 @@ sus flags: `CLARIN_RUN_CONTACT_MEDIA_INTEGRATION`,
 `EVENT_LOGBOOK_TEST_DATABASE_URL`. Un test omitido por flag no cuenta como
 integración ejecutada.
 
-Resultados finales: las 41 incidencias de la matriz tienen corrección y evidencia
-local; ninguna queda pendiente en este alcance.
+Resultados finales: las 41 incidencias de la matriz tienen controles y evidencia
+local. DEV08 acredita el bloqueo explicado de una acción no implementada;
+la baja remota Meta continúa pendiente y no se presenta como una función probada.
 
 | Verificación | Resultado |
 | --- | --- |
-| Suite Go general sobre las fuentes finales | 1.720 registros PASS, 82 SKIP, 0 FAIL. El contador incluye tests padre y subtests; los SKIP de integraciones optativas no se contabilizan como ejecuciones. |
-| Suite frontend general | 1.627 pruebas de aplicación, 28 del editor y 44 de scripts PASS. Los últimos ajustes de Eventos y Dispositivos se verificaron además con sus suites focales y la compilación final. |
+| Suite Go general sobre el backend final bfce3e1 | 1.720 registros PASS, 82 SKIP, 0 FAIL, sin caché de resultados. El contador incluye tests padre y subtests; los SKIP de integraciones optativas no se contabilizan como ejecuciones. |
+| Suite frontend general sobre 943d74f, idéntico en bfce3e1 | 296 archivos/1.629 pruebas de aplicación, 28 del editor y 44 de scripts PASS: 1.701 pruebas, 0 FAIL y 0 SKIP. Los focales se solapan y no se suman como pruebas únicas. |
+| Integraciones repetidas sobre 943d74f | 11 grupos/37 pruebas principales PASS; 89 registros contando subpruebas, 0 FAIL y 0 SKIP. El refuerzo posterior de PRG05 se prueba además sobre bfce3e1. |
+| Peticiones HTTP dedicadas sobre la API final bfce3e1 | 3 grupos PASS: C02 bulk devuelve created=1/skipped=1 sin identidad/etiqueta parcial; PRG05 rechaza cuatro altas y cinco actualizaciones inválidas sin mutación y conserva estados válidos/default; PRG06 guarda notas single/batch, autor e historia, reintenta sin duplicar y rechaza notas de más de 4.000 caracteres sin escribir. Fixtures propias: 0 restantes. |
 | Compilación de producción y TypeScript | PASS, incluida generación de shells interactivos/offline y artefactos del editor. |
 | Migración de arranque sobre datos previos y repetición | PASS. La reparación de carpetas conserva historia y la FK rechaza referencias ajenas. |
 | Contactos: PostgreSQL/MinIO y API | 8 regresiones de ciclo de foto PASS; integración de foto en Contact/Chat/Lead/EventParticipant/ProgramParticipant PASS; creación atómica, permisos, orden y variantes de caché PASS. |
 | Contactos: interfaz y Chromium | 55 pruebas focales PASS. PNG/JPEG se suben y visualizan sin dispositivo conectado. Restaurar el mismo JPEG de una foto histórica rota conserva el asset, cambia revisión/URL y la muestra sin F5. Recorte móvil e imagen corrupta verificados. |
 | Dispositivos: Go/PostgreSQL/API | 9 pruebas Go, 2 suites SQL y 5 escenarios API PASS, incluidas bajas con sesión ausente, preservación de datos, reservas/identidad y rechazo de baja oficial. |
 | Dispositivos: interfaz y Chromium | 20 pruebas focales y 7 escenarios de navegador PASS: respuestas lentas, errores/rollback, cancelación, doble Enter, Unicode, capacidades y eliminación con eventos WebSocket reales. |
-| Chats: interfaz/API | Regresiones de estado, historial y filtros PASS dentro de la suite frontend; integración API con 5 subcasos de bajas, rollback, permisos, cuenta y WebSocket PASS. |
+| Chats: interfaz/API/Chromium | Regresiones de estado, historial y filtros PASS dentro de la suite frontend; integración API con 5 subcasos de bajas, rollback, permisos, cuenta y WebSocket PASS. Tres escenarios Chromium verifican historial real sin dispositivo conectado (50 por defecto, máximo 200), recuperación de HTTP 500 inyectado y baja desde otra pestaña por WebSocket real sin F5, conservando Contact y otro historial. |
 | Eventos: PostgreSQL/API/interfaz | 7 grupos SQL, 6 casos API y 20 pruebas frontend PASS en Lima y UTC; integración adicional de metadatos cerrados PASS. |
 | Eventos: Chromium | 7 escenarios PASS: fechas sin desplazamiento, nulls persistidos, validación, captura concurrente, respuestas tardías y controles de eventos cerrados. |
-| Programas: PostgreSQL/interfaz | 4 grupos de integración y 40 pruebas focales finales PASS; una ejecución más amplia anterior pasó 80 pruebas. |
+| Programas: PostgreSQL/interfaz/Chromium | 4 grupos de integración y 40 pruebas focales finales PASS; una ejecución más amplia anterior pasó 80 pruebas. Cuatro escenarios Chromium reales verifican inscripción externa + Actualizar, Sin datos, ausencia real 0 % y conflicto de versión HTTP 409 + recarga + guardado HTTP 200, con capturas escritorio/móvil. |
 | Higiene del cambio | `git diff --check` PASS; fixtures propias de navegador limpiadas y credenciales/cookies fuera del commit. |
 
 El navegador usa la API, PostgreSQL y MinIO locales reales. Para Dispositivos,
@@ -114,6 +122,20 @@ porque Next dev sólo configura `/api`; las notificaciones no son simuladas.
 Los fallos HTTP inyectados de interfaz se distinguen de las pruebas de
 integración y de las cargas/bajas reales. No se cuenta una prueba de
 caracterización del fallo anterior como una regresión superada.
+
+La petición HTTP dedicada de alta descubrió que el DTO descartaba `status`,
+aunque el servicio lo validaba. La nueva regresión falló antes del refuerzo
+(201/active para `invalid`) y pasó después: cuatro estados inválidos rechazados
+sin filas; catálogo válido y valor predeterminado persistidos. También pasan los
+otros cuatro subcasos de la integración del handler. La compilación y el arranque
+autenticado de la API final se comprobaron tras repetir Go.
+
+Se conservan los intentos fallidos por configuración del arnés: URLs absolutas
+del runtime en fixtures unitarias que esperan `/api`, y mezcla de `localhost`
+con `127.0.0.1` en el escenario Programas. La reejecución usa el entorno de prueba
+correspondiente sin modificar código para eludir aserciones. En desarrollo se
+observó además un aviso de hidratación de estilos de viewport en `RootLayout`,
+preexistente y fuera del parche; no se declara una consola libre de avisos.
 
 ## Alcance de publicación
 
