@@ -64,11 +64,12 @@ PLAYWRIGHT_LOCAL_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:3011 \
   npx playwright test tests/storage-self-service.spec.ts --project=chromium
 ```
 
-El script de integración crea PostgreSQL 16 y un MinIO oficial temporal,
+El script de integración crea PostgreSQL 16, Redis 7 y un MinIO oficial temporal,
 utiliza cuentas y credenciales sintéticas, restringe sus puertos a loopback y
 elimina sólo sus propios servicios al terminar. No lee la configuración de
 producción ni inicia sesiones de WhatsApp o Kommo. También ejecuta los casos de
-concurrencia y de conservación de los estados de carga de otros módulos.
+concurrencia y de conservación de los estados de carga de otros módulos. Redis
+permite comprobar sesiones reales, cambio de cuenta y revocación de descargas.
 
 Las pruebas de navegador del almacenamiento usan respuestas de API simuladas
 para comprobar interfaz y comportamiento. Las pruebas Go de integración
@@ -89,15 +90,42 @@ borrado físico. El runner nativo también incorpora estos casos.
 Estas pruebas no dependen de GitHub Actions, retirado según la documentación de
 QA existente. Ejecutar el script desde un entorno Linux con Bash, Go 1.25.11
 (el toolchain del backend), `curl`, `openssl` y un daemon Docker local operativo
-y accesible. El cliente Docker por sí solo no basta. Un daemon remoto tampoco
+y accesible mediante `/var/run/docker.sock`. El runner fija ese socket local y
+descarta contextos remotos; Docker rootless en otro socket no está contemplado.
+El cliente Docker por sí solo no basta. Un daemon remoto tampoco
 expone PostgreSQL en el loopback que usan las pruebas. También se necesita acceso
 al registro de imágenes de PostgreSQL y a las dependencias Go verificadas de MinIO.
 
 Antes de crear recursos, el script comprueba las herramientas y el acceso a
-Docker. Los puertos locales 15439, 19001 y 19002 deben estar libres. El script
-arranca PostgreSQL y MinIO, espera sus comprobaciones de salud y ejecuta las
+Docker. Los puertos locales 15439, 16379, 19001 y 19002 deben estar libres. El script
+arranca PostgreSQL, Redis y MinIO, espera sus comprobaciones de salud y ejecuta las
 pruebas; no necesita un `.env` ni servicios de producción. Redis forma parte del
-laboratorio histórico, pero esta batería concreta no lo requiere.
+laboratorio de sesiones y se elimina junto con los demás servicios desechables.
+
+En un entorno ya preparado se puede reutilizar un binario oficial de MinIO
+mediante `CLARIN_QA_MINIO_BINARY` y su `CLARIN_QA_MINIO_SHA256`, obtenido y
+verificado previamente contra la distribución oficial. El runner comprueba el
+checksum antes de crear recursos, imprime la versión y sigue utilizando datos
+temporales y credenciales nuevas. Si no se especifica, compila la revisión
+oficial fijada en el script. Esto permite usar el entorno general de Clarín sin
+alterar sus servicios persistentes ni depender de otra descarga.
+
+La medición sintética es opcional y se ejecuta después de las suites funcionales:
+
+```bash
+CLARIN_RUN_STORAGE_SELF_SERVICE_PERFORMANCE=1 \
+CLARIN_STORAGE_PERF_OBJECTS=1000,10000,50000 \
+CLARIN_STORAGE_PERF_SAMPLES=10 \
+CLARIN_STORAGE_PERF_CHATS=100 \
+bash scripts/qa/run-storage-self-service.sh
+```
+
+Cada objeto tiene 1 KiB, una referencia de Chat y diez mensajes adicionales sin
+medios (`CLARIN_STORAGE_PERF_TEXT_RATIO`), repartidos entre 100 chats
+(`CLARIN_STORAGE_PERF_CHATS`). Se miden las páginas inicial y final,
+búsqueda, Uso y la apertura paralela de Uso y Archivos. Los registros
+`STORAGE_PERF` contienen latencia, asignaciones y memoria del proceso Go; no
+incluyen la RAM de PostgreSQL/MinIO ni acreditan capacidad de producción.
 
 El laboratorio anterior está definido en `deploy/docker-compose.integrity-qa.yml`.
 Su script `start-integrity-services.sh` espera la ruta fija
@@ -111,14 +139,27 @@ necesita un entorno que permita esos servicios. La integración nativa debe
 mantenerse pendiente hasta ejecutarla allí; las pruebas con API simulada o PGlite
 no la sustituyen.
 
-## Capacidad pendiente de medir
+## Capacidad y límites medidos
 
 La paginación limita la respuesta y los elementos de la interfaz. El inventario
 del servidor todavía enumera los objetos y referencias de la cuenta; su coste
-crece con el volumen total. No se ha medido con los datos de producción ni debe
-considerarse probada su capacidad para cuentas grandes. La revisión de despliegue
-debe medir latencia y memoria con un volumen representativo, además de comprobar
-los tiempos de espera y la recuperación ante servicios lentos.
+crece con el volumen total. Se omiten filas sin medios y se calculan huellas sólo
+para las selecciones revisadas; las confirmaciones conservan su revalidación.
+
+El [pase nativo del 10 de octubre de 2026](qa/storage-self-service-native-20261010.md)
+aprobó PostgreSQL 16.15, Redis 7.4.11 y MinIO reales, además del backend completo.
+Midió 1.000, 10.000 y 50.000 objetos sintéticos, con 100 chats y diez mensajes de
+texto adicionales por objeto. En 50.000 objetos la primera página tuvo una
+mediana de 2,27 s; abrir Uso y Archivos en paralelo, 2,57 s. Esa apertura asignó
+1.112,8 MiB acumulados y alcanzó 253,5 MiB de RSS Go muestreado: son métricas
+distintas, y excluyen la memoria de los servicios. El informe contiene las quince
+mediciones, condiciones y límites de reproducción.
+
+El recorrido completo y su duplicación al abrir Uso/Archivos siguen pendientes
+de una solución de escala. No se ha medido con datos de producción ni bajo carga
+concurrente sostenida. Antes del despliegue se debe contrastar la distribución
+real de cuentas y medios, los tiempos de espera y la recuperación ante servicios
+lentos; este ensayo sintético no acredita por sí solo capacidad de producción.
 
 ## Condiciones del despliegue
 

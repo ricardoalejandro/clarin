@@ -159,8 +159,8 @@ func (f *storageQAFixture) expectObject(key string, present bool) {
 	if present && err != nil {
 		f.t.Fatalf("required object missing: %v", err)
 	}
-	if !present && err == nil {
-		f.t.Fatal("object still present after confirmed purge")
+	if !present && !storageSelfServiceObjectMissing(err) {
+		f.t.Fatalf("physical absence was not confirmed: %v", err)
 	}
 }
 
@@ -251,6 +251,9 @@ func TestStorageSelfServiceIntegration(t *testing.T) {
 		t.Fatal("disposable QA storage unavailable")
 	}
 	t.Run("media access and publication", func(t *testing.T) { runMediaAccessIntegrationChecks(t, db, store) })
+	t.Run("usage capacity follows current account authority", func(t *testing.T) { runStorageUsageIntegrationChecks(t, db, store) })
+	t.Run("catalog sparse references and review fingerprints", func(t *testing.T) { runStorageCatalogOptimizationIntegrationChecks(t, db, store) })
+	t.Run("concurrency and recovery", func(t *testing.T) { runStorageConcurrencyIntegrationChecks(t, db, store) })
 	t.Run("inventory and known object access are isolated by account and module", func(t *testing.T) {
 		f := newStorageQAFixture(t, db, store)
 		own, _, _ := f.media(f.account, "chats", "own-document.pdf", true)
@@ -535,6 +538,10 @@ func TestStorageSelfServiceIntegration(t *testing.T) {
 	})
 	t.Run("deleting initiating user preserves durable cleanup and allows only account administrator recovery", func(t *testing.T) {
 		f := newStorageQAFixture(t, db, store)
+		// The first member owns the automatic Work default lists, whose unrelated
+		// RESTRICT FKs correctly prevent deletion. Use the other member to test
+		// cleanup durability after deleting a user who owns no Work resources.
+		f.user, f.secondUser = f.secondUser, f.user
 		key, asset, _ := f.media(f.account, "chats", "departed-user.pdf", true)
 		f.confirm(f.preview("trash", key))
 		f.exec(`UPDATE storage_media_trash SET purge_after=NOW()-INTERVAL '1 minute' WHERE account_id=$1 AND object_key=$2`, f.account, key)

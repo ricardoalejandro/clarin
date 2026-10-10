@@ -175,7 +175,7 @@ func storageSelfServiceExtractKeys(accountID uuid.UUID, value string) []string {
 // account_id column. JSON payloads are inspected as well as normalized links.
 // A failed source query fails the whole catalog: it can never mean "unused".
 var storageSelfServiceReferenceQueries = []struct{ origin, sql string }{
-	{"chats", `SELECT m.id::text,COALESCE(NULLIF(c.name,''),'Conversación'),'/dashboard/chats?open='||c.id::text,COALESCE(m.media_filename,''),jsonb_build_array(m.media_url,ma.object_key)::text FROM messages m JOIN chats c ON c.id=m.chat_id AND c.account_id=m.account_id LEFT JOIN media_assets ma ON ma.id=m.media_asset_id AND ma.account_id=m.account_id WHERE m.account_id=$1 AND NOT COALESCE(m.media_deleted,false)`},
+	{"chats", `SELECT m.id::text,COALESCE(NULLIF(c.name,''),'Conversación'),'/dashboard/chats?open='||c.id::text,COALESCE(m.media_filename,''),jsonb_build_array(m.media_url,ma.object_key)::text FROM messages m JOIN chats c ON c.id=m.chat_id AND c.account_id=m.account_id LEFT JOIN media_assets ma ON ma.id=m.media_asset_id AND ma.account_id=m.account_id WHERE m.account_id=$1 AND NOT COALESCE(m.media_deleted,false) AND ((m.media_url IS NOT NULL AND m.media_url<>'') OR m.media_asset_id IS NOT NULL)`},
 	{"campaigns", `SELECT id::text,name,'/dashboard/broadcasts','',jsonb_build_array(media_url,settings)::text FROM campaigns WHERE account_id=$1`},
 	{"campaigns", `SELECT a.id::text,c.name,'/dashboard/broadcasts',COALESCE(a.file_name,''),jsonb_build_array(a.media_url)::text FROM campaign_attachments a JOIN campaigns c ON c.id=a.campaign_id WHERE c.account_id=$1`},
 	{"quick_replies", `SELECT id::text,title,'/dashboard/settings?tab=quick-replies',COALESCE(media_filename,''),jsonb_build_array(media_url,items)::text FROM quick_replies WHERE account_id=$1`},
@@ -192,7 +192,7 @@ var storageSelfServiceReferenceQueries = []struct{ origin, sql string }{
 	{"surveys", `SELECT r.id::text,'Imagen de encuesta','/dashboard/surveys',ma.filename,jsonb_build_array(ma.object_key)::text FROM survey_branding_asset_refs r JOIN media_assets ma ON ma.id=r.media_asset_id AND ma.account_id=r.account_id WHERE r.account_id=$1`},
 	{"surveys", `SELECT id::text,name,'/dashboard/surveys','',jsonb_build_array(branding)::text FROM surveys WHERE account_id=$1`},
 	{"surveys", `SELECT id::text,name,'/dashboard/surveys','',jsonb_build_array(branding)::text FROM survey_templates WHERE account_id=$1`},
-	{"contacts", `SELECT c.id::text,COALESCE(NULLIF(c.name,''),'Foto de contacto'),'/dashboard/contacts','',jsonb_build_array(c.avatar_url,ma.object_key)::text FROM contacts c LEFT JOIN media_assets ma ON ma.id=c.avatar_media_asset_id AND ma.account_id=c.account_id WHERE c.account_id=$1`},
+	{"contacts", `SELECT c.id::text,COALESCE(NULLIF(c.name,''),'Foto de contacto'),'/dashboard/contacts','',jsonb_build_array(c.avatar_url,ma.object_key)::text FROM contacts c LEFT JOIN media_assets ma ON ma.id=c.avatar_media_asset_id AND ma.account_id=c.account_id WHERE c.account_id=$1 AND ((c.avatar_url IS NOT NULL AND c.avatar_url<>'') OR c.avatar_media_asset_id IS NOT NULL)`},
 	{"private_status", `SELECT s.id::text,'','','',jsonb_build_array(s.media_url,ma.object_key)::text FROM whatsapp_statuses s LEFT JOIN media_assets ma ON ma.id=s.media_asset_id AND ma.account_id=s.account_id WHERE s.account_id=$1`},
 	{"private_work", `SELECT a.id::text,'','','',jsonb_build_array(ma.object_key)::text FROM task_attachments a JOIN media_assets ma ON ma.id=a.media_asset_id AND ma.account_id=a.account_id WHERE a.account_id=$1`},
 	{"private_work", `SELECT p.id::text,'','','',jsonb_build_array(ma.object_key)::text FROM task_attachment_previews p JOIN media_assets ma ON ma.id=p.derivative_asset_id AND ma.account_id=p.account_id WHERE p.account_id=$1`},
@@ -259,6 +259,12 @@ func storageSelfServiceFingerprint(file storageSelfServiceFile, refs []storageSe
 		Refs                []refID
 	}{file.ObjectKey, file.SizeBytes, file.LastModified, file.Status, file.TrashAt, file.PurgeAfter, ids})
 	return fmt.Sprintf("%x", sha256.Sum256(payload))
+}
+
+// Keep reviewed selections bound to the exact bytes as well as their live
+// references. Full inventory reads never consume or expose this fingerprint.
+func storageSelfServiceReviewFingerprint(file storageSelfServiceFile, refs []storageSelfServiceReference, etag string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(storageSelfServiceFingerprint(file, refs)+"|"+etag)))
 }
 
 func (s *Server) storageSelfServiceCatalog(ctx context.Context, q storageSelfServiceQuerier, accountID, actorID uuid.UUID, claims *service.JWTClaims, selected ...[]string) (*storageSelfServiceCatalog, error) {
@@ -425,7 +431,9 @@ func (s *Server) storageSelfServiceCatalog(ctx context.Context, q storageSelfSer
 		if !ownsTrash || t.state != "purging" {
 			file.PreviewURL = "/api/storage/content?object_key=" + url.QueryEscape(object.Key)
 		}
-		file.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(storageSelfServiceFingerprint(file, allRefs)+"|"+etags[object.Key])))
+		if len(selected) > 0 {
+			file.Fingerprint = storageSelfServiceReviewFingerprint(file, allRefs, etags[object.Key])
+		}
 		catalog.Files = append(catalog.Files, file)
 	}
 	return catalog, nil

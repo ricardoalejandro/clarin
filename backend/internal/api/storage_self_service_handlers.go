@@ -44,11 +44,15 @@ func (s *Server) storageSelfServiceActor(c *fiber.Ctx, parents ...context.Contex
 	}
 	return accountID, actorID, &current, nil
 }
-func (s *Server) storageSelfServiceRequestCatalog(c *fiber.Ctx) (*storageSelfServiceCatalog, *service.JWTClaims, error) {
+func (s *Server) storageSelfServiceRequestCatalog(c *fiber.Ctx, parents ...context.Context) (*storageSelfServiceCatalog, *service.JWTClaims, error) {
 	if s.storage == nil {
 		return nil, nil, storageSelfServiceError(c, 503, "storage_unavailable", "El almacenamiento no está disponible.")
 	}
-	ctx, cancel := context.WithTimeout(c.Context(), storageSelfServiceCatalogTimeout)
+	parent := context.Context(c.Context())
+	if len(parents) > 0 {
+		parent = parents[0]
+	}
+	ctx, cancel := context.WithTimeout(parent, storageSelfServiceCatalogTimeout)
 	defer cancel()
 	accountID, actorID, claims, err := s.storageSelfServiceActor(c, ctx)
 	if err != nil {
@@ -65,14 +69,28 @@ func (s *Server) storageSelfServiceRequestCatalog(c *fiber.Ctx) (*storageSelfSer
 	return catalog, claims, nil
 }
 func (s *Server) handleStorageSelfServiceUsage(c *fiber.Ctx) error {
-	catalog, claims, err := s.storageSelfServiceRequestCatalog(c)
+	// Membership, inventory and capacity share one budget; a slow catalogue
+	// must not leave the final account query running without a deadline.
+	ctx, cancel := context.WithTimeout(c.Context(), storageSelfServiceCatalogTimeout)
+	defer cancel()
+	catalog, claims, err := s.storageSelfServiceRequestCatalog(c, ctx)
 	if catalog == nil {
 		return err
 	}
-	account, err := s.services.Account.GetByID(c.Context(), claims.AccountID)
-	if err != nil {
-		return storageSelfServiceError(c, 503, "storage_usage_failed", "No se pudo consultar la capacidad.")
+	limit := int64(0)
+	if domain.HasAccountAdminAuthority(claims.Role, claims.IsSuperAdmin) {
+		account, err := s.services.Account.GetByID(ctx, claims.AccountID)
+		if err != nil {
+			return storageSelfServiceError(c, 503, "storage_usage_failed", "No se pudo consultar la capacidad.")
+		}
+		if account != nil {
+			limit = account.StorageLimitBytes
+		}
 	}
+	return c.JSON(storageSelfServiceUsage(catalog, claims, limit))
+}
+
+func storageSelfServiceUsage(catalog *storageSelfServiceCatalog, claims *service.JWTClaims, accountLimit int64) fiber.Map {
 	var visible, removable, trash int64
 	var count, removableCount int
 	byType := map[string]int64{"image": 0, "video": 0, "audio": 0, "document": 0}
@@ -95,14 +113,12 @@ func (s *Server) handleStorageSelfServiceUsage(c *fiber.Ctx) error {
 	used := visible
 	scope := "authorized"
 	reserved := int64(0)
+	limit := int64(0)
 	if domain.HasAccountAdminAuthority(claims.Role, claims.IsSuperAdmin) {
 		used = catalog.TotalBytes
 		scope = "account"
 		reserved = used - visible
-	}
-	limit := int64(0)
-	if account != nil {
-		limit = account.StorageLimitBytes
+		limit = accountLimit
 	}
 	available := int64(0)
 	percent := float64(0)
@@ -116,7 +132,9 @@ func (s *Server) handleStorageSelfServiceUsage(c *fiber.Ctx) error {
 			percent = 100
 		}
 	}
-	return c.JSON(fiber.Map{"success": true, "scope": scope, "used_bytes": used, "visible_bytes": visible, "managed_elsewhere_bytes": reserved, "object_count": count, "limit_bytes": limit, "available_bytes": available, "percent_used": percent, "by_type": byType, "by_origin": byOrigin, "removable_bytes": removable, "removable_count": removableCount, "trash_bytes": trash, "can_manage": storageSelfServiceHasPermission(claims, domain.PermSettings), "retention_days": storageSelfServiceRetentionDays})
+	// Zero-valued capacity fields preserve the response contract for members
+	// without revealing a quota or treating visible bytes as total account use.
+	return fiber.Map{"success": true, "scope": scope, "used_bytes": used, "visible_bytes": visible, "managed_elsewhere_bytes": reserved, "object_count": count, "limit_bytes": limit, "available_bytes": available, "percent_used": percent, "by_type": byType, "by_origin": byOrigin, "removable_bytes": removable, "removable_count": removableCount, "trash_bytes": trash, "can_manage": storageSelfServiceHasPermission(claims, domain.PermSettings), "retention_days": storageSelfServiceRetentionDays}
 }
 func storageSelfServicePage(c *fiber.Ctx) (int, int) {
 	limit := c.QueryInt("limit", 40)

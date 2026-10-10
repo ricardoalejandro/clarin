@@ -124,6 +124,50 @@ func TestStorageSelfServiceSettingsDoNotGrantChatAccess(t *testing.T) {
 		t.Fatal("admin bypassed private Work ACL")
 	}
 }
+
+func TestStorageSelfServiceUsageKeepsAccountCapacityBehindAdminAuthority(t *testing.T) {
+	catalog := &storageSelfServiceCatalog{TotalBytes: 80, Files: []storageSelfServiceFile{
+		{MediaType: "document", SizeBytes: 20, Status: "active", CanRemove: true, Origins: []storageSelfServiceReference{{Origin: "chats"}}},
+		{MediaType: "image", SizeBytes: 10, Status: "trash"},
+	}}
+	for _, tc := range []struct {
+		name, role                  string
+		superAdmin                  bool
+		limit, used, reserved, free int64
+		percent                     float64
+		scope                       string
+	}{
+		{name: "member sees only authorized bytes", role: "member", limit: 100, used: 30, scope: "authorized"},
+		{name: "admin sees complete account usage", role: "admin", limit: 100, used: 80, reserved: 50, free: 20, percent: 80, scope: "account"},
+		{name: "super admin has account authority", role: "member", superAdmin: true, limit: 100, used: 80, reserved: 50, free: 20, percent: 80, scope: "account"},
+		{name: "over quota never has negative free space", role: "admin", limit: 50, used: 80, reserved: 50, percent: 100, scope: "account"},
+		{name: "unlimited account has no inferred capacity", role: "admin", used: 80, reserved: 50, scope: "account"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claims := &service.JWTClaims{Role: tc.role, IsSuperAdmin: tc.superAdmin, Permissions: []string{domain.PermSettings}}
+			got := storageSelfServiceUsage(catalog, claims, tc.limit)
+			wantLimit := tc.limit
+			if tc.scope == "authorized" {
+				wantLimit = 0
+			}
+			for field, want := range map[string]any{
+				"scope": tc.scope, "used_bytes": tc.used, "visible_bytes": int64(30),
+				"managed_elsewhere_bytes": tc.reserved, "limit_bytes": wantLimit,
+				"available_bytes": tc.free, "percent_used": tc.percent,
+				"object_count": 2, "removable_bytes": int64(20), "removable_count": 1,
+				"trash_bytes": int64(10), "can_manage": true,
+			} {
+				if got[field] != want {
+					t.Errorf("%s=%v, want %v", field, got[field], want)
+				}
+			}
+			if !reflect.DeepEqual(got["by_type"], map[string]int64{"document": 20, "image": 10, "audio": 0, "video": 0}) || !reflect.DeepEqual(got["by_origin"], map[string]int64{"chats": 20, "trash": 10}) {
+				t.Fatal("breakdowns included bytes outside the authorized inventory")
+			}
+		})
+	}
+}
+
 func TestStorageSelfServiceFiltersStablePagesAndTrash(t *testing.T) {
 	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
 	files := []storageSelfServiceFile{{ObjectKey: "b", Filename: "B.pdf", MediaType: "document", SizeBytes: 10, Status: "active", CanRemove: true, LastModified: now.Add(-8 * 24 * time.Hour), Origins: []storageSelfServiceReference{{Origin: "chats", Label: "Amigos"}}}, {ObjectKey: "a", Filename: "A.pdf", MediaType: "document", SizeBytes: 10, Status: "active", CanRemove: true, LastModified: now.Add(-8 * 24 * time.Hour)}, {ObjectKey: "trash", Filename: "C.pdf", MediaType: "document", SizeBytes: 99, Status: "trash", LastModified: now}}
