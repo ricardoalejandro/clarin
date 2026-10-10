@@ -1,6 +1,9 @@
 name: Storage self-service QA
 
 on:
+  push:
+    branches:
+      - 'feat/storage-self-service'
   pull_request:
     paths:
       - 'backend/**'
