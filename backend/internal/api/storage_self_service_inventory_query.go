@@ -56,6 +56,18 @@ func storageInventoryOrigins(claims *service.JWTClaims) []string {
 	return origins
 }
 
+// Compare source identities once for this object. A correlated anti-join can
+// be planned as 10000-by-10000 nested comparisons when generation estimates
+// underestimate authorized rows. EXCEPT keeps the exact same source/key policy,
+// including readable mirrors and the actor's verified ownership exception.
+func storageInventoryRetainedElsewhereSQL(objectKey string) string {
+	return `EXISTS(SELECT hidden.source_kind,hidden.source_id FROM storage_inventory_references hidden
+ WHERE hidden.account_id=$1 AND hidden.object_key=` + objectKey + `
+ AND NOT(hidden.source_kind='storage_upload_ownership' AND EXISTS(SELECT 1 FROM storage_upload_ownership own
+  WHERE own.account_id=$1 AND own.actor_id=$2 AND own.id::text=hidden.source_id AND own.provenance_verified AND own.state='active'))
+ EXCEPT SELECT vr.source_kind,vr.source_id FROM authorized_refs vr WHERE vr.object_key=` + objectKey + `)`
+}
+
 // All labels, filenames, search predicates and counts use this actor-specific
 // relation. Resource grants are resolved on every query; no cached permission
 // bit can retain access after an ACL or account membership is revoked.
@@ -128,7 +140,7 @@ func storageInventoryCTE(claims *service.JWTClaims) string {
 	  AND NOT EXISTS(SELECT 1 FROM storage_removed_references newer WHERE newer.account_id=$1 AND newer.object_key=io.object_key AND newer.state IN ('removed','purging'))) AS can_purge,
 	 (SELECT count(*) FROM authorized_refs vr WHERE vr.object_key=io.object_key) AS references_count,
 	 COALESCE(t.id::text,'') AS recovery_id,
- EXISTS(SELECT 1 FROM storage_inventory_references hidden WHERE hidden.account_id=$1 AND hidden.object_key=io.object_key AND NOT(hidden.source_kind='storage_upload_ownership' AND EXISTS(SELECT 1 FROM storage_upload_ownership own WHERE own.account_id=$1 AND own.actor_id=$2 AND own.id::text=hidden.source_id AND own.provenance_verified AND own.state='active')) AND NOT EXISTS(SELECT 1 FROM authorized_refs vr WHERE vr.source_kind=hidden.source_kind AND vr.source_id=hidden.source_id AND vr.object_key=hidden.object_key)) AS retained_elsewhere,
+ ` + storageInventoryRetainedElsewhereSQL("io.object_key") + ` AS retained_elsewhere,
 	 EXISTS(SELECT 1 FROM storage_upload_ownership own WHERE own.account_id=$1 AND own.object_key=io.object_key AND own.actor_id=$2 AND own.provenance_verified AND own.state='active') AS is_own_upload,
 	 ((SELECT ready FROM catalog_state) AND EXISTS(SELECT 1 FROM storage_upload_ownership own WHERE own.account_id=$1 AND own.object_key=io.object_key AND own.actor_id=$2 AND own.provenance_verified AND own.state='active' AND own.last_uploaded_at<NOW()-INTERVAL '24 hours')
 	 AND NOT EXISTS(SELECT 1 FROM storage_upload_ownership other WHERE other.account_id=$1 AND other.object_key=io.object_key AND other.actor_id<>$2 AND other.state<>'removed')
@@ -148,7 +160,7 @@ func storageInventoryCTE(claims *service.JWTClaims) string {
 	  AND NOT EXISTS(SELECT 1 FROM storage_media_trash legacy WHERE legacy.account_id=$1 AND legacy.object_key=rr.object_key AND legacy.state IN ('trash','purging') AND jsonb_array_length(legacy.message_backups)>0)
 	  AND NOT EXISTS(SELECT 1 FROM storage_inventory_references ar WHERE ar.account_id=$1 AND ar.object_key=rr.object_key)
 	  AND NOT EXISTS(SELECT 1 FROM storage_removed_references retained WHERE retained.account_id=$1 AND retained.object_key=rr.object_key AND retained.state='removed' AND retained.retain_until>NOW())) AS can_purge,
-	 (SELECT count(*) FROM authorized_refs vr WHERE vr.object_key=rr.object_key) AS references_count,rr.id::text AS recovery_id,EXISTS(SELECT 1 FROM storage_inventory_references hidden WHERE hidden.account_id=$1 AND hidden.object_key=rr.object_key AND NOT(hidden.source_kind='storage_upload_ownership' AND EXISTS(SELECT 1 FROM storage_upload_ownership own WHERE own.account_id=$1 AND own.actor_id=$2 AND own.id::text=hidden.source_id AND own.provenance_verified AND own.state='active')) AND NOT EXISTS(SELECT 1 FROM authorized_refs vr WHERE vr.source_kind=hidden.source_kind AND vr.source_id=hidden.source_id AND vr.object_key=hidden.object_key)) AS retained_elsewhere,false AS is_own_upload,false AS unused_upload
+	 (SELECT count(*) FROM authorized_refs vr WHERE vr.object_key=rr.object_key) AS references_count,rr.id::text AS recovery_id,` + storageInventoryRetainedElsewhereSQL("rr.object_key") + ` AS retained_elsewhere,false AS is_own_upload,false AS unused_upload
 	 FROM storage_removed_references rr
 	 LEFT JOIN storage_inventory_objects io ON io.account_id=rr.account_id AND io.object_key=rr.object_key AND io.bucket_kind=CASE WHEN split_part(rr.object_key,'/',2)='_private' THEN 'private' ELSE 'ordinary' END
 	 WHERE rr.account_id=$1 AND rr.state IN ('removed','purging') AND (rr.actor_id=$2 OR $4::boolean)

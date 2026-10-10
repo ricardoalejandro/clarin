@@ -64,6 +64,54 @@ func storageInventoryRawGET(t *testing.T, f *storageQAFixture, path string) map[
 }
 
 func runStorageInventoryIntegrationChecks(t *testing.T, db *pgxpool.Pool, store *storage.Storage) {
+	t.Run("inventory shared fanout stays bounded and retains hidden authority", func(t *testing.T) {
+		const references = 10000
+		f := storagePerformanceSharedFixture(t, db, store, references)
+		key := f.account.String() + "/chats/" + storagePerformanceFilename(0)
+		storagePerformanceTrackS3(t, f)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		reconcile := func() {
+			t.Helper()
+			if err := f.server.ReconcileStorageInventory(ctx, f.account); err != nil {
+				t.Fatal(err)
+			}
+			f.inventoryS3Requests.Store(0)
+		}
+		check := func(wantReferences int, retained bool) {
+			t.Helper()
+			page := storageInventoryRawGET(t, f, "/storage/files?limit=40")
+			files := storageQAItems(t, page, "files")
+			if page["total"] != float64(1) || len(files) != 1 || files[0]["references_count"] != float64(wantReferences) || files[0]["retained_elsewhere"] != retained || files[0]["has_more_uses"] != true {
+				t.Fatalf("incorrect shared-file projection: %v", files)
+			}
+			if origins, ok := files[0]["origins"].([]any); !ok || len(origins) > 6 {
+				t.Fatal("shared-file summary materialized every use")
+			}
+			if f.inventoryS3Requests.Load() != 0 {
+				t.Fatal("shared-file page contacted S3")
+			}
+		}
+		check(references, false)
+		config, _ := json.Marshal(map[string]any{"overlay_image_url": mediaProxyURLFromObjectKey(key)})
+		f.exec(`INSERT INTO dynamics(account_id,name,slug,config) VALUES($1,'Secret fanout origin',$2,$3::jsonb)`, f.account, "fanout-"+f.account.String(), config)
+		reconcile()
+		check(references, true)
+		if got := storageInventoryRawGET(t, f, "/storage/files?q=Secret%20fanout")["total"]; got != float64(0) {
+			t.Fatal("hidden source leaked through search")
+		}
+		f.exec(`UPDATE roles SET permissions=$2 WHERE id=$1`, f.role, []string{domain.PermSettings, domain.PermChats, domain.PermDynamics})
+		check(references+1, false)
+		f.exec(`UPDATE roles SET permissions=$2 WHERE id=$1`, f.role, []string{domain.PermSettings, domain.PermChats})
+		check(references, true) // Revocation is immediate without rebuilding the index.
+		f.exec(`DELETE FROM dynamics WHERE account_id=$1`, f.account)
+		f.exec(`INSERT INTO storage_upload_ownership(account_id,object_key,actor_id,provenance_verified,state) VALUES($1,$2,$3,true,'active')`, f.account, key, f.user)
+		reconcile()
+		check(references, false) // This actor's verified ownership is not a hidden use.
+		f.exec(`INSERT INTO storage_upload_ownership(account_id,object_key,actor_id,provenance_verified,state) VALUES($1,$2,$3,true,'active')`, f.account, key, f.secondUser)
+		reconcile()
+		check(references, true) // Another actor's claim still retains the object.
+	})
 	t.Run("inventory private identities require current module and resource authority", func(t *testing.T) {
 		f := newStorageMultiOriginQAFixture(t, db, store)
 		task := storagePrivateQASeedTask(f)
