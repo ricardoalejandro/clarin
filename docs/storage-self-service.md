@@ -77,7 +77,24 @@ compartidas, reintentos y fallos parciales. Una suite omitida por falta de servi
 no equivale a una integración aprobada. PGlite sólo complementa la comprobación
 de SQL; no sustituye la prueba de concurrencia en PostgreSQL nativo.
 
-El workflow `Storage self-service QA` ejecuta estos controles en pull requests.
+Las suites `TestStorageSelfServiceSQLIntegration` y
+`TestMediaAccessSQLIntegration` ejecutan consultas y repositorios reales sin S3.
+Cubren la resolución actual de permisos, referencias entre módulos, aislamiento,
+operaciones transaccionales y revocación de publicaciones. No prueban la lectura
+de bytes, el ciclo completo de confirmación, las políticas del bucket ni el
+borrado físico. El runner nativo también incorpora estos casos.
+
+El workflow `Storage self-service QA` ejecuta estos controles en pull requests y
+en la rama `feat/storage-self-service`.
+
+## Capacidad pendiente de medir
+
+La paginación limita la respuesta y los elementos de la interfaz. El inventario
+del servidor todavía enumera los objetos y referencias de la cuenta; su coste
+crece con el volumen total. No se ha medido con los datos de producción ni debe
+considerarse probada su capacidad para cuentas grandes. La revisión de despliegue
+debe medir latencia y memoria con un volumen representativo, además de comprobar
+los tiempos de espera y la recuperación ante servicios lentos.
 
 ## Condiciones del despliegue
 

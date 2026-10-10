@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -87,7 +88,12 @@ func (s *Server) handleStorageCleanupPreview(c *fiber.Ctx) error {
 	if s.storage == nil {
 		return storageSelfServiceError(c, 503, "storage_unavailable", "El almacenamiento no está disponible.")
 	}
-	accountID, actorID, claims, err := s.storageSelfServiceActor(c)
+	ctx, cancel := context.WithTimeout(c.Context(), storageSelfServiceCatalogTimeout)
+	defer cancel()
+	accountID, actorID, claims, err := s.storageSelfServiceActor(c, ctx)
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return storageSelfServiceError(c, 503, "storage_scan_failed", "No se pudo verificar la selección. No se ha modificado ningún archivo.")
+	}
 	if err != nil || !storageSelfServiceHasPermission(claims, domain.PermSettings) {
 		return storageSelfServiceError(c, 403, "storage_forbidden", "No tienes permiso para gestionar el almacenamiento.")
 	}
@@ -105,7 +111,7 @@ func (s *Server) handleStorageCleanupPreview(c *fiber.Ctx) error {
 	if err != nil {
 		return storageSelfServiceError(c, 400, "invalid_selection", err.Error())
 	}
-	catalog, err := s.storageSelfServiceCatalog(c.Context(), s.repos.DB(), accountID, actorID, claims, keys)
+	catalog, err := s.storageSelfServiceCatalog(ctx, s.repos.DB(), accountID, actorID, claims, keys)
 	if err != nil {
 		log.Printf("[StorageSelfService] preview scan failed: %v", err)
 		return storageSelfServiceError(c, 503, "storage_scan_failed", "No se pudo verificar la selección. No se ha modificado ningún archivo.")
@@ -135,7 +141,7 @@ func (s *Server) handleStorageCleanupPreview(c *fiber.Ctx) error {
 	}
 	expires := time.Now().UTC().Add(10 * time.Minute)
 	id := uuid.New()
-	_, err = s.repos.DB().Exec(c.Context(), `INSERT INTO storage_cleanup_previews(id,account_id,actor_id,action,items,expires_at) VALUES($1,$2,$3,$4,$5::jsonb,$6)`, id, accountID, actorID, req.Action, payload, expires)
+	_, err = s.repos.DB().Exec(ctx, `INSERT INTO storage_cleanup_previews(id,account_id,actor_id,action,items,expires_at) VALUES($1,$2,$3,$4,$5::jsonb,$6)`, id, accountID, actorID, req.Action, payload, expires)
 	if err != nil {
 		return storageSelfServiceError(c, 503, "storage_preview_failed", "No se pudo preparar la revisión. Inténtalo de nuevo.")
 	}

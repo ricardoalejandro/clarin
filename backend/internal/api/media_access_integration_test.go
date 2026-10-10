@@ -22,6 +22,7 @@ import (
 // object ACLs are checked by the catalog suite; this covers anonymous publication
 // capabilities and their immediate lifecycle revocation against real persistence.
 func runMediaAccessIntegrationChecks(t *testing.T, db *pgxpool.Pool, store *storage.Storage) {
+	t.Run("SQL media assignment authority", func(t *testing.T) { runMediaAccessSQLChecks(t, db) })
 	f := newStorageQAFixture(t, db, store)
 	f.server.cfg = &config.Config{JWTSecret: "disposable-media-qa-signing-key"}
 	key, _, _ := f.media(f.account, "surveys/branding", "public-brand.pdf", false)

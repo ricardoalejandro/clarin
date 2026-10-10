@@ -1,17 +1,79 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/service"
 	"github.com/naperu/clarin/internal/ws"
 )
+
+// Stops at the first real catalogue query so the test observes the context
+// passed to PostgreSQL, without depending on a database or object-store service.
+type storageCatalogContextProbe struct {
+	ctx context.Context
+}
+
+func (p *storageCatalogContextProbe) Query(ctx context.Context, _ string, _ ...interface{}) (pgx.Rows, error) {
+	p.ctx = ctx
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return nil, errors.New("catalog context observed")
+}
+func (p *storageCatalogContextProbe) QueryRow(context.Context, string, ...interface{}) pgx.Row {
+	panic("catalogue must begin by checking references")
+}
+
+func TestStorageSelfServiceCatalogBoundsDatabaseWorkAndHonorsCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		deadline  time.Duration
+		cancelled bool
+	}{
+		{name: "bounded inventory"},
+		{name: "shorter caller budget", deadline: 2 * time.Second},
+		{name: "cancelled request", cancelled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := context.Background()
+			cancel := func() {}
+			if tc.deadline > 0 {
+				parent, cancel = context.WithTimeout(parent, tc.deadline)
+			}
+			if tc.cancelled {
+				parent, cancel = context.WithCancel(parent)
+				cancel()
+			}
+			defer cancel()
+			probe := &storageCatalogContextProbe{}
+			before := time.Now()
+			_, err := (&Server{}).storageSelfServiceCatalog(parent, probe, uuid.New(), uuid.New(), &service.JWTClaims{})
+			if err == nil || probe.ctx == nil {
+				t.Fatal("catalogue did not propagate the reference query failure")
+			}
+			deadline, ok := probe.ctx.Deadline()
+			budget := storageSelfServiceCatalogTimeout
+			if tc.deadline > 0 {
+				budget = tc.deadline
+			}
+			if !ok || deadline.After(before.Add(budget+time.Second)) {
+				t.Fatal("reference query did not receive the bounded request budget")
+			}
+			if tc.cancelled && !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancelled request was ignored: %v", err)
+			}
+		})
+	}
+}
 
 func TestStorageSelfServiceClassifiesHumanMediaOnly(t *testing.T) {
 	for _, tc := range []struct{ name, mime, want string }{

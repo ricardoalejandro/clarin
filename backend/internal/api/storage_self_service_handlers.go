@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -16,7 +18,7 @@ import (
 
 // Storage operations refresh the account membership instead of trusting an old
 // token after a role change. Every later query still carries this account id.
-func (s *Server) storageSelfServiceActor(c *fiber.Ctx) (uuid.UUID, uuid.UUID, *service.JWTClaims, error) {
+func (s *Server) storageSelfServiceActor(c *fiber.Ctx, parents ...context.Context) (uuid.UUID, uuid.UUID, *service.JWTClaims, error) {
 	accountID, ok := c.Locals("account_id").(uuid.UUID)
 	if !ok {
 		return uuid.Nil, uuid.Nil, nil, fmt.Errorf("missing account")
@@ -29,8 +31,14 @@ func (s *Server) storageSelfServiceActor(c *fiber.Ctx) (uuid.UUID, uuid.UUID, *s
 	if !ok || claims == nil || claims.AccountID != accountID || claims.UserID != actorID {
 		return uuid.Nil, uuid.Nil, nil, fmt.Errorf("invalid actor")
 	}
+	// Role definitions are global; tenant authority comes from this exact
+	// account membership, never from users.account_id or a role-owned account.
 	current := *claims
-	err := s.repos.DB().QueryRow(c.Context(), `SELECT ua.role,COALESCE(u.is_super_admin,false),COALESCE(r.permissions,'{}'::text[]) FROM user_accounts ua JOIN users u ON u.id=ua.user_id LEFT JOIN roles r ON r.id=ua.role_id AND r.account_id=ua.account_id WHERE ua.account_id=$1 AND ua.user_id=$2`, accountID, actorID).Scan(&current.Role, &current.IsSuperAdmin, &current.Permissions)
+	ctx := context.Context(c.Context())
+	if len(parents) > 0 {
+		ctx = parents[0]
+	}
+	err := s.repos.DB().QueryRow(ctx, `SELECT ua.role,COALESCE(u.is_super_admin,false),COALESCE(r.permissions,'{}'::text[]) FROM user_accounts ua JOIN users u ON u.id=ua.user_id LEFT JOIN roles r ON r.id=ua.role_id WHERE ua.account_id=$1 AND ua.user_id=$2`, accountID, actorID).Scan(&current.Role, &current.IsSuperAdmin, &current.Permissions)
 	if err != nil {
 		return uuid.Nil, uuid.Nil, nil, err
 	}
@@ -40,11 +48,16 @@ func (s *Server) storageSelfServiceRequestCatalog(c *fiber.Ctx) (*storageSelfSer
 	if s.storage == nil {
 		return nil, nil, storageSelfServiceError(c, 503, "storage_unavailable", "El almacenamiento no está disponible.")
 	}
-	accountID, actorID, claims, err := s.storageSelfServiceActor(c)
+	ctx, cancel := context.WithTimeout(c.Context(), storageSelfServiceCatalogTimeout)
+	defer cancel()
+	accountID, actorID, claims, err := s.storageSelfServiceActor(c, ctx)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return nil, nil, storageSelfServiceError(c, 503, "storage_scan_failed", "No se pudo verificar el almacenamiento. Inténtalo de nuevo.")
+		}
 		return nil, nil, storageSelfServiceError(c, 403, "storage_forbidden", "No tienes acceso a esta cuenta.")
 	}
-	catalog, err := s.storageSelfServiceCatalog(c.Context(), s.repos.DB(), accountID, actorID, claims)
+	catalog, err := s.storageSelfServiceCatalog(ctx, s.repos.DB(), accountID, actorID, claims)
 	if err != nil {
 		log.Printf("[StorageSelfService] catalog failed account=%s: %v", accountID, err)
 		return nil, nil, storageSelfServiceError(c, 503, "storage_scan_failed", "No se pudo verificar el almacenamiento. Inténtalo de nuevo.")

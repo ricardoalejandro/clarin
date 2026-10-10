@@ -63,6 +63,9 @@ export CLARIN_RUN_STORAGE_SELF_SERVICE_INTEGRATION=1
 unset CLARIN_STORAGE_QA_PGLITE
 cd "$repo_root/backend"
 go test -count=1 -timeout=10m -run '^TestStorageSelfServiceIntegration$' -v ./internal/api
+docker exec "$qa_postgres" createdb --username storageqa clarin_storage_qa
+export DATABASE_URL="postgres://storageqa:$qa_password@127.0.0.1:15439/clarin_storage_qa?sslmode=disable"
+CLARIN_RUN_STORAGE_SELF_SERVICE_SQL_INTEGRATION=1 go test -count=1 -timeout=5m -run '^TestStorageSelfServiceSQLIntegration$' -v ./internal/api
 docker exec "$qa_postgres" createdb --username storageqa clarin_storage_guard_qa
 export DATABASE_URL="postgres://storageqa:$qa_password@127.0.0.1:15439/clarin_storage_guard_qa?sslmode=disable"
 export CLARIN_RUN_STORAGE_REFERENCE_GUARD_INTEGRATION=1

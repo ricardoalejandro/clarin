@@ -21,6 +21,10 @@ import (
 
 const storageSelfServiceRetentionDays = 7
 
+// Bounds each inventory scan, including all PostgreSQL and MinIO calls. This
+// is a safety budget, not a claim that a full scan scales to unlimited volume.
+const storageSelfServiceCatalogTimeout = 45 * time.Second
+
 type storageSelfServiceQuerier interface {
 	Query(context.Context, string, ...interface{}) (pgx.Rows, error)
 	QueryRow(context.Context, string, ...interface{}) pgx.Row
@@ -258,6 +262,8 @@ func storageSelfServiceFingerprint(file storageSelfServiceFile, refs []storageSe
 }
 
 func (s *Server) storageSelfServiceCatalog(ctx context.Context, q storageSelfServiceQuerier, accountID, actorID uuid.UUID, claims *service.JWTClaims, selected ...[]string) (*storageSelfServiceCatalog, error) {
+	ctx, cancel := context.WithTimeout(ctx, storageSelfServiceCatalogTimeout)
+	defer cancel()
 	var refs map[string][]storageSelfServiceReference
 	var objects []storage.ObjectSummary
 	etags := map[string]string{}
