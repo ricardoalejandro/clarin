@@ -226,28 +226,10 @@ func (s *Storage) ensureBucket(ctx context.Context) error {
 		}
 	}
 
-	// Keep ordinary media public for backwards compatibility, but explicitly
-	// omit historical status/Work namespaces and any accidentally uploaded
-	// private key. Authenticated service credentials can still read these keys.
-	policy := fmt.Sprintf(`{
-		"Version": "2012-10-17",
-		"Statement": [
-			{
-				"Effect": "Allow",
-				"Principal": {"AWS": ["*"]},
-				"Action": ["s3:GetObject"],
-				"NotResource": [
-					"arn:aws:s3:::%s/*/%s/*",
-					"arn:aws:s3:::%s/*/%s/*",
-					"arn:aws:s3:::%s/*/%s/*",
-					"arn:aws:s3:::%s/*/%s/*"
-				]
-			}
-		]
-	}`, s.bucket, legacyStatusObjectFolder, s.bucket, privateObjectFolder,
-		s.bucket, legacyTaskAttachmentFolder, s.bucket, legacyTaskPreviewFolder)
-	if err := s.client.SetBucketPolicy(ctx, s.bucket, policy); err != nil {
-		return fmt.Errorf("failed to enforce public bucket policy: %w", err)
+	// Ordinary media is also private. Browser access goes through the backend's
+	// account and module authorization; explicit publications use scoped grants.
+	if err := s.client.SetBucketPolicy(ctx, s.bucket, ""); err != nil {
+		return fmt.Errorf("failed to enforce private media bucket policy: %w", err)
 	}
 
 	return nil
@@ -498,12 +480,13 @@ func (s *Storage) DeletePrefix(ctx context.Context, prefix string) (int64, error
 	return deleted, nil
 }
 
-// GetPublicURL returns the public URL for an object
+// GetPublicURL preserves the legacy API name but returns an authenticated
+// same-origin proxy URL. Public publication requires an explicit scoped grant.
 func (s *Storage) GetPublicURL(objectKey string) string {
 	if IsProtectedMediaObjectKey(objectKey) {
 		return ""
 	}
-	return fmt.Sprintf("%s/%s/%s", s.publicURL, s.bucket, objectKey)
+	return "/api/media/file/" + objectKey
 }
 
 // ExtractObjectKey extracts the object key from a full URL

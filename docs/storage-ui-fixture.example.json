@@ -1,0 +1,45 @@
+{
+  "description": "Schema example only. The real manifest is private mode 0600 under work/storage-ui-qa; never commit its credentials.",
+  "kind": "clarin-storage-ui-qa-v1",
+  "run_id": "GENERATED_UUID",
+  "state": "ready",
+  "accounts": {
+    "a": { "id": "GENERATED_ACCOUNT_A_UUID", "name": "QA almacenamiento RUN · Cuenta A" },
+    "b": { "id": "GENERATED_ACCOUNT_B_UUID", "name": "QA almacenamiento RUN · Cuenta B" }
+  },
+  "actors": {
+    "admin_a": {
+      "id": "GENERATED_USER_UUID",
+      "account_id": "GENERATED_ACCOUNT_A_UUID",
+      "username": "GENERATED_SYNTHETIC_LOGIN",
+      "password": "ONLY_IN_PRIVATE_MANIFEST",
+      "permissions": ["*"],
+      "memberships": ["GENERATED_ACCOUNT_A_UUID", "GENERATED_ACCOUNT_B_UUID"]
+    },
+    "member_a": {
+      "id": "GENERATED_USER_UUID",
+      "account_id": "GENERATED_ACCOUNT_A_UUID",
+      "username": "GENERATED_SYNTHETIC_LOGIN",
+      "password": "ONLY_IN_PRIVATE_MANIFEST",
+      "permissions": ["chats", "settings"],
+      "memberships": ["GENERATED_ACCOUNT_A_UUID"]
+    }
+  },
+  "files": [
+    {
+      "label": "restore",
+      "account_id": "GENERATED_ACCOUNT_A_UUID",
+      "object_key": "GENERATED_ACCOUNT_A_UUID/qa-browser/GENERATED_RUN_UUID/restore.pdf",
+      "filename": "Solo retiro y restauración.pdf",
+      "media_type": "document",
+      "content_type": "application/pdf",
+      "size_bytes": 0,
+      "sha256": "EXACT_FIXTURE_HASH",
+      "asset_id": "GENERATED_UUID",
+      "contact_id": "GENERATED_UUID",
+      "chat_id": "GENERATED_UUID",
+      "message_id": "GENERATED_UUID",
+      "initial_state": "active"
+    }
+  ]
+}

@@ -9,6 +9,7 @@ import {
   Building2,
   ClipboardList,
   Contact,
+  HardDrive,
   LogOut,
   MessageSquare,
   ShieldAlert,
@@ -54,6 +55,7 @@ export function MobileAppHeader({
   activeLabel,
   version,
   hidden,
+  storageAvailable = true,
   onSwitchAccount,
   onLogout,
 }: {
@@ -62,6 +64,7 @@ export function MobileAppHeader({
   activeLabel: string
   version: string
   hidden: boolean
+  storageAvailable?: boolean
   onSwitchAccount: (accountID: string) => Promise<string | null>
   onLogout: () => Promise<void>
 }) {
@@ -86,6 +89,12 @@ export function MobileAppHeader({
           <div className="rounded-2xl border border-slate-700/70 bg-slate-800 p-2 shadow-sm">
             <AccountSwitcher currentAccount={{ id: user.account_id, name: user.account_name || 'Cuenta' }} accountCount={accountCount} collapsed={false} onSwitch={onSwitchAccount} />
           </div>
+          {storageAvailable && (
+            <Link href="/dashboard/storage" onClick={() => setOpen(false)} className="mt-4 flex min-h-14 items-center gap-3 rounded-2xl border border-slate-200 px-4 py-3 text-slate-800 transition hover:border-emerald-200 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
+              <HardDrive className="h-5 w-5 shrink-0 text-emerald-600" />
+              <span><span className="block text-sm font-semibold">Almacenamiento</span><span className="mt-0.5 block text-xs text-slate-500">Revisa y gestiona tus archivos</span></span>
+            </Link>
+          )}
           <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
             <div className="flex items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white text-slate-500 shadow-sm"><Building2 className="h-4 w-4" /></span><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-800">{user.account_name || 'Cuenta'}</p><p className="mt-0.5 text-xs text-slate-500">Clarin móvil · v{version}</p></div></div>
           </div>
