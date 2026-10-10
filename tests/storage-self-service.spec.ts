@@ -129,8 +129,27 @@ async function openStorage(page: Page) {
   await expect(page.getByRole('heading', { name: 'Almacenamiento', exact: true })).toBeVisible()
 }
 
+async function expectMobileFileRowGeometry(page: Page, name: string, minimumNameWidth?: number) {
+  const row = page.locator('[data-storage-workspace] article').filter({ has: page.getByRole('button', { name, exact: true }) })
+  const filename = row.getByRole('button', { name, exact: true })
+  const details = row.getByRole('button', { name: 'Ver detalles', exact: true })
+  await expect(filename).toBeVisible()
+  // Measure usable reading space and the action's actual position. Merely
+  // fitting inside the viewport allowed the former ~100 px filename column.
+  if (minimumNameWidth) await expect.poll(async () => (await filename.boundingBox())?.width || 0, { message: 'the mobile filename retains a useful reading width' }).toBeGreaterThanOrEqual(minimumNameWidth)
+  const textBounds = await filename.evaluate(node => { const r = node.parentElement!.getBoundingClientRect(); return { left: r.left, bottom: r.bottom } })
+  const actionBounds = await details.boundingBox()
+  const rowBounds = await row.boundingBox()
+  expect(actionBounds).not.toBeNull(); expect(rowBounds).not.toBeNull()
+  expect(actionBounds!.y, 'details action is below the filename and metadata').toBeGreaterThanOrEqual(textBounds.bottom)
+  expect(Math.abs(actionBounds!.x - textBounds.left), 'details action aligns with the filename').toBeLessThanOrEqual(1)
+  expect(actionBounds!.width).toBeGreaterThanOrEqual(44)
+  expect(actionBounds!.height).toBeGreaterThanOrEqual(44)
+  expect(actionBounds!.x + actionBounds!.width).toBeLessThanOrEqual(rowBounds!.x + rowBounds!.width)
+}
+
 test('UI: geometría sin desborde y acciones táctiles con nombres largos', async ({ page }, testInfo) => {
-  await installStorageUI(page, { longFilename: true }); await openStorage(page)
+  const mock = await installStorageUI(page, { longFilename: true }); await openStorage(page)
   await expect(page.getByText(/Documento con un nombre extremadamente largo/)).toBeVisible()
   for (const width of [320, 375, 768, 1024, 1280, 1440]) {
     await page.setViewportSize({ width, height: width < 500 ? 740 : 900 })
@@ -141,7 +160,8 @@ test('UI: geometría sin desborde y acciones táctiles con nombres largos', asyn
     await expect.poll(() => heading.evaluate(node => { const r = node.getBoundingClientRect(); return document.elementFromPoint(r.left + 5, r.top + r.height / 2)?.closest('h1') === node })).toBe(true)
     expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), `horizontal overflow at ${width}px`).toBeLessThanOrEqual(0)
     expect((await primary.boundingBox())?.height || 0).toBeGreaterThanOrEqual(44)
-    if (width === 320 || width === 1440) await page.screenshot({ path: testInfo.outputPath(`storage-${width}.png`), fullPage: true })
+    if (width < 500) await expectMobileFileRowGeometry(page, mock.records[0].filename, width === 375 ? 190 : undefined)
+    if (width === 320 || width === 375 || width === 1440) await page.screenshot({ path: testInfo.outputPath(`storage-${width}.png`), fullPage: true })
   }
 })
 
@@ -252,6 +272,8 @@ test('UI: papelera permite restaurar y reconcilia inventario sin recargar', asyn
   await page.getByRole('button', { name: 'Revisar selección', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Confirmar retirada', exact: true }).click()
   await page.getByRole('tab', { name: /Papelera/ }).click()
+  await page.setViewportSize({ width: 375, height: 740 })
+  await expectMobileFileRowGeometry(page, mock.records[0].filename)
   await page.getByRole('checkbox', { name: 'Seleccionar Documento 001.pdf', exact: true }).check()
   await page.getByRole('button', { name: 'Restaurar', exact: true }).click()
   await page.getByRole('dialog', { name: 'Revisar restauración', exact: true }).getByRole('button', { name: 'Restaurar archivos', exact: true }).click()
