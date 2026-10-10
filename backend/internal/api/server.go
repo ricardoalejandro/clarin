@@ -295,6 +295,7 @@ func (s *Server) setupRoutes() {
 
 	// API routes
 	api := s.app.Group("/api")
+	api.Use(s.normalizeMediaResponse)
 
 	// Version endpoint — public, returns version info and changelog
 	api.Get("/version", s.handleGetVersion)
@@ -304,8 +305,8 @@ func (s *Server) setupRoutes() {
 	// Device health endpoint (protected) — detailed per-device metrics
 	// Registered after auth middleware setup below
 
-	// Media proxy - public access for displaying images/videos in chat
-	// MUST be registered before protected group to avoid auth middleware
+	// Media performs its own account/module authorization. Explicit public
+	// publications use object-scoped expiring capabilities.
 	api.Get("/media/file/*", s.handleMediaProxy)
 
 	// Public survey routes (no auth required)
@@ -455,11 +456,15 @@ func (s *Server) setupRoutes() {
 	protected.Get("/settings", s.handleGetSettings)
 	protected.Put("/settings/profile", s.handleUpdateProfile)
 	protected.Put("/settings/account", s.handleUpdateAccount)
-	protected.Get("/storage/usage", s.handleGetStorageUsage)
-	protected.Get("/storage/files", s.handleListStorageFiles)
-	protected.Delete("/storage/files", s.handleDeleteStorageFiles)
-	protected.Post("/storage/dedupe", s.handleStartStorageDedupe)
-	protected.Get("/storage/dedupe/:id", s.handleGetStorageDedupeJob)
+	protected.Get("/storage/usage", s.handleStorageSelfServiceUsage)
+	protected.Get("/storage/files", s.handleStorageSelfServiceFiles)
+	protected.Delete("/storage/files", s.handleStorageLegacyMutationDisabled)
+	protected.Post("/storage/dedupe", s.handleStorageLegacyMutationDisabled)
+	protected.Get("/storage/dedupe/:id", s.handleStorageLegacyMutationDisabled)
+	protected.Get("/storage/content", s.handleStorageSelfServiceContent)
+	protected.Post("/storage/cleanup/preview", s.handleStorageCleanupPreview)
+	protected.Post("/storage/cleanup/confirm", s.handleStorageCleanupConfirm)
+	protected.Get("/storage/activity", s.handleStorageCleanupActivity)
 	protected.Put("/settings/password", s.handleChangePassword)
 	protected.Put("/settings/incoming-stage", s.handleSetIncomingStage)
 
@@ -3632,6 +3637,9 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	if err := s.authorizeMediaPublication(c, req.MediaURL); err != nil {
+		return mediaPublicationDenied(c, err)
+	}
 
 	deviceID, err := uuid.Parse(req.DeviceID)
 	if err != nil {
@@ -3726,8 +3734,8 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 }
 
 func (s *Server) validateAccountStickerMedia(ctx context.Context, accountID uuid.UUID, mediaURL string) (string, error) {
-	objectKey := objectKeyFromMediaURL(mediaURL)
-	if objectKey == "" || !strings.HasPrefix(objectKey, accountID.String()+"/") {
+	objectKey, stored := s.ordinaryObjectKeyFromURL(mediaURL)
+	if !stored || objectKey == "" || !strings.HasPrefix(objectKey, accountID.String()+"/") {
 		return "", fiber.NewError(fiber.StatusBadRequest, "El sticker no pertenece a esta cuenta")
 	}
 	var contentType string
@@ -4367,20 +4375,18 @@ func classifyStorageMediaType(objectKey, contentType string) string {
 	return "other"
 }
 
+// This extracts identity only; callers must separately authorize account,
+// origin and module access. Capabilities never form part of an object key.
 func objectKeyFromMediaURL(mediaURL string) string {
-	mediaURL = strings.TrimSpace(mediaURL)
-	if mediaURL == "" {
+	parsed, err := url.Parse(strings.TrimSpace(mediaURL))
+	if err != nil {
 		return ""
 	}
-	if strings.HasPrefix(mediaURL, "/api/media/file/") {
-		key := strings.TrimPrefix(mediaURL, "/api/media/file/")
-		if decoded, err := url.PathUnescape(key); err == nil {
-			return decoded
-		}
-		return key
+	if strings.HasPrefix(parsed.Path, "/api/media/file/") {
+		return strings.TrimPrefix(parsed.Path, "/api/media/file/")
 	}
-	if sidx := strings.Index(mediaURL, "/clarin-media/"); sidx >= 0 {
-		return mediaURL[sidx+len("/clarin-media/"):]
+	if at := strings.Index(parsed.Path, "/clarin-media/"); at >= 0 {
+		return parsed.Path[at+len("/clarin-media/"):]
 	}
 	return ""
 }
@@ -4461,815 +4467,6 @@ func (s *Server) userCanManageStorage(c *fiber.Ctx) bool {
 	return false
 }
 
-func (s *Server) handleGetStorageUsage(c *fiber.Ctx) error {
-	if s.storage == nil {
-		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Storage not configured"})
-	}
-	accountID := c.Locals("account_id").(uuid.UUID)
-	account, err := s.services.Account.GetByID(c.Context(), accountID)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-
-	objects, err := s.storage.ListPrefix(c.Context(), accountID.String()+"/")
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-	associated, err := s.storageAssociatedURLs(c.Context(), accountID)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-
-	byType := map[string]int64{"image": 0, "video": 0, "audio": 0, "document": 0, "other": 0}
-	byFolder := map[string]int64{"chats": 0, "uploads": 0, "avatars": 0, "other": 0}
-	var used int64
-	var associatedBytes int64
-	var orphanBytes int64
-	var associatedCount int
-	var orphanCount int
-	for _, object := range objects {
-		mediaType := classifyStorageMediaType(object.Key, "")
-		folder := storageFolderFromObjectKey(accountID, object.Key)
-		if _, ok := byFolder[folder]; !ok {
-			folder = "other"
-		}
-		byType[mediaType] += object.Size
-		byFolder[folder] += object.Size
-		used += object.Size
-		if _, ok := associated[mediaProxyURLFromObjectKey(object.Key)]; ok {
-			associatedBytes += object.Size
-			associatedCount++
-		} else {
-			orphanBytes += object.Size
-			orphanCount++
-		}
-	}
-
-	var limit int64
-	if account != nil {
-		limit = account.StorageLimitBytes
-	}
-	available := int64(0)
-	percent := float64(0)
-	if limit > 0 {
-		available = limit - used
-		if available < 0 {
-			available = 0
-		}
-		percent = float64(used) / float64(limit) * 100
-		if percent > 100 {
-			percent = 100
-		}
-	}
-
-	return c.JSON(fiber.Map{
-		"success":          true,
-		"limit_bytes":      limit,
-		"used_bytes":       used,
-		"available_bytes":  available,
-		"object_count":     len(objects),
-		"percent_used":     percent,
-		"by_type":          byType,
-		"by_folder":        byFolder,
-		"associated_bytes": associatedBytes,
-		"orphan_bytes":     orphanBytes,
-		"associated_count": associatedCount,
-		"orphan_count":     orphanCount,
-		"can_manage":       s.userCanManageStorage(c),
-	})
-}
-
-type storageMessageRef struct {
-	mediaType    string
-	filename     string
-	dbSize       int64
-	lastUsed     time.Time
-	references   int64
-	mediaAssetID *uuid.UUID
-	contentHash  string
-}
-
-func (s *Server) storageAssociatedURLs(ctx context.Context, accountID uuid.UUID) (map[string]storageMessageRef, error) {
-	rows, err := s.repos.DB().Query(ctx, `
-		SELECT m.media_url,
-		       COALESCE(message_type, 'document') AS message_type,
-		       COALESCE(media_filename, '') AS filename,
-		       COALESCE(MAX(media_size), 0) AS db_size,
-		       MAX(timestamp) AS last_used_at,
-		       COUNT(*) AS references_count,
-		       (ARRAY_AGG(m.media_asset_id) FILTER (WHERE m.media_asset_id IS NOT NULL))[1] AS media_asset_id,
-		       COALESCE(MAX(ma.content_hash), '') AS content_hash
-		FROM messages m
-		LEFT JOIN media_assets ma ON ma.id = m.media_asset_id AND ma.account_id = m.account_id
-		WHERE m.account_id = $1
-		  AND COALESCE(m.media_deleted, false) = false
-		  AND m.media_url IS NOT NULL
-		  AND m.media_url <> ''
-		  AND m.media_url LIKE $2
-		GROUP BY m.media_url, message_type, media_filename
-	`, accountID, "/api/media/file/"+accountID.String()+"/%")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	result := make(map[string]storageMessageRef)
-	for rows.Next() {
-		var mediaURL string
-		ref := storageMessageRef{}
-		if err := rows.Scan(&mediaURL, &ref.mediaType, &ref.filename, &ref.dbSize, &ref.lastUsed, &ref.references, &ref.mediaAssetID, &ref.contentHash); err != nil {
-			return nil, err
-		}
-		result[mediaURL] = ref
-		if objectKey := objectKeyFromMediaURL(mediaURL); objectKey != "" {
-			result[mediaProxyURLFromObjectKey(objectKey)] = ref
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	statusRows, err := s.repos.DB().Query(ctx, `
-		SELECT ws.media_url,
-		       ws.kind,
-		       '',
-		       COALESCE(MAX(ws.media_size), 0),
-		       MAX(COALESCE(ws.sent_at, ws.created_at)),
-		       COUNT(*),
-		       (ARRAY_AGG(ws.media_asset_id) FILTER (WHERE ws.media_asset_id IS NOT NULL))[1],
-		       COALESCE(MAX(ma.content_hash), '')
-		FROM whatsapp_statuses ws
-		LEFT JOIN media_assets ma ON ma.id=ws.media_asset_id AND ma.account_id=ws.account_id
-		WHERE ws.account_id=$1 AND ws.expires_at>NOW()
-		  AND ws.media_url IS NOT NULL AND ws.media_url<>'' AND ws.media_url LIKE $2
-		GROUP BY ws.media_url, ws.kind
-	`, accountID, "/api/media/file/"+accountID.String()+"/%")
-	if err != nil {
-		return nil, err
-	}
-	defer statusRows.Close()
-	for statusRows.Next() {
-		var mediaURL string
-		ref := storageMessageRef{}
-		if err := statusRows.Scan(&mediaURL, &ref.mediaType, &ref.filename, &ref.dbSize, &ref.lastUsed, &ref.references, &ref.mediaAssetID, &ref.contentHash); err != nil {
-			return nil, err
-		}
-		if current, ok := result[mediaURL]; ok {
-			current.references += ref.references
-			if ref.lastUsed.After(current.lastUsed) {
-				current.lastUsed = ref.lastUsed
-			}
-			result[mediaURL] = current
-		} else {
-			result[mediaURL] = ref
-		}
-		if objectKey := objectKeyFromMediaURL(mediaURL); objectKey != "" {
-			result[mediaProxyURLFromObjectKey(objectKey)] = result[mediaURL]
-		}
-	}
-	if err := statusRows.Err(); err != nil {
-		return nil, err
-	}
-
-	surveyRows, err := s.repos.DB().Query(ctx, `
-		SELECT '/api/media/file/' || ma.object_key,
-		       'image', COALESCE(ma.filename,''), ma.size_bytes,
-		       MAX(ref.updated_at), COUNT(*), ma.id, ma.content_hash
-		FROM survey_branding_asset_refs ref
-		JOIN media_assets ma ON ma.account_id=ref.account_id AND ma.id=ref.media_asset_id
-		WHERE ref.account_id=$1
-		GROUP BY ma.id,ma.object_key,ma.filename,ma.size_bytes,ma.content_hash
-	`, accountID)
-	if err != nil {
-		return nil, err
-	}
-	defer surveyRows.Close()
-	for surveyRows.Next() {
-		var mediaURL string
-		ref := storageMessageRef{}
-		if err := surveyRows.Scan(&mediaURL, &ref.mediaType, &ref.filename, &ref.dbSize, &ref.lastUsed, &ref.references, &ref.mediaAssetID, &ref.contentHash); err != nil {
-			return nil, err
-		}
-		if current, ok := result[mediaURL]; ok {
-			current.references += ref.references
-			if ref.lastUsed.After(current.lastUsed) {
-				current.lastUsed = ref.lastUsed
-			}
-			result[mediaURL] = current
-		} else {
-			result[mediaURL] = ref
-		}
-	}
-	return result, surveyRows.Err()
-}
-
-func (s *Server) handleListStorageFiles(c *fiber.Ctx) error {
-	if s.storage == nil {
-		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Storage not configured"})
-	}
-	accountID := c.Locals("account_id").(uuid.UUID)
-	mediaType := strings.TrimSpace(c.Query("type", ""))
-	query := strings.ToLower(strings.TrimSpace(c.Query("q", "")))
-	status := strings.TrimSpace(c.Query("status", "all"))
-	sortBy := strings.TrimSpace(c.Query("sort", "date"))
-	order := strings.TrimSpace(c.Query("order", "desc"))
-	limit := c.QueryInt("limit", 50)
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
-	offset := c.QueryInt("offset", 0)
-	if offset < 0 {
-		offset = 0
-	}
-
-	associated, err := s.storageAssociatedURLs(c.Context(), accountID)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-
-	objects, err := s.storage.ListPrefix(c.Context(), accountID.String()+"/")
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-
-	type storageFileRow struct {
-		objectKey       string
-		mediaURL        string
-		mediaType       string
-		filename        string
-		sizeBytes       int64
-		lastModified    time.Time
-		lastUsed        time.Time
-		referencesCount int64
-		mediaAssetID    *uuid.UUID
-		contentHash     string
-		status          string
-		folder          string
-	}
-
-	allFiles := make([]storageFileRow, 0, len(objects))
-	for _, object := range objects {
-		// Private status and Work media are managed only through their owning
-		// resource and durable cleanup workers. They still count toward quota and
-		// orphan detection, but their keys must not be enumerated by this generic UI.
-		if storage.IsProtectedMediaObjectKey(object.Key) {
-			continue
-		}
-		mediaURL := mediaProxyURLFromObjectKey(object.Key)
-		ref, isAssociated := associated[mediaURL]
-		fileStatus := "orphan"
-		if isAssociated {
-			fileStatus = "associated"
-		}
-		if status != "" && status != "all" && status != fileStatus {
-			continue
-		}
-		typ := classifyStorageMediaType(object.Key, "")
-		if ref.mediaType != "" {
-			typ = ref.mediaType
-		}
-		if mediaType != "" && mediaType != typ {
-			continue
-		}
-		filename := ref.filename
-		if filename == "" {
-			filename = filepath.Base(object.Key)
-		}
-		if query != "" && !strings.Contains(strings.ToLower(filename), query) && !strings.Contains(strings.ToLower(object.Key), query) {
-			continue
-		}
-		allFiles = append(allFiles, storageFileRow{
-			objectKey:       object.Key,
-			mediaURL:        mediaURL,
-			mediaType:       typ,
-			filename:        filename,
-			sizeBytes:       object.Size,
-			lastModified:    object.LastModified,
-			lastUsed:        ref.lastUsed,
-			referencesCount: ref.references,
-			mediaAssetID:    ref.mediaAssetID,
-			contentHash:     ref.contentHash,
-			status:          fileStatus,
-			folder:          storageFolderFromObjectKey(accountID, object.Key),
-		})
-	}
-
-	sort.SliceStable(allFiles, func(i, j int) bool {
-		less := false
-		switch sortBy {
-		case "name":
-			less = strings.ToLower(allFiles[i].filename) < strings.ToLower(allFiles[j].filename)
-		case "size":
-			less = allFiles[i].sizeBytes < allFiles[j].sizeBytes
-		default:
-			left := allFiles[i].lastModified
-			right := allFiles[j].lastModified
-			if !allFiles[i].lastUsed.IsZero() {
-				left = allFiles[i].lastUsed
-			}
-			if !allFiles[j].lastUsed.IsZero() {
-				right = allFiles[j].lastUsed
-			}
-			less = left.Before(right)
-		}
-		if order == "asc" {
-			return less
-		}
-		return !less
-	})
-
-	total := len(allFiles)
-	end := offset + limit
-	if end > total {
-		end = total
-	}
-	if offset > total {
-		offset = total
-	}
-	files := make([]fiber.Map, 0, end-offset)
-	for _, file := range allFiles[offset:end] {
-		files = append(files, fiber.Map{
-			"object_key":           file.objectKey,
-			"media_url":            file.mediaURL,
-			"preview_url":          file.mediaURL,
-			"media_type":           file.mediaType,
-			"filename":             file.filename,
-			"size_bytes":           file.sizeBytes,
-			"last_modified":        file.lastModified,
-			"last_used_at":         file.lastUsed,
-			"references_count":     file.referencesCount,
-			"media_asset_id":       file.mediaAssetID,
-			"content_hash":         file.contentHash,
-			"is_shared":            file.referencesCount > 1,
-			"canonical_object_key": file.objectKey,
-			"status":               file.status,
-			"folder":               file.folder,
-		})
-	}
-
-	return c.JSON(fiber.Map{
-		"success":     true,
-		"files":       files,
-		"total":       total,
-		"limit":       limit,
-		"offset":      offset,
-		"next_offset": offset + len(files),
-		"can_manage":  s.userCanManageStorage(c),
-	})
-}
-
-func (s *Server) handleDeleteStorageFiles(c *fiber.Ctx) error {
-	if s.storage == nil {
-		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Storage not configured"})
-	}
-	if !s.userCanManageStorage(c) {
-		return c.Status(403).JSON(fiber.Map{"success": false, "error": "No tienes permiso para eliminar archivos"})
-	}
-	accountID := c.Locals("account_id").(uuid.UUID)
-	userID := c.Locals("user_id").(uuid.UUID)
-	var req struct {
-		ObjectKeys    []string `json:"object_keys"`
-		MediaAssetIDs []string `json:"media_asset_ids"`
-		Confirmation  string   `json:"confirmation"`
-	}
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
-	}
-	if req.Confirmation != "DELETE_MEDIA" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Confirmation must be DELETE_MEDIA"})
-	}
-	if len(req.ObjectKeys) == 0 && len(req.MediaAssetIDs) == 0 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "object_keys or media_asset_ids is required"})
-	}
-	if len(req.ObjectKeys)+len(req.MediaAssetIDs) > 100 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Máximo 100 archivos por operación"})
-	}
-
-	deleted := 0
-	var freedBytes int64
-	var messagesAffected int64
-	errors := make([]fiber.Map, 0)
-	accountPrefix := accountID.String() + "/"
-	for _, rawAssetID := range req.MediaAssetIDs {
-		assetID, err := uuid.Parse(strings.TrimSpace(rawAssetID))
-		if err != nil {
-			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "ID inválido"})
-			continue
-		}
-		var objectKey string
-		var sizeBytes int64
-		if err := s.repos.DB().QueryRow(c.Context(), `
-			SELECT object_key, size_bytes
-			FROM media_assets
-			WHERE id = $1 AND account_id = $2 AND status = 'active'
-		`, assetID, accountID).Scan(&objectKey, &sizeBytes); err != nil {
-			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "No se pudo encontrar el asset"})
-			continue
-		}
-		if !strings.HasPrefix(objectKey, accountPrefix) {
-			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "Archivo fuera del alcance permitido"})
-			continue
-		}
-		if storage.IsAccountPrivateAvatarObjectKey(accountID, objectKey) {
-			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "La foto pertenece a un Contacto; reemplázala o quítala desde su ficha"})
-			continue
-		}
-		if storage.IsProtectedTaskObjectKey(objectKey) {
-			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "El archivo pertenece a Work y se elimina únicamente desde su tarea o Papelera"})
-			continue
-		}
-		if storage.IsProtectedStatusObjectKey(objectKey) {
-			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "La media privada de estados se elimina únicamente mediante su retención"})
-			continue
-		}
-		var statusRefs int
-		if err := s.repos.DB().QueryRow(c.Context(), `
-			SELECT COUNT(*) FROM whatsapp_statuses
-			WHERE account_id=$1 AND media_asset_id=$2
-		`, accountID, assetID).Scan(&statusRefs); err != nil {
-			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "No se pudieron validar las referencias de estados"})
-			continue
-		}
-		if statusRefs > 0 {
-			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "El archivo pertenece a un estado de WhatsApp y se eliminará con su retención"})
-			continue
-		}
-		var taskRefs int
-		if err := s.repos.DB().QueryRow(c.Context(), `
-			SELECT (SELECT COUNT(*) FROM task_attachments WHERE account_id=$1 AND media_asset_id=$2)
-			     + (SELECT COUNT(*) FROM task_attachment_previews WHERE account_id=$1 AND derivative_asset_id=$2)
-		`, accountID, assetID).Scan(&taskRefs); err != nil {
-			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "No se pudieron validar las referencias de Work"})
-			continue
-		}
-		if taskRefs > 0 {
-			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": "El archivo pertenece a Work y se elimina únicamente desde su tarea o Papelera"})
-			continue
-		}
-		if info, statErr := s.storage.GetFileInfo(c.Context(), objectKey); statErr == nil {
-			sizeBytes = info.Size
-		}
-		if err := s.storage.DeleteFile(c.Context(), objectKey); err != nil {
-			errors = append(errors, fiber.Map{"media_asset_id": rawAssetID, "error": err.Error()})
-			continue
-		}
-		result, _ := s.repos.DB().Exec(c.Context(), `
-			UPDATE messages
-			SET media_url = NULL,
-			    media_size = NULL,
-			    media_asset_id = NULL,
-			    media_deleted = TRUE,
-			    media_deleted_at = NOW()
-			WHERE account_id = $1 AND media_asset_id = $2 AND COALESCE(media_deleted, false) = false
-		`, accountID, assetID)
-		messagesAffected += result.RowsAffected()
-		_, _ = s.repos.DB().Exec(c.Context(), `
-			UPDATE media_assets
-			SET status = 'deleted', deleted_at = NOW(), updated_at = NOW()
-			WHERE id = $1 AND account_id = $2
-		`, assetID, accountID)
-		_, _ = s.repos.DB().Exec(c.Context(), `
-			INSERT INTO storage_objects (account_id, object_key, media_type, filename, size_bytes, source, status, deleted_at, deleted_by, updated_at)
-			VALUES ($1, $2, $3, $4, $5, 'chat', 'deleted', NOW(), $6, NOW())
-			ON CONFLICT (account_id, object_key) DO UPDATE
-			SET status = 'deleted', deleted_at = NOW(), deleted_by = $6, updated_at = NOW()
-		`, accountID, objectKey, classifyStorageMediaType(objectKey, ""), filepath.Base(objectKey), sizeBytes, userID)
-		freedBytes += sizeBytes
-		deleted++
-	}
-	for _, objectKey := range req.ObjectKeys {
-		objectKey = strings.TrimSpace(objectKey)
-		if !strings.HasPrefix(objectKey, accountPrefix) {
-			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "Archivo fuera del alcance permitido"})
-			continue
-		}
-		if storage.IsAccountPrivateAvatarObjectKey(accountID, objectKey) {
-			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "La foto pertenece a un Contacto; reemplázala o quítala desde su ficha"})
-			continue
-		}
-		if storage.IsProtectedTaskObjectKey(objectKey) {
-			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "El archivo pertenece a Work y se elimina únicamente desde su tarea o Papelera"})
-			continue
-		}
-		if storage.IsProtectedStatusObjectKey(objectKey) {
-			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "La media privada de estados se elimina únicamente mediante su retención"})
-			continue
-		}
-		proxyURL := mediaProxyURLFromObjectKey(objectKey)
-		publicURL := ""
-		if s.storage != nil {
-			publicURL = s.storage.GetPublicURL(objectKey)
-		}
-		var statusRefs int
-		if err := s.repos.DB().QueryRow(c.Context(), `
-			SELECT COUNT(*)
-			FROM whatsapp_statuses ws
-			LEFT JOIN media_assets ma ON ma.id=ws.media_asset_id AND ma.account_id=ws.account_id
-			WHERE ws.account_id=$1
-			  AND (ws.media_url=$2 OR ws.media_url=$3 OR ma.object_key=$4)
-		`, accountID, proxyURL, publicURL, objectKey).Scan(&statusRefs); err != nil {
-			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "No se pudieron validar las referencias de estados"})
-			continue
-		}
-		if statusRefs > 0 {
-			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "El archivo pertenece a un estado de WhatsApp y se eliminará con su retención"})
-			continue
-		}
-		var taskRefs int
-		if err := s.repos.DB().QueryRow(c.Context(), `
-			SELECT COUNT(*) FROM media_assets asset
-			WHERE asset.account_id=$1 AND asset.object_key=$2 AND (
-				EXISTS(SELECT 1 FROM task_attachments attachment WHERE attachment.account_id=asset.account_id AND attachment.media_asset_id=asset.id)
-				OR EXISTS(SELECT 1 FROM task_attachment_previews preview WHERE preview.account_id=asset.account_id AND preview.derivative_asset_id=asset.id)
-			)
-		`, accountID, objectKey).Scan(&taskRefs); err != nil {
-			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "No se pudieron validar las referencias de Work"})
-			continue
-		}
-		if taskRefs > 0 {
-			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "El archivo pertenece a Work y se elimina únicamente desde su tarea o Papelera"})
-			continue
-		}
-		var activeMessageRefs int
-		if err := s.repos.DB().QueryRow(c.Context(), `
-			SELECT COUNT(*)
-			FROM messages
-			WHERE account_id = $1
-			  AND (media_url = $2 OR media_url = $3)
-			  AND COALESCE(media_deleted, false) = false
-		`, accountID, proxyURL, publicURL).Scan(&activeMessageRefs); err != nil {
-			errors = append(errors, fiber.Map{"object_key": objectKey, "error": "No se pudo validar el archivo"})
-			continue
-		}
-		if activeMessageRefs == 0 {
-			info, statErr := s.storage.GetFileInfo(c.Context(), objectKey)
-			sizeBytes := int64(0)
-			if statErr == nil {
-				sizeBytes = info.Size
-				freedBytes += sizeBytes
-			}
-			if err := s.storage.DeleteFile(c.Context(), objectKey); err != nil && statErr == nil {
-				errors = append(errors, fiber.Map{"object_key": objectKey, "error": err.Error()})
-				continue
-			}
-			_, _ = s.repos.DB().Exec(c.Context(), `
-				INSERT INTO storage_objects (account_id, object_key, media_type, filename, size_bytes, source, status, deleted_at, deleted_by, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, 'deleted', NOW(), $7, NOW())
-				ON CONFLICT (account_id, object_key) DO UPDATE
-				SET status = 'deleted', deleted_at = NOW(), deleted_by = $7, updated_at = NOW()
-			`, accountID, objectKey, classifyStorageMediaType(objectKey, ""), filepath.Base(objectKey), sizeBytes, storageFolderFromObjectKey(accountID, objectKey), userID)
-			deleted++
-			continue
-		}
-		info, statErr := s.storage.GetFileInfo(c.Context(), objectKey)
-		sizeBytes := int64(0)
-		if statErr == nil {
-			sizeBytes = info.Size
-			freedBytes += sizeBytes
-		}
-		if err := s.storage.DeleteFile(c.Context(), objectKey); err != nil && statErr == nil {
-			errors = append(errors, fiber.Map{"object_key": objectKey, "error": err.Error()})
-			continue
-		}
-		result, _ := s.repos.DB().Exec(c.Context(), `
-			UPDATE messages
-			SET media_url = NULL,
-			    media_size = NULL,
-			    media_asset_id = NULL,
-			    media_deleted = TRUE,
-			    media_deleted_at = NOW()
-			WHERE account_id = $1 AND (media_url = $2 OR media_url = $3)
-		`, accountID, proxyURL, publicURL)
-		messagesAffected += result.RowsAffected()
-		_, _ = s.repos.DB().Exec(c.Context(), `
-			INSERT INTO storage_objects (account_id, object_key, media_type, filename, size_bytes, source, status, deleted_at, deleted_by, updated_at)
-			VALUES ($1, $2, $3, $4, $5, 'chat', 'deleted', NOW(), $6, NOW())
-			ON CONFLICT (account_id, object_key) DO UPDATE
-			SET status = 'deleted', deleted_at = NOW(), deleted_by = $6, updated_at = NOW()
-		`, accountID, objectKey, classifyStorageMediaType(objectKey, ""), filepath.Base(objectKey), sizeBytes, userID)
-		deleted++
-	}
-
-	if messagesAffected > 0 {
-		s.invalidateMessagesCache(accountID, nil)
-	}
-
-	return c.JSON(fiber.Map{
-		"success":           true,
-		"deleted":           deleted,
-		"freed_bytes":       freedBytes,
-		"messages_affected": messagesAffected,
-		"errors":            errors,
-	})
-}
-
-func (s *Server) handleStartStorageDedupe(c *fiber.Ctx) error {
-	if s.storage == nil {
-		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Storage not configured"})
-	}
-	if !s.userCanManageStorage(c) {
-		return c.Status(403).JSON(fiber.Map{"success": false, "error": "No tienes permiso para compactar almacenamiento"})
-	}
-	accountID := c.Locals("account_id").(uuid.UUID)
-	var running int
-	if err := s.repos.DB().QueryRow(c.Context(), `
-		SELECT COUNT(*) FROM storage_dedupe_jobs
-		WHERE account_id = $1 AND status IN ('queued', 'running')
-	`, accountID).Scan(&running); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-	if running > 0 {
-		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Ya hay una compactación en progreso"})
-	}
-	var jobID uuid.UUID
-	if err := s.repos.DB().QueryRow(c.Context(), `
-		INSERT INTO storage_dedupe_jobs (account_id, status)
-		VALUES ($1, 'queued')
-		RETURNING id
-	`, accountID).Scan(&jobID); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-	go s.runStorageDedupeJob(context.Background(), accountID, jobID)
-	return c.Status(202).JSON(fiber.Map{"success": true, "job_id": jobID})
-}
-
-func (s *Server) handleGetStorageDedupeJob(c *fiber.Ctx) error {
-	accountID := c.Locals("account_id").(uuid.UUID)
-	jobID, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid job ID"})
-	}
-	var status, errText string
-	var total, processed, found, deleted, freed int64
-	var startedAt, completedAt *time.Time
-	if err := s.repos.DB().QueryRow(c.Context(), `
-		SELECT status, total_objects, processed_objects, duplicates_found, duplicates_deleted, bytes_freed, error, started_at, completed_at
-		FROM storage_dedupe_jobs
-		WHERE id = $1 AND account_id = $2
-	`, jobID, accountID).Scan(&status, &total, &processed, &found, &deleted, &freed, &errText, &startedAt, &completedAt); err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Job not found"})
-	}
-	return c.JSON(fiber.Map{
-		"success":            true,
-		"job_id":             jobID,
-		"status":             status,
-		"total_objects":      total,
-		"processed_objects":  processed,
-		"duplicates_found":   found,
-		"duplicates_deleted": deleted,
-		"bytes_freed":        freed,
-		"error":              errText,
-		"started_at":         startedAt,
-		"completed_at":       completedAt,
-	})
-}
-
-func (s *Server) runStorageDedupeJob(ctx context.Context, accountID, jobID uuid.UUID) {
-	_, _ = s.repos.DB().Exec(ctx, `
-		UPDATE storage_dedupe_jobs
-		SET status = 'running', started_at = NOW(), updated_at = NOW()
-		WHERE id = $1 AND account_id = $2
-	`, jobID, accountID)
-	failJob := func(err error) {
-		_, _ = s.repos.DB().Exec(ctx, `
-			UPDATE storage_dedupe_jobs
-			SET status = 'failed', error = $3, completed_at = NOW(), updated_at = NOW()
-			WHERE id = $1 AND account_id = $2
-		`, jobID, accountID, err.Error())
-	}
-
-	objects, err := s.storage.ListPrefix(ctx, accountID.String()+"/chats/")
-	if err != nil {
-		failJob(err)
-		return
-	}
-	_, _ = s.repos.DB().Exec(ctx, `UPDATE storage_dedupe_jobs SET total_objects = $3, updated_at = NOW() WHERE id = $1 AND account_id = $2`, jobID, accountID, len(objects))
-	type canonical struct {
-		assetID   uuid.UUID
-		objectKey string
-		sizeBytes int64
-		mediaURL  string
-	}
-	seen := make(map[string]canonical)
-	var processed, found, deleted, freed int64
-	for _, object := range objects {
-		processed++
-		data, err := s.storage.GetFile(ctx, object.Key)
-		if err != nil {
-			_, _ = s.repos.DB().Exec(ctx, `UPDATE storage_dedupe_jobs SET processed_objects = $3, error = $4, updated_at = NOW() WHERE id = $1 AND account_id = $2`, jobID, accountID, processed, err.Error())
-			continue
-		}
-		hash := sha256.Sum256(data)
-		rawContentHash := fmt.Sprintf("%x", hash[:])
-		contentHash := rawContentHash
-		mediaType := classifyStorageMediaType(object.Key, "")
-		if mediaType == "other" {
-			mediaType = strings.TrimPrefix(strings.ToLower(filepath.Ext(object.Key)), ".")
-			if mediaType == "" {
-				mediaType = "bin"
-			}
-		}
-		ext := strings.ToLower(filepath.Ext(object.Key))
-		if ext == "" {
-			ext = ".bin"
-		}
-		can, ok := seen[contentHash]
-		if !ok {
-			existing, resolvedHash, lookupErr := s.findNonStatusMediaAsset(ctx, accountID, rawContentHash)
-			contentHash = resolvedHash
-			if lookupErr != nil {
-				_, _ = s.repos.DB().Exec(ctx, `UPDATE storage_dedupe_jobs SET processed_objects = $3, error = $4, updated_at = NOW() WHERE id = $1 AND account_id = $2`, jobID, accountID, processed, lookupErr.Error())
-				continue
-			}
-			if existing != nil {
-				can = canonical{assetID: existing.ID, objectKey: existing.ObjectKey, sizeBytes: existing.SizeBytes, mediaURL: mediaProxyURLFromObjectKey(existing.ObjectKey)}
-			} else {
-				// The candidate is always unique. If another request wins the hash
-				// upsert, deleting this candidate can never remove the winner's object.
-				canonicalObjectKey := fmt.Sprintf("%s/media/%s/%s-%s%s", accountID.String(), mediaType, contentHash, uuid.NewString(), ext)
-				uploadedCanonical := canonicalObjectKey != object.Key
-				if uploadedCanonical {
-					if _, err := s.storage.UploadObject(ctx, canonicalObjectKey, data, ""); err != nil {
-						_, _ = s.repos.DB().Exec(ctx, `UPDATE storage_dedupe_jobs SET processed_objects = $3, error = $4, updated_at = NOW() WHERE id = $1 AND account_id = $2`, jobID, accountID, processed, err.Error())
-						continue
-					}
-				}
-				asset, err := s.repos.MediaAsset.Upsert(ctx, repository.MediaAssetUpsert{
-					AccountID:   accountID,
-					ContentHash: contentHash,
-					ObjectKey:   canonicalObjectKey,
-					MediaType:   mediaType,
-					ContentType: "",
-					Filename:    filepath.Base(object.Key),
-					SizeBytes:   int64(len(data)),
-				})
-				if err != nil {
-					if uploadedCanonical {
-						_ = s.storage.DeleteFile(ctx, canonicalObjectKey)
-					}
-					_, _ = s.repos.DB().Exec(ctx, `UPDATE storage_dedupe_jobs SET processed_objects = $3, error = $4, updated_at = NOW() WHERE id = $1 AND account_id = $2`, jobID, accountID, processed, err.Error())
-					continue
-				}
-				if uploadedCanonical && asset.ObjectKey != canonicalObjectKey {
-					if deleteErr := s.storage.DeleteFile(ctx, canonicalObjectKey); deleteErr != nil {
-						_, _ = s.repos.DB().Exec(ctx, `UPDATE storage_dedupe_jobs SET error = $3, updated_at = NOW() WHERE id = $1 AND account_id = $2`, jobID, accountID, deleteErr.Error())
-					}
-				}
-				can = canonical{assetID: asset.ID, objectKey: asset.ObjectKey, sizeBytes: asset.SizeBytes, mediaURL: mediaProxyURLFromObjectKey(asset.ObjectKey)}
-			}
-			seen[contentHash] = can
-			seen[rawContentHash] = can
-		}
-
-		oldURL := mediaProxyURLFromObjectKey(object.Key)
-		publicURL := s.storage.GetPublicURL(object.Key)
-		result, _ := s.repos.DB().Exec(ctx, `
-			UPDATE messages
-			SET media_url = $4,
-			    media_asset_id = $5,
-			    media_size = $6
-			WHERE account_id = $1
-			  AND COALESCE(media_deleted, false) = false
-			  AND (media_url = $2 OR media_url = $3)
-		`, accountID, oldURL, publicURL, can.mediaURL, can.assetID, can.sizeBytes)
-		if object.Key != can.objectKey {
-			found++
-			if result.RowsAffected() > 0 {
-				if err := s.storage.DeleteFile(ctx, object.Key); err == nil {
-					deleted++
-					freed += object.Size
-					_, _ = s.repos.DB().Exec(ctx, `
-						INSERT INTO storage_objects (account_id, object_key, media_type, filename, size_bytes, source, status, deleted_at, updated_at)
-						VALUES ($1, $2, $3, $4, $5, 'dedupe', 'deleted', NOW(), NOW())
-						ON CONFLICT (account_id, object_key) DO UPDATE
-						SET status = 'deleted', deleted_at = NOW(), updated_at = NOW()
-					`, accountID, object.Key, mediaType, filepath.Base(object.Key), object.Size)
-				}
-			}
-		}
-		_, _ = s.repos.DB().Exec(ctx, `
-			UPDATE storage_dedupe_jobs
-			SET processed_objects = $3,
-			    duplicates_found = $4,
-			    duplicates_deleted = $5,
-			    bytes_freed = $6,
-			    updated_at = NOW()
-			WHERE id = $1 AND account_id = $2
-		`, jobID, accountID, processed, found, deleted, freed)
-	}
-	_, _ = s.repos.DB().Exec(ctx, `
-		UPDATE storage_dedupe_jobs
-		SET status = 'completed',
-		    processed_objects = $3,
-		    duplicates_found = $4,
-		    duplicates_deleted = $5,
-		    bytes_freed = $6,
-		    completed_at = NOW(),
-		    updated_at = NOW()
-		WHERE id = $1 AND account_id = $2
-	`, jobID, accountID, processed, found, deleted, freed)
-}
-
 func (s *Server) handleGetUploadURL(c *fiber.Ctx) error {
 	if s.storage == nil {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Storage not configured"})
@@ -5345,10 +4542,10 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 			SET source=CASE WHEN source='whatsapp_status' THEN $3 ELSE source END,
 			    status='active',deleted_at=NULL,updated_at=NOW()
 			WHERE account_id=$1 AND object_key=$2`, accountID, existing.ObjectKey, folder)
-		proxyURL := mediaProxyURLFromObjectKey(existing.ObjectKey)
+		proxyURL := s.uploadPreviewURL(c, existing.ObjectKey)
 		return c.JSON(fiber.Map{
 			"success":        true,
-			"public_url":     s.storage.GetPublicURL(existing.ObjectKey),
+			"public_url":     proxyURL,
 			"proxy_url":      proxyURL,
 			"filename":       existing.Filename,
 			"media_asset_id": existing.ID,
@@ -5413,6 +4610,8 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 		mediaAssetID = asset.ID
 	}
 
+	proxyURL = s.uploadPreviewURL(c, objectKey)
+	publicURL = proxyURL
 	return c.JSON(fiber.Map{
 		"success":        true,
 		"public_url":     publicURL,
@@ -5474,12 +4673,12 @@ func (s *Server) handleMediaProxy(c *fiber.Ctx) error {
 	if decoded, err := url.PathUnescape(objectKey); err == nil {
 		objectKey = decoded
 	}
-	if storage.IsProtectedMediaObjectKey(objectKey) {
+	if storage.IsProtectedMediaObjectKey(objectKey) || !s.authorizeOrdinaryMedia(c, objectKey) {
 		c.Set("Cache-Control", "private, no-store, max-age=0")
 		c.Set("Vary", "Cookie, Authorization")
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "File not found"})
 	}
-	return s.serveStorageObject(c, objectKey, "public, max-age=31536000", "")
+	return s.serveStorageObject(c, objectKey, "private, no-store, max-age=0", "")
 }
 
 func storageResponseNotModified(cacheControl, rangeHeader, ifNoneMatch, etag string) bool {
@@ -11044,6 +10243,10 @@ func (s *Server) handleCreateCampaign(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	if err := s.authorizeMediaReferencePayload(c, req); err != nil {
+		return mediaPublicationDenied(c, err)
+	}
+
 	if req.Name == "" || req.DeviceID == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "name and device_id are required"})
 	}
@@ -11156,6 +10359,10 @@ func (s *Server) handleUpdateCampaign(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	if err := s.authorizeMediaReferencePayload(c, req); err != nil {
+		return mediaPublicationDenied(c, err)
+	}
+
 	if req.Name != nil {
 		campaign.Name = *req.Name
 	}
@@ -11918,6 +11125,10 @@ func (s *Server) handleUpdateCampaignAttachments(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	if err := s.authorizeMediaReferencePayload(c, req); err != nil {
+		return mediaPublicationDenied(c, err)
+	}
+
 	// Delete existing and re-create
 	if err := s.repos.CampaignAttachment.DeleteByCampaignID(c.Context(), id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -14422,6 +13633,10 @@ func (s *Server) handleCreateCampaignFromEvent(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	if err := s.authorizeMediaReferencePayload(c, req); err != nil {
+		return mediaPublicationDenied(c, err)
+	}
+
 	if req.Name == "" || req.DeviceID == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "name and device_id are required"})
 	}
@@ -16358,6 +15573,10 @@ func (s *Server) handleSaveSticker(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil || req.MediaURL == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "media_url is required"})
 	}
+	if err := s.authorizeMediaPublication(c, req.MediaURL); err != nil {
+		return mediaPublicationDenied(c, err)
+	}
+
 	canonicalURL, validationErr := s.validateAccountStickerMedia(c.Context(), accountID, req.MediaURL)
 	if validationErr != nil {
 		if apiErr, ok := validationErr.(*fiber.Error); ok {
@@ -16663,6 +15882,7 @@ func (s *Server) storageReferencedObjectKeysWithInventory(ctx context.Context, i
 		direct bool
 	}
 	columns := []refColumn{
+		{"storage_media_trash", "object_key", "state IN ('trash','purging')", true},
 		{"messages", "media_url", "COALESCE(media_deleted, false) = false", false},
 		{"contacts", "avatar_url", "", false},
 		{"campaigns", "media_url", "", false},
@@ -17655,6 +16875,7 @@ type quickReplyAttachmentRequest struct {
 	MediaType     string     `json:"media_type"`
 	MediaFilename string     `json:"media_filename"`
 	Caption       string     `json:"caption"`
+	MediaURL      string     `json:"media_url"`
 }
 
 type quickReplyMutationRequest struct {
@@ -17737,6 +16958,15 @@ func (s *Server) handleCreateQuickReply(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "invalid_request", "error": "No se pudo leer la solicitud"})
 	}
+	if err := s.authorizeMediaReferencePayload(c, req); err != nil {
+		return mediaPublicationDenied(c, err)
+	}
+	for _, attachment := range req.Attachments {
+		if err := s.authorizeMediaAssetAssignment(c, attachment.MediaAssetID, attachment.MediaURL); err != nil {
+			return mediaPublicationDenied(c, err)
+		}
+	}
+
 	quickReply, err := s.services.QuickReply.Create(c.Context(), req.quickReply(uuid.Nil, accountID))
 	if err != nil {
 		return writeQuickReplyError(c, err)
@@ -17755,6 +16985,15 @@ func (s *Server) handleUpdateQuickReply(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "invalid_request", "error": "No se pudo leer la solicitud"})
 	}
+	if err := s.authorizeMediaReferencePayload(c, req); err != nil {
+		return mediaPublicationDenied(c, err)
+	}
+	for _, attachment := range req.Attachments {
+		if err := s.authorizeMediaAssetAssignment(c, attachment.MediaAssetID, attachment.MediaURL); err != nil {
+			return mediaPublicationDenied(c, err)
+		}
+	}
+
 	expectedUpdatedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(req.ExpectedUpdatedAt))
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "missing_quick_reply_version", "error": "Recarga la respuesta rápida antes de editarla"})

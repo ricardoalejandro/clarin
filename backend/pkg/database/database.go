@@ -3934,6 +3934,7 @@ func Migrate(db *pgxpool.Pool) error {
 	migrations = append(migrations, surveyTemplateInstanceMigrations()...)
 	migrations = append(migrations, surveyPublicSlugReservationMigrations()...)
 	migrations = append(migrations, chatAttentionMigrations()...)
+	migrations = append(migrations, storageSelfServiceMigrations()...)
 
 	var dataTx pgx.Tx
 	skipDataMigration := false
@@ -4042,6 +4043,13 @@ func Migrate(db *pgxpool.Pool) error {
 
 	if err := migrateProgramFolderIntegrity(ctx, db); err != nil {
 		return err
+	}
+	// Storage reference guards depend on all business modules, including Work
+	// and whiteboards; install them only after those startup migrations.
+	for _, migration := range storageSelfServiceReferenceGuardMigrations() {
+		if _, err := db.Exec(ctx, migration); err != nil {
+			return fmt.Errorf("storage reference guard migration: %w", err)
+		}
 	}
 	return nil
 }

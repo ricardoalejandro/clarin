@@ -48,6 +48,9 @@ export function isAllowedMobileAppPath(
   subject: MobileAppPermissionSubject,
   options: { allowSubscriptionRecovery?: boolean } = {},
 ) {
+  // Account utility: its API enforces origin permissions and tenant isolation.
+  // Keep it outside the five primary modules and their offline cache.
+  if (pathname === '/dashboard/storage') return true
   if (options.allowSubscriptionRecovery && pathnameMatchesPrefix(pathname, '/dashboard/settings')) return true
   const module = mobileAppModuleForPath(pathname)
   return Boolean(module && canUseMobileAppModule(subject, module))

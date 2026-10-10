@@ -99,6 +99,10 @@ func (s *Server) handleUpdateSurvey(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 	}
 
+	if err := s.authorizeBrandingPublication(c, req.Branding); err != nil {
+		return mediaPublicationDenied(c, err)
+	}
+
 	survey := &domain.Survey{
 		ID:                  id,
 		AccountID:           accountID,
@@ -650,7 +654,7 @@ func (s *Server) handleGetPublicSurvey(c *fiber.Ctx) error {
 			"thank_you_title":        survey.ThankYouTitle,
 			"thank_you_message":      survey.ThankYouMessage,
 			"thank_you_redirect_url": service.SafeSurveyRedirectURL(survey.ThankYouRedirectURL),
-			"branding":               survey.Branding,
+			"branding":               s.publishSurveyBranding(survey),
 		},
 		"questions": publicQuestions,
 	})
