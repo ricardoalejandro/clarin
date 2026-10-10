@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatDocumentDescriptor } from '@/utils/chatDocuments'
+import { OperationalOverlayProvider } from '@/components/operational-window/OperationalOverlayContext'
 
 const mocks = vi.hoisted(() => ({
   apiBlob: vi.fn(),
@@ -141,5 +142,83 @@ describe('ChatDocumentViewer', () => {
     expect(signals[0].aborted).toBe(true)
     expect(screen.getByRole('button', { name: 'Reintentar' })).toBeEnabled()
     expect(screen.getByRole('link', { name: 'Descargar original' })).toHaveAttribute('href', descriptor().src)
+  })
+
+  it('suspends interaction while preserving the PDF, canvas, page, zoom and focus for resumption', async () => {
+    const runtime = installReadyPdf(3)
+    mocks.apiBlob.mockResolvedValue({ success: true, blob: { arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)) } as Blob })
+    const onClose = vi.fn()
+    const unregister = vi.fn()
+    const register = vi.fn(() => unregister)
+    const outside = render(<button type="button">Volver al archivo</button>)
+    const trigger = screen.getByRole('button', { name: 'Volver al archivo' })
+    trigger.focus()
+    const viewer = (suspended: boolean) => <OperationalOverlayProvider portalTarget={null} registerOverlay={register}><ChatDocumentViewer document={descriptor()} onClose={onClose} suspended={suspended} /></OperationalOverlayProvider>
+    const view = render(viewer(false))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Página siguiente' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Página siguiente' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Página siguiente' })).toBeEnabled())
+    const zoomButton = screen.getByRole('button', { name: 'Acercar PDF' })
+    fireEvent.click(zoomButton)
+    await waitFor(() => expect(runtime.page.getViewport).toHaveBeenLastCalledWith({ scale: 1.5 }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Página siguiente' })).toBeEnabled())
+    zoomButton.focus()
+    const canvas = screen.getByLabelText('Página 2 de 3')
+    const renderCount = runtime.page.render.mock.calls.length
+    const cancelCount = runtime.renderTask.cancel.mock.calls.length
+
+    view.rerender(viewer(true))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(canvas).toBeInTheDocument()
+    expect(canvas).not.toBeVisible()
+    expect(canvas.closest('[inert]')).toHaveAttribute('aria-hidden', 'true')
+    expect(document.querySelector('[data-chat-overlay="document-viewer"]')).toBeNull()
+    expect(unregister).toHaveBeenCalledTimes(1)
+    expect(document.body.style.overflow).toBe('')
+    trigger.focus()
+    for (const key of ['Tab', 'Escape']) {
+      const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
+      window.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(false)
+    }
+    expect(trigger).toHaveFocus()
+    expect(onClose).not.toHaveBeenCalled()
+    expect(runtime.pdf.destroy).not.toHaveBeenCalled()
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled()
+
+    view.rerender(viewer(false))
+    await waitFor(() => expect(zoomButton).toHaveFocus())
+    expect(screen.getByLabelText('Página 2 de 3')).toBe(canvas)
+    expect(canvas).toBeVisible()
+    expect(screen.getByText('120%')).toBeInTheDocument()
+    expect(register).toHaveBeenCalledTimes(2)
+    expect(mocks.apiBlob).toHaveBeenCalledTimes(1)
+    expect(runtime.getDocument).toHaveBeenCalledTimes(1)
+    expect(runtime.page.render).toHaveBeenCalledTimes(renderCount)
+    expect(runtime.renderTask.cancel).toHaveBeenCalledTimes(cancelCount)
+
+    view.unmount()
+    expect(runtime.pdf.destroy).toHaveBeenCalledTimes(1)
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:chat-pdf')
+    expect(trigger).toHaveFocus()
+    outside.unmount()
+  })
+
+  it('destroys a suspended download on unmount and rejects its late response', async () => {
+    let resolveDownload!: (value: { success: boolean; blob: Blob }) => void
+    const pending = new Promise<{ success: boolean; blob: Blob }>(resolve => { resolveDownload = resolve })
+    let signal: AbortSignal | undefined
+    mocks.apiBlob.mockImplementation((_src: string, options?: { signal?: AbortSignal }) => { signal = options?.signal; return pending })
+    const onClose = vi.fn()
+    const view = render(<ChatDocumentViewer document={descriptor()} onClose={onClose} />)
+    view.rerender(<ChatDocumentViewer document={descriptor()} onClose={onClose} suspended />)
+    expect(signal?.aborted).toBe(false)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    view.unmount()
+    expect(signal?.aborted).toBe(true)
+    await act(async () => resolveDownload({ success: true, blob: { arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)) } as Blob }))
+    expect(mocks.loadPdfRuntime).not.toHaveBeenCalled()
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 })

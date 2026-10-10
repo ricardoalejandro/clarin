@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 )
 
 type storageQAFixture struct {
+	inventoryS3Requests                    *atomic.Int64
 	t                                      *testing.T
 	db                                     *pgxpool.Pool
 	store                                  *storage.Storage
@@ -92,6 +94,20 @@ func (f *storageQAFixture) exec(query string, args ...any) {
 
 func (f *storageQAFixture) request(method, path string, body any, headers map[string]string) (int, map[string]any) {
 	f.t.Helper()
+	// Drain the production worker outside the HTTP request under test. Tests
+	// of intentionally stale projections call app.Test directly.
+	if method == "GET" && (strings.HasPrefix(path, "/storage/files") || strings.HasPrefix(path, "/storage/usage")) {
+		account := f.account
+		if headers["X-QA-Account"] == "other" {
+			account = f.other
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		err := f.server.ReconcileStorageInventory(ctx, account)
+		cancel()
+		if err != nil {
+			f.t.Fatal(err)
+		}
+	}
 	permissions := []string{domain.PermSettings, domain.PermChats}
 	if headers["X-QA-Permission"] == "no-chats" {
 		permissions = []string{domain.PermSettings}
@@ -218,7 +234,7 @@ func TestStorageSelfServiceIntegration(t *testing.T) {
 			t.Skip("requires explicit disposable storage integration opt-in")
 		}
 		parsed, err := url.Parse(os.Getenv("DATABASE_URL"))
-		if err != nil || parsed.Hostname() != "127.0.0.1" || parsed.Port() != "15439" || parsed.Path != "/clarin_storage_qa" {
+		if err != nil || parsed.Hostname() != "127.0.0.1" || parsed.Port() != storageQAPort(t, "CLARIN_STORAGE_QA_POSTGRES_PORT", "15439") || parsed.Path != "/clarin_storage_qa" {
 			t.Fatal("PGlite mode requires the dedicated loopback QA endpoint")
 		}
 		config, err := pgxpool.ParseConfig(parsed.String())
@@ -243,7 +259,7 @@ func TestStorageSelfServiceIntegration(t *testing.T) {
 	} else {
 		db = newFunctionalIntegrityIntegrationDB(t, "CLARIN_RUN_STORAGE_SELF_SERVICE_INTEGRATION", "clarin_storage_qa_")
 	}
-	if os.Getenv("MINIO_ENDPOINT") != "127.0.0.1:19001" || !strings.HasPrefix(os.Getenv("MINIO_BUCKET"), "clarin-qa") {
+	if os.Getenv("MINIO_ENDPOINT") != storageQAMinioEndpoint(t) || !strings.HasPrefix(os.Getenv("MINIO_BUCKET"), "clarin-qa") {
 		t.Fatal("disposable loopback MinIO and clarin-qa bucket required")
 	}
 	store, err := storage.New(storage.Config{Endpoint: os.Getenv("MINIO_ENDPOINT"), AccessKey: os.Getenv("MINIO_ACCESS_KEY"), SecretKey: os.Getenv("MINIO_SECRET_KEY"), Bucket: os.Getenv("MINIO_BUCKET"), PublicURL: os.Getenv("MINIO_PUBLIC_URL")})
@@ -253,6 +269,7 @@ func TestStorageSelfServiceIntegration(t *testing.T) {
 	t.Run("media access and publication", func(t *testing.T) { runMediaAccessIntegrationChecks(t, db, store) })
 	t.Run("usage capacity follows current account authority", func(t *testing.T) { runStorageUsageIntegrationChecks(t, db, store) })
 	t.Run("catalog sparse references and review fingerprints", func(t *testing.T) { runStorageCatalogOptimizationIntegrationChecks(t, db, store) })
+	runStorageInventoryIntegrationChecks(t, db, store)
 	t.Run("concurrency and recovery", func(t *testing.T) { runStorageConcurrencyIntegrationChecks(t, db, store) })
 	t.Run("inventory and known object access are isolated by account and module", func(t *testing.T) {
 		f := newStorageQAFixture(t, db, store)

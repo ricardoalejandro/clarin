@@ -2135,6 +2135,8 @@ func (r *MediaAssetRepository) GetByHash(ctx context.Context, accountID uuid.UUI
 	return asset, nil
 }
 
+var ErrMediaAssetDeletionInProgress = errors.New("media deletion is still in progress")
+
 func (r *MediaAssetRepository) Upsert(ctx context.Context, input MediaAssetUpsert) (*domain.MediaAsset, error) {
 	asset := &domain.MediaAsset{}
 	err := r.db.QueryRow(ctx, `
@@ -2149,11 +2151,15 @@ func (r *MediaAssetRepository) Upsert(ctx context.Context, input MediaAssetUpser
 		    status = 'active',
 		    deleted_at = NULL,
 		    updated_at = NOW()
+		WHERE media_assets.status NOT IN ('task_gc_deleting','whiteboard_gc_deleting','avatar_gc_deleting')
 		RETURNING id, account_id, content_hash, object_key, media_type, content_type, filename, size_bytes, status, created_at, updated_at, deleted_at
 	`, input.AccountID, input.ContentHash, input.ObjectKey, input.MediaType, input.ContentType, input.Filename, input.SizeBytes).Scan(
 		&asset.ID, &asset.AccountID, &asset.ContentHash, &asset.ObjectKey, &asset.MediaType,
 		&asset.ContentType, &asset.Filename, &asset.SizeBytes, &asset.Status, &asset.CreatedAt, &asset.UpdatedAt, &asset.DeletedAt,
 	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrMediaAssetDeletionInProgress
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -5919,17 +5925,38 @@ func (r *CampaignRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain
 	return camp, nil
 }
 
+var ErrCampaignConflict = errors.New("campaign changed; reload before updating")
+
 func (r *CampaignRepository) Update(ctx context.Context, c *domain.Campaign) error {
-	c.UpdatedAt = time.Now()
-	_, err := r.db.Exec(ctx, `
+	previousUpdatedAt := c.UpdatedAt
+	updatedAt := time.Now().UTC().Truncate(time.Microsecond)
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('storage-self-service:' || $1::text,0))`, c.AccountID); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `
 		UPDATE campaigns SET name=$1, message_template=$2, media_url=$3, media_type=$4, status=$5,
 			scheduled_at=$6, started_at=$7, completed_at=$8, total_recipients=$9, sent_count=$10,
 			failed_count=$11, settings=$12, device_id=$13, started_by=$14, updated_at=$15
-		WHERE id=$16
+		WHERE id=$16 AND account_id=$17 AND updated_at=$18
 	`, c.Name, c.MessageTemplate, c.MediaURL, c.MediaType, c.Status,
 		c.ScheduledAt, c.StartedAt, c.CompletedAt, c.TotalRecipients, c.SentCount,
-		c.FailedCount, c.Settings, c.DeviceID, c.StartedBy, c.UpdatedAt, c.ID)
-	return err
+		c.FailedCount, c.Settings, c.DeviceID, c.StartedBy, updatedAt, c.ID, c.AccountID, previousUpdatedAt)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrCampaignConflict
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	c.UpdatedAt = updatedAt
+	return nil
 }
 
 func (r *CampaignRepository) Delete(ctx context.Context, id uuid.UUID) error {

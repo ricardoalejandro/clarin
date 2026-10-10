@@ -30,7 +30,7 @@ func TestCommentAttachmentDraftContractIsOwnerScopedHiddenAndDurable(t *testing.
 	for _, invariant := range []string{
 		"TaskAttachmentScopeCommentDraft",
 		"ON CONFLICT DO NOTHING",
-		"attachment_scope='comment_draft' AND draft_owner_id=$4 FOR UPDATE",
+		"attachment_scope='comment_draft' AND draft_owner_id=$4 AND storage_removed_at IS NULL FOR UPDATE",
 		"currentDraftOwner == nil || *currentDraftOwner != userID",
 		"lockAndRequireTaskAccessTx(ctx, tx, accountID, userID, []uuid.UUID{taskID}, requiredAccess)",
 		"reconcileTaskCommentDraftGCJobTx",
@@ -52,7 +52,7 @@ func TestCommentAttachmentDraftContractIsOwnerScopedHiddenAndDurable(t *testing.
 		}
 	}
 	for _, invariant := range []string{
-		"WHERE account_id=$1 AND task_id=$2 AND id=$3 FOR UPDATE",
+		"WHERE account_id=$1 AND task_id=$2 AND id=$3 AND storage_removed_at IS NULL FOR UPDATE",
 		"*ownerID != actorID",
 		"attachment_scope='comment'",
 		"COALESCE(ta.attachment_scope,'task')='task'",

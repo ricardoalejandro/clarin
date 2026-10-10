@@ -31,7 +31,7 @@ func TestMediaAccessSQLIntegration(t *testing.T) {
 	var db *pgxpool.Pool
 	if os.Getenv("CLARIN_STORAGE_QA_PGLITE") == "1" {
 		parsed, err := url.Parse(os.Getenv("DATABASE_URL"))
-		if err != nil || parsed.Hostname() != "127.0.0.1" || parsed.Port() != "15439" || parsed.Path != "/clarin_storage_qa" {
+		if err != nil || parsed.Hostname() != "127.0.0.1" || parsed.Port() != storageQAPort(t, "CLARIN_STORAGE_QA_POSTGRES_PORT", "15439") || parsed.Path != "/clarin_storage_qa" {
 			t.Fatal("dedicated loopback PGlite endpoint required")
 		}
 		cfg, err := pgxpool.ParseConfig(parsed.String())

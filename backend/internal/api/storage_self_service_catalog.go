@@ -37,23 +37,32 @@ type storageSelfServiceReference struct {
 	Filename string `json:"-"`
 }
 type storageSelfServiceFile struct {
-	ObjectKey       string                        `json:"object_key"`
-	Filename        string                        `json:"filename"`
-	MediaType       string                        `json:"media_type"`
-	SizeBytes       int64                         `json:"size_bytes"`
-	LastModified    time.Time                     `json:"last_modified"`
-	Origins         []storageSelfServiceReference `json:"origins"`
-	ReferencesCount int                           `json:"references_count"`
-	CanRemove       bool                          `json:"can_remove"`
-	CanRestore      bool                          `json:"can_restore"`
-	CanPurge        bool                          `json:"can_purge"`
-	BlockedReason   string                        `json:"blocked_reason"`
-	PreviewURL      string                        `json:"preview_url"`
-	Status          string                        `json:"status"`
-	TrashAt         *time.Time                    `json:"trash_at,omitempty"`
-	PurgeAfter      *time.Time                    `json:"purge_after,omitempty"`
-	Fingerprint     string                        `json:"-"`
-	refs            []storageSelfServiceReference
+	HasMoreUses            bool                          `json:"has_more_uses"`
+	ObjectKey              string                        `json:"object_key"`
+	Filename               string                        `json:"filename"`
+	MediaType              string                        `json:"media_type"`
+	SizeBytes              int64                         `json:"size_bytes"`
+	LastModified           time.Time                     `json:"last_modified"`
+	Origins                []storageSelfServiceReference `json:"origins"`
+	ReferencesCount        int                           `json:"references_count"`
+	CanRemove              bool                          `json:"can_remove"`
+	CanRemoveUses          bool                          `json:"can_remove_uses"`
+	RecoveryID             string                        `json:"recovery_id,omitempty"`
+	IsOwnUpload            bool                          `json:"is_own_upload"`
+	OwnershipVerified      bool                          `json:"ownership_verified"`
+	RetainedElsewhere      bool                          `json:"retained_elsewhere"`
+	RemovedUsesCount       int                           `json:"removed_uses_count"`
+	ActiveUsesVisibleCount int                           `json:"active_uses_visible_count"`
+	ObjectRetained         bool                          `json:"object_retained"`
+	CanRestore             bool                          `json:"can_restore"`
+	CanPurge               bool                          `json:"can_purge"`
+	BlockedReason          string                        `json:"blocked_reason"`
+	PreviewURL             string                        `json:"preview_url"`
+	Status                 string                        `json:"status"`
+	TrashAt                *time.Time                    `json:"trash_at,omitempty"`
+	PurgeAfter             *time.Time                    `json:"purge_after,omitempty"`
+	Fingerprint            string                        `json:"-"`
+	refs                   []storageSelfServiceReference
 }
 type storageSelfServiceCatalog struct {
 	Files      []storageSelfServiceFile
@@ -194,11 +203,12 @@ var storageSelfServiceReferenceQueries = []struct{ origin, sql string }{
 	{"surveys", `SELECT id::text,name,'/dashboard/surveys','',jsonb_build_array(branding)::text FROM survey_templates WHERE account_id=$1`},
 	{"contacts", `SELECT c.id::text,COALESCE(NULLIF(c.name,''),'Foto de contacto'),'/dashboard/contacts','',jsonb_build_array(c.avatar_url,ma.object_key)::text FROM contacts c LEFT JOIN media_assets ma ON ma.id=c.avatar_media_asset_id AND ma.account_id=c.account_id WHERE c.account_id=$1 AND ((c.avatar_url IS NOT NULL AND c.avatar_url<>'') OR c.avatar_media_asset_id IS NOT NULL)`},
 	{"private_status", `SELECT s.id::text,'','','',jsonb_build_array(s.media_url,ma.object_key)::text FROM whatsapp_statuses s LEFT JOIN media_assets ma ON ma.id=s.media_asset_id AND ma.account_id=s.account_id WHERE s.account_id=$1`},
-	{"private_work", `SELECT a.id::text,'','','',jsonb_build_array(ma.object_key)::text FROM task_attachments a JOIN media_assets ma ON ma.id=a.media_asset_id AND ma.account_id=a.account_id WHERE a.account_id=$1`},
+	{"private_work", `SELECT a.id::text,t.title,'/dashboard/tasks?task='||t.id::text,ma.filename,jsonb_build_array(ma.object_key)::text FROM task_attachments a JOIN tasks t ON t.id=a.task_id AND t.account_id=a.account_id JOIN media_assets ma ON ma.id=a.media_asset_id AND ma.account_id=a.account_id WHERE a.account_id=$1 AND a.storage_removed_at IS NULL`},
 	{"private_work", `SELECT p.id::text,'','','',jsonb_build_array(ma.object_key)::text FROM task_attachment_previews p JOIN media_assets ma ON ma.id=p.derivative_asset_id AND ma.account_id=p.account_id WHERE p.account_id=$1`},
-	{"private_whiteboards", `SELECT a.id::text,'','','',jsonb_build_array(ma.object_key)::text FROM whiteboard_assets a JOIN media_assets ma ON ma.id=a.media_asset_id AND ma.account_id=a.account_id WHERE a.account_id=$1`},
-	{"private_whiteboards", `SELECT a.id::text,'','','',jsonb_build_array(ma.object_key)::text FROM whiteboard_revision_assets a JOIN media_assets ma ON ma.id=a.media_asset_id AND ma.account_id=a.account_id WHERE a.account_id=$1`},
+	{"private_whiteboards", `SELECT a.id::text,COALESCE(b.name,library.name||' · Biblioteca',''),CASE WHEN b.id IS NOT NULL THEN '/dashboard/whiteboards/'||b.id::text WHEN library.id IS NOT NULL THEN '/dashboard/whiteboards' ELSE '' END,ma.filename,jsonb_build_array(ma.object_key)::text FROM whiteboard_assets a LEFT JOIN whiteboards b ON b.id=a.board_id AND b.account_id=a.account_id LEFT JOIN whiteboard_libraries library ON library.id=a.library_id AND library.account_id=a.account_id JOIN media_assets ma ON ma.id=a.media_asset_id AND ma.account_id=a.account_id WHERE a.account_id=$1`},
+	{"private_whiteboards", `SELECT a.id::text,b.name||' · Historial','/dashboard/whiteboards/'||b.id::text,ma.filename,jsonb_build_array(ma.object_key)::text FROM whiteboard_revision_assets a JOIN whiteboards b ON b.id=a.board_id AND b.account_id=a.account_id JOIN media_assets ma ON ma.id=a.media_asset_id AND ma.account_id=a.account_id WHERE a.account_id=$1`},
 	{"private_whiteboards", `SELECT id::text,'','','',jsonb_build_array(snapshot_object_key)::text FROM whiteboard_revisions WHERE account_id=$1`},
+	{"private_upload_claims", `SELECT id::text,'','','',jsonb_build_array(object_key)::text FROM storage_upload_ownership WHERE account_id=$1 AND state='active'`},
 }
 
 func storageSelfServiceReferences(ctx context.Context, q storageSelfServiceQuerier, accountID uuid.UUID, stores ...*storage.Storage) (map[string][]storageSelfServiceReference, error) {
@@ -334,7 +344,7 @@ func (s *Server) storageSelfServiceCatalog(ctx context.Context, q storageSelfSer
 		removed, purge             time.Time
 	}
 	trashMap := map[string]trash{}
-	rows, err = q.Query(ctx, `SELECT object_key,actor_id,filename,media_type,state,removed_at,purge_after FROM storage_media_trash WHERE account_id=$1 AND state IN ('trash','purging') AND ($2::text[] IS NULL OR object_key=ANY($2::text[]))`, accountID, selectedKeys)
+	rows, err = q.Query(ctx, `SELECT object_key,actor_id,filename,media_type,state,removed_at,purge_after FROM storage_media_trash WHERE account_id=$1 AND state IN ('trash','purging') AND jsonb_array_length(message_backups)>0 AND ($2::text[] IS NULL OR object_key=ANY($2::text[]))`, accountID, selectedKeys)
 	if err != nil {
 		return nil, err
 	}
@@ -361,13 +371,26 @@ func (s *Server) storageSelfServiceCatalog(ctx context.Context, q storageSelfSer
 		}
 		catalog.TotalBytes += object.Size
 		allRefs := refs[object.Key]
+		var uses []storageSelfServiceUse
+		if len(selected) > 0 {
+			uses, err = s.storageSelfServiceListUses(ctx, q, storageUseActor{accountID, actorID, claims}, object.Key)
+			if err != nil {
+				return nil, err
+			}
+		}
 		t, inTrash := trashMap[object.Key]
 		ownsTrash := inTrash && (t.owner == actorID || isAdmin) && storageSelfServiceHasPermission(claims, domain.PermChats)
-		if !storageSelfServiceCanRead(claims, allRefs) && !ownsTrash {
+		if !storageSelfServiceCanRead(claims, allRefs) && !ownsTrash && len(uses) == 0 {
 			continue
 		}
 		m := metadata[object.Key]
-		filename := m.filename
+		filename := ""
+		for _, use := range uses {
+			if use.Filename != "" {
+				filename = use.Filename
+				break
+			}
+		}
 		visible := make([]storageSelfServiceReference, 0)
 		chatOnly := len(allRefs) > 0
 		for _, ref := range allRefs {
@@ -388,15 +411,19 @@ func (s *Server) storageSelfServiceCatalog(ctx context.Context, q storageSelfSer
 		if ownsTrash {
 			filename = t.filename
 		}
-		if filename == "" {
-			filename = path.Base(object.Key)
-		}
 		filename = path.Base(strings.ReplaceAll(filename, "\\", "/"))
 		mediaType := storageSelfServiceMediaType(filename, m.contentType)
+		if filename == "." {
+			// The canonical object's metadata may originate in an inaccessible
+			// use of a deduplicated file. Derive its type without disclosing that
+			// other use's filename or an internal object key.
+			mediaType = storageSelfServiceMediaType(object.Key, m.contentType)
+			filename = map[string]string{"image": "Foto", "video": "Vídeo", "audio": "Audio", "document": "Documento"}[mediaType]
+		}
 		if mediaType == "" {
 			continue
 		}
-		if storage.IsProtectedTaskObjectKey(object.Key) || storage.IsProtectedStatusObjectKey(object.Key) || strings.Contains(object.Key, "/whiteboards/") {
+		if storage.IsAccountStatusObjectKey(accountID, object.Key) || (storage.IsProtectedMediaObjectKey(object.Key) && !storageSelfServiceHasAuthorizedPrivateUse(accountID, object.Key, uses)) {
 			continue
 		}
 		file := storageSelfServiceFile{ObjectKey: object.Key, Filename: filename, MediaType: mediaType, SizeBytes: object.Size, LastModified: object.LastModified, Origins: visible, ReferencesCount: len(visible), Status: "active", CanRemove: canManage && chatOnly, BlockedReason: "Gestiona este archivo desde el contenido donde se utiliza.", refs: allRefs}
@@ -427,6 +454,9 @@ func (s *Server) storageSelfServiceCatalog(ctx context.Context, q storageSelfSer
 		} else if inTrash {
 			file.CanRemove = false
 			file.BlockedReason = "Este archivo tiene una operación de recuperación pendiente."
+		}
+		if !inTrash && len(uses) > 0 {
+			storageApplyUseProjection(&file, uses)
 		}
 		if !ownsTrash || t.state != "purging" {
 			file.PreviewURL = "/api/storage/content?object_key=" + url.QueryEscape(object.Key)

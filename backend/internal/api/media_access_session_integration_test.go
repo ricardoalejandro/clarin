@@ -30,8 +30,8 @@ import (
 func runMediaAccessSessionIntegrationChecks(t *testing.T, db *pgxpool.Pool, store *storage.Storage) {
 	ctx := context.Background()
 	redisURL, err := url.Parse(os.Getenv("CLARIN_STORAGE_QA_REDIS_URL"))
-	if err != nil || redisURL.Scheme != "redis" || redisURL.Hostname() != "127.0.0.1" || redisURL.Port() != "16379" {
-		t.Fatal("ordinary media integration requires disposable Redis at 127.0.0.1:16379 via CLARIN_STORAGE_QA_REDIS_URL")
+	if err != nil || redisURL.Scheme != "redis" || redisURL.Hostname() != "127.0.0.1" || redisURL.Port() != storageQAPort(t, "CLARIN_STORAGE_QA_REDIS_PORT", "16379") {
+		t.Fatal("ordinary media integration requires configured disposable loopback Redis via CLARIN_STORAGE_QA_REDIS_URL")
 	}
 	redisCache, err := cache.New(redisURL.String())
 	if err != nil {

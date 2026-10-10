@@ -450,14 +450,14 @@ const whiteboardMediaReferenceProofSQL = `SELECT EXISTS(
 	SELECT 1 FROM whiteboard_assets WHERE account_id=$1 AND media_asset_id=$2
 	UNION ALL SELECT 1 FROM whiteboard_revision_assets WHERE account_id=$1 AND media_asset_id=$2
 	UNION ALL SELECT 1 FROM whiteboards WHERE account_id=$1 AND thumbnail_media_asset_id=$2
-	UNION ALL SELECT 1 FROM task_attachments WHERE account_id=$1 AND media_asset_id=$2
+	UNION ALL SELECT 1 FROM task_attachments WHERE account_id=$1 AND media_asset_id=$2 AND storage_removed_at IS NULL
 	UNION ALL SELECT 1 FROM task_attachment_previews WHERE account_id=$1 AND derivative_asset_id=$2
 	UNION ALL SELECT 1 FROM messages WHERE account_id=$1 AND media_asset_id=$2
 	UNION ALL SELECT 1 FROM contacts WHERE account_id=$1 AND avatar_media_asset_id=$2
 	UNION ALL SELECT 1 FROM whatsapp_statuses WHERE account_id=$1 AND media_asset_id=$2
 	UNION ALL SELECT 1 FROM survey_file_uploads WHERE account_id=$1 AND media_asset_id=$2 AND status<>'deleted'
 	UNION ALL SELECT 1 FROM survey_branding_asset_refs WHERE account_id=$1 AND media_asset_id=$2
-)`
+) OR clarin_storage_has_live_references($1,(SELECT object_key FROM media_assets WHERE account_id=$1 AND id=$2),$2)`
 
 func (r *WhiteboardRepository) PrepareWhiteboardMediaGCDeletion(ctx context.Context, job *WhiteboardMediaGCJob) (bool, error) {
 	if job == nil || job.ID == uuid.Nil || job.AccountID == uuid.Nil || job.MediaAssetID == uuid.Nil || job.ClaimToken == uuid.Nil {
@@ -468,6 +468,20 @@ func (r *WhiteboardRepository) PrepareWhiteboardMediaGCDeletion(ctx context.Cont
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('storage-self-service:'||$1::text,0))`, job.AccountID); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE storage_reference_epochs SET version=version+1 WHERE account_id=$1`, job.AccountID); err != nil {
+		return false, err
+	}
+	var recoveryHold bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM storage_removed_references WHERE account_id=$1 AND object_key=$2 AND state IN ('removed','purging'))
+	 OR EXISTS(SELECT 1 FROM storage_media_trash WHERE account_id=$1 AND object_key=$2 AND state IN ('trash','purging'))`, job.AccountID, job.ObjectKey).Scan(&recoveryHold); err != nil {
+		return false, err
+	}
+	if recoveryHold {
+		return false, tx.Commit(ctx)
+	}
 	var claimedObjectKey string
 	err = tx.QueryRow(ctx, `SELECT object_key FROM whiteboard_media_gc_jobs
 		WHERE id=$1 AND account_id=$2 AND media_asset_id=$3 AND claim_token=$4 AND status='processing'
@@ -580,14 +594,14 @@ func (r *WhiteboardRepository) CompleteWhiteboardMediaGCJob(ctx context.Context,
 	} else {
 		if _, err := tx.Exec(ctx, `UPDATE media_assets SET status='active',deleted_at=NULL,updated_at=NOW()
 			WHERE account_id=$1 AND id=$2 AND object_key=$3 AND status IN
-			('whiteboard_gc_pending','whiteboard_gc_deleting','whiteboard_upload_pending')`,
+			('whiteboard_gc_pending','whiteboard_upload_pending')`,
 			job.AccountID, job.MediaAssetID, job.ObjectKey); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE storage_objects SET status='active',deleted_at=NULL,
 			next_delete_at=NULL,delete_error='',updated_at=NOW()
 			WHERE account_id=$1 AND object_key=$2 AND status IN
-			('whiteboard_gc_pending','whiteboard_gc_deleting','whiteboard_upload_pending')`,
+			('whiteboard_gc_pending','whiteboard_upload_pending')`,
 			job.AccountID, job.ObjectKey); err != nil {
 			return err
 		}
@@ -620,13 +634,9 @@ func (r *WhiteboardRepository) RetryWhiteboardMediaGCJob(ctx context.Context, jo
 		return err
 	}
 	availableAt := time.Now().UTC().Add(whiteboardGCRetryDelay(job.Attempts))
-	if _, err := tx.Exec(ctx, `UPDATE media_assets SET status='whiteboard_gc_pending',updated_at=NOW()
-		WHERE account_id=$1 AND id=$2 AND object_key=$3 AND status='whiteboard_gc_deleting'`,
-		job.AccountID, job.MediaAssetID, job.ObjectKey); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE storage_objects SET status='whiteboard_gc_pending',
-		next_delete_at=$3,delete_error=$4,updated_at=NOW()
+	// An ambiguous provider error must not make the same object reusable.
+	// The next claim resumes physical deletion under the durable marker.
+	if _, err := tx.Exec(ctx, `UPDATE storage_objects SET next_delete_at=$3,delete_error=$4,updated_at=NOW()
 		WHERE account_id=$1 AND object_key=$2 AND status='whiteboard_gc_deleting'`,
 		job.AccountID, job.ObjectKey, availableAt, whiteboardGCError(cause)); err != nil {
 		return err

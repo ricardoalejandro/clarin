@@ -117,6 +117,15 @@ func TestStorageReferenceGuardIntegration(t *testing.T) {
 			t.Fatalf("reference was not rejected safely: %v", err)
 		}
 	}
+	t.Run("canonical contact avatar routes retain physical account validation", func(t *testing.T) {
+		ownAsset, foreignAsset, contact := uuid.New(), uuid.New(), uuid.New()
+		exec(`INSERT INTO media_assets(id,account_id,content_hash,object_key) VALUES($1,$2,$3,$4)`, ownAsset, a, ownAsset.String(), a.String()+"/_private/avatars/"+contact.String()+"/photo.jpg")
+		exec(`INSERT INTO media_assets(id,account_id,content_hash,object_key) VALUES($1,$2,$3,$4)`, foreignAsset, b, foreignAsset.String(), b.String()+"/_private/avatars/"+contact.String()+"/foreign.jpg")
+		logicalURL := "/api/contact-avatars/" + contact.String() + "/content?v=1"
+		exec(`INSERT INTO contacts(id,account_id,jid,name,avatar_media_asset_id,avatar_url) VALUES($1,$2,$3,'Canonical photo',$4,$5)`, contact, a, contact.String(), ownAsset, logicalURL)
+		assertRejected(`UPDATE contacts SET avatar_media_asset_id=$3 WHERE account_id=$1 AND id=$2`, a, contact, foreignAsset)
+		assertRejected(`UPDATE contacts SET avatar_url=$3 WHERE account_id=$1 AND id=$2`, a, contact, "/api/media/file/"+b.String()+"/uploads/foreign.jpg")
+	})
 	t.Run("purging and purged URLs cannot be reattached", func(t *testing.T) {
 		for _, state := range []string{"purging", "purged"} {
 			exec(`UPDATE storage_media_trash SET state=$3 WHERE account_id=$1 AND object_key=$2`, a, key, state)
@@ -131,6 +140,19 @@ func TestStorageReferenceGuardIntegration(t *testing.T) {
 		assertRejected(`UPDATE media_assets SET status='active',deleted_at=NULL WHERE account_id=$1 AND id=$2`, a, asset)
 		exec(`UPDATE media_assets SET object_key=$3,status='active',deleted_at=NULL WHERE account_id=$1 AND id=$2`, a, asset, a.String()+"/uploads/new-object.pdf")
 		exec(`UPDATE media_assets SET updated_at=NOW() WHERE account_id=$1 AND id=$2`, a, asset)
+	})
+	t.Run("administrative deletion intents block new references without granting user recovery", func(t *testing.T) {
+		adminKey := a.String() + "/uploads/administrative-orphan.pdf"
+		exec(`INSERT INTO storage_admin_delete_intents(account_id,object_key,actor_id,size_bytes) VALUES($1,$2,$3,42)`, a, adminKey, user)
+		for _, state := range []string{"purging", "purged"} {
+			exec(`UPDATE storage_admin_delete_intents SET state=$3 WHERE account_id=$1 AND object_key=$2`, a, adminKey, state)
+			assertRejected(`INSERT INTO saved_stickers(account_id,media_url) VALUES($1,$2)`, a, "/api/media/file/"+adminKey)
+			assertRejected(`INSERT INTO storage_upload_ownership(account_id,object_key,actor_id,provenance_verified) VALUES($1,$2,$3,true)`, a, adminKey, user)
+		}
+		var recoveryCount int
+		if err := db.QueryRow(ctx, `SELECT count(*) FROM storage_media_trash WHERE account_id=$1 AND object_key=$2`, a, adminKey).Scan(&recoveryCount); err != nil || recoveryCount != 0 {
+			t.Fatalf("administrative orphan leaked into user recovery: count=%d err=%v", recoveryCount, err)
+		}
 	})
 	t.Run("normalized asset references and child account joins are guarded", func(t *testing.T) {
 		// New object reuses the deduplication row safely. Revoking its physical

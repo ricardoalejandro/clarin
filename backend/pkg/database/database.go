@@ -3935,6 +3935,9 @@ func Migrate(db *pgxpool.Pool) error {
 	migrations = append(migrations, surveyPublicSlugReservationMigrations()...)
 	migrations = append(migrations, chatAttentionMigrations()...)
 	migrations = append(migrations, storageSelfServiceMigrations()...)
+	migrations = append(migrations, storageRemovedReferencesMigrations()...)
+	migrations = append(migrations, storageUploadOwnershipMigrations()...)
+	migrations = append(migrations, storageAdminCleanupMigrations()...)
 
 	var dataTx pgx.Tx
 	skipDataMigration := false
@@ -4046,9 +4049,24 @@ func Migrate(db *pgxpool.Pool) error {
 	}
 	// Storage reference guards depend on all business modules, including Work
 	// and whiteboards; install them only after those startup migrations.
+	for _, migration := range storagePrivateMediaMigrations() {
+		if _, err := db.Exec(ctx, migration); err != nil {
+			return fmt.Errorf("storage private media migration: %w", err)
+		}
+	}
 	for _, migration := range storageSelfServiceReferenceGuardMigrations() {
 		if _, err := db.Exec(ctx, migration); err != nil {
 			return fmt.Errorf("storage reference guard migration: %w", err)
+		}
+	}
+	for _, migration := range storageContactAvatarRecoveryGCMigrations() {
+		if _, err := db.Exec(ctx, migration); err != nil {
+			return fmt.Errorf("contact avatar recovery GC migration: %w", err)
+		}
+	}
+	for _, migration := range StorageInventoryMigrations() {
+		if _, err := db.Exec(ctx, migration); err != nil {
+			return fmt.Errorf("storage inventory migration: %w", err)
 		}
 	}
 	return nil

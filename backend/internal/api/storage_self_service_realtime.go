@@ -9,6 +9,20 @@ import (
 	"time"
 )
 
+// Generic invalidation contains no object names, keys, sizes or resource IDs.
+// The next read re-applies current resource ACL before returning any data.
+func (s *Server) storageSelfServicePublishChanged(accountID uuid.UUID, reason string) {
+	if s.hub == nil || accountID == uuid.Nil {
+		return
+	}
+	if reason != "access_changed" {
+		reason = "changed"
+	}
+	s.hub.BroadcastToAccount(accountID, "storage_changed", map[string]interface{}{
+		"account_id": accountID.String(), "revision": time.Now().UnixMilli(), "reason": reason,
+	})
+}
+
 // Keep the existing canonical message event so open conversations reconcile
 // their media flags without resetting history, scroll, text or reactions.
 func storageSelfServicePublishMessages(accountID uuid.UUID, messages []*domain.Message, publish func(uuid.UUID, string, string, interface{})) {

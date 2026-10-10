@@ -27,6 +27,8 @@ vi.mock('@/lib/api', () => ({
   subscribeWebSocket: apiMocks.subscribe,
 }))
 
+vi.mock('./TaskAttachmentViewer', () => ({ default: ({ attachment }: { attachment: TaskAttachment }) => <div role="dialog" aria-label={`Vista ${attachment.filename}`} /> }))
+
 vi.mock('./TaskAccessPanel', () => ({
   default: ({ task: panelTask, onChanged }: { task: Task; onChanged: (changed?: Task, operationID?: string) => void }) => {
     accessPanelMocks.callbacks.set(panelTask.id, onChanged)
@@ -1008,4 +1010,213 @@ describe('TaskDetailDrawer simplified full-editor access', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Usar versión recibida' }))
     await waitFor(() => expect(description).toHaveValue('Remota versión 3'))
   })
+  it('reconciles storage comment media without clearing its text or the composer', async () => {
+    let socketListener: ((raw: unknown) => void) | undefined
+    apiMocks.subscribe.mockImplementation(listener => { socketListener = listener; return () => {} })
+    const restored = attachment('comment-file', task.id, 'recuperado.png')
+    const comments: Record<string, TaskComment[]> = { [task.id]: [canonicalComment('Comentario conservado')] }
+    mockTaskDetailAPI([task], {}, comments)
+    render(<TaskDetailDrawer taskId={task.id} allTasks={[task]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+    await screen.findByDisplayValue(task.title)
+    fireEvent.click(screen.getByRole('button', { name: /^Actividad/ }))
+    const composer = screen.getByPlaceholderText('Escribe un comentario…')
+    fireEvent.change(composer, { target: { value: 'Mi borrador sigue aquí' } })
+    comments[task.id] = [canonicalComment('Comentario conservado', { attachments: [restored] })]
+    act(() => socketListener?.({ event: 'task_update', data: { action: 'attachment_added', task_id: task.id, attachment_id: restored.id, attachment_scope: 'comment', origin: 'storage' } }))
+    expect(await screen.findByText('recuperado.png')).toBeInTheDocument()
+    comments[task.id] = [canonicalComment('Comentario conservado')]
+    act(() => socketListener?.({ event: 'task_update', data: { action: 'attachment_deleted', task_id: task.id, attachment_id: restored.id, attachment_scope: 'comment', origin: 'storage' } }))
+    await waitFor(() => expect(screen.queryByText('recuperado.png')).not.toBeInTheDocument())
+    expect(screen.getByPlaceholderText('Escribe un comentario…')).toHaveValue('Mi borrador sigue aquí')
+    expect(screen.getByText('Comentario conservado')).toBeInTheDocument()
+    expect(apiMocks.post).not.toHaveBeenCalled()
+  })
+
+  it('restores media in a previously loaded older comment through bounded canonical pages', async () => {
+    let socketListener: ((raw: unknown) => void) | undefined
+    apiMocks.subscribe.mockImplementation(listener => { socketListener = listener; return () => {} })
+    mockTaskDetailAPI([task])
+    const baseGet = apiMocks.get.getMockImplementation()!
+    let oldAttachment: TaskAttachment[] = []
+    apiMocks.get.mockImplementation(async endpoint => {
+      if (String(endpoint).includes('/comments?')) {
+        return String(endpoint).includes('offset=100')
+          ? { success: true, data: { comments: [canonicalComment('Comentario antiguo', { id: 'old', created_at: '2026-01-01T00:00:00Z', attachments: oldAttachment })], has_more: false, next_offset: 101 } }
+          : { success: true, data: { comments: [canonicalComment('Comentario reciente')], has_more: true, next_offset: 100 } }
+      }
+      return baseGet(endpoint)
+    })
+    render(<TaskDetailDrawer taskId={task.id} allTasks={[task]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+    await screen.findByDisplayValue(task.title)
+    fireEvent.click(screen.getByRole('button', { name: /^Actividad/ }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Cargar comentarios anteriores' }))
+    await screen.findByText('Comentario antiguo')
+    oldAttachment = [attachment('old-file', task.id, 'archivo-antiguo.png')]
+    act(() => socketListener?.({ event: 'task_update', data: { action: 'attachment_added', task_id: task.id, attachment_id: 'old-file', attachment_scope: 'comment', origin: 'storage' } }))
+    expect(await screen.findByText('archivo-antiguo.png')).toBeInTheDocument()
+    expect(apiMocks.get.mock.calls.filter(([path]) => String(path).includes('/comments?') && String(path).includes('offset=100'))).toHaveLength(2)
+  })
+
+  it('rejects an older restoration refresh that finishes after a newer media removal', async () => {
+    let socketListener: ((raw: unknown) => void) | undefined
+    apiMocks.subscribe.mockImplementation(listener => { socketListener = listener; return () => {} })
+    mockTaskDetailAPI([task])
+    const baseGet = apiMocks.get.getMockImplementation()!
+    const restored = attachment('restored-file', task.id, 'retirada-remota.png')
+    const staleOlder = deferred<{ success: boolean; data: { comments: TaskComment[]; has_more: boolean; next_offset: number } }>()
+    let phase: 'initial' | 'restore' | 'remove' = 'initial'
+    const olderPage = () => ({ success: true, data: { comments: [canonicalComment('Comentario antiguo', { id: 'old', created_at: '2026-01-01T00:00:00Z' })], has_more: false, next_offset: 101 } })
+    apiMocks.get.mockImplementation(async endpoint => {
+      if (!String(endpoint).includes('/comments?')) return baseGet(endpoint)
+      if (String(endpoint).includes('offset=100')) return phase === 'restore' ? staleOlder.promise : olderPage()
+      return { success: true, data: { comments: [canonicalComment('Comentario reciente', { attachments: phase === 'restore' ? [restored] : [] })], has_more: true, next_offset: 100 } }
+    })
+    render(<TaskDetailDrawer taskId={task.id} allTasks={[task]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+    await screen.findByDisplayValue(task.title)
+    fireEvent.click(screen.getByRole('button', { name: /^Actividad/ }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Cargar comentarios anteriores' }))
+    await screen.findByText('Comentario antiguo')
+    fireEvent.change(screen.getByPlaceholderText('Escribe un comentario…'), { target: { value: 'Borrador conservado' } })
+
+    phase = 'restore'
+    await act(async () => socketListener?.({ event: 'task_update', data: { action: 'attachment_added', task_id: task.id, attachment_id: restored.id, attachment_scope: 'comment', origin: 'storage' } }))
+    expect(apiMocks.get.mock.calls.filter(([path]) => String(path).includes('/comments?') && String(path).includes('offset=100'))).toHaveLength(2)
+    phase = 'remove'
+    await act(async () => socketListener?.({ event: 'task_update', data: { action: 'attachment_deleted', task_id: task.id, attachment_id: restored.id, attachment_scope: 'comment', origin: 'storage' } }))
+    expect(apiMocks.get.mock.calls.filter(([path]) => String(path).includes('/comments?') && String(path).includes('offset=100'))).toHaveLength(3)
+    await act(async () => staleOlder.resolve(olderPage()))
+
+    expect(screen.queryByText('retirada-remota.png')).not.toBeInTheDocument()
+    expect(screen.getByText('Comentario reciente')).toBeInTheDocument()
+    expect(screen.getByText('Comentario antiguo')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('Escribe un comentario…')).toHaveValue('Borrador conservado')
+  })
+
+  it('rejects older pagination from before a media change and keeps that page retryable', async () => {
+    let socketListener: ((raw: unknown) => void) | undefined
+    apiMocks.subscribe.mockImplementation(listener => { socketListener = listener; return () => {} })
+    mockTaskDetailAPI([task])
+    const baseGet = apiMocks.get.getMockImplementation()!
+    const removed = attachment('old-file', task.id, 'archivo-retirado.png')
+    const staleOlder = deferred<{ success: boolean; data: { comments: TaskComment[]; has_more: boolean; next_offset: number } }>()
+    let olderReads = 0
+    const olderPage = (attachments: TaskAttachment[]) => ({ success: true, data: { comments: [canonicalComment('Comentario antiguo', { id: 'old', created_at: '2026-01-01T00:00:00Z', attachments })], has_more: false, next_offset: 101 } })
+    apiMocks.get.mockImplementation(async endpoint => {
+      if (!String(endpoint).includes('/comments?')) return baseGet(endpoint)
+      if (String(endpoint).includes('offset=100')) return ++olderReads === 1 ? staleOlder.promise : olderPage([])
+      return { success: true, data: { comments: [canonicalComment('Comentario reciente')], has_more: true, next_offset: 100 } }
+    })
+    render(<TaskDetailDrawer taskId={task.id} allTasks={[task]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+    await screen.findByDisplayValue(task.title)
+    fireEvent.click(screen.getByRole('button', { name: /^Actividad/ }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Cargar comentarios anteriores' }))
+    expect(olderReads).toBe(1)
+    await act(async () => socketListener?.({ event: 'task_update', data: { action: 'attachment_deleted', task_id: task.id, attachment_id: removed.id, attachment_scope: 'comment', origin: 'storage' } }))
+    await act(async () => staleOlder.resolve(olderPage([removed])))
+
+    expect(screen.queryByText('archivo-retirado.png')).not.toBeInTheDocument()
+    expect(screen.queryByText('Comentario antiguo')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Cargar comentarios anteriores' }))
+    await screen.findByText('Comentario antiguo')
+    expect(screen.queryByText('archivo-retirado.png')).not.toBeInTheDocument()
+    expect(olderReads).toBe(2)
+  })
+
+  it('keeps a storage reconciliation newer than the initial comments response', async () => {
+    let socketListener: ((raw: unknown) => void) | undefined
+    apiMocks.subscribe.mockImplementation(listener => { socketListener = listener; return () => {} })
+    mockTaskDetailAPI([task])
+    const baseGet = apiMocks.get.getMockImplementation()!
+    const removed = attachment('initial-file', task.id, 'adjunto-obsoleto.png')
+    const initialComments = deferred<{ success: boolean; data: { comments: TaskComment[]; has_more: boolean; next_offset: number } }>()
+    let commentReads = 0
+    apiMocks.get.mockImplementation(async endpoint => {
+      if (!String(endpoint).includes('/comments?')) return baseGet(endpoint)
+      return ++commentReads === 1 ? initialComments.promise : { success: true, data: { comments: [canonicalComment('Comentario conservado')], has_more: false, next_offset: 1 } }
+    })
+    render(<TaskDetailDrawer taskId={task.id} allTasks={[task]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+    await screen.findByDisplayValue(task.title)
+    fireEvent.click(screen.getByRole('button', { name: /^Actividad/ }))
+    await act(async () => socketListener?.({ event: 'task_update', data: { action: 'attachment_deleted', task_id: task.id, attachment_id: removed.id, attachment_scope: 'comment', origin: 'storage' } }))
+    expect(commentReads).toBe(2)
+    await screen.findByText('Comentario conservado')
+    await act(async () => initialComments.resolve({ success: true, data: { comments: [canonicalComment('Comentario conservado', { attachments: [removed] })], has_more: false, next_offset: 1 } }))
+    expect(screen.queryByText('adjunto-obsoleto.png')).not.toBeInTheDocument()
+    expect(screen.getByText('Comentario conservado')).toBeInTheDocument()
+  })
+
+  it('rejects a task attachment refresh older than storage removal and still accepts restoration', async () => {
+    let socketListener: ((raw: unknown) => void) | undefined
+    apiMocks.subscribe.mockImplementation(listener => { socketListener = listener; return () => {} })
+    mockTaskDetailAPI([task])
+    const baseGet = apiMocks.get.getMockImplementation()!
+    const removed = attachment('task-file', task.id, 'retirado.png')
+    const retained = attachment('retained-file', task.id, 'conservado.png')
+    const staleRefresh = deferred<{ success: boolean; data: { attachments: TaskAttachment[] } }>()
+    let phase: 'initial' | 'stale' | 'remove' | 'restore' = 'initial'
+    apiMocks.get.mockImplementation(async endpoint => {
+      if (!String(endpoint).endsWith('/attachments')) return baseGet(endpoint)
+      if (phase === 'stale') return staleRefresh.promise
+      return { success: true, data: { attachments: phase === 'remove' ? [retained] : [removed, retained] } }
+    })
+    render(<TaskDetailDrawer taskId={task.id} allTasks={[task]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+    await screen.findByText('retirado.png')
+    fireEvent.click(screen.getByRole('button', { name: /^Actividad/ }))
+    fireEvent.change(screen.getByPlaceholderText('Escribe un comentario…'), { target: { value: 'Borrador conservado' } })
+    phase = 'stale'
+    await act(async () => socketListener?.({ event: 'task_update', data: { action: 'attachment_added', task_id: task.id, attachment_scope: 'task', origin: 'storage' } }))
+    phase = 'remove'
+    await act(async () => socketListener?.({ event: 'task_update', data: { action: 'attachment_deleted', task_id: task.id, attachment_id: removed.id, attachment_scope: 'task', origin: 'storage' } }))
+    fireEvent.click(screen.getByRole('button', { name: /^Detalles/ }))
+    await waitFor(() => expect(screen.queryByText('retirado.png')).not.toBeInTheDocument())
+    await act(async () => staleRefresh.resolve({ success: true, data: { attachments: [removed, retained] } }))
+    expect(screen.queryByText('retirado.png')).not.toBeInTheDocument()
+    expect(screen.getByText('conservado.png')).toBeInTheDocument()
+
+    phase = 'restore'
+    await act(async () => socketListener?.({ event: 'task_update', data: { action: 'attachment_added', task_id: task.id, attachment_id: removed.id, attachment_scope: 'task', origin: 'storage' } }))
+    expect(await screen.findByText('retirado.png')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^Actividad/ }))
+    expect(screen.getByPlaceholderText('Escribe un comentario…')).toHaveValue('Borrador conservado')
+  })
+
+  it('rejects an initial task attachment response older than storage removal', async () => {
+    let socketListener: ((raw: unknown) => void) | undefined
+    apiMocks.subscribe.mockImplementation(listener => { socketListener = listener; return () => {} })
+    mockTaskDetailAPI([task])
+    const baseGet = apiMocks.get.getMockImplementation()!
+    const removed = attachment('initial-task-file', task.id, 'inicial-obsoleto.png')
+    const retained = attachment('retained-file', task.id, 'vigente.png')
+    const initialAttachments = deferred<{ success: boolean; data: { attachments: TaskAttachment[] } }>()
+    let attachmentReads = 0
+    apiMocks.get.mockImplementation(async endpoint => {
+      if (!String(endpoint).endsWith('/attachments')) return baseGet(endpoint)
+      return ++attachmentReads === 1 ? initialAttachments.promise : { success: true, data: { attachments: [retained] } }
+    })
+    render(<TaskDetailDrawer taskId={task.id} allTasks={[task]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+    await screen.findByDisplayValue(task.title)
+    await act(async () => socketListener?.({ event: 'task_update', data: { action: 'attachment_deleted', task_id: task.id, attachment_id: removed.id, attachment_scope: 'task', origin: 'storage' } }))
+    expect(attachmentReads).toBe(2)
+    await act(async () => initialAttachments.resolve({ success: true, data: { attachments: [removed, retained] } }))
+    expect(screen.queryByText('inicial-obsoleto.png')).not.toBeInTheDocument()
+    expect(screen.getByText('vigente.png')).toBeInTheDocument()
+  })
+
+  it('destroys a task attachment preview immediately after storage removes its use', async () => {
+    let socketListener: ((raw: unknown) => void) | undefined
+    apiMocks.subscribe.mockImplementation(listener => { socketListener = listener; return () => {} })
+    mockTaskDetailAPI([task])
+    const baseGet = apiMocks.get.getMockImplementation()!
+    const attached = attachment('task-file', task.id, 'informe.png')
+    let files = [attached]
+    apiMocks.get.mockImplementation(async endpoint => String(endpoint).endsWith('/attachments') ? { success: true, data: { attachments: files } } : baseGet(endpoint))
+    render(<TaskDetailDrawer taskId={task.id} allTasks={[task]} users={[]} lists={[]} folders={[]} workflows={[]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+    fireEvent.click(await screen.findByText('informe.png'))
+    expect(screen.getByRole('dialog', { name: 'Vista informe.png' })).toBeInTheDocument()
+    files = []
+    act(() => socketListener?.({ event: 'task_update', data: { action: 'attachment_deleted', task_id: task.id, attachment_id: attached.id, attachment_scope: 'task', origin: 'storage' } }))
+    expect(screen.queryByRole('dialog', { name: 'Vista informe.png' })).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText('informe.png')).not.toBeInTheDocument())
+  })
+
 })

@@ -103,7 +103,7 @@ func runMediaLegacyBucketPolicyIntegrationCheck(t *testing.T) {
 		SecretKey: os.Getenv("MINIO_SECRET_KEY"), PublicURL: os.Getenv("MINIO_PUBLIC_URL"),
 		Bucket: "clarin-qa-legacy-" + uuid.NewString(),
 	}
-	if cfg.Endpoint != "127.0.0.1:19001" {
+	if cfg.Endpoint != storageQAMinioEndpoint(t) {
 		t.Fatal("legacy bucket policy test requires the disposable loopback MinIO")
 	}
 	client, err := minio.New(cfg.Endpoint, &minio.Options{

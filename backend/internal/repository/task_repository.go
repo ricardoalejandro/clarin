@@ -122,7 +122,7 @@ const taskSelectFields = `
 	COALESCE((SELECT COUNT(*) FROM tasks st JOIN task_statuses child_status ON child_status.id=st.status_id AND child_status.account_id=st.account_id WHERE st.parent_task_id = t.id AND st.account_id=t.account_id AND st.deleted_at IS NULL AND child_status.category='done'), 0) AS subtask_done,
 	COALESCE((SELECT COUNT(*) FROM task_comments comment WHERE comment.account_id=t.account_id AND comment.task_id=t.id AND comment.deleted_at IS NULL), 0) AS comment_count,
 	COALESCE((SELECT COUNT(*) FROM task_attachments attachment WHERE attachment.account_id=t.account_id AND attachment.task_id=t.id
-		AND COALESCE(attachment.attachment_scope,'task')='task'), 0) AS attachment_count
+		AND COALESCE(attachment.attachment_scope,'task')='task' AND attachment.storage_removed_at IS NULL), 0) AS attachment_count
 `
 
 const taskJoins = `
@@ -1104,7 +1104,7 @@ func (r *TaskRepository) getByAccount(ctx context.Context, accountID uuid.UUID, 
 	}{
 		{key: "has_subtasks", predicate: "EXISTS(SELECT 1 FROM tasks child WHERE child.account_id=t.account_id AND child.parent_task_id=t.id AND child.deleted_at IS NULL)"},
 		{key: "has_comments", predicate: "EXISTS(SELECT 1 FROM task_comments comment WHERE comment.account_id=t.account_id AND comment.task_id=t.id AND comment.deleted_at IS NULL)"},
-		{key: "has_attachments", predicate: "EXISTS(SELECT 1 FROM task_attachments attachment WHERE attachment.account_id=t.account_id AND attachment.task_id=t.id AND COALESCE(attachment.attachment_scope,'task')='task')"},
+		{key: "has_attachments", predicate: "EXISTS(SELECT 1 FROM task_attachments attachment WHERE attachment.account_id=t.account_id AND attachment.task_id=t.id AND COALESCE(attachment.attachment_scope,'task')='task' AND attachment.storage_removed_at IS NULL)"},
 		{key: "has_dependencies", predicate: dependencyPresence},
 	} {
 		if value := strings.ToLower(strings.TrimSpace(filters[presence.key])); value == "true" {

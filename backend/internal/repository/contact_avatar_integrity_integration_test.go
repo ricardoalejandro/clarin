@@ -6,11 +6,13 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -27,8 +29,13 @@ func avatarIntegrityStorage(t *testing.T, endpoint string) *storage.Storage {
 	if os.Getenv("CLARIN_RUN_CONTACT_MEDIA_INTEGRATION") != "1" {
 		t.Skip("requires disposable PostgreSQL and MinIO")
 	}
-	if os.Getenv("MINIO_ENDPOINT") != "127.0.0.1:19001" {
-		t.Fatal("contact media tests require the isolated MinIO endpoint")
+	qaPort := os.Getenv("CLARIN_STORAGE_QA_MINIO_PORT")
+	if qaPort == "" {
+		qaPort = "19001"
+	}
+	port, err := strconv.Atoi(qaPort)
+	if err != nil || port < 1024 || port > 65535 || os.Getenv("MINIO_ENDPOINT") != net.JoinHostPort("127.0.0.1", qaPort) {
+		t.Fatal("contact media tests require the isolated loopback MinIO endpoint")
 	}
 	if endpoint == "" {
 		endpoint = os.Getenv("MINIO_ENDPOINT")
@@ -181,11 +188,11 @@ func TestContactAvatarSharedGCAndDeletedRestoration(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertReadableAvatar(t, pool, store, restored, data)
-	if *restored.MediaAssetID != *a.MediaAssetID || *restored.ObjectKey != *a.ObjectKey {
-		t.Fatal("deleted content restoration duplicated inventory")
+	if *restored.MediaAssetID != *a.MediaAssetID || *restored.ObjectKey == *a.ObjectKey {
+		t.Fatal("same-photo upload must retain asset identity and retire the deleted object key")
 	}
 	var objects int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM storage_objects WHERE account_id=$1`, f.account).Scan(&objects); err != nil || objects != 1 {
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM storage_objects WHERE account_id=$1 AND status='active'`, f.account).Scan(&objects); err != nil || objects != 1 {
 		t.Fatalf("restored inventory objects=%d: %v", objects, err)
 	}
 }
@@ -238,7 +245,7 @@ func TestContactAvatarAttachmentWaitsForPhysicalGC(t *testing.T) {
 		record, err := repo.Save(ctx, store, f.account, other, "manual", data, SaveContactAvatarOptions{})
 		saveDone <- result{record, err}
 	}()
-	waitIntegrityLock(t, pool, "SELECT id,object_key,status,filename")
+	waitIntegrityLock(t, pool, "SELECT pg_advisory_xact_lock_shared(")
 	select {
 	case <-saveDone:
 		t.Fatal("attachment completed while physical deletion was in flight")
@@ -320,7 +327,7 @@ func TestContactAvatarFailedDeletedRestorationTracksOrphan(t *testing.T) {
 	}
 	var mediaStatus, storageStatus, key string
 	if err := pool.QueryRow(ctx, `SELECT ma.status,so.status,ma.object_key FROM media_assets ma JOIN storage_objects so
-		ON so.account_id=ma.account_id AND so.object_key=ma.object_key WHERE ma.account_id=$1 AND ma.id=$2`, f.account, *saved.MediaAssetID).Scan(&mediaStatus, &storageStatus, &key); err != nil {
+		ON so.account_id=ma.account_id AND so.object_key=ma.object_key WHERE ma.account_id=$1 AND ma.object_key<>$2 AND ma.status='avatar_gc_pending'`, f.account, *saved.ObjectKey).Scan(&mediaStatus, &storageStatus, &key); err != nil {
 		t.Fatal(err)
 	}
 	if mediaStatus != "avatar_gc_pending" || storageStatus != "avatar_gc_pending" {

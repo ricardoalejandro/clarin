@@ -1,7 +1,7 @@
 import { expect, test, type Page, type Route } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { StorageAction, StorageFile, StorageReview } from '../frontend/src/components/storage/storageModel'
+import type { StorageAction, StorageFile, StorageReview, StorageTarget, StorageUse } from '../frontend/src/components/storage/storageModel'
 
 // Browser/UI contract tests with synthetic API responses. Real SQL, MinIO,
 // tenant authorization and physical deletion belong to the independent Go
@@ -30,11 +30,12 @@ function makeFile(index: number, account = accountA): StorageFile {
     references_count: 1, can_remove: true, status: 'active' }
 }
 
-async function installStorageUI(page: Page, options: { count?: number; canManage?: boolean; firstFilesFail?: boolean; previewExpired?: boolean; confirmMode?: 'partial' | 'conflict' | 'network'; longFilename?: boolean } = {}) {
+async function installStorageUI(page: Page, options: { count?: number; canManage?: boolean; firstFilesFail?: boolean; previewExpired?: boolean; confirmMode?: 'partial' | 'conflict' | 'network'; longFilename?: boolean; recommendations?: boolean } = {}) {
   const records = Array.from({ length: options.count ?? 3 }, (_, index) => makeFile(index))
   if (options.longFilename && records[0]) records[0].filename = 'Documento con un nombre extremadamente largo para comprobar el desborde en teléfonos pequeños y paneles estrechos.pdf'
   const previews = new Map<string, StorageReview>()
-  const calls = { files: [] as string[], previews: [] as { action: StorageAction; object_keys: string[] }[], confirms: [] as { preview_id: string }[] }
+  const calls = { files: [] as string[], uses: [] as string[], previews: [] as { action: StorageAction; targets?: StorageTarget[]; recovery_ids?: string[] }[], confirms: [] as { preview_id: string }[] }
+  const uses = new Map<string, StorageUse[]>(records.map(file => [file.object_key, [{ use_id: `use-${file.object_key}`, type: 'chats', label: 'Conversación de prueba', can_remove: true }]]))
   let account = accountA
   let failFiles = !!options.firstFilesFail
   let failConfirm = options.confirmMode
@@ -57,7 +58,7 @@ async function installStorageUI(page: Page, options: { count?: number; canManage
       const own = records.filter(file => file.object_key.startsWith(account + '/'))
       const used = own.reduce((sum, file) => sum + file.size_bytes, 0)
       const trash = own.filter(file => file.status === 'trash').reduce((sum, file) => sum + file.size_bytes, 0)
-      return json(route, { success: true, scope: 'account', used_bytes: used, visible_bytes: used, limit_bytes: 104857600, available_bytes: 104857600 - used, percent_used: used / 1048576, object_count: own.length, by_type: { document: used }, by_origin: { chats: used }, removable_bytes: used - trash, removable_count: own.filter(file => file.status === 'active').length, trash_bytes: trash, can_manage: options.canManage !== false, retention_days: 7 })
+      return json(route, { success: true, scope: 'account', used_bytes: used, visible_bytes: used, limit_bytes: 104857600, available_bytes: 104857600 - used, percent_used: used / 1048576, object_count: own.length, by_type: { document: used }, by_origin: { chats: used }, removable_bytes: used - trash, removable_count: own.filter(file => file.status === 'active').length, trash_bytes: trash, can_manage: options.canManage !== false, retention_days: 7, catalog_status: 'ready', inventory_complete: true, recommendations: options.recommendations ? [{ id: 'large_files', count: 1, bytes: 12582912, filters: { min_size: 10485760 } }, { id: 'unused_uploads', count: 1, bytes: 4096, filters: { status: 'unused_uploads' } }] : [] })
     }
     if (path === '/api/storage/files') {
       calls.files.push(url.search)
@@ -68,11 +69,28 @@ async function installStorageUI(page: Page, options: { count?: number; canManage
       const all = records.filter(file => file.object_key.startsWith(account + '/') && file.status === (status === 'trash' ? 'trash' : 'active') && file.filename.toLocaleLowerCase().includes(query))
       return json(route, { success: true, files: all.slice(offset, offset + limit), total: all.length, offset, limit, next_offset: Math.min(offset + limit, all.length), has_more: offset + limit < all.length, can_manage: options.canManage !== false })
     }
+    if (path === '/api/storage/uses') {
+      calls.uses.push(url.search)
+      const key = url.searchParams.get('object_key') || ''
+      if (!key.startsWith(account + '/')) return json(route, { success: false }, 404)
+      const all = uses.get(key) || []
+      const offset = Number(url.searchParams.get('cursor') || 0); const limit = Number(url.searchParams.get('limit') || 40)
+      return json(route, { success: true, uses: all.slice(offset, offset + limit), total: all.length, limit, has_more: offset + limit < all.length, next_cursor: offset + limit < all.length ? String(offset + limit) : '', can_manage: options.canManage !== false })
+    }
     if (path === '/api/storage/cleanup/preview' && method === 'POST') {
-      const body = route.request().postDataJSON() as { action: StorageAction; object_keys: string[] }
+      const body = route.request().postDataJSON() as { action: StorageAction; targets?: StorageTarget[]; recovery_ids?: string[] }
       calls.previews.push(body)
-      const selected = records.filter(file => body.object_keys.includes(file.object_key))
-      const preview: StorageReview = { success: true, preview_id: `preview-${calls.previews.length}`, action: body.action, expires_at: new Date(Date.now() + (options.previewExpired ? -1000 : 300000)).toISOString(), eligible_count: selected.length, estimated_bytes: selected.reduce((sum, file) => sum + file.size_bytes, 0), items: selected.map(file => ({ object_key: file.object_key, filename: file.filename, size_bytes: file.size_bytes, eligible: true })) }
+      const selected = records.filter(file => body.action === 'trash' ? body.targets?.some(target => target.object_key === file.object_key) : body.recovery_ids?.includes(file.recovery_id || ''))
+      const preview: StorageReview = { success: true, preview_id: `preview-${calls.previews.length}`, action: body.action, expires_at: new Date(Date.now() + (options.previewExpired ? -1000 : 300000)).toISOString(), eligible_count: selected.length, estimated_bytes: selected.reduce((sum, file) => sum + file.size_bytes, 0), items: selected.map(file => {
+        const target = body.targets?.find(value => value.object_key === file.object_key)
+        const total = uses.get(file.object_key)?.length || 0
+        const removed = target?.mode === 'uses' ? target.use_ids.length : total
+        return { object_key: file.object_key, ...(file.recovery_id ? { recovery_id: file.recovery_id } : {}), filename: file.filename, size_bytes: file.size_bytes, eligible: true, selected_uses_count: removed, removed_uses: removed, retained_uses_visible_count: Math.max(0, total - removed), will_trash: total === removed, trash_bytes: total === removed ? file.size_bytes : 0, estimated_freed_bytes: body.action === 'purge' ? file.size_bytes : 0 }
+      }) }
+      preview.selected_uses_count = preview.items.reduce((sum, item) => sum + (item.selected_uses_count || 0), 0)
+      preview.retained_uses_visible_count = preview.items.reduce((sum, item) => sum + (item.retained_uses_visible_count || 0), 0)
+      preview.trash_bytes = preview.items.reduce((sum, item) => sum + (item.trash_bytes || 0), 0)
+      preview.estimated_freed_bytes = preview.items.reduce((sum, item) => sum + (item.estimated_freed_bytes || 0), 0)
       previews.set(preview.preview_id, preview)
       return json(route, preview)
     }
@@ -82,10 +100,15 @@ async function installStorageUI(page: Page, options: { count?: number; canManage
       if (failConfirm === 'conflict') { failConfirm = undefined; return json(route, { success: false, error: 'Los archivos cambiaron. Revisa nuevamente la selección.', code: 'storage_preview_changed' }, 409) }
       if (failConfirm === 'network') { failConfirm = undefined; return route.abort('failed') }
       const partial = failConfirm === 'partial'; failConfirm = undefined
-      const items = preview.items.map((file, index) => ({ object_key: file.object_key, filename: file.filename, status: partial && index === 1 ? 'failed' : 'completed', ...(partial && index === 1 ? { reason: 'No se pudo procesar este archivo. Puedes reintentarlo.' } : {}) }))
+      const selection = calls.previews[Number(body.preview_id.split('-')[1]) - 1]
+      const items = preview.items.map((file, index) => ({ object_key: file.object_key, ...(file.recovery_id ? { recovery_id: file.recovery_id } : {}), filename: file.filename, status: partial && index === 1 ? 'failed' : 'completed', removed_uses: file.removed_uses, ...(partial && index === 1 ? { reason: 'No se pudo procesar este archivo. Puedes reintentarlo.' } : {}) }))
       for (const item of items.filter(item => item.status === 'completed')) {
         const file = records.find(file => file.object_key === item.object_key)!
-        file.status = preview.action === 'trash' ? 'trash' : 'active'; file.can_restore = true; file.can_purge = false
+        const target = selection.targets?.find(value => value.object_key === file.object_key)
+        if (preview.action === 'trash') uses.set(file.object_key, target?.mode === 'uses' ? (uses.get(file.object_key) || []).filter(use => !target.use_ids.includes(use.use_id)) : [])
+        file.status = preview.action === 'trash' && !uses.get(file.object_key)?.length ? 'trash' : 'active'; file.can_restore = true; file.can_purge = false
+        if (file.status === 'trash') file.recovery_id = `recovery-${body.preview_id}-${file.object_key}`
+        else delete file.recovery_id
         file.trash_at = new Date().toISOString(); file.purge_after = new Date(Date.now() + 7 * 86400000).toISOString()
       }
       return json(route, { success: true, status: partial ? 'partial' : 'completed', action: preview.action, operation_id: body.preview_id, items, freed_bytes: 0, retained_bytes: preview.items.reduce((sum, file) => sum + file.size_bytes, 0) })
@@ -94,7 +117,7 @@ async function installStorageUI(page: Page, options: { count?: number; canManage
     if (path === '/api/storage/content') return json(route, { success: false, error: 'Vista previa de prueba no disponible.' }, 503)
     return json(route, { success: true })
   })
-  return { calls, records, switchAccount: async () => {
+  return { calls, records, uses, switchAccount: async () => {
     account = accountB; records.push({ ...makeFile(0, accountB), filename: 'Documento privado de Cuenta B.pdf' })
     await page.evaluate(() => { localStorage.setItem('clarin:auth_scope', 'changing:storage-qa-b'); window.dispatchEvent(new Event('clarin:auth-scope-changed')) })
     await page.evaluate(() => { localStorage.setItem('clarin:auth_scope', 'active:storage-qa-b'); window.dispatchEvent(new Event('clarin:auth-scope-changed')) })
@@ -139,8 +162,8 @@ test('UI: revisión no muta, Escape devuelve foco y confirmar envía una operaci
   await expect(dialog).toBeVisible(); expect(mock.calls.confirms).toHaveLength(0)
   await page.keyboard.press('Escape'); await expect(dialog).toBeHidden(); await expect(trigger).toBeFocused()
   await trigger.press('Enter'); await expect(dialog).toBeVisible()
-  await dialog.getByRole('button', { name: 'Mover a la papelera', exact: true }).click()
-  await expect(page.getByText(/1 archivo en la papelera/)).toBeVisible()
+  await dialog.getByRole('button', { name: 'Confirmar retirada', exact: true }).click()
+  await expect(page.getByText(/1 archivo procesado/)).toBeVisible()
   expect(mock.calls.confirms).toHaveLength(1)
   expect(Object.keys(mock.calls.confirms[0])).toEqual(['preview_id'])
   await expect(page.getByText(/Todavía no se ha liberado espacio/)).toBeVisible()
@@ -151,18 +174,18 @@ test('UI: fallo parcial conserva solo la selección pendiente', async ({ page })
   await page.getByRole('checkbox', { name: 'Seleccionar Documento 001.pdf', exact: true }).check()
   await page.getByRole('checkbox', { name: 'Seleccionar Documento 002.pdf', exact: true }).check()
   await page.getByRole('button', { name: 'Revisar selección', exact: true }).click()
-  await page.getByRole('dialog').getByRole('button', { name: 'Mover a la papelera', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Confirmar retirada', exact: true }).click()
   await expect(page.getByText(/1 no se pudieron procesar/)).toBeVisible()
   await expect(page.getByRole('checkbox', { name: 'Seleccionar Documento 002.pdf', exact: true })).toBeChecked()
   await page.getByRole('button', { name: 'Revisar selección', exact: true }).click()
-  expect(mock.calls.previews.at(-1)?.object_keys).toEqual([mock.records[1].object_key])
+  expect(mock.calls.previews.at(-1)?.targets).toEqual([{ object_key: mock.records[1].object_key, mode: 'file' }])
 })
 
 test('UI: conflicto invalida revisión y conserva selección para revisar de nuevo', async ({ page }) => {
   const mock = await installStorageUI(page, { confirmMode: 'conflict' }); await openStorage(page)
   await page.getByRole('checkbox', { name: 'Seleccionar Documento 001.pdf', exact: true }).check()
   await page.getByRole('button', { name: 'Revisar selección', exact: true }).click()
-  await page.getByRole('dialog').getByRole('button', { name: 'Mover a la papelera', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Confirmar retirada', exact: true }).click()
   await expect(page.getByText(/Los archivos cambiaron/)).toBeVisible()
   expect(mock.calls.confirms).toHaveLength(1)
   await expect(page.getByRole('checkbox', { name: 'Seleccionar Documento 001.pdf', exact: true })).toBeChecked()
@@ -173,7 +196,7 @@ test('UI: revisión vencida bloquea confirmación', async ({ page }) => {
   await page.getByRole('checkbox', { name: 'Seleccionar Documento 001.pdf', exact: true }).check()
   await page.getByRole('button', { name: 'Revisar selección', exact: true }).click()
   await expect(page.getByRole('dialog').getByText('La revisión venció. Vuelve a comprobar los archivos antes de confirmar.')).toBeVisible()
-  await expect(page.getByRole('dialog').getByRole('button', { name: 'Mover a la papelera', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('dialog').getByRole('button', { name: 'Confirmar retirada', exact: true })).toHaveCount(0)
   await expect(page.getByRole('dialog').getByRole('button', { name: 'Volver a revisar', exact: true })).toBeEnabled()
   expect(mock.calls.confirms).toHaveLength(0)
 })
@@ -217,7 +240,7 @@ test('UI: diálogo móvil conserva acciones y captura teclado sin escapar al fon
   const bounds = await dialog.boundingBox()
   expect(bounds!.x).toBeGreaterThanOrEqual(0); expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(320)
   expect(bounds!.y).toBeGreaterThanOrEqual(0); expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(568)
-  const confirm = dialog.getByRole('button', { name: 'Mover a la papelera', exact: true })
+  const confirm = dialog.getByRole('button', { name: 'Confirmar retirada', exact: true })
   await expect(confirm).toBeVisible(); expect((await confirm.boundingBox())?.height || 0).toBeGreaterThanOrEqual(44)
   await page.screenshot({ path: testInfo.outputPath('storage-review-320.png') })
   await page.keyboard.press('Escape'); await expect(dialog).toBeHidden()
@@ -227,7 +250,7 @@ test('UI: papelera permite restaurar y reconcilia inventario sin recargar', asyn
   const mock = await installStorageUI(page); await openStorage(page)
   await page.getByRole('checkbox', { name: 'Seleccionar Documento 001.pdf', exact: true }).check()
   await page.getByRole('button', { name: 'Revisar selección', exact: true }).click()
-  await page.getByRole('dialog').getByRole('button', { name: 'Mover a la papelera', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Confirmar retirada', exact: true }).click()
   await page.getByRole('tab', { name: /Papelera/ }).click()
   await page.getByRole('checkbox', { name: 'Seleccionar Documento 001.pdf', exact: true }).check()
   await page.getByRole('button', { name: 'Restaurar', exact: true }).click()
@@ -247,6 +270,69 @@ function wavFixture(): Buffer {
   pcm.write('data', 36); pcm.writeUInt32LE(samples * 2, 40)
   return pcm
 }
+
+test('UI: retirar un uso conserva las ubicaciones restantes y muestra el impacto', async ({ page }) => {
+  const mock = await installStorageUI(page, { count: 1 })
+  const key = mock.records[0].object_key
+  mock.records[0].references_count = 3
+  mock.records[0].can_remove = false
+  mock.records[0].can_remove_uses = true
+  mock.records[0].has_protected_uses = true
+  mock.uses.set(key, [
+    { use_id: 'chat-use', type: 'chats', label: 'Chat autorizado', can_remove: true },
+    { use_id: 'reply-use', type: 'quick_replies', label: 'Respuesta reutilizable', can_remove: true },
+    { use_id: 'campaign-use', type: 'campaigns', label: 'Campaña programada', can_remove: false, blocked_reason: 'La campaña programada conserva su adjunto.' },
+  ])
+  await openStorage(page)
+  await page.getByRole('button', { name: 'Documento 001.pdf', exact: true }).click()
+  await expect(page.getByRole('checkbox', { name: 'Seleccionar uso: Campaña programada', exact: true })).toBeDisabled()
+  await page.getByRole('checkbox', { name: 'Seleccionar uso: Chat autorizado', exact: true }).check()
+  await page.getByRole('button', { name: 'Revisar usos seleccionados', exact: true }).click()
+  const review = page.getByRole('dialog', { name: 'Revisar eliminación', exact: true })
+  await expect(review.getByText('1 uso seleccionado para retirar.')).toBeVisible()
+  await expect(review.getByText('2 usos visibles se conservan.')).toBeVisible()
+  expect(mock.calls.previews[0]).toEqual({ action: 'trash', targets: [{ object_key: key, mode: 'uses', use_ids: ['chat-use'] }] })
+  expect(mock.calls.confirms).toHaveLength(0)
+  await review.getByRole('button', { name: 'Confirmar retirada', exact: true }).click()
+  await expect(page.getByText(/1 archivo procesado/)).toBeVisible()
+  expect(mock.records[0].status).toBe('active')
+  await page.getByRole('button', { name: 'Documento 001.pdf', exact: true }).click()
+  await expect(page.getByText('Chat autorizado', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Respuesta reutilizable', { exact: true })).toBeVisible()
+  await expect(page.getByText('Campaña programada', { exact: true })).toBeVisible()
+})
+
+test('UI: usos paginados mantienen selección y piden confirmar su descarte', async ({ page }) => {
+  const mock = await installStorageUI(page, { count: 1 })
+  const key = mock.records[0].object_key
+  mock.uses.set(key, Array.from({ length: 41 }, (_, index) => ({ use_id: `chat-${index}`, type: 'chats', label: `Conversación ${index + 1}`, can_remove: true })))
+  await page.setViewportSize({ width: 375, height: 812 })
+  await openStorage(page); await page.getByRole('button', { name: 'Documento 001.pdf', exact: true }).click()
+  await page.getByRole('checkbox', { name: 'Seleccionar uso: Conversación 1', exact: true }).check()
+  await page.getByRole('button', { name: 'Usos siguientes', exact: true }).click()
+  await expect(page.getByText('Conversación 41', { exact: true })).toBeVisible()
+  await page.getByRole('checkbox', { name: 'Seleccionar uso: Conversación 41', exact: true }).check()
+  await page.getByRole('button', { name: 'Usos anteriores', exact: true }).click()
+  await expect(page.getByRole('checkbox', { name: 'Seleccionar uso: Conversación 1', exact: true })).toBeChecked()
+  await page.getByRole('button', { name: 'Cerrar', exact: true }).click()
+  const discard = page.getByRole('dialog', { name: 'Descartar selección de usos', exact: true })
+  await expect(discard).toBeVisible()
+  await discard.getByRole('button', { name: 'Seguir revisando', exact: true }).click()
+  await expect(page.getByText('2 usos seleccionados de un máximo de 100')).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0)
+  expect(mock.calls.confirms).toHaveLength(0)
+})
+
+test('UI: recomendaciones aplican filtros y nunca confirman una eliminación', async ({ page }) => {
+  const mock = await installStorageUI(page, { recommendations: true })
+  await openStorage(page)
+  await page.getByRole('button', { name: /^Archivos grandes/ }).click()
+  await expect.poll(() => mock.calls.files.at(-1) || '').toContain('min_size=10485760')
+  await page.getByRole('button', { name: /^Mis cargas sin utilizar/ }).click()
+  await expect.poll(() => mock.calls.files.at(-1) || '').toContain('status=unused_uploads')
+  expect(mock.calls.previews).toHaveLength(0); expect(mock.calls.confirms).toHaveLength(0)
+})
+
 const renderedMedia = [
   { type: 'image' as const, filename: 'foto.png', mime: 'image/png', bytes: () => Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAGUlEQVR4nGNkWFHBQApgIkn1qIZRDUNKAwCjhQFAyVwhKgAAAABJRU5ErkJggg==', 'base64') },
   { type: 'audio' as const, filename: 'audio.wav', mime: 'audio/wav', bytes: wavFixture },
@@ -256,7 +342,7 @@ for (const media of renderedMedia) test(`UI: vista previa real ${media.type} dec
   const mock = await installStorageUI(page, { count: 1 })
   const bytes = media.bytes(); Object.assign(mock.records[0], { filename: media.filename, media_type: media.type, size_bytes: bytes.length })
   await page.route(url => url.pathname === '/api/storage/content', route => route.fulfill({ status: 200, contentType: media.mime, body: bytes }))
-  await openStorage(page); await page.getByRole('button', { name: media.filename, exact: true }).click()
+  await openStorage(page); await page.getByRole('button', { name: `Ver ${media.filename}`, exact: true }).click()
   const dialog = page.getByRole('dialog', { name: media.filename, exact: true }); await expect(dialog).toBeVisible()
   const element = dialog.locator(media.type === 'image' ? 'img' : media.type)
   await expect(element).toBeVisible()
@@ -272,7 +358,7 @@ test('UI: PDF real se renderiza con PDF.js y vuelve a detalles al cerrar', async
   const mock = await installStorageUI(page, { count: 1 }); const bytes = readFileSync(join(__dirname, 'fixtures/storage/preview.pdf'))
   mock.records[0].size_bytes = bytes.length
   await page.route(url => url.pathname === '/api/storage/content', route => route.fulfill({ status: 200, contentType: 'application/pdf', body: bytes }))
-  await openStorage(page); await page.getByRole('button', { name: 'Documento 001.pdf', exact: true }).click()
+  await openStorage(page); await page.getByRole('button', { name: 'Ver Documento 001.pdf', exact: true }).click()
   await page.getByRole('button', { name: 'Abrir vista previa', exact: true }).click()
   const viewer = page.getByRole('dialog', { name: 'Vista previa de Documento 001.pdf', exact: true })
   await expect(viewer).toBeVisible()
@@ -289,7 +375,7 @@ test('UI: PDF real se renderiza con PDF.js y vuelve a detalles al cerrar', async
 
 test('UI: fallo de vista previa informa y permite reintentar sin ventana vacía', async ({ page }) => {
   const mock = await installStorageUI(page, { count: 1 }); Object.assign(mock.records[0], { filename: 'video-error.webm', media_type: 'video' })
-  await openStorage(page); await page.getByRole('button', { name: 'video-error.webm', exact: true }).click()
+  await openStorage(page); await page.getByRole('button', { name: 'Ver video-error.webm', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: 'video-error.webm', exact: true })
   await expect(dialog.getByRole('alert')).toContainText('Vista previa de prueba no disponible.')
   await expect(dialog.getByRole('button', { name: 'Reintentar', exact: true })).toBeEnabled()

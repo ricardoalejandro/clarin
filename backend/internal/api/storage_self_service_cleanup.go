@@ -18,6 +18,7 @@ import (
 )
 
 type storageCleanupItem struct {
+	RecoveryID      string `json:"recovery_id,omitempty"`
 	ObjectKey       string `json:"object_key"`
 	Filename        string `json:"filename"`
 	SizeBytes       int64  `json:"size_bytes"`
@@ -27,10 +28,11 @@ type storageCleanupItem struct {
 	Fingerprint     string `json:"fingerprint,omitempty"`
 }
 type storageCleanupItemResult struct {
-	ObjectKey string `json:"object_key"`
-	Filename  string `json:"filename"`
-	Status    string `json:"status"`
-	Reason    string `json:"reason"`
+	RecoveryID string `json:"recovery_id,omitempty"`
+	ObjectKey  string `json:"object_key"`
+	Filename   string `json:"filename"`
+	Status     string `json:"status"`
+	Reason     string `json:"reason"`
 }
 type storageCleanupResult struct {
 	Success       bool                       `json:"success"`
@@ -98,8 +100,10 @@ func (s *Server) handleStorageCleanupPreview(c *fiber.Ctx) error {
 		return storageSelfServiceError(c, 403, "storage_forbidden", "No tienes permiso para gestionar el almacenamiento.")
 	}
 	var req struct {
-		ObjectKeys []string `json:"object_keys"`
-		Action     string   `json:"action"`
+		ObjectKeys  []string           `json:"object_keys"`
+		Targets     []storageUseTarget `json:"targets"`
+		RecoveryIDs []uuid.UUID        `json:"recovery_ids"`
+		Action      string             `json:"action"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return storageSelfServiceError(c, 400, "invalid_selection", "Revisa los archivos seleccionados.")
@@ -107,9 +111,22 @@ func (s *Server) handleStorageCleanupPreview(c *fiber.Ctx) error {
 	if req.Action != "trash" && req.Action != "restore" && req.Action != "purge" {
 		return storageSelfServiceError(c, 400, "invalid_action", "La operación no es válida.")
 	}
+	if len(req.Targets) > 0 || len(req.RecoveryIDs) > 0 {
+		if len(req.ObjectKeys) > 0 {
+			return storageSelfServiceError(c, 400, "invalid_selection", "Utiliza una única selección.")
+		}
+		return s.handleStorageUsePreview(c, storageUseActor{accountID, actorID, claims}, req.Action, req.Targets, req.RecoveryIDs)
+	}
 	keys, err := storageSelfServiceCleanSelection(accountID, req.ObjectKeys)
 	if err != nil {
 		return storageSelfServiceError(c, 400, "invalid_selection", err.Error())
+	}
+	var perUseRecovery bool
+	if err = s.repos.DB().QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM storage_removed_references WHERE account_id=$1 AND object_key=ANY($2::text[]) AND state IN ('removed','purging'))`, accountID, keys).Scan(&perUseRecovery); err != nil {
+		return err
+	}
+	if perUseRecovery && req.Action != "restore" {
+		return storageSelfServiceError(c, 409, "storage_selection_changed", "Selecciona cada recuperación desde Papelera para revisar su impacto.")
 	}
 	catalog, err := s.storageSelfServiceCatalog(ctx, s.repos.DB(), accountID, actorID, claims, keys)
 	if err != nil {
@@ -129,7 +146,13 @@ func (s *Server) handleStorageCleanupPreview(c *fiber.Ctx) error {
 			return storageSelfServiceError(c, 404, "storage_not_found", "La selección contiene un archivo que ya no está disponible.")
 		}
 		allowed, reason := storageSelfServiceEligibility(f, req.Action)
-		items = append(items, storageCleanupItem{key, f.Filename, f.SizeBytes, allowed, reason, f.ReferencesCount, f.Fingerprint})
+		recoveryID := ""
+		if req.Action != "trash" {
+			if err = s.repos.DB().QueryRow(ctx, `SELECT id::text FROM storage_media_trash WHERE account_id=$1 AND object_key=$2 AND jsonb_array_length(message_backups)>0`, accountID, key).Scan(&recoveryID); err != nil {
+				return storageSelfServiceError(c, 404, "storage_not_found", "La recuperación no está disponible.")
+			}
+		}
+		items = append(items, storageCleanupItem{RecoveryID: recoveryID, ObjectKey: key, Filename: f.Filename, SizeBytes: f.SizeBytes, Eligible: allowed, Reason: reason, ReferencesCount: f.ReferencesCount, Fingerprint: f.Fingerprint})
 		if allowed {
 			eligible++
 			bytes += f.SizeBytes
@@ -160,7 +183,7 @@ func (s *Server) handleStorageCleanupConfirm(c *fiber.Ctx) error {
 		return storageSelfServiceError(c, 503, "storage_unavailable", "El almacenamiento no está disponible.")
 	}
 	accountID, actorID, claims, err := s.storageSelfServiceActor(c)
-	if err != nil || !storageSelfServiceHasPermission(claims, domain.PermSettings) || !storageSelfServiceHasPermission(claims, domain.PermChats) {
+	if err != nil || !storageSelfServiceHasPermission(claims, domain.PermSettings) {
 		return storageSelfServiceError(c, 403, "storage_forbidden", "No tienes permiso para gestionar el almacenamiento.")
 	}
 	var req struct {
@@ -172,6 +195,13 @@ func (s *Server) handleStorageCleanupConfirm(c *fiber.Ctx) error {
 	id, err := uuid.Parse(req.PreviewID)
 	if err != nil {
 		return storageSelfServiceError(c, 400, "invalid_preview", "Revisa nuevamente la selección.")
+	}
+	var usesPlan bool
+	if e := s.repos.DB().QueryRow(c.Context(), `SELECT use_selection IS NOT NULL FROM storage_cleanup_previews WHERE account_id=$1 AND id=$2`, accountID, id).Scan(&usesPlan); e == nil && usesPlan {
+		return s.handleStorageUseConfirm(c, storageUseActor{accountID, actorID, claims}, id)
+	}
+	if !storageSelfServiceHasPermission(claims, domain.PermChats) {
+		return storageSelfServiceError(c, 403, "storage_forbidden", "Necesitas acceso a Chats para esta operación.")
 	}
 	ctx, cancel := context.WithTimeout(c.Context(), 45*time.Second)
 	defer cancel()
@@ -237,6 +267,15 @@ func (s *Server) handleStorageCleanupConfirm(c *fiber.Ctx) error {
 	for _, item := range items {
 		selected = append(selected, item.ObjectKey)
 	}
+	if action != "restore" {
+		var hasUseRecovery bool
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM storage_removed_references WHERE account_id=$1 AND object_key=ANY($2::text[]) AND state IN ('removed','purging'))`, accountID, selected).Scan(&hasUseRecovery); err != nil {
+			return err
+		}
+		if hasUseRecovery {
+			return storageSelfServiceError(c, 409, "storage_preview_stale", "El archivo conserva otras recuperaciones. Revisa su estado desde Papelera.")
+		}
+	}
 	if _, err = tx.Exec(ctx, `UPDATE storage_reference_epochs SET version=version+1 WHERE account_id=$1`, accountID); err != nil {
 		return storageSelfServiceError(c, 503, "storage_guard_unavailable", "No se pudo verificar la seguridad de la operación.")
 	}
@@ -263,7 +302,7 @@ func (s *Server) handleStorageCleanupConfirm(c *fiber.Ctx) error {
 	if action == "purge" {
 		result.Status = "processing"
 		for _, item := range items {
-			r := storageCleanupItemResult{ObjectKey: item.ObjectKey, Filename: item.Filename, Status: "blocked", Reason: item.Reason}
+			r := storageCleanupItemResult{RecoveryID: item.RecoveryID, ObjectKey: item.ObjectKey, Filename: item.Filename, Status: "blocked", Reason: item.Reason}
 			if item.Eligible {
 				if err := s.storageSelfServiceStagePurge(ctx, tx, accountID, item.ObjectKey); err != nil {
 					return storageSelfServiceError(c, 409, "storage_preview_stale", "El estado cambió. Revisa nuevamente la selección.")
@@ -288,7 +327,7 @@ func (s *Server) handleStorageCleanupConfirm(c *fiber.Ctx) error {
 	}
 	completed, failed := 0, 0
 	for _, item := range items {
-		r := storageCleanupItemResult{ObjectKey: item.ObjectKey, Filename: item.Filename, Status: "blocked", Reason: item.Reason}
+		r := storageCleanupItemResult{RecoveryID: item.RecoveryID, ObjectKey: item.ObjectKey, Filename: item.Filename, Status: "blocked", Reason: item.Reason}
 		if !item.Eligible {
 			result.Items = append(result.Items, r)
 			continue
@@ -344,6 +383,9 @@ func (s *Server) handleStorageCleanupConfirm(c *fiber.Ctx) error {
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return storageSelfServiceError(c, 503, "storage_result_unavailable", "No se pudo confirmar el resultado. Revisa Actividad antes de volver a intentarlo.")
+	}
+	if completed > 0 {
+		s.storageSelfServicePublishChanged(accountID, "changed")
 	}
 	if completed > 0 && (action == "trash" || action == "restore") {
 		s.invalidateMessagesCache(accountID, nil)
@@ -540,6 +582,9 @@ func (s *Server) storageSelfServiceFinishPurge(ctx context.Context, accountID, a
 			if err == nil {
 				_, err = tx.Exec(ctx, `UPDATE storage_media_trash SET state='purged',updated_at=NOW() WHERE account_id=$1 AND object_key=$2`, accountID, item.ObjectKey)
 			}
+			if err == nil {
+				_, err = tx.Exec(ctx, `UPDATE storage_removed_references SET state='purged',purged_at=NOW(),updated_at=NOW() WHERE account_id=$1 AND object_key=$2 AND state IN ('removed','purging')`, accountID, item.ObjectKey)
+			}
 			if err != nil {
 				tx.Rollback(context.Background())
 				return result, err
@@ -547,6 +592,12 @@ func (s *Server) storageSelfServiceFinishPurge(ctx context.Context, accountID, a
 			item.Status = "completed"
 			item.Reason = ""
 			result.FreedBytes += freed
+		}
+		for i := range result.Items {
+			if i != index && result.Items[i].ObjectKey == item.ObjectKey {
+				result.Items[i].Status = item.Status
+				result.Items[i].Reason = item.Reason
+			}
 		}
 		completed, failed, pending := 0, 0, 0
 		for _, r := range result.Items {
@@ -579,6 +630,7 @@ func (s *Server) storageSelfServiceFinishPurge(ctx context.Context, accountID, a
 		if err = tx.Commit(ctx); err != nil {
 			return result, err
 		}
+		s.storageSelfServicePublishChanged(accountID, "changed")
 	}
 }
 func storageSelfServiceObjectMissing(err error) bool {

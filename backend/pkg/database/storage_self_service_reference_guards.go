@@ -29,12 +29,13 @@ var storageReferenceGuardSpecs = []storageReferenceGuardSpec{
 	{"survey_templates", "direct", "branding"},
 	{"contacts", "direct", "avatar_url,avatar_media_asset_id"},
 	{"whatsapp_statuses", "direct", "media_url,media_asset_id"},
-	{"task_attachments", "direct", "media_asset_id"},
+	{"task_attachments", "direct", "media_asset_id,storage_removed_at,storage_removal_id"},
 	{"task_attachment_previews", "direct", "derivative_asset_id"},
 	{"whiteboard_assets", "direct", "media_asset_id"},
 	{"whiteboard_revision_assets", "direct", "media_asset_id"},
 	{"whiteboard_revisions", "direct", "snapshot_object_key"},
 	{"media_assets", "direct", "object_key,status"},
+	{"storage_upload_ownership", "direct", "object_key,state"},
 }
 
 func storageSelfServiceReferenceGuardMigrations() []string {
@@ -132,7 +133,13 @@ func storageSelfServiceReferenceGuardMigrations() []string {
 		 IF table_name='messages' AND COALESCE((item->>'media_deleted')::boolean,FALSE) THEN RETURN result; END IF;
 		 IF table_name='media_assets' AND COALESCE(item->>'status','active')<>'active' THEN RETURN result; END IF;
 		 IF table_name='survey_file_uploads' AND COALESCE(item->>'status','staged') IN ('deleted','deleting') THEN RETURN result; END IF;
+		 IF table_name='storage_upload_ownership' AND COALESCE(item->>'state','active')<>'active' THEN RETURN result; END IF;
+		 IF table_name='task_attachments' AND NULLIF(item->>'storage_removed_at','') IS NOT NULL THEN RETURN result; END IF;
 		 FOREACH field IN ARRAY string_to_array(fields,',') LOOP
+		   -- The canonical avatar endpoint names a Contact, not an object key.
+		   -- Its physical identity remains guarded through avatar_media_asset_id.
+		   IF table_name='contacts' AND field='avatar_url'
+		     AND split_part(item->>field,'?',1)='/api/contact-avatars/' || (item->>'id') || '/content' THEN CONTINUE; END IF;
 		   IF item->field IS NOT NULL AND item->field<>'null'::jsonb THEN result := result || jsonb_build_object(field,item->field); END IF;
 		 END LOOP;
 		 RETURN result;
@@ -145,6 +152,15 @@ func storageSelfServiceReferenceGuardMigrations() []string {
 		 BEGIN
 		 IF TG_OP<>'INSERT' THEN old_item:=to_jsonb(OLD); old_account:=clarin_storage_reference_account(TG_ARGV[0],old_item); END IF;
 		 IF TG_OP<>'DELETE' THEN new_item:=to_jsonb(NEW); new_account:=clarin_storage_reference_account(TG_ARGV[0],new_item); END IF;
+		 -- A provider error can occur after deletion succeeded. Keep the media
+		 -- row and key attached to its durable GC job until deletion completes;
+		 -- replacing the row early could discard the old key's retry job.
+		 IF TG_TABLE_NAME='media_assets' AND TG_OP='UPDATE'
+		   AND old_item->>'status' IN ('task_gc_deleting','whiteboard_gc_deleting','avatar_gc_deleting')
+		   AND (old_item->>'object_key' IS DISTINCT FROM new_item->>'object_key'
+		     OR new_item->>'status' NOT IN ('task_gc_deleting','whiteboard_gc_deleting','avatar_gc_deleting','status_gc_deleting','survey_upload_deleting','deleting','deleted')) THEN
+		   RAISE EXCEPTION USING ERRCODE='23514', MESSAGE='The referenced media is being permanently removed';
+		 END IF;
 		 old_payload:=clarin_storage_reference_payload(TG_TABLE_NAME,old_item,TG_ARGV[1]);
 		 new_payload:=clarin_storage_reference_payload(TG_TABLE_NAME,new_item,TG_ARGV[1]);
 		 IF TG_OP='UPDATE' AND old_account IS NOT DISTINCT FROM new_account AND old_payload=new_payload THEN RETURN NEW; END IF;
@@ -189,8 +205,21 @@ func storageSelfServiceReferenceGuardMigrations() []string {
 		   IF split_part(candidate_key,'/',1)<>new_account::text AND NOT(candidate_key=ANY(old_keys) AND old_account=new_account) THEN
 		     RAISE EXCEPTION USING ERRCODE='23514', MESSAGE='Media must belong to the same account';
 		   END IF;
-		   IF EXISTS(SELECT 1 FROM storage_media_trash t WHERE t.account_id=new_account AND t.object_key=candidate_key AND t.state IN ('purging','purged')) THEN
+		   IF EXISTS(SELECT 1 FROM storage_media_trash t WHERE t.account_id=new_account AND t.object_key=candidate_key AND t.state IN ('purging','purged'))
+		     OR EXISTS(SELECT 1 FROM storage_admin_delete_intents t WHERE t.account_id=new_account AND t.object_key=candidate_key)
+		     OR EXISTS(SELECT 1 FROM storage_objects object WHERE object.account_id=new_account AND object.object_key=candidate_key
+		       AND object.status IN ('task_gc_deleting','whiteboard_gc_deleting','avatar_gc_deleting','status_gc_deleting','survey_upload_deleting','deleted'))
+		     OR EXISTS(SELECT 1 FROM media_assets asset WHERE asset.account_id=new_account AND asset.object_key=candidate_key
+		       AND asset.status IN ('task_gc_deleting','whiteboard_gc_deleting','avatar_gc_deleting','status_gc_deleting','survey_upload_deleting','deleting','deleted')
+		       AND (TG_TABLE_NAME<>'media_assets' OR asset.id::text<>new_item->>'id')) THEN
 		     RAISE EXCEPTION USING ERRCODE='23514', MESSAGE='The referenced media is being permanently removed';
+		   END IF;
+		   -- The first real business reference promotes all upload claims. A
+		   -- staged file is no longer an abandoned upload after attachment. The
+		   -- promotion shares this transaction and the account cleanup barrier.
+		   IF TG_TABLE_NAME NOT IN ('media_assets','storage_upload_ownership') THEN
+		     UPDATE storage_upload_ownership SET state='attached',version=version+1
+		     WHERE account_id=new_account AND object_key=candidate_key AND state='active';
 		   END IF;
 		 END LOOP;
 		 RETURN NEW;

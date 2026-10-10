@@ -169,6 +169,9 @@ func (r *QuickReplyRepository) Create(ctx context.Context, quickReply *domain.Qu
 		return nil, fmt.Errorf("begin quick reply create: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('storage-self-service:' || $1::text,0))`, quickReply.AccountID); err != nil {
+		return nil, err
+	}
 
 	quickReply.ID = uuid.New()
 	if err := tx.QueryRow(ctx, `
@@ -201,6 +204,9 @@ func (r *QuickReplyRepository) Update(ctx context.Context, accountID uuid.UUID, 
 		return nil, fmt.Errorf("begin quick reply update: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('storage-self-service:' || $1::text,0))`, accountID); err != nil {
+		return nil, err
+	}
 
 	var currentUpdatedAt time.Time
 	var hasItems bool
@@ -260,6 +266,9 @@ func (r *QuickReplyRepository) Delete(ctx context.Context, accountID, id uuid.UU
 		return fmt.Errorf("begin quick reply delete: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('storage-self-service:' || $1::text,0))`, accountID); err != nil {
+		return err
+	}
 
 	assetIDs, err := quickReplyAssetIDsTx(ctx, tx, accountID, id)
 	if err != nil {

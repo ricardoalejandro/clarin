@@ -16,9 +16,9 @@ func (r *MessageRepository) ListStorageCleanupMessages(ctx context.Context, acco
  m.quoted_message_id,m.quoted_body,m.quoted_sender,m.quoted_is_from_me,
  COALESCE(m.is_revoked,false),COALESCE(m.is_view_once,false),COALESCE(m.media_deleted,false),
  m.latitude,m.longitude,m.contact_name,m.contact_phone,m.contact_vcard,m.sender
- FROM messages m WHERE m.account_id=$1 AND m.id>$3 AND EXISTS(
+ FROM messages m WHERE m.account_id=$1 AND m.id>$3 AND (EXISTS(
  SELECT 1 FROM storage_media_trash t CROSS JOIN LATERAL jsonb_array_elements(t.message_backups) b
- WHERE t.account_id=$1 AND t.object_key=ANY($2::text[]) AND b->>'id'=m.id::text AND b->>'chat_id'=m.chat_id::text)
+ WHERE t.account_id=$1 AND t.object_key=ANY($2::text[]) AND b->>'id'=m.id::text AND b->>'chat_id'=m.chat_id::text) OR EXISTS(SELECT 1 FROM storage_removed_references r WHERE r.account_id=$1 AND r.object_key=ANY($2::text[]) AND r.adapter='ordinary' AND r.origin_type='chats' AND r.snapshot->>'source_id'=m.id::text AND r.snapshot->>'parent_id'=m.chat_id::text))
  ORDER BY m.id LIMIT 200`, accountID, keys, after)
 	if err != nil {
 		return nil, err

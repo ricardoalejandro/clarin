@@ -44,7 +44,7 @@ func (r *TaskWorkRepository) ResolveAttachmentDownload(ctx context.Context, acco
 			 AND asset.status='active'
 			WHERE preview.account_id=$1 AND preview.task_id=$2
 			  AND preview.attachment_id=$3 AND preview.status='ready'
-			  AND COALESCE(attachment.attachment_scope,'task')<>'comment_draft'
+			  AND COALESCE(attachment.attachment_scope,'task')<>'comment_draft' AND attachment.storage_removed_at IS NULL
 		`, accountID, taskID, attachmentID).Scan(&item.ObjectKey, &item.Filename, &item.ContentType)
 	} else {
 		err = r.db.QueryRow(ctx, `
@@ -55,7 +55,7 @@ func (r *TaskWorkRepository) ResolveAttachmentDownload(ctx context.Context, acco
 			 AND asset.id=attachment.media_asset_id
 			 AND asset.status='active'
 			WHERE attachment.account_id=$1 AND attachment.task_id=$2 AND attachment.id=$3
-			  AND COALESCE(attachment.attachment_scope,'task')<>'comment_draft'
+			  AND COALESCE(attachment.attachment_scope,'task')<>'comment_draft' AND attachment.storage_removed_at IS NULL
 		`, accountID, taskID, attachmentID).Scan(&item.ObjectKey, &item.Filename, &item.ContentType)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {

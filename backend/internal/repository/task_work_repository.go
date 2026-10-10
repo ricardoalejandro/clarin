@@ -2308,7 +2308,7 @@ func (r *TaskWorkRepository) hydrateCommentRelations(ctx context.Context, accoun
 	attachmentRows, err := r.db.Query(ctx, `SELECT relation.comment_id,attachment.id,attachment.account_id,attachment.task_id,attachment.media_asset_id,
 		media.filename,media.content_type,media.media_type,media.size_bytes,media.object_key,attachment.uploaded_by,attachment.created_at
 		FROM task_comment_attachments relation
-		JOIN task_attachments attachment ON attachment.account_id=relation.account_id AND attachment.task_id=relation.task_id AND attachment.id=relation.attachment_id
+		JOIN task_attachments attachment ON attachment.account_id=relation.account_id AND attachment.task_id=relation.task_id AND attachment.id=relation.attachment_id AND attachment.storage_removed_at IS NULL
 		JOIN media_assets media ON media.account_id=attachment.account_id AND media.id=attachment.media_asset_id AND media.status='active'
 		WHERE relation.account_id=$1 AND relation.task_id=$2 AND relation.comment_id=ANY($3::uuid[])
 		ORDER BY relation.created_at`, accountID, taskID, commentIDs)
@@ -2361,7 +2361,7 @@ func claimTaskCommentAttachmentTx(ctx context.Context, tx pgx.Tx, accountID, tas
 	var expiresAt *time.Time
 	var assetID uuid.UUID
 	err := tx.QueryRow(ctx, `SELECT COALESCE(attachment_scope,'task'),draft_owner_id,draft_expires_at,media_asset_id
-		FROM task_attachments WHERE account_id=$1 AND task_id=$2 AND id=$3 FOR UPDATE`, accountID, taskID, attachmentID).
+		FROM task_attachments WHERE account_id=$1 AND task_id=$2 AND id=$3 AND storage_removed_at IS NULL FOR UPDATE`, accountID, taskID, attachmentID).
 		Scan(&scope, &ownerID, &expiresAt, &assetID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, ErrTaskWorkNotFound
@@ -2392,7 +2392,7 @@ func scheduleOrphanedCommentAttachmentsTx(ctx context.Context, tx pgx.Tx, accoun
 	rows, err := tx.Query(ctx, `UPDATE task_attachments attachment SET
 		attachment_scope='comment_draft',draft_owner_id=$3,draft_expires_at=$4
 		WHERE attachment.account_id=$1 AND attachment.task_id=$2 AND attachment.id=ANY($5::uuid[])
-		  AND attachment.attachment_scope='comment'
+		  AND attachment.attachment_scope='comment' AND attachment.storage_removed_at IS NULL
 		  AND NOT EXISTS(SELECT 1 FROM task_comment_attachments relation
 			WHERE relation.account_id=attachment.account_id AND relation.task_id=attachment.task_id
 			  AND relation.attachment_id=attachment.id)
@@ -2520,7 +2520,9 @@ func (r *TaskWorkRepository) UpdateComment(ctx context.Context, accountID, taskI
 		return err
 	}
 	previousRows.Close()
-	if _, err := tx.Exec(ctx, `DELETE FROM task_comment_attachments WHERE account_id=$1 AND task_id=$2 AND comment_id=$3`, accountID, taskID, commentID); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM task_comment_attachments relation WHERE account_id=$1 AND task_id=$2 AND comment_id=$3
+		AND NOT EXISTS(SELECT 1 FROM task_attachments removed WHERE removed.account_id=relation.account_id
+		 AND removed.id=relation.attachment_id AND removed.storage_removed_at IS NOT NULL)`, accountID, taskID, commentID); err != nil {
 		return err
 	}
 	seenMentions := map[uuid.UUID]struct{}{}
@@ -2697,7 +2699,7 @@ func (r *TaskWorkRepository) ListActivityForActor(ctx context.Context, accountID
 func (r *TaskWorkRepository) ListAttachments(ctx context.Context, accountID, taskID uuid.UUID) ([]*domain.TaskAttachment, error) {
 	rows, err := r.db.Query(ctx, `SELECT ta.id,ta.account_id,ta.task_id,ta.media_asset_id,ma.filename,ma.content_type,ma.media_type,ma.size_bytes,ma.object_key,ta.uploaded_by,ta.created_at
 		FROM task_attachments ta JOIN media_assets ma ON ma.account_id=ta.account_id AND ma.id=ta.media_asset_id AND ma.status='active'
-		WHERE ta.account_id=$1 AND ta.task_id=$2 AND COALESCE(ta.attachment_scope,'task')='task' ORDER BY ta.created_at`, accountID, taskID)
+		WHERE ta.account_id=$1 AND ta.task_id=$2 AND COALESCE(ta.attachment_scope,'task')='task' AND ta.storage_removed_at IS NULL ORDER BY ta.created_at`, accountID, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -2736,7 +2738,7 @@ func (r *TaskWorkRepository) AddAttachment(ctx context.Context, accountID, taskI
 }
 
 func (r *TaskWorkRepository) DeleteAttachment(ctx context.Context, accountID, taskID, attachmentID uuid.UUID) error {
-	command, err := r.db.Exec(ctx, `DELETE FROM task_attachments WHERE account_id=$1 AND task_id=$2 AND id=$3`, accountID, taskID, attachmentID)
+	command, err := r.db.Exec(ctx, `DELETE FROM task_attachments WHERE account_id=$1 AND task_id=$2 AND id=$3 AND storage_removed_at IS NULL`, accountID, taskID, attachmentID)
 	if err == nil && command.RowsAffected() == 0 {
 		return ErrTaskWorkNotFound
 	}

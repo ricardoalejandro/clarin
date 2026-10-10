@@ -180,7 +180,7 @@ func TestStorageSelfServiceSQLIntegration(t *testing.T) {
 		t.Skip("requires explicit disposable SQL-only integration opt-in")
 	}
 	parsed, err := url.Parse(os.Getenv("DATABASE_URL"))
-	if err != nil || parsed.Hostname() != "127.0.0.1" || parsed.Port() != "15439" || parsed.Path != "/clarin_storage_qa" {
+	if err != nil || parsed.Hostname() != "127.0.0.1" || parsed.Port() != storageQAPort(t, "CLARIN_STORAGE_QA_POSTGRES_PORT", "15439") || parsed.Path != "/clarin_storage_qa" {
 		t.Fatal("requires dedicated loopback disposable clarin_storage_qa database")
 	}
 	ctx := context.Background()

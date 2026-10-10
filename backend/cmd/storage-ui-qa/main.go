@@ -30,6 +30,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
+	"github.com/naperu/clarin/internal/api"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/storage"
 	"golang.org/x/crypto/bcrypt"
@@ -64,16 +65,18 @@ type mediaFile struct {
 	ChatID       uuid.UUID `json:"chat_id"`
 	MessageID    uuid.UUID `json:"message_id"`
 	InitialState string    `json:"initial_state"`
+	RecoveryID   uuid.UUID `json:"recovery_id,omitempty"`
 }
 type manifest struct {
-	Kind      string             `json:"kind"`
-	RunID     uuid.UUID          `json:"run_id"`
-	CreatedAt time.Time          `json:"created_at"`
-	State     string             `json:"state"`
-	RoleID    uuid.UUID          `json:"role_id"`
-	Accounts  map[string]account `json:"accounts"`
-	Actors    map[string]actor   `json:"actors"`
-	Files     []mediaFile        `json:"files"`
+	Kind           string             `json:"kind"`
+	RunID          uuid.UUID          `json:"run_id"`
+	CreatedAt      time.Time          `json:"created_at"`
+	State          string             `json:"state"`
+	RoleID         uuid.UUID          `json:"role_id"`
+	ReadOnlyRoleID uuid.UUID          `json:"read_only_role_id,omitempty"`
+	Accounts       map[string]account `json:"accounts"`
+	Actors         map[string]actor   `json:"actors"`
+	Files          []mediaFile        `json:"files"`
 }
 type laboratory struct {
 	ctx   context.Context
@@ -209,8 +212,8 @@ func newManifest() (*manifest, error) {
 	id := uuid.New()
 	prefix := "QA almacenamiento " + id.String()[:8]
 	a, b := account{uuid.New(), prefix + " · Cuenta A"}, account{uuid.New(), prefix + " · Cuenta B"}
-	m := &manifest{Kind: manifestKind, RunID: id, CreatedAt: time.Now().UTC(), State: "preparing", RoleID: uuid.New(), Accounts: map[string]account{"a": a, "b": b}, Actors: map[string]actor{}}
-	for _, name := range []string{"admin_a", "member_a"} {
+	m := &manifest{Kind: manifestKind, RunID: id, CreatedAt: time.Now().UTC(), State: "preparing", RoleID: uuid.New(), ReadOnlyRoleID: uuid.New(), Accounts: map[string]account{"a": a, "b": b}, Actors: map[string]actor{}}
+	for _, name := range []string{"admin_a", "member_a", "read_only_a"} {
 		secret := make([]byte, 24)
 		if _, err := rand.Read(secret); err != nil {
 			return nil, err
@@ -218,6 +221,9 @@ func newManifest() (*manifest, error) {
 		permissions, memberships := []string{domain.PermAll}, []uuid.UUID{a.ID, b.ID}
 		if name == "member_a" {
 			permissions, memberships = []string{domain.PermChats, domain.PermSettings}, []uuid.UUID{a.ID}
+		}
+		if name == "read_only_a" {
+			permissions, memberships = []string{domain.PermChats}, []uuid.UUID{a.ID}
 		}
 		m.Actors[name] = actor{ID: uuid.New(), AccountID: a.ID, Username: "storageqa-" + name + "-" + id.String()[:8], Password: base64.RawURLEncoding.EncodeToString(secret), Permissions: permissions, Memberships: memberships}
 	}
@@ -391,7 +397,10 @@ func (lab laboratory) create(m *manifest, assets, manifestPath string) error {
 	if err := exec(`INSERT INTO roles(id,name,permissions) VALUES($1,$2,$3)`, m.RoleID, "storage-ui-qa-"+m.RunID.String(), []string{domain.PermChats, domain.PermSettings}); err != nil {
 		return err
 	}
-	for _, name := range []string{"admin_a", "member_a"} {
+	if err := exec(`INSERT INTO roles(id,name,permissions) VALUES($1,$2,$3)`, m.ReadOnlyRoleID, "storage-ui-qa-read-only-"+m.RunID.String(), []string{domain.PermChats}); err != nil {
+		return err
+	}
+	for _, name := range []string{"admin_a", "member_a", "read_only_a"} {
 		a := m.Actors[name]
 		hash, err := bcrypt.GenerateFromPassword([]byte(a.Password), bcrypt.DefaultCost)
 		if err != nil {
@@ -401,11 +410,15 @@ func (lab laboratory) create(m *manifest, assets, manifestPath string) error {
 		if name == "admin_a" {
 			role, admin = "admin", true
 		}
+		roleID := m.RoleID
+		if name == "read_only_a" {
+			roleID = m.ReadOnlyRoleID
+		}
 		if err := exec(`INSERT INTO users(id,account_id,username,email,password_hash,display_name,is_admin,is_super_admin,is_active,role) VALUES($1,$2,$3,$4,$5,$6,$7,false,true,$8)`, a.ID, a.AccountID, a.Username, a.Username+"@test.invalid", string(hash), "QA almacenamiento · "+name, admin, role); err != nil {
 			return err
 		}
 		for _, accountID := range a.Memberships {
-			if err := exec(`INSERT INTO user_accounts(user_id,account_id,role,role_id,is_default) VALUES($1,$2,$3,$4,$5)`, a.ID, accountID, role, m.RoleID, accountID == a.AccountID); err != nil {
+			if err := exec(`INSERT INTO user_accounts(user_id,account_id,role,role_id,is_default) VALUES($1,$2,$3,$4,$5)`, a.ID, accountID, role, roleID, accountID == a.AccountID); err != nil {
 				return err
 			}
 		}
@@ -452,7 +465,7 @@ func (lab laboratory) create(m *manifest, assets, manifestPath string) error {
 		return err
 	}
 	defer apiJSON(client, "/api/auth/logout", map[string]any{}, nil)
-	for _, f := range m.Files {
+	for index, f := range m.Files {
 		if f.InitialState != "trash" {
 			continue
 		}
@@ -460,7 +473,7 @@ func (lab laboratory) create(m *manifest, assets, manifestPath string) error {
 			PreviewID     uuid.UUID `json:"preview_id"`
 			EligibleCount int       `json:"eligible_count"`
 		}
-		if err := apiJSON(client, "/api/storage/cleanup/preview", map[string]any{"action": "trash", "object_keys": []string{f.ObjectKey}}, &preview); err != nil {
+		if err := apiJSON(client, "/api/storage/cleanup/preview", map[string]any{"action": "trash", "targets": []map[string]any{{"object_key": f.ObjectKey, "mode": "file"}}}, &preview); err != nil {
 			return err
 		}
 		if preview.PreviewID == uuid.Nil || preview.EligibleCount != 1 {
@@ -475,9 +488,17 @@ func (lab laboratory) create(m *manifest, assets, manifestPath string) error {
 		if confirmation.Status != "completed" {
 			return errors.New("synthetic trash initialization did not complete")
 		}
+		if err := lab.db.QueryRow(lab.ctx, `SELECT id FROM storage_removed_references WHERE account_id=$1 AND object_key=$2 AND actor_id=$3 AND state='removed'`, f.AccountID, f.ObjectKey, a.ID).Scan(&m.Files[index].RecoveryID); err != nil {
+			return errors.New("synthetic trash initialization did not create an actor-owned recovery")
+		}
 	}
 	if err := lab.ageTrash(m, "purge"); err != nil {
 		return err
+	}
+	for _, account := range m.Accounts {
+		if err := api.ReconcileStorageInventory(lab.ctx, lab.db, lab.store, account.ID); err != nil {
+			return errors.New("synthetic inventory reconciliation did not complete")
+		}
 	}
 	m.State = "ready"
 	return writePrivateJSON(manifestPath, m)
@@ -513,14 +534,28 @@ func (lab laboratory) ageTrash(m *manifest, label string) error {
 		if f.Label != label {
 			continue
 		}
-		tag, err := lab.db.Exec(lab.ctx, `UPDATE storage_media_trash SET removed_at=NOW()-INTERVAL '8 days',purge_after=NOW()-INTERVAL '1 day',updated_at=NOW() WHERE account_id=$1 AND object_key=$2 AND state='trash'`, f.AccountID, f.ObjectKey)
+		tx, err := lab.db.Begin(lab.ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(lab.ctx)
+		tag, err := tx.Exec(lab.ctx, `UPDATE storage_media_trash SET removed_at=NOW()-INTERVAL '8 days',purge_after=NOW()-INTERVAL '1 day',updated_at=NOW() WHERE account_id=$1 AND object_key=$2 AND state='trash'`, f.AccountID, f.ObjectKey)
 		if err != nil {
 			return err
 		}
 		if tag.RowsAffected() != 1 {
 			return errors.New("selected synthetic file is not currently in trash")
 		}
-		return nil
+		if f.RecoveryID != uuid.Nil {
+			tag, err = tx.Exec(lab.ctx, `UPDATE storage_removed_references SET removed_at=NOW()-INTERVAL '8 days',retain_until=NOW()-INTERVAL '1 day',updated_at=NOW() WHERE id=$1 AND account_id=$2 AND object_key=$3 AND actor_id=$4 AND state='removed'`, f.RecoveryID, f.AccountID, f.ObjectKey, m.Actors["admin_a"].ID)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != 1 {
+				return errors.New("selected synthetic recovery is not owned by this fixture")
+			}
+		}
+		return tx.Commit(lab.ctx)
 	}
 	return errors.New("age-trash requires an exact file label from this manifest")
 }
@@ -561,6 +596,22 @@ func (lab laboratory) verify(m *manifest, expectations string) ([]map[string]any
 		state := ledger
 		if state == "none" || state == "restored" {
 			state = "active"
+		}
+		var removedUses, restoredUses, purgedUses int
+		if err := lab.db.QueryRow(lab.ctx, `SELECT COUNT(*) FILTER(WHERE state IN ('removed','purging')),COUNT(*) FILTER(WHERE state='restored'),COUNT(*) FILTER(WHERE state='purged') FROM storage_removed_references WHERE account_id=$1 AND object_key=$2`, f.AccountID, f.ObjectKey).Scan(&removedUses, &restoredUses, &purgedUses); err != nil {
+			return nil, err
+		}
+		if (state == "purged" && (purgedUses == 0 || removedUses != 0)) || (state == "trash" && removedUses == 0) || (state == "active" && removedUses != 0) {
+			return nil, fmt.Errorf("physical and per-use recovery ledgers disagree for %s", f.Label)
+		}
+		if f.Label == "shared" {
+			var count int
+			if err := lab.db.QueryRow(lab.ctx, `SELECT COUNT(*) FROM quick_replies WHERE account_id=$1 AND shortcut=$2 AND body='Contenido sintético' AND media_url=$3 AND media_type=$4 AND media_filename=$5`, f.AccountID, "qa-"+m.RunID.String()[:8], "/api/media/file/"+f.ObjectKey, f.MediaType, f.Filename).Scan(&count); err != nil {
+				return nil, err
+			}
+			if count != 1 {
+				return nil, errors.New("shared quick reply changed while removing a different use")
+			}
 		}
 		if want, ok := expected[f.Label]; ok {
 			if want != state {
@@ -616,7 +667,7 @@ func (lab laboratory) verify(m *manifest, expectations string) ([]map[string]any
 		if state == "purged" && (inventoryStatus != "deleted" || assetStatus != "deleted") {
 			return nil, fmt.Errorf("purged inventory audit is not retained for %s", f.Label)
 		}
-		report = append(report, map[string]any{"label": f.Label, "account_id": f.AccountID, "state": state, "ledger_state": ledger, "message_preserved": true, "object_present": present, "exact_bytes_verified": present, "size_bytes": f.SizeBytes, "active_inventory_count": inventoryCount, "inventory_status": inventoryStatus, "asset_status": assetStatus})
+		report = append(report, map[string]any{"label": f.Label, "account_id": f.AccountID, "state": state, "ledger_state": ledger, "removed_uses": removedUses, "restored_uses": restoredUses, "purged_uses": purgedUses, "message_preserved": true, "object_present": present, "exact_bytes_verified": present, "size_bytes": f.SizeBytes, "active_inventory_count": inventoryCount, "inventory_status": inventoryStatus, "asset_status": assetStatus})
 	}
 	if len(expected) != 0 {
 		return nil, errors.New("unknown file label in verification expectations")
@@ -653,6 +704,11 @@ func (lab laboratory) cleanup(m *manifest) error {
 	}
 	if _, err := tx.Exec(lab.ctx, `DELETE FROM roles WHERE id=$1 AND name=$2`, m.RoleID, "storage-ui-qa-"+m.RunID.String()); err != nil {
 		return err
+	}
+	if m.ReadOnlyRoleID != uuid.Nil {
+		if _, err := tx.Exec(lab.ctx, `DELETE FROM roles WHERE id=$1 AND name=$2`, m.ReadOnlyRoleID, "storage-ui-qa-read-only-"+m.RunID.String()); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(lab.ctx); err != nil {
 		return err

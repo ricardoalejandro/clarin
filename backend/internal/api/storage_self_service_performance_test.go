@@ -19,7 +19,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -27,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,7 +60,7 @@ func TestStorageSelfServicePerformance(t *testing.T) {
 	if os.Getenv("CLARIN_STORAGE_QA_PGLITE") == "1" {
 		t.Fatal("performance measurements require native PostgreSQL 16, not PGlite")
 	}
-	if os.Getenv("MINIO_ENDPOINT") != "127.0.0.1:19001" || !strings.HasPrefix(os.Getenv("MINIO_BUCKET"), "clarin-qa") {
+	if os.Getenv("MINIO_ENDPOINT") != storageQAMinioEndpoint(t) || !strings.HasPrefix(os.Getenv("MINIO_BUCKET"), "clarin-qa") {
 		t.Fatal("disposable loopback MinIO and clarin-qa bucket required")
 	}
 	sizes := os.Getenv("CLARIN_STORAGE_PERF_OBJECTS")
@@ -103,26 +106,66 @@ func TestStorageSelfServicePerformance(t *testing.T) {
 				t.Fatalf("seed mismatch: objects=%d bytes=%d", len(objects), bytes)
 			}
 			objects = nil
-			t.Logf("STORAGE_PERF_SEED objects=%d bytes=%d chat_media_references=%d text_messages=%d chats=%d other_account_objects=1 duration_ms=%.3f", n, bytes, n, n*textRatio, chatCount, float64(time.Since(started).Microseconds())/1000)
+			seedDuration := time.Since(started)
+
+			indexStart := time.Now()
+			indexCtx, indexCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			indexErr := f.server.ReconcileStorageInventory(indexCtx, f.account)
+			indexCancel()
+			if indexErr != nil {
+				t.Fatal(indexErr)
+			}
+			t.Logf("STORAGE_PERF_INDEX objects=%d duration_ms=%.3f", n, float64(time.Since(indexStart).Microseconds())/1000)
+			storagePerformanceAnalyzeInventory(t, f)
+			storagePerformanceExplainInventory(t, f, n)
+			t.Logf("STORAGE_PERF_SEED objects=%d bytes=%d chat_media_references=%d text_messages=%d chats=%d other_account_objects=1 duration_ms=%.3f", n, bytes, n, n*textRatio, chatCount, float64(seedDuration.Microseconds())/1000)
+			storagePerformanceTrackS3(t, f)
 			lastOffset := (n - 1) / 40 * 40
 			first := storagePerformanceRequest{path: "/storage/files?limit=40", total: n, files: 40}
 			usage := storagePerformanceRequest{path: "/storage/usage", total: n, usage: true}
 			scenarios := []struct {
 				name     string
 				requests []storagePerformanceRequest
+				role     string
 			}{
-				{"files_first", []storagePerformanceRequest{first}},
-				{"files_last", []storagePerformanceRequest{{path: fmt.Sprintf("/storage/files?limit=40&offset=%d", lastOffset), total: n, files: n - lastOffset}}},
-				{"files_search", []storagePerformanceRequest{{path: "/storage/files?limit=40&q=storage-bench-000000.pdf", total: 1, files: 1}}},
-				{"usage", []storagePerformanceRequest{usage}},
-				{"page_open_parallel", []storagePerformanceRequest{usage, first}},
+				{"files_first", []storagePerformanceRequest{first}, "member"},
+				{"files_last", []storagePerformanceRequest{{path: fmt.Sprintf("/storage/files?limit=40&offset=%d", lastOffset), total: n, files: n - lastOffset}}, "member"},
+				{"files_search", []storagePerformanceRequest{{path: "/storage/files?limit=40&q=storage-bench-000000.pdf", total: 1, files: 1}}, "member"},
+				{"usage", []storagePerformanceRequest{usage}, "member"},
+				{"page_open_parallel", []storagePerformanceRequest{usage, first}, "member"},
+				{"files_first_admin", []storagePerformanceRequest{first}, "admin"},
+				{"page_open_admin_parallel", []storagePerformanceRequest{usage, first}, "admin"},
 			}
 			for _, scenario := range scenarios {
 				t.Run(scenario.name, func(t *testing.T) {
+					// Membership changes occur outside timings. Handlers reload the
+					// canonical role; synthetic claims intentionally remain stale.
+					f.exec(`UPDATE user_accounts SET role=$3 WHERE account_id=$1 AND user_id=$2`, f.account, f.user, scenario.role)
 					storagePerformanceMeasure(t, f, scenario.name, scenario.requests, n, samples, textRatio, chatCount, foreign)
 				})
 			}
 		})
+	}
+	storagePerformanceSharedReferences(t, db, store, samples)
+}
+
+func storagePerformanceTrackS3(t *testing.T, f *storageQAFixture) {
+	counter := &atomic.Int64{}
+	_, store := storageQAProxy(t, func(proxy *httputil.ReverseProxy) {
+		original := proxy.Director
+		proxy.Director = func(r *http.Request) { counter.Add(1); original(r) }
+	})
+	f.server.storage = store
+	counter.Store(0)
+	f.inventoryS3Requests = counter
+}
+
+func storagePerformanceAnalyzeInventory(t *testing.T, f *storageQAFixture) {
+	t.Helper()
+	// The fixture inserts a full account in one burst. Explicit statistics keep
+	// query planning independent of autovacuum's timing, outside measurements.
+	for _, table := range []string{"storage_inventory_objects", "storage_inventory_sources", "storage_inventory_references", "storage_inventory_totals", "storage_inventory_backfill", "storage_inventory_scans"} {
+		f.exec("ANALYZE " + table)
 	}
 }
 
@@ -270,7 +313,9 @@ func storagePerformanceSeed(t *testing.T, f *storageQAFixture, n, textRatio, cha
 type storagePerformanceRequest struct {
 	path         string
 	total, files int
+	references   int
 	usage        bool
+	uses         bool
 }
 
 type storagePerformanceResponse struct {
@@ -319,12 +364,26 @@ func storagePerformanceValidate(t *testing.T, f *storageQAFixture, requests []st
 			Files        []storageSelfServiceFile `json:"files"`
 			ObjectCount  int                      `json:"object_count"`
 			VisibleBytes int64                    `json:"visible_bytes"`
+			Uses         []storageSelfServiceUse  `json:"uses"`
+			HasMore      bool                     `json:"has_more"`
+			NextCursor   string                   `json:"next_cursor"`
 		}
 		if err := json.Unmarshal(res.body, &data); err != nil || !data.Success {
 			t.Fatalf("invalid performance response: %v", err)
 		}
 		want := requests[i]
-		if want.usage {
+		if want.uses {
+			if data.Total != want.total || len(data.Uses) != want.files || !data.HasMore || data.NextCursor == "" {
+				t.Fatalf("uses mismatch: total=%d uses=%d has_more=%v expected=%d/%d", data.Total, len(data.Uses), data.HasMore, want.total, want.files)
+			}
+			seen := map[string]bool{}
+			for _, use := range data.Uses {
+				if use.Type != "chats" || use.UseID == "" || !use.CanRemove || seen[use.UseID] {
+					t.Fatal("incorrect or repeated business use in benchmark page")
+				}
+				seen[use.UseID] = true
+			}
+		} else if want.usage {
 			if data.ObjectCount != want.total || data.VisibleBytes != int64(want.total*storagePerformanceObjectBytes) {
 				t.Fatalf("usage mismatch: count=%d bytes=%d", data.ObjectCount, data.VisibleBytes)
 			}
@@ -333,7 +392,14 @@ func storagePerformanceValidate(t *testing.T, f *storageQAFixture, requests []st
 				t.Fatalf("files mismatch: total=%d files=%d expected=%d/%d", data.Total, len(data.Files), want.total, want.files)
 			}
 			for _, file := range data.Files {
-				if !strings.HasPrefix(file.ObjectKey, f.account.String()+"/") || file.SizeBytes != storagePerformanceObjectBytes || !file.CanRemove || file.ReferencesCount != 1 {
+				expectedRefs := want.references
+				if expectedRefs == 0 {
+					expectedRefs = 1
+				}
+				if len(file.Origins) > 6 || (expectedRefs > 6 && !file.HasMoreUses) {
+					t.Fatal("unbounded or incomplete shared-use summary")
+				}
+				if !strings.HasPrefix(file.ObjectKey, f.account.String()+"/") || file.SizeBytes != storagePerformanceObjectBytes || !file.CanRemove || file.ReferencesCount != expectedRefs {
 					t.Fatal("incorrect account, bytes, eligibility or reference count in benchmark inventory")
 				}
 			}
@@ -366,6 +432,10 @@ func storagePerformanceRSS() uint64 {
 
 func storagePerformanceMeasure(t *testing.T, f *storageQAFixture, scenario string, requests []storagePerformanceRequest, n, samples, textRatio, chatCount int, foreign string) {
 	t.Helper()
+	var actorRole string
+	if err := f.db.QueryRow(context.Background(), `SELECT role FROM user_accounts WHERE account_id=$1 AND user_id=$2`, f.account, f.user).Scan(&actorRole); err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < 2; i++ {
 		storagePerformanceValidate(t, f, requests, storagePerformanceCall(f, requests), foreign)
 	}
@@ -374,6 +444,10 @@ func storagePerformanceMeasure(t *testing.T, f *storageQAFixture, scenario strin
 	var pauses uint64
 	var collections uint32
 	responseBytes := 0
+	s3Before := int64(0)
+	if f.inventoryS3Requests != nil {
+		s3Before = f.inventoryS3Requests.Load()
+	}
 	for i := 0; i < samples; i++ {
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
@@ -430,9 +504,19 @@ func storagePerformanceMeasure(t *testing.T, f *storageQAFixture, scenario strin
 		peakRSS = rss
 	}
 	storagePerformanceValidate(t, f, requests, responses, foreign)
+	if f.inventoryS3Requests != nil && f.inventoryS3Requests.Load() != s3Before {
+		t.Fatal("inventory request contacted S3 during performance measurements")
+	}
+	referencesPerObject := 1
+	for _, request := range requests {
+		if request.references > referencesPerObject {
+			referencesPerObject = request.references
+		}
+	}
 	result := map[string]any{
-		"scenario": scenario, "objects": n, "samples": samples, "requests_per_sample": len(requests),
-		"chats": chatCount, "text_messages_per_object": textRatio, "object_bytes": storagePerformanceObjectBytes,
+		"s3_requests_during_measurements": 0, "scenario": scenario, "objects": n, "samples": samples, "requests_per_sample": len(requests),
+		"actor_role": actorRole,
+		"chats":      chatCount, "references_per_object": referencesPerObject, "text_messages_per_object": textRatio, "object_bytes": storagePerformanceObjectBytes,
 		"latency_ms": storagePerformanceQuantiles(latency), "allocated_bytes_per_sample": storagePerformanceQuantiles(allocations), "allocations_per_sample": storagePerformanceQuantiles(allocCounts),
 		"gc_collections": collections, "gc_pause_ms": float64(pauses) / 1e6, "response_bytes_last_sample": responseBytes,
 		"memory_extra_samples": 1, "memory_sampling_ms": 10, "baseline_heap_bytes": baseline.HeapAlloc, "sampled_peak_heap_bytes": peakHeap,

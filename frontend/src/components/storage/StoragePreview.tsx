@@ -1,11 +1,11 @@
 'use client'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 import { AudioLines, Download, ExternalLink, FileText, ImageIcon, Loader2, ShieldCheck, Video } from 'lucide-react'
-import { apiBlob } from '@/lib/api'
+import { apiBlob, apiGet } from '@/lib/api'
 import { getAuthScope } from '@/lib/authScope'
 import ChatDocumentViewer from '@/components/chat/ChatDocumentViewer'
 import { StorageDialog } from './StorageDialog'
-import { formatStorageBytes, PREVIEW_MAX_BYTES, PREVIEW_TIMEOUT_MS, safeStorageOriginHref, storageContentPath, THUMBNAIL_MAX_BYTES, type StorageFile } from './storageModel'
+import { formatStorageBytes, PREVIEW_MAX_BYTES, PREVIEW_TIMEOUT_MS, safeStorageOriginHref, storageContentPath, storageUsesPath, THUMBNAIL_MAX_BYTES, type StorageFile, type StorageUsesResponse } from './storageModel'
 
 export function MediaIcon({ type, className = 'h-5 w-5' }: { type: string; className?: string }) {
   const Icon = type === 'image' ? ImageIcon : type === 'video' ? Video : type === 'audio' ? AudioLines : FileText
@@ -35,7 +35,20 @@ export function StorageThumbnail({ file, scope }: { file: StorageFile; scope: st
   return <span ref={host} className="flex h-full w-full items-center justify-center overflow-hidden rounded-xl bg-slate-100 text-slate-500">{url ? <img src={url} alt="" className="h-full w-full object-cover" loading="lazy" /> : <MediaIcon type={file.media_type} className="h-7 w-7" />}</span>
 }
 
-export function StoragePreview({ file, scope, onClose }: { file: StorageFile; scope: string; onClose: () => void }) {
+export function StoragePreview({ file, scope, onClose, refresh = 0, onUnavailable }: { file: StorageFile; scope: string; onClose: () => void; refresh?: number; onUnavailable?: () => void }) {
+  const [validatedRefresh, setValidatedRefresh] = useState(refresh)
+  const [accessError, setAccessError] = useState('')
+  const [accessRetry, setAccessRetry] = useState(0)
+  const firstValidation = useRef(true)
+  const unavailable = useRef(onUnavailable || onClose)
+  unavailable.current = onUnavailable || onClose
+  const [revoked, setRevoked] = useState(false)
+  const authorized = validatedRefresh === refresh && !accessError && !revoked
+  const authorizedRef = useRef(authorized)
+  authorizedRef.current = authorized
+  const mediaRef = useRef<HTMLMediaElement | null>(null)
+  const resumePlayback = useRef(false)
+  const validationCloseRef = useRef<HTMLButtonElement>(null)
   const [url, setUrl] = useState('')
   const [mime, setMime] = useState('')
   const [busy, setBusy] = useState(false)
@@ -48,30 +61,63 @@ export function StoragePreview({ file, scope, onClose }: { file: StorageFile; sc
   const safeInline = file.media_type !== 'document'
   const autoLoad = safeInline && file.size_bytes <= PREVIEW_MAX_BYTES
   useEffect(() => {
-    setUrl(''); setMime(''); setError('')
-    if (!autoLoad && !downloadRequested) return
+    if (firstValidation.current) { firstValidation.current = false; return }
+    const controller = new AbortController()
+    setValidatedRefresh(-1); setAccessError(''); validationCloseRef.current?.focus({ preventScroll: true })
+    const timeout = window.setTimeout(() => { controller.abort(); setAccessError('No se pudo verificar tu acceso a este archivo. Vuelve a intentarlo.') }, PREVIEW_TIMEOUT_MS)
+    void apiGet<StorageUsesResponse>(storageUsesPath(file.object_key), { signal: controller.signal }).then(response => {
+      if (controller.signal.aborted || getAuthScope() !== scope) return
+      if ([401, 403, 404].includes(response.status || 0)) { setRevoked(true); setPdfOpen(false); unavailable.current(); return }
+      if (!response.success || !response.data?.success) { setAccessError(response.error || response.data?.error || 'No se pudo verificar tu acceso a este archivo.'); return }
+      setValidatedRefresh(refresh)
+    }).catch(() => { if (!controller.signal.aborted && getAuthScope() === scope) setAccessError('No se pudo verificar tu acceso a este archivo. Revisa tu conexión.') }).finally(() => window.clearTimeout(timeout))
+    return () => { controller.abort(); window.clearTimeout(timeout) }
+  }, [refresh, accessRetry, scope, file.object_key])
+
+  useEffect(() => {
+    setUrl(''); setMime(''); setError(''); setBusy(false)
+    if (revoked || (!autoLoad && !downloadRequested)) return
     const controller = new AbortController(); let objectURL = ''; let timedOut = false
     setBusy(true)
     const timeout = window.setTimeout(() => { timedOut = true; controller.abort(); setBusy(false); setError('La descarga está tardando demasiado. Revisa tu conexión y vuelve a intentarlo.') }, PREVIEW_TIMEOUT_MS)
     void apiBlob(storageContentPath(file), { signal: controller.signal }).then(result => {
       if (controller.signal.aborted || getAuthScope() !== scope) return
+      if ([401, 403, 404].includes(result.status || 0)) { setRevoked(true); setPdfOpen(false); unavailable.current(); return }
       if (!result.success || !result.blob) { setError(result.error || 'No se pudo abrir el archivo.'); return }
       objectURL = URL.createObjectURL(result.blob); setUrl(objectURL); setMime(result.blob.type)
-      if (downloadRequested) { const link = document.createElement('a'); link.href = objectURL; link.download = file.filename; link.click() }
+      if (downloadRequested && authorizedRef.current) { const link = document.createElement('a'); link.href = objectURL; link.download = file.filename; link.click() }
     }).catch(() => { if (!controller.signal.aborted && getAuthScope() === scope) setError('No se pudo abrir el archivo. Inténtalo de nuevo.') }).finally(() => { window.clearTimeout(timeout); if (!controller.signal.aborted && getAuthScope() === scope && !timedOut) setBusy(false) })
     return () => { window.clearTimeout(timeout); controller.abort(); if (objectURL) URL.revokeObjectURL(objectURL) }
-  }, [file.object_key, file.filename, autoLoad, downloadRequested, retry, scope])
+  }, [file.object_key, file.filename, autoLoad, downloadRequested, retry, scope, revoked])
+  useEffect(() => {
+    const media = mediaRef.current
+    if (!media) return
+    if (!authorized) {
+      if (!media.paused) { resumePlayback.current = true; media.pause() }
+    } else if (resumePlayback.current && getAuthScope() === scope) {
+      resumePlayback.current = false
+      void media.play().catch(() => { /* The browser can require another user gesture. */ })
+    }
+  }, [authorized, scope, url])
+
   const download = () => {
-    if (getAuthScope() !== scope) return
+    if (getAuthScope() !== scope || !authorized) return
     if (url) { const link = document.createElement('a'); link.href = url; link.download = file.filename; link.click() }
     else { setDownloadRequested(true); setRetry(value => value + 1) }
   }
   const canRender = (file.media_type === 'image' && /^image\/(jpeg|png|webp|gif|avif)$/.test(mime)) || (file.media_type === 'video' && mime.startsWith('video/')) || (file.media_type === 'audio' && mime.startsWith('audio/')) || (file.media_type === 'document' && mime === 'application/pdf')
-  if (pdfOpen) return <ChatDocumentViewer document={{ sessionId: `${scope}:${file.object_key}`, src: storageContentPath(file), filename: file.filename, mimeType: 'application/pdf', size: file.size_bytes }} onClose={() => setPdfOpen(false)} />
-  return <StorageDialog title={file.filename || 'Archivo'} description={formatStorageBytes(file.size_bytes)} onClose={onClose} wide initialFocusRef={isPDF ? pdfButtonRef : undefined} footer={<><button onClick={onClose} className="min-h-11 rounded-xl border border-slate-200 px-4 text-sm font-medium text-slate-700 hover:bg-slate-100">Cerrar</button><button onClick={download} disabled={busy} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"><Download className="h-4 w-4" />Descargar</button></>}>
+  const validationContent = accessError ? <div role="alert"><p className="text-sm text-rose-700">{accessError}</p><button onClick={() => { setValidatedRefresh(-1); setAccessRetry(value => value + 1) }} className="mt-3 min-h-11 rounded-xl border border-slate-200 px-4 text-sm">Reintentar verificación</button></div> : <p role="status" className="flex items-center gap-2 py-8 text-sm text-slate-600"><Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" />Comprobando acceso…</p>
+  return <>
+    {pdfOpen && <ChatDocumentViewer document={{ sessionId: `${scope}:${file.object_key}`, src: storageContentPath(file), filename: file.filename, mimeType: 'application/pdf', size: file.size_bytes }} suspended={!authorized} onClose={() => setPdfOpen(false)} />}
+    {pdfOpen && !authorized && <StorageDialog title="Verificar acceso al archivo" description="El almacenamiento cambió. Estamos comprobando que el archivo siga disponible." onClose={onClose}>{validationContent}</StorageDialog>}
+    {!pdfOpen && <StorageDialog title={authorized ? file.filename || 'Archivo' : 'Verificar acceso al archivo'} description={authorized ? formatStorageBytes(file.size_bytes) : 'El almacenamiento cambió. Estamos comprobando que el archivo siga disponible.'} onClose={onClose} wide initialFocusRef={!authorized ? validationCloseRef : isPDF ? pdfButtonRef : undefined} footer={<><button ref={validationCloseRef} onClick={onClose} className="min-h-11 rounded-xl border border-slate-200 px-4 text-sm font-medium text-slate-700 hover:bg-slate-100">Cerrar</button><button onClick={download} disabled={busy || !authorized} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"><Download className="h-4 w-4" />Descargar</button></>}>
+    {!authorized && validationContent}
+    <div hidden={!authorized} inert={!authorized}>
     <div className="flex min-h-48 items-center justify-center rounded-2xl bg-slate-100 p-3 sm:min-h-64">
-      {busy ? <div role="status" className="py-10 text-center text-sm text-slate-600"><Loader2 className="mx-auto mb-3 h-6 w-6 animate-spin motion-reduce:animate-none" />Abriendo archivo…</div> : error ? <div role="alert" className="max-w-md py-8 text-center"><p className="text-sm text-rose-700">{error}</p><button onClick={() => setRetry(value => value + 1)} className="mt-3 min-h-11 rounded-xl border border-slate-300 bg-white px-4 text-sm">Reintentar</button></div> : url && canRender && safeInline && autoLoad ? file.media_type === 'image' ? <img src={url} alt={file.filename} className="max-h-[55dvh] max-w-full object-contain" /> : file.media_type === 'video' ? <video src={url} controls className="max-h-[55dvh] max-w-full" /> : file.media_type === 'audio' ? <audio src={url} controls className="w-full max-w-lg" /> : null : <div className="max-w-sm py-8 text-center"><MediaIcon type={file.media_type} className="mx-auto mb-3 h-10 w-10 text-slate-400" /><p className="text-sm font-medium text-slate-700">{file.size_bytes > PREVIEW_MAX_BYTES ? 'Este archivo es grande' : isPDF ? 'Documento PDF' : 'Descarga el archivo para abrirlo'}</p><p className="mt-2 text-sm text-slate-500">{file.size_bytes > PREVIEW_MAX_BYTES ? 'Puedes descargarlo para verlo en tu dispositivo.' : isPDF ? 'Consulta sus páginas sin salir de Clarin.' : 'El contenido se conserva en su formato original.'}</p>{isPDF && file.size_bytes <= PREVIEW_MAX_BYTES && <button ref={pdfButtonRef} onClick={() => { setDownloadRequested(false); setPdfOpen(true) }} className="mt-4 min-h-11 rounded-xl bg-emerald-600 px-4 text-sm font-medium text-white hover:bg-emerald-700">Abrir vista previa</button>}</div>}
+      {busy ? <div role="status" className="py-10 text-center text-sm text-slate-600"><Loader2 className="mx-auto mb-3 h-6 w-6 animate-spin motion-reduce:animate-none" />Abriendo archivo…</div> : error ? <div role="alert" className="max-w-md py-8 text-center"><p className="text-sm text-rose-700">{error}</p><button onClick={() => setRetry(value => value + 1)} className="mt-3 min-h-11 rounded-xl border border-slate-300 bg-white px-4 text-sm">Reintentar</button></div> : url && canRender && safeInline && autoLoad ? file.media_type === 'image' ? <img src={url} alt={file.filename} className="max-h-[55dvh] max-w-full object-contain" /> : file.media_type === 'video' ? <video ref={mediaRef as RefObject<HTMLVideoElement>} src={url} controls className="max-h-[55dvh] max-w-full" /> : file.media_type === 'audio' ? <audio ref={mediaRef as RefObject<HTMLAudioElement>} src={url} controls className="w-full max-w-lg" /> : null : <div className="max-w-sm py-8 text-center"><MediaIcon type={file.media_type} className="mx-auto mb-3 h-10 w-10 text-slate-400" /><p className="text-sm font-medium text-slate-700">{file.size_bytes > PREVIEW_MAX_BYTES ? 'Este archivo es grande' : isPDF ? 'Documento PDF' : 'Descarga el archivo para abrirlo'}</p><p className="mt-2 text-sm text-slate-500">{file.size_bytes > PREVIEW_MAX_BYTES ? 'Puedes descargarlo para verlo en tu dispositivo.' : isPDF ? 'Consulta sus páginas sin salir de Clarin.' : 'El contenido se conserva en su formato original.'}</p>{isPDF && file.size_bytes <= PREVIEW_MAX_BYTES && <button ref={pdfButtonRef} onClick={() => { setDownloadRequested(false); setPdfOpen(true) }} className="mt-4 min-h-11 rounded-xl bg-emerald-600 px-4 text-sm font-medium text-white hover:bg-emerald-700">Abrir vista previa</button>}</div>}
     </div>
     <section className="mt-5"><h3 className="text-sm font-semibold text-slate-900">Dónde se usa</h3><div className="mt-2 flex flex-wrap gap-2">{file.origins?.length ? file.origins.map((origin, index) => { const href = safeStorageOriginHref(origin.href); return href ? <a key={`${origin.type}-${index}`} href={href} className="inline-flex min-h-11 max-w-full items-center gap-2 rounded-xl border border-slate-200 px-3 text-sm text-slate-700 hover:bg-slate-50"><span className="break-words">{origin.label}</span><ExternalLink className="h-3.5 w-3.5 shrink-0" /></a> : <span key={`${origin.type}-${index}`} className="inline-flex min-h-11 items-center rounded-xl bg-slate-100 px-3 text-sm text-slate-600">{origin.label}</span> }) : <p className="text-sm text-slate-500">No hay ubicaciones disponibles para mostrar.</p>}</div>{file.blocked_reason && <p className="mt-3 flex items-start gap-2 rounded-xl bg-slate-50 p-3 text-sm text-slate-600"><ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />{file.blocked_reason}</p>}</section>
-  </StorageDialog>
+    </div>
+  </StorageDialog>}
+  </>
 }

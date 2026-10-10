@@ -1,18 +1,19 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { StoragePreview, StorageThumbnail } from './StoragePreview'
-import { apiBlob } from '@/lib/api'
+import { apiBlob, apiGet } from '@/lib/api'
 import { PREVIEW_MAX_BYTES, PREVIEW_TIMEOUT_MS, type StorageFile } from './storageModel'
 
 const identity = vi.hoisted(() => ({ scope: 'account-a' }))
-vi.mock('@/lib/api', () => ({ apiBlob: vi.fn() }))
-vi.mock('@/components/chat/ChatDocumentViewer', () => ({ default: ({ document, onClose }: { document: { sessionId: string; src: string }; onClose: () => void }) => <div role="dialog" aria-label="PDF canónico"><span data-testid="pdf-source">{document.src}</span><span data-testid="pdf-session">{document.sessionId}</span><button onClick={onClose}>Cerrar PDF</button></div> }))
+vi.mock('@/lib/api', () => ({ apiBlob: vi.fn(), apiGet: vi.fn() }))
+vi.mock('@/components/chat/ChatDocumentViewer', () => ({ default: ({ document, onClose, suspended = false }: { document: { sessionId: string; src: string }; onClose: () => void; suspended?: boolean }) => <div role="dialog" aria-label="PDF canónico" hidden={suspended} inert={suspended}><input aria-label="Página actual" defaultValue="1" /><span data-testid="pdf-source">{document.src}</span><span data-testid="pdf-session">{document.sessionId}</span><button onClick={onClose}>Cerrar PDF</button></div> }))
 vi.mock('@/lib/authScope', () => ({ getAuthScope: () => identity.scope }))
 const file: StorageFile = { object_key: 'account-a/photo.png', filename: 'Foto.png', media_type: 'image', size_bytes: 4096, origins: [{ type: 'chats', label: 'Chat', href: '/dashboard/chats' }], references_count: 1, can_remove: true, status: 'active' }
 const mockBlob = vi.mocked(apiBlob)
+const mockGet = vi.mocked(apiGet)
 let createURL = vi.fn(() => 'blob:private-file')
 let revokeURL = vi.fn()
-beforeEach(() => { identity.scope = 'account-a'; mockBlob.mockReset(); createURL = vi.fn(() => 'blob:private-file'); revokeURL = vi.fn(); URL.createObjectURL = createURL; URL.revokeObjectURL = revokeURL })
+beforeEach(() => { identity.scope = 'account-a'; mockBlob.mockReset(); mockGet.mockReset(); createURL = vi.fn(() => 'blob:private-file'); revokeURL = vi.fn(); URL.createObjectURL = createURL; URL.revokeObjectURL = revokeURL })
 afterEach(() => { cleanup(); vi.useRealTimers() })
 
 describe('authenticated storage preview sessions', () => {
@@ -79,6 +80,104 @@ describe('authenticated storage preview sessions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Cerrar PDF' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Abrir vista previa' })).toHaveFocus())
     expect(screen.getByText('Dónde se usa')).toBeTruthy()
+  })
+
+  it('hides cached media while revalidating and destroys it when access is revoked', async () => {
+    mockBlob.mockResolvedValue({ success: true, blob: new Blob(['image'], { type: 'image/png' }) })
+    const onUnavailable = vi.fn()
+    const view = render(<StoragePreview file={file} scope={identity.scope} refresh={0} onClose={vi.fn()} onUnavailable={onUnavailable} />)
+    await screen.findByRole('img')
+    let finish: (value: unknown) => void = () => {}
+    mockGet.mockImplementationOnce(() => new Promise(resolve => { finish = resolve as typeof finish }))
+    view.rerender(<StoragePreview file={file} scope={identity.scope} refresh={1} onClose={vi.fn()} onUnavailable={onUnavailable} />)
+    expect(screen.queryByRole('img')).toBeNull()
+    expect(revokeURL).not.toHaveBeenCalled()
+    expect(mockGet.mock.calls[0][0]).toBe('/api/storage/uses?object_key=account-a%2Fphoto.png&limit=40')
+    await act(async () => finish({ success: false, status: 404 }))
+    expect(onUnavailable).toHaveBeenCalledOnce()
+    expect(revokeURL).toHaveBeenCalledWith('blob:private-file')
+    expect(mockBlob).toHaveBeenCalledTimes(1)
+  })
+  it('preserves the mounted PDF and selected page across successful canonical revalidation', async () => {
+    const pdf = { ...file, filename: 'Informe.pdf', media_type: 'document' as const }
+    const view = render(<StoragePreview file={pdf} scope={identity.scope} refresh={0} onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Abrir vista previa' }))
+    const pdfSession = screen.getByRole('dialog', { name: 'PDF canónico' })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Página actual' }), { target: { value: '4' } })
+    let finish: (value: unknown) => void = () => {}
+    mockGet.mockImplementationOnce(() => new Promise(resolve => { finish = resolve as typeof finish }))
+    view.rerender(<StoragePreview file={pdf} scope={identity.scope} refresh={1} onClose={vi.fn()} />)
+    expect(screen.queryByRole('dialog', { name: 'PDF canónico' })).toBeNull()
+    await act(async () => finish({ success: true, data: { success: true, uses: [], has_more: false, limit: 40 } }))
+    expect(screen.getByRole('dialog', { name: 'PDF canónico' })).toBe(pdfSession)
+    expect(screen.getByRole('textbox', { name: 'Página actual' })).toHaveValue('4')
+    expect(mockBlob).not.toHaveBeenCalled()
+  })
+  it('keeps failed revalidation explicit and retries without rendering the cached image', async () => {
+    mockBlob.mockResolvedValue({ success: true, blob: new Blob(['image'], { type: 'image/png' }) })
+    const view = render(<StoragePreview file={file} scope={identity.scope} refresh={0} onClose={vi.fn()} />)
+    await screen.findByRole('img')
+    mockGet.mockResolvedValueOnce({ success: false, status: 503, error: 'No se pudo revalidar' })
+    view.rerender(<StoragePreview file={file} scope={identity.scope} refresh={1} onClose={vi.fn()} />)
+    await screen.findByText('No se pudo revalidar')
+    expect(screen.queryByRole('img')).toBeNull()
+    mockGet.mockResolvedValueOnce({ success: true, data: { success: true, uses: [], limit: 40, has_more: false } })
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar verificación' }))
+    expect(await screen.findByRole('img')).toBeTruthy()
+  })
+  it('aborts revalidation on close and ignores an old account completion', async () => {
+    mockBlob.mockResolvedValue({ success: true, blob: new Blob(['image'], { type: 'image/png' }) })
+    const onUnavailable = vi.fn()
+    const view = render(<StoragePreview file={file} scope={identity.scope} refresh={0} onClose={vi.fn()} onUnavailable={onUnavailable} />)
+    await screen.findByRole('img')
+    let finish: (value: unknown) => void = () => {}
+    mockGet.mockImplementationOnce(() => new Promise(resolve => { finish = resolve as typeof finish }))
+    view.rerender(<StoragePreview file={file} scope={identity.scope} refresh={1} onClose={vi.fn()} onUnavailable={onUnavailable} />)
+    const signal = mockGet.mock.calls[0][1]?.signal
+    view.unmount(); identity.scope = 'account-b'
+    await act(async () => finish({ success: false, status: 404 }))
+    expect(signal?.aborted).toBe(true)
+    expect(onUnavailable).not.toHaveBeenCalled()
+    expect(createURL).toHaveBeenCalledOnce()
+  })
+
+  it.each(['video', 'audio'] as const)('pauses %s while checking and resumes the same player at its preserved position after 200', async media_type => {
+    mockBlob.mockResolvedValue({ success: true, blob: new Blob(['media'], { type: `${media_type}/mp4` }) })
+    const mediaFile = { ...file, filename: 'Grabación.mp4', media_type }
+    const view = render(<StoragePreview file={mediaFile} scope={identity.scope} refresh={0} onClose={vi.fn()} />)
+    await waitFor(() => expect(document.querySelector(media_type)).toBeTruthy())
+    const player = document.querySelector(media_type) as HTMLMediaElement
+    player.currentTime = 37.5
+    let playing = true
+    vi.spyOn(player, 'paused', 'get').mockImplementation(() => !playing)
+    const pause = vi.spyOn(player, 'pause').mockImplementation(() => { playing = false })
+    const play = vi.spyOn(player, 'play').mockImplementation(async () => { playing = true })
+    let finish: (value: unknown) => void = () => {}
+    mockGet.mockImplementationOnce(() => new Promise(resolve => { finish = resolve as typeof finish }))
+    view.rerender(<StoragePreview file={mediaFile} scope={identity.scope} refresh={1} onClose={vi.fn()} />)
+    expect(player).not.toBeVisible()
+    expect(pause).toHaveBeenCalledOnce()
+    expect(player.currentTime).toBe(37.5)
+    expect(revokeURL).not.toHaveBeenCalled()
+    await act(async () => finish({ success: true, data: { success: true, uses: [], has_more: false, limit: 40 } }))
+    expect(document.querySelector(media_type)).toBe(player)
+    expect(player).toBeVisible()
+    expect(player.currentTime).toBe(37.5)
+    expect(play).toHaveBeenCalledOnce()
+    expect(mockBlob).toHaveBeenCalledTimes(1)
+  })
+  it('keeps a paused player paused after revalidation', async () => {
+    mockBlob.mockResolvedValue({ success: true, blob: new Blob(['media'], { type: 'audio/mp4' }) })
+    const mediaFile = { ...file, filename: 'Grabación.mp4', media_type: 'audio' as const }
+    const view = render(<StoragePreview file={mediaFile} scope={identity.scope} refresh={0} onClose={vi.fn()} />)
+    await waitFor(() => expect(document.querySelector('audio')).toBeTruthy())
+    const player = document.querySelector('audio')!
+    const play = vi.spyOn(player, 'play').mockResolvedValue()
+    mockGet.mockResolvedValueOnce({ success: true, data: { success: true, uses: [], has_more: false, limit: 40 } })
+    view.rerender(<StoragePreview file={mediaFile} scope={identity.scope} refresh={1} onClose={vi.fn()} />)
+    await waitFor(() => expect(player).toBeVisible())
+    expect(play).not.toHaveBeenCalled()
+    expect(document.querySelector('audio')).toBe(player)
   })
 
 })

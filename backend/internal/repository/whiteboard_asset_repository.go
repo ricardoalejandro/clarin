@@ -94,6 +94,9 @@ func (r *WhiteboardRepository) ReserveWhiteboardAsset(ctx context.Context, input
 		return nil, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('storage-self-service:'||$1::text,0))`, input.AccountID); err != nil {
+		return nil, false, err
+	}
 	var existingStatus string
 	err = tx.QueryRow(ctx, `SELECT status FROM media_assets
 		WHERE account_id=$1 AND content_hash=$2 FOR UPDATE`, input.AccountID, input.ContentHash).Scan(&existingStatus)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canSelectStorageFile, EMPTY_FILTERS, formatStorageBytes, nextStorageTab, reconcileStorageSelection, resultStorageMessage, safeStorageOriginHref, STORAGE_SELECTION_LIMIT, storageContentPath, storageDate, storageFilesQuery, storagePreviewExpired, storageTrashStatus, toggleStorageSelection, type StorageFile, type StorageResult } from './storageModel'
+import { canSelectStorageFile, EMPTY_FILTERS, formatStorageBytes, nextStorageTab, reconcileStorageSelection, resultStorageMessage, safeStorageOriginHref, STORAGE_SELECTION_LIMIT, storageContentPath, storageDate, storageAdvancedFilterCount, storageFileIdentity, storagePreviewRequest, storageRecommendationFilters, storageRealtimeChange, reconcileStorageUses, storageUsesPath, storageFilesQuery, storagePreviewExpired, storageTrashStatus, toggleStorageSelection, type StorageFile, type StorageResult } from './storageModel'
 
 const file = (key: string, extra: Partial<StorageFile> = {}): StorageFile => ({ object_key: key, filename: `${key}.jpg`, media_type: 'image', size_bytes: 4096, origins: [{ type: 'chats', label: 'Chat' }], references_count: 1, status: 'active', can_remove: true, ...extra })
 
@@ -21,7 +21,7 @@ describe('storage self-service rules', () => {
   it('requires both management permission and action capability', () => {
     expect(canSelectStorageFile(file('a'), 'files', false)).toBe(false)
     expect(canSelectStorageFile(file('a', { can_remove: false }), 'files', true)).toBe(false)
-    expect(canSelectStorageFile(file('a', { status: 'trash', can_restore: true }), 'trash', true)).toBe(true)
+    expect(canSelectStorageFile(file('a', { status: 'trash', recovery_id: 'recovery-a', can_restore: true }), 'trash', true)).toBe(true)
     expect(canSelectStorageFile(file('a', { status: 'trash', can_remove: true }), 'trash', true)).toBe(false)
   })
   it('does not treat an elapsed retention date as permission to purge', () => {
@@ -72,4 +72,49 @@ describe('storage self-service rules', () => {
   it('formats missing and invalid measurements without fake quota claims', () => {
     expect(formatStorageBytes(-1)).toBe('0 B'); expect(formatStorageBytes(NaN)).toBe('0 B'); expect(storageDate('invalid')).toBe('Sin fecha')
   })
+  it('keeps independent recoveries of one object distinct through selection and partial results', () => {
+    const first = file('shared', { recovery_id: 'r1' }), second = file('shared', { recovery_id: 'r2' })
+    const selected = toggleStorageSelection(toggleStorageSelection(new Map(), first), second)
+    expect([...selected.keys()]).toEqual(['recovery:r1', 'recovery:r2'])
+    expect(storagePreviewRequest('restore', selected.values())).toEqual({ action: 'restore', recovery_ids: ['r1', 'r2'] })
+    expect(storagePreviewRequest('purge', [second])).toEqual({ action: 'purge', recovery_ids: ['r2'] })
+    const result: StorageResult = { success: true, action: 'restore', operation_id: 'op', status: 'partial', freed_bytes: 0, retained_bytes: 4096, items: [{ object_key: 'shared', recovery_id: 'r1', filename: 'shared', status: 'completed' }] }
+    expect([...reconcileStorageSelection(selected, result).keys()]).toEqual(['recovery:r2'])
+    expect(storageFileIdentity(file('legacy'))).toBe('legacy')
+    expect(canSelectStorageFile(file('legacy', { status: 'trash', can_restore: true }), 'trash', true)).toBe(false)
+  })
+  it('sends explicit whole-file or individual-use scope without expanding another selection', () => {
+    expect(storagePreviewRequest('trash', [file('a')])).toEqual({ action: 'trash', targets: [{ object_key: 'a', mode: 'file' }] })
+    expect(storagePreviewRequest('trash', [file('a')], [{ object_key: 'b', mode: 'uses', use_ids: ['one'] }])).toEqual({ action: 'trash', targets: [{ object_key: 'b', mode: 'uses', use_ids: ['one'] }] })
+    expect(storageUsesPath('account/a b.pdf', 'opaque/cursor')).toBe('/api/storage/uses?object_key=account%2Fa+b.pdf&limit=40&cursor=opaque%2Fcursor')
+  })
+  it('reconciles use permissions without losing selections on other pages', () => {
+    const selected = new Map([['one', { use_id: 'one', type: 'chats', label: 'Old', can_remove: true }], ['other-page', { use_id: 'other-page', type: 'chats', label: 'Other', can_remove: true }]])
+    expect([...reconcileStorageUses(selected, [{ use_id: 'one', type: 'chats', label: 'Revoked', can_remove: false }], true).keys()]).toEqual(['other-page'])
+    expect(reconcileStorageUses(selected, [], false).size).toBe(0)
+    expect(selected.size).toBe(2)
+  })
+  it('turns exact recommendation filters into bounded file and trash queries', () => {
+    const rec = storageRecommendationFilters({ id: 'trash_ready', count: 3, bytes: 4096, filters: { status: 'trash_ready', min_size: 10485760, older_than_days: 180 } })
+    expect(rec.tab).toBe('trash')
+    const params = new URLSearchParams(storageFilesQuery(rec.filters, rec.tab, 0))
+    expect(params.get('status')).toBe('trash_ready'); expect(params.get('min_size')).toBe('10485760'); expect(params.get('older_than_days')).toBe('180')
+  })
+  it('only accepts account-scoped storage invalidations and always honors a restrictive access signal', () => {
+    const event = (account_id: string, revision: number, reason = 'changed') => ({ event: 'storage_changed', data: { account_id, revision, reason } })
+    expect(storageRealtimeChange(event('b', 20), 'a', 5)).toBeNull()
+    expect(storageRealtimeChange(event('a', 4), 'a', 5)).toBeNull()
+    expect(storageRealtimeChange(event('a', 5), 'a', 5)).toEqual({ action: 'refresh', revision: 5 })
+    expect(storageRealtimeChange(event('a', 6), 'a', 5)).toEqual({ action: 'refresh', revision: 6 })
+    expect(storageRealtimeChange(event('a', 4, 'access_changed'), 'a', 5)).toEqual({ action: 'reset', revision: 5 })
+    expect(storageRealtimeChange(event('a', 6), undefined)).toBeNull()
+    expect(storageRealtimeChange({ event: 'task_update', data: { action: 'access_revoked' } }, 'a', 5)).toEqual({ action: 'reset', revision: 5 })
+    expect(storageRealtimeChange({ event: 'task_update', account_id: 'b', data: { action: 'access_revoked' } }, 'a')).toBeNull()
+  })
+
+  it('counts only the advanced filter and ordering controls with a non-default value', () => {
+    expect(storageAdvancedFilterCount({ ...EMPTY_FILTERS, query: 'foto', type: 'image' })).toBe(0)
+    expect(storageAdvancedFilterCount({ ...EMPTY_FILTERS, origin: 'chats', minSize: '10485760', age: '180', status: 'removable', sort: 'name' })).toBe(5)
+  })
+
 })

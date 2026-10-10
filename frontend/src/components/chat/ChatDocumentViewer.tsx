@@ -12,6 +12,7 @@ import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperational
 interface ChatDocumentViewerProps {
   document: ChatDocumentDescriptor
   onClose: () => void
+  suspended?: boolean
 }
 
 type ViewerPhase = 'downloading' | 'opening' | 'rendering' | 'ready' | 'error'
@@ -36,10 +37,15 @@ function formatFileSize(bytes?: number) {
   return `PDF · ${(bytes / Math.pow(1024, unit)).toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`
 }
 
-export default function ChatDocumentViewer({ document: descriptor, onClose }: ChatDocumentViewerProps) {
+export default function ChatDocumentViewer({ document: descriptor, onClose, suspended = false }: ChatDocumentViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const dialogRef = useRef<HTMLElement>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
+  const resumeFocusRef = useRef<HTMLElement | null>(null)
+  const onCloseRef = useRef(onClose)
+  const suspendedRef = useRef(suspended)
+  onCloseRef.current = onClose
+  suspendedRef.current = suspended
   const resourcesRef = useRef<ViewerResources>({})
   const sessionRef = useRef(0)
   const [reloadKey, setReloadKey] = useState(0)
@@ -52,7 +58,7 @@ export default function ChatDocumentViewer({ document: descriptor, onClose }: Ch
   const [slow, setSlow] = useState(false)
   const [error, setError] = useState('')
   const operationalPortal = useOperationalOverlayPortal()
-  useOperationalOverlayRegistration(true, `chat-document-viewer:${descriptor.sessionId}`)
+  useOperationalOverlayRegistration(!suspended, `chat-document-viewer:${descriptor.sessionId}`)
 
   const clearTimers = useCallback(() => {
     const resources = resourcesRef.current
@@ -87,16 +93,23 @@ export default function ChatDocumentViewer({ document: descriptor, onClose }: Ch
   const closeViewer = useCallback(() => {
     sessionRef.current++
     disposeResources()
-    onClose()
-  }, [disposeResources, onClose])
+    onCloseRef.current()
+  }, [disposeResources])
 
   useEffect(() => {
+    if (suspended) return
     const previousOverflow = document.body.style.overflow
-    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    previousFocusRef.current ||= document.activeElement instanceof HTMLElement ? document.activeElement : null
     document.body.style.overflow = 'hidden'
-    const focusFrame = window.requestAnimationFrame(() => dialogRef.current?.focus())
+    const focusFrame = window.requestAnimationFrame(() => {
+      if (suspendedRef.current) return
+      const resumeFocus = resumeFocusRef.current
+      if (resumeFocus?.isConnected && dialogRef.current?.contains(resumeFocus) && !resumeFocus.matches(':disabled')) resumeFocus.focus({ preventScroll: true })
+      else dialogRef.current?.focus({ preventScroll: true })
+    })
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (suspendedRef.current) return
       if (event.key === 'Escape') {
         event.preventDefault()
         event.stopImmediatePropagation()
@@ -131,7 +144,7 @@ export default function ChatDocumentViewer({ document: descriptor, onClose }: Ch
       document.body.style.overflow = previousOverflow
       previousFocusRef.current?.focus()
     }
-  }, [closeViewer])
+  }, [closeViewer, suspended])
 
   useEffect(() => {
     const session = ++sessionRef.current
@@ -308,14 +321,18 @@ export default function ChatDocumentViewer({ document: descriptor, onClose }: Ch
 
   return createPortal(
     <div
-      data-chat-overlay="document-viewer"
+      data-chat-overlay={suspended ? undefined : 'document-viewer'}
+      hidden={suspended}
+      inert={suspended}
+      aria-hidden={suspended || undefined}
       className="app-viewport pointer-events-auto fixed inset-0 flex items-center justify-center bg-slate-950/75 p-0 backdrop-blur-[2px] sm:p-5"
-      style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog }}
+      style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog, display: suspended ? 'none' : undefined }}
       role="presentation"
       onMouseDown={event => { if (event.target === event.currentTarget) closeViewer() }}
     >
       <section
         ref={dialogRef}
+        onFocusCapture={event => { if (!suspended) resumeFocusRef.current = event.target as HTMLElement }}
         tabIndex={-1}
         role="dialog"
         aria-modal="true"

@@ -164,6 +164,10 @@ func TestCRMMigrationDirtyAndIdempotent(t *testing.T) {
 	for _, statement := range []string{
 		`ALTER TABLE whatsapp_statuses DROP CONSTRAINT whatsapp_statuses_account_device_fkey`,
 		`ALTER TABLE whatsapp_statuses DROP CONSTRAINT whatsapp_statuses_account_media_asset_fkey`,
+		// The current media barrier correctly rejects this historic corruption
+		// too. Remove it only while building the pre-upgrade fixture; Migrate
+		// must repair the rows and reinstall every present-day guard below.
+		`DROP TRIGGER IF EXISTS clarin_storage_reference_barrier ON whatsapp_statuses`,
 	} {
 		if _, err := db.Exec(ctx, statement); err != nil {
 			t.Fatal(err)

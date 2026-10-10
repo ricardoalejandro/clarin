@@ -114,7 +114,7 @@ func offlineV5EnrichTaskSnapshot(ctx context.Context, tx pgx.Tx, accountID, user
 		task.created_at,
 		(SELECT COUNT(*)::int FROM tasks child WHERE child.account_id=task.account_id AND child.parent_task_id=task.id AND child.deleted_at IS NULL),
 		(SELECT COUNT(*)::int FROM task_comments comment WHERE comment.account_id=task.account_id AND comment.task_id=task.id AND comment.deleted_at IS NULL),
-		(SELECT COUNT(*)::int FROM task_attachments attachment WHERE attachment.account_id=task.account_id AND attachment.task_id=task.id AND attachment.attachment_scope='task')
+		(SELECT COUNT(*)::int FROM task_attachments attachment WHERE attachment.account_id=task.account_id AND attachment.task_id=task.id AND attachment.attachment_scope='task' AND attachment.storage_removed_at IS NULL)
 		FROM tasks task JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
 		WHERE task.account_id=$1 AND task.list_id=$2 AND task.id=ANY($3::uuid[]) AND task.deleted_at IS NULL
 		  AND `+taskActorCanViewSQL("task", "list_item", "$4")+`
@@ -327,7 +327,7 @@ func offlineV5TaskAttachments(ctx context.Context, tx pgx.Tx, accountID uuid.UUI
 	rows, err := tx.Query(ctx, `SELECT attachment.id,attachment.task_id,attachment.media_asset_id,media.filename,media.content_type,
 		media.media_type,media.size_bytes,media.content_hash,attachment.uploaded_by,attachment.created_at
 		FROM task_attachments attachment JOIN media_assets media ON media.account_id=attachment.account_id AND media.id=attachment.media_asset_id
-		WHERE attachment.account_id=$1 AND attachment.task_id=ANY($2::uuid[]) AND attachment.attachment_scope='task'
+		WHERE attachment.account_id=$1 AND attachment.task_id=ANY($2::uuid[]) AND attachment.attachment_scope='task' AND attachment.storage_removed_at IS NULL
 		  AND media.status='active' AND media.deleted_at IS NULL
 		ORDER BY attachment.task_id,attachment.created_at,attachment.id LIMIT $3`, accountID, taskIDs, offlineV3MaxSnapshotRows+1)
 	if err != nil {

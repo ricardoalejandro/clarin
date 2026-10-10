@@ -458,6 +458,7 @@ func (s *Server) setupRoutes() {
 	protected.Put("/settings/account", s.handleUpdateAccount)
 	protected.Get("/storage/usage", s.handleStorageSelfServiceUsage)
 	protected.Get("/storage/files", s.handleStorageSelfServiceFiles)
+	protected.Get("/storage/uses", s.handleStorageSelfServiceUses)
 	protected.Delete("/storage/files", s.handleStorageLegacyMutationDisabled)
 	protected.Post("/storage/dedupe", s.handleStorageLegacyMutationDisabled)
 	protected.Get("/storage/dedupe/:id", s.handleStorageLegacyMutationDisabled)
@@ -4538,16 +4539,23 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 	}
 	mediaType := classifyStorageMediaType(cleanFilename, contentType)
 	if existing != nil {
-		_, _ = s.repos.DB().Exec(c.Context(), `UPDATE storage_objects
+		if err := s.recordStorageUpload(c.Context(), accountID, c.Locals("user_id").(uuid.UUID), existing, false, cleanFilename); err != nil {
+			return c.Status(409).JSON(fiber.Map{"success": false, "error": "No se pudo registrar la carga. Vuelve a intentarlo.", "code": "upload_registration_failed"})
+		}
+		_, err = s.repos.DB().Exec(c.Context(), `UPDATE storage_objects
 			SET source=CASE WHEN source='whatsapp_status' THEN $3 ELSE source END,
 			    status='active',deleted_at=NULL,updated_at=NOW()
 			WHERE account_id=$1 AND object_key=$2`, accountID, existing.ObjectKey, folder)
+		if err != nil {
+			log.Printf("[Storage] upload inventory update failed account=%s: %v", accountID, err)
+			return c.Status(503).JSON(fiber.Map{"success": false, "error": "No se pudo actualizar el inventario de la carga.", "code": "upload_inventory_failed"})
+		}
 		proxyURL := s.uploadPreviewURL(c, existing.ObjectKey)
 		return c.JSON(fiber.Map{
 			"success":        true,
 			"public_url":     proxyURL,
 			"proxy_url":      proxyURL,
-			"filename":       existing.Filename,
+			"filename":       cleanFilename,
 			"media_asset_id": existing.ID,
 			"content_hash":   existing.ContentHash,
 			"deduped":        true,
@@ -4562,6 +4570,7 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 	// A unique key also prevents overwriting an object pending retention cleanup.
 	uniqueFilename := contentHash + "-" + uuid.NewString() + ext
 	objectKey := accountID.String() + "/" + strings.Trim(folder, "/") + "/" + uniqueFilename
+	candidateKey := objectKey
 	publicURL, err := s.storage.UploadObject(c.Context(), objectKey, data, contentType)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to upload: " + err.Error()})
@@ -4578,7 +4587,12 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 		SizeBytes:   int64(len(data)),
 	})
 	if assetErr != nil {
+		if errors.Is(assetErr, repository.ErrMediaAssetDeletionInProgress) {
+			_ = s.storage.DeleteFile(c.Context(), candidateKey)
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Este archivo está terminando una eliminación. Vuelve a intentar la carga en unos momentos.", "code": "media_deletion_in_progress"})
+		}
 		log.Printf("[Storage] Failed to upsert media asset: %v", assetErr)
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "No se pudo registrar el archivo. Vuelve a intentarlo.", "code": "upload_inventory_failed"})
 	} else if asset != nil {
 		if asset.ObjectKey != objectKey {
 			deduped = true
@@ -4589,13 +4603,13 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 		objectKey = asset.ObjectKey
 		publicURL = s.storage.GetPublicURL(asset.ObjectKey)
 		proxyURL = mediaProxyURLFromObjectKey(asset.ObjectKey)
-		uniqueFilename = asset.Filename
+		uniqueFilename = cleanFilename
 		mediaType = asset.MediaType
 		contentType = asset.ContentType
 	}
-	_, _ = s.repos.DB().Exec(c.Context(), `
+	_, err = s.repos.DB().Exec(c.Context(), `
 		INSERT INTO storage_objects (account_id, object_key, media_type, content_type, filename, size_bytes, source, status, next_delete_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'active',
+		VALUES ($1, $2, $3, $4, $5, $6, $7::text, 'active',
 			CASE WHEN $7::text = 'quick-reply-drafts' THEN NOW() + INTERVAL '24 hours' ELSE NULL END,
 			NOW())
 		ON CONFLICT (account_id, object_key) DO UPDATE
@@ -4605,6 +4619,13 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 				ELSE storage_objects.next_delete_at
 			END, updated_at = NOW()
 	`, accountID, objectKey, mediaType, contentType, uniqueFilename, int64(len(data)), folder)
+	if err != nil {
+		log.Printf("[Storage] upload inventory insert failed account=%s: %v", accountID, err)
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "No se pudo actualizar el inventario de la carga.", "code": "upload_inventory_failed"})
+	}
+	if err := s.recordStorageUpload(c.Context(), accountID, c.Locals("user_id").(uuid.UUID), asset, asset != nil && asset.ObjectKey == candidateKey, cleanFilename); err != nil {
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "No se pudo registrar la carga. Vuelve a intentarlo.", "code": "upload_registration_failed"})
+	}
 	var mediaAssetID interface{}
 	if asset != nil {
 		mediaAssetID = asset.ID
@@ -10405,7 +10426,7 @@ func (s *Server) handleUpdateCampaign(c *fiber.Ctx) error {
 		campaign.Settings = req.Settings
 	}
 	if err := s.services.Campaign.Update(c.Context(), campaign); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return writeCampaignMutationError(c, err, 500)
 	}
 	// Load attachments for response
 	attachments, _ := s.repos.CampaignAttachment.GetByCampaignID(c.Context(), campaign.ID)
@@ -10999,7 +11020,7 @@ func (s *Server) handleStartCampaign(c *fiber.Ctx) error {
 		startedBy = &userID
 	}
 	if err := s.services.Campaign.Start(c.Context(), id, startedBy); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return writeCampaignMutationError(c, err, 500)
 	}
 	s.invalidateCampaignsCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "message": "Campaign started"})
@@ -11019,7 +11040,7 @@ func (s *Server) handlePauseCampaign(c *fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
 	}
 	if err := s.services.Campaign.Pause(c.Context(), id); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return writeCampaignMutationError(c, err, 500)
 	}
 	s.invalidateCampaignsCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "message": "Campaign paused"})
@@ -11039,7 +11060,7 @@ func (s *Server) handleCancelCampaign(c *fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Campaign not found"})
 	}
 	if err := s.services.Campaign.Cancel(c.Context(), id); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
+		return writeCampaignMutationError(c, err, 400)
 	}
 	s.invalidateCampaignsCache(accountID)
 	return c.JSON(fiber.Map{"success": true, "message": "Campaign cancelled"})
@@ -15883,6 +15904,8 @@ func (s *Server) storageReferencedObjectKeysWithInventory(ctx context.Context, i
 	}
 	columns := []refColumn{
 		{"storage_media_trash", "object_key", "state IN ('trash','purging')", true},
+		{"storage_removed_references", "object_key", "state IN ('removed','purging')", true},
+		{"storage_upload_ownership", "object_key", "state='active'", true},
 		{"messages", "media_url", "COALESCE(media_deleted, false) = false", false},
 		{"contacts", "avatar_url", "", false},
 		{"campaigns", "media_url", "", false},
@@ -16143,6 +16166,20 @@ func (s *Server) handleAdminCleanupStorageOrphans(c *fiber.Ctx) error {
 	targets := scan.DeletedAccountOrphans
 	if scope == "active_accounts" {
 		targets = scan.ActiveEligibleOrphans
+		pending, pendingErr := s.storageAdminPendingOrphans(c.Context())
+		if pendingErr != nil {
+			return c.Status(503).JSON(fiber.Map{"success": false, "error": "No se pudieron revisar las eliminaciones administrativas pendientes."})
+		}
+		seen := make(map[string]bool, len(targets))
+		for _, target := range targets {
+			seen[target.ObjectKey] = true
+		}
+		for _, target := range pending {
+			if !seen[target.ObjectKey] {
+				targets = append(targets, target)
+				seen[target.ObjectKey] = true
+			}
+		}
 	} else if scope != "deleted_accounts" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid cleanup scope"})
 	}
@@ -16151,25 +16188,23 @@ func (s *Server) handleAdminCleanupStorageOrphans(c *fiber.Ctx) error {
 	var freedBytes int64
 	errors := make([]fiber.Map, 0)
 	for _, item := range targets {
+		if scope == "active_accounts" {
+			actorID, _ := c.Locals("user_id").(uuid.UUID)
+			freed, deleteErr := s.storageAdminRemoveOrphan(c.Context(), actorID, item, minAgeDays)
+			if deleteErr != nil {
+				errors = append(errors, fiber.Map{"object_key": item.ObjectKey, "error": "El archivo se conservó o su eliminación sigue pendiente; vuelve a revisar sus usos y reintenta."})
+				continue
+			}
+			deleted++
+			freedBytes += freed
+			continue
+		}
 		if err := s.storage.DeleteFile(c.Context(), item.ObjectKey); err != nil {
 			errors = append(errors, fiber.Map{"object_key": item.ObjectKey, "error": err.Error()})
 			continue
 		}
 		deleted++
 		freedBytes += item.SizeBytes
-		if scope == "active_accounts" {
-			accountID, parseErr := uuid.Parse(item.AccountID)
-			if parseErr != nil {
-				log.Printf("[StorageOrphans] deleted active orphan but could not audit object %s: invalid account id %q", item.ObjectKey, item.AccountID)
-				continue
-			}
-			_, _ = s.repos.DB().Exec(c.Context(), `
-				INSERT INTO storage_objects (account_id, object_key, media_type, filename, size_bytes, source, status, deleted_at, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, 'deleted', NOW(), NOW())
-				ON CONFLICT (account_id, object_key) DO UPDATE
-				SET status = 'deleted', deleted_at = NOW(), updated_at = NOW()
-			`, accountID, item.ObjectKey, classifyStorageMediaType(item.ObjectKey, ""), filepath.Base(item.ObjectKey), item.SizeBytes, storageFolderFromObjectKey(accountID, item.ObjectKey))
-		}
 	}
 	return c.JSON(fiber.Map{
 		"success":     true,
