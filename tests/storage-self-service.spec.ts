@@ -72,7 +72,7 @@ async function installStorageUI(page: Page, options: { count?: number; canManage
       const body = route.request().postDataJSON() as { action: StorageAction; object_keys: string[] }
       calls.previews.push(body)
       const selected = records.filter(file => body.object_keys.includes(file.object_key))
-      const preview: StorageReview = { success: true, preview_id: `preview-${calls.previews.length}`, action: body.action, expires_at: new Date(Date.now() + (options.previewExpired ? -1000 : 300000)).toISOString(), eligible_count: selected.length, estimated_bytes: body.action === 'purge' ? selected.reduce((sum, file) => sum + file.size_bytes, 0) : 0, items: selected.map(file => ({ object_key: file.object_key, filename: file.filename, size_bytes: file.size_bytes, eligible: true })) }
+      const preview: StorageReview = { success: true, preview_id: `preview-${calls.previews.length}`, action: body.action, expires_at: new Date(Date.now() + (options.previewExpired ? -1000 : 300000)).toISOString(), eligible_count: selected.length, estimated_bytes: selected.reduce((sum, file) => sum + file.size_bytes, 0), items: selected.map(file => ({ object_key: file.object_key, filename: file.filename, size_bytes: file.size_bytes, eligible: true })) }
       previews.set(preview.preview_id, preview)
       return json(route, preview)
     }

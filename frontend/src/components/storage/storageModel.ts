@@ -52,6 +52,11 @@ export function storageDate(value?: string): string {
   if (!value || !Number.isFinite(Date.parse(value))) return 'Sin fecha'
   return new Date(value).toLocaleDateString('es-PE', { day: '2-digit', month: 'short', year: 'numeric' })
 }
+export function storageTrashStatus(file: Pick<StorageFile, 'blocked_reason' | 'can_purge' | 'purge_after'>): string {
+  const reason = file.blocked_reason || (file.can_purge ? 'Disponible para borrado definitivo' : 'El borrado definitivo todavía no está disponible.')
+  if (file.can_purge || !file.purge_after || !Number.isFinite(Date.parse(file.purge_after))) return reason
+  return `${reason} Retención mínima hasta ${storageDate(file.purge_after)}.`
+}
 export function storageFilesQuery(filters: StorageFilters, tab: StorageTab, offset: number): string {
   const params = new URLSearchParams({ limit: String(STORAGE_PAGE_SIZE), offset: String(Math.max(0, offset)), sort: filters.sort, order: filters.sort === 'name' ? 'asc' : 'desc', status: tab === 'trash' ? 'trash' : filters.status })
   if (filters.query.trim()) params.set('q', filters.query.trim())

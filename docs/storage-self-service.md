@@ -55,7 +55,7 @@ La limpieza administrativa reconoce la papelera para no saltarse su retención.
 cd backend
 GOCACHE=/tmp/go-build go test ./...
 cd ../frontend
-TZ=UTC npm run test:unit
+env -u NEXT_PUBLIC_API_URL TZ=UTC npm run test:unit
 npm run typecheck
 npm run build
 cd ..
@@ -71,8 +71,12 @@ producción ni inicia sesiones de WhatsApp o Kommo. También ejecuta los casos d
 concurrencia y de conservación de los estados de carga de otros módulos. Redis
 permite comprobar sesiones reales, cambio de cuenta y revocación de descargas.
 
-Las pruebas de navegador del almacenamiento usan respuestas de API simuladas
-para comprobar interfaz y comportamiento. Las pruebas Go de integración
+La suite `tests/storage-self-service.spec.ts` usa respuestas de API simuladas
+para comprobar interfaz y comportamiento. La suite adicional
+`tests/storage-self-service-live.spec.ts` inicia sesión desde la interfaz y usa
+la API, PostgreSQL, Redis y MinIO locales, sin simular respuestas. Su preparación,
+evidencias y límites están en el [informe de aceptación visual y funcional](qa/storage-self-service-browser-20261010.md).
+Las pruebas Go de integración
 comprueban SQL, transacciones, almacenamiento real, aislamiento, referencias
 compartidas, reintentos y fallos parciales. Una suite omitida por falta de servicios
 no equivale a una integración aprobada. PGlite sólo complementa la comprobación

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canSelectStorageFile, EMPTY_FILTERS, formatStorageBytes, nextStorageTab, reconcileStorageSelection, resultStorageMessage, safeStorageOriginHref, STORAGE_SELECTION_LIMIT, storageContentPath, storageDate, storageFilesQuery, storagePreviewExpired, toggleStorageSelection, type StorageFile, type StorageResult } from './storageModel'
+import { canSelectStorageFile, EMPTY_FILTERS, formatStorageBytes, nextStorageTab, reconcileStorageSelection, resultStorageMessage, safeStorageOriginHref, STORAGE_SELECTION_LIMIT, storageContentPath, storageDate, storageFilesQuery, storagePreviewExpired, storageTrashStatus, toggleStorageSelection, type StorageFile, type StorageResult } from './storageModel'
 
 const file = (key: string, extra: Partial<StorageFile> = {}): StorageFile => ({ object_key: key, filename: `${key}.jpg`, media_type: 'image', size_bytes: 4096, origins: [{ type: 'chats', label: 'Chat' }], references_count: 1, status: 'active', can_remove: true, ...extra })
 
@@ -23,6 +23,20 @@ describe('storage self-service rules', () => {
     expect(canSelectStorageFile(file('a', { can_remove: false }), 'files', true)).toBe(false)
     expect(canSelectStorageFile(file('a', { status: 'trash', can_restore: true }), 'trash', true)).toBe(true)
     expect(canSelectStorageFile(file('a', { status: 'trash', can_remove: true }), 'trash', true)).toBe(false)
+  })
+  it('does not treat an elapsed retention date as permission to purge', () => {
+    const status = storageTrashStatus({ can_purge: false, purge_after: '2000-01-01T12:00:00Z', blocked_reason: 'El archivo volvió a utilizarse y se conservará.' })
+    expect(status).toContain('El archivo volvió a utilizarse y se conservará.')
+    expect(status).toContain('Retención mínima hasta')
+    expect(status).not.toContain('Borrado disponible')
+    expect(storageTrashStatus({ can_purge: true })).toBe('Disponible para borrado definitivo')
+  })
+  it('keeps the server blocking reason authoritative even with an inconsistent capability', () => {
+    const reason = 'La eliminación está pendiente. Puedes reintentarla desde Actividad.'
+    expect(storageTrashStatus({ can_purge: true, blocked_reason: reason })).toBe(reason)
+  })
+  it.each([undefined, 'invalid'])('does not invent a purge date when retention is %s', purge_after => {
+    expect(storageTrashStatus({ can_purge: false, purge_after })).toBe('El borrado definitivo todavía no está disponible.')
   })
   it('deduplicates selections, preserves order and caps bulk writes at 100', () => {
     let selected = new Map<string, StorageFile>()

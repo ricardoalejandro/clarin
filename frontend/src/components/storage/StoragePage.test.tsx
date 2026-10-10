@@ -69,6 +69,31 @@ describe('storage complete workflow', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancelar' }))
     expect(screen.queryByRole('dialog')).toBeNull(); expect(mockApi).toHaveBeenCalledTimes(1)
   })
+  it('returns focus to the re-enabled invoker when Escape closes a pending review', async () => {
+    await loaded(); selectA()
+    const trigger = screen.getByRole('button', { name: 'Revisar selección' })
+    trigger.focus()
+    let finish: (value: unknown) => void = () => {}
+    mockApi.mockImplementationOnce(() => {
+      // Chromium drops focus when the invoker becomes disabled, before the
+      // dialog effect can capture it. JSDOM needs that focus loss explicitly.
+      trigger.blur()
+      return new Promise(resolve => { finish = resolve as typeof finish })
+    })
+    fireEvent.click(trigger)
+    const dialog = await screen.findByRole('dialog', { name: 'Revisar eliminación' })
+    expect(trigger).toBeDisabled()
+    within(dialog).getByRole('button', { name: 'Cerrar ventana' }).focus()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(trigger).toBeEnabled()
+    expect(trigger).toHaveFocus()
+    expect(mockApi.mock.calls[0][1]?.signal?.aborted).toBe(true)
+    await act(async () => finish({ success: true, data: staged }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(trigger).toHaveFocus()
+    expect(screen.getByRole('checkbox', { name: 'Seleccionar a.pdf' })).toBeChecked()
+  })
   it('uses real pagination and preserves selection across pages beyond 200 files', async () => {
     response = { ...response, total: 241, has_more: true, next_offset: 240 }
     await loaded(); selectA()
@@ -129,6 +154,32 @@ describe('storage complete workflow', () => {
     expect(mockApi).toHaveBeenCalledTimes(1)
     expect(mockApi.mock.calls[0][0]).toBe('/api/storage/cleanup/confirm')
     expect(JSON.parse(mockApi.mock.calls[0][1]!.body as string)).toEqual({ preview_id: 'durable-operation' })
+  })
+  it.each([
+    { reason: 'La eliminación está pendiente. Puedes reintentarla desde Actividad.', canRestore: false },
+    { reason: 'El archivo volvió a utilizarse y se conservará.', canRestore: true },
+  ])('explains a blocked trash item instead of promising purge availability: $reason', async ({ reason, canRestore }) => {
+    await loaded()
+    response = { ...response, files: [file('retained', { status: 'trash', can_remove: false, can_restore: canRestore, can_purge: false, purge_after: '2000-01-01T12:00:00Z', blocked_reason: reason })], total: 1 }
+    fireEvent.click(screen.getByRole('tab', { name: 'Papelera' }))
+    const checkbox = await screen.findByRole('checkbox', { name: 'Seleccionar retained.pdf' })
+    const row = checkbox.closest('article')!
+    expect(row.textContent).toContain(reason)
+    expect(row.textContent).toContain('Retención mínima hasta')
+    expect(row.textContent).not.toContain('Borrado disponible desde')
+    expect(row.textContent).not.toContain('Disponible para borrado definitivo')
+    if (canRestore) expect(checkbox).toBeEnabled()
+    else expect(checkbox).toBeDisabled()
+  })
+  it.each([
+    { scope: 'account' as const, label: 'Tus operaciones y los borrados definitivos de esta cuenta' },
+    { scope: 'authorized' as const, label: 'Tus operaciones de almacenamiento' },
+  ])('describes the authorized activity scope for $scope', async ({ scope, label }) => {
+    usageResponse = { ...usage, scope }
+    await loaded()
+    fireEvent.click(screen.getByRole('tab', { name: 'Actividad' }))
+    expect(await screen.findByText(label)).toBeTruthy()
+    expect(screen.queryByText('Historial de las operaciones de esta cuenta')).toBeNull()
   })
   it('keeps a retry failure visible after the inventory refresh succeeds', async () => {
     await loaded()
