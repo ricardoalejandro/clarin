@@ -84,8 +84,32 @@ operaciones transaccionales y revocación de publicaciones. No prueban la lectur
 de bytes, el ciclo completo de confirmación, las políticas del bucket ni el
 borrado físico. El runner nativo también incorpora estos casos.
 
-El workflow `Storage self-service QA` ejecuta estos controles en pull requests y
-en la rama `feat/storage-self-service`.
+### Preparación del entorno
+
+Estas pruebas no dependen de GitHub Actions, retirado según la documentación de
+QA existente. Ejecutar el script desde un entorno Linux con Bash, Go 1.25.11
+(el toolchain del backend), `curl`, `openssl` y un daemon Docker local operativo
+y accesible. El cliente Docker por sí solo no basta. Un daemon remoto tampoco
+expone PostgreSQL en el loopback que usan las pruebas. También se necesita acceso
+al registro de imágenes de PostgreSQL y a las dependencias Go verificadas de MinIO.
+
+Antes de crear recursos, el script comprueba las herramientas y el acceso a
+Docker. Los puertos locales 15439, 19001 y 19002 deben estar libres. El script
+arranca PostgreSQL y MinIO, espera sus comprobaciones de salud y ejecuta las
+pruebas; no necesita un `.env` ni servicios de producción. Redis forma parte del
+laboratorio histórico, pero esta batería concreta no lo requiere.
+
+El laboratorio anterior está definido en `deploy/docker-compose.integrity-qa.yml`.
+Su script `start-integrity-services.sh` espera la ruta fija
+`/root/clarin-integrity-qa-20261007`; no debe confundirse con un arranque automático
+de cualquier workspace. El runner de almacenamiento resuelve la raíz del
+repositorio desde su propia ubicación.
+
+Si la plataforma no permite un daemon Docker o las operaciones de red requeridas
+por MinIO, instalar paquetes o añadir variables no resuelve esa limitación. Se
+necesita un entorno que permita esos servicios. La integración nativa debe
+mantenerse pendiente hasta ejecutarla allí; las pruebas con API simulada o PGlite
+no la sustituyen.
 
 ## Capacidad pendiente de medir
 

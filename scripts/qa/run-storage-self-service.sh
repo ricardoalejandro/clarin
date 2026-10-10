@@ -2,6 +2,17 @@
 # Disposable native PostgreSQL/MinIO integration. Never reads deployment .env.
 set -euo pipefail
 
+for qa_command in docker go curl openssl; do
+  if ! command -v "$qa_command" >/dev/null 2>&1; then
+    printf 'Storage QA requires %s in PATH. Prepare a Linux environment with Docker, Go 1.25+, curl and openssl.\n' "$qa_command" >&2
+    exit 1
+  fi
+done
+if ! docker info >/dev/null 2>&1; then
+  printf 'Storage QA requires an accessible Docker daemon; installing the Docker client alone is insufficient.\n' >&2
+  exit 1
+fi
+
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 qa_id="clarin-storage-qa-$(date +%s)-$$"
 qa_postgres="${qa_id}-postgres"
