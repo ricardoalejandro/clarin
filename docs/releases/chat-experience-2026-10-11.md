@@ -40,4 +40,8 @@ Backend: `GOCACHE=/tmp/go-build GOMAXPROCS=2 go test ./...` completado en Linux.
 
 Las pruebas del proveedor no envían mensajes a contactos reales. La evaluación de Android usa Chromium con viewport/touch y APIs sintéticas; no equivale a probar un teléfono físico con su teclado.
 
+Navegador: pase completo en 375, 768 y 1440 px, sin desbordamiento horizontal ni errores JavaScript. El final queda a 0 px después de cargar imágenes y mostrar errores de audio; redimensionar mientras se lee el historial conserva la posición. Verificados compositor con teclado simulado, lectura independiente de Pendiente, visor y navegación Atrás, Detalles, selector de dispositivos y ausencia de solicitudes para videos ya eliminados. Las acciones de escritorio se revelan al pasar el puntero o recibir foco para evitar cubrir texto en reposo; en táctil conservan su control exterior visible.
+
+Reversión: revisión independiente de los cinco IDs de imagen contra sus etiquetas y `sh -n rollback.sh` aprobadas. No se ejecutó el rollback.
+
 La advertencia amarilla de preload de la captura no identifica el recurso exacto. Los 404 de medios eliminados tienen una causa confirmada y se corrigen; no se atribuye a esa advertencia un fallo de chat sin evidencia.

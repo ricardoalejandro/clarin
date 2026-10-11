@@ -72,9 +72,9 @@
 
 @media (hover: hover) and (pointer: fine) {
   .messageActions {
-    /* Keep the action chevron quietly discoverable without competing with
-       the message; hover/focus still promotes the complete control. */
-    opacity: 0.42;
+    /* Keep text unobstructed at rest; pointer hover and keyboard focus reveal
+       the controls. Touch keeps its separate, always visible action target. */
+    opacity: 0;
   }
 
   .messageContainer:hover .messageActions,
