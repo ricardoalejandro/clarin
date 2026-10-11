@@ -8,6 +8,10 @@ import type { Lead } from '@/types/contact'
 import type { CustomFieldValue } from '@/types/custom-field'
 import type { DocumentTemplate } from '@/types/document'
 import { formatFieldValue, type FieldFormat } from '@/lib/dynamicFieldFormat'
+import { documentPlainText } from '@/lib/documents/documentText'
+import { validateDocumentTemplate } from '@/lib/documents/documentValidation'
+import { safeDocumentFilename } from '@/lib/documents/documentLibrary'
+import { renderDocumentSnapshot } from '@/lib/fabric/export'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -31,6 +35,7 @@ export interface CanvasElement {
 
 export interface RenderOptions {
   format: 'png' | 'pdf'
+  signal?: AbortSignal
   scale?: number // multiplier for export resolution (default 4 = ~200 DPI)
 }
 
@@ -109,7 +114,7 @@ export function resolveFieldTyped(key: string, lead: Lead): ResolvedField {
   }
 
   // Other mapped fields → text
-  const resolver = FIELD_MAP[normalized]
+  const resolver = Object.hasOwn(FIELD_MAP, normalized) ? FIELD_MAP[normalized] : undefined
   if (resolver) {
     const v = resolver(lead)
     return v === '' ? { type: 'empty', value: '' } : { type: 'text', value: v }
@@ -128,15 +133,7 @@ export function resolveFieldTyped(key: string, lead: Lead): ResolvedField {
       if (match.value_bool != null) return { type: 'bool', value: match.value_bool }
       if (match.value_text != null) {
         const raw = match.value_text
-        if (/<\/?[a-z][^>]*>/i.test(raw)) {
-          if (typeof document !== 'undefined') {
-            const tmp = document.createElement('div')
-            tmp.innerHTML = raw
-            return { type: 'text', value: tmp.textContent || tmp.innerText || '' }
-          }
-          return { type: 'text', value: raw.replace(/<[^>]*>/g, '') }
-        }
-        return { type: 'text', value: raw }
+        return { type: 'text', value: documentPlainText(raw) }
       }
       if (match.value_json != null && Array.isArray(match.value_json)) {
         return { type: 'text', value: match.value_json.join(', ') }
@@ -149,7 +146,7 @@ export function resolveFieldTyped(key: string, lead: Lead): ResolvedField {
 
 function resolveField(key: string, lead: Lead): string {
   const normalized = key.toLowerCase().replace(/\s+/g, '_').replace(/^\{\{|\}\}$/g, '')
-  const resolver = FIELD_MAP[normalized]
+  const resolver = Object.hasOwn(FIELD_MAP, normalized) ? FIELD_MAP[normalized] : undefined
   if (resolver) return resolver(lead)
 
   // Fallback: look up custom field values by slug
@@ -160,15 +157,7 @@ function resolveField(key: string, lead: Lead): string {
       if (match.value_text != null) {
         // If the stored text contains HTML tags (rich text variant), strip them for plain render.
         const raw = match.value_text
-        if (/<\/?[a-z][^>]*>/i.test(raw)) {
-          if (typeof document !== 'undefined') {
-            const tmp = document.createElement('div')
-            tmp.innerHTML = raw
-            return tmp.textContent || tmp.innerText || ''
-          }
-          return raw.replace(/<[^>]*>/g, '')
-        }
-        return raw
+        return documentPlainText(raw)
       }
       if (match.value_number != null) return String(match.value_number)
       if (match.value_date != null) {
@@ -235,178 +224,34 @@ export function substituteFields(elements: CanvasElement[], lead: Lead): CanvasE
 
 // ─── Fabric.js Rendering Engine ──────────────────────────────────────────────
 
-/**
- * Substitute dynamic fields on a Fabric canvas.
- * Iterates all objects, replacing text on DynamicText instances.
- */
-async function substituteFabricFields(
-  fabricModule: typeof import('@/lib/fabric/runtime'),
-  canvasObjects: any[],
-  lead: Lead
-): Promise<void> {
-  for (const obj of canvasObjects) {
-    // Check for DynamicText or objects with isDynamic custom prop
-    if (obj.isDynamic && obj.fieldName) {
-      const fmt: FieldFormat | undefined = obj.fieldFormat
-      let value: string
-      if (fmt && fmt.type !== 'general') {
-        const typed = resolveFieldTyped(obj.fieldName, lead)
-        value = formatFieldValue(typed.value, fmt)
-      } else {
-        value = resolveField(obj.fieldName, lead)
-      }
-      obj.set('text', value)
-      // Reset fill to black if it was the dynamic marker color
-      if (obj.fill === '#059669') {
-        obj.set('fill', '#000000')
-      }
-    } else if (obj.text && typeof obj.text === 'string' && obj.text.includes('{{')) {
-      const newText = obj.text.replace(/\{\{(\w+)\}\}/g, (_: string, field: string) => {
-        return resolveField(field, lead)
-      })
-      obj.set('text', newText)
-    }
-    // Handle groups recursively
-    if (obj._objects && Array.isArray(obj._objects)) {
-      await substituteFabricFields(fabricModule, obj._objects, lead)
-    }
+/** Substitute only text slots in a cloned, validated design. Never feed data
+ * values into HTML, image URLs, object types or other executable properties. */
+export function substituteDocumentFields(template: DocumentTemplate, lead: Lead): Record<string, unknown> {
+  const invalid = validateDocumentTemplate(template)
+  if (invalid) throw new Error(invalid)
+  const design = JSON.parse(JSON.stringify(template.canvas_json)) as Record<string, unknown>
+  function visit(node: unknown) {
+    if (!node || typeof node !== 'object') return
+    if (Array.isArray(node)) { node.forEach(visit); return }
+    const object = node as Record<string, any>
+    const textKey = typeof object.text === 'string' ? 'text' : typeof object.content === 'string' ? 'content' : null
+    if (textKey && object.isDynamic && typeof object.fieldName === 'string') {
+      const fmt = object.fieldFormat as FieldFormat | undefined
+      object[textKey] = fmt && fmt.type !== 'general' ? formatFieldValue(resolveFieldTyped(object.fieldName, lead).value, fmt) : resolveField(object.fieldName, lead)
+      if (object.fill === '#059669') object.fill = '#000000'
+    } else if (textKey) object[textKey] = object[textKey].replace(/\{\{(\w+)\}\}/g, (_: string, field: string) => resolveField(field, lead))
+    for (const value of Object.values(object)) visit(value)
   }
+  visit(design)
+  return design
 }
-
-/**
- * Render a document using Fabric.js StaticCanvas.
- * Works for both V3 (Fabric JSON) and V2 (legacy elements).
- */
-export async function renderDocument(
-  template: DocumentTemplate,
-  _elements: CanvasElement[],  // kept for API compat but not used for V3
-  _background: { color: string; imageUrl?: string },
-  options: RenderOptions
-): Promise<Blob> {
-  const fabricModule = await import('@/lib/fabric/runtime')
-  const fabricLib = await import('@/lib/fabric')
-  await fabricLib.ensureFontsLoaded()
-
-  const multiplier = options.scale || 4
-  const pageW = template.page_width * MM_TO_PX
-  const pageH = template.page_height * MM_TO_PX
-
-  // Create headless StaticCanvas
-  const canvas = new fabricModule.StaticCanvas(undefined, {
-    width: pageW,
-    height: pageH,
-    backgroundColor: '#ffffff',
-    renderOnAddRemove: false,
-  })
-
-  // Load template into canvas
-  const bg = await fabricLib.loadTemplateToCanvas(canvas, template.canvas_json, template.page_width, template.page_height)
-  canvas.backgroundColor = bg.color
-  canvas.renderAll()
-
-  // Export
-  if (options.format === 'png') {
-    const dataUrl = canvas.toDataURL({
-      format: 'png',
-      multiplier,
-      quality: 1,
-    })
-    canvas.dispose()
-    return dataUrlToBlob(dataUrl)
-  } else {
-    const { jsPDF } = await import('jspdf')
-    const docW = template.page_width
-    const docH = template.page_height
-    const orientation = docW > docH ? 'l' : 'p'
-    const pdf = new jsPDF({ orientation, unit: 'mm', format: [docW, docH] })
-    const dataUrl = canvas.toDataURL({ format: 'png', multiplier, quality: 1 })
-    pdf.addImage(dataUrl, 'PNG', 0, 0, docW, docH)
-    canvas.dispose()
-    return pdf.output('blob')
-  }
+export async function renderDocument(template: DocumentTemplate, elements: CanvasElement[], background: { color: string; imageUrl?: string }, options: RenderOptions): Promise<Blob> {
+  const invalid = validateDocumentTemplate(template); if (invalid) throw new Error(invalid)
+  const canvasJson = template.canvas_json.version === 3 ? template.canvas_json : { ...template.canvas_json, elements, background }
+  return renderDocumentSnapshot({ canvasJson, width: template.page_width * MM_TO_PX, height: template.page_height * MM_TO_PX }, { format: options.format, multiplier: options.scale ?? 4, signal: options.signal })
 }
-
-/**
- * Render a Fabric canvas for a specific lead (loads template + substitutes fields).
- * Returns the canvas for further processing or the rendered blob.
- */
-async function renderForLead(
-  template: DocumentTemplate,
-  lead: Lead,
-  multiplier: number,
-): Promise<{ canvas: InstanceType<typeof import('@/lib/fabric/runtime').StaticCanvas>; bg: { color: string; imageUrl?: string } }> {
-  const fabricModule = await import('@/lib/fabric/runtime')
-  const fabricLib = await import('@/lib/fabric')
-  await fabricLib.ensureFontsLoaded()
-
-  const pageW = template.page_width * MM_TO_PX
-  const pageH = template.page_height * MM_TO_PX
-
-  const canvas = new fabricModule.StaticCanvas(undefined, {
-    width: pageW,
-    height: pageH,
-    backgroundColor: '#ffffff',
-    renderOnAddRemove: false,
-  })
-
-  const bg = await fabricLib.loadTemplateToCanvas(canvas, template.canvas_json, template.page_width, template.page_height)
-  canvas.backgroundColor = bg.color
-
-  // Substitute dynamic fields
-  const objects = canvas.getObjects()
-  await substituteFabricFields(fabricModule, objects, lead)
-
-  // Handle background image
-  if (bg.imageUrl) {
-    try {
-      const bgImg = await fabricModule.FabricImage.fromURL(bg.imageUrl, { crossOrigin: 'anonymous' })
-      const scaleX = pageW / (bgImg.width || 1)
-      const scaleY = pageH / (bgImg.height || 1)
-      const scale = Math.max(scaleX, scaleY) // cover
-      bgImg.set({
-        left: pageW / 2, top: pageH / 2,
-        originX: 'center', originY: 'center',
-        scaleX: scale, scaleY: scale,
-        selectable: false, evented: false,
-      })
-      // Insert at index 0 (behind everything)
-      canvas.insertAt(0, bgImg)
-    } catch (err) {
-      console.warn('Failed to load background image:', err)
-    }
-  }
-
-  canvas.renderAll()
-  return { canvas, bg }
-}
-
-// ─── Single Document Generation ──────────────────────────────────────────────
-
-export async function generateForLead(
-  template: DocumentTemplate,
-  lead: Lead,
-  options: RenderOptions
-): Promise<Blob> {
-  const multiplier = options.scale || 4
-  const { canvas } = await renderForLead(template, lead, multiplier)
-
-  try {
-    if (options.format === 'png') {
-      const dataUrl = canvas.toDataURL({ format: 'png', multiplier, quality: 1 })
-      return dataUrlToBlob(dataUrl)
-    } else {
-      const { jsPDF } = await import('jspdf')
-      const docW = template.page_width
-      const docH = template.page_height
-      const orientation = docW > docH ? 'l' : 'p'
-      const pdf = new jsPDF({ orientation, unit: 'mm', format: [docW, docH] })
-      const dataUrl = canvas.toDataURL({ format: 'png', multiplier, quality: 1 })
-      pdf.addImage(dataUrl, 'PNG', 0, 0, docW, docH)
-      return pdf.output('blob')
-    }
-  } finally {
-    canvas.dispose()
-  }
+export async function generateForLead(template: DocumentTemplate, lead: Lead, options: RenderOptions): Promise<Blob> {
+  return renderDocumentSnapshot({ canvasJson: substituteDocumentFields(template, lead), width: template.page_width * MM_TO_PX, height: template.page_height * MM_TO_PX }, { format: options.format, multiplier: options.scale ?? 4, signal: options.signal })
 }
 
 // ─── Bulk Document Generation ────────────────────────────────────────────────
@@ -427,7 +272,7 @@ export async function generateBulk(
     onProgress?.({ current: i + 1, total: leads.length, leadName })
 
     const blob = await generateForLead(template, lead, options)
-    results.push({ blob, filename: `${safeName}_${template.name}.${ext}` })
+    results.push({ blob, filename: `${safeName}_${safeDocumentFilename(template.name)}.${ext}` })
   }
 
   return results
@@ -462,31 +307,14 @@ export async function mergePdfs(
 
     if (i > 0) pdf.addPage([docW, docH], orientation)
 
-    const { canvas } = await renderForLead(template, lead, multiplier)
-    try {
-      const dataUrl = canvas.toDataURL({ format: 'png', multiplier, quality: 1 })
-      pdf.addImage(dataUrl, 'PNG', 0, 0, docW, docH)
-    } finally {
-      canvas.dispose()
-    }
+    const image = await generateForLead(template, lead, { format: 'png', scale: multiplier, signal: options.signal })
+    pdf.addImage(new Uint8Array(await image.arrayBuffer()), 'PNG', 0, 0, docW, docH)
   }
 
   return pdf.output('blob')
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function dataUrlToBlob(dataUrl: string): Blob {
-  const parts = dataUrl.split(',')
-  const mime = parts[0].match(/:(.*?);/)?.[1] || 'image/png'
-  const byteString = atob(parts[1])
-  const ab = new ArrayBuffer(byteString.length)
-  const ia = new Uint8Array(ab)
-  for (let i = 0; i < byteString.length; i++) {
-    ia[i] = byteString.charCodeAt(i)
-  }
-  return new Blob([ab], { type: mime })
-}
 
 export function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob)

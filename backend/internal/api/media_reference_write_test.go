@@ -25,8 +25,8 @@ func TestMediaReferenceWritersDenyUnreadableInputBeforeMutation(t *testing.T) {
 		{"campaign direct", server.handleCreateCampaign, map[string]any{"name": "Example", "device_id": uuid.NewString(), "message_template": "text", "media_url": mediaProxyURLFromObjectKey(key)}},
 		{"campaign attachment", server.handleCreateCampaign, map[string]any{"name": "Example", "device_id": uuid.NewString(), "attachments": []any{map[string]any{"media_url": mediaProxyURLFromObjectKey(key)}}}},
 		{"campaign settings graft", server.handleCreateCampaign, map[string]any{"settings": map[string]any{"nested": []string{key}}}},
-		{"document canvas", server.handleCreateDocumentTemplate, map[string]any{"name": "Example", "canvas_json": map[string]any{"objects": []any{map[string]any{"src": mediaProxyURLFromObjectKey(key)}}}}},
-		{"document import raw key", server.handleImportDocumentTemplate, map[string]any{"name": "Example", "canvas_json": map[string]any{"objects": []any{map[string]any{"src": key}}}}},
+		{"document canvas", server.handleCreateDocumentTemplate, map[string]any{"name": "Example", "canvas_json": map[string]any{"objects": []any{map[string]any{"type": "Image", "src": mediaProxyURLFromObjectKey(key)}}}}},
+		{"document import raw key", server.handleImportDocumentTemplate, map[string]any{"name": "Example", "canvas_json": map[string]any{"objects": []any{map[string]any{"type": "Rect", "customResource": key}}}}},
 		{"quick reply attachment", server.handleCreateQuickReply, map[string]any{"shortcut": "hello", "attachments": []any{map[string]any{"media_url": mediaProxyURLFromObjectKey(key), "media_asset_id": uuid.NewString()}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

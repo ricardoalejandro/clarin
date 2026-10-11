@@ -125,3 +125,11 @@ it('distinguishes expired sessions and denied reads without exposing a hidden re
   expect(storageUnavailableMessage(403)).toContain('permiso')
   expect(storageUnavailableMessage(404)).toContain('no está disponible o no tienes acceso')
 })
+
+describe('storage quota precision', () => {
+  it('keeps a decimal for multi-digit GiB so quota and remaining space agree visibly', () => {
+    expect(formatStorageBytes(3726320026)).toBe('3.5 GiB')
+    expect(formatStorageBytes(20 * 1024 ** 3 - 3726320026)).toBe('16.5 GiB')
+    expect(formatStorageBytes(20 * 1024 ** 3)).toBe('20.0 GiB')
+  })
+})

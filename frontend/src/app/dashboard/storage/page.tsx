@@ -52,6 +52,7 @@ function StorageWorkspace({ scope }: { scope: string }) {
   const [review, setReview] = useState<StorageReview | null>(null)
   const [reviewAction, setReviewAction] = useState<StorageAction | null>(null)
   const [reviewError, setReviewError] = useState('')
+  const [reviewUncertain, setReviewUncertain] = useState(false)
   const [reviewBusy, setReviewBusy] = useState(false)
   const [confirmBusy, setConfirmBusy] = useState(false)
   const [retryingOperation, setRetryingOperation] = useState<string | null>(null)
@@ -285,7 +286,7 @@ function StorageWorkspace({ scope }: { scope: string }) {
     // Retrying inside the dialog must preserve the original return target.
     if (!reviewAction) reviewReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     mutation.current?.abort(); const controller = new AbortController(); mutation.current = controller
-    setReviewTargets(targets); setReviewAction(action); setReview(null); setReviewError(''); setAcknowledged(false); setReviewBusy(true)
+    setReviewTargets(targets); setReviewAction(action); setReview(null); setReviewError(''); setReviewUncertain(false); setAcknowledged(false); setReviewBusy(true)
     const timeout = window.setTimeout(() => {
       if (!isCurrent() || controller.signal.aborted || mutation.current !== controller) return
       controller.abort(); setReviewBusy(false)
@@ -304,11 +305,22 @@ function StorageWorkspace({ scope }: { scope: string }) {
       if (isCurrent() && !controller.signal.aborted) setReviewBusy(false)
     }
   }
-  const closeReview = () => { if (confirmBusy) return; mutation.current?.abort(); setReviewAction(null); setReview(null); setReviewBusy(false); setReviewError(''); setReviewTargets(undefined) }
+  const closeReview = () => { if (confirmBusy) return; mutation.current?.abort(); setReviewAction(null); setReview(null); setReviewBusy(false); setReviewError(''); setReviewUncertain(false); setReviewTargets(undefined) }
   const confirmReview = async () => {
     if (!review || !isCurrent() || confirmLock.current || reviewBusy || storagePreviewExpired(review) || !review.eligible_count || (review.action === 'purge' && !acknowledged)) return
-    confirmLock.current = true; setConfirmBusy(true); setReviewError('')
+    confirmLock.current = true; setConfirmBusy(true); setReviewError(''); setReviewUncertain(false)
     mutation.current?.abort(); const controller = new AbortController(); mutation.current = controller
+    const timeout = window.setTimeout(() => {
+      if (!isCurrent() || controller.signal.aborted || mutation.current !== controller) return
+      controller.abort(); mutation.current = null; confirmLock.current = false; setConfirmBusy(false)
+      // The write may have committed. Keep the original review/ID and selection;
+      // only a canonical result may announce completion or reconcile the rows.
+      setReviewUncertain(true)
+      setReviewError('La respuesta tardó demasiado. El resultado está pendiente de comprobar. Consulta Actividad antes de volver a intentarlo; se conserva esta revisión.')
+      setRefresh(value => value + 1)
+    }, STORAGE_READ_TIMEOUT_MS)
+    const clearDeadline = () => window.clearTimeout(timeout)
+    controller.signal.addEventListener('abort', clearDeadline, { once: true })
     try {
       const response = await api<StorageResult>('/api/storage/cleanup/confirm', { method: 'POST', body: JSON.stringify({ preview_id: review.preview_id }), signal: controller.signal })
       if (!isCurrent() || controller.signal.aborted) return
@@ -320,12 +332,23 @@ function StorageWorkspace({ scope }: { scope: string }) {
       }
       setResult(response.data); setSelected(previous => reconcileStorageSelection(previous, response.data!)); setReview(null); setReviewAction(null); setReviewTargets(undefined); setPreview(null); setDetails(null); setRefresh(value => value + 1)
     } catch { if (isCurrent() && !controller.signal.aborted) setReviewError('Se interrumpió la conexión. Consulta Actividad para comprobar el resultado antes de volver a intentarlo.') }
-    finally { confirmLock.current = false; if (isCurrent() && !controller.signal.aborted) setConfirmBusy(false) }
+    finally {
+      clearDeadline(); controller.signal.removeEventListener('abort', clearDeadline)
+      if (mutation.current === controller) { mutation.current = null; confirmLock.current = false; if (isCurrent() && !controller.signal.aborted) setConfirmBusy(false) }
+    }
   }
   const retryOperation = async (operationID: string) => {
     if (!isCurrent() || confirmLock.current || !usage?.can_manage) return
     confirmLock.current = true; setRetryingOperation(operationID); setOperationError('')
     mutation.current?.abort(); const controller = new AbortController(); mutation.current = controller
+    const timeout = window.setTimeout(() => {
+      if (!isCurrent() || controller.signal.aborted || mutation.current !== controller) return
+      controller.abort(); mutation.current = null; confirmLock.current = false; setRetryingOperation(null)
+      setOperationError('La respuesta tardó demasiado. El resultado está pendiente de comprobar en Actividad. Se conserva la operación original para consultar o reintentar su resultado.')
+      setRefresh(value => value + 1)
+    }, STORAGE_READ_TIMEOUT_MS)
+    const clearDeadline = () => window.clearTimeout(timeout)
+    controller.signal.addEventListener('abort', clearDeadline, { once: true })
     try {
       const response = await api<StorageResult>('/api/storage/cleanup/confirm', { method: 'POST', body: JSON.stringify({ preview_id: operationID }), signal: controller.signal })
       if (!isCurrent() || controller.signal.aborted) return
@@ -333,7 +356,10 @@ function StorageWorkspace({ scope }: { scope: string }) {
       else setOperationError(response.error || response.data?.error || 'No se pudo confirmar el resultado. Vuelve a consultar Actividad.')
       setRefresh(value => value + 1)
     } catch { if (isCurrent() && !controller.signal.aborted) setOperationError('Se interrumpió la conexión. Vuelve a consultar Actividad para comprobar el resultado.') }
-    finally { confirmLock.current = false; if (isCurrent() && !controller.signal.aborted) setRetryingOperation(null) }
+    finally {
+      clearDeadline(); controller.signal.removeEventListener('abort', clearDeadline)
+      if (mutation.current === controller) { mutation.current = null; confirmLock.current = false; if (isCurrent() && !controller.signal.aborted) setRetryingOperation(null) }
+    }
   }
   const expired = review ? storagePreviewExpired(review, clock) : false
   const selectedBytes = Array.from(new Map(Array.from(selected.values()).map(file => [file.object_key, file])).values()).reduce((sum, file) => sum + file.size_bytes, 0)
@@ -400,7 +426,7 @@ function StorageWorkspace({ scope }: { scope: string }) {
     {preview && <StoragePreview key={`${scope}:${preview.object_key}`} file={preview} scope={scope} refresh={refresh} onUnavailable={message => { clearSensitiveState(); setOperationError(message || 'El archivo ya no está disponible.'); setRefresh(value => value + 1) }} onClose={() => setPreview(null)} />}
     {reviewAction && <StorageDialog title={actionTitles[reviewAction]} description="Comprueba los archivos y el efecto de la operación. Al confirmar se volverá a verificar el impacto." busy={confirmBusy} onClose={closeReview} footer={<><button onClick={closeReview} disabled={confirmBusy} className={secondary}>Cancelar</button>{(!review || expired) && !reviewBusy ? <button onClick={() => void prepare(reviewAction, reviewTargets)} className={primary}>Volver a revisar</button> : <button onClick={() => void confirmReview()} disabled={reviewBusy || confirmBusy || !review?.eligible_count || expired || (reviewAction === 'purge' && !acknowledged)} className={reviewAction === 'purge' ? `${button} bg-rose-600 text-white hover:bg-rose-700` : primary}>{confirmBusy && <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />}{actionLabels[reviewAction]}</button>}</>}>
       {reviewBusy ? <p role="status" className="flex items-center gap-2 py-8 text-sm text-slate-500"><Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" />Comprobando dónde se utilizan los archivos…</p> : <>
-        {reviewError && <p role="alert" className="mb-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{reviewError}</p>}
+        {reviewError && <div role="alert" className={`mb-4 rounded-xl p-3 text-sm ${reviewUncertain ? 'bg-amber-50 text-amber-900' : 'bg-rose-50 text-rose-700'}`}><p>{reviewError}</p>{reviewUncertain && <button onClick={() => { closeReview(); changeTab('activity') }} className={`${secondary} mt-3`}>Consultar Actividad</button>}</div>}
         {review && <><div className={`rounded-xl p-4 ${reviewAction === 'purge' ? 'bg-rose-50' : 'bg-emerald-50'}`}><p className="text-sm font-semibold text-slate-900">{review.eligible_count} archivo{review.eligible_count === 1 ? '' : 's'} · {formatStorageBytes(review.estimated_bytes)}</p><p className="mt-2 text-sm leading-6 text-slate-600">{reviewAction === 'trash' ? `Se retirarán únicamente los usos incluidos en esta revisión. Los demás se conservarán. Podrás recuperar las retiradas desde la papelera. El espacio se liberará cuando no queden usos y se complete el borrado definitivo, a partir de ${usage?.retention_days || 7} días.` : reviewAction === 'restore' ? 'Los archivos volverán a estar disponibles en sus ubicaciones originales, si estas siguen existiendo.' : 'Esta acción elimina los archivos definitivamente. No podrás recuperarlos. El espacio se confirmará cuando termine el borrado.'}</p>{reviewAction === 'trash' && <div className="mt-3 space-y-1 text-xs leading-5 text-slate-600">{review.selected_uses_count != null && <p>{review.selected_uses_count} uso{review.selected_uses_count === 1 ? '' : 's'} seleccionado{review.selected_uses_count === 1 ? '' : 's'} para retirar.</p>}{(review.retained_uses_visible_count || 0) > 0 && <p>{review.retained_uses_visible_count} uso{review.retained_uses_visible_count === 1 ? ' visible se conserva' : 's visibles se conservan'}.</p>}{review.retained_elsewhere && <p>El archivo también se conservará en otras ubicaciones protegidas.</p>}{review.trash_bytes != null && <p>{review.trash_bytes > 0 ? `${formatStorageBytes(review.trash_bytes)} permanecerán en la papelera. ` : ''}Espacio liberado ahora: 0 B.</p>}</div>}</div>
           <ul className="mt-4 divide-y divide-slate-100">{review.items.map(item => <li key={storageFileIdentity(item)} className="flex items-start gap-2 py-3">{item.eligible ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" /> : <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />}<div className="min-w-0 flex-1"><p className="break-all text-sm font-medium text-slate-800">{item.filename}</p><p className="mt-0.5 text-xs leading-5 text-slate-500">{item.reason || (item.eligible ? 'Listo para procesar' : 'Se conservará porque no se puede retirar con seguridad.')}</p>{reviewAction === 'trash' && (item.impact?.retained_elsewhere || item.retained_elsewhere || (item.impact?.retained_uses_visible_count || item.retained_uses_visible_count || 0) > 0) && <p className="mt-1 text-xs leading-5 text-amber-800">El archivo seguirá disponible en los usos que se conservan.</p>}</div><span className="shrink-0 text-xs text-slate-500">{formatStorageBytes(item.size_bytes)}</span></li>)}</ul>
           {reviewAction === 'purge' && review.eligible_count > 0 && <label className="mt-3 flex min-h-11 cursor-pointer items-start gap-3 rounded-xl border border-rose-200 p-3 text-sm text-slate-700"><input type="checkbox" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} className="mt-1 h-4 w-4 shrink-0 accent-rose-600" />Entiendo que estos archivos no se podrán recuperar.</label>}

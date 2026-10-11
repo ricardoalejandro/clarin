@@ -50,11 +50,18 @@ const storageReferenceSelectedKeysSQL = `WITH selected_keys AS MATERIALIZED (
  FROM unnest($2::text[]) AS keys(object_key)
 ) `
 
+// Only URL-bearing scalar values need percent decoding. A percent sign in a
+// document's text/style must not decode its entire serialized design per key.
+// The Go structural parser remains the authority after this coarse filter.
 const storageReferenceSelectedKeyPredicateSQL = `EXISTS(SELECT 1 FROM selected_keys selected
  WHERE strpos(r.payload,selected.object_key)>0 OR strpos(r.payload,selected.encoded_key)>0
- OR (strpos(r.payload,'%')>0 AND
-  (strpos(clarin_storage_path_unescape(r.payload),selected.object_key)>0
-   OR strpos(clarin_storage_path_unescape(r.payload),selected.encoded_key)>0)))`
+ OR (strpos(r.payload,'%')>0 AND EXISTS(
+  SELECT 1 FROM jsonb_path_query(r.payload::jsonb, '$.** ? (@.type() == "string")') scalar(value)
+  WHERE strpos(scalar.value #>> '{}','%')>0
+  AND ((scalar.value #>> '{}') ~ '^(https?://|/)'
+    OR strpos(scalar.value #>> '{}','/api/media/file/')>0
+    OR strpos(scalar.value #>> '{}','/clarin-media/')>0)
+  AND strpos(clarin_storage_path_unescape(scalar.value #>> '{}'),selected.object_key)>0)))`
 
 func storageSelfServiceReferencesForKeys(ctx context.Context, q storageSelfServiceQuerier, account uuid.UUID, keys []string, stores ...*storage.Storage) (map[string][]storageSelfServiceReference, error) {
 	if len(keys) == 0 || len(keys) > 100 {

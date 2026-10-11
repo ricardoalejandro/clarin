@@ -1,125 +1,58 @@
-/**
- * Fabric.js Canvas Export — PNG, JPEG, PDF with quality multiplier
- * Replaces html2canvas entirely. Uses Canvas 2D API natively.
- */
-
 import type { Canvas, StaticCanvas } from 'fabric'
-
-export interface ExportOptions {
-  format: 'png' | 'pdf' | 'jpeg'
-  multiplier?: number  // default 4 (~200 DPI)
-  quality?: number     // 0-1 for JPEG, ignored for PNG
+import { validateDocumentCanvas } from '@/lib/documents/documentValidation'
+export const DOCUMENT_EXPORT_PROFILES = {
+  compact: { label: 'Ligero', dpi: 96, quality: 0.72 },
+  balanced: { label: 'Equilibrado', dpi: 150, quality: 0.85 },
+  print: { label: 'Impresión', dpi: 300, quality: 0.95 },
+} as const
+export interface ExportOptions { format: 'png' | 'pdf' | 'jpeg'; multiplier?: number; dpi?: number; quality?: number; scope?: 'page' | 'selection'; transparent?: boolean; signal?: AbortSignal }
+export interface DocumentRenderSnapshot { canvasJson: Record<string, unknown>; width: number; height: number }
+export function documentExportGeometry(width: number, height: number, options: Pick<ExportOptions, 'dpi' | 'multiplier'>) {
+  if (![width, height].every(n => Number.isFinite(n) && n > 0 && n <= 1e7)) throw new Error('El área de exportación no es válida.')
+  const requested = options.dpi !== undefined ? options.dpi / 50.8 : (options.multiplier ?? 150 / 50.8)
+  if (!Number.isFinite(requested) || requested <= 0 || requested > 64) throw new Error('La resolución no es válida.')
+  const multiplier = Math.min(requested, 16384 / width, 16384 / height, Math.sqrt(32_000_000 / (width * height)))
+  return { multiplier, width: Math.max(1, Math.floor(width * multiplier)), height: Math.max(1, Math.floor(height * multiplier)), effectiveDpi: multiplier * 50.8, clamped: multiplier < requested }
 }
-
-/**
- * Export a Fabric canvas to a Blob.
- * Exports only the page area (not the pasteboard).
- */
-export async function exportCanvasToBlob(
-  canvas: Canvas | StaticCanvas,
-  options: ExportOptions
-): Promise<Blob> {
-  const multiplier = options.multiplier ?? 4
-  const quality = options.quality ?? 0.92
-  const format = options.format
-
-  // Get page dimensions (pasteboard model)
-  const pageW = (canvas as any).__pageWidth || canvas.getWidth()
-  const pageH = (canvas as any).__pageHeight || canvas.getHeight()
-
-  if (format === 'pdf') {
-    return exportToPdf(canvas, multiplier, pageW, pageH)
-  }
-
-  // PNG or JPEG — export only the page area
-  const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/png'
-
-  // Save current viewport transform
-  const origVpt = [...canvas.viewportTransform!]
-
-  // Reset viewport to identity (1:1) so export covers the page area at origin
-  canvas.setViewportTransform([1, 0, 0, 1, 0, 0])
-
-  const dataUrl = canvas.toDataURL({
-    format: format === 'jpeg' ? 'jpeg' : 'png',
-    multiplier,
-    quality: format === 'jpeg' ? quality : 1,
-    left: 0,
-    top: 0,
-    width: pageW,
-    height: pageH,
-  })
-
-  // Restore viewport
-  canvas.setViewportTransform(origVpt as any)
-  canvas.requestRenderAll()
-
-  return dataUrlToBlob(dataUrl, mimeType)
+function abortCheck(signal?: AbortSignal) { if (signal?.aborted) throw new DOMException('Exportación cancelada', 'AbortError') }
+export async function renderDocumentSnapshotWithPreview(snapshot: DocumentRenderSnapshot, options: ExportOptions): Promise<{ blob: Blob; preview: Blob }> {
+  abortCheck(options.signal)
+  const invalid = validateDocumentCanvas(snapshot.canvasJson); if (invalid) throw new Error(invalid)
+  const geometry = documentExportGeometry(snapshot.width, snapshot.height, options)
+  if (snapshot.width > 16384 || snapshot.height > 16384 || snapshot.width * snapshot.height > 32_000_000) throw new Error('El área seleccionada es demasiado grande. Acerca los elementos o exporta la página.')
+  const { StaticCanvas } = await import('./runtime')
+  const { loadTemplateToCanvas, ensureFontsLoaded } = await import('./serialization')
+  await ensureFontsLoaded(); abortCheck(options.signal)
+  const canvas = new StaticCanvas(undefined, { width: snapshot.width, height: snapshot.height, renderOnAddRemove: false, enableRetinaScaling: false })
+  try {
+    await loadTemplateToCanvas(canvas, snapshot.canvasJson, snapshot.width / 2, snapshot.height / 2, options.signal)
+    if (options.transparent && options.format === 'png') canvas.backgroundColor = ''
+    else if (!canvas.backgroundColor) canvas.backgroundColor = '#ffffff'
+    canvas.setViewportTransform([1, 0, 0, 1, 0, 0]); canvas.renderAll(); abortCheck(options.signal)
+    const quality = Math.min(1, Math.max(0.1, options.quality ?? 0.85))
+    const element = canvas.toCanvasElement(geometry.multiplier, { left: 0, top: 0, width: snapshot.width, height: snapshot.height })
+    try {
+      const lossless = options.format === 'png' || (options.format === 'pdf' && (options.dpi ?? geometry.effectiveDpi) >= 300)
+      const mime = lossless ? 'image/png' : 'image/jpeg'
+      const image = await new Promise<Blob>((resolve, reject) => element.toBlob(blob => blob ? resolve(blob) : reject(new Error('No se pudo codificar la imagen.')), mime, quality))
+      abortCheck(options.signal)
+      if (options.format !== 'pdf') return { blob: image, preview: image }
+      const { jsPDF } = await import('jspdf')
+      const pdf = new jsPDF({ orientation: snapshot.width > snapshot.height ? 'l' : 'p', unit: 'mm', format: [snapshot.width / 2, snapshot.height / 2], compress: true })
+      const bytes = new Uint8Array(await image.arrayBuffer()); abortCheck(options.signal)
+      pdf.addImage(bytes, lossless ? 'PNG' : 'JPEG', 0, 0, snapshot.width / 2, snapshot.height / 2)
+      return { blob: pdf.output('blob'), preview: image }
+    } finally { element.width = 0; element.height = 0 }
+  } finally { await canvas.dispose() }
 }
-
-/**
- * Export canvas to PDF using jsPDF + native canvas export.
- */
-async function exportToPdf(
-  canvas: Canvas | StaticCanvas,
-  multiplier: number,
-  pageW: number,
-  pageH: number,
-): Promise<Blob> {
-  const { jsPDF } = await import('jspdf')
-
-  const mmW = pageW / 2 // MM_TO_PX = 2
-  const mmH = pageH / 2
-
-  const orientation = mmW > mmH ? 'l' : 'p'
-  const pdf = new jsPDF({ orientation, unit: 'mm', format: [mmW, mmH] })
-
-  // Save current viewport transform
-  const origVpt = [...canvas.viewportTransform!]
-
-  // Reset viewport to identity for clean export
-  canvas.setViewportTransform([1, 0, 0, 1, 0, 0])
-
-  const dataUrl = canvas.toDataURL({
-    format: 'jpeg',
-    multiplier,
-    quality: 0.85,
-    left: 0,
-    top: 0,
-    width: pageW,
-    height: pageH,
-  })
-
-  // Restore viewport
-  canvas.setViewportTransform(origVpt as any)
-  canvas.requestRenderAll()
-
-  pdf.addImage(dataUrl, 'JPEG', 0, 0, mmW, mmH)
-  return pdf.output('blob')
+export async function renderDocumentSnapshot(snapshot: DocumentRenderSnapshot, options: ExportOptions): Promise<Blob> { return (await renderDocumentSnapshotWithPreview(snapshot, options)).blob }
+/** Every export renders a detached snapshot; live viewport, helpers, selection
+ * and history are never temporarily mutated, even when encoding fails. */
+export async function exportCanvasToBlob(canvas: Canvas | StaticCanvas, options: ExportOptions): Promise<Blob> {
+  const { createDocumentRenderSnapshot } = await import('./editorSnapshot')
+  const snapshot = await createDocumentRenderSnapshot(canvas, options.scope ?? 'page', options.transparent === true && options.format === 'png')
+  return renderDocumentSnapshot(snapshot, options)
 }
-
-/**
- * Convert a data URL to a Blob.
- */
-function dataUrlToBlob(dataUrl: string, mimeType: string): Blob {
-  const parts = dataUrl.split(',')
-  const byteString = atob(parts[1])
-  const ab = new ArrayBuffer(byteString.length)
-  const ia = new Uint8Array(ab)
-  for (let i = 0; i < byteString.length; i++) {
-    ia[i] = byteString.charCodeAt(i)
-  }
-  return new Blob([ab], { type: mimeType })
-}
-
-/**
- * Download a blob as a file.
- */
 export function downloadBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
+  const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
 }

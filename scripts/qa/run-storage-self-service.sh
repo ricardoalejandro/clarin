@@ -38,6 +38,16 @@ fi
 
 # Prepared environments can reuse an official binary without downloading MinIO
 # again. Require its independently verified checksum before creating resources.
+# A previously pulled immutable official image can run in an isolated container.
+# Its digest is explicit; no production container, environment or volume is used.
+qa_minio_image="${CLARIN_QA_MINIO_IMAGE:-}"
+if [ -n "$qa_minio_image" ]; then
+  if [[ ! "$qa_minio_image" =~ ^(minio/minio|quay.io/minio/minio)@sha256:[a-f0-9]{64}$ ]] \
+    || ! docker image inspect "$qa_minio_image" >/dev/null 2>&1; then
+    echo 'Prepared MinIO image requires an already-pulled official immutable digest.' >&2
+    exit 1
+  fi
+fi
 qa_minio_binary="${CLARIN_QA_MINIO_BINARY:-}"
 if [ -n "$qa_minio_binary" ]; then
   if [ ! -x "$qa_minio_binary" ] || ! command -v sha256sum >/dev/null 2>&1 \
@@ -54,10 +64,12 @@ qa_postgres="${qa_id}-postgres"
 qa_redis="${qa_id}-redis"
 qa_temp=$(mktemp -d -t clarin-storage-qa.XXXXXX)
 qa_minio_pid=''
+qa_minio_container=''
 qa_password=$(openssl rand -hex 24)
 qa_minio_password=$(openssl rand -hex 24)
 
 cleanup() {
+  if [ -n "$qa_minio_container" ]; then docker rm -f "$qa_minio_container" >/dev/null 2>&1 || true; fi
   if [ -n "$qa_minio_pid" ]; then
     kill "$qa_minio_pid" >/dev/null 2>&1 || true
     wait "$qa_minio_pid" 2>/dev/null || true
@@ -79,6 +91,14 @@ docker run --detach --rm --name "$qa_postgres" \
   --env POSTGRES_DB=program_survey_integrity_test postgres:16-alpine >/dev/null
 docker run --detach --rm --name "$qa_redis" \
   --publish "127.0.0.1:$CLARIN_STORAGE_QA_REDIS_PORT:6379" redis:7-alpine >/dev/null
+if [ -n "$qa_minio_image" ]; then
+  qa_minio_container="${qa_id}-minio"
+  docker run --detach --rm --name "$qa_minio_container" \
+    --publish "127.0.0.1:$CLARIN_STORAGE_QA_MINIO_PORT:9000" \
+    --publish "127.0.0.1:$CLARIN_STORAGE_QA_MINIO_CONSOLE_PORT:9001" \
+    --env MINIO_ROOT_USER=storageqa --env "MINIO_ROOT_PASSWORD=$qa_minio_password" --env MINIO_UPDATE=off \
+    "$qa_minio_image" server /data --address :9000 --console-address :9001 >/dev/null
+else
 # Build the exact official source revision; retired container tags are not a
 # reliable test dependency. Go verifies the source using the public checksum DB.
 if [ -z "$qa_minio_binary" ]; then
@@ -91,9 +111,11 @@ MINIO_ROOT_USER=storageqa MINIO_ROOT_PASSWORD="$qa_minio_password" MINIO_UPDATE=
   --console-address "127.0.0.1:$CLARIN_STORAGE_QA_MINIO_CONSOLE_PORT" >"$qa_temp/minio.log" 2>&1 &
 qa_minio_pid=$!
 
+fi
+
 qa_ready=0
 for _ in $(seq 1 60); do
-  if ! kill -0 "$qa_minio_pid" 2>/dev/null; then
+  if [ -n "$qa_minio_pid" ] && ! kill -0 "$qa_minio_pid" 2>/dev/null; then
     echo 'Disposable MinIO process failed to start.' >&2
     exit 1
   fi
@@ -123,7 +145,7 @@ export CLARIN_STORAGE_QA_REDIS_URL="redis://127.0.0.1:$CLARIN_STORAGE_QA_REDIS_P
 export CLARIN_RUN_STORAGE_SELF_SERVICE_INTEGRATION=1
 unset CLARIN_STORAGE_QA_PGLITE
 cd "$repo_root/backend"
-go test -count=1 -timeout=15m -run '^TestStorageSelfService(Integration|MultiOriginIntegration|ResourceACLIntegration|OrphansIntegration|IndexIntegration|ReportedRegressionsIntegration)$' -v ./internal/api
+go test -count=1 -timeout=15m -run '^TestStorageSelfService(Integration|MultiOriginIntegration|ResourceACLIntegration|OrphansIntegration|IndexIntegration|ReportedRegressionsIntegration|FastReadsIntegration)$' -v ./internal/api
 # Exercise the real preview publication lock helper against PostgreSQL too;
 # its temporary schema is isolated from the service fixtures below.
 go test -count=1 -timeout=1m -run '^TestTaskPreviewPublicationConcurrencyIntegration$' -v ./internal/taskpreview

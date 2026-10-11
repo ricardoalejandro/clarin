@@ -48,7 +48,7 @@ func storagePerformanceExplainInventory(t *testing.T, f *storageQAFixture, objec
 		}{
 			{"count", storageInventoryCTE(claims, privateSources) + ` SELECT count(*) FROM file_rows f` + storageInventoryFilterSQL, filterArgs},
 			{"files-before-page-projection", storageInventoryCTE(claims) + ` SELECT to_jsonb(f) FROM file_rows f` + storageInventoryFilterSQL + ` ORDER BY size_bytes DESC,object_key ASC,recovery_id ASC LIMIT $13 OFFSET $14`, pageArgs},
-			{"files", storageInventoryPageSQL(claims, filter, privateSources), pageArgs},
+			{"files", storageInventoryPageWithCountSQL(claims, filter, privateSources), pageArgs},
 			{"usage", storageInventoryUsageSQL(claims, privateSources), baseArgs},
 		} {
 			explain := "EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) "
@@ -139,8 +139,8 @@ func storagePerformanceSharedReferences(t *testing.T, db *pgxpool.Pool, store *s
 		f.app.Get("/storage/uses", f.server.handleStorageSelfServiceUses)
 		first := storagePerformanceRequest{path: "/storage/files?limit=40", total: 1, files: 1, references: n}
 		usage := storagePerformanceRequest{path: "/storage/usage", total: 1, usage: true, references: n}
-		// This endpoint intentionally remains a separate result: its adapters
-		// currently load and authorize every use before slicing the HTTP page.
+		// This fan-out remains a separate result: SQL selects the bounded
+		// authorized page before adapters hydrate its canonical business rows.
 		uses := storagePerformanceRequest{path: "/storage/uses?limit=40&object_key=" + url.QueryEscape(f.account.String()+"/chats/"+storagePerformanceFilename(0)), total: n, files: 40, uses: true, references: n}
 		for _, scenario := range []struct {
 			name     string

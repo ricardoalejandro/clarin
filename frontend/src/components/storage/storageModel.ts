@@ -70,7 +70,7 @@ export function formatStorageBytes(value = 0): string {
   if (!Number.isFinite(value) || value <= 0) return '0 B'
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']; let size = value; let unit = 0
   while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1 }
-  return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`
+  return `${unit === 0 || (unit < 3 && size >= 10) ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`
 }
 export function storageDate(value?: string): string {
   if (!value || !Number.isFinite(Date.parse(value))) return 'Sin fecha'

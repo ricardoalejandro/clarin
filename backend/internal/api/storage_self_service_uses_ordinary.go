@@ -115,7 +115,19 @@ func storageOrdinaryLoad(ctx context.Context, q storageSelfServiceQuerier, accou
 }
 
 func (a storageOrdinaryUseAdapter) List(ctx context.Context, s *Server, q storageSelfServiceQuerier, actor storageUseActor, key string) ([]storageSelfServiceUse, error) {
+	selected, bounded := storageReadSelectedIDs(ctx, a.Name())
+	if bounded && len(selected) == 0 {
+		return nil, nil
+	}
+	selectedIDs := make(map[uuid.UUID]bool, len(selected))
+	for _, id := range selected {
+		selectedIDs[id] = true
+	}
 	refs, err := storageSelfServiceObjectReferences(ctx, q, actor.AccountID, key, s.storage)
+	if err != nil {
+		return nil, err
+	}
+	linkedParents, err := storageOrdinaryParents(ctx, q, actor.AccountID, refs)
 	if err != nil {
 		return nil, err
 	}
@@ -138,23 +150,11 @@ func (a storageOrdinaryUseAdapter) List(ctx context.Context, s *Server, q storag
 			continue
 		}
 		parent := id
-		if ref.Origin == "campaigns" {
-			var linked uuid.UUID
-			e = q.QueryRow(ctx, `SELECT a.campaign_id FROM campaign_attachments a JOIN campaigns c ON c.id=a.campaign_id WHERE a.id=$1 AND c.account_id=$2`, id, actor.AccountID).Scan(&linked)
-			if e == nil {
-				parent = linked
-			} else if !errors.Is(e, pgx.ErrNoRows) {
-				return nil, e
-			}
+		if linked, ok := linkedParents[ref.Origin+"|"+ref.ID]; ok {
+			parent = linked
 		}
-		if ref.Origin == "quick_replies" {
-			var linked uuid.UUID
-			e = q.QueryRow(ctx, `SELECT quick_reply_id FROM quick_reply_attachments WHERE id=$1 AND account_id=$2`, id, actor.AccountID).Scan(&linked)
-			if e == nil {
-				parent = linked
-			} else if !errors.Is(e, pgx.ErrNoRows) {
-				return nil, e
-			}
+		if bounded && !selectedIDs[parent] {
+			continue
 		}
 		group := ref.Origin + "|" + parent.String()
 		parents[group] = parent
@@ -165,16 +165,26 @@ func (a storageOrdinaryUseAdapter) List(ctx context.Context, s *Server, q storag
 		groups = append(groups, group)
 	}
 	sort.Strings(groups)
+	if candidateOnly, _ := ctx.Value(storageReadUseCandidatesOnlyKey{}).(bool); candidateOnly {
+		result := make([]storageSelfServiceUse, 0, len(groups))
+		for _, group := range groups {
+			kind := strings.SplitN(group, "|", 2)[0]
+			id := parents[group]
+			result = append(result, storageSelfServiceUse{UseID: storageUseID(actor.AccountID, a.Name(), id, kind, key), Type: kind, Adapter: a.Name(), AccountID: actor.AccountID, ObjectKey: key, SourceID: id, Slot: kind, ReferenceIDs: coverage[group]})
+		}
+		return result, nil
+	}
+	states, err := storageOrdinaryLoadGroups(ctx, q, actor.AccountID, parents)
+	if err != nil {
+		return nil, err
+	}
 	result := []storageSelfServiceUse{}
 	for _, group := range groups {
 		kind := strings.SplitN(group, "|", 2)[0]
 		id := parents[group]
-		state, e := storageOrdinaryLoad(ctx, q, actor.AccountID, id, kind, false)
-		if errors.Is(e, pgx.ErrNoRows) {
+		state, found := states[group]
+		if !found {
 			continue
-		}
-		if e != nil {
-			return nil, e
 		}
 		label, href := "Adjunto en Chats", "/dashboard/chats"
 		parent := id
@@ -194,7 +204,7 @@ func (a storageOrdinaryUseAdapter) List(ctx context.Context, s *Server, q storag
 			label = "Foto de " + storageJSONText(state.Row, "name")
 			href = "/dashboard/contacts"
 		}
-		_, e = s.storageOrdinaryRemovedState(kind, key, state)
+		_, e := s.storageOrdinaryRemovedState(kind, key, state)
 		if !storageOrdinaryCanManage(actor, kind) {
 			e = errStorageUseProtected
 		}

@@ -53,6 +53,14 @@ func storagePerformanceInt(t *testing.T, name string, fallback, min, max int) in
 	return n
 }
 
+// Large cardinality probes can isolate the SQL inventory/read path. One real
+// provider object remains, while the rest have explicit synthetic inventory
+// observations. Canonical sources/FKs/triggers/backfill remain real PostgreSQL.
+// Streaming correctness is covered independently with physical MinIO bytes.
+func storagePerformanceRelationalOnly(n int) bool {
+	return os.Getenv("CLARIN_STORAGE_PERF_RELATIONAL_LARGE") == "1" && n > 1000
+}
+
 func TestStorageSelfServicePerformance(t *testing.T) {
 	if os.Getenv("CLARIN_RUN_STORAGE_SELF_SERVICE_PERFORMANCE") != "1" {
 		t.Skip("requires explicit disposable native storage performance opt-in")
@@ -92,7 +100,11 @@ func TestStorageSelfServicePerformance(t *testing.T) {
 			f := newStorageQAFixture(t, db, store)
 			started := time.Now()
 			chatCount := min(configuredChats, n)
-			storagePerformanceSeed(t, f, n, textRatio, chatCount)
+			sampleTextRatio := textRatio
+			if storagePerformanceRelationalOnly(n) {
+				sampleTextRatio = 0
+			}
+			storagePerformanceSeed(t, f, n, sampleTextRatio, chatCount)
 			foreign, _, _ := f.media(f.other, "chats", "foreign-performance-sentinel.pdf", true)
 			objects, err := store.ListPrefix(context.Background(), f.account.String()+"/")
 			if err != nil {
@@ -102,7 +114,11 @@ func TestStorageSelfServicePerformance(t *testing.T) {
 			for _, object := range objects {
 				bytes += object.Size
 			}
-			if len(objects) != n || bytes != int64(n*storagePerformanceObjectBytes) {
+			physicalCount := n
+			if storagePerformanceRelationalOnly(n) {
+				physicalCount = 1
+			}
+			if len(objects) != physicalCount || bytes != int64(physicalCount*storagePerformanceObjectBytes) {
 				t.Fatalf("seed mismatch: objects=%d bytes=%d", len(objects), bytes)
 			}
 			objects = nil
@@ -115,10 +131,26 @@ func TestStorageSelfServicePerformance(t *testing.T) {
 			if indexErr != nil {
 				t.Fatal(indexErr)
 			}
+			if storagePerformanceRelationalOnly(n) {
+				for first := 0; first < n; first += 1000 {
+					lower := f.account.String() + "/chats/" + storagePerformanceFilename(first)
+					upper := f.account.String() + "/chats/" + storagePerformanceFilename(min(first+1000, n))
+					f.exec(`INSERT INTO storage_inventory_objects(account_id,bucket_kind,object_key,size_bytes,last_modified,media_type,content_type,filename,presence)
+                        SELECT account_id,'ordinary',object_key,size_bytes,NOW(),media_type,content_type,filename,'present' FROM media_assets WHERE account_id=$1 AND object_key>=$2 AND object_key<$3
+                        ON CONFLICT(account_id,bucket_kind,object_key) DO UPDATE SET size_bytes=EXCLUDED.size_bytes,presence='present'`, f.account, lower, upper)
+				}
+				var count int
+				var projectedBytes int64
+				if err = f.db.QueryRow(context.Background(), `SELECT count(*),COALESCE(sum(size_bytes),0) FROM storage_inventory_objects WHERE account_id=$1 AND presence='present'`, f.account).Scan(&count, &projectedBytes); err != nil || count != n || projectedBytes != int64(n*storagePerformanceObjectBytes) {
+					t.Fatal("relational inventory fixture mismatch")
+				}
+			}
+			t.Logf("STORAGE_PERF_SCOPE relational_inventory=%t indexed_objects=%d physical_objects=%d physical_bytes=%d text_messages=%d", storagePerformanceRelationalOnly(n), n, physicalCount, bytes, n*sampleTextRatio)
+
 			t.Logf("STORAGE_PERF_INDEX objects=%d duration_ms=%.3f", n, float64(time.Since(indexStart).Microseconds())/1000)
 			storagePerformanceAnalyzeInventory(t, f)
 			storagePerformanceExplainInventory(t, f, n)
-			t.Logf("STORAGE_PERF_SEED objects=%d bytes=%d chat_media_references=%d text_messages=%d chats=%d other_account_objects=1 duration_ms=%.3f", n, bytes, n, n*textRatio, chatCount, float64(seedDuration.Microseconds())/1000)
+			t.Logf("STORAGE_PERF_SEED objects=%d bytes=%d chat_media_references=%d text_messages=%d chats=%d other_account_objects=1 duration_ms=%.3f", n, bytes, n, n*sampleTextRatio, chatCount, float64(seedDuration.Microseconds())/1000)
 			storagePerformanceTrackS3(t, f)
 			lastOffset := (n - 1) / 40 * 40
 			first := storagePerformanceRequest{path: "/storage/files?limit=40", total: n, files: 40}
@@ -141,7 +173,7 @@ func TestStorageSelfServicePerformance(t *testing.T) {
 					// Membership changes occur outside timings. Handlers reload the
 					// canonical role; synthetic claims intentionally remain stale.
 					f.exec(`UPDATE user_accounts SET role=$3 WHERE account_id=$1 AND user_id=$2`, f.account, f.user, scenario.role)
-					storagePerformanceMeasure(t, f, scenario.name, scenario.requests, n, samples, textRatio, chatCount, foreign)
+					storagePerformanceMeasure(t, f, scenario.name, scenario.requests, n, samples, sampleTextRatio, chatCount, foreign)
 				})
 			}
 		})
@@ -190,13 +222,17 @@ func storagePerformanceSeed(t *testing.T, f *storageQAFixture, n, textRatio, cha
 	// Upload real bytes with bounded parallelism; all keys belong to this test's
 	// newly-created account. The fixture removes only these synthetic prefixes.
 	const workers = 16
+	uploadCount := n
+	if storagePerformanceRelationalOnly(n) {
+		uploadCount = 1
+	}
 	failures := make(chan error, workers)
 	var wg sync.WaitGroup
 	for worker := 0; worker < workers; worker++ {
 		wg.Add(1)
 		go func(worker int) {
 			defer wg.Done()
-			for i := worker; i < n; i += workers {
+			for i := worker; i < uploadCount; i += workers {
 				key := f.account.String() + "/chats/" + storagePerformanceFilename(i)
 				if _, err := f.store.UploadObject(ctx, key, storagePerformancePayload(i), "application/pdf"); err != nil {
 					failures <- err
@@ -515,8 +551,9 @@ func storagePerformanceMeasure(t *testing.T, f *storageQAFixture, scenario strin
 	}
 	result := map[string]any{
 		"s3_requests_during_measurements": 0, "scenario": scenario, "objects": n, "samples": samples, "requests_per_sample": len(requests),
-		"actor_role": actorRole,
-		"chats":      chatCount, "references_per_object": referencesPerObject, "text_messages_per_object": textRatio, "object_bytes": storagePerformanceObjectBytes,
+		"actor_role":                   actorRole,
+		"relational_inventory_fixture": storagePerformanceRelationalOnly(n),
+		"chats":                        chatCount, "references_per_object": referencesPerObject, "text_messages_per_object": textRatio, "object_bytes": storagePerformanceObjectBytes,
 		"latency_ms": storagePerformanceQuantiles(latency), "allocated_bytes_per_sample": storagePerformanceQuantiles(allocations), "allocations_per_sample": storagePerformanceQuantiles(allocCounts),
 		"gc_collections": collections, "gc_pause_ms": float64(pauses) / 1e6, "response_bytes_last_sample": responseBytes,
 		"memory_extra_samples": 1, "memory_sampling_ms": 10, "baseline_heap_bytes": baseline.HeapAlloc, "sampled_peak_heap_bytes": peakHeap,

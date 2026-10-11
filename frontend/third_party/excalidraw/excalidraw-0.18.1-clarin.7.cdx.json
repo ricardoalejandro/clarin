@@ -5497,17 +5497,17 @@
       "version": "1.1.0"
     },
     {
-      "bom-ref": "npm:dompurify@3.4.13:daf998228aa3cded",
+      "bom-ref": "npm:dompurify@3.4.16:b2aa3ea4da77a918",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/dompurify/-/dompurify-3.4.13.tgz"
+          "url": "https://registry.npmjs.org/dompurify/-/dompurify-3.4.16.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "DAF998228AA3CDED9DFA46A43FC4BF9D2E6C85FB25E7CEE4CF012370695376292C5158051E7142B0B603563FC936A2553906464980539AEC9CBF43E87709A731"
+          "content": "B2AA3EA4DA77A918422296E0462D72F13824DBB068D91CBBC34742D4D05E3537590A15A3CFD5DBFCA3A865B44FFD1EA9419F34430F18857C35DE159605B3119D"
         }
       ],
       "licenses": [
@@ -5519,17 +5519,17 @@
       "properties": [
         {
           "name": "clarin:npm:integrity",
-          "value": "sha512-2vmYIoqjze2d+kakP8S/nS5shfsl587kzwEjcGlTdiksUVgFHnFCsLYDVj/JNqJVOQZGSYBTmuycv0PodwmnMQ=="
+          "value": "sha512-sqo+pNp3qRhCIpbgRi1y8Tgk27Bo2Ry7w0dC1NBeNTdZChWjz9Xb/KOoZbRP/R6pQZ80Qw8YhXw13hWWBbMRnQ=="
         },
         {
           "name": "clarin:npm:lock-paths",
           "value": "node_modules/dompurify"
         }
       ],
-      "purl": "pkg:npm/dompurify@3.4.13",
+      "purl": "pkg:npm/dompurify@3.4.16",
       "scope": "required",
       "type": "library",
-      "version": "3.4.13"
+      "version": "3.4.16"
     },
     {
       "bom-ref": "npm:es-toolkit@1.50.0:3b264a85456f11ea",
@@ -7947,17 +7947,17 @@
       "version": "1.0.1"
     },
     {
-      "bom-ref": "npm:source-map-js@1.2.1:51758c2a12cec152",
+      "bom-ref": "npm:source-map-js@1.2.2:2868fff18e37c77e",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.1.tgz"
+          "url": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "51758C2A12CEC1529BEF6F0852D40F5F17D853EBAC7726ED52B2BFF2E184F0240CBEB84EA70BF30C1C23D108522FB31073BBC8B084811BC550F3E203431A5F40"
+          "content": "2868FFF18E37C77E5A6550EDB7E27898AD61A0B18750B3187D290E0C93508CD0C2DE85B53EA3E8C4CC28D292D4B1633F5041B338DFCDC5E1F2C047CD5CD3F757"
         }
       ],
       "licenses": [
@@ -7969,17 +7969,17 @@
       "properties": [
         {
           "name": "clarin:npm:integrity",
-          "value": "sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA=="
+          "value": "sha512-KGj/8Y43x35aZVDtt+J4mK1hoLGHULMYfSkODJNQjNDC3oW1PqPoxMwo0pLUsWM/UEGzON/NxeHywEfNXNP3Vw=="
         },
         {
           "name": "clarin:npm:lock-paths",
           "value": "node_modules/source-map-js"
         }
       ],
-      "purl": "pkg:npm/source-map-js@1.2.1",
+      "purl": "pkg:npm/source-map-js@1.2.2",
       "scope": "required",
       "type": "library",
-      "version": "1.2.1"
+      "version": "1.2.2"
     },
     {
       "bom-ref": "npm:stylis@4.4.0:e59f59a51cdfb87e",
@@ -8730,7 +8730,7 @@
         "npm:sass@1.51.0:85a19da53832c094",
         "npm:tunnel-rat@0.1.2:951e551e690f8737"
       ],
-      "ref": "npm:@excalidraw/excalidraw@0.18.1-clarin.7:da5a8d51ecf03dda"
+      "ref": "npm:@excalidraw/excalidraw@0.18.1-clarin.7:47d97ccb4f8f03c6"
     },
     {
       "dependsOn": [],
@@ -9762,7 +9762,7 @@
       "dependsOn": [
         "npm:@types/trusted-types@2.0.7:49c68f767d5d41cc"
       ],
-      "ref": "npm:dompurify@3.4.13:daf998228aa3cded"
+      "ref": "npm:dompurify@3.4.16:b2aa3ea4da77a918"
     },
     {
       "dependsOn": [],
@@ -9932,7 +9932,7 @@
         "npm:d3@7.9.0:7b5538ea354ffb0e",
         "npm:dagre-d3-es@7.0.14:3f8ac5315abd1125",
         "npm:dayjs@1.11.21:f7c213f8739a8408",
-        "npm:dompurify@3.4.13:daf998228aa3cded",
+        "npm:dompurify@3.4.16:b2aa3ea4da77a918",
         "npm:es-toolkit@1.50.0:3b264a85456f11ea",
         "npm:katex@0.16.47:11ea3c62cd5da14d",
         "npm:khroma@2.1.0:2ecf7ddf3bb37dac",
@@ -10122,7 +10122,7 @@
       "dependsOn": [
         "npm:chokidar@3.6.0:ed54f5ddf9a3a2d2",
         "npm:immutable@4.3.9:39b1f2e1837bc9cc",
-        "npm:source-map-js@1.2.1:51758c2a12cec152"
+        "npm:source-map-js@1.2.2:2868fff18e37c77e"
       ],
       "ref": "npm:sass@1.51.0:85a19da53832c094"
     },
@@ -10146,7 +10146,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "npm:source-map-js@1.2.1:51758c2a12cec152"
+      "ref": "npm:source-map-js@1.2.2:2868fff18e37c77e"
     },
     {
       "dependsOn": [],
@@ -10253,11 +10253,11 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "npm:@excalidraw/excalidraw@0.18.1-clarin.7:da5a8d51ecf03dda",
+      "bom-ref": "npm:@excalidraw/excalidraw@0.18.1-clarin.7:47d97ccb4f8f03c6",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "DA5A8D51ECF03DDA77FA668954710EE994C8C43D8BA3703FDFBC684DF372797A"
+          "content": "47D97CCB4F8F03C694B8C082E4B42E539B0AD7094F2676972BDE816738B07D80"
         }
       ],
       "licenses": [
@@ -10273,7 +10273,7 @@
         },
         {
           "name": "clarin:source:sha256",
-          "value": "da5a8d51ecf03dda77fa668954710ee994c8c43d8ba3703fdfbc684df372797a"
+          "value": "47d97ccb4f8f03c694b8c082e4b42e539b0ad7094f2676972bde816738b07d80"
         },
         {
           "name": "clarin:upstream:tag",
@@ -10307,7 +10307,7 @@
       },
       {
         "name": "clarin:advisory-observed-at",
-        "value": "2026-09-14"
+        "value": "2026-10-11"
       },
       {
         "name": "clarin:advisory-command",
@@ -10315,10 +10315,74 @@
       },
       {
         "name": "clarin:frontend-audit-summary",
-        "value": "{\"info\":0,\"low\":0,\"moderate\":0,\"high\":0,\"critical\":0,\"total\":0}"
+        "value": "{\"info\":0,\"low\":3,\"moderate\":0,\"high\":6,\"critical\":0,\"total\":9}"
       }
     ]
   },
   "specVersion": "1.6",
-  "version": 1
+  "version": 1,
+  "vulnerabilities": [
+    {
+      "affects": [
+        {
+          "ref": "npm:katex@0.16.47:11ea3c62cd5da14d",
+          "versions": [
+            {
+              "status": "affected",
+              "version": "0.16.47"
+            }
+          ]
+        }
+      ],
+      "analysis": {
+        "detail": "Remaining inherited KaTeX advisory through Mermaid. Existing prototype pollution is a precondition. The printable-template path does not invoke KaTeX; editor/whole-application reachability remains outside this focused patch verification.",
+        "state": "in_triage"
+      },
+      "bom-ref": "vulnerability:GHSA-238p-pmpm-9mq7",
+      "id": "GHSA-238p-pmpm-9mq7",
+      "ratings": [
+        {
+          "severity": "low",
+          "source": {
+            "name": "npm audit"
+          }
+        }
+      ],
+      "source": {
+        "name": "GitHub Advisory Database",
+        "url": "https://github.com/advisories/GHSA-238p-pmpm-9mq7"
+      }
+    },
+    {
+      "affects": [
+        {
+          "ref": "npm:braces@3.0.3:c906d780efce4995",
+          "versions": [
+            {
+              "status": "affected",
+              "version": "3.0.3"
+            }
+          ]
+        }
+      ],
+      "analysis": {
+        "detail": "Remaining inherited advisory, not fixed by this patch. Braces is declared through sass/chokidar in the editor install closure as well as frontend build tooling. No invocation found in scoped Storage/printable-template runtime; complete runtime reachability is not asserted.",
+        "state": "in_triage"
+      },
+      "bom-ref": "vulnerability:GHSA-vfj7-8cjw-p6xm",
+      "id": "GHSA-vfj7-8cjw-p6xm",
+      "ratings": [
+        {
+          "severity": "high",
+          "source": {
+            "name": "npm audit"
+          }
+        }
+      ],
+      "source": {
+        "name": "GitHub Advisory Database",
+        "url": "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm"
+      }
+    }
+  ]
 }

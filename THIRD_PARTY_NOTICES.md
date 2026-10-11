@@ -5,7 +5,7 @@ This file indexes notices that must accompany third-party software distributed b
 ## `@excalidraw/excalidraw`
 
 - Distributed version: `0.18.1-clarin.7`
-- Vendored source SHA-256: `da5a8d51ecf03dda77fa668954710ee994c8c43d8ba3703fdfbc684df372797a`
+- Vendored source SHA-256: `47d97ccb4f8f03c694b8c082e4b42e539b0ad7094f2676972bde816738b07d80`
 - Upstream source: tag `v0.18.1`, commit `a2ec2889babf7d2295469c6d90ebe77fae57df84`
 - Editor license: MIT, Copyright (c) 2020 Excalidraw
 - Canonical component notice and current advisory record: [`frontend/THIRD_PARTY_EXCALIDRAW.md`](frontend/THIRD_PARTY_EXCALIDRAW.md)
@@ -30,7 +30,7 @@ This notice covers the public MIT-licensed Excalidraw project only. It grants no
 
 ## Reproducible Excalidraw dependency inventory
 
-The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1-clarin.7` is defined by `frontend/package-lock.json` and the [current candidate baseline](frontend/third_party/excalidraw/supply-chain-2026-09-14.json). The [archived CycloneDX 1.6 SBOM](frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.7.cdx.json) contains 248 components and has SHA-256 `f0bc6879b5d913e8f1f7e250c448edb17f1a72d0af491cf0982c28225aebdef2`. It binds the vendored source to the exact upstream tag/commit plus the documented Clarin patches, including the `.7` Mermaid capability boundary and dependency fixes.
+The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1-clarin.7` is defined by `frontend/package-lock.json` and the [current candidate baseline](frontend/third_party/excalidraw/supply-chain-2026-10-11.json). The [archived CycloneDX 1.6 SBOM](frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.7.cdx.json) contains 248 components and has SHA-256 `bb736384226c43b192654bc8ff96fe90e2f907d328f2ce32654c3e99b74d3834`. It binds the vendored source to the exact upstream tag/commit plus the documented Clarin patches, including the `.7` Mermaid capability boundary and dependency fixes.
 
 Generate and verify it without contacting a third-party service:
 
@@ -38,12 +38,12 @@ Generate and verify it without contacting a third-party service:
 node .codex/skills/clarin-excalidraw-development/scripts/generate-supply-chain-sbom.mjs \
   --manifest frontend/package.json \
   --lockfile frontend/package-lock.json \
-  --baseline frontend/third_party/excalidraw/supply-chain-2026-09-14.json \
+  --baseline frontend/third_party/excalidraw/supply-chain-2026-10-11.json \
   --verify frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.7.cdx.json \
   --output /tmp/clarin-excalidraw-engine.cdx.json
 ```
 
-The [fresh audit](docs/security-dependency-audit-after-2026-09-14.json) covers all exact public versions in the final frontend lock, including development dependencies. npm reports zero findings in both scopes; OSV's two SheetJS matches and GitHub's withdrawn esbuild record are preserved and individually explained. The engine closure has no active matched advisory. This is supply-chain evidence, not browser, deployment or runtime approval: production remains **NO-GO pending the final release gates** recorded in the candidate baseline.
+The [historical September audit](docs/security-dependency-audit-after-2026-09-14.json) covered all exact public versions in that release lock, including development dependencies. npm reported zero findings in both scopes at that time; OSV's two SheetJS matches and GitHub's withdrawn esbuild record are preserved and individually explained. That historical engine closure had no active matched advisory. The current October baseline below retains the newly reported braces and KaTeX advisories; it does not inherit September clearance. Supply-chain evidence does not replace browser, deployment or runtime approval.
 
 The npm lock omits license fields for `fuzzy@0.1.3` and `khroma@2.1.0`; the baseline records their MIT license-file paths and verified SHA-256 hashes. The SBOM does not replace the applicable copyright/license texts.
 
@@ -76,3 +76,7 @@ Clarin uses `fabric@7.4.0`. The narrow legacy-gradient adapter derives from Fabr
 ## SheetJS Community Edition
 
 Clarin uses the unchanged official `xlsx@0.20.3` tarball, not the obsolete npm-registry release. Its Apache-2.0 license remains inside the vendored distribution. [Provenance and immutable SHA-256](frontend/vendor/sheetjs/README.md) identify the official CDN artifact; `frontend/package-lock.json` additionally fixes its SHA-512 integrity.
+
+## Dependency patch evidence — 2026-10-11
+
+The current lock uses Next 16.3.8, sharp 0.35.5, DOMPurify 3.4.16 and source-map-js 1.2.2. The refreshed npm audit reports 9 aggregate findings (6 high, 3 low) in all dependencies and 6 (3 high, 3 low) with development dependencies omitted. Remaining direct advisories concern braces and KaTeX; the current baseline records them as in triage, not fixed or proven unreachable. September scan results cited above are historical evidence only. The editor source is unchanged by this patch; its hash was reproduced independently from the committed Git archive and installed source. The SBOM and notices are regenerated from this lock and exact installed legal texts. These checks do not assert production deployment or approve unresolved runtime risks.

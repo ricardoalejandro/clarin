@@ -57,17 +57,17 @@ func storageSelfServiceReferenceGuardMigrations() []string {
 		// object parser. Plus signs are literal path characters, never spaces.
 		`CREATE OR REPLACE FUNCTION clarin_storage_path_unescape(value TEXT) RETURNS TEXT
 		 LANGUAGE plpgsql IMMUTABLE STRICT AS $$
-		 DECLARE result BYTEA := ''::bytea; i INTEGER := 1; ch TEXT;
+		 DECLARE decoded BYTEA;
 		 BEGIN
-		 WHILE i <= length(value) LOOP
-		   ch := substr(value,i,1);
-		   IF ch='%' AND substr(value,i+1,2) ~ '^[0-9a-fA-F]{2}$' THEN
-		     result := result || decode(substr(value,i+1,2),'hex'); i := i+3;
-		   ELSE
-		     result := result || convert_to(ch,'UTF8'); i := i+1;
-		   END IF;
-		 END LOOP;
-		 RETURN convert_from(result,'UTF8');
+		   IF strpos(value,'%')=0 THEN RETURN value; END IF;
+		   -- Decode contiguous ordinary text in one chunk. The previous loop
+		   -- copied the growing bytea for every character (quadratic for JSON).
+		   SELECT string_agg(CASE WHEN token[1] ~ '^%[0-9a-fA-F]{2}$'
+		     THEN decode(substr(token[1],2),'hex') ELSE convert_to(token[1],'UTF8') END,
+		     ''::bytea ORDER BY position)
+		   INTO decoded
+		   FROM regexp_matches(value,'(%[0-9a-fA-F]{2}|[^%]+|%)','g') WITH ORDINALITY AS chunks(token,position);
+		   RETURN convert_from(COALESCE(decoded,''::bytea),'UTF8');
 		 EXCEPTION WHEN character_not_in_repertoire OR untranslatable_character THEN RETURN value;
 		 END $$`,
 		`CREATE OR REPLACE FUNCTION clarin_storage_reference_keys(payload JSONB) RETURNS TEXT[]

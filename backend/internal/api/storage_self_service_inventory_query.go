@@ -11,6 +11,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/service"
@@ -76,20 +77,22 @@ func storageInventoryRetainedElsewhereSQL(objectKey string) string {
 // projection. Ordinary references remain inline so account/key indexes apply.
 func storageInventoryCTE(claims *service.JWTClaims, includePrivateSources ...bool) string {
 	privateAccess, privateRecovery, privateMutation, privateRestore := "FALSE", "FALSE", "FALSE", "FALSE"
+	boardACL := ""
 	// These claims were reloaded from current membership for this request. A
 	// missing module cannot grant private access; avoid planning its resource
 	// hierarchy at all for actors who cannot use either private module.
 	if (len(includePrivateSources) == 0 || includePrivateSources[0]) && (storageSelfServiceHasPermission(claims, domain.PermTasks) || storageSelfServiceHasPermission(claims, domain.PermWhiteboards)) {
-		privateAccess = repository.StoragePrivateMediaAccessSQL("ir", "$2")
-		privateRecovery = repository.StoragePrivateMediaRecoveryAccessSQL("rr", "$2")
-		privateMutation = repository.StoragePrivateMediaMutationSQL("ir", "$2")
-		privateRestore = repository.StoragePrivateMediaRecoveryMutationSQL("rr", "$2")
+		privateAccess = repository.StoragePrivateMediaAccessSQL("ir", "$2", true)
+		privateRecovery = repository.StoragePrivateMediaRecoveryAccessSQL("rr", "$2", true)
+		privateMutation = repository.StoragePrivateMediaMutationSQL("ir", "$2", true)
+		privateRestore = repository.StoragePrivateMediaRecoveryMutationSQL("rr", "$2", true)
+		boardACL = "storage_private_visible_boards AS MATERIALIZED (" + repository.StoragePrivateWhiteboardACLCTE("$1", "$2") + "), "
 	}
 	quickReplyManage := "FALSE"
 	if storageSelfServiceHasPermission(claims, domain.PermQuickRepliesManage) {
 		quickReplyManage = "TRUE"
 	}
-	return `WITH catalog_state AS (
+	return "WITH " + boardACL + `catalog_state AS (
  SELECT ((SELECT count(*) FROM storage_inventory_backfill WHERE account_id=$1 AND complete)=` + strconv.Itoa(len(storageInventorySources())) + `
  AND (SELECT count(*) FROM storage_inventory_scans WHERE account_id=$1 AND completed_at IS NOT NULL)=2
 	 AND NOT EXISTS(SELECT 1 FROM storage_inventory_scans WHERE account_id=$1 AND last_error<>'')
@@ -259,18 +262,54 @@ func storageInventoryPageSQL(claims *service.JWTClaims, filter storageInventoryF
  ) f ORDER BY selected.sort_value ` + direction + `,selected.object_key ASC,selected.recovery_id ASC`
 }
 
+// Count and page the same authorized scalar projection in one statement.
+// This avoids planning/evaluating the private ACL hierarchy twice. Only the
+// bounded page gets full metadata; an empty page still returns the exact total.
+func storageInventoryPageWithCountSQL(claims *service.JWTClaims, filter storageInventoryFilter, includePrivateSources ...bool) string {
+	direction := "DESC"
+	if filter.Order == "asc" {
+		direction = "ASC"
+	}
+	return storageInventoryCTE(claims, includePrivateSources...) + `, filtered_keys AS MATERIALIZED (
+        SELECT f.object_key,f.recovery_id,` + filter.sortColumnSQL() + ` AS sort_value FROM file_rows f` + storageInventoryFilterSQL + `
+    ), page_keys AS MATERIALIZED (
+        SELECT * FROM filtered_keys ORDER BY sort_value ` + direction + `,object_key ASC,recovery_id ASC LIMIT $13 OFFSET $14
+    ), page_total AS (SELECT count(*) AS total FROM filtered_keys)
+    SELECT (SELECT to_jsonb(f) FROM file_rows f WHERE f.object_key=selected.object_key AND f.recovery_id=selected.recovery_id OFFSET 0),page_total.total
+    FROM page_total LEFT JOIN page_keys selected ON true
+    ORDER BY selected.sort_value ` + direction + `,selected.object_key ASC,selected.recovery_id ASC`
+}
+
+// These bounded interactive reads expand current Work/Whiteboard ACLs into
+// several SQL projections. JIT compilation of those expressions took 3-4 seconds
+// on the reported account before returning any rows. Disable JIT only inside
+// this read-only transaction; no session/global setting or permission is cached.
+func (s *Server) storageInventoryReader(ctx context.Context) (pgx.Tx, error) {
+	tx, err := s.repos.DB().BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	if _, err = tx.Exec(ctx, "SET LOCAL jit=off"); err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, err
+	}
+	return tx, nil
+}
+
 func (s *Server) storageInventoryFiles(ctx context.Context, accountID, actorID uuid.UUID, claims *service.JWTClaims, filter storageInventoryFilter) ([]storageSelfServiceFile, int, error) {
 	privateSources, err := s.storageInventoryHasPrivateSources(ctx, accountID, claims)
 	if err != nil {
 		return nil, 0, err
 	}
-	args := append(storageInventoryArguments(accountID, actorID, claims), filter.Type, filter.Query, filter.Origin, filter.Status, filter.MinSize, filter.OlderThan)
-	var total int
-	if err := s.repos.DB().QueryRow(ctx, storageInventoryCTE(claims, privateSources)+` SELECT count(*) FROM file_rows f`+storageInventoryFilterSQL, args...).Scan(&total); err != nil {
+	q, err := s.storageInventoryReader(ctx)
+	if err != nil {
 		return nil, 0, err
 	}
+	defer q.Rollback(context.Background())
+	args := append(storageInventoryArguments(accountID, actorID, claims), filter.Type, filter.Query, filter.Origin, filter.Status, filter.MinSize, filter.OlderThan)
+	var total int
 	args = append(args, filter.Limit, filter.Offset)
-	rows, err := s.repos.DB().Query(ctx, storageInventoryPageSQL(claims, filter, privateSources), args...)
+	rows, err := q.Query(ctx, storageInventoryPageWithCountSQL(claims, filter, privateSources), args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -279,9 +318,12 @@ func (s *Server) storageInventoryFiles(ctx context.Context, accountID, actorID u
 	for rows.Next() {
 		var data []byte
 		var file storageSelfServiceFile
-		if err = rows.Scan(&data); err != nil {
+		if err = rows.Scan(&data, &total); err != nil {
 			rows.Close()
 			return nil, 0, err
+		}
+		if len(data) == 0 {
+			continue
 		}
 		if err = json.Unmarshal(data, &file); err != nil {
 			rows.Close()
@@ -300,13 +342,21 @@ func (s *Server) storageInventoryFiles(ctx context.Context, accountID, actorID u
 	if len(keys) == 0 {
 		return files, total, nil
 	}
+	// Context labels only need private ACLs for this page, not every private
+	// attachment in the account. The keys and permissions remain statement-bound.
+	pagePrivate := false
+	if privateSources {
+		if err = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM storage_inventory_references WHERE account_id=$1 AND object_key=ANY($2::text[]) AND source_kind IN ('task_attachments','whiteboard_assets','whiteboard_revision_assets'))`, accountID, keys).Scan(&pagePrivate); err != nil {
+			return nil, 0, err
+		}
+	}
 	refArgs := append(storageInventoryArguments(accountID, actorID, claims), keys)
 	// Keep all positional parameters typed even though this projection needs
 	// only the actor and module permissions from the shared CTE.
 	// One object may have millions of references. Keep its exact authorized
 	// count in SQL, but return at most six distinct presentation contexts per
 	// requested key. A page cannot materialize every message using one file.
-	rows, err = s.repos.DB().Query(ctx, storageInventoryCTE(claims, privateSources)+` SELECT requested.object_key,summary.origin,summary.ref_id,summary.label,summary.href,summary.filename
+	rows, err = q.Query(ctx, storageInventoryKeysCTE(claims, pagePrivate)+` SELECT requested.object_key,summary.origin,summary.ref_id,summary.label,summary.href,summary.filename
 	 FROM (SELECT DISTINCT unnest($7::text[]) AS object_key) requested
 	 CROSS JOIN LATERAL (SELECT vr.origin,min(vr.ref_id) AS ref_id,vr.label,vr.href,max(vr.filename) AS filename
 	 FROM authorized_refs vr WHERE vr.object_key=requested.object_key
@@ -352,7 +402,7 @@ func (s *Server) storageInventoryFiles(ctx context.Context, accountID, actorID u
 			f.BlockedReason = "El archivo se conserva mientras haya usos activos o recuperación pendiente."
 		}
 	}
-	if err = s.decorateStorageSelfServiceIndexedFiles(ctx, s.repos.DB(), accountID, actorID, claims, files); err != nil {
+	if err = s.decorateStorageSelfServiceIndexedFiles(ctx, q, accountID, actorID, claims, files); err != nil {
 		return nil, 0, err
 	}
 	return files, total, nil
@@ -363,10 +413,15 @@ func (s *Server) storageInventoryUsage(ctx context.Context, accountID, actorID u
 	if err != nil {
 		return nil, err
 	}
+	q, err := s.storageInventoryReader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer q.Rollback(context.Background())
 	args := storageInventoryArguments(accountID, actorID, claims)
 	var visible, count, removable, removableCount, trash int64
 	var byType, byOrigin, recommendations []byte
-	err = s.repos.DB().QueryRow(ctx, storageInventoryUsageSQL(claims, privateSources), args...).Scan(&visible, &count, &removable, &removableCount, &trash, &byType, &byOrigin, &recommendations)
+	err = q.QueryRow(ctx, storageInventoryUsageSQL(claims, privateSources), args...).Scan(&visible, &count, &removable, &removableCount, &trash, &byType, &byOrigin, &recommendations)
 	if err != nil {
 		return nil, err
 	}
@@ -389,7 +444,7 @@ func (s *Server) storageInventoryUsage(ctx context.Context, accountID, actorID u
 	var limit, reserved int64
 	if domain.HasAccountAdminAuthority(claims.Role, claims.IsSuperAdmin) {
 		scope = "account"
-		if err = s.repos.DB().QueryRow(ctx, `SELECT COALESCE(t.size_bytes,0),a.storage_limit_bytes FROM accounts a LEFT JOIN storage_inventory_totals t ON t.account_id=a.id WHERE a.id=$1`, accountID).Scan(&used, &limit); err != nil {
+		if err = q.QueryRow(ctx, `SELECT COALESCE(t.size_bytes,0),a.storage_limit_bytes FROM accounts a LEFT JOIN storage_inventory_totals t ON t.account_id=a.id WHERE a.id=$1`, accountID).Scan(&used, &limit); err != nil {
 			return nil, err
 		}
 		reserved = used - visible

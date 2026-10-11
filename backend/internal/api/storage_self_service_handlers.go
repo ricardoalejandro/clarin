@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/url"
 	"sort"
 	"strings"
@@ -63,7 +62,7 @@ func (s *Server) storageSelfServiceRequestCatalog(c *fiber.Ctx, parents ...conte
 	}
 	catalog, err := s.storageSelfServiceCatalog(ctx, s.repos.DB(), accountID, actorID, claims)
 	if err != nil {
-		log.Printf("[StorageSelfService] catalog failed account=%s: %v", accountID, err)
+		storageReadFailure("catalog", err)
 		return nil, nil, storageSelfServiceError(c, 503, "storage_scan_failed", "No se pudo verificar el almacenamiento. Inténtalo de nuevo.")
 	}
 	return catalog, claims, nil
@@ -80,7 +79,7 @@ func (s *Server) handleStorageSelfServiceUsage(c *fiber.Ctx) error {
 	}
 	response, err := s.storageInventoryUsage(ctx, accountID, actorID, claims)
 	if err != nil {
-		log.Printf("[StorageInventory] usage failed account=%s: %v", accountID, err)
+		storageReadFailure("usage", err)
 		return storageSelfServiceError(c, 503, "storage_scan_failed", "No se pudo consultar el almacenamiento. Inténtalo de nuevo.")
 	}
 	freshness, err := s.storageInventoryFreshness(ctx, accountID)
@@ -230,7 +229,7 @@ func (s *Server) handleStorageSelfServiceFiles(c *fiber.Ctx) error {
 	filter := storageInventoryRequestFilter(c)
 	files, total, err := s.storageInventoryFiles(ctx, accountID, actorID, claims, filter)
 	if err != nil {
-		log.Printf("[StorageInventory] files failed account=%s: %v", accountID, err)
+		storageReadFailure("files", err)
 		return storageSelfServiceError(c, 503, "storage_scan_failed", "No se pudo consultar el almacenamiento. Inténtalo de nuevo.")
 	}
 	freshness, err := s.storageInventoryFreshness(ctx, accountID)
@@ -252,38 +251,31 @@ func (s *Server) handleStorageSelfServiceContent(c *fiber.Ctx) error {
 	if s.storage == nil {
 		return storageSelfServiceError(c, 503, "storage_unavailable", "El almacenamiento no está disponible.")
 	}
-	accountID, actorID, claims, err := s.storageSelfServiceActor(c)
+	ctx, cancel := context.WithTimeout(c.Context(), storageSelfServiceCatalogTimeout)
+	defer cancel()
+	accountID, actorID, claims, err := s.storageSelfServiceActor(c, ctx)
 	if err != nil {
 		return storageSelfServiceError(c, 403, "storage_forbidden", "No tienes acceso a esta cuenta.")
 	}
 	key := c.Query("object_key")
-	if !storageSelfServiceValidKey(accountID, key) {
+	filename, allowed, err := s.storageAuthorizeContent(ctx, storageUseActor{accountID, actorID, claims}, key)
+	if err != nil {
+		storageReadFailure("content_authorization", err)
+		return storageSelfServiceError(c, 503, "storage_unavailable", "No se pudo comprobar el archivo. Inténtalo de nuevo.")
+	}
+	if !allowed {
 		return storageSelfServiceError(c, 404, "storage_not_found", "Archivo no disponible.")
 	}
-	catalog, err := s.storageSelfServiceCatalog(c.Context(), s.repos.DB(), accountID, actorID, claims, []string{key})
-	if err != nil {
-		return storageSelfServiceError(c, 503, "storage_unavailable", "No se pudo comprobar el archivo. Inténtalo de nuevo.")
+	disposition := "inline"
+	if c.Query("download") == "1" {
+		disposition = "attachment"
 	}
-	for _, f := range catalog.Files {
-		if f.ObjectKey == key && f.PreviewURL != "" {
-			c.Set("Content-Disposition", fmt.Sprintf("inline; filename*=UTF-8''%s", url.PathEscape(f.Filename)))
-			c.Set("Content-Security-Policy", "sandbox; default-src 'none'")
-			return s.serveStorageObject(c, key, "private, no-store", "")
-		}
-	}
-	recoveries, recoveryErr := s.storageSelfServiceRecoveryFiles(c.Context(), s.repos.DB(), storageUseActor{AccountID: accountID, UserID: actorID, Claims: claims}, []string{key})
-	if recoveryErr != nil {
-		return storageSelfServiceError(c, 503, "storage_unavailable", "No se pudo comprobar el archivo. Inténtalo de nuevo.")
-	}
-	for _, f := range recoveries {
-		if f.ObjectKey == key && f.PreviewURL != "" {
-			c.Set("Content-Disposition", fmt.Sprintf("inline; filename*=UTF-8''%s", url.PathEscape(f.Filename)))
-			c.Set("Content-Security-Policy", "sandbox; default-src 'none'")
-			return s.serveStorageObject(c, key, "private, no-store", "")
-		}
-	}
-	return storageSelfServiceError(c, 404, "storage_not_found", "Archivo no disponible.")
+	c.Set("Content-Disposition", fmt.Sprintf("%s; filename*=UTF-8''%s", disposition, url.PathEscape(filename)))
+	c.Set("Content-Security-Policy", "sandbox; default-src 'none'")
+	c.Set("X-Content-Type-Options", "nosniff")
+	return s.serveStorageObject(c, key, "private, no-store, max-age=0", "")
 }
+
 func (s *Server) handleStorageLegacyMutationDisabled(c *fiber.Ctx) error {
 	return storageSelfServiceError(c, 410, "storage_review_required", "Esta operación ya no está disponible. Revisa los archivos desde Almacenamiento.")
 }

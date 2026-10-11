@@ -108,6 +108,9 @@ func storageOwnUploadEligible(owner storageUploadOwnership, actorID uuid.UUID, h
 }
 
 func (a storageOwnUploadAdapter) List(ctx context.Context, s *Server, q storageSelfServiceQuerier, actor storageUseActor, key string) ([]storageSelfServiceUse, error) {
+	if selected, bounded := storageReadSelectedIDs(ctx, a.Name()); bounded && len(selected) == 0 {
+		return nil, nil
+	}
 	if storage.IsProtectedMediaObjectKey(key) {
 		return nil, nil
 	}

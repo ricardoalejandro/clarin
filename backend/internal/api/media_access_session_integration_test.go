@@ -100,6 +100,7 @@ func runMediaAccessSessionIntegrationChecks(t *testing.T, db *pgxpool.Pool, stor
 	raw, otherRaw, draftRaw := mediaProxyURLFromObjectKey(key), mediaProxyURLFromObjectKey(otherKey), mediaProxyURLFromObjectKey(draftKey)
 	app := fiber.New()
 	app.Get("/api/media/file/*", f.server.handleMediaProxy)
+	app.Get("/api/storage/content", f.server.authMiddleware, f.server.handleStorageSelfServiceContent)
 	// Exercise the same authenticated capability issuance used after an upload.
 	app.Get("/qa/upload-preview", f.server.authMiddleware, func(c *fiber.Ctx) error {
 		return c.SendString(f.server.uploadPreviewURL(c, draftKey))
@@ -152,6 +153,52 @@ func runMediaAccessSessionIntegrationChecks(t *testing.T, db *pgxpool.Pool, stor
 			t.Fatal(err)
 		}
 		get(raw, expiredToken, false, http.StatusNotFound, nil, nil)
+	})
+	t.Run("storage native cookie HEAD and range download", func(t *testing.T) {
+		target := "/api/storage/content?object_key=" + url.QueryEscape(key)
+		req := httptest.NewRequest(http.MethodHead, target+"&download=1", nil)
+		req.AddCookie(&http.Cookie{Name: "auth-token", Value: owner.token})
+		response, err := app.Test(req, 15000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != http.StatusOK || len(body) != 0 || response.ContentLength != int64(len(want)) {
+			t.Fatalf("native HEAD failed status=%d length=%d body=%d error=%v", response.StatusCode, response.ContentLength, len(body), err)
+		}
+		if response.Header.Get("X-Content-Type-Options") != "nosniff" || !strings.HasPrefix(response.Header.Get("Content-Disposition"), "attachment;") {
+			t.Fatal("native download missing safe attachment headers")
+		}
+		get(target, owner.token, true, http.StatusPartialContent, want[:8], map[string]string{"Range": "bytes=0-7"})
+		get(target, otherToken, true, http.StatusNotFound, nil, nil)
+		f.exec(`UPDATE roles SET permissions=$2 WHERE id=$1`, f.role, []string{domain.PermSettings})
+		get(target, owner.token, true, http.StatusNotFound, nil, map[string]string{"Range": "bytes=0-7"})
+		f.exec(`UPDATE roles SET permissions=$2 WHERE id=$1`, f.role, []string{domain.PermSettings, domain.PermChats})
+	})
+
+	t.Run("durable canonical own upload remains actor scoped until attached or retained", func(t *testing.T) {
+		for _, state := range []string{"business", "trash", "recovery"} {
+			t.Run(state, func(t *testing.T) {
+				ownKey, _, _ := f.media(f.account, "uploads", "durable-"+state+".pdf", false)
+				ownWant := readObject(ownKey)
+				f.exec(`INSERT INTO storage_upload_ownership(account_id,object_key,actor_id,provenance_verified,state,filename) VALUES($1,$2,$3,true,'active','own.pdf')`, f.account, ownKey, f.user)
+				ownURL := mediaProxyURLFromObjectKey(ownKey)
+				get(ownURL, owner.token, true, http.StatusOK, ownWant, nil)
+				get(ownURL, secondSession.token, true, http.StatusOK, ownWant, nil)
+				get(ownURL, otherActor.token, true, http.StatusNotFound, nil, nil)
+				get(ownURL, otherToken, true, http.StatusNotFound, nil, nil)
+				switch state {
+				case "business":
+					f.exec(`INSERT INTO document_templates(account_id,name,canvas_json) VALUES($1,'Private own draft',jsonb_build_object('backgroundImage',jsonb_build_object('src',$2::text)))`, f.account, ownURL)
+				case "trash":
+					f.exec(`INSERT INTO storage_media_trash(account_id,object_key,actor_id,filename,media_type,size_bytes,message_backups,purge_after) VALUES($1,$2,$3,'own.pdf','document',$4,'[]',NOW()+INTERVAL '7 days')`, f.account, ownKey, f.user, len(ownWant))
+				case "recovery":
+					f.exec(`UPDATE storage_upload_ownership SET state='removed' WHERE account_id=$1 AND object_key=$2`, f.account, ownKey)
+				}
+				get(ownURL, owner.token, true, http.StatusNotFound, nil, nil)
+			})
+		}
 	})
 	t.Run("legacy URL-only references preserve encoded filenames and authority", func(t *testing.T) {
 		for _, name := range []string{"Historia 17.11.41.mp4", "Niñez y canción.jpeg", "6392_0216(1)1.mp4", "la historia).mp4", "a+b.jpeg", "literal%20espacio.jpeg", "100% listo.jpeg", "pregunta?.jpeg", "fragmento#.jpeg", "una \"cita\".jpeg", "signos'\"]}.jpeg", "una \"cita\" & <foto>.jpeg", "separadores \"línea\" \u2028 y \u2029.jpeg"} {

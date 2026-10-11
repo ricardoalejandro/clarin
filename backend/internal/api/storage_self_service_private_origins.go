@@ -38,10 +38,14 @@ func (a storagePrivateUseAdapter) references(ctx context.Context, q storageSelfS
 	if key != "" {
 		keys = []string{key}
 	}
-	if a.whiteboards {
-		return repository.ListWhiteboardStorageReferences(ctx, q, actor.AccountID, actor.UserID, keys)
+	selected, bounded := storageReadSelectedIDs(ctx, a.Name())
+	if bounded && len(selected) == 0 {
+		return []repository.PrivateStorageReference{}, nil
 	}
-	return repository.ListTaskStorageReferences(ctx, q, actor.AccountID, actor.UserID, keys)
+	if a.whiteboards {
+		return repository.ListWhiteboardStorageReferences(ctx, q, actor.AccountID, actor.UserID, keys, selected)
+	}
+	return repository.ListTaskStorageReferences(ctx, q, actor.AccountID, actor.UserID, keys, selected)
 }
 func (a storagePrivateUseAdapter) use(actor storageUseActor, ref repository.PrivateStorageReference) storageSelfServiceUse {
 	return storageSelfServiceUse{UseID: storageUseID(actor.AccountID, a.Name(), ref.ID, ref.Kind, ref.ObjectKey), Type: ref.Origin, Label: ref.Label, Href: ref.Href,
