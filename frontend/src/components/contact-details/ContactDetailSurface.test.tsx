@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRef, type ReactNode } from 'react'
 import type { ContactProfileContact } from '@/types/contact-profile'
@@ -66,7 +66,7 @@ vi.mock('./useGoogleContactSync', () => ({
 
 vi.mock('@/components/ContactAvatarControl', () => ({ default: () => <div data-testid="avatar" /> }))
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 beforeEach(() => {
   mocks.profileOverrides = {}
@@ -90,6 +90,40 @@ beforeEach(() => {
 })
 
 describe('ContactDetailSurface date editing', () => {
+  it('focuses a general note and protects its draft when the detail closes', async () => {
+    const ref = createRef<ContactDetailSurfaceHandle>()
+    const onClose = vi.fn()
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    render(<ContactDetailSurface ref={ref} contactId="contact-1" context={{ type: 'chat', id: 'chat-1' }} initialContact={contact} onClose={onClose} />)
+    fireEvent.click(screen.getByRole('button', { name: /^Observación$/ }))
+    const composer = screen.getByRole('textbox', { name: 'Nota general del contacto' })
+    await waitFor(() => expect(composer).toHaveFocus())
+    fireEvent.change(composer, { target: { value: 'Pendiente de terminar' } })
+    expect(ref.current?.requestClose()).toBe(false)
+    expect(confirm).toHaveBeenCalledWith('Hay una nota sin guardar. ¿Deseas cerrar y descartarla?')
+    expect(onClose).not.toHaveBeenCalled()
+    expect(composer).toHaveValue('Pendiente de terminar')
+    confirm.mockReturnValue(true)
+    expect(ref.current?.canClose()).toBe(true)
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('preserves typing made while a note is saving and deduplicates a double click', async () => {
+    let resolveSave!: (value: unknown) => void
+    mocks.createObservation.mockImplementation(() => new Promise(resolve => { resolveSave = resolve }))
+    render(<ContactDetailSurface contactId="contact-1" context={{ type: 'chat', id: 'chat-1' }} initialContact={contact} onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: /^Observación$/ }))
+    const composer = screen.getByRole('textbox', { name: 'Nota general del contacto' })
+    fireEvent.change(composer, { target: { value: 'Nota enviada' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar nota' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar nota' }))
+    expect(mocks.createObservation).toHaveBeenCalledTimes(1)
+    fireEvent.change(composer, { target: { value: 'La siguiente nota' } })
+    await act(async () => { resolveSave({ success: true }) })
+    expect(composer).toHaveValue('La siguiente nota')
+    expect(screen.getByRole('status')).toHaveTextContent('Nota guardada.')
+  })
+
   it('opens the general composer from the primary action while history stays collapsed, including errors', async () => {
     mocks.createObservation.mockResolvedValue({ success: false, error: 'Fallo controlado de guardado' })
     render(<ContactDetailSurface contactId="contact-1" context={{ type: 'chat', id: 'chat-1' }} initialContact={contact} onClose={vi.fn()} />)

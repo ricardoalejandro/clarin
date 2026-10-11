@@ -2588,6 +2588,10 @@ func (s *Server) handleGetChatDetails(c *fiber.Ctx) error {
 		details.Lead.StructuredTags = tags
 	}
 
+	state, err := s.repos.Chat.State(c.Context(), accountID, chatID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo cargar el estado de la conversación"})
+	}
 	return c.JSON(fiber.Map{
 		"success":               true,
 		"chat":                  details.Chat,
@@ -2596,6 +2600,7 @@ func (s *Server) handleGetChatDetails(c *fiber.Ctx) error {
 		"opportunities":         details.Opportunities,
 		"active_opportunity_id": details.ActiveOpportunityID,
 		"device":                details.Device,
+		"chat_state":            state,
 	})
 }
 
@@ -3402,8 +3407,11 @@ func (s *Server) handleGetMessages(c *fiber.Ctx) error {
 	if s.cache != nil && offset == 0 && limit <= 50 {
 		cacheKey = fmt.Sprintf("messages:%s:%s:%d:%d", accountID.String(), chatID.String(), limit, offset)
 		if cached, err := s.cache.Get(c.Context(), cacheKey); err == nil && cached != nil {
-			c.Set("Content-Type", "application/json")
-			return c.Send(cached)
+			projected, projectionErr := s.projectCachedChatMedia(c.Context(), accountID, cached)
+			if projectionErr == nil {
+				c.Set("Content-Type", "application/json")
+				return c.Send(projected)
+			}
 		}
 	}
 
@@ -3412,6 +3420,9 @@ func (s *Server) handleGetMessages(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
+	if err := s.projectChatMedia(c.Context(), accountID, messages); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo comprobar la disponibilidad de los adjuntos"})
+	}
 	if err := s.services.Chat.AttachReactions(c.Context(), accountID, chatID, messages); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudieron cargar las reacciones"})
 	}
@@ -3464,6 +3475,9 @@ func (s *Server) handleSearchMessages(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	if err := s.projectChatMedia(c.Context(), accountID, messages); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo comprobar la disponibilidad de los adjuntos"})
+	}
 	if err := s.services.Chat.AttachReactions(c.Context(), accountID, chatID, messages); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudieron cargar las reacciones"})
 	}
@@ -3502,13 +3516,18 @@ func (s *Server) handleMarkAsRead(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	s.invalidateChatCaches(accountID, &chatID)
-	if s.hub != nil {
-		if state, e := s.repos.Chat.State(c.Context(), accountID, chatID); e == nil {
-			s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventChatUpdate, state)
-		}
+	s.invalidateChatsCache(accountID)
+	s.invalidateMessagesCache(accountID, &chatID)
+	state, err := s.repos.Chat.State(c.Context(), accountID, chatID)
+	if err != nil {
+		return fiber.ErrInternalServerError
 	}
-	state, _ := s.repos.Chat.State(c.Context(), accountID, chatID)
+	if s.hub != nil {
+		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventChatUpdate, state)
+	}
+	// HTTP and realtime share one canonical snapshot, including arrivals that
+	// committed after the read transaction released the chat lock.
+	unreadCount = state.UnreadCount
 	return c.JSON(fiber.Map{"success": true, "chat_id": chatID.String(), "unread_count": unreadCount, "read_through": readThrough, "chat_state": state})
 }
 

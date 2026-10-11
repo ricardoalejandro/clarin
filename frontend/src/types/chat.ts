@@ -65,6 +65,7 @@ export interface PollVote {
 }
 
 export interface Message {
+  send_phase?: 'uploading' | 'sending'
   sender?: { user_id?: string; name?: string; origin: string }
   id: string
   device_id?: string
@@ -107,6 +108,8 @@ export interface Message {
 }
 
 export interface Chat {
+  last_incoming_message_id?: string | null
+  last_incoming_at?: string | null
   state_version?: number
   needs_reply?: boolean
   waiting_since?: string | null
@@ -129,4 +132,4 @@ export interface Chat {
   identity_pending?: boolean
 }
 
-export interface ChatState { chat_id: string; unread_count: number; needs_reply: boolean; waiting_since: string | null; state_version: number }
+export interface ChatState { last_incoming_message_id?: string | null; last_incoming_at?: string | null; chat_id: string; unread_count: number; needs_reply: boolean; waiting_since: string | null; state_version: number }

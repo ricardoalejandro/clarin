@@ -93,6 +93,9 @@ func (s *Server) handleGetMessageContext(c *fiber.Ctx) error {
 	messagesToHydrate := make([]*domain.Message, 0, len(messages)+1)
 	messagesToHydrate = append(messagesToHydrate, target)
 	messagesToHydrate = append(messagesToHydrate, messages...)
+	if err := s.projectChatMedia(c.Context(), accountID, messagesToHydrate); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo comprobar la disponibilidad de los adjuntos"})
+	}
 	if err := s.services.Chat.AttachReactions(c.Context(), accountID, chatID, messagesToHydrate); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudieron cargar las reacciones del contexto"})
 	}

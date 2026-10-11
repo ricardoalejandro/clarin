@@ -18,6 +18,32 @@ const baseMessage: Message = {
 }
 
 describe('MessageBubble message actions', () => {
+  it('keeps unavailable media from issuing a request or offering playback', () => {
+    const { container } = render(<MessageBubble message={{ ...baseMessage, message_type: 'video', media_url: '/missing.mp4', media_deleted: true }} />)
+    expect(screen.getByText('Archivo eliminado')).toBeInTheDocument()
+    expect(container.querySelector('video')).toBeNull()
+  })
+
+  it('removes the repeated sender only for an explicit group and preserves message actions', () => {
+    const { rerender } = render(<MessageBubble message={baseMessage} contactName="Ana" onReply={vi.fn()} />)
+    expect(screen.getByText('Ana')).toBeInTheDocument()
+    rerender(<MessageBubble message={baseMessage} contactName="Ana" groupedWithPrevious onReply={vi.fn()} />)
+    expect(screen.queryByText('Ana')).not.toBeInTheDocument()
+    expect(screen.getByText('Hola')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Más acciones del mensaje' })).toBeInTheDocument()
+  })
+
+  it('offers an accessible send retry only when the action is available', () => {
+    const onRetry = vi.fn()
+    const failed = { ...baseMessage, is_from_me: true, status: 'failed' }
+    const { rerender } = render(<MessageBubble message={failed} onRetry={onRetry} />)
+    fireEvent.click(screen.getByRole('button', { name: 'No se envió el mensaje. Reintentar envío' }))
+    expect(onRetry).toHaveBeenCalledWith(failed)
+    rerender(<MessageBubble message={failed} />)
+    expect(screen.queryByRole('button', { name: /Reintentar envío/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('No se envió')
+  })
+
   it('opens PDF documents in the internal viewer with their original metadata', () => {
     const onDocumentClick = vi.fn()
     render(<MessageBubble message={{

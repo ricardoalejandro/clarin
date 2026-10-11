@@ -58,11 +58,13 @@ export default function CrmDetailAccordion({ id, title, summary, icon: Icon, ton
             <span className="flex min-w-0 items-center gap-2"><span className="truncate text-sm font-extrabold text-slate-900">{title}</span>{badge}</span>
             {summary && <span className="mt-0.5 block truncate text-[11px] leading-4 text-slate-500">{summary}</span>}
           </span>
-          <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition-transform duration-200 motion-reduce:transition-none ${open ? 'rotate-180' : ''}`} />
+          <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition-transform duration-[160ms] ease-out motion-reduce:transition-none ${open ? 'rotate-180' : ''}`} />
         </button>
         {action && <div className="flex shrink-0 items-center pr-3" onClick={event => event.stopPropagation()}>{action}</div>}
       </div>
-      <div id={`${id}-content`} aria-hidden={!open} className={`${open ? '' : 'hidden'} border-t ${palette.shell} ${contentClassName}`}>{children}</div>
+      <div id={`${id}-content`} aria-hidden={!open} inert={!open} className={`grid transition-[grid-template-rows,opacity,visibility] duration-[160ms] ease-out motion-reduce:transition-none ${open ? 'visible grid-rows-[1fr] opacity-100' : 'invisible grid-rows-[0fr] opacity-0'}`}>
+        <div className="min-h-0 overflow-hidden"><div className={`border-t ${palette.shell} ${contentClassName}`}>{children}</div></div>
+      </div>
     </section>
   )
 }

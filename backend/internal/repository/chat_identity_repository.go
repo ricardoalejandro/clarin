@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -197,13 +198,14 @@ func (r *ChatRepository) ReconcileLIDChat(
 	}
 
 	// Reactions are keyed by WhatsApp stanza rather than the local message UUID.
-	// Keep the newest semantic value if both projections already contain it.
+	// Allocate a new row UUID while the source still exists, and keep the newest
+	// semantic value if both projections already contain it.
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO message_reactions (
 			id,account_id,chat_id,target_message_id,sender_jid,sender_name,
 			emoji,is_from_me,timestamp,created_at
 		)
-		SELECT id,account_id,$1,target_message_id,
+		SELECT gen_random_uuid(),account_id,$1,target_message_id,
 			CASE WHEN LOWER(sender_jid)=LOWER($3::text) THEN $4::text ELSE sender_jid END,
 			sender_name,emoji,is_from_me,timestamp,created_at
 		FROM message_reactions
@@ -225,6 +227,39 @@ func (r *ChatRepository) ReconcileLIDChat(
 		UPDATE bot_sessions SET chat_id=$1,updated_at=NOW()
 		WHERE account_id=$2 AND chat_id=$3
 	`, canonicalChatID, accountID, sourceChatID); err != nil {
+		return nil, err
+	}
+
+	// A read on either projection remains read after deduplication. Preserve
+	// the earliest known receipt without inventing reads for unrelated rows.
+	if _, err := tx.Exec(ctx, `
+		UPDATE messages canonical SET
+		 is_read=canonical.is_read OR source.is_read,
+		 read_at=LEAST(canonical.read_at,source.read_at)
+		FROM messages source
+		WHERE canonical.account_id=$1 AND canonical.chat_id=$2
+		 AND source.account_id=$1 AND source.chat_id=$3
+		 AND canonical.message_id=source.message_id AND NOT canonical.is_from_me
+	`, accountID, canonicalChatID, sourceChatID); err != nil {
+		return nil, err
+	}
+	// The source frontier may name a duplicate UUID that is about to disappear.
+	// Translate it to the retained message before choosing the merged frontier.
+	if _, err := tx.Exec(ctx, `
+		UPDATE chats c SET attention_through_at=canonical.timestamp,attention_through_id=canonical.id
+		FROM messages source JOIN messages canonical ON canonical.account_id=source.account_id
+		 AND canonical.message_id=source.message_id AND canonical.chat_id=$2
+		WHERE c.account_id=$1 AND c.id=ANY($4::uuid[])
+		 AND source.account_id=$1 AND source.chat_id=$3 AND c.attention_through_id=source.id
+	`, accountID, canonicalChatID, sourceChatID, []uuid.UUID{canonicalChatID, sourceChatID}); err != nil {
+		return nil, err
+	}
+	var attentionAt *time.Time
+	var attentionID *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT attention_through_at,attention_through_id
+	 FROM chats WHERE account_id=$1 AND id=ANY($2::uuid[])
+	 ORDER BY attention_through_at DESC NULLS LAST,attention_through_id DESC NULLS LAST LIMIT 1`,
+		accountID, []uuid.UUID{canonicalChatID, sourceChatID}).Scan(&attentionAt, &attentionID); err != nil {
 		return nil, err
 	}
 
@@ -258,7 +293,13 @@ func (r *ChatRepository) ReconcileLIDChat(
 				WHEN canonical.last_message_at IS NULL THEN source.last_message_at
 				WHEN source.last_message_at IS NULL THEN canonical.last_message_at
 				ELSE GREATEST(canonical.last_message_at,source.last_message_at) END,
-			unread_count=canonical.unread_count+source.unread_count,
+			unread_count=(SELECT COUNT(*) FROM messages m WHERE m.account_id=$2 AND m.chat_id=$1
+			 AND NOT m.is_from_me AND NOT m.is_read AND NOT COALESCE(m.is_revoked,FALSE)),
+			attention_through_at=$4::timestamptz,attention_through_id=$5::uuid,
+			waiting_since=(SELECT MIN(m.timestamp) FROM messages m WHERE m.account_id=$2 AND m.chat_id=$1
+			 AND NOT m.is_from_me AND NOT COALESCE(m.is_revoked,FALSE) AND COALESCE(m.sender->>'origin','')<>'history'
+			 AND ($4::timestamptz IS NULL OR (m.timestamp,m.id)>($4::timestamptz,$5::uuid))),
+			state_version=GREATEST(canonical.state_version,source.state_version)+1,
 			is_archived=canonical.is_archived AND source.is_archived,
 			is_pinned=canonical.is_pinned OR source.is_pinned,
 			last_inbound_at=CASE
@@ -277,7 +318,7 @@ func (r *ChatRepository) ReconcileLIDChat(
 			created_at=LEAST(canonical.created_at,source.created_at),updated_at=NOW()
 		FROM chats source
 		WHERE canonical.id=$1 AND canonical.account_id=$2 AND source.id=$3 AND source.account_id=$2
-	`, canonicalChatID, accountID, sourceChatID); err != nil {
+	`, canonicalChatID, accountID, sourceChatID, attentionAt, attentionID); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM chats WHERE id=$1 AND account_id=$2`, sourceChatID, accountID); err != nil {

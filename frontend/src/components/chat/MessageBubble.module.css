@@ -2,6 +2,27 @@
   opacity: 1;
 }
 
+.messageText {
+  font-size: 14.5px;
+  line-height: 19px;
+}
+
+@media (hover: none), (pointer: coarse), (max-width: 639px) {
+  .messageText {
+    font-size: 15px;
+    line-height: 21px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .messageContainer *,
+  .messageActions,
+  .reactionOption {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
 .compactSelectionSurface {
   -webkit-touch-callout: none;
   touch-action: pan-y;
@@ -51,9 +72,9 @@
 
 @media (hover: hover) and (pointer: fine) {
   .messageActions {
-    /* Keep the action chevron quietly discoverable without competing with
-       the message; hover/focus still promotes the complete control. */
-    opacity: 0.42;
+    /* Keep text unobstructed at rest; pointer hover and keyboard focus reveal
+       the controls. Touch keeps its separate, always visible action target. */
+    opacity: 0;
   }
 
   .messageContainer:hover .messageActions,

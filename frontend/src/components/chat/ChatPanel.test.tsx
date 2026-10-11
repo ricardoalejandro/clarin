@@ -95,6 +95,7 @@ describe('ChatPanel canonical device truth', () => {
   afterEach(() => {
     cleanup()
     vi.unstubAllGlobals()
+    vi.restoreAllMocks()
   })
 
   it('restores drafts across rapid chat switches, including identical values', async () => {
@@ -186,6 +187,8 @@ describe('ChatPanel canonical device truth', () => {
   })
 
   it('marks only the displayed incoming watermark as locally read and reconciles its canonical count', async () => {
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1200)
     const onRead = vi.fn()
     const incoming = {
       id: 'row-incoming-1',
@@ -439,6 +442,7 @@ describe('ChatPanel canonical device truth', () => {
   })
 
   it('disables and explains reactions in the touch selection sheet for another-device history', async () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })))
     const historicalMessage = {
       id: 'historical-row-1',
       message_id: 'historical-message-1',
@@ -475,17 +479,16 @@ describe('ChatPanel canonical device truth', () => {
     const selectButton = await screen.findByRole('button', { name: 'Seleccionar mensaje' })
     await waitFor(() => expect(screen.getByTestId('chat-composer')).toBeInTheDocument())
     fireEvent.click(selectButton)
-    const moreActions = await screen.findByRole('button', { name: 'Más acciones del mensaje' })
-    fireEvent.click(moreActions)
+    await screen.findByRole('menu', { name: 'Acciones del mensaje seleccionado' })
+    expect(screen.queryByTestId('message-selection-header')).toBeNull()
 
     const unavailableReaction = await screen.findByRole('button', { name: /No se puede reaccionar con 👍/ })
     expect(unavailableReaction).toBeDisabled()
     expect(screen.getByText(/otro dispositivo de WhatsApp/)).toBeInTheDocument()
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('menu', { name: 'Acciones del mensaje seleccionado' })).not.toBeInTheDocument()
-    await waitFor(() => expect(moreActions).toHaveFocus())
     expect(onBackToDetail).not.toHaveBeenCalled()
-    expect(screen.getByTestId('message-selection-header')).toBeInTheDocument()
+    expect(screen.queryByTestId('message-selection-header')).toBeNull()
     rectSpy.mockRestore()
   })
 })

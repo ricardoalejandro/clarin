@@ -2001,14 +2001,14 @@ func (r *ChatRepository) MarkAsRead(ctx context.Context, accountID, chatID uuid.
 	query := `
 		SELECT id, timestamp, message_id
 		FROM messages
-		WHERE account_id=$1 AND chat_id=$2 AND is_from_me=FALSE
+		WHERE account_id=$1 AND chat_id=$2
 	`
 	args := []any{accountID, chatID}
 	if strings.TrimSpace(throughMessageID) != "" {
 		query += ` AND (id::text=$3 OR message_id=$3) ORDER BY CASE WHEN id::text=$3 THEN 0 ELSE 1 END LIMIT 1`
 		args = append(args, strings.TrimSpace(throughMessageID))
 	} else {
-		query += ` ORDER BY timestamp DESC, id DESC LIMIT 1`
+		query += ` AND is_from_me=FALSE ORDER BY timestamp DESC, id DESC LIMIT 1`
 	}
 	watermarkErr := tx.QueryRow(ctx, query, args...).Scan(&watermarkID, &watermarkTime, &readThrough)
 	if watermarkErr != nil && (strings.TrimSpace(throughMessageID) != "" || !errors.Is(watermarkErr, pgx.ErrNoRows)) {
@@ -2018,7 +2018,7 @@ func (r *ChatRepository) MarkAsRead(ctx context.Context, accountID, chatID uuid.
 		if _, err := tx.Exec(ctx, `
 			UPDATE messages
 			SET is_read=TRUE, read_at=COALESCE(read_at, NOW())
-			WHERE account_id=$1 AND chat_id=$2 AND is_from_me=FALSE
+			WHERE account_id=$1 AND chat_id=$2 AND is_from_me=FALSE AND is_read=FALSE
 			  AND (timestamp < $3 OR (timestamp = $3 AND id <= $4))
 		`, accountID, chatID, watermarkTime, watermarkID); err != nil {
 			return 0, "", err
