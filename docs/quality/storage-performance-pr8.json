@@ -1,0 +1,1857 @@
+{
+  "date": "2026-10-11",
+  "physical_consistency": {
+    "time_utc": "2026-10-11T17:28:39.703456+00:00",
+    "scope": "one_account_prefix_two_buckets",
+    "read_only": true,
+    "ordinary": {
+      "objects": 1172,
+      "bytes": 3689223836,
+      "pages": 2
+    },
+    "private": {
+      "objects": 179,
+      "bytes": 37096190,
+      "pages": 1
+    },
+    "physical_objects": 1351,
+    "physical_bytes": 3726320026,
+    "sql": {
+      "bytes": 3726320026,
+      "count": 1351,
+      "observed_bytes": 3726320026,
+      "observed_count": 1351
+    },
+    "match": true
+  },
+  "production_read_only": {
+    "reported_account_1351_objects": [
+      {
+        "layer": "sql_and_go_read_only",
+        "max_ms": 353.497,
+        "p50_ms": 195.032,
+        "p95_ms": 341.131,
+        "samples": 30,
+        "scenario": "summary"
+      },
+      {
+        "layer": "sql_and_go_read_only",
+        "max_ms": 286.468,
+        "p50_ms": 87.33,
+        "p95_ms": 226.258,
+        "samples": 30,
+        "scenario": "files"
+      },
+      {
+        "layer": "sql_and_go_read_only",
+        "max_ms": 82.975,
+        "p50_ms": 53.875,
+        "p95_ms": 72.407,
+        "samples": 30,
+        "scenario": "videos"
+      },
+      {
+        "layer": "sql_and_go_read_only",
+        "max_ms": 93.006,
+        "p50_ms": 35.525,
+        "p95_ms": 66.106,
+        "samples": 30,
+        "scenario": "uses"
+      },
+      {
+        "layer": "sql_and_go_read_only",
+        "max_ms": 4.489,
+        "p50_ms": 1.283,
+        "p95_ms": 4.292,
+        "samples": 30,
+        "scenario": "content_authorization"
+      }
+    ],
+    "comparison_account_4056_objects": [
+      {
+        "layer": "sql_and_go_read_only",
+        "max_ms": 849.929,
+        "p50_ms": 285.901,
+        "p95_ms": 613.613,
+        "samples": 30,
+        "scenario": "summary"
+      },
+      {
+        "layer": "sql_and_go_read_only",
+        "max_ms": 389.536,
+        "p50_ms": 189.925,
+        "p95_ms": 344.003,
+        "samples": 30,
+        "scenario": "files"
+      },
+      {
+        "layer": "sql_and_go_read_only",
+        "max_ms": 265.677,
+        "p50_ms": 103.276,
+        "p95_ms": 237.331,
+        "samples": 30,
+        "scenario": "videos"
+      },
+      {
+        "layer": "sql_and_go_read_only",
+        "max_ms": 73.221,
+        "p50_ms": 17.823,
+        "p95_ms": 71.015,
+        "samples": 30,
+        "scenario": "uses"
+      },
+      {
+        "layer": "sql_and_go_read_only",
+        "max_ms": 13.038,
+        "p50_ms": 1.15,
+        "p95_ms": 10.007,
+        "samples": 30,
+        "scenario": "content_authorization"
+      }
+    ]
+  },
+  "explain_before": [
+    {
+      "execution_ms": 3910.961,
+      "jit": {
+        "Functions": 3550,
+        "Options": {
+          "Deforming": true,
+          "Expressions": true,
+          "Inlining": false,
+          "Optimization": false
+        },
+        "Timing": {
+          "Emission": 2902.626,
+          "Generation": 472.629,
+          "Inlining": 0,
+          "Optimization": 166.16,
+          "Total": 3541.415
+        }
+      },
+      "nodes": [
+        {
+          "cost": 145536.32,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1,
+          "time": 3381.627,
+          "type": "Aggregate"
+        },
+        {
+          "cost": 0.02,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 3276.319,
+          "type": "CTE Scan"
+        },
+        {
+          "cost": 1684.96,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 3275.587,
+          "type": "Unique"
+        },
+        {
+          "cost": 1684.95,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 3275.175,
+          "type": "Sort"
+        },
+        {
+          "cost": 1684.94,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 3271.466,
+          "type": "Nested Loop"
+        },
+        {
+          "cost": 1617.41,
+          "loops": 1,
+          "plan_rows": 8,
+          "relation": null,
+          "rows": 1266,
+          "time": 3264.255,
+          "type": "Append"
+        },
+        {
+          "cost": 1579.94,
+          "loops": 1,
+          "plan_rows": 7,
+          "relation": null,
+          "rows": 1266,
+          "time": 3263.992,
+          "type": "Subquery Scan"
+        },
+        {
+          "cost": 1579.87,
+          "loops": 1,
+          "plan_rows": 7,
+          "relation": null,
+          "rows": 1266,
+          "time": 3263.805,
+          "type": "Hash Join"
+        },
+        {
+          "cost": 936.91,
+          "loops": 1,
+          "plan_rows": 7,
+          "relation": "storage_inventory_objects",
+          "rows": 1275,
+          "time": 3068.556,
+          "type": "Bitmap Heap Scan"
+        },
+        {
+          "cost": 20.05,
+          "loops": 1275,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1,
+          "time": 0.132,
+          "type": "Nested Loop"
+        },
+        {
+          "cost": 11.6,
+          "loops": 1275,
+          "plan_rows": 1,
+          "relation": "storage_inventory_references",
+          "rows": 1,
+          "time": 0.125,
+          "type": "Index Scan"
+        },
+        {
+          "cost": 2.5,
+          "loops": 1,
+          "plan_rows": 125,
+          "relation": null,
+          "rows": 505,
+          "time": 151.071,
+          "type": "CTE Scan"
+        }
+      ],
+      "planning_ms": 352.908,
+      "query": "summary"
+    },
+    {
+      "execution_ms": 3284.359,
+      "jit": {
+        "Functions": 3351,
+        "Options": {
+          "Deforming": true,
+          "Expressions": true,
+          "Inlining": false,
+          "Optimization": false
+        },
+        "Timing": {
+          "Emission": 2514.998,
+          "Generation": 390.302,
+          "Inlining": 0,
+          "Optimization": 151.934,
+          "Total": 3057.235
+        }
+      },
+      "nodes": [
+        {
+          "cost": 142589.39,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1,
+          "time": 2868.644,
+          "type": "Aggregate"
+        },
+        {
+          "cost": 956.88,
+          "loops": 1,
+          "plan_rows": 2,
+          "relation": null,
+          "rows": 1266,
+          "time": 2868.286,
+          "type": "Append"
+        },
+        {
+          "cost": 948.68,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 2868.124,
+          "type": "Subquery Scan"
+        },
+        {
+          "cost": 948.67,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 2867.984,
+          "type": "Hash Join"
+        },
+        {
+          "cost": 940.29,
+          "loops": 1,
+          "plan_rows": 7,
+          "relation": "storage_inventory_objects",
+          "rows": 1275,
+          "time": 2667.144,
+          "type": "Bitmap Heap Scan"
+        },
+        {
+          "cost": 20.05,
+          "loops": 1275,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1,
+          "time": 0.156,
+          "type": "Nested Loop"
+        },
+        {
+          "cost": 11.6,
+          "loops": 1275,
+          "plan_rows": 1,
+          "relation": "storage_inventory_references",
+          "rows": 1,
+          "time": 0.149,
+          "type": "Index Scan"
+        },
+        {
+          "cost": 2.5,
+          "loops": 1,
+          "plan_rows": 125,
+          "relation": null,
+          "rows": 505,
+          "time": 178.483,
+          "type": "CTE Scan"
+        },
+        {
+          "cost": 59885.72,
+          "loops": 1,
+          "plan_rows": 125,
+          "relation": null,
+          "rows": 505,
+          "time": 178.418,
+          "type": "Unique"
+        },
+        {
+          "cost": 59885.1,
+          "loops": 1,
+          "plan_rows": 125,
+          "relation": null,
+          "rows": 505,
+          "time": 178.33,
+          "type": "Sort"
+        },
+        {
+          "cost": 59880.43,
+          "loops": 1,
+          "plan_rows": 125,
+          "relation": "storage_inventory_references",
+          "rows": 505,
+          "time": 177.919,
+          "type": "Index Scan"
+        },
+        {
+          "cost": 107.92,
+          "loops": 492,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1,
+          "time": 0.339,
+          "type": "Hash Join"
+        }
+      ],
+      "planning_ms": 279.621,
+      "query": "files_count"
+    },
+    {
+      "execution_ms": 4461.701,
+      "jit": {
+        "Functions": 3798,
+        "Options": {
+          "Deforming": true,
+          "Expressions": true,
+          "Inlining": false,
+          "Optimization": false
+        },
+        "Timing": {
+          "Emission": 3404.339,
+          "Generation": 497.101,
+          "Inlining": 0,
+          "Optimization": 178.488,
+          "Total": 4079.927
+        }
+      },
+      "nodes": [
+        {
+          "cost": 143378.3,
+          "loops": 1,
+          "plan_rows": 4,
+          "relation": null,
+          "rows": 40,
+          "time": 3929.161,
+          "type": "Sort"
+        },
+        {
+          "cost": 788.85,
+          "loops": 1,
+          "plan_rows": 4,
+          "relation": null,
+          "rows": 40,
+          "time": 3928.767,
+          "type": "Nested Loop"
+        },
+        {
+          "cost": 0.04,
+          "loops": 1,
+          "plan_rows": 2,
+          "relation": null,
+          "rows": 40,
+          "time": 3902.658,
+          "type": "CTE Scan"
+        },
+        {
+          "cost": 956.91,
+          "loops": 1,
+          "plan_rows": 2,
+          "relation": null,
+          "rows": 40,
+          "time": 3902.638,
+          "type": "Limit"
+        },
+        {
+          "cost": 956.91,
+          "loops": 1,
+          "plan_rows": 2,
+          "relation": null,
+          "rows": 40,
+          "time": 323.145,
+          "type": "Sort"
+        },
+        {
+          "cost": 956.89,
+          "loops": 1,
+          "plan_rows": 2,
+          "relation": null,
+          "rows": 1266,
+          "time": 322.057,
+          "type": "Append"
+        },
+        {
+          "cost": 948.69,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 321.721,
+          "type": "Subquery Scan"
+        },
+        {
+          "cost": 948.68,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 321.455,
+          "type": "Hash Join"
+        },
+        {
+          "cost": 20.05,
+          "loops": 1275,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1,
+          "time": 0.248,
+          "type": "Nested Loop"
+        },
+        {
+          "cost": 11.6,
+          "loops": 1275,
+          "plan_rows": 1,
+          "relation": "storage_inventory_references",
+          "rows": 1,
+          "time": 0.235,
+          "type": "Index Scan"
+        },
+        {
+          "cost": 2.5,
+          "loops": 1,
+          "plan_rows": 125,
+          "relation": null,
+          "rows": 505,
+          "time": 284.663,
+          "type": "CTE Scan"
+        },
+        {
+          "cost": 59885.72,
+          "loops": 1,
+          "plan_rows": 125,
+          "relation": null,
+          "rows": 505,
+          "time": 284.54,
+          "type": "Unique"
+        }
+      ],
+      "planning_ms": 338.208,
+      "query": "files_page"
+    }
+  ],
+  "explain_after": [
+    {
+      "execution_ms": 323.602,
+      "jit": null,
+      "nodes": [
+        {
+          "cost": 62252.28,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1,
+          "time": 300.872,
+          "type": "Aggregate"
+        },
+        {
+          "cost": 2218.67,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1,
+          "time": 231.494,
+          "type": "Aggregate"
+        },
+        {
+          "cost": 2218.65,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 7,
+          "time": 231.459,
+          "type": "Aggregate"
+        },
+        {
+          "cost": 2218.64,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 231.247,
+          "type": "Sort"
+        },
+        {
+          "cost": 2218.62,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 229.587,
+          "type": "Subquery Scan"
+        },
+        {
+          "cost": 2218.61,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 229.428,
+          "type": "Aggregate"
+        },
+        {
+          "cost": 2218.56,
+          "loops": 1,
+          "plan_rows": 2,
+          "relation": null,
+          "rows": 12526,
+          "time": 218.393,
+          "type": "Sort"
+        },
+        {
+          "cost": 2218.55,
+          "loops": 1,
+          "plan_rows": 2,
+          "relation": null,
+          "rows": 12526,
+          "time": 114.994,
+          "type": "Append"
+        },
+        {
+          "cost": 2218.51,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 11260,
+          "time": 113.05,
+          "type": "Nested Loop"
+        },
+        {
+          "cost": 11.54,
+          "loops": 11616,
+          "plan_rows": 1,
+          "relation": "storage_inventory_references",
+          "rows": 1,
+          "time": 0.008,
+          "type": "Index Scan"
+        },
+        {
+          "cost": 0.02,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 67.3,
+          "type": "CTE Scan"
+        },
+        {
+          "cost": 1684.96,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 66.565,
+          "type": "Unique"
+        }
+      ],
+      "planning_ms": 211.763,
+      "query": "summary"
+    },
+    {
+      "execution_ms": 62.911,
+      "jit": null,
+      "nodes": [
+        {
+          "cost": 59305.35,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1,
+          "time": 48.074,
+          "type": "Aggregate"
+        },
+        {
+          "cost": 956.88,
+          "loops": 1,
+          "plan_rows": 2,
+          "relation": null,
+          "rows": 1266,
+          "time": 47.689,
+          "type": "Append"
+        },
+        {
+          "cost": 948.68,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 47.534,
+          "type": "Subquery Scan"
+        },
+        {
+          "cost": 948.67,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 47.367,
+          "type": "Hash Join"
+        },
+        {
+          "cost": 20.05,
+          "loops": 1275,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1,
+          "time": 0.031,
+          "type": "Nested Loop"
+        },
+        {
+          "cost": 11.6,
+          "loops": 1275,
+          "plan_rows": 1,
+          "relation": "storage_inventory_references",
+          "rows": 1,
+          "time": 0.016,
+          "type": "Index Scan"
+        },
+        {
+          "cost": 8.44,
+          "loops": 1266,
+          "plan_rows": 1,
+          "relation": "storage_inventory_sources",
+          "rows": 1,
+          "time": 0.009,
+          "type": "Index Scan"
+        },
+        {
+          "cost": 940.29,
+          "loops": 1,
+          "plan_rows": 7,
+          "relation": "storage_inventory_objects",
+          "rows": 1275,
+          "time": 6.712,
+          "type": "Bitmap Heap Scan"
+        },
+        {
+          "cost": 2.5,
+          "loops": 1,
+          "plan_rows": 125,
+          "relation": null,
+          "rows": 505,
+          "time": 3.245,
+          "type": "CTE Scan"
+        },
+        {
+          "cost": 26739.08,
+          "loops": 1,
+          "plan_rows": 125,
+          "relation": null,
+          "rows": 505,
+          "time": 3.086,
+          "type": "Unique"
+        },
+        {
+          "cost": 26738.46,
+          "loops": 1,
+          "plan_rows": 125,
+          "relation": null,
+          "rows": 505,
+          "time": 2.974,
+          "type": "Sort"
+        },
+        {
+          "cost": 26733.79,
+          "loops": 1,
+          "plan_rows": 125,
+          "relation": "storage_inventory_references",
+          "rows": 505,
+          "time": 2.669,
+          "type": "Index Scan"
+        }
+      ],
+      "planning_ms": 299.257,
+      "query": "files_count"
+    },
+    {
+      "execution_ms": 320.125,
+      "jit": null,
+      "nodes": [
+        {
+          "cost": 60094.34,
+          "loops": 1,
+          "plan_rows": 2,
+          "relation": null,
+          "rows": 40,
+          "time": 292.075,
+          "type": "Sort"
+        },
+        {
+          "cost": 788.92,
+          "loops": 1,
+          "plan_rows": 2,
+          "relation": null,
+          "rows": 40,
+          "time": 291.427,
+          "type": "Nested Loop"
+        },
+        {
+          "cost": 0.06,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1,
+          "time": 152.867,
+          "type": "Aggregate"
+        },
+        {
+          "cost": 0.04,
+          "loops": 1,
+          "plan_rows": 2,
+          "relation": null,
+          "rows": 1266,
+          "time": 152.587,
+          "type": "CTE Scan"
+        },
+        {
+          "cost": 956.89,
+          "loops": 1,
+          "plan_rows": 2,
+          "relation": null,
+          "rows": 1266,
+          "time": 151.233,
+          "type": "Append"
+        },
+        {
+          "cost": 948.69,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 151.032,
+          "type": "Subquery Scan"
+        },
+        {
+          "cost": 948.68,
+          "loops": 1,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1266,
+          "time": 150.758,
+          "type": "Hash Join"
+        },
+        {
+          "cost": 394.4,
+          "loops": 40,
+          "plan_rows": 2,
+          "relation": null,
+          "rows": 1,
+          "time": 3.34,
+          "type": "Result"
+        },
+        {
+          "cost": 394.38,
+          "loops": 40,
+          "plan_rows": 2,
+          "relation": null,
+          "rows": 1,
+          "time": 3.261,
+          "type": "Append"
+        },
+        {
+          "cost": 20.05,
+          "loops": 1275,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1,
+          "time": 0.098,
+          "type": "Nested Loop"
+        },
+        {
+          "cost": 304.16,
+          "loops": 40,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1,
+          "time": 3.123,
+          "type": "Subquery Scan"
+        },
+        {
+          "cost": 304.15,
+          "loops": 40,
+          "plan_rows": 1,
+          "relation": null,
+          "rows": 1,
+          "time": 3.112,
+          "type": "Nested Loop"
+        }
+      ],
+      "planning_ms": 731.829,
+      "query": "files_page"
+    }
+  ],
+  "isolated_http": [
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 545552,
+        "p50": 462872,
+        "p95": 532824
+      },
+      "allocations_per_sample": {
+        "max": 1808,
+        "p50": 1741,
+        "p95": 1786
+      },
+      "baseline_heap_bytes": 5615216,
+      "baseline_rss_bytes": 35786752,
+      "chats": 100,
+      "gc_collections": 3,
+      "gc_pause_ms": 0.404253,
+      "latency_ms": {
+        "max": 94.574,
+        "p50": 45.858,
+        "p95": 85.639
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": false,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 30786,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6106440,
+      "sampled_peak_rss_bytes": 36020224,
+      "samples": 30,
+      "scenario": "files_first",
+      "text_messages_per_object": 10
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 575904,
+        "p50": 463088,
+        "p95": 532968
+      },
+      "allocations_per_sample": {
+        "max": 1806,
+        "p50": 1747,
+        "p95": 1793
+      },
+      "baseline_heap_bytes": 5411456,
+      "baseline_rss_bytes": 35893248,
+      "chats": 100,
+      "gc_collections": 3,
+      "gc_pause_ms": 0.422676,
+      "latency_ms": {
+        "max": 81.138,
+        "p50": 48.088,
+        "p95": 71.781
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": false,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 30792,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 5897448,
+      "sampled_peak_rss_bytes": 36184064,
+      "samples": 30,
+      "scenario": "files_last",
+      "text_messages_per_object": 10
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 175456,
+        "p50": 137912,
+        "p95": 151048
+      },
+      "allocations_per_sample": {
+        "max": 633,
+        "p50": 583,
+        "p95": 616
+      },
+      "baseline_heap_bytes": 5300392,
+      "baseline_rss_bytes": 35434496,
+      "chats": 100,
+      "gc_collections": 0,
+      "gc_pause_ms": 0,
+      "latency_ms": {
+        "max": 80.306,
+        "p50": 51.747,
+        "p95": 70.265
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": false,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 1071,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 5451744,
+      "sampled_peak_rss_bytes": 35516416,
+      "samples": 30,
+      "scenario": "files_search",
+      "text_messages_per_object": 10
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 155216,
+        "p50": 67480,
+        "p95": 105064
+      },
+      "allocations_per_sample": {
+        "max": 653,
+        "p50": 597,
+        "p95": 626
+      },
+      "baseline_heap_bytes": 5353160,
+      "baseline_rss_bytes": 35545088,
+      "chats": 100,
+      "gc_collections": 0,
+      "gc_pause_ms": 0,
+      "latency_ms": {
+        "max": 106.764,
+        "p50": 67.004,
+        "p95": 106.75
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": false,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 902,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 5445544,
+      "sampled_peak_rss_bytes": 35573760,
+      "samples": 30,
+      "scenario": "usage",
+      "text_messages_per_object": 10
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 595488,
+        "p50": 530848,
+        "p95": 592288
+      },
+      "allocations_per_sample": {
+        "max": 2381,
+        "p50": 2342,
+        "p95": 2374
+      },
+      "baseline_heap_bytes": 5602056,
+      "baseline_rss_bytes": 36110336,
+      "chats": 100,
+      "gc_collections": 3,
+      "gc_pause_ms": 0.695125,
+      "latency_ms": {
+        "max": 155.002,
+        "p50": 88.597,
+        "p95": 144.277
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": false,
+      "requests_per_sample": 2,
+      "response_bytes_last_sample": 31688,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6176280,
+      "sampled_peak_rss_bytes": 36364288,
+      "samples": 30,
+      "scenario": "page_open_parallel",
+      "text_messages_per_object": 10
+    },
+    {
+      "actor_role": "admin",
+      "allocated_bytes_per_sample": {
+        "max": 543056,
+        "p50": 460432,
+        "p95": 542864
+      },
+      "allocations_per_sample": {
+        "max": 1847,
+        "p50": 1782,
+        "p95": 1845
+      },
+      "baseline_heap_bytes": 5626536,
+      "baseline_rss_bytes": 36081664,
+      "chats": 100,
+      "gc_collections": 3,
+      "gc_pause_ms": 1.857028,
+      "latency_ms": {
+        "max": 145.502,
+        "p50": 50.839,
+        "p95": 80.878
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": false,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 30786,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6109512,
+      "sampled_peak_rss_bytes": 36335616,
+      "samples": 30,
+      "scenario": "files_first_admin",
+      "text_messages_per_object": 10
+    },
+    {
+      "actor_role": "admin",
+      "allocated_bytes_per_sample": {
+        "max": 683360,
+        "p50": 531056,
+        "p95": 608672
+      },
+      "allocations_per_sample": {
+        "max": 2548,
+        "p50": 2447,
+        "p95": 2492
+      },
+      "baseline_heap_bytes": 5765000,
+      "baseline_rss_bytes": 36487168,
+      "chats": 100,
+      "gc_collections": 3,
+      "gc_pause_ms": 1.642197,
+      "latency_ms": {
+        "max": 170.591,
+        "p50": 105.087,
+        "p95": 152.083
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": false,
+      "requests_per_sample": 2,
+      "response_bytes_last_sample": 31702,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6392296,
+      "sampled_peak_rss_bytes": 36810752,
+      "samples": 30,
+      "scenario": "page_open_admin_parallel",
+      "text_messages_per_object": 10
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 571304,
+        "p50": 462960,
+        "p95": 538112
+      },
+      "allocations_per_sample": {
+        "max": 1792,
+        "p50": 1745,
+        "p95": 1787
+      },
+      "baseline_heap_bytes": 5483816,
+      "baseline_rss_bytes": 37285888,
+      "chats": 100,
+      "gc_collections": 1,
+      "gc_pause_ms": 0.305307,
+      "latency_ms": {
+        "max": 1762.463,
+        "p50": 425.326,
+        "p95": 980.321
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 10000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": true,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 30871,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6259968,
+      "sampled_peak_rss_bytes": 37793792,
+      "samples": 30,
+      "scenario": "files_first",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 570640,
+        "p50": 463072,
+        "p95": 532944
+      },
+      "allocations_per_sample": {
+        "max": 1793,
+        "p50": 1749,
+        "p95": 1790
+      },
+      "baseline_heap_bytes": 5671848,
+      "baseline_rss_bytes": 37474304,
+      "chats": 100,
+      "gc_collections": 3,
+      "gc_pause_ms": 0.353839,
+      "latency_ms": {
+        "max": 407.404,
+        "p50": 342.455,
+        "p95": 405.635
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 10000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": true,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 30919,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6218360,
+      "sampled_peak_rss_bytes": 37744640,
+      "samples": 30,
+      "scenario": "files_last",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 222952,
+        "p50": 137912,
+        "p95": 183600
+      },
+      "allocations_per_sample": {
+        "max": 612,
+        "p50": 583,
+        "p95": 610
+      },
+      "baseline_heap_bytes": 5610296,
+      "baseline_rss_bytes": 37462016,
+      "chats": 100,
+      "gc_collections": 0,
+      "gc_pause_ms": 0,
+      "latency_ms": {
+        "max": 531.257,
+        "p50": 384.633,
+        "p95": 513.882
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 10000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": true,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 1071,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 5839304,
+      "sampled_peak_rss_bytes": 37625856,
+      "samples": 30,
+      "scenario": "files_search",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 104712,
+        "p50": 67576,
+        "p95": 82112
+      },
+      "allocations_per_sample": {
+        "max": 661,
+        "p50": 601,
+        "p95": 626
+      },
+      "baseline_heap_bytes": 5569440,
+      "baseline_rss_bytes": 37437440,
+      "chats": 100,
+      "gc_collections": 0,
+      "gc_pause_ms": 0,
+      "latency_ms": {
+        "max": 1206.967,
+        "p50": 920.717,
+        "p95": 1142.335
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 10000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": true,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 909,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 5811456,
+      "sampled_peak_rss_bytes": 37605376,
+      "samples": 30,
+      "scenario": "usage",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 600272,
+        "p50": 531048,
+        "p95": 599704
+      },
+      "allocations_per_sample": {
+        "max": 2386,
+        "p50": 2348,
+        "p95": 2384
+      },
+      "baseline_heap_bytes": 5743136,
+      "baseline_rss_bytes": 37912576,
+      "chats": 100,
+      "gc_collections": 3,
+      "gc_pause_ms": 0.501562,
+      "latency_ms": {
+        "max": 2551.137,
+        "p50": 1079.287,
+        "p95": 2302.202
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 10000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": true,
+      "requests_per_sample": 2,
+      "response_bytes_last_sample": 31780,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6487728,
+      "sampled_peak_rss_bytes": 38264832,
+      "samples": 30,
+      "scenario": "page_open_parallel",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "admin",
+      "allocated_bytes_per_sample": {
+        "max": 567256,
+        "p50": 460328,
+        "p95": 535488
+      },
+      "allocations_per_sample": {
+        "max": 1823,
+        "p50": 1784,
+        "p95": 1814
+      },
+      "baseline_heap_bytes": 5602624,
+      "baseline_rss_bytes": 37605376,
+      "chats": 100,
+      "gc_collections": 3,
+      "gc_pause_ms": 0.593467,
+      "latency_ms": {
+        "max": 498.892,
+        "p50": 381.839,
+        "p95": 447.135
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 10000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": true,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 30871,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6146032,
+      "sampled_peak_rss_bytes": 37908480,
+      "samples": 30,
+      "scenario": "files_first_admin",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "admin",
+      "allocated_bytes_per_sample": {
+        "max": 600656,
+        "p50": 530504,
+        "p95": 599592
+      },
+      "allocations_per_sample": {
+        "max": 2482,
+        "p50": 2449,
+        "p95": 2480
+      },
+      "baseline_heap_bytes": 5754648,
+      "baseline_rss_bytes": 37986304,
+      "chats": 100,
+      "gc_collections": 3,
+      "gc_pause_ms": 1.876708,
+      "latency_ms": {
+        "max": 1727.618,
+        "p50": 748.554,
+        "p95": 1359.238
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 10000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": true,
+      "requests_per_sample": 2,
+      "response_bytes_last_sample": 31784,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6478712,
+      "sampled_peak_rss_bytes": 38379520,
+      "samples": 30,
+      "scenario": "page_open_admin_parallel",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 580672,
+        "p50": 464608,
+        "p95": 532912
+      },
+      "allocations_per_sample": {
+        "max": 1797,
+        "p50": 1752,
+        "p95": 1787
+      },
+      "baseline_heap_bytes": 5565568,
+      "baseline_rss_bytes": 38326272,
+      "chats": 100,
+      "gc_collections": 3,
+      "gc_pause_ms": 1.414546,
+      "latency_ms": {
+        "max": 4129.734,
+        "p50": 1598.981,
+        "p95": 2401.668
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 50000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": true,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 30910,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6598376,
+      "sampled_peak_rss_bytes": 38952960,
+      "samples": 30,
+      "scenario": "files_first",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 607336,
+        "p50": 463248,
+        "p95": 538432
+      },
+      "allocations_per_sample": {
+        "max": 1807,
+        "p50": 1757,
+        "p95": 1786
+      },
+      "baseline_heap_bytes": 5574712,
+      "baseline_rss_bytes": 38313984,
+      "chats": 100,
+      "gc_collections": 3,
+      "gc_pause_ms": 11.021221,
+      "latency_ms": {
+        "max": 4507.694,
+        "p50": 2233.439,
+        "p95": 4451.22
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 50000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": true,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 30921,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6644280,
+      "sampled_peak_rss_bytes": 39051264,
+      "samples": 30,
+      "scenario": "files_last",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 220824,
+        "p50": 138072,
+        "p95": 218008
+      },
+      "allocations_per_sample": {
+        "max": 631,
+        "p50": 591,
+        "p95": 625
+      },
+      "baseline_heap_bytes": 5606016,
+      "baseline_rss_bytes": 38371328,
+      "chats": 100,
+      "gc_collections": 0,
+      "gc_pause_ms": 0,
+      "latency_ms": {
+        "max": 3263.805,
+        "p50": 2265.636,
+        "p95": 3156.879
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 50000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": true,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 1071,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6127592,
+      "sampled_peak_rss_bytes": 38735872,
+      "samples": 30,
+      "scenario": "files_search",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 104848,
+        "p50": 67816,
+        "p95": 80824
+      },
+      "allocations_per_sample": {
+        "max": 654,
+        "p50": 614,
+        "p95": 638
+      },
+      "baseline_heap_bytes": 5649216,
+      "baseline_rss_bytes": 38363136,
+      "chats": 100,
+      "gc_collections": 0,
+      "gc_pause_ms": 0,
+      "latency_ms": {
+        "max": 8205.556,
+        "p50": 3763.164,
+        "p95": 5179.468
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 50000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": true,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 909,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6425712,
+      "sampled_peak_rss_bytes": 38920192,
+      "samples": 30,
+      "scenario": "usage",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 627248,
+        "p50": 532224,
+        "p95": 602496
+      },
+      "allocations_per_sample": {
+        "max": 2453,
+        "p50": 2361,
+        "p95": 2404
+      },
+      "baseline_heap_bytes": 5856280,
+      "baseline_rss_bytes": 38617088,
+      "chats": 100,
+      "gc_collections": 3,
+      "gc_pause_ms": 1.297388,
+      "latency_ms": {
+        "max": 8181.016,
+        "p50": 3899.812,
+        "p95": 5547.528
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 50000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": true,
+      "requests_per_sample": 2,
+      "response_bytes_last_sample": 31819,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 7116600,
+      "sampled_peak_rss_bytes": 39362560,
+      "samples": 30,
+      "scenario": "page_open_parallel",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "admin",
+      "allocated_bytes_per_sample": {
+        "max": 543184,
+        "p50": 460432,
+        "p95": 530440
+      },
+      "allocations_per_sample": {
+        "max": 1860,
+        "p50": 1788,
+        "p95": 1833
+      },
+      "baseline_heap_bytes": 5617336,
+      "baseline_rss_bytes": 38391808,
+      "chats": 100,
+      "gc_collections": 3,
+      "gc_pause_ms": 0.406966,
+      "latency_ms": {
+        "max": 4080.439,
+        "p50": 1678.405,
+        "p95": 2660.354
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 50000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": true,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 30910,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6502816,
+      "sampled_peak_rss_bytes": 38932480,
+      "samples": 30,
+      "scenario": "files_first_admin",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "admin",
+      "allocated_bytes_per_sample": {
+        "max": 654032,
+        "p50": 531760,
+        "p95": 645312
+      },
+      "allocations_per_sample": {
+        "max": 2523,
+        "p50": 2464,
+        "p95": 2503
+      },
+      "baseline_heap_bytes": 5733312,
+      "baseline_rss_bytes": 38649856,
+      "chats": 100,
+      "gc_collections": 3,
+      "gc_pause_ms": 0.319514,
+      "latency_ms": {
+        "max": 7530.271,
+        "p50": 3986.3,
+        "p95": 7527.631
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 50000,
+      "references_per_object": 1,
+      "relational_inventory_fixture": true,
+      "requests_per_sample": 2,
+      "response_bytes_last_sample": 31824,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 8200752,
+      "sampled_peak_rss_bytes": 40464384,
+      "samples": 30,
+      "scenario": "page_open_admin_parallel",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 166928,
+        "p50": 145816,
+        "p95": 154288
+      },
+      "allocations_per_sample": {
+        "max": 697,
+        "p50": 642,
+        "p95": 672
+      },
+      "baseline_heap_bytes": 5679880,
+      "baseline_rss_bytes": 38424576,
+      "chats": 101,
+      "gc_collections": 1,
+      "gc_pause_ms": 0.137678,
+      "latency_ms": {
+        "max": 1291.787,
+        "p50": 480.443,
+        "p95": 993.496
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1,
+      "references_per_object": 10000,
+      "relational_inventory_fixture": false,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 1628,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 5948480,
+      "sampled_peak_rss_bytes": 38572032,
+      "samples": 30,
+      "scenario": "shared_files",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 139808,
+        "p50": 65536,
+        "p95": 109056
+      },
+      "allocations_per_sample": {
+        "max": 622,
+        "p50": 582,
+        "p95": 600
+      },
+      "baseline_heap_bytes": 5635032,
+      "baseline_rss_bytes": 38449152,
+      "chats": 101,
+      "gc_collections": 0,
+      "gc_pause_ms": 0,
+      "latency_ms": {
+        "max": 274.092,
+        "p50": 186.055,
+        "p95": 249.064
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1,
+      "references_per_object": 10000,
+      "relational_inventory_fixture": false,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 881,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 5742040,
+      "sampled_peak_rss_bytes": 38469632,
+      "samples": 30,
+      "scenario": "shared_usage",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 226176,
+        "p50": 211336,
+        "p95": 220280
+      },
+      "allocations_per_sample": {
+        "max": 1258,
+        "p50": 1222,
+        "p95": 1249
+      },
+      "baseline_heap_bytes": 5727672,
+      "baseline_rss_bytes": 38588416,
+      "chats": 101,
+      "gc_collections": 1,
+      "gc_pause_ms": 0.248933,
+      "latency_ms": {
+        "max": 747.419,
+        "p50": 563.162,
+        "p95": 699.535
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1,
+      "references_per_object": 10000,
+      "relational_inventory_fixture": false,
+      "requests_per_sample": 2,
+      "response_bytes_last_sample": 2508,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6056336,
+      "sampled_peak_rss_bytes": 38727680,
+      "samples": 30,
+      "scenario": "shared_page_open_parallel",
+      "text_messages_per_object": 0
+    },
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 880872,
+        "p50": 805632,
+        "p95": 858216
+      },
+      "allocations_per_sample": {
+        "max": 10113,
+        "p50": 10078,
+        "p95": 10112
+      },
+      "baseline_heap_bytes": 5744408,
+      "baseline_rss_bytes": 39178240,
+      "chats": 101,
+      "gc_collections": 3,
+      "gc_pause_ms": 0.241178,
+      "latency_ms": {
+        "max": 375.34,
+        "p50": 319.245,
+        "p95": 365.343
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1,
+      "references_per_object": 10000,
+      "relational_inventory_fixture": false,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 7836,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 6611000,
+      "sampled_peak_rss_bytes": 39419904,
+      "samples": 30,
+      "scenario": "shared_uses_detail",
+      "text_messages_per_object": 0
+    }
+  ],
+  "pre_budget_dirty_fallback": [
+    {
+      "actor_role": "member",
+      "allocated_bytes_per_sample": {
+        "max": 120688808,
+        "p50": 120676424,
+        "p95": 120683680
+      },
+      "allocations_per_sample": {
+        "max": 1749560,
+        "p50": 1749495,
+        "p95": 1749524
+      },
+      "baseline_heap_bytes": 36010968,
+      "baseline_rss_bytes": 85770240,
+      "chats": 101,
+      "gc_collections": 136,
+      "gc_pause_ms": 39.53849,
+      "latency_ms": {
+        "max": 1119.381,
+        "p50": 530.91,
+        "p95": 1033.494
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1,
+      "references_per_object": 10000,
+      "relational_inventory_fixture": false,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 7836,
+      "rss_available": true,
+      "s3_requests_during_measurements": 0,
+      "sampled_peak_heap_bytes": 83951424,
+      "sampled_peak_rss_bytes": 124919808,
+      "samples": 30,
+      "scenario": "shared_uses_detail_dirty",
+      "text_messages_per_object": 0
+    }
+  ],
+  "isolated_matrix": {
+    "completed": true,
+    "scenarios_recorded": 25,
+    "samples_per_scenario": 30,
+    "warmups_per_scenario": 2,
+    "transport": "Fiber app.Test; SQL and MinIO native; no public network or browser"
+  }
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -50,11 +51,18 @@ const storageReferenceSelectedKeysSQL = `WITH selected_keys AS MATERIALIZED (
  FROM unnest($2::text[]) AS keys(object_key)
 ) `
 
+// Only URL-bearing scalar values need percent decoding. A percent sign in a
+// document's text/style must not decode its entire serialized design per key.
+// The Go structural parser remains the authority after this coarse filter.
 const storageReferenceSelectedKeyPredicateSQL = `EXISTS(SELECT 1 FROM selected_keys selected
  WHERE strpos(r.payload,selected.object_key)>0 OR strpos(r.payload,selected.encoded_key)>0
- OR (strpos(r.payload,'%')>0 AND
-  (strpos(clarin_storage_path_unescape(r.payload),selected.object_key)>0
-   OR strpos(clarin_storage_path_unescape(r.payload),selected.encoded_key)>0)))`
+ OR (strpos(r.payload,'%')>0 AND EXISTS(
+  SELECT 1 FROM jsonb_path_query(r.payload::jsonb, '$.** ? (@.type() == "string")') scalar(value)
+  WHERE strpos(scalar.value #>> '{}','%')>0
+  AND ((scalar.value #>> '{}') ~ '^(https?://|/)'
+    OR strpos(scalar.value #>> '{}','/api/media/file/')>0
+    OR strpos(scalar.value #>> '{}','/clarin-media/')>0)
+  AND strpos(clarin_storage_path_unescape(scalar.value #>> '{}'),selected.object_key)>0)))`
 
 func storageSelfServiceReferencesForKeys(ctx context.Context, q storageSelfServiceQuerier, account uuid.UUID, keys []string, stores ...*storage.Storage) (map[string][]storageSelfServiceReference, error) {
 	if len(keys) == 0 || len(keys) > 100 {
@@ -67,11 +75,28 @@ func storageSelfServiceReferencesForKeys(ctx context.Context, q storageSelfServi
 		}
 		refs[key] = []storageSelfServiceReference{}
 	}
+	budget, bounded := ctx.Value(storageReferenceReadBudgetKey{}).(*storageReferenceReadBudget)
+	payloadSelect := "r.payload"
+	if bounded {
+		// Oversized payloads never cross the SQL/Go boundary. The length is
+		// checked before the structural parser and no partial result is returned.
+		payloadSelect = "CASE WHEN octet_length(r.payload)<=" + strconv.FormatInt(storageFallbackPayloadLimit, 10) + " THEN r.payload ELSE '' END,octet_length(r.payload)"
+	}
 	queries := make([]string, 0, len(storageSelfServiceReferenceQueries))
 	for _, source := range storageSelfServiceReferenceQueries {
-		queries = append(queries, `SELECT '`+source.origin+`',r.id,r.label,r.href,r.filename,r.payload FROM (`+source.sql+`) AS r(id,label,href,filename,payload) WHERE `+storageReferenceSelectedKeyPredicateSQL)
+		queries = append(queries, `SELECT '`+source.origin+`',r.id,r.label,r.href,r.filename,`+payloadSelect+` FROM (`+source.sql+`) AS r(id,label,href,filename,payload) WHERE `+storageReferenceSelectedKeyPredicateSQL)
 	}
-	rows, err := q.Query(ctx, storageReferenceSelectedKeysSQL+strings.Join(queries, " UNION ALL "), account, keys)
+	query := storageReferenceSelectedKeysSQL + strings.Join(queries, " UNION ALL ")
+	if bounded {
+		query += " LIMIT " + strconv.Itoa(storageFallbackCandidateLimit+1)
+	}
+	queryCtx := ctx
+	cancelRead := func() {}
+	if bounded {
+		queryCtx, cancelRead = context.WithCancel(ctx)
+		defer cancelRead()
+	}
+	rows, err := q.Query(queryCtx, query, account, keys)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +105,18 @@ func storageSelfServiceReferencesForKeys(ctx context.Context, q storageSelfServi
 	for rows.Next() {
 		var ref storageSelfServiceReference
 		var payload string
-		if err = rows.Scan(&ref.Origin, &ref.ID, &ref.Label, &ref.Href, &ref.Filename, &payload); err != nil {
+		if bounded {
+			var size int64
+			err = rows.Scan(&ref.Origin, &ref.ID, &ref.Label, &ref.Href, &ref.Filename, &payload, &size)
+			if err == nil && !budget.consume(size) {
+				// Stop PostgreSQL before Rows.Close can drain unneeded payloads.
+				cancelRead()
+				return nil, errStorageIndexingBudget
+			}
+		} else {
+			err = rows.Scan(&ref.Origin, &ref.ID, &ref.Label, &ref.Href, &ref.Filename, &payload)
+		}
+		if err != nil {
 			return nil, err
 		}
 		for key, readable := range storageSelfServiceReferenceValues(account, payload, stores...) {

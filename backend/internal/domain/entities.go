@@ -3448,6 +3448,7 @@ type DynamicWhatsAppQueue struct {
 
 // DocumentTemplate represents a reusable document design template
 type DocumentTemplate struct {
+	Revision        int64           `json:"revision"`
 	ID              uuid.UUID       `json:"id"`
 	AccountID       uuid.UUID       `json:"account_id"`
 	Name            string          `json:"name"`

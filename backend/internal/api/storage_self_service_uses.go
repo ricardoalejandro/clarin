@@ -2,13 +2,12 @@ package api
 
 import (
 	"context"
-	"encoding/base64"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"encoding/json"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
@@ -81,72 +80,47 @@ func (s *Server) storageSelfServiceListUses(ctx context.Context, q storageSelfSe
 func (s *Server) handleStorageSelfServiceUses(c *fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(c.Context(), storageSelfServiceCatalogTimeout)
 	defer cancel()
-	account, actor, claims, err := s.storageSelfServiceActor(c, ctx)
+	account, user, claims, err := s.storageSelfServiceActor(c, ctx)
 	if err != nil {
 		return storageSelfServiceError(c, 403, "storage_forbidden", "No tienes acceso al almacenamiento.")
 	}
+	actor := storageUseActor{account, user, claims}
 	key := strings.TrimSpace(c.Query("object_key"))
 	if !storageSelfServiceValidKey(account, key) {
 		return storageSelfServiceError(c, 404, "storage_not_found", "El archivo no está disponible.")
 	}
-	uses, err := s.storageSelfServiceListUses(ctx, s.repos.DB(), storageUseActor{account, actor, claims}, key)
+	after, err := storageDecodeUseCursor(c.Query("cursor"), actor, key)
 	if err != nil {
-		return storageSelfServiceError(c, 503, "storage_scan_failed", "No se pudieron verificar los usos.")
-	}
-	if len(uses) == 0 {
-		recoveries, e := s.storageSelfServiceRecoveryFiles(ctx, s.repos.DB(), storageUseActor{account, actor, claims}, []string{key})
-		if e != nil {
-			return storageSelfServiceError(c, 503, "storage_scan_failed", "No se pudieron verificar los usos.")
-		}
-		readable := false
-		for _, recovery := range recoveries {
-			if recovery.PreviewURL != "" {
-				readable = true
-				break
-			}
-		}
-		if !readable && !storage.IsProtectedMediaObjectKey(key) && storageSelfServiceHasPermission(claims, domain.PermChats) {
-			if e = s.repos.DB().QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM storage_media_trash WHERE account_id=$1 AND object_key=$2 AND state='trash' AND jsonb_array_length(message_backups)>0 AND (actor_id=$3 OR $4::boolean))`, account, key, actor, domain.HasAccountAdminAuthority(claims.Role, claims.IsSuperAdmin)).Scan(&readable); e != nil {
-				return storageSelfServiceError(c, 503, "storage_scan_failed", "No se pudieron verificar los usos.")
-			}
-		}
-		if !readable {
-			return storageSelfServiceError(c, 404, "storage_not_found", "El archivo no está disponible.")
-		}
+		return storageSelfServiceError(c, 400, "invalid_cursor", "Vuelve a cargar los usos.")
 	}
 	limit, _ := strconv.Atoi(c.Query("limit", "40"))
 	if limit < 1 || limit > 100 {
 		limit = 40
 	}
-	after := ""
-	if encoded := c.Query("cursor"); encoded != "" {
-		decoded, e := base64.RawURLEncoding.DecodeString(encoded)
-		if e != nil {
-			return storageSelfServiceError(c, 400, "invalid_cursor", "Vuelve a cargar los usos.")
-		}
-		var cursor struct {
-			AccountID, ActorID uuid.UUID
-			Key, After         string
-		}
-		if json.Unmarshal(decoded, &cursor) != nil || cursor.AccountID != account || cursor.ActorID != actor || cursor.Key != key {
-			return storageSelfServiceError(c, 400, "invalid_cursor", "Vuelve a cargar los usos.")
-		}
-		after = cursor.After
+	uses, total, next, err := s.storageReadUsesPage(ctx, actor, key, after, limit)
+	if errors.Is(err, errStorageIndexingBudget) {
+		c.Set(fiber.HeaderRetryAfter, "3")
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"success": false, "code": "storage_indexing_budget", "catalog_status": "indexing", "retry_after_seconds": 3, "error": "Estamos actualizando las ubicaciones del archivo. Vuelve a intentarlo en unos segundos."})
 	}
-	start := sort.Search(len(uses), func(i int) bool { return uses[i].UseID > after })
-	end := start + limit
-	if end > len(uses) {
-		end = len(uses)
+	if err != nil {
+		storageReadFailure("uses", err)
+		return storageSelfServiceError(c, 503, "storage_scan_failed", "No se pudieron verificar los usos.")
 	}
-	next := ""
-	if end < len(uses) {
-		raw, _ := json.Marshal(struct {
-			AccountID, ActorID uuid.UUID
-			Key, After         string
-		}{account, actor, key, uses[end-1].UseID})
-		next = base64.RawURLEncoding.EncodeToString(raw)
+	if total == 0 {
+		_, allowed, err := s.storageAuthorizeContent(ctx, actor, key)
+		if err != nil {
+			storageReadFailure("uses_access", err)
+			return storageSelfServiceError(c, 503, "storage_scan_failed", "No se pudieron verificar los usos.")
+		}
+		if !allowed {
+			return storageSelfServiceError(c, 404, "storage_not_found", "El archivo no está disponible.")
+		}
 	}
-	return c.JSON(fiber.Map{"success": true, "uses": uses[start:end], "total": len(uses), "limit": limit, "has_more": end < len(uses), "next_cursor": next, "can_manage": storageSelfServiceHasPermission(claims, domain.PermSettings)})
+	encoded := ""
+	if next != "" {
+		encoded = storageEncodeUseCursor(actor, key, next)
+	}
+	return c.JSON(fiber.Map{"success": true, "uses": uses, "total": total, "limit": limit, "has_more": next != "", "next_cursor": encoded, "can_manage": storageSelfServiceHasPermission(claims, domain.PermSettings)})
 }
 
 func (s *Server) storageUseAuthorizeRecovery(ctx context.Context, q storageSelfServiceQuerier, actor storageUseActor, snapshot storageUseSnapshot, owner uuid.UUID, action string) error {

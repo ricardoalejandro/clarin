@@ -3,6 +3,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { X, FileText, Download, Loader2, Package, CheckSquare, Square } from 'lucide-react'
 import { api } from '@/lib/api'
+import { getAuthScope } from '@/lib/authScope'
+import { useDocumentLibrary } from '@/lib/documents/useDocumentLibrary'
 import type { DocumentTemplate } from '@/types/document'
 import type { Lead } from '@/types/contact'
 import {
@@ -21,8 +23,10 @@ interface Props {
 }
 
 export default function BulkGenerateDocumentModal({ leads, onClose }: Props) {
-  const [templates, setTemplates] = useState<DocumentTemplate[]>([])
-  const [loading, setLoading] = useState(true)
+  const library = useDocumentLibrary()
+  const { templates, loading } = library
+  const generation = useRef<AbortController | null>(null)
+  useEffect(() => () => { generation.current?.abort() }, [])
 
   // Close on Escape — stop propagation so parent handlers don't fire
   useEffect(() => {
@@ -54,20 +58,7 @@ export default function BulkGenerateDocumentModal({ leads, onClose }: Props) {
   const [error, setError] = useState('')
   const cancelledRef = useRef(false)
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await api<{ templates: DocumentTemplate[] }>('/api/document-templates')
-        if (res.success && res.data?.templates) {
-          setTemplates(res.data.templates)
-        }
-      } catch {
-        setError('Error al cargar plantillas')
-      } finally {
-        setLoading(false)
-      }
-    })()
-  }, [])
+
 
   const toggleLead = (id: string) => {
     setSelectedLeadIds(prev => {
@@ -96,10 +87,15 @@ export default function BulkGenerateDocumentModal({ leads, onClose }: Props) {
   const handleGenerate = useCallback(async () => {
     if (!selectedTemplate || selectedLeads.length === 0) return
 
+    generation.current?.abort()
+    const controller = new AbortController(); generation.current = controller
+    const identity = getAuthScope()
+    const current = () => !controller.signal.aborted && generation.current === controller && identity === getAuthScope()
     // Fetch full template with canvas_json (List endpoint omits it)
     let fullTemplate: typeof selectedTemplate
     try {
-      const fullRes = await api<{ template: typeof selectedTemplate }>(`/api/document-templates/${selectedTemplate.id}`)
+      const fullRes = await api<{ template: typeof selectedTemplate }>(`/api/document-templates/${selectedTemplate.id}`, { signal: controller.signal })
+      if (!current()) return
       if (!fullRes.success || !fullRes.data?.template) {
         setError('Error al cargar la plantilla completa')
         return
@@ -119,7 +115,7 @@ export default function BulkGenerateDocumentModal({ leads, onClose }: Props) {
       const enrichedLeads = await Promise.all(selectedLeads.map(async (lead) => {
         if (lead.contact_id && (!lead.custom_field_values || lead.custom_field_values.length === 0)) {
           try {
-            const cfRes = await api<{ values: any[] }>(`/api/contacts/${lead.contact_id}/custom-fields`)
+            const cfRes = await api<{ values: any[] }>(`/api/contacts/${lead.contact_id}/custom-fields`, { signal: controller.signal })
             if (cfRes.success && Array.isArray(cfRes.data?.values)) {
               return { ...lead, custom_field_values: cfRes.data.values }
             }
@@ -131,6 +127,7 @@ export default function BulkGenerateDocumentModal({ leads, onClose }: Props) {
       const opts: RenderOptions = {
         format: 'png',
         scale: 4, // HD (~200 DPI)
+        signal: controller.signal,
       }
 
       const onProgress = (p: BulkProgress) => {
@@ -141,16 +138,18 @@ export default function BulkGenerateDocumentModal({ leads, onClose }: Props) {
       const templateName = fullTemplate.name.replace(/[^a-zA-Z0-9áéíóúñÁÉÍÓÚÑ\s_-]/g, '').replace(/\s+/g, '_')
 
       const results = await generateBulk(fullTemplate, enrichedLeads, opts, onProgress)
+      if (!current()) return
       if (results.length === 1) {
         downloadBlob(results[0].blob, results[0].filename)
       } else {
         const zipBlob = await packageAsZip(results)
+        if (!current()) return
         downloadBlob(zipBlob, `${templateName}_${results.length}_documentos.zip`)
       }
 
       onClose()
     } catch (err: any) {
-      if (err?.message === 'Cancelled') return
+      if (!current() || err?.message === 'Cancelled') return
       console.error('Bulk generation error:', err)
       setError('Error al generar documentos')
       setStep('options')
@@ -158,6 +157,7 @@ export default function BulkGenerateDocumentModal({ leads, onClose }: Props) {
   }, [selectedTemplate, selectedLeads, onClose])
 
   const handleCancel = () => {
+    generation.current?.abort()
     cancelledRef.current = true
     setStep('options')
     setProgress(null)
@@ -187,7 +187,13 @@ export default function BulkGenerateDocumentModal({ leads, onClose }: Props) {
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
-          {loading ? (
+          <div className="space-y-2">
+            <input aria-label="Buscar plantillas" value={library.query} maxLength={256} onChange={e => library.setQuery(e.target.value)} placeholder="Buscar plantillas" className="min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm" />
+            {library.pending && <p role="status" className="text-xs text-slate-500">Buscando…</p>}
+            {library.error && <div role="alert" className="text-sm text-rose-700">{library.error}<button onClick={() => void library.retry()} className="ml-2 min-h-11 underline">Reintentar</button></div>}
+            {library.cursor && <button disabled={loading} onClick={() => void library.loadMore()} className="min-h-11 rounded-xl border border-slate-200 px-3 text-sm disabled:opacity-40">Cargar más plantillas</button>}
+          </div>
+          {loading && !templates.length ? (
             <div className="flex items-center justify-center py-12">
               <Loader2 className="w-6 h-6 text-emerald-500 animate-spin" />
             </div>

@@ -56,10 +56,10 @@ export function calculateSnap(
 
   // Moving object bounds in scene coordinates (from bounding rect)
   const movBR = movingObj.getBoundingRect()
-  const brLeft = (movBR.left - vpt[4]) / zoom
-  const brTop = (movBR.top - vpt[5]) / zoom
-  const brW = movBR.width / zoom
-  const brH = movBR.height / zoom
+  const brLeft = movBR.left
+  const brTop = movBR.top
+  const brW = movBR.width
+  const brH = movBR.height
 
   // Offset between obj.left/top and bounding rect left/top
   const leftOffset = (movingObj.left ?? 0) - brLeft
@@ -96,13 +96,13 @@ export function calculateSnap(
   ]
 
   // Other objects: edges and centers
-  const objects = canvas.getObjects().filter(o => o !== movingObj && o.visible && !(o as any).__isPage)
+  const objects = canvas.getObjects().filter(o => o !== movingObj && o.visible && !(o as any).__isPage && !(o as any).__isDocumentBackground)
   for (const o of objects) {
     const b = o.getBoundingRect()
-    const oL = (b.left - vpt[4]) / zoom
-    const oT = (b.top - vpt[5]) / zoom
-    const oW = b.width / zoom
-    const oH = b.height / zoom
+    const oL = b.left
+    const oT = b.top
+    const oW = b.width
+    const oH = b.height
     targetsX.push(
       { pos: oL, type: 'edge' },
       { pos: oL + oW / 2, type: 'center' },
@@ -186,16 +186,16 @@ export function calculateDistances(
   const toScene = (o: FabricObject) => {
     const b = o.getBoundingRect()
     return {
-      left: (b.left - vpt[4]) / zoom,
-      top: (b.top - vpt[5]) / zoom,
-      right: (b.left - vpt[4]) / zoom + b.width / zoom,
-      bottom: (b.top - vpt[5]) / zoom + b.height / zoom,
+      left: b.left,
+      top: b.top,
+      right: b.left + b.width,
+      bottom: b.top + b.height,
     }
   }
 
   const m = toScene(movingObj)
   const others = canvas.getObjects()
-    .filter(o => o !== movingObj && o.visible && !(o as any).__isPage && !(o as any).__isMarginOverlay)
+    .filter(o => o !== movingObj && o.visible && !(o as any).__isPage && !(o as any).__isDocumentBackground && !(o as any).__isMarginOverlay)
 
   const results: DistanceLabel[] = []
 

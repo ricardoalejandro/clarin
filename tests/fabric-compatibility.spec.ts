@@ -14,6 +14,7 @@ test.beforeAll(async () => {
         export * from './src/lib/fabric/runtime';
         export { loadTemplateToCanvas } from './src/lib/fabric/serialization';
         export { exportCanvasToBlob } from './src/lib/fabric/export';
+        export { documentPlainText } from './src/lib/documents/documentText';
       `,
       resolveDir: frontend,
       loader: 'ts',
@@ -73,7 +74,7 @@ test('Fabric compatibility preserves browser raster output, gradient alpha and P
     })
     const viewport = [2, 0, 0, 2, 18, 24]
     canvas.setViewportTransform(viewport)
-    const png = await api.exportCanvasToBlob(canvas, { format: 'png', multiplier: 1 })
+    const png = await api.exportCanvasToBlob(canvas, { format: 'png', multiplier: 1, transparent: true })
     const bitmap = await createImageBitmap(png)
     const raster = document.createElement('canvas')
     raster.width = bitmap.width
@@ -98,4 +99,31 @@ test('Fabric compatibility preserves browser raster output, gradient alpha and P
   }
   expect(result.header).toBe('%PDF-')
   expect(result.restored).toEqual([2, 0, 0, 2, 18, 24])
+})
+
+
+test('print PDF uses lossless pixels at physical dimensions and default PNG is opaque', async ({ page }) => {
+ const output=await page.evaluate(async()=>{
+  const api=(window as any).ClarinFabricFixture
+  const canvas=new api.StaticCanvas('canvas',{width:100,height:80,enableRetinaScaling:false})
+  canvas.add(new api.Rect({left:0,top:0,width:100,height:80,fill:'rgba(255,0,0,0.25)',strokeWidth:0}))
+  const png=await api.exportCanvasToBlob(canvas,{format:'png',dpi:96})
+  const bitmap=await createImageBitmap(png),raster=document.createElement('canvas');raster.width=bitmap.width;raster.height=bitmap.height
+  const ctx=raster.getContext('2d')!;ctx.drawImage(bitmap,0,0);const pixel=Array.from(ctx.getImageData(2,2,1,1).data);bitmap.close()
+  const pdf=await api.exportCanvasToBlob(canvas,{format:'pdf',dpi:300,quality:.95}),text=new TextDecoder().decode(await pdf.arrayBuffer())
+  const box=text.match(/\/MediaBox \[([^\]]+)\]/)?.[1].split(/\s+/).map(Number)
+  await canvas.dispose();return {pixel,box,lossy:text.includes('/DCTDecode'),bytes:pdf.size}
+ })
+ expect(output.pixel[3]).toBe(255);expect(output.lossy).toBe(false);expect(output.bytes).toBeGreaterThan(500)
+ expect(output.box?.[2]).toBeCloseTo(50*72/25.4,4);expect(output.box?.[3]).toBeCloseTo(40*72/25.4,4)
+})
+
+test('custom field HTML is decoded as inert text without firing image handlers',async({page})=>{
+ const result=await page.evaluate(async()=>{
+  const api=(window as any).ClarinFabricFixture;(window as any).documentTextExecuted=0
+  const text=api.documentPlainText('<b>Perú &amp; café</b><img src="data:image/png;base64,a" onerror="window.documentTextExecuted++">')
+  await new Promise(resolve=>setTimeout(resolve,50))
+  return {text,executed:(window as any).documentTextExecuted,images:document.querySelectorAll('img').length}
+ })
+ expect(result).toEqual({text:'Perú & café',executed:0,images:0})
 })

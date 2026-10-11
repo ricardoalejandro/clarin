@@ -1,3 +1,4 @@
+import { storageUnavailableMessage } from './storageModel'
 import { describe, expect, it } from 'vitest'
 import { canSelectStorageFile, EMPTY_FILTERS, formatStorageBytes, nextStorageTab, reconcileStorageSelection, resultStorageMessage, safeStorageOriginHref, STORAGE_SELECTION_LIMIT, storageContentPath, storageDate, storageAdvancedFilterCount, storageFileIdentity, storagePreviewRequest, storageRecommendationFilters, storageRealtimeChange, reconcileStorageUses, storageUsesPath, storageFilesQuery, storagePreviewExpired, storageTrashStatus, toggleStorageSelection, type StorageFile, type StorageResult } from './storageModel'
 
@@ -54,7 +55,7 @@ describe('storage self-service rules', () => {
   })
   it('never presents retained bytes as freed bytes', () => {
     const result: StorageResult = { success: true, operation_id: 'op', status: 'completed', action: 'purge', freed_bytes: 2048, retained_bytes: 9999999, items: [{ object_key: 'a', filename: 'a', status: 'completed' }] }
-    expect(resultStorageMessage(result)).toContain('2.0 KB'); expect(resultStorageMessage(result)).not.toContain('9.5 MB')
+    expect(resultStorageMessage(result)).toContain('2.0 KiB'); expect(resultStorageMessage(result)).not.toContain('9.5 MiB')
   })
   it('expires reviews at the boundary and fails closed on invalid dates', () => {
     expect(storagePreviewExpired({ expires_at: '2026-10-10T10:00:00Z' }, Date.parse('2026-10-10T09:59:59Z'))).toBe(false)
@@ -117,4 +118,18 @@ describe('storage self-service rules', () => {
     expect(storageAdvancedFilterCount({ ...EMPTY_FILTERS, origin: 'chats', minSize: '10485760', age: '180', status: 'removable', sort: 'name' })).toBe(5)
   })
 
+})
+
+it('distinguishes expired sessions and denied reads without exposing a hidden resource', () => {
+  expect(storageUnavailableMessage(401)).toContain('sesión caducó')
+  expect(storageUnavailableMessage(403)).toContain('permiso')
+  expect(storageUnavailableMessage(404)).toContain('no está disponible o no tienes acceso')
+})
+
+describe('storage quota precision', () => {
+  it('keeps a decimal for multi-digit GiB so quota and remaining space agree visibly', () => {
+    expect(formatStorageBytes(3726320026)).toBe('3.5 GiB')
+    expect(formatStorageBytes(20 * 1024 ** 3 - 3726320026)).toBe('16.5 GiB')
+    expect(formatStorageBytes(20 * 1024 ** 3)).toBe('20.0 GiB')
+  })
 })

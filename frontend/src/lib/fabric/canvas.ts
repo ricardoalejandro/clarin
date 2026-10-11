@@ -1,9 +1,10 @@
+import {configureDocumentObjectCaching,ensureObjectIds,isDocumentObject} from './editorModel'
 /**
  * Fabric.js Canvas initialization, zoom, pan, and grid rendering.
  * Uses a pasteboard model: canvas fills viewport, white Rect = "page".
  */
 
-import { Canvas, Rect, Shadow, Point, type FabricObject } from './runtime'
+import { Canvas, Rect, Shadow, Point, ActiveSelection, type FabricObject } from './runtime'
 import { MM_TO_PX, ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, GRID_COLOR } from './constants'
 import { calculateSnap, calculateDistances, type SnapGuide, type DistanceLabel, type UserGuide } from './snap'
 
@@ -17,7 +18,7 @@ declare module 'fabric' {
   }
 }
 
-export const DEFAULT_PASTEBOARD_COLOR = '#61636b'
+export const DEFAULT_PASTEBOARD_COLOR = '#E8EDF3'
 
 // ─── Wheel helpers (reusable by external overlays like user guides) ──────────
 
@@ -101,6 +102,7 @@ export function createEditorCanvas(opts: CanvasSetupOptions): Canvas {
     height: containerH,
     backgroundColor: opts.pasteboardColor || DEFAULT_PASTEBOARD_COLOR,
     selection: true,
+    enablePointerEvents: true,
     preserveObjectStacking: true,
     stopContextMenu: true,
     fireRightClick: true,
@@ -141,8 +143,8 @@ export function createEditorCanvas(opts: CanvasSetupOptions): Canvas {
     const active = canvas.getActiveObject()
     if (!active) {
       opts.onSelectionChange?.([])
-    } else if ('_objects' in active && Array.isArray((active as any)._objects)) {
-      opts.onSelectionChange?.((active as any)._objects)
+    } else if (active instanceof ActiveSelection) {
+      opts.onSelectionChange?.(active.getObjects())
     } else {
       opts.onSelectionChange?.([active])
     }
@@ -161,7 +163,7 @@ export function createEditorCanvas(opts: CanvasSetupOptions): Canvas {
   // ─── Snap guides during move ────────────────────────────────────────
   canvas.on('object:moving', (e) => {
     const obj = e.target
-    if (!obj) return
+    if (!obj || (obj as any).__editorPreview || (e.e as MouseEvent)?.ctrlKey || (e.e as MouseEvent)?.metaKey) return
     const result = calculateSnap(canvas, obj, undefined, opts.getUserGuides?.() || [])
     if (result.x !== undefined) obj.set('left', result.x)
     if (result.y !== undefined) obj.set('top', result.y)
@@ -202,7 +204,7 @@ export function createEditorCanvas(opts: CanvasSetupOptions): Canvas {
 
   canvas.on('mouse:down', (opt) => {
     const e = opt.e as MouseEvent
-    if ((e as any).__spacePan) {
+    if ((e as any).__spacePan || canvas.__panActive) {
       isPanning = true
       panStart = { x: e.clientX, y: e.clientY }
       canvas.selection = false
@@ -275,6 +277,7 @@ export function createEditorCanvas(opts: CanvasSetupOptions): Canvas {
     document.removeEventListener('mouseup', onMiddleUp)
   }
 
+  canvas.on('object:added',({target})=>{configureDocumentObjectCaching([target]);if(isDocumentObject(target))ensureObjectIds([target])})
   return canvas
 }
 
@@ -309,7 +312,7 @@ export function resizeCanvas(canvas: Canvas, containerEl: HTMLElement): void {
 // ─── Get page objects (filter out __isPage rect) ─────────────────────────────
 
 export function getPageObjects(canvas: Canvas): FabricObject[] {
-  return canvas.getObjects().filter(o => !(o as any).__isPage)
+  return canvas.getObjects().filter(o => !(o as any).__isPage && !(o as any).__isDocumentBackground)
 }
 
 // ─── Ensure page rect stays at bottom ────────────────────────────────────────
@@ -317,6 +320,7 @@ export function getPageObjects(canvas: Canvas): FabricObject[] {
 export function ensurePageAtBottom(canvas: Canvas): void {
   const pageRect = canvas.__pageRect
   if (pageRect) {
+    if (!canvas.getObjects().includes(pageRect)) canvas.add(pageRect)
     canvas.sendObjectToBack(pageRect)
   }
 }
@@ -408,7 +412,7 @@ export function zoomToFit(canvas: Canvas, padding = 40): number {
 
   const availW = canvasW - padding * 2
   const availH = canvasH - padding * 2
-  const zoom = Math.min(availW / pageW, availH / pageH, 2)
+  const zoom = Math.max(ZOOM_MIN, Math.min(Math.max(1,availW) / pageW, Math.max(1,availH) / pageH, 2))
 
   // Reset transform and zoom
   canvas.setViewportTransform([1, 0, 0, 1, 0, 0])

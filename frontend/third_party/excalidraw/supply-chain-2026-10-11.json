@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "root": {
+    "name": "@excalidraw/excalidraw",
+    "version": "0.18.1-clarin.7",
+    "source": {
+      "type": "vendored",
+      "manifestSpec": "file:vendor/excalidraw-clarin/packages/excalidraw",
+      "lockPath": "vendor/excalidraw-clarin/packages/excalidraw",
+      "treePath": "vendor/excalidraw-clarin",
+      "sha256": "47d97ccb4f8f03c694b8c082e4b42e539b0ad7094f2676972bde816738b07d80",
+      "upstreamTag": "v0.18.1",
+      "upstreamCommit": "a2ec2889babf7d2295469c6d90ebe77fae57df84",
+      "localCommit": "716e5c73adda20fb136c8143a34ec79b2b8178f4",
+      "verification": "Hash independently reproduced from git archive HEAD and clean tracked source; the September baseline predates existing vendor changes. This patch does not change vendor source."
+    },
+    "expectedComponentCount": 248,
+    "expectedSbomSha256": "bb736384226c43b192654bc8ff96fe90e2f907d328f2ce32654c3e99b74d3834"
+  },
+  "audit": {
+    "observedAt": "2026-10-11",
+    "command": "npm audit --json and npm audit --omit=dev --json",
+    "frontendSummary": {
+      "info": 0,
+      "low": 3,
+      "moderate": 0,
+      "high": 6,
+      "critical": 0,
+      "total": 9
+    },
+    "evidence": "docs/storage-templates-dependency-audit-2026-10-11.json",
+    "runtimeEvidence": "docs/storage-templates-dependency-runtime-audit-2026-10-11.json",
+    "lockfileSha256": "8a5d9dc73cffea99a557b3ed40e03e32fa652443262a5d2d234f26e616b6cfbe",
+    "scope": "npm advisory refresh for the dependency patch; no new OSV/GitHub exhaustive scan performed."
+  },
+  "licenseOverrides": [
+    {
+      "name": "fuzzy",
+      "version": "0.1.3",
+      "expression": "MIT",
+      "lockPath": "node_modules/fuzzy",
+      "licenseFile": "LICENSE-MIT",
+      "sha256": "a4aca837172fb1f6188c426e38835202e96bc853e25b7029cc5c933964f8401e"
+    },
+    {
+      "name": "khroma",
+      "version": "2.1.0",
+      "expression": "MIT",
+      "lockPath": "node_modules/khroma",
+      "licenseFile": "license",
+      "sha256": "66b333b0f66759a0b710459e03f7029abe17f4358114a128d2c972e642961b49"
+    }
+  ],
+  "advisories": [
+    {
+      "id": "GHSA-vfj7-8cjw-p6xm",
+      "url": "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm",
+      "severity": "high",
+      "affects": [
+        {
+          "name": "braces",
+          "versions": [
+            "3.0.3"
+          ]
+        }
+      ],
+      "analysisState": "in_triage",
+      "detail": "Remaining inherited advisory, not fixed by this patch. Braces is declared through sass/chokidar in the editor install closure as well as frontend build tooling. No invocation found in scoped Storage/printable-template runtime; complete runtime reachability is not asserted."
+    },
+    {
+      "id": "GHSA-238p-pmpm-9mq7",
+      "url": "https://github.com/advisories/GHSA-238p-pmpm-9mq7",
+      "severity": "low",
+      "affects": [
+        {
+          "name": "katex",
+          "versions": [
+            "0.16.47"
+          ]
+        }
+      ],
+      "analysisState": "in_triage",
+      "detail": "Remaining inherited KaTeX advisory through Mermaid. Existing prototype pollution is a precondition. The printable-template path does not invoke KaTeX; editor/whole-application reachability remains outside this focused patch verification."
+    }
+  ],
+  "releaseDecision": {
+    "status": "PENDING_FINAL_VERIFICATION",
+    "scope": "Storage and printable-template dependency patches, not an Excalidraw engine upgrade",
+    "reason": "Next, sharp, DOMPurify and source-map-js patched within compatible release lines. Remaining inherited findings are retained in current raw audit evidence. No automatic production approval is implied by the regenerated SBOM or notices."
+  }
+}

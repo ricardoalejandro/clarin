@@ -7,6 +7,7 @@ export { exportCanvasToBlob, downloadBlob, type ExportOptions } from './export'
 export {
   canvasToTemplateJson,
   loadTemplateToCanvas,
+  applyDocumentBackground,
   ensureFontsLoaded,
   extractFieldsUsed,
 } from './serialization'

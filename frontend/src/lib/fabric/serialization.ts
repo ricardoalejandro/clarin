@@ -7,6 +7,7 @@ import {
   Canvas, StaticCanvas, Rect, Ellipse, Line, FabricImage,
   Shadow, type FabricObject,
 } from './runtime'
+import {preflightDocumentImages} from './imageBudget'
 import { DynamicText } from './objects'
 import { CUSTOM_PROPS, MM_TO_PX, DYNAMIC_COLOR, GOOGLE_FONTS_URL } from './constants'
 
@@ -24,14 +25,30 @@ interface TemplateData {
   background: CanvasBackground
 }
 
+/** Strip only legacy same-origin read tickets; durable document access uses the cookie. */
+export function normalizeDocumentAssetURL(value:string):string {
+  try{
+    const base=typeof location==='undefined'?'http://localhost':location.origin
+    const url=new URL(value,base)
+    if(url.origin!==base||!url.pathname.startsWith('/api/media/file/'))return value
+    url.searchParams.delete('media_preview');url.searchParams.delete('access')
+    return url.pathname+url.search+url.hash
+  }catch{return value}
+}
+function normalizedDocumentJSON<T>(value:T):T{
+  if(Array.isArray(value))return value.map(normalizedDocumentJSON) as T
+  if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([key,item])=>[key,(key==='src'||key==='imageUrl'||key==='source'&&String((value as any).type).toLowerCase()==='pattern')&&typeof item==='string'?normalizeDocumentAssetURL(item):normalizedDocumentJSON(item)])) as T
+  return value
+}
+
 // ─── Font Loading ─────────────────────────────────────────────────────────────
 
 let fontsLoaded = false
 
 export async function ensureFontsLoaded(): Promise<void> {
-  if (typeof document === 'undefined') return
+  if (typeof document === 'undefined' || !document.fonts) return
   if (fontsLoaded) {
-    await document.fonts.ready
+    await Promise.race([document.fonts.ready, new Promise(resolve => setTimeout(resolve, 4000))])
     return
   }
   const existing = document.querySelector(`link[href*="fonts.googleapis.com"]`)
@@ -41,7 +58,7 @@ export async function ensureFontsLoaded(): Promise<void> {
     link.href = GOOGLE_FONTS_URL
     document.head.appendChild(link)
   }
-  await document.fonts.ready
+  await Promise.race([document.fonts.ready, new Promise(resolve => setTimeout(resolve, 4000))])
   fontsLoaded = true
 }
 
@@ -54,13 +71,15 @@ export function canvasToTemplateJson(
   const fabricJson = canvas.toObject(CUSTOM_PROPS)
   // Filter out the __isPage rect (pasteboard page background)
   if (fabricJson.objects && Array.isArray(fabricJson.objects)) {
-    fabricJson.objects = fabricJson.objects.filter((o: any) => !o.__isPage)
+    fabricJson.objects = fabricJson.objects.filter((o: any) => !o.__isPage && !o.__isDocumentBackground && !o.__editorPreview)
   }
-  return {
+  delete fabricJson.backgroundImage
+  delete fabricJson.background
+  return normalizedDocumentJSON({
     version: 3,
     fabricJson,
     background,
-  }
+  })
 }
 
 // ─── Load: Backend JSON → Canvas ──────────────────────────────────────────────
@@ -69,19 +88,43 @@ export async function loadTemplateToCanvas(
   canvas: Canvas | StaticCanvas,
   canvasJson: Record<string, unknown>,
   pageWidth: number,
-  pageHeight: number
+  pageHeight: number,
+  signal?: AbortSignal
 ): Promise<CanvasBackground> {
-  const data = canvasJson as unknown as TemplateData
+  const normalized=normalizedDocumentJSON(canvasJson)
+  await preflightDocumentImages(normalized,signal)
+  const data=normalized as unknown as TemplateData
+  const background=data.background||{color:'#ffffff'}
+  // All asynchronous resources are ready before replacing the visible document.
+  const prepared=background.imageUrl?await FabricImage.fromURL(background.imageUrl,{crossOrigin:'anonymous',signal}):undefined
+  try{
+    signal?.throwIfAborted()
+    if(data.version===3&&data.fabricJson)await canvas.loadFromJSON(data.fabricJson,undefined,{signal})
+    else await migrateV2ToFabric(canvas,normalized,pageWidth,pageHeight,signal)
+    await applyDocumentBackground(canvas,background,pageWidth,pageHeight,signal,prepared)
+    return background
+  }catch(error){prepared?.dispose();throw error}
+}
 
-  // Version 3 = Fabric.js format
-  if (data.version === 3 && data.fabricJson) {
-    await canvas.loadFromJSON(data.fabricJson)
-    canvas.renderAll()
-    return data.background || { color: '#ffffff' }
+/** The same page composition is used in editor, generated documents and export. */
+export async function applyDocumentBackground(canvas:Canvas|StaticCanvas,background:CanvasBackground,widthMm:number,heightMm:number,signal?:AbortSignal,prepared?:FabricImage){
+  const image=background.imageUrl?(prepared||await FabricImage.fromURL(normalizeDocumentAssetURL(background.imageUrl),{crossOrigin:'anonymous',signal})):undefined
+  signal?.throwIfAborted()
+  const pageW=widthMm*MM_TO_PX,pageH=heightMm*MM_TO_PX,editor=canvas instanceof Canvas&&canvas.__pageWidth!==undefined
+  ;(canvas as any).__documentBackground={...background}
+  canvas.getObjects().filter(o=>(o as any).__isPage||(o as any).__isDocumentBackground).forEach(o=>{canvas.remove(o);o.dispose()})
+  const oldBackground=canvas.backgroundImage;canvas.backgroundImage=undefined;if(oldBackground&&oldBackground!==image)oldBackground.dispose()
+  if(editor){
+    canvas.__pageWidth=pageW;canvas.__pageHeight=pageH
+    const page=new Rect({left:0,top:0,width:pageW,height:pageH,fill:background.color||'#FFFFFF',strokeWidth:0,selectable:false,evented:false,hasControls:false})
+    ;(page as any).__isPage=true;canvas.__pageRect=page;canvas.insertAt(0,page)
+  }else canvas.backgroundColor=background.color||'#FFFFFF'
+  if(image){
+    const source=image.getOriginalSize(),scale=Math.max(pageW/(source.width||1),pageH/(source.height||1))
+    image.set({left:0,top:0,width:pageW/scale,height:pageH/scale,cropX:((source.width||0)-pageW/scale)/2,cropY:((source.height||0)-pageH/scale)/2,scaleX:scale,scaleY:scale,selectable:false,evented:false,hasControls:false})
+    if(editor){(image as any).__isDocumentBackground=true;canvas.insertAt(1,image)}else canvas.backgroundImage=image
   }
-
-  // Version 2 or legacy = old DOM-based format, convert
-  return await migrateV2ToFabric(canvas, canvasJson, pageWidth, pageHeight)
+  canvas.requestRenderAll()
 }
 
 // ─── Migration: V2 (old DOM editor) → Fabric objects ─────────────────────────
@@ -107,27 +150,23 @@ async function migrateV2ToFabric(
   canvas: Canvas | StaticCanvas,
   canvasJson: Record<string, unknown>,
   _pageWidth: number,
-  _pageHeight: number
+  _pageHeight: number,
+  signal?:AbortSignal
 ): Promise<CanvasBackground> {
   const cj = canvasJson as any
   const elements: LegacyElement[] = cj?.elements || []
   const bg: CanvasBackground = cj?.background || { color: '#ffffff' }
 
-  canvas.clear()
-
-  for (const el of elements) {
-    if (el.visible === false) continue
-    const obj = await legacyElementToFabric(el)
-    if (obj) {
-      canvas.add(obj)
-    }
-  }
+  const objects:FabricObject[]=[]
+  try{for(const el of elements){signal?.throwIfAborted();const object=await legacyElementToFabric(el,signal);if(object)objects.push(object)}}
+  catch(error){objects.forEach(object=>object.dispose());throw error}
+  signal?.throwIfAborted();canvas.clear();canvas.add(...objects)
 
   canvas.renderAll()
   return bg
 }
 
-async function legacyElementToFabric(el: LegacyElement): Promise<FabricObject | null> {
+async function legacyElementToFabric(el: LegacyElement,signal?:AbortSignal): Promise<FabricObject | null> {
   const commonOpts = {
     left: el.x,
     top: el.y,
@@ -209,7 +248,7 @@ async function legacyElementToFabric(el: LegacyElement): Promise<FabricObject | 
     case 'image': {
       if (!el.src) return null
       try {
-        const img = await FabricImage.fromURL(el.src, { crossOrigin: 'anonymous' })
+        const img = await FabricImage.fromURL(el.src, { crossOrigin: 'anonymous',signal })
         img.set({
           ...commonOpts,
           scaleX: el.width / (img.width || el.width),
@@ -217,7 +256,7 @@ async function legacyElementToFabric(el: LegacyElement): Promise<FabricObject | 
         })
         return img
       } catch {
-        return null
+        throw new Error("No se pudo cargar una imagen de la plantilla. Reintenta antes de editar.")
       }
     }
 

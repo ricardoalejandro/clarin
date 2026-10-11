@@ -119,5 +119,5 @@ export const CUSTOM_PROPS = [
   'isDynamic', 'fieldName', 'elementType', 'elementName',
   'verticalAlign', 'qrData', 'lineHeightRatio', 'letterSpacingValue',
   'fieldFormat',
-  '__isPage',
+  '__isPage', '__isDocumentBackground', 'objectId', 'imageFit',
 ]

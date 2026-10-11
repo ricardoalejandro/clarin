@@ -36,6 +36,39 @@ const deferred = <T,>() => {
 }
 
 describe('storage complete workflow', () => {
+  it('renders a file page while the independent summary is still pending, including a filter change', async () => {
+    const summary = deferred<unknown>()
+    mockGet.mockImplementation(async endpoint => endpoint === '/api/storage/usage' ? await summary.promise as never : list())
+    render(<StoragePage />)
+    expect(await screen.findByRole('button', { name: 'a.pdf' })).toBeTruthy()
+    const summarySignal = mockGet.mock.calls.find(([path]) => path === '/api/storage/usage')?.[1]?.signal
+    fireEvent.click(screen.getByRole('button', { name: 'Videos' }))
+    await waitFor(() => expect(mockGet.mock.calls.some(([path]) => path.includes('type=video'))).toBe(true))
+    expect(summarySignal?.aborted).toBe(false)
+    expect(mockGet.mock.calls.filter(([path]) => path === '/api/storage/usage')).toHaveLength(1)
+    await act(async () => summary.resolve({ success: true, data: usage }))
+    expect(await screen.findByRole('progressbar', { name: 'Espacio utilizado' })).toBeTruthy()
+  })
+  it('renders the verified summary while the independent file page is still pending', async () => {
+    const files = deferred<unknown>()
+    mockGet.mockImplementation(async endpoint => endpoint === '/api/storage/usage' ? { success: true, data: usage } : await files.promise as never)
+    render(<StoragePage />)
+    expect(await screen.findByRole('progressbar', { name: 'Espacio utilizado' })).toBeTruthy()
+    expect(screen.getByRole('status', { name: 'Cargando archivos' })).toBeTruthy()
+    await act(async () => files.resolve(list()))
+    expect(await screen.findByRole('button', { name: 'a.pdf' })).toBeTruthy()
+  })
+  it('keeps loaded files usable after a summary error and retries the summary explicitly', async () => {
+    let failed = true
+    mockGet.mockImplementation(async endpoint => endpoint === '/api/storage/usage' ? failed ? { success: false, status: 503, error: 'Resumen temporalmente no disponible' } : { success: true, data: usage } : list())
+    render(<StoragePage />)
+    expect(await screen.findByRole('button', { name: 'a.pdf' })).toBeTruthy()
+    expect(await screen.findByText('Resumen temporalmente no disponible')).toBeTruthy()
+    failed = false
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar resumen' }))
+    expect(await screen.findByRole('progressbar', { name: 'Espacio utilizado' })).toBeTruthy()
+    expect(screen.queryByText('Resumen temporalmente no disponible')).toBeNull()
+  })
   it('stages a review without deleting, confirms exactly once, and reports retained space honestly', async () => {
     await loaded(); selectA()
     mockApi.mockResolvedValueOnce({ success: true, data: staged })
@@ -157,7 +190,7 @@ describe('storage complete workflow', () => {
     await screen.findByText('Eliminación pendiente')
     mockApi.mockResolvedValueOnce({ success: true, data: { success: true, operation_id: 'durable-operation', status: 'completed', action: 'purge', items: [{ object_key: 'a', filename: 'a.pdf', status: 'completed' }], freed_bytes: 4096, retained_bytes: 0 } })
     fireEvent.click(screen.getByRole('button', { name: 'Reintentar operación' }))
-    await screen.findByText(/Espacio liberado: 4.0 KB/)
+    await screen.findByText(/Espacio liberado: 4.0 KiB/)
     expect(mockApi).toHaveBeenCalledTimes(1)
     expect(mockApi.mock.calls[0][0]).toBe('/api/storage/cleanup/confirm')
     expect(JSON.parse(mockApi.mock.calls[0][1]!.body as string)).toEqual({ preview_id: 'durable-operation' })
@@ -212,7 +245,7 @@ describe('storage complete workflow', () => {
   it('explains the account quota gap without exposing technical files', async () => {
     usageResponse = { ...usage, managed_elsewhere_bytes: 1048576 }
     await loaded()
-    expect(screen.getByText('1.0 MB corresponden a contenido gestionado desde otros módulos.')).toBeTruthy()
+    expect(screen.getByText('1.0 MiB corresponden a contenido gestionado desde otros módulos.')).toBeTruthy()
     expect(screen.queryByText(/MinIO|tabla|logs/)).toBeNull()
   })
 
@@ -416,6 +449,64 @@ describe('storage complete workflow', () => {
     mockApi.mockResolvedValueOnce({ success: false, status: 503, error: 'Fallo de prueba' })
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Confirmar retirada' })))
     expect(JSON.parse(mockApi.mock.calls[2][1]!.body as string)).toEqual({ preview_id: 'fresh-review' })
+  })
+
+  it('bounds confirmation without calling an uncertain result failed and preserves the same review for retry', async () => {
+    await loaded(); selectA()
+    mockApi.mockResolvedValueOnce({ success: true, data: staged })
+    fireEvent.click(screen.getByRole('button', { name: 'Revisar selección' }))
+    const confirm = await screen.findByRole('button', { name: 'Confirmar retirada' })
+    vi.useFakeTimers()
+    const stalled = deferred<any>(), retried = deferred<any>()
+    mockApi.mockReturnValueOnce(stalled.promise)
+    fireEvent.click(confirm)
+    const signal = mockApi.mock.calls[1][1]!.signal!
+    await act(async () => vi.advanceTimersByTime(29_999))
+    expect(confirm).toBeDisabled(); expect(signal.aborted).toBe(false)
+    await act(async () => vi.advanceTimersByTime(1))
+    expect(signal.aborted).toBe(true); expect(confirm).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Cancelar' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Consultar Actividad' })).toBeEnabled()
+    expect(screen.getByText(/El resultado está pendiente de comprobar/)).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Seleccionar a.pdf' })).toBeChecked()
+    expect(screen.queryByRole('region', { name: 'Resultado de la operación' })).toBeNull()
+    mockApi.mockReturnValueOnce(retried.promise)
+    fireEvent.click(confirm)
+    expect(JSON.parse(mockApi.mock.calls[2][1]!.body as string)).toEqual({ preview_id: staged.preview_id })
+    const completed = { success: true, data: { success: true, operation_id: 'same-operation', status: 'completed', action: 'trash', items: [{ object_key: 'a', filename: 'a.pdf', status: 'completed' }], freed_bytes: 0, retained_bytes: 4096 } }
+    await act(async () => stalled.resolve(completed))
+    expect(confirm).toBeDisabled()
+    expect(screen.queryByRole('region', { name: 'Resultado de la operación' })).toBeNull()
+    expect(screen.getByRole('checkbox', { name: 'Seleccionar a.pdf' })).toBeChecked()
+    fireEvent.click(confirm); expect(mockApi).toHaveBeenCalledTimes(3)
+    await act(async () => retried.resolve(completed))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.getByRole('checkbox', { name: 'Seleccionar a.pdf' })).not.toBeChecked()
+  })
+
+  it('bounds a durable operation retry and ignores abort rejection without inventing a failed result', async () => {
+    await loaded()
+    mockGet.mockImplementation(async endpoint => endpoint === '/api/storage/usage' ? { success: true, data: usageResponse } : endpoint.startsWith('/api/storage/activity') ? { success: true, data: { success: true, operations: [{ id: 'durable-operation', action: 'purge', status: 'processing', can_retry: true, created_at: '2026-10-10T10:00:00Z', files_count: 0, freed_bytes: 0, retained_bytes: 4096 }], total: 1, has_more: false } } : list())
+    fireEvent.click(screen.getByRole('tab', { name: 'Actividad' }))
+    const retry = await screen.findByRole('button', { name: 'Reintentar operación' })
+    vi.useFakeTimers()
+    mockApi.mockImplementationOnce((_endpoint, options) => new Promise((_resolve, reject) => {
+      options?.signal?.addEventListener('abort', () => reject(new DOMException('Cancelled', 'AbortError')), { once: true })
+    }))
+    fireEvent.click(retry)
+    const signal = mockApi.mock.calls[0][1]!.signal!
+    await act(async () => vi.advanceTimersByTime(30_000))
+    expect(signal.aborted).toBe(true); expect(retry).toBeEnabled()
+    expect(screen.getByText(/El resultado está pendiente de comprobar en Actividad/)).toBeInTheDocument()
+    expect(screen.getByText('Eliminación pendiente')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Resultado de la operación' })).toBeNull()
+    const retried = deferred<any>()
+    mockApi.mockReturnValueOnce(retried.promise)
+    fireEvent.click(retry)
+    expect(JSON.parse(mockApi.mock.calls[1][1]!.body as string)).toEqual({ preview_id: 'durable-operation' })
+    fireEvent.click(retry); expect(mockApi).toHaveBeenCalledTimes(2)
+    await act(async () => retried.resolve({ success: true, data: { success: true, operation_id: 'durable-operation', status: 'completed', action: 'purge', items: [{ object_key: 'a', filename: 'a.pdf', status: 'completed' }], freed_bytes: 4096, retained_bytes: 0 } }))
+    expect(screen.getByText(/Espacio liberado: 4.0 KiB/)).toBeInTheDocument()
   })
 
   it('discards a conflicted review and requires a fresh impact check before confirming again', async () => {

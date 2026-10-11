@@ -1,4 +1,5 @@
 export interface DocumentTemplate {
+  revision: number
   id: string
   account_id: string
   name: string

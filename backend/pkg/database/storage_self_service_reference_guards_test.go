@@ -84,6 +84,22 @@ func TestStorageReferenceGuardIntegration(t *testing.T) {
 	asset := uuid.New()
 	exec(`INSERT INTO media_assets(id,account_id,content_hash,object_key,media_type,content_type,filename,size_bytes) VALUES($1,$2,$3,$4,'document','application/pdf','report final.pdf',42)`, asset, a, asset.String(), key)
 	exec(`INSERT INTO storage_media_trash(account_id,object_key,actor_id,filename,media_type,size_bytes,message_backups,purge_after,state) VALUES($1,$2,$3,'report final.pdf','document',42,'[]',NOW()-INTERVAL '1 day','purging')`, a, key, user)
+	t.Run("percent decoder processes chunks and preserves one escape layer", func(t *testing.T) {
+		for _, tc := range []struct{ input, want string }{
+			{"literal + plus % invalid", "literal + plus % invalid"},
+			{"espa%C3%B1ol%20y%20%2520", "español y %20"},
+			{"bad%FF", "bad%FF"},
+			{strings.Repeat("50% ancho — 日本語 ", 5000), strings.Repeat("50% ancho — 日本語 ", 5000)},
+		} {
+			deadline, cancel := context.WithTimeout(ctx, 2*time.Second)
+			var actual string
+			err := db.QueryRow(deadline, `SELECT clarin_storage_path_unescape($1::text)`, tc.input).Scan(&actual)
+			cancel()
+			if err != nil || actual != tc.want {
+				t.Fatalf("scalar decoding failed: %v", err)
+			}
+		}
+	})
 	t.Run("canonical keys and path escape remain exact", func(t *testing.T) {
 		cases := []struct {
 			payload any

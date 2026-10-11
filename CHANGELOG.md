@@ -1,5 +1,17 @@
 # Changelog — Clarin CRM
 
+## 2026-10-11
+
+### Almacenamiento y diseño de plantillas
+
+- Resumen, filtros y ubicaciones de archivos con cargas independientes, consultas paginadas y estados recuperables durante la actualización del catálogo.
+- Consumo expresado en GiB con bytes exactos, alcance de visibilidad y fecha de verificación. Los archivos recuperables siguen formando parte del espacio ocupado.
+- Vista previa de audio y vídeo por streaming, desplazamiento mediante rangos y cancelación al cerrar. Retirada, restauración y purga conservan la revisión de usos y permisos actuales.
+- Biblioteca de plantillas renovada y editor adaptable con herramientas, capas, grupos, menú contextual, dibujo libre, colores y edición no destructiva de imágenes.
+- Guardado con protección del borrador, historial completo y resolución de conflictos entre sesiones mediante recarga o copia.
+- Exportación PNG, JPEG y PDF con perfiles Ligero, Equilibrado e Impresión, resolución personalizable, vista previa y peso exacto antes de descargar.
+- Validación de documentos e imágenes, referencias de medios autorizadas por cuenta y generación sin interpretar HTML activo de campos personalizados.
+
 ## 2026-09-21
 
 ### Respuestas rápidas y atención de conversaciones

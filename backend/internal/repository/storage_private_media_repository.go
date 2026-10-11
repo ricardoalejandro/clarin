@@ -25,9 +25,22 @@ type StoragePrivateMediaQuerier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
+// One statement may inspect hundreds of assets belonging to the same board.
+// Evaluate the canonical account/actor hierarchy once, then join by board ID.
+// This is a statement-local relation, never a persisted authorization cache.
+func StoragePrivateWhiteboardACLCTE(accountParam, actorParam string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(whiteboardHubAccessCTE, "$1", accountParam), "$2", actorParam) + ` SELECT id,account_id,effective_level,archived_at,view_deleted_at,work_lifecycle FROM visible`
+}
+func storagePrivateWhiteboardRelation(accountParam, actorParam string, factored []bool) (string, string) {
+	if len(factored) > 0 && factored[0] {
+		return "", "storage_private_visible_boards"
+	}
+	return strings.ReplaceAll(strings.ReplaceAll(whiteboardHubAccessCTE, "$1", accountParam), "$2", actorParam), "visible"
+}
+
 // Only internally supplied SQL aliases/parameter expressions may be passed.
 // The same canonical Work/Whiteboard policy is evaluated before pagination.
-func StoragePrivateMediaAccessSQL(refAlias, actorParam string) string {
+func StoragePrivateMediaAccessSQL(refAlias, actorParam string, factored ...bool) string {
 	task := `EXISTS(SELECT 1 FROM task_attachments storage_attachment
 		JOIN tasks storage_task ON storage_task.account_id=storage_attachment.account_id AND storage_task.id=storage_attachment.task_id
 		JOIN task_lists storage_list ON storage_list.account_id=storage_task.account_id AND storage_list.id=storage_task.list_id
@@ -35,13 +48,13 @@ func StoragePrivateMediaAccessSQL(refAlias, actorParam string) string {
 		AND storage_attachment.storage_removed_at IS NULL AND storage_task.deleted_at IS NULL
 		AND (storage_attachment.attachment_scope<>'comment_draft' OR storage_attachment.draft_owner_id=` + actorParam + `)
 		AND ` + taskActorCanViewSQL("storage_task", "storage_list", actorParam) + `)`
-	boardCTE := strings.ReplaceAll(strings.ReplaceAll(whiteboardHubAccessCTE, "$1", refAlias+".account_id"), "$2", actorParam)
-	board := `EXISTS(` + boardCTE + ` SELECT 1 FROM visible storage_board JOIN whiteboard_assets storage_asset
+	boardCTE, boardTable := storagePrivateWhiteboardRelation(refAlias+".account_id", actorParam, factored)
+	board := `EXISTS(` + boardCTE + ` SELECT 1 FROM ` + boardTable + ` storage_board JOIN whiteboard_assets storage_asset
 		ON storage_asset.account_id=storage_board.account_id AND storage_asset.board_id=storage_board.id
 		WHERE storage_asset.id::text=` + refAlias + `.source_id AND storage_asset.kind='asset' AND storage_board.effective_level<>'none'
 		AND storage_board.archived_at IS NULL AND storage_board.view_deleted_at IS NULL
 		AND (storage_asset.committed_at IS NOT NULL OR storage_asset.uploaded_by=` + actorParam + `))`
-	history := `EXISTS(` + boardCTE + ` SELECT 1 FROM visible storage_board JOIN whiteboard_revision_assets storage_revision
+	history := `EXISTS(` + boardCTE + ` SELECT 1 FROM ` + boardTable + ` storage_board JOIN whiteboard_revision_assets storage_revision
 		ON storage_revision.account_id=storage_board.account_id AND storage_revision.board_id=storage_board.id
 		WHERE storage_revision.id::text=` + refAlias + `.source_id AND storage_board.effective_level<>'none')`
 	library := `EXISTS(SELECT 1 FROM whiteboard_assets storage_asset JOIN whiteboard_libraries storage_library
@@ -65,7 +78,7 @@ func storagePrivateModuleAccessSQL(accountParam, actorParam, permission string) 
 
 // Recovery identity comes from the server-owned snapshot. Account ownership of
 // the ledger does not replace the resource's current ACL after revocation.
-func StoragePrivateMediaRecoveryAccessSQL(recoveryAlias, actorParam string) string {
+func StoragePrivateMediaRecoveryAccessSQL(recoveryAlias, actorParam string, factored ...bool) string {
 	account := recoveryAlias + ".account_id"
 	task := `EXISTS(SELECT 1 FROM task_attachments storage_attachment
 		JOIN tasks storage_task ON storage_task.account_id=storage_attachment.account_id AND storage_task.id=storage_attachment.task_id
@@ -74,8 +87,8 @@ func StoragePrivateMediaRecoveryAccessSQL(recoveryAlias, actorParam string) stri
 		AND storage_task.id::text=` + recoveryAlias + `.snapshot->>'parent_id' AND storage_attachment.storage_removed_at IS NOT NULL
 		AND storage_task.deleted_at IS NULL AND (storage_attachment.attachment_scope<>'comment_draft' OR storage_attachment.draft_owner_id=` + actorParam + `)
 		AND ` + taskActorCanViewSQL("storage_task", "storage_list", actorParam) + `)`
-	boardCTE := strings.ReplaceAll(strings.ReplaceAll(whiteboardHubAccessCTE, "$1", account), "$2", actorParam)
-	board := `EXISTS(` + boardCTE + ` SELECT 1 FROM visible storage_board WHERE storage_board.id::text=` + recoveryAlias + `.snapshot->>'parent_id' AND effective_level<>'none'
+	boardCTE, boardTable := storagePrivateWhiteboardRelation(account, actorParam, factored)
+	board := `EXISTS(` + boardCTE + ` SELECT 1 FROM ` + boardTable + ` storage_board WHERE storage_board.id::text=` + recoveryAlias + `.snapshot->>'parent_id' AND effective_level<>'none'
 		AND (` + recoveryAlias + `.snapshot->'before'->>'committed_at' IS NOT NULL OR ` + recoveryAlias + `.snapshot->'before'->>'uploaded_by'=` + actorParam + `::text))`
 	admin := taskActorAdminSQL(recoveryAlias, actorParam)
 	taskGone := `NOT EXISTS(SELECT 1 FROM tasks parent WHERE parent.account_id=` + account + ` AND parent.id::text=` + recoveryAlias + `.snapshot->>'parent_id')`
@@ -84,30 +97,30 @@ func StoragePrivateMediaRecoveryAccessSQL(recoveryAlias, actorParam string) stri
 		WHEN 'private_whiteboards' THEN (` + storagePrivateModuleAccessSQL(account, actorParam, domain.PermWhiteboards) + ` AND (` + board + ` OR (` + admin + ` AND ` + boardGone + `))) ELSE FALSE END)`
 }
 
-func StoragePrivateMediaMutationSQL(refAlias, actorParam string) string {
+func StoragePrivateMediaMutationSQL(refAlias, actorParam string, factored ...bool) string {
 	task := `EXISTS(SELECT 1 FROM task_attachments attachment JOIN tasks task ON task.account_id=attachment.account_id AND task.id=attachment.task_id
 		JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
 		WHERE attachment.account_id=` + refAlias + `.account_id AND attachment.id::text=` + refAlias + `.source_id AND attachment.storage_removed_at IS NULL
 		AND (` + taskActorAccessRankSQL("task", "list_item", actorParam) + `)>=3
 		AND (attachment.attachment_scope<>'comment_draft' OR (attachment.draft_owner_id=` + actorParam + ` AND attachment.draft_expires_at<=NOW())))`
-	cte := strings.ReplaceAll(strings.ReplaceAll(whiteboardHubAccessCTE, "$1", refAlias+".account_id"), "$2", actorParam)
-	board := `EXISTS(` + cte + ` SELECT 1 FROM visible board JOIN whiteboard_assets link ON link.account_id=board.account_id AND link.board_id=board.id
+	cte, boardTable := storagePrivateWhiteboardRelation(refAlias+".account_id", actorParam, factored)
+	board := `EXISTS(` + cte + ` SELECT 1 FROM ` + boardTable + ` board JOIN whiteboard_assets link ON link.account_id=board.account_id AND link.board_id=board.id
 		WHERE link.id::text=` + refAlias + `.source_id AND board.effective_level IN ('edit','manage') AND board.archived_at IS NULL AND board.view_deleted_at IS NULL
 		AND board.work_lifecycle IN ('','active') AND (link.committed_at IS NOT NULL OR (link.uploaded_by=` + actorParam + ` AND link.draft_expires_at<=NOW())))`
-	return `(` + StoragePrivateMediaAccessSQL(refAlias, actorParam) + ` AND CASE ` + refAlias + `.source_kind WHEN 'task_attachments' THEN ` + task + ` WHEN 'whiteboard_assets' THEN ` + board + ` ELSE FALSE END)`
+	return `(` + StoragePrivateMediaAccessSQL(refAlias, actorParam, factored...) + ` AND CASE ` + refAlias + `.source_kind WHEN 'task_attachments' THEN ` + task + ` WHEN 'whiteboard_assets' THEN ` + board + ` ELSE FALSE END)`
 }
 
 // This capability is specifically restoration: deleted containers cannot be
 // recreated through storage, even when an administrator may purge their bytes.
-func StoragePrivateMediaRecoveryMutationSQL(recoveryAlias, actorParam string) string {
+func StoragePrivateMediaRecoveryMutationSQL(recoveryAlias, actorParam string, factored ...bool) string {
 	account := recoveryAlias + ".account_id"
 	task := `EXISTS(SELECT 1 FROM tasks task JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
 		WHERE task.account_id=` + account + ` AND task.id::text=` + recoveryAlias + `.snapshot->>'parent_id' AND task.deleted_at IS NULL
 		AND ` + taskActorCanViewSQL("task", "list_item", actorParam) + ` AND (` + taskActorAccessRankSQL("task", "list_item", actorParam) + `)>=3)`
-	cte := strings.ReplaceAll(strings.ReplaceAll(whiteboardHubAccessCTE, "$1", account), "$2", actorParam)
-	board := `EXISTS(` + cte + ` SELECT 1 FROM visible board WHERE board.id::text=` + recoveryAlias + `.snapshot->>'parent_id'
+	cte, boardTable := storagePrivateWhiteboardRelation(account, actorParam, factored)
+	board := `EXISTS(` + cte + ` SELECT 1 FROM ` + boardTable + ` board WHERE board.id::text=` + recoveryAlias + `.snapshot->>'parent_id'
 		AND effective_level IN ('edit','manage') AND archived_at IS NULL AND view_deleted_at IS NULL AND work_lifecycle IN ('','active'))`
-	return `(` + StoragePrivateMediaRecoveryAccessSQL(recoveryAlias, actorParam) + ` AND CASE ` + recoveryAlias + `.adapter WHEN 'private_work' THEN ` + task + ` WHEN 'private_whiteboards' THEN ` + board + ` ELSE FALSE END)`
+	return `(` + StoragePrivateMediaRecoveryAccessSQL(recoveryAlias, actorParam, factored...) + ` AND CASE ` + recoveryAlias + `.adapter WHEN 'private_work' THEN ` + task + ` WHEN 'private_whiteboards' THEN ` + board + ` ELSE FALSE END)`
 }
 
 func AuthorizePrivateStorageRecovery(ctx context.Context, q StoragePrivateMediaQuerier, accountID, actorID, parentID uuid.UUID, whiteboards, mutate bool) error {
@@ -146,7 +159,11 @@ func AuthorizePrivateStorageRecovery(ctx context.Context, q StoragePrivateMediaQ
 	return nil
 }
 
-func ListTaskStorageReferences(ctx context.Context, q StoragePrivateMediaQuerier, accountID, actorID uuid.UUID, keys []string) ([]PrivateStorageReference, error) {
+func ListTaskStorageReferences(ctx context.Context, q StoragePrivateMediaQuerier, accountID, actorID uuid.UUID, keys []string, selected ...[]uuid.UUID) ([]PrivateStorageReference, error) {
+	var ids []uuid.UUID
+	if len(selected) > 0 {
+		ids = selected[0]
+	}
 	rows, err := q.Query(ctx, `SELECT attachment.id,task.id,asset.object_key,task.title,asset.filename,
 		task.version::text||':'||attachment.attachment_scope,
 		(`+taskActorAccessRankSQL("task", "list_item", "$2")+`)>=3,
@@ -156,9 +173,9 @@ func ListTaskStorageReferences(ctx context.Context, q StoragePrivateMediaQuerier
 		JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
 		JOIN media_assets asset ON asset.account_id=attachment.account_id AND asset.id=attachment.media_asset_id AND asset.status='active'
 		WHERE attachment.account_id=$1 AND attachment.storage_removed_at IS NULL AND task.deleted_at IS NULL
-		AND ($3::text[] IS NULL OR asset.object_key=ANY($3::text[]))
+		AND ($3::text[] IS NULL OR asset.object_key=ANY($3::text[])) AND ($4::uuid[] IS NULL OR attachment.id=ANY($4::uuid[]))
 		AND (attachment.attachment_scope<>'comment_draft' OR attachment.draft_owner_id=$2)
-		AND `+taskActorCanViewSQL("task", "list_item", "$2")+` ORDER BY attachment.id`, accountID, actorID, keys)
+		AND `+taskActorCanViewSQL("task", "list_item", "$2")+` ORDER BY attachment.id`, accountID, actorID, keys, ids)
 	if err != nil {
 		return nil, err
 	}

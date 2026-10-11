@@ -999,6 +999,7 @@ func (s *Server) setupRoutes() {
 	docTemplates.Get("/", s.handleListDocumentTemplates)
 	docTemplates.Post("/", s.handleCreateDocumentTemplate)
 	docTemplates.Post("/import", s.handleImportDocumentTemplate)
+	docTemplates.Post("/assets", s.handleDocumentAssetUpload)
 	docTemplates.Get("/:id", s.handleGetDocumentTemplate)
 	docTemplates.Put("/:id", s.handleUpdateDocumentTemplate)
 	docTemplates.Delete("/:id", s.handleDeleteDocumentTemplate)
@@ -4529,6 +4530,9 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 	}
 	hashBytes := sha256.Sum256(data)
 	rawContentHash := fmt.Sprintf("%x", hashBytes[:])
+	if isolated, ok := c.Locals(documentIsolatedHashLocal).(string); ok && folder == "documents" {
+		rawContentHash = isolated
+	}
 	existing, contentHash, lookupErr := s.findNonStatusMediaAsset(c.Context(), accountID, rawContentHash)
 	if lookupErr != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo validar el inventario de media"})
@@ -4815,7 +4819,9 @@ func (s *Server) serveStorageObject(c *fiber.Ctx, objectKey, cacheControl, expli
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Storage not configured"})
 	}
 
-	info, err := s.storage.GetFileInfo(c.Context(), objectKey)
+	metadataCtx, metadataCancel := context.WithTimeout(c.Context(), 10*time.Second)
+	info, err := s.storage.GetFileInfo(metadataCtx, objectKey)
+	metadataCancel()
 	if err != nil {
 		return storageObjectReadError(c, err)
 	}
@@ -4834,52 +4840,8 @@ func (s *Server) serveStorageObject(c *fiber.Ctx, objectKey, cacheControl, expli
 		return c.SendStatus(fiber.StatusNotModified)
 	}
 
-	// Check for Range header (needed for video streaming)
-	rangeHeader := c.Get("Range")
-	if rangeHeader != "" {
-		totalSize := info.Size
-
-		// Parse range header: "bytes=start-end"
-		rangeHeader = strings.TrimPrefix(rangeHeader, "bytes=")
-		parts := strings.SplitN(rangeHeader, "-", 2)
-		var start, end int64
-		if parts[0] != "" {
-			fmt.Sscanf(parts[0], "%d", &start)
-		}
-		if len(parts) > 1 && parts[1] != "" {
-			fmt.Sscanf(parts[1], "%d", &end)
-		} else {
-			// Serve chunks of 1MB max for streaming
-			end = start + 1024*1024 - 1
-			if end >= totalSize {
-				end = totalSize - 1
-			}
-		}
-		if end >= totalSize {
-			end = totalSize - 1
-		}
-
-		length := end - start + 1
-		data, err := s.storage.GetFileRange(c.Context(), objectKey, start, length)
-		if err != nil {
-			return storageObjectReadError(c, err)
-		}
-
-		c.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, totalSize))
-		c.Set("Content-Length", fmt.Sprintf("%d", len(data)))
-		setMediaCacheHeaders()
-		return c.Status(206).Send(data)
-	}
-
-	// Full file download
-	data, err := s.storage.GetFile(c.Context(), objectKey)
-	if err != nil {
-		return storageObjectReadError(c, err)
-	}
-
-	c.Set("Content-Length", fmt.Sprintf("%d", len(data)))
 	setMediaCacheHeaders()
-	return c.Send(data)
+	return s.sendStorageStream(c, objectKey, info.Size, etag, info.ETag, info.LastModified)
 }
 
 // --- Lead Handlers ---

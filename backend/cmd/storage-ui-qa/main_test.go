@@ -149,3 +149,16 @@ func TestSyntheticPreviewAssetsAreValidAndIndependent(t *testing.T) {
 		t.Fatal("large audio fixture is not a complete PCM WAV above 10 MiB")
 	}
 }
+
+func TestLocalAPIBaseRejectsRemoteAndAmbiguousTargets(t *testing.T) {
+	for _, value := range []string{"", "http://127.0.0.1:8080", "http://127.0.0.1:18089"} {
+		if _, err := localAPIBase(value); err != nil {
+			t.Fatalf("valid loopback target rejected: %v", err)
+		}
+	}
+	for _, value := range []string{"https://clarin.naperu.cloud", "http://localhost:18089", "http://127.0.0.1:18089/api", "http://127.0.0.1:8081", "http://user@127.0.0.1:18089", "http://127.0.0.1:18089?host=remote", "http://127.0.0.1:18089#x"} {
+		if _, err := localAPIBase(value); err == nil {
+			t.Fatal("unsafe fixture API accepted")
+		}
+	}
+}

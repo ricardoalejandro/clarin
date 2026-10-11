@@ -13,7 +13,11 @@ import (
 	whiteboardcore "github.com/naperu/clarin/internal/whiteboard"
 )
 
-func ListWhiteboardStorageReferences(ctx context.Context, q StoragePrivateMediaQuerier, accountID, actorID uuid.UUID, keys []string) ([]PrivateStorageReference, error) {
+func ListWhiteboardStorageReferences(ctx context.Context, q StoragePrivateMediaQuerier, accountID, actorID uuid.UUID, keys []string, selected ...[]uuid.UUID) ([]PrivateStorageReference, error) {
+	var ids []uuid.UUID
+	if len(selected) > 0 {
+		ids = selected[0]
+	}
 	rows, err := q.Query(ctx, whiteboardHubAccessCTE+` SELECT link.id,board.id,asset.object_key,board.name,asset.filename,
 		board.scene_sequence::text||':'||board.access_revision::text,
 		(board.effective_level IN ('edit','manage') AND board.archived_at IS NULL AND board.view_deleted_at IS NULL AND board.work_lifecycle IN ('','active')),
@@ -21,7 +25,7 @@ func ListWhiteboardStorageReferences(ctx context.Context, q StoragePrivateMediaQ
 		FROM visible board JOIN whiteboard_assets link ON link.account_id=board.account_id AND link.board_id=board.id AND link.kind='asset'
 		JOIN media_assets asset ON asset.account_id=link.account_id AND asset.id=link.media_asset_id AND asset.status='active'
 		WHERE board.effective_level<>'none' AND (link.committed_at IS NOT NULL OR link.uploaded_by=$2)
-		AND ($3::text[] IS NULL OR asset.object_key=ANY($3::text[])) ORDER BY link.id`, accountID, actorID, keys)
+		AND ($3::text[] IS NULL OR asset.object_key=ANY($3::text[])) AND ($4::uuid[] IS NULL OR link.id=ANY($4::uuid[])) ORDER BY link.id`, accountID, actorID, keys, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +57,7 @@ func ListWhiteboardStorageReferences(ctx context.Context, q StoragePrivateMediaQ
 		FROM visible board JOIN whiteboard_revision_assets link ON link.account_id=board.account_id AND link.board_id=board.id
 		JOIN whiteboard_revisions revision ON revision.account_id=link.account_id AND revision.id=link.revision_id AND revision.board_id=board.id
 		JOIN media_assets asset ON asset.account_id=link.account_id AND asset.id=link.media_asset_id AND asset.status<>'deleted'
-		WHERE board.effective_level<>'none' AND ($3::text[] IS NULL OR asset.object_key=ANY($3::text[])) ORDER BY link.id`, accountID, actorID, keys)
+		WHERE board.effective_level<>'none' AND ($3::text[] IS NULL OR asset.object_key=ANY($3::text[])) AND ($4::uuid[] IS NULL OR link.id=ANY($4::uuid[])) ORDER BY link.id`, accountID, actorID, keys, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +87,7 @@ func ListWhiteboardStorageReferences(ctx context.Context, q StoragePrivateMediaQ
 		WHERE link.account_id=$1 AND link.kind='asset' AND library.archived_at IS NULL
 		AND (library.created_by=actor.id OR library.visibility='account' OR member.role IN ('admin','super_admin') OR actor.is_super_admin)
 		AND (link.committed_at IS NOT NULL OR link.uploaded_by=actor.id)
-		AND ($3::text[] IS NULL OR asset.object_key=ANY($3::text[])) ORDER BY link.id`, accountID, actorID, keys)
+		AND ($3::text[] IS NULL OR asset.object_key=ANY($3::text[])) AND ($4::uuid[] IS NULL OR link.id=ANY($4::uuid[])) ORDER BY link.id`, accountID, actorID, keys, ids)
 	if err != nil {
 		return nil, err
 	}

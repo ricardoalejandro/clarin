@@ -13,6 +13,12 @@ import (
 // can introduce them. This prevents a caption/settings/canvas field from being
 // used to fabricate an authorized origin for an otherwise unreadable object.
 func (s *Server) authorizeMediaReferencePayload(c *fiber.Ctx, payload any) error {
+	return s.authorizeMediaReferencePayloadUsing(c, payload, s.authorizeMediaPublication)
+}
+
+// Keep one complete traversal for inventory-recognized references; a writer may
+// add a narrower owner-specific authorization without skipping hidden strings.
+func (s *Server) authorizeMediaReferencePayloadUsing(c *fiber.Ctx, payload any, authorize func(*fiber.Ctx, string) error) error {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -43,7 +49,7 @@ func (s *Server) authorizeMediaReferencePayload(c *fiber.Ctx, payload any) error
 				return nil
 			}
 			seen[value] = true
-			if err := s.authorizeMediaPublication(c, value); err != nil {
+			if err := authorize(c, value); err != nil {
 				return err
 			}
 			if claims == nil {
@@ -57,7 +63,7 @@ func (s *Server) authorizeMediaReferencePayload(c *fiber.Ctx, payload any) error
 				if direct && key == directKey {
 					continue
 				}
-				if err := s.authorizeMediaPublication(c, mediaProxyURLFromObjectKey(key)); err != nil {
+				if err := authorize(c, mediaProxyURLFromObjectKey(key)); err != nil {
 					return err
 				}
 			}

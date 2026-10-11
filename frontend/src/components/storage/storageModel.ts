@@ -68,9 +68,9 @@ export const THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
 export const ORIGIN_LABELS: Record<string, string> = { chats: 'Chats', campaigns: 'Campañas', quick_replies: 'Respuestas rápidas', dynamics: 'Dinámicas', surveys: 'Encuestas', documents: 'Documentos', contacts: 'Contactos', tasks: 'Tareas', whiteboards: 'Pizarras', own_uploads: 'Mis cargas', stickers: 'Stickers' }
 export function formatStorageBytes(value = 0): string {
   if (!Number.isFinite(value) || value <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']; let size = value; let unit = 0
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']; let size = value; let unit = 0
   while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1 }
-  return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`
+  return `${unit === 0 || (unit < 3 && size >= 10) ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`
 }
 export function storageDate(value?: string): string {
   if (!value || !Number.isFinite(Date.parse(value))) return 'Sin fecha'
@@ -194,4 +194,11 @@ export function nextStorageTab(current: StorageTab, key: string, canViewActivity
   if (key === 'ArrowRight') return tabs[(index + 1) % tabs.length]
   if (key === 'ArrowLeft') return tabs[(index + tabs.length - 1) % tabs.length]
   return null
+}
+
+/** Public distinctions only: never expose a hidden origin or account. */
+export function storageUnavailableMessage(status?: number): string {
+  if (status === 401) return 'Tu sesión caducó. Inicia sesión de nuevo para abrir el archivo.'
+  if (status === 403) return 'Ya no tienes permiso para abrir este archivo.'
+  return 'El archivo ya no está disponible o no tienes acceso a él. Se actualizará la lista.'
 }

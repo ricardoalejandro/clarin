@@ -396,6 +396,29 @@ func (s *Storage) GetFileRange(ctx context.Context, objectKey string, offset, le
 	return data, nil
 }
 
+// OpenFileRange returns a streaming body. The caller must close it on success,
+// failure and disconnection; unlike GetFile/GetFileRange this never buffers the
+// full object. Metadata/open errors are checked before committing HTTP headers.
+func (s *Storage) OpenFileRange(ctx context.Context, objectKey string, offset, length int64, etag string) (io.ReadCloser, error) {
+	if offset < 0 || length <= 0 || offset > int64(^uint64(0)>>1)-length {
+		return nil, fmt.Errorf("invalid stream range")
+	}
+	opts := minio.GetObjectOptions{}
+	if err := opts.SetRange(offset, offset+length-1); err != nil {
+		return nil, err
+	}
+	if etag != "" {
+		opts.SetMatchETag(strings.Trim(etag, "\""))
+	}
+	// Core opens the HTTP response immediately. Calling Object.Stat on the
+	// lazy GetObject reader removes its Range header and fetches the full file.
+	reader, _, _, err := (minio.Core{Client: s.client}).GetObject(ctx, s.bucketForObjectKey(objectKey), objectKey, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file stream: %w", err)
+	}
+	return reader, nil
+}
+
 // DeleteFile removes a file from storage
 func (s *Storage) DeleteFile(ctx context.Context, objectKey string) error {
 	if err := s.client.RemoveObject(ctx, s.bucketForObjectKey(objectKey), objectKey, minio.RemoveObjectOptions{}); err != nil {

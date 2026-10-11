@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sbomSha256": "f0bc6879b5d913e8f1f7e250c448edb17f1a72d0af491cf0982c28225aebdef2",
+  "sbomSha256": "bb736384226c43b192654bc8ff96fe90e2f907d328f2ce32654c3e99b74d3834",
   "observedAt": "2026-09-14",
   "scope": "License texts for the exact archived engine closure, over-approximating the browser bundle. No lifecycle scripts; no package downloads.",
   "overrides": [

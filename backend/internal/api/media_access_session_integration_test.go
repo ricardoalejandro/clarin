@@ -3,6 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"image"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -100,11 +103,12 @@ func runMediaAccessSessionIntegrationChecks(t *testing.T, db *pgxpool.Pool, stor
 	raw, otherRaw, draftRaw := mediaProxyURLFromObjectKey(key), mediaProxyURLFromObjectKey(otherKey), mediaProxyURLFromObjectKey(draftKey)
 	app := fiber.New()
 	app.Get("/api/media/file/*", f.server.handleMediaProxy)
+	app.Get("/api/storage/content", f.server.authMiddleware, f.server.handleStorageSelfServiceContent)
 	// Exercise the same authenticated capability issuance used after an upload.
 	app.Get("/qa/upload-preview", f.server.authMiddleware, func(c *fiber.Ctx) error {
 		return c.SendString(f.server.uploadPreviewURL(c, draftKey))
 	})
-	get := func(target, token string, cookie bool, wantStatus int, wantBody []byte, headers map[string]string) http.Header {
+	getAt := func(t *testing.T, target, token string, cookie bool, wantStatus int, wantBody []byte, headers map[string]string) http.Header {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodGet, target, nil)
 		if token != "" {
@@ -137,6 +141,9 @@ func runMediaAccessSessionIntegrationChecks(t *testing.T, db *pgxpool.Pool, stor
 		}
 		return res.Header
 	}
+	get := func(target, token string, cookie bool, wantStatus int, wantBody []byte, headers map[string]string) http.Header {
+		return getAt(t, target, token, cookie, wantStatus, wantBody, headers)
+	}
 	t.Run("cookie and bearer access isolate active accounts", func(t *testing.T) {
 		get(raw, "", false, http.StatusNotFound, nil, nil)
 		get(raw, owner.token, true, http.StatusOK, want, nil)
@@ -152,6 +159,135 @@ func runMediaAccessSessionIntegrationChecks(t *testing.T, db *pgxpool.Pool, stor
 			t.Fatal(err)
 		}
 		get(raw, expiredToken, false, http.StatusNotFound, nil, nil)
+	})
+	t.Run("storage native cookie HEAD and range download", func(t *testing.T) {
+		target := "/api/storage/content?object_key=" + url.QueryEscape(key)
+		req := httptest.NewRequest(http.MethodHead, target+"&download=1", nil)
+		req.AddCookie(&http.Cookie{Name: "auth-token", Value: owner.token})
+		response, err := app.Test(req, 15000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != http.StatusOK || len(body) != 0 || response.ContentLength != int64(len(want)) {
+			t.Fatalf("native HEAD failed status=%d length=%d body=%d error=%v", response.StatusCode, response.ContentLength, len(body), err)
+		}
+		if response.Header.Get("X-Content-Type-Options") != "nosniff" || !strings.HasPrefix(response.Header.Get("Content-Disposition"), "attachment;") {
+			t.Fatal("native download missing safe attachment headers")
+		}
+		get(target, owner.token, true, http.StatusPartialContent, want[:8], map[string]string{"Range": "bytes=0-7"})
+		get(target, otherToken, true, http.StatusNotFound, nil, nil)
+		f.exec(`UPDATE roles SET permissions=$2 WHERE id=$1`, f.role, []string{domain.PermSettings})
+		get(target, owner.token, true, http.StatusNotFound, nil, map[string]string{"Range": "bytes=0-7"})
+		f.exec(`UPDATE roles SET permissions=$2 WHERE id=$1`, f.role, []string{domain.PermSettings, domain.PermChats})
+	})
+
+	t.Run("durable canonical own upload remains actor scoped until attached or retained", func(t *testing.T) {
+		for _, state := range []string{"business", "trash", "recovery"} {
+			t.Run(state, func(t *testing.T) {
+				ownKey, _, _ := f.media(f.account, "uploads", "durable-"+state+".pdf", false)
+				ownWant := readObject(ownKey)
+				f.exec(`INSERT INTO storage_upload_ownership(account_id,object_key,actor_id,provenance_verified,state,filename) VALUES($1,$2,$3,true,'active','own.pdf')`, f.account, ownKey, f.user)
+				ownURL := mediaProxyURLFromObjectKey(ownKey)
+				get(ownURL, owner.token, true, http.StatusOK, ownWant, nil)
+				get(ownURL, secondSession.token, true, http.StatusOK, ownWant, nil)
+				get(ownURL, otherActor.token, true, http.StatusNotFound, nil, nil)
+				get(ownURL, otherToken, true, http.StatusNotFound, nil, nil)
+				switch state {
+				case "business":
+					f.exec(`INSERT INTO document_templates(account_id,name,canvas_json) VALUES($1,'Private own draft',jsonb_build_object('backgroundImage',jsonb_build_object('src',$2::text)))`, f.account, ownURL)
+				case "trash":
+					f.exec(`INSERT INTO storage_media_trash(account_id,object_key,actor_id,filename,media_type,size_bytes,message_backups,purge_after) VALUES($1,$2,$3,'own.pdf','document',$4,'[]',NOW()+INTERVAL '7 days')`, f.account, ownKey, f.user, len(ownWant))
+				case "recovery":
+					f.exec(`UPDATE storage_upload_ownership SET state='removed' WHERE account_id=$1 AND object_key=$2`, f.account, ownKey)
+				}
+				get(ownURL, owner.token, true, http.StatusNotFound, nil, nil)
+			})
+		}
+	})
+	t.Run("historical document images read before saving with current authority", func(t *testing.T) {
+		previousURL := f.server.cfg.PublicURL
+		f.server.cfg.PublicURL = "https://clarin.test.invalid"
+		defer func() {
+			f.server.cfg.PublicURL = previousURL
+			f.exec(`UPDATE roles SET permissions=$2 WHERE id=$1`, f.role, []string{domain.PermSettings, domain.PermChats})
+		}()
+		f.exec(`UPDATE roles SET permissions=$2 WHERE id=$1`, f.role, []string{domain.PermSettings, domain.PermDocuments})
+		var pngBytes bytes.Buffer
+		if err := png.Encode(&pngBytes, image.NewRGBA(image.Rect(0, 0, 2, 3))); err != nil {
+			t.Fatal(err)
+		}
+		seed := func(name, slot string, documentAccount uuid.UUID, host, folder string) (string, uuid.UUID) {
+			t.Helper()
+			assetKey, _, _ := f.media(documentAccount, folder, name+".png", false)
+			if _, err := store.UploadObject(ctx, assetKey, pngBytes.Bytes(), "image/png"); err != nil {
+				t.Fatal(err)
+			}
+			absolute := host + mediaProxyURLFromObjectKey(assetKey)
+			canvas := map[string]any{"fabricJson": map[string]any{"objects": []any{map[string]any{"type": "Image", "src": absolute}}}}
+			thumbnail := ""
+			switch slot {
+			case "background":
+				canvas = map[string]any{"background": map[string]any{"imageUrl": absolute}}
+			case "pattern":
+				canvas = map[string]any{"fabricJson": map[string]any{"objects": []any{map[string]any{"type": "Rect", "fill": map[string]any{"type": "pattern", "source": absolute}}}}}
+			case "thumbnail":
+				canvas, thumbnail = map[string]any{}, absolute
+			case "text":
+				canvas = map[string]any{"fabricJson": map[string]any{"objects": []any{map[string]any{"type": "Textbox", "text": absolute}}}}
+			}
+			encoded, err := json.Marshal(canvas)
+			if err != nil {
+				t.Fatal(err)
+			}
+			documentID := uuid.New()
+			f.exec(`INSERT INTO document_templates(id,account_id,name,canvas_json,thumbnail_url) VALUES($1,$2,'Historical image QA',$3::jsonb,$4)`, documentID, documentAccount, encoded, thumbnail)
+			return assetKey, documentID
+		}
+		for _, slot := range []string{"src", "background", "pattern", "thumbnail"} {
+			t.Run(slot, func(t *testing.T) {
+				assetKey, documentID := seed(slot, slot, f.account, f.server.cfg.PublicURL, "documents")
+				proxy := mediaProxyURLFromObjectKey(assetKey)
+				if h := getAt(t, proxy, owner.token, true, http.StatusOK, pngBytes.Bytes(), nil); h.Get("Content-Type") != "image/png" {
+					t.Fatal("historical image did not retain its PNG content type")
+				}
+				getAt(t, proxy, otherToken, true, http.StatusNotFound, nil, nil)
+				f.exec(`UPDATE roles SET permissions=$2 WHERE id=$1`, f.role, []string{domain.PermSettings})
+				getAt(t, proxy, owner.token, true, http.StatusNotFound, nil, nil)
+				f.exec(`UPDATE roles SET permissions=$2 WHERE id=$1`, f.role, []string{domain.PermSettings, domain.PermDocuments})
+				getAt(t, proxy, owner.token, true, http.StatusOK, pngBytes.Bytes(), nil)
+				var historical bool
+				if err := db.QueryRow(ctx, `SELECT position($3::text IN jsonb_build_array(canvas_json,thumbnail_url)::text)>0 FROM document_templates WHERE id=$1 AND account_id=$2`, documentID, f.account, f.server.cfg.PublicURL).Scan(&historical); err != nil || !historical {
+					t.Fatal("media read changed the historical document instead of authorizing its original asset")
+				}
+				f.exec(`DELETE FROM document_templates WHERE id=$1 AND account_id=$2`, documentID, f.account)
+				getAt(t, proxy, owner.token, true, http.StatusNotFound, nil, nil)
+			})
+		}
+		for _, negative := range []struct {
+			name, slot, host, folder string
+			foreign                  bool
+		}{
+			{"foreign_document", "src", "https://clarin.test.invalid", "documents", true},
+			{"external_host", "src", "https://foreign.invalid", "documents", false},
+			{"text_only", "text", "https://clarin.test.invalid", "documents", false},
+			{"protected", "src", "https://clarin.test.invalid", "_private/tasks/attachments", false},
+		} {
+			t.Run(negative.name, func(t *testing.T) {
+				account := f.account
+				if negative.foreign {
+					account = f.other
+				}
+				assetKey, _ := seed(negative.name, negative.slot, account, negative.host, negative.folder)
+				getAt(t, mediaProxyURLFromObjectKey(assetKey), owner.token, true, http.StatusNotFound, nil, nil)
+			})
+		}
+		t.Run("retained", func(t *testing.T) {
+			assetKey, _ := seed("retained", "src", f.account, f.server.cfg.PublicURL, "documents")
+			f.exec(`INSERT INTO storage_media_trash(account_id,object_key,actor_id,filename,media_type,size_bytes,message_backups,purge_after) VALUES($1,$2,$3,'history.png','image',$4,'[]',NOW()+INTERVAL '7 days')`, f.account, assetKey, f.user, pngBytes.Len())
+			getAt(t, mediaProxyURLFromObjectKey(assetKey), owner.token, true, http.StatusNotFound, nil, nil)
+		})
 	})
 	t.Run("legacy URL-only references preserve encoded filenames and authority", func(t *testing.T) {
 		for _, name := range []string{"Historia 17.11.41.mp4", "Niñez y canción.jpeg", "6392_0216(1)1.mp4", "la historia).mp4", "a+b.jpeg", "literal%20espacio.jpeg", "100% listo.jpeg", "pregunta?.jpeg", "fragmento#.jpeg", "una \"cita\".jpeg", "signos'\"]}.jpeg", "una \"cita\" & <foto>.jpeg", "separadores \"línea\" \u2028 y \u2029.jpeg"} {

@@ -111,3 +111,11 @@ for (const [name, resolver] of [
     assert.equal(result.status, 0, result.stderr)
   })
 }
+
+
+test('document runtime locks patched Next, image decoder and PDF sanitizer releases', () => {
+ const lock=JSON.parse(readFileSync(new URL('../package-lock.json',import.meta.url),'utf8'))
+ assert.equal(lock.packages['node_modules/next'].version,'16.3.8')
+ assert.equal(lock.packages['node_modules/sharp'].version,'0.35.5')
+ assert.equal(lock.packages['node_modules/dompurify'].version,'3.4.16')
+})
