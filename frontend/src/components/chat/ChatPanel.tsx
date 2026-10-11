@@ -517,7 +517,15 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }, [chatId, loading, isActive, messages.length, showSearch, quotedContextActive, searchWindowMessages, markDisplayedIncomingRead])
 
   useEffect(() => {
-    if (!isActive) messagesContainerRef.current?.querySelectorAll<HTMLMediaElement>('audio, video').forEach(media => media.pause())
+    const container = messagesContainerRef.current
+    if (!isActive) {
+      container?.querySelectorAll<HTMLMediaElement>('audio, video').forEach(media => media.pause())
+    } else {
+      // GIFs are silent looping videos; ordinary audio/video must remain user-controlled.
+      container?.querySelectorAll<HTMLVideoElement>('video[autoplay][loop]').forEach(media => {
+        if (media.muted && !media.controls) void media.play().catch(() => {})
+      })
+    }
   }, [isActive])
 
   useEffect(() => {

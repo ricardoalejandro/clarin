@@ -140,8 +140,9 @@ describe('ChatPanel experience invariants', () => {
     await act(async () => { await new Promise(resolve => requestAnimationFrame(() => resolve(undefined))) })
     expect(viewport.scrollTop).toBe(200)
   })
-  it('pauses inline audio and video on Back while preserving the mounted draft and media source', async () => {
+  it('pauses media on Back and resumes only silent GIF loops, preserving the draft and handling rejected play', async () => {
     const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockRejectedValue(new DOMException('Autoplay blocked', 'NotAllowedError'))
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
       if (url === '/api/chats/chat-1') return Promise.resolve(jsonResponse({ success: true, chat, device: device('connected') }))
@@ -156,11 +157,23 @@ describe('ChatPanel experience invariants', () => {
     audio.src = '/qa-audio.ogg'
     const video = document.createElement('video')
     video.src = '/qa-video.mp4'
-    viewport.append(audio, video)
+    const gif = document.createElement('video')
+    gif.src = '/qa-gif.mp4'; gif.autoplay = true; gif.loop = true; gif.muted = true
+    const audibleLoop = document.createElement('video')
+    audibleLoop.autoplay = true; audibleLoop.loop = true
+    const controlledVideo = document.createElement('video')
+    controlledVideo.autoplay = true; controlledVideo.loop = true; controlledVideo.muted = true; controlledVideo.controls = true
+    viewport.append(audio, video, gif, audibleLoop, controlledVideo)
     panel.rerender(<ChatPanel chatId={chat.id} initialChat={chat} isActive={false} />)
-    expect(pause).toHaveBeenCalledTimes(2)
+    expect(pause).toHaveBeenCalledTimes(5)
     expect(audio.getAttribute('src')).toBe('/qa-audio.ogg')
     expect(video.getAttribute('src')).toBe('/qa-video.mp4')
+    expect(editor).toHaveValue('Borrador al volver')
+    expect(play).not.toHaveBeenCalled()
+    await act(async () => panel.rerender(<ChatPanel chatId={chat.id} initialChat={chat} isActive />))
+    expect(play).toHaveBeenCalledTimes(1)
+    expect(play.mock.contexts[0]).toBe(gif)
+    expect(gif.getAttribute('src')).toBe('/qa-gif.mp4')
     expect(editor).toHaveValue('Borrador al volver')
   })
   it('marks the outgoing canonical boundary and preserves pending attention beyond the latest history window', async () => {
