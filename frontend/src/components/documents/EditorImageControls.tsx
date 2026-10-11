@@ -3,12 +3,13 @@ import {useRef,useState} from 'react'
 import {Crop,FlipHorizontal2,FlipVertical2,RotateCw,SlidersHorizontal} from 'lucide-react'
 import type {FabricImage,Canvas,Group} from '@/lib/fabric/runtime'
 import EditorPopover from './EditorPopover'
+import {isObjectLocked} from '@/lib/fabric/editorModel'
 import {clampCrop,cropWithRatio,applyImageFrameCrop,type NormalizedCrop as CropRect} from '@/lib/fabric/imageFrame'
-export default function EditorImageControls({image,frame,canvas,onCommit}:{image:FabricImage;frame?:Group;canvas:Canvas|null;onCommit:()=>void}){
+export default function EditorImageControls({image,frame,canvas,onCommit,onCrop}:{image:FabricImage;frame?:Group;canvas:Canvas|null;onCommit:()=>void;onCrop?:()=>void}){
  const anchor=useRef<HTMLButtonElement>(null),[open,setOpen]=useState(false)
  const update=(props:Record<string,unknown>)=>{const target=frame||image;if(target.lockMovementX)return;target.set(props);target.setCoords();canvas?.requestRenderAll();onCommit()}
  return <div className="space-y-2">
- <button ref={anchor} type="button" onClick={()=>setOpen(true)} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-sm"><Crop className="h-4 w-4"/> Recortar y ajustar</button>
+ <button ref={anchor} type="button" onClick={()=>onCrop?onCrop():setOpen(true)} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-sm"><Crop className="h-4 w-4"/> Recortar y ajustar</button>
  <div className="grid grid-cols-3 gap-1">{[
  {label:'Voltear horizontal',icon:FlipHorizontal2,run:()=>update({flipX:!(frame||image).flipX})},
  {label:'Voltear vertical',icon:FlipVertical2,run:()=>update({flipY:!(frame||image).flipY})},
@@ -17,7 +18,7 @@ export default function EditorImageControls({image,frame,canvas,onCommit}:{image
  {open&&<ImageDraft image={image} frame={frame} canvas={canvas} anchor={anchor.current} onClose={()=>setOpen(false)} onCommit={onCommit}/>}
  </div>
 }
-function ImageDraft({image,frame,canvas,anchor,onClose,onCommit}:{image:FabricImage;frame?:Group;canvas:Canvas|null;anchor:HTMLElement|null;onClose:()=>void;onCommit:()=>void}){
+export function ImageDraft({image,frame,canvas,anchor,point,onClose,onCommit}:{image:FabricImage;frame?:Group;canvas:Canvas|null;anchor:HTMLElement|null;point?:{x:number;y:number};onClose:()=>void;onCommit:()=>void}){
  const size=image.getOriginalSize(),sw=size.width||1,sh=size.height||1
  const [crop,setCrop]=useState<CropRect>(()=>clampCrop({x:(image.cropX||0)/sw,y:(image.cropY||0)/sh,width:image.width/sw,height:image.height/sh}))
  const [ratio,setRatio]=useState<number|null>(null),[fit,setFit]=useState<'cover'|'contain'>((frame as any)?.imageFit||'cover')
@@ -31,7 +32,7 @@ function ImageDraft({image,frame,canvas,anchor,onClose,onCommit}:{image:FabricIm
    const dx=(e.clientX-g.startX)/r.width,dy=(e.clientY-g.startY)/r.height
    setCrop(g.mode==='move'?clampCrop({...g.crop,x:g.crop.x+dx,y:g.crop.y+dy}):cropWithRatio({...g.crop,width:Math.min(1-g.crop.x,g.crop.width+dx),height:Math.min(1-g.crop.y,g.crop.height+dy)},ratio,sw,sh))
  }
- const apply=async()=>{if(image.lockMovementX)return;setBusy(true);try{
+ const apply=async()=>{if(isObjectLocked(frame||image))return;setBusy(true);try{
    const {filters}=await import('@/lib/fabric/runtime')
    if(!canvas)return
    const previousFilters=image.filters
@@ -40,7 +41,7 @@ function ImageDraft({image,frame,canvas,anchor,onClose,onCommit}:{image:FabricIm
    applyImageFrameCrop(canvas,image,crop,fit,frame)
    image.setCoords();canvas?.requestRenderAll();onCommit();onClose()
  }catch{setError('No se pudo aplicar el ajuste. Conserva el borrador y vuelve a intentarlo.')}finally{setBusy(false)}}
- return <EditorPopover label="Editar imagen" anchor={anchor} onClose={onClose} width={410}><div className="space-y-3 p-2">
+ return <EditorPopover label="Editar imagen" anchor={anchor} point={point} onClose={onClose} width={410}><div className="space-y-3 p-2">
  <div className="flex items-center justify-between"><h3 className="font-semibold">Recorte y ajustes</h3><span className="text-xs text-slate-500">Original conservado</span></div>
  <div ref={preview} className="relative overflow-hidden rounded-lg bg-slate-100" style={{aspectRatio:sw/sh,width:Math.min(350,260*sw/sh),maxWidth:"100%",margin:"0 auto"}}>
  <img src={image.getSrc()} alt="Vista previa de recorte" draggable={false} className="h-full w-full object-fill" style={{filter:`brightness(${1+brightness}) contrast(${1+contrast}) saturate(${1+saturation})`}}/>

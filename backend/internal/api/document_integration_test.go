@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/service"
+	"github.com/naperu/clarin/pkg/config"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -23,7 +25,7 @@ func TestDocumentTemplatesRevisionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	repos := repository.NewRepositories(db)
-	server := &Server{repos: repos, services: service.NewServices(repos, nil, nil)}
+	server := &Server{repos: repos, services: service.NewServices(repos, nil, nil), cfg: &config.Config{PublicURL: "https://clarin.test.invalid"}}
 	app := fiber.New()
 	app.Use(func(c *fiber.Ctx) error {
 		active := account
@@ -32,7 +34,7 @@ func TestDocumentTemplatesRevisionIntegration(t *testing.T) {
 		}
 		c.Locals("account_id", active)
 		c.Locals("user_id", user)
-		c.Locals("claims", &service.JWTClaims{AccountID: active, UserID: user})
+		c.Locals("claims", &service.JWTClaims{AccountID: active, UserID: user, Permissions: []string{domain.PermDocuments}})
 		return c.Next()
 	})
 	app.Get("/", server.handleListDocumentTemplates)
@@ -136,12 +138,69 @@ func TestDocumentTemplatesRevisionIntegration(t *testing.T) {
 	if _, err := db.Exec(ctx, `INSERT INTO storage_upload_ownership(account_id,object_key,actor_id,provenance_verified,state,filename,last_uploaded_at) VALUES($1,$2,$3,true,'active','qa.png',NOW()-INTERVAL '2 hours')`, account, key, user); err != nil {
 		t.Fatal(err)
 	}
-	assetBody := map[string]any{"name": "Owned", "canvas_json": map[string]any{"version": 3, "fabricJson": map[string]any{"objects": []any{map[string]any{"type": "Image", "src": mediaProxyURLFromObjectKey(key)}}}}, "page_width": 210, "page_height": 140, "page_orientation": "landscape"}
+	assetBody := map[string]any{"name": "Owned", "canvas_json": map[string]any{"version": 3, "fabricJson": map[string]any{"objects": []any{map[string]any{"type": "Image", "src": "https://clarin.test.invalid" + mediaProxyURLFromObjectKey(key)}}}}, "page_width": 210, "page_height": 140, "page_orientation": "landscape"}
 	if status, _ = call("POST", "/", assetBody, true); status != 403 {
 		t.Fatalf("foreign publication %d", status)
 	}
 	if status, result = call("POST", "/", assetBody, false); status != 201 {
 		t.Fatalf("durable owned publication %d %v", status, result)
+	}
+
+	// Publication switches from verified upload ownership to the canonical
+	// document reference on the first save, even while inventory is dirty.
+	ownedID := result["template"].(map[string]any)["id"].(string)
+	assetBody["thumbnail_url"] = "https://clarin.test.invalid" + mediaProxyURLFromObjectKey(key)
+	for revision := 1; revision <= 2; revision++ {
+		assetBody["expected_revision"] = revision
+		status, result = call("PUT", "/"+ownedID, assetBody, false)
+		if status != 200 || result["template"].(map[string]any)["revision"] != float64(revision+1) {
+			t.Fatalf("consecutive owned save revision %d: status=%d result=%v", revision, status, result)
+		}
+		canonical := result["template"].(map[string]any)
+		if canonical["thumbnail_url"] != mediaProxyURLFromObjectKey(key) {
+			t.Fatal("thumbnail was not canonical")
+		}
+		saved, _ := json.Marshal(canonical["canvas_json"])
+		if strings.Contains(string(saved), "https://clarin.test.invalid") {
+			t.Fatal("Fabric absolute src persisted")
+		}
+	}
+
+	// A previously persisted same-origin Fabric image is recovered from its real
+	// document slot, never by treating every private_external reference as public.
+	oldAbsolute, _ := json.Marshal(assetBody["canvas_json"])
+	if _, err := db.Exec(ctx, `UPDATE document_templates SET canvas_json=$1,thumbnail_url=$2 WHERE id=$3 AND account_id=$4`, oldAbsolute, assetBody["thumbnail_url"], ownedID, account); err != nil {
+		t.Fatal(err)
+	}
+	assetBody["expected_revision"] = 3
+	if status, result = call("PUT", "/"+ownedID, assetBody, false); status != 200 {
+		t.Fatalf("existing absolute document: %d %v", status, result)
+	}
+	if status, _ = call("GET", "/"+ownedID, nil, false); status != 200 {
+		t.Fatal("canonical reload")
+	}
+	if status, _ = call("POST", "/"+ownedID+"/duplicate", nil, false); status != 201 {
+		t.Fatal("canonical duplicate")
+	}
+	if status, _ = call("PUT", "/"+ownedID, assetBody, true); status != 403 {
+		t.Fatalf("foreign asset write %d", status)
+	}
+	// A hostile host or a key placed in document text cannot confer image access.
+	for _, textOnly := range []bool{false, true} {
+		blockedKey := account.String() + "/documents/forbidden-" + uuid.NewString() + ".png"
+		value := "https://foreign.invalid" + mediaProxyURLFromObjectKey(blockedKey)
+		object := map[string]any{"type": "Image", "src": value}
+		if textOnly {
+			object = map[string]any{"type": "Textbox", "text": "https://clarin.test.invalid" + mediaProxyURLFromObjectKey(blockedKey)}
+		}
+		canvas, _ := json.Marshal(map[string]any{"fabricJson": map[string]any{"objects": []any{object}}})
+		if _, err := db.Exec(ctx, `INSERT INTO document_templates(account_id,name,canvas_json) VALUES($1,'Unauthorized reference',$2::jsonb)`, account, canvas); err != nil {
+			t.Fatal(err)
+		}
+		blockedBody := map[string]any{"name": "Denied", "canvas_json": map[string]any{"fabricJson": map[string]any{"objects": []any{map[string]any{"type": "Image", "src": mediaProxyURLFromObjectKey(blockedKey)}}}}, "page_width": 210, "page_height": 140, "page_orientation": "landscape"}
+		if status, _ = call("POST", "/", blockedBody, false); status != 403 {
+			t.Fatalf("foreign host or text reference granted access: %d", status)
+		}
 	}
 
 	legacyID := result["template"].(map[string]any)["id"].(string)
@@ -151,6 +210,7 @@ func TestDocumentTemplatesRevisionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	assetBody["canvas_json"] = legacyCanvas
+	assetBody["thumbnail_url"] = ""
 	if status, _ = call("POST", "/", assetBody, false); status != 422 {
 		t.Fatalf("new external image %d", status)
 	}

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
@@ -97,6 +98,10 @@ func (s *Server) handleStorageSelfServiceUses(c *fiber.Ctx) error {
 		limit = 40
 	}
 	uses, total, next, err := s.storageReadUsesPage(ctx, actor, key, after, limit)
+	if errors.Is(err, errStorageIndexingBudget) {
+		c.Set(fiber.HeaderRetryAfter, "3")
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"success": false, "code": "storage_indexing_budget", "catalog_status": "indexing", "retry_after_seconds": 3, "error": "Estamos actualizando las ubicaciones del archivo. Vuelve a intentarlo en unos segundos."})
+	}
 	if err != nil {
 		storageReadFailure("uses", err)
 		return storageSelfServiceError(c, 503, "storage_scan_failed", "No se pudieron verificar los usos.")

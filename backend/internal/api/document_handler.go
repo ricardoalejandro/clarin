@@ -126,6 +126,7 @@ func (s *Server) writeDocument(c *fiber.Ctx, update bool) error {
 	if err := s.authorizeDocumentMediaPayload(c, body); err != nil {
 		return mediaPublicationDenied(c, err)
 	}
+	s.canonicalizeDocumentAssets(&body)
 	t := &domain.DocumentTemplate{AccountID: account, Name: body.Name, Description: body.Description, CanvasJSON: body.CanvasJSON, ThumbnailURL: body.ThumbnailURL, PageWidth: body.PageWidth, PageHeight: body.PageHeight, PageOrientation: body.PageOrientation, FieldsUsed: body.FieldsUsed, CreatedBy: &user}
 	if !update {
 		if t.PageWidth == 0 {

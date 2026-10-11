@@ -3,7 +3,9 @@ package api
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"github.com/google/uuid"
+	"github.com/naperu/clarin/pkg/config"
 	"image"
 	"image/color"
 	"image/gif"
@@ -73,5 +75,39 @@ func TestDocumentIsolatedUploadHash(t *testing.T) {
 	}
 	if first == documentIsolatedContentHash(uuid.New(), actor, hash) || first == documentIsolatedContentHash(account, uuid.New(), hash) || first == hash {
 		t.Fatal("isolated upload crossed ownership")
+	}
+}
+
+func TestDocumentCanonicalAssetsPreserveTextAndMetadata(t *testing.T) {
+	key := uuid.NewString() + "/documents/image.png"
+	absolute := "https://clarin.test.invalid" + mediaProxyURLFromObjectKey(key)
+	external := "https://foreign.invalid" + mediaProxyURLFromObjectKey(key)
+	canvas := map[string]any{"version": 3, "background": map[string]any{"imageUrl": absolute}, "fabricJson": map[string]any{"objects": []any{
+		map[string]any{"type": "Image", "src": absolute},
+		map[string]any{"type": "IText", "text": absolute, "fieldValue": absolute, "metadata": map[string]any{"url": absolute}},
+		map[string]any{"type": "Rect", "fill": map[string]any{"type": "pattern", "source": absolute}},
+		map[string]any{"type": "Image", "src": external},
+	}}}
+	encoded, _ := json.Marshal(canvas)
+	body := documentWriteBody{CanvasJSON: encoded, ThumbnailURL: absolute}
+	s := &Server{cfg: &config.Config{PublicURL: "https://clarin.test.invalid"}}
+	s.canonicalizeDocumentAssets(&body)
+	var got map[string]any
+	if err := json.Unmarshal(body.CanvasJSON, &got); err != nil {
+		t.Fatal(err)
+	}
+	objects := got["fabricJson"].(map[string]any)["objects"].([]any)
+	text := objects[1].(map[string]any)
+	if text["text"] != absolute || text["fieldValue"] != absolute || text["metadata"].(map[string]any)["url"] != absolute {
+		t.Fatal("canonicalization modified authored text or metadata")
+	}
+	if objects[0].(map[string]any)["src"] != mediaProxyURLFromObjectKey(key) || body.ThumbnailURL != mediaProxyURLFromObjectKey(key) || got["background"].(map[string]any)["imageUrl"] != mediaProxyURLFromObjectKey(key) {
+		t.Fatal("local image slots were not canonical")
+	}
+	if objects[2].(map[string]any)["fill"].(map[string]any)["source"] != mediaProxyURLFromObjectKey(key) {
+		t.Fatal("pattern was not canonical")
+	}
+	if objects[3].(map[string]any)["src"] != external {
+		t.Fatal("foreign origin became trusted")
 	}
 }

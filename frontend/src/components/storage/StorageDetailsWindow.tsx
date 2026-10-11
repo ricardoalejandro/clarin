@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { ArrowLeft, ArrowRight, ExternalLink, Eye, FileText, Loader2, RefreshCw, ShieldCheck } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Clock3, ExternalLink, Eye, FileText, Loader2, RefreshCw, ShieldCheck } from 'lucide-react'
 import { apiGet } from '@/lib/api'
 import { getAuthScope } from '@/lib/authScope'
 import OperationalWindowShell from '@/components/operational-window/OperationalWindowShell'
@@ -9,6 +9,8 @@ import { OPERATIONAL_OVERLAY_LAYERS } from '@/components/operational-overlay/ope
 import { StorageDialog } from './StorageDialog'
 import { StorageReadQueue } from './storageReadQueue'
 import { formatStorageBytes, ORIGIN_LABELS, reconcileStorageUses, safeStorageOriginHref, STORAGE_READ_TIMEOUT_MS, STORAGE_SELECTION_LIMIT, storageDate, storageUsesPath, type StorageFile, type StorageTarget, type StorageUse, type StorageUsesResponse } from './storageModel'
+
+type StorageUsesRead = StorageUsesResponse & { code?: string; catalog_status?: string; retry_after_seconds?: number }
 
 const control = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-xl px-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-45'
 
@@ -25,6 +27,8 @@ export function StorageDetailsWindow({ file, scope, refresh, canManage, reviewBu
   const [selected, setSelected] = useState<Map<string, StorageUse>>(new Map())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [indexing, setIndexing] = useState<{ retryAt: number } | null>(null)
+  const [clock, setClock] = useState(Date.now())
   const [retry, setRetry] = useState(0)
   const [discardOpen, setDiscardOpen] = useState(false)
   const requests = useRef<{ invalidate: (revision: number) => void; dispose: () => void } | null>(null)
@@ -34,6 +38,12 @@ export function StorageDetailsWindow({ file, scope, refresh, canManage, reviewBu
   const canSelect = canManage && response?.can_manage !== false && file.status === 'active'
   const viewIdentity = JSON.stringify([scope, file.object_key, cursor, canManage])
   const viewReady = response !== null && responseIdentity === viewIdentity
+  const retryReady = !indexing || clock >= indexing.retryAt
+  useEffect(() => {
+    if (!indexing) return
+    const timer = window.setTimeout(() => setClock(Date.now()), Math.max(0, indexing.retryAt - Date.now()))
+    return () => window.clearTimeout(timer)
+  }, [indexing])
 
   useEffect(() => { onSelectionChange?.(selected.size > 0) }, [selected.size, onSelectionChange])
 
@@ -44,12 +54,18 @@ export function StorageDetailsWindow({ file, scope, refresh, canManage, reviewBu
   useEffect(() => {
     const queue = new StorageReadQueue(refresh, {
       timeoutMs: STORAGE_READ_TIMEOUT_MS,
-      read: signal => apiGet<StorageUsesResponse>(storageUsesPath(file.object_key, cursor), { signal }),
-      onStart: () => { setLoading(true); setError('') },
+      read: signal => apiGet<StorageUsesRead>(storageUsesPath(file.object_key, cursor), { signal }),
+      onStart: () => { setLoading(true); setError(''); setIndexing(null) },
       onResult: result => {
         if (getAuthScope() !== scope) return false
         if (!result.success || !result.data?.success || !Array.isArray(result.data.uses)) {
           setResponseIdentity(null)
+          if (result.status === 503 && result.data?.code === 'storage_indexing_budget' && result.data.catalog_status === 'indexing') {
+            const seconds = result.data.retry_after_seconds
+            const delay = typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0 ? Math.min(60, seconds) : 3
+            const now = Date.now(); setClock(now); setIndexing({ retryAt: now + delay * 1000 }); setError('')
+            return false
+          }
           if (result.status === 401 || result.status === 403 || result.status === 404) {
             setResponse(null); setSelected(new Map()); unavailable.current(); return false
           }
@@ -98,8 +114,9 @@ export function StorageDetailsWindow({ file, scope, refresh, canManage, reviewBu
       <div className="space-y-5 p-4 sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 p-3"><div className="min-w-0"><p className="text-sm font-medium text-slate-800">{file.is_own_upload && file.ownership_verified ? 'Carga tuya verificada' : 'Archivo compartido con sus ubicaciones'}</p><p className="mt-1 text-xs leading-5 text-slate-500">Un archivo puede utilizarse en varios lugares. Retirar un uso conserva los demás.</p></div><button type="button" onClick={onPreview} className={button}><Eye className="h-4 w-4" />Vista previa</button></div>
         <section aria-label="Usos del archivo"><div className="flex items-center justify-between gap-3"><div><h3 className="text-sm font-semibold text-slate-900">Dónde se usa</h3><p className="mt-1 text-xs text-slate-500">Sólo aparecen las ubicaciones a las que tienes acceso.</p></div>{loading && response && <Loader2 aria-label="Actualizando usos" className="h-4 w-4 animate-spin text-emerald-600 motion-reduce:animate-none" />}</div>
+          {indexing && <div role="status" className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><p className="flex items-center gap-2 font-medium"><Clock3 className="h-4 w-4 shrink-0" />Ubicaciones en actualización</p><p className="mt-2">Estamos preparando el catálogo de este archivo. Sus usos todavía no se han podido verificar.{response ? ' Se conserva la última información disponible y tu selección.' : ' Los usos aparecerán cuando termine la actualización.'}</p><button type="button" aria-label="Reintentar indexación" disabled={!retryReady} onClick={() => { if (retryReady) setRetry(value => value + 1) }} className={button+' mt-2'}><RefreshCw className="h-4 w-4" />Reintentar</button>{!retryReady && <p className="mt-2 text-xs">Podrás volver a intentarlo en unos segundos.</p>}</div>}
           {error && <div role="alert" className="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800"><p>{error}</p><button type="button" onClick={() => setRetry(value => value + 1)} className={`${button} mt-2`}><RefreshCw className="h-4 w-4" />Reintentar</button></div>}
-          {loading && !response ? <p role="status" className="flex items-center gap-2 py-8 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />Comprobando ubicaciones y permisos…</p> : response && response.uses.length === 0 ? <p className="mt-3 rounded-xl border border-slate-200 p-4 text-sm leading-6 text-slate-600">{file.is_own_upload && file.ownership_verified ? 'Esta carga no tiene usos actuales. Puedes seleccionarla desde Archivos para revisar su traslado a la papelera.' : 'No hay usos disponibles para mostrar en esta página.'}</p> : <ul className="mt-3 divide-y divide-slate-100">{response?.uses.map(use => {
+          {loading && !response ? <p role="status" className="flex items-center gap-2 py-8 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />Comprobando ubicaciones y permisos…</p> : response && response.uses.length === 0 && !indexing ? <p className="mt-3 rounded-xl border border-slate-200 p-4 text-sm leading-6 text-slate-600">{file.is_own_upload && file.ownership_verified ? 'Esta carga no tiene usos actuales. Puedes seleccionarla desde Archivos para revisar su traslado a la papelera.' : 'No hay usos disponibles para mostrar en esta página.'}</p> : <ul className="mt-3 divide-y divide-slate-100">{response?.uses.map(use => {
             const href = safeStorageOriginHref(use.href)
             return <li key={use.use_id} className="flex items-start gap-3 py-3">
               {canManage && file.status === 'active' && <label className="flex h-11 w-11 shrink-0 items-center justify-center"><input type="checkbox" aria-label={`Seleccionar uso: ${use.label}${use.context_label ? ` · ${use.context_label}` : ''}`} checked={selected.has(use.use_id)} onChange={() => toggle(use)} disabled={!canSelect || !use.can_remove || !viewReady || !!error || (!selected.has(use.use_id) && selected.size >= STORAGE_SELECTION_LIMIT)} className="h-4 w-4 accent-emerald-600 disabled:opacity-40" /></label>}

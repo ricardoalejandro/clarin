@@ -1,6 +1,6 @@
  'use client'
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Plus, Search, FileText, Trash2, Copy, Download, Upload, LayoutGrid, List, Loader2, ArrowRight, RefreshCw, X } from 'lucide-react'
+import { Plus, Search, FileText, Trash2, Copy, Download, Upload, LayoutGrid, List, Loader2, ArrowRight, RefreshCw, X, Pencil } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import { api } from '@/lib/api'
 import { getAuthScope, subscribeAuthScope, isAuthIdentityChanging } from '@/lib/authScope'
@@ -8,6 +8,7 @@ import type { DocumentTemplate } from '@/types/document'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { documentLibraryPath, mergeDocumentPage, safeDocumentFilename, type DocumentLibraryPage } from '@/lib/documents/documentLibrary'
 import { DOCUMENT_MAX_BYTES, validateDocumentTemplate, validDocumentAssetURL } from '@/lib/documents/documentValidation'
+import { DocumentRequestTimeoutError, withDocumentRequestDeadline } from '@/lib/documents/documentRequest'
 import { downloadBlob } from '@/lib/fabric/export'
 import { StorageDialog as DocumentDialog } from '@/components/storage/StorageDialog'
 const presets = [{ name: 'A4', w: 210, h: 297 }, { name: 'A5', w: 148, h: 210 }, { name: 'Carta', w: 216, h: 279 }, { name: 'Ficha', w: 210, h: 140 }]
@@ -34,6 +35,10 @@ function DocumentsLibrary() {
   const [draft, setDraft] = useState(emptyDraft)
   const [draftError, setDraftError] = useState('')
   const [discard, setDiscard] = useState(false)
+  const [renaming, setRenaming] = useState<DocumentTemplate | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [renameError, setRenameError] = useState('')
+  const renameRef = useRef<HTMLInputElement>(null)
   const [deleting, setDeleting] = useState<DocumentTemplate | null>(null)
   const request = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null })
   const mounted = useRef(true)
@@ -44,21 +49,25 @@ function DocumentsLibrary() {
     request.current.controller?.abort()
     const controller = new AbortController(); const id = ++request.current.id; const identity = getAuthScope()
     request.current.controller = controller; setLoading(true); setError('')
-    const result = await api<DocumentLibraryPage>(documentLibraryPath(settledQuery, next), { signal: controller.signal })
-    if (controller.signal.aborted || request.current.id !== id || !mounted.current || identity !== getAuthScope()) return
-    if (result.success && result.data) { setTemplates(previous => next ? mergeDocumentPage(previous, result.data!.templates) : result.data!.templates); setTotal(result.data.total); setCursor(result.data.next_cursor || '') }
-    else setError(result.error || 'No se pudieron cargar las plantillas.')
-    setLoading(false)
+    const current = () => !controller.signal.aborted && request.current.id === id && mounted.current && identity === getAuthScope()
+    try {
+      const result = await withDocumentRequestDeadline(signal => api<DocumentLibraryPage>(documentLibraryPath(settledQuery, next), { signal }), controller.signal)
+      if (!current()) return
+      if (result.success && result.data) { setTemplates(previous => next ? mergeDocumentPage(previous, result.data!.templates) : result.data!.templates); setTotal(result.data.total); setCursor(result.data.next_cursor || '') }
+      else setError(result.error || 'No se pudieron cargar las plantillas.')
+    } catch (reason) {
+      if (current()) setError(reason instanceof DocumentRequestTimeoutError ? 'No se pudieron cargar las plantillas en 30 segundos. Puedes reintentar.' : 'No se pudieron cargar las plantillas.')
+    } finally { if (current()) setLoading(false) }
   }, [settledQuery])
   const latestLoad=useRef(load);latestLoad.current=load
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; request.current.controller?.abort(); mutations.current.forEach(controller => controller.abort()) } }, [])
   useEffect(() => { void load(); return () => request.current.controller?.abort() }, [load])
-  const mutation = async (key: string, work: (signal: AbortSignal, current: () => boolean) => Promise<void>) => {
+  const mutation = async (key: string, work: (signal: AbortSignal, current: () => boolean) => Promise<void>, onError: (message: string) => void = setError) => {
     if (busy) return
     const controller = new AbortController(); const identity = getAuthScope(); mutations.current.add(controller)
     const current = () => mounted.current && !controller.signal.aborted && identity === getAuthScope()
     setBusy(key); setError(''); setNotice('')
-    try { await work(controller.signal, current) } catch (reason) { if (current()) setError(reason instanceof Error ? reason.message : 'No se pudo completar la operación.') }
+    try { await withDocumentRequestDeadline(signal => work(signal, () => current() && !signal.aborted), controller.signal) } catch (reason) { if (current()) onError(reason instanceof Error ? reason.message : 'No se pudo completar la operación.') }
     finally { mutations.current.delete(controller); if (current()) setBusy('') }
   }
   const duplicate = (item: DocumentTemplate) => void mutation(item.id, async (signal, current) => {
@@ -93,14 +102,43 @@ function DocumentsLibrary() {
   const closeCreate = () => { if (busy === 'create') return; if (JSON.stringify(draft) !== JSON.stringify(emptyDraft)) setDiscard(true); else setCreate(false) }
   const saveCreate = async (event: React.FormEvent) => {
     event.preventDefault(); const invalid = validateDocumentTemplate(draft); if (invalid) { setDraftError(invalid); return }
-    if (busy) return; setBusy('create'); setDraftError('')
-    const controller = new AbortController(); const identity = getAuthScope(); mutations.current.add(controller)
-    const response = await api<{ template: DocumentTemplate }>('/api/document-templates', { method: 'POST', body: JSON.stringify(draft), signal: controller.signal })
-    mutations.current.delete(controller)
-    if (!mounted.current || controller.signal.aborted || identity !== getAuthScope()) return
-    setBusy('')
-    if (!response.success || !response.data) { setDraftError(response.error || 'No se pudo crear la plantilla.'); return }
-    setCreate(false); setDraft(emptyDraft); router.push(`/dashboard/documents/${response.data.template.id}`)
+    setDraftError('')
+    await mutation('create', async (signal, current) => {
+      const response = await api<{ template: DocumentTemplate }>('/api/document-templates', { method: 'POST', body: JSON.stringify(draft), signal })
+      if (!current()) return
+      if (!response.success || !response.data) throw new Error(response.error || 'No se pudo crear la plantilla.')
+      setCreate(false); setDraft(emptyDraft); router.push(`/dashboard/documents/${response.data.template.id}`)
+    }, setDraftError)
+  }
+  const saveRename = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!renaming || busy) return
+    const item = renaming; const name = renameDraft.trim()
+    if (!name || name.length > 200) { setRenameError('Escribe un nombre de entre 1 y 200 caracteres.'); return }
+    setRenameError('')
+    await mutation(item.id, async (signal, current) => {
+      // The paged row omits its canvas. Re-read the full resource before changing only its name.
+      const fetched = await api<{ template: DocumentTemplate }>(`/api/document-templates/${item.id}`, { signal })
+      if (!current()) return
+      if (!fetched.success || !fetched.data) throw new Error(fetched.error || 'No se pudo comprobar la plantilla. Conservamos el nombre que escribiste.')
+      const { description, page_width, page_height, page_orientation, thumbnail_url, canvas_json, fields_used } = fetched.data.template
+      const response = await api<{ template: DocumentTemplate }>(`/api/document-templates/${item.id}`, { method: 'PUT', signal, body: JSON.stringify({ name, description, page_width, page_height, page_orientation, thumbnail_url, canvas_json, fields_used, expected_revision: item.revision }) })
+      if (!current()) return
+      if (!response.success || !response.data) {
+        if (response.status === 409) {
+          const canonical = response.data?.template
+          // Preserve the draft; only an explicit second save may retry against this revision.
+          if (canonical) setRenaming(canonical)
+          setRenameError(`La plantilla cambió${canonical ? ` y ahora se llama «${canonical.name}»` : ''}. Conservamos tu nombre; revisa el cambio antes de volver a guardarlo.`)
+          await latestLoad.current()
+          return
+        }
+        throw new Error(response.error || 'No se pudo confirmar el cambio. Conservamos el nombre que escribiste.')
+      }
+      await latestLoad.current()
+      if (!current()) return
+      setRenaming(null); setRenameDraft(''); setNotice('Nombre de la plantilla actualizado.')
+    }, setRenameError)
   }
   const remove = () => { if (!deleting) return; const item = deleting; void mutation(item.id, async (signal, current) => {
     const response = await api(`/api/document-templates/${item.id}?expected_revision=${item.revision}`, { method: 'DELETE', signal })
@@ -119,11 +157,12 @@ function DocumentsLibrary() {
         {templates.map(item => <article key={item.id} className={`min-w-0 rounded-2xl border border-slate-200 bg-white transition-shadow hover:shadow-sm ${view === 'list' ? 'flex flex-wrap items-center gap-4 p-3' : 'overflow-hidden'}`}>
           <a href={`/dashboard/documents/${item.id}`} className={`${view === 'list' ? 'h-16 w-20 shrink-0 rounded-lg' : 'flex h-40 w-full border-b border-slate-100'} flex items-center justify-center bg-slate-100/80 p-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500`} aria-label={`Editar ${item.name}`}>{item.thumbnail_url && validDocumentAssetURL(item.thumbnail_url) ? <img src={item.thumbnail_url} alt="" loading="lazy" className="max-h-full max-w-full object-contain shadow-sm" onError={e => { e.currentTarget.style.visibility = 'hidden' }} /> : <FileText className="h-9 w-9 text-slate-300" />}</a>
           <div className={view === 'list' ? 'min-w-0 flex-1 basis-40' : 'p-4 pb-2'}><a href={`/dashboard/documents/${item.id}`} className="break-words text-sm font-semibold hover:text-emerald-700">{item.name}</a>{item.description && <p className="mt-1 line-clamp-2 break-words text-xs leading-5 text-slate-500">{item.description}</p>}<p className="mt-2 text-xs text-slate-400">{item.page_width} × {item.page_height} mm · {new Date(item.updated_at).toLocaleDateString('es-PE', { day: 'numeric', month: 'short', year: 'numeric' })}</p></div>
-          <div className={`flex flex-wrap items-center gap-1 ${view === 'grid' ? 'px-3 pb-3' : ''}`}><a href={`/dashboard/documents/${item.id}`} className="mr-auto inline-flex min-h-11 items-center gap-2 rounded-xl px-3 text-sm font-medium text-emerald-700 hover:bg-emerald-50">Editar<ArrowRight className="h-4 w-4" /></a>{[{ label: 'Duplicar', Icon: Copy, run: () => duplicate(item) }, { label: 'Descargar diseño', Icon: Download, run: () => exportJSON(item) }, { label: 'Eliminar', Icon: Trash2, run: () => { setError(''); setDeleting(item) } }].map(({ label, Icon, run }) => <button key={label} title={label} aria-label={`${label}: ${item.name}`} disabled={!!busy} onClick={run} className={`flex h-11 w-11 items-center justify-center rounded-xl disabled:opacity-40 ${label === 'Eliminar' ? 'text-slate-400 hover:bg-rose-50 hover:text-rose-600' : 'text-slate-500 hover:bg-slate-100'}`}><Icon className="h-4 w-4" /></button>)}</div>
+          <div className={`flex flex-wrap items-center gap-1 ${view === 'grid' ? 'px-3 pb-3' : ''}`}><a href={`/dashboard/documents/${item.id}`} className="mr-auto inline-flex min-h-11 items-center gap-2 rounded-xl px-3 text-sm font-medium text-emerald-700 hover:bg-emerald-50">Editar<ArrowRight className="h-4 w-4" /></a>{[{ label: 'Renombrar', Icon: Pencil, run: () => { setRenameError(''); setRenameDraft(item.name); setRenaming(item) } }, { label: 'Duplicar', Icon: Copy, run: () => duplicate(item) }, { label: 'Descargar diseño', Icon: Download, run: () => exportJSON(item) }, { label: 'Eliminar', Icon: Trash2, run: () => { setError(''); setDeleting(item) } }].map(({ label, Icon, run }) => <button key={label} title={label} aria-label={`${label}: ${item.name}`} disabled={!!busy} onClick={run} className={`flex h-11 w-11 items-center justify-center rounded-xl disabled:opacity-40 ${label === 'Eliminar' ? 'text-slate-400 hover:bg-rose-50 hover:text-rose-600' : 'text-slate-500 hover:bg-slate-100'}`}><Icon className="h-4 w-4" /></button>)}</div>
         </article>)}
       </div>}
       {cursor && <div className="mt-5 text-center"><button disabled={loading} onClick={() => void load(cursor)} className={`${control} inline-flex items-center gap-2 disabled:opacity-50`}>{loading && <Loader2 className="h-4 w-4 animate-spin" />}Cargar más plantillas</button></div>}
     </main>
+    {renaming && <DocumentDialog title="Renombrar plantilla" description="Actualiza el nombre sin cambiar el diseño ni sus recursos." onClose={() => { if (!busy) setRenaming(null) }} busy={!!busy} initialFocusRef={renameRef} footer={<><button disabled={!!busy} className={control} onClick={() => setRenaming(null)}>Cancelar</button><button form="rename-document" type="submit" disabled={!!busy || !renameDraft.trim()} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white disabled:opacity-40">{busy && <Loader2 className="h-4 w-4 animate-spin" />}Guardar nombre</button></>}><form id="rename-document" onSubmit={saveRename} className="space-y-4"><label className="block text-sm font-medium">Nuevo nombre<input ref={renameRef} maxLength={200} required disabled={!!busy} value={renameDraft} onChange={e => setRenameDraft(e.target.value)} className={`${control} mt-2 w-full`} /></label>{renameError && <p role="alert" className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{renameError}</p>}</form></DocumentDialog>}
     {create && <DocumentDialog title="Nueva plantilla" description="Elige un formato; podrás ajustar el diseño en el editor." onClose={closeCreate} busy={busy === 'create'} initialFocusRef={nameRef} footer={<><button onClick={closeCreate} disabled={busy === 'create'} className={control}>Cancelar</button><button form="new-document" type="submit" disabled={busy === 'create' || !draft.name.trim()} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white disabled:opacity-40">{busy === 'create' && <Loader2 className="h-4 w-4 animate-spin" />}Crear y diseñar</button></>}><form id="new-document" onSubmit={saveCreate} className="space-y-4">
       {draftError && <p role="alert" className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{draftError}</p>}
       <label className="block text-sm font-medium">Nombre<input ref={nameRef} maxLength={200} required value={draft.name} onChange={e => setDraft(v => ({ ...v, name: e.target.value }))} className={`${control} mt-2 w-full`} placeholder="Por ejemplo, ficha de inscripción" /></label>

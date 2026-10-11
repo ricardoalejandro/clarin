@@ -75,11 +75,11 @@ export function canvasToTemplateJson(
   }
   delete fabricJson.backgroundImage
   delete fabricJson.background
-  return {
+  return normalizedDocumentJSON({
     version: 3,
     fabricJson,
     background,
-  }
+  })
 }
 
 // ─── Load: Backend JSON → Canvas ──────────────────────────────────────────────

@@ -1,5 +1,5 @@
-import {FabricImage,Group,Rect,type Canvas,type FabricObject} from './runtime'
-import {ensureObjectIds,isObjectLocked} from './editorModel'
+import {FabricImage,Group,Rect,type Canvas,type FabricObject,type Point} from './runtime'
+import {ensureObjectIds,isObjectLocked,coverImageCrop} from './editorModel'
 export type NormalizedCrop={x:number;y:number;width:number;height:number}
 export function clampCrop(c:NormalizedCrop):NormalizedCrop{
  const width=Math.min(1,Math.max(.01,Number.isFinite(c.width)?c.width:1)),height=Math.min(1,Math.max(.01,Number.isFinite(c.height)?c.height:1))
@@ -42,4 +42,38 @@ export function applyImageFrameCrop(canvas:Canvas,image:FabricImage,crop:Normali
  const group=new Group([frame,image],{...outer,subTargetCheck:true})
  ;(group as any).elementType='image-frame';(group as any).elementName=(image as any).elementName||'Imagen';(group as any).imageFit=fit
  ensureObjectIds([group]);collection.insertAt(Math.max(0,index),group);canvas.setActiveObject(group);canvas.requestRenderAll();return group
+}
+
+export function imageEditingTarget(object:FabricObject):{image:FabricImage;frame?:Group}|null{
+ const child=imageFrameChild(object)
+ if(child)return {image:child,frame:object as Group}
+ if(object instanceof FabricImage)return {image:object,...(object.parent&&imageFrameChild(object.parent)===object?{frame:object.parent}:{})}
+ return null
+}
+/** Hit-test in document/world coordinates, including nested and transparent frames. */
+export function imageTargetAtPoint(objects:FabricObject[],point:Point):FabricObject|null{
+ for(const object of [...objects].reverse()){
+  if(!object.visible)continue
+  object.setCoords()
+  if(!object.containsPoint(point))continue
+  if(imageEditingTarget(object))return object
+  if(object instanceof Group){const target=imageTargetAtPoint(object.getObjects(),point);if(target)return target}
+ }
+ return null
+}
+/** Replacement preserves the existing frame, transforms, filters and source identity. */
+export function replaceEditorImage(canvas:Canvas,target:FabricObject,next:FabricImage):boolean{
+ const resolved=imageEditingTarget(target)
+ if(!resolved||isObjectLocked(target))return false
+ const {image,frame}=resolved,center=image.getRelativeCenterPoint()
+ const width=image.width*image.scaleX,height=image.height*image.scaleY
+ image.setElement(next.getElement())
+ if(frame)applyImageFrameCrop(canvas,image,{x:0,y:0,width:1,height:1},(frame as any).imageFit==='contain'?'contain':'cover',frame)
+ else {image.set(coverImageCrop(next.width,next.height,Math.abs(width),Math.abs(height)));image.setPositionByOrigin(center,'center','center')}
+ image.applyFilters();image.setCoords()
+ let parent=image.parent;while(parent){parent.dirty=true;parent.setCoords();parent=parent.parent}
+ let selection:FabricObject=frame||image
+ while(selection.parent)selection=selection.parent
+ canvas.setActiveObject(selection);canvas.requestRenderAll()
+ return true
 }

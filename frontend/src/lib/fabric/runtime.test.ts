@@ -1,14 +1,14 @@
 import { createCanvas, loadImage, type Canvas as NativeCanvas } from '@napi-rs/canvas'
 import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ActiveSelection, Group, Point, Canvas, Gradient, Rect, StaticCanvas, Textbox, FabricImage, util } from './runtime'
+import { ActiveSelection, Group, Point, Canvas, Gradient, Pattern, Rect, StaticCanvas, Textbox, FabricImage, util } from './runtime'
 import { DynamicText } from './objects'
 import { loadTemplateToCanvas, canvasToTemplateJson } from './serialization'
 import { exportCanvasToBlob } from './export'
 import { CanvasHistory } from './history'
 import { editorSelection, groupEditorSelection, ungroupEditorSelection, serializeWorldObjects, pasteWorldObjects, alignEditorSelection, distributeEditorSelection, applyObjectLock, coverImageCrop, normalizeEditorColor } from './editorModel'
 import { createDocumentRenderSnapshot } from './editorSnapshot'
-import {applyImageFrameCrop,cropWithRatio} from './imageFrame'
+import {applyImageFrameCrop,cropWithRatio,imageTargetAtPoint,replaceEditorImage} from './imageFrame'
 import {documentImageSources,documentImageBudgetError,documentImageWorkload,imageFilterPixelFactor,liveDocumentImagePixels} from './imageBudget'
 import { setupShortcuts,commitFocusedEditorDraft } from './shortcuts'
 import {flushSync} from 'react-dom'
@@ -306,6 +306,21 @@ describe('document editor geometry and resource-independent snapshots',()=>{
     const expected=matrices(group.getObjects());const children=ungroupEditorSelection(canvas)
     expect(children).toHaveLength(2);expect(matrices(children)).toEqual(expected);expect(canvas.getObjects()).toEqual(children)
   })
+  it('persists same-origin raster, pattern and background references canonically without altering external hosts',()=>{
+    const canvas=interactive(),element=document.createElement('img')
+    element.src=location.origin+'/api/media/file/account/image.png?media_preview=old&access=expired'
+    const image=new FabricImage(element,{width:20,height:20})
+    canvas.add(new Group([image]),new Rect({width:20,height:20,fill:new Pattern({source:element})}))
+    const background={color:'#fff',imageUrl:location.origin+'/api/media/file/account/background.png?access=expired'}
+    const saved=canvasToTemplateJson(canvas,background),objects=(saved.fabricJson as any).objects
+    expect(objects[0].objects[0].src).toBe('/api/media/file/account/image.png')
+    expect(objects[1].fill.source).toBe('/api/media/file/account/image.png')
+    expect((saved.background as any).imageUrl).toBe('/api/media/file/account/background.png')
+    expect(image.getSrc()).toContain('media_preview=old');expect(background.imageUrl).toContain('access=expired')
+    element.src='https://different.example/api/media/file/account/image.png?access=legacy'
+    const external=canvasToTemplateJson(canvas,{color:'#fff'})
+    expect((external.fabricJson as any).objects[0].objects[0].src).toBe(element.src)
+  })
   it('encodes a real thumbnail without data URL fetch and preserves hidden object visibility in rendering',async()=>{
     const canvas=makeCanvas()
     canvas.add(new Rect({left:0,top:0,width:100,height:80,fill:'#ff0000',strokeWidth:0}),new Rect({left:0,top:0,width:100,height:80,fill:'#0000ff',visible:false,strokeWidth:0}))
@@ -365,6 +380,28 @@ describe('document editor geometry and resource-independent snapshots',()=>{
     expect(image.scaleX).toBeCloseTo(image.scaleY)
     const constrained=cropWithRatio({x:.2,y:.1,width:.7,height:.7},16/9,1000,500)
     expect(constrained.width*1000/(constrained.height*500)).toBeCloseTo(16/9);expect(constrained.x+constrained.width).toBeLessThanOrEqual(1)
+  })
+  it('replaces a contain-frame image inside a transformed nested group without inserting or moving its frame',()=>{
+    const canvas=interactive(),source=document.createElement('canvas');source.width=400;source.height=200
+    const image=new FabricImage(source,{left:30,top:45,width:160,height:120,angle:18,scaleX:1.2,scaleY:.9})
+    canvas.add(image)
+    const frame=applyImageFrameCrop(canvas,image,{x:0,y:0,width:1,height:1},'contain') as Group
+    canvas.remove(frame)
+    const parent=new Group([frame,new Rect({left:-50,top:-50,width:10,height:10})],{left:95,top:80,angle:28,scaleX:1.3,scaleY:.8})
+    canvas.add(parent);parent.setCoords();frame.setCoords()
+    const before=frame.getBoundingRect(),center=frame.getCenterPoint(),filters=image.filters
+    expect(imageTargetAtPoint(canvas.getObjects(),center)).toBe(frame)
+    const replacement=document.createElement('canvas');replacement.width=300;replacement.height=700
+    expect(replaceEditorImage(canvas,frame,new FabricImage(replacement))).toBe(true)
+    expect(canvas.getObjects()).toEqual([parent]);expect(parent.getObjects()).toContain(frame)
+    const after=frame.getBoundingRect()
+    for(const key of ['left','top','width','height'] as const)expect(after[key]).toBeCloseTo(before[key],5)
+    expect(image.getOriginalSize()).toEqual({width:300,height:700});expect(image.scaleX).toBeCloseTo(image.scaleY)
+    expect(image.filters).toBe(filters);expect((frame as any).imageFit).toBe('contain')
+    applyObjectLock(parent,true)
+    expect(imageTargetAtPoint(canvas.getObjects(),frame.getCenterPoint())).toBe(frame)
+    expect(replaceEditorImage(canvas,frame,new FabricImage(source))).toBe(false)
+    expect(image.getOriginalSize()).toEqual({width:300,height:700})
   })
   it('budgets decoded images across nested groups and repeated sources before rendering',()=>{
     const sources=documentImageSources({fabricJson:{objects:[{type:'Image',src:'/one'},{type:'Group',objects:[{type:'Image',src:'/one'},{type:'Image',src:'/two'}]}]},background:{imageUrl:'/background'}})

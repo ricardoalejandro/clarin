@@ -1,0 +1,80 @@
+[
+  {
+    "count": 30,
+    "initialMs": 62,
+    "measurements": [
+      {
+        "zoom": 0.25,
+        "meanMs": 1.39,
+        "p95Ms": 4.7
+      },
+      {
+        "zoom": 1,
+        "meanMs": 0.99,
+        "p95Ms": 3
+      },
+      {
+        "zoom": 4,
+        "meanMs": 0.3,
+        "p95Ms": 1.3
+      }
+    ],
+    "snapshotMs": 5.7,
+    "exportMs": 230.3,
+    "exportBytes": 29532,
+    "viewportUnchanged": true,
+    "objectCount": 30
+  },
+  {
+    "count": 200,
+    "initialMs": 82.5,
+    "measurements": [
+      {
+        "zoom": 0.25,
+        "meanMs": 4.16,
+        "p95Ms": 9.7
+      },
+      {
+        "zoom": 1,
+        "meanMs": 1.77,
+        "p95Ms": 5.6
+      },
+      {
+        "zoom": 4,
+        "meanMs": 1.03,
+        "p95Ms": 2.8
+      }
+    ],
+    "snapshotMs": 23.2,
+    "exportMs": 516.5,
+    "exportBytes": 64775,
+    "viewportUnchanged": true,
+    "objectCount": 200
+  },
+  {
+    "count": 1000,
+    "initialMs": 236.1,
+    "measurements": [
+      {
+        "zoom": 0.25,
+        "meanMs": 19.21,
+        "p95Ms": 42.6
+      },
+      {
+        "zoom": 1,
+        "meanMs": 6.31,
+        "p95Ms": 15.4
+      },
+      {
+        "zoom": 4,
+        "meanMs": 2.3,
+        "p95Ms": 4.7
+      }
+    ],
+    "snapshotMs": 51.5,
+    "exportMs": 1596.3,
+    "exportBytes": 237035,
+    "viewportUnchanged": true,
+    "objectCount": 1000
+  }
+]

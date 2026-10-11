@@ -30,8 +30,8 @@ export default function EditorPopover({children,onClose,anchor,point,label,menu=
      e.preventDefault();const i=items.indexOf(document.activeElement as HTMLButtonElement)
      items[e.key==='Home'?0:e.key==='End'?items.length-1:(i+(e.key==='ArrowUp'?-1:1)+items.length)%items.length].focus()
    }
-   document.addEventListener('pointerdown',down);document.addEventListener('keydown',key,true)
-   return()=>{cancelAnimationFrame(frame);document.removeEventListener('pointerdown',down);document.removeEventListener('keydown',key,true);if(previous?.isConnected)previous.focus()}
+   document.addEventListener('pointerdown',down,true);document.addEventListener('keydown',key,true)
+   return()=>{cancelAnimationFrame(frame);document.removeEventListener('pointerdown',down,true);document.removeEventListener('keydown',key,true);if(previous?.isConnected)previous.focus()}
  },[anchor,menu])
  return createPortal(<div ref={ref} role={menu?'menu':'dialog'} aria-label={label} data-editor-input className="fixed overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 text-sm text-slate-800 shadow-xl" style={{...position,width,maxWidth:'calc(100vw - 16px)',maxHeight:'calc(100dvh - 16px)',zIndex:OPERATIONAL_OVERLAY_LAYERS.picker}}>{children}</div>,document.body)
 }

@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -10,7 +11,9 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/service"
+	"github.com/naperu/clarin/internal/storage"
 	"image"
 	_ "image/gif"
 	_ "image/jpeg"
@@ -209,6 +212,10 @@ func (s *Server) handleDocumentAssetUpload(c *fiber.Ctx) error {
 	response["proxy_url"], response["public_url"] = canonical, canonical
 	return c.JSON(response)
 }
+func documentAssetSlot(key string, object map[string]any) bool {
+	return key == "src" || key == "imageUrl" || (key == "source" && object["type"] == "pattern")
+}
+
 func documentAssetStrings(canvas json.RawMessage, thumbnail string) []string {
 	values := []string{}
 	if thumbnail != "" {
@@ -227,7 +234,7 @@ func documentAssetStrings(canvas json.RawMessage, thumbnail string) []string {
 			}
 		case map[string]any:
 			for key, child := range value {
-				if key == "src" || key == "imageUrl" || (key == "source" && value["type"] == "pattern") {
+				if documentAssetSlot(key, value) {
 					if raw, ok := child.(string); ok && raw != "" {
 						values = append(values, raw)
 					}
@@ -309,10 +316,93 @@ func (s *Server) authorizeDocumentMediaPublication(c *fiber.Ctx, raw string) err
 		return denied
 	}
 	_, allowed, err := s.storageOwnUploadReadAllowed(c.Context(), s.repos.DB(), claims.AccountID, claims.UserID, key)
-	if err != nil || !allowed {
+	if err != nil {
 		return denied
 	}
-	return nil
+	if allowed {
+		return nil
+	}
+	// Fabric historically persisted the browser's absolute same-origin src.
+	// The general inventory intentionally treats arbitrary absolute URLs as
+	// retention-only evidence. Recover only an exact image slot in a currently
+	// account-authorized document whose host matches the configured Clarin/S3
+	// origin; a private_external row or a key mentioned in text grants nothing.
+	if s.documentHasAuthorizedAssetReference(c.Context(), claims, key) {
+		return nil
+	}
+	return denied
+}
+
+func (s *Server) documentHasAuthorizedAssetReference(ctx context.Context, claims *service.JWTClaims, key string) bool {
+	if claims == nil || s.repos == nil || !storageSelfServiceValidKey(claims.AccountID, key) || storage.IsProtectedMediaObjectKey(key) || !storageSelfServiceHasPermission(claims, domain.PermDocuments) {
+		return false
+	}
+	var retained bool
+	if err := s.repos.DB().QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM storage_media_trash WHERE account_id=$1 AND object_key=$2 AND state IN ('trash','purging','purged'))`, claims.AccountID, key).Scan(&retained); err != nil || retained {
+		return false
+	}
+	rows, err := s.repos.DB().Query(ctx, storageReferenceSelectedKeysSQL+`SELECT r.payload FROM (
+ SELECT jsonb_build_array(thumbnail_url,canvas_json)::text AS payload FROM document_templates WHERE account_id=$1
+ ) r WHERE `+storageReferenceSelectedKeyPredicateSQL, claims.AccountID, []string{key})
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var payload string
+		if rows.Scan(&payload) != nil {
+			return false
+		}
+		var values []json.RawMessage
+		if json.Unmarshal([]byte(payload), &values) != nil || len(values) != 2 {
+			continue
+		}
+		var thumbnail string
+		_ = json.Unmarshal(values[0], &thumbnail)
+		for _, raw := range documentAssetStrings(values[1], thumbnail) {
+			if candidate, local := s.ordinaryObjectKeyFromURL(raw); local && candidate == key {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Run only after publication authorization. Persist stable local resource
+// identities rather than Fabric's browser-expanded absolute URLs or tickets.
+func (s *Server) canonicalizeDocumentAssets(body *documentWriteBody) {
+	canonical := func(raw string) string {
+		if key, local := s.ordinaryObjectKeyFromURL(raw); local {
+			return mediaProxyURLFromObjectKey(key)
+		}
+		return raw
+	}
+	body.ThumbnailURL = canonical(body.ThumbnailURL)
+	var parsed any
+	if json.Unmarshal(body.CanvasJSON, &parsed) != nil {
+		return
+	}
+	var visit func(any) any
+	visit = func(node any) any {
+		switch v := node.(type) {
+		case []any:
+			for i := range v {
+				v[i] = visit(v[i])
+			}
+		case map[string]any:
+			for key, child := range v {
+				if raw, stringValue := child.(string); stringValue && documentAssetSlot(key, v) {
+					v[key] = canonical(raw)
+				} else {
+					v[key] = visit(child)
+				}
+			}
+		}
+		return node
+	}
+	if encoded, err := json.Marshal(visit(parsed)); err == nil {
+		body.CanvasJSON = encoded
+	}
 }
 
 func (s *Server) authorizeDocumentMediaPayload(c *fiber.Ctx, body documentWriteBody) error {

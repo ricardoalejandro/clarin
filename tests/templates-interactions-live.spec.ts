@@ -1,3 +1,4 @@
+import {isolatedNativeLogin} from './helpers/isolated-native-login'
 import {test,expect,type Page} from '@playwright/test'
 import {readFileSync,mkdirSync} from 'node:fs'
 import {resolve} from 'node:path'
@@ -6,15 +7,7 @@ const base=process.env.PLAYWRIGHT_BASE_URL||'http://localhost:13001'
 const manifest=process.env.CLARIN_STORAGE_UI_QA_MANIFEST||resolve('work/storage-templates-qa/fixture.private.json')
 const evidence=process.env.CLARIN_TEMPLATES_QA_EVIDENCE_DIR||resolve('work/storage-templates-qa/evidence')
 let actor:{username:string;password:string}
-async function login(page:Page){
- const ready=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/public/security-config')
- await page.goto(base+'/login',{waitUntil:'domcontentloaded'});expect((await ready).status()).toBe(200)
- await page.getByPlaceholder('usuario o correo').fill(actor.username)
- try{await page.getByPlaceholder('tu contraseña').fill(actor.password)}catch{throw new Error('Unable to fill private QA login')}
- const signed=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/auth/login'&&r.request().method()==='POST')
- await page.getByRole('button',{name:'Iniciar sesión',exact:true}).click();expect((await signed).status()).toBe(200)
- await page.waitForURL(/\/dashboard(?:\/|$|\?)/)
-}
+async function login(page:Page){await isolatedNativeLogin(page,base,actor)}
 async function create(page:Page){
  const response=await page.request.post(base+'/api/document-templates',{data:{name:'Interacciones de diseño QA',description:'',canvas_json:{},page_width:210,page_height:140,page_orientation:'landscape'}})
  expect(response.status()).toBe(201);const id=(await response.json()).template.id
@@ -35,7 +28,10 @@ test.describe('Native template object interactions',()=>{
    expect((await uploaded).status()).toBe(200);await expect(page.getByRole('button',{name:'Recortar y ajustar',exact:true})).toBeVisible()
    const before=await save(page,id),original=before.canvas_json.fabricJson.objects[0]
    expect(before.thumbnail_url).toMatch(/\/api\/media\/file\//);await expect(page.getByText('Cambios guardados. La miniatura se actualizará al volver a guardar.')).toHaveCount(0)
-   await page.getByRole('button',{name:'Recortar y ajustar',exact:true}).click()
+   await page.getByRole('button',{name:'Más acciones',exact:true}).click()
+   let menu=page.getByRole('menu',{name:'Acciones de la plantilla'})
+   await expect(menu.getByRole('menuitem',{name:'Reemplazar imagen',exact:true})).toBeEnabled()
+   await menu.getByRole('menuitem',{name:'Recortar y ajustar',exact:true}).click()
    let dialog=page.getByRole('dialog',{name:'Editar imagen',exact:true});await dialog.getByRole('button',{name:'1:1',exact:true}).click()
    await dialog.getByRole('slider',{name:'Brillo',exact:true}).focus();await page.keyboard.press('ArrowRight')
    await dialog.getByRole('button',{name:'Cancelar',exact:true}).click()
@@ -46,6 +42,24 @@ test.describe('Native template object interactions',()=>{
    await dialog.getByRole('button',{name:'Aplicar',exact:true}).click()
    const changed=await save(page,id),group=changed.canvas_json.fabricJson.objects[0],image=group.objects.find((o:any)=>String(o.type).toLowerCase()==='image')
    expect(group.elementType).toBe('image-frame');expect(group.width).toBeCloseTo(original.width);expect(group.height).toBeCloseTo(original.height);expect(image.scaleX).toBeCloseTo(image.scaleY);expect(image.filters.find((f:any)=>f.type==='Brightness').brightness).toBeGreaterThan(0)
+   // The context command keeps the image-frame semantics after a contain crop.
+   await page.getByRole('button',{name:'Más acciones',exact:true}).click()
+   menu=page.getByRole('menu',{name:'Acciones de la plantilla'})
+   await expect(menu.getByRole('menuitem',{name:'Recortar y ajustar',exact:true})).toBeEnabled()
+   const replacementData=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=90;c.height=270;const x=c.getContext('2d')!;x.fillStyle='#2563EB';x.fillRect(0,0,90,135);x.fillStyle='#DB2777';x.fillRect(0,135,90,135);return c.toDataURL('image/png').split(',')[1]})
+   const chooser=page.waitForEvent('filechooser'),replacementUpload=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/document-templates/assets'&&r.request().method()==='POST')
+   await menu.getByRole('menuitem',{name:'Reemplazar imagen',exact:true}).click()
+   await (await chooser).setFiles({name:'replacement.png',mimeType:'image/png',buffer:Buffer.from(replacementData,'base64')})
+   expect((await replacementUpload).status()).toBe(200)
+   await expect(page.getByRole('button',{name:'Guardar',exact:true})).toBeEnabled()
+   const replaced=await save(page,id),replacementFrame=replaced.canvas_json.fabricJson.objects[0],replacementImage=replacementFrame.objects.find((o:any)=>String(o.type).toLowerCase()==='image')
+   expect(replaced.canvas_json.fabricJson.objects).toHaveLength(1)
+   expect(replacementFrame.elementType).toBe('image-frame');expect(replacementFrame.imageFit).toBe('contain')
+   for(const key of ['left','top','width','height','angle','scaleX','scaleY'])expect(replacementFrame[key]).toBeCloseTo(group[key])
+   expect(replacementImage.filters).toEqual(image.filters)
+   expect(replacementImage.src).not.toBe(image.src)
+   expect(replacementImage.scaleX).toBeCloseTo(replacementImage.scaleY)
+   expect(replacementImage.width/replacementImage.height).toBeCloseTo(90/270)
    await page.reload();await expect(page.getByRole('button',{name:'Guardar',exact:true})).toBeEnabled();await page.screenshot({path:resolve(evidence,'templates-image-frame.png')})
   }finally{await clear(page,id)}
  })
@@ -93,10 +107,28 @@ test.describe('Native template object interactions',()=>{
    const canvas=page.locator('canvas.upper-canvas'),box=(await canvas.boundingBox())!
    for(const point of [{x:3,y:3},{x:box.width-3,y:3},{x:3,y:box.height-3},{x:box.width-3,y:box.height-3}]){
     await canvas.click({button:'right',position:point});const menu=page.getByRole('menu',{name:'Acciones de la plantilla'});await expect(menu).toBeVisible();const rect=(await menu.boundingBox())!,view=page.viewportSize()!
+    await expect(menu.getByRole('menuitem')).toHaveCount(4)
+    await expect(menu.getByRole('menuitem',{name:'Ajustar página',exact:true})).toBeEnabled()
+    await expect(menu.getByRole('menuitem',{name:'Eliminar plantilla…',exact:true})).toHaveCount(0)
+    await expect(menu.locator('button:disabled')).toHaveCount(0)
     expect(rect.x).toBeGreaterThanOrEqual(0);expect(rect.y).toBeGreaterThanOrEqual(0);expect(rect.x+rect.width).toBeLessThanOrEqual(view.width);expect(rect.y+rect.height).toBeLessThanOrEqual(view.height)
     await page.keyboard.press('ArrowDown');await expect(menu.locator('[role="menuitem"]:focus')).toHaveCount(1)
+    if(point.x>box.width/2&&point.y>box.height/2)await page.screenshot({path:resolve(evidence,'templates-context-menu.png')})
     await page.keyboard.press('Escape');await expect(menu).toHaveCount(0)
    }
+   await page.getByTitle('Restablecer zoom al 100%',{exact:true}).click()
+   await canvas.click({button:'right',position:{x:40,y:40}})
+   await page.getByRole('menuitem',{name:'Ajustar página',exact:true}).click()
+   await expect(page.getByTitle('Restablecer zoom al 100%',{exact:true})).not.toHaveText('100%')
+   await canvas.click({button:'right',position:{x:box.width*.4,y:box.height*.45}})
+   await page.getByRole('menuitem',{name:/^Insertar rectángulo/}).click()
+   // A context insertion happens immediately at the scene point; no second click.
+   const inserted=await save(page,id);expect(inserted.canvas_json.fabricJson.objects).toHaveLength(1)
+   await canvas.click({position:{x:8,y:8}})
+   await page.getByRole('button',{name:'Más acciones',exact:true}).click()
+   await page.getByRole('menuitem',{name:/^Seleccionar todo/}).click()
+   await expect(page.getByRole('button',{name:'Duplicar',exact:true})).toBeEnabled()
+   await page.getByRole('button',{name:'Deshacer',exact:true}).click()
    await page.getByRole('button',{name:'Rectángulo (R)',exact:true}).click();const p=await canvasPoint(page);await page.mouse.move(p.x,p.y);await page.mouse.down();await page.mouse.move(p.x+80,p.y+60);await page.keyboard.press('Escape');await page.mouse.up()
    const saved=await save(page,id);expect(saved.canvas_json.fabricJson.objects).toHaveLength(0)
   }finally{await clear(page,id)}

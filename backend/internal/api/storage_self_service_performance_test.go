@@ -347,11 +347,12 @@ func storagePerformanceSeed(t *testing.T, f *storageQAFixture, n, textRatio, cha
 }
 
 type storagePerformanceRequest struct {
-	path         string
-	total, files int
-	references   int
-	usage        bool
-	uses         bool
+	path           string
+	total, files   int
+	references     int
+	usage          bool
+	uses           bool
+	indexingBudget bool
 }
 
 type storagePerformanceResponse struct {
@@ -387,6 +388,20 @@ func storagePerformanceValidate(t *testing.T, f *storageQAFixture, requests []st
 	t.Helper()
 	bytes := 0
 	for i, res := range responses {
+		if requests[i].indexingBudget {
+			var budget map[string]any
+			if res.err != nil || res.status != 503 || json.Unmarshal(res.body, &budget) != nil || budget["code"] != "storage_indexing_budget" || budget["catalog_status"] != "indexing" || budget["retry_after_seconds"] != float64(3) {
+				t.Fatal("excessive canonical fallback did not return bounded retry state")
+			}
+			if _, exists := budget["uses"]; exists {
+				t.Fatal("budget response contained use results")
+			}
+			if _, exists := budget["total"]; exists {
+				t.Fatal("budget response contained a total")
+			}
+			bytes += len(res.body)
+			continue
+		}
 		if res.err != nil || res.status != 200 {
 			t.Fatalf("performance request %s failed: status=%d error=%v", requests[i].path, res.status, res.err)
 		}
@@ -549,8 +564,14 @@ func storagePerformanceMeasure(t *testing.T, f *storageQAFixture, scenario strin
 			referencesPerObject = request.references
 		}
 	}
+	httpStatus := 200
+	for _, request := range requests {
+		if request.indexingBudget {
+			httpStatus = 503
+		}
+	}
 	result := map[string]any{
-		"s3_requests_during_measurements": 0, "scenario": scenario, "objects": n, "samples": samples, "requests_per_sample": len(requests),
+		"http_status": httpStatus, "s3_requests_during_measurements": 0, "scenario": scenario, "objects": n, "samples": samples, "requests_per_sample": len(requests),
 		"actor_role":                   actorRole,
 		"relational_inventory_fixture": storagePerformanceRelationalOnly(n),
 		"chats":                        chatCount, "references_per_object": referencesPerObject, "text_messages_per_object": textRatio, "object_bytes": storagePerformanceObjectBytes,

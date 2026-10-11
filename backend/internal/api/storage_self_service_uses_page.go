@@ -103,6 +103,12 @@ func (s *Server) storageReadUsesPage(ctx context.Context, actor storageUseActor,
 		return nil, 0, "", err
 	}
 	if !freshness.Complete {
+		release, acquired := storageFallbackReaders.acquire(ctx, actor.AccountID)
+		if !acquired {
+			return nil, 0, "", errStorageIndexingBudget
+		}
+		defer release()
+		ctx = context.WithValue(ctx, storageReferenceReadBudgetKey{}, &storageReferenceReadBudget{})
 		// Initial indexing and dirty sources keep immediate canonical behavior. One
 		// request-local reference snapshot avoids re-scanning for every adapter.
 		// Ordinary uses only contribute identities until the page is selected;

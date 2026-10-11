@@ -38,15 +38,19 @@ import EditorColorPicker from '@/components/documents/EditorColorPicker'
 import EditorFontPicker from '@/components/documents/EditorFontPicker'
 import EditorDesignProvider from '@/components/documents/EditorDesignContext'
 import EditorLayers from '@/components/documents/EditorLayers'
-import EditorImageControls from '@/components/documents/EditorImageControls'
+import EditorImageControls, {ImageDraft} from '@/components/documents/EditorImageControls'
+import EditorCommandMenu from '@/components/documents/EditorCommandMenu'
+import EditorCommandIcon from '@/components/documents/EditorCommandIcon'
+import {executeEditorCommand,resolveEditorCommand,type EditorCommandId,type EditorCommandState,type EditorCommandHandlers,type EditorCommandInvocation} from '@/lib/fabric/editorCommands'
 import EditorConfirmDialog from '@/components/documents/EditorConfirmDialog'
 import DocumentExportDialog from '@/components/documents/DocumentExportDialog'
 import { validateDocumentCanvas, validateDocumentTemplate } from '@/lib/documents/documentValidation'
 import { editorSelection, isDocumentObject, isObjectLocked, applyObjectLock, ensureObjectIds, groupEditorSelection, ungroupEditorSelection, serializeWorldObjects, pasteWorldObjects, alignEditorSelection, distributeEditorSelection, coverImageCrop, editorInputOwnsKeyboard } from '@/lib/fabric/editorModel'
-import { imageFrameChild } from '@/lib/fabric/imageFrame'
+import { imageFrameChild,imageEditingTarget,imageTargetAtPoint,replaceEditorImage } from '@/lib/fabric/imageFrame'
 import {liveDocumentImagePixels,documentImageBudgetError,imageFilterPixelFactor} from '@/lib/fabric/imageBudget'
 import { createDocumentRenderSnapshot } from '@/lib/fabric/editorSnapshot'
 import {installEditorNavigationGuard} from '@/lib/fabric/editorNavigation'
+import {selectionPaintCapabilities} from '@/lib/fabric/selectionStyle'
 import {createDocumentThumbnail} from '@/lib/fabric/editorThumbnail'
 
 
@@ -87,7 +91,7 @@ function DocumentEditorWorkspace() {
   const [showExportMenu, setShowExportMenu] = useState(false)
   const [showDynamicFields, setShowDynamicFields] = useState(false)
   const [rightTab, setRightTab] = useState<'properties' | 'layers'>('properties')
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; scene?:{x:number;y:number} } | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; scene?:{x:number;y:number};documentActions?:boolean } | null>(null)
   const [allObjects, setAllObjects] = useState<FabricObject[]>([])
   const [editingText, setEditingText] = useState(false)
   const editingTextRef = useRef(false)
@@ -110,6 +114,9 @@ function DocumentEditorWorkspace() {
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const replaceImageInputRef = useRef<HTMLInputElement>(null)
+  const imageInsertPointRef=useRef<{x:number;y:number}|undefined>(undefined)
+  const imageReplaceTargetRef=useRef<FabricObject|null>(null)
+  const [imageEditorTarget,setImageEditorTarget]=useState<{image:any;frame?:any;point:{x:number;y:number}}|null>(null)
   const bgFileInputRef = useRef<HTMLInputElement>(null)
   const tableButtonRef = useRef<HTMLButtonElement>(null)
   const dynamicFieldsBtnRef = useRef<HTMLButtonElement>(null)
@@ -651,30 +658,9 @@ function DocumentEditorWorkspace() {
     if (!canvas || !history || !fabricMod || !fabricCore) return
 
     const cleanup = fabricMod.setupShortcuts(canvas, history, {
-      onSave: () => {flushSync(()=>commitFocusedEditorDraft(canvas,surfaceRef.current));latestActionsRef.current.save()},
-      onUndo:()=>latestActionsRef.current.undo(),onRedo:()=>latestActionsRef.current.redo(),onChanged:()=>latestActionsRef.current.changed(),
-      onDelete: () => deleteSelected(),
-      onDuplicate: () => duplicateSelected(),
-      onSelectAll: () => {
-        const objs = canvas.getObjects().filter(o => o.selectable && o.visible)
-        if (objs.length === 0) return
-        canvas.discardActiveObject()
-        const sel = objs.length===1?objs[0]:new fabricCore.ActiveSelection(objs, { canvas })
-        canvas.setActiveObject(sel)
-        canvas.renderAll()
-      },
-      onGroup: () => groupSelected(),
-      onUngroup: () => ungroupSelected(),
-      onCopy: () => copySelected(),
-      onPaste: () => pasteClipboard(),
-      onDeselect:()=>latestActionsRef.current.cancel(),
+      onCommand:id=>latestActionsRef.current.command(id),
+      onChanged:()=>latestActionsRef.current.changed(),
       isEditingText: () => editingTextRef.current,
-      onToolSelect: () => { setActiveTool('select'); setDrawingTool(null) },
-      onToolText: () => addTextElement(),
-      onToolRect: () => addRectElement(),
-      onToolCircle: () => addCircleElement(),
-      onToolLine: () => addLineElement(),
-      onToolPencil:()=>{setDrawingTool(null);setActiveTool('pencil')},
     })
 
     return () => document.removeEventListener('keydown', cleanup)
@@ -745,7 +731,7 @@ function DocumentEditorWorkspace() {
       if(documentSettingsRef.current.name===captured.name){documentSettingsRef.current.name=canonical.name;setTemplateName(canonical.name)}
       savedSnapshotRef.current=JSON.stringify(canonicalSnapshot);reconcileDirty();setSaveMessage(thumbnailFailed?'Cambios guardados. La miniatura se actualizará al volver a guardar.':'Guardado')
       return true
-    } catch {setEditorError('No se guardó la plantilla. Revisa la conexión y reintenta.');return false}
+    } catch {setEditorError('No se pudo confirmar el guardado. Tu borrador se conserva; comprueba la versión actual antes de volver a intentarlo.');return false}
     finally {clearTimeout(timeout);if(saveAbortRef.current===controller)saveAbortRef.current=null;saveLockRef.current=false;if(generation===sessionRef.current)setSaving(false)}
   },[])
 
@@ -1003,26 +989,24 @@ function DocumentEditorWorkspace() {
       canvas.add(image);canvas.setActiveObject(image);canvas.requestRenderAll()
     })
   },[prepareImage])
-  const handleImageUpload=(e:React.ChangeEvent<HTMLInputElement>)=>{const file=e.target.files?.[0];e.target.value='';if(file)void insertImage(file)}
+  const handleImageUpload=(e:React.ChangeEvent<HTMLInputElement>)=>{const file=e.target.files?.[0],point=imageInsertPointRef.current;imageInsertPointRef.current=undefined;e.target.value='';if(file)void insertImage(file,point)}
   const replaceImageOnObject=useCallback(async(target:any,file:File)=>{
     const canvas=fabricRef.current;if(!canvas||isObjectLocked(target))return
     await prepareImage(file,async(url,signal)=>{
-      const w=target.width*target.scaleX,h=target.height*target.scaleY
       const next=await fabricCoreRef.current!.FabricImage.fromURL(url,{crossOrigin:'anonymous',signal});signal.throwIfAborted()
-      const crop=coverImageCrop(next.width,next.height,Math.abs(w),Math.abs(h))
-      target.setElement(next.getElement());target.set({...crop});target.applyFilters();target.setCoords();canvas.setActiveObject(target);canvas.requestRenderAll()
-    },target)
+      replaceEditorImage(canvas,target,next)
+    },imageEditingTarget(target)?.image||target)
   },[prepareImage])
-  const handleReplaceImageInput=(e:React.ChangeEvent<HTMLInputElement>)=>{const file=e.target.files?.[0],target=fabricRef.current?.getActiveObject();e.target.value='';if(file&&target)void replaceImageOnObject(imageFrameChild(target)||target,file)}
-  const [dragOverTargetId,setDragOverTargetId]=useState<string|null>(null)
+  const handleReplaceImageInput=(e:React.ChangeEvent<HTMLInputElement>)=>{const file=e.target.files?.[0],target=imageReplaceTargetRef.current||fabricRef.current?.getActiveObject();imageReplaceTargetRef.current=null;e.target.value='';if(file&&target)void replaceImageOnObject(target,file)}
+  const [dragOverTarget,setDragOverTarget]=useState<FabricObject|null>(null)
   const getImageObjAtPointer=useCallback((clientX:number,clientY:number)=>{
     const c=fabricRef.current,fc=fabricCoreRef.current;if(!c||!fc)return null
     const point=c.getScenePoint(new MouseEvent('mousemove',{clientX,clientY}))
-    return [...c.getObjects()].reverse().find(o=>isDocumentObject(o)&&o.visible&&!isObjectLocked(o)&&o instanceof fc.FabricImage&&o.containsPoint(point))||null
+    return imageTargetAtPoint(c.getObjects().filter(isDocumentObject),point)
   },[])
-  const handleCanvasDragOver=(e:React.DragEvent<HTMLDivElement>)=>{if(!e.dataTransfer.types.includes('Files'))return;e.preventDefault();e.dataTransfer.dropEffect='copy';const target=getImageObjAtPointer(e.clientX,e.clientY);setDragOverTargetId(target?((target as any).__id||='image-target'):null)}
-  const handleCanvasDragLeave=(e:React.DragEvent<HTMLDivElement>)=>{if(!e.currentTarget.contains(e.relatedTarget as Node))setDragOverTargetId(null)}
-  const handleCanvasDrop=async(e:React.DragEvent<HTMLDivElement>)=>{const file=e.dataTransfer.files[0];if(!file)return;e.preventDefault();setDragOverTargetId(null);const target=getImageObjAtPointer(e.clientX,e.clientY),canvas=fabricRef.current;if(target)await replaceImageOnObject(target,file);else if(canvas)await insertImage(file,canvas.getScenePoint(e.nativeEvent))}
+  const handleCanvasDragOver=(e:React.DragEvent<HTMLDivElement>)=>{if(!e.dataTransfer.types.includes('Files'))return;e.preventDefault();const target=getImageObjAtPointer(e.clientX,e.clientY);e.dataTransfer.dropEffect=target&&isObjectLocked(target)?'none':'copy';setDragOverTarget(target&&!isObjectLocked(target)?target:null)}
+  const handleCanvasDragLeave=(e:React.DragEvent<HTMLDivElement>)=>{if(!e.currentTarget.contains(e.relatedTarget as Node))setDragOverTarget(null)}
+  const handleCanvasDrop=async(e:React.DragEvent<HTMLDivElement>)=>{const file=e.dataTransfer.files[0];if(!file)return;e.preventDefault();setDragOverTarget(null);const target=getImageObjAtPointer(e.clientX,e.clientY),canvas=fabricRef.current;if(target)await replaceImageOnObject(target,file);else if(canvas)await insertImage(file,canvas.getScenePoint(e.nativeEvent))}
   const handleBgImageUpload=(e:React.ChangeEvent<HTMLInputElement>)=>{const file=e.target.files?.[0];e.target.value='';if(file)void prepareImage(file,async(url,signal)=>{signal.throwIfAborted();setBackground(prev=>({...prev,imageUrl:url}))},fabricRef.current?.getObjects().find(o=>(o as any).__isDocumentBackground))}
 
   // ─── Object operations ────────────────────────────────────────────────
@@ -1063,7 +1047,7 @@ function DocumentEditorWorkspace() {
   const copySelected = useCallback(async () => {
     const canvas=fabricRef.current;if(!canvas)return
     const generation=sessionRef.current,data=await serializeWorldObjects(editorSelection(canvas))
-    if(generation===sessionRef.current)clipboardRef.current=data
+    if(generation===sessionRef.current){clipboardRef.current=data;forceRender()}
   },[])
   const pasteClipboard = useCallback(async (point?:{x:number;y:number}) => {
     const canvas=fabricRef.current;if(!canvas||!clipboardRef.current.length)return
@@ -1179,7 +1163,7 @@ function DocumentEditorWorkspace() {
     if(editingGroup){let target:any=editingGroup;target.set({interactive:false});while(target.parent){target=target.parent;target.set({interactive:false})}canvas.setActiveObject(target);setEditingGroup(null)}else canvas.discardActiveObject()
     canvas.requestRenderAll()
   }
-  latestActionsRef.current={save:handleSave,undo:handleUndo,redo:handleRedo,changed:()=>{refreshObjectList();reconcileDirty()},cancel:cancelEditorGesture}
+
 
   useEffect(()=>{const cancel=()=>{if(drawingRef.current||spaceHeldRef.current){spaceHeldRef.current=false;latestActionsRef.current.cancel?.()}};window.addEventListener('pointercancel',cancel);window.addEventListener('blur',cancel);return()=>{window.removeEventListener('pointercancel',cancel);window.removeEventListener('blur',cancel)}},[])
 
@@ -1215,6 +1199,49 @@ function DocumentEditorWorkspace() {
       default: return false
     }
   }, [])
+
+  // All entry points execute this registry against the live Fabric selection.
+  const getCommandState=():EditorCommandState=>{
+    const canvas=fabricRef.current,objects=canvas?editorSelection(canvas):[],only=objects.length===1?objects[0]:null
+    return {ready:fabricReady,busy:restoring||commandPending||uploading||!!historyRef.current?.busy||commandBusyRef.current||!!uploadAbortRef.current,saving,count:objects.length,objectCount:canvas?canvas.getObjects().filter(o=>isDocumentObject(o)&&o.visible&&o.selectable).length:0,locked:objects.some(isObjectLocked),allLocked:objects.length>0&&objects.every(isObjectLocked),image:!!only&&!!imageEditingTarget(only),group:!!only&&isInstance(only,'Group')&&!imageFrameChild(only),clipboard:clipboardRef.current.length>0,canUndo,canRedo,alignToPage}
+  }
+  const visibleCenter=()=>{
+    const canvas=fabricRef.current,fc=fabricCoreRef.current;if(!canvas||!fc)return undefined
+    return fc.util.transformPoint(new fc.Point(canvas.width/2,canvas.height/2),fc.util.invertTransform(canvas.viewportTransform))
+  }
+  const insertAtPoint=(kind:'text'|'rect',point:{x:number;y:number})=>{
+    const canvas=fabricRef.current,fc=fabricCoreRef.current,mod=fabricModRef.current;if(!canvas||!fc||!mod)return
+    setDrawingTool(null);setActiveTool('select')
+    const object=kind==='text'?new mod.DynamicText('',{left:point.x,top:point.y,width:200,fontSize:11,fontFamily:'Arial',fill:'#000000',elementType:'text',elementName:'Texto',splitByGrapheme:true}):new fc.Rect({left:point.x,top:point.y,width:120,height:80,fill:'#e2e8f0',stroke:'#94a3b8',strokeWidth:1,rx:4,ry:4,originX:'left',originY:'top'})
+    canvas.add(object);canvas.setActiveObject(object);canvas.requestRenderAll();pushHistory()
+    if(kind==='text')requestAnimationFrame(()=>{if(canvas===fabricRef.current)(object as any).enterEditing()})
+  }
+  const commandHandlers:EditorCommandHandlers={
+    save:()=>{const canvas=fabricRef.current;if(canvas)flushSync(()=>commitFocusedEditorDraft(canvas,surfaceRef.current));return handleSave()},
+    undo:handleUndo,redo:handleRedo,
+    select:()=>{setActiveTool('select');setDrawingTool(null)},hand:()=>{setActiveTool('hand');setDrawingTool(null)},
+    text:({point})=>point?insertAtPoint('text',point):addTextElement(),
+    rect:({point})=>point?insertAtPoint('rect',point):addRectElement(),
+    circle:addCircleElement,triangle:addTriangleElement,line:addLineElement,pencil:()=>{setDrawingTool(null);setActiveTool('pencil')},
+    image:({point})=>{imageInsertPointRef.current=point;fileInputRef.current?.click()},
+    copy:copySelected,paste:({point})=>pasteClipboard(point),duplicate:duplicateSelected,group:groupSelected,ungroup:ungroupSelected,
+    front:bringToFront,back:sendToBack,forward:bringForward,backward:sendBackward,lock:toggleLock,delete:deleteSelected,
+    crop:()=>{const only=fabricRef.current?.getActiveObject();if(!only)return;const target=imageEditingTarget(only);if(!target)return;setImageEditorTarget({...target,point:{x:Math.max(8,(surfaceRef.current?.getBoundingClientRect().right||600)-420),y:(surfaceRef.current?.getBoundingClientRect().top||0)+80}})},
+    replace:()=>{imageReplaceTargetRef.current=fabricRef.current?.getActiveObject()||null;replaceImageInputRef.current?.click()},
+    alignTarget:()=>setAlignToPage(value=>!value),
+    alignLeft:()=>handleAlign('left'),alignCenterH:()=>handleAlign('center-h'),alignRight:()=>handleAlign('right'),alignTop:()=>handleAlign('top'),alignCenterV:()=>handleAlign('center-v'),alignBottom:()=>handleAlign('bottom'),
+    distributeH:()=>{if(fabricRef.current){distributeEditorSelection(fabricRef.current,'x');pushHistory()}},
+    distributeV:()=>{if(fabricRef.current){distributeEditorSelection(fabricRef.current,'y');pushHistory()}},
+    selectAll:()=>{const canvas=fabricRef.current,fc=fabricCoreRef.current;if(!canvas||!fc)return;const objects=canvas.getObjects().filter(o=>isDocumentObject(o)&&o.selectable&&o.visible);canvas.discardActiveObject();if(objects.length)canvas.setActiveObject(objects.length===1?objects[0]:new fc.ActiveSelection(objects,{canvas}));canvas.requestRenderAll()},
+    fit:()=>{const canvas=fabricRef.current,mod=fabricModRef.current;if(canvas&&mod)setZoom(mod.zoomToFit(canvas))},
+    zoomIn:handleZoomIn,zoomOut:handleZoomOut,zoom100:()=>{const canvas=fabricRef.current,fc=fabricCoreRef.current;if(canvas&&fc){canvas.zoomToPoint(new fc.Point(canvas.width/2,canvas.height/2),1);setZoom(1)}},
+    grid:()=>setShowGrid(value=>!value),rulers:()=>setShowRulers(value=>!value),margins:()=>setShowMargins(value=>!value),
+    export:()=>setShowExportMenu(true),saveCopy:()=>handleSave(true),deleteTemplate:()=>setDeleteConfirm(true),cancel:cancelEditorGesture,
+  }
+  const runCommand=(id:EditorCommandId,invocation:EditorCommandInvocation={})=>executeEditorCommand(id,getCommandState(),commandHandlers,invocation)
+  const commandState=getCommandState()
+  const command=(id:EditorCommandId)=>resolveEditorCommand(id,commandState)
+  latestActionsRef.current={command:runCommand,changed:()=>{refreshObjectList();reconcileDirty()},cancel:cancelEditorGesture}
 
   // ─── Loading ──────────────────────────────────────────────────────────
   if (loading) {
@@ -1272,53 +1299,36 @@ function DocumentEditorWorkspace() {
           <p className="flex items-center gap-2 px-2 text-xs text-slate-500"><span>{pageWidth} × {pageHeight} mm</span><span aria-live="polite">{saving?'Guardando…':dirty?'Cambios sin guardar':saveMessage||'Todos los cambios guardados'}</span></p>
         </div>
         <div className="flex items-center gap-1">
-          <button aria-label="Deshacer" title="Deshacer (Ctrl+Z)" disabled={!canUndo||!fabricReady} onClick={()=>void handleUndo()} className="flex h-11 w-11 items-center justify-center rounded-xl hover:bg-slate-100 disabled:opacity-30"><Undo2 className="h-4 w-4"/></button>
-          <button aria-label="Rehacer" title="Rehacer (Ctrl+Mayús+Z)" disabled={!canRedo||!fabricReady} onClick={()=>void handleRedo()} className="flex h-11 w-11 items-center justify-center rounded-xl hover:bg-slate-100 disabled:opacity-30"><Redo2 className="h-4 w-4"/></button>
-          <button disabled={!fabricReady} onClick={()=>setShowExportMenu(true)} className="flex min-h-11 items-center gap-2 rounded-xl border border-slate-200 px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-40"><Download className="h-4 w-4"/><span className="hidden sm:inline">Exportar</span></button>
-          <button disabled={saving||restoring||commandPending||uploading||!fabricReady} onClick={()=>void handleSave()} className="flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"><Save className="h-4 w-4"/>{saving?'Guardando…':'Guardar'}</button>
-          <button aria-label="Más acciones" title="Más acciones" onClick={e=>{const r=e.currentTarget.getBoundingClientRect();setContextMenu({x:r.right-260,y:r.bottom+6})}} className="flex h-11 w-11 items-center justify-center rounded-xl hover:bg-slate-100"><MoreHorizontal className="h-5 w-5"/></button>
+          <button aria-label="Deshacer" title="Deshacer (Ctrl+Z)" disabled={command('undo').disabled} onClick={()=>void runCommand('undo')} className="flex h-11 w-11 items-center justify-center rounded-xl hover:bg-slate-100 disabled:opacity-30"><Undo2 className="h-4 w-4"/></button>
+          <button aria-label="Rehacer" title="Rehacer (Ctrl+Mayús+Z)" disabled={command('redo').disabled} onClick={()=>void runCommand('redo')} className="flex h-11 w-11 items-center justify-center rounded-xl hover:bg-slate-100 disabled:opacity-30"><Redo2 className="h-4 w-4"/></button>
+          <button disabled={command('export').disabled} onClick={()=>runCommand('export')} className="flex min-h-11 items-center gap-2 rounded-xl border border-slate-200 px-3 text-sm font-medium hover:bg-slate-50 disabled:opacity-40"><Download className="h-4 w-4"/><span className="hidden sm:inline">Exportar</span></button>
+          <button disabled={command('save').disabled} onClick={()=>void runCommand('save')} className="flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"><Save className="h-4 w-4"/>{saving?'Guardando…':'Guardar'}</button>
+          <button aria-label="Más acciones" title="Más acciones" onClick={e=>{const r=e.currentTarget.getBoundingClientRect();setContextMenu({x:r.right-288,y:r.bottom+6,documentActions:true})}} className="flex h-11 w-11 items-center justify-center rounded-xl hover:bg-slate-100"><MoreHorizontal className="h-5 w-5"/></button>
         </div>
       </header>
       {editorError&&<div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 border-b border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-800"><AlertCircle className="h-4 w-4 shrink-0"/><span className="flex-1">{editorError}</span>{!fabricReady&&<button className="min-h-11 rounded-lg border border-rose-200 px-3" onClick={()=>setLoadNonce(n=>n+1)}>Reintentar</button>}<button aria-label="Cerrar aviso" className="h-11 w-11" onClick={()=>setEditorError('')}><X className="mx-auto h-4 w-4"/></button></div>}
       {conflict&&<div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900"><span className="flex-1">Otra sesión ha actualizado esta plantilla. Conserva tus cambios como una copia o carga la versión del servidor.</span><button className="min-h-11 rounded-xl border border-amber-300 px-3" onClick={()=>void handleSave(true)}>Guardar como copia</button><button className="min-h-11 rounded-xl border border-amber-300 px-3" onClick={()=>setLeaveTarget('reload')}>Cargar versión actual</button></div>}
-      <div className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-3 py-1">
-        <div className="flex items-center rounded-xl border border-slate-200">
-          <button title="Alejar" aria-label="Alejar" onClick={handleZoomOut} className="h-11 w-10"><ZoomOut className="mx-auto h-4 w-4"/></button>
-          <button title="Restablecer zoom al 100%" onClick={()=>{const c=fabricRef.current;if(c&&fabricModRef.current)(c.zoomToPoint(new fabricCoreRef.current!.Point(c.width/2,c.height/2),1),setZoom(1))}} className="min-h-11 min-w-14 text-xs font-medium">{zoomPercent}%</button>
-          <button title="Acercar" aria-label="Acercar" onClick={handleZoomIn} className="h-11 w-10"><ZoomIn className="mx-auto h-4 w-4"/></button>
+      <div role="toolbar" aria-label="Vista del documento" data-document-toolbar className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-3 py-1">
+        <div className="flex shrink-0 items-center rounded-xl border border-slate-200">
+          <button title="Alejar" aria-label="Alejar" disabled={command('zoomOut').disabled} onClick={()=>runCommand('zoomOut')} className="h-11 w-10"><ZoomOut className="mx-auto h-4 w-4"/></button>
+          <button title="Restablecer zoom al 100%" disabled={command('zoom100').disabled} onClick={()=>runCommand('zoom100')} className="min-h-11 min-w-14 text-xs font-medium">{zoomPercent}%</button>
+          <button title="Acercar" aria-label="Acercar" disabled={command('zoomIn').disabled} onClick={()=>runCommand('zoomIn')} className="h-11 w-10"><ZoomIn className="mx-auto h-4 w-4"/></button>
         </div>
-        <button onClick={()=>{const c=fabricRef.current;if(c&&fabricModRef.current)setZoom(fabricModRef.current.zoomToFit(c))}} className="min-h-11 rounded-xl px-3 text-xs hover:bg-slate-100">Ajustar página</button>
-        <div className="min-w-0 flex-1 text-xs text-slate-500">{editingGroup?<button onClick={cancelEditorGesture} className="min-h-11 text-emerald-700">← Salir del grupo</button>:activeTool==='pencil'?'Dibujo libre · Esc para terminar':drawingTool?'Arrastra para dibujar · Mayús mantiene proporción':activeTool==='text'?'Haz clic o arrastra un área para escribir':hasSelection?selectedObjects.length+' seleccionado'+(selectedObjects.length===1?'':'s'):'Selecciona un objeto o inserta uno desde la barra'}</div>
-        <button title={panelOpen?'Ocultar panel':'Mostrar panel'} aria-label={panelOpen?'Ocultar panel':'Mostrar panel'} aria-expanded={panelOpen} onClick={()=>setPanelOpen(v=>!v)} className="flex h-11 w-11 items-center justify-center rounded-xl hover:bg-slate-100">{panelOpen?<PanelRightClose className="h-5 w-5"/>:<PanelRightOpen className="h-5 w-5"/>}</button>
+        <button aria-label="Ajustar página" disabled={command('fit').disabled} onClick={()=>runCommand('fit')} className="min-h-11 shrink-0 whitespace-nowrap rounded-xl px-2 text-xs hover:bg-slate-100">{surfaceWidth<640?'Ajustar':'Ajustar página'}</button>
+        {(surfaceWidth>=640||editingGroup)&&<div data-editor-context-hint className={surfaceWidth<640?'order-last basis-full text-xs text-slate-500':'min-w-0 flex-1 text-xs text-slate-500'}>{editingGroup?<button onClick={cancelEditorGesture} className="min-h-11 text-emerald-700">← Salir del grupo</button>:activeTool==='pencil'?'Dibujo libre · Esc para terminar':drawingTool?'Arrastra para dibujar · Mayús mantiene proporción':activeTool==='text'?'Haz clic o arrastra un área para escribir':hasSelection?selectedObjects.length+' seleccionado'+(selectedObjects.length===1?'':'s'):'Selecciona un objeto o inserta uno desde la barra'}</div>}
+        <button title={panelOpen?'Ocultar panel':'Mostrar panel'} aria-label={panelOpen?'Ocultar panel':'Mostrar panel'} aria-expanded={panelOpen} onClick={()=>setPanelOpen(v=>!v)} className="ml-auto flex h-11 w-11 shrink-0 items-center justify-center rounded-xl hover:bg-slate-100">{panelOpen?<PanelRightClose className="h-5 w-5"/>:<PanelRightOpen className="h-5 w-5"/>}</button>
       </div>
       {/* ─── Main Area ───────────────────────────────────────────────── */}
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
         {/* ─── Left Toolbar ─────────────────────────────────────────── */}
         <div className="w-14 overflow-y-auto bg-white border-r border-slate-200 flex flex-col items-center py-2 gap-1 flex-shrink-0 z-10">
-          {[
-            { tool: 'select', icon: MousePointer, label: 'Seleccionar (V)', action: () => { setActiveTool('select'); setDrawingTool(null) } },
-            { tool: 'hand', icon: Hand, label: 'Mover lienzo (Espacio)', action: () => { setActiveTool('hand'); setDrawingTool(null) } },
-            { tool: 'text', icon: Type, label: 'Texto (T)', action: addTextElement },
-            { tool: 'rect', icon: Square, label: 'Rectángulo (R)', action: addRectElement },
-            { tool: 'circle', icon: Circle, label: 'Círculo (C)', action: addCircleElement },
-            { tool: 'triangle', icon: Triangle, label: 'Triángulo', action: addTriangleElement },
-            { tool: 'pencil', icon: Paintbrush, label: 'Dibujo libre (B)', action: () => {setDrawingTool(null);setActiveTool('pencil')} },
-            { tool: 'line', icon: Minus, label: 'Línea (L)', action: addLineElement },
-          ].map(({ tool, icon: Icon, label, action }) => (
-            <button
-              key={tool}
-              onClick={action}
-              title={label}
-              aria-label={label}
-              disabled={!fabricReady}
-              className={`p-2 rounded-lg transition ${activeTool === tool ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:text-slate-800 hover:bg-slate-100'}`}
-            >
-              <Icon className="w-4 h-4" />
-            </button>
-          ))}
+          {(['select','hand','text','rect','circle','triangle','pencil','line'] as const).map(id=>{
+            const action=command(id),label=(action.toolbarLabel||action.label)+(action.shortcut?' ('+action.shortcut+')':'')
+            return <button key={id} onClick={()=>runCommand(id)} title={label} aria-label={label} disabled={action.disabled} className={'p-2 rounded-lg transition disabled:opacity-40 '+(activeTool===id?'bg-emerald-50 text-emerald-700':'text-slate-600 hover:text-slate-800 hover:bg-slate-100')}><EditorCommandIcon name={action.icon}/></button>
+          })}
 
           {/* Image upload */}
-          <button onClick={() => fileInputRef.current?.click()} title="Subir imagen" className="p-2 rounded-lg text-slate-600 hover:text-slate-800 hover:bg-slate-100 transition">
+          <button onClick={()=>runCommand('image')} disabled={command('image').disabled} title="Subir imagen" className="p-2 rounded-lg text-slate-600 hover:text-slate-800 hover:bg-slate-100 transition">
             <ImagePlus className="w-4 h-4" />
           </button>
           <input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden" onChange={handleImageUpload} />
@@ -1384,76 +1394,25 @@ function DocumentEditorWorkspace() {
           <hr className="w-6 border-slate-200 my-1" />
 
           {/* View toggles */}
-          <button onClick={() => setShowGrid(!showGrid)} title="Grilla" className={`p-2 rounded-lg transition ${showGrid ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:text-slate-800 hover:bg-slate-100'}`}>
+          <button disabled={command('grid').disabled} onClick={()=>runCommand('grid')} title="Grilla" className={`p-2 rounded-lg transition ${showGrid ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:text-slate-800 hover:bg-slate-100'}`}>
             <Grid3X3 className="w-4 h-4" />
           </button>
-          <button onClick={() => setShowRulers(!showRulers)} title="Reglas" className={`p-2 rounded-lg transition ${showRulers ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:text-slate-800 hover:bg-slate-100'}`}>
+          <button disabled={command('rulers').disabled} onClick={()=>runCommand('rulers')} title="Reglas" className={`p-2 rounded-lg transition ${showRulers ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:text-slate-800 hover:bg-slate-100'}`}>
             <Ruler className="w-4 h-4" />
           </button>
-          <button onClick={() => setShowMargins(!showMargins)} title="Márgenes" className={`p-2 rounded-lg transition ${showMargins ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:text-slate-800 hover:bg-slate-100'}`}>
+          <button disabled={command('margins').disabled} onClick={()=>runCommand('margins')} title="Márgenes" className={`p-2 rounded-lg transition ${showMargins ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:text-slate-800 hover:bg-slate-100'}`}>
             <FlipVertical2 className="w-4 h-4" />
           </button>
 
           <hr className="w-6 border-slate-200 my-1" />
 
-          {/* Alignment — only when selection exists */}
-          {hasSelection && (
-            <>
-              <button title={alignToPage?'Alinear a selección':'Alinear a página'} aria-label={alignToPage?'Alinear a selección':'Alinear a página'} onClick={()=>setAlignToPage(v=>!v)} className="p-2 text-[10px] text-emerald-700">{alignToPage?'Pág.':'Selec.'}</button>
-              {selectedObjects.length>=3&&<><button aria-label="Distribuir horizontalmente" title="Distribuir horizontalmente" onClick={()=>{if(fabricRef.current){distributeEditorSelection(fabricRef.current,'x');pushHistory()}}} className="p-2"><MoveHorizontal className="h-4 w-4"/></button><button aria-label="Distribuir verticalmente" title="Distribuir verticalmente" onClick={()=>{if(fabricRef.current){distributeEditorSelection(fabricRef.current,'y');pushHistory()}}} className="p-2"><MoveVertical className="h-4 w-4"/></button></>}
-              {(() => {
-                const toPage = selectedObjects.length === 1
-                const suffix = toPage ? ' en página' : ''
-                const items: { align: string; icon: any; label: string }[] = [
-                  { align: 'left',     icon: AlignStartVertical,    label: `Alinear a la izquierda${suffix}` },
-                  { align: 'center-h', icon: AlignCenterVertical,   label: `Centrar horizontalmente${suffix}` },
-                  { align: 'right',    icon: AlignEndVertical,      label: `Alinear a la derecha${suffix}` },
-                  { align: 'top',      icon: AlignStartHorizontal,  label: `Alinear arriba${suffix}` },
-                  { align: 'center-v', icon: AlignCenterHorizontal, label: `Centrar verticalmente${suffix}` },
-                  { align: 'bottom',   icon: AlignEndHorizontal,    label: `Alinear abajo${suffix}` },
-                ]
-                return items.map(({ align, icon: Icon, label }) => (
-                  <button key={align} onClick={() => handleAlign(align)} title={label} className="p-2 rounded-lg text-slate-600 hover:text-slate-800 hover:bg-slate-100 transition">
-                    <Icon className="w-4 h-4" />
-                  </button>
-                ))
-              })()}
-              <hr className="w-6 border-slate-200 my-1" />
-            </>
-          )}
+          {hasSelection&&<>
+            {commandState.count>1&&<button title={command('alignTarget').label} aria-label={command('alignTarget').label} disabled={command('alignTarget').disabled} onClick={()=>runCommand('alignTarget')} className="p-2 text-[10px] text-emerald-700 disabled:opacity-40">{alignToPage?'Pág.':'Selec.'}</button>}
+            {(['alignLeft','alignCenterH','alignRight','alignTop','alignCenterV','alignBottom',...(commandState.count>=3?['distributeH','distributeV'] as const:[])] as const).map(id=>{const action=command(id);return <button key={id} aria-label={action.label} title={action.label+(commandState.count===1?' en página':'')} disabled={action.disabled} onClick={()=>runCommand(id)} className="rounded-lg p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-40"><EditorCommandIcon name={action.icon}/></button>})}
+            <hr className="my-1 w-6 border-slate-200"/>
+            {(['lock',...(commandState.count>1?['group'] as const:commandState.group?['ungroup'] as const:[]),'duplicate','delete'] as const).map(id=>{const action=command(id);return <button key={id} aria-label={action.label} title={action.label+(action.shortcut?' ('+action.shortcut+')':'')} disabled={action.disabled} onClick={()=>void runCommand(id)} className="rounded-lg p-2 text-slate-600 hover:bg-slate-100 disabled:opacity-40"><EditorCommandIcon name={action.icon}/></button>})}
+          </>}
 
-          {/* Object actions */}
-          {hasSelection && (
-            <>
-              {selectedObj?.lockMovementX ? (
-                <button onClick={toggleLock} title="Desbloquear" className="p-2 rounded-lg text-amber-400 bg-amber-900/30 transition">
-                  <Lock className="w-4 h-4" />
-                </button>
-              ) : selectedObj ? (
-                <button onClick={toggleLock} title="Bloquear" className="p-2 rounded-lg text-slate-600 hover:text-slate-800 hover:bg-slate-100 transition">
-                  <Unlock className="w-4 h-4" />
-                </button>
-              ) : null}
-
-              {selectedObjects.length >= 2 && (
-                <button onClick={groupSelected} title="Agrupar (Ctrl+G)" className="p-2 rounded-lg text-slate-600 hover:text-slate-800 hover:bg-slate-100 transition">
-                  <Group className="w-4 h-4" />
-                </button>
-              )}
-              {selectedObj && isInstance(selectedObj, 'Group') && (
-                <button onClick={ungroupSelected} title="Desagrupar (Ctrl+Shift+G)" className="p-2 rounded-lg text-slate-600 hover:text-slate-800 hover:bg-slate-100 transition">
-                  <Ungroup className="w-4 h-4" />
-                </button>
-              )}
-
-              <button onClick={duplicateSelected} title="Duplicar (Ctrl+D)" className="p-2 rounded-lg text-slate-600 hover:text-slate-800 hover:bg-slate-100 transition">
-                <Copy className="w-4 h-4" />
-              </button>
-              <button onClick={deleteSelected} title="Eliminar (Delete)" className="p-2 rounded-lg text-slate-600 hover:text-red-400 hover:bg-red-500/20 transition">
-                <Trash2 className="w-4 h-4" />
-              </button>
-            </>
-          )}
         </div>
 
         {/* ─── Canvas Area ──────────────────────────────────────────── */}
@@ -1581,11 +1540,11 @@ function DocumentEditorWorkspace() {
             )}
 
             {/* Drag-drop image replace: highlight over target */}
-            {dragOverTargetId && (() => {
+            {dragOverTarget && (() => {
               const canvas = fabricRef.current
               const vpt = canvas?.viewportTransform
               if (!canvas) return null
-              const target = canvas.getObjects().find((o: any) => o.__id === dragOverTargetId) as any
+              const target = dragOverTarget
               if (!target) return null
               const scene = target.getBoundingRect()
               const b={left:scene.left*zoom+(vpt?.[4]||0),top:scene.top*zoom+(vpt?.[5]||0),width:scene.width*zoom,height:scene.height*zoom}
@@ -1943,7 +1902,7 @@ function DocumentEditorWorkspace() {
           <div className="flex-1 overflow-y-auto p-3 space-y-3">
             {rightTab === 'properties' ? (
               selectedObj ? (
-                <><div className="flex items-center justify-between gap-2"><span className="text-xs font-semibold">{(selectedObj as any).elementName||'Objeto'}</span><button onClick={toggleLock} className="min-h-11 rounded-lg px-2 text-xs text-slate-600">{isObjectLocked(selectedObj)?'Desbloquear':'Bloquear'}</button></div><fieldset disabled={isObjectLocked(selectedObj)} className="space-y-4 disabled:opacity-60"><PropertiesContent key={(selectedObj as any).objectId}
+                <><div className="flex items-center justify-between gap-2"><span className="text-xs font-semibold">{(selectedObj as any).elementName||'Objeto'}</span><button onClick={()=>runCommand('lock')} disabled={command('lock').disabled} className="min-h-11 rounded-lg px-2 text-xs text-slate-600">{isObjectLocked(selectedObj)?'Desbloquear':'Bloquear'}</button></div><fieldset disabled={isObjectLocked(selectedObj)} className="space-y-4 disabled:opacity-60"><PropertiesContent key={(selectedObj as any).objectId}
                   selectedObj={selectedObj}
                   updateProp={updateProp}
                   pushHistory={pushHistory}
@@ -1951,12 +1910,13 @@ function DocumentEditorWorkspace() {
                   fabricRef={fabricRef}
                   fileInputRef={fileInputRef}
                   replaceImageInputRef={replaceImageInputRef}
+                  onCommand={runCommand}
                   SYSTEM_FONTS={SYSTEM_FONTS}
                   GOOGLE_FONTS={GOOGLE_FONTS}
-                  bringForward={bringForward}
-                  sendBackward={sendBackward}
-                  bringToFront={bringToFront}
-                  sendToBack={sendToBack}
+                  bringForward={()=>runCommand('forward')}
+                  sendBackward={()=>runCommand('backward')}
+                  bringToFront={()=>runCommand('front')}
+                  sendToBack={()=>runCommand('back')}
                   copiedFieldFormatRef={copiedFieldFormatRef}
                 /></fieldset></>
               ) : selectedObjects.length > 1 ? (
@@ -2011,24 +1971,8 @@ function DocumentEditorWorkspace() {
         </aside>}</>
       </div>
 
-      {contextMenu&&<EditorPopover point={contextMenu} menu label="Acciones de la plantilla" onClose={()=>setContextMenu(null)}>
-        {[
-          {label:'Insertar texto',disabled:!fabricReady,run:addTextElement},
-          {label:'Insertar rectángulo',disabled:!fabricReady,run:addRectElement},
-          {label:'Insertar imagen',disabled:!fabricReady,run:()=>fileInputRef.current?.click()},
-          {label:'Copiar',shortcut:'Ctrl+C',disabled:!hasSelection,run:copySelected},
-          {label:'Pegar',shortcut:'Ctrl+V',disabled:!clipboardRef.current.length,run:()=>pasteClipboard(contextMenu.scene)},
-          {label:'Duplicar',shortcut:'Ctrl+D',disabled:!hasSelection,run:duplicateSelected},
-          {label:'Agrupar',shortcut:'Ctrl+G',disabled:selectedObjects.length<2||selectedObjects.some(isObjectLocked),run:groupSelected},
-          {label:'Desagrupar',shortcut:'Ctrl+Mayús+G',disabled:!selectedObj||!isInstance(selectedObj,'Group')||isObjectLocked(selectedObj),run:ungroupSelected},
-          {label:'Traer al frente',disabled:!hasSelection||selectedObjects.some(isObjectLocked),run:bringToFront},
-          {label:'Enviar al fondo',disabled:!hasSelection||selectedObjects.some(isObjectLocked),run:sendToBack},
-          {label:selectedObjects.every(o=>o.lockMovementX)?'Desbloquear':'Bloquear',disabled:!hasSelection,run:toggleLock},
-          {label:'Eliminar selección',shortcut:'Supr',disabled:!hasSelection||selectedObjects.some(isObjectLocked),run:deleteSelected},
-          {label:'Guardar como copia',disabled:!fabricReady||saving,run:()=>handleSave(true)},
-          {label:'Eliminar plantilla…',run:()=>setDeleteConfirm(true)},
-        ].map(action=><button role="menuitem" key={action.label} disabled={action.disabled} onClick={()=>{void action.run();setContextMenu(null)}} className="flex min-h-11 w-full items-center justify-between gap-3 rounded-lg px-3 text-left text-sm hover:bg-slate-100 disabled:opacity-35"><span>{action.label}</span>{action.shortcut&&<span className="text-xs text-slate-600">{action.shortcut}</span>}</button>)}
-      </EditorPopover>}
+      {contextMenu&&<EditorCommandMenu state={commandState} point={contextMenu} documentActions={!!contextMenu.documentActions} onClose={()=>setContextMenu(null)} onCommand={id=>{void runCommand(id,{point:contextMenu.scene||visibleCenter()})}}/>}
+      {imageEditorTarget&&<ImageDraft image={imageEditorTarget.image} frame={imageEditorTarget.frame} canvas={fabricRef.current} anchor={null} point={imageEditorTarget.point} onClose={()=>setImageEditorTarget(null)} onCommit={pushHistory}/>}
       {showExportMenu&&fabricRef.current&&<DocumentExportDialog canvas={fabricRef.current} templateName={templateName} pageWidth={pageWidth} pageHeight={pageHeight} onClose={()=>setShowExportMenu(false)}/>}
       {leaveTarget&&<EditorConfirmDialog title="Tienes cambios sin guardar" onCancel={()=>{pendingNavigationRef.current=null;setLeaveTarget(null)}} actions={<><button className="min-h-11 rounded-xl border px-3" onClick={()=>{pendingNavigationRef.current=null;setLeaveTarget(null)}}>Seguir editando</button><button className="min-h-11 rounded-xl border border-rose-200 px-3 text-rose-700" onClick={()=>{const target=leaveTarget;continueLeave(target)}}>Descartar cambios</button><button disabled={saving} className="min-h-11 rounded-xl bg-emerald-600 px-3 text-white disabled:opacity-50" onClick={async()=>{if(await handleSave()){const target=leaveTarget;continueLeave(target)}}}>Guardar y continuar</button></>}>Guarda esta versión antes de salir o descarta tus cambios para continuar.</EditorConfirmDialog>}
       {deleteConfirm&&<EditorConfirmDialog title="Eliminar esta plantilla" onCancel={()=>setDeleteConfirm(false)} actions={<><button className="min-h-11 rounded-xl border px-3" onClick={()=>setDeleteConfirm(false)}>Cancelar</button><button disabled={deleting} className="min-h-11 rounded-xl bg-rose-600 px-3 text-white disabled:opacity-50" onClick={()=>void handleDeleteTemplate()}>{deleting?'Eliminando…':'Eliminar plantilla'}</button></>}>La plantilla se eliminará de la biblioteca. Los documentos que ya exportaste se conservan.</EditorConfirmDialog>}
@@ -2044,7 +1988,7 @@ function DocumentEditorWorkspace() {
 // ─── Properties Panel Sub-Component ─────────────────────────────────────────
 
 function PropertiesContent({
-  selectedObj, updateProp, pushHistory, isInstance, fabricRef, fileInputRef, replaceImageInputRef,
+  selectedObj, updateProp, pushHistory, isInstance, fabricRef, fileInputRef, replaceImageInputRef, onCommand,
   SYSTEM_FONTS, GOOGLE_FONTS, bringForward, sendBackward, bringToFront, sendToBack,
   copiedFieldFormatRef,
 }: {
@@ -2055,6 +1999,7 @@ function PropertiesContent({
   fabricRef: React.MutableRefObject<FabricCanvasType | null>
   fileInputRef: React.RefObject<HTMLInputElement | null>
   replaceImageInputRef: React.RefObject<HTMLInputElement | null>
+  onCommand:(id:EditorCommandId)=>unknown
   SYSTEM_FONTS: string[]
   GOOGLE_FONTS: string[]
   bringForward: () => void
@@ -2090,7 +2035,7 @@ function PropertiesContent({
     </section>}
     {isDynamic&&<section className="border-t border-slate-200 pt-4"><DynamicFormatSection objs={[obj]} fabricRef={fabricRef} pushHistory={pushHistory} copiedFieldFormatRef={copiedFieldFormatRef}/></section>}
     {!isImage&&<section className="space-y-3 border-t border-slate-200 pt-4"><h3 className={heading}>{isText?'Contorno':'Apariencia'}</h3>{!isText&&!isLine&&<EditorColorPicker label="Relleno" value={obj.fill} onChange={v=>updateProp('fill',v)}/>}<EditorColorPicker label="Color del contorno" value={obj.stroke||'transparent'} onChange={v=>updateProp('stroke',v)}/><EditorNumberField label="Grosor del contorno" min={0} max={100} step={.25} value={obj.strokeWidth||0} onCommit={v=>updateProp('strokeWidth',v)}/>{isInstance(obj,'Rect')&&<EditorNumberField label="Radio de las esquinas" min={0} max={200} value={obj.rx||0} onCommit={v=>{selectedObj.set({rx:v,ry:v} as any);fabricRef.current?.requestRenderAll();pushHistory()}}/>}</section>}
-    {isImage&&<section className="space-y-3 border-t border-slate-200 pt-4"><h3 className={heading}>Imagen</h3><EditorImageControls image={framedImage||obj} frame={framedImage?obj:undefined} canvas={fabricRef.current} onCommit={pushHistory}/><button onClick={()=>replaceImageInputRef.current?.click()} className="min-h-11 w-full rounded-xl border border-dashed border-slate-300 px-3 text-sm hover:border-emerald-500">Reemplazar imagen</button><p className="text-xs leading-relaxed text-slate-500">El reemplazo conserva la posición y el marco sin deformar la imagen.</p></section>}
+    {isImage&&<section className="space-y-3 border-t border-slate-200 pt-4"><h3 className={heading}>Imagen</h3><EditorImageControls image={framedImage||obj} frame={framedImage?obj:undefined} canvas={fabricRef.current} onCommit={pushHistory} onCrop={()=>onCommand('crop')}/><button onClick={()=>onCommand('replace')} className="min-h-11 w-full rounded-xl border border-dashed border-slate-300 px-3 text-sm hover:border-emerald-500">Reemplazar imagen</button><p className="text-xs leading-relaxed text-slate-500">El reemplazo conserva la posición y el marco sin deformar la imagen.</p></section>}
     <section className="space-y-3 border-t border-slate-200 pt-4"><EditorNumberField label="Opacidad (%)" min={0} max={100} value={(obj.opacity??1)*100} onCommit={v=>updateProp('opacity',v/100)}/><ShadowControl selectedObj={selectedObj} updateProp={updateProp}/></section>
     <section className="space-y-2 border-t border-slate-200 pt-4"><h3 className={heading}>Orden</h3><div className="grid grid-cols-2 gap-2">{[{label:'Al frente',run:bringToFront},{label:'Al fondo',run:sendToBack},{label:'Subir una capa',run:bringForward},{label:'Bajar una capa',run:sendBackward}].map(({label,run})=><button key={label} onClick={run} className="min-h-11 rounded-xl border border-slate-200 text-xs hover:bg-slate-50">{label}</button>)}</div></section>
   </>
@@ -2218,9 +2163,7 @@ function MultiSelectProperties({
   const count = selectedObjects.length
   const allText = selectedObjects.every(o => isInstance(o, 'DynamicText') || isInstance(o, 'FabricText'))
   const allDynamicField = selectedObjects.every(o => isInstance(o, 'DynamicText') && (o as any).isDynamic && (o as any).fieldName)
-  const allShape = selectedObjects.every(o => isInstance(o, 'Rect') || isInstance(o, 'Ellipse') || isInstance(o, 'Triangle'))
-  const allHaveFill = selectedObjects.every(o => (o as any).fill !== undefined)
-  const allHaveStroke = selectedObjects.every(o => 'stroke' in (o as any))
+  const {fill:allHaveFill,stroke:allHaveStroke}=selectionPaintCapabilities(selectedObjects)
 
   // Shared value helper: returns value if all equal, or null if mixed
   const shared = <T,>(read: (o: any) => T): T | null => {
@@ -2261,8 +2204,8 @@ function MultiSelectProperties({
 
   const opacity = shared(o => o.opacity ?? 1)
   const angle = shared(o => Math.round(o.angle ?? 0))
-  const fill = allHaveFill ? shared(o => String(o.fill ?? '')) : null
-  const stroke = allHaveStroke ? shared(o => String(o.stroke ?? '')) : null
+  const fill = allHaveFill ? shared(o => o.fill ?? '') : null
+  const stroke = allHaveStroke ? shared(o => o.stroke ?? '') : null
   const strokeWidth = allHaveStroke ? shared(o => o.strokeWidth ?? 0) : null
   const fontSize = allText ? shared(o => o.fontSize ?? 16) : null
   const fontFamily = allText ? shared(o => o.fontFamily ?? 'Arial') : null
@@ -2345,7 +2288,7 @@ function MultiSelectProperties({
           <div>
             <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">Relleno</label>
             <div className="flex items-center gap-2 mt-1">
-              <EditorColorPicker label="Relleno de selección" value={fill} onChange={v=>writeAll('fill',v)}/>
+              <EditorColorPicker label="Relleno de selección" mixed={fill===null} value={fill} onChange={v=>writeAll('fill',v)}/>
 
             </div>
           </div>
@@ -2353,15 +2296,15 @@ function MultiSelectProperties({
       )}
 
       {/* Stroke (shared) */}
-      {allHaveStroke && allShape && (
+      {allHaveStroke && (
         <>
           <hr className="border-slate-200" />
           <div>
             <label className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">Borde</label>
             <div className="grid grid-cols-2 gap-1.5 mt-1">
-              <EditorColorPicker label="Contorno de selección" value={stroke} onChange={v=>writeAll('stroke',v)}/>
+              <EditorColorPicker label="Contorno de selección" mixed={stroke===null} value={stroke} onChange={v=>writeAll('stroke',v)}/>
               <input
-                type="number" min={0} max={50} step={0.25}
+                aria-label="Grosor del contorno de selección" type="number" min={0} max={50} step={0.25}
                 value={strokeWidth ?? ''}
                 placeholder={strokeWidth === null ? mixedPH : ''}
                 onChange={e => writeAll('strokeWidth', Number(e.target.value))}
@@ -2401,7 +2344,7 @@ function MultiSelectProperties({
               </div>
               <div>
                 <span className="text-[10px] text-slate-500">Color</span>
-                <EditorColorPicker label="Relleno de selección" value={fill} onChange={v=>writeAll('fill',v)}/>
+                <EditorColorPicker label="Relleno de selección" mixed={fill===null} value={fill} onChange={v=>writeAll('fill',v)}/>
               </div>
             </div>
             <div className="flex items-center gap-1 mt-2">

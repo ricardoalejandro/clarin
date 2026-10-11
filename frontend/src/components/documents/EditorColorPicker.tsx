@@ -5,7 +5,7 @@ import {useEditorDesign} from './EditorDesignContext'
 import EditorPopover from './EditorPopover'
 import {normalizeEditorColor} from '@/lib/fabric/editorModel'
 const COLORS=['#FFFFFF','#0F172A','#475569','#94A3B8','#E2E8F0','#059669','#10B981','#2563EB','#0EA5E9','#7C3AED','#DB2777','#DC2626','#EA580C','#D97706','#FACC15','#92400E']
-export default function EditorColorPicker({value,onChange,label='Color',allowNone=true}:{value:unknown;onChange:(color:string)=>void;label?:string;allowNone?:boolean}){
+export default function EditorColorPicker({value,onChange,label='Color',allowNone=true,mixed=false}:{value:unknown;onChange:(color:string)=>void;label?:string;allowNone?:boolean;mixed?:boolean}){
  const anchor=useRef<HTMLButtonElement>(null),[open,setOpen]=useState(false),[draft,setDraft]=useState(''),[error,setError]=useState('')
  const design=useEditorDesign()
  const documentColors:string[]=[]
@@ -17,7 +17,7 @@ export default function EditorColorPicker({value,onChange,label='Color',allowNon
  const apply=()=>{const color=normalizeEditorColor(draft);if(!color){setError('Usa un color hexadecimal de 6 dígitos, por ejemplo #059669.');return}choose(color)}
  return <><button ref={anchor} type="button" aria-label={label} aria-haspopup="dialog" aria-expanded={open} onClick={()=>setOpen(v=>!v)} className="flex min-h-11 w-full items-center gap-2 rounded-xl border border-slate-200 bg-white px-2.5 text-left text-xs text-slate-700 hover:border-emerald-400">
  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-slate-300" style={{background:normalized||'#F8FAFC'}}>{none?<X className="h-4 w-4"/>:!normalized?<Palette className="h-4 w-4"/>:null}</span>
- <span className="min-w-0 truncate">{normalized|| (none?'Sin relleno':'Degradado existente')}</span></button>
+ <span className="min-w-0 truncate">{mixed?'Varios colores':normalized|| (none?'Sin relleno':'Degradado existente')}</span></button>
  {open&&<EditorPopover anchor={anchor.current} label={label} onClose={()=>setOpen(false)}><div className="space-y-3 p-2">
  <p className="font-semibold">{label}</p><div className="grid grid-cols-5 gap-1">{COLORS.map(color=><button key={color} aria-label={color} title={color} className="flex h-11 w-11 items-center justify-center rounded-md border border-slate-200" style={{background:color}} onClick={()=>choose(color)}>{color===normalized&&<Check className="h-4 w-4" style={{color:['#FFFFFF','#FACC15','#E2E8F0'].includes(color)?'#0F172A':'#FFFFFF'}}/>}</button>)}</div>
  {[{title:'En este documento',colors:documentColors.slice(0,15)},{title:'Recientes',colors:design.recent}].filter(section=>section.colors.length).map(section=><section key={section.title}><p className="mb-2 text-xs text-slate-500">{section.title}</p><div className="grid grid-cols-5 gap-1">{section.colors.map(color=><button key={color} aria-label={section.title+' '+color} title={color} className="h-11 w-11 rounded-lg border border-slate-200" style={{background:color}} onClick={()=>choose(color)}/>)}</div></section>)}

@@ -262,6 +262,12 @@ func (s *Server) authorizeOrdinaryMediaChecked(c *fiber.Ctx, objectKey string) (
 	} else if allowed {
 		return true, nil
 	}
+	// Legacy Fabric documents may still hold absolute same-origin image URLs.
+	// Reuse their exact canonical image-slot relationship with the freshly
+	// hydrated actor; retention-only private_external evidence grants nothing.
+	if s.documentHasAuthorizedAssetReference(ctx, claims, objectKey) {
+		return true, nil
+	}
 	if grant, err := verifyMediaAccessGrant(s.cfg.JWTSecret, c.Query("media_preview"), objectKey, time.Now()); err == nil && privateMediaPreviewAllowed(grant, claims) {
 		// A persisted draft URL must not keep a removed attachment accessible.
 		// Restoration/retention previews have their own actor-authorized endpoint.

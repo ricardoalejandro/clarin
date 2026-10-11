@@ -150,5 +150,11 @@ func storagePerformanceSharedReferences(t *testing.T, db *pgxpool.Pool, store *s
 				storagePerformanceMeasure(t, f, scenario.name, scenario.requests, 1, samples, 0, 101, "foreign-never-present")
 			})
 		}
+		t.Run("shared_uses_detail_dirty", func(t *testing.T) {
+			f.exec(`INSERT INTO document_templates(account_id,name,canvas_json) VALUES($1,'Pending unrelated index','{"objects":[]}'::jsonb)`, f.account)
+			dirtyUses := uses
+			dirtyUses.indexingBudget = n > storageFallbackCandidateLimit
+			storagePerformanceMeasure(t, f, "shared_uses_detail_dirty", []storagePerformanceRequest{dirtyUses}, 1, samples, 0, 101, "foreign-never-present")
+		})
 	})
 }

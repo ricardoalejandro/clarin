@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -74,11 +75,28 @@ func storageSelfServiceReferencesForKeys(ctx context.Context, q storageSelfServi
 		}
 		refs[key] = []storageSelfServiceReference{}
 	}
+	budget, bounded := ctx.Value(storageReferenceReadBudgetKey{}).(*storageReferenceReadBudget)
+	payloadSelect := "r.payload"
+	if bounded {
+		// Oversized payloads never cross the SQL/Go boundary. The length is
+		// checked before the structural parser and no partial result is returned.
+		payloadSelect = "CASE WHEN octet_length(r.payload)<=" + strconv.FormatInt(storageFallbackPayloadLimit, 10) + " THEN r.payload ELSE '' END,octet_length(r.payload)"
+	}
 	queries := make([]string, 0, len(storageSelfServiceReferenceQueries))
 	for _, source := range storageSelfServiceReferenceQueries {
-		queries = append(queries, `SELECT '`+source.origin+`',r.id,r.label,r.href,r.filename,r.payload FROM (`+source.sql+`) AS r(id,label,href,filename,payload) WHERE `+storageReferenceSelectedKeyPredicateSQL)
+		queries = append(queries, `SELECT '`+source.origin+`',r.id,r.label,r.href,r.filename,`+payloadSelect+` FROM (`+source.sql+`) AS r(id,label,href,filename,payload) WHERE `+storageReferenceSelectedKeyPredicateSQL)
 	}
-	rows, err := q.Query(ctx, storageReferenceSelectedKeysSQL+strings.Join(queries, " UNION ALL "), account, keys)
+	query := storageReferenceSelectedKeysSQL + strings.Join(queries, " UNION ALL ")
+	if bounded {
+		query += " LIMIT " + strconv.Itoa(storageFallbackCandidateLimit+1)
+	}
+	queryCtx := ctx
+	cancelRead := func() {}
+	if bounded {
+		queryCtx, cancelRead = context.WithCancel(ctx)
+		defer cancelRead()
+	}
+	rows, err := q.Query(queryCtx, query, account, keys)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +105,18 @@ func storageSelfServiceReferencesForKeys(ctx context.Context, q storageSelfServi
 	for rows.Next() {
 		var ref storageSelfServiceReference
 		var payload string
-		if err = rows.Scan(&ref.Origin, &ref.ID, &ref.Label, &ref.Href, &ref.Filename, &payload); err != nil {
+		if bounded {
+			var size int64
+			err = rows.Scan(&ref.Origin, &ref.ID, &ref.Label, &ref.Href, &ref.Filename, &payload, &size)
+			if err == nil && !budget.consume(size) {
+				// Stop PostgreSQL before Rows.Close can drain unneeded payloads.
+				cancelRead()
+				return nil, errStorageIndexingBudget
+			}
+		} else {
+			err = rows.Scan(&ref.Origin, &ref.ID, &ref.Label, &ref.Href, &ref.Filename, &payload)
+		}
+		if err != nil {
 			return nil, err
 		}
 		for key, readable := range storageSelfServiceReferenceValues(account, payload, stores...) {

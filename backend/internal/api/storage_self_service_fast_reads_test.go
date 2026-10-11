@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -144,6 +146,55 @@ func TestStorageSelfServiceFastReadsIntegration(t *testing.T) {
 		status, data := f.request("GET", "/storage/files", nil, map[string]string{"X-QA-Account": "other"})
 		if status != 200 || data["total"] != float64(0) {
 			t.Fatal("indexed private page crossed account boundary")
+		}
+	})
+	t.Run("fallback budget returns retry status and ready ten thousand uses stay paginated", func(t *testing.T) {
+		f := storagePerformanceSharedFixture(t, db, store, 10000)
+		f.app.Get("/storage/uses", f.server.handleStorageSelfServiceUses)
+		key := f.account.String() + "/chats/" + storagePerformanceFilename(0)
+		path := "/storage/uses?limit=40&object_key=" + url.QueryEscape(key)
+		status, data := f.request("GET", path, nil, nil)
+		if status != 200 || data["total"] != float64(10000) || len(storageQAItems(t, data, "uses")) != 40 {
+			t.Fatal("ready high-fanout uses are not paginated")
+		}
+		f.exec(`INSERT INTO document_templates(account_id,name,canvas_json) VALUES($1,'Pending index','{"objects":[]}'::jsonb)`, f.account)
+		response, err := f.app.Test(httptest.NewRequest("GET", path, nil), 15000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		raw, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data = map[string]any{}
+		if json.Unmarshal(raw, &data) != nil || response.StatusCode != 503 || response.Header.Get("Retry-After") != "3" || data["code"] != "storage_indexing_budget" || data["catalog_status"] != "indexing" || data["retry_after_seconds"] != float64(3) {
+			t.Fatalf("missing bounded indexing status: status=%d", response.StatusCode)
+		}
+		if _, exists := data["uses"]; exists {
+			t.Fatal("budget response claimed an empty use page")
+		}
+		if _, exists := data["total"]; exists {
+			t.Fatal("budget response claimed a reference count")
+		}
+		if release, ok := storageFallbackReaders.acquire(context.Background(), f.account); !ok {
+			t.Fatal("budget error retained its slot")
+		} else {
+			release()
+		}
+	})
+	t.Run("fallback rejects oversized payload without restricting canonical reviews", func(t *testing.T) {
+		f := newStorageMultiOriginQAFixture(t, db, store)
+		key, _, _ := f.media(f.account, "chats", "bounded.pdf", true)
+		payload, _ := json.Marshal(map[string]any{"objects": []any{map[string]string{"type": "image", "src": mediaProxyURLFromObjectKey(key)}}, "description": strings.Repeat("x", int(storageFallbackPayloadLimit))})
+		f.exec(`INSERT INTO document_templates(account_id,name,canvas_json) VALUES($1,'Large canonical reference',$2::jsonb)`, f.account, payload)
+		status, data := f.request("GET", "/storage/uses?object_key="+url.QueryEscape(key), nil, nil)
+		if status != 503 || data["code"] != "storage_indexing_budget" {
+			t.Fatal("oversized fallback was parsed")
+		}
+		refs, err := storageSelfServiceReferencesForKeys(context.Background(), db, f.account, []string{key}, store)
+		if err != nil || len(refs[key]) != 2 {
+			t.Fatalf("canonical reference validation was truncated: count=%d error=%v", len(refs[key]), err)
 		}
 	})
 	t.Run("ready shared-object uses page before canonical hydration", func(t *testing.T) {
