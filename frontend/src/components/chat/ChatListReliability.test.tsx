@@ -1,4 +1,4 @@
-import {act,cleanup,fireEvent,render,screen,waitFor} from '@testing-library/react';
+import {act,cleanup,fireEvent,render,screen,waitFor,within} from '@testing-library/react';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 const socket=vi.hoisted(()=>({listeners:new Set<(x:unknown)=>void>(),setActive:vi.fn()}));
 vi.mock('@/lib/api',()=>({subscribeWebSocket:vi.fn((listener:(x:unknown)=>void)=>{socket.listeners.add(listener);return ()=>socket.listeners.delete(listener)})}));
@@ -16,6 +16,42 @@ function emit(event:string,data:unknown){socket.listeners.forEach(l=>l({event,da
 describe('Chat list canonical membership',()=>{
  beforeEach(()=>{localStorage.clear();localStorage.setItem('token','synthetic-audit-token');socket.listeners.clear();vi.spyOn(HTMLElement.prototype,'getBoundingClientRect').mockReturnValue({width:1440,height:900,top:0,bottom:900,left:0,right:1440,x:0,y:0,toJSON(){}})});
  afterEach(()=>{cleanup();vi.unstubAllGlobals();socket.listeners.clear()});
+ it('keeps unread counts and inbox filters without repeated pending labels on rows',async()=>{
+  const rows=[
+   {...chat,id:'pending-read',name:'Pendiente ya leído',contact_name:'Pendiente ya leído',needs_reply:true,waiting_since:'2026-10-01T12:00:00Z'},
+   {...chat,id:'pending-unread',name:'Pendiente sin leer',contact_name:'Pendiente sin leer',needs_reply:true,unread_count:3,waiting_since:'2026-10-02T12:00:00Z'},
+   {...chat,id:'attended',name:'Conversación atendida',contact_name:'Conversación atendida'},
+  ];
+  const requests:URLSearchParams[]=[];
+  vi.stubGlobal('fetch',vi.fn((input:RequestInfo|URL)=>{
+   const url=String(input);
+   if(url.startsWith('/api/chats?')){
+    const params=new URL(url,'http://test.invalid').searchParams;requests.push(params);
+    const visible=params.has('pending_only')?rows.filter(row=>row.needs_reply):params.has('unread_only')?rows.filter(row=>row.unread_count>0):rows;
+    return Promise.resolve(json({success:true,chats:visible,total:visible.length}));
+   }
+   return Promise.resolve(json({success:true,devices:[]}));
+  }));
+  render(<ChatsPage/>);
+  const unread=await screen.findByRole('button',{name:'Conversación con Pendiente sin leer'});
+  expect(within(unread).getByText('3')).toBeInTheDocument();
+  expect(screen.getByRole('button',{name:'Conversación con Pendiente ya leído'})).toBeInTheDocument();
+  expect(screen.queryByText('Leído · pendiente')).not.toBeInTheDocument();
+  expect(screen.queryByText('Pendiente de atención')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:'Pendientes',exact:true}));
+  await waitFor(()=>expect(requests.at(-1)?.get('pending_only')).toBe('true'));
+  await waitFor(()=>expect(screen.queryByRole('button',{name:'Conversación con Conversación atendida'})).not.toBeInTheDocument());
+  expect(screen.getByRole('button',{name:'Pendientes',exact:true})).toHaveAttribute('aria-pressed','true');
+  expect(screen.getByRole('button',{name:'Conversación con Pendiente ya leído'})).toBeInTheDocument();
+  expect(within(screen.getByRole('button',{name:'Conversación con Pendiente sin leer'})).getByText('3')).toBeInTheDocument();
+  expect(screen.queryByText('Leído · pendiente')).not.toBeInTheDocument();
+  expect(screen.queryByText('Pendiente de atención')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:'No leídos',exact:true}));
+  await waitFor(()=>expect(requests.at(-1)?.get('unread_only')).toBe('true'));
+  expect(requests.at(-1)?.has('pending_only')).toBe(false);
+  await waitFor(()=>expect(screen.queryByRole('button',{name:'Conversación con Pendiente ya leído'})).not.toBeInTheDocument());
+  expect(within(screen.getByRole('button',{name:'Conversación con Pendiente sin leer'})).getByText('3')).toBeInTheDocument();
+ });
  it('removes a chat after its last matching reaction is removed',async()=>{
   let matches=true;
   const fetchMock=vi.fn((input:RequestInfo|URL)=>{

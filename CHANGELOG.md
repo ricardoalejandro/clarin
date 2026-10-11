@@ -2,6 +2,13 @@
 
 ## 2026-10-11
 
+### Ajustes tras la revisión de Chats y Contactos
+
+- Las filas de chats dejan de repetir «Leído · pendiente» y «Pendiente de atención»; se conservan el filtro Pendientes y los contadores de no leídos.
+- Las etiquetas mantienen su color y tamaño, con texto blanco u oscuro según el contraste real del fondo.
+- El acceso online renueva el documento del navegador para que las vistas previas de adjuntos y fotos de contacto no hereden restricciones del login. La entrada offline conserva su sesión desbloqueada.
+- El visor de una imagen abierta durante el envío adopta su URL definitiva al confirmarse, y salir del chat durante la preparación de una imagen evita un envío tardío.
+
 ### Chats y Contactos: lectura, escritura y navegación
 
 - No leídos se reconcilia al llegar al final de la conversación, incluso con mensajes entrantes antiguos. Leer sin responder conserva el estado Pendiente.

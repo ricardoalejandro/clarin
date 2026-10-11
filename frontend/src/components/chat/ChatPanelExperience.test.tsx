@@ -25,8 +25,9 @@ vi.mock('../WhatsAppTextInput', async () => {
   }
 })
 vi.mock('./MessageBubble', () => ({
-  default: ({ message, onDocumentClick, onReact, onSelect, onRetry }: { message: { status?: string; body?: string; quoted_body?: string; reactions?: Array<{ emoji: string; is_from_me: boolean }> }; onDocumentClick?: (document: { sessionId: string; src: string; filename: string; mimeType: string; size: number }) => void; onReact?: (message: unknown, emoji: string) => void; onSelect?: (message: unknown) => void; onRetry?: (message: unknown) => void }) => (
+  default: ({ message, onMediaClick, onDocumentClick, onReact, onSelect, onRetry }: { message: { media_url?: string; status?: string; body?: string; quoted_body?: string; reactions?: Array<{ emoji: string; is_from_me: boolean }> }; onMediaClick?: (url: string, type: string) => void; onDocumentClick?: (document: { sessionId: string; src: string; filename: string; mimeType: string; size: number }) => void; onReact?: (message: unknown, emoji: string) => void; onSelect?: (message: unknown) => void; onRetry?: (message: unknown) => void }) => (
     <div data-testid="message-bubble">
+      {message.media_url && onMediaClick && <button onClick={() => onMediaClick(message.media_url!, 'image')}>Abrir imagen simulada</button>}
       <span>{message.body}</span>{message.status === 'failed' && <button onClick={() => onRetry?.(message)}>Reintentar envío</button>}<span>{message.quoted_body}</span>
       <span data-testid="own-reaction">{message.reactions?.find(reaction => reaction.is_from_me)?.emoji || ''}</span>
       <span data-testid="contact-reaction">{message.reactions?.find(reaction => !reaction.is_from_me)?.emoji || ''}</span>
@@ -43,7 +44,7 @@ vi.mock('./ContactPanel', () => ({ default: () => null }))
 vi.mock('./ForwardMessageModal', () => ({ default: () => null }))
 vi.mock('./MessageInfoDialog', () => ({ default: () => null }))
 vi.mock('./QuickReplyPicker', () => ({ default: () => null }))
-vi.mock('./ImageViewer', () => ({ default: () => null }))
+vi.mock('./ImageViewer', () => ({ default: ({ src, onClose }: { src: string; onClose: () => void }) => <div role="dialog" aria-label="Imagen simulada" data-src={src}><button onClick={onClose}>Cerrar imagen simulada</button></div> }))
 vi.mock('./ChatDocumentViewer', () => ({
   default: ({ document, onClose }: { document: { filename: string }; onClose: () => void }) => (
     <div role="dialog" aria-label={`Vista previa de ${document.filename}`}>
@@ -246,6 +247,78 @@ describe('ChatPanel experience invariants', () => {
     await act(async () => finishCompression(file))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0].attention_through_message_id).toBe(incoming.id)
+  })
+  it('does not allocate or send media after the panel unmounts during image compression', async () => {
+    const OriginalURL = URL
+    const create = vi.fn(() => 'blob:qa-unmount-draft')
+    const revoke = vi.fn()
+    vi.stubGlobal('URL', class extends OriginalURL {
+      static createObjectURL = create
+      static revokeObjectURL = revoke
+    })
+    let finishCompression!: (file: File) => void
+    compression.compress.mockImplementationOnce(() => new Promise<File>(resolve => { finishCompression = resolve }))
+    const writes: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/chats/chat-1') return Promise.resolve(jsonResponse({ success: true, chat, device: device('connected') }))
+      if (url.includes('/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: [] }))
+      if (url === '/api/media/upload' || url === '/api/messages/send') writes.push(url)
+      return Promise.resolve(jsonResponse({ success: true, stickers: [], quick_replies: [] }))
+    }))
+    const panel = render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).not.toBeDisabled())
+    const file = new File(['image'], 'image.jpg', { type: 'image/jpeg' })
+    fireEvent.change(panel.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*"]')!, { target: { files: [file] } })
+    fireEvent.click(await screen.findByRole('button', { name: 'Enviar adjunto' }))
+    await waitFor(() => expect(finishCompression).toBeTypeOf('function'))
+    expect(create).toHaveBeenCalledTimes(1)
+    panel.unmount()
+    expect(revoke).toHaveBeenCalledWith('blob:qa-unmount-draft')
+    await act(async () => finishCompression(file))
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(writes).toEqual([])
+  })
+  it.each(['http', 'websocket'] as const)('keeps the open optimistic image viewer alive with its canonical source after %s confirmation', async source => {
+    const OriginalURL = URL
+    let nextBlob = 0
+    const revoke = vi.fn()
+    vi.stubGlobal('URL', class extends OriginalURL {
+      static createObjectURL = vi.fn(() => `blob:qa-viewer-${++nextBlob}`)
+      static revokeObjectURL = revoke
+    })
+    let finishSend!: (response: Response) => void
+    const canonicalURL = '/api/media/file/account/viewer.jpg'
+    const canonical = { ...message, id: 'sent-viewer', message_id: 'wa-viewer', body: '', message_type: 'image', media_filename: 'image.jpg', media_url: canonicalURL }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/chats/chat-1') return Promise.resolve(jsonResponse({ success: true, chat, device: device('connected') }))
+      if (url.includes('/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: [] }))
+      if (url === '/api/media/upload') return Promise.resolve(jsonResponse({ success: true, proxy_url: canonicalURL }))
+      if (url === '/api/messages/send') return new Promise<Response>(resolve => { finishSend = resolve })
+      return Promise.resolve(jsonResponse({ success: true, stickers: [], quick_replies: [] }))
+    }))
+    const panel = render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).not.toBeDisabled())
+    const file = new File(['image'], 'image.jpg', { type: 'image/jpeg' })
+    fireEvent.change(panel.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*"]')!, { target: { files: [file] } })
+    fireEvent.click(await screen.findByRole('button', { name: 'Enviar adjunto' }))
+    await waitFor(() => expect(finishSend).toBeTypeOf('function'))
+    expect(revoke).toHaveBeenCalledWith('blob:qa-viewer-1')
+    expect(revoke).not.toHaveBeenCalledWith('blob:qa-viewer-2')
+    fireEvent.click(await screen.findByRole('button', { name: 'Abrir imagen simulada' }))
+    const viewer = screen.getByRole('dialog', { name: 'Imagen simulada' })
+    expect(viewer).toHaveAttribute('data-src', 'blob:qa-viewer-2')
+    if (source === 'http') {
+      await act(async () => finishSend(jsonResponse({ success: true, message: canonical })))
+    } else {
+      await act(async () => { for (const listener of Array.from(websocket.listeners)) listener({ event: 'message_sent', data: { chat_id: chat.id, message: canonical } }) })
+    }
+    await waitFor(() => expect(viewer).toHaveAttribute('data-src', canonicalURL))
+    expect(screen.getByRole('dialog', { name: 'Imagen simulada' })).toBe(viewer)
+    expect(revoke.mock.calls.filter(([url]) => url === 'blob:qa-viewer-2')).toHaveLength(1)
+    if (source === 'websocket') await act(async () => finishSend(jsonResponse({ success: true, message: canonical })))
+    expect(revoke.mock.calls.filter(([url]) => url === 'blob:qa-viewer-2')).toHaveLength(1)
   })
   it('uploads media once and retries the exact frozen payload while preserving the next draft', async () => {
     const OriginalURL = URL

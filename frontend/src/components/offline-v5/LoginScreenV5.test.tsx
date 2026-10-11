@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   push: vi.fn(),
   replace: vi.fn(),
+  navigateOnline: vi.fn(),
   unlock: vi.fn(),
   select: vi.fn(),
   fallback: vi.fn(),
@@ -26,6 +27,7 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: mocks.push, replace: mocks.replace, refresh: vi.fn() }) }))
+vi.mock('@/lib/onlineLoginNavigation', () => ({ navigateAfterOnlineLogin: mocks.navigateOnline }))
 vi.mock('next/script', () => ({ default: () => null }))
 vi.mock('@/components/branding/ClarinBrandMark', () => ({ default: () => <span aria-label="Clarin" /> }))
 vi.mock('@/lib/api', () => ({
@@ -129,6 +131,19 @@ afterEach(() => {
 })
 
 describe('Login normal con copias Offline v5', () => {
+  it('leaves the login document after ordinary online authentication so its CSP cannot block local previews', async () => {
+    mocks.hasWorkerRegistration.mockResolvedValue(false)
+    window.history.replaceState({}, '', '/login?next=%2Fwhiteboards%2Flibrary-import')
+    render(<LoginScreen />)
+    fireEvent.change(screen.getByPlaceholderText('usuario o correo'), { target: { value: 'qa-local' } })
+    fireEvent.change(screen.getByPlaceholderText('tu contraseña'), { target: { value: 'synthetic-test-password' } })
+    fireEvent.click(screen.getByRole('button', { name: /^Iniciar sesión$/i }))
+
+    await vi.waitFor(() => expect(mocks.navigateOnline).toHaveBeenCalledExactlyOnceWith('/whiteboards/library-import'))
+    expect(mocks.push).not.toHaveBeenCalled()
+    expect(mocks.completeOnline).not.toHaveBeenCalled()
+  })
+
   it('does not start the offline runtime or expose controls when this browser never prepared a copy', async () => {
     mocks.hasWorkerRegistration.mockResolvedValue(false)
     render(<LoginScreen />)
@@ -158,6 +173,7 @@ describe('Login normal con copias Offline v5', () => {
     expect(await screen.findByText('No se pudo conectar con Clarin. Puedes esperar y volver a intentarlo.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Entrar en modo offline' })).not.toBeInTheDocument()
     expect(screen.queryByText(/copia offline autorizada/i)).not.toBeInTheDocument()
+    expect(mocks.navigateOnline).not.toHaveBeenCalled()
   })
 
   it('replaces a revoked offline shell with the ordinary online login', async () => {
@@ -192,6 +208,7 @@ describe('Login normal con copias Offline v5', () => {
     fireEvent.click(screen.getByRole('button', { name: /Cuenta B/i }))
     await vi.waitFor(() => expect(mocks.select).toHaveBeenCalledWith('grant-b'))
     expect(mocks.push).toHaveBeenCalledWith('/dashboard')
+    expect(mocks.navigateOnline).not.toHaveBeenCalled()
   })
 
   it('completes only the v5 transition after Clarin verifies the exact offline identity', async () => {
@@ -214,7 +231,9 @@ describe('Login normal con copias Offline v5', () => {
     expect(mocks.beginOnline).toHaveBeenCalledOnce()
     expect(mocks.invalidate).not.toHaveBeenCalled()
     expect(mocks.lock).not.toHaveBeenCalled()
-    expect(mocks.push).toHaveBeenCalledWith('/dashboard')
+    expect(mocks.navigateOnline).toHaveBeenCalledExactlyOnceWith(null)
+    expect(mocks.completeOnline.mock.invocationCallOrder[0]).toBeLessThan(mocks.navigateOnline.mock.invocationCallOrder[0])
+    expect(mocks.push).not.toHaveBeenCalled()
   })
 
   it('cancels the v5 latch after rejected authentication without locking or losing the offline session', async () => {
@@ -240,6 +259,31 @@ describe('Login normal con copias Offline v5', () => {
     expect(mocks.completeOnline).not.toHaveBeenCalled()
     expect(mocks.lock).not.toHaveBeenCalled()
     expect(await screen.findByText('Credenciales incorrectas')).toBeInTheDocument()
+    expect(mocks.navigateOnline).not.toHaveBeenCalled()
+  })
+
+  it('keeps the current document when the offline worker cannot complete the online transition', async () => {
+    const userId = '11111111-1111-4111-8111-111111111111'
+    const accountId = '22222222-2222-4222-8222-222222222222'
+    mocks.expectation = { version: 3, user_id: userId, account_id: accountId, issued_at: Date.now() }
+    mocks.completeOnline.mockRejectedValue(new Error('Worker unavailable'))
+    window.history.replaceState({}, '', '/login?offline_reauth=1')
+    vi.mocked(fetch).mockImplementation(async input => new Response(JSON.stringify(String(input).includes('/api/auth/login')
+      ? { success: true, user: { id: userId, account_id: accountId } }
+      : { success: true, login_enabled: true, login_turnstile_required: false }), {
+      status: 200, headers: { 'Content-Type': 'application/json', 'X-Clarin-Response': '1' },
+    }))
+    render(<LoginScreen />)
+    await screen.findByText(/exactamente el mismo usuario/i)
+    fireEvent.change(screen.getByPlaceholderText('usuario o correo'), { target: { value: 'qa-local' } })
+    fireEvent.change(screen.getByPlaceholderText('tu contraseña'), { target: { value: 'synthetic-test-password' } })
+    fireEvent.click(screen.getByRole('button', { name: /Iniciar sesión/i }))
+
+    expect(await screen.findByText(/no pudo cerrar el modo offline de forma segura/i)).toBeInTheDocument()
+    expect(mocks.cancelOnline).toHaveBeenCalledOnce()
+    expect(mocks.navigateOnline).not.toHaveBeenCalled()
+    expect(mocks.push).not.toHaveBeenCalled()
+    expect(mocks.lock).not.toHaveBeenCalled()
   })
 
   it('cancels an explicit transition and returns to the still-active canonical offline session', async () => {
@@ -256,6 +300,7 @@ describe('Login normal con copias Offline v5', () => {
     await vi.waitFor(() => expect(mocks.cancelOnline).toHaveBeenCalledOnce())
     expect(mocks.replace).toHaveBeenCalledWith('/dashboard')
     expect(mocks.lock).not.toHaveBeenCalled()
+    expect(mocks.navigateOnline).not.toHaveBeenCalled()
   })
 
   it('lets a locked user explicitly choose a fresh online login without an installer or v4 shell', async () => {
@@ -290,7 +335,9 @@ describe('Login normal con copias Offline v5', () => {
     expect(mocks.beginOnline.mock.invocationCallOrder[0]).toBeLessThan(mocks.invalidate.mock.invocationCallOrder[0])
     expect(mocks.replace).toHaveBeenCalledWith('/login?offline_fresh_login=1')
     expect(mocks.lock).not.toHaveBeenCalled()
-    expect(mocks.push).toHaveBeenCalledWith('/dashboard')
+    expect(mocks.navigateOnline).toHaveBeenCalledExactlyOnceWith(null)
+    expect(mocks.completeOnline.mock.invocationCallOrder[0]).toBeLessThan(mocks.navigateOnline.mock.invocationCallOrder[0])
+    expect(mocks.push).not.toHaveBeenCalled()
   })
 
   it('upgrades an ordinary login to exact reauthentication while a local identity is active', async () => {

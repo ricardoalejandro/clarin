@@ -28,5 +28,13 @@ describe('Contact experience geometry and drafts', () => {
     expect(contactTagForeground('#FFFF00')).toBe('#0F172A')
     expect(contactTagForeground('#123456')).toBe('#FFFFFF')
     expect(contactTagForeground('invalid')).toBe('#FFFFFF')
+    expect(contactTagForeground()).toBe('#FFFFFF')
+  })
+  it('chooses white on indigo and mid-gray where slate has less contrast', () => {
+    expect(contactTagForeground('#6366f1')).toBe('#FFFFFF')
+    expect(contactTagForeground('#6366F1')).toBe('#FFFFFF')
+    expect(contactTagForeground('#777777')).toBe('#FFFFFF')
+    expect(contactTagForeground('#808080')).toBe('#0F172A')
+    expect(contactTagForeground('#818CF8')).toBe('#0F172A')
   })
 })
