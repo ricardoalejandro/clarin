@@ -266,6 +266,10 @@ func (s *Server) storageBuildUseSelection(ctx context.Context, q storageSelfServ
 			}
 			info, err := s.storage.GetFileInfo(ctx, recovery.ObjectKey)
 			if err != nil {
+				if storageSelfServiceObjectMissing(err) {
+					selection.Items = append(selection.Items, storageMissingRecoveryReviewItem(recovery, refs, selection.Action))
+					continue
+				}
 				return selection, err
 			}
 			item := storageUseReviewItem{ObjectKey: recovery.ObjectKey, RecoveryID: id.String(), RecoveryOrder: recovery.RemovalOrder, Filename: recovery.Filename, MediaType: recovery.MediaType, SizeBytes: info.Size, Eligible: recovery.State == "removed", storageUseImpact: storageUseImpact{SelectedUsesCount: 1, RemovedUses: 1, RetainedElsewhere: len(refs) > 0}}

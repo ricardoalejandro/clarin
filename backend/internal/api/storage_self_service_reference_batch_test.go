@@ -111,3 +111,18 @@ func TestStorageReviewDistinguishesConflictsFromOperationalFailures(t *testing.T
 		}
 	}
 }
+
+func TestStorageMissingRecoveryPreservesHistoryWithoutOfferingMutation(t *testing.T) {
+	recovery := storageUseRecovery{ID: uuid.New(), ObjectKey: uuid.NewString() + "/chats/lost.pdf", Filename: "Documento.pdf", MediaType: "document", State: "removed", SizeBytes: 1024, RemovalOrder: 42}
+	for _, action := range []string{"restore", "purge"} {
+		item := storageMissingRecoveryReviewItem(recovery, nil, action)
+		if item.Eligible || item.SizeBytes != 0 || item.EstimatedFreedBytes != 0 || item.RemovedUses != 0 || item.SelectedUsesCount != 0 || item.WillTrash || item.RecoveryID != recovery.ID.String() || item.RecoveryOrder != 42 || item.Filename != recovery.Filename || item.Reason == "" {
+			t.Fatal("missing recovery offered a mutation or replaced historical identity")
+		}
+		changed := recovery
+		changed.State = "restored"
+		if storageMissingRecoveryReviewItem(changed, nil, action).Fingerprint == item.Fingerprint {
+			t.Fatal("changed recovery did not invalidate blocked review")
+		}
+	}
+}

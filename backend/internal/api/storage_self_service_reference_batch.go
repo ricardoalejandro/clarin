@@ -155,6 +155,13 @@ func storageMissingUseReviewItem(key string, uses []storageSelfServiceUse, refs 
 		ReferencesCount: len(uses), Fingerprint: storageUseFingerprint([]any{"missing", key, refs, fingerprints})}
 }
 
+func storageMissingRecoveryReviewItem(recovery storageUseRecovery, refs []storageSelfServiceReference, action string) storageUseReviewItem {
+	return storageUseReviewItem{ObjectKey: recovery.ObjectKey, RecoveryID: recovery.ID.String(),
+		RecoveryOrder: recovery.RemovalOrder, Filename: recovery.Filename, MediaType: recovery.MediaType,
+		Eligible: false, Reason: "El archivo ya no está en el almacenamiento. Su recuperación se conservará para revisión.",
+		ReferencesCount: len(refs), Fingerprint: storageUseFingerprint([]any{"missing-recovery", recovery, refs, action})}
+}
+
 func storageUseSelectionConflict(err error) bool {
-	return errors.Is(err, errStorageUseProtected) || errors.Is(err, errStorageUseChanged) || errors.Is(err, pgx.ErrNoRows)
+	return errors.Is(err, errStorageUseProtected) || errors.Is(err, errStorageUseChanged) || errors.Is(err, errStorageUseRestoreConflict) || errors.Is(err, pgx.ErrNoRows)
 }

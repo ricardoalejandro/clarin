@@ -152,10 +152,13 @@ func storagePrivateUseError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, repository.ErrTaskAccessDenied) || errors.Is(err, repository.ErrWhiteboardForbidden) {
+	// Resource ACL queries intentionally return not-found for hidden parents.
+	// Preserve that denial at the adapter boundary; it is not an unavailable
+	// database or evidence that a caller may inspect the original location.
+	if errors.Is(err, repository.ErrTaskAccessDenied) || errors.Is(err, repository.ErrWhiteboardForbidden) || errors.Is(err, pgx.ErrNoRows) || errors.Is(err, repository.ErrTaskWorkNotFound) || errors.Is(err, repository.ErrWhiteboardNotFound) {
 		return errStorageUseProtected
 	}
-	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, repository.ErrTaskWorkNotFound) || errors.Is(err, repository.ErrWhiteboardNotFound) || errors.Is(err, repository.ErrWhiteboardConflict) || errors.Is(err, repository.ErrTaskAccessRevisionConflict) {
+	if errors.Is(err, repository.ErrWhiteboardConflict) || errors.Is(err, repository.ErrTaskAccessRevisionConflict) {
 		return errStorageUseRestoreConflict
 	}
 	return err

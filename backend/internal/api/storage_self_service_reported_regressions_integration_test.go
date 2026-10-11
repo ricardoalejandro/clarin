@@ -222,6 +222,54 @@ func TestStorageSelfServiceReportedRegressionsIntegration(t *testing.T) {
 		}
 		f.expectObject(key, false)
 	})
+	t.Run("missing recovery bytes block restore and purge without consuming history", func(t *testing.T) {
+		f := newStorageMultiOriginQAFixture(t, db, store)
+		key, _, message := f.media(f.account, "chats", "missing-recovery.pdf", true)
+		use := storageQAUseOfType(t, f.uses(key, nil), "chats")["use_id"].(string)
+		f.confirmUse(f.previewUses(key, use))
+		id := f.recoveryID(key, use)
+		// Make purge otherwise eligible without waiting seven wall-clock days.
+		// The missing-byte review must preserve both this recovery and its marker.
+		f.exec(`UPDATE storage_removed_references SET removed_at=NOW()-INTERVAL '9 days',retain_until=NOW()-INTERVAL '1 day' WHERE account_id=$1 AND id=$2`, f.account, id)
+		f.exec(`UPDATE storage_media_trash SET removed_at=NOW()-INTERVAL '9 days',purge_after=NOW()-INTERVAL '1 day' WHERE account_id=$1 AND object_key=$2`, f.account, key)
+		var beforeRecovery, beforeMarker string
+		if err := db.QueryRow(ctx, `SELECT to_jsonb(r)::text FROM storage_removed_references r WHERE account_id=$1 AND id=$2`, f.account, id).Scan(&beforeRecovery); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRow(ctx, `SELECT to_jsonb(t)::text FROM storage_media_trash t WHERE account_id=$1 AND object_key=$2`, f.account, key).Scan(&beforeMarker); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.DeleteFile(ctx, key); err != nil {
+			t.Fatal(err)
+		}
+		// No inventory reconciliation after externally losing the physical object.
+		for _, action := range []string{"restore", "purge"} {
+			status, raw := storageReportedRequest(t, f, "POST", "/storage/cleanup/preview", map[string]any{"action": action, "recovery_ids": []string{id}}, nil)
+			result := storageReportedJSON(t, raw)
+			if status != 200 || result["eligible_count"] != float64(0) || result["estimated_bytes"] != float64(0) || result["estimated_freed_bytes"] != float64(0) {
+				t.Fatalf("missing recovery %s review status=%d eligible=%v", action, status, result["eligible_count"])
+			}
+			items := storageQAItems(t, result, "items")
+			if len(items) != 1 || items[0]["recovery_id"] != id || items[0]["eligible"] != false || items[0]["size_bytes"] != float64(0) {
+				t.Fatalf("missing recovery %s was not retained as one blocked zero-byte item", action)
+			}
+			if reason, ok := items[0]["reason"].(string); !ok || reason == "" {
+				t.Fatalf("missing recovery %s did not explain why it is blocked", action)
+			}
+			var recovery, marker string
+			if err := db.QueryRow(ctx, `SELECT to_jsonb(r)::text FROM storage_removed_references r WHERE account_id=$1 AND id=$2`, f.account, id).Scan(&recovery); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.QueryRow(ctx, `SELECT to_jsonb(t)::text FROM storage_media_trash t WHERE account_id=$1 AND object_key=$2`, f.account, key).Scan(&marker); err != nil {
+				t.Fatal(err)
+			}
+			if recovery != beforeRecovery || marker != beforeMarker {
+				t.Fatalf("missing recovery %s changed stored history or retention", action)
+			}
+			f.expectMessage(message, true)
+			f.expectObject(key, false)
+		}
+	})
 	t.Run("provider inspection failure is unavailable rather than false absence", func(t *testing.T) {
 		f := newStorageMultiOriginQAFixture(t, db, store)
 		key, _, message := f.media(f.account, "chats", "provider-failure.pdf", true)
