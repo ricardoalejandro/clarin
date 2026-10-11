@@ -93,6 +93,9 @@ func TestStorageReferenceGuardIntegration(t *testing.T) {
 			{map[string]any{"nested": []any{map[string]any{"url": "https://media.invalid/clarin-media/" + a.String() + "/uploads/report%20final.pdf"}, nil}}, []string{key}},
 			{map[string]any{"raw": a.String() + "/uploads/a+b.pdf"}, []string{a.String() + "/uploads/a+b.pdf"}},
 			{map[string]any{"raw": key}, []string{key}},
+			{map[string]any{"raw": a.String() + "/uploads/literal%20space?.pdf#v'\"]}"}, []string{a.String() + "/uploads/literal%20space?.pdf#v'\"]}"}},
+			{map[string]any{"url": "/api/media/file/" + a.String() + "/uploads/literal%2520space%3F.pdf%23v%27%22%5D%7D?media_preview=x"}, []string{a.String() + "/uploads/literal%20space?.pdf#v'\"]}"}},
+			{map[string]any{"raw": a.String() + "/uploads/bad\nheader.pdf"}, []string{}},
 			{map[string]any{"url": "https://media.invalid/custom-bucket/" + a.String() + "%2Fuploads%2Freport%20final.pdf?signature=x"}, []string{key}},
 			{map[string]any{"url": "/api/media/file/" + a.String() + "%2Fuploads%2Fespa%C3%B1ol.pdf"}, []string{a.String() + "/uploads/español.pdf"}},
 			{map[string]any{"url": "https://other.invalid/plain.pdf"}, []string{}},
@@ -117,6 +120,13 @@ func TestStorageReferenceGuardIntegration(t *testing.T) {
 			t.Fatalf("reference was not rejected safely: %v", err)
 		}
 	}
+	t.Run("literal percent tombstones cannot be bypassed by raw key decoding", func(t *testing.T) {
+		literalKey := a.String() + "/uploads/literal%20identity.pdf"
+		exec(`INSERT INTO storage_media_trash(account_id,object_key,actor_id,filename,media_type,size_bytes,message_backups,purge_after,state) VALUES($1,$2,$3,'literal.pdf','document',42,'[]',NOW(),'purging')`, a, literalKey, user)
+		assertRejected(`INSERT INTO media_assets(id,account_id,content_hash,object_key) VALUES($1,$2,$3,$4)`, uuid.New(), a, uuid.NewString(), literalKey)
+		assertRejected(`INSERT INTO saved_stickers(account_id,media_url) VALUES($1,$2)`, a, "/api/media/file/"+a.String()+"/uploads/literal%2520identity.pdf")
+		exec(`INSERT INTO media_assets(id,account_id,content_hash,object_key) VALUES($1,$2,$3,$4)`, uuid.New(), a, uuid.NewString(), a.String()+"/uploads/literal identity.pdf")
+	})
 	t.Run("canonical contact avatar routes retain physical account validation", func(t *testing.T) {
 		ownAsset, foreignAsset, contact := uuid.New(), uuid.New(), uuid.New()
 		exec(`INSERT INTO media_assets(id,account_id,content_hash,object_key) VALUES($1,$2,$3,$4)`, ownAsset, a, ownAsset.String(), a.String()+"/_private/avatars/"+contact.String()+"/photo.jpg")

@@ -64,6 +64,7 @@ func storageInventoryRawGET(t *testing.T, f *storageQAFixture, path string) map[
 }
 
 func runStorageInventoryIntegrationChecks(t *testing.T, db *pgxpool.Pool, store *storage.Storage) {
+	runStorageInventoryQueryRegressionChecks(t, db, store)
 	t.Run("inventory shared fanout stays bounded and retains hidden authority", func(t *testing.T) {
 		const references = 10000
 		f := storagePerformanceSharedFixture(t, db, store, references)

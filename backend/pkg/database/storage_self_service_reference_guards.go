@@ -93,12 +93,13 @@ func storageSelfServiceReferenceGuardMigrations() []string {
 		   END IF;
 		   -- A normalized raw key may contain spaces; URL delimiters apply only
 		   -- to keys extracted from a proxy/S3 URL embedded in another string.
-		   IF decoded_value ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/' THEN
-		     object_key:=rtrim(decoded_value,chr(39)||']}'||chr(34));
+		   IF value ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/' THEN
+		     object_key:=value;
 		     IF object_key !~ '(^|/)\.{1,2}(/|$)' AND strpos(object_key,'//')=0
-		       AND strpos(object_key,chr(92))=0 AND right(object_key,1)<>'/' THEN
+		       AND strpos(object_key,chr(92))=0 AND strpos(object_key,chr(10))=0 AND strpos(object_key,chr(13))=0 AND right(object_key,1)<>'/' THEN
 		       result:=array_append(result,object_key);
 		     END IF;
+		     CONTINUE;
 		   END IF;
 		   FOR hit IN SELECT regexp_matches(value, '(/api/media/file/|/clarin-media/)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/[^"\\?[:space:]<>(){},]+)', 'g') LOOP
 		     object_key := rtrim(clarin_storage_path_unescape(hit[2]), chr(39)||']}'||chr(34));

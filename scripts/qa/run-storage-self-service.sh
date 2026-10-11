@@ -123,7 +123,7 @@ export CLARIN_STORAGE_QA_REDIS_URL="redis://127.0.0.1:$CLARIN_STORAGE_QA_REDIS_P
 export CLARIN_RUN_STORAGE_SELF_SERVICE_INTEGRATION=1
 unset CLARIN_STORAGE_QA_PGLITE
 cd "$repo_root/backend"
-go test -count=1 -timeout=15m -run '^TestStorageSelfService(Integration|MultiOriginIntegration|ResourceACLIntegration|OrphansIntegration|IndexIntegration)$' -v ./internal/api
+go test -count=1 -timeout=15m -run '^TestStorageSelfService(Integration|MultiOriginIntegration|ResourceACLIntegration|OrphansIntegration|IndexIntegration|ReportedRegressionsIntegration)$' -v ./internal/api
 # Exercise the real preview publication lock helper against PostgreSQL too;
 # its temporary schema is isolated from the service fixtures below.
 go test -count=1 -timeout=1m -run '^TestTaskPreviewPublicationConcurrencyIntegration$' -v ./internal/taskpreview
@@ -134,6 +134,9 @@ docker exec "$qa_postgres" createdb --username storageqa clarin_storage_guard_qa
 export DATABASE_URL="postgres://storageqa:$qa_password@127.0.0.1:$CLARIN_STORAGE_QA_POSTGRES_PORT/clarin_storage_guard_qa?sslmode=disable"
 export CLARIN_RUN_STORAGE_REFERENCE_GUARD_INTEGRATION=1
 go test -count=1 -timeout=5m -run '^TestStorageReferenceGuardIntegration$' -v ./pkg/database
+# This upgrade test creates and removes its own database in this disposable
+# PostgreSQL server, including the one-time legacy parser projection reset.
+CLARIN_RUN_STORAGE_INVENTORY_INTEGRATION=1 go test -count=1 -timeout=5m -run '^TestStorageInventoryMigrationsIntegration$' -v ./pkg/database
 # Avatar GC shares the same media lifecycle. This database belongs only to
 # this ephemeral PostgreSQL container; no reusable workspace database is read.
 INTEGRITY_TEST_DATABASE_URL="postgres://storageqa:$qa_password@127.0.0.1:$CLARIN_STORAGE_QA_POSTGRES_PORT/program_survey_integrity_test?sslmode=disable" \

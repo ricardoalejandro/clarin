@@ -226,6 +226,28 @@ func TestStorageInventoryMigrationsIntegration(t *testing.T) {
 		}
 		assertTotals(accountA, 1, 25)
 	})
+	t.Run("parser upgrade atomically hides old references exactly once", func(t *testing.T) {
+		// Simulate an already-indexed installation created by the old parser.
+		exec(`UPDATE storage_inventory_sources SET indexed_generation=generation WHERE account_id=ANY($1::uuid[])`, []uuid.UUID{accountA, accountB})
+		exec(`DELETE FROM storage_inventory_projection_upgrades WHERE version='exact-object-key-parser-v2'`)
+		beforeA, beforeB := generation(accountA, "messages", messageA), generation(accountB, "messages", messageB)
+		migrate()
+		assertInvalidated(accountA, "messages", messageA, beforeA)
+		assertInvalidated(accountB, "messages", messageB, beforeB)
+		var visible, dirty int
+		if err := db.QueryRow(ctx, `SELECT count(*) FROM storage_inventory_references r JOIN storage_inventory_sources s USING(account_id,source_kind,source_id)
+		 WHERE r.readable AND r.source_generation=s.generation AND s.indexed_generation=s.generation`).Scan(&visible); err != nil || visible != 0 {
+			t.Fatalf("old parser reference remained visible: count=%d err=%v", visible, err)
+		}
+		if err := db.QueryRow(ctx, `SELECT count(*) FROM storage_inventory_sources WHERE generation<>indexed_generation`).Scan(&dirty); err != nil || dirty == 0 {
+			t.Fatalf("upgrade did not leave resumable worker jobs: count=%d err=%v", dirty, err)
+		}
+		upgradedA, upgradedB := generation(accountA, "messages", messageA), generation(accountB, "messages", messageB)
+		migrate()
+		if generation(accountA, "messages", messageA) != upgradedA || generation(accountB, "messages", messageB) != upgradedB {
+			t.Fatal("repeated startup invalidated the projection again")
+		}
+	})
 	t.Run("deleted accounts leave no projection or totals", func(t *testing.T) {
 		exec(`DELETE FROM accounts WHERE id=$1`, accountA)
 		for _, table := range []string{"storage_inventory_objects", "storage_inventory_sources", "storage_inventory_references", "storage_inventory_totals"} {

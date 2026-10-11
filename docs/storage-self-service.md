@@ -143,6 +143,34 @@ incompleta no se presenta como consumo total definitivo.
 
 Las revisiones, confirmaciones, descargas y detalles de usos comprueban en vivo
 los objetos seleccionados y sus referencias; el índice no autoriza eliminaciones.
+La disponibilidad para revisar un archivo de Chats depende de sus referencias
+autorizadas y vigentes, sin bloquearlo por una fuente ajena que esté actualizándose.
+Un uso protegido nuevo puede bloquear la revisión en vivo aunque todavía no haya
+llegado al índice. Las cargas abandonadas y la purga siguen exigiendo un índice
+completo. La revisión de hasta 100 archivos reúne sus referencias en una consulta;
+esa instantánea sólo pertenece a una fase de lectura de la petición y se renueva
+al confirmar, bajo la barrera de la cuenta. Nunca se reutiliza tras una mutación.
+
+La proyección creada con el parser anterior se invalida una sola vez al aplicar
+`exact-object-key-parser-v2`. La actualización atómica cambia generaciones del
+índice, conserva todos los datos de negocio y deja la reconstrucción al trabajador
+por lotes. Los resultados anteriores dejan de autorizar lecturas mientras esperan
+su reconstrucción; repetir el arranque no vuelve a invalidarlos.
+
+Las claves se conservan literalmente y las URLs se decodifican una sola vez.
+Un archivo físicamente ausente devuelve 404 y queda bloqueado en una revisión
+mixta, con cero bytes atribuidos y sin eliminar sus ubicaciones. Un fallo operativo
+de SQL, Redis o S3 devuelve un error recuperable de servicio, no una ausencia ni
+un conflicto de selección. Los conflictos reales de la revisión devuelven 409 y
+exigen revisar de nuevo antes de confirmar.
+
+Los avisos ordinarios de almacenamiento agrupan una lectura posterior sin
+cancelar la que está en curso ni descartar la revisión. Cambiar de cuenta, recurso
+o permisos sigue cancelando y ocultando inmediatamente el estado anterior.
+La carga y preparación tienen un plazo de 30 segundos en el cliente y ofrecen
+reintento explícito; los avisos no reinician ese plazo. Las miniaturas descargan
+como máximo cuatro imágenes simultáneas por ámbito autorizado.
+
 El resumen autorizado aún puede recorrer las filas SQL que correspondan al actor,
 y el detalle de usos materializa los usos coincidentes antes de aplicar su cursor.
 Estos costes no equivalen a un recorrido de S3 en cada página. El informe de QA separa el volumen sintético medido y las distribuciones privadas que todavía no se han medido.

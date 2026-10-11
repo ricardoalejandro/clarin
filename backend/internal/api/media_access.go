@@ -13,6 +13,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/service"
 	"github.com/naperu/clarin/internal/storage"
@@ -217,41 +218,54 @@ func (s *Server) publicMediaGrantCurrent(ctx context.Context, grant *mediaAccess
 }
 
 func (s *Server) authorizeOrdinaryMedia(c *fiber.Ctx, objectKey string) bool {
+	allowed, _ := s.authorizeOrdinaryMediaChecked(c, objectKey)
+	return allowed
+}
+
+func (s *Server) authorizeOrdinaryMediaChecked(c *fiber.Ctx, objectKey string) (bool, error) {
+	ctx, cancel := context.WithTimeout(c.Context(), storageSelfServiceCatalogTimeout)
+	defer cancel()
 	accountID, valid := ordinaryMediaKeyAccount(objectKey)
 	if !valid || s.cfg == nil {
-		return false
+		return false, nil
 	}
-	if grant, err := verifyMediaAccessGrant(s.cfg.JWTSecret, c.Query("media_access"), objectKey, time.Now()); err == nil && grant.Purpose != "upload-preview" && s.publicMediaGrantCurrent(c.Context(), grant) {
-		return true
+	if grant, err := verifyMediaAccessGrant(s.cfg.JWTSecret, c.Query("media_access"), objectKey, time.Now()); err == nil && grant.Purpose != "upload-preview" && s.publicMediaGrantCurrent(ctx, grant) {
+		return true, nil
 	}
 	token := authTokenFromRequest(c)
 	if token == "" || s.services == nil || s.services.Auth == nil {
-		return false
+		return false, nil
 	}
-	claims, err := s.services.Auth.ValidateTokenReadOnly(c.Context(), token, s.cfg.JWTSecret)
-	if err != nil || claims.AccountID != accountID {
-		return false
+	claims, err := s.services.Auth.ValidateTokenReadOnly(ctx, token, s.cfg.JWTSecret)
+	if errors.Is(err, service.ErrAuthSessionUnavailable) {
+		return false, err
 	}
-	if s.hydrateAccountScopedClaims(c.Context(), claims) != nil {
-		return false
+	if err != nil || claims == nil || claims.AccountID != accountID {
+		return false, nil
 	}
-	refs, err := storageSelfServiceObjectReferences(c.Context(), s.repos.DB(), accountID, objectKey, s.storage)
+	if err := s.hydrateAccountScopedClaims(ctx, claims); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	refs, err := storageSelfServiceObjectReferences(ctx, s.repos.DB(), accountID, objectKey, s.storage)
 	if err != nil {
-		return false
+		return false, err
 	}
 	if len(refs) > 0 && storageSelfServiceCanRead(claims, refs) {
-		return true
+		return true, nil
 	}
 	if grant, err := verifyMediaAccessGrant(s.cfg.JWTSecret, c.Query("media_preview"), objectKey, time.Now()); err == nil && privateMediaPreviewAllowed(grant, claims) {
 		// A persisted draft URL must not keep a removed attachment accessible.
 		// Restoration/retention previews have their own actor-authorized endpoint.
 		var removed bool
-		if err := s.repos.DB().QueryRow(c.Context(), `SELECT EXISTS(SELECT 1 FROM storage_media_trash WHERE account_id=$1 AND object_key=$2 AND state IN ('trash','purging','purged'))`, accountID, objectKey).Scan(&removed); err != nil {
-			return false
+		if err := s.repos.DB().QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM storage_media_trash WHERE account_id=$1 AND object_key=$2 AND state IN ('trash','purging','purged'))`, accountID, objectKey).Scan(&removed); err != nil {
+			return false, err
 		}
-		return !removed
+		return !removed, nil
 	}
-	return false
+	return false, nil
 }
 
 func (s *Server) publishSurveyBranding(survey *domain.Survey) domain.SurveyBranding {

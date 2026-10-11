@@ -7,6 +7,13 @@ import (
 	"github.com/google/uuid"
 )
 
+// MediaProxyURL preserves every filename character as path data. In particular,
+// a literal percent escape in an object key must not be decoded a second time
+// when the authenticated proxy receives the generated URL.
+func MediaProxyURL(objectKey string) string {
+	return (&url.URL{Path: "/api/media/file/" + objectKey}).String()
+}
+
 // OrdinaryObjectKeyFromURL recognizes only the configured S3 origins/bucket.
 // Matching a bucket substring in an unrelated URL must never make it trusted.
 func (s *Storage) OrdinaryObjectKeyFromURL(raw string) (string, bool) {
@@ -47,5 +54,5 @@ func (s *Storage) CanonicalMediaURL(raw string) string {
 			return raw
 		}
 	}
-	return "/api/media/file/" + strings.ReplaceAll(url.PathEscape(key), "%2F", "/")
+	return MediaProxyURL(key)
 }

@@ -135,6 +135,8 @@ func StorageInventoryMigrations() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_storage_inventory_references_key ON storage_inventory_references(account_id,object_key,source_kind,source_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_storage_inventory_references_origin ON storage_inventory_references(account_id,origin,object_key)`,
+		`CREATE INDEX IF NOT EXISTS idx_storage_removed_references_private_active ON storage_removed_references(account_id)
+ WHERE state IN ('removed','purging') AND adapter IN ('private_work','private_whiteboards')`,
 		`CREATE TABLE IF NOT EXISTS storage_inventory_backfill (
 		 account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
 		 source_kind TEXT NOT NULL,
@@ -248,6 +250,7 @@ func StorageInventoryMigrations() []string {
 		`CREATE TRIGGER clarin_storage_inventory_change AFTER UPDATE OF name,account_id OR DELETE ON whiteboards
    FOR EACH ROW EXECUTE FUNCTION clarin_storage_inventory_source_change('direct','','id,account_id,name')`,
 	)
+	migrations = append(migrations, storageInventoryParserMigrations()...)
 	return migrations
 }
 

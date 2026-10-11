@@ -74,12 +74,12 @@ func storageInventoryRetainedElsewhereSQL(objectKey string) string {
 // Materialize only private ACL identities within this statement: otherwise
 // PostgreSQL expands the large canonical predicates into every correlated
 // projection. Ordinary references remain inline so account/key indexes apply.
-func storageInventoryCTE(claims *service.JWTClaims) string {
+func storageInventoryCTE(claims *service.JWTClaims, includePrivateSources ...bool) string {
 	privateAccess, privateRecovery, privateMutation, privateRestore := "FALSE", "FALSE", "FALSE", "FALSE"
 	// These claims were reloaded from current membership for this request. A
 	// missing module cannot grant private access; avoid planning its resource
 	// hierarchy at all for actors who cannot use either private module.
-	if storageSelfServiceHasPermission(claims, domain.PermTasks) || storageSelfServiceHasPermission(claims, domain.PermWhiteboards) {
+	if (len(includePrivateSources) == 0 || includePrivateSources[0]) && (storageSelfServiceHasPermission(claims, domain.PermTasks) || storageSelfServiceHasPermission(claims, domain.PermWhiteboards)) {
 		privateAccess = repository.StoragePrivateMediaAccessSQL("ir", "$2")
 		privateRecovery = repository.StoragePrivateMediaRecoveryAccessSQL("rr", "$2")
 		privateMutation = repository.StoragePrivateMediaMutationSQL("ir", "$2")
@@ -131,9 +131,8 @@ func storageInventoryCTE(claims *service.JWTClaims) string {
 	 COALESCE(NULLIF(t.media_type,''),io.media_type) AS media_type,io.size_bytes,io.last_modified,
 	 CASE WHEN t.object_key IS NOT NULL THEN 'trash' ELSE 'active' END AS status,
 	 t.removed_at AS trash_at,t.purge_after,
-	 ($5::boolean AND (SELECT ready FROM catalog_state) AND t.object_key IS NULL AND EXISTS(SELECT 1 FROM storage_inventory_references ar WHERE ar.account_id=$1 AND ar.object_key=io.object_key AND ar.origin='chats')
-	  AND NOT EXISTS(SELECT 1 FROM storage_inventory_references ar WHERE ar.account_id=$1 AND ar.object_key=io.object_key AND ar.origin<>'chats')
-	  AND NOT EXISTS(SELECT 1 FROM storage_inventory_sources ds WHERE ds.account_id=$1 AND ds.generation<>ds.indexed_generation)) AS can_remove,
+	 ($5::boolean AND t.object_key IS NULL AND EXISTS(SELECT 1 FROM authorized_refs ar WHERE ar.object_key=io.object_key AND ar.origin='chats')
+	  AND NOT EXISTS(SELECT 1 FROM storage_inventory_references ar WHERE ar.account_id=$1 AND ar.object_key=io.object_key AND ar.origin<>'chats')) AS can_remove,
 	 ($5::boolean AND t.object_key IS NULL AND EXISTS(SELECT 1 FROM mutable_refs mr WHERE mr.object_key=io.object_key)) AS can_remove_uses,
  ($5::boolean AND t.state='trash') AS can_restore,
 	 ($5::boolean AND (SELECT ready FROM catalog_state) AND t.state='trash' AND t.purge_after<=NOW() AND NOT EXISTS(SELECT 1 FROM storage_inventory_references ar WHERE ar.account_id=$1 AND ar.object_key=io.object_key)
@@ -199,18 +198,22 @@ func storageInventoryRequestFilter(c *fiber.Ctx) storageInventoryFilter {
 }
 
 func (f storageInventoryFilter) orderSQL() string {
-	column := "last_modified"
-	switch f.Sort {
-	case "size":
-		column = "size_bytes"
-	case "name":
-		column = "lower(filename)"
-	}
 	direction := "DESC"
 	if f.Order == "asc" {
 		direction = "ASC"
 	}
-	return column + " " + direction + ",object_key ASC,recovery_id ASC"
+	return f.sortColumnSQL() + " " + direction + ",object_key ASC,recovery_id ASC"
+}
+
+func (f storageInventoryFilter) sortColumnSQL() string {
+	switch f.Sort {
+	case "size":
+		return "size_bytes"
+	case "name":
+		return "lower(filename)"
+	default:
+		return "last_modified"
+	}
 }
 
 const storageInventoryFilterSQL = ` WHERE ($7::text='' OR f.media_type=$7::text)
@@ -223,14 +226,51 @@ func storageInventoryArguments(accountID, actorID uuid.UUID, claims *service.JWT
 	return []any{accountID, actorID, storageInventoryOrigins(claims), domain.HasAccountAdminAuthority(claims.Role, claims.IsSuperAdmin), storageSelfServiceHasPermission(claims, domain.PermSettings), storageSelfServiceHasPermission(claims, domain.PermChats)}
 }
 
+// PostgreSQL otherwise plans the private resource hierarchies even for a Chat-
+// only account. This uncached probe can only suppress private results: if the
+// first private reference appears concurrently, the following GET will include
+// it. Whenever a private source or recovery exists, all canonical ACL predicates
+// remain in the statement, including current module and resource authority.
+func (s *Server) storageInventoryHasPrivateSources(ctx context.Context, accountID uuid.UUID, claims *service.JWTClaims) (bool, error) {
+	if !storageSelfServiceHasPermission(claims, domain.PermTasks) && !storageSelfServiceHasPermission(claims, domain.PermWhiteboards) {
+		return false, nil
+	}
+	var present bool
+	err := s.repos.DB().QueryRow(ctx, `SELECT
+ EXISTS(SELECT 1 FROM storage_inventory_references WHERE account_id=$1 AND source_kind IN ('task_attachments','whiteboard_assets','whiteboard_revision_assets'))
+ OR EXISTS(SELECT 1 FROM storage_removed_references WHERE account_id=$1 AND state IN ('removed','purging') AND adapter IN ('private_work','private_whiteboards'))`, accountID).Scan(&present)
+	return present, err
+}
+
+func storageInventoryPageSQL(claims *service.JWTClaims, filter storageInventoryFilter, includePrivateSources ...bool) string {
+	// Select scalar identities first. A wide subquery still evaluates all of
+	// its reference/capability projections before sorting on PostgreSQL 16.
+	// The lateral fence then hydrates only selected rows, with the same live
+	// authorization and generation checks as the scalar selection.
+	direction := "DESC"
+	if filter.Order == "asc" {
+		direction = "ASC"
+	}
+	return storageInventoryCTE(claims, includePrivateSources...) + `, page_keys AS MATERIALIZED (
+ SELECT f.object_key,f.recovery_id,` + filter.sortColumnSQL() + ` AS sort_value
+ FROM file_rows f` + storageInventoryFilterSQL + ` ORDER BY ` + filter.orderSQL() + ` LIMIT $13 OFFSET $14
+ ) SELECT to_jsonb(f) FROM page_keys selected CROSS JOIN LATERAL (
+ SELECT * FROM file_rows f WHERE f.object_key=selected.object_key AND f.recovery_id=selected.recovery_id OFFSET 0
+ ) f ORDER BY selected.sort_value ` + direction + `,selected.object_key ASC,selected.recovery_id ASC`
+}
+
 func (s *Server) storageInventoryFiles(ctx context.Context, accountID, actorID uuid.UUID, claims *service.JWTClaims, filter storageInventoryFilter) ([]storageSelfServiceFile, int, error) {
+	privateSources, err := s.storageInventoryHasPrivateSources(ctx, accountID, claims)
+	if err != nil {
+		return nil, 0, err
+	}
 	args := append(storageInventoryArguments(accountID, actorID, claims), filter.Type, filter.Query, filter.Origin, filter.Status, filter.MinSize, filter.OlderThan)
 	var total int
-	if err := s.repos.DB().QueryRow(ctx, storageInventoryCTE(claims)+` SELECT count(*) FROM file_rows f`+storageInventoryFilterSQL, args...).Scan(&total); err != nil {
+	if err := s.repos.DB().QueryRow(ctx, storageInventoryCTE(claims, privateSources)+` SELECT count(*) FROM file_rows f`+storageInventoryFilterSQL, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	args = append(args, filter.Limit, filter.Offset)
-	rows, err := s.repos.DB().Query(ctx, storageInventoryCTE(claims)+` SELECT to_jsonb(f) FROM file_rows f`+storageInventoryFilterSQL+` ORDER BY `+filter.orderSQL()+` LIMIT $13 OFFSET $14`, args...)
+	rows, err := s.repos.DB().Query(ctx, storageInventoryPageSQL(claims, filter, privateSources), args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -266,7 +306,7 @@ func (s *Server) storageInventoryFiles(ctx context.Context, accountID, actorID u
 	// One object may have millions of references. Keep its exact authorized
 	// count in SQL, but return at most six distinct presentation contexts per
 	// requested key. A page cannot materialize every message using one file.
-	rows, err = s.repos.DB().Query(ctx, storageInventoryCTE(claims)+` SELECT requested.object_key,summary.origin,summary.ref_id,summary.label,summary.href,summary.filename
+	rows, err = s.repos.DB().Query(ctx, storageInventoryCTE(claims, privateSources)+` SELECT requested.object_key,summary.origin,summary.ref_id,summary.label,summary.href,summary.filename
 	 FROM (SELECT DISTINCT unnest($7::text[]) AS object_key) requested
 	 CROSS JOIN LATERAL (SELECT vr.origin,min(vr.ref_id) AS ref_id,vr.label,vr.href,max(vr.filename) AS filename
 	 FROM authorized_refs vr WHERE vr.object_key=requested.object_key
@@ -319,12 +359,14 @@ func (s *Server) storageInventoryFiles(ctx context.Context, accountID, actorID u
 }
 
 func (s *Server) storageInventoryUsage(ctx context.Context, accountID, actorID uuid.UUID, claims *service.JWTClaims) (fiber.Map, error) {
+	privateSources, err := s.storageInventoryHasPrivateSources(ctx, accountID, claims)
+	if err != nil {
+		return nil, err
+	}
 	args := storageInventoryArguments(accountID, actorID, claims)
 	var visible, count, removable, removableCount, trash int64
-	var byType, byOrigin []byte
-	err := s.repos.DB().QueryRow(ctx, storageInventoryCTE(claims)+storageInventoryPhysicalFilesSQL+`, unique_files AS (SELECT DISTINCT ON(object_key) * FROM physical_files ORDER BY object_key,CASE WHEN status='active' THEN 0 ELSE 1 END,recovery_id), type_totals AS (SELECT media_type,sum(size_bytes) bytes FROM unique_files GROUP BY media_type), origin_totals AS (SELECT COALESCE((SELECT vr.origin FROM authorized_refs vr WHERE vr.object_key=u.object_key ORDER BY vr.origin,vr.ref_id LIMIT 1),CASE WHEN u.status='trash' THEN 'trash' ELSE 'uploads' END) AS origin,sum(size_bytes) bytes FROM unique_files u GROUP BY origin)
-	 SELECT COALESCE(sum(size_bytes),0),count(*),COALESCE(sum(size_bytes) FILTER(WHERE can_remove),0),count(*) FILTER(WHERE can_remove),COALESCE(sum(size_bytes) FILTER(WHERE status='trash'),0),
-	 COALESCE((SELECT jsonb_object_agg(media_type,bytes) FROM type_totals),'{}'::jsonb),COALESCE((SELECT jsonb_object_agg(origin,bytes) FROM origin_totals),'{}'::jsonb) FROM unique_files`, args...).Scan(&visible, &count, &removable, &removableCount, &trash, &byType, &byOrigin)
+	var byType, byOrigin, recommendations []byte
+	err = s.repos.DB().QueryRow(ctx, storageInventoryUsageSQL(claims, privateSources), args...).Scan(&visible, &count, &removable, &removableCount, &trash, &byType, &byOrigin, &recommendations)
 	if err != nil {
 		return nil, err
 	}
@@ -367,21 +409,42 @@ func (s *Server) storageInventoryUsage(ctx context.Context, accountID, actorID u
 			percent = 100
 		}
 	}
-	var recommendations []byte
-	err = s.repos.DB().QueryRow(ctx, storageInventoryCTE(claims)+storageInventoryPhysicalFilesSQL+`, candidates AS (SELECT DISTINCT ON(object_key) * FROM physical_files ORDER BY object_key,CASE WHEN status='active' THEN 0 ELSE 1 END,recovery_id), recs AS (
-	 SELECT 'large_files' AS id,count(*) AS count,COALESCE(sum(size_bytes),0) AS bytes,jsonb_build_object('min_size',10485760) AS filters FROM candidates WHERE status='active' AND size_bytes>=10485760
-	 UNION ALL SELECT 'older_files',count(*),COALESCE(sum(size_bytes),0),jsonb_build_object('older_than_days',180) FROM candidates WHERE status='active' AND last_modified<NOW()-INTERVAL '180 days'
-	 UNION ALL SELECT 'unused_uploads',count(*),COALESCE(sum(size_bytes),0),jsonb_build_object('status','unused_uploads') FROM candidates WHERE status='active' AND unused_upload
-	 UNION ALL SELECT 'trash_ready',count(*),COALESCE(sum(size_bytes),0),jsonb_build_object('status','trash_ready') FROM candidates WHERE status='trash' AND can_purge)
-	 SELECT jsonb_agg(to_jsonb(recs) ORDER BY id) FROM recs`, args...).Scan(&recommendations)
-	if err != nil {
-		return nil, err
-	}
 	var recs []any
 	if err = json.Unmarshal(recommendations, &recs); err != nil {
 		return nil, err
 	}
 	return fiber.Map{"success": true, "account_id": accountID, "scope": scope, "used_bytes": used, "visible_bytes": visible, "managed_elsewhere_bytes": reserved, "object_count": count, "limit_bytes": limit, "available_bytes": available, "percent_used": percent, "by_type": types, "by_origin": origins, "removable_bytes": removable, "removable_count": removableCount, "trash_bytes": trash, "can_manage": storageSelfServiceHasPermission(claims, domain.PermSettings), "retention_days": storageSelfServiceRetentionDays, "recommendations": recs}, nil
+}
+
+// Aggregate the physical, actor-visible relation once for the complete summary.
+// In particular, recommendations must not rebuild the entire ACL and object
+// relation in a second statement. Origin selection is the same lexical first
+// origin as before; grouping it once avoids one ordered lookup per object.
+func storageInventoryUsageSQL(claims *service.JWTClaims, includePrivateSources ...bool) string {
+	return storageInventoryCTE(claims, includePrivateSources...) + storageInventoryPhysicalFilesSQL + `,
+ unique_files AS MATERIALIZED (
+ SELECT DISTINCT ON(object_key) * FROM physical_files
+ ORDER BY object_key,CASE WHEN status='active' THEN 0 ELSE 1 END,recovery_id
+ ), type_totals AS (
+ SELECT media_type,sum(size_bytes) bytes FROM unique_files GROUP BY media_type
+ ), origin_inputs AS (
+ SELECT object_key,origin,NULL::text AS fallback_origin,NULL::bigint AS size_bytes FROM authorized_refs
+ UNION ALL SELECT object_key,NULL::text,CASE WHEN status='trash' THEN 'trash' ELSE 'uploads' END,size_bytes FROM unique_files
+ ), object_origins AS (
+ SELECT object_key,COALESCE(min(origin),max(fallback_origin)) AS origin,max(size_bytes) AS size_bytes
+ FROM origin_inputs GROUP BY object_key HAVING count(size_bytes)>0
+ ), origin_totals AS (
+ SELECT origin,sum(size_bytes) bytes FROM object_origins GROUP BY origin
+ )
+ SELECT COALESCE(sum(size_bytes),0),count(*),COALESCE(sum(size_bytes) FILTER(WHERE can_remove),0),count(*) FILTER(WHERE can_remove),COALESCE(sum(size_bytes) FILTER(WHERE status='trash'),0),
+ COALESCE((SELECT jsonb_object_agg(media_type,bytes) FROM type_totals),'{}'::jsonb),
+ COALESCE((SELECT jsonb_object_agg(origin,bytes) FROM origin_totals),'{}'::jsonb),
+ jsonb_build_array(
+ jsonb_build_object('id','large_files','count',count(*) FILTER(WHERE status='active' AND size_bytes>=10485760),'bytes',COALESCE(sum(size_bytes) FILTER(WHERE status='active' AND size_bytes>=10485760),0),'filters',jsonb_build_object('min_size',10485760)),
+ jsonb_build_object('id','older_files','count',count(*) FILTER(WHERE status='active' AND last_modified<NOW()-INTERVAL '180 days'),'bytes',COALESCE(sum(size_bytes) FILTER(WHERE status='active' AND last_modified<NOW()-INTERVAL '180 days'),0),'filters',jsonb_build_object('older_than_days',180)),
+ jsonb_build_object('id','trash_ready','count',count(*) FILTER(WHERE status='trash' AND can_purge),'bytes',COALESCE(sum(size_bytes) FILTER(WHERE status='trash' AND can_purge),0),'filters',jsonb_build_object('status','trash_ready')),
+ jsonb_build_object('id','unused_uploads','count',count(*) FILTER(WHERE status='active' AND unused_upload),'bytes',COALESCE(sum(size_bytes) FILTER(WHERE status='active' AND unused_upload),0),'filters',jsonb_build_object('status','unused_uploads'))
+ ) FROM unique_files`
 }
 
 // A recovery retains its historical size for review, but summary accounting

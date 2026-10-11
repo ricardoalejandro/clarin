@@ -139,6 +139,26 @@ func storageSelfServiceMediaType(filename, contentType string) string {
 	return ""
 }
 
+// Raw object keys are exact identities, not URL paths. Decode a URL only once
+// through net/url, before removing its routing prefix; never split a decoded
+// filename on punctuation that may legitimately belong to the object key.
+func storageSelfServiceExactValueKey(accountID uuid.UUID, value string) (string, bool) {
+	if strings.HasPrefix(value, accountID.String()+"/") {
+		return value, true
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || (!parsed.IsAbs() && !strings.HasPrefix(value, "/")) {
+		return "", false
+	}
+	if strings.HasPrefix(parsed.Path, "/api/media/file/") {
+		return strings.TrimPrefix(parsed.Path, "/api/media/file/"), true
+	}
+	if at := strings.Index(parsed.Path, "/"+accountID.String()+"/"); at >= 0 {
+		return parsed.Path[at+1:], true
+	}
+	return "", false
+}
+
 func storageSelfServiceExtractKeys(accountID uuid.UUID, value string) []string {
 	seen := map[string]bool{}
 	var visit func(interface{})
@@ -153,6 +173,14 @@ func storageSelfServiceExtractKeys(accountID uuid.UUID, value string) []string {
 				visit(x)
 			}
 		case string:
+			if key, exact := storageSelfServiceExactValueKey(accountID, v); exact {
+				if storageSelfServiceValidKey(accountID, key) {
+					seen[key] = true
+				}
+				return
+			}
+			// Embedded legacy text is only conservative retention evidence. The
+			// read projection below never derives authorization from this scan.
 			keys := storageObjectKeyFromValue(v)
 			for _, key := range keys {
 				if decoded, err := url.PathUnescape(key); err == nil {
@@ -476,14 +504,17 @@ func storageSelfServiceError(c *fiber.Ctx, status int, code, message string) err
 // One round trip and only matching rows for hot-path image authorization. The
 // final structural key check avoids substring/filename collisions in JSON.
 func storageSelfServiceObjectReferences(ctx context.Context, q storageSelfServiceQuerier, accountID uuid.UUID, key string, stores ...*storage.Storage) ([]storageSelfServiceReference, error) {
+	if refs, ok := storageSelectedReferences(ctx, q, accountID, key, stores...); ok {
+		return refs, nil
+	}
 	if !storageSelfServiceValidKey(accountID, key) {
 		return nil, nil
 	}
 	queries := make([]string, 0, len(storageSelfServiceReferenceQueries))
 	for _, source := range storageSelfServiceReferenceQueries {
-		queries = append(queries, `SELECT '`+source.origin+`',r.id,r.label,r.href,r.filename,r.payload FROM (`+source.sql+`) AS r(id,label,href,filename,payload) WHERE strpos(r.payload,$2)>0 OR (strpos(r.payload,'%')>0 AND strpos(clarin_storage_path_unescape(r.payload),$2)>0)`)
+		queries = append(queries, `SELECT '`+source.origin+`',r.id,r.label,r.href,r.filename,r.payload FROM (`+source.sql+`) AS r(id,label,href,filename,payload) WHERE `+storageReferenceSelectedKeyPredicateSQL)
 	}
-	rows, err := q.Query(ctx, strings.Join(queries, " UNION ALL "), accountID, key)
+	rows, err := q.Query(ctx, storageReferenceSelectedKeysSQL+strings.Join(queries, " UNION ALL "), accountID, []string{key})
 	if err != nil {
 		return nil, err
 	}
@@ -531,9 +562,14 @@ func storageSelfServiceReferenceValues(accountID uuid.UUID, payload string, stor
 				visit(child)
 			}
 		case string:
-			local := strings.HasPrefix(v, "/api/media/file/") || strings.HasPrefix(v, accountID.String()+"/")
 			for _, key := range storageSelfServiceExtractKeys(accountID, v) {
-				result[key] = result[key] || local
+				if _, exists := result[key]; !exists {
+					result[key] = false
+				}
+			}
+			if strings.HasPrefix(v, accountID.String()+"/") && storageSelfServiceValidKey(accountID, v) {
+				result[v] = true
+				return
 			}
 			parsed, err := url.Parse(v)
 			if err == nil && strings.HasPrefix(v, "/api/media/file/") {

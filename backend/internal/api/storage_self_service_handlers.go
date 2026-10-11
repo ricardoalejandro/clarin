@@ -247,6 +247,8 @@ func (s *Server) handleStorageSelfServiceFiles(c *fiber.Ctx) error {
 }
 
 func (s *Server) handleStorageSelfServiceContent(c *fiber.Ctx) error {
+	c.Set("Cache-Control", "private, no-store, max-age=0")
+	c.Set("Vary", "Cookie, Authorization")
 	if s.storage == nil {
 		return storageSelfServiceError(c, 503, "storage_unavailable", "El almacenamiento no está disponible.")
 	}
@@ -260,7 +262,7 @@ func (s *Server) handleStorageSelfServiceContent(c *fiber.Ctx) error {
 	}
 	catalog, err := s.storageSelfServiceCatalog(c.Context(), s.repos.DB(), accountID, actorID, claims, []string{key})
 	if err != nil {
-		return storageSelfServiceError(c, 404, "storage_not_found", "Archivo no disponible.")
+		return storageSelfServiceError(c, 503, "storage_unavailable", "No se pudo comprobar el archivo. Inténtalo de nuevo.")
 	}
 	for _, f := range catalog.Files {
 		if f.ObjectKey == key && f.PreviewURL != "" {
@@ -270,13 +272,14 @@ func (s *Server) handleStorageSelfServiceContent(c *fiber.Ctx) error {
 		}
 	}
 	recoveries, recoveryErr := s.storageSelfServiceRecoveryFiles(c.Context(), s.repos.DB(), storageUseActor{AccountID: accountID, UserID: actorID, Claims: claims}, []string{key})
-	if recoveryErr == nil {
-		for _, f := range recoveries {
-			if f.ObjectKey == key && f.PreviewURL != "" {
-				c.Set("Content-Disposition", fmt.Sprintf("inline; filename*=UTF-8''%s", url.PathEscape(f.Filename)))
-				c.Set("Content-Security-Policy", "sandbox; default-src 'none'")
-				return s.serveStorageObject(c, key, "private, no-store", "")
-			}
+	if recoveryErr != nil {
+		return storageSelfServiceError(c, 503, "storage_unavailable", "No se pudo comprobar el archivo. Inténtalo de nuevo.")
+	}
+	for _, f := range recoveries {
+		if f.ObjectKey == key && f.PreviewURL != "" {
+			c.Set("Content-Disposition", fmt.Sprintf("inline; filename*=UTF-8''%s", url.PathEscape(f.Filename)))
+			c.Set("Content-Security-Policy", "sandbox; default-src 'none'")
+			return s.serveStorageObject(c, key, "private, no-store", "")
 		}
 	}
 	return storageSelfServiceError(c, 404, "storage_not_found", "Archivo no disponible.")

@@ -29,6 +29,11 @@ afterEach(() => { cleanup(); vi.useRealTimers() })
 const loaded = async () => { render(<StoragePage />); await screen.findByRole('checkbox', { name: 'Seleccionar a.pdf' }) }
 const selectA = () => fireEvent.click(screen.getByRole('checkbox', { name: 'Seleccionar a.pdf' }))
 const staged = { success: true, preview_id: 'review-1', expires_at: '2099-10-10T10:00:00Z', action: 'trash', items: [{ object_key: 'a', filename: 'a.pdf', size_bytes: 4096, eligible: true }], eligible_count: 1, estimated_bytes: 4096 }
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(complete => { resolve = complete })
+  return { promise, resolve }
+}
 
 describe('storage complete workflow', () => {
   it('stages a review without deleting, confirms exactly once, and reports retained space honestly', async () => {
@@ -249,7 +254,7 @@ describe('storage complete workflow', () => {
     expect(screen.getByRole('combobox', { name: 'Disponibilidad para limpiar' })).toHaveValue('unused_uploads')
   })
 
-  it('ignores other accounts, silently reconciles canonical events, and invalidates a stale review', async () => {
+  it('ignores other accounts and preserves a staged review while canonical data reconciles', async () => {
     await loaded(); selectA()
     const message = () => vi.mocked(subscribeWebSocket).mock.calls.at(-1)![0]
     mockGet.mockClear()
@@ -262,9 +267,58 @@ describe('storage complete workflow', () => {
     act(() => message()({ event: 'storage_changed', data: { account_id: 'account-a', revision: 3, operation_id: 'local-operation' } }))
     expect(screen.getByRole('checkbox', { name: 'Seleccionar a.pdf' })).toBeChecked()
     expect(screen.queryByRole('status', { name: 'Cargando archivos' })).toBeNull()
-    await within(dialog).findByText(/El almacenamiento cambió/)
-    expect(within(dialog).queryByRole('button', { name: 'Confirmar retirada' })).toBeNull()
+    expect(within(dialog).getByRole('button', { name: 'Confirmar retirada' })).toBeEnabled()
+    expect(within(dialog).queryByText(/El almacenamiento cambió/)).toBeNull()
     await waitFor(() => expect(mockGet.mock.calls.some(([path]) => path === '/api/storage/usage')).toBe(true))
+  })
+
+  it('keeps selection and impact review usable during continuous ordinary updates', async () => {
+    await loaded()
+    const background = deferred<ReturnType<typeof list>>()
+    const impact = deferred<{ success: true; data: typeof staged }>()
+    mockGet.mockImplementation(async endpoint => endpoint === '/api/storage/usage' ? { success: true, data: usageResponse } : background.promise)
+    mockApi.mockReturnValueOnce(impact.promise)
+    const message = vi.mocked(subscribeWebSocket).mock.calls.at(-1)![0]
+    await act(async () => message({ event: 'storage_changed', data: { account_id: 'account-a', revision: 1 } }))
+    expect(screen.getByRole('checkbox', { name: 'Seleccionar a.pdf' })).toBeEnabled()
+    selectA()
+    expect(screen.getByRole('button', { name: 'Revisar selección' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Revisar selección' }))
+    const signal = mockApi.mock.calls[0][1]!.signal!
+    for (const revision of [2, 3, 4]) await act(async () => message({ event: 'storage_changed', data: { account_id: 'account-a', revision } }))
+    expect(signal.aborted).toBe(false)
+    await act(async () => impact.resolve({ success: true, data: staged }))
+    await act(async () => message({ event: 'storage_changed', data: { account_id: 'account-a', revision: 5 } }))
+    expect(screen.getByRole('button', { name: 'Confirmar retirada' })).toBeEnabled()
+    mockApi.mockResolvedValueOnce({ success: true, data: { success: true, operation_id: 'op', status: 'completed', action: 'trash', items: [{ object_key: 'a', filename: 'a.pdf', status: 'completed' }], freed_bytes: 0, retained_bytes: 4096 } })
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Confirmar retirada' })))
+    expect(mockApi).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(mockApi.mock.calls[1][1]!.body as string)).toEqual({ preview_id: staged.preview_id })
+    expect(screen.getByRole('region', { name: 'Resultado de la operación' })).toBeInTheDocument()
+  })
+
+  it('keeps actions disabled for old rows while a different filter is loading', async () => {
+    await loaded()
+    mockGet.mockImplementation(() => new Promise(() => {}))
+    fireEvent.click(screen.getByRole('button', { name: 'Filtros' }))
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filtrar por origen' }), { target: { value: 'chats' } })
+    expect(screen.getByRole('checkbox', { name: 'Seleccionar a.pdf' })).toBeDisabled()
+    expect(screen.getByRole('checkbox', { name: 'Seleccionar archivos de esta página' })).toBeDisabled()
+  })
+
+  it('aborts an impact review and rejects its completion after an explicit access reset', async () => {
+    await loaded(); selectA()
+    const impact = deferred<{ success: true; data: typeof staged }>()
+    mockApi.mockReturnValueOnce(impact.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Revisar selección' }))
+    const signal = mockApi.mock.calls[0][1]!.signal!
+    mockGet.mockImplementation(() => new Promise(() => {}))
+    await act(async () => vi.mocked(subscribeWebSocket).mock.calls.at(-1)![0]({ event: 'storage_changed', data: { account_id: 'account-a', revision: 1, reason: 'access_changed' } }))
+    expect(signal.aborted).toBe(true)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    await act(async () => impact.resolve({ success: true, data: staged }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.queryByRole('checkbox', { name: 'Seleccionar a.pdf' })).toBeNull()
   })
 
   it('redacts viewers and selected files immediately when Work access is revoked', async () => {
@@ -276,6 +330,109 @@ describe('storage complete workflow', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(screen.queryByRole('checkbox', { name: 'Seleccionar a.pdf' })).toBeNull()
     expect(screen.queryByText(/1 seleccionado ·/)).toBeNull()
+  })
+
+  it('finishes an in-flight page under repeated ordinary events and coalesces one follow-up', async () => {
+    await loaded()
+    const first = deferred<ReturnType<typeof list>>()
+    const latest = deferred<ReturnType<typeof list>>()
+    let reads = 0
+    mockGet.mockImplementation(async endpoint => endpoint === '/api/storage/usage'
+      ? { success: true, data: usageResponse }
+      : ++reads === 1 ? first.promise : latest.promise)
+    fireEvent.click(screen.getByRole('tab', { name: 'Papelera' }))
+    const signal = mockGet.mock.calls.at(-1)![1]!.signal!
+    const message = vi.mocked(subscribeWebSocket).mock.calls.at(-1)![0]
+    for (const revision of [1, 2, 3]) await act(async () => message({ event: 'storage_changed', data: { account_id: 'account-a', revision } }))
+    expect(signal.aborted).toBe(false)
+    expect(reads).toBe(1)
+    const oldPage = { ...response, files: [file('first', { status: 'trash', recovery_id: 'first-recovery', can_restore: true })], total: 1 }
+    await act(async () => first.resolve({ success: true, data: oldPage }))
+    expect(screen.getByRole('button', { name: 'first.pdf' })).toBeInTheDocument()
+    expect(screen.queryByRole('status', { name: 'Cargando archivos' })).toBeNull()
+    expect(reads).toBe(2)
+    await act(async () => latest.resolve({ success: true, data: { ...oldPage, files: [file('latest', { status: 'trash', recovery_id: 'latest-recovery', can_restore: true })] } }))
+    expect(screen.getByRole('button', { name: 'latest.pdf' })).toBeInTheDocument()
+    expect(screen.queryByText('Actualizando…')).toBeNull()
+    expect(reads).toBe(2)
+  })
+
+  it('bounds a stalled page read and ignores its late response after retry', async () => {
+    await loaded()
+    vi.useFakeTimers()
+    const stalled = deferred<ReturnType<typeof list>>()
+    mockGet.mockImplementation(async endpoint => endpoint === '/api/storage/usage' ? { success: true, data: usageResponse } : stalled.promise)
+    fireEvent.click(screen.getByRole('tab', { name: 'Papelera' }))
+    const signal = mockGet.mock.calls.at(-1)![1]!.signal!
+    await act(async () => vi.advanceTimersByTime(30_000))
+    expect(signal.aborted).toBe(true)
+    expect(screen.queryByRole('status', { name: 'Cargando archivos' })).toBeNull()
+    expect(screen.getByText(/La consulta de archivos tardó demasiado/)).toBeInTheDocument()
+    mockGet.mockImplementation(async endpoint => endpoint === '/api/storage/usage' ? { success: true, data: usageResponse } : list())
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Actualizar' })))
+    expect(screen.getByRole('button', { name: 'a.pdf' })).toBeInTheDocument()
+    await act(async () => stalled.resolve({ success: true, data: { ...response, files: [file('stale')], total: 1 } }))
+    expect(screen.queryByRole('button', { name: 'stale.pdf' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'a.pdf' })).toBeInTheDocument()
+  })
+
+  it('interrupts queued ordinary refreshes immediately when account access is revoked', async () => {
+    await loaded(); selectA()
+    const stale = deferred<ReturnType<typeof list>>()
+    const canonical = deferred<ReturnType<typeof list>>()
+    let reads = 0
+    mockGet.mockImplementation(async endpoint => endpoint === '/api/storage/usage'
+      ? { success: true, data: usageResponse }
+      : ++reads === 1 ? stale.promise : canonical.promise)
+    const message = vi.mocked(subscribeWebSocket).mock.calls.at(-1)![0]
+    await act(async () => message({ event: 'storage_changed', data: { account_id: 'account-a', revision: 1 } }))
+    const signal = mockGet.mock.calls.at(-1)![1]!.signal!
+    await act(async () => message({ event: 'storage_changed', data: { account_id: 'account-a', revision: 2 } }))
+    await act(async () => message({ event: 'storage_changed', data: { account_id: 'account-a', revision: 3, reason: 'access_changed' } }))
+    expect(signal.aborted).toBe(true)
+    expect(screen.queryByRole('checkbox', { name: 'Seleccionar a.pdf' })).toBeNull()
+    expect(screen.queryByText(/1 seleccionado ·/)).toBeNull()
+    await act(async () => stale.resolve(list()))
+    expect(screen.queryByRole('checkbox', { name: 'Seleccionar a.pdf' })).toBeNull()
+    await act(async () => canonical.resolve({ success: true, data: { ...response, files: [], total: 0, can_manage: false } }))
+    expect(screen.getByText('No hay archivos disponibles')).toBeInTheDocument()
+  })
+
+  it('bounds a stalled impact review without losing its selection and accepts an explicit retry', async () => {
+    await loaded(); selectA()
+    vi.useFakeTimers()
+    const stalled = deferred<{ success: true; data: typeof staged }>()
+    mockApi.mockReturnValueOnce(stalled.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Revisar selección' }))
+    const signal = mockApi.mock.calls[0][1]!.signal!
+    await act(async () => vi.advanceTimersByTime(30_000))
+    expect(signal.aborted).toBe(true)
+    expect(screen.queryByText('Comprobando dónde se utilizan los archivos…')).toBeNull()
+    expect(screen.getByText(/La revisión tardó demasiado/)).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Seleccionar a.pdf' })).toBeChecked()
+    mockApi.mockResolvedValueOnce({ success: true, data: { ...staged, preview_id: 'fresh-review' } })
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Volver a revisar' })))
+    await act(async () => stalled.resolve({ success: true, data: staged }))
+    mockApi.mockResolvedValueOnce({ success: false, status: 503, error: 'Fallo de prueba' })
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Confirmar retirada' })))
+    expect(JSON.parse(mockApi.mock.calls[2][1]!.body as string)).toEqual({ preview_id: 'fresh-review' })
+  })
+
+  it('discards a conflicted review and requires a fresh impact check before confirming again', async () => {
+    await loaded(); selectA()
+    mockApi.mockResolvedValueOnce({ success: true, data: staged })
+    fireEvent.click(screen.getByRole('button', { name: 'Revisar selección' }))
+    const confirm = await screen.findByRole('button', { name: 'Confirmar retirada' })
+    mockApi.mockResolvedValueOnce({ success: false, status: 409, error: 'El archivo cambió. Vuelve a revisar.' })
+    fireEvent.click(confirm)
+    await screen.findByText('El archivo cambió. Vuelve a revisar.')
+    expect(screen.queryByRole('button', { name: 'Confirmar retirada' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Volver a revisar' })).toBeEnabled()
+    expect(screen.getByRole('checkbox', { name: 'Seleccionar a.pdf' })).toBeChecked()
+    mockApi.mockResolvedValueOnce({ success: true, data: { ...staged, preview_id: 'fresh-review' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Volver a revisar' }))
+    await screen.findByRole('button', { name: 'Confirmar retirada' })
+    expect(mockApi.mock.calls[2][0]).toBe('/api/storage/cleanup/preview')
   })
 
   it('discards sensitive cached rows on a forbidden canonical response', async () => {

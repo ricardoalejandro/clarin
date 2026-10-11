@@ -486,7 +486,7 @@ func (s *Storage) GetPublicURL(objectKey string) string {
 	if IsProtectedMediaObjectKey(objectKey) {
 		return ""
 	}
-	return "/api/media/file/" + objectKey
+	return MediaProxyURL(objectKey)
 }
 
 // ExtractObjectKey extracts the object key from a full URL

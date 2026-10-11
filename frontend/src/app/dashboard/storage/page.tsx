@@ -10,7 +10,7 @@ import { StorageDetailsWindow } from '@/components/storage/StorageDetailsWindow'
 import { StorageRecommendations } from '@/components/storage/StorageRecommendations'
 import { StorageDialog } from '@/components/storage/StorageDialog'
 import { MediaIcon, StoragePreview, StorageThumbnail } from '@/components/storage/StoragePreview'
-import { canSelectStorageFile, EMPTY_FILTERS, formatStorageBytes, nextStorageTab, ORIGIN_LABELS, reconcileStorageSelection, resultStorageMessage, STORAGE_PAGE_SIZE, STORAGE_SELECTION_LIMIT, storageAdvancedFilterCount, storageDate, storageFileIdentity, storageFilesQuery, storagePreviewRequest, storageRealtimeChange, storageRecommendationFilters, storagePreviewExpired, storageTrashStatus, toggleStorageSelection, type StorageAction, type StorageActivity, type StorageFile, type StorageFilesResponse, type StorageFilters, type StorageResult, type StorageReview, type StorageTab, type StorageUsage, type StorageTarget, type StorageRecommendation } from '@/components/storage/storageModel'
+import { canSelectStorageFile, EMPTY_FILTERS, formatStorageBytes, nextStorageTab, ORIGIN_LABELS, reconcileStorageSelection, resultStorageMessage, STORAGE_PAGE_SIZE, STORAGE_READ_TIMEOUT_MS, STORAGE_SELECTION_LIMIT, storageAdvancedFilterCount, storageDate, storageFileIdentity, storageFilesQuery, storagePreviewRequest, storageRealtimeChange, storageRecommendationFilters, storagePreviewExpired, storageTrashStatus, toggleStorageSelection, type StorageAction, type StorageActivity, type StorageFile, type StorageFilesResponse, type StorageFilters, type StorageResult, type StorageReview, type StorageTab, type StorageUsage, type StorageTarget, type StorageRecommendation } from '@/components/storage/storageModel'
 
 const button = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-xl px-4 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-45'
 const secondary = `${button} border border-slate-200 bg-white text-slate-700 hover:bg-slate-50`
@@ -29,6 +29,7 @@ function StorageWorkspace({ scope }: { scope: string }) {
   const [usage, setUsage] = useState<StorageUsage | null>(null)
   const [collection, setCollection] = useState<StorageFilesResponse | null>(null)
   const [activity, setActivity] = useState<StorageActivity | null>(null)
+  const [loadedView, setLoadedView] = useState<string | null>(null)
   const [filters, setFilters] = useState<StorageFilters>({ ...EMPTY_FILTERS })
   const [query, setQuery] = useState('')
   const [filtersOpen, setFiltersOpen] = useState(false)
@@ -55,6 +56,8 @@ function StorageWorkspace({ scope }: { scope: string }) {
   const [clock, setClock] = useState(Date.now())
   const [refresh, setRefresh] = useState(0)
   const requests = useRef(new SearchRequestLifecycle())
+  const readInFlight = useRef(false)
+  const refreshPending = useRef(false)
   const usageCache = useRef<{ refresh: number; data: StorageUsage & { success: boolean; error?: string } } | null>(null)
   const mutation = useRef<AbortController | null>(null)
   const mounted = useRef(true)
@@ -66,6 +69,8 @@ function StorageWorkspace({ scope }: { scope: string }) {
   const files = collection?.files || []
   const canManage = usage?.can_manage === true && collection?.can_manage === true
   const pendingSearch = query.trim() !== filters.query
+  const requestedView = tab === 'activity' ? `activity:${offset}` : `${tab}:${storageFilesQuery(filters, tab, offset)}`
+  const viewPending = loadedView !== requestedView
   const isCurrent = useCallback(() => mounted.current && getAuthScope() === scope, [scope])
 
   useEffect(() => {
@@ -95,7 +100,8 @@ function StorageWorkspace({ scope }: { scope: string }) {
 
   const clearSensitiveState = useCallback(() => {
     requests.current.invalidate(); mutation.current?.abort(); usageCache.current = null; pageIDs.current.clear()
-    setUsage(null); setCollection(null); setActivity(null); setSelected(new Map()); setPreview(null); setDetails(null); setDetailsDirty(false); setPendingDetails(null)
+    readInFlight.current = false; refreshPending.current = false
+    setUsage(null); setCollection(null); setActivity(null); setLoadedView(null); setSelected(new Map()); setPreview(null); setDetails(null); setDetailsDirty(false); setPendingDetails(null)
     setReview(null); setReviewAction(null); setReviewTargets(undefined); setReviewBusy(false); setConfirmBusy(false); setRetryingOperation(null); setResult(null)
     confirmLock.current = false
   }, [])
@@ -108,12 +114,14 @@ function StorageWorkspace({ scope }: { scope: string }) {
       if (!change) return
       revision.current = change.revision
       if (change.action === 'reset') clearSensitiveState()
-      else if (!confirmLock.current) {
-        mutation.current?.abort(); setReview(null); setReviewBusy(false)
-        setReviewError('El almacenamiento cambió. Vuelve a revisar el impacto antes de confirmar.')
-      }
+      // An ordinary hint may concern another file. Preserve the user's impact
+      // review; confirmation revalidates it and conflicts require a new review.
       usageCache.current = null
-      setRefresh(value => value + 1)
+      // Ordinary events must not continually abort a slower canonical read.
+      // Drain one follow-up after it finishes; permission resets still cancel
+      // and redact immediately above.
+      if (readInFlight.current) refreshPending.current = true
+      else setRefresh(value => value + 1)
     }, () => {
       if (!isCurrent()) return
       // A reconnect may have missed a permission change. Revalidate before
@@ -126,15 +134,26 @@ function StorageWorkspace({ scope }: { scope: string }) {
   useEffect(() => {
     if (pendingSearch || !isCurrent()) return
     const lease = requests.current.begin()
+    const controller = new AbortController()
+    const cancel = () => controller.abort()
+    lease.signal.addEventListener('abort', cancel, { once: true })
+    readInFlight.current = true; refreshPending.current = false
     setLoading(true); setError('')
+    const timeout = window.setTimeout(() => {
+      if (!requests.current.isCurrent(lease) || !isCurrent()) return
+      requests.current.invalidate()
+      readInFlight.current = false; refreshPending.current = false
+      setLoading(false)
+      setError(tab === 'activity' ? 'La consulta de actividad tardó demasiado. Vuelve a intentarlo.' : 'La consulta de archivos tardó demasiado. Vuelve a intentarlo.')
+    }, STORAGE_READ_TIMEOUT_MS)
     const load = async () => {
       const [usageResult, dataResult] = await Promise.all([
         usageCache.current?.refresh === refresh
           ? Promise.resolve({ success: true, data: usageCache.current.data, error: undefined, status: 200 })
-          : apiGet<StorageUsage & { success: boolean; error?: string }>('/api/storage/usage', { signal: lease.signal }),
+          : apiGet<StorageUsage & { success: boolean; error?: string }>('/api/storage/usage', { signal: controller.signal }),
         tab === 'activity'
-          ? apiGet<StorageActivity>(`/api/storage/activity?limit=${STORAGE_PAGE_SIZE}&offset=${offset}`, { signal: lease.signal })
-          : apiGet<StorageFilesResponse>(`/api/storage/files?${storageFilesQuery(filters, tab, offset)}`, { signal: lease.signal }),
+          ? apiGet<StorageActivity>(`/api/storage/activity?limit=${STORAGE_PAGE_SIZE}&offset=${offset}`, { signal: controller.signal })
+          : apiGet<StorageFilesResponse>(`/api/storage/files?${storageFilesQuery(filters, tab, offset)}`, { signal: controller.signal }),
       ])
       if (!requests.current.isCurrent(lease) || !isCurrent()) return
       if ([usageResult.status, dataResult.status].some(status => status === 401 || status === 403)) {
@@ -142,11 +161,12 @@ function StorageWorkspace({ scope }: { scope: string }) {
       }
       if (usageResult.success && usageResult.data?.success) { usageCache.current = { refresh, data: usageResult.data }; setUsage(usageResult.data) }
       if (dataResult.success && dataResult.data?.success) {
-        if (tab === 'activity') setActivity(dataResult.data as StorageActivity)
+        if (tab === 'activity') { setActivity(dataResult.data as StorageActivity); setLoadedView(requestedView) }
         else {
           const data = dataResult.data as StorageFilesResponse
           if (offset > 0 && data.files.length === 0 && data.total <= offset) { setOffset(Math.max(0, Math.ceil(data.total / STORAGE_PAGE_SIZE) * STORAGE_PAGE_SIZE - STORAGE_PAGE_SIZE)); return }
           setCollection(data)
+          setLoadedView(requestedView)
           const pageKey = `${tab}:${storageFilesQuery(filters, tab, offset)}`
           const previousIDs = pageIDs.current.get(pageKey) || []
           const currentIDs = new Set(data.files.map(storageFileIdentity))
@@ -167,9 +187,24 @@ function StorageWorkspace({ scope }: { scope: string }) {
       }
       if (!dataResult.success || !dataResult.data?.success || !usageResult.success || !usageResult.data?.success) setError(dataResult.error || dataResult.data?.error || usageResult.error || usageResult.data?.error || 'No se pudo actualizar el almacenamiento. Revisa tu conexión y vuelve a intentarlo.')
     }
-    void load().catch(() => { if (requests.current.isCurrent(lease) && isCurrent()) setError('No se pudo actualizar el almacenamiento. Inténtalo de nuevo.') }).finally(() => { if (requests.current.finish(lease) && isCurrent()) setLoading(false) })
-    return () => requests.current.invalidate()
-  }, [filters, offset, tab, refresh, scope, pendingSearch, isCurrent, clearSensitiveState])
+    void load().catch(() => { if (requests.current.isCurrent(lease) && isCurrent()) setError('No se pudo actualizar el almacenamiento. Inténtalo de nuevo.') }).finally(() => {
+      window.clearTimeout(timeout)
+      lease.signal.removeEventListener('abort', cancel)
+      if (requests.current.finish(lease) && isCurrent()) {
+        readInFlight.current = false; setLoading(false)
+        if (refreshPending.current) {
+          refreshPending.current = false; usageCache.current = null
+          setRefresh(value => value + 1)
+        }
+      }
+    })
+    return () => {
+      window.clearTimeout(timeout)
+      controller.abort(); lease.signal.removeEventListener('abort', cancel)
+      readInFlight.current = false
+      requests.current.invalidate()
+    }
+  }, [filters, offset, tab, refresh, scope, pendingSearch, isCurrent, clearSensitiveState, requestedView])
 
   useEffect(() => {
     if (usage?.can_manage !== false) return
@@ -218,13 +253,23 @@ function StorageWorkspace({ scope }: { scope: string }) {
     if (!reviewAction) reviewReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     mutation.current?.abort(); const controller = new AbortController(); mutation.current = controller
     setReviewTargets(targets); setReviewAction(action); setReview(null); setReviewError(''); setAcknowledged(false); setReviewBusy(true)
+    const timeout = window.setTimeout(() => {
+      if (!isCurrent() || controller.signal.aborted || mutation.current !== controller) return
+      controller.abort(); setReviewBusy(false)
+      setReviewError('La revisión tardó demasiado. No se ha eliminado ningún archivo. Vuelve a intentarlo.')
+    }, STORAGE_READ_TIMEOUT_MS)
+    const clearTimeout = () => window.clearTimeout(timeout)
+    controller.signal.addEventListener('abort', clearTimeout, { once: true })
     try {
       const response = await api<StorageReview>('/api/storage/cleanup/preview', { method: 'POST', body: JSON.stringify(storagePreviewRequest(action, selected.values(), targets)), signal: controller.signal })
       if (!isCurrent() || controller.signal.aborted) return
       if (!response.success || !response.data?.success) { setReviewError(response.error || response.data?.error || 'No se pudo revisar la selección.'); return }
       setReview(response.data); setClock(Date.now())
     } catch { if (isCurrent() && !controller.signal.aborted) setReviewError('No se pudo revisar la selección. Revisa tu conexión e inténtalo de nuevo.') }
-    finally { if (isCurrent() && !controller.signal.aborted) setReviewBusy(false) }
+    finally {
+      clearTimeout(); controller.signal.removeEventListener('abort', clearTimeout)
+      if (isCurrent() && !controller.signal.aborted) setReviewBusy(false)
+    }
   }
   const closeReview = () => { if (confirmBusy) return; mutation.current?.abort(); setReviewAction(null); setReview(null); setReviewBusy(false); setReviewError(''); setReviewTargets(undefined) }
   const confirmReview = async () => {
@@ -235,6 +280,7 @@ function StorageWorkspace({ scope }: { scope: string }) {
       const response = await api<StorageResult>('/api/storage/cleanup/confirm', { method: 'POST', body: JSON.stringify({ preview_id: review.preview_id }), signal: controller.signal })
       if (!isCurrent() || controller.signal.aborted) return
       if (!response.data?.operation_id) {
+        if (response.status === 409) setReview(null)
         setReviewError(response.error || response.data?.error || 'No se pudo confirmar el resultado. Consulta Actividad antes de volver a intentarlo.')
         setRefresh(value => value + 1)
         return
@@ -295,29 +341,29 @@ function StorageWorkspace({ scope }: { scope: string }) {
             {activeFilters && <button onClick={resetFilters} className="inline-flex min-h-11 items-center gap-2 text-sm text-slate-600 hover:text-slate-900"><X className="h-4 w-4" />Limpiar filtros</button>}
           </div>}
           {tab === 'trash' && <p className="flex items-start gap-2 border-b border-slate-100 bg-slate-50/70 px-4 py-3 text-sm text-slate-600"><Clock3 className="mt-0.5 h-4 w-4 shrink-0" />Cada retirada se puede recuperar por separado. Los archivos que siguen en uso se conservan. El borrado definitivo exige cumplir la retención y una nueva comprobación.</p>}
-          {selected.size > 0 && <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b border-emerald-100 bg-emerald-50 p-3"><div className="min-w-0 flex-1"><p className="text-sm font-semibold text-emerald-900">{selected.size} seleccionado{selected.size === 1 ? '' : 's'} · {formatStorageBytes(selectedBytes)}</p><p className="text-xs text-emerald-700">{selected.size === STORAGE_SELECTION_LIMIT ? 'Has llegado al máximo de 100 archivos por operación.' : 'Revisarás el impacto antes de confirmar.'}</p></div><button onClick={() => setSelected(new Map())} className={secondary}>Cancelar selección</button>{tab === 'trash' ? <><button onClick={() => void prepare('restore')} disabled={!selectedCanRestore || reviewBusy || confirmBusy || loading || pendingSearch || !!error} className={primary}><Undo2 className="h-4 w-4" />Restaurar</button><button onClick={() => void prepare('purge')} disabled={!selectedCanPurge || reviewBusy || confirmBusy || loading || pendingSearch || !!error} className={`${secondary} text-rose-700`}>Revisar borrado</button></> : <button onClick={() => void prepare('trash')} disabled={reviewBusy || confirmBusy || loading || pendingSearch || !!error} className={primary}><CheckSquare className="h-4 w-4" />Revisar selección</button>}</div>}
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-2"><div className="flex min-h-11 items-center gap-2 text-xs text-slate-500">{canManage && tab !== 'activity' && files.length > 0 && <label className="flex min-h-11 cursor-pointer items-center gap-2"><input aria-label="Seleccionar archivos de esta página" type="checkbox" checked={allPageSelected} disabled={!eligiblePage.length || loading || pendingSearch} onChange={togglePage} className="h-4 w-4 accent-emerald-600" /><span>Seleccionar página</span></label>}{tab === 'activity' ? <span>{usage?.scope === 'account' ? 'Tus operaciones y los borrados definitivos de esta cuenta' : 'Tus operaciones de almacenamiento'}</span> : <span>{total.toLocaleString('es-PE')} {tab === 'trash' ? `retirada${total === 1 ? '' : 's'}` : `archivo${total === 1 ? '' : 's'}`}</span>}</div>{(loading || pendingSearch) && <span role="status" className="flex items-center gap-2 text-xs text-slate-500"><Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />{pendingSearch ? 'Esperando búsqueda…' : 'Actualizando…'}</span>}</div>
-          {showSkeleton ? <div role="status" aria-label="Cargando archivos" className="space-y-3 p-4">{[0, 1, 2, 3].map(value => <div key={value} className="h-16 animate-pulse rounded-xl bg-slate-100 motion-reduce:animate-none" />)}</div> : total === 0 ? <div className="px-5 py-14 text-center"><div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-50 text-slate-400">{tab === 'activity' ? <History className="h-6 w-6" /> : <HardDrive className="h-6 w-6" />}</div><h3 className="mt-4 text-sm font-semibold text-slate-800">{error ? 'No se pudieron cargar los archivos' : tab === 'activity' ? 'Todavía no hay operaciones' : tab === 'trash' ? 'La papelera está vacía' : activeFilters ? 'No hay archivos con estos filtros' : 'No hay archivos disponibles'}</h3><p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-slate-500">{tab === 'activity' ? 'Aquí verás las limpiezas, restauraciones y su resultado.' : activeFilters ? 'Prueba con otro nombre o amplía los filtros.' : 'Los archivos que puedes consultar aparecerán aquí.'}</p>{activeFilters && <button onClick={resetFilters} className={`${secondary} mt-4`}>Limpiar filtros</button>}</div> : tab === 'activity' ? <div className="divide-y divide-slate-100">{activity?.operations.map(operation => <article key={operation.id} className="flex flex-wrap items-start gap-3 p-4"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-500">{operation.action === 'restore' ? <Undo2 className="h-5 w-5" /> : <Trash2 className="h-5 w-5" />}</span><div className="min-w-0 flex-1"><h3 className="text-sm font-medium text-slate-800">{operation.action === 'trash' ? 'Retirada de usos y archivos' : operation.action === 'restore' ? 'Restauración de archivos' : 'Borrado definitivo'}</h3><p className="mt-1 text-xs leading-5 text-slate-500">{storageDate(operation.created_at)} · {operation.files_count} archivo{operation.files_count === 1 ? '' : 's'} procesado{operation.files_count === 1 ? '' : 's'}{operation.action === 'purge' ? ` · ${formatStorageBytes(operation.freed_bytes)} liberados` : operation.action === 'trash' ? ' · El espacio sigue ocupado' : ''}</p></div><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${operation.status === 'completed' ? 'bg-emerald-50 text-emerald-700' : operation.status === 'processing' ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-800'}`}>{operation.status === 'completed' ? 'Completada' : operation.status === 'partial' ? 'Completada con pendientes' : operation.status === 'processing' ? 'Eliminación pendiente' : 'No se pudo completar'}</span>{operation.can_retry && <button onClick={() => void retryOperation(operation.id)} disabled={!!retryingOperation || loading} className={secondary}>{retryingOperation === operation.id ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <RefreshCw className="h-4 w-4" />}Reintentar operación</button>}</article>)}</div> : <div className={view === 'grid' ? 'grid gap-3 p-4' : 'divide-y divide-slate-100'} style={view === 'grid' ? { gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 210px), 1fr))' } : undefined}>{files.map(file => {
+          {selected.size > 0 && <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b border-emerald-100 bg-emerald-50 p-3"><div className="min-w-0 flex-1"><p className="text-sm font-semibold text-emerald-900">{selected.size} seleccionado{selected.size === 1 ? '' : 's'} · {formatStorageBytes(selectedBytes)}</p><p className="text-xs text-emerald-700">{selected.size === STORAGE_SELECTION_LIMIT ? 'Has llegado al máximo de 100 archivos por operación.' : 'Revisarás el impacto antes de confirmar.'}</p></div><button onClick={() => setSelected(new Map())} className={secondary}>Cancelar selección</button>{tab === 'trash' ? <><button onClick={() => void prepare('restore')} disabled={!selectedCanRestore || reviewBusy || confirmBusy || viewPending || pendingSearch || !!error} className={primary}><Undo2 className="h-4 w-4" />Restaurar</button><button onClick={() => void prepare('purge')} disabled={!selectedCanPurge || reviewBusy || confirmBusy || viewPending || pendingSearch || !!error} className={`${secondary} text-rose-700`}>Revisar borrado</button></> : <button onClick={() => void prepare('trash')} disabled={reviewBusy || confirmBusy || viewPending || pendingSearch || !!error} className={primary}><CheckSquare className="h-4 w-4" />Revisar selección</button>}</div>}
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-2"><div className="flex min-h-11 items-center gap-2 text-xs text-slate-500">{canManage && tab !== 'activity' && files.length > 0 && <label className="flex min-h-11 cursor-pointer items-center gap-2"><input aria-label="Seleccionar archivos de esta página" type="checkbox" checked={allPageSelected} disabled={!eligiblePage.length || viewPending || pendingSearch} onChange={togglePage} className="h-4 w-4 accent-emerald-600" /><span>Seleccionar página</span></label>}{tab === 'activity' ? <span>{usage?.scope === 'account' ? 'Tus operaciones y los borrados definitivos de esta cuenta' : 'Tus operaciones de almacenamiento'}</span> : <span>{total.toLocaleString('es-PE')} {tab === 'trash' ? `retirada${total === 1 ? '' : 's'}` : `archivo${total === 1 ? '' : 's'}`}</span>}</div>{(loading || pendingSearch) && <span role="status" className="flex items-center gap-2 text-xs text-slate-500"><Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />{pendingSearch ? 'Esperando búsqueda…' : 'Actualizando…'}</span>}</div>
+          {showSkeleton ? <div role="status" aria-label="Cargando archivos" className="space-y-3 p-4">{[0, 1, 2, 3].map(value => <div key={value} className="h-16 animate-pulse rounded-xl bg-slate-100 motion-reduce:animate-none" />)}</div> : total === 0 ? <div className="px-5 py-14 text-center"><div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-50 text-slate-400">{tab === 'activity' ? <History className="h-6 w-6" /> : <HardDrive className="h-6 w-6" />}</div><h3 className="mt-4 text-sm font-semibold text-slate-800">{error ? 'No se pudieron cargar los archivos' : tab === 'activity' ? 'Todavía no hay operaciones' : tab === 'trash' ? 'La papelera está vacía' : activeFilters ? 'No hay archivos con estos filtros' : 'No hay archivos disponibles'}</h3><p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-slate-500">{tab === 'activity' ? 'Aquí verás las limpiezas, restauraciones y su resultado.' : activeFilters ? 'Prueba con otro nombre o amplía los filtros.' : 'Los archivos que puedes consultar aparecerán aquí.'}</p>{activeFilters && <button onClick={resetFilters} className={`${secondary} mt-4`}>Limpiar filtros</button>}</div> : tab === 'activity' ? <div className="divide-y divide-slate-100">{activity?.operations.map(operation => <article key={operation.id} className="flex flex-wrap items-start gap-3 p-4"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-500">{operation.action === 'restore' ? <Undo2 className="h-5 w-5" /> : <Trash2 className="h-5 w-5" />}</span><div className="min-w-0 flex-1"><h3 className="text-sm font-medium text-slate-800">{operation.action === 'trash' ? 'Retirada de usos y archivos' : operation.action === 'restore' ? 'Restauración de archivos' : 'Borrado definitivo'}</h3><p className="mt-1 text-xs leading-5 text-slate-500">{storageDate(operation.created_at)} · {operation.files_count} archivo{operation.files_count === 1 ? '' : 's'} procesado{operation.files_count === 1 ? '' : 's'}{operation.action === 'purge' ? ` · ${formatStorageBytes(operation.freed_bytes)} liberados` : operation.action === 'trash' ? ' · El espacio sigue ocupado' : ''}</p></div><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${operation.status === 'completed' ? 'bg-emerald-50 text-emerald-700' : operation.status === 'processing' ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-800'}`}>{operation.status === 'completed' ? 'Completada' : operation.status === 'partial' ? 'Completada con pendientes' : operation.status === 'processing' ? 'Eliminación pendiente' : 'No se pudo completar'}</span>{operation.can_retry && <button onClick={() => void retryOperation(operation.id)} disabled={!!retryingOperation || viewPending} className={secondary}>{retryingOperation === operation.id ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <RefreshCw className="h-4 w-4" />}Reintentar operación</button>}</article>)}</div> : <div className={view === 'grid' ? 'grid gap-3 p-4' : 'divide-y divide-slate-100'} style={view === 'grid' ? { gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 210px), 1fr))' } : undefined}>{files.map(file => {
             const selectable = canSelectStorageFile(file, tab, canManage)
             const mobileFileRow = view === 'list'
             const rowLayout = mobileFileRow
               ? `grid items-start gap-x-3 px-3 py-2 sm:flex sm:flex-wrap sm:items-center sm:gap-3 sm:px-4 ${canManage ? 'grid-cols-[44px_48px_minmax(0,1fr)]' : 'grid-cols-[48px_minmax(0,1fr)]'}`
               : 'flex flex-wrap items-center gap-3 px-3 py-2 sm:px-4'
             return <article key={storageFileIdentity(file)} className={`${view === 'grid' ? 'flex flex-col rounded-2xl border p-3' : rowLayout} ${selected.has(storageFileIdentity(file)) ? 'border-emerald-200 bg-emerald-50/60' : 'border-slate-200 hover:bg-slate-50/70'}`}>
-              <div className={view === 'grid' ? 'mb-2 flex items-center justify-between gap-2' : mobileFileRow && !canManage ? 'hidden shrink-0 sm:block' : 'shrink-0'}>{canManage && <label className="flex h-11 w-11 cursor-pointer items-center justify-center" title={!selectable ? file.blocked_reason || 'Este archivo debe conservarse' : 'Seleccionar archivo'}><input aria-label={`Seleccionar ${file.filename}`} type="checkbox" checked={selected.has(storageFileIdentity(file))} disabled={!selectable || loading || pendingSearch || (!selected.has(storageFileIdentity(file)) && selected.size >= STORAGE_SELECTION_LIMIT)} onChange={() => setSelected(previous => toggleStorageSelection(previous, file))} className="h-4 w-4 accent-emerald-600 disabled:cursor-not-allowed disabled:opacity-40" /></label>}{view === 'grid' && <span className="text-xs text-slate-500">{formatStorageBytes(file.size_bytes)}</span>}</div>
+              <div className={view === 'grid' ? 'mb-2 flex items-center justify-between gap-2' : mobileFileRow && !canManage ? 'hidden shrink-0 sm:block' : 'shrink-0'}>{canManage && <label className="flex h-11 w-11 cursor-pointer items-center justify-center" title={!selectable ? file.blocked_reason || 'Este archivo debe conservarse' : 'Seleccionar archivo'}><input aria-label={`Seleccionar ${file.filename}`} type="checkbox" checked={selected.has(storageFileIdentity(file))} disabled={!selectable || viewPending || pendingSearch || (!selected.has(storageFileIdentity(file)) && selected.size >= STORAGE_SELECTION_LIMIT)} onChange={() => setSelected(previous => toggleStorageSelection(previous, file))} className="h-4 w-4 accent-emerald-600 disabled:cursor-not-allowed disabled:opacity-40" /></label>}{view === 'grid' && <span className="text-xs text-slate-500">{formatStorageBytes(file.size_bytes)}</span>}</div>
               <button onClick={() => setPreview(file)} aria-label={`Ver ${file.filename}`} className={view === 'grid' ? 'mb-3 aspect-[4/3] w-full overflow-hidden rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500' : 'h-12 w-12 shrink-0 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500'}><StorageThumbnail file={file} scope={scope} /></button>
               <div className="min-w-0 flex-1"><button onClick={() => openDetails(file)} className="min-h-11 max-w-full text-left text-sm font-medium text-slate-900 hover:text-emerald-700"><span className={`block ${mobileFileRow ? 'break-normal [overflow-wrap:anywhere] sm:break-all' : 'break-all'}`}>{file.filename || 'Archivo'}</span></button><p className="text-xs leading-5 text-slate-500">{view === 'list' && `${formatStorageBytes(file.size_bytes)} · `}{storageDate(file.last_modified)}</p><p className="mt-1 break-words text-xs leading-5 text-slate-500">{file.origins?.map(origin => origin.label).join(' · ') || 'Archivo de la cuenta'}</p>{file.status === 'trash' ? <p className="mt-1 text-xs leading-5 text-amber-700">{file.removed_uses_count ? `${file.removed_uses_count} uso${file.removed_uses_count === 1 ? '' : 's'} retirado${file.removed_uses_count === 1 ? '' : 's'}. ` : ''}{file.object_retained ? 'El archivo sigue en uso. ' : ''}{storageTrashStatus(file)}</p> : !file.can_remove && <p className="mt-1 flex items-start gap-1 text-xs leading-5 text-slate-500"><ShieldCheck className="mt-1 h-3 w-3 shrink-0" /><span>{file.blocked_reason || 'Se conserva porque sigue en uso.'}</span></p>}</div>
               <button onClick={() => openDetails(file)} className={`min-h-11 rounded-xl px-3 text-xs font-medium text-emerald-700 hover:bg-emerald-50 ${view === 'grid' ? 'mt-3 border border-slate-200' : mobileFileRow ? `justify-self-start sm:ml-auto ${canManage ? 'col-start-3' : 'col-start-2'}` : 'ml-auto'}`}>Ver detalles</button>
             </article>
           })}</div>}
-          {total > 0 && <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 p-4"><p className="text-xs text-slate-500">{offset + 1}–{Math.min(offset + shown, total)} de {total.toLocaleString('es-PE')}{selected.size ? ` · ${selected.size} seleccionados en total` : ''}</p><div className="flex gap-2"><button aria-label="Página anterior" onClick={() => { requests.current.invalidate(); setOffset(Math.max(0, offset - STORAGE_PAGE_SIZE)) }} disabled={offset === 0 || loading || pendingSearch} className={secondary}><ArrowLeft className="h-4 w-4" /><span>Anterior</span></button><button aria-label="Página siguiente" onClick={() => { requests.current.invalidate(); setOffset(tab === 'activity' ? offset + STORAGE_PAGE_SIZE : collection?.next_offset ?? offset + STORAGE_PAGE_SIZE) }} disabled={!hasMore || loading || pendingSearch} className={secondary}><span>Siguiente</span><ArrowRight className="h-4 w-4" /></button></div></footer>}
+          {total > 0 && <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 p-4"><p className="text-xs text-slate-500">{offset + 1}–{Math.min(offset + shown, total)} de {total.toLocaleString('es-PE')}{selected.size ? ` · ${selected.size} seleccionados en total` : ''}</p><div className="flex gap-2"><button aria-label="Página anterior" onClick={() => { requests.current.invalidate(); setOffset(Math.max(0, offset - STORAGE_PAGE_SIZE)) }} disabled={offset === 0 || viewPending || pendingSearch} className={secondary}><ArrowLeft className="h-4 w-4" /><span>Anterior</span></button><button aria-label="Página siguiente" onClick={() => { requests.current.invalidate(); setOffset(tab === 'activity' ? offset + STORAGE_PAGE_SIZE : collection?.next_offset ?? offset + STORAGE_PAGE_SIZE) }} disabled={!hasMore || viewPending || pendingSearch} className={secondary}><span>Siguiente</span><ArrowRight className="h-4 w-4" /></button></div></footer>}
         </div>
       </section>
     </div>
     {details && <StorageDetailsWindow key={`${scope}:${storageFileIdentity(details)}`} file={details} scope={scope} refresh={refresh} canManage={usage?.can_manage === true} onSelectionChange={setDetailsDirty} reviewBusy={reviewBusy || confirmBusy} onClose={() => { setDetails(null); setDetailsDirty(false) }} onPreview={() => setPreview(details)} onReview={target => void prepare('trash', [target])} onUnavailable={() => { clearSensitiveState(); setRefresh(value => value + 1) }} />}
     {pendingDetails && <StorageDialog title="Cambiar de archivo" description="Tienes usos seleccionados que todavía no has revisado." onClose={() => setPendingDetails(null)} footer={<><button onClick={() => setPendingDetails(null)} className={secondary}>Seguir revisando</button><button onClick={() => { setDetails(pendingDetails); setDetailsDirty(false); setPendingDetails(null) }} className={primary}>Descartar selección y cambiar</button></>}><p className="text-sm text-slate-600">Al cambiar de archivo se descartará esta selección. No se retirará ningún uso.</p></StorageDialog>}
     {preview && <StoragePreview key={`${scope}:${preview.object_key}`} file={preview} scope={scope} refresh={refresh} onUnavailable={() => { clearSensitiveState(); setRefresh(value => value + 1) }} onClose={() => setPreview(null)} />}
-    {reviewAction && <StorageDialog title={actionTitles[reviewAction]} description="Comprueba los archivos y el efecto de la operación antes de confirmar." busy={confirmBusy} onClose={closeReview} footer={<><button onClick={closeReview} disabled={confirmBusy} className={secondary}>Cancelar</button>{(!review || expired) && !reviewBusy ? <button onClick={() => void prepare(reviewAction, reviewTargets)} className={primary}>Volver a revisar</button> : <button onClick={() => void confirmReview()} disabled={reviewBusy || confirmBusy || !review?.eligible_count || expired || (reviewAction === 'purge' && !acknowledged)} className={reviewAction === 'purge' ? `${button} bg-rose-600 text-white hover:bg-rose-700` : primary}>{confirmBusy && <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />}{actionLabels[reviewAction]}</button>}</>}>
+    {reviewAction && <StorageDialog title={actionTitles[reviewAction]} description="Comprueba los archivos y el efecto de la operación. Al confirmar se volverá a verificar el impacto." busy={confirmBusy} onClose={closeReview} footer={<><button onClick={closeReview} disabled={confirmBusy} className={secondary}>Cancelar</button>{(!review || expired) && !reviewBusy ? <button onClick={() => void prepare(reviewAction, reviewTargets)} className={primary}>Volver a revisar</button> : <button onClick={() => void confirmReview()} disabled={reviewBusy || confirmBusy || !review?.eligible_count || expired || (reviewAction === 'purge' && !acknowledged)} className={reviewAction === 'purge' ? `${button} bg-rose-600 text-white hover:bg-rose-700` : primary}>{confirmBusy && <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />}{actionLabels[reviewAction]}</button>}</>}>
       {reviewBusy ? <p role="status" className="flex items-center gap-2 py-8 text-sm text-slate-500"><Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" />Comprobando dónde se utilizan los archivos…</p> : <>
         {reviewError && <p role="alert" className="mb-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{reviewError}</p>}
         {review && <><div className={`rounded-xl p-4 ${reviewAction === 'purge' ? 'bg-rose-50' : 'bg-emerald-50'}`}><p className="text-sm font-semibold text-slate-900">{review.eligible_count} archivo{review.eligible_count === 1 ? '' : 's'} · {formatStorageBytes(review.estimated_bytes)}</p><p className="mt-2 text-sm leading-6 text-slate-600">{reviewAction === 'trash' ? `Se retirarán únicamente los usos incluidos en esta revisión. Los demás se conservarán. Podrás recuperar las retiradas desde la papelera. El espacio se liberará cuando no queden usos y se complete el borrado definitivo, a partir de ${usage?.retention_days || 7} días.` : reviewAction === 'restore' ? 'Los archivos volverán a estar disponibles en sus ubicaciones originales, si estas siguen existiendo.' : 'Esta acción elimina los archivos definitivamente. No podrás recuperarlos. El espacio se confirmará cuando termine el borrado.'}</p>{reviewAction === 'trash' && <div className="mt-3 space-y-1 text-xs leading-5 text-slate-600">{review.selected_uses_count != null && <p>{review.selected_uses_count} uso{review.selected_uses_count === 1 ? '' : 's'} seleccionado{review.selected_uses_count === 1 ? '' : 's'} para retirar.</p>}{(review.retained_uses_visible_count || 0) > 0 && <p>{review.retained_uses_visible_count} uso{review.retained_uses_visible_count === 1 ? ' visible se conserva' : 's visibles se conservan'}.</p>}{review.retained_elsewhere && <p>El archivo también se conservará en otras ubicaciones protegidas.</p>}{review.trash_bytes != null && <p>{review.trash_bytes > 0 ? `${formatStorageBytes(review.trash_bytes)} permanecerán en la papelera. ` : ''}Espacio liberado ahora: 0 B.</p>}</div>}</div>

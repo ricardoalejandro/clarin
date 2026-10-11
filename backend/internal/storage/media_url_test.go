@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -11,6 +12,17 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
+
+func TestNewMediaURLsPreserveLiteralReservedFilenameCharacters(t *testing.T) {
+	store := &Storage{}
+	for _, name := range []string{"Niñez (1).jpeg", "100% listo.mp4", "literal%20space.jpeg", "a+b.jpeg", "question?.jpeg", "fragment#.jpeg"} {
+		key := uuid.NewString() + "/uploads/" + name
+		parsed, err := url.Parse(store.GetPublicURL(key))
+		if err != nil || parsed.Path != "/api/media/file/"+key || parsed.RawQuery != "" || parsed.Fragment != "" {
+			t.Errorf("generated media URL changes filename identity for %q", name)
+		}
+	}
+}
 
 func TestCanonicalMediaURLExactConfiguredOriginsAndAccount(t *testing.T) {
 	account := uuid.NewString()

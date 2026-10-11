@@ -60,6 +60,7 @@ export interface StorageActivity { success: boolean; error?: string; operations:
 export interface StorageFilters { query: string; type: string; origin: string; status: string; minSize: string; age: string; sort: string }
 export const EMPTY_FILTERS: StorageFilters = { query: '', type: '', origin: '', status: 'all', minSize: '', age: '', sort: 'size' }
 export const STORAGE_PAGE_SIZE = 40
+export const STORAGE_READ_TIMEOUT_MS = 30_000
 export const STORAGE_SELECTION_LIMIT = 100
 export const PREVIEW_MAX_BYTES = 100 * 1024 * 1024
 export const PREVIEW_TIMEOUT_MS = 45_000

@@ -5,7 +5,40 @@ import { apiBlob, apiGet } from '@/lib/api'
 import { getAuthScope } from '@/lib/authScope'
 import ChatDocumentViewer from '@/components/chat/ChatDocumentViewer'
 import { StorageDialog } from './StorageDialog'
-import { formatStorageBytes, PREVIEW_MAX_BYTES, PREVIEW_TIMEOUT_MS, safeStorageOriginHref, storageContentPath, storageUsesPath, THUMBNAIL_MAX_BYTES, type StorageFile, type StorageUsesResponse } from './storageModel'
+import { StorageReadQueue } from './storageReadQueue'
+import { formatStorageBytes, PREVIEW_MAX_BYTES, PREVIEW_TIMEOUT_MS, safeStorageOriginHref, STORAGE_READ_TIMEOUT_MS, storageContentPath, storageUsesPath, THUMBNAIL_MAX_BYTES, type StorageFile, type StorageUsesResponse } from './storageModel'
+
+const thumbnailQueues = new Map<string, { active: number; pending: Set<() => void> }>()
+
+/** Scope-local permits contain no media data and are removed when their last request ends. */
+function reserveThumbnail(scope: string, signal: AbortSignal): Promise<(() => void) | null> {
+  if (signal.aborted) return Promise.resolve(null)
+  let queue = thumbnailQueues.get(scope)
+  if (!queue) { queue = { active: 0, pending: new Set() }; thumbnailQueues.set(scope, queue) }
+  const session = queue
+  return new Promise(resolve => {
+    let active = false
+    let released = false
+    const release = () => {
+      if (released) return
+      released = true
+      signal.removeEventListener('abort', release)
+      if (active) session.active--
+      else { session.pending.delete(start); resolve(null) }
+      while (session.active < 4 && session.pending.size) session.pending.values().next().value?.()
+      if (!session.active && !session.pending.size && thumbnailQueues.get(scope) === session) thumbnailQueues.delete(scope)
+    }
+    const start = () => {
+      session.pending.delete(start)
+      active = true
+      session.active++
+      resolve(release)
+    }
+    signal.addEventListener('abort', release, { once: true })
+    if (session.active < 4) start()
+    else session.pending.add(start)
+  })
+}
 
 export function MediaIcon({ type, className = 'h-5 w-5' }: { type: string; className?: string }) {
   const Icon = type === 'image' ? ImageIcon : type === 'video' ? Video : type === 'audio' ? AudioLines : FileText
@@ -19,18 +52,25 @@ export function StorageThumbnail({ file, scope }: { file: StorageFile; scope: st
   useEffect(() => {
     setUrl('')
     if (file.media_type !== 'image' || file.size_bytes > THUMBNAIL_MAX_BYTES || file.status === 'trash') return
-    const controller = new AbortController(); let objectURL = ''; let started = false
+    const controller = new AbortController(); let objectURL = ''; let started = false; let timeout: number | undefined
     const load = async () => {
       if (started) return
       started = true
-      const result = await apiBlob(storageContentPath(file), { signal: controller.signal })
-      if (controller.signal.aborted || getAuthScope() !== scope || !result.success || !result.blob || !/^image\/(jpeg|png|webp|gif|avif)$/.test(result.blob.type)) return
-      objectURL = URL.createObjectURL(result.blob); setUrl(objectURL)
+      const release = await reserveThumbnail(scope, controller.signal)
+      if (!release) return
+      if (controller.signal.aborted || getAuthScope() !== scope) { release(); return }
+      timeout = window.setTimeout(() => controller.abort(), STORAGE_READ_TIMEOUT_MS)
+      try {
+        const result = await apiBlob(storageContentPath(file), { signal: controller.signal })
+        if (controller.signal.aborted || getAuthScope() !== scope || !result.success || !result.blob || !/^image\/(jpeg|png|webp|gif|avif)$/.test(result.blob.type)) return
+        objectURL = URL.createObjectURL(result.blob); setUrl(objectURL)
+      } catch { /* The media icon remains available when a thumbnail cannot load. */ }
+      finally { window.clearTimeout(timeout); release() }
     }
     const observer = typeof IntersectionObserver !== 'undefined' ? new IntersectionObserver(entries => { if (entries.some(entry => entry.isIntersecting)) { void load(); observer?.disconnect() } }, { rootMargin: '100px' }) : null
     if (observer && host.current) observer.observe(host.current)
     else void load()
-    return () => { observer?.disconnect(); controller.abort(); if (objectURL) URL.revokeObjectURL(objectURL) }
+    return () => { observer?.disconnect(); window.clearTimeout(timeout); controller.abort(); if (objectURL) URL.revokeObjectURL(objectURL) }
   }, [file.object_key, file.media_type, file.size_bytes, file.status, scope])
   return <span ref={host} className="flex h-full w-full items-center justify-center overflow-hidden rounded-xl bg-slate-100 text-slate-500">{url ? <img src={url} alt="" className="h-full w-full object-cover" loading="lazy" /> : <MediaIcon type={file.media_type} className="h-7 w-7" />}</span>
 }
@@ -40,6 +80,7 @@ export function StoragePreview({ file, scope, onClose, refresh = 0, onUnavailabl
   const [accessError, setAccessError] = useState('')
   const [accessRetry, setAccessRetry] = useState(0)
   const firstValidation = useRef(true)
+  const validation = useRef<{ invalidate: (revision: number) => void; dispose: () => void } | null>(null)
   const unavailable = useRef(onUnavailable || onClose)
   unavailable.current = onUnavailable || onClose
   const [revoked, setRevoked] = useState(false)
@@ -61,18 +102,26 @@ export function StoragePreview({ file, scope, onClose, refresh = 0, onUnavailabl
   const safeInline = file.media_type !== 'document'
   const autoLoad = safeInline && file.size_bytes <= PREVIEW_MAX_BYTES
   useEffect(() => {
-    if (firstValidation.current) { firstValidation.current = false; return }
-    const controller = new AbortController()
-    setValidatedRefresh(-1); setAccessError(''); validationCloseRef.current?.focus({ preventScroll: true })
-    const timeout = window.setTimeout(() => { controller.abort(); setAccessError('No se pudo verificar tu acceso a este archivo. Vuelve a intentarlo.') }, PREVIEW_TIMEOUT_MS)
-    void apiGet<StorageUsesResponse>(storageUsesPath(file.object_key), { signal: controller.signal }).then(response => {
-      if (controller.signal.aborted || getAuthScope() !== scope) return
-      if ([401, 403, 404].includes(response.status || 0)) { setRevoked(true); setPdfOpen(false); unavailable.current(); return }
-      if (!response.success || !response.data?.success) { setAccessError(response.error || response.data?.error || 'No se pudo verificar tu acceso a este archivo.'); return }
-      setValidatedRefresh(refresh)
-    }).catch(() => { if (!controller.signal.aborted && getAuthScope() === scope) setAccessError('No se pudo verificar tu acceso a este archivo. Revisa tu conexión.') }).finally(() => window.clearTimeout(timeout))
-    return () => { controller.abort(); window.clearTimeout(timeout) }
-  }, [refresh, accessRetry, scope, file.object_key])
+    const queue = new StorageReadQueue(refresh, {
+      timeoutMs: PREVIEW_TIMEOUT_MS,
+      read: signal => apiGet<StorageUsesResponse>(storageUsesPath(file.object_key), { signal }),
+      onStart: () => { setValidatedRefresh(-1); setAccessError(''); validationCloseRef.current?.focus({ preventScroll: true }) },
+      onResult: (response, revision) => {
+        if (getAuthScope() !== scope) return false
+        if ([401, 403, 404].includes(response.status || 0)) { setRevoked(true); setPdfOpen(false); unavailable.current(); return false }
+        if (!response.success || !response.data?.success) { setAccessError(response.error || response.data?.error || 'No se pudo verificar tu acceso a este archivo.'); return false }
+        setValidatedRefresh(revision)
+        return true
+      },
+      onError: reason => { if (getAuthScope() === scope) setAccessError(reason === 'timeout' ? 'No se pudo verificar tu acceso a este archivo. Vuelve a intentarlo.' : 'No se pudo verificar tu acceso a este archivo. Revisa tu conexión.') },
+      onSettled: () => {},
+    })
+    validation.current = queue
+    if (firstValidation.current) firstValidation.current = false
+    else queue.start()
+    return () => { queue.dispose(); if (validation.current === queue) validation.current = null }
+  }, [accessRetry, scope, file.object_key])
+  useEffect(() => { validation.current?.invalidate(refresh) }, [refresh])
 
   useEffect(() => {
     setUrl(''); setMime(''); setError(''); setBusy(false)

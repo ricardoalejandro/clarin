@@ -119,6 +119,11 @@ func (s *Server) storageSelfServiceRecoveryFiles(ctx context.Context, q storageS
 
 func (s *Server) storageBuildUseSelection(ctx context.Context, q storageSelfServiceQuerier, actor storageUseActor, selection storageUseSelection) (storageUseSelection, error) {
 	selection.Items = []storageUseReviewItem{}
+	var err error
+	ctx, err = s.storageReviewReferenceContext(ctx, q, actor, selection)
+	if err != nil {
+		return selection, err
+	}
 	if selection.Action == "trash" {
 		if len(selection.Targets) < 1 || len(selection.Targets) > 100 || len(selection.RecoveryIDs) > 0 {
 			return selection, errStorageUseProtected
@@ -140,8 +145,30 @@ func (s *Server) storageBuildUseSelection(ctx context.Context, q storageSelfServ
 			if err != nil {
 				return selection, err
 			}
+			requestedBeforeStat := map[string]bool{}
+			for _, id := range target.UseIDs {
+				if id == "" || requestedBeforeStat[id] {
+					return selection, errStorageUseProtected
+				}
+				requestedBeforeStat[id] = true
+			}
+			if target.Mode == "uses" {
+				if len(requestedBeforeStat) == 0 || len(requestedBeforeStat) > 100 {
+					return selection, errStorageUseProtected
+				}
+				for _, use := range uses {
+					delete(requestedBeforeStat, use.UseID)
+				}
+				if len(requestedBeforeStat) > 0 {
+					return selection, errStorageUseProtected
+				}
+			}
 			info, err := s.storage.GetFileInfo(ctx, target.ObjectKey)
 			if err != nil {
+				if storageSelfServiceObjectMissing(err) {
+					selection.Items = append(selection.Items, storageMissingUseReviewItem(target.ObjectKey, uses, refs))
+					continue
+				}
 				return selection, err
 			}
 			item := storageUseReviewItem{ObjectKey: target.ObjectKey, Filename: "Archivo", MediaType: storageSelfServiceMediaType(target.ObjectKey, info.ContentType), SizeBytes: info.Size, Eligible: true, UseIDs: []string{}}
@@ -312,6 +339,9 @@ func (s *Server) handleStorageUsePreview(c *fiber.Ctx, actor storageUseActor, ac
 	}
 	selection, err := s.storageBuildUseSelection(ctx, s.repos.DB(), actor, storageUseSelection{Version: 1, Action: action, Targets: targets, RecoveryIDs: recoveryIDs})
 	if err != nil {
+		if !storageUseSelectionConflict(err) {
+			return storageSelfServiceError(c, 503, "storage_review_unavailable", "No se pudo completar la revisión. Conservamos tu selección; inténtalo de nuevo.")
+		}
 		return storageSelfServiceError(c, 409, "storage_selection_changed", "La selección cambió o ya no tienes acceso. Revisa sus usos de nuevo.")
 	}
 	id := uuid.New()
@@ -412,8 +442,10 @@ func (s *Server) handleStorageUseConfirm(c *fiber.Ctx, actor storageUseActor, id
 		return err
 	}
 	fresh, err := s.storageBuildUseSelection(ctx, tx, actor, plan)
+	if err != nil && !storageUseSelectionConflict(err) {
+		return storageSelfServiceError(c, 503, "storage_review_unavailable", "No se pudo comprobar la selección. No se retiró ningún archivo; inténtalo de nuevo.")
+	}
 	if err != nil || len(fresh.Items) != len(plan.Items) {
-		log.Printf("[StorageSelfService] use revalidation failed: %v", err)
 		return storageSelfServiceError(c, 409, "storage_selection_changed", "La selección cambió. Vuelve a revisar el impacto.")
 	}
 	for i := range plan.Items {

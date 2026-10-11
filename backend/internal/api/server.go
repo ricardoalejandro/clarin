@@ -4393,7 +4393,7 @@ func objectKeyFromMediaURL(mediaURL string) string {
 }
 
 func mediaProxyURLFromObjectKey(objectKey string) string {
-	return "/api/media/file/" + objectKey
+	return storage.MediaProxyURL(objectKey)
 }
 
 // findNonStatusMediaAsset keeps private status and Work assets from being
@@ -4575,7 +4575,7 @@ func (s *Server) handleDirectUpload(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to upload: " + err.Error()})
 	}
-	proxyURL := fmt.Sprintf("/api/media/file/%s", objectKey)
+	proxyURL := mediaProxyURLFromObjectKey(objectKey)
 	deduped := false
 	asset, assetErr := s.repos.MediaAsset.Upsert(c.Context(), repository.MediaAssetUpsert{
 		AccountID:   accountID,
@@ -4694,9 +4694,16 @@ func (s *Server) handleMediaProxy(c *fiber.Ctx) error {
 	if decoded, err := url.PathUnescape(objectKey); err == nil {
 		objectKey = decoded
 	}
-	if storage.IsProtectedMediaObjectKey(objectKey) || !s.authorizeOrdinaryMedia(c, objectKey) {
-		c.Set("Cache-Control", "private, no-store, max-age=0")
-		c.Set("Vary", "Cookie, Authorization")
+	c.Set("Cache-Control", "private, no-store, max-age=0")
+	c.Set("Vary", "Cookie, Authorization")
+	if storage.IsProtectedMediaObjectKey(objectKey) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "File not found"})
+	}
+	allowed, err := s.authorizeOrdinaryMediaChecked(c, objectKey)
+	if err != nil {
+		return storageSelfServiceError(c, 503, "storage_unavailable", "No se pudo comprobar el archivo. Inténtalo de nuevo.")
+	}
+	if !allowed {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "File not found"})
 	}
 	return s.serveStorageObject(c, objectKey, "private, no-store, max-age=0", "")
@@ -4800,13 +4807,17 @@ func setStorageResponseHeaders(c *fiber.Ctx, contentType, cacheControl, etag, la
 }
 
 func (s *Server) serveStorageObject(c *fiber.Ctx, objectKey, cacheControl, explicitContentType string) error {
+	c.Set(fiber.HeaderCacheControl, cacheControl)
+	if strings.Contains(cacheControl, "private") {
+		c.Set(fiber.HeaderVary, "Cookie, Authorization")
+	}
 	if s.storage == nil {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "Storage not configured"})
 	}
 
 	info, err := s.storage.GetFileInfo(c.Context(), objectKey)
 	if err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "File not found"})
+		return storageObjectReadError(c, err)
 	}
 	contentType := storageContentType(objectKey, explicitContentType, info.ContentType)
 	etagSeed := fmt.Sprintf("%s:%d:%d", objectKey, info.Size, info.LastModified.UnixNano())
@@ -4851,7 +4862,7 @@ func (s *Server) serveStorageObject(c *fiber.Ctx, objectKey, cacheControl, expli
 		length := end - start + 1
 		data, err := s.storage.GetFileRange(c.Context(), objectKey, start, length)
 		if err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": "Failed to read file"})
+			return storageObjectReadError(c, err)
 		}
 
 		c.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, totalSize))
@@ -4863,7 +4874,7 @@ func (s *Server) serveStorageObject(c *fiber.Ctx, objectKey, cacheControl, expli
 	// Full file download
 	data, err := s.storage.GetFile(c.Context(), objectKey)
 	if err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "File not found"})
+		return storageObjectReadError(c, err)
 	}
 
 	c.Set("Content-Length", fmt.Sprintf("%d", len(data)))

@@ -153,6 +153,38 @@ func runMediaAccessSessionIntegrationChecks(t *testing.T, db *pgxpool.Pool, stor
 		}
 		get(raw, expiredToken, false, http.StatusNotFound, nil, nil)
 	})
+	t.Run("legacy URL-only references preserve encoded filenames and authority", func(t *testing.T) {
+		for _, name := range []string{"Historia 17.11.41.mp4", "Niñez y canción.jpeg", "6392_0216(1)1.mp4", "la historia).mp4", "a+b.jpeg", "literal%20espacio.jpeg", "100% listo.jpeg", "pregunta?.jpeg", "fragmento#.jpeg", "una \"cita\".jpeg", "signos'\"]}.jpeg", "una \"cita\" & <foto>.jpeg", "separadores \"línea\" \u2028 y \u2029.jpeg"} {
+			t.Run(name, func(t *testing.T) {
+				mediaKey, _, message := f.media(f.account, "legacy", name, true)
+				wantBytes := readObject(mediaKey)
+				proxy := mediaProxyURLFromObjectKey(mediaKey)
+				persisted := proxy
+				if !strings.ContainsAny(name, "%?#") {
+					// Historical rows stored spaces, Unicode and parentheses in
+					// the URL itself, without a normalized media_asset_id.
+					persisted = "/api/media/file/" + mediaKey
+				}
+				f.exec(`UPDATE messages SET media_asset_id=NULL,media_url=$3 WHERE account_id=$1 AND id=$2`, f.account, message, persisted)
+				get(proxy, owner.token, true, http.StatusOK, wantBytes, nil)
+				get(proxy, otherToken, true, http.StatusNotFound, nil, nil)
+				get(proxy, "", false, http.StatusNotFound, nil, nil)
+				f.exec(`UPDATE roles SET permissions=$2 WHERE id=$1`, f.role, []string{domain.PermSettings})
+				get(proxy, owner.token, true, http.StatusNotFound, nil, nil)
+				f.exec(`UPDATE roles SET permissions=$2 WHERE id=$1`, f.role, []string{domain.PermSettings, domain.PermChats})
+				get(proxy, owner.token, true, http.StatusOK, wantBytes, nil)
+			})
+		}
+	})
+	t.Run("a missing provider object does not erase its authorized reference", func(t *testing.T) {
+		mediaKey, _, message := f.media(f.account, "legacy", "Objeto ausente.jpeg", true)
+		f.expectObject(mediaKey, true)
+		if err := store.DeleteFile(ctx, mediaKey); err != nil {
+			t.Fatal(err)
+		}
+		get(mediaProxyURLFromObjectKey(mediaKey), owner.token, true, http.StatusNotFound, nil, nil)
+		f.expectMessage(message, false)
+	})
 	t.Run("ranges and conditional requests revalidate authority", func(t *testing.T) {
 		before, err := redisCache.Get(ctx, "session:"+owner.claims.SessionID)
 		if err != nil {
@@ -232,6 +264,6 @@ func runMediaAccessSessionIntegrationChecks(t *testing.T, db *pgxpool.Pool, stor
 		}
 		f.server.services.Auth.SetCache(failedCache)
 		defer f.server.services.Auth.SetCache(redisCache)
-		get(raw, otherActor.token, true, http.StatusNotFound, nil, nil)
+		get(raw, otherActor.token, true, http.StatusServiceUnavailable, nil, nil)
 	})
 }

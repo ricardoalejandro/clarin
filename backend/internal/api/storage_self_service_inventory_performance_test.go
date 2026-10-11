@@ -17,8 +17,9 @@ import (
 	"github.com/naperu/clarin/internal/storage"
 )
 
-// Optional diagnostic plans are distinct from timed HTTP samples. Both settings
-// are transaction-local and never change the reusable PostgreSQL configuration.
+// Optional diagnostic plans are distinct from timed HTTP samples. They compare
+// the previous wide projection with the current page and summary statements
+// against the same fixture, without changing PostgreSQL configuration.
 func storagePerformanceExplainInventory(t *testing.T, f *storageQAFixture, objects int) {
 	t.Helper()
 	directory := os.Getenv("CLARIN_STORAGE_PERF_PLAN_DIR")
@@ -28,42 +29,50 @@ func storagePerformanceExplainInventory(t *testing.T, f *storageQAFixture, objec
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		t.Fatal(err)
 	}
-	claims := &service.JWTClaims{AccountID: f.account, UserID: f.user, Role: "member", Permissions: []string{domain.PermSettings, domain.PermChats}}
-	args := append(storageInventoryArguments(f.account, f.user, claims), "", "", "", "all", int64(0), (*time.Time)(nil), 40, 0)
-	query := storageInventoryCTE(claims) + ` SELECT to_jsonb(f) FROM file_rows f` + storageInventoryFilterSQL + ` ORDER BY size_bytes DESC,object_key ASC,recovery_id ASC LIMIT $13 OFFSET $14`
-	explain := "EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) "
-	if os.Getenv("CLARIN_STORAGE_PERF_PLAN_ANALYZE") == "0" {
-		explain = "EXPLAIN(FORMAT JSON) "
-	}
-	for _, jit := range []string{"on", "off"} {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		tx, err := f.db.Begin(ctx)
-		if err != nil {
-			cancel()
-			t.Fatal(err)
-		}
-		if _, err = tx.Exec(ctx, "SET LOCAL jit="+jit); err != nil {
-			_ = tx.Rollback(ctx)
-			cancel()
-			t.Fatal(err)
-		}
-		var data []byte
-		err = tx.QueryRow(ctx, explain+query, args...).Scan(&data)
-		_ = tx.Rollback(ctx)
-		cancel()
+	defer f.exec(`UPDATE user_accounts SET role='member' WHERE account_id=$1 AND user_id=$2`, f.account, f.user)
+	for _, role := range []string{"member", "admin"} {
+		f.exec(`UPDATE user_accounts SET role=$3 WHERE account_id=$1 AND user_id=$2`, f.account, f.user, role)
+		claims := &service.JWTClaims{AccountID: f.account, UserID: f.user, Role: role, Permissions: []string{domain.PermSettings, domain.PermChats}}
+		privateSources, err := f.server.storageInventoryHasPrivateSources(context.Background(), f.account, claims)
 		if err != nil {
 			t.Fatal(err)
 		}
-		file := filepath.Join(directory, fmt.Sprintf("inventory-files-%d-jit-%s.json", objects, jit))
-		if err = os.WriteFile(file, data, 0600); err != nil {
-			t.Fatal(err)
+		baseArgs := storageInventoryArguments(f.account, f.user, claims)
+		filterArgs := append(append([]any{}, baseArgs...), "", "", "", "all", int64(0), (*time.Time)(nil))
+		pageArgs := append(append([]any{}, filterArgs...), 40, 0)
+		filter := storageInventoryFilter{Sort: "size", Order: "desc"}
+		for _, query := range []struct {
+			name string
+			sql  string
+			args []any
+		}{
+			{"count", storageInventoryCTE(claims, privateSources) + ` SELECT count(*) FROM file_rows f` + storageInventoryFilterSQL, filterArgs},
+			{"files-before-page-projection", storageInventoryCTE(claims) + ` SELECT to_jsonb(f) FROM file_rows f` + storageInventoryFilterSQL + ` ORDER BY size_bytes DESC,object_key ASC,recovery_id ASC LIMIT $13 OFFSET $14`, pageArgs},
+			{"files", storageInventoryPageSQL(claims, filter, privateSources), pageArgs},
+			{"usage", storageInventoryUsageSQL(claims, privateSources), baseArgs},
+		} {
+			explain := "EXPLAIN(ANALYZE,BUFFERS,FORMAT JSON) "
+			if os.Getenv("CLARIN_STORAGE_PERF_PLAN_ANALYZE") == "0" {
+				explain = "EXPLAIN(FORMAT JSON) "
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			var data []byte
+			err := f.db.QueryRow(ctx, explain+query.sql, query.args...).Scan(&data)
+			cancel()
+			if err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(directory, fmt.Sprintf("inventory-%s-%s-%d.json", query.name, role, objects))
+			if err = os.WriteFile(file, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			var plans []map[string]any
+			if err = json.Unmarshal(data, &plans); err != nil || len(plans) != 1 {
+				t.Fatalf("invalid query plan: %v", err)
+			}
+			summary, _ := json.Marshal(map[string]any{"objects": objects, "actor_role": role, "query": query.name, "planning_ms": plans[0]["Planning Time"], "execution_ms": plans[0]["Execution Time"], "jit": plans[0]["JIT"], "sql_bytes": len(query.sql)})
+			t.Logf("STORAGE_PERF_PLAN %s", summary)
 		}
-		var plans []map[string]any
-		if err = json.Unmarshal(data, &plans); err != nil || len(plans) != 1 {
-			t.Fatalf("invalid query plan: %v", err)
-		}
-		summary, _ := json.Marshal(map[string]any{"objects": objects, "jit_setting": jit, "planning_ms": plans[0]["Planning Time"], "execution_ms": plans[0]["Execution Time"], "jit": plans[0]["JIT"], "sql_bytes": len(query)})
-		t.Logf("STORAGE_PERF_PLAN %s", summary)
 	}
 }
 

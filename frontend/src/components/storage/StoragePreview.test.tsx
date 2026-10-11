@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { StoragePreview, StorageThumbnail } from './StoragePreview'
 import { apiBlob, apiGet } from '@/lib/api'
-import { PREVIEW_MAX_BYTES, PREVIEW_TIMEOUT_MS, type StorageFile } from './storageModel'
+import { PREVIEW_MAX_BYTES, PREVIEW_TIMEOUT_MS, STORAGE_READ_TIMEOUT_MS, type StorageFile } from './storageModel'
 
 const identity = vi.hoisted(() => ({ scope: 'account-a' }))
 vi.mock('@/lib/api', () => ({ apiBlob: vi.fn(), apiGet: vi.fn() }))
@@ -178,6 +178,121 @@ describe('authenticated storage preview sessions', () => {
     await waitFor(() => expect(player).toBeVisible())
     expect(play).not.toHaveBeenCalled()
     expect(document.querySelector('audio')).toBe(player)
+  })
+
+  it('coalesces revalidation hints without aborting the active read or resetting its deadline', async () => {
+    vi.useFakeTimers()
+    mockBlob.mockResolvedValue({ success: true, blob: new Blob(['image'], { type: 'image/png' }) })
+    mockGet.mockImplementation(() => new Promise(() => {}))
+    const onClose = vi.fn()
+    const view = render(<StoragePreview file={file} scope={identity.scope} refresh={0} onClose={onClose} />)
+    await act(async () => {})
+    view.rerender(<StoragePreview file={file} scope={identity.scope} refresh={1} onClose={onClose} />)
+    const firstSignal = mockGet.mock.calls[0][1]?.signal
+    await act(async () => vi.advanceTimersByTime(PREVIEW_TIMEOUT_MS - 1000))
+    view.rerender(<StoragePreview file={file} scope={identity.scope} refresh={2} onClose={onClose} />)
+    view.rerender(<StoragePreview file={file} scope={identity.scope} refresh={3} onClose={onClose} />)
+    expect(firstSignal?.aborted).toBe(false)
+    expect(mockGet).toHaveBeenCalledTimes(1)
+    await act(async () => vi.advanceTimersByTime(1000))
+    expect(screen.getByRole('alert')).toHaveTextContent('No se pudo verificar tu acceso')
+    expect(firstSignal?.aborted).toBe(true)
+    expect(screen.getByRole('button', { name: 'Reintentar verificación' })).toBeEnabled()
+  })
+
+  it('bounds simultaneous thumbnails and cancels queued work when it unmounts', async () => {
+    const completions: ((value: unknown) => void)[] = []
+    mockBlob.mockImplementation(() => new Promise(resolve => completions.push(resolve as (value: unknown) => void)))
+    const view = render(<>{Array.from({ length: 40 }, (_, index) => <StorageThumbnail key={index} file={{ ...file, object_key: `account-a/${index}.png` }} scope={identity.scope} />)}</>)
+    await act(async () => {})
+    expect(mockBlob).toHaveBeenCalledTimes(4)
+    await act(async () => completions[0]({ success: false, status: 404 }))
+    expect(mockBlob).toHaveBeenCalledTimes(5)
+    const signals = mockBlob.mock.calls.map(([, options]) => options?.signal)
+    view.unmount()
+    await act(async () => completions[1]({ success: false, status: 404 }))
+    expect(signals.every(signal => signal?.aborted)).toBe(true)
+    expect(mockBlob).toHaveBeenCalledTimes(5)
+  })
+
+  it('resumes the same PDF session after a successful read while its coalesced follow-up continues', async () => {
+    const completions: ((value: unknown) => void)[] = []
+    mockGet.mockImplementation(() => new Promise(resolve => completions.push(resolve as (value: unknown) => void)))
+    const pdf = { ...file, filename: 'Informe.pdf', media_type: 'document' as const }
+    const onClose = vi.fn()
+    const view = render(<StoragePreview file={pdf} scope={identity.scope} refresh={0} onClose={onClose} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Abrir vista previa' }))
+    const session = screen.getByRole('dialog', { name: 'PDF canónico' })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Página actual' }), { target: { value: '4' } })
+    view.rerender(<StoragePreview file={pdf} scope={identity.scope} refresh={1} onClose={onClose} />)
+    view.rerender(<StoragePreview file={pdf} scope={identity.scope} refresh={2} onClose={onClose} />)
+    view.rerender(<StoragePreview file={pdf} scope={identity.scope} refresh={3} onClose={onClose} />)
+    expect(mockGet).toHaveBeenCalledTimes(1)
+    const valid = { success: true, data: { success: true, uses: [], has_more: false, limit: 40 } }
+    await act(async () => completions[0](valid))
+    expect(mockGet).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('dialog', { name: 'PDF canónico' })).toBe(session)
+    await act(async () => completions[1](valid))
+    expect(screen.getByRole('dialog', { name: 'PDF canónico' })).toBe(session)
+    expect(screen.getByRole('textbox', { name: 'Página actual' })).toHaveValue('4')
+    expect(mockBlob).not.toHaveBeenCalled()
+  })
+
+  it('keeps resuming verified PDFs under continuous hints without timing out successful reads', async () => {
+    vi.useFakeTimers()
+    const completions: ((value: unknown) => void)[] = []
+    mockGet.mockImplementation(() => new Promise(resolve => completions.push(resolve as (value: unknown) => void)))
+    const pdf = { ...file, filename: 'Informe.pdf', media_type: 'document' as const }
+    const onClose = vi.fn(), onUnavailable = vi.fn()
+    const view = render(<StoragePreview file={pdf} scope={identity.scope} refresh={0} onClose={onClose} onUnavailable={onUnavailable} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Abrir vista previa' }))
+    const session = screen.getByRole('dialog', { name: 'PDF canónico' })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Página actual' }), { target: { value: '4' } })
+    view.rerender(<StoragePreview file={pdf} scope={identity.scope} refresh={1} onClose={onClose} onUnavailable={onUnavailable} />)
+    for (let index = 0; index < 4; index++) {
+      view.rerender(<StoragePreview file={pdf} scope={identity.scope} refresh={index + 2} onClose={onClose} onUnavailable={onUnavailable} />)
+      await act(async () => vi.advanceTimersByTime(30_000))
+      await act(async () => completions[index]({ success: true, data: { success: true, uses: [], has_more: false, limit: 40 } }))
+      expect(mockGet).toHaveBeenCalledTimes(index + 2)
+      expect(screen.getByRole('dialog', { name: 'PDF canónico' })).toBe(session)
+      expect(screen.getByRole('textbox', { name: 'Página actual' })).toHaveValue('4')
+      expect(screen.queryByRole('alert')).toBeNull()
+    }
+    await act(async () => completions[4]({ success: false, status: 404 }))
+    expect(onUnavailable).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('dialog', { name: 'PDF canónico' })).toBeNull()
+  })
+
+  it('releases stalled thumbnail permits and ignores their late media bodies', async () => {
+    vi.useFakeTimers()
+    const completions: ((value: unknown) => void)[] = []
+    mockBlob.mockImplementation(() => new Promise(resolve => completions.push(resolve as (value: unknown) => void)))
+    render(<>{Array.from({ length: 5 }, (_, index) => <StorageThumbnail key={index} file={{ ...file, object_key: `account-a/${index}.png` }} scope={identity.scope} />)}</>)
+    await act(async () => {})
+    expect(mockBlob).toHaveBeenCalledTimes(4)
+    const firstSignals = mockBlob.mock.calls.map(([, options]) => options?.signal)
+    await act(async () => vi.advanceTimersByTime(STORAGE_READ_TIMEOUT_MS))
+    expect(firstSignals.every(signal => signal?.aborted)).toBe(true)
+    expect(mockBlob).toHaveBeenCalledTimes(5)
+    await act(async () => completions[0]({ success: true, blob: new Blob(['late'], { type: 'image/png' }) }))
+    expect(createURL).not.toHaveBeenCalled()
+  })
+
+  it('does not start queued old-account thumbnails with the new account credentials', async () => {
+    const completions: ((value: unknown) => void)[] = []
+    mockBlob.mockImplementation(() => new Promise(resolve => completions.push(resolve as (value: unknown) => void)))
+    const oldScope = identity.scope
+    render(<>{Array.from({ length: 6 }, (_, index) => <StorageThumbnail key={index} file={{ ...file, object_key: `account-a/${index}.png` }} scope={oldScope} />)}</>)
+    await act(async () => {})
+    expect(mockBlob).toHaveBeenCalledTimes(4)
+    identity.scope = 'account-b'
+    render(<StorageThumbnail file={{ ...file, object_key: 'account-b/new.png' }} scope={identity.scope} />)
+    await act(async () => {})
+    expect(mockBlob).toHaveBeenCalledTimes(5)
+    expect(mockBlob.mock.calls[4][0]).toContain('account-b%2Fnew.png')
+    await act(async () => completions[0]({ success: true, blob: new Blob(['old'], { type: 'image/png' }) }))
+    expect(mockBlob).toHaveBeenCalledTimes(5)
+    expect(createURL).not.toHaveBeenCalled()
   })
 
 })

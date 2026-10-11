@@ -68,15 +68,17 @@ type mediaFile struct {
 	RecoveryID   uuid.UUID `json:"recovery_id,omitempty"`
 }
 type manifest struct {
-	Kind           string             `json:"kind"`
-	RunID          uuid.UUID          `json:"run_id"`
-	CreatedAt      time.Time          `json:"created_at"`
-	State          string             `json:"state"`
-	RoleID         uuid.UUID          `json:"role_id"`
-	ReadOnlyRoleID uuid.UUID          `json:"read_only_role_id,omitempty"`
-	Accounts       map[string]account `json:"accounts"`
-	Actors         map[string]actor   `json:"actors"`
-	Files          []mediaFile        `json:"files"`
+	Kind                 string             `json:"kind"`
+	Profile              string             `json:"profile,omitempty"`
+	MissingObjectRemoved bool               `json:"missing_object_removed,omitempty"`
+	RunID                uuid.UUID          `json:"run_id"`
+	CreatedAt            time.Time          `json:"created_at"`
+	State                string             `json:"state"`
+	RoleID               uuid.UUID          `json:"role_id"`
+	ReadOnlyRoleID       uuid.UUID          `json:"read_only_role_id,omitempty"`
+	Accounts             map[string]account `json:"accounts"`
+	Actors               map[string]actor   `json:"actors"`
+	Files                []mediaFile        `json:"files"`
 }
 type laboratory struct {
 	ctx   context.Context
@@ -94,6 +96,7 @@ func main() {
 
 func run() error {
 	action := flag.String("action", "", "create, age-trash, verify or cleanup")
+	profile := flag.String("profile", "", "optional regression profile; default acceptance stays unchanged")
 	manifestPath := flag.String("manifest", "", "private manifest path under work/")
 	assets := flag.String("assets", "", "tests/fixtures/storage directory")
 	label := flag.String("label", "", "exact fixture file label for age-trash")
@@ -102,8 +105,11 @@ func run() error {
 	if os.Getenv("CLARIN_STORAGE_UI_QA") != "1" {
 		return errors.New("requires explicit CLARIN_STORAGE_UI_QA=1")
 	}
-	if *action != "create" && *action != "age-trash" && *action != "verify" && *action != "cleanup" {
+	if *action != "create" && *action != "age-trash" && *action != "verify" && *action != "cleanup" && *action != "noise" && *action != "simulate-missing" {
 		return errors.New("choose create, age-trash, verify or cleanup")
+	}
+	if *profile != "" && (*profile != "regression" || *action != "create") {
+		return errors.New("profile=regression is supported only when creating a new fixture")
 	}
 	if *manifestPath == "" {
 		return errors.New("private manifest path is required")
@@ -138,6 +144,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		m.Profile = *profile
 		// Persist recovery scope before the first database/object mutation.
 		if err := writePrivateJSON(*manifestPath, m); err != nil {
 			return err
@@ -156,6 +163,13 @@ func run() error {
 		return err
 	}
 	switch *action {
+	case "noise":
+		return lab.regressionNoise(m)
+	case "simulate-missing":
+		if err := lab.regressionMissing(m); err != nil {
+			return err
+		}
+		return writePrivateJSON(*manifestPath, m)
 	case "age-trash":
 		if err := lab.ageTrash(m, *label); err != nil {
 			return err
@@ -360,6 +374,22 @@ func (lab laboratory) create(m *manifest, assets, manifestPath string) error {
 		{"large_audio", "Grabación grande de prueba.wav", "audio", "audio/wav", "active", syntheticWAV(12 * 1024 * 1024)},
 		{"other_account", "Privado de la cuenta B.pdf", "document", "application/pdf", "active", pdf},
 	}
+	if m.Profile == "regression" {
+		specs = nil
+		for index := 1; index <= 40; index++ {
+			specs = append(specs, spec{fmt.Sprintf("batch_%02d", index), fmt.Sprintf("Batch review %02d.pdf", index), "document", "application/pdf", "active", pdf})
+		}
+		for _, item := range []struct{ label, filename string }{
+			{"legacy_plain", "Canción de otoño (versión 2).pdf"},
+			{"legacy_percent", "Porcentaje %20 + signos.pdf"},
+			{"legacy_delimiters", "Pregunta ? y fragmento #.pdf"},
+			{"legacy_unicode", "Documento 中文 y café.pdf"},
+			{"missing", "Archivo ausente tras observar.pdf"},
+			{"other_account", "Privado de otra cuenta.pdf"},
+		} {
+			specs = append(specs, spec{item.label, item.filename, "document", "application/pdf", "active", pdf})
+		}
+	}
 	for index, s := range specs {
 		// Distinct valid bytes keep the production account/hash uniqueness rule
 		// intact while browser scenarios retain independent file lifecycles.
@@ -377,7 +407,11 @@ func (lab laboratory) create(m *manifest, assets, manifestPath string) error {
 			accountID = m.Accounts["b"].ID
 		}
 		digest := sha256.Sum256(s.payload)
-		m.Files = append(m.Files, mediaFile{Label: s.label, AccountID: accountID, ObjectKey: accountID.String() + "/qa-browser/" + m.RunID.String() + "/" + s.label + filepath.Ext(s.filename), Filename: s.filename, MediaType: s.mediaType, ContentType: s.contentType, SizeBytes: len(s.payload), SHA256: hex.EncodeToString(digest[:]), AssetID: uuid.New(), ContactID: uuid.New(), ChatID: uuid.New(), MessageID: uuid.New(), InitialState: s.initialState})
+		objectName := s.label + filepath.Ext(s.filename)
+		if m.Profile == "regression" {
+			objectName = s.filename
+		}
+		m.Files = append(m.Files, mediaFile{Label: s.label, AccountID: accountID, ObjectKey: accountID.String() + "/qa-browser/" + m.RunID.String() + "/" + objectName, Filename: s.filename, MediaType: s.mediaType, ContentType: s.contentType, SizeBytes: len(s.payload), SHA256: hex.EncodeToString(digest[:]), AssetID: uuid.New(), ContactID: uuid.New(), ChatID: uuid.New(), MessageID: uuid.New(), InitialState: s.initialState})
 	}
 	if err := writePrivateJSON(manifestPath, m); err != nil {
 		return err
@@ -440,7 +474,11 @@ func (lab laboratory) create(m *manifest, assets, manifestPath string) error {
 		if err := exec(`INSERT INTO chats(id,account_id,jid,contact_id) VALUES($1,$2,$3,$4)`, f.ChatID, f.AccountID, jid, f.ContactID); err != nil {
 			return err
 		}
-		if err := exec(`INSERT INTO messages(id,account_id,chat_id,message_id,body,message_type,media_url,media_mimetype,media_filename,media_size,media_asset_id,timestamp) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())`, f.MessageID, f.AccountID, f.ChatID, uuid.NewString(), messageBody(f), f.MediaType, "/api/media/file/"+f.ObjectKey, f.ContentType, f.Filename, f.SizeBytes, f.AssetID); err != nil {
+		var messageAsset any = f.AssetID
+		if m.Profile == "regression" && strings.HasPrefix(f.Label, "legacy_") {
+			messageAsset = nil
+		}
+		if err := exec(`INSERT INTO messages(id,account_id,chat_id,message_id,body,message_type,media_url,media_mimetype,media_filename,media_size,media_asset_id,timestamp) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())`, f.MessageID, f.AccountID, f.ChatID, uuid.NewString(), messageBody(f), f.MediaType, fixtureMediaURL(m, f), f.ContentType, f.Filename, f.SizeBytes, messageAsset); err != nil {
 			return err
 		}
 		if f.Label == "shared" {
@@ -449,12 +487,23 @@ func (lab laboratory) create(m *manifest, assets, manifestPath string) error {
 			}
 		}
 	}
+	if m.Profile == "regression" {
+		f := m.Files[0]
+		if err := exec(`INSERT INTO messages(account_id,chat_id,message_id,body,message_type,timestamp) SELECT $1,$2,'regression-text-'||g::text,'Unrelated synthetic text','text',NOW() FROM generate_series(1,10000) g`, f.AccountID, f.ChatID); err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(lab.ctx); err != nil {
 		return err
 	}
 	m.State = "seeded"
 	if err := writePrivateJSON(manifestPath, m); err != nil {
 		return err
+	}
+	// Deliberately do not drain the index: acceptance must exercise the normal
+	// background worker and its real storage_changed notifications.
+	if m.Profile == "regression" {
+		return nil
 	}
 	client, err := newAPIClient()
 	if err != nil {
@@ -620,7 +669,11 @@ func (lab laboratory) verify(m *manifest, expectations string) ([]map[string]any
 			delete(expected, f.Label)
 		}
 		if state == "active" {
-			if deleted || assetID == nil || *assetID != f.AssetID || mediaURL != "/api/media/file/"+f.ObjectKey {
+			assetMatches := assetID != nil && *assetID == f.AssetID
+			if m.Profile == "regression" && strings.HasPrefix(f.Label, "legacy_") {
+				assetMatches = assetID == nil
+			}
+			if deleted || !assetMatches || mediaURL != fixtureMediaURL(m, f) {
 				return nil, fmt.Errorf("active message attachment differs for %s", f.Label)
 			}
 		} else if !deleted || assetID != nil || mediaURL != "" {
@@ -634,7 +687,11 @@ func (lab laboratory) verify(m *manifest, expectations string) ([]map[string]any
 		if state == "purged" && present {
 			return nil, fmt.Errorf("purged object still exists for %s", f.Label)
 		}
-		if state != "purged" && !present {
+		expectedMissing := m.Profile == "regression" && f.Label == "missing" && m.MissingObjectRemoved
+		if expectedMissing && present {
+			return nil, errors.New("simulated missing object unexpectedly reappeared")
+		}
+		if state != "purged" && !present && !expectedMissing {
 			return nil, fmt.Errorf("retained fixture object missing for %s", f.Label)
 		}
 		if present {
