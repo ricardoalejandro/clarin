@@ -21,8 +21,12 @@ import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import { getChatDisplayName } from '@/utils/chat'
 import WhatsAppTextInput, { WhatsAppTextInputHandle } from '../WhatsAppTextInput'
 import ImageViewer from './ImageViewer'
+import { useChatHistoryLayer } from './useChatHistoryLayer'
+import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import ChatDocumentViewer from './ChatDocumentViewer'
 import MessageBubble from './MessageBubble'
+import { groupChatMessages } from './messageGrouping'
+import { latestReadBoundary, observedIncomingBoundary, mergeChatSnapshot, isConversationAtLatest, followConversationLatest, sendOnEnter, captureConversationAnchor, restoreConversationAnchor, type ConversationAnchor } from './chatExperience'
 import StickerPicker from './StickerPicker'
 import EmojiPicker from './EmojiPicker'
 import ContactPanel from './ContactPanel'
@@ -93,6 +97,9 @@ type RetryableMedia = {
   caption: string
   previewUrl: string
   uploadedMediaUrl?: string
+  operationId: string
+  frozenPayload?: string
+  attentionBoundary?: string
   quotedMessageId?: string
   quotedBody?: string
   quotedSender?: string
@@ -176,15 +183,24 @@ interface ChatPanelProps {
   isActive?: boolean
   onRead?: (chatId: string, unreadCount: number, state?: ChatState) => void
   onNext?: () => string | void | Promise<string | void>
+  focusRequest?: number
   attentionMode?: boolean
 }
 
 type DeviceValidationState = 'validating' | 'ready' | 'error'
 
-export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, initialChat, onClose, className = '', readOnly = false, readOnlyReason: explicitReadOnlyReason, onContactInfoToggle, contactInfoOpen, onRequestDelete, isActive = true, onRead, onNext, attentionMode }: ChatPanelProps) {
+export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, initialChat, onClose, className = '', readOnly = false, readOnlyReason: explicitReadOnlyReason, onContactInfoToggle, contactInfoOpen, onRequestDelete, isActive = true, onRead, onNext, attentionMode, focusRequest }: ChatPanelProps) {
   const { ref: panelRef, width: panelWidth } = useContainerWidth<HTMLDivElement>()
   const { setComposerAccessoryOpen } = useChatMobileChrome()
   const compactActions = panelWidth > 0 && panelWidth < 640
+  const [touchKeyboard, setTouchKeyboard] = useState(false)
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const media = window.matchMedia('(pointer: coarse)')
+    const update = () => setTouchKeyboard(media.matches)
+    update(); media.addEventListener?.('change', update)
+    return () => media.removeEventListener?.('change', update)
+  }, [])
   const operationalPortal = useOperationalOverlayPortal()
   const [canonicalDevice, setCanonicalDevice] = useState<Device | null>(device || null)
   const [deviceValidationState, setDeviceValidationState] = useState<DeviceValidationState>(chatId ? 'validating' : 'ready')
@@ -288,6 +304,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const selectionHistoryActiveRef = useRef(false)
   const [showSelectionMenu, setShowSelectionMenu] = useState(false)
   const selectionMenuTriggerRef = useRef<HTMLButtonElement>(null)
+  const selectionSheetRef = useRef<HTMLDivElement>(null)
   useOperationalOverlayRegistration(showSelectionMenu, 'chat-selection-menu')
   const [messageActionPending, setMessageActionPending] = useState<'delete' | null>(null)
   const [infoMessage, setInfoMessage] = useState<Message | null>(null)
@@ -306,6 +323,11 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const [quickReplyLoading, setQuickReplyLoading] = useState(true)
   const [quickReplyLoadingMore, setQuickReplyLoadingMore] = useState(false)
   const [quickReplyError, setQuickReplyError] = useState('')
+  const [quickReplyReviewOpen, setQuickReplyReviewOpen] = useState(false)
+  const quickReplyReviewRef = useRef<HTMLDivElement>(null)
+  useAccessibleDialog(quickReplyReviewOpen, quickReplyReviewRef, () => setQuickReplyReviewOpen(false))
+  useChatHistoryLayer(quickReplyReviewOpen, '__clarinQuickReplyReview', () => setQuickReplyReviewOpen(false))
+  useChatHistoryLayer(Boolean(viewDocument), '__clarinDocumentViewer', () => setViewDocument(null))
   const [quickReplyDraft, setQuickReplyDraft] = useState<QuickReplyComposerDraft | null>(null)
   const draftCacheRef = useRef(new Map<string, { text: string; quick: QuickReplyComposerDraft | null; quote: Message | null; attachment: AttachmentDraft | null }>())
   const draftOwnerRef = useRef(chatId)
@@ -352,6 +374,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }, [cacheMessages, chatId])
 
   const messagesContainerRef = useRef<HTMLDivElement>(null)
+  const messagesContentRef = useRef<HTMLDivElement>(null)
   const searchRequestRef = useRef<AbortController | null>(null)
   const quoteContextRequestRef = useRef<AbortController | null>(null)
   const chatDetailsRequestRef = useRef<AbortController | null>(null)
@@ -385,20 +408,61 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const isActiveRef = useRef(isActive)
   const onReadRef = useRef(onRead)
   const readThroughRef = useRef(new Map<string, string>())
+  const chatSnapshotRef = useRef(chat)
+  chatSnapshotRef.current = chat
+  const reconcileChatSnapshot = useCallback((snapshot: Chat, state?: ChatState) => {
+    const canonical = mergeChatSnapshot(chatSnapshotRef.current, snapshot, state)
+    chatSnapshotRef.current = canonical
+    setChat(current => mergeChatSnapshot(current, canonical))
+    return canonical
+  }, [])
+  const historyContextRef = useRef(false)
+  historyContextRef.current = Boolean(searchWindowMessages || quotedContextActive || showSearch)
+  const returnAnchorRef = useRef<ConversationAnchor | null>(null)
+  const textSendPayloadsRef = useRef(new Map<string, string>())
+  const sendingChatsRef = useRef(new Set<string>())
+  const [attentionPending, setAttentionPending] = useState(false)
+  const attentionPendingRef = useRef(false)
+  const [nextPending, setNextPending] = useState(false)
+  const nextPendingRef = useRef(false)
+  useEffect(() => {
+    if (focusRequest && isActive) requestAnimationFrame(() => inputRef.current?.focus())
+  }, [focusRequest, isActive])
   const readInFlightRef = useRef(new Map<string, string>())
   isActiveRef.current = isActive
   onReadRef.current = onRead
 
   const markDisplayedIncomingRead = useCallback(async (targetChatId: string, displayedMessages: Message[]) => {
     if (!isActiveRef.current || !isNearBottomRef.current || activeChatIdRef.current !== targetChatId || document.visibilityState === 'hidden') return
-    const incoming = displayedMessages.filter(message => !message.is_from_me && !message.is_revoked && !message.id.startsWith('optimistic-'))
-    const latest = incoming.at(-1)
+    if (historyContextRef.current || !isConversationAtLatest(messagesContainerRef.current)) return
+    const latest = latestReadBoundary(displayedMessages)
+    const unreadCount = chatSnapshotRef.current?.id === targetChatId ? chatSnapshotRef.current.unread_count : 0
+    const hasUnread = displayedMessages.some(message => !message.is_from_me && !message.is_read && !message.is_revoked)
+    if (!hasUnread && unreadCount <= 0) return
     if (!latest) return
+    // Fetch and realtime callbacks can run before React commits the displayed boundary.
+    const rendered = Array.from(messagesContainerRef.current?.querySelectorAll<HTMLElement>('[data-chat-message-id]') || [])
+      .some(row => row.dataset.chatMessageId === latest.id)
+    if (!rendered) return
     const through = latest.id || latest.message_id
-    if (!through || readThroughRef.current.get(targetChatId) === through || readInFlightRef.current.get(targetChatId) === through) return
+    if (!through || readInFlightRef.current.has(targetChatId)) return
     readInFlightRef.current.set(targetChatId, through)
     try {
       const token = localStorage.getItem('token')
+      const snapshot = chatSnapshotRef.current
+      const unreadIncoming = displayedMessages.filter(message => !message.is_from_me && !message.is_read && !message.is_revoked && !message.id.startsWith('optimistic-'))
+      if (snapshot?.id === targetChatId && snapshot.device_id && snapshot.jid && unreadIncoming.length) {
+        void fetch('/api/messages/read-receipt', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            device_id: snapshot.device_id,
+            chat_jid: snapshot.jid,
+            sender_jid: unreadIncoming[unreadIncoming.length - 1].from_jid || '',
+            message_ids: unreadIncoming.map(message => message.message_id),
+          }),
+        }).catch(() => {})
+      }
       const response = await fetch(`/api/chats/${targetChatId}/read`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -408,7 +472,9 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       if (!response.ok || !data.success || activeChatIdRef.current !== targetChatId) return
       readThroughRef.current.set(targetChatId, through)
       const unreadCount = typeof data.unread_count === 'number' ? data.unread_count : 0
-      setChat(current => current?.id === targetChatId ? { ...current, unread_count: unreadCount } : current)
+      if (chatSnapshotRef.current?.id === targetChatId) reconcileChatSnapshot(
+        data.chat_state ? chatSnapshotRef.current : { ...chatSnapshotRef.current, unread_count: unreadCount }, data.chat_state,
+      )
       updateMessages(current => current.map(message => {
         if (message.is_from_me || message.is_revoked) return message
         const isBeforeWatermark = new Date(message.timestamp).getTime() < new Date(latest.timestamp).getTime()
@@ -421,7 +487,38 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     } finally {
       if (readInFlightRef.current.get(targetChatId) === through) readInFlightRef.current.delete(targetChatId)
     }
-  }, [updateMessages])
+  }, [reconcileChatSnapshot, updateMessages])
+
+  useLayoutEffect(() => {
+    const container = messagesContainerRef.current
+    const content = messagesContentRef.current
+    if (!chatId || loading || !container || !content) return
+    let frame: number | null = null
+    const followLatest = () => {
+      frame = null
+      if (activeChatIdRef.current !== chatId) return
+      if (followConversationLatest(container, isNearBottomRef.current, isActiveRef.current, historyContextRef.current)) {
+        void markDisplayedIncomingRead(chatId, messagesCacheRef.current.get(chatId)?.messages || [])
+      }
+    }
+    const schedule = () => {
+      if (frame !== null) cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(followLatest)
+    }
+    followLatest()
+    schedule()
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedule)
+    observer?.observe(container)
+    observer?.observe(content)
+    return () => {
+      if (frame !== null) cancelAnimationFrame(frame)
+      observer?.disconnect()
+    }
+  }, [chatId, loading, isActive, messages.length, showSearch, quotedContextActive, searchWindowMessages, markDisplayedIncomingRead])
+
+  useEffect(() => {
+    if (!isActive) messagesContainerRef.current?.querySelectorAll<HTMLMediaElement>('audio, video').forEach(media => media.pause())
+  }, [isActive])
 
   useEffect(() => {
     if (!chatId || !isActive) return
@@ -590,6 +687,15 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     }
   }, [activePopup, compactActions])
 
+  const returnToConversation = useCallback(() => {
+    setSearchWindowMessages(null)
+    setQuotedContextActive(false)
+    setActiveSearchMessageId('')
+    const anchor = returnAnchorRef.current
+    returnAnchorRef.current = null
+    requestAnimationFrame(() => restoreConversationAnchor(messagesContainerRef.current, anchor, activeChatIdRef.current))
+  }, [])
+
   const closeSearch = useCallback(() => {
     searchSessionRef.current += 1
     searchOpenRef.current = false
@@ -605,6 +711,9 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     setActiveSearchMessageId('')
     setSearchWindowMessages(null)
     setQuotedContextActive(false)
+    const anchor = returnAnchorRef.current
+    returnAnchorRef.current = null
+    requestAnimationFrame(() => restoreConversationAnchor(messagesContainerRef.current, anchor, activeChatIdRef.current))
   }, [])
 
   const openSearch = useCallback(() => {
@@ -612,10 +721,11 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       setShowSearch(true)
       return
     }
+    if (chatId && !returnAnchorRef.current) returnAnchorRef.current = captureConversationAnchor(messagesContainerRef.current, chatId)
     searchSessionRef.current += 1
     searchOpenRef.current = true
     setShowSearch(true)
-  }, [])
+  }, [chatId])
 
   const toggleSearch = useCallback(() => {
     if (searchOpenRef.current) closeSearch()
@@ -639,7 +749,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }, [])
 
   const selectMessage = useCallback((message: Message) => {
-    if (!compactActions || message.is_revoked || message.id.startsWith('optimistic-')) return
+    if (!touchKeyboard || message.is_revoked || message.id.startsWith('optimistic-')) return
     if (!selectionHistoryActiveRef.current && typeof window !== 'undefined') {
       const currentState = typeof window.history.state === 'object' && window.history.state ? window.history.state : {}
       window.history.pushState({ ...currentState, __clarinMessageSelection: true }, '')
@@ -647,22 +757,24 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     }
     selectedMessageRef.current = message
     setSelectedMessage(message)
-    setShowSelectionMenu(false)
+    setShowSelectionMenu(true)
     setShowHeaderMenu(false)
     setShowAttachments(false)
     setActivePopup(null)
-  }, [compactActions])
+  }, [touchKeyboard])
+
+  useAccessibleDialog(showSelectionMenu, selectionSheetRef, () => clearMessageSelection())
 
   useEffect(() => {
     const handlePopState = (event: PopStateEvent) => {
-      if (accessoryHistoryActiveRef.current) {
+      if (accessoryHistoryActiveRef.current && !event.state?.__clarinComposerAccessory) {
         accessoryHistoryActiveRef.current = false
         closedAccessoryHistoryActiveRef.current = false
         setActivePopup(null)
         setMobileAccessoryReady(false)
         return
       }
-      if (closedAccessoryHistoryActiveRef.current) {
+      if (closedAccessoryHistoryActiveRef.current && !event.state?.__clarinComposerAccessoryClosed) {
         closedAccessoryHistoryActiveRef.current = false
         window.setTimeout(() => window.history.back(), 0)
         return
@@ -678,9 +790,9 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }, [])
 
   useEffect(() => {
-    if (compactActions) return
+    if (touchKeyboard) return
     clearMessageSelection(false)
-  }, [clearMessageSelection, compactActions])
+  }, [clearMessageSelection, touchKeyboard])
 
   useEffect(() => {
     const current = selectedMessageRef.current
@@ -701,6 +813,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     clearMessageSelection(false)
     setInfoMessage(null)
     setViewDocument(null)
+    setQuickReplyReviewOpen(false)
   }, [chatId, clearMessageSelection])
 
   useEffect(() => {
@@ -797,6 +910,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     const controller = new AbortController()
     quoteContextRequestRef.current = controller
     const targetChatId = chatId
+    if (!returnAnchorRef.current) returnAnchorRef.current = captureConversationAnchor(messagesContainerRef.current, targetChatId)
     setQuoteNavigationLoading(true)
     setComposerFeedback(null)
 
@@ -805,7 +919,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     if (loadedMessage) {
       quoteContextRequestRef.current = null
       setSearchWindowMessages(null)
-      setQuotedContextActive(false)
+      setQuotedContextActive(true)
       setActiveSearchMessageId(loadedMessage.id)
       setQuoteNavigationLoading(false)
       scrollMessageIntoView(loadedMessage.id)
@@ -961,7 +1075,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       event.stopPropagation()
       event.stopImmediatePropagation()
       if (showSelectionMenu) {
-        setShowSelectionMenu(false)
+        clearMessageSelection()
         requestAnimationFrame(() => selectionMenuTriggerRef.current?.focus())
         return
       }
@@ -1155,7 +1269,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     setActivePopup(null)
     setShowAttachments(false)
     setSendingAttachment(false)
-    setSendingMessage(false)
+    setSendingMessage(Boolean(chatId && sendingChatsRef.current.has(chatId)))
     setComposerFeedback(null)
     attachmentSendingRef.current = false
     messageSendSequenceRef.current += 1
@@ -1264,7 +1378,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
   useEffect(() => {
     if (initialChat && (!chatId || initialChat.id === chatId)) {
-        setChat(initialChat)
+        reconcileChatSnapshot(initialChat)
         const cached = messagesCacheRef.current.get(initialChat.id)
         if (cached) {
           setMessages(cached.messages)
@@ -1274,7 +1388,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
           setHasMoreMessages(true)
         }
     }
-  }, [initialChat, chatId])
+  }, [initialChat, chatId, reconcileChatSnapshot])
 
   useEffect(() => {
     activeChatIdRef.current = chatId
@@ -1338,7 +1452,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         || activeChatIdRef.current !== targetChatId
       ) return
       if (!response.ok || !data.success) throw new Error('No se pudo validar el canal')
-      setChat(data.chat)
+      reconcileChatSnapshot(data.chat, data.chat_state)
       setCanonicalDevice(data.device || null)
       setValidatedDeviceChatId(targetChatId)
       setDeviceValidationState('ready')
@@ -1633,7 +1747,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       const data = await res.json().catch(() => ({}))
 	  if (controller.signal.aborted || requestSequence !== chatDetailsRequestSequenceRef.current || activeChatIdRef.current !== targetChatId) return
       if (res.ok && data.success) {
-        setChat(data.chat)
+        reconcileChatSnapshot(data.chat, data.chat_state)
         setCanonicalDevice(data.device || null)
         setValidatedDeviceChatId(targetChatId)
         setDeviceValidationState('ready')
@@ -1668,26 +1782,6 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         if (isNearBottomRef.current) scrollToBottom()
 		void markDisplayedIncomingRead(targetChatId, authoritativeMessages)
 
-        // Send read receipts for unread incoming messages
-        const fetchedDeviceId = typeof data.device?.id === 'string' ? data.device.id : undefined
-        if (fetchedDeviceId && data.chat?.jid) {
-          const unreadIncoming = authoritativeMessages.filter(
-            (m: Message) => !m.is_from_me && !m.is_read
-          )
-          if (unreadIncoming.length > 0) {
-            const lastMsg = unreadIncoming[unreadIncoming.length - 1]
-            fetch('/api/messages/read-receipt', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-              body: JSON.stringify({
-                device_id: fetchedDeviceId,
-                chat_jid: data.chat.jid,
-                sender_jid: lastMsg.from_jid || '',
-                message_ids: unreadIncoming.map((m: Message) => m.message_id)
-              })
-            }).catch(() => {})
-          }
-        }
       }
     } catch (error) {
 	  if (!controller.signal.aborted) {
@@ -1712,11 +1806,11 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     isNearBottomRef.current = true
     setIsFollowingLatest(true)
     setPendingLatestMessages(0)
-    setTimeout(() => {
-      if (activeChatIdRef.current === targetChatId && messagesContainerRef.current) {
-        messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight
+    requestAnimationFrame(() => {
+      if (activeChatIdRef.current === targetChatId && followConversationLatest(messagesContainerRef.current, isNearBottomRef.current, isActiveRef.current, historyContextRef.current)) {
+        if (targetChatId) void markDisplayedIncomingRead(targetChatId, messagesCacheRef.current.get(targetChatId)?.messages || [])
       }
-    }, 100)
+    })
   }
 
   const loadOlderMessages = async () => {
@@ -1744,6 +1838,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
           // Preserve scroll position
           const container = messagesContainerRef.current
           const prevHeight = container?.scrollHeight || 0
+          const prevScrollTop = container?.scrollTop || 0
           const nextHasMore = authoritativeMessages.length >= 50
           updateMessages(prev => {
             const existingKeys = new Set(prev.flatMap(message => [message.id, message.message_id].filter(Boolean)))
@@ -1758,7 +1853,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
           // Restore scroll position after prepending
           requestAnimationFrame(() => {
             if (container) {
-              container.scrollTop = container.scrollHeight - prevHeight
+              container.scrollTop = prevScrollTop + container.scrollHeight - prevHeight
             }
           })
         }
@@ -1779,7 +1874,9 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     if (!container) return
     const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight
     const nearBottom = distanceFromBottom <= 120
+    const reachedBottom = nearBottom && !isNearBottomRef.current
     isNearBottomRef.current = nearBottom
+    if (reachedBottom && chatId) void markDisplayedIncomingRead(chatId, messagesCacheRef.current.get(chatId)?.messages || messages)
     setIsFollowingLatest(current => current === nearBottom ? current : nearBottom)
     if (nearBottom) setPendingLatestMessages(0)
     if (container.scrollTop < 80 && hasMoreMessages && !historyError && !loadingMore && !loadingMoreRef.current) {
@@ -1796,11 +1893,12 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
     const text = messageText.trim()
     if (editingMsg && !text) return
-    if (activeMessageSendRef.current !== null) return
+    if (activeMessageSendRef.current !== null || (chatId && sendingChatsRef.current.has(chatId))) return
 
     const targetChatId = chatId
     const requestSequence = ++messageSendSequenceRef.current
     activeMessageSendRef.current = requestSequence
+    if (targetChatId) sendingChatsRef.current.add(targetChatId)
     setSendingMessage(true)
 
     const updateTargetMessages = (updater: (prev: Message[]) => Message[]) => {
@@ -1809,6 +1907,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     }
 
     const finishMessageSend = () => {
+      if (targetChatId) sendingChatsRef.current.delete(targetChatId)
+      if (activeChatIdRef.current === targetChatId) setSendingMessage(false)
       if (
         activeChatIdRef.current !== targetChatId ||
         activeMessageSendRef.current !== requestSequence
@@ -1896,14 +1996,11 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     scrollToBottom()
 
     const token = localStorage.getItem('token')
-    try {
-        const res = await fetch('/api/messages/send', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${token}`
-            },
-            body: JSON.stringify({
+    const attentionBoundary = observedIncomingBoundary(messagesCacheRef.current.get(targetChatId!)?.messages || messages, chat)
+    const frozenPayload = JSON.stringify({
+                client_operation_id: crypto.randomUUID(),
+                attention_through_message_id: attentionBoundary,
+                defer_attention: !attentionBoundary,
                 device_id: deviceId,
                 chat_id: targetChatId,
                 to: chat.jid,
@@ -1913,10 +2010,17 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                 quoted_sender: replyingTo?.is_from_me ? 'Me' : (replyingTo?.from_name || replyingTo?.from_jid || ''),
                 quoted_is_from_me: Boolean(replyingTo?.is_from_me),
             })
+    textSendPayloadsRef.current.set(tempId, frozenPayload)
+    try {
+        const res = await fetch('/api/messages/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: frozenPayload,
         })
         const data = await res.json()
 
-        if (data.success) {
+        if (res.ok && data.success) {
+            textSendPayloadsRef.current.delete(tempId)
             // Always update the optimistic message from the API response
             const realMsg = data.message
             if (realMsg) {
@@ -1947,6 +2051,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     try {
       let uploadedMediaUrl = media.uploadedMediaUrl
       if (!uploadedMediaUrl) {
+        updateMessagesForChat(targetChatId, previous => previous.map(message => message.id === tempId ? { ...message, send_phase: 'uploading' } : message))
         const formData = new FormData()
         formData.append('file', media.file)
         formData.append('folder', 'uploads')
@@ -1965,10 +2070,10 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         media.uploadedMediaUrl = uploadedMediaUrl
       }
 
-      const res = await fetch('/api/messages/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
+      media.frozenPayload ||= JSON.stringify({
+          client_operation_id: media.operationId,
+          attention_through_message_id: media.attentionBoundary,
+          defer_attention: !media.attentionBoundary,
           device_id: targetDeviceId,
           chat_id: targetChatId,
           to: targetChatJid,
@@ -1980,7 +2085,11 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
           quoted_body: media.quotedBody,
           quoted_sender: media.quotedSender,
           quoted_is_from_me: media.quotedIsFromMe,
-        }),
+        })
+      updateMessagesForChat(targetChatId, previous => previous.map(message => message.id === tempId ? { ...message, send_phase: 'sending' } : message))
+      const res = await fetch('/api/messages/send', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: media.frozenPayload,
+
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok || !data.success) throw new Error(data.error || 'Error al enviar archivo')
@@ -2007,6 +2116,9 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         setComposerFeedback({ kind: 'error', message: `${detail}. Puedes reintentarlo desde el mensaje.` })
       }
       return false
+    } finally {
+      sendingChatsRef.current.delete(targetChatId)
+      if (activeChatIdRef.current === targetChatId) setSendingMessage(false)
     }
   }
 
@@ -2016,8 +2128,32 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     const targetChatJid = chat.jid
     const targetDeviceId = deviceId
 
+    const frozenPayload = textSendPayloadsRef.current.get(failedMsg.id)
+    if (frozenPayload) {
+      if (sendingChatsRef.current.has(targetChatId)) return
+      sendingChatsRef.current.add(targetChatId)
+      setSendingMessage(true)
+      updateMessagesForChat(targetChatId, previous => previous.map(message => message.id === failedMsg.id ? { ...message, status: 'sending' } : message))
+      try {
+        const response = await fetch('/api/messages/send', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` }, body: frozenPayload })
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok || !data.success) throw new Error(data.error || 'No se pudo enviar. Puedes reintentar sin duplicar el mensaje.')
+        textSendPayloadsRef.current.delete(failedMsg.id)
+        updateMessagesForChat(targetChatId, previous => data.message ? reconcileOptimisticMessage(previous, failedMsg.id, data.message) : previous.map(message => message.id === failedMsg.id ? { ...message, status: 'sent' } : message))
+      } catch (error) {
+        updateMessagesForChat(targetChatId, previous => previous.map(message => message.id === failedMsg.id ? { ...message, status: 'failed' } : message))
+        if (activeChatIdRef.current === targetChatId) setComposerFeedback({ kind: 'error', message: error instanceof Error ? error.message : 'No se pudo enviar el mensaje.' })
+      } finally {
+        sendingChatsRef.current.delete(targetChatId)
+        if (activeChatIdRef.current === targetChatId) setSendingMessage(false)
+      }
+      return
+    }
+
     const retryableMedia = mediaRetryRef.current.get(failedMsg.id)
     if (retryableMedia) {
+      if (sendingChatsRef.current.has(targetChatId)) return
+      sendingChatsRef.current.add(targetChatId); setSendingMessage(true)
       updateMessagesForChat(targetChatId, prev => prev.map(message => message.id === failedMsg.id ? { ...message, status: 'sending' } : message))
       await transmitRetryableMedia(failedMsg.id, retryableMedia, targetChatId, targetChatJid, targetDeviceId)
       return
@@ -2072,7 +2208,10 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     const targetChatId = chatId
     const targetChatJid = chat.jid
     const targetDeviceId = deviceId
+    if (sendingChatsRef.current.has(targetChatId) || activeMessageSendRef.current !== null) return false
+    sendingChatsRef.current.add(targetChatId); setSendingMessage(true)
     const quote = replyingTo
+    const attentionBoundary = observedIncomingBoundary(messagesCacheRef.current.get(targetChatId)?.messages || messages, chat)
 
     // Compress images client-side (like WhatsApp: max 1600px, JPEG 70%)
     let fileToSend = file
@@ -2084,12 +2223,14 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       }
     }
 
-    if (activeChatIdRef.current !== targetChatId) return false
+    if (activeChatIdRef.current !== targetChatId) { sendingChatsRef.current.delete(targetChatId); return false }
 
     const tempId = `optimistic-${++optimisticIdRef.current}`
     const previewUrl = URL.createObjectURL(fileToSend)
     const finalCaption = caption ?? (mediaType === 'document' ? fileToSend.name : '')
     const retryableMedia: RetryableMedia = {
+      operationId: crypto.randomUUID(),
+      attentionBoundary,
       file: fileToSend,
       type: mediaType,
       caption: finalCaption,
@@ -2138,20 +2279,21 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     })
     const data = await response.json().catch(() => ({}))
     if (!response.ok || !data.success) throw new Error(data.error || 'No se pudo actualizar la atención. Reintenta sin reenviar los mensajes.')
-    if (activeChatIdRef.current === targetChatId) { setChat(current => current ? { ...current, ...data.chat_state, id: targetChatId } : current); setComposerFeedback({ kind: 'info', message: data.chat_state.needs_reply ? 'Hay un mensaje nuevo que aún requiere atención.' : 'Conversación atendida. Puedes pasar a la siguiente.' }) }
+    if (activeChatIdRef.current === targetChatId && chatSnapshotRef.current?.id === targetChatId) { const canonical = reconcileChatSnapshot(chatSnapshotRef.current, data.chat_state); setComposerFeedback({ kind: 'info', message: canonical.needs_reply ? 'Hay un mensaje nuevo que aún requiere atención.' : 'Conversación atendida. Puedes pasar a la siguiente.' }) }
     onReadRef.current?.(targetChatId, data.chat_state.unread_count, data.chat_state)
   }
 
   const handleSendQuickReplyDraft = async () => {
-    if (!quickReplyDraft || effectiveReadOnly || !chat || !deviceId || !chatId || activeMessageSendRef.current !== null) return
+    if (!quickReplyDraft || effectiveReadOnly || !chat || !deviceId || !chatId || activeMessageSendRef.current !== null || sendingChatsRef.current.has(chatId)) return
     if (!quickReplyDraft.items?.some(item => item.type === 'media' || item.text?.trim()) && !messageText.trim()) { setComposerFeedback({ kind: 'info', message: 'Añade un mensaje antes de enviar la respuesta rápida.' }); return }
     const targetChatId = chatId
     const sequence = ++messageSendSequenceRef.current
     activeMessageSendRef.current = sequence
+    sendingChatsRef.current.add(targetChatId)
     setSendingMessage(true)
-    const incoming = (messagesCacheRef.current.get(chatId)?.messages || []).filter(message => !message.is_from_me && !message.is_revoked).at(-1)
+    const incomingBoundary = observedIncomingBoundary(messagesCacheRef.current.get(chatId)?.messages || messages, chat)
     let progress = freezeQuickReplySequence(quickReplyDraft, {
-      chatId, jid: chat.jid, deviceId, through: incoming?.id || '', quote: replyingTo, trailingText: messageText,
+      chatId, jid: chat.jid, deviceId, through: incomingBoundary || '', quote: replyingTo, trailingText: messageText,
     })
     const publish = (next: QuickReplyComposerDraft | null) => {
       const cached = draftCacheRef.current.get(targetChatId)
@@ -2188,6 +2330,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       progress = { ...progress, error: error instanceof Error ? error.message : 'No pudimos confirmar el envío. Reintenta para verificarlo.' }
       publish(progress)
     } finally {
+      sendingChatsRef.current.delete(targetChatId)
       if (activeMessageSendRef.current === sequence) activeMessageSendRef.current = null
       if (activeChatIdRef.current === targetChatId) setSendingMessage(false)
     }
@@ -2404,7 +2547,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (sendOnEnter({ key: e.key, shiftKey: e.shiftKey, isComposing: e.nativeEvent.isComposing, keyCode: e.nativeEvent.keyCode }, touchKeyboard)) {
        e.preventDefault()
        handleSendMessage()
     }
@@ -2756,22 +2899,6 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   return (
     <div ref={panelRef} className={`relative flex-1 flex flex-col min-h-0 overflow-hidden h-full ${className}`}>
          {/* Chat header */}
-         {selectedMessage && compactActions ? (
-           <div data-testid="message-selection-header" className="flex min-h-14 shrink-0 items-center justify-between gap-1 border-b border-emerald-200 bg-emerald-50 px-2">
-             <div className="flex min-w-0 items-center gap-1">
-               <button type="button" onClick={() => clearMessageSelection()} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar selección del mensaje"><X className="h-5 w-5" /></button>
-               <span className="min-w-6 text-center text-sm font-bold text-slate-800" aria-label="1 mensaje seleccionado">1</span>
-             </div>
-             <div className="flex shrink-0 items-center gap-0.5">
-               {!effectiveReadOnly && <button type="button" onClick={() => handleBeginReply(selectedMessage)} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Responder mensaje"><Reply className="h-5 w-5" /></button>}
-               {!effectiveReadOnly && <button type="button" onClick={() => handleBeginForward(selectedMessage)} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Reenviar mensaje"><CornerUpRight className="h-5 w-5" /></button>}
-               {canDeleteMessage(selectedMessage) && (
-                 <button type="button" onClick={() => void handleDeleteChatMessage(selectedMessage)} disabled={messageActionPending === 'delete'} className="flex h-11 w-11 items-center justify-center rounded-xl text-red-600 hover:bg-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-wait disabled:opacity-50" aria-label="Eliminar mensaje para todos">{messageActionPending === 'delete' ? <RefreshCw className="h-5 w-5 animate-spin" /> : <Trash2 className="h-5 w-5" />}</button>
-               )}
-               <button ref={selectionMenuTriggerRef} type="button" onClick={() => setShowSelectionMenu(value => !value)} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Más acciones del mensaje" aria-haspopup="menu" aria-expanded={showSelectionMenu}><MoreVertical className="h-5 w-5" /></button>
-             </div>
-           </div>
-         ) : (
          <div className="flex min-h-14 shrink-0 items-center justify-between gap-2 border-b border-slate-200 bg-white px-2 sm:px-4">
               <div className="flex min-w-0 items-center gap-2 sm:gap-3">
                 {onClose && (
@@ -2847,12 +2974,11 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                    </div>
               </div>
          </div>
-         )}
 
-         {showSelectionMenu && selectedMessage && compactActions && typeof document !== 'undefined' && createPortal(
+         {showSelectionMenu && selectedMessage && touchKeyboard && typeof document !== 'undefined' && createPortal(
            <>
-             <button type="button" data-chat-overlay="selection-backdrop" className="app-viewport pointer-events-auto fixed inset-0 bg-slate-950/20" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.sheet }} onClick={() => setShowSelectionMenu(false)} aria-label="Cerrar acciones del mensaje" />
-             <div data-chat-overlay="selection-menu" role="menu" aria-label="Acciones del mensaje seleccionado" className="pointer-events-auto fixed inset-x-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] max-h-[min(72dvh,28rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog }}>
+             <button type="button" data-chat-overlay="selection-backdrop" className="app-viewport pointer-events-auto fixed inset-0 bg-slate-950/20" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.sheet }} onClick={() => clearMessageSelection()} aria-label="Cerrar acciones del mensaje" />
+             <div ref={selectionSheetRef} tabIndex={-1} data-chat-overlay="selection-menu" role="menu" aria-label="Acciones del mensaje seleccionado" className="pointer-events-auto fixed inset-x-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] max-h-[min(72dvh,28rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog }}>
                {selectedReactionAvailability && <>
                  <p className="px-3 pb-2 pt-1 text-[11px] font-bold uppercase tracking-wide text-slate-400">Reaccionar</p>
                  <div className="grid grid-cols-6 gap-1 px-1 pb-2" role="group" aria-label="Reacciones rápidas">
@@ -2883,6 +3009,10 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                  )}
                </>}
                <div className="border-t border-slate-100 pt-1">
+                 {!effectiveReadOnly && <button type="button" role="menuitem" onClick={() => handleBeginReply(selectedMessage)} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50"><Reply className="h-4 w-4" /> Responder</button>}
+                 {!effectiveReadOnly && <button type="button" role="menuitem" onClick={() => handleBeginForward(selectedMessage)} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50"><CornerUpRight className="h-4 w-4" /> Reenviar</button>}
+                 {canDeleteMessage(selectedMessage) && <button type="button" role="menuitem" disabled={messageActionPending === 'delete'} onClick={() => void handleDeleteChatMessage(selectedMessage)} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-red-600 hover:bg-red-50 disabled:opacity-50"><Trash2 className="h-4 w-4" /> Eliminar para todos</button>}
+
                  {(selectedMessage.body || selectedMessage.media_filename) && <button type="button" role="menuitem" onClick={() => { setShowSelectionMenu(false); void handleCopyMessage(selectedMessage) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Copy className="h-4 w-4 text-slate-400" /> Copiar</button>}
                  {selectedMessage.is_from_me && isCanonicalMessage(selectedMessage) && <button type="button" role="menuitem" onClick={() => { setShowSelectionMenu(false); handleOpenMessageInfo(selectedMessage) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Info className="h-4 w-4 text-slate-400" /> Información del mensaje</button>}
                  {canEditMessage(selectedMessage) && <button type="button" role="menuitem" onClick={() => { setShowSelectionMenu(false); handleBeginEdit(selectedMessage) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><FileText className="h-4 w-4 text-slate-400" /> Editar mensaje</button>}
@@ -2959,14 +3089,16 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
              {/* Messages */}
              <div
                 ref={messagesContainerRef}
+                data-chat-messages-viewport
                 onScroll={searchWindowMessages ? undefined : handleMessagesScroll}
-                className="relative flex-1 space-y-2 overflow-y-auto px-2 py-3 overscroll-contain sm:p-4"
+                className="relative flex-1 overflow-y-auto px-2 py-3 overscroll-contain sm:p-4"
                 style={{
                   backgroundColor: '#efeae2',
                   backgroundImage: "url('/whatsapp-chat-background.png')",
                   backgroundRepeat: 'repeat',
                 }}
 	             >
+                  <div ref={messagesContentRef} className="flow-root min-w-0" data-chat-messages-content>
 	                  {quoteNavigationLoading && (
 	                    <div className="sticky top-0 z-20 mx-auto flex w-fit items-center gap-2 rounded-full border border-slate-200 bg-white/95 px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm backdrop-blur" role="status">
 	                      <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-emerald-200 border-t-emerald-600" /> Buscando mensaje original…
@@ -2976,7 +3108,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 	                    <div className="sticky top-0 z-20 mx-auto flex w-fit max-w-full items-center gap-2 rounded-full border border-emerald-200 bg-white/95 px-3 py-1.5 text-xs text-slate-600 shadow-sm backdrop-blur" role="status">
 	                      <Reply className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
 	                      <span className="truncate">Mostrando el mensaje respondido</span>
-	                      <button type="button" onClick={() => { setSearchWindowMessages(null); setQuotedContextActive(false); setActiveSearchMessageId(''); requestAnimationFrame(scrollToBottom) }} className="shrink-0 rounded-lg px-2 py-1 font-bold text-emerald-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">Volver al final</button>
+	                      <button type="button" onClick={returnToConversation} className="shrink-0 rounded-lg px-2 py-1 font-bold text-emerald-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">Volver a donde estaba</button>
 	                    </div>
 	                  )}
 	                  {!searchWindowMessages && loadingMore && (
@@ -3014,7 +3146,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                         })
 
                       return (
-	                          <div key={msg.id} data-chat-message-id={msg.id} data-whatsapp-message-id={msg.message_id} className={`rounded-xl transition-[background-color,box-shadow] duration-500 ${activeSearchMessageId === msg.id || activeSearchMessageId === msg.message_id ? 'bg-amber-100/80 shadow-[0_0_0_4px_rgba(251,191,36,0.18)]' : ''}`}>
+	                          <div key={msg.id} data-chat-message-id={msg.id} data-whatsapp-message-id={msg.message_id} className={`${groupChatMessages(visibleMessages[idx - 1], msg) ? 'mt-1' : 'mt-3'} rounded-xl transition-[background-color,box-shadow] duration-[160ms] motion-reduce:transition-none ${activeSearchMessageId === msg.id || activeSearchMessageId === msg.message_id ? 'bg-amber-100/80 shadow-[0_0_0_4px_rgba(251,191,36,0.18)]' : ''}`}>
                               {showDateSep && isValidDate && (
                                 <div className="flex justify-center my-3">
                                   <span className="bg-white/90 text-slate-600 text-xs px-3 py-1 rounded-lg shadow-sm font-medium">
@@ -3024,6 +3156,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                               )}
                               <MessageBubble
                                 message={msg}
+                                groupedWithPrevious={groupChatMessages(visibleMessages[idx - 1], msg)}
                                 contactName={contactName}
 	                                onMediaClick={openMessageMedia}
 	                                onDocumentClick={openMessageDocument}
@@ -3035,7 +3168,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 	                                onEdit={canEditMessage(msg) ? editMessageStable : undefined}
 	                                onInfo={msg.is_from_me && isCanonicalMessage(msg) ? openMessageInfoStable : undefined}
 	                                onCopy={(msg.body || msg.media_filename) ? copyMessageStable : undefined}
-                                compactSelection={compactActions}
+                                compactSelection={touchKeyboard}
                                 selected={Boolean(selectedMessage && hasSameMessageIdentity(msg, selectedMessage))}
                                 onSelect={selectMessage}
 	                                onToggleStickerFavorite={toggleSavedStickerStable}
@@ -3047,6 +3180,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                           </div>
                       )
                   })}
+                  </div>
              </div>
 
              {!searchWindowMessages && !isFollowingLatest && (
@@ -3135,7 +3269,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                      return next
                    })}
                    placeholder={attachmentDraft.type === 'document' ? 'Agregar descripción...' : 'Agregar pie de foto...'}
-                   onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !sendingAttachment) { e.preventDefault(); void handleSendPendingMedia() } }}
+                   onKeyDown={e => { if (sendOnEnter({ key: e.key, shiftKey: e.shiftKey, isComposing: e.nativeEvent.isComposing, keyCode: e.nativeEvent.keyCode }, touchKeyboard) && !sendingAttachment) { e.preventDefault(); void handleSendPendingMedia() } }}
                    formatToolbarPlacement="outside"
                    singleLine
                    disabled={sendingAttachment}
@@ -3143,7 +3277,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                </div>
                <button
                  onClick={() => void handleSendPendingMedia()}
-                 disabled={sendingAttachment}
+                 disabled={sendingAttachment || sendingMessage}
                  className="p-3 bg-emerald-600 text-white rounded-full hover:bg-emerald-700 transition shadow-md disabled:opacity-50"
                  aria-label={sendingAttachment ? 'Preparando adjunto' : 'Enviar adjunto'}
                >
@@ -3154,9 +3288,39 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
          )}
 
               {attentionMode && <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2">
-                <button type="button" disabled={sendingMessage || loading} onClick={async () => { if (!chatId) return; const through = messages.filter(message => !message.is_from_me && !message.is_revoked).at(-1)?.id; if (!through) return; try { await acknowledgeAttention(chatId, through) } catch (error) { setComposerFeedback({ kind: 'error', message: error instanceof Error ? error.message : 'No se pudo actualizar la atención.' }) } }} className="min-h-11 rounded-xl px-3 text-xs font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-40">No requiere respuesta</button>
-                <button type="button" disabled={sendingMessage || loading} onClick={async () => { const notice = await onNext?.(); if (notice) setComposerFeedback({ kind: 'info', message: notice }) }} className="min-h-11 rounded-xl bg-emerald-50 px-4 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-40">Siguiente pendiente →</button>
+                <button type="button" disabled={sendingMessage || loading || attentionPending} onClick={async () => {
+                  if (!chatId || attentionPendingRef.current) return
+                  const target = chatId
+                  const through = observedIncomingBoundary(messagesCacheRef.current.get(chatId)?.messages || messages, chat)
+                  if (!through) { setComposerFeedback({ kind: 'info', message: 'Actualiza el historial para obtener la última recepción antes de cerrar la atención.' }); return }
+                  attentionPendingRef.current = true; setAttentionPending(true)
+                  try { await acknowledgeAttention(target, through) }
+                  catch (error) { if (activeChatIdRef.current === target) setComposerFeedback({ kind: 'error', message: error instanceof Error ? error.message : 'No se pudo actualizar la atención.' }) }
+                  finally { attentionPendingRef.current = false; setAttentionPending(false) }
+                }} className="min-h-11 rounded-xl px-3 text-xs font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-40">{attentionPending ? 'Actualizando…' : 'No requiere respuesta'}</button>
+                <button type="button" disabled={sendingMessage || loading || nextPending} onClick={async () => {
+                  if (nextPendingRef.current) return
+                  const target = chatId
+                  nextPendingRef.current = true; setNextPending(true)
+                  try { const notice = await onNext?.(); if (notice && activeChatIdRef.current === target && isActiveRef.current) setComposerFeedback({ kind: 'info', message: notice }) }
+                  catch { if (activeChatIdRef.current === target && isActiveRef.current) setComposerFeedback({ kind: 'error', message: 'No se pudo obtener el siguiente pendiente. Reintenta.' }) }
+                  finally { nextPendingRef.current = false; setNextPending(false) }
+                }} className="min-h-11 rounded-xl bg-emerald-50 px-4 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-40">{nextPending ? 'Buscando…' : 'Siguiente pendiente →'}</button>
               </div>}
+
+         {quickReplyReviewOpen && quickReplyDraft && typeof document !== 'undefined' && createPortal(
+           <div ref={quickReplyReviewRef} role="dialog" aria-modal="true" aria-label="Revisar respuesta rápida" tabIndex={-1} className="app-viewport pointer-events-auto fixed inset-0 flex flex-col bg-white" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog }}>
+             <div className="flex min-h-14 shrink-0 items-center justify-between border-b border-slate-200 px-4"><h2 className="text-sm font-bold text-slate-900">/{quickReplyDraft.shortcut} · Revisar mensajes</h2><button type="button" onClick={() => setQuickReplyReviewOpen(false)} className="flex h-11 w-11 items-center justify-center rounded-xl hover:bg-slate-100" aria-label="Cerrar revisión"><X className="h-5 w-5" /></button></div>
+             <div className="min-h-0 flex-1 overflow-y-auto p-3">
+                      <QuickReplySequenceEditor compact items={quickReplyDraft.items || []} attachments={quickReplyDraft.allAttachments || []}
+                        disabled={sendingMessage || Boolean(quickReplyDraft.started)}
+                        onChange={(items, attachments) => setQuickReplyDraft(current => current ? { ...current, allAttachments: attachments, items: items.map(item => ({ ...item, operationId: current.items?.find(row => row.id === item.id)?.operationId || crypto.randomUUID() })) } : current)}
+                        onRemoveAttachment={id => setQuickReplyDraft(current => current ? { ...current, items: current.items?.filter(item => item.attachment_id !== id), allAttachments: current.allAttachments?.filter(item => item.id !== id) } : current)} />
+
+             </div>
+             <div className="shrink-0 border-t border-slate-200 p-3" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}><button type="button" onClick={() => setQuickReplyReviewOpen(false)} className="min-h-11 w-full rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white">Listo · volver al chat</button></div>
+           </div>, operationalPortal || document.body,
+         )}
 
          {/* Footer / Input */}
          {effectiveReadOnly ? (
@@ -3205,10 +3369,12 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                         </div>
                         <button type="button" disabled={sendingMessage} onClick={cancelQuickReplyDraft} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-white hover:text-slate-800 disabled:opacity-40" aria-label="Quitar respuesta rápida preparada"><X className="h-4 w-4" /></button>
                       </div>
+                      {compactActions ? <button type="button" onClick={() => { inputRef.current?.blur(); setQuickReplyReviewOpen(true) }} className="mt-1 flex min-h-11 w-full items-center justify-between rounded-xl bg-white px-3 text-xs font-semibold text-emerald-800"><span>{quickReplyDraft.items?.length || 0} mensajes preparados</span><span>Revisar →</span></button> : <>
                       <QuickReplySequenceEditor compact items={quickReplyDraft.items || []} attachments={quickReplyDraft.allAttachments || []}
                         disabled={sendingMessage || Boolean(quickReplyDraft.started)}
                         onChange={(items, attachments) => setQuickReplyDraft(current => current ? { ...current, allAttachments: attachments, items: items.map(item => ({ ...item, operationId: current.items?.find(row => row.id === item.id)?.operationId || crypto.randomUUID() })) } : current)}
                         onRemoveAttachment={id => setQuickReplyDraft(current => current ? { ...current, items: current.items?.filter(item => item.attachment_id !== id), allAttachments: current.allAttachments?.filter(item => item.id !== id) } : current)} />
+                      </>}
                       {quickReplyDraft.error && <p role="alert" className="mt-2 flex items-start gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-2.5 py-2 text-[10px] font-bold leading-4 text-rose-700"><AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />{quickReplyDraft.error}</p>}
                     </div>
                   )}
@@ -3314,7 +3480,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                       placeholder="Escribe un mensaje…"
                       onKeyDown={handleKeyDown}
                       onPasteFiles={files => beginAttachmentDraft(files)}
-                      disabled={sendingMessage || Boolean(quickReplyDraft?.started)}
+                      disabled={Boolean(quickReplyDraft?.started) || Boolean(editingMsg && sendingMessage)}
                       keyboardChromeTarget
                       formatToolbarPlacement="outside"
                       singleLine

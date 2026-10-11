@@ -91,7 +91,7 @@ describe('Contact deep links and identity initialization', () => {
     expect(window.location.search).toBe('')
   })
 })
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); mocks.listeners.clear() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); mocks.listeners.clear() })
 
 describe('mobile Contact actions portal', () => {
   it('keeps a portaled action mounted through mousedown and opens the export dialog on click', async () => {
@@ -131,6 +131,17 @@ describe('mobile Contact actions portal', () => {
 })
 
 describe('applied Contact list filters and columns', () => {
+  it('keeps focus in search without opening filters until the explicit control is activated', async () => {
+    render(<ContactsPage />)
+    await screen.findByText('Contactos')
+    const search = screen.getByPlaceholderText('Buscar por nombre, teléfono, email...')
+    fireEvent.focus(search)
+    expect(screen.getByRole('button', { name: 'Abrir filtros y orden' })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('Campos')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Abrir filtros y orden' }))
+    expect(screen.getByText('Campos')).toBeVisible()
+  })
+
   it('debounces exactly 500 ms, aborts a predecessor, and accepts a fresh A after A → B → A', async () => {
     const base = vi.mocked(fetch).getMockImplementation()!
     let resolveStale!: (response: Response) => void
@@ -167,7 +178,7 @@ describe('applied Contact list filters and columns', () => {
     render(<ContactsPage />)
     await screen.findByText('Contactos')
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 650)) })
-    fireEvent.focus(screen.getByPlaceholderText('Buscar por nombre, teléfono, email...'))
+    fireEvent.click(screen.getByRole('button', { name: 'Abrir filtros y orden' }))
     const fieldsLabel = await screen.findByText('Campos')
     const addFilter = fieldsLabel.parentElement?.parentElement?.querySelector('button')
     expect(addFilter).toBeTruthy()
@@ -186,5 +197,66 @@ describe('applied Contact list filters and columns', () => {
     fireEvent.click(await screen.findByTitle('Columnas personalizadas'))
     fireEvent.click(screen.getByRole('checkbox', { name: 'Calidad QA' }))
     await waitFor(() => expect(requestUrls.some(url => url.startsWith('/api/contacts?') && url.includes('include_custom_fields=true'))).toBe(true))
+  })
+})
+
+describe('Contact list continuity and deletion feedback', () => {
+  it('silently revalidates every loaded page on realtime changes without dropping the loaded tail', async () => {
+    mocks.width = 375
+    const base = vi.mocked(fetch).getMockImplementation()!
+    const all = Array.from({ length: 150 }, (_, index) => ({ id: `contact-${index}`, name: `Persona ${index}`, phone: `519${String(index).padStart(8, '0')}`, tags: [], structured_tags: [] }))
+    let refreshed = false
+    const offsets: number[] = []
+    vi.mocked(fetch).mockImplementation((input, options) => {
+      const url = String(input)
+      if (!url.startsWith('/api/contacts?')) return base(input, options)
+      const params = new URL(url, 'http://test.invalid').searchParams
+      const offset = Number(params.get('offset'))
+      offsets.push(offset)
+      return Promise.resolve({ ok: true, json: async () => ({ success: true, contacts: all.slice(offset, offset + 50).map(contact => refreshed && contact.id === 'contact-120' ? { ...contact, name: 'Persona actualizada' } : contact), total: all.length }) } as Response)
+    })
+    render(<ContactsPage />)
+    await screen.findByText('Mostrando 50 de 150 contactos')
+    const scroll = document.querySelector('[data-contact-id]')!.parentElement!.parentElement!
+    fireEvent.scroll(scroll)
+    await screen.findByText('Mostrando 100 de 150 contactos')
+    fireEvent.scroll(scroll)
+    await screen.findByText('Mostrando 150 de 150 contactos')
+    refreshed = true
+    offsets.length = 0
+    act(() => { mocks.listeners.forEach(listener => listener({ event: 'contact_update', data: { id: 'contact-120' } })) })
+    expect(screen.getByText('Persona 149')).toBeVisible()
+    expect(screen.queryByText('Cargando más...')).not.toBeInTheDocument()
+    await screen.findByText('Persona actualizada')
+    expect(screen.getByText('Persona 149')).toBeVisible()
+    expect(screen.getByText('Mostrando 150 de 150 contactos')).toBeVisible()
+    expect(offsets).toEqual([0, 50, 100])
+  }, 15000)
+
+  it('prevents duplicate deletion and retains the contact with an actionable failure', async () => {
+    mocks.width = 375
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const base = vi.mocked(fetch).getMockImplementation()!
+    let finishDelete!: (response: Response) => void
+    let deleteRequests = 0
+    vi.mocked(fetch).mockImplementation((input, options) => {
+      if (options?.method === 'DELETE') { deleteRequests++; return new Promise(resolve => { finishDelete = resolve }) }
+      if (String(input).startsWith('/api/contacts?')) return Promise.resolve({ ok: true, json: async () => ({ success: true, contacts: [{ id: 'contact-1', name: 'Persona segura', phone: '51999999999', tags: [], structured_tags: [] }], total: 1 }) } as Response)
+      return base(input, options)
+    })
+    render(<ContactsPage />)
+    await screen.findByText('Persona segura')
+    fireEvent.click(screen.getByRole('button', { name: 'Acciones de Persona segura' }))
+    fireEvent.click(screen.getByRole('button', { name: /^Eliminar$/ }))
+    expect(screen.getByRole('status')).toHaveTextContent('Eliminando')
+    fireEvent.click(screen.getByRole('button', { name: 'Acciones de Persona segura' }))
+    const secondDelete = screen.getByRole('button', { name: /^Eliminar$/ })
+    expect(secondDelete).toBeDisabled()
+    fireEvent.click(secondDelete)
+    expect(deleteRequests).toBe(1)
+    await act(async () => { finishDelete({ ok: false, status: 403, json: async () => ({ success: false, error: 'No tienes permiso para eliminar' }) } as Response) })
+    expect(screen.getByRole('alert')).toHaveTextContent('No tienes permiso para eliminar')
+    expect(screen.getByRole('button', { name: 'Reintentar eliminación' })).toBeEnabled()
+    expect(screen.getByRole('heading', { name: 'Persona segura' })).toBeVisible()
   })
 })

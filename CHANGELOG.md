@@ -2,6 +2,14 @@
 
 ## 2026-10-11
 
+### Chats y Contactos: lectura, escritura y navegación
+
+- No leídos se reconcilia al llegar al final de la conversación, incluso con mensajes entrantes antiguos. Leer sin responder conserva el estado Pendiente.
+- Escritura continua durante el envío, borradores al cambiar de conversación y reintentos que reutilizan el mensaje y archivo originales. En celular, Enter añade una nueva línea.
+- Mensajes consecutivos más legibles, acciones táctiles, filtros con Aplicar y navegación Atrás que conserva el contexto de la conversación.
+- Medios cargados según su uso, errores con reintento explícito y archivos eliminados identificados sin solicitudes repetidas.
+- Detalles se adapta al ancho disponible, protege notas sin guardar y conserva el acceso a contacto, etiquetas y contexto comercial. Contactos actualiza las páginas cargadas sin saltar al inicio.
+
 ### Almacenamiento y diseño de plantillas
 
 - Resumen, filtros y ubicaciones de archivos con cargas independientes, consultas paginadas y estados recuperables durante la actualización del catálogo.

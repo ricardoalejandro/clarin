@@ -11,8 +11,15 @@ import (
 
 func (r *ChatRepository) State(ctx context.Context, accountID, chatID uuid.UUID) (*domain.ChatState, error) {
 	state := &domain.ChatState{ChatID: chatID}
-	err := r.db.QueryRow(ctx, `SELECT unread_count,waiting_since,waiting_since IS NOT NULL,state_version
-	 FROM chats WHERE account_id=$1 AND id=$2`, accountID, chatID).Scan(&state.UnreadCount, &state.WaitingSince, &state.NeedsReply, &state.Version)
+	err := r.db.QueryRow(ctx, `SELECT c.unread_count,c.waiting_since,c.waiting_since IS NOT NULL,c.state_version,
+	 incoming.id,incoming.timestamp
+	 FROM chats c LEFT JOIN LATERAL (
+	  SELECT m.id,m.timestamp FROM messages m WHERE m.account_id=c.account_id AND m.chat_id=c.id
+	  AND NOT m.is_from_me AND NOT COALESCE(m.is_revoked,FALSE)
+	  ORDER BY m.timestamp DESC,m.id DESC LIMIT 1
+	 ) incoming ON TRUE WHERE c.account_id=$1 AND c.id=$2`, accountID, chatID).Scan(
+		&state.UnreadCount, &state.WaitingSince, &state.NeedsReply, &state.Version,
+		&state.LastIncomingMessageID, &state.LastIncomingAt)
 	return state, err
 }
 

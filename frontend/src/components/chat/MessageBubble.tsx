@@ -11,6 +11,7 @@ import { canonicalChatMediaUrl, chatMediaIdentity } from '@/utils/chatMediaUrl'
 import { chatDocumentDescriptor, isPdfChatDocument, type ChatDocumentDescriptor } from '@/utils/chatDocuments'
 import { dedupeReactions } from '@/utils/chatReactions'
 import styles from './MessageBubble.module.css'
+import ChatMessageMedia from './ChatMessageMedia'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
 /** Reconstruct WhatsApp-formatted text from DOM nodes (preserves *, _, ~, ` markers on copy) */
@@ -64,6 +65,7 @@ interface MessageBubbleProps {
   reactionUnavailableReason?: string
   savedStickerUrls?: Set<string>
   savingStickerUrls?: Set<string>
+  groupedWithPrevious?: boolean
 }
 
 // Convert MinIO public URL to backend proxy URL
@@ -81,9 +83,7 @@ const formatQuotedSender = (sender?: string, isFromMe?: boolean): string => {
   return sender.replace(/@s\.whatsapp\.net$/, '').replace(/@lid$/, '')
 }
 
-function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, onRetry, onReply, onQuotedMessageClick, onForward, onDelete, onEdit, onInfo, onCopy, compactSelection = false, selected = false, onSelect, onToggleStickerFavorite, onReact, reactionUnavailableReason, savedStickerUrls, savingStickerUrls }: MessageBubbleProps) {
-  const [imageLoaded, setImageLoaded] = useState(false)
-  const [imageError, setImageError] = useState(false)
+function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, onRetry, onReply, onQuotedMessageClick, onForward, onDelete, onEdit, onInfo, onCopy, compactSelection = false, selected = false, onSelect, onToggleStickerFavorite, onReact, reactionUnavailableReason, savedStickerUrls, savingStickerUrls, groupedWithPrevious = false }: MessageBubbleProps) {
   const [stickerLoadError, setStickerLoadError] = useState(false)
   const [showEmojiPicker, setShowEmojiPicker] = useState(false)
   const [showFullPicker, setShowFullPicker] = useState(false)
@@ -287,8 +287,6 @@ function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, on
   }, [positionContextMenu, positionQuickReactions, showContextMenu, showEmojiPicker, showFullPicker])
 
   useEffect(() => {
-    setImageLoaded(false)
-    setImageError(false)
     setStickerLoadError(false)
   }, [message.media_url])
 
@@ -333,7 +331,7 @@ function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, on
               : (contactName || formatQuotedSender(message.quoted_sender))}
           </p>
         )}
-        <p className="text-xs text-slate-600 truncate max-w-[250px]">
+        <p className="line-clamp-2 break-words text-xs leading-4 text-slate-600">
           {quotedPreview}
         </p>
       </button>
@@ -383,72 +381,10 @@ function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, on
 
     switch (message.message_type) {
       case 'image':
-        return (
-          <div
-            className={`relative cursor-pointer overflow-hidden bg-gray-100 ${imageLoaded || imageError ? '' : 'min-h-48'}`}
-            onClick={() => onMediaClick?.(proxyUrl, 'image')}
-          >
-            {!imageLoaded && !imageError && (
-              <div className="absolute inset-0 flex min-h-48 w-full animate-pulse items-center justify-center bg-gray-200">
-                <span className="text-gray-500 text-sm">Cargando...</span>
-              </div>
-            )}
-            {imageError ? (
-              <div className="w-full h-32 bg-gray-200 flex items-center justify-center">
-                <span className="text-gray-500 text-sm">Error al cargar imagen</span>
-              </div>
-            ) : (
-              <img
-                src={proxyUrl}
-                alt="Imagen"
-                loading="lazy"
-                decoding="async"
-                className={`block w-full transition-opacity duration-150 ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
-                onLoad={() => setImageLoaded(true)}
-                onError={() => setImageError(true)}
-              />
-            )}
-          </div>
-        )
-
       case 'video':
-        return (
-          <div className="relative overflow-hidden bg-black">
-            <video
-              src={proxyUrl}
-              className="w-full block"
-              controls
-              preload="metadata"
-              playsInline
-            />
-          </div>
-        )
-
-      case 'gif': {
-        const sourceIsOriginalGIF = message.media_mimetype === 'image/gif' || /\.gif(?:$|\?)/i.test(message.media_url)
-        return (
-          <div className="relative overflow-hidden bg-black">
-            {sourceIsOriginalGIF ? (
-              <img src={proxyUrl} alt="GIF" loading="lazy" decoding="async" className="block w-full" />
-            ) : (
-              <video src={proxyUrl} className="w-full block" autoPlay loop muted playsInline preload="metadata" />
-            )}
-            <span className="absolute bottom-2 left-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-bold text-white">GIF</span>
-          </div>
-        )
-      }
-
+      case 'gif':
       case 'audio':
-        return (
-          <div className="mb-1 max-w-[280px]">
-            <audio
-              src={proxyUrl}
-              controls
-              className="w-full h-10"
-              style={{ minWidth: '200px' }}
-            />
-          </div>
-        )
+        return <ChatMessageMedia key={`${message.id}:${proxyUrl}`} src={proxyUrl} kind={message.message_type} originalGIF={message.media_mimetype === 'image/gif' || /\.gif(?:$|\?)/i.test(message.media_url)} onOpen={message.message_type === 'image' && onMediaClick ? () => onMediaClick(proxyUrl, 'image') : undefined} />
 
       case 'document': {
         const descriptor = chatDocumentDescriptor(message, proxyUrl)
@@ -694,20 +630,19 @@ function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, on
 
     switch (message.status) {
       case 'read':
-        return <CheckCheck className="w-4 h-4 text-blue-500" />
+        return <CheckCheck className="w-4 h-4 text-blue-500" aria-label="Leído en WhatsApp" role="img" />
       case 'delivered':
-        return <CheckCheck className="w-4 h-4 text-gray-400" />
+        return <CheckCheck className="w-4 h-4 text-gray-400" aria-label="Entregado" role="img" />
       case 'sending':
-        return <Clock className="w-4 h-4 text-gray-400 animate-pulse" />
+        return <span className="inline-flex items-center gap-1 text-[10px] text-slate-500" role="status"><Clock className="w-4 h-4 text-gray-400 animate-pulse motion-reduce:animate-none" aria-hidden />{message.send_phase === 'uploading' ? 'Subiendo archivo…' : 'Enviando…'}</span>
       case 'failed':
         return (
-          <button onClick={() => onRetry?.(message)} className="flex items-center gap-1 text-red-500 hover:text-red-700" title="Reintentar">
-            <AlertCircle className="w-4 h-4" />
-            <RefreshCw className="w-3 h-3" />
-          </button>
+          onRetry ? <button type="button" onClick={() => onRetry(message)} className="inline-flex min-h-11 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-red-600 hover:bg-red-50 hover:text-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500" aria-label="No se envió el mensaje. Reintentar envío">
+            <AlertCircle className="h-4 w-4" aria-hidden /> No se envió · Reintentar
+          </button> : <span className="inline-flex items-center gap-1 text-xs text-red-600" role="status"><AlertCircle className="h-4 w-4" aria-hidden />No se envió</span>
         )
       default:
-        return <Check className="w-4 h-4 text-gray-400" />
+        return <Check className="w-4 h-4 text-gray-400" aria-label="Enviado" role="img" />
     }
   }
 
@@ -810,18 +745,18 @@ function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, on
               : hasVisualMedia
                 ? `max-w-[330px] rounded-xl shadow-sm overflow-hidden ${
                     message.is_from_me
-                      ? 'bg-[#d9fdd3] rounded-br-none'
-                      : 'bg-white rounded-bl-none'
+                      ? `bg-[#d9fdd3] ${groupedWithPrevious ? '' : 'rounded-br-none'}`
+                      : `bg-white ${groupedWithPrevious ? '' : 'rounded-bl-none'}`
                   }`
                 : `px-3 py-1.5 rounded-xl shadow-sm ${
                     message.is_from_me
-                      ? 'bg-[#d9fdd3] rounded-br-none'
-                      : 'bg-white rounded-bl-none'
+                      ? `bg-[#d9fdd3] ${groupedWithPrevious ? '' : 'rounded-br-none'}`
+                      : `bg-white ${groupedWithPrevious ? '' : 'rounded-bl-none'}`
                   }`
         }`}
       >
         {/* Sender name for incoming messages (hidden for emoji-only like WhatsApp Web) */}
-        {!message.is_from_me && !isEmojiOnly && (senderDisplayName || message.from_name) && (
+        {!groupedWithPrevious && !message.is_from_me && !isEmojiOnly && (senderDisplayName || message.from_name) && (
           <p className={`text-xs text-emerald-700 font-medium mb-0.5 ${hasVisualMedia ? 'px-3 pt-1.5' : ''}`}>
             {senderDisplayName || message.from_name}
           </p>
@@ -862,7 +797,7 @@ function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, on
             </div>
           ) : (
             <p
-              className={`text-slate-900 whitespace-pre-wrap break-words text-[14.5px] leading-[19px] ${hasVisualMedia ? 'px-3 pt-1' : ''}`}
+              className={`${styles.messageText} text-slate-900 whitespace-pre-wrap break-words ${hasVisualMedia ? 'px-3 pt-1' : ''}`}
               onCopy={(e) => {
                 const sel = window.getSelection()
                 if (!sel || sel.rangeCount === 0) return

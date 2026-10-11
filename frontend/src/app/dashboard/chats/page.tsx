@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { Search, Plus, X, Trash2, CheckSquare, MessageCircle, ShieldBan, Heart, ChevronDown, ChevronUp, MoreVertical, PanelRight, ListChecks, AlertTriangle, Loader2, RotateCcw, Sparkles, SlidersHorizontal } from 'lucide-react'
@@ -10,8 +10,9 @@ import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import DeviceSelector from '@/components/chat/DeviceSelector'
 import NewChatModal from '@/components/chat/NewChatModal'
 import ChatPanel from '@/components/chat/ChatPanel'
-import ContactPanel from '@/components/chat/ContactPanel'
+import ContactPanel, { type ContactPanelHandle } from '@/components/chat/ContactPanel'
 import OwnStatusesCenter from '@/components/chat/OwnStatusesCenter'
+import { useChatHistoryLayer } from '@/components/chat/useChatHistoryLayer'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { Chat, ChatState, Device, Message } from '@/types/chat'
 import { applyChatState, matchesInbox, nextPendingChat, orderInbox, reconcileInboxPage, type InboxView } from '@/utils/chatInbox'
@@ -89,9 +90,26 @@ const messageTimestampValue = (value?: string) => {
 export default function ChatsPage() {
   const { setConversationActive } = useChatMobileChrome()
   const pageRef = useRef<HTMLDivElement>(null)
-  const [chats, setChats] = useState<Chat[]>([])
+  const chatListRef = useRef<HTMLDivElement>(null)
+  const listAnchorRef = useRef<{ id: string; offset: number; query: string } | null>(null)
+  const [chats, setChatRows] = useState<Chat[]>([])
+  const setChats = useCallback((next: Chat[] | ((rows: Chat[]) => Chat[])) => {
+    const container = chatListRef.current
+    if (container && container.scrollTop > 24 && !listAnchorRef.current) {
+      const top = container.getBoundingClientRect().top
+      const row = Array.from(container.querySelectorAll<HTMLElement>('[data-chat-row-id]')).find(element => element.getBoundingClientRect().bottom > top)
+      if (row?.dataset.chatRowId) listAnchorRef.current = { id: row.dataset.chatRowId, offset: row.getBoundingClientRect().top - top, query: activeChatQueryKeyRef.current }
+    }
+    setChatRows(next)
+  }, [])
   const [devices, setDevices] = useState<Device[]>([])
   const [selectedChat, setSelectedChat] = useState<Chat | null>(null)
+  const chatCacheRef = useRef(new Map<string, Chat>())
+  for (const row of chats) chatCacheRef.current.set(row.id, row)
+  if (selectedChat) chatCacheRef.current.set(selectedChat.id, selectedChat)
+  const navigationGenerationRef = useRef(0)
+  const nextRequestRef = useRef(false)
+  const [composerFocusRequest, setComposerFocusRequest] = useState(0)
   const [compactSurface, setCompactSurface] = useState<CompactSurface>('list')
 
   // Filters & UI State
@@ -152,7 +170,17 @@ export default function ChatsPage() {
   const [reactionRange, setReactionRange] = useState<'any' | '1d' | '7d' | '30d' | 'custom'>('30d')
   const [reactionCustomFrom, setReactionCustomFrom] = useState('')
   const [reactionCustomTo, setReactionCustomTo] = useState('')
-  const [showReactionAdvanced, setShowReactionAdvanced] = useState(false)
+  const [filterDraft, setFilterDraft] = useState({ view: 'all' as InboxView, reaction: false, from: 'client' as 'any' | 'client' | 'me', emojis: [] as string[], range: '30d' as 'any' | '1d' | '7d' | '30d' | 'custom', customFrom: '', customTo: '' })
+  const filterDialogRef = useRef<HTMLDivElement>(null)
+  useAccessibleDialog(showMobileFilters, filterDialogRef, () => setShowMobileFilters(false))
+  useChatHistoryLayer(showMobileFilters, '__clarinChatFilters', () => setShowMobileFilters(false))
+  const openFilterDraft = () => {
+    setFilterDraft({ view: inboxView, reaction: filterHasReaction, from: reactionFromMe, emojis: [...reactionEmojis], range: reactionRange, customFrom: reactionCustomFrom, customTo: reactionCustomTo })
+    searchInputRef.current?.blur(); setShowMobileFilters(true)
+  }
+  const applyFilterDraft = () => {
+    setInboxView(filterDraft.view); setFilterHasReaction(filterDraft.reaction); setReactionFromMe(filterDraft.from); setReactionEmojis(filterDraft.emojis); setReactionRange(filterDraft.range); setReactionCustomFrom(filterDraft.customFrom); setReactionCustomTo(filterDraft.customTo); setShowMobileFilters(false)
+  }
   const chatQueryKey = JSON.stringify([filterDevices, filterUnread, filterPending, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
   const activeChatQueryKeyRef = useRef(chatQueryKey)
   activeChatQueryKeyRef.current = chatQueryKey
@@ -163,7 +191,6 @@ export default function ChatsPage() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [totalChats, setTotalChats] = useState(0)
   const offsetRef = useRef(0)
-  const chatListRef = useRef<HTMLDivElement>(null)
   const chatsRequestSequenceRef = useRef(0)
   const chatsReconcileSequenceRef = useRef(0)
   const chatsRequestAbortRef = useRef<AbortController | null>(null)
@@ -182,6 +209,7 @@ export default function ChatsPage() {
 
   // Contact info (3rd column)
   const [showContactInfo, setShowContactInfo] = useState(false)
+  const contactPanelRef = useRef<ContactPanelHandle>(null)
 
   // Virtualizer for chat list
   const chatVirtualizer = useVirtualizer({
@@ -191,6 +219,24 @@ export default function ChatsPage() {
     estimateSize: () => 80,
     overscan: 10,
   })
+
+  useLayoutEffect(() => {
+    const anchor = listAnchorRef.current
+    listAnchorRef.current = null
+    if (!anchor || anchor.query !== chatQueryKey) return
+    const index = chats.findIndex(chat => chat.id === anchor.id)
+    if (index < 0) return
+    const restore = () => {
+      const container = chatListRef.current
+      const row = container && Array.from(container.querySelectorAll<HTMLElement>('[data-chat-row-id]')).find(element => element.dataset.chatRowId === anchor.id)
+      if (container && row) container.scrollTop += row.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.offset
+      return Boolean(row)
+    }
+    if (!restore()) {
+      chatVirtualizer.scrollToIndex?.(index, { align: 'start', behavior: 'auto' })
+      requestAnimationFrame(restore)
+    }
+  }, [chats, chatQueryKey, chatVirtualizer])
 
   const inlineDetailsWidth = leftPanelWidth + CHAT_PANEL_MIN + rightPanelWidth + WIDE_PANEL_SEPARATORS_WIDTH
   const layoutMode: LayoutMode = containerWidth < COMPACT_WORKSPACE_MAX ? 'compact' : containerWidth >= inlineDetailsWidth ? 'wide' : 'medium'
@@ -236,11 +282,11 @@ export default function ChatsPage() {
   }, [])
 
   useEffect(() => {
-    selectedChatIdRef.current = layoutMode === 'compact' && compactSurface === 'list' ? null : selectedChat?.id || null
+    selectedChatIdRef.current = compactSurface === 'list' ? null : selectedChat?.id || null
   }, [compactSurface, layoutMode, selectedChat])
 
   const pushCompactHistory = useCallback((surface: 'conversation' | 'details', chatId: string) => {
-    if (layoutMode !== 'compact' || typeof window === 'undefined') return
+    if (typeof window === 'undefined' || (pageRef.current?.getBoundingClientRect().width || containerWidth) >= COMPACT_WORKSPACE_MAX) return
     const current = (window.history.state || {}) as CompactHistoryState
     if (current.clarinChatSurface === surface && current.clarinChatId === chatId) return
     const nextDepth = compactHistoryDepthRef.current + 1
@@ -250,24 +296,32 @@ export default function ChatsPage() {
       window.location.href,
     )
     compactHistoryDepthRef.current = nextDepth
-  }, [layoutMode])
+  }, [containerWidth])
 
   const openChat = useCallback((chat: Chat, addHistory = true) => {
+    if (contactPanelRef.current?.canClose() === false) return false
+    navigationGenerationRef.current++
+    chatCacheRef.current.set(chat.id, chat)
     setSelectedChat(chat)
     setShowContactInfo(false)
     setCompactSurface('conversation')
     closeRowMenu()
     if (addHistory) pushCompactHistory('conversation', chat.id)
+    return true
   }, [closeRowMenu, pushCompactHistory])
 
   const openContactInfo = useCallback((addHistory = true) => {
     if (!selectedChat) return
+    navigationGenerationRef.current++
     setShowContactInfo(true)
     setCompactSurface('details')
     if (addHistory) pushCompactHistory('details', selectedChat.id)
   }, [pushCompactHistory, selectedChat])
 
   const openChatDetails = useCallback((chat: Chat) => {
+    if (contactPanelRef.current?.canClose() === false) return
+    navigationGenerationRef.current++
+    chatCacheRef.current.set(chat.id, chat)
     setSelectedChat(chat)
     setShowContactInfo(true)
     setCompactSurface('details')
@@ -279,13 +333,13 @@ export default function ChatsPage() {
   }, [closeRowMenu, layoutMode, pushCompactHistory])
 
   const returnFromCompactSurface = useCallback((surface: 'conversation' | 'details') => {
+    navigationGenerationRef.current++
     if (layoutMode !== 'compact' || typeof window === 'undefined') {
       if (surface === 'details') {
         setShowContactInfo(false)
         setCompactSurface('conversation')
       }
       else {
-        setSelectedChat(null)
         setShowContactInfo(false)
         setCompactSurface('list')
       }
@@ -309,38 +363,44 @@ export default function ChatsPage() {
 
   useEffect(() => {
     const handlePopState = (event: PopStateEvent) => {
-      if (layoutMode !== 'compact') return
+      const generation = ++navigationGenerationRef.current
       const state = (event.state || {}) as CompactHistoryState
-      if (state.clarinChatSurface === 'details' && state.clarinChatId) {
-        compactHistoryDepthRef.current = Math.max(1, Number(state.clarinChatDepth) || 1)
-        const chat = chats.find(item => item.id === state.clarinChatId)
-        if (chat) setSelectedChat(chat)
-        setShowContactInfo(true)
-        setCompactSurface('details')
+      if (showContactInfo && state.clarinChatSurface !== 'details' && contactPanelRef.current?.canClose() === false) {
+        window.history.pushState({ ...window.history.state, clarinChatSurface: 'details', clarinChatId: selectedChat?.id, clarinChatDepth: compactHistoryDepthRef.current }, '')
         return
       }
-      if (state.clarinChatSurface === 'conversation' && state.clarinChatId) {
+      if (state.clarinChatId && state.clarinChatSurface) {
         compactHistoryDepthRef.current = Math.max(1, Number(state.clarinChatDepth) || 1)
-        const chat = chats.find(item => item.id === state.clarinChatId)
-        if (chat) setSelectedChat(chat)
-        setShowContactInfo(false)
-        setCompactSurface('conversation')
+        const cached = chatCacheRef.current.get(state.clarinChatId)
+        if (cached) setSelectedChat(applyChatState(cached, canonicalStatesRef.current.get(cached.id)))
+        else {
+          setSelectedChat(null)
+          void fetch(`/api/chats/${state.clarinChatId}`, { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } })
+            .then(response => response.json()).then(data => {
+              if (generation !== navigationGenerationRef.current) return
+              if (!data.success || !data.chat) throw new Error('La conversación ya no está disponible.')
+              const canonical = applyChatState(data.chat, data.chat_state)
+              chatCacheRef.current.set(canonical.id, canonical)
+              setSelectedChat(canonical)
+            }).catch(() => { if (generation === navigationGenerationRef.current) { setListFeedback('No se pudo recuperar la conversación. Vuelve a abrirla.'); setCompactSurface('list') } })
+        }
+        setShowContactInfo(state.clarinChatSurface === 'details')
+        setCompactSurface(state.clarinChatSurface)
         return
       }
+      if (layoutMode !== 'compact') return
       setShowContactInfo(false)
       setCompactSurface('list')
       compactHistoryDepthRef.current = 0
     }
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
-  }, [chats, layoutMode])
+  }, [layoutMode, showContactInfo, selectedChat?.id])
 
-  useEffect(() => {
-    if (layoutMode === 'compact' || compactHistoryDepthRef.current === 0) return
-    const depth = compactHistoryDepthRef.current
-    compactHistoryDepthRef.current = 0
-    window.history.go(-depth)
-  }, [layoutMode])
+  const focusConversation = useCallback(() => {
+    if (layoutMode !== 'wide') returnFromCompactSurface('details')
+    setComposerFocusRequest(value => value + 1)
+  }, [layoutMode, returnFromCompactSurface])
 
   // Observe the actual chat workspace, not the browser viewport (sidebar/Eros consume width).
   useEffect(() => {
@@ -631,48 +691,33 @@ export default function ChatsPage() {
     setSelectedChats(new Set())
     setSelectionMode(false)
     closeRowMenu()
-  }, [closeRowMenu, searchTerm, filterDevices, filterUnread, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
+  }, [closeRowMenu, searchTerm, filterDevices, inboxView, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
 
-  // Auto-open handling
+  // Direct links get a list entry beneath the conversation, even with an empty/filtered inbox.
   useEffect(() => {
     if (autoOpenProcessedRef.current) return
     const params = new URLSearchParams(window.location.search)
     const openChatId = params.get('open')
     const jid = params.get('jid')
     const deviceId = params.get('device')
-
-    if (openChatId) {
-      const chat = chats.find(c => c.id === openChatId)
-      if (chat) {
-        setSelectedChat(chat)
-        setCompactSurface('conversation')
-        autoOpenProcessedRef.current = true
-        window.history.replaceState({}, '', '/dashboard/chats')
-      } else if (chats.length > 0) {
-        // Fetch specific chat if not in list
-        const token = localStorage.getItem('token')
-        fetch(`/api/chats/${openChatId}`, { headers: { Authorization: `Bearer ${token}` } })
-          .then(r => r.json())
-          .then(data => {
-            if (data.success && data.chat) {
-               setSelectedChat(data.chat)
-               setCompactSurface('conversation')
-               autoOpenProcessedRef.current = true
-               window.history.replaceState({}, '', '/dashboard/chats')
-            }
-          })
-      }
-    } else if (jid && deviceId) {
-       // Search by JID logic simplified for brevity, similar to original
-       const chat = chats.find(c => c.jid === jid && c.device_id === deviceId)
-       if (chat) {
-          setSelectedChat(chat)
-          setCompactSurface('conversation')
-          autoOpenProcessedRef.current = true
-          window.history.replaceState({}, '', '/dashboard/chats')
-       }
+    const known = chats.find(chat => openChatId ? chat.id === openChatId : chat.jid === jid && chat.device_id === deviceId)
+    if (!openChatId && !known) return
+    autoOpenProcessedRef.current = true
+    const generation = navigationGenerationRef.current
+    const openDirect = (chat: Chat) => {
+      if (navigationGenerationRef.current !== generation) return
+      const { clarinChatSurface: _surface, clarinChatId: _id, clarinChatDepth: _depth, ...rest } = window.history.state || {}
+      window.history.replaceState(rest, '', '/dashboard/chats')
+      compactHistoryDepthRef.current = 0
+      openChat(chat)
     }
-  }, [chats, fetchChats])
+    if (known) { openDirect(known); return }
+    void fetch(`/api/chats/${encodeURIComponent(openChatId!)}`, { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } })
+      .then(response => response.json()).then(data => {
+        if (!data.success || !data.chat) throw new Error('No se pudo abrir el chat del enlace.')
+        openDirect(applyChatState(data.chat, data.chat_state))
+      }).catch(() => { if (generation === navigationGenerationRef.current) setListFeedback('No se pudo abrir el chat del enlace. Reintenta desde la bandeja.') })
+  }, [chats, openChat])
 
   const reconcileChatUnread = useCallback((chatId: string, unreadCount: number, state?: ChatState) => {
     if (!state) return
@@ -690,14 +735,26 @@ export default function ChatsPage() {
   }, [inboxView])
 
   const openNextPending = async () => {
-    // Reconcile the head before choosing: another advisor may have handled it.
-    let fresh = await fetchChats(true, { silent: true, after: queueAnchorRef.current })
-    if (!fresh) return 'No se pudo comprobar la cola. Reintenta.'
-    if (fresh.length === 0 && queueAnchorRef.current) fresh = await fetchChats(true, { silent: true })
-    if (!fresh) return 'No se pudo comprobar la cola. Reintenta.'
-    const candidate = nextPendingChat(fresh, selectedChatIdRef.current, queueAnchorRef.current)
-    if (candidate) { setSelectedChat(candidate); setCompactSurface('conversation') }
-    else return 'No hay más conversaciones pendientes en estos filtros.'
+    if (nextRequestRef.current) return
+    nextRequestRef.current = true
+    const generation = navigationGenerationRef.current
+    const query = activeChatQueryKeyRef.current
+    const currentId = selectedChatIdRef.current
+    const current = () => navigationGenerationRef.current === generation && activeChatQueryKeyRef.current === query && selectedChatIdRef.current === currentId
+    try {
+      let fresh = await fetchChats(true, { silent: true, after: queueAnchorRef.current })
+      if (!current()) return
+      if (!fresh) return 'No se pudo comprobar la cola. Reintenta.'
+      if (fresh.length === 0 && queueAnchorRef.current) fresh = await fetchChats(true, { silent: true })
+      if (!current()) return
+      if (!fresh) return 'No se pudo comprobar la cola. Reintenta.'
+      const candidate = nextPendingChat(fresh, currentId, queueAnchorRef.current)
+      if (!candidate) return 'No hay más conversaciones pendientes en estos filtros.'
+      if (!openChat(candidate, false)) return
+      if (layoutMode === 'compact') {
+        window.history.replaceState({ ...window.history.state, clarinChatSurface: 'conversation', clarinChatId: candidate.id, clarinChatDepth: compactHistoryDepthRef.current || 1 }, '')
+      }
+    } finally { nextRequestRef.current = false }
   }
 
   const applyMessageToChatList = useCallback((rawPayload: unknown) => {
@@ -1005,16 +1062,17 @@ export default function ChatsPage() {
   }
 
   const handleChatCreated = (chatId: string) => {
-    fetchChats()
-    setTimeout(() => {
-        // Optimistically select new chat
-        const token = localStorage.getItem('token')
-        fetch(`/api/chats/${chatId}`, { headers: { Authorization: `Bearer ${token}` } })
-        .then(r => r.json())
-        .then(data => {
-            if (data.success && data.chat) openChat(data.chat)
-        })
-    }, 500)
+    const generation = ++navigationGenerationRef.current
+    void fetchChats(true, { silent: true })
+    const token = localStorage.getItem('token')
+    void fetch(`/api/chats/${chatId}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(response => response.json()).then(data => {
+        if (generation !== navigationGenerationRef.current) return
+        if (!data.success || !data.chat) throw new Error('No se pudo abrir la conversación creada.')
+        openChat(applyChatState(data.chat, data.chat_state))
+      }).catch(() => {
+        if (generation === navigationGenerationRef.current) setListFeedback('La conversación se creó, pero no se pudo abrir. Búscala en la lista para volver a intentarlo.')
+      })
   }
 
   const selectedDevice = selectedChat?.device_id ? devices.find(device => device.id === selectedChat.device_id) : undefined
@@ -1107,6 +1165,10 @@ export default function ChatsPage() {
               </div>
             )}
 
+              <div className="flex rounded-xl bg-slate-100 p-1" role="group" aria-label="Vista de la bandeja">
+                {([['all', 'Todos'], ['unread', 'No leídos'], ['pending', 'Pendientes']] as const).map(([view, label]) => <button key={view} type="button" onClick={() => setInboxView(view)} aria-pressed={inboxView === view} className={`min-h-10 flex-1 rounded-lg px-2 text-xs font-semibold transition ${inboxView === view ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}
+              </div>
+              {filterPending && <p className="text-[11px] leading-4 text-slate-500">Primero quienes esperan más tiempo. Leer no marca la conversación como atendida.</p>}
             {/* Search */}
              <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
@@ -1126,7 +1188,7 @@ export default function ChatsPage() {
                 {layoutMode === 'compact' && (
                   <button
                     type="button"
-                    onClick={() => { searchInputRef.current?.blur(); setShowMobileFilters(true) }}
+                    onClick={openFilterDraft}
                     className="absolute right-0 top-0 inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
                     aria-label={`Abrir filtros de chats${activeMobileFilterCount ? `, ${activeMobileFilterCount} activos` : ''}`}
                   >
@@ -1136,10 +1198,6 @@ export default function ChatsPage() {
                 )}
             </div>
 
-              <div className="flex rounded-xl bg-slate-100 p-1" role="group" aria-label="Vista de la bandeja">
-                {([['all', 'Todos'], ['unread', 'No leídos'], ['pending', 'Pendientes']] as const).map(([view, label]) => <button key={view} type="button" onClick={() => setInboxView(view)} aria-pressed={inboxView === view} className={`min-h-10 flex-1 rounded-lg px-2 text-xs font-semibold transition ${inboxView === view ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}
-              </div>
-              {filterPending && <p className="text-[11px] leading-4 text-slate-500">Primero quienes esperan más tiempo. Leer no marca la conversación como atendida.</p>}
               {/* Quick filters */}
               {layoutMode !== 'compact' && <div className="flex flex-wrap items-center gap-2">
 
@@ -1158,110 +1216,7 @@ export default function ChatsPage() {
                 </button>
             </div>}
 
-            {/* Reaction advanced panel */}
-            {layoutMode !== 'compact' && filterHasReaction && (
-                <div data-testid="filter-reaction-advanced" className="max-h-[min(44dvh,22rem)] space-y-2 overflow-y-auto overscroll-contain rounded-xl border border-emerald-200 bg-emerald-50/40 p-2.5 shadow-sm shadow-emerald-600/5">
-                    <button
-                        onClick={() => setShowReactionAdvanced(!showReactionAdvanced)}
-                    className="flex min-h-11 w-full items-center justify-between text-[11px] font-semibold uppercase tracking-wide text-emerald-700 transition-colors hover:text-emerald-800"
-                    >
-                        <span className="flex items-center gap-1.5">
-                      <Heart className="w-3 h-3 fill-emerald-500 text-emerald-500" />
-                            Opciones de reacción
-                        </span>
-                        {showReactionAdvanced ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                    </button>
-                    {showReactionAdvanced && (
-                        <div className="space-y-2.5 pt-1">
-                            <div>
-                                <label className="block text-[10px] font-medium text-slate-600 mb-1 uppercase tracking-wide">¿De quién?</label>
-                                <div className="flex gap-1">
-                                    {([
-                                        { v: 'client' as const, label: 'Cliente' },
-                                        { v: 'me' as const, label: 'Operador' },
-                                        { v: 'any' as const, label: 'Cualquiera' },
-                                    ]).map(opt => (
-                                        <button
-                                            key={opt.v}
-                                            data-testid={`reaction-from-${opt.v}`}
-                                            onClick={() => setReactionFromMe(opt.v)}
-                                            className={`min-h-11 flex-1 rounded-md border px-2 text-[11px] font-medium transition-all ${
-                                                reactionFromMe === opt.v
-                                                ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm'
-                                                : 'bg-white text-slate-600 border-slate-200 hover:border-emerald-300 hover:text-slate-800'
-                                            }`}
-                                        >{opt.label}</button>
-                                    ))}
-                                </div>
-                            </div>
-                            <div>
-                                <label className="block text-[10px] font-medium text-slate-600 mb-1 uppercase tracking-wide">Emojis (opcional)</label>
-                                <div className="flex flex-wrap gap-1">
-                                    {['👍','❤️','😂','😮','😢','🙏','🔥'].map(e => {
-                                        const active = reactionEmojis.includes(e)
-                                        return (
-                                            <button
-                                                key={e}
-                                                data-testid={`reaction-emoji-${e}`}
-                                                onClick={() => setReactionEmojis(active ? reactionEmojis.filter(x => x !== e) : [...reactionEmojis, e])}
-                                                className={`flex h-11 w-11 items-center justify-center rounded-md border text-sm transition-all ${
-                                                  active ? 'bg-emerald-100 border-emerald-400 ring-2 ring-emerald-200' : 'bg-white border-slate-200 hover:border-emerald-300'
-                                                }`}
-                                            >{e}</button>
-                                        )
-                                    })}
-                                    {reactionEmojis.length > 0 && (
-                                        <button
-                                            data-testid="reaction-emoji-clear"
-                                            onClick={() => setReactionEmojis([])}
-                                            className="h-11 px-2 text-[10px] text-slate-500 transition-colors hover:text-emerald-700"
-                                        >limpiar</button>
-                                    )}
-                                </div>
-                            </div>
-                            <div>
-                                <label className="block text-[10px] font-medium text-slate-600 mb-1 uppercase tracking-wide">Cuándo</label>
-                                <div className="flex flex-wrap gap-1">
-                                    {([
-                                        { v: '1d' as const, label: 'Hoy' },
-                                        { v: '7d' as const, label: '7 días' },
-                                        { v: '30d' as const, label: '30 días' },
-                                        { v: 'any' as const, label: 'Siempre' },
-                                        { v: 'custom' as const, label: 'Rango' },
-                                    ]).map(opt => (
-                                        <button
-                                            key={opt.v}
-                                            data-testid={`reaction-range-${opt.v}`}
-                                            onClick={() => setReactionRange(opt.v)}
-                                            className={`min-h-11 rounded-md border px-3 text-[11px] font-medium transition-all ${
-                                                reactionRange === opt.v
-                                                ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm'
-                                                : 'bg-white text-slate-600 border-slate-200 hover:border-emerald-300 hover:text-slate-800'
-                                            }`}
-                                        >{opt.label}</button>
-                                    ))}
-                                </div>
-                                {reactionRange === 'custom' && (
-                                    <div className="mt-1.5 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-                                        <input
-                                            type="date"
-                                            value={reactionCustomFrom}
-                                            onChange={e => setReactionCustomFrom(e.target.value)}
-                                            className="h-11 min-w-0 rounded-md border border-slate-200 bg-white px-2 text-[11px] outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-300"
-                                        />
-                                        <input
-                                            type="date"
-                                            value={reactionCustomTo}
-                                            onChange={e => setReactionCustomTo(e.target.value)}
-                                            className="h-11 min-w-0 rounded-md border border-slate-200 bg-white px-2 text-[11px] outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-300"
-                                        />
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    )}
-                </div>
-            )}
+            {layoutMode !== 'compact' && filterHasReaction && <button type="button" data-testid="filter-reaction-advanced" onClick={openFilterDraft} className="flex min-h-11 w-full items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-700"><span>Opciones de reacción</span><SlidersHorizontal className="h-4 w-4" /></button>}
          </div>
 
          {/* Chat List Items */}
@@ -1291,8 +1246,8 @@ export default function ChatsPage() {
               <div className="w-14 h-14 rounded-2xl bg-slate-100 flex items-center justify-center mb-4">
                 <MessageCircle className="w-7 h-7 text-slate-400" />
               </div>
-              <h3 className="text-sm font-semibold text-slate-700 mb-1">No se encontraron chats</h3>
-              <p className="text-xs leading-5 text-slate-500 max-w-[220px]">Prueba con otra búsqueda o desactiva algún filtro para ampliar los resultados.</p>
+              <h3 className="text-sm font-semibold text-slate-700 mb-1">{filterPending ? 'No hay conversaciones pendientes' : filterUnread ? 'Todo leído' : 'No se encontraron chats'}</h3>
+              <p className="text-xs leading-5 text-slate-500 max-w-[220px]">{filterUnread ? 'Los mensajes ya leídos salen de esta vista. Revisa Pendientes para ver a quién falta responder.' : filterPending ? 'Las conversaciones que requieran atención aparecerán aquí.' : 'Prueba con otra búsqueda o desactiva algún filtro para ampliar los resultados.'}</p>
             </div>
             ) : (
                 <div style={{ height: chatVirtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
@@ -1304,6 +1259,7 @@ export default function ChatsPage() {
                         key={chat.id}
                         ref={chatVirtualizer.measureElement}
                         data-index={virtualRow.index}
+                        data-chat-row-id={chat.id}
                         style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${virtualRow.start}px)` }}
                         onContextMenu={(e) => {
                           e.preventDefault()
@@ -1371,6 +1327,7 @@ export default function ChatsPage() {
                                     {chat.last_message || 'Sin mensajes'}
                                 </span>
                             </div>
+                            {chat.needs_reply && <p className="mt-1 truncate text-[10px] font-medium text-amber-700" title={chat.waiting_since ? `En espera desde ${new Date(chat.waiting_since).toLocaleString('es-PE')}` : undefined}>{chat.unread_count > 0 ? 'Pendiente de atención' : 'Leído · pendiente'}{filterPending && chat.waiting_since ? ` · Desde ${formatTime(chat.waiting_since)}` : ''}</p>}
                             {/* Device & Phone Labels */}
                             <div className="mt-1 flex min-w-0 items-center gap-1.5">
                                  {chat.device_name && (
@@ -1475,7 +1432,8 @@ export default function ChatsPage() {
 
       {/* Main Chat Panel */}
       <div className={`${layoutMode === 'compact' && compactSurface === 'list' ? 'hidden' : 'flex'} relative min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-slate-50/70`} style={layoutMode === 'compact' ? undefined : { minWidth: CHAT_PANEL_MIN }}>
-        {selectedChat ? (
+        {selectedChat && (
+              <div className={compactSurface === 'list' ? 'hidden' : 'flex min-h-0 min-w-0 flex-1 flex-col'}>
 	            <ChatPanel
 	                chatId={selectedChat.id}
 	                deviceId={selectedChat.device_id || ''}
@@ -1485,16 +1443,19 @@ export default function ChatsPage() {
 	                onClose={() => returnFromCompactSurface('conversation')}
 	                onContactInfoToggle={show => {
 	                  if (show) openContactInfo()
-	                  else returnFromCompactSurface('details')
+	                  else if (contactPanelRef.current?.canClose() !== false) returnFromCompactSurface('details')
 	                }}
 	                contactInfoOpen={showContactInfo}
 	                onRequestDelete={() => requestSingleChatDeletion(selectedChat)}
-	                isActive={layoutMode !== 'compact' || compactSurface === 'conversation'}
+	                isActive={compactSurface !== 'list' && (layoutMode !== 'compact' || compactSurface === 'conversation')}
 	                onRead={reconcileChatUnread}
+                  focusRequest={composerFocusRequest}
                   attentionMode={filterPending}
                   onNext={openNextPending}
 	            />
-        ) : (
+              </div>
+        )}
+        {(!selectedChat || compactSurface === 'list') && (
             <div className="flex flex-1 flex-col items-center justify-center bg-[radial-gradient(circle_at_center,rgba(16,185,129,0.08)_1px,transparent_1px)] bg-[length:22px_22px] p-8 text-center text-slate-400">
                 <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-slate-200 bg-white shadow-sm">
                     <MessageCircle className="h-7 w-7 text-emerald-500" />
@@ -1527,9 +1488,12 @@ export default function ChatsPage() {
           </div>
           <div className="shrink-0 overflow-hidden bg-white" style={{ width: rightPanelWidth }}>
             <ContactPanel
+              ref={contactPanelRef}
               chatId={selectedChat.id}
               isOpen={true}
               onClose={() => returnFromCompactSurface('details')}
+              onFocusConversation={focusConversation}
+              focusConversationClosesDetails={false}
               deviceName={selectedDeviceName}
               devicePhone={selectedDevicePhone}
               chatPhone={formatPhone(selectedChat.jid, selectedChat.contact_phone)}
@@ -1541,15 +1505,18 @@ export default function ChatsPage() {
       {/* Medium widths use a drawer; compact widths use a full workspace panel. */}
       {layoutMode !== 'wide' && showContactInfo && selectedChat && (
         <>
-          {layoutMode === 'medium' && <button type="button" className="absolute inset-0 z-20 bg-slate-950/20" onClick={() => setShowContactInfo(false)} aria-label="Cerrar detalles" />}
+          {layoutMode === 'medium' && <button type="button" className="absolute inset-0 z-20 bg-slate-950/20" onClick={() => { if (contactPanelRef.current?.canClose() !== false) setShowContactInfo(false) }} aria-label="Cerrar detalles" />}
           <div
             className={`absolute inset-y-0 right-0 z-30 overflow-hidden bg-white shadow-2xl ${layoutMode === 'compact' ? 'left-0' : 'border-l border-slate-200'}`}
             style={layoutMode === 'compact' ? undefined : { width: 'clamp(360px, 38vw, 440px)', maxWidth: '92%' }}
           >
             <ContactPanel
+              ref={contactPanelRef}
               chatId={selectedChat.id}
               isOpen={true}
               onClose={() => returnFromCompactSurface('details')}
+              onFocusConversation={focusConversation}
+              focusConversationClosesDetails
               deviceName={selectedDeviceName}
               devicePhone={selectedDevicePhone}
               chatPhone={formatPhone(selectedChat.jid, selectedChat.contact_phone)}
@@ -1558,8 +1525,8 @@ export default function ChatsPage() {
         </>
       )}
 
-      {showMobileFilters && layoutMode === 'compact' && typeof document !== 'undefined' && createPortal(
-        <div className="app-viewport fixed inset-0 z-[90] flex flex-col bg-white" role="dialog" aria-modal="true" aria-labelledby="mobile-chat-filters-title">
+      {showMobileFilters && typeof document !== 'undefined' && createPortal(
+        <div className="app-viewport fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/30 p-0 sm:p-4"><div ref={filterDialogRef} tabIndex={-1} className="flex h-full w-full flex-col bg-white shadow-2xl sm:max-h-[min(760px,92dvh)] sm:max-w-lg sm:rounded-2xl" role="dialog" aria-modal="true" aria-labelledby="mobile-chat-filters-title">
           <div className="safe-area-top flex min-h-16 shrink-0 items-center justify-between border-b border-slate-200 px-4">
             <div className="min-w-0">
               <h2 id="mobile-chat-filters-title" className="font-bold text-slate-900">Filtros de chats</h2>
@@ -1570,24 +1537,24 @@ export default function ChatsPage() {
           <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-4 py-4">
             <section aria-labelledby="mobile-basic-chat-filters" className="space-y-2">
               <h3 id="mobile-basic-chat-filters" className="text-xs font-bold uppercase tracking-wider text-slate-400">Mostrar</h3>
-              <button type="button" onClick={() => setFilterUnread(value => !value)} className={`flex min-h-12 w-full items-center justify-between rounded-xl border px-4 text-sm font-semibold ${filterUnread ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-700'}`} aria-pressed={filterUnread}>
+              <button type="button" onClick={() => setFilterDraft(draft => ({ ...draft, view: draft.view === 'unread' ? 'all' : 'unread' }))} className={`flex min-h-12 w-full items-center justify-between rounded-xl border px-4 text-sm font-semibold ${(filterDraft.view === 'unread') ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-700'}`} aria-pressed={(filterDraft.view === 'unread')}>
                 <span className="flex items-center gap-3"><MessageCircle className="h-5 w-5" />Solo no leídos</span>
-                <span className={`h-5 w-9 rounded-full p-0.5 transition ${filterUnread ? 'bg-emerald-600' : 'bg-slate-200'}`}><span className={`block h-4 w-4 rounded-full bg-white shadow transition ${filterUnread ? 'translate-x-4' : ''}`} /></span>
+                <span className={`h-5 w-9 rounded-full p-0.5 transition ${(filterDraft.view === 'unread') ? 'bg-emerald-600' : 'bg-slate-200'}`}><span className={`block h-4 w-4 rounded-full bg-white shadow transition ${(filterDraft.view === 'unread') ? 'translate-x-4' : ''}`} /></span>
               </button>
-              <button type="button" data-testid="mobile-filter-reaction-toggle" onClick={() => setFilterHasReaction(value => !value)} className={`flex min-h-12 w-full items-center justify-between rounded-xl border px-4 text-sm font-semibold ${filterHasReaction ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-700'}`} aria-pressed={filterHasReaction}>
-                <span className="flex items-center gap-3"><Heart className={`h-5 w-5 ${filterHasReaction ? 'fill-emerald-500' : ''}`} />Con reacción</span>
-                <span className={`h-5 w-9 rounded-full p-0.5 transition ${filterHasReaction ? 'bg-emerald-600' : 'bg-slate-200'}`}><span className={`block h-4 w-4 rounded-full bg-white shadow transition ${filterHasReaction ? 'translate-x-4' : ''}`} /></span>
+              <button type="button" data-testid="mobile-filter-reaction-toggle" onClick={() => setFilterDraft(draft => ({ ...draft, reaction: !draft.reaction }))} className={`flex min-h-12 w-full items-center justify-between rounded-xl border px-4 text-sm font-semibold ${filterDraft.reaction ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-700'}`} aria-pressed={filterDraft.reaction}>
+                <span className="flex items-center gap-3"><Heart className={`h-5 w-5 ${filterDraft.reaction ? 'fill-emerald-500' : ''}`} />Con reacción</span>
+                <span className={`h-5 w-9 rounded-full p-0.5 transition ${filterDraft.reaction ? 'bg-emerald-600' : 'bg-slate-200'}`}><span className={`block h-4 w-4 rounded-full bg-white shadow transition ${filterDraft.reaction ? 'translate-x-4' : ''}`} /></span>
               </button>
             </section>
 
-            {filterHasReaction && (
+            {filterDraft.reaction && (
               <section className="space-y-4 rounded-2xl border border-emerald-100 bg-emerald-50/40 p-4" aria-labelledby="mobile-reaction-options">
                 <h3 id="mobile-reaction-options" className="text-xs font-bold uppercase tracking-wider text-emerald-700">Opciones de reacción</h3>
                 <div>
                   <p className="mb-2 text-xs font-semibold text-slate-600">¿De quién?</p>
                   <div className="grid grid-cols-3 gap-2">
                     {([{ v: 'client' as const, label: 'Cliente' }, { v: 'me' as const, label: 'Operador' }, { v: 'any' as const, label: 'Cualquiera' }]).map(option => (
-                      <button key={option.v} type="button" onClick={() => setReactionFromMe(option.v)} className={`min-h-11 rounded-xl border px-2 text-xs font-semibold ${reactionFromMe === option.v ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-200 bg-white text-slate-600'}`}>{option.label}</button>
+                      <button key={option.v} type="button" onClick={() => setFilterDraft(draft => ({ ...draft, from: option.v }))} className={`min-h-11 rounded-xl border px-2 text-xs font-semibold ${filterDraft.from === option.v ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-200 bg-white text-slate-600'}`}>{option.label}</button>
                     ))}
                   </div>
                 </div>
@@ -1595,8 +1562,8 @@ export default function ChatsPage() {
                   <p className="mb-2 text-xs font-semibold text-slate-600">Emojis opcionales</p>
                   <div className="flex flex-wrap gap-2">
                     {['👍','❤️','😂','😮','😢','🙏','🔥'].map(emoji => {
-                      const active = reactionEmojis.includes(emoji)
-                      return <button key={emoji} type="button" onClick={() => setReactionEmojis(active ? reactionEmojis.filter(value => value !== emoji) : [...reactionEmojis, emoji])} className={`flex h-11 w-11 items-center justify-center rounded-xl border text-base ${active ? 'border-emerald-400 bg-emerald-100 ring-2 ring-emerald-200' : 'border-slate-200 bg-white'}`} aria-pressed={active}>{emoji}</button>
+                      const active = filterDraft.emojis.includes(emoji)
+                      return <button key={emoji} type="button" onClick={() => setFilterDraft(draft => ({ ...draft, emojis: active ? draft.emojis.filter(value => value !== emoji) : [...draft.emojis, emoji] }))} className={`flex h-11 w-11 items-center justify-center rounded-xl border text-base ${active ? 'border-emerald-400 bg-emerald-100 ring-2 ring-emerald-200' : 'border-slate-200 bg-white'}`} aria-pressed={active}>{emoji}</button>
                     })}
                   </div>
                 </div>
@@ -1604,19 +1571,20 @@ export default function ChatsPage() {
                   <p className="mb-2 text-xs font-semibold text-slate-600">Período</p>
                   <div className="flex flex-wrap gap-2">
                     {([{ v: '1d' as const, label: 'Hoy' }, { v: '7d' as const, label: '7 días' }, { v: '30d' as const, label: '30 días' }, { v: 'any' as const, label: 'Siempre' }, { v: 'custom' as const, label: 'Rango' }]).map(option => (
-                      <button key={option.v} type="button" onClick={() => setReactionRange(option.v)} className={`min-h-11 rounded-xl border px-3 text-xs font-semibold ${reactionRange === option.v ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-200 bg-white text-slate-600'}`}>{option.label}</button>
+                      <button key={option.v} type="button" onClick={() => setFilterDraft(draft => ({ ...draft, range: option.v }))} className={`min-h-11 rounded-xl border px-3 text-xs font-semibold ${filterDraft.range === option.v ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-200 bg-white text-slate-600'}`}>{option.label}</button>
                     ))}
                   </div>
-                  {reactionRange === 'custom' && <div className="mt-3 grid grid-cols-1 gap-2 min-[380px]:grid-cols-2"><label className="text-xs text-slate-500">Desde<input type="date" value={reactionCustomFrom} onChange={event => setReactionCustomFrom(event.target.value)} className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-slate-700" /></label><label className="text-xs text-slate-500">Hasta<input type="date" value={reactionCustomTo} onChange={event => setReactionCustomTo(event.target.value)} className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-slate-700" /></label></div>}
+                  {filterDraft.range === 'custom' && <div className="mt-3 grid grid-cols-1 gap-2 min-[380px]:grid-cols-2"><label className="text-xs text-slate-500">Desde<input type="date" value={filterDraft.customFrom} onChange={event => setFilterDraft(draft => ({ ...draft, customFrom: event.target.value }))} className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-slate-700" /></label><label className="text-xs text-slate-500">Hasta<input type="date" value={filterDraft.customTo} onChange={event => setFilterDraft(draft => ({ ...draft, customTo: event.target.value }))} className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-slate-700" /></label></div>}
                 </div>
               </section>
             )}
           </div>
           <div className="safe-area-bottom flex shrink-0 gap-2 border-t border-slate-200 bg-white p-4">
-            <button type="button" onClick={() => { setFilterUnread(false); setFilterHasReaction(false); setReactionEmojis([]); setReactionFromMe('client'); setReactionRange('30d'); setReactionCustomFrom(''); setReactionCustomTo('') }} disabled={activeMobileFilterCount === 0} className="min-h-12 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 disabled:opacity-40">Limpiar</button>
-            <button type="button" onClick={() => setShowMobileFilters(false)} className="min-h-12 flex-1 rounded-xl bg-emerald-600 text-sm font-bold text-white hover:bg-emerald-700">Ver resultados</button>
+            <button type="button" onClick={() => setFilterDraft({ view: 'all', reaction: false, from: 'client', emojis: [], range: '30d', customFrom: '', customTo: '' })} className="min-h-12 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600">Limpiar</button>
+            <button type="button" onClick={() => setShowMobileFilters(false)} className="min-h-12 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600">Cancelar</button>
+            <button type="button" onClick={applyFilterDraft} className="min-h-12 flex-1 rounded-xl bg-emerald-600 text-sm font-bold text-white hover:bg-emerald-700">Aplicar</button>
           </div>
-        </div>,
+        </div></div>,
         document.body,
       )}
 

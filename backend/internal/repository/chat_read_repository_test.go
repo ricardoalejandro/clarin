@@ -20,7 +20,8 @@ func TestMarkAsReadUsesAccountScopedDisplayedWatermark(t *testing.T) {
 	for _, invariant := range []string{
 		"SELECT id FROM chats WHERE account_id=$1 AND id=$2 FOR UPDATE",
 		"AND (id::text=$3 OR message_id=$3)",
-		"WHERE account_id=$1 AND chat_id=$2 AND is_from_me=FALSE",
+		"WHERE account_id=$1 AND chat_id=$2 AND is_from_me=FALSE AND is_read=FALSE",
+		"AND is_from_me=FALSE ORDER BY timestamp DESC, id DESC LIMIT 1",
 		"timestamp < $3 OR (timestamp = $3 AND id <= $4)",
 		"COALESCE(is_revoked, FALSE)=FALSE",
 		"UPDATE chats SET unread_count=$3",

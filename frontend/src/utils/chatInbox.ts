@@ -9,7 +9,7 @@ export function matchesInbox(chat: Chat, view: InboxView) {
 }
 export function applyChatState(chat: Chat, state?: ChatState): Chat {
   if (!state || state.chat_id !== chat.id || state.state_version < (chat.state_version || 0)) return chat
-  return { ...chat, unread_count: state.unread_count, waiting_since: state.waiting_since, needs_reply: state.needs_reply, state_version: state.state_version }
+  return { ...chat, ...(state.last_incoming_message_id !== undefined ? { last_incoming_message_id: state.last_incoming_message_id, last_incoming_at: state.last_incoming_at } : {}), unread_count: state.unread_count, waiting_since: state.waiting_since, needs_reply: state.needs_reply, state_version: state.state_version }
 }
 export function orderInbox(chats: Chat[], view: InboxView): Chat[] {
   return [...chats].sort((a, b) => view === 'pending'

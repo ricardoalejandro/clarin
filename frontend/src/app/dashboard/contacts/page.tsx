@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback, useRef, useMemo, useSyncExternalStore } from 'react'
+import { useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { useRouter } from 'next/navigation'
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -34,6 +34,7 @@ import { subscribeWebSocket } from '@/lib/api'
 import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
 import { contactFilterCount, contactFilterParams, emptyContactListFilters, type ContactListFilters } from '@/components/contact-details/contactListFilters'
 import { fetchContactExportPages } from '@/components/contact-details/contactExportPages'
+import { refreshContactWindow, refreshedContactAnchor, type ContactScrollAnchor } from '@/components/contact-details/contactListRefresh'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider'
 import type { Lead } from '@/types/contact'
@@ -327,6 +328,10 @@ export default function ContactsPage() {
   const [devices, setDevices] = useState<Device[]>([])
   const [loading, setLoading] = useState(true)
   const [contactsError, setContactsError] = useState('')
+  const [deletingContacts, setDeletingContacts] = useState(false)
+  const [contactDeleteError, setContactDeleteError] = useState('')
+  const [contactDeleteRetryIds, setContactDeleteRetryIds] = useState<string[]>([])
+  const deletingContactsRef = useRef(false)
   const [total, setTotal] = useState(0)
   const [searchTerm, setSearchTerm] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
@@ -364,6 +369,10 @@ export default function ContactsPage() {
   const offsetRef = useRef(0)
   const contactsRequestRef = useRef(0)
   const contactsAbortRef = useRef<AbortController | null>(null)
+  const contactsBusyRef = useRef(false)
+  const contactsRefreshQueuedRef = useRef(false)
+  const latestFetchContactsRef = useRef<(reset?: boolean, silent?: boolean) => void>(() => {})
+  const pendingContactAnchorRef = useRef<ContactScrollAnchor | null>(null)
   const exportAbortRef = useRef<AbortController | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
@@ -535,7 +544,7 @@ export default function ContactsPage() {
   const queryKeyRef = useRef(queryKey)
   queryKeyRef.current = queryKey
   const searchPending = searchTerm !== debouncedSearch || searchEditRevision !== settledSearchRevision
-  const invalidateContactQuery = () => { contactsAbortRef.current?.abort(); contactsRequestRef.current += 1; setLoading(false); setLoadingMore(false) }
+  const invalidateContactQuery = () => { contactsAbortRef.current?.abort(); contactsRequestRef.current += 1; contactsBusyRef.current = false; contactsRefreshQueuedRef.current = false; pendingContactAnchorRef.current = null; setLoading(false); setLoadingMore(false) }
   const restoreFilterDraft = () => {
     setFilterDevice(appliedFilters.deviceId)
     setFilterTagNames(new Set(appliedFilters.tagNames))
@@ -628,43 +637,52 @@ export default function ContactsPage() {
     overscan: 15,
   })
 
-  const fetchContacts = useCallback(async (reset: boolean = true) => {
+  const fetchContacts = useCallback(async (reset: boolean = true, silent = false) => {
     if (!token || isAuthIdentityChanging(authScope) || searchPending) return
     const requestScope = getAuthScope()
     const requestKey = queryKey
     if (requestScope !== authScope) return
+    if (silent && (contactsBusyRef.current || deletingContactsRef.current)) { contactsRefreshQueuedRef.current = true; return }
     contactsAbortRef.current?.abort()
     const controller = new AbortController()
     contactsAbortRef.current = controller
+    contactsBusyRef.current = true
     const offset = reset ? 0 : offsetRef.current
-    if (reset) {
+    if (reset && !silent) {
       setLoading(true)
-    } else {
+    } else if (!silent) {
       setLoadingMore(true)
     }
     const requestId = ++contactsRequestRef.current
-    if (reset) setContactsError('')
+    const current = () => requestId === contactsRequestRef.current && !controller.signal.aborted && requestKey === queryKeyRef.current && requestScope === getAuthScope()
+    if (reset && !silent) setContactsError('')
     try {
-      const params = new URLSearchParams(contactQuery)
-      params.set('limit', String(CONTACTS_PAGE_SIZE))
-      params.set('offset', String(offset))
-      params.set('has_phone', 'false')
-
-      const res = await fetch(`/api/contacts?${params.toString()}`, {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: controller.signal,
-      })
-      const data = await res.json().catch(() => ({}))
-      if (requestId !== contactsRequestRef.current || controller.signal.aborted || requestKey !== queryKeyRef.current || requestScope !== getAuthScope()) return
-      if (!res.ok || !data.success) throw new Error(data.error || 'No se pudieron cargar los contactos')
-      if (data.success) {
-        const newContacts: Contact[] = data.contacts || []
-        const serverTotal: number = data.total ?? 0
+      const fetchPage = async (pageOffset: number, limit: number) => {
+        const params = new URLSearchParams(contactQuery)
+        params.set('limit', String(limit)); params.set('offset', String(pageOffset)); params.set('has_phone', 'false')
+        const res = await fetch(`/api/contacts?${params}`, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
+        const data = await res.json().catch(() => ({}))
+        if (!current()) throw new DOMException('Aborted', 'AbortError')
+        if (!res.ok || !data.success) throw new Error(data.error || 'No se pudieron cargar los contactos')
+        return { contacts: (data.contacts || []) as Contact[], total: Number(data.total) || 0 }
+      }
+      const result = silent ? await refreshContactWindow(offsetRef.current, CONTACTS_PAGE_SIZE, fetchPage) : { ...await fetchPage(offset, CONTACTS_PAGE_SIZE), offset: -1 }
+      if (current()) {
+        const newContacts = result.contacts
+        const serverTotal = result.total
+        if (silent) {
+          const container = scrollContainerRef.current
+          if (container) {
+            const top = container.getBoundingClientRect().top
+            const row = Array.from(container.querySelectorAll<HTMLElement>('[data-contact-id]')).find(item => item.getBoundingClientRect().bottom > top)
+            if (row?.dataset.contactId) pendingContactAnchorRef.current = refreshedContactAnchor(newContacts, { id: row.dataset.contactId, index: Number(row.dataset.contactIndex) || 0, offset: row.getBoundingClientRect().top - top })
+          }
+        }
         setTotal(serverTotal)
 
         if (reset) {
           setContacts(newContacts)
-          offsetRef.current = newContacts.length
+          offsetRef.current = silent ? result.offset : newContacts.length
         } else {
           setContacts(prev => {
             const existingIds = new Set(prev.map(c => c.id))
@@ -673,7 +691,7 @@ export default function ContactsPage() {
           })
           offsetRef.current = offset + newContacts.length
         }
-        setHasMore((offset + newContacts.length) < serverTotal)
+        setHasMore(offsetRef.current < serverTotal)
         setContactsError('')
       }
     } catch (err) {
@@ -681,14 +699,37 @@ export default function ContactsPage() {
       console.error('Failed to fetch contacts:', err)
       setContactsError(err instanceof Error ? err.message : 'No se pudieron cargar los contactos')
     } finally {
-      if (requestId === contactsRequestRef.current && requestKey === queryKeyRef.current && requestScope === getAuthScope()) {
+      if (requestId === contactsRequestRef.current) contactsBusyRef.current = false
+      if (current()) {
         setLoading(false)
         setLoadingMore(false)
         setContactsInitialized(true)
+        if (contactsRefreshQueuedRef.current) {
+          contactsRefreshQueuedRef.current = false
+          queueMicrotask(() => latestFetchContactsRef.current(true, true))
+        }
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, authScope, searchPending, contactQuery, queryKey])
+  latestFetchContactsRef.current = fetchContacts
+
+  useLayoutEffect(() => {
+    const anchor = pendingContactAnchorRef.current
+    const container = scrollContainerRef.current
+    if (!anchor || !container) return
+    pendingContactAnchorRef.current = null
+    const align = () => {
+      const row = Array.from(container.querySelectorAll<HTMLElement>('[data-contact-id]')).find(item => item.dataset.contactId === anchor.id)
+      if (!row) return false
+      container.scrollTop += row.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.offset
+      return true
+    }
+    if (align()) return
+    if (!isCompactWorkspace) contactsVirtualizer.scrollToIndex(anchor.index, { align: 'start' })
+    const frame = requestAnimationFrame(align)
+    return () => cancelAnimationFrame(frame)
+  }, [contacts, isCompactWorkspace, contactsVirtualizer])
 
   const loadMoreContacts = useCallback(() => {
     if (loadingMore || !hasMore) return
@@ -823,7 +864,7 @@ export default function ContactsPage() {
       if (authScope !== getAuthScope() || isAuthIdentityChanging(authScope)) return
       const msg = data as { event?: string }
       if (msg.event === 'contact_update' || msg.event === 'device_deletion') {
-        void fetchContacts(true)
+        void fetchContacts(true, true)
       } else if (msg.event === 'custom_field_def_update') {
         if (token) {
           fetch('/api/custom-fields', { headers: { Authorization: `Bearer ${token}` } })
@@ -854,6 +895,13 @@ export default function ContactsPage() {
 
   useEffect(() => {
     contactsScopeRef.current = authScope
+    contactsBusyRef.current = false
+    contactsRefreshQueuedRef.current = false
+    pendingContactAnchorRef.current = null
+    deletingContactsRef.current = false
+    setDeletingContacts(false)
+    setContactDeleteError('')
+    setContactDeleteRetryIds([])
     contactsAbortRef.current?.abort()
     contactsRequestRef.current += 1
     contactDetailAbortRef.current?.abort()
@@ -961,46 +1009,51 @@ export default function ContactsPage() {
     void loadDetailOpportunities(contact.id)
   }
 
-  const handleDeleteContact = async (contactId: string) => {
-    if (!confirm('¿Eliminar este contacto? También se eliminarán sus leads, chats y mensajes. Esta acción no se puede deshacer.')) return
+  const deleteContacts = async (contactIds: string[]) => {
+    const ids = [...new Set(contactIds)]
+    if (!ids.length || deletingContactsRef.current) return
+    if (!confirm(`¿Eliminar ${ids.length === 1 ? 'este contacto' : `${ids.length} contactos`}? También se eliminarán sus leads, chats y mensajes. Esta acción no se puede deshacer.`)) return
+    const requestScope = getAuthScope()
+    deletingContactsRef.current = true
+    setDeletingContacts(true)
+    setContactDeleteError('')
+    setContactDeleteRetryIds([])
+    invalidateContactQuery()
     try {
-      const res = await fetch(`/api/contacts/${contactId}`, {
+      const res = await fetch(ids.length === 1 ? `/api/contacts/${ids[0]}` : '/api/contacts/batch', {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        ...(ids.length > 1 ? { body: JSON.stringify({ ids }) } : {}),
       })
-      const data = await res.json()
-      if (data.success) {
+      const data = await res.json().catch(() => null)
+      if (requestScope !== getAuthScope()) return
+      if (!res.ok || !data?.success) throw new Error(data?.error || 'No se pudo eliminar el contacto. Revisa tus permisos e inténtalo de nuevo.')
+      if (activeContactIdRef.current && ids.includes(activeContactIdRef.current)) {
         closeDetailPanel()
         setSelectedContact(null)
-        fetchContacts()
       }
-    } catch {
-      alert('Error de conexión')
+      setContacts(current => current.filter(contact => !ids.includes(contact.id)))
+      setSelectedIds(current => new Set([...current].filter(id => !ids.includes(id))))
+      setTotal(current => Math.max(0, current - ids.length))
+      offsetRef.current = Math.max(0, offsetRef.current - ids.length)
+      void fetchContacts(true, true)
+    } catch (error) {
+      if (requestScope !== getAuthScope()) return
+      setContactDeleteError(error instanceof Error ? error.message : 'No pudimos confirmar la eliminación. Revisa la conexión e inténtalo de nuevo.')
+      setContactDeleteRetryIds(ids)
+    } finally {
+      if (requestScope === getAuthScope()) {
+        deletingContactsRef.current = false
+        setDeletingContacts(false)
+        if (contactsRefreshQueuedRef.current) {
+          contactsRefreshQueuedRef.current = false
+          void latestFetchContactsRef.current(true, true)
+        }
+      }
     }
   }
-
-  const handleDeleteSelected = async () => {
-    if (selectedIds.size === 0) return
-    if (!confirm(`¿Eliminar ${selectedIds.size} contacto(s)? También se eliminarán sus leads, chats y mensajes. Esta acción no se puede deshacer.`)) return
-    try {
-      const res = await fetch('/api/contacts/batch', {
-        method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ ids: Array.from(selectedIds) }),
-      })
-      const data = await res.json()
-      if (data.success) {
-        setSelectedIds(new Set())
-        setSelectionMode(false)
-        fetchContacts()
-      }
-    } catch {
-      alert('Error de conexión')
-    }
-  }
+  const handleDeleteContact = (contactId: string) => deleteContacts([contactId])
+  const handleDeleteSelected = () => deleteContacts([...selectedIds])
 
   const toggleSelection = (id: string) => {
     const next = new Set(selectedIds)
@@ -1402,28 +1455,24 @@ export default function ContactsPage() {
             type="text"
             value={searchTerm}
             onChange={(e) => updateSearchTerm(e.target.value)}
-            onFocus={() => {
-              if (!isCompactWorkspace) openContactFilters()
-            }}
             placeholder="Buscar por nombre, teléfono, email..."
             aria-busy={searchPending || loading}
-            className={`${isCompactWorkspace ? 'h-11 rounded-xl pr-24' : 'rounded-lg py-1.5 pr-16'} w-full border bg-white pl-8 text-sm text-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500 ${activeFilterCount > 0 ? 'border-emerald-400 ring-1 ring-emerald-200' : 'border-slate-200'}`}
+            className={`h-11 w-full rounded-xl border bg-white pl-8 pr-24 text-sm text-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500 ${activeFilterCount > 0 ? 'border-emerald-400 ring-1 ring-emerald-200' : 'border-slate-200'}`}
           />
-          {searchPending && <Loader2 aria-label="Esperando para buscar contactos" className={`absolute top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500 ${isCompactWorkspace ? 'right-20' : 'right-10'}`} />}
-          {searchTerm && <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => updateSearchTerm('')} aria-label="Limpiar búsqueda de contactos" className={`absolute top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 ${isCompactWorkspace ? 'right-11' : 'right-1'}`}><X className="h-4 w-4" /></button>}
-          {activeFilterCount > 0 && !showFilterDropdown && !isCompactWorkspace && (
-            <span className="absolute right-2.5 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full bg-emerald-600 text-[10px] font-bold text-white">{activeFilterCount}</span>
-          )}
-          {isCompactWorkspace && <button
+          {searchPending && <Loader2 aria-label="Esperando para buscar contactos" className="absolute right-20 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" />}
+          {searchTerm && <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => updateSearchTerm('')} aria-label="Limpiar búsqueda de contactos" className="absolute right-11 top-1/2 flex h-11 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
+          <button
             type="button"
             onMouseDown={(event) => event.preventDefault()}
             onClick={openContactFilters}
             className="absolute right-0 top-0 inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
             aria-label={`Abrir filtros y orden${mobileFilterAdjustmentCount > 0 ? `, ${mobileFilterAdjustmentCount} ajustes activos` : ''}`}
+            title="Filtros y orden"
+            aria-expanded={showFilterDropdown}
           >
             <Filter className="h-5 w-5" />
             {mobileFilterAdjustmentCount > 0 && <span className="absolute right-1.5 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-600 px-1 text-[9px] font-bold text-white">{mobileFilterAdjustmentCount}</span>}
-          </button>}
+          </button>
 
           {/* Filter dropdown */}
           {showFilterDropdown && (
@@ -1440,7 +1489,7 @@ export default function ContactsPage() {
                 <div className="flex items-center gap-2">
                   {activeFilterCount > 0 && (
                     <button
-                      onClick={() => { setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setLeadFormulaType('simple'); setLeadFormulaText(''); setLeadFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setFilterDevice(''); setCfFilters([]); invalidateContactQuery(); setAppliedFilters(emptyContactListFilters()) }}
+                      onClick={() => { setFilterTagNames(new Set()); setExcludeFilterTagNames(new Set()); setTagFilterMode('OR'); setLeadFormulaType('simple'); setLeadFormulaText(''); setLeadFormulaIsValid(true); setAppliedFormulaType('simple'); setAppliedFormulaText(''); setFilterDateField('created_at'); setFilterDatePreset(''); setFilterDateFrom(''); setFilterDateTo(''); setFilterDevice(''); setCfFilters([]) }}
                       className="text-[11px] text-red-400 hover:text-red-600 font-medium transition-colors"
                     >
                       Limpiar todo
@@ -1919,10 +1968,10 @@ export default function ContactsPage() {
               </button>
               {!isCompactWorkspace && <button
                 onClick={handleDeleteSelected}
-                disabled={selectedIds.size === 0}
+                disabled={selectedIds.size === 0 || deletingContacts}
                 className="rounded-lg bg-red-600 px-3 py-2 text-sm text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Eliminar ({selectedIds.size})
+                {deletingContacts ? 'Eliminando…' : `Eliminar (${selectedIds.size})`}
               </button>}
               {googleConnected && !isCompactWorkspace && (
                 <>
@@ -2056,9 +2105,14 @@ export default function ContactsPage() {
       {contactsError && (
         <div className="mb-2 flex shrink-0 flex-col gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 sm:flex-row sm:items-center sm:justify-between" role="alert">
           <span>{contactsError}. Conservamos los contactos que ya estaban cargados.</span>
-          <button type="button" onClick={() => void fetchContacts(true)} className="min-h-11 shrink-0 rounded-lg border border-red-300 bg-white px-4 font-semibold text-red-700 hover:bg-red-100">Reintentar</button>
+          <button type="button" onClick={() => void fetchContacts(true, contacts.length > 0)} className="min-h-11 shrink-0 rounded-lg border border-red-300 bg-white px-4 font-semibold text-red-700 hover:bg-red-100">Reintentar</button>
         </div>
       )}
+      {(contactDeleteError || deletingContacts) && <div role={contactDeleteError ? 'alert' : 'status'} className={`mb-2 flex shrink-0 items-center gap-3 rounded-xl border px-4 py-3 text-sm ${contactDeleteError ? 'border-red-200 bg-red-50 text-red-800' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+        {deletingContacts && <Loader2 className="h-4 w-4 shrink-0 animate-spin" />}
+        <span className="min-w-0 flex-1">{contactDeleteError || 'Eliminando contactos…'}</span>
+        {contactDeleteError && contactDeleteRetryIds.length > 0 && <button type="button" disabled={deletingContacts} onClick={() => void deleteContacts(contactDeleteRetryIds)} className="min-h-11 rounded-lg border border-red-300 bg-white px-3 font-semibold">Reintentar eliminación</button>}
+      </div>}
 
       {/* Main content */}
       <div className="flex flex-col flex-1 min-h-0">
@@ -2088,11 +2142,13 @@ export default function ContactsPage() {
                   <p className="font-medium">No hay contactos</p>
                   <p className="mt-1 text-xs leading-relaxed">Los contactos se sincronizan automáticamente desde tus dispositivos WhatsApp.</p>
                 </div>
-              ) : contacts.map((contact) => {
+              ) : contacts.map((contact, contactIndex) => {
                 const tags = contact.structured_tags || []
                 return (
                   <article
                     key={`mobile-${contact.id}`}
+                    data-contact-id={contact.id}
+                    data-contact-index={contactIndex}
                     className={`group relative px-3 py-3 transition ${selectedIds.has(contact.id) ? 'bg-emerald-50' : selectedContact?.id === contact.id ? 'bg-emerald-50/70' : 'bg-white active:bg-slate-50'}`}
                     onClick={() => selectionMode ? toggleSelection(contact.id) : openDetail(contact)}
                   >
@@ -2224,6 +2280,8 @@ export default function ContactsPage() {
                   return (
                   <tr
                     key={contact.id}
+                    data-contact-id={contact.id}
+                    data-contact-index={virtualRow.index}
                     ref={contactsVirtualizer.measureElement}
                     data-index={virtualRow.index}
                     style={{ position: 'absolute', top: 0, left: 0, width: '100%', display: 'table', tableLayout: 'fixed', transform: `translateY(${virtualRow.start}px)` }}
@@ -2381,7 +2439,7 @@ export default function ContactsPage() {
                             )}
                             <div className="my-1 border-t border-slate-100" />
                             <button
-                              onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteContact(contact.id); setActionsMenuId(null) }}
+                              disabled={deletingContacts} onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteContact(contact.id); setActionsMenuId(null) }}
                               className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-red-600 hover:bg-red-50"
                             >
                               <Trash2 className="w-4 h-4 text-red-400" /> Eliminar
@@ -2459,7 +2517,7 @@ export default function ContactsPage() {
           <div role="dialog" aria-modal="true" aria-label="Acciones de selección" className="w-full rounded-t-3xl bg-white px-3 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
             <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-300" />
             <p className="px-2 pb-2 text-sm font-semibold text-slate-800">{selectedIds.size} contacto{selectedIds.size === 1 ? '' : 's'} seleccionado{selectedIds.size === 1 ? '' : 's'}</p>
-            <button type="button" onClick={() => { setShowMobileBulkMenu(false); handleDeleteSelected() }} disabled={selectedIds.size === 0} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm font-medium text-red-600 transition hover:bg-red-50 disabled:opacity-40"><Trash2 className="h-5 w-5" />Eliminar seleccionados</button>
+            <button type="button" onClick={() => { setShowMobileBulkMenu(false); handleDeleteSelected() }} disabled={selectedIds.size === 0 || deletingContacts} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm font-medium text-red-600 transition hover:bg-red-50 disabled:opacity-40"><Trash2 className="h-5 w-5" />Eliminar seleccionados</button>
             {googleConnected && (
               <>
                 <button type="button" onClick={() => { setShowMobileBulkMenu(false); handleGoogleBatchSync() }} disabled={selectedIds.size === 0 || selectedIds.size > 30 || googleSyncing} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-40"><Upload className="h-5 w-5 text-blue-500" />Sincronizar con Google</button>
@@ -2494,7 +2552,7 @@ export default function ContactsPage() {
               <MessageSquare className="h-5 w-5 text-slate-400" />Enviar mensaje
             </button>
             {googleConnected && <button type="button" onClick={() => { setActionsMenuId(null); handleGoogleSyncSingle(mobileActionContact.id) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Upload className="h-5 w-5 text-blue-500" />{mobileActionContact.google_sync ? 'Re-sincronizar Google' : 'Sincronizar con Google'}</button>}
-            <button type="button" onClick={() => { setActionsMenuId(null); handleDeleteContact(mobileActionContact.id) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-red-600 hover:bg-red-50"><Trash2 className="h-5 w-5" />Eliminar</button>
+            <button type="button" disabled={deletingContacts} onClick={() => { setActionsMenuId(null); handleDeleteContact(mobileActionContact.id) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-red-600 hover:bg-red-50"><Trash2 className="h-5 w-5" />Eliminar</button>
             <button type="button" onClick={() => setActionsMenuId(null)} className="mt-2 min-h-12 w-full rounded-xl border border-slate-200 text-sm font-semibold text-slate-600">Cancelar</button>
           </div>
         </div>,

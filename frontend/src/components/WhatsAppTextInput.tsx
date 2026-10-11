@@ -353,7 +353,7 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
   }, [applyFormat, onKeyDown])
 
   const minH = singleLine ? 'min-h-[42px]' : `min-h-[${Math.max(rows * 24, 64)}px]`
-  const maxH = singleLine ? 'max-h-32' : 'max-h-60'
+  const maxH = singleLine ? 'max-h-[min(128px,25dvh)]' : 'max-h-60'
 
   const formatToolbar = toolbar ? (
     <div
@@ -396,14 +396,14 @@ const WhatsAppTextInput = forwardRef<WhatsAppTextInputHandle, WhatsAppTextInputP
       <div
         ref={editorRef}
         role="textbox"
-        aria-multiline={!singleLine}
+        aria-multiline={keyboardChromeTarget || !singleLine}
         aria-label={placeholder}
         data-chat-keyboard-target={keyboardChromeTarget ? 'true' : undefined}
         contentEditable={!disabled}
         onInput={handleInput}
         onKeyDown={handleEditorKeyDown}
         onPaste={handlePaste}
-        className={`w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900 ${minH} ${maxH} overflow-y-auto whitespace-pre-wrap break-words outline-none text-sm ${className}`}
+        className={`w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent text-gray-900 ${minH} ${maxH} overflow-y-auto whitespace-pre-wrap break-words outline-none ${keyboardChromeTarget ? 'text-base' : 'text-sm'} ${className}`}
       />
       {/* Formatting toolbar */}
       {formatToolbarPlacement === 'inline' && formatToolbar}

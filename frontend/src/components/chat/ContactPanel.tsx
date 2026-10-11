@@ -1,10 +1,10 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { forwardRef, useState, useEffect, useRef, useCallback, useImperativeHandle, type ForwardedRef } from 'react'
 import { createPortal } from 'react-dom'
 import { X, User, Smartphone, Check, Archive, ShieldBan, ShieldOff, AlertCircle, CheckCircle2, Loader2, RotateCcw, BriefcaseBusiness, Plus, RefreshCw, Search } from 'lucide-react'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
-import ContactDetailSurface from '@/components/contact-details/ContactDetailSurface'
+import ContactDetailSurface, { type ContactDetailSurfaceHandle } from '@/components/contact-details/ContactDetailSurface'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import type { Lead, PipelineStage, StructuredTag } from '@/types/contact'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
@@ -57,12 +57,27 @@ interface ContactPanelProps {
   chatId: string
   isOpen: boolean
   onClose: () => void
+  onFocusConversation?: () => void
+  focusConversationClosesDetails?: boolean
   deviceName?: string
   devicePhone?: string
   chatPhone?: string
 }
 
-export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devicePhone, chatPhone }: ContactPanelProps) {
+export interface ContactPanelHandle {
+  /** Synchronous draft guard; never changes history or calls onClose. */
+  canClose: () => boolean
+}
+
+function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusConversationClosesDetails = true, deviceName, devicePhone, chatPhone }: ContactPanelProps, forwardedRef: ForwardedRef<ContactPanelHandle>) {
+  const contactSurfaceRef = useRef<ContactDetailSurfaceHandle>(null)
+  const canClose = useCallback(() => contactSurfaceRef.current?.canClose() ?? true, [])
+  useImperativeHandle(forwardedRef, () => ({ canClose }), [canClose])
+  const requestClose = useCallback(() => {
+    if (contactSurfaceRef.current) return contactSurfaceRef.current.requestClose()
+    onClose()
+    return true
+  }, [onClose])
   const [contact, setContact] = useState<Contact | null>(null)
   const [chatDevice, setChatDevice] = useState<ChatDevice | null>(null)
   const [lead, setLead] = useState<Lead | null>(null)
@@ -424,11 +439,11 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
     const h = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || showArchiveModal || showBlockModal || stageChangeRequest) return
       if (showContactLinker) setShowContactLinker(false)
-      else onClose()
+      else requestClose()
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [isOpen, onClose, showArchiveModal, showBlockModal, showContactLinker, stageChangeRequest])
+  }, [isOpen, requestClose, showArchiveModal, showBlockModal, showContactLinker, stageChangeRequest])
 
   useEffect(() => {
 	mutationEpochRef.current += 1
@@ -493,7 +508,9 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
     setLoadingOpportunity(false)
     const controller = new AbortController()
     detailsAbortRef.current = controller
-    setLoading(true)
+    // Keep the identity surface mounted during contextual refreshes so notes,
+    // edit drafts and the single scroll position survive canonical reloads.
+    if (!contact || activeChatIdRef.current !== targetChatId) setLoading(true)
     setDetailsError('')
     setOpportunitiesError('')
     setOpportunitySelectionError(null)
@@ -693,7 +710,7 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
           <h3 className="text-base font-bold text-slate-900">Detalles</h3>
           <p className="text-[11px] text-slate-500">Contacto y contexto comercial</p>
         </div>
-        <button type="button" onClick={onClose} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar detalles">
+        <button type="button" onClick={requestClose} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar detalles">
           <X className="h-5 w-5" />
         </button>
       </div>
@@ -795,6 +812,7 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
             ) : (
               <>
                 <ContactDetailSurface
+                  ref={contactSurfaceRef}
                   contactId={contact.id}
                   context={{ type: 'chat', id: chatId }}
                   initialContact={{
@@ -806,6 +824,7 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
                   title="Detalles"
                   subtitle="Contacto y contexto comercial"
                   onClose={onClose}
+                  onSendMessage={onFocusConversation ? () => { if (!focusConversationClosesDetails || canClose()) onFocusConversation() } : undefined}
                   onContactChange={updated => setContact(current => current?.id === updated.id ? { ...current, ...updated, jid: updated.jid || current.jid, is_group: updated.is_group ?? current.is_group } as Contact : current)}
                   hideHeader
                   parentOwnsScroll
@@ -1056,3 +1075,7 @@ export default function ContactPanel({ chatId, isOpen, onClose, deviceName, devi
     </div>
   )
 }
+
+const ContactPanel = forwardRef<ContactPanelHandle, ContactPanelProps>(ContactPanelImpl)
+ContactPanel.displayName = 'ContactPanel'
+export default ContactPanel

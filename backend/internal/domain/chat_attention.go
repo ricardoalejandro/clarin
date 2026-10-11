@@ -36,11 +36,13 @@ func MessageSendContextFrom(ctx context.Context) (MessageSendContext, bool) {
 }
 
 type ChatState struct {
-	ChatID       uuid.UUID  `json:"chat_id"`
-	UnreadCount  int        `json:"unread_count"`
-	WaitingSince *time.Time `json:"waiting_since"`
-	NeedsReply   bool       `json:"needs_reply"`
-	Version      int64      `json:"state_version"`
+	LastIncomingMessageID *uuid.UUID `json:"last_incoming_message_id"`
+	LastIncomingAt        *time.Time `json:"last_incoming_at"`
+	ChatID                uuid.UUID  `json:"chat_id"`
+	UnreadCount           int        `json:"unread_count"`
+	WaitingSince          *time.Time `json:"waiting_since"`
+	NeedsReply            bool       `json:"needs_reply"`
+	Version               int64      `json:"state_version"`
 }
 
 type QuickReplyItem struct {
