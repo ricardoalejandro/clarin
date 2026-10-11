@@ -398,6 +398,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const attachmentDraftRef = useRef<AttachmentDraft | null>(attachmentDraft)
   const attachmentSendingRef = useRef(false)
   const mediaRetryRef = useRef<Map<string, RetryableMedia>>(new Map())
+  const mediaMountedRef = useRef(true)
   const reactionOperationSequenceRef = useRef(0)
   const reactionQueuesRef = useRef<Map<string, ReactionIntentQueue>>(new Map())
   const reactionEventTimestampsRef = useRef<Map<string, string>>(new Map())
@@ -1098,9 +1099,14 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     }
   }, [showHeaderMenu, showSelectionMenu])
 
-  const releaseRetryableMedia = useCallback((tempId: string) => {
+  const releaseRetryableMedia = useCallback((tempId: string, canonicalMediaUrl?: string) => {
     const media = mediaRetryRef.current.get(tempId)
-    if (media?.previewUrl) URL.revokeObjectURL(media.previewUrl)
+    const nextUrl = canonicalMediaUrl || media?.uploadedMediaUrl
+    if (media?.previewUrl) {
+      // An image opened while uploading keeps the same viewer session after send.
+      if (nextUrl) setViewImage(current => current === media.previewUrl ? nextUrl : current)
+      URL.revokeObjectURL(media.previewUrl)
+    }
     mediaRetryRef.current.delete(tempId)
   }, [])
 
@@ -1241,15 +1247,19 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     return () => window.clearTimeout(timer)
   }, [composerFeedback])
 
-  useEffect(() => () => {
-    savedStickersRequestRef.current?.abort()
-    const draftURLs = new Set(Array.from(draftCacheRef.current.values()).map(draft => draft.attachment?.previewUrl).filter(Boolean))
-    if (attachmentDraftRef.current?.previewUrl) draftURLs.add(attachmentDraftRef.current.previewUrl)
-    draftURLs.forEach(url => URL.revokeObjectURL(url!))
-    mediaRetryRef.current.forEach(media => {
-      if (media.previewUrl) URL.revokeObjectURL(media.previewUrl)
-    })
-    mediaRetryRef.current.clear()
+  useEffect(() => {
+    mediaMountedRef.current = true
+    return () => {
+      mediaMountedRef.current = false
+      savedStickersRequestRef.current?.abort()
+      const draftURLs = new Set(Array.from(draftCacheRef.current.values()).map(draft => draft.attachment?.previewUrl).filter(Boolean))
+      if (attachmentDraftRef.current?.previewUrl) draftURLs.add(attachmentDraftRef.current.previewUrl)
+      draftURLs.forEach(url => URL.revokeObjectURL(url!))
+      mediaRetryRef.current.forEach(media => {
+        if (media.previewUrl) URL.revokeObjectURL(media.previewUrl)
+      })
+      mediaRetryRef.current.clear()
+    }
   }, [])
 
   // Helper: send typing/composing presence to recipient
@@ -1562,7 +1572,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                 const optimisticIndex = findCompatibleOptimisticIndex(prev, actualMessage)
                 if (optimisticIndex >= 0) {
                   const tempId = prev[optimisticIndex].id
-                  releaseRetryableMedia(tempId)
+                  releaseRetryableMedia(tempId, actualMessage.media_url)
                   return reconcileOptimisticMessage(prev, tempId, actualMessage)
                 }
                 if (realAlreadyExists) {
@@ -2104,12 +2114,12 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
       if (data.message) {
         updateMessagesForChat(targetChatId, prev => reconcileOptimisticMessage(prev, tempId, data.message as Message))
-        releaseRetryableMedia(tempId)
+        releaseRetryableMedia(tempId, data.message.media_url || uploadedMediaUrl)
       } else {
         updateMessagesForChat(targetChatId, prev => prev.map(message =>
           message.id === tempId ? { ...message, status: 'sent', media_url: uploadedMediaUrl } : message
         ))
-        releaseRetryableMedia(tempId)
+        releaseRetryableMedia(tempId, uploadedMediaUrl)
       }
       return true
     } catch (err) {
@@ -2231,7 +2241,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       }
     }
 
-    if (activeChatIdRef.current !== targetChatId) { sendingChatsRef.current.delete(targetChatId); return false }
+    if (!mediaMountedRef.current || activeChatIdRef.current !== targetChatId) { sendingChatsRef.current.delete(targetChatId); return false }
 
     const tempId = `optimistic-${++optimisticIdRef.current}`
     const previewUrl = URL.createObjectURL(fileToSend)

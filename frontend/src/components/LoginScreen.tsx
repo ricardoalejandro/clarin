@@ -8,7 +8,7 @@ import ClarinBrandMark from '@/components/branding/ClarinBrandMark'
 import { getLoginNoticeForLogoutReason, invalidateOfflineBeforeIdentityChange, markAuthTokenRefreshed } from '@/lib/api'
 import { completeAuthIdentityChange, getAuthScope, isAuthIdentityChanging } from '@/lib/authScope'
 import { fetchAuthCookie } from '@/lib/authCookieLock'
-import { WHITEBOARD_PUBLIC_LIBRARY_CALLBACK_PATH } from '@/lib/whiteboardPublicLibraries'
+import { navigateAfterOnlineLogin } from '@/lib/onlineLoginNavigation'
 import { classifyRemoteResponse } from '@/offline-v3/availability'
 import {
   clearOfflineReauthExpectation,
@@ -474,17 +474,7 @@ export default function LoginScreen() {
       markAuthTokenRefreshed()
       completeAuthIdentityChange()
       const next = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('next') : ''
-      const safeNext = next && (
-        next === WHITEBOARD_PUBLIC_LIBRARY_CALLBACK_PATH
-        || next.startsWith('/oauth/authorize')
-        || next.startsWith('https://clarin.naperu.cloud/oauth/authorize')
-      ) ? next : '/dashboard'
-      if (safeNext.startsWith('/oauth/authorize') || safeNext.startsWith('https://clarin.naperu.cloud/oauth/authorize')) {
-        window.location.assign(safeNext)
-        return
-      }
-      router.push(safeNext)
-      router.refresh()
+      navigateAfterOnlineLogin(next)
     } catch {
       await cancelFailedTransition()
       showOfflineFallback('No se pudo conectar con Clarin')

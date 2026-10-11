@@ -1327,7 +1327,6 @@ export default function ChatsPage() {
                                     {chat.last_message || 'Sin mensajes'}
                                 </span>
                             </div>
-                            {chat.needs_reply && <p className="mt-1 truncate text-[10px] font-medium text-amber-700" title={chat.waiting_since ? `En espera desde ${new Date(chat.waiting_since).toLocaleString('es-PE')}` : undefined}>{chat.unread_count > 0 ? 'Pendiente de atención' : 'Leído · pendiente'}{filterPending && chat.waiting_since ? ` · Desde ${formatTime(chat.waiting_since)}` : ''}</p>}
                             {/* Device & Phone Labels */}
                             <div className="mt-1 flex min-w-0 items-center gap-1.5">
                                  {chat.device_name && (

@@ -13,14 +13,24 @@ export function clearSubmittedNote(current: string, submitted: string): string {
   return current === submitted ? '' : current
 }
 
-export function contactTagForeground(color?: string): '#0F172A' | '#FFFFFF' {
-  const hex = /^#[0-9a-f]{6}$/i.test(color || '') ? color! : '#64748B'
+function tagColorLuminance(hex: string): number {
   const channels = [1, 3, 5].map(index => {
     const value = parseInt(hex.slice(index, index + 2), 16) / 255
     return value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4
   })
-  const luminance = channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722
-  return luminance > .179 ? '#0F172A' : '#FFFFFF'
+  return channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722
+}
+
+const TAG_DARK_FOREGROUND_LUMINANCE = tagColorLuminance('#0F172A')
+
+export function contactTagForeground(color?: string): '#0F172A' | '#FFFFFF' {
+  const hex = /^#[0-9a-f]{6}$/i.test(color || '') ? color! : '#64748B'
+  const luminance = tagColorLuminance(hex)
+  const whiteContrast = 1.05 / (luminance + .05)
+  // Compare the actual slate ink: a black/white threshold makes indigo tags too dark.
+  const darkContrast = (Math.max(luminance, TAG_DARK_FOREGROUND_LUMINANCE) + .05)
+    / (Math.min(luminance, TAG_DARK_FOREGROUND_LUMINANCE) + .05)
+  return whiteContrast >= darkContrast ? '#FFFFFF' : '#0F172A'
 }
 
 export function contactTagMenuPosition(rect: { left: number; top: number; bottom: number; width: number }, viewport: { left: number; top: number; width: number; height: number }) {

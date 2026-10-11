@@ -90,6 +90,19 @@ beforeEach(() => {
 })
 
 describe('ContactDetailSurface date editing', () => {
+  it('renders assigned tag text with contrast without changing its saved background', () => {
+    mocks.profileOverrides = { contact: { ...contact, structured_tags: [
+      { id: 'indigo-tag', name: 'Seguimiento', color: '#6366f1' },
+      { id: 'yellow-tag', name: 'Prioridad', color: '#FFFF00' },
+    ] } }
+    render(<ContactDetailSurface contactId="contact-1" context={{ type: 'chat', id: 'chat-1' }} initialContact={contact} onClose={vi.fn()} />)
+
+    expect(screen.getByText('Seguimiento').parentElement).toHaveStyle({ backgroundColor: '#6366f1', color: '#FFFFFF' })
+    expect(screen.getByText('Prioridad').parentElement).toHaveStyle({ backgroundColor: '#FFFF00', color: '#0F172A' })
+    expect(screen.getByRole('button', { name: 'Quitar etiqueta Seguimiento' }).querySelector('svg')).toHaveAttribute('stroke', 'currentColor')
+    expect(mocks.updateContact).not.toHaveBeenCalled()
+  })
+
   it('focuses a general note and protects its draft when the detail closes', async () => {
     const ref = createRef<ContactDetailSurfaceHandle>()
     const onClose = vi.fn()
