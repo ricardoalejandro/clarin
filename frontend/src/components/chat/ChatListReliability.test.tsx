@@ -38,15 +38,15 @@ describe('Chat list canonical membership',()=>{
   expect(screen.getByRole('button',{name:'Conversación con Pendiente ya leído'})).toBeInTheDocument();
   expect(screen.queryByText('Leído · pendiente')).not.toBeInTheDocument();
   expect(screen.queryByText('Pendiente de atención')).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button',{name:'Pendientes',exact:true}));
+  fireEvent.click(screen.getByRole('button',{name:/^Pendientes$/}));
   await waitFor(()=>expect(requests.at(-1)?.get('pending_only')).toBe('true'));
   await waitFor(()=>expect(screen.queryByRole('button',{name:'Conversación con Conversación atendida'})).not.toBeInTheDocument());
-  expect(screen.getByRole('button',{name:'Pendientes',exact:true})).toHaveAttribute('aria-pressed','true');
+  expect(screen.getByRole('button',{name:/^Pendientes$/})).toHaveAttribute('aria-pressed','true');
   expect(screen.getByRole('button',{name:'Conversación con Pendiente ya leído'})).toBeInTheDocument();
   expect(within(screen.getByRole('button',{name:'Conversación con Pendiente sin leer'})).getByText('3')).toBeInTheDocument();
   expect(screen.queryByText('Leído · pendiente')).not.toBeInTheDocument();
   expect(screen.queryByText('Pendiente de atención')).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button',{name:'No leídos',exact:true}));
+  fireEvent.click(screen.getByRole('button',{name:/^No leídos$/}));
   await waitFor(()=>expect(requests.at(-1)?.get('unread_only')).toBe('true'));
   expect(requests.at(-1)?.has('pending_only')).toBe(false);
   await waitFor(()=>expect(screen.queryByRole('button',{name:'Conversación con Pendiente ya leído'})).not.toBeInTheDocument());
