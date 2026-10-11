@@ -91,6 +91,7 @@ import {
   type TaskMutationFailure,
   type TaskScopedWriteQueues,
 } from './taskVisualWriteQueue'
+import { reconcileTaskMediaCounts } from './taskMediaRealtime'
 import { reconcileTaskDescriptionRealtime } from './taskDescriptionRealtime'
 import TaskLocationViewBar from './TaskLocationViewBar'
 import type { WhiteboardLeaveGuard } from '@/components/whiteboards/WhiteboardEditor'
@@ -1937,7 +1938,7 @@ export default function TaskWorkspace() {
     }
   }, [])
 	useEffect(() => subscribeWebSocket(async raw => {
-    const message = raw as { event?: string; data?: { action?: string; task?: Task; task_id?: string; list_id?: string; folder_id?: string; target_type?: 'task' | 'list' | 'folder' | 'environment'; target_id?: string; description?: string; updated_at?: string; version?: number; operation_id?: string; structure_changed?: boolean; hierarchy_counts?: TaskHierarchyCounts; order?: { list_id?: string; task_ids?: string[] } } }
+    const message = raw as { event?: string; data?: { action?: string; origin?: string; attachment_scope?: string; task?: Task; task_id?: string; list_id?: string; folder_id?: string; target_type?: 'task' | 'list' | 'folder' | 'environment'; target_id?: string; description?: string; updated_at?: string; version?: number; operation_id?: string; structure_changed?: boolean; hierarchy_counts?: TaskHierarchyCounts; order?: { list_id?: string; task_ids?: string[] } } }
     if (message.event !== 'task_update' && message.event !== 'task_overdue') return
     const payload = message.data || {}
     const action = payload.action || ''
@@ -2121,12 +2122,7 @@ export default function TaskWorkspace() {
       return
     }
     if (payload.task_id && ['comment_created', 'comment_deleted', 'attachment_added', 'attachment_deleted'].includes(action)) {
-      setTasks(current => current.map(task => {
-        if (task.id !== payload.task_id) return task
-        if (action === 'comment_created') return { ...task, comment_count: (task.comment_count || 0) + 1 }
-        if (action === 'comment_deleted') return { ...task, comment_count: Math.max(0, (task.comment_count || 0) - 1) }
-        return { ...task, attachment_count: Math.max(0, (task.attachment_count || 0) + (action === 'attachment_added' ? 1 : -1)) }
-      }))
+      setTasks(current => current.map(task => reconcileTaskMediaCounts(task, payload)))
       if (refreshTimer.current) clearTimeout(refreshTimer.current)
       refreshTimer.current = setTimeout(() => void loadTasks(false), 180)
       return

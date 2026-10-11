@@ -47,6 +47,16 @@ describe('Clarin mobile app policy', () => {
     expect(isAllowedMobileAppPath('/dashboard/settings/billing', admin, { allowSubscriptionRecovery: true })).toBe(true)
   })
 
+  it('allows the online storage utility without adding a sixth primary module', () => {
+    const subject = { permissions: [] }
+    expect(isAllowedMobileAppPath('/dashboard/storage', subject)).toBe(true)
+    expect(isAllowedMobileAppPath('/dashboard/storage-other', subject)).toBe(false)
+    expect(availableMobileAppModules(subject)).toEqual([])
+    expect(mobileAppModuleForPath('/dashboard/storage')).toBeNull()
+    expect(pwaRequestStrategy({ method: 'GET', sameOrigin: true, mode: 'cors', pathname: '/api/storage/files' })).toBe('ignore')
+    expect(pwaRequestStrategy({ method: 'GET', sameOrigin: true, mode: 'cors', pathname: '/api/storage/content' })).toBe('ignore')
+  })
+
   it('recognizes installed and iOS app contexts safely', () => {
     expect(isStandaloneApp({ displayModeStandalone: true })).toBe(true)
     expect(isStandaloneApp({ displayModeStandalone: false, navigatorStandalone: true })).toBe(true)

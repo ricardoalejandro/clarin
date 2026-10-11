@@ -610,17 +610,22 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM task_attachments WHERE account_id=$1 AND id=$2`, accountA, futureAttachmentID).Scan(&futureDraftCount); err != nil || futureDraftCount != 0 {
 		t.Fatalf("final shared comment draft retained: count=%d err=%v", futureDraftCount, err)
 	}
-	// A content-hash reservation may reuse this media row after Prepare has
-	// committed but before the old worker reports physical deletion. The stale
-	// completion must fail closed against the replaced key and claim.
+	// Reusing the row before physical deletion completes would replace its
+	// durable retry job. Only a completed deletion permits a new unique key;
+	// a later repeated completion must still leave that new reservation intact.
 	reusedObjectKey := accountA.String() + "/_private/tasks/attachments/reused-after-gc.pdf"
 	if _, err := db.Exec(ctx, `UPDATE media_assets SET object_key=$3,status='task_upload_pending',deleted_at=NULL,updated_at=NOW()
-		WHERE account_id=$1 AND id=$2`, accountA, expiredAssetID, reusedObjectKey); err != nil {
-		t.Fatalf("simulate media hash reuse after GC prepare: %v", err)
+		WHERE account_id=$1 AND id=$2`, accountA, expiredAssetID, reusedObjectKey); err == nil {
+		t.Fatal("GC-owned media row was reused before completion")
 	}
-	if _, err := db.Exec(ctx, `UPDATE task_media_gc_jobs SET object_key=$3,status='pending',claim_token=NULL,
-		available_at=NOW()+INTERVAL '1 hour',updated_at=NOW() WHERE id=$1 AND account_id=$2`, gcJob.ID, accountA, reusedObjectKey); err != nil {
-		t.Fatalf("replace GC job for reused media: %v", err)
+	if err := taskWork.CompleteTaskMediaGCJob(ctx, gcJob, true); err != nil {
+		t.Fatalf("complete original GC reservation: %v", err)
+	}
+	if _, _, err := taskWork.ReserveTaskAttachmentAsset(ctx, repository.MediaAssetUpsert{
+		AccountID: accountA, ContentHash: "expired-comment-draft-" + expiredAssetID.String(), ObjectKey: reusedObjectKey,
+		Filename: "reused-after-gc.pdf", MediaType: "document", ContentType: "application/pdf", SizeBytes: 5,
+	}); err != nil {
+		t.Fatalf("reserve new key after GC completion: %v", err)
 	}
 	if err := taskWork.CompleteTaskMediaGCJob(ctx, gcJob, true); err != nil {
 		t.Fatalf("complete stale GC claim: %v", err)
@@ -631,7 +636,7 @@ func TestTaskWorkMigrationAndAccountIsolation(t *testing.T) {
 		Scan(&reusedAssetKey, &reusedAssetStatus); err != nil {
 		t.Fatalf("load reused media after stale completion: %v", err)
 	}
-	if err := db.QueryRow(ctx, `SELECT object_key,status,claim_token FROM task_media_gc_jobs WHERE id=$1 AND account_id=$2`, gcJob.ID, accountA).
+	if err := db.QueryRow(ctx, `SELECT object_key,status,claim_token FROM task_media_gc_jobs WHERE media_asset_id=$1 AND account_id=$2`, expiredAssetID, accountA).
 		Scan(&reusedJobKey, &reusedJobStatus, &reusedJobClaim); err != nil {
 		t.Fatalf("load replacement GC job after stale completion: %v", err)
 	}

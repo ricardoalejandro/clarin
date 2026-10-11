@@ -30,7 +30,7 @@ func newFunctionalIntegrityIntegrationDB(t *testing.T, gate, prefix string) *pgx
 	}
 	ctx := context.Background()
 	parsed, err := url.Parse(os.Getenv("DATABASE_URL"))
-	if err != nil || (parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "localhost") || parsed.Port() != "15439" || (parsed.Path != "/clarin_cloud_dev" && parsed.Path != "/program_survey_integrity_test") {
+	if err != nil || (parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "localhost") || parsed.Port() != storageQAPort(t, "CLARIN_STORAGE_QA_POSTGRES_PORT", "15439") || (parsed.Path != "/clarin_cloud_dev" && parsed.Path != "/program_survey_integrity_test") {
 		t.Fatal("exact isolated local QA database required")
 	}
 	adminURL := *parsed

@@ -116,6 +116,10 @@ func (r *ContactAvatarRepository) Save(ctx context.Context, store *storage.Stora
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('storage-self-service:' || $1::text,0))`, accountID); err != nil {
+		return nil, err
+	}
+
 	var oldAssetID *uuid.UUID
 	var oldURL *string
 	if err := tx.QueryRow(ctx, `
@@ -211,6 +215,9 @@ func (r *ContactAvatarRepository) ensureAsset(ctx context.Context, tx pgx.Tx, st
 	if err != nil && err != pgx.ErrNoRows {
 		return uuid.Nil, "", "", false, err
 	}
+	if err == nil && (existingStatus == "avatar_gc_deleting" || existingStatus == "deleting") {
+		return existingID, existingKey, "", false, ErrMediaAssetDeletionInProgress
+	}
 	newAsset := err == pgx.ErrNoRows
 	objectKey := existingKey
 	uploadedKey := ""
@@ -237,12 +244,12 @@ func (r *ContactAvatarRepository) ensureAsset(ctx context.Context, tx pgx.Tx, st
 				return existingID, objectKey, "", false, ErrAvatarStorageLimit
 			}
 		}
-		if newAsset {
+		if newAsset || existingStatus == "deleted" {
 			filename = uuid.NewString() + ".jpg"
 			objectKey = storage.PrivateObjectKey(accountID, "avatars", contactID.String(), filename)
 		}
-		// Reuse the existing key when restoring pending/deleted content, avoiding
-		// an orphaned old inventory row on each same-photo replacement.
+		// Pending content may reuse its key before deletion intent is committed.
+		// A deleted key is permanently retired; the same photo gets a fresh key.
 		if _, err := store.UploadObject(ctx, objectKey, data, "image/jpeg"); err != nil {
 			return existingID, objectKey, "", false, err
 		}
@@ -255,8 +262,8 @@ func (r *ContactAvatarRepository) ensureAsset(ctx context.Context, tx pgx.Tx, st
 				VALUES ($1,$2,$3,'avatar','image/jpeg',$4,$5,'active',NOW()) RETURNING id
 			`, accountID, contentHash, objectKey, filename, len(data)).Scan(&existingID)
 		} else {
-			_, err = tx.Exec(ctx, `UPDATE media_assets SET status='active',deleted_at=NULL,updated_at=NOW()
-				WHERE id=$1 AND account_id=$2`, existingID, accountID)
+			_, err = tx.Exec(ctx, `UPDATE media_assets SET object_key=$3,filename=$4,status='active',deleted_at=NULL,updated_at=NOW()
+				WHERE id=$1 AND account_id=$2`, existingID, accountID, objectKey, filename)
 		}
 		if err != nil {
 			return existingID, objectKey, uploadedKey, false, err
@@ -284,6 +291,10 @@ func (r *ContactAvatarRepository) trackUnattachedUpload(ctx context.Context, acc
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('storage-self-service:' || $1::text,0))`, accountID); err != nil {
+		return err
+	}
+
 	var assetID uuid.UUID
 	err = tx.QueryRow(ctx, `SELECT id FROM media_assets WHERE account_id=$1 AND object_key=$2 FOR UPDATE`, accountID, key).Scan(&assetID)
 	if err == pgx.ErrNoRows {
@@ -308,6 +319,10 @@ func (r *ContactAvatarRepository) Remove(ctx context.Context, accountID, contact
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('storage-self-service:' || $1::text,0))`, accountID); err != nil {
+		return nil, err
+	}
+
 	var oldAssetID *uuid.UUID
 	if err := tx.QueryRow(ctx, `
 		SELECT avatar_media_asset_id FROM contacts WHERE account_id=$1 AND id=$2 FOR UPDATE
@@ -340,6 +355,10 @@ func (r *ContactAvatarRepository) ScheduleAssetGC(ctx context.Context, accountID
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('storage-self-service:' || $1::text,0))`, accountID); err != nil {
+		return err
+	}
+
 	var key string
 	err = tx.QueryRow(ctx, `SELECT object_key FROM media_assets
 		WHERE account_id=$1 AND id=$2 AND content_hash LIKE $3 || '%'
@@ -357,6 +376,13 @@ func (r *ContactAvatarRepository) ScheduleAssetGC(ctx context.Context, accountID
 }
 
 func scheduleLockedAvatarGC(ctx context.Context, tx pgx.Tx, accountID, assetID uuid.UUID, key string) error {
+	var retained bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM storage_removed_references WHERE account_id=$1 AND object_key=$2 AND state IN ('removed','purging')) OR EXISTS(SELECT 1 FROM storage_media_trash WHERE account_id=$1 AND object_key=$2 AND state IN ('trash','purging')) OR clarin_storage_has_live_references($1,$2,$3)`, accountID, key, assetID).Scan(&retained); err != nil {
+		return err
+	}
+	if retained {
+		return nil
+	}
 	var referenced bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM contacts WHERE account_id=$1 AND avatar_media_asset_id=$2)`, accountID, assetID).Scan(&referenced); err != nil {
 		return err
@@ -386,7 +412,7 @@ func (r *ContactAvatarRepository) DrainGC(ctx context.Context, store *storage.St
 		SELECT ma.id,ma.account_id,ma.object_key
 		FROM media_assets ma
 		JOIN storage_objects so ON so.account_id=ma.account_id AND so.object_key=ma.object_key
-		WHERE ma.status='avatar_gc_pending' AND so.status='avatar_gc_pending'
+		WHERE ma.status IN ('avatar_gc_pending','avatar_gc_deleting') AND so.status IN ('avatar_gc_pending','avatar_gc_deleting')
 		  AND COALESCE(so.next_delete_at,so.updated_at)<=NOW()
 		ORDER BY so.updated_at,ma.id LIMIT $1
 	`, limit)
@@ -425,44 +451,88 @@ func (r *ContactAvatarRepository) DrainGC(ctx context.Context, store *storage.St
 }
 
 func (r *ContactAvatarRepository) deleteUnreferencedAvatar(ctx context.Context, store *storage.Storage, accountID, assetID uuid.UUID, key string) (bool, error) {
+	// Persist deletion intent before touching S3. Neither a lost acknowledgement
+	// nor a failed final database commit may leave an attachable missing object.
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('storage-self-service:' || $1::text,0))`, accountID); err != nil {
+		return false, err
+	}
 	var status string
-	if err := tx.QueryRow(ctx, `SELECT status FROM media_assets WHERE id=$1 AND account_id=$2 AND object_key=$3 FOR UPDATE`, assetID, accountID, key).Scan(&status); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT status FROM media_assets WHERE id=$1 AND account_id=$2 AND object_key=$3 FOR UPDATE`, assetID, accountID, key).Scan(&status); err != nil {
 		if err == pgx.ErrNoRows {
 			return false, nil
 		}
 		return false, err
 	}
-	if status != "avatar_gc_pending" {
+	if status != "avatar_gc_pending" && status != "avatar_gc_deleting" {
 		return false, nil
 	}
-	var referenced bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM contacts WHERE account_id=$1 AND avatar_media_asset_id=$2)`, accountID, assetID).Scan(&referenced); err != nil {
+	var retained bool
+	if err = tx.QueryRow(ctx, `SELECT
+ EXISTS(SELECT 1 FROM storage_removed_references WHERE account_id=$1 AND object_key=$2 AND state IN ('removed','purging'))
+ OR EXISTS(SELECT 1 FROM storage_media_trash WHERE account_id=$1 AND object_key=$2 AND state IN ('trash','purging'))
+ OR EXISTS(SELECT 1 FROM storage_upload_ownership WHERE account_id=$1 AND object_key=$2 AND state='active')
+ OR EXISTS(SELECT 1 FROM storage_admin_delete_intents WHERE account_id=$1 AND object_key=$2 AND state='purging')
+ OR clarin_storage_has_live_references($1,$2,$3)`, accountID, key, assetID).Scan(&retained); err != nil {
 		return false, err
 	}
-	if referenced {
+	if retained {
 		return false, nil
 	}
-	// Do not release the asset lock between this reference check and S3 deletion:
-	// a concurrent Save cannot attach it until deletion and inventory commit.
-	if err := store.DeleteFile(ctx, key); err != nil {
-		if _, dbErr := tx.Exec(ctx, `UPDATE storage_objects SET delete_attempts=delete_attempts+1,
-			delete_error=$3,next_delete_at=NOW()+INTERVAL '15 minutes',updated_at=NOW()
-			WHERE account_id=$1 AND object_key=$2`, accountID, key, err.Error()); dbErr != nil {
-			return false, dbErr
+	if status == "avatar_gc_pending" {
+		if _, err = tx.Exec(ctx, `UPDATE storage_reference_epochs SET version=version+1 WHERE account_id=$1`, accountID); err != nil {
+			return false, err
 		}
-		return false, tx.Commit(ctx)
+		if _, err = tx.Exec(ctx, `UPDATE media_assets SET status='avatar_gc_deleting',updated_at=NOW() WHERE account_id=$1 AND id=$2 AND object_key=$3`, accountID, assetID, key); err != nil {
+			return false, err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE storage_objects SET status='avatar_gc_deleting',next_delete_at=NOW(),updated_at=NOW() WHERE account_id=$1 AND object_key=$2`, accountID, key); err != nil {
+			return false, err
+		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE media_assets SET status='deleted',deleted_at=NOW(),updated_at=NOW() WHERE id=$1 AND account_id=$2`, assetID, accountID); err != nil {
+	if err = tx.Commit(ctx); err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE storage_objects SET status='deleted',deleted_at=NOW(),delete_error='',next_delete_at=NULL,updated_at=NOW()
-		WHERE account_id=$1 AND object_key=$2`, accountID, key); err != nil {
+	finish, err := r.db.Begin(ctx)
+	if err != nil {
 		return false, err
 	}
-	return true, tx.Commit(ctx)
+	defer finish.Rollback(ctx)
+	if _, err = finish.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('storage-self-service:' || $1::text,0))`, accountID); err != nil {
+		return false, err
+	}
+	if err = finish.QueryRow(ctx, `SELECT status FROM media_assets WHERE id=$1 AND account_id=$2 AND object_key=$3 FOR UPDATE`, assetID, accountID, key).Scan(&status); err != nil {
+		return false, err
+	}
+	if status == "deleted" {
+		return false, nil
+	}
+	if status != "avatar_gc_deleting" {
+		return false, fmt.Errorf("avatar deletion intent changed")
+	}
+	deleteErr := store.DeleteFile(ctx, key)
+	if deleteErr == nil {
+		_, verifyErr := store.GetFileInfo(ctx, key)
+		code := minio.ToErrorResponse(verifyErr).Code
+		if code != "NoSuchKey" && code != "NoSuchObject" && code != "NotFound" {
+			deleteErr = fmt.Errorf("avatar deletion was not confirmed")
+		}
+	}
+	if deleteErr != nil {
+		if _, err = finish.Exec(ctx, `UPDATE storage_objects SET delete_attempts=delete_attempts+1,delete_error=$3,next_delete_at=NOW()+INTERVAL '15 minutes',updated_at=NOW() WHERE account_id=$1 AND object_key=$2 AND status='avatar_gc_deleting'`, accountID, key, deleteErr.Error()); err != nil {
+			return false, err
+		}
+		return false, finish.Commit(ctx)
+	}
+	if _, err = finish.Exec(ctx, `UPDATE media_assets SET status='deleted',deleted_at=NOW(),updated_at=NOW() WHERE id=$1 AND account_id=$2 AND object_key=$3 AND status='avatar_gc_deleting'`, assetID, accountID, key); err != nil {
+		return false, err
+	}
+	if _, err = finish.Exec(ctx, `UPDATE storage_objects SET status='deleted',deleted_at=NOW(),delete_error='',next_delete_at=NULL,updated_at=NOW() WHERE account_id=$1 AND object_key=$2`, accountID, key); err != nil {
+		return false, err
+	}
+	return true, finish.Commit(ctx)
 }

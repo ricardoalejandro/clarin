@@ -22,6 +22,7 @@ import {
   X,
   Zap,
 } from 'lucide-react'
+import { quickReplyAttachmentPayload } from './quickReplyAttachmentPayload'
 import QuickReplySequenceEditor, { QuickReplySequencePreview } from '@/components/chat/QuickReplySequenceEditor'
 import OperationalWindowShell from '@/components/operational-window/OperationalWindowShell'
 import { subscribeWebSocket } from '@/lib/api'
@@ -571,14 +572,7 @@ export default function QuickRepliesSettings({ accountId, canManage, onMessage }
           body: quickReplyTextProjection(items),
           items,
           expected_updated_at: draft.updated_at || '',
-          attachments: draft.attachments.map((attachment, position) => ({
-            id: attachment.id,
-            media_asset_id: attachment.media_asset_id,
-            media_type: attachment.media_type,
-            media_filename: attachment.media_filename,
-            caption: attachment.caption || '',
-            position,
-          })),
+          attachments: quickReplyAttachmentPayload(draft.attachments),
         }),
       })
       const data = await response.json().catch(() => ({})) as QuickReplyMutationResponse

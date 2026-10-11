@@ -144,6 +144,9 @@ it('aborts a contact realtime refresh and rejects its old program context', asyn
   });
   const view=render(<ProgramDetailPage/>);
   expect(await screen.findByText('Participant program-A')).toBeInTheDocument();
+  // The roster can commit before its passive contact-context effect. Finish
+  // the initial mocked request/effect cycle before delivering the event once.
+  await act(async () => {});
   act(()=>fixture.wsCallback!({event:'contact_update',data:{contact_id:'shared-contact',account_id:'foreign-account'}}));
   expect(contactSignal).toBeUndefined();
   act(()=>fixture.wsCallback!({event:'contact_update',data:{contact_id:'shared-contact',account_id:'account'}}));

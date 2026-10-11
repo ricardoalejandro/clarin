@@ -68,7 +68,7 @@ func claim(ctx context.Context, db *pgxpool.Pool, workerID string) (*job, error)
 	), candidate AS (
 		SELECT j.id FROM task_attachment_preview_jobs j
 		JOIN task_attachment_previews p ON p.id=j.preview_id AND p.account_id=j.account_id
-		JOIN task_attachments ta ON ta.account_id=p.account_id AND ta.id=p.attachment_id
+		JOIN task_attachments ta ON ta.account_id=p.account_id AND ta.id=p.attachment_id AND ta.storage_removed_at IS NULL
 		JOIN media_assets ma ON ma.account_id=ta.account_id AND ma.id=ta.media_asset_id AND ma.status='active'
 		WHERE j.status IN ('pending','failed') AND j.available_at<=NOW() AND j.attempts<5
 		ORDER BY j.available_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1
@@ -77,7 +77,7 @@ func claim(ctx context.Context, db *pgxpool.Pool, workerID string) (*job, error)
 		FROM candidate WHERE j.id=candidate.id RETURNING j.id,j.account_id,j.preview_id,j.attempts
 	) SELECT c.id,c.account_id,c.preview_id,p.attachment_id,ma.object_key,ma.filename,c.attempts
 	FROM claimed c JOIN task_attachment_previews p ON p.id=c.preview_id AND p.account_id=c.account_id
-	JOIN task_attachments ta ON ta.account_id=p.account_id AND ta.id=p.attachment_id
+	JOIN task_attachments ta ON ta.account_id=p.account_id AND ta.id=p.attachment_id AND ta.storage_removed_at IS NULL
 	JOIN media_assets ma ON ma.account_id=ta.account_id AND ma.id=ta.media_asset_id AND ma.status='active'`, workerID).Scan(&item.id, &item.accountID, &item.previewID, &item.attachmentID, &item.objectKey, &item.filename, &item.attempts)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -148,6 +148,9 @@ func process(parent context.Context, db *pgxpool.Pool, store *storage.Storage, i
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockPreviewPublication(ctx, tx, item.accountID, item.attachmentID); err != nil {
+		return err
+	}
 	assetID := uuid.New()
 	var canonicalID uuid.UUID
 	var canonicalKey string
@@ -173,6 +176,19 @@ func process(parent context.Context, db *pgxpool.Pool, store *storage.Storage, i
 		_ = store.DeleteFile(ctx, objectKey)
 	}
 	return nil
+}
+
+func lockPreviewPublication(ctx context.Context, tx pgx.Tx, accountID, attachmentID uuid.UUID) error {
+	// Match cleanup's account-before-attachment order. Reference triggers below
+	// also need the shared barrier, so taking the attachment first can deadlock.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('storage-self-service:'||$1::text,0))`, accountID); err != nil {
+		return err
+	}
+	// A conversion may finish after removal. The caller publishes no derivative
+	// when this current-state check fails and discards its candidate object.
+	var found uuid.UUID
+	return tx.QueryRow(ctx, `SELECT id FROM task_attachments WHERE account_id=$1 AND id=$2
+		AND storage_removed_at IS NULL FOR SHARE`, accountID, attachmentID).Scan(&found)
 }
 
 func fail(ctx context.Context, db *pgxpool.Pool, item job, cause error) error {

@@ -68,6 +68,10 @@ func (s *Server) handleCreateDynamic(c *fiber.Ctx) error {
 		req.Type = "scratch_card"
 	}
 
+	if err := s.authorizeMediaPublication(c, req.Config.OverlayImageURL); err != nil {
+		return mediaPublicationDenied(c, err)
+	}
+
 	d := &domain.Dynamic{
 		AccountID:   accountID,
 		Type:        req.Type,
@@ -117,6 +121,10 @@ func (s *Server) handleUpdateDynamic(c *fiber.Ctx) error {
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+	}
+
+	if err := s.authorizeMediaPublication(c, req.Config.OverlayImageURL); err != nil {
+		return mediaPublicationDenied(c, err)
 	}
 
 	d := &domain.Dynamic{
@@ -501,6 +509,22 @@ func (s *Server) handleGetPublicDynamic(c *fiber.Ctx) error {
 	if options == nil {
 		options = []*domain.DynamicOption{}
 	}
+
+	grant := mediaAccessGrant{Purpose: "dynamic-public", AccountID: d.AccountID, ResourceID: d.ID}
+	if link != nil {
+		grant.LinkID = link.ID
+	}
+	d.Config.OverlayImageURL = s.publicResourceMediaURL(d.Config.OverlayImageURL, grant)
+	for _, item := range items {
+		item.ImageURL = s.publicResourceMediaURL(item.ImageURL, grant)
+	}
+	if link != nil {
+		link.ExtraMessageMediaURL = s.publicResourceMediaURL(link.ExtraMessageMediaURL, grant)
+		for _, media := range link.ExtraMedia {
+			media.URL = s.publicResourceMediaURL(media.URL, grant)
+		}
+	}
+	c.Set(fiber.HeaderCacheControl, "no-store, max-age=0")
 
 	result := fiber.Map{
 		"dynamic": d,

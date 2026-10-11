@@ -68,6 +68,7 @@ export default defineConfig({
       'src/components/programs/**/*.test.{ts,tsx}',
       'src/components/whiteboards/**/*.test.{ts,tsx}',
       'src/components/admin/**/*.test.{ts,tsx}',
+      'src/components/storage/**/*.test.{ts,tsx}',
 	  'src/components/settings/**/*.test.{ts,tsx}',
     ],
     restoreMocks: true,

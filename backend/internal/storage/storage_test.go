@@ -181,8 +181,8 @@ func TestPublicAndPrivateBucketsIntegration(t *testing.T) {
 		t.Fatalf("anonymous public GET: %v", err)
 	}
 	publicResponse.Body.Close()
-	if publicResponse.StatusCode != http.StatusOK {
-		t.Fatalf("public object was not anonymous: %s", publicResponse.Status)
+	if publicResponse.StatusCode == http.StatusOK {
+		t.Fatalf("ordinary account media was anonymously readable: %s", publicResponse.Status)
 	}
 	legacyResponse, err := http.Get("http://" + endpoint + "/" + bucket + "/" + legacyKey) // #nosec G107 -- disposable integration endpoint
 	if err != nil {

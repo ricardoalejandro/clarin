@@ -1363,6 +1363,20 @@ func (r *TaskWorkRepository) PrepareTaskMediaGCDeletion(ctx context.Context, job
 		return false, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('storage-self-service:'||$1::text,0))`, job.AccountID); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE storage_reference_epochs SET version=version+1 WHERE account_id=$1`, job.AccountID); err != nil {
+		return false, err
+	}
+	var recoveryHold bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM storage_removed_references WHERE account_id=$1 AND object_key=$2 AND state IN ('removed','purging'))
+	 OR EXISTS(SELECT 1 FROM storage_media_trash WHERE account_id=$1 AND object_key=$2 AND state IN ('trash','purging'))`, job.AccountID, job.ObjectKey).Scan(&recoveryHold); err != nil {
+		return false, err
+	}
+	if recoveryHold {
+		return false, tx.Commit(ctx)
+	}
 	var objectKey string
 	if err := tx.QueryRow(ctx, `SELECT object_key FROM media_assets WHERE account_id=$1 AND id=$2 FOR UPDATE`, job.AccountID, job.MediaAssetID).Scan(&objectKey); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1379,12 +1393,12 @@ func (r *TaskWorkRepository) PrepareTaskMediaGCDeletion(ctx context.Context, job
 	// the object. A published comment deletes this GC job transactionally.
 	if _, err := tx.Exec(ctx, `DELETE FROM task_attachments
 		WHERE account_id=$1 AND media_asset_id=$2 AND attachment_scope='comment_draft'
-		  AND draft_expires_at<=NOW()`, job.AccountID, job.MediaAssetID); err != nil {
+		  AND draft_expires_at<=NOW() AND storage_removed_at IS NULL`, job.AccountID, job.MediaAssetID); err != nil {
 		return false, err
 	}
 	var nextDraftExpiry *time.Time
 	if err := tx.QueryRow(ctx, `SELECT MIN(draft_expires_at) FROM task_attachments
-		WHERE account_id=$1 AND media_asset_id=$2 AND attachment_scope='comment_draft'`, job.AccountID, job.MediaAssetID).
+		WHERE account_id=$1 AND media_asset_id=$2 AND attachment_scope='comment_draft' AND storage_removed_at IS NULL`, job.AccountID, job.MediaAssetID).
 		Scan(&nextDraftExpiry); err != nil {
 		return false, err
 	}
@@ -1397,19 +1411,32 @@ func (r *TaskWorkRepository) PrepareTaskMediaGCDeletion(ctx context.Context, job
 	}
 	var referenced bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(
-		SELECT 1 FROM task_attachments WHERE account_id=$1 AND media_asset_id=$2
+		SELECT 1 FROM task_attachments WHERE account_id=$1 AND media_asset_id=$2 AND storage_removed_at IS NULL
 		UNION ALL SELECT 1 FROM task_attachment_previews WHERE account_id=$1 AND derivative_asset_id=$2
+		UNION ALL SELECT 1 FROM whiteboard_assets WHERE account_id=$1 AND media_asset_id=$2
+		UNION ALL SELECT 1 FROM whiteboard_revision_assets WHERE account_id=$1 AND media_asset_id=$2
+		UNION ALL SELECT 1 FROM whiteboards WHERE account_id=$1 AND thumbnail_media_asset_id=$2
+		UNION ALL SELECT 1 FROM quick_reply_attachments WHERE account_id=$1 AND media_asset_id=$2
+		UNION ALL SELECT 1 FROM survey_branding_asset_refs WHERE account_id=$1 AND media_asset_id=$2
 		UNION ALL SELECT 1 FROM messages WHERE account_id=$1 AND media_asset_id=$2
 		UNION ALL SELECT 1 FROM contacts WHERE account_id=$1 AND avatar_media_asset_id=$2
 		UNION ALL SELECT 1 FROM whatsapp_statuses WHERE account_id=$1 AND media_asset_id=$2
 		UNION ALL SELECT 1 FROM survey_file_uploads WHERE account_id=$1 AND media_asset_id=$2 AND status<>'deleted'
-	)`, job.AccountID, job.MediaAssetID).Scan(&referenced); err != nil {
+	) OR clarin_storage_has_live_references($1,(SELECT object_key FROM media_assets WHERE account_id=$1 AND id=$2),$2)`, job.AccountID, job.MediaAssetID).Scan(&referenced); err != nil {
 		return false, err
 	}
 	if referenced {
 		return false, tx.Commit(ctx)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE media_assets SET status='task_gc_deleting',updated_at=NOW() WHERE account_id=$1 AND id=$2`, job.AccountID, job.MediaAssetID); err != nil {
+		return false, err
+	}
+	// Keep the old key reserved even when a later upload replaces the hash's
+	// media row with a new unique key while physical deletion is in flight.
+	if _, err := tx.Exec(ctx, `INSERT INTO storage_objects(account_id,object_key,media_type,content_type,filename,size_bytes,source,status,next_delete_at,updated_at)
+		SELECT account_id,object_key,media_type,content_type,filename,size_bytes,'task_attachment','task_gc_deleting',NOW(),NOW()
+		FROM media_assets WHERE account_id=$1 AND id=$2 AND object_key=$3
+		ON CONFLICT(account_id,object_key) DO UPDATE SET status='task_gc_deleting',next_delete_at=NOW(),updated_at=NOW()`, job.AccountID, job.MediaAssetID, job.ObjectKey); err != nil {
 		return false, err
 	}
 	return true, tx.Commit(ctx)
@@ -1460,9 +1487,9 @@ func (r *TaskWorkRepository) RetryTaskMediaGCJob(ctx context.Context, job *domai
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `UPDATE media_assets SET status='active',updated_at=NOW() WHERE account_id=$1 AND id=$2 AND status='task_gc_deleting'`, job.AccountID, job.MediaAssetID); err != nil {
-		return err
-	}
+	// Delete errors may mean the provider removed bytes before the connection
+	// failed. Keep the durable deleting marker until a later attempt completes;
+	// never return that same key to writers or content-hash deduplication.
 	if _, err = tx.Exec(ctx, `UPDATE task_media_gc_jobs SET status='pending',claim_token=NULL,attempts=attempts+1,last_error=$3,available_at=NOW()+INTERVAL '15 minutes',updated_at=NOW() WHERE id=$1 AND claim_token=$2`, job.ID, job.ClaimToken, strings.TrimSpace(cause.Error())); err != nil {
 		return err
 	}

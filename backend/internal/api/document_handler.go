@@ -54,6 +54,9 @@ func (s *Server) handleCreateDocumentTemplate(c *fiber.Ctx) error {
 	if err := json.Unmarshal(c.Body(), &body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "invalid body"})
 	}
+	if err := s.authorizeMediaReferencePayload(c, body); err != nil {
+		return mediaPublicationDenied(c, err)
+	}
 
 	t := &domain.DocumentTemplate{
 		AccountID:       accountID,
@@ -93,6 +96,9 @@ func (s *Server) handleUpdateDocumentTemplate(c *fiber.Ctx) error {
 	}
 	if err := json.Unmarshal(c.Body(), &body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "invalid body"})
+	}
+	if err := s.authorizeMediaReferencePayload(c, body); err != nil {
+		return mediaPublicationDenied(c, err)
 	}
 
 	t := &domain.DocumentTemplate{
@@ -157,6 +163,9 @@ func (s *Server) handleImportDocumentTemplate(c *fiber.Ctx) error {
 	}
 	if err := json.Unmarshal(c.Body(), &body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "invalid JSON"})
+	}
+	if err := s.authorizeMediaReferencePayload(c, body); err != nil {
+		return mediaPublicationDenied(c, err)
 	}
 
 	t := &domain.DocumentTemplate{

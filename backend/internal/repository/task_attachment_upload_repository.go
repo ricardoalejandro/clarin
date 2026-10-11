@@ -27,7 +27,7 @@ const (
 func reconcileTaskCommentDraftGCJobTx(ctx context.Context, tx pgx.Tx, accountID, assetID uuid.UUID) error {
 	var nextExpiry *time.Time
 	if err := tx.QueryRow(ctx, `SELECT MIN(draft_expires_at) FROM task_attachments
-		WHERE account_id=$1 AND media_asset_id=$2 AND attachment_scope='comment_draft'`, accountID, assetID).Scan(&nextExpiry); err != nil {
+		WHERE account_id=$1 AND media_asset_id=$2 AND attachment_scope='comment_draft' AND storage_removed_at IS NULL`, accountID, assetID).Scan(&nextExpiry); err != nil {
 		return err
 	}
 	if nextExpiry == nil {
@@ -58,6 +58,9 @@ func (r *TaskWorkRepository) ReserveTaskAttachmentAsset(ctx context.Context, inp
 		return nil, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('storage-self-service:'||$1::text,0))`, input.AccountID); err != nil {
+		return nil, false, err
+	}
 
 	asset := &domain.MediaAsset{}
 	err = tx.QueryRow(ctx, `
@@ -73,12 +76,16 @@ func (r *TaskWorkRepository) ReserveTaskAttachmentAsset(ctx context.Context, inp
 			status=CASE WHEN media_assets.status='active' THEN 'active' ELSE 'task_upload_pending' END,
 			deleted_at=NULL,
 			updated_at=NOW()
+		WHERE media_assets.status NOT IN ('task_gc_deleting','whiteboard_gc_deleting','avatar_gc_deleting')
 		RETURNING id,account_id,content_hash,object_key,media_type,content_type,filename,size_bytes,status,created_at,updated_at,deleted_at
 	`, input.AccountID, input.ContentHash, input.ObjectKey, input.MediaType, input.ContentType, input.Filename, input.SizeBytes).Scan(
 		&asset.ID, &asset.AccountID, &asset.ContentHash, &asset.ObjectKey, &asset.MediaType,
 		&asset.ContentType, &asset.Filename, &asset.SizeBytes, &asset.Status,
 		&asset.CreatedAt, &asset.UpdatedAt, &asset.DeletedAt,
 	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, ErrTaskAttachmentUploadInProgress
+	}
 	if err != nil {
 		return nil, false, err
 	}
@@ -162,6 +169,9 @@ func (r *TaskWorkRepository) AttachReservedTaskAsset(ctx context.Context, accoun
 	// task/environment locks used by ACL replacement. A concurrent revocation
 	// therefore wins before this transaction or waits until after it commits;
 	// it can never race between authorization and the visible attachment link.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('storage-self-service:'||$1::text,0))`, accountID); err != nil {
+		return nil, false, err
+	}
 	if err := lockAndRequireTaskAccessTx(ctx, tx, accountID, userID, []uuid.UUID{taskID}, requiredAccess); err != nil {
 		return nil, false, err
 	}
@@ -204,12 +214,12 @@ func (r *TaskWorkRepository) AttachReservedTaskAsset(ctx context.Context, accoun
 		case TaskAttachmentScopeTask:
 			err = tx.QueryRow(ctx, `SELECT id,COALESCE(attachment_scope,'task'),draft_owner_id,draft_expires_at
 				FROM task_attachments WHERE account_id=$1 AND task_id=$2 AND media_asset_id=$3
-				  AND attachment_scope='task' FOR UPDATE`, accountID, taskID, assetID).
+				  AND attachment_scope='task' AND storage_removed_at IS NULL FOR UPDATE`, accountID, taskID, assetID).
 				Scan(&attachmentID, &currentScope, &currentDraftOwner, &currentDraftExpiry)
 		case TaskAttachmentScopeCommentDraft:
 			err = tx.QueryRow(ctx, `SELECT id,COALESCE(attachment_scope,'task'),draft_owner_id,draft_expires_at
 				FROM task_attachments WHERE account_id=$1 AND task_id=$2 AND media_asset_id=$3
-				  AND attachment_scope='comment_draft' AND draft_owner_id=$4 FOR UPDATE`, accountID, taskID, assetID, userID).
+				  AND attachment_scope='comment_draft' AND draft_owner_id=$4 AND storage_removed_at IS NULL FOR UPDATE`, accountID, taskID, assetID, userID).
 				Scan(&attachmentID, &currentScope, &currentDraftOwner, &currentDraftExpiry)
 		}
 		if err != nil {
@@ -285,7 +295,7 @@ func (r *TaskWorkRepository) AttachReservedTaskAsset(ctx context.Context, accoun
 		media.filename,media.content_type,media.media_type,media.size_bytes,media.object_key,attachment.uploaded_by,attachment.created_at
 		FROM task_attachments attachment JOIN media_assets media
 		  ON media.account_id=attachment.account_id AND media.id=attachment.media_asset_id AND media.status='active'
-		WHERE attachment.account_id=$1 AND attachment.task_id=$2 AND attachment.id=$3`, accountID, taskID, attachmentID).
+		WHERE attachment.account_id=$1 AND attachment.task_id=$2 AND attachment.id=$3 AND attachment.storage_removed_at IS NULL`, accountID, taskID, attachmentID).
 		Scan(&item.ID, &item.AccountID, &item.TaskID, &item.MediaAssetID, &item.Filename, &item.ContentType,
 			&item.MediaType, &item.SizeBytes, &ignoredKey, &item.UploadedBy, &item.CreatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

@@ -305,6 +305,8 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
   const requestCloseRef = useRef<() => void>(() => onClose())
   const commentsNextOffsetRef = useRef(0)
   const commentsRef = useRef<TaskComment[]>([])
+  const commentsRefreshGenerationRef = useRef(0)
+  const attachmentsRefreshGenerationRef = useRef(0)
   const prependScrollHeightRef = useRef<number | null>(null)
   const editingTitleRef = useRef(false)
   const skipTitleSaveRef = useRef(false)
@@ -571,12 +573,33 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
     const response = await apiGet<{ tasks: Task[] }>(historicalReadURL(`/api/tasks/${token.taskId}/children`), { signal: token.signal })
     if (acceptsReadToken(token) && response.success) setChildren(response.data?.tasks || [])
   }, [acceptsReadToken, captureReadToken, historicalReadURL])
-  const refreshComments = useCallback(async () => {
+  const refreshComments = useCallback(async (includeLoadedPages = false) => {
     const token = captureReadToken()
     if (!token) return
+    const generation = ++commentsRefreshGenerationRef.current
+    const isCurrent = () => acceptsReadToken(token) && commentsRefreshGenerationRef.current === generation
+    // Pagination started before this canonical refresh must not reintroduce
+    // removed attachments or apply its old scroll correction afterward.
+    prependScrollHeightRef.current = null
     const response = await apiGet<TaskCommentPage>(historicalReadURL(`/api/tasks/${token.taskId}/comments?limit=100&offset=0`), { signal: token.signal })
-    if (!acceptsReadToken(token) || !response.success) return
-    const latest = response.data?.comments || []
+    if (!isCurrent() || !response.success) return
+    const latest = [...(response.data?.comments || [])]
+    // A restored attachment can belong to an older, already loaded comment.
+    // Revalidate that loaded window in bounded pages without resetting drafts.
+    if (includeLoadedPages) {
+      let page = response.data
+      const loadedThrough = Math.max(100, commentsNextOffsetRef.current)
+      let nextOffset = page?.next_offset || 100
+      while (page?.has_more && nextOffset < loadedThrough) {
+        const older = await apiGet<TaskCommentPage>(historicalReadURL(`/api/tasks/${token.taskId}/comments?limit=100&offset=${nextOffset}`), { signal: token.signal })
+        if (!isCurrent() || !older.success) return
+        latest.push(...(older.data?.comments || []))
+        page = older.data
+        const following = page?.next_offset || nextOffset + 100
+        if (following <= nextOffset) break
+        nextOffset = following
+      }
+    }
     const existing = new Map(commentsRef.current.map(item => [item.id, item]))
     let inserted = 0
     for (const item of latest) {
@@ -596,12 +619,16 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
   const loadOlderComments = useCallback(async () => {
     const token = captureReadToken()
     if (!token || commentsLoadingMore || !commentsHasMore) return
+    const refreshGeneration = commentsRefreshGenerationRef.current
     const offset = commentsNextOffsetRef.current
     setCommentsLoadingMore(true)
     prependScrollHeightRef.current = feedScrollRef.current?.scrollHeight ?? null
     const response = await apiGet<TaskCommentPage>(historicalReadURL(`/api/tasks/${token.taskId}/comments?limit=100&offset=${offset}`), { signal: token.signal })
-    if (!acceptsReadToken(token)) {
-      if (taskIdRef.current === token.taskId) setCommentsLoadingMore(false)
+    if (!acceptsReadToken(token) || commentsRefreshGenerationRef.current !== refreshGeneration) {
+      if (taskIdRef.current === token.taskId) {
+        prependScrollHeightRef.current = null
+        setCommentsLoadingMore(false)
+      }
       return
     }
     if (!response.success) {
@@ -628,8 +655,9 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
   const refreshAttachments = useCallback(async () => {
     const token = captureReadToken()
     if (!token) return
+    const generation = ++attachmentsRefreshGenerationRef.current
     const response = await apiGet<{ attachments: TaskAttachment[] }>(historicalReadURL(`/api/tasks/${token.taskId}/attachments`), { signal: token.signal })
-    if (acceptsReadToken(token) && response.success) setAttachments(response.data?.attachments || [])
+    if (acceptsReadToken(token) && attachmentsRefreshGenerationRef.current === generation && response.success) setAttachments(response.data?.attachments || [])
   }, [acceptsReadToken, captureReadToken, historicalReadURL])
   const refreshDependencies = useCallback(async () => {
     const token = captureReadToken()
@@ -655,6 +683,8 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
     if (!requestedTaskId) return
     readSessionRef.current?.controller.abort()
     const sequence = ++loadSequenceRef.current
+    const commentsGeneration = ++commentsRefreshGenerationRef.current
+    const attachmentsGeneration = ++attachmentsRefreshGenerationRef.current
     const controller = new AbortController()
     readSessionRef.current = { taskId: requestedTaskId, generation: sequence, controller }
     setLoading(true)
@@ -679,13 +709,17 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
     const [childRes, commentRes, activityRes, attachmentRes, dependencyRes] = await Promise.all(sectionRequests)
     if (controller.signal.aborted || loadSequenceRef.current !== sequence || taskIdRef.current !== requestedTaskId) return
     setChildren(childRes.data?.tasks || [])
-    commentsRef.current = commentRes.data?.comments || []
-    setComments(commentsRef.current)
-    recordCommentPersistence(requestedTaskId, commentsRef.current)
-    commentsNextOffsetRef.current = commentRes.data?.next_offset || commentRes.data?.comments?.length || 0
-    setCommentsHasMore(Boolean(commentRes.data?.has_more))
+    if (commentsRefreshGenerationRef.current === commentsGeneration) {
+      commentsRef.current = commentRes.data?.comments || []
+      setComments(commentsRef.current)
+      recordCommentPersistence(requestedTaskId, commentsRef.current)
+      commentsNextOffsetRef.current = commentRes.data?.next_offset || commentRes.data?.comments?.length || 0
+      setCommentsHasMore(Boolean(commentRes.data?.has_more))
+    }
     setActivity(activityRes.data?.activity || [])
-    setAttachments(attachmentRes.data?.attachments || [])
+    if (attachmentsRefreshGenerationRef.current === attachmentsGeneration) {
+      setAttachments(attachmentRes.data?.attachments || [])
+    }
     setDependencies(dependencyRes.data?.dependencies || [])
     if (![childRes, commentRes, activityRes, attachmentRes, dependencyRes].every(result => result.success)) {
       showFailure('Algunos datos de la tarea no se pudieron cargar.', () => { void load() }, requestedTaskId)
@@ -862,7 +896,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
   useEffect(() => subscribeWebSocket(raw => {
     const envelope = raw as {
       event?: string
-      data?: { action?: string; task_id?: string; description?: string; version?: number; updated_at?: string; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts; related_task_ids?: string[]; task?: Task; subtask?: Task; comment_id?: string; comment?: TaskComment; attachment_id?: string }
+      data?: { action?: string; task_id?: string; description?: string; version?: number; updated_at?: string; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts; related_task_ids?: string[]; task?: Task; subtask?: Task; comment_id?: string; comment?: TaskComment; attachment_id?: string; attachment_scope?: string; origin?: string }
     }
     if (envelope.event !== 'task_update' && envelope.event !== 'task_overdue') return
     const message = envelope.data || {}
@@ -946,6 +980,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
         setPreviewAttachment(current => current?.id === message.attachment_id ? null : current)
       }
       void refreshAttachments()
+      if (message.origin === 'storage') void refreshComments(true)
     }
     else if (message.action?.includes('dependency')) void refreshDependencies()
     else if (!message.task) void refreshTask()

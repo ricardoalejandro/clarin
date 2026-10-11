@@ -1,0 +1,625 @@
+{
+  "recorded_on_utc": "2026-10-10",
+  "scope": "Synthetic native PostgreSQL/MinIO handler measurements; no production data",
+  "base_commit": "22b9269a7b952e5da80fe4e72c8c9138a37bc768",
+  "measured_source_sha256": {
+    "scripts/qa/run-storage-self-service.sh": "eb9e5c8f2c87b55fec4889570fae816b937ccf1279cfff884e8400e190ba3397",
+    "backend/internal/api/storage_self_service_catalog.go": "17597e1a6a36da3f171f49223dc5209efba22049af7dbe88583e4ae337aefb49",
+    "backend/internal/api/storage_self_service_handlers.go": "b5cffcaddd34f3fcfca7e3a528be5ff583c2bc9c4c85735bcab0760777e61c23",
+    "backend/internal/api/storage_self_service_integration_test.go": "e909bfc12ed6b71bcd495e3d9ad91d242f869ff3dbe61ef9630ade78be3629c5",
+    "backend/internal/api/storage_self_service_performance_test.go": "be9279f83a681905b8ab8ae967c8d0670629e29f058e5159e11cb01e48a3d463"
+  },
+  "environment": {
+    "go": "go1.25.11",
+    "postgres": "16.15",
+    "postgres_version_num": 160015,
+    "redis": "7.4.11",
+    "minio_release": "RELEASE.2025-09-07T16-13-09Z",
+    "minio_commit": "07c3a429bfed433e49018cb0f78a52145d4bedeb",
+    "minio_binary_sha256": "7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f",
+    "minio_go": "go1.24.6",
+    "os": "linux",
+    "arch": "amd64",
+    "visible_cpus": 5,
+    "cgroup_cpu_quota": 4,
+    "gomaxprocs": 3,
+    "cgroup_memory_limit_bytes": 17179869184
+  },
+  "method": {
+    "native_services": true,
+    "production_data_measured": false,
+    "transport": "Fiber httptest; synthetic fixture identity; loopback SQL/S3",
+    "actor": "member with settings and chats permissions; Usage scope=authorized",
+    "warmups_per_scenario": 2,
+    "samples_per_scenario": 10,
+    "quantiles": "nearest rank; p95 equals maximum with ten samples",
+    "objects_bytes_each": 1024,
+    "media_references_per_object": 1,
+    "text_messages_per_object": 10,
+    "chats_per_account": 100,
+    "page_size": 40,
+    "memory_sampling_ms": 10,
+    "memory_requests_per_scenario": 1,
+    "memory_scope": "Go test process only; PostgreSQL, MinIO and Redis excluded",
+    "allocation_scope": "cumulative allocations during request(s), not resident memory",
+    "latency_excludes": [
+      "seeding",
+      "response validation",
+      "login",
+      "browser",
+      "remote HTTP/TLS",
+      "memory observation request"
+    ],
+    "limitations": [
+      "uniform object size and already ordered keys",
+      "one media reference per file",
+      "no large JSON payloads or private/trash workload",
+      "SQL rows of preceding volumes remain until database teardown",
+      "no sustained multi-user load or cold-start measurement",
+      "10ms memory sampling may miss brief peaks"
+    ]
+  },
+  "native_suites": [
+    {
+      "name": "TestStorageSelfServiceIntegration",
+      "status": "PASS",
+      "go_test_duration_seconds": 5.6
+    },
+    {
+      "name": "TestStorageSelfServiceSQLIntegration",
+      "status": "PASS",
+      "go_test_duration_seconds": 2.721
+    },
+    {
+      "name": "TestStorageReferenceGuardIntegration",
+      "status": "PASS",
+      "go_test_duration_seconds": 2.465
+    }
+  ],
+  "performance_suite": {
+    "name": "TestStorageSelfServicePerformance",
+    "status": "PASS",
+    "go_test_duration_seconds": 703.421
+  },
+  "seeds": [
+    {
+      "objects": 1000,
+      "bytes": 1024000,
+      "chat_media_references": 1000,
+      "text_messages": 10000,
+      "chats": 100,
+      "other_account_objects": 1,
+      "duration_ms": 14398.081
+    },
+    {
+      "objects": 10000,
+      "bytes": 10240000,
+      "chat_media_references": 10000,
+      "text_messages": 100000,
+      "chats": 100,
+      "other_account_objects": 1,
+      "duration_ms": 99603.876
+    },
+    {
+      "objects": 50000,
+      "bytes": 51200000,
+      "chat_media_references": 50000,
+      "text_messages": 500000,
+      "chats": 100,
+      "other_account_objects": 1,
+      "duration_ms": 395070.618
+    }
+  ],
+  "measurements": [
+    {
+      "allocated_bytes_per_sample": {
+        "max": 11685608,
+        "p50": 11640912,
+        "p95": 11685608
+      },
+      "allocations_per_sample": {
+        "max": 164828,
+        "p50": 164770,
+        "p95": 164828
+      },
+      "baseline_heap_bytes": 5079304,
+      "baseline_rss_bytes": 32776192,
+      "chats": 100,
+      "gc_collections": 21,
+      "gc_pause_ms": 1.338671,
+      "latency_ms": {
+        "max": 64.387,
+        "p50": 57.822,
+        "p95": 64.387
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1000,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 22665,
+      "rss_available": true,
+      "sampled_peak_heap_bytes": 9013944,
+      "sampled_peak_rss_bytes": 38432768,
+      "samples": 10,
+      "scenario": "files_first",
+      "text_messages_per_object": 10
+    },
+    {
+      "allocated_bytes_per_sample": {
+        "max": 11681632,
+        "p50": 11647744,
+        "p95": 11681632
+      },
+      "allocations_per_sample": {
+        "max": 164836,
+        "p50": 164776,
+        "p95": 164836
+      },
+      "baseline_heap_bytes": 5164352,
+      "baseline_rss_bytes": 33304576,
+      "chats": 100,
+      "gc_collections": 22,
+      "gc_pause_ms": 1.512311,
+      "latency_ms": {
+        "max": 56.262,
+        "p50": 53.073,
+        "p95": 56.262
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1000,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 22669,
+      "rss_available": true,
+      "sampled_peak_heap_bytes": 10036200,
+      "sampled_peak_rss_bytes": 39174144,
+      "samples": 10,
+      "scenario": "files_last",
+      "text_messages_per_object": 10
+    },
+    {
+      "allocated_bytes_per_sample": {
+        "max": 10730440,
+        "p50": 10692192,
+        "p95": 10730440
+      },
+      "allocations_per_sample": {
+        "max": 166671,
+        "p50": 166622,
+        "p95": 166671
+      },
+      "baseline_heap_bytes": 5110520,
+      "baseline_rss_bytes": 33538048,
+      "chats": 100,
+      "gc_collections": 20,
+      "gc_pause_ms": 1.372929,
+      "latency_ms": {
+        "max": 68.283,
+        "p50": 54.2,
+        "p95": 68.283
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1000,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 673,
+      "rss_available": true,
+      "sampled_peak_heap_bytes": 8721368,
+      "sampled_peak_rss_bytes": 38768640,
+      "samples": 10,
+      "scenario": "files_search",
+      "text_messages_per_object": 10
+    },
+    {
+      "allocated_bytes_per_sample": {
+        "max": 10683840,
+        "p50": 10640592,
+        "p95": 10683840
+      },
+      "allocations_per_sample": {
+        "max": 164686,
+        "p50": 164646,
+        "p95": 164686
+      },
+      "baseline_heap_bytes": 5215008,
+      "baseline_rss_bytes": 34197504,
+      "chats": 100,
+      "gc_collections": 19,
+      "gc_pause_ms": 1.680607,
+      "latency_ms": {
+        "max": 66.461,
+        "p50": 51.868,
+        "p95": 66.461
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1000,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 376,
+      "rss_available": true,
+      "sampled_peak_heap_bytes": 10482024,
+      "sampled_peak_rss_bytes": 39219200,
+      "samples": 10,
+      "scenario": "usage",
+      "text_messages_per_object": 10
+    },
+    {
+      "allocated_bytes_per_sample": {
+        "max": 22309696,
+        "p50": 22270128,
+        "p95": 22309696
+      },
+      "allocations_per_sample": {
+        "max": 329459,
+        "p50": 329410,
+        "p95": 329459
+      },
+      "baseline_heap_bytes": 5257752,
+      "baseline_rss_bytes": 34623488,
+      "chats": 100,
+      "gc_collections": 33,
+      "gc_pause_ms": 4.437222,
+      "latency_ms": {
+        "max": 86.606,
+        "p50": 77.09,
+        "p95": 86.606
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 1000,
+      "requests_per_sample": 2,
+      "response_bytes_last_sample": 23041,
+      "rss_available": true,
+      "sampled_peak_heap_bytes": 12967424,
+      "sampled_peak_rss_bytes": 44027904,
+      "samples": 10,
+      "scenario": "page_open_parallel",
+      "text_messages_per_object": 10
+    },
+    {
+      "allocated_bytes_per_sample": {
+        "max": 121279264,
+        "p50": 121195992,
+        "p95": 121279264
+      },
+      "allocations_per_sample": {
+        "max": 1635488,
+        "p50": 1635453,
+        "p95": 1635488
+      },
+      "baseline_heap_bytes": 5189432,
+      "baseline_rss_bytes": 36134912,
+      "chats": 100,
+      "gc_collections": 120,
+      "gc_pause_ms": 9.688349,
+      "latency_ms": {
+        "max": 504.58,
+        "p50": 476.892,
+        "p95": 504.58
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 10000,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 22668,
+      "rss_available": true,
+      "sampled_peak_heap_bytes": 31866144,
+      "sampled_peak_rss_bytes": 70443008,
+      "samples": 10,
+      "scenario": "files_first",
+      "text_messages_per_object": 10
+    },
+    {
+      "allocated_bytes_per_sample": {
+        "max": 121241920,
+        "p50": 121180600,
+        "p95": 121241920
+      },
+      "allocations_per_sample": {
+        "max": 1635487,
+        "p50": 1635451,
+        "p95": 1635487
+      },
+      "baseline_heap_bytes": 5205080,
+      "baseline_rss_bytes": 36601856,
+      "chats": 100,
+      "gc_collections": 123,
+      "gc_pause_ms": 11.503871,
+      "latency_ms": {
+        "max": 515,
+        "p50": 478.528,
+        "p95": 515
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 10000,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 22675,
+      "rss_available": true,
+      "sampled_peak_heap_bytes": 32322064,
+      "sampled_peak_rss_bytes": 67043328,
+      "samples": 10,
+      "scenario": "files_last",
+      "text_messages_per_object": 10
+    },
+    {
+      "allocated_bytes_per_sample": {
+        "max": 110130880,
+        "p50": 110025536,
+        "p95": 110130880
+      },
+      "allocations_per_sample": {
+        "max": 1655327,
+        "p50": 1655293,
+        "p95": 1655327
+      },
+      "baseline_heap_bytes": 5202304,
+      "baseline_rss_bytes": 37015552,
+      "chats": 100,
+      "gc_collections": 115,
+      "gc_pause_ms": 11.575203,
+      "latency_ms": {
+        "max": 565.197,
+        "p50": 479.03,
+        "p95": 565.197
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 10000,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 673,
+      "rss_available": true,
+      "sampled_peak_heap_bytes": 27827816,
+      "sampled_peak_rss_bytes": 62922752,
+      "samples": 10,
+      "scenario": "files_search",
+      "text_messages_per_object": 10
+    },
+    {
+      "allocated_bytes_per_sample": {
+        "max": 109371768,
+        "p50": 109314656,
+        "p95": 109371768
+      },
+      "allocations_per_sample": {
+        "max": 1635350,
+        "p50": 1635330,
+        "p95": 1635350
+      },
+      "baseline_heap_bytes": 5091312,
+      "baseline_rss_bytes": 36044800,
+      "chats": 100,
+      "gc_collections": 117,
+      "gc_pause_ms": 9.18921,
+      "latency_ms": {
+        "max": 489.388,
+        "p50": 450.605,
+        "p95": 489.388
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 10000,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 383,
+      "rss_available": true,
+      "sampled_peak_heap_bytes": 27107392,
+      "sampled_peak_rss_bytes": 62119936,
+      "samples": 10,
+      "scenario": "usage",
+      "text_messages_per_object": 10
+    },
+    {
+      "allocated_bytes_per_sample": {
+        "max": 230409528,
+        "p50": 230308528,
+        "p95": 230409528
+      },
+      "allocations_per_sample": {
+        "max": 3270738,
+        "p50": 3270696,
+        "p95": 3270738
+      },
+      "baseline_heap_bytes": 5169208,
+      "baseline_rss_bytes": 38715392,
+      "chats": 100,
+      "gc_collections": 163,
+      "gc_pause_ms": 22.252771,
+      "latency_ms": {
+        "max": 777.35,
+        "p50": 619.294,
+        "p95": 777.35
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 10000,
+      "requests_per_sample": 2,
+      "response_bytes_last_sample": 23051,
+      "rss_available": true,
+      "sampled_peak_heap_bytes": 47376368,
+      "sampled_peak_rss_bytes": 101412864,
+      "samples": 10,
+      "scenario": "page_open_parallel",
+      "text_messages_per_object": 10
+    },
+    {
+      "allocated_bytes_per_sample": {
+        "max": 617068704,
+        "p50": 616875576,
+        "p95": 617068704
+      },
+      "allocations_per_sample": {
+        "max": 8169600,
+        "p50": 8169557,
+        "p95": 8169600
+      },
+      "baseline_heap_bytes": 5266584,
+      "baseline_rss_bytes": 39145472,
+      "chats": 100,
+      "gc_collections": 249,
+      "gc_pause_ms": 21.602662,
+      "latency_ms": {
+        "max": 2389.804,
+        "p50": 2267.672,
+        "p95": 2389.804
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 50000,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 22672,
+      "rss_available": true,
+      "sampled_peak_heap_bytes": 131822776,
+      "sampled_peak_rss_bytes": 182972416,
+      "samples": 10,
+      "scenario": "files_first",
+      "text_messages_per_object": 10
+    },
+    {
+      "allocated_bytes_per_sample": {
+        "max": 617053984,
+        "p50": 616955328,
+        "p95": 617053984
+      },
+      "allocations_per_sample": {
+        "max": 8169625,
+        "p50": 8169584,
+        "p95": 8169625
+      },
+      "baseline_heap_bytes": 5266232,
+      "baseline_rss_bytes": 43163648,
+      "chats": 100,
+      "gc_collections": 248,
+      "gc_pause_ms": 20.902216,
+      "latency_ms": {
+        "max": 2364.694,
+        "p50": 2164.753,
+        "p95": 2364.694
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 50000,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 22678,
+      "rss_available": true,
+      "sampled_peak_heap_bytes": 124009336,
+      "sampled_peak_rss_bytes": 189661184,
+      "samples": 10,
+      "scenario": "files_last",
+      "text_messages_per_object": 10
+    },
+    {
+      "allocated_bytes_per_sample": {
+        "max": 554367976,
+        "p50": 554216120,
+        "p95": 554367976
+      },
+      "allocations_per_sample": {
+        "max": 8269446,
+        "p50": 8269412,
+        "p95": 8269446
+      },
+      "baseline_heap_bytes": 5263376,
+      "baseline_rss_bytes": 41656320,
+      "chats": 100,
+      "gc_collections": 234,
+      "gc_pause_ms": 17.284812,
+      "latency_ms": {
+        "max": 2248.603,
+        "p50": 2132.8,
+        "p95": 2248.603
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 50000,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 673,
+      "rss_available": true,
+      "sampled_peak_heap_bytes": 107221416,
+      "sampled_peak_rss_bytes": 162775040,
+      "samples": 10,
+      "scenario": "files_search",
+      "text_messages_per_object": 10
+    },
+    {
+      "allocated_bytes_per_sample": {
+        "max": 550692600,
+        "p50": 550549840,
+        "p95": 550692600
+      },
+      "allocations_per_sample": {
+        "max": 8169475,
+        "p50": 8169424,
+        "p95": 8169475
+      },
+      "baseline_heap_bytes": 5262472,
+      "baseline_rss_bytes": 41103360,
+      "chats": 100,
+      "gc_collections": 229,
+      "gc_pause_ms": 17.157901,
+      "latency_ms": {
+        "max": 2213.952,
+        "p50": 2124.276,
+        "p95": 2213.952
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 50000,
+      "requests_per_sample": 1,
+      "response_bytes_last_sample": 383,
+      "rss_available": true,
+      "sampled_peak_heap_bytes": 103578456,
+      "sampled_peak_rss_bytes": 163409920,
+      "samples": 10,
+      "scenario": "usage",
+      "text_messages_per_object": 10
+    },
+    {
+      "allocated_bytes_per_sample": {
+        "max": 1167159960,
+        "p50": 1166896256,
+        "p95": 1167159960
+      },
+      "allocations_per_sample": {
+        "max": 16338841,
+        "p50": 16338752,
+        "p95": 16338841
+      },
+      "baseline_heap_bytes": 5397480,
+      "baseline_rss_bytes": 44199936,
+      "chats": 100,
+      "gc_collections": 255,
+      "gc_pause_ms": 38.696552,
+      "latency_ms": {
+        "max": 2758.738,
+        "p50": 2574.747,
+        "p95": 2758.738
+      },
+      "memory_extra_samples": 1,
+      "memory_sampling_ms": 10,
+      "object_bytes": 1024,
+      "objects": 50000,
+      "requests_per_sample": 2,
+      "response_bytes_last_sample": 23055,
+      "rss_available": true,
+      "sampled_peak_heap_bytes": 213595184,
+      "sampled_peak_rss_bytes": 265826304,
+      "samples": 10,
+      "scenario": "page_open_parallel",
+      "text_messages_per_object": 10
+    }
+  ]
+}

@@ -63,6 +63,9 @@ uploads/
 tmp/
 temp/
 *.tmp
+# Local browser QA manifests and reports must not enter source control.
+/work/storage-ui-qa/
+/work/qa-acceptance/
 
 # Docker
 *.tar

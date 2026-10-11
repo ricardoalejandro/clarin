@@ -630,7 +630,7 @@ function DashboardLayoutContent({
   if (!user) return null
 
   const subscriptionBlocked = !isOffline && user.subscription_active === false && !pathname?.startsWith('/dashboard/settings')
-  const mobileNoModules = mobileAppMode && mobileModules.length === 0
+  const mobileNoModules = mobileAppMode && mobileModules.length === 0 && !(!isOffline && pathname === '/dashboard/storage')
   const mobilePathUnavailable = mobileAppMode && !mobileNoModules && pathname !== '/dashboard' && !mobilePathAllowed
 
   if (subscriptionBlocked) {
@@ -868,7 +868,8 @@ function DashboardLayoutContent({
           <MobileAppHeader
             user={user}
             accountCount={accountCount}
-            activeLabel={mobileModule?.label || (subscriptionRecoveryPath ? 'Configuración' : 'Clarin móvil')}
+            activeLabel={mobileModule?.label || (pathname === '/dashboard/storage' ? 'Almacenamiento' : subscriptionRecoveryPath ? 'Configuración' : 'Clarin móvil')}
+            storageAvailable={!isOffline}
             version={clientVersion}
             hidden={chatConversationActive || chatComposerKeyboardOpen || chatComposerAccessoryOpen}
             onSwitchAccount={handleSwitchAccount}

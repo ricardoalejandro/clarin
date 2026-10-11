@@ -249,6 +249,12 @@ func (s *Server) handleCreateSurveyTemplate(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Solicitud inválida"})
 	}
 	template := &domain.SurveyTemplate{AccountID: accountID, Name: *req.Name, Status: "active", CreatedBy: &userID}
+	if req.Branding != nil {
+		if err := s.authorizeBrandingPublication(c, *req.Branding); err != nil {
+			return mediaPublicationDenied(c, err)
+		}
+	}
+
 	applySurveyTemplateMutation(template, req)
 	if err := s.services.SurveyTemplate.Create(c.Context(), template); err != nil {
 		return surveyTemplateError(c, err)
@@ -283,6 +289,12 @@ func (s *Server) handleUpdateSurveyTemplate(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Solicitud inválida"})
 	}
+	if req.Branding != nil {
+		if err := s.authorizeBrandingPublication(c, *req.Branding); err != nil {
+			return mediaPublicationDenied(c, err)
+		}
+	}
+
 	applySurveyTemplateMutation(template, req)
 	if err := s.services.SurveyTemplate.Update(c.Context(), template); err != nil {
 		return surveyTemplateError(c, err)
@@ -324,6 +336,9 @@ func (s *Server) handleUpdateSurveyTemplateDesign(c *fiber.Ctx) error {
 			*assetID = nil
 			*targetURL = ""
 		case "external":
+			if err := s.authorizeMediaPublication(c, *targetURL); err != nil {
+				return err
+			}
 			*assetID = nil
 		case "upload":
 			file, fileErr := c.FormFile(slot)
