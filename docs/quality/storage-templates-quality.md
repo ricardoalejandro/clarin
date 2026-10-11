@@ -10,7 +10,7 @@ Esta entrega comprende las seis incidencias de Almacenamiento, la biblioteca y e
 
 ## Criterios pendientes de verificación
 
-- [ ] Base PR #7 desplegada y health/version/logs comprobados.
+- [x] Base PR #7 desplegada y health/version/logs comprobados.
 - [ ] Resumen, listado y usos rápidos y con carga independiente.
 - [ ] Consumo físico conciliado, alcance y unidades visibles.
 - [ ] Streaming, rangos, cierre/cambio de recurso y permisos actuales.
@@ -27,3 +27,11 @@ Esta entrega comprende las seis incidencias de Almacenamiento, la biblioteca y e
 
 Los resultados se registrarán después de ejecutar cada comprobación. Una compilación correcta no certifica por sí sola el recorrido completo ni el despliegue.
 No se ejecutará limpieza masiva de datos productivos. Los datos de pruebas se limitarán a servicios aislados.
+
+## Base verificada — 11 octubre, 16:51 UTC
+
+`make deploy` terminó correctamente. `/api/version`: `2026.10.11-1-163747573976283-f6715fb70a27`.
+Contenedores backend/frontend/worker/signer/bridge activos; backend healthy, PostgreSQL y Redis saludables.
+Revisadas 42 líneas de backend y 5 de frontend posteriores al arranque: ningún error/fatal/panic.
+
+Primera verificación focal de interfaz de Almacenamiento: 100/100 pruebas, cinco archivos. Incluye independencia resumen/lista, cancelación, reproducción por rangos y conservación de selección; todavía pendiente navegador real.

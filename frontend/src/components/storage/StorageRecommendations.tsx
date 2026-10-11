@@ -4,7 +4,7 @@ import { ArrowRight, Clock3, FileSearch, HardDrive, Loader2, ShieldCheck, Trash2
 import { formatStorageBytes, type StorageRecommendation, type StorageUsage } from './storageModel'
 
 const descriptions = {
-  large_files: { title: 'Archivos grandes', description: 'Revisa archivos de al menos 10 MB.', icon: HardDrive },
+  large_files: { title: 'Archivos grandes', description: 'Revisa archivos de al menos 10 MiB.', icon: HardDrive },
   older_files: { title: 'Archivos antiguos', description: 'Cargados hace al menos 180 días. Su antigüedad no significa que hayan dejado de usarse.', icon: Clock3 },
   unused_uploads: { title: 'Mis cargas sin utilizar', description: 'Cargas tuyas verificadas, sin usos actuales y con al menos un día de antigüedad.', icon: FileSearch },
   trash_ready: { title: 'Papelera para revisar', description: 'La retención mínima terminó. Revisa las referencias antes del borrado definitivo.', icon: Trash2 },

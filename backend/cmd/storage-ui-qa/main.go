@@ -36,7 +36,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const apiBase = "http://127.0.0.1:8080"
+var apiBase = "http://127.0.0.1:8080"
+
 const manifestKind = "clarin-storage-ui-qa-v1"
 
 type account struct {
@@ -114,6 +115,11 @@ func run() error {
 	if *manifestPath == "" {
 		return errors.New("private manifest path is required")
 	}
+	localAPI, err := localAPIBase(os.Getenv("CLARIN_STORAGE_UI_QA_API_URL"))
+	if err != nil {
+		return err
+	}
+	apiBase = localAPI
 	dbConfig, err := localDatabaseConfig(os.Getenv("DATABASE_URL"))
 	if err != nil {
 		return err
@@ -201,6 +207,19 @@ func run() error {
 // Both the visible URL and the effective pgx target must identify this exact
 // laboratory. pgx query parameters, PG environment and service settings can
 // override URL components or add fallback hosts; never reparse after checking.
+// localAPIBase keeps fixture login and review calls on an explicitly selected
+// loopback lab. A VPS may already run production on the historical port 8080.
+func localAPIBase(raw string) (string, error) {
+	if raw == "" {
+		return "http://127.0.0.1:8080", nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || (parsed.Port() != "8080" && parsed.Port() != "18089") || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("requires an isolated loopback API at port 8080 or 18089")
+	}
+	return raw, nil
+}
+
 func localDatabaseConfig(raw string) (*pgxpool.Config, error) {
 	denied := errors.New("requires the local PostgreSQL laboratory 127.0.0.1:15439/clarin_cloud_dev without foreign overrides or fallbacks")
 	parsed, err := url.Parse(raw)

@@ -23,8 +23,8 @@ describe('storage authorized recommendations', () => {
   })
   it('uses singular for one candidate and plural for multiple candidates', () => {
     render(<StorageRecommendations usage={{ ...usage, recommendations: [{ id: 'large_files', count: 1, bytes: 12582912, filters: { min_size: 10485760 } }, { id: 'trash_ready', count: 2, bytes: 2048, filters: { status: 'trash_ready' } }] }} onChoose={vi.fn()} disabled={false} />)
-    expect(screen.getByText('1 archivo · 12 MB')).toBeTruthy()
-    expect(screen.getByText('2 archivos · 2.0 KB')).toBeTruthy()
+    expect(screen.getByText('1 archivo · 12 MiB')).toBeTruthy()
+    expect(screen.getByText('2 archivos · 2.0 KiB')).toBeTruthy()
     expect(screen.queryByText(/1 archivos/)).toBeNull()
   })
 

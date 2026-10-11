@@ -36,6 +36,39 @@ const deferred = <T,>() => {
 }
 
 describe('storage complete workflow', () => {
+  it('renders a file page while the independent summary is still pending, including a filter change', async () => {
+    const summary = deferred<unknown>()
+    mockGet.mockImplementation(async endpoint => endpoint === '/api/storage/usage' ? await summary.promise as never : list())
+    render(<StoragePage />)
+    expect(await screen.findByRole('button', { name: 'a.pdf' })).toBeTruthy()
+    const summarySignal = mockGet.mock.calls.find(([path]) => path === '/api/storage/usage')?.[1]?.signal
+    fireEvent.click(screen.getByRole('button', { name: 'Videos' }))
+    await waitFor(() => expect(mockGet.mock.calls.some(([path]) => path.includes('type=video'))).toBe(true))
+    expect(summarySignal?.aborted).toBe(false)
+    expect(mockGet.mock.calls.filter(([path]) => path === '/api/storage/usage')).toHaveLength(1)
+    await act(async () => summary.resolve({ success: true, data: usage }))
+    expect(await screen.findByRole('progressbar', { name: 'Espacio utilizado' })).toBeTruthy()
+  })
+  it('renders the verified summary while the independent file page is still pending', async () => {
+    const files = deferred<unknown>()
+    mockGet.mockImplementation(async endpoint => endpoint === '/api/storage/usage' ? { success: true, data: usage } : await files.promise as never)
+    render(<StoragePage />)
+    expect(await screen.findByRole('progressbar', { name: 'Espacio utilizado' })).toBeTruthy()
+    expect(screen.getByRole('status', { name: 'Cargando archivos' })).toBeTruthy()
+    await act(async () => files.resolve(list()))
+    expect(await screen.findByRole('button', { name: 'a.pdf' })).toBeTruthy()
+  })
+  it('keeps loaded files usable after a summary error and retries the summary explicitly', async () => {
+    let failed = true
+    mockGet.mockImplementation(async endpoint => endpoint === '/api/storage/usage' ? failed ? { success: false, status: 503, error: 'Resumen temporalmente no disponible' } : { success: true, data: usage } : list())
+    render(<StoragePage />)
+    expect(await screen.findByRole('button', { name: 'a.pdf' })).toBeTruthy()
+    expect(await screen.findByText('Resumen temporalmente no disponible')).toBeTruthy()
+    failed = false
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar resumen' }))
+    expect(await screen.findByRole('progressbar', { name: 'Espacio utilizado' })).toBeTruthy()
+    expect(screen.queryByText('Resumen temporalmente no disponible')).toBeNull()
+  })
   it('stages a review without deleting, confirms exactly once, and reports retained space honestly', async () => {
     await loaded(); selectA()
     mockApi.mockResolvedValueOnce({ success: true, data: staged })
@@ -157,7 +190,7 @@ describe('storage complete workflow', () => {
     await screen.findByText('Eliminación pendiente')
     mockApi.mockResolvedValueOnce({ success: true, data: { success: true, operation_id: 'durable-operation', status: 'completed', action: 'purge', items: [{ object_key: 'a', filename: 'a.pdf', status: 'completed' }], freed_bytes: 4096, retained_bytes: 0 } })
     fireEvent.click(screen.getByRole('button', { name: 'Reintentar operación' }))
-    await screen.findByText(/Espacio liberado: 4.0 KB/)
+    await screen.findByText(/Espacio liberado: 4.0 KiB/)
     expect(mockApi).toHaveBeenCalledTimes(1)
     expect(mockApi.mock.calls[0][0]).toBe('/api/storage/cleanup/confirm')
     expect(JSON.parse(mockApi.mock.calls[0][1]!.body as string)).toEqual({ preview_id: 'durable-operation' })
@@ -212,7 +245,7 @@ describe('storage complete workflow', () => {
   it('explains the account quota gap without exposing technical files', async () => {
     usageResponse = { ...usage, managed_elsewhere_bytes: 1048576 }
     await loaded()
-    expect(screen.getByText('1.0 MB corresponden a contenido gestionado desde otros módulos.')).toBeTruthy()
+    expect(screen.getByText('1.0 MiB corresponden a contenido gestionado desde otros módulos.')).toBeTruthy()
     expect(screen.queryByText(/MinIO|tabla|logs/)).toBeNull()
   })
 
