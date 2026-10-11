@@ -2,6 +2,12 @@
 
 ## 2026-10-11
 
+### Diagnóstico de imágenes en Plantillas
+
+- La carga identifica las imágenes que fallaron por su nombre y explica si no están disponibles, requieren acceso o agotaron el tiempo de espera, sin mostrar enlaces privados.
+- El aviso conserva el reintento y explica por qué guardar y exportar permanecen bloqueados cuando faltan recursos. La cabecera indica «Carga incompleta».
+- Reintentar o cambiar de plantilla cancela el diagnóstico anterior para que sus errores no reaparezcan en la nueva carga.
+
 ### Ajustes tras la revisión de Chats y Contactos
 
 - Las filas de chats dejan de repetir «Leído · pendiente» y «Pendiente de atención»; se conservan el filtro Pendientes y los contadores de no leídos.

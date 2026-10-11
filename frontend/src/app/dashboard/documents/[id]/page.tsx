@@ -44,6 +44,8 @@ import EditorCommandIcon from '@/components/documents/EditorCommandIcon'
 import {executeEditorCommand,resolveEditorCommand,type EditorCommandId,type EditorCommandState,type EditorCommandHandlers,type EditorCommandInvocation} from '@/lib/fabric/editorCommands'
 import EditorConfirmDialog from '@/components/documents/EditorConfirmDialog'
 import DocumentExportDialog from '@/components/documents/DocumentExportDialog'
+import DocumentResourceAlert from '@/components/documents/DocumentResourceAlert'
+import {DocumentImageLoadError} from '@/lib/documents/resourceErrors'
 import { validateDocumentCanvas, validateDocumentTemplate } from '@/lib/documents/documentValidation'
 import { editorSelection, isDocumentObject, isObjectLocked, applyObjectLock, ensureObjectIds, groupEditorSelection, ungroupEditorSelection, serializeWorldObjects, pasteWorldObjects, alignEditorSelection, distributeEditorSelection, coverImageCrop, editorInputOwnsKeyboard } from '@/lib/fabric/editorModel'
 import { imageFrameChild,imageEditingTarget,imageTargetAtPoint,replaceEditorImage } from '@/lib/fabric/imageFrame'
@@ -134,6 +136,7 @@ function DocumentEditorWorkspace() {
   const fabricCoreRef = useRef<typeof import('@/lib/fabric/runtime') | null>(null)
 
   const [editorError, setEditorError] = useState('')
+  const [imageLoadError, setImageLoadError] = useState<DocumentImageLoadError | null>(null)
   const [dirty, setDirty] = useState(false)
   const [saveMessage, setSaveMessage] = useState('')
   const [conflict, setConflict] = useState<DocumentTemplate | null>(null)
@@ -204,7 +207,7 @@ function DocumentEditorWorkspace() {
   useEffect(() => {
     const controller=new AbortController(),generation=++sessionRef.current
     clipboardAbortRef.current.abort();clipboardAbortRef.current=new AbortController()
-    setLoading(true);setSaving(false);setEditorError('');setTemplate(null);setConflict(null);setDirty(false);savedSnapshotRef.current=''
+    setLoading(true);setSaving(false);setEditorError('');setImageLoadError(null);setTemplate(null);setConflict(null);setDirty(false);savedSnapshotRef.current=''
     ;(async()=>{
       const res=await api<{template:DocumentTemplate}>(`/api/document-templates/${templateId}`,{signal:controller.signal})
       if(controller.signal.aborted||generation!==sessionRef.current)return
@@ -384,7 +387,10 @@ function DocumentEditorWorkspace() {
           }
         }
       } catch (err) {
-        setEditorError(err instanceof Error&&/^(Las imágenes|Una imagen)/.test(err.message)?err.message:'No se pudieron cargar todos los recursos. Reintenta antes de editar o guardar.');return
+        if (disposed || initialization.signal.aborted) return
+        if (err instanceof DocumentImageLoadError) setImageLoadError(err)
+        else setEditorError(err instanceof Error&&/^(Las imágenes|Una imagen)/.test(err.message)?err.message:'No se pudieron cargar todos los recursos. Reintenta antes de editar o guardar.')
+        return
       }
 
       ensureObjectIds(canvas.getObjects().filter(isDocumentObject))
@@ -421,7 +427,9 @@ function DocumentEditorWorkspace() {
       updateHistoryState()
     }
 
-    initCanvas().catch(()=>setEditorError('No se pudo preparar el editor. Reintenta la carga.'))
+    initCanvas().catch(()=>{
+      if (!disposed && !initialization.signal.aborted) setEditorError('No se pudo preparar el editor. Reintenta la carga.')
+    })
 
     return () => {
       disposed = true
@@ -1296,7 +1304,7 @@ function DocumentEditorWorkspace() {
         <button aria-label="Volver a plantillas" title="Volver a plantillas" onClick={()=>requestLeave('/dashboard/documents')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl hover:bg-slate-100"><ArrowLeft className="h-5 w-5"/></button>
         <div className="min-w-36 flex-1">
           <input aria-label="Nombre de la plantilla" maxLength={200} value={templateName} onChange={e=>setTemplateName(e.target.value)} className="w-full rounded-lg border border-transparent bg-transparent px-2 py-1 text-sm font-semibold outline-none hover:border-slate-200 focus:border-emerald-500"/>
-          <p className="flex items-center gap-2 px-2 text-xs text-slate-500"><span>{pageWidth} × {pageHeight} mm</span><span aria-live="polite">{saving?'Guardando…':dirty?'Cambios sin guardar':saveMessage||'Todos los cambios guardados'}</span></p>
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 text-xs text-slate-500"><span>{pageWidth} × {pageHeight} mm</span><span aria-live="polite">{!fabricReady?(imageLoadError||editorError?'Carga incompleta':'Cargando recursos…'):saving?'Guardando…':dirty?'Cambios sin guardar':saveMessage||'Todos los cambios guardados'}</span></p>
         </div>
         <div className="flex items-center gap-1">
           <button aria-label="Deshacer" title="Deshacer (Ctrl+Z)" disabled={command('undo').disabled} onClick={()=>void runCommand('undo')} className="flex h-11 w-11 items-center justify-center rounded-xl hover:bg-slate-100 disabled:opacity-30"><Undo2 className="h-4 w-4"/></button>
@@ -1306,7 +1314,8 @@ function DocumentEditorWorkspace() {
           <button aria-label="Más acciones" title="Más acciones" onClick={e=>{const r=e.currentTarget.getBoundingClientRect();setContextMenu({x:r.right-288,y:r.bottom+6,documentActions:true})}} className="flex h-11 w-11 items-center justify-center rounded-xl hover:bg-slate-100"><MoreHorizontal className="h-5 w-5"/></button>
         </div>
       </header>
-      {editorError&&<div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 border-b border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-800"><AlertCircle className="h-4 w-4 shrink-0"/><span className="flex-1">{editorError}</span>{!fabricReady&&<button className="min-h-11 rounded-lg border border-rose-200 px-3" onClick={()=>setLoadNonce(n=>n+1)}>Reintentar</button>}<button aria-label="Cerrar aviso" className="h-11 w-11" onClick={()=>setEditorError('')}><X className="mx-auto h-4 w-4"/></button></div>}
+      {imageLoadError&&<DocumentResourceAlert error={imageLoadError} onRetry={()=>setLoadNonce(n=>n+1)}/>}
+      {editorError&&<div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 border-b border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-800"><AlertCircle className="h-4 w-4 shrink-0"/><span className="flex-1">{editorError}</span>{!fabricReady&&<button className="min-h-11 rounded-lg border border-rose-200 px-3" onClick={()=>setLoadNonce(n=>n+1)}>Reintentar</button>}{fabricReady&&<button aria-label="Cerrar aviso" className="h-11 w-11" onClick={()=>setEditorError('')}><X className="mx-auto h-4 w-4"/></button>}</div>}
       {conflict&&<div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900"><span className="flex-1">Otra sesión ha actualizado esta plantilla. Conserva tus cambios como una copia o carga la versión del servidor.</span><button className="min-h-11 rounded-xl border border-amber-300 px-3" onClick={()=>void handleSave(true)}>Guardar como copia</button><button className="min-h-11 rounded-xl border border-amber-300 px-3" onClick={()=>setLeaveTarget('reload')}>Cargar versión actual</button></div>}
       <div role="toolbar" aria-label="Vista del documento" data-document-toolbar className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-3 py-1">
         <div className="flex shrink-0 items-center rounded-xl border border-slate-200">
