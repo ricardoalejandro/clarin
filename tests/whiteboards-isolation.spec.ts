@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
 import { expect, test, type BrowserContext, type Locator, type Page, type Request, type Route, type TestInfo, type WebSocketRoute } from '@playwright/test'
 
@@ -2073,6 +2074,91 @@ test('grosor Amplio · icono propio, persistencia y tinta completa en SVG y PNG'
   } finally { await context.close() }
 })
 
+test('exportación de fuentes · ejecuta el worker local real sin file URLs ni fallback al hilo principal', async ({ browser, browserName }, testInfo) => {
+  test.setTimeout(120_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  await context.addInitScript(() => {
+    Reflect.deleteProperty(globalThis, 'showOpenFilePicker')
+    Reflect.deleteProperty(globalThis, 'showSaveFilePicker')
+    const replies: Array<{ url: string; bytes: number }> = []
+    Object.assign(window, { __subsetWorkerReplies: replies })
+    const NativeWorker = window.Worker
+    window.Worker = class extends NativeWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        super(url, options)
+        this.addEventListener('message', event => {
+          if (event.data instanceof ArrayBuffer) replies.push({ url: String(url), bytes: event.data.byteLength })
+        })
+      }
+    }
+  })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, new Set<string>())
+  // A cold download alone exceeds the old one-second active/idle deadline.
+  await context.route('**/subset-worker.js', async route => {
+    await new Promise(resolve => setTimeout(resolve, 1500))
+    await route.continue()
+  })
+  const page = await context.newPage()
+  const consoleErrors: string[] = []
+  const pageErrors: string[] = []
+  const workerURLs: string[] = []
+  page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+  page.on('pageerror', error => pageErrors.push(error.message))
+  page.on('worker', worker => workerURLs.push(worker.url()))
+  try {
+    await openEditor(page)
+    await openWhiteboardMore(page)
+    await page.getByRole('menuitem', { name: 'Exportar imagen…', exact: true }).click()
+    const dialog = page.locator('.ImageExportModal')
+    await expect(dialog).toBeVisible()
+    const downloading = page.waitForEvent('download')
+    await dialog.getByRole('button', { name: 'Exportar a SVG' }).click()
+    const source = readFileSync((await (await downloading).path())!, 'utf8')
+    expect(source).toContain('data:font/woff2;base64,')
+    const replies = await page.evaluate(() => (window as unknown as { __subsetWorkerReplies: Array<{ url: string; bytes: number }> }).__subsetWorkerReplies)
+    expect(replies.length).toBeGreaterThan(0)
+    const expectedURL = new URL('/vendor/whiteboards-editor/0.18.1-clarin.8/subset-worker.js', baseURL).href
+    expect(replies.every(reply => reply.url === expectedURL && reply.bytes > 0)).toBe(true)
+    expect(workerURLs).toContain(expectedURL)
+    expect(workerURLs.some(url => url.startsWith('file:'))).toBe(false)
+    expect(consoleErrors.filter(message => /subsetting|Skipped glyph|WebAssembly|Content Security Policy|SecurityError/u.test(message))).toEqual([])
+    expect(pageErrors).toEqual([])
+    expect(blocked).toEqual([])
+    const response = await context.request.get(expectedURL)
+    expect(response.ok()).toBe(true)
+    expect(response.headers()['content-security-policy']).toContain("connect-src 'none'")
+    expect(response.headers()['content-security-policy']).toContain("'wasm-unsafe-eval'")
+    const workerSource = await response.text()
+    // The standard build publishes v4's independent editor. V5 reuses the
+    // canonical vendor assets; v3 is an optional legacy build, not a third copy.
+    const offlinePath = '/offline-v4/whiteboard-assets/subset-worker.js'
+    const offline = await context.request.get(new URL(offlinePath, baseURL).href)
+    expect(offline.ok()).toBe(true)
+    expect(await offline.text()).toBe(workerSource)
+    expect(offline.headers()['content-security-policy']).toContain("connect-src 'none'")
+    expect(offline.headers()['content-security-policy']).toContain("'wasm-unsafe-eval'")
+    const hash = createHash('sha256').update(workerSource).digest('hex')
+    for (const version of [4, 5]) {
+      const manifest = await context.request.get(new URL(`/offline-v${version}/manifest.json`, baseURL).href)
+      expect(manifest.ok()).toBe(true)
+      expect((await manifest.json()).assets).toContainEqual(expect.objectContaining({
+        url: version === 4 ? offlinePath : new URL(expectedURL).pathname,
+        sha256: hash,
+      }))
+    }
+  } finally {
+    const replies = await page.evaluate(() => (window as unknown as { __subsetWorkerReplies?: unknown[] }).__subsetWorkerReplies || []).catch(() => [])
+    const path = testInfo.outputPath('worker-and-hydration-diagnostics.json')
+    writeFileSync(path, JSON.stringify({ browser: browserName, workerURLs, replies, consoleErrors, pageErrors }, null, 2))
+    await testInfo.attach('worker-and-hydration-diagnostics', { path, contentType: 'application/json' })
+    await context.close()
+  }
+})
+
 test('presión de trazo · Lápiz y Resaltador exponen el control, persisten su modo y reconcilian sin duplicar', async ({ browser, browserName }, testInfo) => {
   test.skip(browserName !== 'chromium', 'La persistencia y el realtime de Presión se validan una vez en Chromium.')
   test.setTimeout(360_000)
@@ -3934,5 +4020,103 @@ test('integración simulada · Pizarras permanece same-origin y reconcilia ACK p
     if (process.env.WHITEBOARD_BRANDING_SNAPSHOT) writeFileSync(process.env.WHITEBOARD_BRANDING_SNAPSHOT, brandingBody)
   } finally {
     await Promise.allSettled([firstContext.close(), secondContext.close()])
+  }
+})
+
+
+// Member editor + real Next history/CSP; persistence transport is deliberately mocked.
+test('navegación del miembro conserva la edición posterior al Back y cancela Back y Forward sin perder el cursor', async ({ browser }, testInfo) => {
+  test.setTimeout(180_000)
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  const harness = new WhiteboardRealtimeHarness()
+  harness.elements = []
+  harness.failTicketsFor('Ana QA')
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', new Set(), [], new Set())
+  let failWrites = false
+  let holdWrite = true
+  let releaseWrite: (() => void) | null = null
+  await context.route(`**/api/whiteboards/${boardID}/scene`, async route => {
+    if (route.request().method() === 'GET') { await route.fallback(); return }
+    if (failWrites) { await json(route, { error: 'Fallo controlado de guardado' }, 503); return }
+    if (holdWrite) { holdWrite = false; await new Promise<void>(resolve => { releaseWrite = resolve }) }
+    await route.fallback()
+  })
+  const page = await context.newPage()
+  const cspViolations: string[] = []
+  const historyTransitions: unknown[] = []
+  await page.exposeFunction('recordHistoryTransition', (event: unknown) => historyTransitions.push(event))
+  await page.addInitScript(() => {
+    const record = (kind: string) => { void (window as any).recordHistoryTransition({ kind, url: location.href, length: history.length, position: history.state?.__clarin_history_position, time: Date.now() }) }
+    for (const method of ['pushState', 'replaceState'] as const) {
+      const original = history[method].bind(history)
+      history[method] = (...args) => { original(...args); record(method) }
+    }
+    window.addEventListener('popstate', () => record('popstate'), true)
+    window.addEventListener('pageshow', () => record('pageshow'))
+  })
+  await page.exposeFunction('recordHistoryCSPViolation', (directive: string) => cspViolations.push(directive))
+  await page.addInitScript(() => window.addEventListener('securitypolicyviolation', event => {
+    void (window as any).recordHistoryCSPViolation(event.effectiveDirective)
+  }))
+  try {
+    await page.goto(`${baseURL}/dashboard/whiteboards?qa_history=exact#catalog`, { waitUntil: 'domcontentloaded' })
+    await page.getByLabel('Abrir Pizarra QA autónoma', { exact: true }).first().click()
+    await expect(page.locator('canvas.interactive')).toBeVisible({ timeout: 30_000 })
+    const editorURL = page.url()
+    const historyLength = await page.evaluate(() => history.length)
+    await drawRectangle(page, 0)
+    await page.evaluate(() => history.back())
+    await expect.poll(() => Boolean(releaseWrite), { timeout: 20_000 }).toBe(true)
+    await expect(page).toHaveURL(editorURL)
+    await expect(page.locator('canvas.interactive')).toBeVisible()
+    await drawRectangle(page, 30)
+    releaseWrite!()
+    await expect(page).toHaveURL(`${baseURL}/dashboard/whiteboards?qa_history=exact#catalog`, { timeout: 30_000 })
+    expect(harness.elements.filter(element => !element.isDeleted && element.type === 'rectangle')).toHaveLength(2)
+    await expect(page.getByLabel('Abrir Pizarra QA autónoma', { exact: true }).first()).toBeVisible()
+    expect(await page.evaluate(() => history.length)).toBe(historyLength)
+    await page.evaluate(() => history.forward())
+    await expect(page.locator('canvas.interactive')).toBeVisible({ timeout: 30_000 })
+    expect(await page.evaluate(() => history.length)).toBe(historyLength)
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await expect(page.locator('canvas.interactive')).toBeVisible({ timeout: 30_000 })
+    // Reload is a separate native document boundary in Firefox. Assert each
+    // guarded traversal against its own pre-navigation cursor and length.
+    const reloadedHistoryLength = await page.evaluate(() => history.length)
+    failWrites = true
+    await drawRectangle(page, 60)
+    let cancelled = 0
+    page.on('dialog', async dialog => { cancelled += 1; await dialog.dismiss() })
+    await page.evaluate(() => history.back())
+    await expect.poll(() => cancelled, { timeout: 30_000 }).toBe(1)
+    await expect(page).toHaveURL(editorURL)
+    await expect(page.locator('canvas.interactive')).toBeVisible()
+    expect(await page.evaluate(() => history.length)).toBe(reloadedHistoryLength)
+    failWrites = false
+    await page.keyboard.press('Control+s')
+    await expect.poll(() => harness.elements.filter(element => !element.isDeleted && element.type === 'rectangle').length, { timeout: 20_000 }).toBe(3)
+    await page.getByRole('button', { name: 'Volver a Pizarras', exact: true }).click()
+    await expect(page).toHaveURL(`${baseURL}/dashboard/whiteboards`)
+    await page.evaluate(() => history.back())
+    await expect(page.locator('canvas.interactive')).toBeVisible({ timeout: 30_000 })
+    failWrites = true
+    await drawRectangle(page, 90)
+    const beforeForwardLength = await page.evaluate(() => history.length)
+    await page.evaluate(() => history.forward())
+    await expect.poll(() => cancelled, { timeout: 30_000 }).toBe(2)
+    await expect(page).toHaveURL(editorURL)
+    await expect(page.locator('canvas.interactive')).toBeVisible()
+    expect(await page.evaluate(() => history.length)).toBe(beforeForwardLength)
+    failWrites = false
+    await page.keyboard.press('Control+s')
+    await expect.poll(() => harness.elements.filter(element => !element.isDeleted && element.type === 'rectangle').length, { timeout: 20_000 }).toBe(4)
+    await page.evaluate(() => history.forward())
+    await expect(page).toHaveURL(`${baseURL}/dashboard/whiteboards`)
+    expect(cspViolations).toEqual([])
+  } finally {
+    releaseWrite?.()
+    await testInfo.attach('whiteboard-history-transitions.json', { body: Buffer.from(JSON.stringify(historyTransitions, null, 2)), contentType: 'application/json' })
+    await context.close()
   }
 })

@@ -1,0 +1,147 @@
+{
+  "count": 10000,
+  "engine": "0.18.1-clarin.8",
+  "browser": "145.0.7632.6",
+  "viewport": "1440x900",
+  "sampleCount": 1,
+  "shape": "unfilled roughness-0 rectangles on a 100-column grid with one visible edit target; viewport culling applies",
+  "edit": "Select perf-0 and move it one pixel right; cardinality stays fixed, including the 50,000-element canonical limit.",
+  "limitations": "Guest editor; HTTP/WebSocket mocked locally; includes browser decoding, fonts, render, save debounce and mock ACK. No server/DB latency, images, rich text, FPS, or device-wide memory claim. Context cache starts empty; server is warm.",
+  "sceneJSONBytes": 4181445,
+  "navigationToCanvasAndTwoFramesMs": 6097.53,
+  "pointerAndKeyboardGestureMs": 1692.24,
+  "editThroughConfirmedSaveMs": 4181.47,
+  "firstPatchAfterEditMs": 2764.5309670000006,
+  "patchesForGesture": 1,
+  "exportedElementCount": 10000,
+  "outcome": "completed",
+  "browserMetrics": {
+    "longTasks": [
+      {
+        "start": 262,
+        "duration": 61
+      },
+      {
+        "start": 597.3999996185303,
+        "duration": 214
+      },
+      {
+        "start": 1556.5,
+        "duration": 227
+      },
+      {
+        "start": 2488.800000190735,
+        "duration": 658
+      },
+      {
+        "start": 3158.800000190735,
+        "duration": 213
+      },
+      {
+        "start": 3430.0999994277954,
+        "duration": 1273
+      },
+      {
+        "start": 4722.699999809265,
+        "duration": 64
+      },
+      {
+        "start": 4865.39999961853,
+        "duration": 218
+      },
+      {
+        "start": 5083.800000190735,
+        "duration": 62
+      },
+      {
+        "start": 5314.300000190735,
+        "duration": 287
+      },
+      {
+        "start": 5666.199999809265,
+        "duration": 185
+      },
+      {
+        "start": 5859.300000190735,
+        "duration": 121
+      },
+      {
+        "start": 6001.89999961853,
+        "duration": 136
+      },
+      {
+        "start": 6181,
+        "duration": 171
+      },
+      {
+        "start": 6415.199999809265,
+        "duration": 161
+      },
+      {
+        "start": 6598.199999809265,
+        "duration": 232
+      },
+      {
+        "start": 6862,
+        "duration": 162
+      },
+      {
+        "start": 7152.599999427795,
+        "duration": 198
+      },
+      {
+        "start": 7402,
+        "duration": 164
+      },
+      {
+        "start": 7581.300000190735,
+        "duration": 155
+      },
+      {
+        "start": 7751,
+        "duration": 242
+      },
+      {
+        "start": 7993.199999809265,
+        "duration": 565
+      },
+      {
+        "start": 8559.89999961853,
+        "duration": 186
+      },
+      {
+        "start": 8823.699999809265,
+        "duration": 316
+      },
+      {
+        "start": 9143.699999809265,
+        "duration": 119
+      },
+      {
+        "start": 10164.199999809265,
+        "duration": 178
+      },
+      {
+        "start": 10343.099999427795,
+        "duration": 113
+      },
+      {
+        "start": 10876.099999427795,
+        "duration": 596
+      },
+      {
+        "start": 11475.89999961853,
+        "duration": 267
+      },
+      {
+        "start": 11841.199999809265,
+        "duration": 103
+      }
+    ],
+    "approximateJSHeapBytes": 91700000
+  },
+  "blockedRequests": [],
+  "pageErrors": [],
+  "consoleErrors": [],
+  "workerURLs": []
+}

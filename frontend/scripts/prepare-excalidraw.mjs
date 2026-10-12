@@ -16,6 +16,7 @@ import {
 } from './whiteboard-font-catalog.mjs'
 import { buildExcalidrawFork } from './build-excalidraw-fork.mjs'
 import { buildDependencyNotices, composeEditorNotice } from './dependency-notices.mjs'
+import { verifyStandaloneSubsetWorker } from './verify-subset-worker.mjs'
 
 const dependencyNotices = buildDependencyNotices()
 const archivedDependencyNotices = await readFile(join(process.cwd(), 'third_party/excalidraw/DEPENDENCY-LICENSES.txt'), 'utf8')
@@ -39,6 +40,9 @@ await mkdir(dirname(destinationRoot), { recursive: true })
 await cp(sourceFonts, join(destinationRoot, 'fonts'), { recursive: true })
 await cp(join(whiteboardFontRoot, 'fonts', 'Clarin'), join(destinationRoot, 'fonts', 'Clarin'), { recursive: true })
 await cp(join(whiteboardFontRoot, 'licenses'), join(destinationRoot, 'CLARIN-FONT-LICENSES'), { recursive: true })
+await hardenJavaScriptTree(join(packageRoot, 'dist', 'prod', 'worker'), { fontCatalog: runtimeFontCatalog })
+verifyStandaloneSubsetWorker(await readFile(join(packageRoot, 'dist', 'prod', 'worker', 'subset-worker.js'), 'utf8'))
+await cp(join(packageRoot, 'dist', 'prod', 'worker', 'subset-worker.js'), join(destinationRoot, 'subset-worker.js'))
 const notice = await readFile(join(process.cwd(), 'THIRD_PARTY_EXCALIDRAW.md'), 'utf8')
 const license = notice.match(/## Licencia del editor\s+([\s\S]*?)\s+Fuente:/u)?.[1]
 if (!license) throw new Error('No se pudo extraer la licencia MIT del aviso de terceros.')

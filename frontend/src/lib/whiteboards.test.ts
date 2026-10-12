@@ -298,6 +298,14 @@ describe('whiteboard frontend contracts', () => {
     })).toBe(false)
   })
 
+  it('keeps edits made while navigation waits protected until their own acknowledgement', () => {
+    const click = { requiredSceneVersion: 7, savedSceneVersion: 7, requiredLibraryVersion: null, savedLibraryVersion: 0 }
+    expect(whiteboardNavigationWritesCovered({ ...click, latestSceneVersion: 8 })).toBe(false)
+    expect(whiteboardNavigationWritesCovered({ ...click, latestSceneVersion: 8, savedSceneVersion: 8 })).toBe(true)
+    expect(whiteboardNavigationWritesCovered({ ...click, latestLibraryVersion: 1 })).toBe(false)
+    expect(whiteboardNavigationWritesCovered({ ...click, latestLibraryVersion: 1, savedLibraryVersion: 1 })).toBe(true)
+  })
+
   it('falls back immediately and bounds automatic retries without discarding the operation', () => {
     expect(whiteboardSaveFailureAction(undefined, 1)).toBe('retry')
     expect(whiteboardSaveFailureAction(503, 2)).toBe('retry')

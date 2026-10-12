@@ -146,6 +146,7 @@ export interface WhiteboardCommentsProviderHandle {
   hasPendingMutations: () => boolean
   hasUnsavedDrafts: () => boolean
   hasUnsavedWork: () => boolean
+  getNavigationRevision: () => number
 }
 
 export interface WhiteboardCommentsProviderProps {
@@ -290,6 +291,7 @@ export const WhiteboardCommentsProvider = forwardRef<WhiteboardCommentsProviderH
     const [focusRequestVersion, setFocusRequestVersion] = useState(0)
     const [activeComposerKey, setActiveComposerKey] = useState<string | null>(null)
     const [drafts, setDrafts] = useState<Record<string, WhiteboardCommentDraft>>({})
+    const navigationRevisionRef = useRef(0)
     const draftsRef = useRef(drafts)
     draftsRef.current = drafts
     const [draftAnchor, setDraftAnchor] = useState<WhiteboardCommentAnchor | null>(null)
@@ -882,10 +884,12 @@ export const WhiteboardCommentsProvider = forwardRef<WhiteboardCommentsProviderH
       hasPendingMutations,
       hasUnsavedDrafts,
       hasUnsavedWork,
+      getNavigationRevision: () => navigationRevisionRef.current,
     }), [applyRealtimeEvent, getSummary, hasPendingMutations, hasUnsavedDrafts, hasUnsavedWork, reload])
 
     const startPending = useCallback((key: string) => {
       if (pendingKeysRef.current.has(key)) return false
+      navigationRevisionRef.current += 1
       pendingKeysRef.current.add(key)
       setPendingKeys(new Set(pendingKeysRef.current))
       return true
@@ -904,6 +908,7 @@ export const WhiteboardCommentsProvider = forwardRef<WhiteboardCommentsProviderH
       commentID?: string | null
       baseVersion?: number | null
     }) => {
+      navigationRevisionRef.current += 1
       setDrafts(current => current[input.key] ? current : {
         ...current,
         [input.key]: createWhiteboardCommentDraft({
@@ -915,6 +920,7 @@ export const WhiteboardCommentsProvider = forwardRef<WhiteboardCommentsProviderH
     }, [])
 
     const updateDraftBody = useCallback((key: string, body: string) => {
+      navigationRevisionRef.current += 1
       setDrafts(current => {
         const draft = current[key]
         if (!draft) return current
@@ -929,6 +935,7 @@ export const WhiteboardCommentsProvider = forwardRef<WhiteboardCommentsProviderH
 
     const closeDraft = useCallback((key: string, discard: boolean) => {
       if (discard) {
+        navigationRevisionRef.current += 1
         setDrafts(current => {
           if (!current[key]) return current
           const next = { ...current }

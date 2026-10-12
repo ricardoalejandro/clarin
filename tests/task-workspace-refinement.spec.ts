@@ -918,7 +918,7 @@ test.describe('Clarin Work workspace refinement', () => {
     }
   })
 
-  test('integrity keeps task controls usable with docked Eros reduced motion and 125 percent layout zoom', async ({ page }, testInfo) => {
+  test('integrity keeps task controls usable with docked Eros reduced motion and an emulated 125 percent viewport scale', async ({ page, browser }, testInfo) => {
     await installWorkspaceMock(page)
     await page.setViewportSize({ width: 1440, height: 1000 })
     await page.emulateMedia({ reducedMotion: 'reduce' })
@@ -936,13 +936,31 @@ test.describe('Clarin Work workspace refinement', () => {
     await expect(page.getByRole('button', { name: 'Nueva tarea', exact: true })).toBeVisible()
     await page.screenshot({ path: testInfo.outputPath('tasks-eros-reduced-motion.png'), fullPage: true })
     await eros.getByTitle('Cerrar', { exact: true }).click()
-    // CSS zoom exercises increased layout scale without depending on browser UI
-    // shortcuts, which are unavailable to headless Chromium.
-    await page.evaluate(() => { document.documentElement.style.zoom = '1.25' })
-    await expect(page.getByRole('button', { name: 'Nueva tarea', exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Personalizar vista', exact: true })).toBeVisible()
-    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
-    await page.screenshot({ path: testInfo.outputPath('tasks-layout-zoom-125.png'), fullPage: true })
+    // Emulate the CSS viewport and pixel ratio of a 1440x1000 surface scaled
+    // to 125%. This checks layout under scaling, not the browser's Ctrl+ UI.
+    const scaledContext = await browser.newContext({ viewport: { width: 1152, height: 800 }, deviceScaleFactor: 1.25, reducedMotion: 'reduce' })
+    try {
+      const scaledPage = await scaledContext.newPage()
+      await installWorkspaceMock(scaledPage)
+      await scaledPage.goto(`${baseURL}/dashboard/tasks`)
+      await expect(scaledPage.locator('[data-task-workspace-canvas]')).toBeVisible({ timeout: 30_000 })
+      for (const name of ['Nueva tarea', 'Personalizar vista', 'Vistas guardadas']) {
+        const button = scaledPage.getByRole('button', { name, exact: true })
+        await expect(button).toBeVisible()
+        const box = await button.boundingBox()
+        expect(box).not.toBeNull()
+        expect(box!.x).toBeGreaterThanOrEqual(0)
+        expect(box!.x + box!.width).toBeLessThanOrEqual(1153)
+      }
+      await scaledPage.getByRole('button', { name: 'Personalizar vista', exact: true }).click()
+      const dialog = scaledPage.getByRole('dialog', { name: 'Personalizar vista' })
+      await expect(dialog).toBeVisible()
+      await dialog.getByRole('button', { name: 'Cancelar', exact: true }).click()
+      await expect.poll(() => scaledPage.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
+      await scaledPage.screenshot({ path: testInfo.outputPath('tasks-emulated-scale-125.png'), fullPage: true })
+    } finally {
+      await scaledContext.close()
+    }
   })
 
   test('opens the global overdue inbox with the dashboard predicate and then the real task', async ({ page }) => {
@@ -1684,7 +1702,8 @@ test.describe('Clarin Work workspace refinement', () => {
     await page.goto(`${baseURL}/dashboard/tasks`)
     await expect(page.locator('[data-task-view-tabs]')).toBeVisible({ timeout: 15_000 })
 
-    await page.getByRole('button', { name: 'Administrar Entorno' }).click()
+    await page.getByRole('button', { name: 'Entorno General', exact: true }).click()
+    await page.getByRole('dialog', { name: 'Seleccionar Entorno' }).getByRole('button', { name: 'Administrar', exact: true }).click()
     const environmentWindow = page.locator('[data-window-kind="task-environment-window"]')
     await expect(environmentWindow).toBeVisible()
     await environmentWindow.getByLabel('Nombre').fill('General QA')

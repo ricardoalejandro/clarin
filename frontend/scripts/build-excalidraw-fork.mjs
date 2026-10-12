@@ -63,6 +63,20 @@ export async function buildExcalidrawFork() {
     minify: true,
     define: { 'import.meta.env': JSON.stringify(safeEnvironment('production')) },
   })
+  // Do not let Next turn a worker's import.meta.url into a build-time file URL.
+  // This dedicated module embeds WOFF2/HarfBuzz WASM and has no runtime imports.
+  await build({
+    absWorkingDir: packageRoot,
+    entryPoints: ['subset/subset-worker.chunk.ts'],
+    outfile: join(packageRoot, 'dist', 'prod', 'worker', 'subset-worker.js'),
+    bundle: true,
+    splitting: false,
+    format: 'esm',
+    platform: 'browser',
+    target: 'es2020',
+    minify: true,
+    define: { 'import.meta.env': JSON.stringify(safeEnvironment('production')) },
+  })
   return packageRoot
 }
 

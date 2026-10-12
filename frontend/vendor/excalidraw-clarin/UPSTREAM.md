@@ -12,7 +12,8 @@ The `packages/excalidraw`, `packages/math`, and `packages/utils` directories
 were copied from the exact upstream commit above. Clarin changes are intentionally
 limited to rich-text marks, per-paragraph alignment, deterministic local font
 preloading, native caret stops for blank editable paragraphs, the narrow host
-API needed by Pizarras, semantic stroke presets, export-only ink bounds, and the audited freedraw pressure backport recorded in
+API needed by Pizarras, semantic stroke presets, export-only ink bounds,
+same-origin font-subsetting workers, and the audited freedraw pressure backport recorded in
 `PATCHES.md`. Existing network and product
 hardening is applied by the repository build pipeline after this source fork is
 compiled.

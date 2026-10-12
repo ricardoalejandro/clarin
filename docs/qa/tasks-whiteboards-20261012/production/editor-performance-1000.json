@@ -1,0 +1,59 @@
+{
+  "count": 1000,
+  "engine": "0.18.1-clarin.8",
+  "browser": "145.0.7632.6",
+  "viewport": "1440x900",
+  "sampleCount": 1,
+  "shape": "unfilled roughness-0 rectangles on a 100-column grid with one visible edit target; viewport culling applies",
+  "edit": "Select perf-0 and move it one pixel right; cardinality stays fixed, including the 50,000-element canonical limit.",
+  "limitations": "Guest editor; HTTP/WebSocket mocked locally; includes browser decoding, fonts, render, save debounce and mock ACK. No server/DB latency, images, rich text, FPS, or device-wide memory claim. Context cache starts empty; server is warm.",
+  "sceneJSONBytes": 414173,
+  "navigationToCanvasAndTwoFramesMs": 2131.61,
+  "pointerAndKeyboardGestureMs": 254.9,
+  "editThroughConfirmedSaveMs": 2142.2,
+  "firstPatchAfterEditMs": 1445.767782,
+  "patchesForGesture": 1,
+  "exportedElementCount": 1000,
+  "outcome": "completed",
+  "browserMetrics": {
+    "longTasks": [
+      {
+        "start": 241.69999980926514,
+        "duration": 65
+      },
+      {
+        "start": 561.0999994277954,
+        "duration": 150
+      },
+      {
+        "start": 967.3999996185303,
+        "duration": 266
+      },
+      {
+        "start": 1289.3000001907349,
+        "duration": 179
+      },
+      {
+        "start": 1635.8999996185303,
+        "duration": 131
+      },
+      {
+        "start": 2966.5999994277954,
+        "duration": 71
+      },
+      {
+        "start": 4382.89999961853,
+        "duration": 51
+      },
+      {
+        "start": 4435,
+        "duration": 125
+      }
+    ],
+    "approximateJSHeapBytes": 27600000
+  },
+  "blockedRequests": [],
+  "pageErrors": [],
+  "consoleErrors": [],
+  "workerURLs": []
+}

@@ -2611,15 +2611,17 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
         await waitForActiveWrites()
         if (whiteboardNavigationAction(state()) === 'leave') break
       }
-      const durableWritesCoverClick = whiteboardNavigationWritesCovered({
+      const durableWritesCoverCurrentState = whiteboardNavigationWritesCovered({
         requiredSceneVersion,
         savedSceneVersion: lastSavedChangeVersionRef.current,
+        latestSceneVersion: changeVersionRef.current,
         requiredLibraryVersion,
         savedLibraryVersion: lastSavedLibraryChangeVersionRef.current,
+        latestLibraryVersion: libraryChangeVersionRef.current,
         commentsPending: commentsRef.current?.hasPendingMutations() || false,
         commentsDirty: commentsRef.current?.hasUnsavedDrafts() || false,
       })
-      const action = durableWritesCoverClick ? 'leave' : whiteboardNavigationAction(state())
+      const action = durableWritesCoverCurrentState ? 'leave' : whiteboardNavigationAction(state())
       if (action !== 'leave') {
         const discard = window.confirm('Clarin no pudo confirmar todos los cambios. ¿Salir y descartar únicamente lo que siga pendiente?')
         if (!discard) return false
@@ -2654,8 +2656,10 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
         return whiteboardNavigationWritesCovered({
           requiredSceneVersion,
           savedSceneVersion: lastSavedChangeVersionRef.current,
+          latestSceneVersion: changeVersionRef.current,
           requiredLibraryVersion,
           savedLibraryVersion: lastSavedLibraryChangeVersionRef.current,
+          latestLibraryVersion: libraryChangeVersionRef.current,
           commentsPending: commentsRef.current?.hasPendingMutations() || false,
           commentsDirty: commentsRef.current?.hasUnsavedDrafts() || false,
         })
@@ -2677,6 +2681,18 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   const requestLeave = useCallback((options?: WhiteboardLeaveGuardOptions) => (
     options?.forced ? prepareForForcedClose() : prepareToLeave()
   ), [prepareForForcedClose, prepareToLeave])
+
+  const historyLeaveRef = useRef(requestLeave)
+  historyLeaveRef.current = requestLeave
+  useEffect(() => {
+    if (phase !== 'ready') return
+    return window.__CLARIN_NAVIGATION_HISTORY__?.register({
+      requestLeave: () => historyLeaveRef.current(),
+      shouldBlock: () => Boolean(dirtyRef.current || pendingSaveRef.current || savingRef.current || assetSavingRef.current
+        || libraryDirtyRef.current || librarySavingRef.current || commentsRef.current?.hasUnsavedWork()),
+      revision: () => `${changeVersionRef.current}:${libraryChangeVersionRef.current}:${commentsRef.current?.getNavigationRevision() || 0}`,
+    })
+  }, [phase])
 
   useImperativeHandle(forwardedRef, () => ({ requestLeave }), [requestLeave])
   useEffect(() => {

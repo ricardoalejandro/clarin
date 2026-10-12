@@ -23,16 +23,21 @@ export class WorkerPool<T, R> {
   private idleWorkers: Set<IdleWorker> = new Set();
   private readonly workerUrl: URL;
   private readonly workerTTL: number;
+  private readonly requestTimeout: number;
 
   private constructor(
     workerUrl: URL,
     options: {
       ttl?: number;
+      requestTimeout?: number;
     },
   ) {
     this.workerUrl = workerUrl;
     // by default, active & idle workers will be terminated after 1s of inactivity
     this.workerTTL = options.ttl || 1000;
+    // A cold worker must fetch/compile its WASM before replying. Idle cleanup
+    // stays short, while active work has a separate bounded deadline.
+    this.requestTimeout = options.requestTimeout || 15000;
   }
 
   /**
@@ -47,6 +52,7 @@ export class WorkerPool<T, R> {
     workerUrl: URL | undefined,
     options: {
       ttl?: number;
+      requestTimeout?: number;
     } = {},
   ): WorkerPool<T, R> {
     if (!workerUrl) {
@@ -79,15 +85,26 @@ export class WorkerPool<T, R> {
     }
 
     return new Promise((resolve, reject) => {
-      worker.instance.onmessage = this.onMessageHandler(worker, resolve);
-      worker.instance.onerror = this.onErrorHandler(worker, reject);
-
-      worker.instance.postMessage(data, options);
-      worker.debounceTerminate(() =>
-        reject(
-          new Error(`Active worker did not respond for ${this.workerTTL}ms!`),
-        ),
-      );
+      worker.debounceTerminate.cancel();
+      const deadline = setTimeout(() => {
+        worker.instance.terminate();
+        reject(new Error(`Active worker did not respond for ${this.requestTimeout}ms!`));
+      }, this.requestTimeout);
+      worker.instance.onmessage = this.onMessageHandler(worker, value => {
+        clearTimeout(deadline);
+        resolve(value);
+      });
+      worker.instance.onerror = this.onErrorHandler(worker, error => {
+        clearTimeout(deadline);
+        reject(error);
+      });
+      try {
+        worker.instance.postMessage(data, options);
+      } catch (error) {
+        clearTimeout(deadline);
+        worker.instance.terminate();
+        reject(error);
+      }
     });
   }
 

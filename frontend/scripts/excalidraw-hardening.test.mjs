@@ -6,6 +6,32 @@ import { fileURLToPath } from 'node:url'
 
 import { hardenEditorBundle } from './excalidraw-hardening.mjs'
 import { loadWhiteboardFontCatalog, runtimeWhiteboardFontCatalog } from './whiteboard-font-catalog.mjs'
+import { verifyStandaloneSubsetWorker } from './verify-subset-worker.mjs'
+
+test('rejects a filesystem-dependent or split worker artifact before publication', () => {
+  const protocol = 'self.onmessage = async () => WebAssembly.instantiate(new Uint8Array());'
+  assert.doesNotThrow(() => verifyStandaloneSubsetWorker(protocol))
+  assert.throws(() => verifyStandaloneSubsetWorker(`${protocol} new URL("file:///build/subset-worker.js")`), /filesystem/u)
+  assert.throws(() => verifyStandaloneSubsetWorker(`${protocol} new URL(import.meta.url)`), /filesystem/u)
+  assert.throws(() => verifyStandaloneSubsetWorker(`import "./unpublished.js"; ${protocol}`), /embed/u)
+  assert.throws(() => verifyStandaloneSubsetWorker(`${protocol} import("./unpublished.js")`), /embed/u)
+  assert.throws(() => verifyStandaloneSubsetWorker(`${protocol} new Function("return 1")`), /compile JavaScript/u)
+})
+
+test('allows embedded WASM only inside the isolated worker, without relaxing whiteboard documents', async () => {
+  const { default: config } = await import('../next.config.js')
+  const headers = await config.headers()
+  const policy = source => headers.find(entry => entry.source === source)?.headers.find(header => header.key === 'Content-Security-Policy')?.value
+  for (const source of ['/vendor/whiteboards-editor/:version/subset-worker.js', ...[3, 4, 5].map(version => `/offline-v${version}/whiteboard-assets/subset-worker.js`)]) {
+    const worker = policy(source)
+    assert.match(worker, /script-src 'self' 'wasm-unsafe-eval'/u)
+    assert.match(worker, /connect-src 'none'/u)
+    assert.doesNotMatch(worker, /'unsafe-eval'|https?:/u)
+  }
+  for (const source of ['/dashboard/whiteboards/:path*', '/dashboard/tasks/:path*', '/shared/whiteboards/:path*', '/offline-v3/:path*', '/offline-v4/:path*', '/offline-v5/:path*']) {
+    assert.doesNotMatch(policy(source), /wasm-unsafe-eval|'unsafe-eval'/u)
+  }
+})
 
 test('all Mermaid parser imports are behind the host capability boundary', async () => {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '../vendor/excalidraw-clarin/packages/excalidraw')

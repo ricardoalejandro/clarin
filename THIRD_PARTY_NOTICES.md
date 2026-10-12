@@ -5,7 +5,7 @@ This file indexes notices that must accompany third-party software distributed b
 ## `@excalidraw/excalidraw`
 
 - Distributed version: `0.18.1-clarin.8`
-- Vendored source SHA-256: `4e7a50f8c7f21fdeb88bb0206106b90f7ef31b0b406fc2aaea4055282c1785d1`
+- Vendored source SHA-256: `b9753650b2b80704a46b670d6651a80da59c7858d774be343936f2f8c15d3eb9`
 - Upstream source: tag `v0.18.1`, commit `a2ec2889babf7d2295469c6d90ebe77fae57df84`
 - Editor license: MIT, Copyright (c) 2020 Excalidraw
 - Canonical component notice and current advisory record: [`frontend/THIRD_PARTY_EXCALIDRAW.md`](frontend/THIRD_PARTY_EXCALIDRAW.md)
@@ -30,7 +30,7 @@ This notice covers the public MIT-licensed Excalidraw project only. It grants no
 
 ## Reproducible Excalidraw dependency inventory
 
-The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1-clarin.8` is defined by `frontend/package-lock.json` and the [current candidate baseline](frontend/third_party/excalidraw/supply-chain-2026-10-12.json). The [archived CycloneDX 1.6 SBOM](frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.8.cdx.json) contains 248 components and has SHA-256 `43d3a239b16f8572ab9cac40335946834fd499f57c4998c14972d7e00c5bec0e`. It binds the vendored source to the exact upstream tag/commit plus the documented Clarin patches, including the `.7` Mermaid capability boundary and dependency fixes.
+The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1-clarin.8` is defined by `frontend/package-lock.json` and the [current candidate baseline](frontend/third_party/excalidraw/supply-chain-2026-10-12.json). The [archived CycloneDX 1.6 SBOM](frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.8.cdx.json) contains 248 components and has SHA-256 `11dbd6b8a303cec9017237893fe4c715696e7c874f4325e3d158b1fc4da498ef`. It binds the vendored source to the exact upstream tag/commit plus the documented Clarin patches, including the `.7` Mermaid capability boundary and dependency fixes.
 
 Generate and verify it without contacting a third-party service:
 

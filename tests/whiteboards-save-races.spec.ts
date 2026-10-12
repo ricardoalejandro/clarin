@@ -17,8 +17,15 @@ class SaveHarness {
   uploads = 0
   writes: Array<{ operationID: string; elements: Element[] }> = []
   blocked: string[] = []
+  online = true
+  abortedRequests = 0
+  connectedRooms = 0
   private readonly sockets = new Set<WebSocketRoute>()
   private readonly operations = new Map<string, number>()
+  async disconnect() {
+    this.online = false
+    await Promise.all([...this.sockets].map(socket => socket.close({ code: 1001, reason: 'QA network disconnected' })))
+  }
   sceneRecord() {
     return { board_id: boardID, sequence: this.sequence, editor_version: '0.18.1-clarin.8', scene_schema_version: 'excalidraw', updated_at: '2026-10-12T00:00:00Z',
       scene: { type: 'excalidraw', version: 2, source: 'clarin', elements: clone(this.elements), appState: { viewBackgroundColor: '#ffffff' }, files: {} } }
@@ -37,11 +44,14 @@ class SaveHarness {
   }
   async install(context: BrowserContext, name: string, realtime = true) {
     await context.routeWebSocket(/\/ws(?:\/whiteboards\/[^?]+)?(?:\?.*)?$/, socket => {
+      if (!this.online) { void socket.close({ code: 1001, reason: 'QA network disconnected' }); return }
       this.sockets.add(socket)
       socket.onClose(() => this.sockets.delete(socket))
       socket.onMessage(raw => {
+        if (!this.online) return
         const message = JSON.parse(String(raw))
         if (message.event === 'sync.request') {
+          this.connectedRooms += 1
           socket.send(JSON.stringify({ event: 'ack', sequence: this.sequence }))
           socket.send(JSON.stringify({ event: 'room.ready', actor: { kind: 'guest', id: name, display_name: name, access: 'edit' }, data: { actor_id: name } }))
           return
@@ -58,6 +68,12 @@ class SaveHarness {
       const request = route.request()
       const url = new URL(request.url())
       if (url.origin !== new URL(baseURL).origin) { this.blocked.push(url.href); await route.abort(); return }
+      // Browser offline mode does not disable Playwright's fulfilled API mocks.
+      // Abort them explicitly as well, so neither HTTP nor mocked WS can save.
+      if (!this.online && url.pathname.startsWith('/api/')) {
+        this.abortedRequests += 1
+        await route.abort('internetdisconnected'); return
+      }
       if (!url.pathname.startsWith('/api/')) {
         if (request.resourceType() === 'document' && process.env.PLAYWRIGHT_LOCAL_SERVER === '1') {
           const response = await route.fetch(); const headers = response.headers()
@@ -171,6 +187,49 @@ test.describe('guardado en navegador con transporte simulado', () => {
       expect(harness.uploads).toBe(2)
       expect(harness.elements.map(element => element.id)).toEqual(localIDs)
       expect(await exportedIDs(page)).toEqual(localIDs)
+    } finally { await context.close() }
+  })
+  test('desconexión offline real conserva el dibujo, reconecta y reabre la escena completa', async ({ browser }) => {
+    test.setTimeout(120_000)
+    const harness = new SaveHarness()
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+    await harness.install(context, 'Offline QA')
+    const page = await context.newPage()
+    const errors: string[] = []
+    page.on('pageerror', error => errors.push(error.message))
+    try {
+      await open(page)
+      await expect.poll(() => harness.connectedRooms).toBeGreaterThan(0)
+      await draw(page, 0)
+      await expect(page.getByLabel('Guardado en Clarin')).toBeVisible({ timeout: 30_000 })
+      const committedIDs = await exportedIDs(page)
+      expect(committedIDs).toHaveLength(1)
+      const writesBeforeOffline = harness.writes.length
+      const roomsBeforeOffline = harness.connectedRooms
+      await context.setOffline(true)
+      await harness.disconnect()
+      expect(await page.evaluate(() => navigator.onLine)).toBe(false)
+      await draw(page, 95)
+      await expect.poll(() => harness.abortedRequests, { timeout: 20_000 }).toBeGreaterThan(0)
+      await expect(page.getByLabel('Guardado en Clarin')).toHaveCount(0)
+      const localIDs = await exportedIDs(page)
+      expect(localIDs).toHaveLength(2)
+      expect(localIDs).toEqual(expect.arrayContaining(committedIDs))
+      expect(harness.writes).toHaveLength(writesBeforeOffline)
+      expect(harness.elements.map(element => element.id).sort()).toEqual(committedIDs)
+
+      harness.online = true
+      await context.setOffline(false)
+      expect(await page.evaluate(() => navigator.onLine)).toBe(true)
+      await expect.poll(() => harness.connectedRooms, { timeout: 30_000 }).toBeGreaterThan(roomsBeforeOffline)
+      await expect(page.getByLabel('Guardado en Clarin')).toBeVisible({ timeout: 30_000 })
+      expect(harness.elements.filter(element => !element.isDeleted).map(element => element.id).sort()).toEqual(localIDs)
+      expect(await exportedIDs(page)).toEqual(localIDs)
+      await page.reload({ waitUntil: 'domcontentloaded' })
+      await expect(page.locator('canvas.interactive')).toBeVisible({ timeout: 60_000 })
+      expect(await exportedIDs(page)).toEqual(localIDs)
+      expect(errors).toEqual([])
+      expect(harness.blocked).toEqual([])
     } finally { await context.close() }
   })
 })

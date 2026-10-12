@@ -1,10 +1,12 @@
 /* eslint-disable */
 // @ts-nocheck
+import { createClarinNamedFunction, createClarinDynCaller, createClarinInvoker } from "./clarinCspBindings";
 
 /**
  * Slitghly modified emscripten bindings of https://github.com/kekee000/fonteditor-core/blob/582bba757aa2915ec2240c61717ff12c50594675/woff2src/woff2.js
  * 
  * CHANGELOG:
+ * - Clarin: replace dynamic Function construction with CSP-safe closures; preserve embind arity, receivers, conversion and destructor order.
  * - replaced existing exports with default esm export (`export default Module;`)
  * - replaced "instanceof ArrayBuffer" with "Object.prototype.toString.call(d) === "[object ArrayBuffer]", due to unreliability of different ArrayBuffer instances depending on the context (i.e. inside VM)
 
@@ -1341,14 +1343,7 @@ const Module = (function () {
       return name;
     }
     function createNamedFunction(name, body) {
-      name = makeLegalFunctionName(name);
-      return new Function(
-        "body",
-        `return function ${name}() {\n` +
-          `    "use strict";` +
-          `    return body.apply(this, arguments);\n` +
-          `};\n`,
-      )(body);
+      return createClarinNamedFunction(makeLegalFunctionName(name), body);
     }
     function extendError(baseErrorType, errorName) {
       const errorClass = createNamedFunction(errorName, function (message) {
@@ -2052,20 +2047,7 @@ const Module = (function () {
     function embind__requireFunction(signature, rawFunction) {
       signature = readLatin1String(signature);
       function makeDynCaller(dynCall) {
-        const args = [];
-        for (let i = 1; i < signature.length; ++i) {
-          args.push(`a${i}`);
-        }
-        const name = `dynCall_${signature}_${rawFunction}`;
-        let body = `return function ${name}(${args.join(", ")}) {\n`;
-        body += `    return dynCall(rawFunction${
-          args.length ? ", " : ""
-        }${args.join(", ")});\n`;
-        body += "};\n";
-        return new Function("dynCall", "rawFunction", body)(
-          dynCall,
-          rawFunction,
-        );
+        return createClarinDynCaller(signature, rawFunction, dynCall);
       }
       let fp;
       if (Module[`FUNCTION_TABLE_${signature}`] !== undefined) {
@@ -2306,118 +2288,11 @@ const Module = (function () {
         return [];
       });
     }
-    function new_(constructor, argumentList) {
-      if (!(constructor instanceof Function)) {
-        throw new TypeError(
-          `new_ called with constructor type ${typeof constructor} which is not a function`,
-        );
-      }
-      const dummy = createNamedFunction(
-        constructor.name || "unknownFunctionName",
-        () => {},
+    function craftInvokerFunction(humanName, argTypes, classType, cppInvokerFunc, cppTargetFunc) {
+      return createClarinInvoker(
+        makeLegalFunctionName(humanName), humanName, argTypes, classType,
+        cppInvokerFunc, cppTargetFunc, throwBindingError, runDestructors,
       );
-      dummy.prototype = constructor.prototype;
-      const obj = new dummy();
-      const r = constructor.apply(obj, argumentList);
-      return r instanceof Object ? r : obj;
-    }
-    function craftInvokerFunction(
-      humanName,
-      argTypes,
-      classType,
-      cppInvokerFunc,
-      cppTargetFunc,
-    ) {
-      const argCount = argTypes.length;
-      if (argCount < 2) {
-        throwBindingError(
-          "argTypes array size mismatch! Must at least get return value and 'this' types!",
-        );
-      }
-      const isClassMethodFunc = argTypes[1] !== null && classType !== null;
-      let needsDestructorStack = false;
-      for (var i = 1; i < argTypes.length; ++i) {
-        if (
-          argTypes[i] !== null &&
-          argTypes[i].destructorFunction === undefined
-        ) {
-          needsDestructorStack = true;
-          break;
-        }
-      }
-      const returns = argTypes[0].name !== "void";
-      let argsList = "";
-      let argsListWired = "";
-      for (var i = 0; i < argCount - 2; ++i) {
-        argsList += `${i !== 0 ? ", " : ""}arg${i}`;
-        argsListWired += `${i !== 0 ? ", " : ""}arg${i}Wired`;
-      }
-      let invokerFnBody =
-        `return function ${makeLegalFunctionName(humanName)}(${argsList}) {\n` +
-        `if (arguments.length !== ${argCount - 2}) {\n` +
-        `throwBindingError('function ${humanName} called with ' + arguments.length + ' arguments, expected ${
-          argCount - 2
-        } args!');\n` +
-        `}\n`;
-      if (needsDestructorStack) {
-        invokerFnBody += "var destructors = [];\n";
-      }
-      const dtorStack = needsDestructorStack ? "destructors" : "null";
-      const args1 = [
-        "throwBindingError",
-        "invoker",
-        "fn",
-        "runDestructors",
-        "retType",
-        "classParam",
-      ];
-      const args2 = [
-        throwBindingError,
-        cppInvokerFunc,
-        cppTargetFunc,
-        runDestructors,
-        argTypes[0],
-        argTypes[1],
-      ];
-      if (isClassMethodFunc) {
-        invokerFnBody += `var thisWired = classParam.toWireType(${dtorStack}, this);\n`;
-      }
-      for (var i = 0; i < argCount - 2; ++i) {
-        invokerFnBody += `var arg${i}Wired = argType${i}.toWireType(${dtorStack}, arg${i}); // ${
-          argTypes[i + 2].name
-        }\n`;
-        args1.push(`argType${i}`);
-        args2.push(argTypes[i + 2]);
-      }
-      if (isClassMethodFunc) {
-        argsListWired = `thisWired${
-          argsListWired.length > 0 ? ", " : ""
-        }${argsListWired}`;
-      }
-      invokerFnBody += `${returns ? "var rv = " : ""}invoker(fn${
-        argsListWired.length > 0 ? ", " : ""
-      }${argsListWired});\n`;
-      if (needsDestructorStack) {
-        invokerFnBody += "runDestructors(destructors);\n";
-      } else {
-        for (var i = isClassMethodFunc ? 1 : 2; i < argTypes.length; ++i) {
-          const paramName = i === 1 ? "thisWired" : `arg${i - 2}Wired`;
-          if (argTypes[i].destructorFunction !== null) {
-            invokerFnBody += `${paramName}_dtor(${paramName}); // ${argTypes[i].name}\n`;
-            args1.push(`${paramName}_dtor`);
-            args2.push(argTypes[i].destructorFunction);
-          }
-        }
-      }
-      if (returns) {
-        invokerFnBody +=
-          "var ret = retType.fromWireType(rv);\n" + "return ret;\n";
-      } else {
-      }
-      invokerFnBody += "}\n";
-      args1.push(invokerFnBody);
-      const invokerFunction = new_(Function, args1).apply(null, args2);
-      return invokerFunction;
     }
     function __embind_register_class_function(
       rawClassType,

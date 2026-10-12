@@ -1,0 +1,138 @@
+{
+  "schema": 1,
+  "browser": "Firefox 146.0.1",
+  "scope": "Real Next member editor, mocked HTTP; production build on isolated VPS QA",
+  "finding": "The first Back, restoration, replay and Forward preserve length 2. The first script of the reloaded document already observes length 3 with no prior marker. Cancelling the subsequent document traversal preserves length 3. No pushState occurs between Forward and the new document bootstrap. The test now waits for the catalog to mount before Forward, and compares each cancellation against its own pre-traversal length; it also checks the complete first Back/Forward cycle.",
+  "events": [
+    {
+      "kind": "replaceState",
+      "url": "http://localhost:3011/dashboard/whiteboards?qa_history=exact#catalog",
+      "length": 1,
+      "position": {
+        "documentID": "fc6a6592-d4c4-41f2-900c-00caeb677651",
+        "index": 0
+      },
+      "time": 1791792504203
+    },
+    {
+      "kind": "replaceState",
+      "url": "http://localhost:3011/dashboard/whiteboards?qa_history=exact#catalog",
+      "length": 1,
+      "position": {
+        "documentID": "fc6a6592-d4c4-41f2-900c-00caeb677651",
+        "index": 0
+      },
+      "time": 1791792504590
+    },
+    {
+      "kind": "pageshow",
+      "url": "http://localhost:3011/dashboard/whiteboards?qa_history=exact#catalog",
+      "length": 1,
+      "position": {
+        "documentID": "fc6a6592-d4c4-41f2-900c-00caeb677651",
+        "index": 0
+      },
+      "time": 1791792504594
+    },
+    {
+      "kind": "pushState",
+      "url": "http://localhost:3011/dashboard/whiteboards/10000000-0000-4000-8000-000000000001",
+      "length": 2,
+      "position": {
+        "documentID": "fc6a6592-d4c4-41f2-900c-00caeb677651",
+        "index": 1
+      },
+      "time": 1791792506009
+    },
+    {
+      "kind": "popstate",
+      "url": "http://localhost:3011/dashboard/whiteboards?qa_history=exact#catalog",
+      "length": 2,
+      "position": {
+        "documentID": "fc6a6592-d4c4-41f2-900c-00caeb677651",
+        "index": 0
+      },
+      "time": 1791792510406
+    },
+    {
+      "kind": "popstate",
+      "url": "http://localhost:3011/dashboard/whiteboards/10000000-0000-4000-8000-000000000001",
+      "length": 2,
+      "position": {
+        "documentID": "fc6a6592-d4c4-41f2-900c-00caeb677651",
+        "index": 1
+      },
+      "time": 1791792510433
+    },
+    {
+      "kind": "popstate",
+      "url": "http://localhost:3011/dashboard/whiteboards?qa_history=exact#catalog",
+      "length": 2,
+      "position": {
+        "documentID": "fc6a6592-d4c4-41f2-900c-00caeb677651",
+        "index": 0
+      },
+      "time": 1791792511617
+    },
+    {
+      "kind": "replaceState",
+      "url": "http://localhost:3011/dashboard/whiteboards?qa_history=exact#catalog",
+      "length": 2,
+      "position": {
+        "documentID": "fc6a6592-d4c4-41f2-900c-00caeb677651",
+        "index": 0
+      },
+      "time": 1791792511648
+    },
+    {
+      "kind": "popstate",
+      "url": "http://localhost:3011/dashboard/whiteboards/10000000-0000-4000-8000-000000000001",
+      "length": 2,
+      "position": {
+        "documentID": "fc6a6592-d4c4-41f2-900c-00caeb677651",
+        "index": 1
+      },
+      "time": 1791792511818
+    },
+    {
+      "kind": "replaceState",
+      "url": "http://localhost:3011/dashboard/whiteboards/10000000-0000-4000-8000-000000000001",
+      "length": 2,
+      "position": {
+        "documentID": "fc6a6592-d4c4-41f2-900c-00caeb677651",
+        "index": 1
+      },
+      "time": 1791792511843
+    },
+    {
+      "kind": "replaceState",
+      "url": "http://localhost:3011/dashboard/whiteboards/10000000-0000-4000-8000-000000000001",
+      "length": 3,
+      "position": {
+        "documentID": "0c046537-9bb2-441f-9f6b-41c9af6204ca",
+        "index": 0
+      },
+      "time": 1791792512683
+    },
+    {
+      "kind": "replaceState",
+      "url": "http://localhost:3011/dashboard/whiteboards/10000000-0000-4000-8000-000000000001",
+      "length": 3,
+      "position": {
+        "documentID": "0c046537-9bb2-441f-9f6b-41c9af6204ca",
+        "index": 0
+      },
+      "time": 1791792512931
+    },
+    {
+      "kind": "pageshow",
+      "url": "http://localhost:3011/dashboard/whiteboards/10000000-0000-4000-8000-000000000001",
+      "length": 3,
+      "position": {
+        "documentID": "0c046537-9bb2-441f-9f6b-41c9af6204ca",
+        "index": 0
+      },
+      "time": 1791792512936
+    }
+  ]
+}

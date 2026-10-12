@@ -429,7 +429,11 @@ describe('WhiteboardCommentsPanel', () => {
     })
 
     const textarea = await screen.findByPlaceholderText('Escribe el primer comentario del hilo')
+    fireEvent.change(textarea, { target: { value: 'Borrador anterior' } })
+    const draftRevision = commentsRef.current!.getNavigationRevision()
     fireEvent.change(textarea, { target: { value: 'Una sola vez' } })
+    expect(commentsRef.current!.getNavigationRevision()).toBeGreaterThan(draftRevision)
+    const submittedRevision = commentsRef.current!.getNavigationRevision()
     expect(commentsRef.current?.hasUnsavedDrafts()).toBe(true)
     fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
     fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
@@ -437,6 +441,7 @@ describe('WhiteboardCommentsPanel', () => {
 
     await waitFor(() => expect(apiMocks.createWhiteboardCommentThread).toHaveBeenCalledTimes(1))
     expect(commentsRef.current?.hasPendingMutations()).toBe(true)
+    expect(commentsRef.current!.getNavigationRevision()).toBeGreaterThan(submittedRevision)
     expect(textarea).toBeDisabled()
     expect(screen.getByPlaceholderText('Escribe el primer comentario del hilo')).toBeInTheDocument()
 

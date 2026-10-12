@@ -8,14 +8,14 @@
       "manifestSpec": "file:vendor/excalidraw-clarin/packages/excalidraw",
       "lockPath": "vendor/excalidraw-clarin/packages/excalidraw",
       "treePath": "vendor/excalidraw-clarin",
-      "sha256": "4e7a50f8c7f21fdeb88bb0206106b90f7ef31b0b406fc2aaea4055282c1785d1",
+      "sha256": "b9753650b2b80704a46b670d6651a80da59c7858d774be343936f2f8c15d3eb9",
       "upstreamTag": "v0.18.1",
       "upstreamCommit": "a2ec2889babf7d2295469c6d90ebe77fae57df84",
       "localCommit": "d349f386f62739a81379338761780e71c721e552",
       "verification": "Exact candidate tree digest, including uncommitted Clarin .8 source changes; localCommit identifies the base checkout, not a new release commit."
     },
     "expectedComponentCount": 248,
-    "expectedSbomSha256": "43d3a239b16f8572ab9cac40335946834fd499f57c4998c14972d7e00c5bec0e"
+    "expectedSbomSha256": "11dbd6b8a303cec9017237893fe4c715696e7c874f4325e3d158b1fc4da498ef"
   },
   "audit": {
     "observedAt": "2026-10-12",
@@ -83,8 +83,136 @@
     }
   ],
   "releaseDecision": {
-    "status": "PENDING_FINAL_VERIFICATION",
-    "scope": "Clarin .8 semantic stroke presets and export ink bounds; upstream unchanged at v0.18.1",
-    "reason": "No production approval. Exact .8 source, SBOM/license binding, native engine unit tests, compiled compatibility/render tests, and Chromium Amplio PNG/SVG/reload and responsive chrome checks passed in isolated QA. Full browser egress/branding suite and final production build are being completed; build/release findings must be read with the QA report. The unresolved braces and browser-reachable KaTeX advisories remain in triage. No deployment or production health check was performed."
+    "status": "VERIFIED_FOR_REVIEW_WITH_KNOWN_LIMITATIONS",
+    "scope": "Clarin .8 semantic stroke presets, export ink bounds and isolated same-origin font workers; upstream unchanged at v0.18.1",
+    "reason": "Verification completed in the isolated VPS QA checkout and its production standalone build. This is evidence for review, not deployment authorization. Inherited braces and browser-reachable KaTeX advisories remain in_triage. Large-scene measurements preserve all elements but show substantial interaction and main-thread cost at 50,000 elements; they do not establish fluid editing or production/server performance.",
+    "checks": {
+      "forkNativeTests": {
+        "passed": 61,
+        "files": 8
+      },
+      "compiledRenderCompatibilityAssetsAndOfflineTests": {
+        "passed": 35,
+        "files": 4
+      },
+      "productionBuild": {
+        "result": "PASS",
+        "verifiedArtifacts": 939,
+        "brandingFiles": 33,
+        "legalArtifacts": 6
+      },
+      "chromiumIsolation": {
+        "passed": 21,
+        "skipped": 2,
+        "skips": [
+          "Opt-in neutral visual reference, captured separately before/after at four widths.",
+          "Local-font export test targets Firefox; separately passed there."
+        ]
+      },
+      "browserSaveRaces": {
+        "passed": 4,
+        "includes": [
+          "Interleaved ACK in one and two sessions with export/reopen consistency.",
+          "Failed image upload then explicit retry without duplicate scene references.",
+          "context.setOffline plus closed WS and aborted HTTP, local draft retained, reconnect and reopen with identical IDs."
+        ]
+      },
+      "nativeFontWorker": {
+        "browsers": [
+          "Chromium",
+          "Firefox",
+          "WebKit"
+        ],
+        "result": "PASS",
+        "assertions": [
+          "Native worker response with font bytes after a 1.5-second cold download delay.",
+          "Same-origin URL, no file URL or main-thread fallback, embedded SVG font.",
+          "Worker-specific WASM CSP; document policy unchanged; v4 worker copy and v4/v5 manifest SHA match."
+        ],
+        "diagnostics": "docs/qa/tasks-whiteboards-20261012/production/worker/"
+      },
+      "memberNavigation": {
+        "browsers": [
+          "Chromium",
+          "Firefox",
+          "WebKit"
+        ],
+        "result": "PASS",
+        "scope": "Save-before-Back including a later edit; cancel failed Back and Forward without changing the cursor or same-document history length. Firefox reload baseline is measured separately because the browser adds its own history entry before bootstrap."
+      },
+      "runtimeEgress": {
+        "result": "PASS",
+        "staticFiles": 69,
+        "tracedURLs": 293,
+        "unexpectedBlocked": 0,
+        "cspViolations": 0,
+        "observedAbortedChunkRequests": 3,
+        "evidence": "docs/qa/tasks-whiteboards-20261012/production/whiteboard-egress.json",
+        "limitation": "Explicit user-triggered fixture link is allow-listed; mocked transport and navigation/teardown chunk aborts are recorded."
+      },
+      "visibleBranding": {
+        "result": "PASS",
+        "surfaces": 2,
+        "visibleActions": 95,
+        "staticFiles": 33,
+        "legalArtifacts": 6,
+        "evidence": "docs/qa/tasks-whiteboards-20261012/production/whiteboard-branding.json"
+      },
+      "fullEditorProfile": {
+        "result": "PASS",
+        "sampleCountPerSize": 1,
+        "scope": "Real guest editor, Chromium 145, 1440x900; simple unfilled rectangles with viewport culling. Select one existing element and move it 1px, retain exactly 1k/10k/50k objects and export them. Mock HTTP/WS echoes the full canonical scene in ACK. Includes debounce/browser work; no server/DB latency or FPS claim.",
+        "samples": [
+          {
+            "elements": 1000,
+            "mountMs": 2131.61,
+            "gestureMs": 254.9,
+            "editThroughConfirmedSaveMs": 2142.2,
+            "patches": 1,
+            "longestMainThreadTaskMs": 266,
+            "approximateJSHeapBytes": 27600000,
+            "evidence": "docs/qa/tasks-whiteboards-20261012/production/editor-performance-1000.json"
+          },
+          {
+            "elements": 10000,
+            "mountMs": 6097.53,
+            "gestureMs": 1692.24,
+            "editThroughConfirmedSaveMs": 4181.47,
+            "patches": 1,
+            "longestMainThreadTaskMs": 1273,
+            "approximateJSHeapBytes": 91700000,
+            "evidence": "docs/qa/tasks-whiteboards-20261012/production/editor-performance-10000.json"
+          },
+          {
+            "elements": 50000,
+            "mountMs": 7763.7,
+            "gestureMs": 3147.01,
+            "editThroughConfirmedSaveMs": 9299.64,
+            "patches": 1,
+            "longestMainThreadTaskMs": 2773,
+            "approximateJSHeapBytes": 342000000,
+            "evidence": "docs/qa/tasks-whiteboards-20261012/production/editor-performance-50000.json"
+          }
+        ]
+      }
+    },
+    "deployment": {
+      "performed": false,
+      "productionHealthClaim": false
+    }
+  },
+  "artifactReachability": {
+    "evidencePath": "docs/qa/tasks-whiteboards-20261012/production/artifact-reachability.json",
+    "sha256": "dc5625caf2d8ba6a0a4fa6b6984a30099457d55b871b988f3b48cbf426f29a5f",
+    "sourceSha256": "b9753650b2b80704a46b670d6651a80da59c7858d774be343936f2f8c15d3eb9",
+    "productionJavascriptFileCount": 311,
+    "productionSourceMapCount": 0,
+    "coBuiltDevelopmentMapCount": 68,
+    "coBuiltDevelopmentSourceCount": 477,
+    "classification": {
+      "sassChokidarBraces": "Installed build-tool chain: fork/Next -> Sass1.51.0 -> Chokidar3.6.0 -> braces3.0.3. The fork build script imports sassPlugin; no direct runtime import or mapped fork source for these tools was found. This is a scoped build-tool classification, not proof of global browser absence from minified Next without production source maps. Advisory stays in_triage.",
+      "katexMermaid": "Browser runtime confirmed in final minified Next chunks listed above. Both editor hosts set aiEnabled=false but leave mermaidEnabled enabled; local Mermaid parsing reaches KaTeX. Prototype-pollution/attacker-controlled-options preconditions and sanitizer bypass were not exercised; advisory stays in_triage."
+    },
+    "limitations": "No exploit remediation or production deployment claim. Static role classification and observed runtime chunks complement, not replace, browser isolation tests."
   }
 }

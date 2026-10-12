@@ -1,6 +1,6 @@
 CLARIN WHITEBOARD DEPENDENCY LICENSES
 Generated deterministically from installed license files and pinned official repository evidence.
-SBOM SHA-256: 43d3a239b16f8572ab9cac40335946834fd499f57c4998c14972d7e00c5bec0e
+SBOM SHA-256: 11dbd6b8a303cec9017237893fe4c715696e7c874f4325e3d158b1fc4da498ef
 SBOM components: 248; covered: 247; explicitly excluded: 1.
 Identical legal texts are included once, with every applicable component listed.
 This install closure over-approximates browser code; inclusion does not imply runtime execution.

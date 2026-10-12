@@ -11,11 +11,23 @@ surface is:
   is removed. `scene/clarinExportBounds.ts` adds the rendered stroke outline to
   export-only bounds so thick strokes and taps fit PNG/SVG; editor hitboxes and
   deliberate frame cropping remain unchanged. Focused fork tests cover both.
+  `subset/clarinSubsetWorkerUrl.ts` resolves the font-subsetting worker solely
+  under the host's same-origin versioned asset directory. Clarin builds and
+  publishes a self-contained ESM worker with embedded WOFF2/HarfBuzz WASM;
+  it no longer depends on Next's build-time `file://` rewriting. A worker-only
+  CSP permits WASM but forbids network access; document script policy is unchanged.
+  The exact offline-v3/v4/v5 asset paths follow the same policy. WOFF2 embind
+  wrappers use ordinary closures instead of runtime JavaScript compilation,
+  preserving receivers, arity and conversion/destruction order. Active worker
+  jobs have a bounded 15-second startup/work deadline; idle workers still close
+  after one second. Regression tests cover a cold download above the old limit.
 
 - `packages/excalidraw/mermaid.ts`, `components/App.tsx` and
   `components/TTDDialog/TTDDialog.tsx`: `.7` closes implicit Mermaid clipboard
-  conversion and dialog/parser loading when the host sets `aiEnabled={false}`.
-  Diagram-like clipboard text remains ordinary editable text. Both parser
+  conversion and dialog/parser loading unless the host enables `mermaidEnabled`.
+  This capability is independent of `aiEnabled`; Clarin currently enables local
+  Mermaid while disabling AI. Without the capability, diagram-like clipboard
+  text remains ordinary editable text. Both parser
   entry points use one tested capability boundary, including direct dialog use.
   Nanoid 3.3.19 and Radix Tabs 1.1.21 retain the same APIs with security fixes
   and React 19 support; remaining transitives are pinned by the root lock.

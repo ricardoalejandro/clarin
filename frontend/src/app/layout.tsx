@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import { buildChunkRecoveryScript } from '@/lib/chunkRecoveryScript'
+import { buildNavigationHistoryScript } from '@/lib/navigationHistory'
 import RootServiceWorkerRuntime from '@/components/mobile-app/RootServiceWorkerRuntime'
 import './globals.css'
 
@@ -40,6 +41,7 @@ export default function RootLayout({
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
         <link rel="canonical" href={APP_URL} />
+        <script dangerouslySetInnerHTML={{ __html: buildNavigationHistoryScript() }} />
         <script dangerouslySetInnerHTML={{ __html: buildChunkRecoveryScript(process.env.NEXT_PUBLIC_BUILD_VERSION || 'dev') }} />
         <script dangerouslySetInnerHTML={{ __html: `
           (function() {

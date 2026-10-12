@@ -38,6 +38,7 @@ export default defineConfig({
       'src/lib/securityDependencyRegression.test.ts',
       'src/lib/pwaCache.test.ts',
       'src/lib/chunkRecoveryScript.test.ts',
+      'src/lib/navigationHistory.test.ts',
       'src/lib/offlineCanonicalRoute.test.ts',
       'src/lib/survey*.test.ts',
       'src/lib/fabric/**/*.test.ts',
