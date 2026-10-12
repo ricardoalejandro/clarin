@@ -1216,7 +1216,7 @@ func (r *TaskRepository) getByAccount(ctx context.Context, accountID uuid.UUID, 
 	}
 	defer rows.Close()
 
-	var tasks []*domain.Task
+	tasks := make([]*domain.Task, 0)
 	for rows.Next() {
 		t, err := r.scanTask(rows)
 		if err != nil {
@@ -1224,7 +1224,7 @@ func (r *TaskRepository) getByAccount(ctx context.Context, accountID uuid.UUID, 
 		}
 		tasks = append(tasks, t)
 	}
-	return tasks, total, nil
+	return tasks, total, rows.Err()
 }
 
 func (r *TaskRepository) GetByAccountForActor(ctx context.Context, accountID, actorID uuid.UUID, filters map[string]string, limit, offset int) ([]*domain.Task, int, error) {

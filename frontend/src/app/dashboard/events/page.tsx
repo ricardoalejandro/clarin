@@ -11,7 +11,11 @@ import {
 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
-import FormulaEditor from '@/components/FormulaEditor'
+import { cancelEventResource } from '@/components/events/eventCancellation'
+import EventConfigurationWindow from '@/components/events/EventConfigurationWindow'
+import { EventStageSummary, type EventStageSummaryItem } from '@/components/events/EventStageSummary'
+import { EventListActions } from '@/components/events/EventListActions'
+import { api, subscribeWebSocket } from '@/lib/api'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 import { resolveEventsResponsiveLayout, type EventsViewMode } from '@/lib/eventsResponsive'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
@@ -95,9 +99,11 @@ interface Event {
   tag_formula_type?: string
   folder_id?: string | null
   created_at: string
+  updated_at?: string
   total_participants: number
   participant_counts?: Record<string, number>
   stage_counts?: Record<string, number>
+  stage_summary?: EventStageSummaryItem[]
   tags?: TagItem[]
 }
 
@@ -183,25 +189,7 @@ export default function EventsPage() {
   // Event modal
   const [showCreate, setShowCreate] = useState(false)
   const [editEvent, setEditEvent] = useState<Event | null>(null)
-  const [formData, setFormData] = useState({
-    name: '', description: '', event_date: '', event_end: '', location: '', color: '#3b82f6', status: 'active',
-    tag_ids: [] as string[], formula_mode: 'OR' as 'AND' | 'OR', include_tag_ids: [] as string[], exclude_tag_ids: [] as string[],
-    tag_formula: '', tag_formula_type: 'simple' as 'simple' | 'advanced',
-  })
-
-  // Tags for auto-sync
-  const [availableTags, setAvailableTags] = useState<TagItem[]>([])
-  const [showTagDropdown, setShowTagDropdown] = useState(false)
-  const [tagSearch, setTagSearch] = useState('')
-  const [debouncedTagSearch, setDebouncedTagSearch] = useDebouncedValue(tagSearch, SEARCH_DEBOUNCE_MS)
-  const tagSearchPending = tagSearch !== debouncedTagSearch
-  const tagDropdownRef = useRef<HTMLDivElement>(null)
-
-  // Formula validation state
-  const [formulaIsValid, setFormulaIsValid] = useState(true)
-  const [ruleRevision, setRuleRevision] = useState(0)
-  const [savingEvent, setSavingEvent] = useState(false)
-
+  const [configurationSection, setConfigurationSection] = useState<'data'|'stages'|'rules'>('data')
   // Folder modal
   const [showFolderModal, setShowFolderModal] = useState(false)
   const [editFolder, setEditFolder] = useState<EventFolder | null>(null)
@@ -211,6 +199,7 @@ export default function EventsPage() {
   const [menuEventID, setMenuEventID] = useState<string | null>(null)
   const [showMoveMenu, setShowMoveMenu] = useState<string | null>(null)
   const [duplicatingEventID, setDuplicatingEventID] = useState<string | null>(null)
+  const [cancellingEventID, setCancellingEventID] = useState<string | null>(null)
 
   // Drag & drop
   const [dragOverFolderID, setDragOverFolderID] = useState<string | null>(null)
@@ -219,18 +208,6 @@ export default function EventsPage() {
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : ''
 
   // ─── Data Fetching ──────────────────────────────────────────────────────────
-
-  const fetchTags = useCallback(async () => {
-    try {
-      const res = await fetch('/api/tags', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success) setAvailableTags(data.tags || [])
-    } catch (e) {
-      console.error(e)
-    }
-  }, [token])
 
   const fetchFolders = useCallback(async () => {
     try {
@@ -244,7 +221,8 @@ export default function EventsPage() {
     }
   }, [token])
 
-  const fetchEvents = useCallback(async (reset: boolean = true) => {
+  const fetchEvents = useCallback(async (reset: boolean = true, reconcile: boolean = false) => {
+    const visibleLimit = reset && reconcile ? Math.max(EVENTS_PAGE_SIZE, offsetRef.current) : EVENTS_PAGE_SIZE
     if (!reset && (!hasMoreRef.current || loadingMoreRef.current)) return
     if (!reset) {
       loadingMoreRef.current = true
@@ -260,17 +238,22 @@ export default function EventsPage() {
         offsetRef.current = 0
         hasMoreRef.current = true
       }
-      const params = eventListQuery({ search: debouncedSearch, status: statusFilter, includeCancelled,
-        folderID: currentFolderID, limit: EVENTS_PAGE_SIZE, offset: offsetRef.current })
-      const res = await fetch(`/api/events?${params}`, {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: controller.signal,
-      })
-      const data = await res.json().catch(() => ({}))
+      const pageItems: Event[] = []
+      let serverCount = 0
+      do {
+        const params = eventListQuery({ search: debouncedSearch, status: statusFilter, includeCancelled,
+          folderID: currentFolderID, limit: Math.min(200, visibleLimit - pageItems.length), offset: offsetRef.current + pageItems.length, sort: sortField ?? 'date', direction: sortDirection })
+        const response = await api<{ success: boolean; events?: Event[]; total?: number; error?: string }>(`/api/events?${params}`, { signal: controller.signal })
+        if (controller.signal.aborted || requestID !== eventsRequestRef.current) return
+        const result = response.data
+        if (!response.success || !result?.success) throw new Error(response.error || result?.error || 'No se pudieron cargar los eventos')
+        const items: Event[] = result.events || []
+        pageItems.push(...items)
+        serverCount = result.total ?? pageItems.length
+        if (!items.length) break
+      } while (reset && reconcile && pageItems.length < visibleLimit && pageItems.length < serverCount)
+      const data = { success: true, events: pageItems, total: serverCount }
       if (requestID !== eventsRequestRef.current) return
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'No se pudieron cargar los eventos')
-      }
       if (data.success) {
         const newEvents: Event[] = data.events || []
         if (reset) {
@@ -301,7 +284,7 @@ export default function EventsPage() {
         loadingMoreRef.current = false
       }
     }
-  }, [token, debouncedSearch, statusFilter, currentFolderID, includeCancelled])
+  }, [token, debouncedSearch, statusFilter, currentFolderID, includeCancelled, sortField, sortDirection])
 
   useEffect(() => () => {
     eventsRequestRef.current += 1
@@ -332,12 +315,18 @@ export default function EventsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  useEffect(() => { void fetchFolders() }, [fetchFolders])
+  useEffect(() => { void fetchEvents() }, [fetchEvents])
   useEffect(() => {
-    setLoading(true)
-    fetchFolders()
-    fetchEvents()
-    fetchTags()
-  }, [fetchFolders, fetchEvents, fetchTags])
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const unsubscribe = subscribeWebSocket((message: unknown) => {
+      const event = (message as { event?: string }).event ?? ''
+      if (!['event_update', 'event_participant_update', 'event_stage_update', 'event_membership_update'].includes(event)) return
+      clearTimeout(timer)
+      timer = setTimeout(() => { void fetchEvents(true, true); }, 150)
+    })
+    return () => { unsubscribe(); clearTimeout(timer) }
+  }, [fetchEvents])
 
   // Infinite scroll for events
   useEffect(() => {
@@ -366,37 +355,15 @@ export default function EventsPage() {
 
       // Escape always dismisses only the topmost layer. A filter/dropdown must
       // never collapse the form behind it or navigate away from the page.
-      if (showTagDropdown) { closeLayer(() => { setShowTagDropdown(false); setTagSearch(''); setDebouncedTagSearch('') }); return }
       if (showMoveMenu) { closeLayer(() => setShowMoveMenu(null)); return }
       if (menuEventID) { closeLayer(() => setMenuEventID(null)); return }
-      if (showCreate || editEvent) {
-        closeLayer(() => {
-          if (savingEvent) return
-          setShowCreate(false)
-          setEditEvent(null)
-        })
-        return
-      }
       if (showFolderModal || editFolder) {
         closeLayer(() => { setShowFolderModal(false); setEditFolder(null) })
       }
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
-  }, [showTagDropdown, showMoveMenu, menuEventID, showCreate, editEvent, savingEvent, showFolderModal, editFolder])
-
-  // Close tag dropdown on outside click
-  useEffect(() => {
-    const h = (e: MouseEvent) => {
-      if (tagDropdownRef.current && !tagDropdownRef.current.contains(e.target as Node)) {
-        setShowTagDropdown(false)
-        setTagSearch('')
-        setDebouncedTagSearch('')
-      }
-    }
-    document.addEventListener('mousedown', h)
-    return () => document.removeEventListener('mousedown', h)
-  }, [])
+  }, [showMoveMenu, menuEventID, showFolderModal, editFolder])
 
   // Close context menus on outside click
   useEffect(() => {
@@ -420,25 +387,7 @@ export default function EventsPage() {
   // The server applies status visibility before counting and pagination.
   const filteredEvents = events
 
-  // Sorted events for list view
-  const sortedEvents = useMemo(() => {
-    if (!sortField) return filteredEvents
-    return [...filteredEvents].sort((a, b) => {
-      let va: string | number = 0, vb: string | number = 0
-      switch (sortField) {
-        case 'name': va = a.name.toLowerCase(); vb = b.name.toLowerCase(); break
-        case 'status': va = a.status; vb = b.status; break
-        case 'formula': va = (a.tag_formula || (a.tags && a.tags.length > 0)) ? 1 : 0; vb = (b.tag_formula || (b.tags && b.tags.length > 0)) ? 1 : 0; break
-        case 'participants': va = a.total_participants; vb = b.total_participants; break
-        case 'asistentes': va = a.stage_counts?.['Asistieron'] || 0; vb = b.stage_counts?.['Asistieron'] || 0; break
-        case 'preinscritos': va = a.stage_counts?.['Pre inscritos'] || 0; vb = b.stage_counts?.['Pre inscritos'] || 0; break
-        case 'inscritos': va = a.stage_counts?.['Inscrito'] || 0; vb = b.stage_counts?.['Inscrito'] || 0; break
-      }
-      if (va < vb) return sortDirection === 'asc' ? -1 : 1
-      if (va > vb) return sortDirection === 'asc' ? 1 : -1
-      return 0
-    })
-  }, [filteredEvents, sortField, sortDirection])
+  const sortedEvents = filteredEvents
 
   const toggleSort = (field: string) => {
     if (sortField === field) {
@@ -450,7 +399,7 @@ export default function EventsPage() {
   }
 
   const SortIcon = ({ field }: { field: string }) => (
-    <span className="inline-flex flex-col ml-1 -space-y-1 text-[8px] leading-none">
+    <span aria-hidden="true" className="inline-flex flex-col ml-1 -space-y-1 text-[8px] leading-none">
       <span className={sortField === field && sortDirection === 'asc' ? 'text-emerald-600' : 'text-slate-300'}>▲</span>
       <span className={sortField === field && sortDirection === 'desc' ? 'text-emerald-600' : 'text-slate-300'}>▼</span>
     </span>
@@ -525,246 +474,34 @@ export default function EventsPage() {
 
   // ─── Event CRUD ─────────────────────────────────────────────────────────────
 
-  const resetEventForm = () => {
-    setFormData({ name: '', description: '', event_date: '', event_end: '', location: '', color: '#3b82f6', status: 'active', tag_ids: [], formula_mode: 'OR', include_tag_ids: [], exclude_tag_ids: [], tag_formula: '', tag_formula_type: 'simple' })
-    setShowTagDropdown(false)
-    setTagSearch('')
-    setDebouncedTagSearch('')
-    setFormulaIsValid(true)
-    setRuleRevision(0)
+  const configurationOpen = showCreate || !!editEvent
+  const configurationOpenRef = useRef(configurationOpen)
+  configurationOpenRef.current = configurationOpen
+  const openEventRoute = (ev: Event, logbook = false) => {
+    if (configurationOpenRef.current) return
+    const query = new URLSearchParams()
+    if (currentFolderID) query.set('folder', currentFolderID)
+    if (logbook) query.set('view', 'logbook')
+    router.push('/dashboard/events/' + ev.id + (query.size ? '?' + query : ''))
   }
+  const resetEventForm = () => { if (configurationOpen) return; setEditEvent(null); setConfigurationSection('data') }
+  const openEditEvent = (ev: Event) => { if (configurationOpen) return; setConfigurationSection('data'); setEditEvent(ev) }
+  const openStageConfiguration = (ev: Event) => { if (configurationOpen) return; setConfigurationSection('stages'); setEditEvent(ev) }
 
-  const openEditEvent = async (ev: Event) => {
-    if (isEventContextReadOnly(ev.status)) return
-    // Fetch tags for this event
-    let includeIds: string[] = []
-    let excludeIds: string[] = []
-    let formulaMode: 'AND' | 'OR' = (ev.tag_formula_mode as 'AND' | 'OR') || 'OR'
-    let tagFormula = ''
-    let tagFormulaType: 'simple' | 'advanced' = 'simple'
+  const handleCancelEvent = async (ev: Event) => {
+    if (cancellingEventID || isEventContextReadOnly(ev.status)) return
+    if (!confirm('¿Cancelar «' + ev.name + '»? Sus participantes, observaciones y bitácoras se conservarán como historial. El evento quedará cerrado y no podrá reabrirse.')) return
+    setCancellingEventID(ev.id)
     try {
-      const res = await fetch(`/api/events/${ev.id}/tags`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json()
-      if (data.success && data.tags) {
-        for (const t of data.tags as TagItem[]) {
-          if (t.negate) {
-            excludeIds.push(t.id)
-          } else {
-            includeIds.push(t.id)
-          }
-        }
-        if (data.formula_mode) formulaMode = data.formula_mode
-        if (data.tag_formula) tagFormula = data.tag_formula
-        if (data.tag_formula_type) tagFormulaType = data.tag_formula_type
-        if (typeof data.rule_revision === 'number') setRuleRevision(data.rule_revision)
-      }
-    } catch (e) {
-      console.error('Failed to fetch event tags:', e)
-    }
-
-    setFormData({
-      name: ev.name,
-      description: ev.description || '',
-      event_date: eventLocalDateTime(ev.event_date),
-      event_end: eventLocalDateTime(ev.event_end),
-      location: ev.location || '',
-      color: ev.color,
-      status: ev.status,
-      tag_ids: [...includeIds, ...excludeIds],
-      formula_mode: formulaMode,
-      include_tag_ids: includeIds,
-      exclude_tag_ids: excludeIds,
-      tag_formula: tagFormula,
-      tag_formula_type: tagFormulaType,
-    })
-    setEditEvent(ev)
-  }
-
-  const currentRulePayload = () => ({
-    formula_mode: formData.formula_mode,
-    include_tag_ids: formData.include_tag_ids,
-    exclude_tag_ids: formData.exclude_tag_ids,
-    tag_formula: formData.tag_formula,
-    tag_formula_type: formData.tag_formula_type,
-  })
-
-  const previewRuleChange = async (eventID: string) => {
-    const res = await fetch(`/api/events/${eventID}/tags/preview`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(currentRulePayload()),
-    })
-    const data = await res.json()
-    if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo previsualizar la regla')
-    const impact = data.impact as { created: number; activated: number; deactivated: number; unchanged: number; matched: number; broad_rule: boolean; rule_revision: number; fingerprint: string }
-    const broad = impact.broad_rule
-      ? '\n\n⚠️ Es una regla negativa/amplia: puede incorporar a todos los contactos que no estén excluidos.'
-      : ''
-    const accepted = window.confirm(
-      `Impacto de la regla:\n\n` +
-      `• Nuevos: ${impact.created}\n• Reactivados: ${impact.activated}\n• Saldrán del listado activo: ${impact.deactivated}\n• Sin cambios: ${impact.unchanged}\n• Coincidencias: ${impact.matched}` +
-      `${broad}\n\nLos participantes que salgan conservarán su historial. Si eliminas todas las reglas, los inactivos no volverán automáticamente. ¿Confirmas el cambio?`
-    )
-    return accepted ? impact : null
-  }
-
-  const applyRuleChange = async (eventID: string, impact: { rule_revision: number; fingerprint: string }) => {
-    const res = await fetch(`/api/events/${eventID}/tags`, {
-      method: 'PUT',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ...currentRulePayload(),
-        expected_rule_revision: impact.rule_revision,
-        preview_fingerprint: impact.fingerprint,
-        confirm: true,
-      }),
-    })
-    const data = await res.json()
-    if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo guardar la regla')
-    setRuleRevision(data.rule_revision ?? impact.rule_revision + 1)
-  }
-
-  const handleCreateEvent = async () => {
-    if (savingEvent) return
-    setSavingEvent(true)
-    let provisionalEventID = ''
-    let canRollbackProvisional = false
-    try {
-    const hasFormula = formData.tag_formula_type === 'advanced'
-      ? formData.tag_formula.trim() !== ''
-      : (formData.include_tag_ids.length > 0 || formData.exclude_tag_ids.length > 0)
-    const requestedStatus = formData.status
-    const body: Record<string, unknown> = { ...formData }
-    delete body.tag_ids
-    delete body.formula_mode
-    delete body.include_tag_ids
-    delete body.exclude_tag_ids
-    delete body.tag_formula
-    delete body.tag_formula_type
-    Object.assign(body, eventDetailPayload(formData))
-    if (currentFolderID) body.folder_id = currentFolderID
-    // Build rule-governed active events as draft -> saved rule -> active. This
-    // prevents an observable interval where the event is active without the
-    // admission rule selected in this form.
-    if (hasFormula && requestedStatus === 'active') body.status = 'draft'
-
-    const res = await fetch('/api/events', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    const data = await res.json()
-    if (!res.ok || !data.success || !data.event?.id) throw new Error(data.error || 'No se pudo crear el evento')
-    provisionalEventID = data.event.id
-    canRollbackProvisional = hasFormula
-
-    if (hasFormula) {
-      const impact = await previewRuleChange(provisionalEventID)
-      if (!impact) {
-        const cleanupRes = await fetch(`/api/events/${provisionalEventID}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } })
-        if (!cleanupRes.ok) throw new Error('No se confirmó la regla y no pudimos retirar el borrador provisional. Actualiza la lista antes de continuar.')
-        provisionalEventID = ''
-        canRollbackProvisional = false
-        return
-      }
-      await applyRuleChange(provisionalEventID, impact)
-    }
-    if (hasFormula && requestedStatus === 'active') {
-      // Once this request starts, a lost response could still mean success; do
-      // not auto-delete in the catch path. The backend transition itself is
-      // atomic and the next refresh reveals active vs draft safely.
-      canRollbackProvisional = false
-      const activateRes = await fetch(`/api/events/${provisionalEventID}`, {
-        method: 'PUT',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'active' }),
-      })
-      const activateData = await activateRes.json().catch(() => ({}))
-      if (!activateRes.ok || !activateData.success) throw new Error(activateData.error || 'La regla se guardó, pero el evento quedó en borrador. Vuelve a activarlo.')
-    }
-    canRollbackProvisional = false
-    provisionalEventID = ''
-    setShowCreate(false)
-    resetEventForm()
-    fetchEvents()
-    fetchFolders()
-    } catch (e) {
-      if (provisionalEventID && canRollbackProvisional) {
-        try {
-          await fetch(`/api/events/${provisionalEventID}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } })
-          provisionalEventID = ''
-        } catch { /* a refresh below will reveal any recoverable draft */ }
-      }
-      fetchEvents()
-      alert(e instanceof Error ? e.message : 'No se pudo crear el evento')
-    } finally { setSavingEvent(false) }
-  }
-
-  const handleUpdateEvent = async () => {
-    if (!editEvent || savingEvent) return
-    setSavingEvent(true)
-    try {
-    const frozen = isEventContextReadOnly(editEvent.status)
-    if (frozen) throw new Error('El evento está cerrado y conserva su historial de solo lectura.')
-    // Validate the complete draft before rule previews or any mutation.
-    const detailPayload = eventDetailPayload(formData, editEvent)
-    const activatesDraft = editEvent.status === 'draft' && formData.status === 'active'
-    const closesEvent = !frozen && (formData.status === 'completed' || formData.status === 'cancelled')
-    const impact = frozen ? null : await previewRuleChange(editEvent.id)
-    if (!frozen && !impact) return
-
-    // A draft must persist its new rule before activation so the backend can
-    // reconcile that exact rule atomically with draft -> active. Likewise, a
-    // closing event applies its final rule before the roster becomes frozen.
-    if (impact && (activatesDraft || closesEvent)) {
-      await applyRuleChange(editEvent.id, impact)
-    }
-    const body: Record<string, unknown> = { ...formData }
-    delete body.tag_ids
-    delete body.formula_mode
-    delete body.include_tag_ids
-    delete body.exclude_tag_ids
-    delete body.tag_formula
-    delete body.tag_formula_type
-    Object.assign(body, detailPayload)
-
-    const res = await fetch(`/api/events/${editEvent.id}`, {
-      method: 'PUT',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    const data = await res.json()
-    if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo actualizar el evento')
-    if (data.success) {
-      if (impact && !activatesDraft && !closesEvent) await applyRuleChange(editEvent.id, impact)
-      setEditEvent(null)
-      resetEventForm()
-      fetchEvents()
-    }
-    } catch (e) {
-      alert(e instanceof Error ? e.message : 'No se pudo actualizar el evento')
-    } finally { setSavingEvent(false) }
-  }
-
-  const handleDeleteEvent = async (id: string) => {
-    if (!confirm('¿Eliminar este evento y todos sus participantes?')) return
-    try {
-      const res = await fetch(`/api/events/${id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok || data.success === false) throw new Error(data.error || 'No se pudo eliminar el evento')
-      await Promise.all([fetchEvents(), fetchFolders()])
+      await cancelEventResource(ev, token || '')
+      await Promise.all([fetchEvents(true, true), fetchFolders()])
     } catch (error) {
-      alert(error instanceof Error ? error.message : 'No se pudo eliminar el evento')
-    }
+      alert(error instanceof Error ? error.message : 'No se pudo cancelar el evento')
+    } finally { setCancellingEventID(null) }
   }
 
   const handleDuplicateEvent = async (id: string) => {
-    if (duplicatingEventID) return
+    if (duplicatingEventID || configurationOpenRef.current) return
     setDuplicatingEventID(id)
     try {
       const res = await fetch(`/api/events/${id}/duplicate`, {
@@ -776,6 +513,7 @@ export default function EventsPage() {
         alert(data.error || 'No se pudo duplicar el evento')
         return
       }
+      if (configurationOpenRef.current) { await fetchEvents(true, true); return }
       router.push(`/dashboard/events/${data.event.id}`)
     } catch (e) {
       console.error('Failed to duplicate event:', e)
@@ -850,395 +588,6 @@ export default function EventsPage() {
   }
 
   // ─── Render Helpers ───────────────────────────────────────────────────────────
-
-  const renderEventForm = (onSubmit: () => void, submitLabel: string) => (
-    <div className="responsive-dialog-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="responsive-dialog-panel flex w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl sm:h-[calc(var(--app-height,100dvh)-2rem)]">
-        {/* Header */}
-        <div className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-slate-200 px-4 pb-4 pt-[max(1rem,env(safe-area-inset-top))] sm:px-6 sm:py-4">
-          <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
-            <CalendarDays className="w-5 h-5 text-emerald-600" />
-            {submitLabel === 'Crear' ? 'Nuevo Evento' : 'Editar Evento'}
-          </h2>
-          <button onClick={() => { setShowCreate(false); setEditEvent(null); resetEventForm() }}
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" aria-label="Cerrar formulario de evento">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Body — 2 columns */}
-        <div className="flex-1 overflow-y-auto">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-0 lg:divide-x lg:divide-slate-200 h-full">
-            {/* LEFT COLUMN — Event details */}
-            <div className="space-y-4 p-4 sm:p-6 lg:overflow-y-auto">
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Nombre *</label>
-                <input value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} autoFocus
-                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900"
-                  placeholder="Ej: Clase Gratuita de Marketing" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Descripción</label>
-                <textarea value={formData.description} onChange={e => setFormData({ ...formData, description: e.target.value })} rows={3}
-                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900"
-                  placeholder="Describe la actividad..." />
-              </div>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Fecha inicio</label>
-                  <input type="datetime-local" value={formData.event_date}
-                    onChange={e => setFormData({ ...formData, event_date: e.target.value })}
-                    className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 text-sm" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Fecha fin</label>
-                  <input type="datetime-local" value={formData.event_end}
-                    onChange={e => setFormData({ ...formData, event_end: e.target.value })}
-                    className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 text-sm" />
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Ubicación</label>
-                <input value={formData.location} onChange={e => setFormData({ ...formData, location: e.target.value })}
-                  className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900"
-                  placeholder="Ej: Zoom, Oficina central..." />
-              </div>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Color</label>
-                  <div className="flex flex-wrap gap-2">
-                    {COLOR_OPTIONS.map(c => (
-                      <button key={c} onClick={() => setFormData({ ...formData, color: c })}
-                        className={`h-11 w-11 rounded-full border-2 transition-all sm:h-7 sm:w-7 ${formData.color === c ? 'border-slate-900 scale-110' : 'border-transparent hover:scale-105'}`}
-                        style={{ backgroundColor: c }} />
-                    ))}
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Estado</label>
-                  <select
-                    value={formData.status}
-                    onChange={e => setFormData({ ...formData, status: e.target.value })}
-                    disabled={Boolean(editEvent && (editEvent.status === 'completed' || editEvent.status === 'cancelled'))}
-                    className="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
-                  >
-                    {STATUS_OPTIONS.filter(option => {
-                      if (!editEvent) return option.value === 'draft' || option.value === 'active'
-                      if (editEvent.status === 'draft') return option.value === 'draft' || option.value === 'active' || option.value === 'cancelled'
-                      if (editEvent.status === 'active') return option.value === 'active' || option.value === 'completed' || option.value === 'cancelled'
-                      return option.value === editEvent.status
-                    }).map(s => <option key={s.value} value={s.value}>{s.label} — {s.desc}</option>)}
-                  </select>
-                  {(() => {
-                    const opt = STATUS_OPTIONS.find(s => s.value === formData.status)
-                    if (!opt) return null
-                    return (
-                      <p className={`text-xs mt-1.5 flex items-center gap-1 ${opt.syncing ? 'text-emerald-600' : 'text-slate-400'}`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${opt.syncing ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
-                        {opt.syncing ? 'Sincronización automática activa' : 'Sincronización pausada'}
-                      </p>
-                    )
-                  })()}
-                </div>
-              </div>
-            </div>
-
-            {/* RIGHT COLUMN — Tag formula configuration */}
-            <fieldset
-              disabled={Boolean(editEvent && (editEvent.status === 'completed' || editEvent.status === 'cancelled'))}
-              className="min-w-0 bg-slate-50/50 p-4 disabled:cursor-not-allowed sm:p-6 lg:overflow-y-auto"
-            >
-              <div className="flex items-center gap-2 mb-1">
-                <Tag className="w-4 h-4 text-emerald-600" />
-                <span className="text-sm font-semibold text-slate-800">Incorporación automática de contactos</span>
-				{editEvent && <span className="ml-auto text-[10px] text-slate-400">Revisión {ruleRevision}</span>}
-              </div>
-              <p className="text-xs text-slate-500 mb-4">
-                La regla es obligatoria para todas las altas. Si un contacto deja de cumplir, sale del listado activo pero conserva todo su historial.
-              </p>
-              {editEvent && (editEvent.status === 'completed' || editEvent.status === 'cancelled') && (
-                <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                  La membresía y las reglas están congeladas porque el evento está {editEvent.status === 'completed' ? 'completado' : 'cancelado'}. Puedes corregir sus datos descriptivos, pero no reabrirlo ni alterar su historial.
-                </div>
-              )}
-
-              {/* Simple / Advanced toggle tabs */}
-              <div className="flex rounded-lg border border-slate-200 bg-white mb-4 overflow-hidden">
-                <button type="button"
-                  onClick={() => setFormData({ ...formData, tag_formula_type: 'simple' })}
-                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold transition-colors ${
-                    formData.tag_formula_type === 'simple'
-                      ? 'bg-emerald-500 text-white'
-                      : 'text-slate-600 hover:bg-slate-50'
-                  }`}>
-                  <FileText className="w-3.5 h-3.5" />
-                  Simple
-                </button>
-                <button type="button"
-                  onClick={() => setFormData({ ...formData, tag_formula_type: 'advanced' })}
-                  className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold transition-colors ${
-                    formData.tag_formula_type === 'advanced'
-                      ? 'bg-violet-500 text-white'
-                      : 'text-slate-600 hover:bg-slate-50'
-                  }`}>
-                  <Code className="w-3.5 h-3.5" />
-                  Avanzado
-                </button>
-              </div>
-
-              {/* ─── SIMPLE MODE ─── */}
-              {formData.tag_formula_type === 'simple' && (
-                <div className="space-y-3">
-                  {/* Formula mode toggle */}
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-medium text-slate-500">Modo:</span>
-                    <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden">
-                      <button type="button"
-                        onClick={() => setFormData({ ...formData, formula_mode: 'OR' })}
-                        className={`px-3 py-1 text-xs font-semibold transition-colors ${
-                          formData.formula_mode === 'OR'
-                            ? 'bg-emerald-500 text-white'
-                            : 'bg-white text-slate-600 hover:bg-slate-50'
-                        }`}>
-                        OR (cualquiera)
-                      </button>
-                      <button type="button"
-                        onClick={() => setFormData({ ...formData, formula_mode: 'AND' })}
-                        className={`px-3 py-1 text-xs font-semibold transition-colors ${
-                          formData.formula_mode === 'AND'
-                            ? 'bg-blue-500 text-white'
-                            : 'bg-white text-slate-600 hover:bg-slate-50'
-                        }`}>
-                        AND (todas)
-                      </button>
-                    </div>
-                    <span className="text-[10px] text-slate-400">
-                      {formData.formula_mode === 'AND' ? 'El contacto debe tener TODAS' : 'El contacto debe tener al menos UNA'}
-                    </span>
-                  </div>
-
-                  {/* Formula preview */}
-                  {(formData.include_tag_ids.length > 0 || formData.exclude_tag_ids.length > 0) && (
-                    <div className="p-2.5 bg-white rounded-lg border border-slate-200">
-                      <div className="text-[10px] font-medium text-slate-400 mb-1">FÓRMULA:</div>
-                      <div className="flex flex-wrap items-center gap-1 text-xs">
-                        {formData.include_tag_ids.map((id, idx) => {
-                          const tag = availableTags.find(t => t.id === id)
-                          if (!tag) return null
-                          return (
-                            <span key={id} className="flex items-center gap-0.5">
-                              {idx > 0 && <span className="font-bold text-slate-500 mx-0.5">{formData.formula_mode}</span>}
-                              <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-white text-[10px] font-medium" style={{ backgroundColor: tag.color }}>{tag.name}</span>
-                            </span>
-                          )
-                        })}
-                        {formData.exclude_tag_ids.map(id => {
-                          const tag = availableTags.find(t => t.id === id)
-                          if (!tag) return null
-                          return (
-                            <span key={id} className="flex items-center gap-0.5">
-                              <span className="font-bold text-red-500 mx-0.5">NOT</span>
-                              <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-white text-[10px] font-medium line-through opacity-75" style={{ backgroundColor: tag.color }}>{tag.name}</span>
-                            </span>
-                          )
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Include tags */}
-                  <div>
-                    <div className="text-xs font-medium text-emerald-600 mb-1 flex items-center gap-1">
-                      <Check className="w-3 h-3" /> Incluir ({formData.formula_mode === 'AND' ? 'TODAS requeridas' : 'cualquiera'})
-                    </div>
-                    {formData.include_tag_ids.length > 0 && (
-                      <div className="flex flex-wrap gap-1.5 mb-1.5">
-                        {formData.include_tag_ids.map(id => {
-                          const tag = availableTags.find(t => t.id === id)
-                          if (!tag) return null
-                          return (
-                            <span key={id} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium text-white"
-                              style={{ backgroundColor: tag.color }}>
-                              {tag.name}
-                              <button type="button" onClick={() => setFormData({
-                                ...formData,
-                                include_tag_ids: formData.include_tag_ids.filter(tid => tid !== id),
-                                tag_ids: formData.tag_ids.filter(tid => tid !== id),
-                              })}
-                                className="hover:bg-white/20 rounded-full p-0.5 transition-colors">
-                                <X className="w-3 h-3" />
-                              </button>
-                            </span>
-                          )
-                        })}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Exclude tags */}
-                  <div>
-                    <div className="text-xs font-medium text-red-500 mb-1 flex items-center gap-1">
-                      <X className="w-3 h-3" /> Excluir (NOT)
-                    </div>
-                    {formData.exclude_tag_ids.length > 0 && (
-                      <div className="flex flex-wrap gap-1.5 mb-1.5">
-                        {formData.exclude_tag_ids.map(id => {
-                          const tag = availableTags.find(t => t.id === id)
-                          if (!tag) return null
-                          return (
-                            <span key={id} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium text-white opacity-75 line-through"
-                              style={{ backgroundColor: tag.color }}>
-                              {tag.name}
-                              <button type="button" onClick={() => setFormData({
-                                ...formData,
-                                exclude_tag_ids: formData.exclude_tag_ids.filter(tid => tid !== id),
-                                tag_ids: formData.tag_ids.filter(tid => tid !== id),
-                              })}
-                                className="hover:bg-white/20 rounded-full p-0.5 transition-colors no-underline">
-                                <X className="w-3 h-3" />
-                              </button>
-                            </span>
-                          )
-                        })}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Tag dropdown */}
-                  <div className="relative" ref={tagDropdownRef}>
-                    <button type="button" onClick={() => setShowTagDropdown(!showTagDropdown)}
-                      className={`w-full flex items-center justify-between px-3 py-2 border rounded-lg text-sm transition-colors ${
-                        showTagDropdown ? 'border-emerald-500 ring-2 ring-emerald-500/20' : 'border-slate-300 hover:border-slate-400'
-                      }`}>
-                      <span className="text-slate-500">
-                        {(formData.include_tag_ids.length + formData.exclude_tag_ids.length) === 0
-                          ? 'Seleccionar etiquetas...'
-                          : `${formData.include_tag_ids.length} incluidas, ${formData.exclude_tag_ids.length} excluidas`}
-                      </span>
-                      <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${showTagDropdown ? 'rotate-180' : ''}`} />
-                    </button>
-                    {showTagDropdown && (
-                      <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-50 overflow-hidden">
-                        <div className="relative p-2 border-b border-slate-100">
-                          <input value={tagSearch} onChange={e => setTagSearch(e.target.value)}
-                            placeholder="Buscar etiqueta..." autoFocus
-                            className="w-full py-1.5 pl-3 pr-9 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent text-slate-900" />
-                          {tagSearchPending && (
-                            <Loader2 className="absolute right-5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-emerald-500" aria-label="Actualizando resultados" />
-                          )}
-                        </div>
-                        <div className="max-h-48 overflow-y-auto">
-                          {availableTags
-                            .filter(t => !debouncedTagSearch || t.name.toLowerCase().includes(debouncedTagSearch.toLowerCase()))
-                            .map(tag => {
-                              const isInclude = formData.include_tag_ids.includes(tag.id)
-                              const isExclude = formData.exclude_tag_ids.includes(tag.id)
-                              return (
-                                <div key={tag.id} className={`flex items-center gap-2 px-3 py-2 text-sm hover:bg-slate-50 transition-colors ${isInclude || isExclude ? 'bg-slate-50/50' : ''}`}>
-                                  <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: tag.color }} />
-                                  <span className="flex-1 text-left text-slate-700">{tag.name}</span>
-                                  <button type="button"
-                                    onClick={() => {
-                                      if (isInclude) {
-                                        setFormData({ ...formData,
-                                          include_tag_ids: formData.include_tag_ids.filter(id => id !== tag.id),
-                                          tag_ids: formData.tag_ids.filter(id => id !== tag.id),
-                                        })
-                                      } else {
-                                        setFormData({ ...formData,
-                                          include_tag_ids: [...formData.include_tag_ids, tag.id],
-                                          exclude_tag_ids: formData.exclude_tag_ids.filter(id => id !== tag.id),
-                                          tag_ids: [...formData.tag_ids.filter(id => id !== tag.id), tag.id],
-                                        })
-                                      }
-                                    }}
-                                    className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
-                                      isInclude ? 'bg-emerald-500 text-white' : 'bg-slate-100 text-slate-500 hover:bg-emerald-100 hover:text-emerald-700'
-                                    }`}>
-                                    {isInclude ? '✓ Incluida' : '+ Incluir'}
-                                  </button>
-                                  <button type="button"
-                                    onClick={() => {
-                                      if (isExclude) {
-                                        setFormData({ ...formData,
-                                          exclude_tag_ids: formData.exclude_tag_ids.filter(id => id !== tag.id),
-                                          tag_ids: formData.tag_ids.filter(id => id !== tag.id),
-                                        })
-                                      } else {
-                                        setFormData({ ...formData,
-                                          exclude_tag_ids: [...formData.exclude_tag_ids, tag.id],
-                                          include_tag_ids: formData.include_tag_ids.filter(id => id !== tag.id),
-                                          tag_ids: [...formData.tag_ids.filter(id => id !== tag.id), tag.id],
-                                        })
-                                      }
-                                    }}
-                                    className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
-                                      isExclude ? 'bg-red-500 text-white' : 'bg-slate-100 text-slate-500 hover:bg-red-100 hover:text-red-700'
-                                    }`}>
-                                    {isExclude ? '✗ Excluida' : '− Excluir'}
-                                  </button>
-                                </div>
-                              )
-                            })}
-                          {availableTags.filter(t => !debouncedTagSearch || t.name.toLowerCase().includes(debouncedTagSearch.toLowerCase())).length === 0 && (
-                            <p className="px-3 py-3 text-xs text-slate-400 text-center">No se encontraron etiquetas</p>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* ─── ADVANCED MODE ─── */}
-              {formData.tag_formula_type === 'advanced' && (
-                <div className="space-y-3">
-                  {/* Syntax reference */}
-                  <div className="p-3 bg-white rounded-lg border border-slate-200">
-                    <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Referencia de sintaxis</div>
-                    <div className="grid grid-cols-1 gap-1 text-xs text-slate-600">
-                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">&quot;etiqueta&quot;</code> — coincidencia exacta</div>
-                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">&quot;mar%&quot;</code> — empieza con &quot;mar&quot; (comodín)</div>
-                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">and</code> — el contacto debe tener ambas</div>
-                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">or</code> — el contacto debe tener al menos una</div>
-                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">not</code> — excluir contactos con esta etiqueta</div>
-                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">not in (...)</code> — excluir una lista</div>
-                      <div><code className="text-violet-600 bg-violet-50 px-1 py-0.5 rounded">( )</code> — agrupar expresiones</div>
-                    </div>
-                    <div className="mt-2 pt-2 border-t border-slate-100">
-                      <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Ejemplo</div>
-                      <code className="text-[11px] text-emerald-700 bg-emerald-50 px-2 py-1 rounded block">
-                        {`"kommo" and not in ("iquitos" or "conf_03-jun" or "interesados junio")`}
-                      </code>
-                    </div>
-                  </div>
-
-                  {/* Formula editor with autocomplete & token validation */}
-                  <FormulaEditor
-                    value={formData.tag_formula}
-                    onChange={(v) => setFormData({ ...formData, tag_formula: v })}
-                    tags={availableTags}
-                    onValidChange={setFormulaIsValid}
-                  />
-                </div>
-              )}
-            </fieldset>
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="flex flex-shrink-0 gap-3 rounded-b-2xl border-t border-slate-200 bg-white px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:justify-end sm:px-6 sm:py-4">
-          <button onClick={() => { setShowCreate(false); setEditEvent(null); resetEventForm() }}
-            className="min-h-11 flex-1 px-4 py-2.5 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors font-medium sm:flex-none">Cancelar</button>
-          <button disabled={savingEvent || !formData.name || (formData.tag_formula_type === 'advanced' && !formulaIsValid)}
-            onClick={onSubmit}
-            className="min-h-11 flex-1 px-6 py-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium sm:flex-none">
-            {savingEvent ? 'Guardando…' : submitLabel}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
 
   const renderFolderModal = () => (
     <div className="responsive-dialog-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/50"
@@ -1322,8 +671,8 @@ export default function EventsPage() {
             <FolderPlus className="w-4 h-4" />
             Nueva carpeta
           </button>
-          <button onClick={() => { resetEventForm(); setShowCreate(true) }}
-            className="flex min-h-11 flex-1 items-center justify-center gap-2 px-3 py-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors shadow-sm text-sm font-medium sm:flex-none sm:px-4">
+          <button disabled={configurationOpen} title={configurationOpen ? 'Cierra la configuración abierta antes de crear otro evento' : undefined} onClick={() => { if (configurationOpen) return; resetEventForm(); setShowCreate(true) }}
+            className="flex min-h-11 flex-1 items-center justify-center gap-2 px-3 py-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors shadow-sm text-sm font-medium sm:flex-none sm:px-4 disabled:cursor-not-allowed disabled:opacity-40">
             <Plus className="w-4 h-4" />
             Nuevo Evento
           </button>
@@ -1533,8 +882,8 @@ export default function EventsPage() {
                     <article key={ev.id} role="listitem" className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
                       <button
                         type="button"
-                        onClick={() => router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`)}
-                        className="w-full p-3 text-left transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500"
+                        disabled={configurationOpen} title={configurationOpen ? 'Cierra la configuración abierta antes de navegar' : undefined} onClick={() => openEventRoute(ev)}
+                        className="w-full p-3 text-left transition disabled:cursor-not-allowed disabled:opacity-50 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500"
                         aria-label={`Abrir evento ${ev.name}`}
                       >
                         <span className="flex items-start gap-2.5">
@@ -1545,40 +894,13 @@ export default function EventsPage() {
                           </span>
                           {statusOpt && <span className={`${statusOpt.color} shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold`}>{statusOpt.label}</span>}
                         </span>
-                        <span className="mt-3 grid grid-cols-2 gap-2 text-xs min-[420px]:grid-cols-3">
-                          <span className="rounded-lg bg-slate-50 px-2.5 py-2"><span className="block text-[10px] text-slate-400">Participantes</span><span className="font-semibold text-slate-700">{ev.total_participants}</span></span>
-                          <span className="rounded-lg bg-emerald-50 px-2.5 py-2"><span className="block text-[10px] text-emerald-600">Asistentes</span><span className="font-semibold text-emerald-700">{ev.stage_counts?.['Asistieron'] || 0}</span></span>
-                          <span className="rounded-lg bg-amber-50 px-2.5 py-2"><span className="block text-[10px] text-amber-600">Pre inscritos</span><span className="font-semibold text-amber-700">{ev.stage_counts?.['Pre inscritos'] || 0}</span></span>
-                          <span className="rounded-lg bg-indigo-50 px-2.5 py-2"><span className="block text-[10px] text-indigo-600">Inscritos</span><span className="font-semibold text-indigo-700">{ev.stage_counts?.['Inscrito'] || 0}</span></span>
-                          <span className="rounded-lg bg-slate-50 px-2.5 py-2"><span className="block text-[10px] text-slate-400">Fórmula</span><span className="font-semibold text-slate-700">{hasFormula ? 'Sí' : 'No'}</span></span>
-                          {ev.event_date && <span className="rounded-lg bg-slate-50 px-2.5 py-2"><span className="block text-[10px] text-slate-400">Fecha</span><span className="font-semibold text-slate-700">{format(new Date(ev.event_date), 'd MMM', { locale: es })}</span></span>}
-                        </span>
+                        <div className="mt-3 flex items-center justify-between gap-3 text-xs text-slate-500"><span>{ev.total_participants.toLocaleString('es-PE')} participantes</span>{ev.event_date && <span>{format(new Date(ev.event_date), 'd MMM', {locale: es})}</span>}</div>
+                        <div className="mt-3"><EventStageSummary stages={ev.stage_summary} total={ev.total_participants}/></div>
                       </button>
-                      <div className="flex min-h-12 items-center justify-between border-t border-slate-100 px-2 pl-3">
-                        <span className="text-[11px] font-medium text-slate-400">Vista de lista</span>
-                        <button
-                          type="button"
-                          data-menu-toggle
-                          onClick={() => setMenuEventID(menuEventID === ev.id ? null : ev.id)}
-                          className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
-                          aria-label={`Acciones de ${ev.name}`}
-                          aria-expanded={menuEventID === ev.id}
-                        >
-                          <MoreHorizontal className="h-5 w-5" />
-                        </button>
-                        {menuEventID === ev.id && (
-                          <div role="menu" className="fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[70] max-h-[75vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl">
-                            <button type="button" onClick={() => { router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Eye className="h-4 w-4" />Ver detalle</button>
-                            <button type="button" disabled={isEventContextReadOnly(ev.status)} title={isEventContextReadOnly(ev.status) ? 'Evento cerrado: solo lectura' : 'Editar'} onClick={() => { openEditEvent(ev); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Edit2 className="h-4 w-4" />Editar</button>
-                            <button type="button" onClick={() => { void handleDuplicateEvent(ev.id); setMenuEventID(null) }} disabled={duplicatingEventID === ev.id} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"><Copy className="h-4 w-4" />Duplicar</button>
-                            <p className="mt-1 border-t border-slate-100 px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Mover a carpeta</p>
-                            {ev.folder_id && <button type="button" onClick={() => { void moveEventToFolder(ev.id, null); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Home className="h-4 w-4" />Sin carpeta</button>}
-                            {folders.filter(folder => folder.id !== ev.folder_id).map(folder => (
-                              <button key={folder.id} type="button" onClick={() => { void moveEventToFolder(ev.id, folder.id); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><span aria-hidden="true">{folder.icon}</span>{folder.name}</button>
-                            ))}
-                            <button type="button" onClick={() => { void handleDeleteEvent(ev.id); setMenuEventID(null) }} className="mt-1 flex min-h-11 w-full items-center gap-3 rounded-xl border-t border-slate-100 px-3 text-sm text-red-700 hover:bg-red-50"><Trash2 className="h-4 w-4" />Eliminar</button>
-                          </div>
-                        )}
+                      <div className="flex items-center justify-end border-t border-slate-100 px-2 py-1">
+                        <EventListActions configurationOpen={configurationOpen} name={ev.name} readOnly={isEventContextReadOnly(ev.status)} busy={duplicatingEventID===ev.id || cancellingEventID===ev.id} folders={folders} folderID={ev.folder_id}
+                          onConfigure={()=>openEditEvent(ev)} onStages={()=>openStageConfiguration(ev)} onLogbooks={()=>openEventRoute(ev,true)}
+                          onDuplicate={()=>{void handleDuplicateEvent(ev.id)}} onCancel={()=>{void handleCancelEvent(ev)}} onMove={id=>{void moveEventToFolder(ev.id,id)}}/>
                       </div>
                     </article>
                   )
@@ -1587,352 +909,52 @@ export default function EventsPage() {
             </div>
           ) : (
             <div className="overflow-x-auto" data-events-table-list>
-              <table className="w-full min-w-[980px]">
-            <thead>
-              <tr className="border-b border-slate-200 bg-slate-50">
-                <th onClick={() => toggleSort('name')} className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 cursor-pointer hover:text-slate-700 select-none">Evento<SortIcon field="name" /></th>
-                <th onClick={() => toggleSort('status')} className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 cursor-pointer hover:text-slate-700 select-none">Estado<SortIcon field="status" /></th>
-                <th onClick={() => toggleSort('formula')} className="text-center text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 cursor-pointer hover:text-slate-700 select-none">Fórmula<SortIcon field="formula" /></th>
-                <th onClick={() => toggleSort('participants')} className="text-center text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 cursor-pointer hover:text-slate-700 select-none">Part.<SortIcon field="participants" /></th>
-                <th onClick={() => toggleSort('asistentes')} className="text-center text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 cursor-pointer hover:text-slate-700 select-none">Asistentes<SortIcon field="asistentes" /></th>
-                <th onClick={() => toggleSort('preinscritos')} className="text-center text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 cursor-pointer hover:text-slate-700 select-none">Pre inscritos<SortIcon field="preinscritos" /></th>
-                <th onClick={() => toggleSort('inscritos')} className="text-center text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3 cursor-pointer hover:text-slate-700 select-none">Inscritos<SortIcon field="inscritos" /></th>
-                <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3">Acciones</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {sortedEvents.map(ev => {
-                const statusOpt = STATUS_OPTIONS.find(s => s.value === ev.status)
-                return (
-                  <tr key={ev.id}
-                    className="hover:bg-slate-50 transition-colors cursor-pointer"
-                    onClick={() => router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`)}>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2.5">
-                        <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: ev.color }} />
-                        <div className="min-w-0">
-                          <p className="text-sm font-medium text-slate-900 truncate">{ev.name}</p>
-                          {ev.description && <p className="text-xs text-slate-500 truncate max-w-[220px]">{ev.description}</p>}
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      {statusOpt && (
-                        <span className={`${statusOpt.color} text-xs font-medium px-2 py-1 rounded-full`}>{statusOpt.label}</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      {(ev.tag_formula || (ev.tags && ev.tags.length > 0)) ? (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-100 text-emerald-700">Sí</span>
-                      ) : (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 text-slate-400">No</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      <span className="text-sm font-medium text-slate-700">{ev.total_participants}</span>
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      <span className="text-sm font-medium text-emerald-600">{ev.stage_counts?.['Asistieron'] || 0}</span>
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      <span className="text-sm font-medium text-amber-600">{ev.stage_counts?.['Pre inscritos'] || 0}</span>
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      <span className="text-sm font-medium text-indigo-600">{ev.stage_counts?.['Inscrito'] || 0}</span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-1">
-                        <button
-                          draggable
-                          onDragStart={e => { e.stopPropagation(); handleDragStart(e, ev.id) }}
-                          onDragEnd={handleDragEnd}
-                          onClick={e => e.stopPropagation()}
-                          className="flex h-11 w-11 cursor-grab items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 active:cursor-grabbing"
-                          title="Arrastrar para mover"
-                          aria-label={`Mover ${ev.name} arrastrando`}
-                        >
-                          <GripVertical className="h-4 w-4" />
-                        </button>
-                        <button onClick={e => { e.stopPropagation(); router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`) }}
-                          className="flex h-11 w-11 items-center justify-center rounded-lg text-emerald-600 transition-colors hover:bg-emerald-50" title="Ver detalle" aria-label={`Ver detalle de ${ev.name}`}>
-                          <Eye className="w-4 h-4" />
-                        </button>
-                        <div className="relative">
-                          <button data-menu-toggle onClick={e => { e.stopPropagation(); setShowMoveMenu(showMoveMenu === ev.id ? null : ev.id) }}
-                            className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" title="Mover" aria-label={`Mover ${ev.name} a otra carpeta`} aria-expanded={showMoveMenu === ev.id}>
-                            <MoveRight className="w-4 h-4" />
-                          </button>
-                          {showMoveMenu === ev.id && (
-                            <div className={compactWorkspace
-                              ? 'fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[70] max-h-[75vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl'
-                              : 'absolute right-0 z-20 min-w-[180px] rounded-xl border border-slate-200 bg-white py-1 shadow-lg'
-                            } onClick={e => e.stopPropagation()}>
-                              <p className="px-3 py-1.5 text-xs font-semibold text-slate-400 uppercase">Mover a</p>
-                              {ev.folder_id && (
-                                <button onClick={() => { moveEventToFolder(ev.id, null); setShowMoveMenu(null) }}
-                                  className="flex min-h-11 w-full items-center gap-2 rounded-lg px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50">
-                                  <Home className="w-3.5 h-3.5" /> Sin carpeta
-                                </button>
-                              )}
-                              {folders.filter(f => f.id !== ev.folder_id).map(f => (
-                                <button key={f.id} onClick={() => { moveEventToFolder(ev.id, f.id); setShowMoveMenu(null) }}
-                                  className="flex min-h-11 w-full items-center gap-2 rounded-lg px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50">
-                                  <span className="text-base">{f.icon}</span> {f.name}
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                        <button disabled={isEventContextReadOnly(ev.status)} title={isEventContextReadOnly(ev.status) ? 'Evento cerrado: solo lectura' : 'Editar'} onClick={e => { e.stopPropagation(); openEditEvent(ev) }}
-                          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" aria-label={`Editar ${ev.name}`}>
-                          <Edit2 className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={e => { e.stopPropagation(); handleDuplicateEvent(ev.id) }}
-                          disabled={duplicatingEventID === ev.id}
-                          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50"
-                          title="Duplicar"
-                          aria-label={`Duplicar ${ev.name}`}
-                        >
-                          <Copy className="w-4 h-4" />
-                        </button>
-                        <button onClick={e => { e.stopPropagation(); handleDeleteEvent(ev.id) }}
-                          className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-red-50 hover:text-red-600" aria-label={`Eliminar ${ev.name}`}>
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
+              <table className="w-full min-w-[720px] text-sm">
+                <thead><tr className="border-b border-slate-200 bg-slate-50/80">
+                  {[['name','Evento'],['status','Estado'],['participants','Participantes']].map(([key,label]) => <th key={key} scope="col" aria-sort={sortField===key ? (sortDirection==='asc'?'ascending':'descending'):'none'} className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500"><button onClick={()=>toggleSort(key)} className="inline-flex items-center gap-1">{label}<SortIcon field={key}/></button></th>)}
+                  <th scope="col" className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500">Distribución por etapa</th>
+                  <th scope="col" className="w-14"><span className="sr-only">Acciones</span></th>
+                </tr></thead>
+                <tbody className="divide-y divide-slate-100">
+                  {sortedEvents.map(ev => {
+                    const statusOpt=STATUS_OPTIONS.find(s=>s.value===ev.status)
+                    return <tr key={ev.id} className="group hover:bg-slate-50/70">
+                      <td className="max-w-[340px] px-4 py-4"><button className="flex w-full items-start gap-3 text-left disabled:cursor-not-allowed disabled:opacity-50" disabled={configurationOpen} title={configurationOpen ? 'Cierra la configuración abierta antes de navegar' : undefined} onClick={()=>openEventRoute(ev)}>
+                        <span className="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full" style={{backgroundColor:ev.color}}/>
+                        <span className="min-w-0"><span className="block font-semibold text-slate-800 group-hover:text-emerald-700">{ev.name}</span><span className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-400">{ev.event_date && <span>{format(new Date(ev.event_date),'d MMM yyyy',{locale:es})}</span>}{ev.location && <span>{ev.location}</span>}</span></span>
+                      </button></td>
+                      <td className="px-4 py-4"><span className={`${statusOpt?.color} inline-flex rounded-full px-2 py-1 text-[11px] font-medium`}>{statusOpt?.label ?? ev.status}</span></td>
+                      <td className="px-4 py-4 font-semibold tabular-nums text-slate-700">{ev.total_participants.toLocaleString('es-PE')}</td>
+                      <td className="w-[42%] px-4 py-4"><EventStageSummary stages={ev.stage_summary} total={ev.total_participants}/></td>
+                      <td className="px-2"><EventListActions configurationOpen={configurationOpen} name={ev.name} readOnly={isEventContextReadOnly(ev.status)} busy={duplicatingEventID===ev.id || cancellingEventID===ev.id} folders={folders} folderID={ev.folder_id}
+                        onConfigure={()=>openEditEvent(ev)} onStages={()=>openStageConfiguration(ev)} onLogbooks={()=>openEventRoute(ev,true)}
+                        onDuplicate={()=>{void handleDuplicateEvent(ev.id)}} onCancel={()=>{void handleCancelEvent(ev)}} onMove={id=>{void moveEventToFolder(ev.id,id)}}/></td>
+                    </tr>
+                  })}
+                </tbody>
               </table>
             </div>
           )}
         </div>
-      ) : effectiveViewMode === 'compact' ? (
-        /* Compact View */
-        <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${compactGridColumns}, minmax(0, 1fr))` }}>
-          {filteredEvents.map(ev => {
-            const statusOpt = STATUS_OPTIONS.find(s => s.value === ev.status)
-            return (
-              <div key={ev.id}
-                className="bg-white border border-slate-200 rounded-xl overflow-hidden hover:shadow-md hover:border-slate-300 transition-all group cursor-pointer"
-                onClick={() => router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`)}>
-                <div className="h-1.5" style={{ backgroundColor: ev.color }} />
-                <div className="p-3.5">
-                  <div className="flex items-start justify-between gap-1">
-                    <p className="text-sm font-semibold text-slate-800 leading-snug line-clamp-2 flex-1">{ev.name}</p>
-                    <button disabled={isEventContextReadOnly(ev.status)} title={isEventContextReadOnly(ev.status) ? 'Evento cerrado: solo lectura' : 'Editar'} onClick={e => { e.stopPropagation(); openEditEvent(ev) }}
-                      className="touch-menu-hidden opacity-0 group-hover:opacity-100 flex-shrink-0 p-0.5 text-slate-400 hover:text-slate-600 rounded">
-                      <Edit2 className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      onClick={e => { e.stopPropagation(); handleDuplicateEvent(ev.id) }}
-                      disabled={duplicatingEventID === ev.id}
-                      className="touch-menu-hidden opacity-0 group-hover:opacity-100 flex-shrink-0 p-0.5 text-slate-400 hover:text-slate-600 rounded disabled:opacity-50"
-                      title="Duplicar"
-                    >
-                      <Copy className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      draggable
-                      onDragStart={e => { e.stopPropagation(); handleDragStart(e, ev.id) }}
-                      onDragEnd={handleDragEnd}
-                      onClick={e => e.stopPropagation()}
-                      className="touch-menu-hidden flex-shrink-0 cursor-grab rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 active:cursor-grabbing"
-                      title="Arrastrar para mover"
-                      aria-label={`Mover ${ev.name} arrastrando`}
-                    >
-                      <GripVertical className="h-3.5 w-3.5" />
-                    </button>
-                    <div className="touch-only-flex relative hidden shrink-0">
-                      <button
-                        type="button"
-                        data-menu-toggle
-                        onClick={e => { e.stopPropagation(); setMenuEventID(menuEventID === ev.id ? null : ev.id) }}
-                        className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100"
-                        aria-label={`Acciones de ${ev.name}`}
-                        aria-expanded={menuEventID === ev.id}
-                      >
-                        <MoreHorizontal className="h-5 w-5" />
-                      </button>
-                      {menuEventID === ev.id && (
-                        <div role="menu" className="fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[70] max-h-[75vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl" onClick={e => e.stopPropagation()}>
-                          <button type="button" onClick={() => { router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Eye className="h-4 w-4" />Ver detalle</button>
-                          <button type="button" disabled={isEventContextReadOnly(ev.status)} title={isEventContextReadOnly(ev.status) ? 'Evento cerrado: solo lectura' : 'Editar'} onClick={() => { openEditEvent(ev); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Edit2 className="h-4 w-4" />Editar</button>
-                          <button type="button" onClick={() => { void handleDuplicateEvent(ev.id); setMenuEventID(null) }} disabled={duplicatingEventID === ev.id} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"><Copy className="h-4 w-4" />Duplicar</button>
-                          <p className="mt-1 border-t border-slate-100 px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Mover a carpeta</p>
-                          {ev.folder_id && <button type="button" onClick={() => { void moveEventToFolder(ev.id, null); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Home className="h-4 w-4" />Sin carpeta</button>}
-                          {folders.filter(folder => folder.id !== ev.folder_id).map(folder => (
-                            <button key={folder.id} type="button" onClick={() => { void moveEventToFolder(ev.id, folder.id); setMenuEventID(null) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><span aria-hidden="true">{folder.icon}</span>{folder.name}</button>
-                          ))}
-                          <button type="button" onClick={() => { void handleDeleteEvent(ev.id); setMenuEventID(null) }} className="mt-1 flex min-h-11 w-full items-center gap-3 rounded-xl border-t border-slate-100 px-3 text-sm text-red-700 hover:bg-red-50"><Trash2 className="h-4 w-4" />Eliminar</button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  {(ev.tag_formula || (ev.tags && ev.tags.length > 0)) && (
-                    <div className="mt-1.5">
-                      <FormulaTagDisplay ev={ev} maxTags={2} size="xs" />
-                    </div>
-                  )}
-                  {ev.event_date && (
-                    <div className="flex items-center gap-1 mt-2 text-xs text-slate-500">
-                      <Clock className="w-3 h-3" />
-                      {format(new Date(ev.event_date), "d MMM", { locale: es })}
-                    </div>
-                  )}
-                  <div className="flex items-center justify-between mt-2">
-                    <div className="flex items-center gap-1 text-xs text-slate-500">
-                      <Users className="w-3 h-3" />{ev.total_participants}
-                    </div>
-                    {statusOpt && (
-                      <span className={`${statusOpt.color} text-xs font-medium px-1.5 py-0.5 rounded-full`}>{statusOpt.label}</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )
-          })}
-        </div>
       ) : (
-        /* Grid View */
-        <div className="grid gap-5" style={{ gridTemplateColumns: `repeat(${eventGridColumns}, minmax(0, 1fr))` }}>
+        <div className="grid gap-4" style={{gridTemplateColumns:`repeat(${effectiveViewMode === 'compact' ? compactGridColumns : eventGridColumns}, minmax(0, 1fr))`}}>
           {filteredEvents.map(ev => {
-            const statusOpt = STATUS_OPTIONS.find(s => s.value === ev.status)
-            const counts = ev.participant_counts || {}
-            const total = ev.total_participants || 0
-            return (
-              <div key={ev.id}
-                className="group rounded-xl border border-slate-200 bg-white hover:border-slate-300 hover:shadow-md transition-all">
-                <div className="h-1.5 rounded-t-xl" style={{ backgroundColor: ev.color }} />
-                <div className="p-5">
-                  <div className="flex items-start justify-between mb-3">
-                    <div className="flex-1 min-w-0">
-                      <h3 className="font-semibold text-slate-900 truncate">{ev.name}</h3>
-                      {ev.description && <p className="text-slate-500 text-sm mt-0.5 line-clamp-2">{ev.description}</p>}
-                    </div>
-                    <div className="flex items-center gap-1 ml-2 flex-shrink-0">
-                      {statusOpt && (
-                        <span className={`${statusOpt.color} text-xs font-medium px-2 py-1 rounded-full`}>{statusOpt.label}</span>
-                      )}
-                      <button
-                        draggable
-                        onDragStart={e => { e.stopPropagation(); handleDragStart(e, ev.id) }}
-                        onDragEnd={handleDragEnd}
-                        className="hidden cursor-grab rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 active:cursor-grabbing lg:block"
-                        title="Arrastrar para mover"
-                        aria-label={`Mover ${ev.name} arrastrando`}
-                      >
-                        <GripVertical className="h-4 w-4" />
-                      </button>
-                      <div className="relative">
-                        <button data-menu-toggle onClick={e => { e.stopPropagation(); setMenuEventID(menuEventID === ev.id ? null : ev.id) }}
-                          className="touch-action-visible flex h-11 w-11 items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg opacity-100 transition-all lg:h-auto lg:w-auto lg:p-1 lg:opacity-0 lg:group-hover:opacity-100" aria-label={`Acciones de ${ev.name}`}>
-                          <MoreHorizontal className="w-4 h-4" />
-                        </button>
-                        {menuEventID === ev.id && (
-                          <div className={compactWorkspace
-                            ? 'fixed inset-x-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-[70] max-h-[75vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white py-1 shadow-2xl'
-                            : 'absolute right-0 top-7 z-20 min-w-[180px] rounded-xl border border-slate-200 bg-white py-1 shadow-lg'
-                          } onClick={e => e.stopPropagation()}>
-                            <button onClick={() => { router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`); setMenuEventID(null) }}
-                              className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
-                              <Eye className="w-3.5 h-3.5" /> Ver detalle
-                            </button>
-                            <button disabled={isEventContextReadOnly(ev.status)} title={isEventContextReadOnly(ev.status) ? 'Evento cerrado: solo lectura' : 'Editar'} onClick={() => { openEditEvent(ev); setMenuEventID(null) }}
-                              className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
-                              <Edit2 className="w-3.5 h-3.5" /> Editar
-                            </button>
-                            <button
-                              onClick={() => { handleDuplicateEvent(ev.id); setMenuEventID(null) }}
-                              disabled={duplicatingEventID === ev.id}
-                              className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                            >
-                              <Copy className="w-3.5 h-3.5" /> Duplicar
-                            </button>
-                            <div className="border-t border-slate-100 my-1" />
-                            <p className="px-3 py-1 text-xs font-semibold text-slate-400 uppercase">Mover a</p>
-                            {ev.folder_id && (
-                              <button onClick={() => { moveEventToFolder(ev.id, null); setMenuEventID(null) }}
-                                className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50">
-                                <Home className="w-3.5 h-3.5" /> Sin carpeta
-                              </button>
-                            )}
-                            {folders.filter(f => f.id !== ev.folder_id).map(f => (
-                              <button key={f.id} onClick={() => { moveEventToFolder(ev.id, f.id); setMenuEventID(null) }}
-                                className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50">
-                                <span className="text-base">{f.icon}</span> {f.name}
-                              </button>
-                            ))}
-                            <div className="border-t border-slate-100 my-1" />
-                            <button onClick={() => { handleDeleteEvent(ev.id); setMenuEventID(null) }}
-                              className="w-full flex min-h-11 items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50">
-                              <Trash2 className="w-3.5 h-3.5" /> Eliminar
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5 text-sm text-slate-500 mb-4">
-                    {ev.event_date && (
-                      <div className="flex items-center gap-2">
-                        <Clock className="w-3.5 h-3.5" />
-                        <span>{format(new Date(ev.event_date), "d MMM yyyy, HH:mm", { locale: es })}</span>
-                      </div>
-                    )}
-                    {ev.location && (
-                      <div className="flex items-center gap-2">
-                        <MapPin className="w-3.5 h-3.5" />
-                        <span className="truncate">{ev.location}</span>
-                      </div>
-                    )}
-                    <div className="flex items-center gap-2">
-                      <Users className="w-3.5 h-3.5" />
-                      <span>{total} participantes</span>
-                    </div>
-                  </div>
-
-                  {/* Formula / tags display */}
-                  {(ev.tag_formula || (ev.tags && ev.tags.length > 0)) && (
-                    <div className="mb-3">
-                      <FormulaTagDisplay ev={ev} maxTags={4} size="sm" />
-                    </div>
-                  )}
-
-                  {total > 0 && (
-                    <div className="mb-4">
-                      <div className="flex h-1.5 rounded-full overflow-hidden bg-slate-100">
-                        {PARTICIPANT_STATUSES.map(ps => {
-                          const count = counts[ps.key] || 0
-                          if (count === 0) return null
-                          return (
-                            <div key={ps.key} className={ps.color}
-                              style={{ width: `${(count / total) * 100}%` }}
-                              title={`${ps.label}: ${count}`} />
-                          )
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="flex items-center gap-2 pt-3 border-t border-slate-100">
-                    <button onClick={() => router.push(`/dashboard/events/${ev.id}${currentFolderID ? `?folder=${currentFolderID}` : ''}`)}
-                      className="flex min-h-11 flex-1 items-center justify-center gap-1.5 px-3 py-2 text-sm bg-emerald-50 text-emerald-700 rounded-lg hover:bg-emerald-100 transition-colors font-medium">
-                      <Eye className="w-3.5 h-3.5" />
-                      Ver detalle
-                    </button>
-                    <button disabled={isEventContextReadOnly(ev.status)} title={isEventContextReadOnly(ev.status) ? 'Evento cerrado: solo lectura' : 'Editar'} onClick={() => openEditEvent(ev)}
-                      className="flex h-11 w-11 items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors" aria-label={`Editar ${ev.name}`}>
-                      <Edit2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
+            const statusOpt=STATUS_OPTIONS.find(s=>s.value===ev.status)
+            return <article key={ev.id} className="flex min-w-0 flex-col rounded-xl border border-slate-200 bg-white transition hover:border-slate-300 hover:shadow-sm">
+              <div className="h-1 rounded-t-xl" style={{backgroundColor:ev.color}}/>
+              <div className="flex items-start justify-between gap-2 px-4 pt-3">
+                <button disabled={configurationOpen} title={configurationOpen ? 'Cierra la configuración abierta antes de navegar' : undefined} onClick={()=>openEventRoute(ev)} className="min-w-0 flex-1 py-1 text-left text-sm font-semibold leading-6 text-slate-900 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-50">{ev.name}</button>
+                <EventListActions configurationOpen={configurationOpen} name={ev.name} readOnly={isEventContextReadOnly(ev.status)} busy={duplicatingEventID===ev.id || cancellingEventID===ev.id} folders={folders} folderID={ev.folder_id}
+                  onConfigure={()=>openEditEvent(ev)} onStages={()=>openStageConfiguration(ev)} onLogbooks={()=>openEventRoute(ev,true)}
+                  onDuplicate={()=>{void handleDuplicateEvent(ev.id)}} onCancel={()=>{void handleCancelEvent(ev)}} onMove={id=>{void moveEventToFolder(ev.id,id)}}/>
               </div>
-            )
+              <div className="flex flex-1 flex-col gap-3 px-4 pb-4">
+                <div className="flex flex-wrap items-center gap-2"><span className={`${statusOpt?.color} rounded-full px-2 py-1 text-[10px] font-semibold`}>{statusOpt?.label}</span>{ev.event_date&&<span className="text-xs text-slate-400">{format(new Date(ev.event_date),'d MMM yyyy',{locale:es})}</span>}</div>
+                {effectiveViewMode!=='compact'&&ev.description&&<p className="line-clamp-2 text-xs leading-5 text-slate-500">{ev.description}</p>}
+                <FormulaTagDisplay ev={ev} maxTags={2} size="xs"/>
+                <div className="mt-auto border-t border-slate-100 pt-3"><div className="mb-3 flex items-baseline gap-1.5"><span className="text-lg font-semibold tabular-nums text-slate-800">{ev.total_participants.toLocaleString('es-PE')}</span><span className="text-xs text-slate-400">participantes</span></div><EventStageSummary stages={ev.stage_summary} total={ev.total_participants}/></div>
+              </div>
+            </article>
           })}
         </div>
       )}
@@ -1972,8 +994,10 @@ export default function EventsPage() {
       )}
 
       {/* Modals */}
-      {showCreate && renderEventForm(handleCreateEvent, 'Crear')}
-      {editEvent && renderEventForm(handleUpdateEvent, 'Guardar')}
+      <EventConfigurationWindow open={showCreate || !!editEvent} eventId={editEvent?.id} initialSection={configurationSection} folderId={currentFolderID}
+        onClose={() => { setShowCreate(false); setEditEvent(null) }}
+        onCreated={() => { void fetchEvents() }}
+        onSaved={async () => { await fetchEvents(true, true) }} />
       {showFolderModal && renderFolderModal()}
     </div>
   )

@@ -1111,6 +1111,7 @@ type EventPipelineStage struct {
 
 // Event represents an activity/event to track contact interactions
 type Event struct {
+	ExpectedUpdatedAt  *time.Time `json:"-"`
 	ID                 uuid.UUID  `json:"id"`
 	AccountID          uuid.UUID  `json:"account_id"`
 	FolderID           *uuid.UUID `json:"folder_id,omitempty"`
@@ -1132,11 +1133,12 @@ type Event struct {
 	UpdatedAt          time.Time  `json:"updated_at"`
 
 	// Populated on demand
-	ParticipantCounts map[string]int `json:"participant_counts,omitempty"`
-	StageCounts       map[string]int `json:"stage_counts,omitempty"`
-	TotalParticipants int            `json:"total_participants"`
-	PipelineName      *string        `json:"pipeline_name,omitempty"`
-	Tags              []*Tag         `json:"tags,omitempty"`
+	ParticipantCounts map[string]int      `json:"participant_counts,omitempty"`
+	StageCounts       map[string]int      `json:"stage_counts,omitempty"`
+	StageSummary      []EventStageSummary `json:"stage_summary"`
+	TotalParticipants int                 `json:"total_participants"`
+	PipelineName      *string             `json:"pipeline_name,omitempty"`
+	Tags              []*Tag              `json:"tags,omitempty"`
 }
 
 // EventFolder represents a folder for organising events (Windows Explorer style)
@@ -2067,6 +2069,8 @@ const (
 
 // EventFilter defines filter options for listing events
 type EventFilter struct {
+	SortBy           string
+	SortDirection    string
 	Search           string
 	Status           string
 	ExcludeCancelled bool   // Applies only when no specific status is selected.
@@ -2650,16 +2654,22 @@ type EventLogbook struct {
 	AccountID         uuid.UUID              `json:"account_id"`
 	Date              time.Time              `json:"date"`
 	Title             string                 `json:"title"`
-	Status            string                 `json:"status"` // pending, completed
+	Status            string                 `json:"status"` // pending, active, completed
 	GeneralNotes      string                 `json:"general_notes"`
 	StageSnapshot     map[string]interface{} `json:"stage_snapshot"`
 	TotalParticipants int                    `json:"total_participants"`
 	CapturedAt        *time.Time             `json:"captured_at,omitempty"`
 	CreatedBy         *uuid.UUID             `json:"created_by,omitempty"`
+	CapturedFilter    json.RawMessage        `json:"captured_filter,omitempty"`
 	SavedFilter       json.RawMessage        `json:"saved_filter,omitempty"`
 	CreatedAt         time.Time              `json:"created_at"`
 	UpdatedAt         time.Time              `json:"updated_at"`
 
+	Version           int64      `json:"version"`
+	CapturedBy        *uuid.UUID `json:"captured_by,omitempty"`
+	CompletedAt       *time.Time `json:"completed_at,omitempty"`
+	CompletedBy       *uuid.UUID `json:"completed_by,omitempty"`
+	EntriesNextCursor string     `json:"entries_next_cursor,omitempty"`
 	// Populated on demand
 	Entries       []*EventLogbookEntry `json:"entries,omitempty"`
 	CreatedByName *string              `json:"created_by_name,omitempty"`
@@ -2667,14 +2677,16 @@ type EventLogbook struct {
 
 // EventLogbookEntry represents a participant's state snapshot in a logbook
 type EventLogbookEntry struct {
-	ID            uuid.UUID  `json:"id"`
-	LogbookID     uuid.UUID  `json:"logbook_id"`
-	ParticipantID uuid.UUID  `json:"participant_id"`
-	StageID       *uuid.UUID `json:"stage_id,omitempty"`
-	StageName     string     `json:"stage_name"`
-	StageColor    string     `json:"stage_color"`
-	Notes         string     `json:"notes"`
-	CreatedAt     time.Time  `json:"created_at"`
+	ID              uuid.UUID  `json:"id"`
+	LogbookID       uuid.UUID  `json:"logbook_id"`
+	ParticipantID   uuid.UUID  `json:"participant_id"`
+	StageID         *uuid.UUID `json:"stage_id,omitempty"`
+	CaptureStageKey string     `json:"capture_stage_key"`
+	StagePosition   *int       `json:"stage_position"`
+	StageName       string     `json:"stage_name"`
+	StageColor      string     `json:"stage_color"`
+	Notes           string     `json:"notes"`
+	CreatedAt       time.Time  `json:"created_at"`
 
 	// Populated on demand
 	ParticipantName  string  `json:"participant_name,omitempty"`
@@ -2684,6 +2696,7 @@ type EventLogbookEntry struct {
 // Logbook status constants
 const (
 	LogbookStatusPending   = "pending"
+	LogbookStatusActive    = "active"
 	LogbookStatusCompleted = "completed"
 )
 

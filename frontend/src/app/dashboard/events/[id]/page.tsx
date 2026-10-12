@@ -15,7 +15,12 @@ import { format, formatDistanceToNow } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
-import ContactSelector, { SelectedPerson } from '@/components/ContactSelector'
+import type { SelectedPerson } from '@/components/ContactSelector'
+import { eventResourceFailure, isEventResourceAbort, loadEventResource, type EventResourceError } from '@/components/events/eventResource'
+import { reconcileEventStageFilters, reconcileEventStageIdentity } from '@/components/events/eventStageReconciliation'
+import EventConfigurationWindow from '@/components/events/EventConfigurationWindow'
+import EventContactPicker from '@/components/events/EventContactPicker'
+import EventLogbooksWorkspace from '@/components/events/EventLogbooksWorkspace'
 import ChatPanel from '@/components/chat/ChatPanel'
 import WhatsAppDevicePicker from '@/components/WhatsAppDevicePicker'
 import ContactDetailSurface from '@/components/contact-details/ContactDetailSurface'
@@ -41,8 +46,7 @@ import { subscribeWebSocket } from '@/lib/api'
 import { useKanbanPan } from '@/lib/useKanbanPan'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
-import { isEventContextReadOnly, logbookSettingsPatch, readLogbookMutation } from '../eventForm'
-import { LogbookSession } from '../logbookSession'
+import { isEventContextReadOnly } from '../eventForm'
 
 const getToken = () => typeof window !== 'undefined' ? localStorage.getItem('token') || '' : ''
 
@@ -371,7 +375,7 @@ const VirtualKanbanColumn = memo(function VirtualKanbanColumn({
   column, totalCount, hasMore, loadingMore, onLoadMore,
   selectedIds, detailParticipantId, draggedId, dragOverColumn, selectionMode,
   onToggleSelection, onOpenDetail, onDelete, onAccessibleDrop,
-  onRenameStage, onColorStage, onDeleteStage, canManageStage = true, canDragParticipants = true,
+  onRenameStage, onColorStage, onDeleteStage, canManageStage = false, canDragParticipants = true,
   stageEditMode = false, onStageDragStart, onStageDrop, isStageDragging = false,
   stageOptions, onParticipantStageChange, compactLayout,
 }: VirtualColumnProps) {
@@ -538,11 +542,6 @@ export default function EventDetailPage() {
   const searchParams = useSearchParams()
   const { ref: pageRef, width: pageWidth } = useContainerWidth<HTMLDivElement>()
   const eventId = params.id as string
-  const logbookSession = useMemo(() => new LogbookSession(), [eventId])
-  useEffect(() => {
-    logbookSession.activate()
-    return () => logbookSession.dispose()
-  }, [logbookSession])
   const crmWindowStorageScope = useCrmWindowStorageScope('events')
   const folderParam = searchParams.get('folder')
 
@@ -560,7 +559,7 @@ export default function EventDetailPage() {
   const stageAbortRefs = useRef<Map<string, AbortController>>(new Map())
 
   // UI state
-  const [viewMode, setViewMode] = useState<'kanban' | 'list' | 'logbook'>('kanban')
+  const [viewMode, setViewMode] = useState<'kanban' | 'list' | 'logbook'>(searchParams.get('view') === 'logbook' ? 'logbook' : 'kanban')
   const [searchQuery, setSearchQuery] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(searchQuery)
   const [showFilterDropdown, setShowFilterDropdown] = useState(false)
@@ -620,6 +619,7 @@ export default function EventDetailPage() {
 
   // Add participant
   const [showAddModal, setShowAddModal] = useState(false)
+  const [inspectingPickedParticipant,setInspectingPickedParticipant] = useState(false)
   const [addTab, setAddTab] = useState<'search' | 'manual'>('search')
   const [manualForm, setManualForm] = useState({ name: '', last_name: '', short_name: '', phone: '', email: '', age: '' })
   const [addingParticipant, setAddingParticipant] = useState(false)
@@ -647,17 +647,12 @@ export default function EventDetailPage() {
   const [showMoreMenu, setShowMoreMenu] = useState(false)
   const moreMenuRef = useRef<HTMLDivElement>(null)
 
-  // Stage management
-  const [showStageModal, setShowStageModal] = useState(false)
-  const [showStageEditorModal, setShowStageEditorModal] = useState(false)
-  const [newStageName, setNewStageName] = useState('')
-  const [newStageColor, setNewStageColor] = useState('#3b82f6')
-  const [stageEditMode, setStageEditMode] = useState(false)
-  const [draftStages, setDraftStages] = useState<DraftStage[]>([])
-  const [draftDeletedStages, setDraftDeletedStages] = useState<DraftStageDeletion[]>([])
-  const [stageLayoutSaving, setStageLayoutSaving] = useState(false)
-  const [stageLayoutError, setStageLayoutError] = useState('')
-  const [draggedStageId, setDraggedStageId] = useState<string | null>(null)
+  // Shared event configuration preserves each section's draft.
+  const [showEventConfiguration, setShowEventConfiguration] = useState(false)
+  const configurationOpenRef = useRef(showEventConfiguration)
+  configurationOpenRef.current = showEventConfiguration
+  const [configurationSection, setConfigurationSection] = useState<'data'|'stages'|'rules'>('data')
+  const beginStageEditMode = () => { setConfigurationSection('stages'); setShowEventConfiguration(true); setShowMoreMenu(false) }
   const [duplicatingEvent, setDuplicatingEvent] = useState(false)
 
   // Google Sync
@@ -697,68 +692,7 @@ export default function EventDetailPage() {
     if (!value) setDebouncedSearch('')
   }, [setDebouncedSearch])
 
-  // ── Logbook (Bitácora) state ──
-  const [logbookError, setLogbookError] = useState('')
-  interface Logbook {
-    id: string; event_id: string; account_id: string; date: string; title: string
-    status: string; general_notes: string; stage_snapshot: Record<string, { name: string; color: string; count: number }>
-    total_participants: number; captured_at: string | null; created_by: string | null
-    created_by_name: string | null; created_at: string; updated_at: string
-    entries?: LogbookEntry[]
-    saved_filter?: Record<string, unknown> | null
-  }
-  interface LogbookEntry {
-    id: string; logbook_id: string; participant_id: string; stage_id: string | null
-    stage_name: string; stage_color: string; notes: string; created_at: string
-    participant_name: string; participant_phone: string | null
-  }
-  // Helper: parse logbook date without timezone shift (dates stored as UTC midnight)
-  const parseLogbookDate = (dateStr: string) => {
-    if (!dateStr) return new Date()
-    // If it's a full ISO string with T00:00:00Z, extract just the date part and parse as local noon
-    const dateOnly = dateStr.includes('T') ? dateStr.split('T')[0] : dateStr.slice(0, 10)
-    return new Date(dateOnly + 'T12:00:00')
-  }
-  const [logbooks, setLogbooks] = useState<Logbook[]>([])
-  const [logbooksLoading, setLogbooksLoading] = useState(false)
-  const [selectedLogbook, setSelectedLogbook] = useState<Logbook | null>(null)
-  const [selectedLogbookLoading, setSelectedLogbookLoading] = useState(false)
-  const [showNewLogbookModal, setShowNewLogbookModal] = useState(false)
-  const [showLogbookSettingsModal, setShowLogbookSettingsModal] = useState(false)
-  const [logbookSettingsTitle, setLogbookSettingsTitle] = useState('')
-  const [logbookSettingsDate, setLogbookSettingsDate] = useState('')
-  const [logbookSettingsStatus, setLogbookSettingsStatus] = useState('pending')
-  const [logbookSettingsInitial, setLogbookSettingsInitial] = useState<{ title: string; date: string; status: string } | null>(null)
-  const [logbookSettingsUpdating, setLogbookSettingsUpdating] = useState(false)
-  const [newLogbookDate, setNewLogbookDate] = useState('')
-  const [newLogbookTitle, setNewLogbookTitle] = useState('')
-  const [newLogbookCaptureNow, setNewLogbookCaptureNow] = useState(false)
-  const [creatingLogbook, setCreatingLogbook] = useState(false)
-  const [capturingSnapshot, setCapturingSnapshot] = useState(false)
-  const [editingLogbookNotes, setEditingLogbookNotes] = useState(false)
-  const [logbookNotesText, setLogbookNotesText] = useState('')
-  const [savingLogbookNotes, setSavingLogbookNotes] = useState(false)
-  const [editingEntryId, setEditingEntryId] = useState<string | null>(null)
-  const [entryNotesText, setEntryNotesText] = useState('')
-  const [savingEntryNotes, setSavingEntryNotes] = useState(false)
-  const [autoCreating, setAutoCreating] = useState(false)
-  const [logbookViewMode, setLogbookViewMode] = useState<'list' | 'kanban'>('list')
-  // Logbook inline editing
-  const [editingLogbookTitle, setEditingLogbookTitle] = useState(false)
-  const [editLogbookTitleValue, setEditLogbookTitleValue] = useState('')
-  const [editingLogbookDate, setEditingLogbookDate] = useState(false)
-  const [editLogbookDateValue, setEditLogbookDateValue] = useState('')
-  // Preview for pending logbooks with saved filter
-  const [previewParticipants, setPreviewParticipants] = useState<Array<{ id: string; name: string; phone: string | null; stage_name: string; stage_color: string; stage_id: string | null }>>([])
-  const [previewLoading, setPreviewLoading] = useState(false)
-  // Filter confirmation for logbook snapshot
-  const [showFilterConfirmDialog, setShowFilterConfirmDialog] = useState(false)
-  const [filterConfirmAction, setFilterConfirmAction] = useState<(() => void) | null>(null)
 
-  // Inline event name editing
-  const [editingEventName, setEditingEventName] = useState(false)
-  const [editNameValue, setEditNameValue] = useState('')
-  const editNameRef = useRef<HTMLInputElement>(null)
 
   const kanbanRef = useRef<HTMLDivElement>(null)
   const topScrollRef = useRef<HTMLDivElement>(null)
@@ -768,23 +702,33 @@ export default function EventDetailPage() {
   useKanbanPan(kanbanRef, topScrollRef)
 
   // ─── Fetch Functions ─────────────────────────────────────────────────────────
+  const [eventLoadError, setEventLoadError] = useState<EventResourceError | null>(null)
+  const eventRequestRef = useRef(0)
+  const eventAbortRef = useRef<AbortController|null>(null)
+  const stageRevisionRef = useRef(0)
   const fetchEvent = useCallback(async () => {
+    eventAbortRef.current?.abort()
+    const controller=new AbortController();eventAbortRef.current=controller
+    const requestId=++eventRequestRef.current
+    setEventLoadError(null)
     try {
-      const res = await fetch(`/api/events/${eventId}`, { headers: { Authorization: `Bearer ${getToken()}` } })
-      const data = await res.json()
-      if (data.success) {
-        setEvent(data.event)
-        if (data.event.pipeline_id) {
-          try {
-            const pRes = await fetch(`/api/events/pipelines/${data.event.pipeline_id}`, { headers: { Authorization: `Bearer ${getToken()}` } })
-            const pData = await pRes.json()
-            if (pData.success && pData.pipeline?.stages) {
-              setPipelineStages(pData.pipeline.stages.sort((a: PipelineStage, b: PipelineStage) => a.position - b.position))
-            }
-          } catch (e) { console.error('[Pipeline]', e) }
-        }
+      const loadedEvent = await loadEventResource<Event>(eventId, getToken(), controller.signal)
+      if (requestId !== eventRequestRef.current || controller.signal.aborted) return
+      setEvent(loadedEvent)
+      if (loadedEvent.pipeline_id) {
+        try {
+          const pRes = await fetch(`/api/events/pipelines/${loadedEvent.pipeline_id}`, { headers: { Authorization: `Bearer ${getToken()}` }, signal:controller.signal })
+          const pData = await pRes.json()
+          if (requestId === eventRequestRef.current && !controller.signal.aborted && pData.success && pData.pipeline?.stages) {
+            setPipelineStages(pData.pipeline.stages.sort((a: PipelineStage, b: PipelineStage) => a.position - b.position))
+          }
+        } catch (e) { if(!controller.signal.aborted) console.error('[Pipeline]', e) }
       }
-    } catch (e) { console.error(e) }
+    } catch (error) {
+      if (requestId !== eventRequestRef.current || controller.signal.aborted || isEventResourceAbort(error)) return
+      setEventLoadError(eventResourceFailure(error))
+      setLoading(false)
+    }
   }, [eventId])
 
   const openMembershipHistory = useCallback(async () => {
@@ -1064,52 +1008,7 @@ export default function EventDetailPage() {
   const eventHasMembershipRules = event?.has_membership_rules ?? Boolean(event?.tag_formula?.trim())
   const eventIsReadOnly = isEventContextReadOnly(event?.status)
   const isCompactLayout = pageWidth > 0 && pageWidth < 768
-  const activeDraftStages = useMemo(() => (
-    draftStages
-      .filter(stage => !stage.isDeleted)
-      .sort((a, b) => a.position - b.position)
-  ), [draftStages])
-
-  const renderedStageData = useMemo(() => {
-    if (!stageEditMode) return stageData
-    const currentById = new Map(stageData.map(stage => [stage.id, stage]))
-    return activeDraftStages.map(stage => {
-      const current = currentById.get(stage.id)
-      return {
-        id: stage.id,
-        pipeline_id: stage.pipeline_id,
-        name: stage.name,
-        color: stage.color,
-        position: stage.position,
-        total_count: current?.total_count ?? stage.total_count,
-        participants: current?.participants || [],
-        has_more: current?.has_more || false,
-      }
-    })
-  }, [activeDraftStages, stageData, stageEditMode])
-
-  const stageEditDirty = useMemo(() => {
-    if (!stageEditMode) return false
-    if (draftDeletedStages.length > 0) return true
-    if (draftStages.some(stage => stage.isNew)) return true
-    const currentById = new Map((pipelineStages.length > 0 ? pipelineStages : stageData)
-      .slice()
-      .sort((a, b) => a.position - b.position)
-      .map((stage, idx) => [stage.id, { name: stage.name, color: stage.color, index: idx }])
-    )
-    return activeDraftStages.some((stage, idx) => {
-      const current = currentById.get(stage.id)
-      return !current || current.name !== stage.name || current.color !== stage.color || current.index !== idx
-    })
-  }, [activeDraftStages, draftDeletedStages.length, draftStages, pipelineStages, stageData, stageEditMode])
-
-  const stageSaveBlocked = useMemo(() => (
-    draftDeletedStages.some(deletion => {
-      const stageStillDeleted = draftStages.some(stage => stage.id === deletion.stageId && stage.isDeleted && !stage.isNew)
-      if (!stageStillDeleted) return false
-      return !deletion.moveToStageId || !activeDraftStages.some(stage => stage.id === deletion.moveToStageId && !stage.isNew)
-    })
-  ), [activeDraftStages, draftDeletedStages, draftStages])
+  const renderedStageData = stageData
 
   const kanbanColumnCount = renderedStageData.length + (unassignedData.total_count > 0 ? 1 : 0)
 
@@ -1263,234 +1162,24 @@ export default function EventDetailPage() {
   }, [findParticipantById, handleBulkMove, handleStageChange, selectedIds])
 
   const applyStageManagementResponse = useCallback((data: any) => {
-    const pipelineChanged = Boolean(data.pipeline_id && event?.pipeline_id && data.pipeline_id !== event.pipeline_id)
-    if (data.pipeline_id) {
-      setEvent(prev => prev ? { ...prev, pipeline_id: data.pipeline_id } : prev)
+    if (typeof data.revision === 'number' && data.revision < stageRevisionRef.current) return
+    stageRevisionRef.current = data.revision ?? stageRevisionRef.current
+    const mapping: Record<string,string> = data.stage_id_map || {}
+    if (Array.isArray(data.stages)) {
+      const canonical: PipelineStage[] = data.stages.map((stage: PipelineStage) => ({...stage,pipeline_id:data.pipeline_id || stage.pipeline_id})).sort((a:PipelineStage,b:PipelineStage)=>a.position-b.position)
+      setFilterStageIds(current=>reconcileEventStageFilters(current,canonical,mapping))
+      setPipelineStages(canonical)
+      setListParticipants(current=>current.map(item=>reconcileEventStageIdentity(item,canonical,mapping)))
+      setDetailParticipant(current=>current?reconcileEventStageIdentity(current,canonical,mapping):current)
     }
-    if (pipelineChanged) {
-      setFilterStageIds(new Set())
-    }
-    if (data.stages) {
-      setPipelineStages((data.stages || []).sort((a: PipelineStage, b: PipelineStage) => a.position - b.position))
-    }
-    fetchEvent()
-    fetchParticipantsPaginated()
-    if (viewMode === 'list') fetchListParticipants(true)
-  }, [event?.pipeline_id, fetchEvent, fetchParticipantsPaginated, fetchListParticipants, viewMode])
-
-  // ─── Stage Management ───────────────────────────────────────────────────────
-  const beginStageEditMode = useCallback(() => {
-    const sourceStages = (pipelineStages.length > 0 ? pipelineStages : stageData)
-      .slice()
-      .sort((a, b) => a.position - b.position)
-    const countByStage = new Map(stageData.map(s => [s.id, s.total_count]))
-    setDraftStages(sourceStages.map((stage, idx) => ({
-      id: stage.id,
-      pipeline_id: stage.pipeline_id,
-      name: stage.name,
-      color: stage.color || '#6366f1',
-      position: idx,
-      total_count: countByStage.get(stage.id) || 0,
-    })))
-    setDraftDeletedStages([])
-    setStageLayoutError('')
-    setDraggedStageId(null)
-    setStageEditMode(true)
-    setShowStageEditorModal(true)
-    setShowMoreMenu(false)
-  }, [pipelineStages, stageData])
-
-  const cancelStageEditMode = useCallback(() => {
-    setStageEditMode(false)
-    setDraftStages([])
-    setDraftDeletedStages([])
-    setStageLayoutError('')
-    setDraggedStageId(null)
-    setShowStageEditorModal(false)
-    setShowStageModal(false)
-    setNewStageName('')
-    setNewStageColor('#3b82f6')
-  }, [])
-
-  const handleCreateStage = useCallback(async () => {
-    const name = newStageName.trim()
-    if (!name || stageLayoutSaving) return
-    if (!stageEditMode) {
-      beginStageEditMode()
-    }
-    const clientId = `draft-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    setDraftStages(prev => {
-      const activeCount = prev.filter(s => !s.isDeleted).length
-      return [...prev, {
-        id: clientId,
-        clientId,
-        pipeline_id: event?.pipeline_id || '',
-        name,
-        color: newStageColor,
-        position: activeCount,
-        total_count: 0,
-        isNew: true,
-      }]
-    })
-    setShowStageModal(false)
-    setNewStageName('')
-    setNewStageColor('#3b82f6')
-    setStageLayoutError('')
-  }, [beginStageEditMode, event?.pipeline_id, newStageColor, newStageName, stageEditMode, stageLayoutSaving])
-
-  const handleRenameStage = useCallback(async (stageId: string, newName: string) => {
-    const name = newName.trim()
-    if (!name) return
-    if (!stageEditMode) return
-    setDraftStages(prev => prev.map(stage => stage.id === stageId ? { ...stage, name } : stage))
-    setStageLayoutError('')
-  }, [stageEditMode])
-
-  const handleColorStage = useCallback((stageId: string, color: string) => {
-    if (!stageEditMode) return
-    setDraftStages(prev => prev.map(stage => stage.id === stageId ? { ...stage, color } : stage))
-    setStageLayoutError('')
-  }, [stageEditMode])
-
-  const handleDeleteStage = useCallback(async (stageId: string, stageName: string, totalCount: number) => {
-    if (!stageEditMode) return
-    const activeStages = draftStages.filter(stage => !stage.isDeleted)
-    if (activeStages.length <= 1) {
-      setStageLayoutError('Debe quedar al menos una etapa activa.')
-      return
-    }
-    const stage = draftStages.find(item => item.id === stageId)
-    if (stage?.isNew) {
-      setDraftStages(prev => prev.filter(item => item.id !== stageId).map((item, idx) => ({ ...item, position: idx })))
-      return
-    }
-    const firstDestination = activeStages.find(item => item.id !== stageId)?.id || ''
-    setDraftStages(prev => prev.map(item => item.id === stageId ? { ...item, isDeleted: true } : item))
-    setDraftDeletedStages(prev => prev.some(item => item.stageId === stageId)
-      ? prev
-      : [...prev, { stageId, stageName, totalCount, moveToStageId: firstDestination }]
-    )
-    setStageLayoutError('')
-  }, [draftStages, stageEditMode])
-
-  const undoDeleteStage = useCallback((stageId: string) => {
-    setDraftStages(prev => prev.map(stage => stage.id === stageId ? { ...stage, isDeleted: false } : stage))
-    setDraftDeletedStages(prev => prev.filter(item => item.stageId !== stageId))
-    setStageLayoutError('')
-  }, [])
-
-  const setDeletedStageDestination = useCallback((stageId: string, moveToStageId: string) => {
-    setDraftDeletedStages(prev => prev.map(item => item.stageId === stageId ? { ...item, moveToStageId } : item))
-    setStageLayoutError('')
-  }, [])
-
-  const moveDraftStage = useCallback((fromId: string, toId: string) => {
-    if (!fromId || !toId || fromId === toId) return
-    setDraftStages(prev => {
-      const active = prev.filter(stage => !stage.isDeleted)
-      const deleted = prev.filter(stage => stage.isDeleted)
-      const fromIndex = active.findIndex(stage => stage.id === fromId)
-      const toIndex = active.findIndex(stage => stage.id === toId)
-      if (fromIndex < 0 || toIndex < 0) return prev
-      const next = [...active]
-      const [moved] = next.splice(fromIndex, 1)
-      next.splice(toIndex, 0, moved)
-      return [
-        ...next.map((stage, idx) => ({ ...stage, position: idx })),
-        ...deleted,
-      ]
-    })
-    setStageLayoutError('')
-  }, [])
-
-  const handleStageColumnDrop = useCallback((targetStageId: string) => {
-    if (!draggedStageId) return
-    moveDraftStage(draggedStageId, targetStageId)
-    setDraggedStageId(null)
-  }, [draggedStageId, moveDraftStage])
-
-  const saveStageLayout = useCallback(async () => {
-    if (stageLayoutSaving) return
-    const activeStages = draftStages
-      .filter(stage => !stage.isDeleted)
-      .sort((a, b) => a.position - b.position)
-    if (activeStages.length === 0) {
-      setStageLayoutError('Debe quedar al menos una etapa activa.')
-      return
-    }
-    const invalidStage = activeStages.find(stage => !stage.name.trim())
-    if (invalidStage) {
-      setStageLayoutError('Todas las etapas necesitan nombre.')
-      return
-    }
-    const invalidDeletion = draftDeletedStages.find(deletion => {
-      const stageStillDeleted = draftStages.some(stage => stage.id === deletion.stageId && stage.isDeleted && !stage.isNew)
-      if (!stageStillDeleted) return false
-      return !deletion.moveToStageId || !activeStages.some(stage => stage.id === deletion.moveToStageId && !stage.isNew)
-    })
-    if (invalidDeletion) {
-      setStageLayoutError(`Elige una etapa destino para "${invalidDeletion.stageName}".`)
-      return
-    }
-
-    setStageLayoutSaving(true)
-    setStageLayoutError('')
-    try {
-      const res = await fetch(`/api/events/${eventId}/stages/layout`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-        body: JSON.stringify({
-          stages: activeStages.map((stage, idx) => ({
-            ...(stage.isNew ? { clientId: stage.clientId || stage.id } : { id: stage.id }),
-            name: stage.name.trim(),
-            color: stage.color || '#6366f1',
-            position: idx,
-          })),
-          deletions: draftDeletedStages
-            .filter(deletion => draftStages.some(stage => stage.id === deletion.stageId && stage.isDeleted && !stage.isNew))
-            .map(deletion => ({
-              id: deletion.stageId,
-              moveTo: { kind: 'stage', id: deletion.moveToStageId },
-            })),
-        }),
-      })
-      const data = await res.json()
-      if (!data.success) {
-        setStageLayoutError(data.error || 'No se pudo guardar el layout de etapas.')
-        return
-      }
-      setFilterStageIds(prev => {
-        const deleted = new Set(draftDeletedStages.map(item => item.stageId))
-        const next = new Set(prev)
-        deleted.forEach(id => next.delete(id))
-        return next
-      })
-      applyStageManagementResponse(data)
-      setStageEditMode(false)
-      setDraftStages([])
-      setDraftDeletedStages([])
-      setShowStageEditorModal(false)
-      setShowStageModal(false)
-      setNewStageName('')
-      setNewStageColor('#3b82f6')
-    } catch (e) {
-      console.error('[SaveStageLayout]', e)
-      setStageLayoutError('No se pudo guardar el layout de etapas.')
-    } finally {
-      setStageLayoutSaving(false)
-    }
-  }, [applyStageManagementResponse, draftDeletedStages, draftStages, eventId, stageLayoutSaving])
-
-  const moveDraftStageByOffset = useCallback((stageId: string, offset: number) => {
-    const active = activeDraftStages
-    const index = active.findIndex(stage => stage.id === stageId)
-    const target = active[index + offset]
-    if (!target) return
-    moveDraftStage(stageId, target.id)
-  }, [activeDraftStages, moveDraftStage])
+    if (data.pipeline_id) setEvent(prev=>prev?{...prev,pipeline_id:data.pipeline_id}:prev)
+    void fetchEvent()
+    void fetchParticipantsPaginated()
+    if (viewMode==='list') void fetchListParticipants(true)
+  }, [fetchEvent, fetchParticipantsPaginated, fetchListParticipants, viewMode])
 
   const handleDuplicateEvent = useCallback(async () => {
-    if (duplicatingEvent) return
+    if (duplicatingEvent || configurationOpenRef.current) return
     setDuplicatingEvent(true)
     setShowMoreMenu(false)
     try {
@@ -1503,7 +1192,7 @@ export default function EventDetailPage() {
         alert(data.error || 'No se pudo duplicar el evento.')
         return
       }
-      router.push(`/dashboard/events/${data.event.id}`)
+      if (!configurationOpenRef.current) router.push(`/dashboard/events/${data.event.id}`)
     } catch (e) {
       console.error('[DuplicateEvent]', e)
       alert('No se pudo duplicar el evento.')
@@ -1513,63 +1202,6 @@ export default function EventDetailPage() {
   }, [duplicatingEvent, eventId, router])
 
   // ─── Add Participants ────────────────────────────────────────────────────────
-  const handleAddFromSelector = async (selected: SelectedPerson[]) => {
-    if (selected.length === 0 || addingParticipant) return
-    const parts = selected.map(p => ({
-      contact_id: p.id,
-      name: p.name, phone: p.phone || '', email: p.email || '',
-    }))
-    setAddingParticipant(true)
-    setAddParticipantError('')
-    try {
-      const res = await fetch(`/api/events/${eventId}/participants/bulk`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ participants: parts }),
-      })
-      const data = await res.json()
-      if (!res.ok || !data.success) {
-        if (data.code === 'EVENT_RULE_NOT_MATCHED' || res.status === 422) {
-          setAddParticipantError(data.error || 'Uno de los contactos ya no cumple las reglas actuales del evento. Actualiza sus etiquetas y vuelve a intentarlo.')
-        } else if (res.status === 409) {
-          setAddParticipantError(data.error || 'El evento cambió de estado y ya no permite agregar participantes.')
-        } else {
-          setAddParticipantError(data.error || 'No pudimos agregar los contactos. Revisa la selección e inténtalo nuevamente.')
-        }
-        return
-      }
-
-      const summary = data.summary || {}
-      const created = Number(summary.created || 0)
-      const reactivated = Number(summary.reactivated || 0)
-      const alreadyActive = Number(summary.already_active || 0)
-      const rejected = Number(summary.rejected || 0)
-      const changed = created + reactivated
-      if (changed > 0) {
-        fetchParticipantsPaginated()
-        fetchEvent()
-      }
-      if (rejected > 0 || (changed === 0 && alreadyActive > 0)) {
-        setParticipantCandidatesRevision(current => current + 1)
-        const completedMessage = changed > 0
-          ? `${changed} contacto${changed !== 1 ? 's se añadieron' : ' se añadió'} correctamente. `
-          : ''
-        const rejectedMessage = rejected > 0
-          ? `${rejected} no ${rejected !== 1 ? 'pudieron añadirse' : 'pudo añadirse'} porque la configuración cambió o ya no cumple las reglas.`
-          : `${alreadyActive} contacto${alreadyActive !== 1 ? 's ya formaban' : ' ya formaba'} parte del evento.`
-        setAddParticipantError(completedMessage + rejectedMessage)
-        return
-      }
-      setShowAddModal(false)
-      setAddParticipantError('')
-    } catch (error) {
-      console.error('[AddEventContacts]', error)
-      setAddParticipantError('No pudimos conectar con el servidor. Revisa tu conexión e inténtalo nuevamente.')
-    } finally {
-      setAddingParticipant(false)
-    }
-  }
-
   const handleAddManual = async () => {
     if (!manualForm.name.trim() || addingParticipant) return
     if (eventHasMembershipRules) {
@@ -1928,125 +1560,6 @@ export default function EventDetailPage() {
     finally { setExporting(false) }
   }
 
-  // ─── Logbook Functions ──────────────────────────────────────────────────────
-  const resetLogbookEditors = useCallback(() => {
-    setEditingLogbookNotes(false)
-    setEditingEntryId(null)
-    setEditingLogbookTitle(false)
-    setEditingLogbookDate(false)
-    setShowLogbookSettingsModal(false)
-    setLogbookSettingsInitial(null)
-    setLogbookError('')
-  }, [])
-
-  const closeLogbook = useCallback(() => {
-    logbookSession.select(null)
-    setSelectedLogbook(null)
-    setSelectedLogbookLoading(false)
-    setPreviewLoading(false)
-    setPreviewParticipants([])
-    resetLogbookEditors()
-  }, [logbookSession, resetLogbookEditors])
-
-  const fetchLogbooks = useCallback(async () => {
-    if (!logbookSession.isActive()) return
-    const request = logbookSession.begin('list')
-    setLogbooksLoading(true)
-    try {
-      const res = await fetch(`/api/events/${eventId}/logbooks`, { headers: { Authorization: `Bearer ${getToken()}` }, signal: request.signal })
-      const data = await readLogbookMutation<Logbook[]>(res)
-      if (!Array.isArray(data)) throw new Error('No se pudieron cargar las bitácoras')
-      if (logbookSession.isCurrent('list', request) && Array.isArray(data)) setLogbooks(data)
-    } catch (e) { if (logbookSession.isCurrent('list', request)) setLogbookError(e instanceof Error ? e.message : 'No se pudieron cargar las bitácoras') }
-    finally { if (logbookSession.isCurrent('list', request)) setLogbooksLoading(false) }
-  }, [eventId, logbookSession])
-
-  const fetchLogbookPreview = useCallback(async (lid: string) => {
-    if (!logbookSession.isActive() || logbookSession.selectedId() !== lid) return
-    const request = logbookSession.begin('preview')
-    setPreviewLoading(true)
-    try {
-      const res = await fetch(`/api/events/${eventId}/logbooks/${lid}/preview`, { headers: { Authorization: `Bearer ${getToken()}` }, signal: request.signal })
-      const data = await readLogbookMutation<{ participants: typeof previewParticipants }>(res)
-      if (logbookSession.isCurrent('preview', request)) setPreviewParticipants(data.participants || [])
-    } catch (e) { if (logbookSession.isCurrent('preview', request)) { setPreviewParticipants([]); setLogbookError(e instanceof Error ? e.message : 'No se pudo cargar la selección') } }
-    finally { if (logbookSession.isCurrent('preview', request)) setPreviewLoading(false) }
-  }, [eventId, logbookSession])
-
-  const fetchLogbookDetail = useCallback(async (lid: string) => {
-    if (!logbookSession.isActive()) return
-    if (logbookSession.selectedId() !== lid) {
-      resetLogbookEditors()
-      setSelectedLogbook(current => current?.id === lid ? current : null)
-    }
-    logbookSession.select(lid)
-    const request = logbookSession.begin('detail')
-    setSelectedLogbookLoading(true)
-    setPreviewParticipants([])
-    setPreviewLoading(false)
-    try {
-      const res = await fetch(`/api/events/${eventId}/logbooks/${lid}`, { headers: { Authorization: `Bearer ${getToken()}` }, signal: request.signal })
-      const data = await readLogbookMutation<Logbook>(res)
-      if (logbookSession.isCurrent('detail', request) && data.id === lid) {
-        setSelectedLogbook(data)
-        setLogbookNotesText(data.general_notes || '')
-        // Auto-fetch preview for pending logbooks with saved filter
-        if (data.status === 'pending' && data.saved_filter) {
-          fetchLogbookPreview(lid)
-        }
-      }
-    } catch (e) { if (logbookSession.isCurrent('detail', request)) setLogbookError(e instanceof Error ? e.message : 'No se pudo cargar la bitácora') }
-    finally { if (logbookSession.isCurrent('detail', request)) setSelectedLogbookLoading(false) }
-  }, [eventId, fetchLogbookPreview, logbookSession, resetLogbookEditors])
-
-  const handleUpdateLogbookSettings = async (updateFilter: boolean = false) => {
-    if (!logbookSession.isActive() || eventIsReadOnly || !selectedLogbook || !logbookSettingsInitial || !logbookSettingsDate || !logbookSettingsTitle.trim()) return
-    const selection = logbookSession.selection()
-    const lid = selectedLogbook.id
-    setLogbookError('')
-    setLogbookSettingsUpdating(true)
-    try {
-      const body: Record<string, unknown> = logbookSettingsPatch({ title: logbookSettingsTitle, date: logbookSettingsDate, status: logbookSettingsStatus }, logbookSettingsInitial)
-      if (updateFilter) {
-        body.saved_filter = getSnapshotFilterBody()
-      }
-      if (Object.keys(body).length === 0) {
-        setShowLogbookSettingsModal(false)
-        return
-      }
-      const res = await fetch(`/api/events/${eventId}/logbooks/${lid}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${getToken()}`
-        },
-        body: JSON.stringify(body)
-      })
-      const updated = await readLogbookMutation<typeof selectedLogbook>(res)
-      if (logbookSession.isSelected(selection)) {
-        setSelectedLogbook(current => current?.id === lid ? updated : current)
-        setShowLogbookSettingsModal(false)
-      }
-      fetchLogbooks()
-    } catch (e) {
-      if (logbookSession.isSelected(selection)) setLogbookError(e instanceof Error ? e.message : 'No se pudo guardar la configuración')
-    } finally {
-      if (logbookSession.isActive()) setLogbookSettingsUpdating(false)
-    }
-  }
-
-  const handleCreateLogbook = async () => {
-    if (!logbookSession.isActive() || eventIsReadOnly || !newLogbookDate) return
-    // If capture_now is checked AND filters are active, show confirmation first
-    if (newLogbookCaptureNow && activeFilterCount > 0) {
-      setFilterConfirmAction(() => () => doCreateLogbook())
-      setShowFilterConfirmDialog(true)
-      return
-    }
-    doCreateLogbook()
-  }
-
-  // Build filter body for snapshot capture
   const getSnapshotFilterBody = () => {
     if (activeFilterCount === 0) return {}
     const body: Record<string, unknown> = {}
@@ -2069,176 +1582,13 @@ export default function EventDetailPage() {
     return body
   }
 
-  const doCreateLogbook = async () => {
-    if (!logbookSession.isActive() || eventIsReadOnly || !newLogbookDate) return
-    const selection = logbookSession.selection()
-    setLogbookError('')
-    setShowFilterConfirmDialog(false)
-    setCreatingLogbook(true)
-    try {
-      const filterBody = getSnapshotFilterBody()
-      const res = await fetch(`/api/events/${eventId}/logbooks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-        body: JSON.stringify({ date: newLogbookDate, title: newLogbookTitle, capture_now: newLogbookCaptureNow, ...filterBody }),
-      })
-      const data = await readLogbookMutation<NonNullable<typeof selectedLogbook>>(res)
-      if (data.id) {
-        await fetchLogbooks()
-        if (logbookSession.isSelected(selection)) {
-          resetLogbookEditors()
-          logbookSession.select(data.id)
-          setSelectedLogbook(data)
-          setShowNewLogbookModal(false)
-          setNewLogbookDate('')
-          setNewLogbookTitle('')
-          setNewLogbookCaptureNow(false)
-        }
-      }
-    } catch (e) { if (logbookSession.isSelected(selection)) setLogbookError(e instanceof Error ? e.message : 'No se pudo crear la bitácora') }
-    finally { if (logbookSession.isActive()) setCreatingLogbook(false) }
-  }
-
-  const handleCaptureSnapshot = async (lid: string) => {
-    if (!logbookSession.isActive() || eventIsReadOnly) return
-    // If filters are active, show confirmation dialog
-    if (activeFilterCount > 0) {
-      setFilterConfirmAction(() => () => doCaptureSnapshot(lid))
-      setShowFilterConfirmDialog(true)
-      return
-    }
-    doCaptureSnapshot(lid)
-  }
-
-  const doCaptureSnapshot = async (lid: string) => {
-    if (!logbookSession.isActive() || eventIsReadOnly || logbookSession.selectedId() !== lid) return
-    const selection = logbookSession.selection()
-    setLogbookError('')
-    setShowFilterConfirmDialog(false)
-    setCapturingSnapshot(true)
-    try {
-      const filterBody = getSnapshotFilterBody()
-      const hasFilters = Object.keys(filterBody).length > 0
-      // If no active UI filters but logbook has saved_filter, send saved_filter
-      let bodyToSend = hasFilters ? filterBody : undefined
-      if (!hasFilters && selectedLogbook?.saved_filter && Object.keys(selectedLogbook.saved_filter).length > 0) {
-        bodyToSend = selectedLogbook.saved_filter as Record<string, unknown>
-      }
-      const sendBody = bodyToSend && Object.keys(bodyToSend).length > 0
-      const res = await fetch(`/api/events/${eventId}/logbooks/${lid}/capture`, {
-        method: 'POST',
-        headers: { ...(sendBody ? { 'Content-Type': 'application/json' } : {}), Authorization: `Bearer ${getToken()}` },
-        ...(sendBody ? { body: JSON.stringify(bodyToSend) } : {}),
-      })
-      const data = await readLogbookMutation<NonNullable<typeof selectedLogbook>>(res)
-      if (data.id) {
-        if (logbookSession.isSelected(selection)) setSelectedLogbook(current => current?.id === lid ? data : current)
-        await fetchLogbooks()
-      }
-    } catch (e) { if (logbookSession.isSelected(selection)) setLogbookError(e instanceof Error ? e.message : 'No se aplicó la recaptura') }
-    finally { if (logbookSession.isActive()) setCapturingSnapshot(false) }
-  }
-
-  const handleAutoCreateLogbooks = async () => {
-    if (!logbookSession.isActive() || eventIsReadOnly) return
-    setLogbookError('')
-    setAutoCreating(true)
-    try {
-      const res = await fetch(`/api/events/${eventId}/logbooks/auto-create`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${getToken()}` },
-      })
-      const data = await readLogbookMutation<{ created: number }>(res)
-      if (data.created > 0) {
-        await fetchLogbooks()
-      }
-    } catch (e) { if (logbookSession.isActive()) setLogbookError(e instanceof Error ? e.message : 'No se pudieron crear las bitácoras') }
-    finally { if (logbookSession.isActive()) setAutoCreating(false) }
-  }
-
-  const handleSaveLogbookNotes = async () => {
-    if (!logbookSession.isActive() || eventIsReadOnly || !selectedLogbook) return
-    const selection = logbookSession.selection()
-    const lid = selectedLogbook.id
-    setLogbookError('')
-    setSavingLogbookNotes(true)
-    try {
-      const response = await fetch(`/api/events/${eventId}/logbooks/${lid}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-        body: JSON.stringify({ general_notes: logbookNotesText }),
-      })
-      const canonical = await readLogbookMutation<typeof selectedLogbook>(response)
-      if (logbookSession.isSelected(selection)) {
-        setSelectedLogbook(current => current?.id === lid ? canonical : current)
-        setEditingLogbookNotes(false)
-      }
-      fetchLogbooks()
-    } catch (e) { if (logbookSession.isSelected(selection)) setLogbookError(e instanceof Error ? e.message : 'No se pudo guardar la nota') }
-    finally { if (logbookSession.isActive()) setSavingLogbookNotes(false) }
-  }
-
-  const handleSaveEntryNotes = async (entryId: string) => {
-    if (!logbookSession.isActive() || eventIsReadOnly || !selectedLogbook) return
-    const selection = logbookSession.selection()
-    const lid = selectedLogbook.id
-    const notes = entryNotesText
-    setLogbookError('')
-    setSavingEntryNotes(true)
-    try {
-      const response = await fetch(`/api/events/${eventId}/logbooks/${lid}/entries/${entryId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-        body: JSON.stringify({ notes }),
-      })
-      await readLogbookMutation(response)
-      if (logbookSession.isSelected(selection)) {
-        setSelectedLogbook(prev => {
-          if (!prev || prev.id !== lid || !prev.entries) return prev
-          return { ...prev, entries: prev.entries.map(e => e.id === entryId ? { ...e, notes } : e) }
-        })
-        setEditingEntryId(current => current === entryId ? null : current)
-      }
-    } catch (e) { if (logbookSession.isSelected(selection)) setLogbookError(e instanceof Error ? e.message : 'No se pudo guardar la nota') }
-    finally { if (logbookSession.isActive()) setSavingEntryNotes(false) }
-  }
-
-  const handleDeleteLogbook = async (lid: string) => {
-    if (!logbookSession.isActive() || eventIsReadOnly) return
-    setLogbookError('')
-    if (!confirm('¿Eliminar esta bitácora? Se perderán las notas y el snapshot.')) return
-    try {
-      const response = await fetch(`/api/events/${eventId}/logbooks/${lid}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${getToken()}` },
-      })
-      if (!response.ok) await readLogbookMutation(response)
-      if (logbookSession.isActive() && logbookSession.selectedId() === lid) closeLogbook()
-      await fetchLogbooks()
-    } catch (e) { if (logbookSession.isActive()) setLogbookError(e instanceof Error ? e.message : 'No se pudo eliminar la bitácora') }
-  }
-
-  // ─── Effects ───────────────────────────────────────────────────────────────
-  useEffect(() => {
-    closeLogbook()
-    setLogbooks([])
-    setLogbooksLoading(false)
-    setCreatingLogbook(false)
-    setCapturingSnapshot(false)
-    setSavingLogbookNotes(false)
-    setSavingEntryNotes(false)
-    setAutoCreating(false)
-    setLogbookSettingsUpdating(false)
-    setShowNewLogbookModal(false)
-    setShowFilterConfirmDialog(false)
-    setFilterConfirmAction(null)
-  }, [closeLogbook])
 
   useEffect(() => {
     Promise.all([fetchEvent(), fetchDevices()]).then(() => {})
   }, [fetchEvent, fetchDevices])
 
   useEffect(() => () => {
+    eventAbortRef.current?.abort()
     participantAbortRef.current?.abort()
     listAbortRef.current?.abort()
     stageAbortRefs.current.forEach(controller => controller.abort())
@@ -2253,11 +1603,6 @@ export default function EventDetailPage() {
     if (viewMode === 'list' && event) fetchListParticipants(true)
   }, [viewMode, fetchListParticipants, event])
 
-  // Fetch logbooks when switching to logbook view
-  useEffect(() => {
-    if (viewMode === 'logbook' && event) fetchLogbooks()
-  }, [viewMode, fetchLogbooks, event])
-
   // WebSocket — debounce reconciliation events to avoid refresh storms from background sync
   const participantDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
@@ -2271,6 +1616,8 @@ export default function EventDetailPage() {
 	  }
 	  const msg = data as ParticipantSocketPayload & { event?: string; data?: ParticipantSocketPayload }
 	  const payload: ParticipantSocketPayload = msg.data ?? msg
+      if (msg.event === 'event_update' && payload.event_id === eventId) { void fetchEvent(); return }
+      if (msg.event === 'event_participant_update' && payload.event_id === eventId && payload.action === 'stages_layout_changed') { applyStageManagementResponse(payload); return }
 	  if (msg.event === 'contact_update') {
 		fetchParticipantsPaginated()
 		if (viewMode === 'list') fetchListParticipants(true)
@@ -2329,9 +1676,6 @@ export default function EventDetailPage() {
         fetchEvent()
         if (viewMode === 'list') fetchListParticipants(true)
       }
-	  if (msg.event === 'logbook_update' && payload.event_id === eventId) {
-        if (viewMode === 'logbook') fetchLogbooks()
-      }
       // Handle interaction updates — invalidate and refetch observations in list view
       if (msg.event === 'interaction_update' && viewMode === 'list') {
         // Invalidate all cached observations and refetch visible ones
@@ -2352,7 +1696,7 @@ export default function EventDetailPage() {
       unsubscribe()
       if (participantDebounceRef.current) clearTimeout(participantDebounceRef.current)
     }
-	  }, [eventId, fetchParticipantsPaginated, fetchEvent, viewMode, fetchListParticipants, fetchLogbooks, listObservations, fetchBatchObservations, stageData, unassignedData])
+	  }, [eventId, fetchParticipantsPaginated, fetchEvent, applyStageManagementResponse, viewMode, fetchListParticipants, listObservations, fetchBatchObservations, stageData, unassignedData])
 
   // Escape key
   useEffect(() => {
@@ -2362,7 +1706,7 @@ export default function EventDetailPage() {
 
       // These dialogs own their Escape handling (focus trap + topmost popover).
       // Returning here prevents the page from navigating while they are open.
-      if (showAddModal || showBlockModal || listHistoryParticipant) return
+      if (showAddModal || showBlockModal || listHistoryParticipant || showEventConfiguration || viewMode === 'logbook') return
 
       const closeLayer = (close: () => void) => {
         e.preventDefault()
@@ -2372,44 +1716,29 @@ export default function EventDetailPage() {
 
       // Close exactly one visible layer. In particular, an open filter is a
       // popover, not a request to leave the event.
-      if (showFilterConfirmDialog) { closeLayer(() => setShowFilterConfirmDialog(false)); return }
       if (showMembershipHistory) { closeLayer(() => setShowMembershipHistory(false)); return }
       if (showGoogleSyncModal) { closeLayer(() => { if (!googleSyncing) setShowGoogleSyncModal(false) }); return }
       if (showExportModal) { closeLayer(() => { if (!exporting) setShowExportModal(false) }); return }
       if (showDeviceSelector) { closeLayer(closeInlineChatAndRestoreFocus); return }
       if (showCampaignModal) { closeLayer(() => { if (!creatingCampaign) setShowCampaignModal(false) }); return }
       if (showInlineChat) { closeLayer(closeInlineChatAndRestoreFocus); return }
-      if (showStageModal) { closeLayer(() => setShowStageModal(false)); return }
-      if (showNewLogbookModal) { closeLayer(() => { if (!creatingLogbook) setShowNewLogbookModal(false) }); return }
-      if (showLogbookSettingsModal) { closeLayer(() => { if (!logbookSettingsUpdating) setShowLogbookSettingsModal(false) }); return }
-      if (showStageEditorModal) { closeLayer(cancelStageEditMode); return }
       if (showMoreMenu) { closeLayer(() => setShowMoreMenu(false)); return }
       if (showFilterDropdown) { closeLayer(() => setShowFilterDropdown(false)); return }
-      if (editingEventName) { closeLayer(() => setEditingEventName(false)); return }
-      if (editingEntryId) { closeLayer(() => setEditingEntryId(null)); return }
-      if (editingLogbookNotes) { closeLayer(() => setEditingLogbookNotes(false)); return }
-      if (editingLogbookTitle) { closeLayer(() => setEditingLogbookTitle(false)); return }
-      if (editingLogbookDate) { closeLayer(() => setEditingLogbookDate(false)); return }
       if (showDetailPanel) { closeLayer(() => { setShowDetailPanel(false); resetInlineChatState() }); return }
       if (selectionMode) { closeLayer(() => { setSelectionMode(false); setSelectedIds(new Set()) }); return }
-      if (selectedLogbook) { closeLayer(closeLogbook); return }
       // If in logbook mode, return to kanban view instead of leaving the event
-      if (viewMode === 'logbook') { closeLayer(() => setViewMode('kanban')); return }
       // No modals open — go back to events list (preserves folder state)
       closeLayer(() => router.push('/dashboard/events' + (folderParam ? `?folder=${folderParam}` : '')))
     }
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
   }, [
-    showAddModal, showBlockModal, listHistoryParticipant, showFilterConfirmDialog,
+    showAddModal, showBlockModal, listHistoryParticipant, showEventConfiguration,
     showMembershipHistory, showGoogleSyncModal, googleSyncing, showExportModal,
     exporting, showDeviceSelector, showCampaignModal, creatingCampaign,
-    showInlineChat, showStageModal, showNewLogbookModal, creatingLogbook,
-    showLogbookSettingsModal, logbookSettingsUpdating, showStageEditorModal,
-    cancelStageEditMode, showMoreMenu, showFilterDropdown, editingEventName,
-    editingEntryId, editingLogbookNotes, editingLogbookTitle, editingLogbookDate,
-    showDetailPanel, selectionMode, selectedLogbook, viewMode, router, folderParam,
-    closeInlineChatAndRestoreFocus, resetInlineChatState, closeLogbook,
+    showInlineChat, showMoreMenu, showFilterDropdown,
+    showDetailPanel, selectionMode, viewMode, router, folderParam,
+    closeInlineChatAndRestoreFocus, resetInlineChatState,
   ])
 
   // Close more menu on outside click
@@ -2509,6 +1838,19 @@ export default function EventDetailPage() {
   const displayStages = pipelineStages.length > 0 ? pipelineStages : stageData.map(s => ({ id: s.id, pipeline_id: s.pipeline_id, name: s.name, color: s.color, position: s.position }))
   const allUniqueTags = allTags
 
+  if (!event && eventLoadError) {
+    return <div ref={pageRef} className="flex h-full min-h-0 items-center justify-center p-6">
+      <div role="alert" className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 text-center">
+        <h1 className="text-lg font-semibold text-slate-900">No se pudo abrir el evento</h1>
+        <p className="mt-2 text-sm leading-6 text-slate-600">{eventLoadError.message}</p>
+        <div className="mt-5 flex flex-wrap justify-center gap-2">
+          <button className="min-h-11 rounded-xl border border-slate-200 px-4 text-sm font-medium text-slate-700" onClick={() => router.push('/dashboard/events')}>Volver a eventos</button>
+          {eventLoadError.retryable && <button className="min-h-11 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700" onClick={() => { void fetchEvent() }}>Reintentar</button>}
+        </div>
+      </div>
+    </div>
+  }
+
   // ─── Loading ───────────────────────────────────────────────────────────────
   if (loading || !event) {
     return (
@@ -2546,58 +1888,18 @@ export default function EventDetailPage() {
   // ─── Render ────────────────────────────────────────────────────────────────
   return (
     <div ref={pageRef} className="flex flex-col h-full min-h-0 min-w-0 pb-[env(safe-area-inset-bottom)]">
+      {eventLoadError && <div role="alert" className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900"><span className="min-w-0 flex-1">{eventLoadError.message}</span>{eventLoadError.retryable && <button className="min-h-11 rounded-lg px-3 font-semibold underline" onClick={() => { void fetchEvent() }}>Reintentar actualización</button>}</div>}
       {/* Event Header — single compact row */}
-      <div className="flex flex-wrap items-center gap-2 sm:gap-3 py-2 shrink-0">
-        <button onClick={() => {
-          if (viewMode === 'logbook') { setViewMode('kanban'); closeLogbook() }
-          else router.push('/dashboard/events' + (folderParam ? `?folder=${folderParam}` : ''))
-        }} className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label={viewMode === 'logbook' ? 'Volver al evento' : 'Volver a eventos'}>
-          <ArrowLeft className="w-5 h-5" />
-        </button>
+      <div className={viewMode === 'logbook' ? 'hidden' : 'flex flex-wrap items-center gap-2 sm:gap-3 py-2 shrink-0'}>
+        {viewMode !== 'logbook' && <button disabled={showEventConfiguration} title={showEventConfiguration ? 'Cierra la configuración antes de volver a eventos' : undefined} onClick={() => { if (!configurationOpenRef.current) router.push('/dashboard/events' + (folderParam ? `?folder=${folderParam}` : '')) }} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40" aria-label="Volver a eventos"><ArrowLeft className="h-5 w-5"/></button>}
         <div className={`${isCompactLayout ? 'flex-1 min-w-[10rem]' : 'min-w-0'} flex items-center gap-2 group/name`}>
           <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: event.color }} />
-          {editingEventName ? (
-            <input
-              ref={editNameRef}
-              value={editNameValue}
-              onChange={e => setEditNameValue(e.target.value)}
-              onBlur={async () => {
-                const v = editNameValue.trim()
-                if (v && v !== event.name) {
-                  try {
-                    await fetch(`/api/events/${eventId}`, {
-                      method: 'PUT',
-                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-                      body: JSON.stringify({ name: v }),
-                    })
-                    setEvent(prev => prev ? { ...prev, name: v } : prev)
-                  } catch (e) { console.error('[Event] rename error:', e) }
-                }
-                setEditingEventName(false)
-              }}
-              onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') { setEditingEventName(false) } }}
-              className="font-bold text-lg text-slate-900 bg-transparent border-b-2 border-emerald-500 outline-none px-0 py-0 min-w-[120px] max-w-full w-auto max-sm:text-base"
-              size={Math.max(10, editNameValue.length)}
-              autoFocus
-            />
-          ) : (
-            <h1
-              className={`font-bold text-lg text-slate-900 truncate max-w-[280px] max-sm:max-w-[calc(100vw-10.5rem)] max-sm:text-base ${eventIsReadOnly ? 'cursor-default' : 'cursor-text hover:bg-slate-100 hover:px-1.5 hover:rounded'}`}
-              onClick={() => { if (!eventIsReadOnly) { setEditNameValue(event.name); setEditingEventName(true) } }}
-              title={event.name}
-            >{event.name}</h1>
-          )}
-          {!editingEventName && !eventIsReadOnly && (
-            <button
-              onClick={() => { setEditNameValue(event.name); setEditingEventName(true) }}
-              className="opacity-0 group-hover/name:opacity-100 p-1 text-slate-400 hover:text-emerald-600 rounded transition flex-shrink-0 max-sm:opacity-100 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center"
-              title="Editar nombre"
-            >
-              <Edit3 className="w-3.5 h-3.5" />
-            </button>
-          )}
+          <h1 className="min-w-0 truncate text-lg font-bold text-slate-900 max-sm:text-base" title={event.name}>{event.name}</h1>
           <span className="text-xs text-slate-400 font-medium tabular-nums bg-slate-100 px-2 py-0.5 rounded-full flex-shrink-0">{totalParticipantCount}</span>
         </div>
+
+        <button onClick={()=>{setConfigurationSection('data');setShowEventConfiguration(true)}} disabled={eventIsReadOnly} className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-600 hover:border-emerald-300 hover:text-emerald-700 disabled:opacity-40"><Settings className="h-3.5 w-3.5"/>Configurar</button>
+        {viewMode !== 'logbook' && <button onClick={()=>{setViewMode('logbook');setSelectionMode(false);setSelectedIds(new Set())}} className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-600 hover:border-emerald-300 hover:text-emerald-700"><BookOpen className="h-3.5 w-3.5"/>Bitácoras</button>}
 
 		<button onClick={openMembershipHistory} className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:border-emerald-300 hover:text-emerald-700 transition max-sm:min-h-11" title="Ver altas, salidas y reactivaciones">
 		  <BookOpen className="w-3.5 h-3.5" />
@@ -2991,16 +2293,16 @@ export default function EventDetailPage() {
         )}
 
         {/* View toggle */}
-        <div className="inline-flex items-center border border-slate-200 rounded-lg overflow-hidden flex-shrink-0">
+        {viewMode !== 'logbook' && <div className="inline-flex items-center border border-slate-200 rounded-lg overflow-hidden flex-shrink-0">
           <button onClick={() => { setViewMode('kanban'); setSelectionMode(false); setSelectedIds(new Set()) }} aria-label="Vista Kanban" className={`inline-flex min-h-11 min-w-11 items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium transition sm:min-h-0 sm:min-w-0 ${viewMode === 'kanban' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}>
             <LayoutGrid className="w-3.5 h-3.5" />
           </button>
           <button onClick={() => { setViewMode('list'); setSelectionMode(false); setSelectedIds(new Set()) }} aria-label="Vista de lista" className={`inline-flex min-h-11 min-w-11 items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium transition sm:min-h-0 sm:min-w-0 ${viewMode === 'list' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50'}`}>
             <List className="w-3.5 h-3.5" />
           </button>
-        </div>
+        </div>}
 
-        {viewMode === 'kanban' && !stageEditMode && (
+        {viewMode === 'kanban' && (
           <button
             onClick={beginStageEditMode}
             disabled={eventIsReadOnly}
@@ -3013,7 +2315,7 @@ export default function EventDetailPage() {
         )}
 
         {/* ─── "Más" dropdown menu ─── */}
-        <div ref={moreMenuRef} className="relative flex-shrink-0">
+        {viewMode !== 'logbook' && <div ref={moreMenuRef} className="relative flex-shrink-0">
           <button
             onClick={() => setShowMoreMenu(v => !v)}
             className={`inline-flex items-center gap-1.5 px-3 py-1.5 border rounded-lg text-sm transition-colors max-sm:min-h-11 ${
@@ -3106,7 +2408,7 @@ export default function EventDetailPage() {
 
               <button
                 onClick={handleDuplicateEvent}
-                disabled={duplicatingEvent}
+                disabled={duplicatingEvent || showEventConfiguration}
                 className="w-full min-h-11 flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors disabled:opacity-50"
               >
                 {duplicatingEvent ? <Loader2 className="w-4 h-4 text-slate-400 animate-spin" /> : <Copy className="w-4 h-4 text-slate-400" />}
@@ -3126,7 +2428,7 @@ export default function EventDetailPage() {
 
               {/* 7. Bitácora */}
               <button
-                onClick={() => { setViewMode(viewMode === 'logbook' ? 'kanban' : 'logbook'); setSelectionMode(false); setSelectedIds(new Set()); setShowMoreMenu(false) }}
+                onClick={() => { setViewMode('logbook'); setSelectionMode(false); setSelectedIds(new Set()); setShowMoreMenu(false) }}
                 className="w-full min-h-11 flex items-center gap-3 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
               >
                 <BookOpen className="w-4 h-4 text-slate-400" />
@@ -3134,7 +2436,7 @@ export default function EventDetailPage() {
               </button>
             </div>
           )}
-        </div>
+        </div>}
       </div>
 
       {eventIsReadOnly && (
@@ -3149,7 +2451,7 @@ export default function EventDetailPage() {
 
       {/* ═══ Kanban View ═══ */}
       {viewMode === 'kanban' && (
-        <CrmPipelineDndContext stages={[...displayStages.map(stage => ({ id: stage.id, name: stage.name, color: stage.color })), { id: CRM_PIPELINE_UNASSIGNED_STAGE_ID, name: 'Sin etapa', color: '#64748b' }]} onSessionChange={handleAccessibleDragSession} disabled={stageEditMode || eventIsReadOnly}>
+        <CrmPipelineDndContext stages={[...displayStages.map(stage => ({ id: stage.id, name: stage.name, color: stage.color })), { id: CRM_PIPELINE_UNASSIGNED_STAGE_ID, name: 'Sin etapa', color: '#64748b' }]} onSessionChange={handleAccessibleDragSession} disabled={eventIsReadOnly}>
         <div className="flex-1 min-h-0 flex flex-col animate-view-enter">
           <div ref={topScrollRef} onScroll={handleTopScroll} className="overflow-x-auto kanban-scroll-top flex-shrink-0" style={{ height: 12 }}>
             <div style={{ width: `${kanbanColumnCount * 288}px`, height: 1 }} />
@@ -3163,7 +2465,7 @@ export default function EventDetailPage() {
                   totalCount={stageItem.total_count}
                   hasMore={stageItem.has_more}
                   loadingMore={loadingMoreStages.has(stageItem.id)}
-                  onLoadMore={() => { if (!stageEditMode) loadMoreForStage(stageItem.id) }}
+                  onLoadMore={() => loadMoreForStage(stageItem.id)}
                   selectedIds={selectedIds}
                   detailParticipantId={detailParticipant?.id || null}
                   draggedId={draggedId}
@@ -3173,15 +2475,7 @@ export default function EventDetailPage() {
                   onOpenDetail={openDetailPanel}
                   onDelete={handleDeleteParticipant}
                   onAccessibleDrop={handleAccessibleParticipantDrop}
-                  onRenameStage={handleRenameStage}
-                  onColorStage={handleColorStage}
-                  onDeleteStage={handleDeleteStage}
-                  canManageStage={stageEditMode && !eventIsReadOnly}
-                  canDragParticipants={!stageEditMode && !eventIsReadOnly}
-                  stageEditMode={stageEditMode}
-                  onStageDragStart={setDraggedStageId}
-                  onStageDrop={handleStageColumnDrop}
-                  isStageDragging={draggedStageId === stageItem.id}
+                  canDragParticipants={!eventIsReadOnly}
                   stageOptions={displayStages}
                   onParticipantStageChange={handleStageChange}
                   compactLayout={isCompactLayout}
@@ -3205,7 +2499,7 @@ export default function EventDetailPage() {
                   onDelete={handleDeleteParticipant}
                   onAccessibleDrop={handleAccessibleParticipantDrop}
                   canManageStage={false}
-                  canDragParticipants={!stageEditMode && !eventIsReadOnly}
+                  canDragParticipants={!eventIsReadOnly}
                   stageOptions={displayStages}
                   onParticipantStageChange={handleStageChange}
                   compactLayout={isCompactLayout}
@@ -3342,997 +2636,11 @@ export default function EventDetailPage() {
       )}
 
       {/* ═══ Logbook (Bitácora) View ═══ */}
-      {viewMode === 'logbook' && logbookError && (
-        <div role="alert" className="border-b border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{logbookError}</div>
-      )}
-      {viewMode === 'logbook' && (
-        <div className="flex-1 min-h-0 flex min-w-0 animate-view-enter">
-          {/* Left Panel — Logbook list */}
-          <div className={`${isCompactLayout && selectedLogbook ? 'hidden' : 'flex'} ${isCompactLayout ? 'w-full border-r-0' : 'w-[280px] border-r'} border-slate-200 bg-slate-50/50 flex-col flex-shrink-0 min-w-0`}>
-            <div className="px-3 py-3 border-b border-slate-200 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-slate-700">Bitácoras</h3>
-              <div className="flex items-center gap-1">
-                {event?.event_date && (
-                  <button onClick={handleAutoCreateLogbooks} disabled={autoCreating || eventIsReadOnly}
-                    className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition disabled:opacity-50 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" title="Auto-crear desde rango de fechas">
-                    {autoCreating ? <Loader2 className="w-4 h-4 animate-spin" /> : <CalendarDays className="w-4 h-4" />}
-                  </button>
-                )}
-                <button onClick={() => setShowNewLogbookModal(true)} disabled={eventIsReadOnly}
-                  className="p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" title="Nueva bitácora">
-                  <Plus className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-            <div className="flex-1 overflow-y-auto">
-              {logbooksLoading ? (
-                <div className="space-y-2 p-3">
-                  {[...Array(4)].map((_, i) => <div key={i} className="h-14 bg-slate-100 rounded-lg animate-pulse" />)}
-                </div>
-              ) : logbooks.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-center px-4">
-                  <BookOpen className="w-10 h-10 text-slate-300 mb-3" />
-                  <p className="text-sm text-slate-500 font-medium">Sin bitácoras</p>
-                  <p className="text-xs text-slate-400 mt-1">Crea una bitácora para registrar el estado de los participantes en una fecha</p>
-                  {event?.event_date && (
-                    <button onClick={handleAutoCreateLogbooks} disabled={autoCreating || eventIsReadOnly}
-                      className="mt-4 flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50">
-                      {autoCreating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CalendarDays className="w-3.5 h-3.5" />}
-                      Crear desde fechas del evento
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <div className="p-2 space-y-1">
-                  {logbooks.map(lb => (
-                    <div key={lb.id}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => { if (isCompactLayout) setSelectedLogbook(lb); fetchLogbookDetail(lb.id) }}
-                      onKeyDown={event => {
-                        if (event.key === 'Enter' || event.key === ' ') {
-                          event.preventDefault()
-                          if (isCompactLayout) setSelectedLogbook(lb)
-                          fetchLogbookDetail(lb.id)
-                        }
-                      }}
-                      className={`w-full min-h-11 text-left px-3 py-2.5 rounded-lg transition-all group ${
-                        selectedLogbook?.id === lb.id
-                          ? 'bg-emerald-50 border border-emerald-200 shadow-sm'
-                          : 'hover:bg-white hover:shadow-sm border border-transparent'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <div className={`w-2 h-2 rounded-full flex-shrink-0 ${lb.status === 'completed' ? 'bg-emerald-500' : 'bg-amber-400'}`} />
-                          <span className="text-sm font-medium text-slate-800 truncate">{lb.title || format(parseLogbookDate(lb.date), 'dd/MM/yyyy')}</span>
-                        </div>
-                        <button onClick={(e) => { e.stopPropagation(); handleDeleteLogbook(lb.id) }} disabled={eventIsReadOnly}
-                          className={`p-1 text-slate-300 hover:text-red-500 transition-opacity ${isCompactLayout ? 'opacity-100 min-h-11 min-w-11 flex items-center justify-center' : 'opacity-0 group-hover:opacity-100'}`} aria-label="Eliminar bitácora">
-                          <Trash2 className="w-3 h-3" />
-                        </button>
-                      </div>
-                      <div className="flex items-center gap-2 mt-1 ml-4">
-                        <span className="text-[11px] text-slate-400">{format(parseLogbookDate(lb.date), 'dd MMM yyyy', { locale: es })}</span>
-                        {lb.status !== 'pending' && (
-                          <span className={`text-[10px] font-medium ${lb.status === 'completed' ? 'text-emerald-600' : 'text-blue-600'}`}>{lb.total_participants} part.</span>
-                        )}
-                        {lb.status === 'pending' && (
-                          <span className="text-[10px] text-amber-500 font-medium">Pendiente</span>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Right Panel — Logbook detail */}
-          <div className={`${isCompactLayout && !selectedLogbook ? 'hidden' : 'flex'} flex-1 flex-col min-h-0 min-w-0 overflow-hidden`}>
-            {selectedLogbookLoading ? (
-              <div className="flex-1 flex items-center justify-center">
-                <Loader2 className="w-8 h-8 animate-spin text-emerald-500" />
-              </div>
-            ) : selectedLogbook ? (
-              <>
-                {/* Logbook header */}
-                <div className="px-3 sm:px-5 py-2.5 border-b border-slate-200 bg-white flex-shrink-0">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    {isCompactLayout && (
-                      <button
-                        type="button"
-                        onClick={closeLogbook}
-                        className="min-h-11 min-w-11 -ml-2 flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100"
-                        aria-label="Volver a la lista de bitácoras"
-                      >
-                        <ArrowLeft className="h-5 w-5" />
-                      </button>
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 group/lbtitle">
-                        {editingLogbookTitle ? (
-                          <input
-                            value={editLogbookTitleValue}
-                            onChange={e => setEditLogbookTitleValue(e.target.value)}
-                            onBlur={async () => {
-                              const selection = logbookSession.selection()
-                              const lid = selectedLogbook.id
-                              const v = editLogbookTitleValue.trim()
-                              if (!eventIsReadOnly && v && v !== selectedLogbook.title) {
-                                setLogbookError('')
-                                try {
-                                  const res = await fetch(`/api/events/${eventId}/logbooks/${lid}`, {
-                                    method: 'PUT',
-                                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-                                    body: JSON.stringify({ title: v }),
-                                  })
-                                  const data = await readLogbookMutation<NonNullable<typeof selectedLogbook>>(res)
-                                  if (data.id) {
-                                    if (logbookSession.isSelected(selection)) setSelectedLogbook(current => current?.id === lid ? data : current)
-                                    fetchLogbooks()
-                                  }
-                                } catch (e) { if (logbookSession.isSelected(selection)) setLogbookError(e instanceof Error ? e.message : 'No se pudo cambiar el título'); return }
-                              }
-                              if (logbookSession.isSelected(selection)) setEditingLogbookTitle(false)
-                            }}
-                            onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setEditingLogbookTitle(false) }}
-                            className="text-lg font-semibold text-slate-900 bg-transparent border-b-2 border-emerald-500 outline-none px-0"
-                            autoFocus
-                          />
-                        ) : (
-                          <h3
-                            className={`text-lg font-semibold text-slate-900 transition break-words ${eventIsReadOnly ? 'cursor-default' : 'cursor-text hover:bg-slate-100 hover:px-1.5 hover:rounded'}`}
-                            onClick={() => { if (!eventIsReadOnly) { setEditLogbookTitleValue(selectedLogbook.title || format(parseLogbookDate(selectedLogbook.date), 'dd/MM/yyyy')); setEditingLogbookTitle(true) } }}
-                            title={eventIsReadOnly ? 'El evento está cerrado' : 'Click para editar'}
-                          >{selectedLogbook.title || format(parseLogbookDate(selectedLogbook.date), 'dd/MM/yyyy')}</h3>
-                        )}
-                        {!editingLogbookTitle && !eventIsReadOnly && (
-                          <button onClick={() => { setEditLogbookTitleValue(selectedLogbook.title || format(parseLogbookDate(selectedLogbook.date), 'dd/MM/yyyy')); setEditingLogbookTitle(true) }}
-                            className="opacity-0 group-hover/lbtitle:opacity-100 p-1 text-slate-400 hover:text-emerald-600 rounded transition max-sm:opacity-100 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center">
-                            <Edit3 className="w-3 h-3" />
-                          </button>
-                        )}
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                          selectedLogbook.status === 'completed' ? 'bg-emerald-50 text-emerald-700' :
-                          selectedLogbook.status === 'active' ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-700'
-                        }`}>
-                          {selectedLogbook.status === 'completed' ? 'Completada' :
-                           selectedLogbook.status === 'active' ? 'Activa' : 'Pendiente'}
-                        </span>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-1 mt-0.5">
-                        {editingLogbookDate ? (
-                          <input
-                            type="date"
-                            value={editLogbookDateValue}
-                            onChange={e => setEditLogbookDateValue(e.target.value)}
-                            onBlur={async () => {
-                              const selection = logbookSession.selection()
-                              const lid = selectedLogbook.id
-                              if (!eventIsReadOnly && editLogbookDateValue && editLogbookDateValue !== selectedLogbook.date.slice(0, 10)) {
-                                setLogbookError('')
-                                try {
-                                  const res = await fetch(`/api/events/${eventId}/logbooks/${lid}`, {
-                                    method: 'PUT',
-                                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
-                                    body: JSON.stringify({ date: editLogbookDateValue }),
-                                  })
-                                  const data = await readLogbookMutation<NonNullable<typeof selectedLogbook>>(res)
-                                  if (data.id) {
-                                    if (logbookSession.isSelected(selection)) setSelectedLogbook(current => current?.id === lid ? data : current)
-                                    fetchLogbooks()
-                                  }
-                                } catch (e) { if (logbookSession.isSelected(selection)) setLogbookError(e instanceof Error ? e.message : 'No se pudo cambiar la fecha'); return }
-                              }
-                              if (logbookSession.isSelected(selection)) setEditingLogbookDate(false)
-                            }}
-                            onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setEditingLogbookDate(false) }}
-                            className="text-xs text-slate-500 bg-transparent border-b border-emerald-500 outline-none"
-                            autoFocus
-                          />
-                        ) : (
-                          <p className={`text-xs text-slate-400 transition ${eventIsReadOnly ? 'cursor-default' : 'cursor-pointer hover:text-emerald-600'}`}
-                            onClick={() => { if (!eventIsReadOnly) { setEditLogbookDateValue(selectedLogbook.date.slice(0, 10)); setEditingLogbookDate(true) } }}
-                            title={eventIsReadOnly ? 'El evento está cerrado' : 'Click para cambiar fecha'}>
-                            {format(parseLogbookDate(selectedLogbook.date), "EEEE, d 'de' MMMM yyyy", { locale: es })}
-                          </p>
-                        )}
-                        {selectedLogbook.captured_at && !editingLogbookDate && (
-                          <span className="text-xs text-slate-400"> · Capturada {formatDistanceToNow(new Date(selectedLogbook.captured_at), { locale: es, addSuffix: true })}</span>
-                        )}
-                      </div>
-                    </div>
-                    <div className={`${isCompactLayout ? 'w-full justify-end' : ''} flex items-center gap-2`}>
-                      <button disabled={eventIsReadOnly} onClick={() => {
-                        setLogbookSettingsTitle(selectedLogbook.title)
-                        setLogbookSettingsDate(selectedLogbook.date.split('T')[0])
-                        setLogbookSettingsStatus(selectedLogbook.status)
-                        setLogbookSettingsInitial({ title: selectedLogbook.title, date: selectedLogbook.date.split('T')[0], status: selectedLogbook.status })
-                        setShowLogbookSettingsModal(true)
-                      }} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" title="Configurar bitácora">
-                        <Settings className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => handleCaptureSnapshot(selectedLogbook.id)}
-                        disabled={eventIsReadOnly || capturingSnapshot || selectedLogbook.status === 'completed'}
-                        className={`flex min-h-11 items-center gap-1.5 px-3 py-2 text-white rounded-lg text-xs font-medium transition shadow-sm disabled:opacity-50 ${selectedLogbook.status === 'completed' ? 'bg-slate-400 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
-                        {capturingSnapshot ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> :
-                           selectedLogbook.status === 'completed' ? <Lock className="w-3.5 h-3.5" /> : <Camera className="w-3.5 h-3.5" />}
-                        {selectedLogbook.status === 'completed' ? 'Completado' : selectedLogbook.status === 'active' ? 'Re-capturar' : 'Capturar Snapshot'}
-                        {activeFilterCount > 0 && selectedLogbook.status !== 'completed' && <span className="bg-white/20 rounded px-1 text-[10px]">({totalParticipantCount})</span>}
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Stage snapshot badges */}
-                  {selectedLogbook.status !== 'pending' && selectedLogbook.stage_snapshot && Object.keys(selectedLogbook.stage_snapshot).length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 mt-2">
-                      {Object.entries(selectedLogbook.stage_snapshot).map(([key, stage]) => (
-                        <div key={key} className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-white"
-                          style={{ backgroundColor: stage.color || '#94a3b8' }}>
-                          {stage.name || 'Sin etapa'}: {stage.count}
-                        </div>
-                      ))}
-                      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600">
-                        Total: {selectedLogbook.total_participants}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* General notes */}
-                <div className="px-3 sm:px-5 py-2 border-b border-slate-100 bg-slate-50/50 flex-shrink-0">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">Observaciones generales</span>
-                    {!editingLogbookNotes ? (
-                      <button disabled={eventIsReadOnly} onClick={() => { setLogbookNotesText(selectedLogbook.general_notes || ''); setEditingLogbookNotes(true) }}
-                        className="p-1 text-slate-400 hover:text-emerald-600 rounded transition max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label="Editar observaciones generales">
-                        <PenLine className="w-3.5 h-3.5" />
-                      </button>
-                    ) : (
-                      <div className="flex items-center gap-1">
-                        <button onClick={() => setEditingLogbookNotes(false)} className="p-1 text-slate-400 hover:text-slate-600 rounded transition max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label="Cancelar edición">
-                          <X className="w-3.5 h-3.5" />
-                        </button>
-                        <button onClick={handleSaveLogbookNotes} disabled={savingLogbookNotes || eventIsReadOnly}
-                          className="p-1 text-emerald-600 hover:text-emerald-700 rounded transition disabled:opacity-50 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label="Guardar observaciones">
-                          {savingLogbookNotes ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                  {editingLogbookNotes ? (
-                    <textarea
-                      value={logbookNotesText}
-                      onChange={e => setLogbookNotesText(e.target.value)}
-                      className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none resize-none"
-                      rows={3}
-                      placeholder="Notas sobre esta fecha..."
-                      autoFocus
-                    />
-                  ) : (
-                    <p className="text-sm text-slate-600 whitespace-pre-line">{selectedLogbook.general_notes || <span className="text-slate-400 italic">Sin notas</span>}</p>
-                  )}
-                </div>
-
-                {/* View mode toggle */}
-                {selectedLogbook.status === 'completed' && selectedLogbook.entries && selectedLogbook.entries.length > 0 && (
-                  <div className={`${isCompactLayout ? 'hidden' : 'flex'} px-5 py-2 border-b border-slate-100 bg-white flex-shrink-0 items-center justify-between`}>
-                    <span className="text-xs text-slate-400">{selectedLogbook.entries.length} participantes</span>
-                    <div className="inline-flex items-center bg-slate-100 rounded-lg p-0.5">
-                      <button
-                        onClick={() => setLogbookViewMode('list')}
-                        className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium transition ${
-                          logbookViewMode === 'list' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-                        }`}
-                      >
-                        <List className="w-3 h-3" />
-                        Lista
-                      </button>
-                      <button
-                        onClick={() => setLogbookViewMode('kanban')}
-                        className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium transition ${
-                          logbookViewMode === 'kanban' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-                        }`}
-                      >
-                        <LayoutGrid className="w-3 h-3" />
-                        Kanban
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Entries */}
-                <div className={`flex-1 min-h-0 ${selectedLogbook.status === 'pending' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
-                  {selectedLogbook.status === 'pending' ? (
-                    <div className="flex flex-col h-full">
-                      {/* Preview banner + capture button */}
-                      <div className="px-3 sm:px-5 py-3 bg-amber-50 border-b border-amber-200 flex flex-wrap items-center justify-between gap-3 flex-shrink-0">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <div className="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0" />
-                          <span className="text-xs text-amber-700 font-medium">
-                            Vista previa{previewParticipants.length > 0 ? ` · ${previewParticipants.length} participantes` : ''}
-                          </span>
-                          {selectedLogbook.saved_filter && (
-                            <span className="text-[10px] text-amber-500 bg-amber-100 px-1.5 py-0.5 rounded">Con filtro guardado</span>
-                          )}
-                        </div>
-                        <button onClick={() => handleCaptureSnapshot(selectedLogbook.id)} disabled={capturingSnapshot || eventIsReadOnly}
-                          className="flex min-h-11 items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50 flex-shrink-0">
-                          {capturingSnapshot ? <Loader2 className="w-3 h-3 animate-spin" /> : <Camera className="w-3 h-3" />}
-                          Capturar Snapshot
-                        </button>
-                      </div>
-
-                      {/* Preview participants list */}
-                      {previewLoading ? (
-                        <div className="flex items-center justify-center py-16">
-                          <Loader2 className="w-6 h-6 animate-spin text-slate-300" />
-                        </div>
-                      ) : previewParticipants.length > 0 ? (
-                        <div className="flex-1 overflow-y-auto min-w-0">
-                          <table className={isCompactLayout ? 'block w-full p-3' : 'w-full'}>
-                            <thead className={isCompactLayout ? 'hidden' : 'sticky top-0 bg-white z-10'}>
-                              <tr className="border-b border-slate-200">
-                                <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4 w-[200px]">Participante</th>
-                                <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4">Etapa</th>
-                                <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4 w-[140px]">Teléfono</th>
-                              </tr>
-                            </thead>
-                            <tbody className={isCompactLayout ? 'block space-y-2' : undefined}>
-                              {previewParticipants.map((p, idx) => (
-                                <tr key={p.id} className={`${isCompactLayout ? 'block rounded-xl border border-slate-200 bg-white p-3 shadow-sm' : 'border-b border-slate-50'} ${!isCompactLayout && idx % 2 !== 0 ? 'bg-slate-50/50' : 'bg-white'}`}>
-                                  <td className={isCompactLayout ? 'block' : 'py-2 px-4'}>
-                                    <span className="text-sm text-slate-700 font-medium">{p.name}</span>
-                                  </td>
-                                  <td className={isCompactLayout ? 'mt-2 block' : 'py-2 px-4'}>
-                                    {p.stage_name ? (
-                                      <span className="inline-flex items-center gap-1.5 text-xs">
-                                        <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: p.stage_color || '#94a3b8' }} />
-                                        {p.stage_name}
-                                      </span>
-                                    ) : (
-                                      <span className="text-xs text-slate-400">Sin etapa</span>
-                                    )}
-                                  </td>
-                                  <td className={`${isCompactLayout ? 'mt-2 block' : 'py-2 px-4'} text-xs text-slate-500 font-mono`}>{p.phone || '—'}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      ) : (
-                        <div className="flex flex-col items-center justify-center py-16 text-center">
-                          <Camera className="w-12 h-12 text-slate-300 mb-3" />
-                          <p className="text-sm text-slate-500 font-medium">Bitácora pendiente</p>
-                          <p className="text-xs text-slate-400 mt-1 max-w-sm">
-                            {selectedLogbook.saved_filter
-                              ? 'El filtro guardado no encontró participantes que coincidan actualmente'
-                              : activeFilterCount > 0
-                                ? `Captura un snapshot con los ${totalParticipantCount} participantes filtrados actualmente`
-                                : 'Captura un snapshot para registrar el estado actual de todos los participantes en esta fecha'}
-                          </p>
-                          {!selectedLogbook.saved_filter && (
-                            <button onClick={() => handleCaptureSnapshot(selectedLogbook.id)} disabled={capturingSnapshot || eventIsReadOnly}
-                              className="mt-4 flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50">
-                              {capturingSnapshot ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
-                              {activeFilterCount > 0 ? `Capturar (${totalParticipantCount} filtrados)` : 'Capturar Snapshot'}
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ) : selectedLogbook.entries && selectedLogbook.entries.length > 0 ? (
-                    (isCompactLayout || logbookViewMode === 'list') ? (
-                    <table className={isCompactLayout ? 'block w-full p-3' : 'w-full'}>
-                      <thead className={isCompactLayout ? 'hidden' : 'sticky top-0 bg-white z-10'}>
-                        <tr className="border-b border-slate-200">
-                          <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4 w-[200px]">Participante</th>
-                          <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4 w-[120px]">Etapa</th>
-                          <th className="text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider py-2.5 px-4">Notas</th>
-                        </tr>
-                      </thead>
-                      <tbody className={isCompactLayout ? 'block space-y-2' : 'divide-y divide-slate-100'}>
-                        {selectedLogbook.entries.map(entry => (
-                          <tr key={entry.id} className={`${isCompactLayout ? 'block rounded-xl border border-slate-200 bg-white p-3 shadow-sm' : ''} hover:bg-slate-50/50 transition-colors`}>
-                            <td className={isCompactLayout ? 'block' : 'px-4 py-2.5'}>
-                              <div className="flex items-center gap-2">
-                                <div className="w-7 h-7 bg-emerald-50 rounded-full flex items-center justify-center flex-shrink-0">
-                                  <span className="text-emerald-700 text-xs font-semibold">{(entry.participant_name || '?').charAt(0).toUpperCase()}</span>
-                                </div>
-                                <div className="min-w-0">
-                                  <p className="text-[13px] font-medium text-slate-800 truncate">{entry.participant_name}</p>
-                                  {entry.participant_phone && <p className="text-[10px] text-slate-400">{entry.participant_phone}</p>}
-                                </div>
-                              </div>
-                            </td>
-                            <td className={isCompactLayout ? 'mt-2 block' : 'px-4 py-2.5'}>
-                              {entry.stage_name ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white" style={{ backgroundColor: entry.stage_color || '#94a3b8' }}>
-                                  {entry.stage_name}
-                                </span>
-                              ) : <span className="text-[10px] text-slate-400 italic">—</span>}
-                            </td>
-                            <td className={isCompactLayout ? 'mt-3 block border-t border-slate-100 pt-3' : 'px-4 py-2.5'}>
-                              {editingEntryId === entry.id ? (
-                                <div className="flex items-center gap-2">
-                                  <input
-                                    value={entryNotesText}
-                                    onChange={e => setEntryNotesText(e.target.value)}
-                                    className="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm text-slate-700 focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none"
-                                    placeholder="Nota sobre este participante..."
-                                    autoFocus
-                                    onKeyDown={e => { if (e.key === 'Enter') handleSaveEntryNotes(entry.id); if (e.key === 'Escape') setEditingEntryId(null) }}
-                                  />
-                                  <button onClick={() => handleSaveEntryNotes(entry.id)} disabled={savingEntryNotes || eventIsReadOnly}
-                                    className="p-1 text-emerald-600 hover:text-emerald-700 disabled:opacity-50 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label="Guardar nota">
-                                    {savingEntryNotes ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
-                                  </button>
-                                  <button onClick={() => setEditingEntryId(null)} className="p-1 text-slate-400 hover:text-slate-600 max-sm:min-h-11 max-sm:min-w-11 max-sm:flex max-sm:items-center max-sm:justify-center" aria-label="Cancelar edición de nota">
-                                    <X className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                              ) : (
-                                <div className="flex items-center gap-1 group/notes cursor-pointer"
-                                  onClick={() => { if (!eventIsReadOnly) { setEditingEntryId(entry.id); setEntryNotesText(entry.notes || '') } }}>
-                                  {entry.notes ? (
-                                    <span className="text-sm text-slate-600">{entry.notes}</span>
-                                  ) : (
-                                    <span className="text-xs text-slate-300 italic">{eventIsReadOnly ? 'Sin notas' : 'Agregar nota...'}</span>
-                                  )}
-                                  {!eventIsReadOnly && <PenLine className="w-3 h-3 text-slate-300 opacity-0 group-hover/notes:opacity-100 transition-opacity max-sm:opacity-100" />}
-                                </div>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    ) : (
-                    /* Kanban view */
-                    <div className="h-full flex flex-col">
-                      <div className="flex-1 overflow-x-auto overflow-y-hidden">
-                        <div className="flex gap-3 p-4 h-full min-w-min">
-                          {(() => {
-                            // Build columns from stage_snapshot first (includes stages with 0 participants)
-                            const grouped: Record<string, { name: string; color: string; entries: typeof selectedLogbook.entries }> = {}
-                            const stageOrder: string[] = []
-                            if (selectedLogbook.stage_snapshot) {
-                              for (const [key, stage] of Object.entries(selectedLogbook.stage_snapshot)) {
-                                if (key === 'unassigned') continue
-                                grouped[stage.name || key] = { name: stage.name || 'Sin etapa', color: stage.color || '#94a3b8', entries: [] }
-                                stageOrder.push(stage.name || key)
-                              }
-                            }
-                            // Assign entries to their stage columns
-                            for (const entry of selectedLogbook.entries) {
-                              const key = entry.stage_name || '__none__'
-                              if (!grouped[key]) {
-                                grouped[key] = { name: entry.stage_name || 'Sin etapa', color: entry.stage_color || '#94a3b8', entries: [] }
-                              }
-                              grouped[key].entries.push(entry)
-                            }
-                            // Sort: snapshot order first, then unnamed, "Sin etapa" last
-                            const sortedKeys = Object.keys(grouped).sort((a, b) => {
-                              if (a === '__none__') return 1
-                              if (b === '__none__') return -1
-                              const ia = stageOrder.indexOf(a)
-                              const ib = stageOrder.indexOf(b)
-                              if (ia !== -1 && ib !== -1) return ia - ib
-                              if (ia !== -1) return -1
-                              if (ib !== -1) return 1
-                              return a.localeCompare(b)
-                            })
-                            return sortedKeys.map(key => {
-                              const group = grouped[key]
-                              return (
-                                <div key={key} className="flex flex-col w-[220px] min-w-[220px] bg-slate-50 rounded-xl border border-slate-200/80 overflow-hidden">
-                                  {/* Column header */}
-                                  <div className="px-3 py-2.5 flex items-center gap-2 flex-shrink-0" style={{ borderBottom: `2px solid ${group.color}` }}>
-                                    <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: group.color }} />
-                                    <span className="text-xs font-semibold text-slate-700 truncate">{group.name}</span>
-                                    <span className="ml-auto text-[10px] font-bold text-slate-400 bg-white rounded-full px-1.5 py-0.5">{group.entries.length}</span>
-                                  </div>
-                                  {/* Cards */}
-                                  <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
-                                    {group.entries.map(entry => (
-                                      <div key={entry.id} className="bg-white rounded-lg border border-slate-100 p-2.5 shadow-sm hover:shadow-md hover:border-slate-200 transition-all group/card">
-                                        <div className="flex items-center gap-2">
-                                          <div className="w-6 h-6 bg-emerald-50 rounded-full flex items-center justify-center flex-shrink-0">
-                                            <span className="text-emerald-700 text-[10px] font-semibold">{(entry.participant_name || '?').charAt(0).toUpperCase()}</span>
-                                          </div>
-                                          <div className="min-w-0 flex-1">
-                                            <p className="text-[12px] font-medium text-slate-800 truncate leading-tight">{entry.participant_name}</p>
-                                            {entry.participant_phone && <p className="text-[10px] text-slate-400 leading-tight">{entry.participant_phone}</p>}
-                                          </div>
-                                        </div>
-                                        {/* Notes inline */}
-                                        <div className="mt-1.5">
-                                          {editingEntryId === entry.id ? (
-                                            <div className="flex items-center gap-1">
-                                              <input
-                                                value={entryNotesText}
-                                                onChange={e => setEntryNotesText(e.target.value)}
-                                                className="flex-1 bg-slate-50 border border-slate-200 rounded px-1.5 py-1 text-[11px] text-slate-700 focus:ring-1 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none"
-                                                placeholder="Nota..."
-                                                autoFocus
-                                                onKeyDown={e => { if (e.key === 'Enter') handleSaveEntryNotes(entry.id); if (e.key === 'Escape') setEditingEntryId(null) }}
-                                              />
-                                              <button onClick={() => handleSaveEntryNotes(entry.id)} disabled={savingEntryNotes || eventIsReadOnly}
-                                                className="p-0.5 text-emerald-600 hover:text-emerald-700 disabled:opacity-50">
-                                                {savingEntryNotes ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
-                                              </button>
-                                              <button onClick={() => setEditingEntryId(null)} className="p-0.5 text-slate-400 hover:text-slate-600">
-                                                <X className="w-3 h-3" />
-                                              </button>
-                                            </div>
-                                          ) : (
-                                            <div className="flex items-center gap-1 cursor-pointer group/cnotes"
-                                              onClick={() => { if (!eventIsReadOnly) { setEditingEntryId(entry.id); setEntryNotesText(entry.notes || '') } }}>
-                                              {entry.notes ? (
-                                                <p className="text-[11px] text-slate-500 leading-snug line-clamp-2">{entry.notes}</p>
-                                              ) : (
-                                                <p className="text-[10px] text-slate-300 italic opacity-0 group-hover/card:opacity-100 transition-opacity">{eventIsReadOnly ? 'Sin notas' : '+ nota'}</p>
-                                              )}
-                                              {!eventIsReadOnly && <PenLine className="w-2.5 h-2.5 text-slate-300 opacity-0 group-hover/cnotes:opacity-100 transition-opacity flex-shrink-0" />}
-                                            </div>
-                                          )}
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
-                              )
-                            })
-                          })()}
-                        </div>
-                      </div>
-                    </div>
-                    )
-                  ) : (
-                    <div className="flex flex-col items-center justify-center py-16 text-slate-400">
-                      <Users className="w-10 h-10 mb-2 text-slate-300" />
-                      <p className="text-sm">Sin entradas</p>
-                    </div>
-                  )}
-                </div>
-              </>
-            ) : (
-              <div className="flex-1 flex flex-col items-center justify-center text-center">
-                <BookOpen className="w-12 h-12 text-slate-300 mb-3" />
-                <p className="text-sm text-slate-500 font-medium">Selecciona una bitácora</p>
-                <p className="text-xs text-slate-400 mt-1">Elige una fecha del panel izquierdo para ver el detalle</p>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Stage Editor Modal */}
-      {showStageEditorModal && (
-        <div className={`app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/45 backdrop-blur-sm ${isCompactLayout ? 'p-0' : 'p-4'}`}>
-          <div className={`bg-white shadow-2xl w-full border border-slate-200 flex flex-col overflow-hidden ${isCompactLayout ? 'h-[var(--app-height)] max-w-none max-h-none rounded-none border-0' : 'max-w-4xl max-h-[88vh] rounded-2xl'}`}>
-            <div className="px-4 sm:px-6 pt-[max(1rem,env(safe-area-inset-top))] pb-4 border-b border-slate-100 flex items-center justify-between gap-4">
-              <div>
-                <h2 className="text-lg font-semibold text-slate-950">Configurar etapas</h2>
-                <p className="text-sm text-slate-500 mt-0.5">{event?.name || 'Evento'}</p>
-              </div>
-              <button
-                onClick={cancelStageEditMode}
-                disabled={stageLayoutSaving}
-                className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition disabled:opacity-50 min-h-11 min-w-11 flex items-center justify-center"
-                aria-label="Cerrar"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="flex-1 min-h-0 px-4 sm:px-6 py-5 overflow-y-auto overscroll-contain space-y-5">
-              <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-end rounded-xl border border-slate-200 bg-slate-50 p-4">
-                <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-1.5">Nueva etapa</label>
-                    <input
-                      value={newStageName}
-                      onChange={e => setNewStageName(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter') handleCreateStage() }}
-                      className="w-full bg-white border border-slate-200 text-slate-800 rounded-lg px-3 py-2.5 text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none"
-                      placeholder="Ej: Seguimiento"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-1.5">Color</label>
-                    <div className="flex flex-wrap gap-1.5 sm:min-w-[200px]">
-                      {STAGE_COLOR_OPTIONS.map(color => (
-                        <button
-                          key={color}
-                          type="button"
-                          onClick={() => setNewStageColor(color)}
-                          className={`w-8 h-8 rounded-full border-2 transition max-sm:min-h-11 max-sm:min-w-11 ${newStageColor === color ? 'border-slate-900 scale-105 shadow-sm' : 'border-white hover:scale-105'}`}
-                          style={{ backgroundColor: color }}
-                          aria-label={`Color ${color}`}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                </div>
-                <button
-                  onClick={handleCreateStage}
-                  disabled={!newStageName.trim() || stageLayoutSaving}
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Plus className="w-4 h-4" />
-                  Crear etapa
-                </button>
-              </div>
-
-              <div className="space-y-2">
-                {activeDraftStages.map((stage, idx) => (
-                  <div
-                    key={stage.id}
-                    draggable
-                    onDragStart={(e) => {
-                      e.dataTransfer.effectAllowed = 'move'
-                      e.dataTransfer.setData('application/x-event-stage', stage.id)
-                      setDraggedStageId(stage.id)
-                    }}
-                    onDragOver={(e) => {
-                      e.preventDefault()
-                      e.dataTransfer.dropEffect = 'move'
-                    }}
-                    onDrop={(e) => {
-                      e.preventDefault()
-                      const sourceId = draggedStageId || e.dataTransfer.getData('application/x-event-stage')
-                      if (sourceId) moveDraftStage(sourceId, stage.id)
-                      setDraggedStageId(null)
-                    }}
-                    onDragEnd={() => setDraggedStageId(null)}
-                    className={`rounded-xl border bg-white p-3 transition ${draggedStageId === stage.id ? 'border-emerald-300 opacity-60' : 'border-slate-200'}`}
-                  >
-                    <div className={`${isCompactLayout ? 'grid-cols-1' : 'grid-cols-[auto_1fr_auto]'} grid gap-3 items-center`}>
-                      <div className="flex items-center gap-2">
-                        <GripVertical className="w-4 h-4 text-slate-300 cursor-grab" />
-                        <span className="w-7 h-7 rounded-lg bg-slate-100 text-slate-500 text-xs font-semibold flex items-center justify-center tabular-nums">{idx + 1}</span>
-                      </div>
-                      <div className="min-w-0">
-                        <input
-                          value={stage.name}
-                          onChange={e => handleRenameStage(stage.id, e.target.value)}
-                          className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
-                        />
-                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                          {STAGE_COLOR_OPTIONS.map(color => (
-                            <button
-                              key={color}
-                              type="button"
-                              onClick={() => handleColorStage(stage.id, color)}
-                              className={`w-6 h-6 rounded-full border-2 transition max-sm:min-h-11 max-sm:min-w-11 ${stage.color === color ? 'border-slate-900 scale-110' : 'border-white hover:scale-105'}`}
-                              style={{ backgroundColor: color }}
-                              aria-label={`Color ${color}`}
-                            />
-                          ))}
-                          {stage.total_count > 0 && (
-                            <span className="ml-2 text-xs text-slate-500">{stage.total_count} participante{stage.total_count !== 1 ? 's' : ''}</span>
-                          )}
-                          {stage.isNew && <span className="text-xs text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">Nueva</span>}
-                        </div>
-                      </div>
-                      <div className={`${isCompactLayout ? 'justify-end' : ''} flex items-center gap-1`}>
-                        <button
-                          type="button"
-                          onClick={() => moveDraftStageByOffset(stage.id, -1)}
-                          disabled={idx === 0}
-                          className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition disabled:opacity-30 min-h-11 min-w-11 flex items-center justify-center"
-                          aria-label="Subir etapa"
-                        >
-                          <ArrowUp className="w-4 h-4" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => moveDraftStageByOffset(stage.id, 1)}
-                          disabled={idx === activeDraftStages.length - 1}
-                          className="p-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition disabled:opacity-30 min-h-11 min-w-11 flex items-center justify-center"
-                          aria-label="Bajar etapa"
-                        >
-                          <ArrowDown className="w-4 h-4" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteStage(stage.id, stage.name, stage.total_count)}
-                          disabled={activeDraftStages.length <= 1}
-                          className="p-2 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition disabled:opacity-30 min-h-11 min-w-11 flex items-center justify-center"
-                          aria-label="Eliminar etapa"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {(draftDeletedStages.length > 0 || stageLayoutError) && (
-                <div className="space-y-2">
-                  {draftDeletedStages.map(deletion => {
-                    const stageStillDeleted = draftStages.some(stage => stage.id === deletion.stageId && stage.isDeleted && !stage.isNew)
-                    if (!stageStillDeleted) return null
-                    const destinationStages = activeDraftStages.filter(stage => stage.id !== deletion.stageId && !stage.isNew)
-                    return (
-                      <div key={deletion.stageId} className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
-                        <div className="flex flex-wrap items-center gap-3">
-                          <Trash2 className="w-4 h-4 text-red-500" />
-                          <div className="min-w-[180px] flex-1">
-                            <p className="text-sm font-medium text-slate-800">Eliminar {deletion.stageName}</p>
-                            <p className="text-xs text-slate-500">
-                              {deletion.totalCount > 0 ? `${deletion.totalCount} participante${deletion.totalCount !== 1 ? 's' : ''} se moverán a otra etapa.` : 'Esta etapa no tiene participantes.'}
-                            </p>
-                          </div>
-                          <select
-                            value={deletion.moveToStageId}
-                            onChange={e => setDeletedStageDestination(deletion.stageId, e.target.value)}
-                            className="min-h-11 w-full sm:w-auto sm:min-w-[220px] rounded-lg border border-slate-200 bg-white px-3 py-2 text-base sm:text-sm text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500/30"
-                          >
-                            <option value="">Mover a...</option>
-                            {destinationStages.map(stage => (
-                              <option key={stage.id} value={stage.id}>{stage.name}</option>
-                            ))}
-                          </select>
-                          <button
-                            onClick={() => undoDeleteStage(deletion.stageId)}
-                            className="min-h-11 px-3 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-white rounded-lg transition"
-                          >
-                            Deshacer
-                          </button>
-                        </div>
-                      </div>
-                    )
-                  })}
-                  {stageLayoutError && (
-                    <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                      <AlertCircle className="w-4 h-4" />
-                      {stageLayoutError}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div className="px-4 sm:px-6 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-slate-100 flex flex-wrap justify-between gap-3 bg-white">
-              <p className="text-xs text-slate-500 self-center">Los cambios se aplican recién al guardar.</p>
-              <div className={`${isCompactLayout ? 'grid grid-cols-2 w-full' : 'flex items-center'} gap-2`}>
-                <button
-                  onClick={cancelStageEditMode}
-                  disabled={stageLayoutSaving}
-                  className="min-h-11 px-4 py-2 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 transition disabled:opacity-50"
-                >
-                  Cancelar
-                </button>
-                <button
-                  onClick={saveStageLayout}
-                  disabled={!stageEditDirty || stageSaveBlocked || stageLayoutSaving}
-                  className="inline-flex min-h-11 items-center justify-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {stageLayoutSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                  Guardar cambios
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Stage Modal */}
-      {showStageModal && (
-        <div className={`app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-sm ${isCompactLayout ? 'p-0' : 'p-4'}`} onClick={() => setShowStageModal(false)}>
-          <div className={`bg-white shadow-2xl w-full border border-slate-100 flex flex-col overflow-hidden ${isCompactLayout ? 'h-[var(--app-height)] max-w-none rounded-none border-0' : 'max-w-sm rounded-2xl'}`} onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-4 sm:px-5 pt-[max(1rem,env(safe-area-inset-top))] pb-4 border-b border-slate-100">
-              <h2 className="text-base font-semibold text-slate-900">Nueva etapa</h2>
-              <button onClick={() => setShowStageModal(false)} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition min-h-11 min-w-11 flex items-center justify-center" aria-label="Cerrar">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto px-4 sm:px-5 py-4 space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-1.5">Nombre *</label>
-                <input
-                  value={newStageName}
-                  onChange={e => setNewStageName(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter') handleCreateStage(); if (e.key === 'Escape') setShowStageModal(false) }}
-                  className="w-full min-h-11 bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-3 py-2.5 text-base sm:text-sm focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none"
-                  placeholder="Ej: Seguimiento"
-                  autoFocus
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-2">Color</label>
-                <div className="flex flex-wrap gap-2">
-                  {STAGE_COLOR_OPTIONS.map(color => (
-                    <button
-                      key={color}
-                      type="button"
-                      onClick={() => setNewStageColor(color)}
-                      className={`w-8 h-8 rounded-full border-2 transition-all max-sm:min-h-11 max-sm:min-w-11 ${newStageColor === color ? 'border-slate-900 scale-110 shadow-sm' : 'border-white hover:scale-105'}`}
-                      style={{ backgroundColor: color }}
-                      title={color}
-                    />
-                  ))}
-                </div>
-              </div>
-            </div>
-            <div className="px-4 sm:px-5 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-slate-100 flex justify-end gap-3">
-              <button onClick={() => setShowStageModal(false)} className="min-h-11 px-4 py-2 text-sm text-slate-500 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition">Cancelar</button>
-              <button
-                onClick={handleCreateStage}
-                disabled={!newStageName.trim() || stageLayoutSaving}
-                className="flex min-h-11 items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50"
-              >
-                {stageLayoutSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-                Crear
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* New Logbook Modal */}
-      {showNewLogbookModal && (
-        <div className={`app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-sm ${isCompactLayout ? 'p-0' : 'p-4'}`} onClick={() => setShowNewLogbookModal(false)}>
-          <div className={`bg-white shadow-2xl w-full border border-slate-100 flex flex-col overflow-hidden ${isCompactLayout ? 'h-[var(--app-height)] max-w-none rounded-none border-0' : 'max-w-md rounded-2xl'}`} onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-4 sm:px-6 pt-[max(1rem,env(safe-area-inset-top))] pb-4 border-b border-slate-100">
-              <h2 className="text-base font-semibold text-slate-900">Nueva Bitácora</h2>
-              <button onClick={() => setShowNewLogbookModal(false)} className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition min-h-11 min-w-11 flex items-center justify-center" aria-label="Cerrar">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-4">
-              {logbookError && <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{logbookError}</p>}
-              <div>
-                <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-1.5">Fecha *</label>
-                <input type="date" value={newLogbookDate} onChange={e => setNewLogbookDate(e.target.value)}
-                  className="w-full min-h-11 bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-3 py-2.5 text-base sm:text-sm focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none" />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-500 uppercase tracking-wider mb-1.5">Título (opcional)</label>
-                <input type="text" value={newLogbookTitle} onChange={e => setNewLogbookTitle(e.target.value)}
-                  placeholder={newLogbookDate ? format(new Date(newLogbookDate + 'T12:00:00'), 'dd/MM/yyyy') : 'Ej: Día 1 - Inauguración'}
-                  className="w-full min-h-11 bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-3 py-2.5 text-base sm:text-sm focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 outline-none placeholder-slate-400" />
-              </div>
-              <label className="flex min-h-11 items-center gap-2 cursor-pointer">
-                <input type="checkbox" checked={newLogbookCaptureNow} onChange={e => setNewLogbookCaptureNow(e.target.checked)}
-                  className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500" />
-                <span className="text-sm text-slate-700">Capturar snapshot ahora</span>
-              </label>
-            </div>
-            <div className="px-4 sm:px-6 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-slate-100 flex justify-end gap-3">
-              <button onClick={() => setShowNewLogbookModal(false)} className="min-h-11 px-4 py-2 text-sm text-slate-500 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition">Cancelar</button>
-              <button onClick={handleCreateLogbook} disabled={eventIsReadOnly || !newLogbookDate || creatingLogbook}
-                className="flex min-h-11 items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition shadow-sm disabled:opacity-50">
-                {creatingLogbook ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-                Crear
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Filter Confirmation Dialog for Logbook Snapshot */}
-      {showFilterConfirmDialog && (
-        <div className="app-viewport fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur-sm" onClick={() => setShowFilterConfirmDialog(false)}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm border border-slate-100 animate-in fade-in zoom-in-95 duration-200" onClick={e => e.stopPropagation()}>
-            <div className="px-6 pt-6 pb-4 text-center">
-              <div className="w-12 h-12 bg-amber-50 rounded-full flex items-center justify-center mx-auto mb-3">
-                <Filter className="w-6 h-6 text-amber-600" />
-              </div>
-              <h3 className="text-base font-semibold text-slate-900 mb-1">Filtros activos</h3>
-              <p className="text-sm text-slate-500">
-                Tienes <span className="font-semibold text-amber-600">{activeFilterCount}</span> filtro{activeFilterCount > 1 ? 's' : ''} activo{activeFilterCount > 1 ? 's' : ''}.
-                La bitácora se creará con <span className="font-semibold text-emerald-600">{totalParticipantCount}</span> de <span className="font-semibold text-slate-700">{event?.total_participants ?? '?'}</span> participantes.
-              </p>
-            </div>
-            <div className="px-6 py-4 border-t border-slate-100 flex gap-3">
-              <button onClick={() => setShowFilterConfirmDialog(false)}
-                className="flex-1 min-h-11 px-4 py-2.5 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition">
-                Cancelar
-              </button>
-              <button onClick={() => { if (filterConfirmAction) filterConfirmAction() }}
-                className="flex-1 min-h-11 px-4 py-2.5 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition shadow-sm">
-                Continuar con filtros
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Logbook Settings Modal */}
-      {showLogbookSettingsModal && (
-        <div className={`app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-sm ${isCompactLayout ? 'p-0' : 'p-4'}`} onClick={() => setShowLogbookSettingsModal(false)}>
-          <div className={`bg-white shadow-2xl w-full border border-slate-100 overflow-hidden flex flex-col ${isCompactLayout ? 'h-[var(--app-height)] max-w-none rounded-none border-0' : 'max-w-md rounded-2xl'}`} onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-4 sm:px-6 pt-[max(1rem,env(safe-area-inset-top))] pb-4 border-b border-slate-100 bg-slate-50/50">
-              <h2 className="text-base font-semibold text-slate-900 flex items-center gap-2">
-                <Settings className="w-5 h-5 text-slate-400" />
-                Configuración de Bitácora
-              </h2>
-              <button onClick={() => setShowLogbookSettingsModal(false)} className="p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition min-h-11 min-w-11 flex items-center justify-center" aria-label="Cerrar">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
-              {logbookError && <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{logbookError}</p>}
-              <div>
-                <label className="block text-[13px] font-medium text-slate-700 mb-1">Título</label>
-                <input
-                  type="text"
-                  value={logbookSettingsTitle}
-                  onChange={(e) => setLogbookSettingsTitle(e.target.value)}
-                  className="w-full min-h-11 px-3 py-2 bg-white border border-slate-200 rounded-lg text-base sm:text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-shadow"
-                />
-              </div>
-              <div>
-                <label className="block text-[13px] font-medium text-slate-700 mb-1">Fecha de la sesión</label>
-                <input
-                  type="date"
-                  value={logbookSettingsDate}
-                  onChange={(e) => setLogbookSettingsDate(e.target.value)}
-                  className="w-full min-h-11 px-3 py-2 bg-white border border-slate-200 rounded-lg text-base sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-shadow"
-                />
-              </div>
-              <div>
-                <label className="block text-[13px] font-medium text-slate-700 mb-1">Estado</label>
-                <select
-                  value={logbookSettingsStatus}
-                  onChange={(e) => setLogbookSettingsStatus(e.target.value)}
-                  className="w-full min-h-11 px-3 py-2 bg-white border border-slate-200 rounded-lg text-base sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-shadow"
-                >
-                  <option value="pending">Pendiente (No capturada)</option>
-                  <option value="active">Activa (Capturada, permite Re-capturar)</option>
-                  <option value="completed">Completada (Bloquea Re-capturar)</option>
-                </select>
-                <p className="mt-1.5 text-xs text-slate-500 leading-tight">
-                  {logbookSettingsStatus === 'pending' && 'La bitácora aún no tiene datos.'}
-                  {logbookSettingsStatus === 'active' && 'Permite actualizar la foto mediante el botón de Re-capturar.'}
-                  {logbookSettingsStatus === 'completed' && 'Oculta el botón de Re-capturar para evitar sobreescribir los datos.'}
-                </p>
-              </div>
-
-              <div className="pt-4 border-t border-slate-100 flex flex-col gap-2">
-                <p className="text-xs font-medium text-slate-700 mb-1">Filtro asociado</p>
-                {selectedLogbook?.saved_filter && Object.keys(selectedLogbook.saved_filter).length > 0 ? (
-                  <div className="bg-slate-50 p-3 rounded-lg border border-slate-100 font-mono text-[10px] text-slate-600 overflow-x-auto max-h-24 overflow-y-auto">
-                    {JSON.stringify(selectedLogbook.saved_filter, null, 2)}
-                  </div>
-                ) : (
-                  <p className="text-xs text-slate-500 italic">No hay filtro guardado</p>
-                )}
-
-                <button
-                  onClick={() => handleUpdateLogbookSettings(true)}
-                  disabled={eventIsReadOnly || logbookSettingsUpdating}
-                  className="mt-1 flex min-h-11 items-center justify-center gap-1.5 w-full px-3 py-2 bg-slate-100 text-slate-700 rounded-lg text-xs font-medium hover:bg-slate-200 transition"
-                  title="Actualizar el filtro guardado con el filtro aplicado actualmente en la pantalla"
-                >
-                  <Filter className="w-3.5 h-3.5" />
-                  Sobreescribir con el Filtro Actual
-                </button>
-              </div>
-
-            </div>
-            <div className="px-4 sm:px-6 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] bg-slate-50/50 border-t border-slate-100 flex gap-2">
-              <button onClick={() => setShowLogbookSettingsModal(false)}
-                className="flex-1 min-h-11 px-4 py-2 text-sm font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition">
-                Cancelar
-              </button>
-              <button
-                onClick={() => handleUpdateLogbookSettings(false)}
-                disabled={eventIsReadOnly || logbookSettingsUpdating}
-                className="flex-1 min-h-11 flex justify-center items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition shadow-sm disabled:opacity-50">
-                {logbookSettingsUpdating && <Loader2 className="w-4 h-4 animate-spin" />}
-                Guardar
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {viewMode === 'logbook' && <EventLogbooksWorkspace key={eventId} eventId={eventId} eventName={event.name} eventDate={event.event_date} eventEnd={event.event_end} readOnly={eventIsReadOnly} currentFilter={getSnapshotFilterBody()} onBack={()=>setViewMode('kanban')}/>}
+      <EventConfigurationWindow open={showEventConfiguration} eventId={eventId} initialSection={configurationSection} onClose={()=>setShowEventConfiguration(false)} onSaved={async (_id, section, result) => {
+        if (section === 'stages') applyStageManagementResponse(result)
+        else { await fetchEvent(); await fetchParticipantsPaginated(); if (viewMode === 'list') await fetchListParticipants(true) }
+      }}/>
 
       {/* ═══ List History Modal ═══ */}
       {listHistoryParticipant && (
@@ -4529,26 +2837,9 @@ export default function EventDetailPage() {
       )}
 
       {/* ═══ Add Participant — ContactSelector ═══ */}
-      <ContactSelector
-        open={showAddModal && addTab === 'search'}
-        onClose={() => {
-          if (addingParticipant) return
-          setShowAddModal(false)
-          setAddParticipantError('')
-        }}
-        onConfirm={handleAddFromSelector}
-        title="Agregar contactos"
-        subtitle={eventHasMembershipRules
-          ? 'Busca por nombre, teléfono o correo. Solo se pueden agregar contactos que cumplan las reglas actuales del evento.'
-          : 'Busca por nombre, teléfono o correo. Como este evento no tiene reglas, puedes agregar cualquier contacto de la cuenta.'}
-        confirmLabel="Agregar al evento"
-        sourceFilter="contact"
-        eventId={eventId}
-        onViewExisting={handleViewExistingParticipant}
-        submitting={addingParticipant}
-        errorMessage={addParticipantError}
-        refreshKey={participantCandidatesRevision}
-      />
+      <EventContactPicker readOnly={eventIsReadOnly} open={showAddModal && addTab === 'search'} eventId={eventId} eventName={event.name} suspended={showDetailPanel && inspectingPickedParticipant} onClose={()=>{setShowAddModal(false);setInspectingPickedParticipant(false)}}
+        onAdded={()=>{void fetchEvent();void fetchParticipantsPaginated();if(viewMode==='list')void fetchListParticipants(true)}}
+        onInspectParticipant={(participantId,contactId)=>{setInspectingPickedParticipant(true);openDetailPanel({id:participantId,event_id:eventId,contact_id:contactId,name:'',status:'invited'})}}/>
 
       {/* ═══ Add Participant — Manual contact ═══ */}
       {showAddModal && addTab === 'manual' && (

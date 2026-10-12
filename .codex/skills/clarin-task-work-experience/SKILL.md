@@ -67,6 +67,8 @@ Implement Clarin Work as one complete collaboration surface. Keep Entorno access
 
 ### 5. Reconcile Safely In Realtime
 
+- Task page responses always serialize a collection, including `tasks: []` for zero results. Normalize legacy null at the shared pagination boundary, reject malformed pages, and let a complete canonical empty result clear current-scope rows, cursor, selection and totals. An empty later page with a positive total must preserve the previously loaded rows. Preserve stale-request rejection across list/filter changes. Cover empty refresh, switching from populated to empty, and moving the last task with unit/integration tests and `tests/work-empty-list-smoke.mjs` against synthetic QA data only.
+
 - Include stable task IDs, versions, actions, access revisions, and operation IDs in authorized-recipient events.
 - Derive recipients from the final actor-authorized resource set, not a global account broadcast or the union of unrelated resources. On revocation, send the removed user only a minimal tombstone; never leak a task payload, breadcrumb, count or sibling identity.
 - Patch canonical task payloads and ordering without replacing a populated board with skeletons or resetting scroll, focus, filters, drafts, or selection.

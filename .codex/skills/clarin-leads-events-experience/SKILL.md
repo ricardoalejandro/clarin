@@ -1,6 +1,6 @@
 ---
 name: clarin-leads-events-experience
-description: Use when analyzing, planning, designing, implementing, reviewing, testing, or deploying Clarin Leads, CRM pipelines, Eventos, event participants, their Kanban/list interactions, Contact detail inside these modules, scoped observations, Contact tags, related Clarin Work tasks, chat sidecars, optimistic stage movement, or CRM realtime reconciliation. Enforces canonical Contact identity, honest Lead and event-participation context, professional operational windows, account isolation, exact rollback, and complete responsive behavior.
+description: Use when analyzing, planning, designing, implementing, reviewing, testing, or deploying Clarin Leads, CRM pipelines, Eventos configuration, contact selection, bitácoras, event participants, their Kanban/list interactions, Contact detail inside these modules, scoped observations, Contact tags, related Clarin Work tasks, chat sidecars, optimistic stage movement, or CRM realtime reconciliation. Enforces canonical Contact identity, honest Lead and event-participation context, professional operational windows, account isolation, exact rollback, and complete responsive behavior.
 ---
 
 # Clarin Leads And Events Experience
@@ -13,7 +13,7 @@ Build Leads and Eventos as one coherent CRM experience without merging their dom
 2. Read `../clarin-interface-design-system/SKILL.md` and its relevant references for every layout, window, control, drag, motion, overlay, or responsive change.
 3. Read every matching layer skill: frontend, backend, database, quality assurance, and chat/WhatsApp as applicable.
 4. Read `../clarin-task-work-experience/SKILL.md` plus its relevant references whenever Leads or Eventos render, create, open, update, or reconcile real Clarin Work tasks.
-5. Read [product-contracts.md](references/product-contracts.md) before changing CRM identity, detail composition, activity scope, pipeline movement, event participation, or related tasks.
+5. Read [product-contracts.md](references/product-contracts.md) before changing CRM identity, detail composition, activity scope, pipeline movement, event participation, event configuration, contact selection, bitácoras, or related tasks.
 6. Read [verification-matrix.md](references/verification-matrix.md) before finalizing tests, deployment, or a completion claim.
 
 ## Execute The Work

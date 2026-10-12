@@ -790,6 +790,7 @@ func (s *Server) setupRoutes() {
 	events.Delete("/pipelines/:pid", s.handleDeleteEventPipeline)
 	events.Put("/pipelines/:pid/stages", s.handleReplaceEventPipelineStages)
 	events.Post("/:id/stages", s.handleCreateEventStage)
+	events.Get("/:id/stages/layout", s.handleGetEventStageLayout)
 	events.Put("/:id/stages/layout", s.handleSaveEventStageLayout)
 	events.Put("/:id/stages/:stageId", s.handleUpdateEventStage)
 	events.Delete("/:id/stages/:stageId", s.handleDeleteEventStage)
@@ -811,6 +812,10 @@ func (s *Server) setupRoutes() {
 	events.Get("/:id/membership-history", s.handleGetEventMembershipHistory)
 	events.Post("/formula/validate", s.handleValidateFormula)
 	events.Get("/:id/participant-candidates", s.handleGetEventParticipantCandidates)
+	events.Get("/:id/contact-candidates", s.handleListEventContactCandidates)
+	events.Post("/:id/participant-selections", s.handlePrepareEventParticipantSelection)
+	events.Get("/:id/participant-selections/:selectionId", s.handleGetEventParticipantSelection)
+	events.Post("/:id/participant-selections/:selectionId/confirm", s.handleConfirmEventParticipantSelection)
 	events.Get("/:id/participants/paginated", s.handleGetEventParticipantsPaginated)
 	events.Get("/:id/participants/by-stage/:stageId", s.handleGetEventParticipantsByStage)
 	events.Post("/:id/participants/observations/batch", s.handleBatchParticipantObservations)
@@ -835,6 +840,12 @@ func (s *Server) setupRoutes() {
 	events.Get("/:id/logbooks", s.handleGetEventLogbooks)
 	events.Post("/:id/logbooks", s.handleCreateEventLogbook)
 	events.Post("/:id/logbooks/auto-create", s.handleAutoCreateLogbooks)
+	events.Get("/:id/logbooks/auto-create", s.handleAutoCreateLogbooks)
+	events.Get("/:id/logbooks/:lid/entries", s.handleLogbookEntries)
+	events.Get("/:id/logbooks/:lid/history", s.handleLogbookHistory)
+	events.Get("/:id/logbooks/:lid/export", s.handleExportLogbook)
+	events.Post("/:id/logbooks/:lid/complete", s.handleCompleteLogbook)
+	events.Post("/:id/logbooks/:lid/reopen", s.handleReopenLogbook)
 	events.Get("/:id/logbooks/:lid", s.handleGetEventLogbook)
 	events.Put("/:id/logbooks/:lid", s.handleUpdateEventLogbook)
 	events.Delete("/:id/logbooks/:lid", s.handleDeleteEventLogbook)
@@ -11460,6 +11471,8 @@ func (s *Server) handleGetEvents(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	filter := domain.EventFilter{
 		Search:           c.Query("search"),
+		SortBy:           c.Query("sort", "date"),
+		SortDirection:    c.Query("direction", "desc"),
 		Status:           c.Query("status"),
 		ExcludeCancelled: c.QueryBool("exclude_cancelled", false),
 		FolderFilter:     c.Query("folder"),
@@ -11467,8 +11480,17 @@ func (s *Server) handleGetEvents(c *fiber.Ctx) error {
 		Offset:           c.QueryInt("offset", 0),
 	}
 
+	if filter.Limit < 1 {
+		filter.Limit = 50
+	}
+	if filter.Limit > 200 {
+		filter.Limit = 200
+	}
+	if filter.Offset < 0 {
+		filter.Offset = 0
+	}
 	// Redis cache for default load — 30s TTL
-	isDefaultEventsLoad := filter.Search == "" && filter.Status == "" && !filter.ExcludeCancelled && filter.FolderFilter == ""
+	isDefaultEventsLoad := filter.Search == "" && filter.Status == "" && !filter.ExcludeCancelled && filter.FolderFilter == "" && filter.SortBy == "date" && filter.SortDirection == "desc"
 	eventsCacheKey := ""
 	if isDefaultEventsLoad && s.cache != nil {
 		eventsCacheKey = fmt.Sprintf("events:%s:%d:%d", accountID.String(), filter.Limit, filter.Offset)
@@ -11530,6 +11552,13 @@ func (s *Server) handleCreateEvent(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
 	req.Name = strings.TrimSpace(req.Name)
+	if req.Color == "" {
+		req.Color = "#3B82F6"
+	}
+	req.Color = strings.ToUpper(req.Color)
+	if err := validateEventIdentity(req.Name, req.Color); err != nil {
+		return c.Status(422).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
 	if req.Name == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
 	}
@@ -11624,24 +11653,26 @@ func (s *Server) handleUpdateEvent(c *fiber.Ctx) error {
 		return writeEventMembershipError(c, repository.ErrEventMembershipFrozen)
 	}
 	var req struct {
-		Name        *string    `json:"name"`
-		Description *string    `json:"description"`
-		EventDate   *time.Time `json:"event_date"`
-		EventEnd    *time.Time `json:"event_end"`
-		Location    *string    `json:"location"`
-		Color       *string    `json:"color"`
-		Status      *string    `json:"status"`
-		PipelineID  *string    `json:"pipeline_id"`
+		ExpectedUpdatedAt *time.Time `json:"expected_updated_at"`
+		Name              *string    `json:"name"`
+		Description       *string    `json:"description"`
+		EventDate         *time.Time `json:"event_date"`
+		EventEnd          *time.Time `json:"event_end"`
+		Location          *string    `json:"location"`
+		Color             *string    `json:"color"`
+		Status            *string    `json:"status"`
+		PipelineID        *string    `json:"pipeline_id"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	event.ExpectedUpdatedAt = req.ExpectedUpdatedAt
 	var supplied map[string]json.RawMessage
 	if err := json.Unmarshal(c.Body(), &supplied); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
 	if req.Name != nil {
-		event.Name = *req.Name
+		event.Name = strings.TrimSpace(*req.Name)
 	}
 	if _, present := supplied["description"]; present {
 		event.Description = req.Description
@@ -11656,7 +11687,7 @@ func (s *Server) handleUpdateEvent(c *fiber.Ctx) error {
 		event.Location = req.Location
 	}
 	if req.Color != nil {
-		event.Color = *req.Color
+		event.Color = strings.ToUpper(*req.Color)
 	}
 	if req.Status != nil {
 		targetStatus := strings.ToLower(strings.TrimSpace(*req.Status))
@@ -11682,6 +11713,9 @@ func (s *Server) handleUpdateEvent(c *fiber.Ctx) error {
 	if !validEventDateRange(event.EventDate, event.EventEnd) {
 		return c.Status(422).JSON(fiber.Map{"success": false, "code": "EVENT_DATE_RANGE_INVALID", "error": "La fecha final no puede ser anterior al inicio"})
 	}
+	if err := validateEventIdentity(event.Name, event.Color); err != nil {
+		return c.Status(422).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
 	var membershipImpact *repository.EventMembershipImpact
 	if originalStatus == domain.EventStatusDraft && event.Status == domain.EventStatusActive {
 		impact, activateErr := s.services.Event.ActivateAndReconcile(c.Context(), event, &userID)
@@ -11698,13 +11732,16 @@ func (s *Server) handleUpdateEvent(c *fiber.Ctx) error {
 	} else {
 		updated, updateErr := s.services.Event.UpdateWithExpectedStatus(c.Context(), event, originalStatus)
 		if updateErr != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": updateErr.Error()})
+			return writeEventMembershipError(c, updateErr)
 		}
 		if !updated {
 			return writeEventMembershipError(c, repository.ErrEventStatusConflict)
 		}
 	}
 	s.invalidateEventsCache(event.AccountID)
+	if s.hub != nil {
+		s.hub.BroadcastToAccount(accountID, "event_update", map[string]interface{}{"event_id": event.ID.String(), "action": "configuration_updated", "updated_at": event.UpdatedAt})
+	}
 	response := fiber.Map{"success": true, "event": event}
 	if membershipImpact != nil {
 		response["membership_impact"] = membershipImpact
@@ -11877,6 +11914,8 @@ func writeEventMembershipError(c *fiber.Ctx, err error) error {
 		return c.Status(409).JSON(fiber.Map{"success": false, "code": "EVENT_MEMBERSHIP_FROZEN", "error": "El evento completado o cancelado conserva su membresía histórica"})
 	case errors.Is(err, repository.ErrEventMembershipAuditOnly):
 		return c.Status(409).JSON(fiber.Map{"success": false, "code": "EVENT_MEMBERSHIP_AUDIT_ONLY", "error": "La cuenta sigue en modo auditoría; habilita strict al aplicar"})
+	case errors.Is(err, repository.ErrEventConfigurationConflict):
+		return c.Status(409).JSON(fiber.Map{"success": false, "code": "EVENT_CONFIGURATION_CONFLICT", "error": "El evento cambió mientras editabas. Revisa la versión actual antes de guardar."})
 	case errors.Is(err, repository.ErrEventStatusConflict):
 		return c.Status(409).JSON(fiber.Map{"success": false, "code": "EVENT_STATUS_CONFLICT", "error": "El estado del evento cambió; recarga antes de continuar"})
 	case strings.Contains(err.Error(), "EVENT_RULE_TAG_OVERLAP"):
@@ -14287,8 +14326,11 @@ func (s *Server) handleReplaceEventPipelineStages(c *fiber.Ctx) error {
 		}
 		stages = append(stages, stage)
 	}
-	if err := s.services.Event.ReplaceStages(c.Context(), pid, stages); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	if err := s.repos.EventPipeline.ReplaceUnusedStageTemplate(c.Context(), accountID, pid, stages); err != nil {
+		if errors.Is(err, repository.ErrEventStageTemplateInUse) {
+			return c.Status(409).JSON(fiber.Map{"success": false, "code": "EVENT_PIPELINE_IN_USE", "error": err.Error()})
+		}
+		return eventStageLayoutError(c, err)
 	}
 	// Return updated stages
 	updatedStages, _ := s.services.Event.GetPipelineStages(c.Context(), pid)
@@ -14313,249 +14355,28 @@ func (s *Server) ensureDedicatedEventPipeline(ctx context.Context, accountID uui
 }
 
 func (s *Server) handleCreateEventStage(c *fiber.Ctx) error {
-	accountID := c.Locals("account_id").(uuid.UUID)
-	eventID, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
-	}
-	event, err := s.services.Event.GetByID(c.Context(), eventID)
-	if err != nil || event == nil || event.AccountID != accountID {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
-	}
-	var req struct {
-		Name  string `json:"name"`
-		Color string `json:"color"`
-	}
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
-	}
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
-	}
-	if strings.TrimSpace(req.Color) == "" {
-		req.Color = "#6366f1"
-	}
-	pipelineID, _, err := s.ensureDedicatedEventPipeline(c.Context(), accountID, event)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-	stage := &domain.EventPipelineStage{
-		PipelineID: pipelineID,
-		Name:       req.Name,
-		Color:      req.Color,
-	}
-	if err := s.services.Event.CreatePipelineStage(c.Context(), stage); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-	stages, _ := s.services.Event.GetPipelineStages(c.Context(), pipelineID)
-	s.invalidateEventsCache(accountID)
-	if s.hub != nil {
-		s.hub.BroadcastToAccount(accountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "stages_changed"})
-	}
-	return c.Status(201).JSON(fiber.Map{"success": true, "stage": stage, "stages": stages, "pipeline_id": pipelineID.String()})
+	return s.mutateLegacyEventStage(c, "create")
 }
 
 func (s *Server) handleUpdateEventStage(c *fiber.Ctx) error {
-	accountID := c.Locals("account_id").(uuid.UUID)
-	eventID, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
-	}
-	stageID, err := uuid.Parse(c.Params("stageId"))
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid stage ID"})
-	}
-	event, err := s.services.Event.GetByID(c.Context(), eventID)
-	if err != nil || event == nil || event.AccountID != accountID {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
-	}
-	var req struct {
-		Name  *string `json:"name"`
-		Color *string `json:"color"`
-	}
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
-	}
-	if req.Name != nil {
-		trimmed := strings.TrimSpace(*req.Name)
-		if trimmed == "" {
-			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Name is required"})
-		}
-		req.Name = &trimmed
-	}
-	if req.Color != nil {
-		trimmed := strings.TrimSpace(*req.Color)
-		if trimmed == "" {
-			req.Color = nil
-		} else {
-			req.Color = &trimmed
-		}
-	}
-	pipelineID, stageMap, err := s.ensureDedicatedEventPipeline(c.Context(), accountID, event)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-	if mappedID, ok := stageMap[stageID]; ok {
-		stageID = mappedID
-	}
-	stage, err := s.services.Event.UpdatePipelineStage(c.Context(), pipelineID, stageID, req.Name, req.Color)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Stage not found"})
-		}
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-	stages, _ := s.services.Event.GetPipelineStages(c.Context(), pipelineID)
-	s.invalidateEventsCache(accountID)
-	if s.hub != nil {
-		s.hub.BroadcastToAccount(accountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "stages_changed"})
-	}
-	return c.JSON(fiber.Map{"success": true, "stage": stage, "stages": stages, "pipeline_id": pipelineID.String()})
+	return s.mutateLegacyEventStage(c, "update")
 }
 
 func (s *Server) handleDeleteEventStage(c *fiber.Ctx) error {
-	accountID := c.Locals("account_id").(uuid.UUID)
-	eventID, err := uuid.Parse(c.Params("id"))
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
-	}
-	stageID, err := uuid.Parse(c.Params("stageId"))
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid stage ID"})
-	}
-	event, err := s.services.Event.GetByID(c.Context(), eventID)
-	if err != nil || event == nil || event.AccountID != accountID {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
-	}
-	pipelineID, stageMap, err := s.ensureDedicatedEventPipeline(c.Context(), accountID, event)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-	if mappedID, ok := stageMap[stageID]; ok {
-		stageID = mappedID
-	}
-	if err := s.services.Event.DeletePipelineStageForEvent(c.Context(), eventID, pipelineID, stageID); err != nil {
-		if err == pgx.ErrNoRows {
-			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Stage not found"})
-		}
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-	stages, _ := s.services.Event.GetPipelineStages(c.Context(), pipelineID)
-	s.invalidateEventsCache(accountID)
-	if s.hub != nil {
-		s.hub.BroadcastToAccount(accountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "stages_changed"})
-	}
-	return c.JSON(fiber.Map{"success": true, "stages": stages, "pipeline_id": pipelineID.String()})
+	return s.mutateLegacyEventStage(c, "delete")
 }
 
 func (s *Server) handleSaveEventStageLayout(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	eventID, err := uuid.Parse(c.Params("id"))
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid event ID"})
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Evento inválido."})
 	}
-	event, err := s.services.Event.GetByID(c.Context(), eventID)
-	if err != nil || event == nil || event.AccountID != accountID {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Event not found"})
+	var input repository.EventStageLayoutInput
+	if err := c.BodyParser(&input); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida."})
 	}
-
-	var req struct {
-		Stages []struct {
-			ID       *string `json:"id"`
-			ClientID string  `json:"clientId"`
-			Name     string  `json:"name"`
-			Color    string  `json:"color"`
-			Position int     `json:"position"`
-		} `json:"stages"`
-		Deletions []struct {
-			ID     string `json:"id"`
-			MoveTo struct {
-				Kind string `json:"kind"`
-				ID   string `json:"id"`
-			} `json:"moveTo"`
-		} `json:"deletions"`
-	}
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
-	}
-	if len(req.Stages) == 0 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "At least one stage is required"})
-	}
-
-	pipelineID, stageMap, err := s.ensureDedicatedEventPipeline(c.Context(), accountID, event)
-	if err != nil {
-		log.Printf("[EVENT_STAGES] ensure dedicated pipeline error event=%s account=%s: %v", eventID, accountID, err)
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-
-	stages := make([]repository.EventStageLayoutStage, 0, len(req.Stages))
-	for idx, item := range req.Stages {
-		name := strings.TrimSpace(item.Name)
-		if name == "" {
-			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Stage name is required"})
-		}
-		color := strings.TrimSpace(item.Color)
-		if color == "" {
-			color = "#6366f1"
-		}
-		stage := repository.EventStageLayoutStage{
-			Name:     name,
-			Color:    color,
-			Position: idx,
-		}
-		if item.ID != nil && strings.TrimSpace(*item.ID) != "" {
-			parsedID, err := uuid.Parse(strings.TrimSpace(*item.ID))
-			if err != nil {
-				return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid stage ID"})
-			}
-			if mappedID, ok := stageMap[parsedID]; ok {
-				parsedID = mappedID
-			}
-			stage.ID = &parsedID
-		}
-		stages = append(stages, stage)
-	}
-
-	deletions := make([]repository.EventStageLayoutDeletion, 0, len(req.Deletions))
-	for _, item := range req.Deletions {
-		stageID, err := uuid.Parse(strings.TrimSpace(item.ID))
-		if err != nil {
-			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid deletion stage ID"})
-		}
-		if mappedID, ok := stageMap[stageID]; ok {
-			stageID = mappedID
-		}
-		if strings.TrimSpace(item.MoveTo.Kind) != "stage" {
-			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Move destination must be a stage"})
-		}
-		moveToID, err := uuid.Parse(strings.TrimSpace(item.MoveTo.ID))
-		if err != nil {
-			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid move destination stage ID"})
-		}
-		if mappedID, ok := stageMap[moveToID]; ok {
-			moveToID = mappedID
-		}
-		deletions = append(deletions, repository.EventStageLayoutDeletion{
-			ID:            stageID,
-			MoveToStageID: moveToID,
-		})
-	}
-
-	if err := s.services.Event.SavePipelineStageLayoutForEvent(c.Context(), eventID, pipelineID, stages, deletions); err != nil {
-		log.Printf("[EVENT_STAGES] save layout error event=%s pipeline=%s: %v", eventID, pipelineID, err)
-		if err == pgx.ErrNoRows {
-			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Stage not found"})
-		}
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-
-	updatedStages, _ := s.services.Event.GetPipelineStages(c.Context(), pipelineID)
-	s.invalidateEventsCache(accountID)
-	if s.hub != nil {
-		s.hub.BroadcastToAccount(accountID, ws.EventEventParticipantUpdate, map[string]interface{}{"event_id": eventID.String(), "action": "stages_layout_changed"})
-	}
-	return c.JSON(fiber.Map{"success": true, "stages": updatedStages, "pipeline_id": pipelineID.String()})
+	return s.saveEventConfigurationStages(c, accountID, eventID, input)
 }
 
 func (s *Server) handleUpdateEventParticipantStage(c *fiber.Ctx) error {

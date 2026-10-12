@@ -93,18 +93,22 @@ func (r *EventRepository) ActivateEventAndReconcile(ctx context.Context, event *
 	}
 
 	var currentStatus string
+	var currentUpdatedAt time.Time
 	var revision int64
 	var config EventRuleConfig
 	if err := tx.QueryRow(ctx, `
-		SELECT status,rule_revision,tag_formula_type,tag_formula_mode,tag_formula
+		SELECT status,rule_revision,tag_formula_type,tag_formula_mode,tag_formula,updated_at
 		FROM events WHERE id=$1 AND account_id=$2 FOR UPDATE
-	`, event.ID, event.AccountID).Scan(&currentStatus, &revision, &config.FormulaType, &config.FormulaMode, &config.Formula); err != nil {
+	`, event.ID, event.AccountID).Scan(&currentStatus, &revision, &config.FormulaType, &config.FormulaMode, &config.Formula, &currentUpdatedAt); err != nil {
 		return EventMembershipImpact{}, err
 	}
 	if currentStatus != domain.EventStatusDraft {
 		return EventMembershipImpact{}, ErrEventStatusConflict
 	}
 
+	if !eventConfigurationMatches(event.ExpectedUpdatedAt, currentUpdatedAt) {
+		return EventMembershipImpact{}, ErrEventConfigurationConflict
+	}
 	rows, err := tx.Query(ctx, `SELECT tag_id,negate FROM event_tags WHERE event_id=$1`, event.ID)
 	if err != nil {
 		return EventMembershipImpact{}, err
@@ -130,7 +134,7 @@ func (r *EventRepository) ActivateEventAndReconcile(ctx context.Context, event *
 	config = normalizeRuleConfig(config)
 
 	event.Status = domain.EventStatusActive
-	event.UpdatedAt = time.Now()
+	event.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
 	result, err := tx.Exec(ctx, `
 		UPDATE events SET name=$1,description=$2,event_date=$3,event_end=$4,location=$5,status='active',color=$6,pipeline_id=$7,updated_at=$8
 		WHERE id=$9 AND account_id=$10 AND status='draft'

@@ -164,6 +164,7 @@ func TestEventLogbookAccountAndHierarchyIsolation(t *testing.T) {
 			t.Fatalf("scoped update accepted wrong context: %v", err)
 		}
 		if pair.account != a.account {
+			wrong.Status = domain.LogbookStatusPending
 			if err := r.Create(ctx, &wrong); !errors.Is(err, pgx.ErrNoRows) {
 				t.Fatalf("scoped create accepted foreign event: %v", err)
 			}
@@ -209,8 +210,8 @@ func TestEventLogbookRecapturePreservesNotesAndConflictsAtomically(t *testing.T)
 		t.Fatal(err)
 	}
 	lb.Status = "active"
-	if _, err := r.Update(ctx, f.account, f.event, lb.ID, LogbookPatch{Status: &lb.Status}); err != nil {
-		t.Fatal(err)
+	if lb.Status != domain.LogbookStatusActive {
+		t.Fatal("capture must open an active logbook")
 	}
 	stale := *lb
 	logbookExec(t, pool, `UPDATE event_participants SET stage_id=$1 WHERE id=$2`, f.secondStage, f.alpha)
@@ -331,7 +332,7 @@ func TestEventLogbookPatchKeepsConcurrentCaptureAndOtherEdits(t *testing.T) {
 	if err := json.Unmarshal(after.SavedFilter, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if after.Status != "completed" || after.GeneralNotes != notes || saved.TextSearch != "Alpha" || after.TotalParticipants != 2 || !reflect.DeepEqual(after.StageSnapshot, captured.StageSnapshot) || !after.CapturedAt.Equal(*captured.CapturedAt) {
+	if after.Status != "active" || after.GeneralNotes != notes || saved.TextSearch != "Alpha" || after.TotalParticipants != 2 || !reflect.DeepEqual(after.StageSnapshot, captured.StageSnapshot) || !after.CapturedAt.Equal(*captured.CapturedAt) {
 		t.Fatalf("title-only edit overwrote concurrent notes, filter or capture: %v", err)
 	}
 	// Explicit null clears the filter while a later omitted filter keeps it clear.
@@ -340,7 +341,7 @@ func TestEventLogbookPatchKeepsConcurrentCaptureAndOtherEdits(t *testing.T) {
 	}
 	emptyNotes := ""
 	after, err = r.Update(ctx, f.account, f.event, pending.ID, LogbookPatch{GeneralNotes: &emptyNotes})
-	if err != nil || len(after.SavedFilter) != 0 || after.GeneralNotes != "" || after.Title != staleTitle || after.Status != "completed" {
+	if err != nil || len(after.SavedFilter) != 0 || after.GeneralNotes != "" || after.Title != staleTitle || after.Status != "active" {
 		t.Fatalf("explicit clear and omitted fields lost patch semantics: %v", err)
 	}
 }
@@ -438,5 +439,110 @@ func TestEventLogbookConcurrentClosureRevalidatesAfterLock(t *testing.T) {
 	after, err := r.GetByIDForEvent(ctx, f.account, f.event, lb.ID)
 	if err != nil || logbookEntry(t, after, f.alpha).Notes != "" {
 		t.Fatalf("blocked mutation changed notes: %v", err)
+	}
+}
+
+func TestLogbookWorkspaceLifecyclePreviewAndHistoricalKey(t *testing.T) {
+	pool := eventLogbookPool(t)
+	r := &LogbookRepository{db: pool}
+	ctx := context.Background()
+	f := eventLogbookFixture(t, pool)
+	lb := createTestLogbook(t, r, f, "2026-11-01")
+	preview, err := r.PreviewPage(ctx, f.account, f.event, lb.ID, LogbookPageOptions{Limit: 1})
+	if err != nil || preview.Total != 2 || len(preview.Items) != 1 || preview.NextCursor == "" {
+		t.Fatalf("unfiltered bounded preview: %#v %v", preview, err)
+	}
+	tail, err := r.PreviewPage(ctx, f.account, f.event, lb.ID, LogbookPageOptions{Limit: 1, Cursor: preview.NextCursor})
+	if err != nil || len(tail.Items) != 1 || tail.Items[0].ID == preview.Items[0].ID {
+		t.Fatal("preview cursor duplicates or loses rows", err)
+	}
+	filter := json.RawMessage(`{"text_search":"Alpha"}`)
+	lb, err = r.Update(ctx, f.account, f.event, lb.ID, LogbookPatch{SavedFilterPresent: true, SavedFilter: filter, ExpectedVersion: lb.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err = r.PreviewPage(ctx, f.account, f.event, lb.ID, LogbookPageOptions{})
+	if err != nil || preview.Total != 1 {
+		t.Fatal("search preview mismatch", err)
+	}
+	lb, err = r.CaptureSnapshot(ctx, f.account, f.event, lb.ID, nil, LogbookWriteOptions{ExpectedVersion: lb.Version})
+	if err != nil || lb.TotalParticipants != preview.Total || lb.Status != "active" {
+		t.Fatal("capture/preview mismatch", err)
+	}
+	var capturedFilter SnapshotFilter
+	if err = json.Unmarshal(lb.CapturedFilter, &capturedFilter); err != nil || capturedFilter.TextSearch != "Alpha" {
+		t.Fatal("captured audience missing", err)
+	}
+	nextFilter := json.RawMessage(`{"text_search":"Beta"}`)
+	lb, err = r.Update(ctx, f.account, f.event, lb.ID, LogbookPatch{SavedFilterPresent: true, SavedFilter: nextFilter, ExpectedVersion: lb.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(lb.CapturedFilter, &capturedFilter); err != nil || capturedFilter.TextSearch != "Alpha" {
+		t.Fatal("editing next capture relabeled historical audience", err)
+	}
+	key := lb.Entries[0].CaptureStageKey
+	if key != f.firstStage.String() {
+		t.Fatal("capture omitted stage identity")
+	}
+	oldVersion := lb.Version
+	lb, err = r.Transition(ctx, f.account, f.event, lb.ID, "complete", LogbookWriteOptions{ExpectedVersion: lb.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = r.CaptureSnapshot(ctx, f.account, f.event, lb.ID, nil); !errors.Is(err, ErrLogbookCompleted) {
+		t.Fatal("completed capture accepted", err)
+	}
+	title := "must not persist"
+	if _, err = r.Update(ctx, f.account, f.event, lb.ID, LogbookPatch{Title: &title}); !errors.Is(err, ErrLogbookCompleted) {
+		t.Fatal("completed data accepted", err)
+	}
+	if err = r.UpdateEntryNotes(ctx, f.account, f.event, lb.ID, lb.Entries[0].ID, "must not persist"); !errors.Is(err, ErrLogbookCompleted) {
+		t.Fatal("completed notes accepted", err)
+	}
+	if _, err = r.Transition(ctx, f.account, f.event, lb.ID, "reopen", LogbookWriteOptions{ExpectedVersion: oldVersion}); !errors.Is(err, ErrLogbookVersion) {
+		t.Fatal("stale reopen accepted", err)
+	}
+	lb, err = r.Transition(ctx, f.account, f.event, lb.ID, "reopen", LogbookWriteOptions{ExpectedVersion: lb.Version})
+	if err != nil || lb.Status != "active" {
+		t.Fatal("explicit reopen failed", err)
+	}
+	logbookExec(t, pool, `UPDATE event_participants SET stage_id=NULL WHERE stage_id=$1`, f.firstStage)
+	logbookExec(t, pool, `DELETE FROM event_pipeline_stages WHERE id=$1`, f.firstStage)
+	lb, err = r.GetByIDForEvent(ctx, f.account, f.event, lb.ID)
+	if err != nil || lb.Entries[0].StageID != nil || lb.Entries[0].CaptureStageKey != key || lb.Entries[0].StageName != "Invited" {
+		t.Fatal("stage deletion changed historical key", err)
+	}
+	actions, err := r.History(ctx, f.account, f.event, lb.ID, 0)
+	if err != nil || len(actions) < 4 {
+		t.Fatal("lifecycle trace missing", err)
+	}
+}
+func TestLogbookWorkspaceAtomicCreateAndCursor(t *testing.T) {
+	pool := eventLogbookPool(t)
+	r := &LogbookRepository{db: pool}
+	ctx := context.Background()
+	f := eventLogbookFixture(t, pool)
+	constraint := "logbook_atomic_" + uuid.New().String()[:8]
+	logbookExec(t, pool, `ALTER TABLE event_logbooks ADD CONSTRAINT `+constraint+` CHECK (title <> '`+constraint+`' OR captured_at IS NULL)`)
+	t.Cleanup(func() { logbookExec(t, pool, `ALTER TABLE event_logbooks DROP CONSTRAINT `+constraint) })
+	lb := &domain.EventLogbook{AccountID: f.account, EventID: f.event, Date: time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC), Title: constraint, Status: "pending"}
+	if err := r.CreateWithCapture(ctx, lb, true); err == nil {
+		t.Fatal("injected capture failure accepted")
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM event_logbooks WHERE account_id=$1 AND event_id=$2`, f.account, f.event).Scan(&count); err != nil || count != 0 {
+		t.Fatal("atomic creation left a pending record", err)
+	}
+	for _, d := range []string{"2026-12-01", "2026-12-02", "2026-12-03"} {
+		createTestLogbook(t, r, f, d)
+	}
+	page, err := r.ListPage(ctx, f.account, f.event, LogbookPageOptions{Limit: 2})
+	if err != nil || page.Total != 3 || len(page.Items) != 2 || page.NextCursor == "" {
+		t.Fatal("list page incorrect", err)
+	}
+	tail, err := r.ListPage(ctx, f.account, f.event, LogbookPageOptions{Limit: 2, Cursor: page.NextCursor})
+	if err != nil || len(tail.Items) != 1 || tail.Items[0].ID == page.Items[1].ID {
+		t.Fatal("list cursor incorrect", err)
 	}
 }

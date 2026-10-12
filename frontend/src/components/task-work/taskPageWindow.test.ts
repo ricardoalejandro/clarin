@@ -4,6 +4,26 @@ import { collectTaskWindow } from './taskPageWindow'
 
 const row = (id: number) => ({ id: String(id), version: 1 }) as Task
 describe('canonical task cursor window', () => {
+  it('normalizes a null first page to an authoritative empty window', async () => {
+    const load = vi.fn(async () => ({ tasks: null, total: 0, next_cursor: '', has_more: false }))
+    const result = await collectTaskWindow(load, 150)
+    expect(result).toEqual({ tasks: [], total: 0, next_cursor: '', has_more: false })
+    expect(load).toHaveBeenCalledTimes(1)
+  })
+
+  it('accepts a null final page after a concurrent page shrink', async () => {
+    const result = await collectTaskWindow(async cursor => cursor
+      ? { tasks: null, total: 1, next_cursor: '' }
+      : { tasks: [row(1)], total: 2, next_cursor: 'next' }, 100)
+    expect(result.tasks.map(task => task.id)).toEqual(['1'])
+    expect(result.next_cursor).toBe('')
+    expect(result.total).toBe(1)
+  })
+
+  it.each([{ total: 0 }, { tasks: {}, total: 1 }, { tasks: [], total: '0' }])('rejects malformed pages without silently deleting rows: %j', async page => {
+    await expect(collectTaskWindow(async () => page, 50)).rejects.toThrow('Reintenta')
+  })
+
   it.each([1, 50, 150])('refreshes %i loaded rows without retaining absent filtered rows', async count => {
     const calls = Math.max(1, Math.ceil(count / 50))
     const load = vi.fn(async (cursor?: string) => {
