@@ -382,4 +382,136 @@ describe('connectWhiteboardRoom', () => {
     expect(getTicket).toHaveBeenCalledTimes(1)
     expect(FakeWhiteboardWebSocket.instances).toHaveLength(1)
   })
+  it('coalesces browser wake-ups and manual retries into one trailing recovery batch', async () => {
+    let sequence = 1
+    const room = connectWhiteboardRoom({ whiteboardID: 'board-1', audience: 'member', getSequence: () => sequence, getTicket: async () => 'ticket', onEvent: vi.fn() })
+    await settlePromises()
+    const socket = FakeWhiteboardWebSocket.instances[0]; socket.open()
+    for (let i = 0; i < 10; i += 1) {
+      window.dispatchEvent(new Event('online')); document.dispatchEvent(new Event('visibilitychange')); window.dispatchEvent(new PageTransitionEvent('pageshow')); room.retryNow()
+    }
+    expect(socket.sent.map(value => JSON.parse(value).event)).toEqual(['sync.request', 'presence.update'])
+    sequence = 9
+    await vi.advanceTimersByTimeAsync(999)
+    expect(socket.sent).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(socket.sent.map(value => JSON.parse(value))).toEqual([
+      { event: 'sync.request', base_sequence: 1 }, { event: 'presence.update', data: { status: 'active' } },
+      { event: 'sync.request', base_sequence: 9 }, { event: 'presence.update', data: { status: 'active' } },
+    ])
+    room.close()
+  })
+
+  it('honors rate cooldown without freezing the cursor and clears only its own notice', async () => {
+    const issues: Array<WhiteboardRealtimeIssue | null> = []
+    const room = connectWhiteboardRoom({ whiteboardID: 'board-1', audience: 'member', getSequence: () => 1, getTicket: async () => 'ticket', onEvent: vi.fn(), onIssue: issue => issues.push(issue) })
+    await settlePromises()
+    const socket = FakeWhiteboardWebSocket.instances[0]; socket.open()
+    socket.emit({ event: 'error', code: 'rate_limited', data: { event: 'sync.request', scope: 'connection', retry_after_ms: 1_000 } })
+    room.retryNow()
+    room.sendCursor({ pointer: { x: 1, y: 2, tool: 'pointer' }, button: 'up' })
+    expect(issues.at(-1)?.kind).toBe('rate_limited')
+    expect(socket.sent.filter(value => JSON.parse(value).event === 'cursor.update')).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(999)
+    expect(socket.sent.filter(value => JSON.parse(value).event === 'sync.request')).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(socket.sent.filter(value => JSON.parse(value).event === 'sync.request')).toHaveLength(2)
+    expect(issues.at(-1)?.kind).toBe('rate_limited')
+    socket.emit({ event: 'ack', sequence: 1 })
+    expect(issues.at(-1)).toBeNull()
+    socket.emit({ event: 'error', code: 'rate_limited' })
+    socket.emit({ event: 'error', code: 'authorization_unavailable', error: 'Temporal' })
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(issues.at(-1)?.kind).toBe('authorization_unavailable')
+    socket.emit({ event: 'error', code: 'rate_limited' })
+    expect(issues.at(-1)?.kind).toBe('authorization_unavailable')
+    room.close()
+  })
+
+  it('keeps rejected durable operations correlated and permits an identical idempotent retry', async () => {
+    const room = connectWhiteboardRoom({ whiteboardID: 'board-1', audience: 'member', getSequence: () => 1, getTicket: async () => 'ticket', onEvent: vi.fn() })
+    await settlePromises()
+    const socket = FakeWhiteboardWebSocket.instances[0]; socket.open()
+    const patch = { event: 'scene.patch' as const, operation_id: 'same-operation', base_sequence: 1, elements: [{ id: 'shape', version: 2 }], app_state: {} }
+    const first = room.sendPatch(patch)
+    const rejected = expect(first).rejects.toMatchObject({ code: 'rate_limited' })
+    socket.emit({ event: 'error', operation_id: patch.operation_id, code: 'rate_limited', data: { event: 'scene.patch', scope: 'room', retry_after_ms: 1_000 } })
+    await rejected
+    const second = room.sendPatch(patch)
+    socket.emit({ event: 'ack', operation_id: patch.operation_id, sequence: 2 })
+    await expect(second).resolves.toMatchObject({ operation_id: patch.operation_id, sequence: 2 })
+    expect(socket.sent.map(value => JSON.parse(value)).filter(value => value.event === 'scene.patch')).toEqual([patch, patch])
+    room.close()
+  })
+
+  it('drops all deferred channels when a room closes', async () => {
+    const onIssue = vi.fn()
+    const room = connectWhiteboardRoom({ whiteboardID: 'board-1', audience: 'guest', getSequence: () => 1, getTicket: async () => 'ticket', onEvent: vi.fn(), onIssue })
+    await settlePromises()
+    const socket = FakeWhiteboardWebSocket.instances[0]; socket.open()
+    room.retryNow(); room.sendCursor({ pointer: { x: 1, y: 2, tool: 'pointer' }, button: 'up' }); room.sendCursor({ pointer: { x: 2, y: 3, tool: 'pointer' }, button: 'up' })
+    room.sendViewport([0, 0, 10, 10]); room.sendViewport([1, 1, 11, 11])
+    socket.emit({ event: 'error', code: 'rate_limited' })
+    room.close()
+    const count = socket.sent.length
+    const issueCount = onIssue.mock.calls.length
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(socket.sent).toHaveLength(count)
+    expect(onIssue).toHaveBeenCalledTimes(issueCount)
+  })
+
+  it('keeps rate feedback through reconnect and a large-scene sync until REST confirms it', async () => {
+    const issues: Array<WhiteboardRealtimeIssue | null> = []
+    const room = connectWhiteboardRoom({ whiteboardID: 'board-1', audience: 'member', getSequence: () => 5, getTicket: async () => 'ticket', onEvent: vi.fn(), onIssue: issue => issues.push(issue) })
+    await settlePromises()
+    const first = FakeWhiteboardWebSocket.instances[0]; first.open()
+    first.emit({ event: 'error', code: 'rate_limited', data: { event: 'cursor.update', retry_after_ms: 1_000 } })
+    first.serverClose()
+    await vi.advanceTimersByTimeAsync(1_000)
+    const second = FakeWhiteboardWebSocket.instances[1]; second.open()
+    expect(issues.at(-1)?.kind).toBe('rate_limited')
+    second.emit({ event: 'sync.required', sequence: 5, data: { reason: 'scene_too_large' } })
+    expect(issues.at(-1)?.kind).toBe('rate_limited')
+    room.confirmSync()
+    expect(issues.at(-1)).toBeNull()
+    room.close()
+  })
+
+  it('keeps rate feedback until the complete replay delta is canonically acknowledged', async () => {
+    const issues: Array<WhiteboardRealtimeIssue | null> = []
+    let sequence = 5
+    const room = connectWhiteboardRoom({ whiteboardID: 'board-1', audience: 'member', getSequence: () => sequence, getTicket: async () => 'ticket', onEvent: event => { if (event.event === 'scene.patch' && event.sequence === sequence + 1) sequence = event.sequence }, onIssue: issue => issues.push(issue) })
+    await settlePromises()
+    const socket = FakeWhiteboardWebSocket.instances[0]; socket.open()
+    socket.emit({ event: 'error', code: 'rate_limited', data: { event: 'sync.request', retry_after_ms: 1_000 } })
+    await vi.advanceTimersByTimeAsync(1_000)
+    socket.emit({ event: 'scene.patch', operation_id: 'patch-six', sequence: 6, data: { elements: [] } })
+    expect(issues.at(-1)?.kind).toBe('rate_limited')
+    socket.emit({ event: 'scene.patch', operation_id: 'patch-seven', sequence: 7, data: { elements: [] } })
+    socket.emit({ event: 'ack', sequence: 6 })
+    expect(issues.at(-1)?.kind).toBe('rate_limited')
+    socket.emit({ event: 'ack', sequence: 7 })
+    expect(issues.at(-1)).toBeNull()
+    room.close()
+  })
+
+  it('waits for canonical REST when a durable ACK explicitly requires snapshot recovery', async () => {
+    const issues: Array<WhiteboardRealtimeIssue | null> = []
+    const room = connectWhiteboardRoom({ whiteboardID: 'board-1', audience: 'member', getSequence: () => 5, getTicket: async () => 'ticket', onEvent: vi.fn(), onIssue: issue => issues.push(issue) })
+    await settlePromises()
+    const socket = FakeWhiteboardWebSocket.instances[0]; socket.open()
+    socket.emit({ event: 'error', code: 'rate_limited', data: { event: 'scene.patch', retry_after_ms: 1_000 } })
+    await vi.advanceTimersByTimeAsync(1_000)
+    const patch = { event: 'scene.patch' as const, operation_id: 'large-canonical-operation', base_sequence: 5, elements: [{ id: 'shape', version: 2 }], app_state: {} }
+    const saved = room.sendPatch(patch)
+    socket.emit({ event: 'ack', operation_id: patch.operation_id, sequence: 6, data: { sync_required: true } })
+    await expect(saved).resolves.toMatchObject({ sequence: 6 })
+    expect(issues.at(-1)?.kind).toBe('rate_limited')
+    socket.emit({ event: 'sync.required', sequence: 6 })
+    expect(issues.at(-1)?.kind).toBe('rate_limited')
+    room.confirmSync()
+    expect(issues.at(-1)).toBeNull()
+    room.close()
+  })
+
 })

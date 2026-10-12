@@ -156,6 +156,10 @@ class WhiteboardRealtimeHarness {
   }> = []
   readonly deliveries: Array<{ recipient: string; operationID: string }> = []
   readonly httpSceneWrites: Array<{ method: string; operationID: string }> = []
+  readonly syncRequests: Array<{ userID: string; time: number }> = []
+  readonly rateLimitRejections: string[] = []
+  enforceRealtimeRates = false
+  private readonly pausedSyncUsers = new Set<string>()
   assetUploads = 0
   readonly assets = new Map<string, {
     id: string
@@ -239,6 +243,23 @@ class WhiteboardRealtimeHarness {
     return this.sockets.size
   }
 
+  pauseSyncFor(userID: string) {
+    this.pausedSyncUsers.add(userID)
+  }
+
+  restoreSyncFor(userID: string) {
+    this.pausedSyncUsers.delete(userID)
+  }
+
+  rateLimitFor(userID: string, event: string) {
+    for (const [socket, owner] of this.sockets) {
+      if (owner === userID) socket.send(JSON.stringify({
+        event: 'error', code: 'rate_limited', error: 'Demasiados eventos de colaboración',
+        data: { event, scope: 'connection', retry_after_ms: 1_000 },
+      }))
+    }
+  }
+
   revoke(userID: string) {
     for (const [socket, owner] of this.sockets) {
       if (owner === userID) socket.send(JSON.stringify({ event: 'access.revoked', code: 'access_revoked' }))
@@ -281,6 +302,7 @@ class WhiteboardRealtimeHarness {
         return
       }
       this.sockets.set(socket, userID)
+      const rateWindows = new Map<string, { startedAt: number; count: number }>()
 	  socket.onClose(() => {
 		this.sockets.delete(socket)
 		if (this.activePresentation?.actor.id === actorIDFor(userID)) {
@@ -297,7 +319,28 @@ class WhiteboardRealtimeHarness {
         } catch {
           return
         }
+        if (message.event === 'sync.request') this.syncRequests.push({ userID, time: performance.now() })
+        if (this.enforceRealtimeRates) {
+          const limits: Record<string, number> = { 'sync.request': 4, 'presence.update': 12, 'cursor.update': 60, 'viewport.update': 24, 'scene.patch': 10 }
+          const limit = limits[message.event]
+          if (limit) {
+            const now = performance.now()
+            let window = rateWindows.get(message.event)
+            if (!window || now - window.startedAt >= 1_000) {
+              window = { startedAt: now, count: 0 }
+              rateWindows.set(message.event, window)
+            }
+            if (window.count >= limit) {
+              this.rateLimitRejections.push(message.event)
+              socket.send(JSON.stringify({ event: 'error', code: 'rate_limited', operation_id: message.operation_id,
+                data: { event: message.event, scope: 'connection', retry_after_ms: Math.ceil(1_000 - (now - window.startedAt)) } }))
+              return
+            }
+            window.count += 1
+          }
+        }
         if (message.event === 'sync.request') {
+          if (this.pausedSyncUsers.has(userID)) return
           socket.send(JSON.stringify({ event: 'ack', sequence: this.sequence }))
 		  socket.send(JSON.stringify({
 			event: 'room.ready',
@@ -547,18 +590,18 @@ async function installWhiteboardHTTP(
       })
       return
     }
-    if (url.pathname === '/api/tasks/environments' && request.method() === 'GET') {
-      await json(route, {
-        success: true,
-        environments: [{
-          id: workEnvironmentID, account_id: 'account-whiteboard-qa', name: 'Entorno QA', description: '', color: '#10b981', icon: 'layers',
-          sort_order: 0, visibility: 'account', default_access_level: 'edit', is_default: true, version: 1, access_revision: 1,
-          created_at: now, updated_at: now, folder_count: 0, list_count: 1, task_count: 0,
-          permissions: { level: 'full', can_view: true, can_comment: true, can_edit: true, can_delete: false, can_archive: true, can_trash: false, can_restore: true, can_manage_access: true, inherited_from: 'account_admin' },
-        }],
-        next_cursor: null,
-        can_create: true,
-      })
+    const isEnvironmentIndex = url.pathname === '/api/tasks/environments'
+    const isEnvironmentDetail = url.pathname === `/api/tasks/environments/${workEnvironmentID}`
+    if ((isEnvironmentIndex || isEnvironmentDetail) && request.method() === 'GET') {
+      const environment = {
+        id: workEnvironmentID, account_id: 'account-whiteboard-qa', name: 'Entorno QA', description: '', color: '#10b981', icon: 'layers',
+        sort_order: 0, visibility: 'account', default_access_level: 'edit', is_default: true, version: 1, access_revision: 1,
+        created_at: now, updated_at: now, folder_count: 0, list_count: 1, task_count: 0,
+        permissions: { level: 'full', can_view: true, can_comment: true, can_edit: true, can_delete: false, can_archive: true, can_trash: false, can_restore: true, can_manage_access: true, inherited_from: 'account_admin' },
+      }
+      await json(route, isEnvironmentDetail
+        ? { success: true, environment }
+        : { success: true, environments: [environment], next_cursor: null, can_create: true })
       return
     }
     if (url.pathname === '/api/account/users') {
@@ -4119,4 +4162,50 @@ test('navegación del miembro conserva la edición posterior al Back y cancela B
     await testInfo.attach('whiteboard-history-transitions.json', { body: Buffer.from(JSON.stringify(historyTransitions, null, 2)), contentType: 'application/json' })
     await context.close()
   }
+})
+
+
+test('colaboración limita los despertares y recupera el aviso solo después de sincronizar', async ({ browser, browserName }) => {
+  test.skip(browserName !== 'chromium', 'El protocolo y los timers se verifican en Chromium.')
+  test.setTimeout(180_000)
+  const harness = new WhiteboardRealtimeHarness()
+  harness.enforceRealtimeRates = true
+  const blocked: string[] = []
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', new Set(), blocked, new Set())
+  const page = await context.newPage()
+  page.setDefaultNavigationTimeout(90_000)
+  try {
+    await openEditor(page)
+    await expect.poll(() => harness.socketCount()).toBe(1)
+    await expect.poll(() => harness.syncRequests.length).toBeGreaterThan(0)
+    const initialSyncs = harness.syncRequests.length
+    harness.pauseSyncFor('Ana QA')
+    harness.rateLimitFor('Ana QA', 'cursor.update')
+    const editor = page.locator('.whiteboard-editor-shell')
+    const notice = editor.getByText('La colaboración está ajustando su ritmo.', { exact: false })
+    await expect(notice).toBeVisible()
+    // Next's production route announcer also owns role=alert outside the editor.
+    await expect(editor.getByRole('alert')).toHaveCount(0)
+    await page.evaluate(() => {
+      for (let i = 0; i < 20; i += 1) {
+        window.dispatchEvent(new Event('online'))
+        document.dispatchEvent(new Event('visibilitychange'))
+        window.dispatchEvent(new PageTransitionEvent('pageshow'))
+      }
+    })
+    await expect.poll(() => harness.syncRequests.length).toBe(initialSyncs + 1)
+    // The cooldown timer only wakes recovery. Its elapsed time cannot claim sync.
+    await expect(notice).toBeVisible()
+    expect(harness.rateLimitRejections).toEqual([])
+    harness.restoreSyncFor('Ana QA')
+    await page.evaluate(() => window.dispatchEvent(new Event('online')))
+    await expect(notice).toBeHidden()
+    await drawRectangle(page, 60)
+    await expect.poll(() => harness.elements.filter(element => element.type === 'rectangle' && element.isDeleted !== true).length).toBe(1)
+    await expect(page.getByLabel('Guardado en Clarin')).toBeVisible({ timeout: 20_000 })
+    expect(harness.rateLimitRejections).toEqual([])
+    expect(blocked).toEqual([])
+  } finally { await context.close() }
 })

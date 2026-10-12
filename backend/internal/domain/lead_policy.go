@@ -31,6 +31,9 @@ func IsCommercialAutomation(leadIDPresent bool, trigger string, graph *Automatio
 	if graph != nil {
 		for _, node := range graph.Nodes {
 			typ, _ := node.Data["nodeType"].(string)
+			if tagKind, _, ok := AutomationTagAction(&node); ok {
+				typ = tagKind
+			}
 			switch typ {
 			case AutoNodeSendWhatsApp, AutoNodeChangeStage, AutoNodeAssignTag, AutoNodeRemoveTag, AutoNodeCondition, AutoTriggerLeadCreated, AutoTriggerLeadStageChanged, AutoTriggerTagAssigned, AutoTriggerTagRemoved:
 				return true

@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createRef, type ReactNode } from 'react'
+import { api } from '@/lib/api'
 import type { ContactProfileContact } from '@/types/contact-profile'
 import ContactDetailSurface, { type ContactDetailSurfaceHandle } from './ContactDetailSurface'
 
@@ -29,6 +30,8 @@ const contact: ContactProfileContact = {
     updated_at: '',
   }],
 }
+
+vi.mock('@/lib/api', () => ({ api: vi.fn() }))
 
 vi.mock('./useContactProfile', () => ({
   useContactProfile: () => ({
@@ -66,9 +69,10 @@ vi.mock('./useGoogleContactSync', () => ({
 
 vi.mock('@/components/ContactAvatarControl', () => ({ default: () => <div data-testid="avatar" /> }))
 
-afterEach(() => { cleanup(); vi.restoreAllMocks() })
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers() })
 
 beforeEach(() => {
+  vi.mocked(api).mockReset().mockResolvedValue({ success: true, data: { success: true, tags: [], can_create: true } })
   mocks.profileOverrides = {}
   mocks.createObservation.mockReset().mockResolvedValue({ success: true })
   mocks.loadMoreObservations.mockReset().mockResolvedValue(undefined)
@@ -283,6 +287,26 @@ describe('ContactDetailSurface date editing', () => {
       custom_field_values: [expect.objectContaining({ field_id: 'field-date', value_date: '2026-06-15' })],
     }))
   })
+
+  it('waits for tag creation before saving the complete Contact editor', async () => {
+    vi.useFakeTimers()
+    let complete!: (result: any) => void
+    vi.mocked(api).mockResolvedValueOnce({ success: true, data: { success: true, tags: [], can_create: true } }).mockReturnValueOnce(new Promise(resolve => { complete = resolve }))
+    render(<ContactDetailSurface contactId="contact-1" context={{ type: 'lead', id: 'lead-1' }} initialContact={contact} onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
+    fireEvent.change(screen.getByPlaceholderText('Nombre sincronizado o registrado'), { target: { value: 'Editado' } })
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Nueva' } })
+    await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+    fireEvent.click(screen.getByRole('option', { name: 'Crear “Nueva”' }))
+    expect(screen.getByRole('button', { name: 'Guardar contacto' })).toBeDisabled()
+    fireEvent.submit(screen.getByRole('form', { name: 'Editar contacto' }))
+    expect(mocks.updateContact).not.toHaveBeenCalled()
+    await act(async () => { complete({ success: true, data: { success: true, tag: { id: 'new-id', name: 'Nueva', color: '#6366F1' } } }) })
+    expect(screen.getByRole('button', { name: 'Guardar contacto' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar contacto' }))
+    await act(async () => { await Promise.resolve() })
+    expect(mocks.updateContact).toHaveBeenCalledWith(expect.objectContaining({ tag_ids: ['new-id'] }))
+  }, 10000)
 
   it('exposes the same dirty-draft close guard to an owning operational window', () => {
     const ref = createRef<ContactDetailSurfaceHandle>()

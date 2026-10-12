@@ -1,18 +1,12 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
-import { X, UserPlus, Phone, Tag, Loader2, Plus } from 'lucide-react'
-import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
-import { api } from '@/lib/api'
-import { SearchRequestLifecycle } from '@/lib/searchRequestLifecycle'
+import { useState, useEffect } from 'react'
+import { X, UserPlus, Phone, Tag, Loader2 } from 'lucide-react'
+import CatalogTagPicker from '@/components/tags/CatalogTagPicker'
+import { tagSelectionIds } from '@/components/tags/tagFormAdapters'
+import type { TagPickerItem } from '@/components/tags/TagPicker'
 import { subscribeAuthScope } from '@/lib/authScope'
-import { canAddContactCreationTag, contactCreationLimits, findContactCreationTag, validateContactCreation } from './contact-details/contactCreation'
-
-interface StructuredTag {
-  id: string
-  name: string
-  color: string
-}
+import { contactCreationLimits, validateContactCreation } from './contact-details/contactCreation'
 
 interface Props {
   open: boolean
@@ -34,125 +28,27 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
-  // Tag state
-  const [allTags, setAllTags] = useState<StructuredTag[]>([])
-  const [selectedTagIds, setSelectedTagIds] = useState<string[]>([])
-  const [tagInput, setTagInput] = useState('')
-  const [debouncedTagInput, setDebouncedTagInput] = useDebouncedValue(tagInput, SEARCH_DEBOUNCE_MS)
-  const [loadingTags, setLoadingTags] = useState(false)
-  const [canCreateTags, setCanCreateTags] = useState(false)
-  const [tagError, setTagError] = useState('')
-  const tagRequests = useRef(new SearchRequestLifecycle())
-  const selectedTagIdsRef = useRef(selectedTagIds)
-  selectedTagIdsRef.current = selectedTagIds
-
-  useEffect(() => {
-    if (!open) {
-      tagRequests.current.invalidate()
-      setCanCreateTags(false)
-      return
-    }
-    const lifecycle = tagRequests.current
-    const lease = lifecycle.begin()
-    setLoadingTags(true)
-    setTagError('')
-    const params = new URLSearchParams({ limit: '20', search: debouncedTagInput.trim() })
-    void api<{ success: boolean; tags: StructuredTag[]; can_create: boolean }>(`/api/tags?${params}`, { signal: lease.signal })
-      .then(result => {
-        if (!lifecycle.isCurrent(lease)) return
-        if (!result.success || !result.data?.success) {
-          setCanCreateTags(false)
-          setTagError(result.error || 'No se pudieron buscar las etiquetas.')
-          setAllTags(previous => previous.filter(tag => selectedTagIdsRef.current.includes(tag.id)))
-        } else {
-          setCanCreateTags(result.data.can_create === true)
-          const results = Array.isArray(result.data.tags) ? result.data.tags.slice(0, 20) : []
-          setAllTags(previous => {
-            const selected = previous.filter(tag => selectedTagIdsRef.current.includes(tag.id))
-            return [...selected, ...results.filter(tag => !selected.some(item => item.id === tag.id))]
-          })
-        }
-        setLoadingTags(false)
-      })
-      .catch(() => {
-        if (!lifecycle.isCurrent(lease)) return
-        setCanCreateTags(false)
-        setLoadingTags(false)
-        setTagError('No se pudieron buscar las etiquetas.')
-      })
-    return () => lifecycle.invalidate()
-  }, [open, debouncedTagInput])
-
-  useEffect(() => subscribeAuthScope(() => {
-    tagRequests.current.invalidate()
-    setCanCreateTags(false)
-    setAllTags([])
-    setSelectedTagIds([])
-    setTagInput('')
-    setDebouncedTagInput('')
-    setTagError('La sesión cambió. Vuelve a abrir el formulario para buscar etiquetas.')
-  }), [setDebouncedTagInput])
+  const [creatingTag, setCreatingTag] = useState(false)
+  const [selectedTags, setSelectedTags] = useState<TagPickerItem[]>([])
+  useEffect(() => { if (!open) setSelectedTags([]) }, [open])
+  useEffect(() => subscribeAuthScope(() => { setSelectedTags([]); setError('La sesión cambió. Vuelve a abrir el formulario.') }), [])
 
   const handleChange = (field: string, value: string) => {
     setForm(prev => ({ ...prev, [field]: value }))
     if (error) setError('')
   }
 
-  const toggleTag = (id: string) => {
-    setSelectedTagIds(prev =>
-      prev.includes(id) ? prev.filter(t => t !== id) : [...prev, id]
-    )
-  }
-
-  const addCustomTag = () => {
-    const name = tagInput.trim()
-    if (!canAddContactCreationTag(name, allTags, canCreateTags) || loadingTags || tagInput !== debouncedTagInput) return
-    const existing = findContactCreationTag(name, allTags)
-    if (existing) {
-      if (!selectedTagIds.includes(existing.id)) {
-        setSelectedTagIds(prev => [...prev, existing.id])
-      }
-    } else {
-      const tempId = `__custom__${name}`
-      if (!allTags.find(t => t.id === tempId)) {
-        setAllTags(prev => [...prev, { id: tempId, name, color: '#6b7280' }])
-      }
-      if (!selectedTagIds.includes(tempId)) {
-        setSelectedTagIds(prev => [...prev, tempId])
-      }
-    }
-    setTagInput('')
-    setDebouncedTagInput('')
-  }
-
-  const removeTag = (id: string) => {
-    setSelectedTagIds(prev => prev.filter(t => t !== id))
-  }
-
   const handleSubmit = async () => {
-    if (loading) return
+    if (loading || creatingTag) return
     const phone = form.phone.trim()
     const validationError = validateContactCreation(form)
     if (validationError) {
       setError(validationError)
       return
     }
-    if (!canCreateTags && selectedTagIds.some(id => id.startsWith('__custom__'))) {
-      setError('No tienes permiso para crear etiquetas. Quita las etiquetas nuevas antes de guardar.')
-      return
-    }
-
     setLoading(true)
     setError('')
     try {
-      const realTagIds = selectedTagIds.filter(id => !id.startsWith('__custom__'))
-      const customTagNames = selectedTagIds
-        .filter(id => id.startsWith('__custom__'))
-        .map(id => id.replace('__custom__', ''))
-      const existingTagNames = allTags
-        .filter(t => realTagIds.includes(t.id))
-        .map(t => t.name)
-
       const res = await fetch('/api/contacts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -165,8 +61,7 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
           dni: form.dni.trim(),
           birth_date: form.birth_date || undefined,
           notes: form.notes.trim(),
-          tags: [...existingTagNames, ...customTagNames],
-          tag_ids: realTagIds,
+          tag_ids: tagSelectionIds(selectedTags),
         }),
       })
       const data = await res.json()
@@ -175,9 +70,7 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
         return
       }
       setForm({ phone: '', name: '', last_name: '', email: '', company: '', dni: '', birth_date: '', notes: '' })
-      setSelectedTagIds([])
-      setTagInput('')
-      setDebouncedTagInput('')
+      setSelectedTags([])
       onSuccess()
       onClose()
     } catch {
@@ -188,13 +81,6 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
   }
 
   if (!open) return null
-
-  const selectedTags = allTags.filter(t => selectedTagIds.includes(t.id))
-  const unselectedTags = allTags.filter(t => !selectedTagIds.includes(t.id))
-  const filteredUnselected = unselectedTags.filter(t =>
-    !debouncedTagInput.trim() || t.name.toLowerCase().includes(debouncedTagInput.trim().toLowerCase())
-  )
-  const tagSearchPending = tagInput !== debouncedTagInput
 
   const inputCls = "w-full px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-lg text-slate-900 text-sm placeholder-slate-400 focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/25 transition-all"
 
@@ -293,54 +179,7 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
                   <Tag className="w-3.5 h-3.5 text-emerald-500" />
                   Etiquetas
                 </label>
-                {selectedTags.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5 mb-2">
-                    {selectedTags.map(tag => (
-                      <span key={tag.id} className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full text-xs font-medium text-white" style={{ backgroundColor: tag.color || '#6b7280' }}>
-                        {tag.name}
-                        <button onClick={() => removeTag(tag.id)} className="w-4 h-4 flex items-center justify-center rounded-full hover:bg-black/20 transition-colors">
-                          <X className="w-2.5 h-2.5" />
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                )}
-                <div className="relative">
-                  <input
-                    type="text"
-                    placeholder={canCreateTags ? 'Buscar o crear etiqueta...' : 'Buscar etiquetas...'}
-                    value={tagInput}
-                    onChange={e => {
-                      const next = e.target.value
-                      tagRequests.current.invalidate()
-                      setLoadingTags(false)
-                      setAllTags(previous => previous.filter(tag => selectedTagIds.includes(tag.id)))
-                      setTagInput(next)
-                      if (!next) setDebouncedTagInput('')
-                    }}
-                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomTag() } }}
-                    className={`${inputCls} pr-16 disabled:opacity-50`}
-                  />
-                  <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1.5">
-                    {tagSearchPending && <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" aria-label="Buscando etiquetas" />}
-                    {canAddContactCreationTag(tagInput, allTags, canCreateTags) && !loadingTags && !tagSearchPending && (
-                      <button onClick={addCustomTag} className="flex h-6 w-6 items-center justify-center rounded-md bg-emerald-600 text-white transition-colors hover:bg-emerald-500" title="Añadir etiqueta">
-                        <Plus className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                  </div>
-                </div>
-                {tagError && <p role="alert" className="mt-1.5 text-xs text-red-600">{tagError}</p>}
-                {!loadingTags && filteredUnselected.length > 0 && (
-                  <div className="mt-1.5 flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
-                    {filteredUnselected.slice(0, 20).map(tag => (
-                      <button key={tag.id} onClick={() => toggleTag(tag.id)} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border hover:shadow-sm transition-all" style={{ borderColor: tag.color || '#d1d5db', color: tag.color || '#6b7280', backgroundColor: `${tag.color}10` }}>
-                        <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: tag.color || '#6b7280' }} />
-                        {tag.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
+                <CatalogTagPicker contextType="contact_create" selected={selectedTags} onChange={setSelectedTags} onCreatingChange={setCreatingTag} disabled={loading} />
               </div>
             </div>
           </div>
@@ -353,7 +192,7 @@ export default function CreateContactModal({ open, onClose, onSuccess }: Props) 
           </button>
           <button
             onClick={handleSubmit}
-            disabled={loading || (!form.phone.trim() && !form.name.trim())}
+            disabled={loading || creatingTag || (!form.phone.trim() && !form.name.trim())}
             className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
           >
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserPlus className="w-4 h-4" />}

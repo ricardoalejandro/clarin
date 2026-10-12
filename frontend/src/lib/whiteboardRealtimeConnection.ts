@@ -1,14 +1,16 @@
-import type { WhiteboardAccessLevel, WhiteboardEffectiveAccess } from './whiteboards'
+import type { WhiteboardAccessLevel, WhiteboardEffectiveAccess, WhiteboardRealtimeRateLimit } from './whiteboards'
 
 export type WhiteboardRealtimeIssueKind =
   | 'session_expired'
   | 'access_revoked'
   | 'authorization_unavailable'
+  | 'rate_limited'
 
 export interface WhiteboardRealtimeIssue {
   kind: WhiteboardRealtimeIssueKind
   message: string
   retryable: boolean
+  rateLimit?: WhiteboardRealtimeRateLimit
 }
 
 export type WhiteboardCollabTicketAudience = 'member' | 'guest'
@@ -114,6 +116,24 @@ export function whiteboardRealtimeIssueFromUnknown(error: unknown): WhiteboardRe
   }
 }
 
+export function whiteboardRealtimeRateLimitFromEvent(
+  event: WhiteboardRealtimeErrorEventLike,
+): WhiteboardRealtimeRateLimit | null {
+  if (event.event !== 'error' || normalizedCode(event.code) !== 'rate_limited') return null
+  const data = event.data && typeof event.data === 'object' && !Array.isArray(event.data)
+    ? event.data as Record<string, unknown>
+    : {}
+  const retry = typeof data.retry_after_ms === 'number' && Number.isFinite(data.retry_after_ms)
+    ? Math.ceil(data.retry_after_ms)
+    : 1_000
+  return {
+    event: typeof data.event === 'string' ? data.event : undefined,
+    scope: data.scope === 'room' ? 'room' : 'connection',
+    // All room/socket budgets use one-second windows. Legacy servers omit data.
+    retry_after_ms: Math.max(1, Math.min(1_000, retry)),
+  }
+}
+
 export function whiteboardRealtimeIssueFromEvent(
   event: WhiteboardRealtimeErrorEventLike,
   audience: WhiteboardCollabTicketAudience,
@@ -134,6 +154,15 @@ export function whiteboardRealtimeIssueFromEvent(
   }
   if (event.event !== 'error') return null
   const code = normalizedCode(event.code)
+  const rateLimit = whiteboardRealtimeRateLimitFromEvent(event)
+  if (rateLimit) {
+    return {
+      kind: 'rate_limited',
+      message: 'La colaboración está ajustando su ritmo. Clarin reintentará automáticamente.',
+      retryable: true,
+      rateLimit,
+    }
+  }
   if (code === 'session_expired') {
     return audience === 'guest'
       ? { kind: 'access_revoked', message: 'Esta sesión compartida expiró.', retryable: false }
@@ -149,12 +178,17 @@ export function whiteboardRealtimeIssueFromEvent(
   return null
 }
 
+// Metadata confirms access, while a rate notice still needs canonical scene sync.
+export function whiteboardRealtimeIssueAfterAccessRevalidation(issue: WhiteboardRealtimeIssue | null) {
+  return issue?.kind === 'rate_limited' ? issue : null
+}
+
 export function whiteboardRealtimeConnectionNotice(input: {
   connection: 'connecting' | 'open' | 'closed'
   hasOpened: boolean
   issue: WhiteboardRealtimeIssue | null
 }): WhiteboardRealtimeConnectionNotice | null {
-  if (input.issue?.kind === 'authorization_unavailable') {
+  if (input.issue?.kind === 'authorization_unavailable' || input.issue?.kind === 'rate_limited') {
     return {
       message: `${input.issue.message} Tus cambios permanecen en pantalla.`,
       busy: true,

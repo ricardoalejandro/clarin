@@ -40,7 +40,10 @@ export function contactTagMenuPosition(rect: { left: number; top: number; bottom
   const below = Math.max(0, viewport.top + viewport.height - rect.bottom - gap - edge)
   const above = Math.max(0, rect.top - viewport.top - gap - edge)
   const flip = below < 180 && above > below
-  const maxHeight = Math.min(280, Math.max(0, viewport.height - edge * 2), flip ? above : below)
-  const top = Math.max(viewport.top + edge, Math.min(flip ? rect.top - gap - maxHeight : rect.bottom + gap, viewport.top + viewport.height - edge - maxHeight))
-  return { left: Math.max(viewport.left + edge, Math.min(rect.left, viewport.left + viewport.width - width - edge)), top, width, maxHeight }
+  const viewportTop = viewport.top + edge
+  const viewportBottom = Math.max(viewportTop, viewport.top + viewport.height - edge)
+  // Anchor the actual content edge, so a short menu stays beside its input.
+  const top = Math.max(viewportTop, Math.min(flip ? rect.top - gap : rect.bottom + gap, viewportBottom))
+  const maxHeight = Math.min(280, Math.max(0, flip ? top - viewportTop : viewportBottom - top))
+  return { left: Math.max(viewport.left + edge, Math.min(rect.left, viewport.left + viewport.width - width - edge)), top, width, maxHeight, transform: flip ? 'translateY(-100%)' : undefined }
 }

@@ -15,7 +15,6 @@ import {
 import { formatDistanceToNow, format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import ImportCSVModal from '@/components/ImportCSVModal'
-import TagInput from '@/components/TagInput'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
 import CreateContactModal from '@/components/CreateContactModal'
 import PasteFromExcelModal from '@/components/PasteFromExcelModal'

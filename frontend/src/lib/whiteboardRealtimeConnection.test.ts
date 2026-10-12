@@ -8,6 +8,7 @@ import {
   whiteboardRealtimeAccessLevel,
   whiteboardCollabTicketError,
   whiteboardRealtimeConnectionNotice,
+  whiteboardRealtimeIssueAfterAccessRevalidation,
   whiteboardRealtimeIssueFromEvent,
   whiteboardRealtimeIssueFromUnknown,
 } from './whiteboardRealtimeConnection'
@@ -134,4 +135,19 @@ describe('whiteboard realtime authorization', () => {
     expect(whiteboardGuestAccessAtLevel('comment')).toBe('view')
     expect(whiteboardGuestAccessAtLevel('edit')).toBe('edit')
   })
+  it.each(['member', 'guest'] as const)('treats %s throttling as recoverable and bounds legacy metadata', audience => {
+    const issue = whiteboardRealtimeIssueFromEvent({ event: 'error', code: 'rate_limited', data: { event: 'cursor.update', scope: 'connection', retry_after_ms: 125.2 } }, audience)
+    expect(issue).toMatchObject({ kind: 'rate_limited', retryable: true, rateLimit: { event: 'cursor.update', scope: 'connection', retry_after_ms: 126 } })
+    expect(whiteboardRealtimeConnectionNotice({ connection: 'open', hasOpened: true, issue })).toMatchObject({ busy: true, warning: true })
+    expect(whiteboardRealtimeIssueFromEvent({ event: 'error', code: 'rate_limited' }, audience)?.rateLimit?.retry_after_ms).toBe(1_000)
+    expect(whiteboardRealtimeIssueFromEvent({ event: 'error', code: 'rate_limited', data: { retry_after_ms: Infinity } }, audience)?.rateLimit?.retry_after_ms).toBe(1_000)
+  })
+
+  it('does not treat permission metadata revalidation as rate recovery', () => {
+    const rate = whiteboardRealtimeIssueFromEvent({ event: 'error', code: 'rate_limited' }, 'member')
+    expect(whiteboardRealtimeIssueAfterAccessRevalidation(rate)).toBe(rate)
+    expect(whiteboardRealtimeIssueAfterAccessRevalidation({ kind: 'authorization_unavailable', message: 'Temporal', retryable: true })).toBeNull()
+    expect(whiteboardRealtimeIssueAfterAccessRevalidation(null)).toBeNull()
+  })
+
 })

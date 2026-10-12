@@ -36,6 +36,8 @@ import {
   type WhiteboardRealtimeIssue,
 } from '@/lib/whiteboardRealtimeConnection'
 
+import { createWhiteboardRealtimeScheduler, WHITEBOARD_REALTIME_CONTROL_INTERVAL_MS, WHITEBOARD_REALTIME_EPHEMERAL_INTERVAL_MS } from '@/lib/whiteboardRealtimeScheduler'
+
 export const WHITEBOARDS_API_ROOT = '/api/whiteboards'
 export const WHITEBOARD_FOLDERS_API_ROOT = '/api/whiteboard-folders'
 export const WHITEBOARD_LIBRARIES_API_ROOT = '/api/whiteboard-libraries'
@@ -704,6 +706,7 @@ export type WhiteboardRoomConnectionState = 'connecting' | 'open' | 'closed'
 export interface WhiteboardRealtimeRoom {
   isOpen: () => boolean
   requestSync: () => boolean
+  confirmSync: () => void
   sendPatch: (patch: WhiteboardScenePatch) => Promise<WhiteboardRealtimeEvent> | null
   sendCursor: (cursor: WhiteboardCursorPayload) => boolean
 	sendPresence: () => boolean
@@ -784,16 +787,13 @@ export function connectWhiteboardRoom(input: {
   let reconnectBlocked = false
   let connecting = false
   let connectionGeneration = 0
-	let cursorTimer: ReturnType<typeof setTimeout> | null = null
-  let pendingCursor: WhiteboardCursorPayload | null = null
-	let lastCursorSentAt = 0
-	let viewportTimer: ReturnType<typeof setTimeout> | null = null
-	let pendingViewport: WhiteboardViewportBounds | null = null
-	let lastViewportSentAt = 0
+  let currentIssue: WhiteboardRealtimeIssue | null = null
+  let rateRetryAt = Number.NEGATIVE_INFINITY
   const pending = new Map<string, {
     resolve: (event: WhiteboardRealtimeEvent) => void
     reject: (error: Error) => void
     timeout: ReturnType<typeof setTimeout>
+    event: string
   }>()
 
   const rejectPending = (message: string) => {
@@ -805,7 +805,7 @@ export function connectWhiteboardRoom(input: {
   }
 
   const send = (message: object) => {
-    if (!socket || socket.readyState !== WebSocket.OPEN) return false
+    if (permanentlyClosed || reconnectBlocked || !socket || socket.readyState !== WebSocket.OPEN) return false
     try {
       socket.send(JSON.stringify(message))
       return true
@@ -814,61 +814,72 @@ export function connectWhiteboardRoom(input: {
     }
   }
 
-  const requestSync = () => send({ event: 'sync.request', base_sequence: Math.max(0, input.getSequence()) })
+  const cursorScheduler = createWhiteboardRealtimeScheduler<WhiteboardCursorPayload>({
+    intervalMS: WHITEBOARD_REALTIME_EPHEMERAL_INTERVAL_MS,
+    send: cursor => {
+      const message = buildWhiteboardCursorUpdate(cursor)
+      if (new TextEncoder().encode(JSON.stringify(message.data)).byteLength > 4_000) return false
+      return send(message)
+    },
+  })
+  const viewportScheduler = createWhiteboardRealtimeScheduler<WhiteboardViewportBounds>({
+    intervalMS: WHITEBOARD_REALTIME_EPHEMERAL_INTERVAL_MS,
+    send: bounds => {
+      const message = buildWhiteboardViewportUpdate(bounds)
+      return Boolean(message && send(message))
+    },
+  })
+  const controlScheduler = createWhiteboardRealtimeScheduler<{ sync: boolean; presence: boolean }>({
+    intervalMS: WHITEBOARD_REALTIME_CONTROL_INTERVAL_MS,
+    merge: (previous, next) => ({ sync: previous.sync || next.sync, presence: previous.presence || next.presence }),
+    send: batch => {
+      const synced = !batch.sync || send({ event: 'sync.request', base_sequence: Math.max(0, input.getSequence()) })
+      const present = !batch.presence || send(buildWhiteboardPresenceUpdate())
+      return synced && present
+    },
+  })
+  const enqueueControl = (sync: boolean, presence: boolean) => Boolean(
+    socket?.readyState === WebSocket.OPEN && controlScheduler.enqueue({ sync, presence }),
+  )
+  const requestSync = () => enqueueControl(true, false)
+  const sendPresence = () => enqueueControl(false, true)
+  const requestRecovery = () => enqueueControl(true, true)
+  const sendCursor = (cursor: WhiteboardCursorPayload) => Boolean(
+    socket?.readyState === WebSocket.OPEN && cursorScheduler.enqueue(cursor),
+  )
+  const sendViewport = (bounds: WhiteboardViewportBounds) => Boolean(
+    socket?.readyState === WebSocket.OPEN && buildWhiteboardViewportUpdate(bounds) && viewportScheduler.enqueue(bounds),
+  )
 
-  const sendPresence = () => send(buildWhiteboardPresenceUpdate())
-
-  const flushCursor = () => {
-    cursorTimer = null
-    const cursor = pendingCursor
-    pendingCursor = null
-    if (!cursor) return false
-    const message = buildWhiteboardCursorUpdate(cursor)
-    const encodedData = JSON.stringify(message.data)
-    if (new TextEncoder().encode(encodedData).byteLength > 4_000) return false
-    const sent = send(message)
-    if (sent) lastCursorSentAt = Date.now()
-    return sent
+  const reportIssue = (issue: WhiteboardRealtimeIssue | null) => {
+    if (issue?.kind === 'rate_limited' && currentIssue && currentIssue.kind !== 'rate_limited') return
+    currentIssue = issue
+    input.onIssue?.(issue)
+  }
+  const confirmSync = () => {
+    if (currentIssue?.kind === 'rate_limited' && performance.now() >= rateRetryAt) reportIssue(null)
+  }
+  const applyRateCooldown = (issue: WhiteboardRealtimeIssue) => {
+    const rate = issue.rateLimit
+    if (!rate) return
+    rateRetryAt = Math.max(rateRetryAt, performance.now() + rate.retry_after_ms)
+    if (rate.event === 'cursor.update' || !rate.event) cursorScheduler.defer(rate.retry_after_ms)
+    if (rate.event === 'viewport.update' || !rate.event) viewportScheduler.defer(rate.retry_after_ms)
+    // Every rejected channel needs canonical recovery, including a final
+    // cursor/viewport update or an operation whose HTTP fallback is still pending.
+    // This scheduler owns the wake timer; elapsed time never clears the notice.
+    controlScheduler.defer(rate.retry_after_ms)
+    requestRecovery()
   }
 
-	const sendCursor = (cursor: WhiteboardCursorPayload) => {
-    if (!socket || socket.readyState !== WebSocket.OPEN) return false
-    pendingCursor = cursor
-    const remaining = Math.max(0, 50 - (Date.now() - lastCursorSentAt))
-    if (remaining === 0) return flushCursor()
-    if (!cursorTimer) cursorTimer = setTimeout(flushCursor, remaining)
-    return true
-	}
-
-	const flushViewport = () => {
-		viewportTimer = null
-		const bounds = pendingViewport
-		pendingViewport = null
-		if (!bounds) return false
-		const message = buildWhiteboardViewportUpdate(bounds)
-		if (!message) return false
-		const sent = send(message)
-		if (sent) lastViewportSentAt = Date.now()
-		return sent
-	}
-
-	const sendViewport = (bounds: WhiteboardViewportBounds) => {
-		if (!socket || socket.readyState !== WebSocket.OPEN || !buildWhiteboardViewportUpdate(bounds)) return false
-		pendingViewport = bounds
-		const remaining = Math.max(0, 50 - (Date.now() - lastViewportSentAt))
-		if (remaining === 0) return flushViewport()
-		if (!viewportTimer) viewportTimer = setTimeout(flushViewport, remaining)
-		return true
-	}
-
-	const sendCorrelated = <T extends { operation_id: string }>(message: T, timeoutMessage: string) => {
+	const sendCorrelated = <T extends { operation_id: string; event: string }>(message: T, timeoutMessage: string) => {
 		if (!socket || socket.readyState !== WebSocket.OPEN) return null
 		return new Promise<WhiteboardRealtimeEvent>((resolve, reject) => {
 			const timeout = setTimeout(() => {
 				pending.delete(message.operation_id)
 				reject(new Error(timeoutMessage))
 			}, WHITEBOARD_REALTIME_ACK_TIMEOUT_MS)
-			pending.set(message.operation_id, { resolve, reject, timeout })
+			pending.set(message.operation_id, { resolve, reject, timeout, event: message.event })
 			if (!send(message)) {
 				pending.delete(message.operation_id)
 				clearTimeout(timeout)
@@ -899,7 +910,7 @@ export function connectWhiteboardRoom(input: {
       connecting = false
       if (permanentlyClosed || generation !== connectionGeneration) return
       const issue = whiteboardRealtimeIssueFromUnknown(error)
-      input.onIssue?.(issue)
+      reportIssue(issue)
       input.onConnectionChange?.('closed')
       if (issue.retryable) scheduleReconnect()
       else reconnectBlocked = true
@@ -913,9 +924,9 @@ export function connectWhiteboardRoom(input: {
     currentSocket.onopen = () => {
       if (socket !== currentSocket || permanentlyClosed || reconnectBlocked) return
       reconnectAttempt = 0
-      input.onIssue?.(null)
-      requestSync()
-      sendPresence()
+      if (currentIssue?.kind === 'rate_limited') controlScheduler.defer(Math.max(0, rateRetryAt - performance.now()))
+      else reportIssue(null)
+      requestRecovery()
       input.onConnectionChange?.('open')
     }
     currentSocket.onmessage = message => {
@@ -930,12 +941,20 @@ export function connectWhiteboardRoom(input: {
       if (!event) return
       const issue = whiteboardRealtimeIssueFromEvent(event, input.audience)
       if (issue) {
-        input.onIssue?.(issue)
-        if (!issue.retryable) reconnectBlocked = true
+        if (issue.kind === 'rate_limited') applyRateCooldown(issue)
+        reportIssue(issue)
+        if (!issue.retryable) {
+          reconnectBlocked = true
+          cursorScheduler.reset()
+          viewportScheduler.reset()
+          controlScheduler.reset()
+        }
       }
+      let sceneWriteAcknowledged = false
       if (event.event === 'ack' && event.operation_id) {
         const operation = pending.get(event.operation_id)
         if (operation) {
+          sceneWriteAcknowledged = operation.event === 'scene.patch'
           pending.delete(event.operation_id)
           clearTimeout(operation.timeout)
           operation.resolve(event)
@@ -953,6 +972,9 @@ export function connectWhiteboardRoom(input: {
         }
       }
       input.onEvent(event)
+      const canonicalSequence = typeof event.sequence === 'number' && Number.isSafeInteger(event.sequence) && event.sequence >= input.getSequence()
+      const acknowledgedSync = event.event === 'ack' && objectRecord(event.data).sync_required !== true && (!event.operation_id || sceneWriteAcknowledged)
+      if (canonicalSequence && ((event.event === 'scene.snapshot' && event.scene) || acknowledgedSync)) confirmSync()
     }
     currentSocket.onerror = () => {
       // onclose owns retry and pending-operation cleanup.
@@ -963,12 +985,9 @@ export function connectWhiteboardRoom(input: {
       // state or schedule a second reconnect loop.
       if (socket !== currentSocket) return
       socket = null
-      pendingCursor = null
-      if (cursorTimer) clearTimeout(cursorTimer)
-      cursorTimer = null
-		pendingViewport = null
-		if (viewportTimer) clearTimeout(viewportTimer)
-		viewportTimer = null
+      cursorScheduler.reset()
+      viewportScheduler.reset()
+      controlScheduler.reset()
       rejectPending('Se interrumpió la conexión en tiempo real antes de confirmar el guardado.')
       input.onConnectionChange?.('closed')
       if (permanentlyClosed || reconnectBlocked) return
@@ -979,8 +998,7 @@ export function connectWhiteboardRoom(input: {
   const retryNow = () => {
     if (permanentlyClosed || reconnectBlocked || typeof window === 'undefined') return
     if (socket?.readyState === WebSocket.OPEN) {
-      requestSync()
-      sendPresence()
+      requestRecovery()
       return
     }
     if (connecting || socket?.readyState === WebSocket.CONNECTING || socket?.readyState === WebSocket.CLOSING) return
@@ -1005,6 +1023,7 @@ export function connectWhiteboardRoom(input: {
   return {
     isOpen: () => Boolean(socket && socket.readyState === WebSocket.OPEN),
     requestSync,
+    confirmSync,
 		sendCursor,
 		sendPresence,
 		startPresentation: () => {
@@ -1039,12 +1058,9 @@ export function connectWhiteboardRoom(input: {
       }
       if (reconnectTimer) clearTimeout(reconnectTimer)
       reconnectTimer = null
-      pendingCursor = null
-			if (cursorTimer) clearTimeout(cursorTimer)
-			cursorTimer = null
-			pendingViewport = null
-			if (viewportTimer) clearTimeout(viewportTimer)
-			viewportTimer = null
+      cursorScheduler.close()
+      viewportScheduler.close()
+      controlScheduler.close()
       rejectPending('La sala de la pizarra se cerró.')
       const current = socket
       socket = null

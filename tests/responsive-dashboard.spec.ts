@@ -257,6 +257,9 @@ function mockAcademicConfig() {
 
 function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
   const path = url.pathname
+  if (path === '/api/settings/lead-policy') {
+    return { success: true, policy: { account_id: 'account-responsive', leads_enabled: true, lead_automation_enabled: true, leads_policy_version: 1 } }
+  }
   if (path === '/api/me') {
     return {
       success: true,
@@ -494,6 +497,13 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
       observations: [{ id: 'contact-note-1', contact_id: 'contact-1', lead_id: null, type: 'note', direction: null, outcome: null, notes: 'Observación canónica visible', created_by_name: 'Responsive QA', created_at: mockNow }],
     }
   }
+  if (path === '/api/tags/search') {
+    const options = [{ id: 'tag-priority', name: 'Prioridad', color: '#f59e0b' }, { id: 'tag-community', name: 'Comunidad', color: '#10b981' }]
+    const q = (url.searchParams.get('q') || '').toLocaleLowerCase('es')
+    const ids = (url.searchParams.get('ids') || '').split(',')
+    const tags = options.filter(tag => ids.includes(tag.id) || (q && tag.name.toLocaleLowerCase('es').includes(q)))
+    return { success: true, tags, total: tags.length, can_create: false }
+  }
   if (path === '/api/contact-profiles/contact-1/tags') {
     return { success: true, total: 1, tags: [{ id: 'tag-priority', name: 'Prioridad', color: '#f59e0b' }] }
   }
@@ -566,6 +576,9 @@ function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
     const contactNumber = Number(path.split('-').pop() || '1')
     const participant = mockProgramParticipants[contactNumber - 1] || mockProgramParticipants[0]
     return { success: true, contact: { id: participant.contact_id, account_id: 'account-responsive', jid: `${participant.contact_phone}@s.whatsapp.net`, phone: participant.contact_phone, name: participant.contact_name, custom_name: participant.contact_name, email: `participante${contactNumber}@example.test`, company: 'Clarin QA', distrito: 'Lima', ocupacion: 'Estudiante', notes: 'Nota general del contacto', tags: ['Comunidad'], structured_tags: [{ id: 'tag-program-1', name: 'Comunidad', color: '#6366f1' }], avatar_url: null, created_at: mockNow, updated_at: mockNow } }
+  }
+  if (path === '/api/campaigns/campaign-1/recipients') {
+    return { success: true, recipients: [{ id: 'recipient-tags-1', campaign_id: 'campaign-1', lead_id: 'lead-1', contact_id: 'contact-1', jid: '51999999999@s.whatsapp.net', name: 'Destinatario QA', phone: '51999999999', status: 'pending', metadata: {}, created_at: mockNow }] }
   }
   if (path === '/api/campaigns') {
     return { success: true, campaigns: [{ id: 'campaign-1', account_id: 'account-responsive', device_id: 'device-1', name: 'Difusión móvil QA', message_template: 'Mensaje responsivo', media_url: null, media_type: null, status: 'draft', scheduled_at: null, started_at: null, completed_at: null, total_recipients: 1, sent_count: 0, failed_count: 0, settings: {}, created_at: mockNow, updated_at: mockNow, device_name: 'Canal QA' }] }
@@ -1901,7 +1914,7 @@ test.describe('Clarin responsive authenticated matrix', () => {
     const createTagRequest = page.waitForRequest(request => request.url().endsWith('/api/tags') && request.method() === 'POST')
     await tagSearch.fill('Etiqueta móvil QA')
     await page.waitForTimeout(550)
-    await page.getByRole('button', { name: 'Crear “Etiqueta móvil QA”' }).click()
+    await page.getByRole('option', { name: 'Crear “Etiqueta móvil QA”' }).click()
     expect((await createTagRequest).postDataJSON()).toMatchObject({ name: 'Etiqueta móvil QA' })
     await page.getByLabel('Nivel').selectOption('avanzado')
 
@@ -3362,5 +3375,352 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expect(collapseSidebar).toBeVisible()
     await collapseSidebar.click()
     await expectInsideVisualViewport(page, desktopEros)
+  })
+})
+
+test.describe('Tag pointer association regression', () => {
+  test.skip(!useMockSession, 'Uses isolated synthetic API responses')
+  const surfaces = [
+    { quick: true, name: 'Contactos', route: '/dashboard/contacts', open: async (page: Page) => { await page.getByText('Contacto móvil', { exact: true }).first().click() } },
+    { quick: true, name: 'Leads', route: '/dashboard/leads', open: async (page: Page) => { await page.getByText('Snapshot de lead desactualizado', { exact: true }).first().click() } },
+    { quick: true, name: 'Eventos', route: '/dashboard/events/event-1', open: async (page: Page) => { await page.getByText('Snapshot de evento desactualizado', { exact: true }).first().click() } },
+    { quick: true, name: 'Programas', route: '/dashboard/programs/program-1', open: async (page: Page) => { await page.getByRole('button', { name: /Álexis Tarillo Mejio.*5192300100.*Activo/ }).click() } },
+    { quick: true, name: 'Chats', route: '/dashboard/chats', open: async (page: Page) => {
+      await page.getByRole('button', { name: 'Conversación con Contacto móvil' }).click()
+      const details = page.getByRole('button', { name: 'Ver detalles de la conversación' })
+      if (await details.isVisible()) await details.click()
+    } },
+    { quick: true, name: 'Chats incrustados', route: '/dashboard/leads', open: async (page: Page) => {
+      await page.getByText('Snapshot de lead desactualizado', { exact: true }).first().click()
+      await page.getByRole('button', { name: 'Enviar mensaje a Contacto móvil' }).click()
+      await page.getByRole('button', { name: 'Ver detalles de la conversación' }).click()
+    } },
+    { quick: false, name: 'Difusiones', route: '/dashboard/broadcasts', open: async (page: Page) => {
+      if ((page.viewportSize()?.width || 1280) < 640) {
+        await page.getByRole('button', { name: 'Acciones de Difusión móvil QA', exact: true }).click()
+        await page.getByRole('button', { name: 'Ver detalles', exact: true }).click()
+      } else {
+        await page.getByText('Difusión móvil QA', { exact: true }).first().click()
+        await page.getByRole('button', { name: 'Ver Destinatarios', exact: true }).click()
+      }
+      await page.getByRole('button', { name: /^Destinatarios \(/ }).click()
+      await page.getByTitle('Editar destinatario').click()
+    } },
+  ]
+  for (const surface of surfaces) {
+    test(`tag pointer: ${surface.name} saves, restores errors and reloads`, async ({ page }, testInfo) => {
+      test.setTimeout(120_000)
+      await page.setViewportSize({ width: testInfo.project.name.includes('mobile') ? 375 : 1280, height: 900 })
+      await authenticate(page)
+      const known = new Map<string, any>([
+        ['tag-community', { id: 'tag-community', name: 'Comunidad', color: '#10b981' }],
+        ['tag-program-1', { id: 'tag-program-1', name: 'Comunidad', color: '#6366f1' }],
+        ['tag-priority', { id: 'tag-priority', name: 'Prioridad', color: '#f59e0b' }],
+      ])
+      const assigned = new Map<string, any[]>()
+      let writes = 0
+      let failNext = false
+      await page.route(/\/api\/contact-profiles\/[^/?]+(?:\?.*)?$/, async route => {
+        const request = route.request()
+        const url = new URL(request.url())
+        const payload: any = mockApiPayload(url, 'GET')
+        const contactId = url.pathname.split('/').pop()!
+        let tags = assigned.get(contactId) || payload.contact.structured_tags || []
+        if (request.method() === 'PATCH') {
+          writes += 1
+          if (failNext) {
+            failNext = false
+            await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ success: false, error: 'Guardado de prueba temporalmente no disponible' }) })
+            return
+          }
+          const body = request.postDataJSON()
+          if (Array.isArray(body.tag_ids)) tags = body.tag_ids.map((id: string) => known.get(id))
+          assigned.set(contactId, tags)
+        }
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...payload, contact: { ...payload.contact, structured_tags: tags, tags: tags.map((tag: any) => tag.name) } }) })
+      })
+      // The embedded chat and its CRM sibling can show the same Contact at once.
+      const controls = surface.name === 'Chats incrustados' ? page.getByRole('region', { name: 'Conversación', exact: true }) : page
+      const openSurface = async () => {
+        await page.goto(`${baseURL}${surface.route}`, { waitUntil: 'domcontentloaded' })
+        await surface.open(page)
+        await expect(surface.quick ? controls.getByRole('button', { name: 'Etiqueta', exact: true }).last() : controls.getByRole('combobox', { name: 'Buscar o crear etiqueta' }).last()).toBeVisible({ timeout: 30_000 })
+      }
+      const pick = async () => {
+        if (surface.quick) await controls.getByRole('button', { name: 'Etiqueta', exact: true }).last().click()
+        const input = controls.getByRole('combobox', { name: 'Buscar o crear etiqueta' }).last()
+        await input.fill('Prioridad')
+        await expect(input).toHaveAttribute('aria-controls', /.+/)
+        const menuId = await input.getAttribute('aria-controls')
+        const option = page.locator(`[id="${menuId}"]`).getByRole('option', { name: 'Prioridad', exact: true })
+        await expect(option).toBeVisible()
+        await expect.poll(() => option.evaluate(element => getComputedStyle(element).pointerEvents)).toBe('auto')
+        const hit = await option.evaluate(element => {
+          const r = element.getBoundingClientRect()
+          return element.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2))
+        })
+        expect(hit).toBe(true)
+        const inputRect = await input.boundingBox()
+        const menuRect = await page.locator(`[id="${menuId}"]`).boundingBox()
+        expect(inputRect).not.toBeNull()
+        expect(menuRect).not.toBeNull()
+        const separation = menuRect!.y >= inputRect!.y + inputRect!.height
+          ? menuRect!.y - inputRect!.y - inputRect!.height
+          : inputRect!.y - menuRect!.y - menuRect!.height
+        expect(separation).toBeGreaterThanOrEqual(0)
+        expect(separation).toBeLessThanOrEqual(8)
+        if (surface.name === 'Contactos') {
+          const screenshotName = 'menu-etiquetas-' + testInfo.project.name
+          const screenshotPath = testInfo.outputPath(screenshotName + '.png')
+          await page.screenshot({ path: screenshotPath })
+          await testInfo.attach(screenshotName, { path: screenshotPath, contentType: 'image/png' })
+        }
+        const rect = await option.boundingBox()
+        expect(rect).not.toBeNull()
+        if (testInfo.project.name.includes('mobile')) await page.touchscreen.tap(rect!.x + rect!.width / 2, rect!.y + rect!.height / 2)
+        else await page.mouse.click(rect!.x + rect!.width / 2, rect!.y + rect!.height / 2)
+      }
+      await openSurface()
+      await pick()
+      const remove = controls.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true }).last()
+      await expect(remove).toBeVisible()
+      await expect.poll(() => writes).toBe(1)
+      // A canonical reload retains the association.
+      await openSurface()
+      await expect(remove).toBeVisible()
+      failNext = true
+      await remove.click()
+      const saveError = surface.name === 'Difusiones'
+        ? controls.getByRole('alert').filter({ hasText: 'Guardado de prueba temporalmente no disponible' })
+        : controls.getByText('Guardado de prueba temporalmente no disponible', { exact: true }).last()
+      await expect(saveError).toBeVisible()
+      await expect(remove).toBeVisible()
+      await expect.poll(() => writes).toBe(2)
+      await remove.click()
+      await expect(remove).toHaveCount(0)
+      await expect.poll(() => writes).toBe(3)
+    })
+  }
+
+  test('tag pointer: full edit keeps tags in explicit drafts in floating and maximized windows', async ({ page }) => {
+    test.setTimeout(120_000)
+    // Both projects exercise the desktop operational-window contract at this width.
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await authenticate(page)
+    const availableTags = [
+      { id: 'tag-priority', name: 'Prioridad', color: '#f59e0b' },
+      ...mockCanonicalContact.structured_tags,
+    ]
+    let assignedTags = mockCanonicalContact.structured_tags
+    await page.route(/\/api\/contact-profiles\/contact-1(?:\?.*)?$/, async route => {
+      const request = route.request()
+      const body = request.method() === 'PATCH' ? request.postDataJSON() : undefined
+      const payload: any = mockApiPayload(new URL(request.url()), request.method(), body)
+      if (Array.isArray(body?.tag_ids)) assignedTags = body.tag_ids.map((id: string) => availableTags.find(tag => tag.id === id))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+        ...payload,
+        contact: { ...payload.contact, structured_tags: assignedTags, tags: assignedTags.map(tag => tag.name) },
+      }) })
+    })
+    await page.route(/\/api\/contact-profiles\/contact-1\/tags(?:\?.*)?$/, async route => {
+      const query = (new URL(route.request().url()).searchParams.get('q') || '').toLocaleLowerCase('es')
+      const tags = availableTags.filter(tag => query && tag.name.toLocaleLowerCase('es').includes(query))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, tags, total: tags.length }) })
+    })
+    let writes = 0
+    let savedContact: { tag_ids?: string[] } | undefined
+    page.on('request', request => {
+      if (new URL(request.url()).pathname === '/api/contact-profiles/contact-1' && request.method() === 'PATCH') {
+        writes++
+        savedContact = request.postDataJSON()
+      }
+    })
+    await page.goto(`${baseURL}/dashboard/contacts`, { waitUntil: 'domcontentloaded' })
+    await page.getByText('Contacto móvil', { exact: true }).first().click()
+    await page.getByRole('button', { name: 'Ventana flotante', exact: true }).click()
+    const panel = page.getByRole('dialog', { name: 'Ficha de contacto', exact: true })
+    const heading = panel.locator(':scope > header').getByRole('heading', { name: 'Ficha de contacto', exact: true })
+    await heading.hover()
+    const beforeDrag = await expectInsideVisualViewport(page, panel)
+    const handle = await heading.boundingBox()
+    expect(handle).not.toBeNull()
+    await page.mouse.move(handle!.x + handle!.width / 2, handle!.y + handle!.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(1408, 868, { steps: 12 })
+    await page.mouse.up()
+    await expect.poll(async () => (await panel.boundingBox())!.x - beforeDrag.x).toBeGreaterThan(5)
+    await expect.poll(async () => (await panel.boundingBox())!.y - beforeDrag.y).toBeGreaterThan(5)
+    const moved = await expectInsideVisualViewport(page, panel)
+    expect(1440 - moved.x - moved.width).toBeLessThanOrEqual(20)
+    expect(900 - moved.y - moved.height).toBeLessThanOrEqual(20)
+    await page.getByRole('button', { name: 'Editar', exact: true }).last().click()
+    const form = page.getByRole('form', { name: 'Editar contacto' })
+    await expect(form).toBeVisible()
+    const input = form.getByRole('combobox', { name: 'Buscar o crear etiqueta' })
+    const scrollOwner = form.locator('xpath=..')
+    const scrollBox = await scrollOwner.boundingBox()
+    expect(scrollBox).not.toBeNull()
+    const beforeScroll = await scrollOwner.evaluate(element => element.scrollTop)
+    await page.mouse.move(scrollBox!.x + scrollBox!.width / 2, scrollBox!.y + scrollBox!.height / 2)
+    await page.mouse.wheel(0, 520)
+    await expect.poll(() => scrollOwner.evaluate(element => element.scrollTop)).toBeGreaterThan(beforeScroll)
+    await input.scrollIntoViewIfNeeded()
+    await input.fill('Prioridad')
+    const menu = page.getByRole('listbox', { name: 'Etiquetas disponibles' })
+    const priority = menu.getByRole('option', { name: 'Prioridad', exact: true })
+    await expect(priority).toBeVisible()
+    await expectInsideVisualViewport(page, menu)
+    expect(await priority.evaluate(element => {
+      const rect = element.getBoundingClientRect()
+      return element.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2))
+    })).toBe(true)
+    await priority.click()
+    const reselectCommunityByKeyboard = async () => {
+      await form.getByRole('button', { name: 'Quitar etiqueta Comunidad', exact: true }).click()
+      await input.fill('Comunidad')
+      const community = menu.getByRole('option', { name: 'Comunidad', exact: true })
+      await expect(community).toBeVisible()
+      await expectInsideVisualViewport(page, menu)
+      expect(await community.evaluate(element => {
+        const rect = element.getBoundingClientRect()
+        return element.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2))
+      })).toBe(true)
+      await input.press('Escape')
+      await expect(menu).toHaveCount(0)
+      await expect(input).toBeFocused()
+      await expect(form).toBeVisible()
+      await input.press('ArrowDown')
+      await expect(community).toBeVisible()
+      await input.press('Enter')
+      await expect(form.getByRole('button', { name: 'Quitar etiqueta Comunidad', exact: true })).toBeVisible()
+      await expect(form.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true })).toBeVisible()
+    }
+    await reselectCommunityByKeyboard()
+    expect(writes).toBe(0)
+    await form.getByRole('button', { name: 'Guardar contacto', exact: true }).click()
+    await expect.poll(() => writes).toBe(1)
+    expect(savedContact?.tag_ids?.slice().sort()).toEqual(['tag-community', 'tag-priority'].sort())
+    await expect(form).toHaveCount(0)
+    // The blocking Contact editor owns its backdrop; change window mode between edits.
+    await page.getByRole('button', { name: 'Maximizar', exact: true }).click()
+    await page.getByRole('button', { name: 'Editar', exact: true }).last().click()
+    await expect(form).toBeVisible()
+    await expect(form.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true })).toBeVisible()
+    await reselectCommunityByKeyboard()
+    // Keyboard changes in the reopened editor remain local without a second save.
+    expect(writes).toBe(1)
+    page.once('dialog', async dialog => {
+      expect(dialog.message()).toContain('sin guardar')
+      await dialog.accept()
+    })
+    await form.getByRole('button', { name: 'Cancelar', exact: true }).click()
+    await expect(form).toHaveCount(0)
+    expect(writes).toBe(1)
+  })
+
+  test('tag pointer: creation catalogs support pointer, keyboard and bounded import selection', async ({ page }, testInfo) => {
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width: testInfo.project.name.includes('mobile') ? 375 : 1280, height: 900 })
+    await authenticate(page)
+    const choose = async (name: string, keyboard = false) => {
+      const input = page.getByRole('combobox', { name: 'Buscar o crear etiqueta' }).last()
+      await input.fill(name)
+      const option = page.getByRole('option', { name, exact: true })
+      await expect(option).toBeVisible()
+      await expectInsideVisualViewport(page, page.getByRole('listbox', { name: 'Etiquetas disponibles' }))
+      if (keyboard) await input.press('Enter')
+      else if (testInfo.project.name.includes('mobile')) await option.tap()
+      else await option.click()
+      await expect(page.getByRole('button', { name: 'Quitar etiqueta ' + name, exact: true }).last()).toBeVisible()
+    }
+    await page.goto(baseURL + '/dashboard/contacts', { waitUntil: 'domcontentloaded' })
+    await page.getByTitle('Más acciones').click()
+    await page.getByRole('button', { name: 'Nuevo contacto', exact: true }).last().click()
+    const contactDialog = page.getByRole('dialog', { name: 'Nuevo contacto' })
+    await expect(contactDialog).toBeVisible()
+    await choose('Prioridad')
+    await choose('Comunidad', true)
+    await contactDialog.getByRole('button', { name: 'Cancelar', exact: true }).click()
+
+    await page.goto(baseURL + '/dashboard/leads', { waitUntil: 'domcontentloaded' })
+    await page.getByTitle('Más acciones').click()
+    await page.getByRole('button', { name: 'Nueva oportunidad', exact: true }).click()
+    const leadDialog = page.getByRole('dialog', { name: 'Nueva oportunidad' })
+    await expect(leadDialog).toBeVisible()
+    await choose('Prioridad')
+    await choose('Comunidad', true)
+    await leadDialog.getByRole('button', { name: 'Cancelar', exact: true }).click()
+    await page.getByTitle('Más acciones').click()
+    await page.getByRole('button', { name: 'Importar Excel', exact: true }).click()
+    await page.getByRole('button', { name: 'Usar etiqueta', exact: true }).click()
+    await choose('Prioridad')
+    await choose('Comunidad')
+    await expect(page.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true })).toHaveCount(0)
+  })
+
+  test('tag pointer: two sessions reconcile canonical tags without reload', async ({ page, browser }) => {
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await authenticate(page)
+    const observerContext = await browser.newContext({ viewport: { width: 1280, height: 900 } })
+    try {
+      const observer = await observerContext.newPage()
+      const observerSocket = await authenticate(observer)
+      let assigned = mockCanonicalContact.structured_tags
+      const priority = { id: 'tag-priority', name: 'Prioridad', color: '#f59e0b' }
+      for (const session of [page, observer]) {
+        await session.route(/\/api\/contact-profiles\/contact-1(?:\?.*)?$/, async route => {
+          const payload: any = mockApiPayload(new URL(route.request().url()), 'GET')
+          if (route.request().method() === 'PATCH') {
+            assigned = route.request().postDataJSON().tag_ids.map((id: string) => id === priority.id ? priority : mockCanonicalContact.structured_tags.find(tag => tag.id === id))
+          }
+          await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...payload, contact: { ...payload.contact, structured_tags: assigned, tags: assigned.map(tag => tag.name) } }) })
+        })
+        await session.goto(baseURL + '/dashboard/contacts', { waitUntil: 'domcontentloaded' })
+        await session.getByText('Contacto móvil', { exact: true }).first().click()
+        await expect(session.getByRole('button', { name: 'Etiqueta', exact: true })).toBeVisible()
+      }
+      await page.getByRole('button', { name: 'Etiqueta', exact: true }).click()
+      await page.getByRole('combobox', { name: 'Buscar o crear etiqueta' }).fill('Prioridad')
+      await page.getByRole('option', { name: 'Prioridad', exact: true }).click()
+      await expect(page.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true })).toBeVisible()
+      const before = await observer.evaluate(() => performance.getEntriesByType('navigation').length)
+      observerSocket!.send({ event: 'contact_update', data: { action: 'updated', contact_id: 'contact-1', updated_at: new Date().toISOString() } })
+      await expect(observer.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true })).toBeVisible()
+      expect(await observer.evaluate(() => performance.getEntriesByType('navigation').length)).toBe(before)
+    } finally { await observerContext.close() }
+  })
+
+  test('tag pointer: automation assigns and removes with a visual single choice', async ({ page }, testInfo) => {
+    test.setTimeout(120_000)
+    // The designer stays at desktop width; projects verify mouse and touch selection.
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await authenticate(page)
+    const automation = { id: 'auto-tags-qa', account_id: 'account-responsive', name: 'Etiquetas QA', description: '', trigger: 'manual', trigger_config: {}, is_active: false, execution_count: 0, created_at: mockNow, updated_at: mockNow, graph: { nodes: [
+      { id: 'assign-qa', type: 'assign_tag', position: { x: 250, y: 160 }, data: { label: 'Asignar etiqueta QA', tag_id: 'tag-priority' } },
+      { id: 'remove-qa', type: 'remove_tag', position: { x: 250, y: 360 }, data: { label: 'Quitar etiqueta QA', tag_id: '' } },
+    ], edges: [] } }
+    let saved: any
+    await page.route('**/api/automations/auto-tags-qa', async route => {
+      if (route.request().method() === 'PUT') saved = route.request().postDataJSON()
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, automation: { ...automation, ...(saved || {}) } }) })
+    })
+    await page.goto(baseURL + '/dashboard/automations/auto-tags-qa', { waitUntil: 'domcontentloaded' })
+    await page.locator('.react-flow__node[data-id="assign-qa"]').click()
+    await expect(page.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true })).toBeVisible()
+    await page.getByRole('combobox', { name: 'Buscar o crear etiqueta' }).fill('Comunidad')
+    const community = page.getByRole('option', { name: 'Comunidad', exact: true })
+    if (testInfo.project.name.includes('mobile')) await community.tap()
+    else await community.click()
+    await expect(page.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Quitar etiqueta Comunidad', exact: true })).toBeVisible()
+    await page.locator('.react-flow__node[data-id="remove-qa"]').click()
+    await page.getByRole('combobox', { name: 'Buscar o crear etiqueta' }).fill('Prioridad')
+    const priority = page.getByRole('option', { name: 'Prioridad', exact: true })
+    if (testInfo.project.name.includes('mobile')) await priority.tap()
+    else await priority.click()
+    await page.getByRole('button', { name: 'Guardar', exact: true }).click()
+    await expect.poll(() => saved?.graph?.nodes?.find((node: any) => node.id === 'assign-qa')?.data.tag_id).toBe('tag-community')
+    expect(saved.graph.nodes.find((node: any) => node.id === 'remove-qa').data.tag_id).toBe('tag-priority')
   })
 })

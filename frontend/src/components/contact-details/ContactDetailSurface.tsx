@@ -316,6 +316,8 @@ function ContactDetailSurfaceImpl({
   const [editDraft, setEditDraft] = useState<ContactEditDraft | null>(null)
   const [editDirty, setEditDirty] = useState(false)
   const [phoneDraft, setPhoneDraft] = useState<ContactProfileExtraPhonePatch[]>([])
+  const [tagCreating, setTagCreating] = useState(false)
+  const [quickTagCreating, setQuickTagCreating] = useState(false)
   const [tagDraft, setTagDraft] = useState<ContactProfileAvailableTag[]>([])
   const [customFieldDraftValues, setCustomFieldDraftValues] = useState<Record<string, string>>({})
   const [collectionError, setCollectionError] = useState('')
@@ -449,7 +451,7 @@ function ContactDetailSurfaceImpl({
   }
 
   const saveCompleteContact = async () => {
-    if (!editDraft || !profile.contact) return
+    if (!editDraft || !profile.contact || profile.saving || tagCreating) return
     const session = surfaceLease()
     const ageText = editDraft.age.trim()
     const age = ageText ? Number(ageText) : null
@@ -734,7 +736,7 @@ function ContactDetailSurfaceImpl({
 
                   <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                     <div className="flex items-center gap-2"><Tag className="h-4 w-4 text-slate-400" /><h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Etiquetas</h4></div>
-                    <ContactTagEditor contactId={profile.contact.id} context={context} selected={tagDraft} canCreate={profile.capabilities.can_create_tags} disabled={profile.saving} onChange={tags => { setTagDraft(tags); setEditDirty(true); setCollectionError('') }} />
+                    <ContactTagEditor contactId={profile.contact.id} context={context} selected={tagDraft} onCreatingChange={setTagCreating} canCreate={profile.capabilities.can_create_tags} disabled={profile.saving} onChange={tags => { setTagDraft(tags); setEditDirty(true); setCollectionError('') }} />
                   </section>
 
                   {profile.customFieldDefinitions.length > 0 && <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="flex items-center gap-2"><SlidersHorizontal className="h-4 w-4 text-slate-400" /><h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Campos personalizados</h4></div><div className="mt-3 space-y-3">{profile.customFieldDefinitions.map(definition => {
@@ -755,7 +757,7 @@ function ContactDetailSurfaceImpl({
                 <footer className="sticky bottom-0 z-20 border-t border-slate-200 bg-white/95 px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))] shadow-[0_-8px_24px_rgba(15,23,42,0.08)] backdrop-blur">
                   {collectionError && <p className="mb-2 rounded-xl bg-red-50 px-3 py-2 text-xs font-medium text-red-700" role="alert">{collectionError}</p>}
                   <div className="mb-2 flex items-center gap-2 text-xs"><span className={`h-2 w-2 rounded-full ${editDirty ? 'bg-amber-500' : 'bg-slate-300'}`} /><span className={editDirty ? 'font-semibold text-amber-700' : 'text-slate-500'}>{editDirty ? 'Cambios sin guardar' : 'Sin cambios pendientes'}</span></div>
-                  <div className="grid grid-cols-2 gap-2"><button type="button" onClick={abandonEdit} disabled={profile.saving} className="min-h-11 rounded-xl border border-slate-200 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Cancelar</button><button type="submit" disabled={profile.saving || !editDirty} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45">{profile.saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}{profile.saving ? 'Guardando…' : 'Guardar contacto'}</button></div>
+                  <div className="grid grid-cols-2 gap-2"><button type="button" onClick={abandonEdit} disabled={profile.saving} className="min-h-11 rounded-xl border border-slate-200 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Cancelar</button><button type="submit" disabled={profile.saving || tagCreating || !editDirty} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45">{profile.saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}{profile.saving ? 'Guardando…' : 'Guardar contacto'}</button></div>
                 </footer>
               </form>
               </>
@@ -802,12 +804,12 @@ function ContactDetailSurfaceImpl({
                         <div className="flex flex-wrap gap-2">
                           {quickTagDraft.map(tag => {
                             const pending = quickTagPendingId === tag.id || quickTagPendingId === '__all__'
-                            return <span key={tag.id} className="inline-flex max-w-full items-center gap-1 rounded-full py-1.5 pl-3 pr-1.5 text-xs font-bold text-white shadow-sm" style={{ backgroundColor: tag.color || '#64748b', color: contactTagForeground(tag.color) }}><span className="truncate">{tag.name}</span>{canEdit && <button type="button" disabled={profile.saving || Boolean(quickTagPendingId)} onClick={() => { void updateQuickTags(quickTagDraft.filter(candidate => candidate.id !== tag.id)) }} aria-label={pending ? `Actualizando etiqueta ${tag.name}` : `Quitar etiqueta ${tag.name}`} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full hover:bg-black/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-current disabled:opacity-70 touch-manipulation">{pending ? <Loader2 className="h-3 w-3 animate-spin" /> : <X className="h-3 w-3" />}</button>}</span>
+                            return <span key={tag.id} className="inline-flex max-w-full items-center gap-1 rounded-full py-1.5 pl-3 pr-1.5 text-xs font-bold text-white shadow-sm" style={{ backgroundColor: tag.color || '#64748b', color: contactTagForeground(tag.color) }}><span className="truncate">{tag.name}</span>{canEdit && <button type="button" disabled={profile.saving || quickTagCreating || Boolean(quickTagPendingId)} onClick={() => { void updateQuickTags(quickTagDraft.filter(candidate => candidate.id !== tag.id)) }} aria-label={pending ? `Actualizando etiqueta ${tag.name}` : `Quitar etiqueta ${tag.name}`} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full hover:bg-black/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-current disabled:opacity-70 touch-manipulation">{pending ? <Loader2 className="h-3 w-3 animate-spin" /> : <X className="h-3 w-3" />}</button>}</span>
                           })}
                         </div>
                       ) : <p className="text-xs italic text-slate-400">Sin etiquetas asignadas.</p>}
                       {quickTagPendingId && <p role="status" className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-semibold text-cyan-700"><Loader2 className="h-3.5 w-3.5 animate-spin" />Actualizando etiquetas…</p>}
-                      {quickTagsOpen && <div className="mt-3 border-t border-cyan-100 pt-3"><ContactTagEditor contactId={profile.contact.id} context={context} selected={quickTagDraft} canCreate={profile.capabilities.can_create_tags} disabled={profile.saving || Boolean(quickTagPendingId)} showSelected={false} onChange={tags => { void updateQuickTags(tags) }} /></div>}
+                      {quickTagsOpen && <div className="mt-3 border-t border-cyan-100 pt-3"><ContactTagEditor contactId={profile.contact.id} context={context} selected={quickTagDraft} onCreatingChange={setQuickTagCreating} canCreate={profile.capabilities.can_create_tags} disabled={profile.saving || Boolean(quickTagPendingId)} showSelected={false} onChange={tags => { void updateQuickTags(tags) }} /></div>}
                       {quickTagError && <div role="alert" className="mt-2 flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"><AlertCircle className="h-3.5 w-3.5 shrink-0" /><span className="min-w-0 flex-1">{quickTagError}</span>{quickTagRetry && <button type="button" onClick={() => void updateQuickTags(quickTagRetry)} className="inline-flex min-h-9 shrink-0 items-center gap-1 rounded-lg px-2 font-bold hover:bg-red-100"><RefreshCw className="h-3.5 w-3.5" />Reintentar</button>}</div>}
                     </CrmDetailAccordion>
 

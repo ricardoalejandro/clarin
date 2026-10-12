@@ -124,6 +124,7 @@ import {
   whiteboardPermissionChangeFeedback,
   whiteboardRealtimeAccessLevel,
   whiteboardRealtimeConnectionNotice,
+  whiteboardRealtimeIssueAfterAccessRevalidation,
   type WhiteboardRealtimeIssue,
 } from '@/lib/whiteboardRealtimeConnection'
 import {
@@ -2187,6 +2188,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
           : canonical.elements,
       )
       canonicalSyncAppliedSequenceRef.current = Math.max(requestedSequence, response.data.scene.sequence)
+      roomRef.current?.confirmSync?.()
       if (preserveLocalChanges && canEdit) {
         // Keep an immutable pending write across reconnect sync. Reusing its
         // operation_id lets the backend return the canonical idempotent result
@@ -2244,7 +2246,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
 
   const handleRealtimeIssue = useCallback((issue: WhiteboardRealtimeIssue | null) => {
     setRealtimeIssue(issue)
-    if (!issue || issue.kind === 'authorization_unavailable') return
+    if (!issue || issue.retryable) return
     if (issue.kind === 'access_revoked') {
       setError('Tu acceso a esta pizarra fue revocado.')
       setPhase('error')
@@ -2289,7 +2291,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     setBoard(metadata)
     setPermissionNotice(feedback.notice)
     if (feedback.saveState) setSaveState(feedback.saveState)
-    setRealtimeIssue(null)
+    setRealtimeIssue(whiteboardRealtimeIssueAfterAccessRevalidation)
   }, [boardID, hostContext])
 
   useEffect(() => {
@@ -2361,7 +2363,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
             void refreshMetadataForPermissionChange()
             return
           }
-          if (event.code === 'session_expired' || event.code === 'authorization_unavailable' || event.code === 'presence_unavailable') return
+          if (event.code === 'session_expired' || event.code === 'authorization_unavailable' || event.code === 'presence_unavailable' || event.code === 'rate_limited') return
           // Correlated operation errors reject sendPatch() and are recovered by
           // the idempotent REST fallback before any user-facing failure state.
           if (!event.operation_id) setError(event.error || 'La colaboración en tiempo real encontró un error.')

@@ -213,3 +213,70 @@ func assertSyncRequiredSequence(t *testing.T, payload []byte, sequence int64) {
 		t.Fatalf("expected canonical sync.required at %d, got %#v", sequence, message)
 	}
 }
+
+func TestWhiteboardRateLimitPreservesOperationAndDeadline(t *testing.T) {
+	server := &Server{}
+	operationID := uuid.New()
+	client := &whiteboardcore.RealtimeClient{Send: make(chan []byte, 1)}
+	incoming := whiteboardcore.IncomingMessage{Event: whiteboardcore.EventScenePatch, OperationID: &operationID}
+	server.queueWhiteboardRateLimit(client, incoming, "connection", 123*time.Millisecond+time.Microsecond)
+	var message struct {
+		Event       string                       `json:"event"`
+		Code        string                       `json:"code"`
+		OperationID uuid.UUID                    `json:"operation_id"`
+		Data        whiteboardcore.RateLimitData `json:"data"`
+	}
+	if err := json.Unmarshal(<-client.Send, &message); err != nil {
+		t.Fatal(err)
+	}
+	if message.Event != whiteboardcore.EventError || message.Code != "rate_limited" || message.OperationID != operationID || message.Data.Event != incoming.Event || message.Data.Scope != "connection" || message.Data.RetryAfterMS != 124 {
+		t.Fatalf("rate limit lost retry/correlation metadata: %#v", message)
+	}
+	server.queueWhiteboardRateLimit(client, whiteboardcore.IncomingMessage{Event: whiteboardcore.EventSyncRequest}, "room", 0)
+	if err := json.Unmarshal(<-client.Send, &message); err != nil {
+		t.Fatal(err)
+	}
+	if message.Data.RetryAfterMS != 1000 || message.Data.Scope != "room" {
+		t.Fatalf("invalid room retry: %#v", message.Data)
+	}
+}
+
+func TestWhiteboardSyncReplayAcknowledgesOnlyTheCompleteDelta(t *testing.T) {
+	t.Parallel()
+	server := &Server{}
+	operations := []*domain.WhiteboardOperation{
+		{OperationID: uuid.New(), Sequence: 8, Patch: json.RawMessage(`{"elements":[]}`)},
+		{OperationID: uuid.New(), Sequence: 9, Patch: json.RawMessage(`{"elements":[]}`)},
+	}
+	client := &whiteboardcore.RealtimeClient{Send: make(chan []byte, 3)}
+	server.queueWhiteboardSyncReplay(client, operations, 9)
+	for i, event := range []string{whiteboardcore.EventScenePatch, whiteboardcore.EventScenePatch, whiteboardcore.EventAck} {
+		var message whiteboardcore.OutgoingMessage
+		if err := json.Unmarshal(<-client.Send, &message); err != nil {
+			t.Fatal(err)
+		}
+		if message.Event != event || message.Sequence != []int64{8, 9, 9}[i] {
+			t.Fatalf("delta order/confirmation changed at %d: %#v", i, message)
+		}
+		if i < 2 && (message.OperationID == nil || *message.OperationID != operations[i].OperationID) {
+			t.Fatalf("delta lost operation identity: %#v", message)
+		}
+		if i == 2 && message.OperationID != nil {
+			t.Fatal("canonical sync ACK must not acknowledge a pending write")
+		}
+	}
+	// The two patches fit but their final ACK cannot; never falsely confirm.
+	saturated := &whiteboardcore.RealtimeClient{Send: make(chan []byte, 2)}
+	server.queueWhiteboardSyncReplay(saturated, operations, 9)
+	assertSyncRequiredSequence(t, <-saturated.Send, 9)
+	if len(saturated.Send) != 0 {
+		t.Fatal("saturated replay retained an incomplete delta or ACK")
+	}
+	oversized := &whiteboardcore.RealtimeClient{Send: make(chan []byte, 3)}
+	operations[0].Patch = json.RawMessage(`{"opaque":"` + strings.Repeat("x", whiteboardcore.MaxRealtimeSnapshotMessageBytes) + `"}`)
+	server.queueWhiteboardSyncReplay(oversized, operations, 9)
+	assertSyncRequiredSequence(t, <-oversized.Send, 9)
+	if len(oversized.Send) != 0 {
+		t.Fatal("oversized replay continued or acknowledged incomplete sync")
+	}
+}

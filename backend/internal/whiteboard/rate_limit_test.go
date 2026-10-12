@@ -34,3 +34,50 @@ func TestEventRateLimiterUsesIndependentOneSecondWindows(t *testing.T) {
 		t.Fatal("unsupported events must not be admitted")
 	}
 }
+
+func TestEventRateLimiterReportsRemainingWindowWithoutExtendingIt(t *testing.T) {
+	limiter := NewEventRateLimiter()
+	now := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 4; i++ {
+		limiter.Allow(EventSyncRequest, now)
+	}
+	if got := limiter.Check(EventSyncRequest, now.Add(250*time.Millisecond)); got.Allowed || got.RetryAfter != 750*time.Millisecond {
+		t.Fatalf("incorrect cooldown: %#v", got)
+	}
+	if got := limiter.Check(EventSyncRequest, now.Add(999*time.Millisecond)); got.RetryAfter != time.Millisecond {
+		t.Fatalf("rejection extended the window: %#v", got)
+	}
+	if !limiter.Check(EventSyncRequest, now.Add(time.Second)).Allowed {
+		t.Fatal("window did not recover")
+	}
+	if !limiter.Check(EventSyncRequest, now.Add(-time.Second)).Allowed {
+		t.Fatal("clock rollback did not reset window")
+	}
+}
+
+func TestRealtimeViolationCounterSeparatesTemporaryAndInvalidTraffic(t *testing.T) {
+	now := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	var counter RealtimeViolationCounter
+	for i := 0; i < 20; i++ {
+		if counter.RejectRate(now.Add(time.Duration(i) * time.Second)) {
+			t.Fatal("isolated throttling accumulated across windows")
+		}
+	}
+	for i := 0; i < 4; i++ {
+		if counter.RejectInvalid() {
+			t.Fatal("invalid frames closed too early")
+		}
+	}
+	if !counter.RejectInvalid() {
+		t.Fatal("malformed-frame protection was weakened")
+	}
+	var burst RealtimeViolationCounter
+	for i := 0; i < 4; i++ {
+		if burst.RejectRate(now) {
+			t.Fatal("rate burst closed too early")
+		}
+	}
+	if !burst.RejectRate(now.Add(999 * time.Millisecond)) {
+		t.Fatal("sustained rate burst was not bounded")
+	}
+}

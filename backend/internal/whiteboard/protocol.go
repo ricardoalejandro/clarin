@@ -68,6 +68,13 @@ type OutgoingMessage struct {
 	Error       string      `json:"error,omitempty"`
 }
 
+// RateLimitData is additive error metadata; it never contains scene or identity data.
+type RateLimitData struct {
+	Event        string `json:"event"`
+	Scope        string `json:"scope"`
+	RetryAfterMS int64  `json:"retry_after_ms"`
+}
+
 type PresentationStopData struct {
 	PresentationID uuid.UUID `json:"presentation_id"`
 }

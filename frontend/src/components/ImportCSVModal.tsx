@@ -1,8 +1,12 @@
 'use client'
 
-import { useState, useRef, useEffect, useCallback } from 'react'
-import { Upload, FileText, X, AlertTriangle, CheckCircle2, Download, Loader2, ShieldCheck, Search, Plus, Check } from 'lucide-react'
-import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
+import { useState, useRef, useEffect } from 'react'
+import { Upload, FileText, X, AlertTriangle, CheckCircle2, Download, Loader2, ShieldCheck, Search } from 'lucide-react'
+import CatalogTagPicker from '@/components/tags/CatalogTagPicker'
+import { importTagName } from '@/components/tags/tagFormAdapters'
+import type { TagPickerItem } from '@/components/tags/TagPicker'
+import { subscribeAuthScope } from '@/lib/authScope'
+import { SearchRequestLifecycle } from '@/lib/searchRequestLifecycle'
 
 interface ImportCSVModalProps {
   open: boolean
@@ -51,23 +55,12 @@ interface ImportSummary {
   errors: string[] | null
 }
 
-interface ImportTagOption {
-  id: string
-  name: string
-  color?: string
-}
-
 const EXCEL_ACCEPT = '.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel'
 const EXCEL_EXTENSIONS = /\.(xlsx|xls)$/i
 const EXCEL_MIME_TYPES = new Set([
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   'application/vnd.ms-excel',
 ])
-const TAG_PRESET_COLORS = [
-  '#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4',
-  '#3b82f6', '#6366f1', '#8b5cf6', '#ec4899', '#6b7280',
-]
-
 const KOMMO_IQUITOS_V2_HEADERS = [
   'ID', 'Nombre del lead', 'Compañía', 'Contacto principal', 'Compañía del lead', 'Responsable', 'Estatus del lead', 'Embudo de ventas', 'Presupuesto', 'Fecha de creación', 'Creado por', 'Última modificación el', 'Modificado por', 'Etiquetas del lead', 'Tareas próximas', 'Cerrado el', 'Próxima cita', 'BOT 1.0', 'Atención', '✅ RED SOCIAL', '‼️MOTIVO PERDIDA', '✅ SEDE', '✅ Acepto invitación?', '✅ Acepto Clase Gratuita', '✅ Desea inscripción?', '✅ Tipo de cliente', '✅ Campaña', '✅ Consulta', '✅ Fecha', 'PRUEBA', 'STATUS', 'DETEC CAM', 'GRUPO', 'OTRAS', '✅ Exportado', 'utm_content', 'utm_medium', 'utm_campaign', 'utm_source', 'utm_term', 'utm_referrer', 'referrer', 'gclientid', 'gclid', 'fbclid', 'ttad_name', 'ttad_id', 'Cargo (contacto)', 'Correo (contacto)', 'E-mail priv. (contacto)', 'Otro e-mail (contacto)', 'Teléfono oficina (contacto)', 'Teléfono oficina directo (contacto)', 'Teléfono celular (contacto)', 'Fax (contacto)', 'Teléfono de casa (contacto)', 'Otro teléfono (contacto)', 'Nota 1', 'Nota 2', 'Nota 3', 'Nota 4', 'Nota 5',
 ]
@@ -142,11 +135,8 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
   const [file, setFile] = useState<File | null>(null)
   const [importTagMode, setImportTagMode] = useState<'none' | 'custom'>('none')
   const [importTag, setImportTag] = useState('')
-  const [tagSearch, setTagSearch] = useState('')
-  const [debouncedTagSearch, setDebouncedTagSearch] = useDebouncedValue(tagSearch, SEARCH_DEBOUNCE_MS)
-  const [tagOptions, setTagOptions] = useState<ImportTagOption[]>([])
   const [creatingTag, setCreatingTag] = useState(false)
-  const [newTagColor, setNewTagColor] = useState(TAG_PRESET_COLORS[6])
+  const [selectedImportTags, setSelectedImportTags] = useState<TagPickerItem[]>([])
   const [previewing, setPreviewing] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [preview, setPreview] = useState<ImportSummary | null>(null)
@@ -155,84 +145,26 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
   const [formatDiagnostic, setFormatDiagnostic] = useState('')
   const [previewFilter, setPreviewFilter] = useState<'all' | 'create' | 'existing' | 'duplicate' | 'invalid'>('all')
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const importRequests = useRef(new SearchRequestLifecycle())
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
 
   useEffect(() => {
+    importRequests.current.invalidate()
+    setPreviewing(false); setUploading(false); setPreview(null); setResult(null)
     if (!open) return
     setImportTagMode('none')
     setImportTag('')
-    setTagSearch('')
-    setDebouncedTagSearch('')
-    setNewTagColor(TAG_PRESET_COLORS[6])
-    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    setSelectedImportTags([])
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) { importRequests.current.invalidate(); onCloseRef.current() } }
     document.addEventListener('keydown', h)
-    return () => document.removeEventListener('keydown', h)
-  }, [open, onClose, defaultType])
+    return () => { importRequests.current.invalidate(); document.removeEventListener('keydown', h) }
+  }, [open, defaultType])
 
-  const fetchTagOptions = useCallback(async () => {
-    if (defaultType === 'contacts') return
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch('/api/tags', { headers: token ? { Authorization: `Bearer ${token}` } : {} })
-      const data = await res.json()
-      if (data.success && Array.isArray(data.tags)) {
-        setTagOptions(data.tags.map((tag: any) => ({
-          id: tag.id,
-          name: tag.name,
-          color: tag.color,
-        })))
-      }
-    } catch {
-      setTagOptions([])
-    }
-  }, [defaultType])
-
-  useEffect(() => {
-    if (!open || defaultType === 'contacts') return
-    fetchTagOptions()
-  }, [open, defaultType, fetchTagOptions])
-
-  const handleSelectImportTag = (tag: ImportTagOption) => {
-    setImportTagMode('custom')
-    setImportTag(tag.name)
-    setTagSearch('')
-    setDebouncedTagSearch('')
-    setPreview(null)
-    setResult(null)
-  }
-
-  const handleCreateImportTag = async () => {
-    const name = tagSearch.trim()
-    if (!name || creatingTag) return
-    setCreatingTag(true)
-    setError('')
-    const token = localStorage.getItem('token')
-    try {
-      const res = await fetch('/api/tags', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ name, color: newTagColor }),
-      })
-      const data = await res.json()
-      if (data.success && data.tag) {
-        const created = { id: data.tag.id, name: data.tag.name, color: data.tag.color }
-        setTagOptions(prev => {
-          const withoutDuplicate = prev.filter(tag => tag.name.toLowerCase() !== created.name.toLowerCase())
-          return [...withoutDuplicate, created].sort((a, b) => a.name.localeCompare(b.name))
-        })
-        handleSelectImportTag(created)
-        setNewTagColor(TAG_PRESET_COLORS[Math.floor(Math.random() * TAG_PRESET_COLORS.length)])
-      } else {
-        setError(data.error || 'No se pudo crear la etiqueta')
-      }
-    } catch {
-      setError('No se pudo crear la etiqueta')
-    } finally {
-      setCreatingTag(false)
-    }
-  }
+  useEffect(() => subscribeAuthScope(() => {
+    importRequests.current.invalidate(); setPreviewing(false); setUploading(false)
+    setSelectedImportTags([]); setImportTag(''); setPreview(null); setResult(null)
+  }), [])
 
   if (!open) return null
 
@@ -292,6 +224,9 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
   }
 
   const handleFileChange = async (nextFile: File | null) => {
+    const lifecycle = importRequests.current, lease = lifecycle.begin()
+    setPreviewing(false); setUploading(false)
+    setFile(null)
     setPreview(null)
     setResult(null)
     setError('')
@@ -309,8 +244,10 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     }
     try {
       await excelToCSVFile(nextFile)
+      if (!lifecycle.isCurrent(lease)) return
       setFile(nextFile)
     } catch (err) {
+      if (!lifecycle.isCurrent(lease)) return
       const message = err instanceof Error ? err.message : 'No se pudo validar el formato del Excel.'
       setFile(null)
       if (message.startsWith('FORMATO_KOMMO_INCOMPATIBLE')) {
@@ -324,7 +261,8 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
   }
 
   const handlePreview = async () => {
-    if (!file) return
+    if (!file || creatingTag || previewing || uploading) return
+    const lifecycle = importRequests.current, lease = lifecycle.begin()
     setPreviewing(true)
     setError('')
     setPreview(null)
@@ -333,13 +271,15 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     const token = localStorage.getItem('token')
     try {
       const formData = await buildFormData()
-      if (!formData) return
+      if (!formData || !lifecycle.isCurrent(lease)) return
       const res = await fetch('/api/import/csv/preview', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
+        signal: lease.signal,
       })
       const data = await res.json()
+      if (!lifecycle.isCurrent(lease)) return
       if (data.success) {
         setPreview(normalizeImportSummary(data.preview))
         setPreviewFilter('all')
@@ -347,14 +287,15 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
         setError(data.error || 'No se pudo analizar el Excel')
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'No se pudo leer el Excel')
+      if (lifecycle.isCurrent(lease)) setError(err instanceof Error ? err.message : 'No se pudo leer el Excel')
     } finally {
-      setPreviewing(false)
+      if (lifecycle.finish(lease)) setPreviewing(false)
     }
   }
 
   const handleUpload = async () => {
-    if (!file) return
+    if (!file || creatingTag || previewing || uploading) return
+    const lifecycle = importRequests.current, lease = lifecycle.begin()
     setUploading(true)
     setError('')
     setFormatDiagnostic('')
@@ -362,13 +303,15 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     const token = localStorage.getItem('token')
     try {
       const formData = await buildFormData()
-      if (!formData) return
+      if (!formData || !lifecycle.isCurrent(lease)) return
       const res = await fetch('/api/import/csv', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
+        signal: lease.signal,
       })
       const data = await res.json()
+      if (!lifecycle.isCurrent(lease)) return
       if (data.success) {
         setResult(normalizeImportSummary(data.summary))
         setPreview(null)
@@ -377,13 +320,14 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
         setError(data.error || 'Error desconocido')
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Error de conexión')
+      if (lifecycle.isCurrent(lease)) setError(err instanceof Error ? err.message : 'Error de conexión')
     } finally {
-      setUploading(false)
+      if (lifecycle.finish(lease)) setUploading(false)
     }
   }
 
   const handleClose = () => {
+    importRequests.current.invalidate()
     setFile(null)
     setPreview(null)
     setResult(null)
@@ -392,9 +336,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     setUploading(false)
     setImportTagMode('none')
     setImportTag('')
-    setTagSearch('')
-    setDebouncedTagSearch('')
-    setNewTagColor(TAG_PRESET_COLORS[6])
+    setSelectedImportTags([])
     onClose()
   }
 
@@ -412,24 +354,8 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     return 'bg-amber-50 text-amber-700 border-amber-100'
   }
 
-  const selectedImportTag = importTag
-    ? tagOptions.find(tag => tag.name.toLowerCase() === importTag.toLowerCase())
-    : null
-  const normalizedRawTagSearch = tagSearch.trim().toLowerCase()
-  const normalizedTagSearch = debouncedTagSearch.trim().toLowerCase()
-  const tagSearchPending = tagSearch !== debouncedTagSearch
-  const filteredTagOptions = normalizedTagSearch
-    ? tagOptions.filter(tag => tag.name.toLowerCase().includes(normalizedTagSearch))
-    : tagOptions
-  const exactTagMatch = normalizedTagSearch
-    ? tagOptions.find(tag => tag.name.toLowerCase() === normalizedTagSearch)
-    : null
-  const actionableExactTagMatch = normalizedRawTagSearch
-    ? tagOptions.find(tag => tag.name.toLowerCase() === normalizedRawTagSearch)
-    : null
-  const canCreateImportTag = !tagSearchPending && Boolean(normalizedTagSearch) && !exactTagMatch
   const needsImportTagSelection = defaultType !== 'contacts' && importTagMode === 'custom' && !importTag.trim()
-  const canPreview = Boolean(file) && !previewing && !needsImportTagSelection
+  const canPreview = Boolean(file) && !previewing && !creatingTag && !needsImportTagSelection
 
   const SummaryStats = ({ data, final = false }: { data: ImportSummary; final?: boolean }) => final || defaultType === 'contacts' ? (
     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -613,7 +539,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
             )}
 
             <div className="flex gap-3 pt-1">
-              <button onClick={() => setPreview(null)} className="min-h-11 flex-1 rounded-xl border border-gray-200 px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-50">
+              <button onClick={() => setPreview(null)} disabled={uploading} className="min-h-11 flex-1 rounded-xl border border-gray-200 px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-50">
                 Volver
               </button>
               <button onClick={handleUpload} disabled={uploading || preview.total_rows === 0} className="min-h-11 flex-1 rounded-xl bg-green-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-green-700 disabled:opacity-50">
@@ -631,12 +557,14 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
               <input
                 ref={fileInputRef}
                 type="file"
+                disabled={previewing || uploading || creatingTag}
                 accept={defaultType === 'contacts' ? EXCEL_ACCEPT : '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}
                 className="hidden"
                 onChange={e => handleFileChange(e.target.files?.[0] || null)}
               />
               <button
                 onClick={() => fileInputRef.current?.click()}
+                disabled={previewing || uploading || creatingTag}
                 className="w-full border-2 border-dashed border-gray-200 rounded-xl p-8 text-center hover:border-green-400 hover:bg-green-50/30 transition group"
               >
                 {file ? (
@@ -693,7 +621,8 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
                 <div className="mt-2 grid grid-cols-2 gap-2">
                   <button
                     type="button"
-                    onClick={() => { setImportTagMode('none'); setImportTag(''); setTagSearch(''); setDebouncedTagSearch('') }}
+                    disabled={previewing || uploading || creatingTag}
+                    onClick={() => { setImportTagMode('none'); setImportTag(''); setSelectedImportTags([]); setPreview(null); setResult(null) }}
                     className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${
                       importTagMode === 'none'
                         ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
@@ -704,6 +633,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
                   </button>
                   <button
                     type="button"
+                    disabled={previewing || uploading || creatingTag}
                     onClick={() => setImportTagMode('custom')}
                     className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${
                       importTagMode === 'custom'
@@ -716,106 +646,9 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
                 </div>
                 {importTagMode === 'custom' && (
                   <div className="mt-3 space-y-3">
-                    {importTag && (
-                      <div className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700">
-                        <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: selectedImportTag?.color || '#10b981' }} />
-                        {importTag}
-                        <button
-                          type="button"
-                          onClick={() => setImportTag('')}
-                          className="rounded-full p-0.5 text-emerald-500 hover:bg-emerald-100 hover:text-emerald-700"
-                          aria-label="Quitar etiqueta seleccionada"
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </div>
-                    )}
-
-                    <div className="relative">
-                      <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                      <input
-                        value={tagSearch}
-                        onChange={e => {
-                          const next = e.target.value
-                          setTagSearch(next)
-                          if (!next) setDebouncedTagSearch('')
-                          setPreview(null)
-                          setResult(null)
-                        }}
-                        onKeyDown={e => {
-                          if (e.key !== 'Enter') return
-                          e.preventDefault()
-                          if (actionableExactTagMatch) {
-                            handleSelectImportTag(actionableExactTagMatch)
-                          } else if (normalizedRawTagSearch) {
-                            handleCreateImportTag()
-                          } else if (!tagSearchPending && normalizedTagSearch && filteredTagOptions[0]) {
-                            handleSelectImportTag(filteredTagOptions[0])
-                          }
-                        }}
-                        placeholder="Buscar etiqueta existente o crear una nueva"
-                        className="w-full rounded-lg border border-slate-200 py-2 pl-9 pr-9 text-sm text-slate-800 outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100"
-                      />
-                      {tagSearchPending && <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-slate-400" aria-label="Buscando etiquetas" />}
-                    </div>
-
-                    {filteredTagOptions.length > 0 && (
-                      <div className="max-h-24 overflow-y-auto rounded-lg border border-slate-100 bg-slate-50 p-2">
-                        <div className="flex flex-wrap gap-1.5">
-                          {filteredTagOptions.slice(0, 10).map(tag => {
-                            const selected = importTag.toLowerCase() === tag.name.toLowerCase()
-                            return (
-                              <button
-                                key={tag.id}
-                                type="button"
-                                onClick={() => handleSelectImportTag(tag)}
-                                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition ${
-                                  selected
-                                    ? 'border-emerald-200 bg-white text-emerald-700'
-                                    : 'border-slate-200 bg-white text-slate-600 hover:border-emerald-200 hover:text-emerald-700'
-                                }`}
-                              >
-                                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: tag.color || '#64748b' }} />
-                                {tag.name}
-                                {selected && <Check className="h-3 w-3" />}
-                              </button>
-                            )
-                          })}
-                        </div>
-                      </div>
-                    )}
-
-                    {canCreateImportTag && (
-                      <div className="rounded-lg border border-dashed border-emerald-200 bg-emerald-50/60 p-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="min-w-0">
-                            <p className="truncate text-xs font-medium text-emerald-800">Crear etiqueta "{debouncedTagSearch.trim()}"</p>
-                            <p className="text-[11px] text-emerald-600">Se creará antes de analizar el Excel.</p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={handleCreateImportTag}
-                            disabled={creatingTag}
-                            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
-                          >
-                            {creatingTag ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
-                            Crear
-                          </button>
-                        </div>
-                        <div className="mt-2 flex flex-wrap gap-1.5">
-                          {TAG_PRESET_COLORS.map(color => (
-                            <button
-                              key={color}
-                              type="button"
-                              onClick={() => setNewTagColor(color)}
-                              className={`h-6 w-6 rounded-full border-2 ${newTagColor === color ? 'border-slate-800' : 'border-white'}`}
-                              style={{ backgroundColor: color }}
-                              aria-label={`Color ${color}`}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                    )}
+                    <CatalogTagPicker contextType="lead_import" mode="single" selected={selectedImportTags} onCreatingChange={setCreatingTag} disabled={previewing || uploading} onChange={tags => {
+                      setSelectedImportTags(tags); setImportTag(importTagName(tags)); setPreview(null); setResult(null)
+                    }} />
 
                     {needsImportTagSelection && (
                       <p className="text-xs text-amber-600">Selecciona una etiqueta existente o crea una nueva. También puedes volver a "Sin etiqueta".</p>

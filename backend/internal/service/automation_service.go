@@ -34,15 +34,17 @@ type AutomationJob struct {
 
 // AutomationService runs the automation engine: triggers, worker pool, delay scheduler.
 type AutomationService struct {
-	repos             *repository.Repositories
-	pool              *whatsapp.DevicePool
-	hub               *ws.Hub
-	cache             *cache.Cache
-	jobs              chan AutomationJob
-	stopCh            chan struct{}
-	wg                sync.WaitGroup
-	policyMu          sync.Mutex
-	commercialRunning map[uuid.UUID]commercialExecutionCancel
+	repos                *repository.Repositories
+	pool                 *whatsapp.DevicePool
+	hub                  *ws.Hub
+	cache                *cache.Cache
+	jobs                 chan AutomationJob
+	stopCh               chan struct{}
+	wg                   sync.WaitGroup
+	policyMu             sync.Mutex
+	commercialRunning    map[uuid.UUID]commercialExecutionCancel
+	contactTagsChangedMu sync.RWMutex
+	contactTagsChanged   func(context.Context, uuid.UUID, uuid.UUID)
 }
 
 // NewAutomationService creates the service and spawns the worker pool.
@@ -61,6 +63,22 @@ func NewAutomationService(repos *repository.Repositories, pool *whatsapp.DeviceP
 // SetCache injects the Redis cache (called after NewServices when cache is available).
 func (s *AutomationService) SetCache(c *cache.Cache) {
 	s.cache = c
+}
+
+// SetContactTagsChanged connects canonical CRM reconciliation after a committed action.
+func (s *AutomationService) SetContactTagsChanged(callback func(context.Context, uuid.UUID, uuid.UUID)) {
+	s.contactTagsChangedMu.Lock()
+	s.contactTagsChanged = callback
+	s.contactTagsChangedMu.Unlock()
+}
+
+func (s *AutomationService) notifyContactTagsChanged(ctx context.Context, accountID, contactID uuid.UUID) {
+	s.contactTagsChangedMu.RLock()
+	callback := s.contactTagsChanged
+	s.contactTagsChangedMu.RUnlock()
+	if callback != nil {
+		callback(ctx, accountID, contactID)
+	}
 }
 
 // Start launches all background goroutines. Call once from main.
@@ -381,6 +399,9 @@ func (s *AutomationService) walkGraph(ctx context.Context, exec *domain.Automati
 		_ = s.repos.Automation.UpdateExecution(ctx, exec)
 
 		nodeType := getNodeDataString(node, "nodeType")
+		if kind, _, ok := domain.AutomationTagAction(node); ok {
+			nodeType = kind
+		}
 
 		// Skip trigger node (it's just the entry point)
 		if node.Type == "trigger" || nodeType == "" {
@@ -437,6 +458,10 @@ func (s *AutomationService) walkGraph(ctx context.Context, exec *domain.Automati
 func (s *AutomationService) executeNode(ctx context.Context, exec *domain.AutomationExecution, node *domain.AutomationNode) (string, error) {
 	nodeType := getNodeDataString(node, "nodeType")
 	cfg := getNodeDataMap(node, "config")
+	if kind, tagID, ok := domain.AutomationTagAction(node); ok {
+		nodeType = kind
+		cfg = map[string]interface{}{"tag_id": tagID}
+	}
 
 	switch nodeType {
 	case domain.AutoNodeSendWhatsApp:
@@ -563,10 +588,14 @@ func (s *AutomationService) execAssignTag(ctx context.Context, exec *domain.Auto
 	if err != nil {
 		return fmt.Errorf("invalid tag_id")
 	}
-	if assign {
-		return s.repos.Tag.AssignToLead(ctx, *exec.LeadID, tagID)
+	contactID, err := s.repos.Tag.MutateLeadTagForAccount(ctx, exec.AccountID, *exec.LeadID, tagID, assign)
+	if err != nil {
+		return err
 	}
-	return s.repos.Tag.RemoveFromLead(ctx, *exec.LeadID, tagID)
+	if contactID != nil {
+		s.notifyContactTagsChanged(ctx, exec.AccountID, *contactID)
+	}
+	return nil
 }
 
 func (s *AutomationService) execDelay(ctx context.Context, exec *domain.AutomationExecution, node *domain.AutomationNode, cfg map[string]interface{}) error {

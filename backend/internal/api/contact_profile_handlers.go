@@ -511,6 +511,10 @@ func (s *Server) handlePatchContactProfile(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo cargar el resumen del historial"})
 	}
+	pinnedCount, err := s.services.ContactProfile.CountPinnedObservations(c.Context(), accountID, contactID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo cargar el resumen de fijados"})
+	}
 	contact, err := s.services.ContactProfile.Update(c.Context(), accountID, contactID, patch)
 	if errors.Is(err, repository.ErrContactProfileNotFound) {
 		return fiber.NewError(fiber.StatusNotFound, "Contacto no encontrado")
@@ -530,10 +534,6 @@ func (s *Server) handlePatchContactProfile(c *fiber.Ctx) error {
 		}
 	}
 	s.afterCanonicalContactProfileChange(accountID, contact)
-	pinnedCount, err := s.services.ContactProfile.CountPinnedObservations(c.Context(), accountID, contactID)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo cargar el resumen de fijados"})
-	}
 	return c.JSON(contactProfileResponse(contact, profileContext, definitions, observationCount, pinnedCount, s.contactAvatarCallerHasPermission(c, domain.PermTags)))
 }
 
