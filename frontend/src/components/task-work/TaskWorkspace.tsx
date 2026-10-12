@@ -2632,7 +2632,7 @@ export default function TaskWorkspace() {
   const setVisibleBoardTasks = useCallback((action: Task[] | ((current: Task[]) => Task[])) => {
     setTasks(current => {
       const next = typeof action === 'function' ? action(current) : action
-      return next.filter(task => taskMatchesClosedVisibility(task, filters, view))
+      return next.filter(task => taskAccessRef.current.canAccept(task) && taskMatchesClosedVisibility(task, filters, view))
     })
   }, [filters, view])
 
