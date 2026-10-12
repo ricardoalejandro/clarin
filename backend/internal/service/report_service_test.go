@@ -46,3 +46,20 @@ func TestBuildWhatsAppCoverageSummaryLeavesPercentagesNullWithoutEligibleMembers
 		t.Fatalf("percentages should be nil without eligible members: %+v", summary)
 	}
 }
+
+func TestWhatsAppReportDisabledPolicyPreservesContactWithoutLeads(t *testing.T) {
+	contact := &domain.WhatsAppReportContact{DisplayName: "Synthetic contact", DoNotContact: true, Tags: []domain.WhatsAppReportTag{{Name: "Contact tag"}}, ActiveLeads: []domain.WhatsAppReportLead{{Title: "Commercial context"}}, HistoricalLeadCount: 2}
+	got := whatsAppReportContactForPolicy(contact, false)
+	if got.DisplayName != contact.DisplayName || !got.DoNotContact || len(got.Tags) != 1 || len(got.ActiveLeads) != 0 || got.HistoricalLeadCount != 0 {
+		t.Fatalf("unexpected independent contact: %+v", got)
+	}
+	if len(contact.ActiveLeads) != 1 || contact.HistoricalLeadCount != 2 {
+		t.Fatal("mutated source")
+	}
+	if whatsAppReportContactForPolicy(contact, true) != contact {
+		t.Fatal("enabled context changed")
+	}
+	if whatsAppReportContactForPolicy(nil, false) != nil {
+		t.Fatal("missing contact became present")
+	}
+}

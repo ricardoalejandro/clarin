@@ -21,7 +21,7 @@ export function reconcileLeadPolicy(current: LeadPolicy | null, next: LeadPolicy
 }
 
 export function isLeadModulePath(path: string) {
-  return ['/dashboard/leads', '/dashboard/automations'].some(prefix => path === prefix || path.startsWith(`${prefix}/`))
+  return ['/dashboard/leads', '/dashboard/automations', '/dashboard/reports/lead-intelligence'].some(prefix => path === prefix || path.startsWith(`${prefix}/`))
 }
 
 export function leadAutomationEnabled(policy: LeadPolicy) {

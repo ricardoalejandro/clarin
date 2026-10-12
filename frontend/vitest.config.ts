@@ -56,6 +56,7 @@ export default defineConfig({
       'src/app/dashboard/admin/**/*.test.{ts,tsx}',
       'src/app/dashboard/DashboardPolicy.test.tsx',
       'src/app/dashboard/events/**/*.test.{ts,tsx}',
+      'src/app/dashboard/reports/**/*.test.{ts,tsx}',
       'src/components/TagInput.test.tsx',
       'src/components/AccountSwitcher.test.tsx',
       'src/components/LeadPolicyProvider.test.tsx',

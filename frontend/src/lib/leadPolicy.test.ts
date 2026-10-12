@@ -18,6 +18,8 @@ describe('account Lead policy', () => {
   it('gates commercial routes without gating Events, Bots, or account administration', () => {
     expect(isLeadModulePath('/dashboard/leads/example')).toBe(true)
     expect(isLeadModulePath('/dashboard/automations')).toBe(true)
-    for (const path of ['/dashboard/events', '/dashboard/programs', '/dashboard/bots', '/dashboard/admin']) expect(isLeadModulePath(path)).toBe(false)
+    expect(isLeadModulePath('/dashboard/reports/lead-intelligence')).toBe(true)
+    expect(isLeadModulePath('/dashboard/reports/lead-intelligence/result')).toBe(true)
+    for (const path of ['/dashboard/events', '/dashboard/programs', '/dashboard/bots', '/dashboard/admin', '/dashboard/reports', '/dashboard/reports/whatsapp-group-coverage', '/dashboard/reports/lead-intelligence-other']) expect(isLeadModulePath(path)).toBe(false)
   })
 })

@@ -66,6 +66,10 @@ func (s *ReportService) ListWhatsAppGroups(ctx context.Context, accountID, devic
 }
 
 func (s *ReportService) GenerateWhatsAppGroupCoverage(ctx context.Context, accountID, deviceID uuid.UUID, groupID string) (*domain.WhatsAppGroupCoverageReport, error) {
+	policy, err := s.repos.Account.GetLeadPolicy(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
 	device, err := s.reportDevice(ctx, accountID, deviceID)
 	if err != nil {
 		return nil, err
@@ -96,8 +100,11 @@ func (s *ReportService) GenerateWhatsAppGroupCoverage(ctx context.Context, accou
 	}
 
 	report := &domain.WhatsAppGroupCoverageReport{
-		GeneratedAt: time.Now().UTC(),
-		Members:     make([]domain.WhatsAppGroupCoverageMember, 0, len(snapshot.Members)),
+		AccountID:          accountID,
+		LeadsEnabled:       policy.LeadsEnabled,
+		LeadsPolicyVersion: policy.Version,
+		GeneratedAt:        time.Now().UTC(),
+		Members:            make([]domain.WhatsAppGroupCoverageMember, 0, len(snapshot.Members)),
 	}
 	report.Device.ID = device.ID
 	report.Device.Name = reportString(device.Name)
@@ -134,7 +141,7 @@ func (s *ReportService) GenerateWhatsAppGroupCoverage(ctx context.Context, accou
 			}
 			exists := true
 			member.ExistsInClarin = &exists
-			member.Contact = matchedContact
+			member.Contact = whatsAppReportContactForPolicy(matchedContact, policy.LeadsEnabled)
 			switch {
 			case member.Contact != nil && len(member.Contact.ActiveLeads) > 0:
 				member.CoverageStatus = domain.ReportCoverageActiveManagement
@@ -154,7 +161,27 @@ func (s *ReportService) GenerateWhatsAppGroupCoverage(ctx context.Context, accou
 		report.Members = append(report.Members, member)
 	}
 	report.Summary = buildWhatsAppCoverageSummary(report.Members)
+	if !policy.LeadsEnabled {
+		report.Summary.ManagementCoveragePercent = nil
+	}
+	currentPolicy, err := s.repos.Account.GetLeadPolicy(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if currentPolicy.Version != policy.Version || currentPolicy.LeadsEnabled != policy.LeadsEnabled {
+		return nil, repository.ErrLeadPolicyConflict
+	}
 	return report, nil
+}
+
+func whatsAppReportContactForPolicy(contact *domain.WhatsAppReportContact, leadsEnabled bool) *domain.WhatsAppReportContact {
+	if contact == nil || leadsEnabled {
+		return contact
+	}
+	copy := *contact
+	copy.ActiveLeads = []domain.WhatsAppReportLead{}
+	copy.HistoricalLeadCount = 0
+	return &copy
 }
 
 func translateWhatsAppReportError(err error) error {
