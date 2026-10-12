@@ -52,7 +52,7 @@ const FALLBACK_SHELL = '/offline';
 const BASE_OFFLINE_FALLBACK_HTML = ${JSON.stringify(BASE_OFFLINE_FALLBACK_HTML)};
 const BASE_READY_REQUEST = '/offline/.ready.json';
 const BASE_ASSETS = ['/favicon.svg', '/icons/apple-touch-icon.png', '/icons/clarin-192.png', '/icons/clarin-512.png', '/icons/clarin-maskable-512.png'];
-const WHITEBOARD_ENGINE = '0.18.1-clarin.7';
+const WHITEBOARD_ENGINE = '0.18.1-clarin.8';
 const ROUTE_SHELLS = Object.freeze({
   login: { document: '/offline-v5/routes/login.html', flight: '/offline-v5/routes/login.rsc' },
   dashboard: { document: '/offline-v5/routes/dashboard.html', flight: '/offline-v5/routes/dashboard.rsc' },

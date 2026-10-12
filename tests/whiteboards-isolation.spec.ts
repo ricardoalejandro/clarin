@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
 import { expect, test, type BrowserContext, type Locator, type Page, type Request, type Route, type TestInfo, type WebSocketRoute } from '@playwright/test'
 
@@ -898,6 +899,7 @@ async function installGuestWhiteboardHTTP(
 async function openEditor(page: Page) {
   const browserErrors: string[] = []
   page.on('pageerror', error => browserErrors.push(error.message))
+  page.on('console', message => { if (message.type() === 'error') browserErrors.push(message.text()) })
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(`${baseURL}/dashboard/whiteboards/${boardID}`, { waitUntil: 'domcontentloaded' })
   try {
@@ -1103,10 +1105,21 @@ async function drawDiamondWithBoundText(page: Page, text: string, offset: number
   await page.keyboard.press('Control+Enter')
 }
 
+async function openWhiteboardMore(page: Page) {
+  const menu = page.getByRole('menu', { name: 'Más acciones de Pizarras' })
+  if (!await menu.isVisible()) await page.getByRole('button', { name: 'Más acciones de Pizarras' }).click()
+  await expect(menu).toBeVisible()
+}
+
+async function openWhiteboardLibrary(page: Page) {
+  await openWhiteboardMore(page)
+  await page.getByRole('menuitem', { name: 'Biblioteca', exact: true }).click()
+}
+
 async function exportEditableScene(page: Page) {
-  await page.getByTestId('main-menu-trigger').click({ timeout: 10_000 })
+  await openWhiteboardMore(page)
   const downloadPromise = page.waitForEvent('download')
-  await page.getByText('Archivo editable', { exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Exportar editable', exact: true }).click()
   const download = await downloadPromise
   const path = await download.path()
   expect(path).not.toBeNull()
@@ -1125,8 +1138,8 @@ async function exerciseNativeStyleAndImageExportEnhancements(
   await ultraBoldStroke.check({ force: true })
   await expect(ultraBoldStroke).toBeChecked()
 
-  await page.getByTestId('main-menu-trigger').click()
-  await page.getByText('Exportar imagen...', { exact: true }).click()
+  await openWhiteboardMore(page)
+  await page.getByRole('menuitem', { name: 'Exportar imagen…', exact: true }).click()
   const exportDialog = page.locator('.ImageExportModal')
   await expect(exportDialog).toBeVisible()
   await expect(exportDialog.locator('.ImageExportModal__preview canvas')).toBeVisible()
@@ -1243,8 +1256,8 @@ async function exerciseNativeStyleAndImageExportEnhancements(
   }
   expect(customText?.originalText).toBe('Árbol, pingüino y acción')
 
-  await page.getByTestId('main-menu-trigger').click()
-  await page.getByText('Exportar imagen...', { exact: true }).click()
+  await openWhiteboardMore(page)
+  await page.getByRole('menuitem', { name: 'Exportar imagen…', exact: true }).click()
   const svgDownloadPromise = page.waitForEvent('download')
   await page.getByRole('button', { name: 'Exportar a SVG' }).click()
   const svgDownload = await Promise.race([
@@ -1259,8 +1272,8 @@ async function exerciseNativeStyleAndImageExportEnhancements(
   await page.locator('.Modal__background').click({ position: { x: 4, y: 4 } })
   await expect(page.locator('.ImageExportModal')).toBeHidden()
 
-  await page.getByTestId('main-menu-trigger').click()
-  await page.getByText('Exportar imagen...', { exact: true }).click()
+  await openWhiteboardMore(page)
+  await page.getByRole('menuitem', { name: 'Exportar imagen…', exact: true }).click()
   const pngDownloadPromise = page.waitForEvent('download')
   await page.getByRole('button', { name: 'Exportar a PNG' }).click()
   const pngDownload = await pngDownloadPromise
@@ -1313,16 +1326,8 @@ async function expectNoDocumentHorizontalOverflow(page: Page, label: string) {
   expect(dimensions.scrollWidth, `${label} no debe crear scroll horizontal global`).toBeLessThanOrEqual(dimensions.clientWidth + 1)
 }
 
-function visibleWhiteboardLibraryActions(page: Page) {
-  return page.locator('.whiteboard-editor-shell [aria-label="Biblioteca"]').filter({ visible: true })
-}
-
 function visibleWhiteboardCommentActions(page: Page) {
   return page.locator('.whiteboard-editor-shell [aria-label^="Comentarios"]').filter({ visible: true })
-}
-
-function whiteboardActionHitTarget(action: Locator) {
-  return action
 }
 
 async function expectMinimumTouchTarget(locator: Locator, label: string) {
@@ -1337,17 +1342,9 @@ async function expectMinimumTouchTarget(locator: Locator, label: string) {
 }
 
 async function expectWhiteboardChromeOwnership(page: Page, label: string) {
-  const library = visibleWhiteboardLibraryActions(page)
   const comments = visibleWhiteboardCommentActions(page)
-  const libraryOwners = await library.evaluateAll(elements => elements.map(element => ({
-    tag: element.tagName,
-    className: element.getAttribute('class'),
-    role: element.getAttribute('role'),
-    dataAction: element.getAttribute('data-whiteboard-action'),
-    dataInternal: element.getAttribute('data-whiteboard-sidebar-internal'),
-    parentClassName: element.parentElement?.getAttribute('class') || null,
-  })))
-  expect(libraryOwners, `${label}: debe existir un solo control visible de Biblioteca; dueños=${JSON.stringify(libraryOwners)}`).toHaveLength(1)
+  await expect(page.locator('[data-whiteboard-action="library"]').filter({ visible: true }), `${label}: Biblioteca se descubre en Más`).toHaveCount(0)
+  await expect(page.getByTestId('main-menu-trigger')).toBeHidden()
   await expect(comments, `${label}: Comentarios debe permanecer oculto`).toHaveCount(0)
   await expect(page.getByLabel('Comentarios de la pizarra'), `${label}: no debe montarse el panel de Comentarios`).toHaveCount(0)
   await expect(page.getByLabel('Pines de comentarios'), `${label}: no deben montarse pines de Comentarios`).toHaveCount(0)
@@ -1372,10 +1369,14 @@ async function expectWhiteboardChromeOwnership(page: Page, label: string) {
       && geometry.bar.y + geometry.bar.height > geometry.nativeToolbar.y
     expect(overlapsNativeToolbar, `${label}: la barra de Clarin no debe cubrir herramientas de Excalidraw`).toBe(false)
   }
-  await expectMinimumTouchTarget(library, `${label}: Biblioteca`)
   await expectMinimumTouchTarget(page.locator('[data-whiteboard-save-status]').filter({ visible: true }), `${label}: estado de guardado`)
   await expectMinimumTouchTarget(page.getByRole('button', { name: 'Más acciones de Pizarras' }), `${label}: Más`)
-  return { library }
+  await openWhiteboardMore(page)
+  const library = page.getByRole('menuitem', { name: 'Biblioteca', exact: true })
+  await expect(library).toHaveCount(1)
+  await expectInsideViewport(page, library, `${label}: Biblioteca`)
+  await expectMinimumTouchTarget(library, `${label}: Biblioteca`)
+  await page.keyboard.press('Escape')
 }
 
 async function expectPublicLibraryDisclosure(page: Page, label: string) {
@@ -1412,7 +1413,7 @@ async function exerciseResponsiveEditor(page: Page, workContext = false) {
     await expect(page.getByRole('menuitem', { name: 'Administrar bibliotecas', exact: true })).toBeVisible()
     await expect(page.getByRole('menuitem', { name: 'Historial', exact: true })).toHaveCount(1)
     await expect(page.getByRole('menuitem', { name: 'Guardar ahora', exact: true })).toHaveCount(1)
-    await expect(page.getByRole('menuitem', { name: 'Biblioteca', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('menuitem', { name: 'Biblioteca', exact: true })).toHaveCount(1)
     await expect(page.getByRole('menuitem', { name: /^Comentarios/u })).toHaveCount(0)
     const toolbarShare = page.locator('[data-whiteboard-action="share"]').filter({ visible: true })
     const menuShare = page.getByRole('menuitem', { name: 'Compartir', exact: true })
@@ -1424,7 +1425,7 @@ async function exerciseResponsiveEditor(page: Page, workContext = false) {
       await expect(page.getByRole('menuitem', { name: workContext ? 'Volver a las tareas' : 'Volver a Pizarras' })).toBeVisible()
     }
     await page.keyboard.press('Escape')
-    await expectInsideViewport(page, page.getByTestId('main-menu-trigger'), `${suffix}: menú`)
+    await expect(page.getByTestId('main-menu-trigger')).toBeHidden()
     await expectInsideViewport(page, page.locator('canvas.interactive'), `${suffix}: lienzo`)
     await expect(page.locator('.whiteboard-editor-shell iframe'), `${suffix}: ningún embed debe crear iframe`).toHaveCount(0)
     await expectNoDocumentHorizontalOverflow(page, suffix)
@@ -1757,13 +1758,8 @@ async function exerciseHelpAndInternalLibraries(page: Page) {
 
   const directLibraryAdmin = page.getByLabel('Administrar bibliotecas de Clarin')
   await expect(directLibraryAdmin).toBeHidden()
-  if (await page.getByLabel('Más acciones de Pizarras').isVisible()) {
-    await page.getByLabel('Más acciones de Pizarras').click()
-    await page.getByRole('menuitem', { name: 'Administrar bibliotecas' }).click()
-  } else {
-    await page.getByTestId('main-menu-trigger').click()
-    await page.getByText('Administrar Mi biblioteca', { exact: true }).click()
-  }
+  await openWhiteboardMore(page)
+  await page.getByRole('menuitem', { name: 'Administrar bibliotecas' }).click()
   const dialog = page.getByRole('dialog', { name: 'Bibliotecas de Pizarras' })
   await expect(dialog).toBeVisible()
   const accountCatalog = dialog.locator('article').filter({ hasText: 'Catálogo QA interno' })
@@ -1772,8 +1768,8 @@ async function exerciseHelpAndInternalLibraries(page: Page) {
   await expect(accountCatalog).toContainText('2 elementos')
   await dialog.getByLabel('Cerrar').click()
 
-  const { library: nativeLibraryToggle } = await expectWhiteboardChromeOwnership(page, 'aislamiento de bibliotecas')
-  await whiteboardActionHitTarget(nativeLibraryToggle).click()
+  await expectWhiteboardChromeOwnership(page, 'aislamiento de bibliotecas')
+  await openWhiteboardLibrary(page)
   await expect(page.locator('.library-menu-items-container')).toBeVisible()
   const publicLibraryButton = page.locator('.library-menu-browse-button')
   await expect(publicLibraryButton).toBeVisible()
@@ -1827,7 +1823,7 @@ async function importLocalSceneWithBlockedEmbed(page: Page, harness: WhiteboardR
   imported.elements = [...imported.elements, template]
   const writesBefore = harness.httpSceneWrites.length
 
-  await page.getByTestId('main-menu-trigger').click()
+  await openWhiteboardMore(page)
   const chooserPromise = page.waitForEvent('filechooser')
   await page.getByText('Importar archivo', { exact: true }).click()
   const chooser = await chooserPromise
@@ -1864,6 +1860,35 @@ async function insertLocalImageAsset(page: Page) {
   }, { bytes: Array.from(imageFixtureBytes) })
 }
 
+test('referencia visual neutra · Pizarras en cuatro anchuras', async ({ browser, browserName }, testInfo) => {
+  test.skip(process.env.CLARIN_VISUAL_REFERENCE !== '1' || browserName !== 'chromium', 'Captura comparativa explícita, independiente de la versión de los controles.')
+  test.setTimeout(120_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const context = await browser.newContext({ serviceWorkers: 'block' })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', new Set<string>(), [], new Set<string>())
+  const page = await context.newPage()
+  try {
+    await openEditor(page)
+    for (const viewport of [
+      { width: 375, height: 812 },
+      { width: 768, height: 800 },
+      { width: 1024, height: 768 },
+      { width: 1440, height: 900 },
+    ]) {
+      await page.setViewportSize(viewport)
+      await waitForEditorResponsiveMode(page)
+      await page.evaluate(() => document.fonts.ready)
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+      const path = testInfo.outputPath(`pizarra-reference-${viewport.width}px.png`)
+      await page.screenshot({ path, animations: 'disabled' })
+      await testInfo.attach(`pizarra-reference-${viewport.width}px`, { path, contentType: 'image/png' })
+    }
+  } finally {
+    await context.close()
+  }
+})
+
 test('integración simulada · la barra tiene un único dueño y Comentarios permanece oculto en la matriz de navegadores', async ({ browser, browserName }, testInfo) => {
   test.setTimeout(210_000)
   const harness = new WhiteboardRealtimeHarness()
@@ -1894,19 +1919,19 @@ test('integración simulada · la barra tiene un único dueño y Comentarios per
     ]) {
       await page.setViewportSize(viewport)
       const label = `${browserName} ${viewport.width}x${viewport.height}`
-      const { library } = await expectWhiteboardChromeOwnership(page, label)
-      const libraryHitTarget = whiteboardActionHitTarget(library)
-      await expectInsideViewport(page, libraryHitTarget, `${label}: Biblioteca`)
+      await expectWhiteboardChromeOwnership(page, label)
       await expectNoDocumentHorizontalOverflow(page, label)
       if (browserName === 'chromium') {
+        const screenshotPath = testInfo.outputPath(`pizarra-${viewport.width}px.png`)
+        await page.screenshot({ path: screenshotPath, animations: 'disabled' })
         await testInfo.attach(`pizarra-${viewport.width}px`, {
-          body: await page.screenshot({ animations: 'disabled' }),
+          path: screenshotPath,
           contentType: 'image/png',
         })
       }
 
       if (viewport.width === 320 || viewport.width === 375) {
-        await libraryHitTarget.tap()
+        await openWhiteboardLibrary(page)
         await expect(page.locator('.library-menu-items-container')).toBeVisible()
         await expect(page.locator('[data-whiteboard-action]').filter({ visible: true })).toHaveCount(0)
         const internalLibrary = page.locator('[data-whiteboard-sidebar-internal="library"]').filter({ visible: true })
@@ -1922,7 +1947,8 @@ test('integración simulada · la barra tiene un único dueño y Comentarios per
       }
 
       if (viewport.width === 768) {
-        await library.focus()
+        await openWhiteboardMore(page)
+        await page.getByRole('menuitem', { name: 'Biblioteca', exact: true }).focus()
         await page.keyboard.press('Space')
         await expect(page.locator('.library-menu-items-container')).toBeVisible()
         await page.locator('.sidebar__close').filter({ visible: true }).click()
@@ -1959,7 +1985,181 @@ test('integración simulada · la barra tiene un único dueño y Comentarios per
   }
 })
 
-test('presión de trazo · Lápiz y Resaltador exponen el control, persisten su modo y reconcilian sin duplicar', async ({ browser, browserName }) => {
+test('grosor Amplio · icono propio, persistencia y tinta completa en SVG y PNG', async ({ browser, browserName }) => {
+  test.skip(browserName !== 'chromium', 'Geometría y exportación se verifican en Chromium.')
+  test.setTimeout(180_000)
+  const harness = new WhiteboardRealtimeHarness()
+  harness.elements = []
+  const blocked: string[] = []
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  await context.addInitScript(() => {
+    Reflect.deleteProperty(globalThis, 'showSaveFilePicker')
+    Reflect.deleteProperty(globalThis, 'showOpenFilePicker')
+    Reflect.deleteProperty(globalThis, 'showDirectoryPicker')
+  })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', new Set(), blocked, new Set())
+  const page = await context.newPage()
+  try {
+    await openEditor(page)
+    await page.getByTestId('toolbar-freedraw').check({ force: true })
+    await expectPressureControls(page, 'constant')
+    const wide = page.getByRole('radio', { name: 'Amplio', exact: true })
+    await wide.check({ force: true })
+    await expect(wide).toBeChecked()
+    const iconWidths = await page.evaluate(() => ['strokeWidth-extraBold', 'strokeWidth-ultraBold'].map(id => {
+      const path = document.querySelector(`[data-testid="${id}"]`)?.parentElement?.querySelector('svg path')
+      return path ? Number.parseFloat(getComputedStyle(path).strokeWidth) : 0
+    }))
+    expect(iconWidths[1]).toBeGreaterThan(iconWidths[0])
+    const drawn = await drawAndCaptureFreeDraw(page, harness, 'Ana QA', 'constant', 0).catch(async error => {
+      await page.screenshot({ path: test.info().outputPath('amplio-draw-failure.png'), fullPage: true })
+      throw new Error(`${error.message}. UI: ${await page.locator('body').innerText()}. Patches: ${JSON.stringify(harness.scenePatches)}`, { cause: error })
+    })
+    expect(drawn.element.strokeWidth).toBe(16)
+
+    for (const format of ['SVG', 'PNG'] as const) {
+      await openWhiteboardMore(page)
+      await page.getByRole('menuitem', { name: 'Exportar imagen…', exact: true }).click()
+      const dialog = page.locator('.ImageExportModal')
+      await expect(dialog).toBeVisible()
+      const downloading = page.waitForEvent('download')
+      await dialog.getByRole('button', { name: `Exportar a ${format}` }).click()
+      const download = await downloading
+      const file = await download.path()
+      expect(file).not.toBeNull()
+      const bytes = readFileSync(file!)
+      if (format === 'SVG') {
+        const margins = await page.evaluate(source => {
+          const svg = new DOMParser().parseFromString(source, 'image/svg+xml').documentElement
+          svg.setAttribute('style', 'position:fixed;left:-10000px;top:0;visibility:hidden')
+          document.body.appendChild(svg)
+          try {
+            const root = svg.getBoundingClientRect()
+            const ink = svg.querySelector('path')!.getBoundingClientRect()
+            return [ink.left - root.left, ink.top - root.top, root.right - ink.right, root.bottom - ink.bottom]
+          } finally { svg.remove() }
+        }, bytes.toString('utf8'))
+        expect(Math.min(...margins)).toBeGreaterThanOrEqual(8)
+      } else {
+        const margins = await page.evaluate(async encoded => {
+          const image = new Image()
+          image.src = `data:image/png;base64,${encoded}`
+          await image.decode()
+          const canvas = document.createElement('canvas')
+          canvas.width = image.width; canvas.height = image.height
+          const ctx = canvas.getContext('2d')!
+          ctx.drawImage(image, 0, 0)
+          const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+          let minX = canvas.width, minY = canvas.height, maxX = -1, maxY = -1
+          for (let y = 0; y < canvas.height; y++) for (let x = 0; x < canvas.width; x++) {
+            const offset = (y * canvas.width + x) * 4
+            if (data[offset + 3] > 40 && Math.min(data[offset], data[offset + 1], data[offset + 2]) < 180) {
+              minX = Math.min(minX, x); minY = Math.min(minY, y)
+              maxX = Math.max(maxX, x); maxY = Math.max(maxY, y)
+            }
+          }
+          if (maxX < 0) throw new Error('No se exportó tinta')
+          return [minX, minY, canvas.width - maxX - 1, canvas.height - maxY - 1]
+        }, bytes.toString('base64'))
+        expect(Math.min(...margins)).toBeGreaterThanOrEqual(8)
+      }
+      await page.locator('.Modal__background').click({ position: { x: 8, y: 8 } })
+    }
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await expect(page.locator('canvas.interactive')).toBeVisible({ timeout: 30_000 })
+    const reopened = await exportEditableScene(page)
+    expect(reopened.elements.find(element => element.id === drawn.element.id)?.strokeWidth).toBe(16)
+    expect(blocked).toEqual([])
+  } finally { await context.close() }
+})
+
+test('exportación de fuentes · ejecuta el worker local real sin file URLs ni fallback al hilo principal', async ({ browser, browserName }, testInfo) => {
+  test.setTimeout(120_000)
+  const harness = new WhiteboardRealtimeHarness()
+  const requests = new Set<string>()
+  const blocked: string[] = []
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  await context.addInitScript(() => {
+    Reflect.deleteProperty(globalThis, 'showOpenFilePicker')
+    Reflect.deleteProperty(globalThis, 'showSaveFilePicker')
+    const replies: Array<{ url: string; bytes: number }> = []
+    Object.assign(window, { __subsetWorkerReplies: replies })
+    const NativeWorker = window.Worker
+    window.Worker = class extends NativeWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        super(url, options)
+        this.addEventListener('message', event => {
+          if (event.data instanceof ArrayBuffer) replies.push({ url: String(url), bytes: event.data.byteLength })
+        })
+      }
+    }
+  })
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', requests, blocked, new Set<string>())
+  // A cold download alone exceeds the old one-second active/idle deadline.
+  await context.route('**/subset-worker.js', async route => {
+    await new Promise(resolve => setTimeout(resolve, 1500))
+    await route.continue()
+  })
+  const page = await context.newPage()
+  const consoleErrors: string[] = []
+  const pageErrors: string[] = []
+  const workerURLs: string[] = []
+  page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+  page.on('pageerror', error => pageErrors.push(error.message))
+  page.on('worker', worker => workerURLs.push(worker.url()))
+  try {
+    await openEditor(page)
+    await openWhiteboardMore(page)
+    await page.getByRole('menuitem', { name: 'Exportar imagen…', exact: true }).click()
+    const dialog = page.locator('.ImageExportModal')
+    await expect(dialog).toBeVisible()
+    const downloading = page.waitForEvent('download')
+    await dialog.getByRole('button', { name: 'Exportar a SVG' }).click()
+    const source = readFileSync((await (await downloading).path())!, 'utf8')
+    expect(source).toContain('data:font/woff2;base64,')
+    const replies = await page.evaluate(() => (window as unknown as { __subsetWorkerReplies: Array<{ url: string; bytes: number }> }).__subsetWorkerReplies)
+    expect(replies.length).toBeGreaterThan(0)
+    const expectedURL = new URL('/vendor/whiteboards-editor/0.18.1-clarin.8/subset-worker.js', baseURL).href
+    expect(replies.every(reply => reply.url === expectedURL && reply.bytes > 0)).toBe(true)
+    expect(workerURLs).toContain(expectedURL)
+    expect(workerURLs.some(url => url.startsWith('file:'))).toBe(false)
+    expect(consoleErrors.filter(message => /subsetting|Skipped glyph|WebAssembly|Content Security Policy|SecurityError/u.test(message))).toEqual([])
+    expect(pageErrors).toEqual([])
+    expect(blocked).toEqual([])
+    const response = await context.request.get(expectedURL)
+    expect(response.ok()).toBe(true)
+    expect(response.headers()['content-security-policy']).toContain("connect-src 'none'")
+    expect(response.headers()['content-security-policy']).toContain("'wasm-unsafe-eval'")
+    const workerSource = await response.text()
+    // The standard build publishes v4's independent editor. V5 reuses the
+    // canonical vendor assets; v3 is an optional legacy build, not a third copy.
+    const offlinePath = '/offline-v4/whiteboard-assets/subset-worker.js'
+    const offline = await context.request.get(new URL(offlinePath, baseURL).href)
+    expect(offline.ok()).toBe(true)
+    expect(await offline.text()).toBe(workerSource)
+    expect(offline.headers()['content-security-policy']).toContain("connect-src 'none'")
+    expect(offline.headers()['content-security-policy']).toContain("'wasm-unsafe-eval'")
+    const hash = createHash('sha256').update(workerSource).digest('hex')
+    for (const version of [4, 5]) {
+      const manifest = await context.request.get(new URL(`/offline-v${version}/manifest.json`, baseURL).href)
+      expect(manifest.ok()).toBe(true)
+      expect((await manifest.json()).assets).toContainEqual(expect.objectContaining({
+        url: version === 4 ? offlinePath : new URL(expectedURL).pathname,
+        sha256: hash,
+      }))
+    }
+  } finally {
+    const replies = await page.evaluate(() => (window as unknown as { __subsetWorkerReplies?: unknown[] }).__subsetWorkerReplies || []).catch(() => [])
+    const path = testInfo.outputPath('worker-and-hydration-diagnostics.json')
+    writeFileSync(path, JSON.stringify({ browser: browserName, workerURLs, replies, consoleErrors, pageErrors }, null, 2))
+    await testInfo.attach('worker-and-hydration-diagnostics', { path, contentType: 'application/json' })
+    await context.close()
+  }
+})
+
+test('presión de trazo · Lápiz y Resaltador exponen el control, persisten su modo y reconcilian sin duplicar', async ({ browser, browserName }, testInfo) => {
   test.skip(browserName !== 'chromium', 'La persistencia y el realtime de Presión se validan una vez en Chromium.')
   test.setTimeout(360_000)
   const harness = new WhiteboardRealtimeHarness()
@@ -1981,6 +2181,9 @@ test('presión de trazo · Lápiz y Resaltador exponen el control, persisten su 
   await installWhiteboardHTTP(secondContext, harness, 'Luis QA', requests, blocked, explicitNavigations)
   const first = await firstContext.newPage()
   const second = await secondContext.newPage()
+  const pressureBrowserErrors: string[] = []
+  first.on('pageerror', error => pressureBrowserErrors.push(error.message))
+  first.on('console', message => { if (message.type() === 'error') pressureBrowserErrors.push(message.text()) })
 
   const selectHighlighter = async () => {
     const extraTools = first.getByTitle(/Más herramientas|More tools/u)
@@ -2056,8 +2259,8 @@ test('presión de trazo · Lápiz y Resaltador exponen el control, persisten su 
     })
 
     await test.step('la exportación de los cuatro trazos produce SVG y PNG válidos sin salir de Clarin', async () => {
-      await first.getByTestId('main-menu-trigger').click()
-      await first.getByText('Exportar imagen...', { exact: true }).click()
+      await openWhiteboardMore(first)
+      await first.getByRole('menuitem', { name: 'Exportar imagen…', exact: true }).click()
       const exportDialog = first.locator('.ImageExportModal')
       await expect(exportDialog).toBeVisible()
       await expect(exportDialog.locator('.ImageExportModal__preview canvas')).toBeVisible()
@@ -2073,8 +2276,8 @@ test('presión de trazo · Lápiz y Resaltador exponen el control, persisten su 
       await first.locator('.Modal__background').click({ position: { x: 8, y: 8 } })
       await expect(exportDialog).toBeHidden()
 
-      await first.getByTestId('main-menu-trigger').click()
-      await first.getByText('Exportar imagen...', { exact: true }).click()
+      await openWhiteboardMore(first)
+      await first.getByRole('menuitem', { name: 'Exportar imagen…', exact: true }).click()
       await expect(exportDialog).toBeVisible()
       const pngDownloadPromise = first.waitForEvent('download', { timeout: 30_000 })
       await exportDialog.getByRole('button', { name: 'Exportar a PNG' }).click()
@@ -2182,6 +2385,11 @@ test('presión de trazo · Lápiz y Resaltador exponen el control, persisten su 
     })
 
     expect(blocked).toEqual([])
+  } catch (error) {
+    const path = testInfo.outputPath('pressure-failure.png')
+    await first.screenshot({ path, animations: 'disabled' }).catch(() => undefined)
+    console.error('Pressure browser diagnostics', JSON.stringify(pressureBrowserErrors))
+    throw error
   } finally {
     await Promise.all([
       firstContext.close().catch(() => undefined),
@@ -3285,8 +3493,8 @@ test('integración simulada · Comentarios permanece inactivo y el catálogo pú
     })
 
     await test.step('abre el catálogo y completa el callback seguro', async () => {
-    const { library: libraryToggle } = await expectWhiteboardChromeOwnership(page, 'flujo simulado de biblioteca')
-    await whiteboardActionHitTarget(libraryToggle).click()
+    await expectWhiteboardChromeOwnership(page, 'flujo simulado de biblioteca')
+    await openWhiteboardLibrary(page)
     const browse = page.locator('.library-menu-browse-button')
     await expect(browse).toBeVisible()
     await expectPublicLibraryDisclosure(page, 'flujo simulado de biblioteca')
@@ -3582,7 +3790,7 @@ test('integración simulada · Pizarras permanece same-origin y reconcilia ACK p
     page.on('requestfailed', request => recordWhiteboardRequestFailure(requestFailures, request))
     page.on('response', response => {
       const path = new URL(response.url()).pathname
-      if (path.startsWith('/vendor/whiteboards-editor/0.18.1-clarin.7/fonts/')) {
+      if (path.startsWith('/vendor/whiteboards-editor/0.18.1-clarin.8/fonts/')) {
         fontResponses.push({ url: response.url(), status: response.status() })
       }
       if (response.status() === 409 && /\/api\/whiteboards\/[^/]+\/scene$/.test(path)) sceneConflicts.push(response.url())
@@ -3812,5 +4020,103 @@ test('integración simulada · Pizarras permanece same-origin y reconcilia ACK p
     if (process.env.WHITEBOARD_BRANDING_SNAPSHOT) writeFileSync(process.env.WHITEBOARD_BRANDING_SNAPSHOT, brandingBody)
   } finally {
     await Promise.allSettled([firstContext.close(), secondContext.close()])
+  }
+})
+
+
+// Member editor + real Next history/CSP; persistence transport is deliberately mocked.
+test('navegación del miembro conserva la edición posterior al Back y cancela Back y Forward sin perder el cursor', async ({ browser }, testInfo) => {
+  test.setTimeout(180_000)
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block' })
+  const harness = new WhiteboardRealtimeHarness()
+  harness.elements = []
+  harness.failTicketsFor('Ana QA')
+  await harness.install(context, 'Ana QA')
+  await installWhiteboardHTTP(context, harness, 'Ana QA', new Set(), [], new Set())
+  let failWrites = false
+  let holdWrite = true
+  let releaseWrite: (() => void) | null = null
+  await context.route(`**/api/whiteboards/${boardID}/scene`, async route => {
+    if (route.request().method() === 'GET') { await route.fallback(); return }
+    if (failWrites) { await json(route, { error: 'Fallo controlado de guardado' }, 503); return }
+    if (holdWrite) { holdWrite = false; await new Promise<void>(resolve => { releaseWrite = resolve }) }
+    await route.fallback()
+  })
+  const page = await context.newPage()
+  const cspViolations: string[] = []
+  const historyTransitions: unknown[] = []
+  await page.exposeFunction('recordHistoryTransition', (event: unknown) => historyTransitions.push(event))
+  await page.addInitScript(() => {
+    const record = (kind: string) => { void (window as any).recordHistoryTransition({ kind, url: location.href, length: history.length, position: history.state?.__clarin_history_position, time: Date.now() }) }
+    for (const method of ['pushState', 'replaceState'] as const) {
+      const original = history[method].bind(history)
+      history[method] = (...args) => { original(...args); record(method) }
+    }
+    window.addEventListener('popstate', () => record('popstate'), true)
+    window.addEventListener('pageshow', () => record('pageshow'))
+  })
+  await page.exposeFunction('recordHistoryCSPViolation', (directive: string) => cspViolations.push(directive))
+  await page.addInitScript(() => window.addEventListener('securitypolicyviolation', event => {
+    void (window as any).recordHistoryCSPViolation(event.effectiveDirective)
+  }))
+  try {
+    await page.goto(`${baseURL}/dashboard/whiteboards?qa_history=exact#catalog`, { waitUntil: 'domcontentloaded' })
+    await page.getByLabel('Abrir Pizarra QA autónoma', { exact: true }).first().click()
+    await expect(page.locator('canvas.interactive')).toBeVisible({ timeout: 30_000 })
+    const editorURL = page.url()
+    const historyLength = await page.evaluate(() => history.length)
+    await drawRectangle(page, 0)
+    await page.evaluate(() => history.back())
+    await expect.poll(() => Boolean(releaseWrite), { timeout: 20_000 }).toBe(true)
+    await expect(page).toHaveURL(editorURL)
+    await expect(page.locator('canvas.interactive')).toBeVisible()
+    await drawRectangle(page, 30)
+    releaseWrite!()
+    await expect(page).toHaveURL(`${baseURL}/dashboard/whiteboards?qa_history=exact#catalog`, { timeout: 30_000 })
+    expect(harness.elements.filter(element => !element.isDeleted && element.type === 'rectangle')).toHaveLength(2)
+    await expect(page.getByLabel('Abrir Pizarra QA autónoma', { exact: true }).first()).toBeVisible()
+    expect(await page.evaluate(() => history.length)).toBe(historyLength)
+    await page.evaluate(() => history.forward())
+    await expect(page.locator('canvas.interactive')).toBeVisible({ timeout: 30_000 })
+    expect(await page.evaluate(() => history.length)).toBe(historyLength)
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await expect(page.locator('canvas.interactive')).toBeVisible({ timeout: 30_000 })
+    // Reload is a separate native document boundary in Firefox. Assert each
+    // guarded traversal against its own pre-navigation cursor and length.
+    const reloadedHistoryLength = await page.evaluate(() => history.length)
+    failWrites = true
+    await drawRectangle(page, 60)
+    let cancelled = 0
+    page.on('dialog', async dialog => { cancelled += 1; await dialog.dismiss() })
+    await page.evaluate(() => history.back())
+    await expect.poll(() => cancelled, { timeout: 30_000 }).toBe(1)
+    await expect(page).toHaveURL(editorURL)
+    await expect(page.locator('canvas.interactive')).toBeVisible()
+    expect(await page.evaluate(() => history.length)).toBe(reloadedHistoryLength)
+    failWrites = false
+    await page.keyboard.press('Control+s')
+    await expect.poll(() => harness.elements.filter(element => !element.isDeleted && element.type === 'rectangle').length, { timeout: 20_000 }).toBe(3)
+    await page.getByRole('button', { name: 'Volver a Pizarras', exact: true }).click()
+    await expect(page).toHaveURL(`${baseURL}/dashboard/whiteboards`)
+    await page.evaluate(() => history.back())
+    await expect(page.locator('canvas.interactive')).toBeVisible({ timeout: 30_000 })
+    failWrites = true
+    await drawRectangle(page, 90)
+    const beforeForwardLength = await page.evaluate(() => history.length)
+    await page.evaluate(() => history.forward())
+    await expect.poll(() => cancelled, { timeout: 30_000 }).toBe(2)
+    await expect(page).toHaveURL(editorURL)
+    await expect(page.locator('canvas.interactive')).toBeVisible()
+    expect(await page.evaluate(() => history.length)).toBe(beforeForwardLength)
+    failWrites = false
+    await page.keyboard.press('Control+s')
+    await expect.poll(() => harness.elements.filter(element => !element.isDeleted && element.type === 'rectangle').length, { timeout: 20_000 }).toBe(4)
+    await page.evaluate(() => history.forward())
+    await expect(page).toHaveURL(`${baseURL}/dashboard/whiteboards`)
+    expect(cspViolations).toEqual([])
+  } finally {
+    releaseWrite?.()
+    await testInfo.attach('whiteboard-history-transitions.json', { body: Buffer.from(JSON.stringify(historyTransitions, null, 2)), contentType: 'application/json' })
+    await context.close()
   }
 })

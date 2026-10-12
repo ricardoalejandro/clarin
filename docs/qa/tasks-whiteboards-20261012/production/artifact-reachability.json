@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "artifact": "isolated QA production build v2; fork0.18.1-clarin.8",
+  "sourceSha256": "b9753650b2b80704a46b670d6651a80da59c7858d774be343936f2f8c15d3eb9",
+  "next": {
+    "javascriptFileCount": 311,
+    "sourceMapCount": 0,
+    "manifestSha256": "880bf5bdf5c1046f888c06b3c19760effd1ed4fb9cab9f40e6f64cf7b22da8bd",
+    "katexCodeMarkers": [
+      {
+        "path": "frontend/.next/static/chunks/d3ac728e.7964f816a1ca64e5.js",
+        "sha256": "5ee9055c40e5d8e80360219cc2459196e63a8a95b9c218097cde3458984d5d10"
+      }
+    ],
+    "mermaidCodeMarkers": [
+      {
+        "path": "frontend/.next/static/chunks/9498.57800e48e88c2cbd.js",
+        "sha256": "32c07476ff3074b1252cc372cce6d6435dfc6a78134a94fd9358b6c7ed3a1b41"
+      },
+      {
+        "path": "frontend/.next/static/chunks/bf2ff291.d50d7f52e7df6803.js",
+        "sha256": "f04cba4c3b00070b242f033e059d7d6131444b2d397d2a3c11ba0f9dc1b07256"
+      }
+    ]
+  },
+  "coBuiltForkDevelopmentMaps": {
+    "mapCount": 68,
+    "sourceCount": 477,
+    "buildToolModules": [],
+    "note": "These maps come from the same fork preparation as the minified production bundle; third-party runtime dependencies may remain external until Next bundles them."
+  },
+  "dependencyPaths": "clarin-frontend@1.0.0 /root/proyect/clarin-work-qa-20261012/frontend\n├─┬ @excalidraw/excalidraw@0.18.1-clarin.8 -> ./vendor/excalidraw-clarin/packages/excalidraw\n│ └─┬ sass@1.51.0\n│   └─┬ chokidar@3.6.0\n│     └── braces@3.0.3\n├─┬ mermaid@11.16.1 overridden\n│ └── katex@0.16.47\n└─┬ next@16.3.8\n  └── sass@1.51.0 deduped\n\n",
+  "classification": {
+    "sassChokidarBraces": "Installed build-tool chain: fork/Next -> Sass1.51.0 -> Chokidar3.6.0 -> braces3.0.3. The fork build script imports sassPlugin; no direct runtime import or mapped fork source for these tools was found. This is a scoped build-tool classification, not proof of global browser absence from minified Next without production source maps. Advisory stays in_triage.",
+    "katexMermaid": "Browser runtime confirmed in final minified Next chunks listed above. Both editor hosts set aiEnabled=false but leave mermaidEnabled enabled; local Mermaid parsing reaches KaTeX. Prototype-pollution/attacker-controlled-options preconditions and sanitizer bypass were not exercised; advisory stays in_triage."
+  },
+  "worker": {
+    "path": "frontend/public/vendor/whiteboards-editor/0.18.1-clarin.8/subset-worker.js",
+    "sha256": "faf1917561717449c4382922505dcd1cf63a6389eaf99d258e24e54f2a017c30"
+  },
+  "limitations": "No exploit remediation or production deployment claim. Static role classification and observed runtime chunks complement, not replace, browser isolation tests."
+}

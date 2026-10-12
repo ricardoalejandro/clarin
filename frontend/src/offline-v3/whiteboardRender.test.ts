@@ -11,7 +11,7 @@ describe('offline whiteboard rendering boundary', () => {
   it.each([
     undefined, '', '0.18.1',
     '0.18.1-clarin.1', '0.18.1-clarin.2', '0.18.1-clarin.3',
-    '0.18.1-clarin.4', '0.18.1-clarin.5', '0.18.1-clarin.6', '0.18.1-clarin.7',
+    '0.18.1-clarin.4', '0.18.1-clarin.5', '0.18.1-clarin.6', '0.18.1-clarin.7', '0.18.1-clarin.8',
   ])('accepts the reviewed editor version %s without rewriting the canonical scene', async (editor_version) => {
     const source = { ...board, editor_version }
     const original = JSON.stringify(source)
@@ -21,7 +21,7 @@ describe('offline whiteboard rendering boundary', () => {
     expect(JSON.stringify(source)).toBe(original)
   })
   it.each([
-    '0.18.1-clarin.0', '0.18.1-clarin.8', '0.18.1-clarin.10',
+    '0.18.1-clarin.0', '0.18.1-clarin.9', '0.18.1-clarin.10',
     '0.18.1-clarin.70', '0.18.1-clarin.7-canary', '0.18.1-clarin.7.1',
     '0.18.2', '0.19.0', '0.99.0',
   ])('rejects unreviewed, future or malformed editor version %s', async (editor_version) => {

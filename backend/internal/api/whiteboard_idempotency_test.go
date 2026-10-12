@@ -37,7 +37,7 @@ func TestWhiteboardPatchRequestHashIsStableAcrossServerRebase(t *testing.T) {
 
 func TestWhiteboardEditorReleaseAndHistoricalAckVersions(t *testing.T) {
 	t.Parallel()
-	if whiteboardEditorVersion != "0.18.1-clarin.7" {
+	if whiteboardEditorVersion != "0.18.1-clarin.8" {
 		t.Fatal("server writes must identify the deployed editor release")
 	}
 	for _, version := range []string{"0.18.1-clarin.6", whiteboardEditorVersion} {

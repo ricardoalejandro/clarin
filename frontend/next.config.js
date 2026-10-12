@@ -112,6 +112,17 @@ const nextConfig = {
       { source: '/offline-v3/:path*', headers: offlineV3Headers },
       { source: '/offline-v4/:path*', headers: offlineV3Headers.map(header => header.key === 'Content-Security-Policy' ? { ...header, value: offlineV3ContentSecurityPolicy.replace(' http://127.0.0.1:17373', '') } : header) },
       { source: '/offline-v5/:path*', headers: offlineV3Headers.map(header => header.key === 'Content-Security-Policy' ? { ...header, value: offlineV3ContentSecurityPolicy.replace(' http://127.0.0.1:17373', '') } : header) },
+      // Only these self-contained workers need WASM; document script/eval policy
+      // stays unchanged. Last-match overrides the broader offline route policy.
+      ...[
+        '/vendor/whiteboards-editor/:version/subset-worker.js',
+        '/offline-v3/whiteboard-assets/subset-worker.js',
+        '/offline-v4/whiteboard-assets/subset-worker.js',
+        '/offline-v5/whiteboard-assets/subset-worker.js',
+      ].map(source => ({ source, headers: [
+        { key: 'Content-Security-Policy', value: "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'; object-src 'none'; base-uri 'none'" },
+        { key: 'X-Content-Type-Options', value: 'nosniff' },
+      ] })),
     ]
   },
 }

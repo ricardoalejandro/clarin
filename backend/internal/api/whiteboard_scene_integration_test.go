@@ -142,6 +142,12 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 	if _, err := db.Exec(ctx, `SET session_replication_role='origin'`); err != nil {
 		t.Fatal(err)
 	}
+	// Account bootstrap was intentionally skipped above. Media writes still
+	// require the same cleanup barrier that normal account creation installs.
+	if _, err := db.Exec(ctx, `INSERT INTO storage_reference_epochs(account_id)
+		VALUES($1),($2) ON CONFLICT(account_id) DO NOTHING`, accountID, foreignAccountID); err != nil {
+		t.Fatal(err)
+	}
 
 	elements := []map[string]any{
 		{"id": "rect-1", "type": "rectangle", "index": "a0", "version": 1, "versionNonce": 101, "x": 40, "y": 40, "width": 180, "height": 100},
@@ -661,6 +667,9 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 	if status != http.StatusNotFound {
 		t.Fatalf("cross-account comment detail did not return 404: status=%d body=%s", status, responseBody)
 	}
+	t.Run("real storage asset durability", func(t *testing.T) {
+		runWhiteboardAssetDurabilityIntegration(t, db, accountID, actorID, foreignAccountID, foreignActorID)
+	})
 }
 
 // TestWhiteboardDeployedRuntimePersistsControlledScene verifies the running

@@ -79,6 +79,26 @@ describe('freedraw pressure renderer', () => {
   const lowToHighPressure = [0.1, 0.2, 0.45, 0.75, 0.95]
   const highToLowPressure = [...lowToHighPressure].reverse()
 
+  it.each([8, 16])('exports the complete constant %i stroke with zero padding', async strokeWidth => {
+    const element = {
+      ...freedrawElement({ id: `wide-${strokeWidth}`, pressures: [], simulatePressure: true, variability: 'constant' }),
+      width: 1000, height: 0, strokeWidth,
+      points: Array.from({ length: 201 }, (_, index) => [index * 5, 0]),
+      lastCommittedPoint: [1000, 0],
+    }
+    const before = JSON.stringify(element)
+    const svg = await exportToSvg({
+      elements: [element] as never, files: {},
+      appState: { exportBackground: false, viewBackgroundColor: '#ffffff' },
+      exportPadding: 0, skipInliningFonts: true,
+    })
+    const viewBox = svg.getAttribute('viewBox')!.split(' ').map(Number)
+    expect(viewBox[3]).toBe(Math.ceil(strokeWidth * 2.8))
+    expect(viewBox[2]).toBeGreaterThan(1000)
+    expect(svg.querySelector('path[fill="#1e1e1e"]')).not.toBeNull()
+    expect(JSON.stringify(element)).toBe(before)
+  })
+
   it('keeps constant strokes identical when physical pressure samples change', async () => {
     const first = await exportedFreedrawPath(freedrawElement({
       id: 'constant-low-high',

@@ -384,7 +384,7 @@ export interface WhiteboardSavePayload {
     app_state: Record<string, unknown>
   }
   scene_schema_version: 'excalidraw'
-  editor_version: '0.18.1-clarin.7'
+  editor_version: '0.18.1-clarin.8'
 }
 
 export interface WhiteboardScenePatch {
@@ -613,7 +613,7 @@ export function buildWhiteboardSavePayload(input: {
     },
     ...(input.includePatch ? { patch: { elements: input.patchElements || input.elements, app_state: appState } } : {}),
     scene_schema_version: 'excalidraw',
-    editor_version: '0.18.1-clarin.7',
+    editor_version: '0.18.1-clarin.8',
   }
 }
 
@@ -893,11 +893,15 @@ export function whiteboardNavigationWritesCovered(input: {
   savedSceneVersion: number
   requiredLibraryVersion: number | null
   savedLibraryVersion: number
+  latestSceneVersion?: number
+  latestLibraryVersion?: number
   commentsPending?: boolean
   commentsDirty?: boolean
 }) {
-  return (input.requiredSceneVersion === null || input.savedSceneVersion >= input.requiredSceneVersion)
-    && (input.requiredLibraryVersion === null || input.savedLibraryVersion >= input.requiredLibraryVersion)
+  // The canvas stays interactive while a leave request waits for I/O. Cover
+  // every edit visible at completion, including ones made after the click.
+  return input.savedSceneVersion >= Math.max(input.requiredSceneVersion ?? 0, input.latestSceneVersion ?? 0)
+    && input.savedLibraryVersion >= Math.max(input.requiredLibraryVersion ?? 0, input.latestLibraryVersion ?? 0)
     && !input.commentsPending
     && !input.commentsDirty
 }

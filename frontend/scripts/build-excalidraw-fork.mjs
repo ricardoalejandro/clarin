@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 import { sassPlugin } from 'esbuild-sass-plugin'
 
-export const EXCALIDRAW_FORK_VERSION = '0.18.1-clarin.7'
+export const EXCALIDRAW_FORK_VERSION = '0.18.1-clarin.8'
 export const EXCALIDRAW_UPSTREAM_COMMIT = 'a2ec2889babf7d2295469c6d90ebe77fae57df84'
 
 const frontendRoot = process.cwd()
@@ -60,6 +60,20 @@ export async function buildExcalidrawFork() {
   await build({
     ...commonConfig,
     outdir: join(packageRoot, 'dist', 'prod'),
+    minify: true,
+    define: { 'import.meta.env': JSON.stringify(safeEnvironment('production')) },
+  })
+  // Do not let Next turn a worker's import.meta.url into a build-time file URL.
+  // This dedicated module embeds WOFF2/HarfBuzz WASM and has no runtime imports.
+  await build({
+    absWorkingDir: packageRoot,
+    entryPoints: ['subset/subset-worker.chunk.ts'],
+    outfile: join(packageRoot, 'dist', 'prod', 'worker', 'subset-worker.js'),
+    bundle: true,
+    splitting: false,
+    format: 'esm',
+    platform: 'browser',
+    target: 'es2020',
     minify: true,
     define: { 'import.meta.env': JSON.stringify(safeEnvironment('production')) },
   })

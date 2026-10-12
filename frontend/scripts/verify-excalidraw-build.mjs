@@ -1,12 +1,16 @@
-import { access } from 'node:fs/promises'
+import { access, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   EXPECTED_EDITOR_VERSION,
   LOCAL_EDITOR_ASSET_PATH,
   verifyArtifactTree,
 } from './excalidraw-hardening.mjs'
+import { verifyStandaloneSubsetWorker } from './verify-subset-worker.mjs'
 
 const packageRoot = join(process.cwd(), 'node_modules', '@excalidraw', 'excalidraw', 'dist')
+const publicWorker = await readFile(join(process.cwd(), 'public', LOCAL_EDITOR_ASSET_PATH, 'subset-worker.js'), 'utf8')
+verifyStandaloneSubsetWorker(publicWorker)
+if (publicWorker !== await readFile(join(packageRoot, 'prod', 'worker', 'subset-worker.js'), 'utf8')) throw new Error('Published subset worker differs from the hardened build')
 const roots = [
   { path: packageRoot, strictExternalHosts: true },
   // Other Clarin modules deliberately use controlled third-party services.

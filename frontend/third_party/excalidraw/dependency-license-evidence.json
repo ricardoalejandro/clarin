@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "sbomSha256": "bb736384226c43b192654bc8ff96fe90e2f907d328f2ce32654c3e99b74d3834",
-  "observedAt": "2026-09-14",
-  "scope": "License texts for the exact archived engine closure, over-approximating the browser bundle. No lifecycle scripts; no package downloads.",
+  "sbomSha256": "11dbd6b8a303cec9017237893fe4c715696e7c874f4325e3d158b1fc4da498ef",
+  "observedAt": "2026-10-12",
+  "scope": "License texts for the exact archived engine closure, over-approximating the browser bundle. Verified from an isolated npm ci --ignore-scripts installation of the exact lock and archived upstream license evidence, without additional license downloads.",
   "overrides": [
     {
       "name": "@radix-ui/primitive",

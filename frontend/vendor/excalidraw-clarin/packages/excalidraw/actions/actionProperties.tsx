@@ -46,6 +46,7 @@ import {
   StrokeWidthBaseIcon,
   StrokeWidthBoldIcon,
   StrokeWidthExtraBoldIcon,
+  StrokeWidthWideIcon,
   FontSizeSmallIcon,
   FontSizeMediumIcon,
   FontSizeLargeIcon,
@@ -86,6 +87,12 @@ import {
   redrawTextBoundingBox,
 } from "../element";
 import { mutateElement, newElementWith } from "../element/mutateElement";
+import {
+  getClarinStrokePreset,
+  getElementStrokePreset,
+  resolveClarinStrokeWidth,
+  type ClarinStrokePreset,
+} from "../element/clarinStrokeWidth";
 import { getBoundTextElement } from "../element/textElement";
 import {
   isArrowElement,
@@ -768,54 +775,80 @@ export const actionChangeStrokeWidth = register({
   name: "changeStrokeWidth",
   label: "labels.strokeWidth",
   trackEvent: false,
-  perform: (elements, appState, value) => {
+  perform: (elements, appState, value: ClarinStrokePreset) => {
     return {
       elements: changeProperty(elements, appState, (el) =>
         newElementWith(el, {
-          strokeWidth: value,
+          strokeWidth: resolveClarinStrokeWidth(value, el),
         }),
       ),
-      appState: { ...appState, currentItemStrokeWidth: value },
+      appState: {
+        ...appState,
+        currentItemStrokeWidth: resolveClarinStrokeWidth(value, {
+          type: appState.activeTool.type,
+          strokeOptions: { variability: appState.currentItemStrokeVariability },
+        }),
+      },
       captureUpdate: CaptureUpdateAction.IMMEDIATELY,
     };
   },
-  PanelComponent: ({ elements, appState, updateData }) => (
-    <fieldset>
-      <legend>{t("labels.strokeWidth")}</legend>
-      <ButtonIconSelect
-        group="stroke-width"
-        options={[
-          {
-            value: STROKE_WIDTH.thin,
-            text: t("labels.thin"),
-            icon: StrokeWidthBaseIcon,
-            testId: "strokeWidth-thin",
-          },
-          {
-            value: STROKE_WIDTH.bold,
-            text: t("labels.bold"),
-            icon: StrokeWidthBoldIcon,
-            testId: "strokeWidth-bold",
-          },
-          {
-            value: STROKE_WIDTH.extraBold,
-            text: t("labels.extraBold"),
-            icon: StrokeWidthExtraBoldIcon,
-            testId: "strokeWidth-extraBold",
-          },
-        ]}
-        value={getFormValue(
-          elements,
-          appState,
-          (element) => element.strokeWidth,
-          (element) => element.hasOwnProperty("strokeWidth"),
-          (hasSelection) =>
-            hasSelection ? null : appState.currentItemStrokeWidth,
+  PanelComponent: ({ elements, appState, updateData }) => {
+    const preset = getFormValue<ClarinStrokePreset | null>(
+      elements, appState, getElementStrokePreset, true,
+      (hasSelection) => hasSelection ? null : getClarinStrokePreset(
+        appState.currentItemStrokeWidth,
+        {
+          type: appState.activeTool.type,
+          strokeOptions: { variability: appState.currentItemStrokeVariability },
+        },
+      ),
+    );
+    const width = getFormValue<number | null>(
+      elements, appState, (element) => element.strokeWidth, true,
+      (hasSelection) => hasSelection ? null : appState.currentItemStrokeWidth,
+    );
+    return (
+      <fieldset>
+        <legend>{t("labels.strokeWidth")}</legend>
+        <ButtonIconSelect<ClarinStrokePreset>
+          group="stroke-width"
+          options={[
+            {
+              value: STROKE_WIDTH.thin,
+              text: t("labels.thin"),
+              icon: StrokeWidthBaseIcon,
+              testId: "strokeWidth-thin",
+            },
+            {
+              value: STROKE_WIDTH.bold,
+              text: t("labels.bold"),
+              icon: StrokeWidthBoldIcon,
+              testId: "strokeWidth-bold",
+            },
+            {
+              value: STROKE_WIDTH.extraBold,
+              text: t("labels.extraBold"),
+              icon: StrokeWidthExtraBoldIcon,
+              testId: "strokeWidth-extraBold",
+            },
+            {
+              value: "wide",
+              text: "Amplio",
+              icon: StrokeWidthWideIcon,
+              testId: "strokeWidth-ultraBold",
+            },
+          ]}
+          value={preset}
+          onChange={(value) => updateData(value)}
+        />
+        {preset === null && (
+          <div className="clarin-stroke-width-readout" role="status">
+            {width === null ? "Grosores variados" : `Grosor personalizado: ${width}`}
+          </div>
         )}
-        onChange={(value) => updateData(value)}
-      />
-    </fieldset>
-  ),
+      </fieldset>
+    );
+  },
 });
 
 export const actionChangeFreedrawMode = register({

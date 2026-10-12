@@ -16,6 +16,7 @@ import {
 } from './whiteboard-font-catalog.mjs'
 import { buildExcalidrawFork } from './build-excalidraw-fork.mjs'
 import { buildDependencyNotices, composeEditorNotice } from './dependency-notices.mjs'
+import { verifyStandaloneSubsetWorker } from './verify-subset-worker.mjs'
 
 const dependencyNotices = buildDependencyNotices()
 const archivedDependencyNotices = await readFile(join(process.cwd(), 'third_party/excalidraw/DEPENDENCY-LICENSES.txt'), 'utf8')
@@ -39,6 +40,9 @@ await mkdir(dirname(destinationRoot), { recursive: true })
 await cp(sourceFonts, join(destinationRoot, 'fonts'), { recursive: true })
 await cp(join(whiteboardFontRoot, 'fonts', 'Clarin'), join(destinationRoot, 'fonts', 'Clarin'), { recursive: true })
 await cp(join(whiteboardFontRoot, 'licenses'), join(destinationRoot, 'CLARIN-FONT-LICENSES'), { recursive: true })
+await hardenJavaScriptTree(join(packageRoot, 'dist', 'prod', 'worker'), { fontCatalog: runtimeFontCatalog })
+verifyStandaloneSubsetWorker(await readFile(join(packageRoot, 'dist', 'prod', 'worker', 'subset-worker.js'), 'utf8'))
+await cp(join(packageRoot, 'dist', 'prod', 'worker', 'subset-worker.js'), join(destinationRoot, 'subset-worker.js'))
 const notice = await readFile(join(process.cwd(), 'THIRD_PARTY_EXCALIDRAW.md'), 'utf8')
 const license = notice.match(/## Licencia del editor\s+([\s\S]*?)\s+Fuente:/u)?.[1]
 if (!license) throw new Error('No se pudo extraer la licencia MIT del aviso de terceros.')
@@ -80,7 +84,6 @@ let securedLibraryBrowseTargets = 0
 let hiddenGenerateSections = 0
 let highlighterMenus = 0
 let highlighterToolLifecycles = 0
-let ultraBoldStrokeWidths = 0
 let customFontFamilyCatalogs = 0
 let customFontLazyRegistrations = 0
 let customFontMetadataCatalogs = 0
@@ -105,7 +108,6 @@ for (const target of ['dev', 'prod']) {
   hiddenGenerateSections += result.hiddenGenerateSections
   highlighterMenus += result.highlighterMenus
   highlighterToolLifecycles += result.highlighterToolLifecycles
-  ultraBoldStrokeWidths += result.ultraBoldStrokeWidths
   fontPickerCategoryFilters += result.fontPickerCategoryFilters
   fontPickerVisiblePreviews += result.fontPickerVisiblePreviews
   fontPickerTriggers += result.fontPickerTriggers
@@ -122,7 +124,7 @@ for (const [index, source] of editorEntrypoints.entries()) {
     throw new Error(`El bundle ${index === 0 ? 'dev' : 'prod'} no contiene el Resaltador nativo completo.`)
   }
   const ultraBoldOptions = source.match(/strokeWidth-ultraBold/gu) || []
-  if (ultraBoldOptions.length !== 1 || !source.includes('clarin-ultra-bold-stroke')) {
+  if (ultraBoldOptions.length !== 1 || !source.includes('Grosor personalizado:') || !source.includes('Amplio')) {
     throw new Error(`El bundle ${index === 0 ? 'dev' : 'prod'} no contiene exactamente un cuarto nivel de grosor.`)
   }
 }
@@ -144,9 +146,6 @@ if (highlighterMenus < 0 || highlighterMenus > 2
   || highlighterMenus !== highlighterToolLifecycles
   || highlighterMenus !== hiddenGenerateSections) {
   throw new Error('El parche del Resaltador no fue idempotente o no alcanzó ambos bundles del editor.')
-}
-if (ultraBoldStrokeWidths < 0 || ultraBoldStrokeWidths > 2) {
-  throw new Error('El parche de grosor máximo no fue idempotente o alcanzó bundles inesperados.')
 }
 for (const [label, value] of Object.entries({ customFontFamilyCatalogs, customFontMetadataCatalogs, customFontRegistrations, fontPickerCategoryFilters })) {
   if (value < 0 || value > 2) throw new Error(`El parche ${label} no fue idempotente o alcanzó bundles inesperados.`)
@@ -175,5 +174,5 @@ await verifyArtifactTree(join(packageRoot, 'dist'), { strictExternalHosts: true 
 await verifyArtifactTree(destinationRoot, { strictExternalHosts: true })
 
 console.log(
-  `Motor de Pizarras ${EXPECTED_EDITOR_VERSION}: ${assetFiles.length} assets locales, ${hardenedFiles} bundles y ${strippedMaps} mapas verificados; catálogo de ${verifiedFontCatalog.totalSelectableFonts} fuentes (${verifiedFontCatalog.fontFaces} WOFF2 Clarin) verificado; ${disabledRoutes} rutas y ${localFallbacks} fallbacks neutralizados; ${libraryBrowseRoutes} rutas de exploración delegadas a Clarin, ${rewrittenLibraryBrowseMessages} mensajes de seguridad adaptados y ${securedLibraryBrowseTargets} destinos asegurados; Resaltador nativo verificado (${highlighterMenus} menús, ${highlighterToolLifecycles} ciclos y ${hiddenGenerateSections} secciones vacías corregidas); grosor máximo nativo verificado (${ultraBoldStrokeWidths} inserciones en esta ejecución).`,
+  `Motor de Pizarras ${EXPECTED_EDITOR_VERSION}: ${assetFiles.length} assets locales, ${hardenedFiles} bundles y ${strippedMaps} mapas verificados; catálogo de ${verifiedFontCatalog.totalSelectableFonts} fuentes (${verifiedFontCatalog.fontFaces} WOFF2 Clarin) verificado; ${disabledRoutes} rutas y ${localFallbacks} fallbacks neutralizados; ${libraryBrowseRoutes} rutas de exploración delegadas a Clarin, ${rewrittenLibraryBrowseMessages} mensajes de seguridad adaptados y ${securedLibraryBrowseTargets} destinos asegurados; Resaltador nativo verificado (${highlighterMenus} menús, ${highlighterToolLifecycles} ciclos y ${hiddenGenerateSections} secciones vacías corregidas); grosor Amplio nativo y lectura de valores personalizados verificados.`,
 )

@@ -32,7 +32,7 @@ async function json(route: Route, body: unknown, status = 200) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 }
 
-async function installWorkspaceMock(page: Page, options: { subtasks?: boolean; calendarItems?: boolean } = {}) {
+async function installWorkspaceMock(page: Page, options: { subtasks?: boolean; calendarItems?: boolean; summaryTotal?: number } = {}) {
   let task = {
     ...makeTask(),
     ...(options.subtasks ? { subtask_count: 2, subtask_done: 1, progress_mode: 'automatic' as const, progress: 50 } : {}),
@@ -111,6 +111,10 @@ async function installWorkspaceMock(page: Page, options: { subtasks?: boolean; c
   const bulkMoves: Array<Record<string, unknown>> = []
   const bulkUpdates: Array<Record<string, unknown>> = []
   const taskQueries: Array<{ search: string; at: number; sharedWithMe: boolean; environmentId: string }> = []
+  const agendaQueries: URLSearchParams[] = []
+  const summaryQueries: URLSearchParams[] = []
+  const revokedTaskIDs = new Set<string>()
+  let nextTaskReadGate: { requested: () => void; wait: Promise<void> } | null = null
   const environmentWrites: Array<Record<string, unknown>> = []
   let generalEnvironmentName = 'General'
   let structureRefreshDelayMs = 0
@@ -144,7 +148,9 @@ async function installWorkspaceMock(page: Page, options: { subtasks?: boolean; c
         await route.continue()
         return
       }
-      const response = await route.fetch()
+      // The local Next dev server may reset one document stream during HMR.
+      // This retries ECONNRESET only; HTTP/application failures remain visible.
+      const response = await route.fetch({ maxRetries: 1 })
       const headers = response.headers()
       const csp = headers['content-security-policy']
       if (csp) headers['content-security-policy'] = csp.replace("script-src 'self' 'unsafe-inline'", "script-src 'self' 'unsafe-inline' 'unsafe-eval'")
@@ -255,13 +261,17 @@ async function installWorkspaceMock(page: Page, options: { subtasks?: boolean; c
     }
     if (path === '/api/tasks/hierarchy') { await json(route, hierarchy); return }
     if (path === '/api/tasks/agenda' && request.method() === 'GET') {
+      agendaQueries.push(new URLSearchParams(url.searchParams))
       const agendaItems = options.calendarItems ? [
         { kind: 'task', key: `task:${task.id}`, task: { ...task, description: 'Descripción breve de la tarea.', breadcrumbs_visible: true } },
         { kind: 'task', key: 'task:calendar-span', task: calendarSpanTask },
         ...createdTasks.map(item => ({ kind: 'task', key: `task:${item.id}`, task: item })),
         { kind: 'event', key: 'event:event-calendar:2026-08-22T15:00:00.000Z', event: calendarEvent },
       ] : []
-      await json(route, { success: true, items: agendaItems, next_cursor: null }); return
+      const search = (url.searchParams.get('search') || '').toLocaleLowerCase()
+      const priorities = url.searchParams.get('priorities')?.split(',') || []
+      const filtered = agendaItems.filter(item => item.kind === 'event' || ('task' in item && (!search || item.task!.title.toLocaleLowerCase().includes(search)) && (!priorities.length || priorities.includes(item.task!.priority))))
+      await json(route, { success: true, items: filtered, next_cursor: null }); return
     }
     if (path === '/api/tasks/events/event-calendar' && request.method() === 'PUT') {
       eventWrites.push(body)
@@ -327,6 +337,11 @@ async function installWorkspaceMock(page: Page, options: { subtasks?: boolean; c
     }
     if (path === '/api/tasks/saved-views') { await json(route, { views: [] }); return }
     if (path === '/api/tasks/stats') { await json(route, { pending: 1, completed: 0, overdue: 0, cancelled: 0, today: 0 }); return }
+    if (path === '/api/tasks/summary') {
+      summaryQueries.push(new URLSearchParams(url.searchParams))
+      const total = options.summaryTotal ?? 1
+      await json(route, { success: true, summary: { total, done: 0, active: total, overdue: 20, owners: 1, progress: 35, by_status: [{ id: activeStatus.id, name: activeStatus.name, color: activeStatus.color, count: total }], by_owner: [{ id: 'user-owner', name: 'Ricardo Rojas', count: total, overdue: 20 }] } }); return
+    }
     if (path === '/api/tasks' && request.method() === 'GET') {
       const search = (url.searchParams.get('search') || '').toLocaleLowerCase()
       const sharedWithMe = url.searchParams.get('shared_with_me') === 'true'
@@ -335,6 +350,7 @@ async function installWorkspaceMock(page: Page, options: { subtasks?: boolean; c
       const requestedListID = url.searchParams.get('list_id') || ''
       const requestedFolderID = url.searchParams.get('folder_id') || ''
       const activeItems = [task, ...createdTasks].filter(item => {
+        if (revokedTaskIDs.has(item.id)) return false
         if (search && !`${item.title} ${item.description}`.toLocaleLowerCase().includes(search)) return false
         if (requestedListID && item.list_id !== requestedListID) return false
         if (requestedFolderID && item.folder_id !== requestedFolderID) return false
@@ -349,7 +365,10 @@ async function installWorkspaceMock(page: Page, options: { subtasks?: boolean; c
           : environmentId === privateEnvironment.id
             ? []
             : activeItems
-      await json(route, { tasks: items, total: items.length, next_cursor: null, has_more: false }); return
+      const gate = nextTaskReadGate
+      nextTaskReadGate = null
+      if (gate) { gate.requested(); await gate.wait }
+      await json(route, { tasks: items, total: items.length, next_cursor: null, has_more: false }).catch(() => undefined); return
     }
     if (path === '/api/tasks/gantt' && request.method() === 'GET') {
       await json(route, { tasks: [task, ...createdTasks], dependencies: [], critical_task_ids: [], slack_minutes: {}, unscheduled_count: 0 }); return
@@ -675,7 +694,14 @@ async function installWorkspaceMock(page: Page, options: { subtasks?: boolean; c
   })
 
   return {
-    structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites, eventWrites, folderCreateWrites, bulkMoves, bulkUpdates, trashWrites, containerLifecycleWrites, taskQueries, environmentWrites, subtaskReads, subtaskWrites,
+    structureWrites, folderStructureWrites, appearanceWrites, collaboratorWrites, taskWrites, createWrites, eventWrites, folderCreateWrites, bulkMoves, bulkUpdates, trashWrites, containerLifecycleWrites, taskQueries, agendaQueries, summaryQueries, environmentWrites, subtaskReads, subtaskWrites,
+    holdNextTaskRead: () => {
+      let requested!: () => void, release!: () => void
+      const started = new Promise<void>(resolve => { requested = resolve })
+      const wait = new Promise<void>(resolve => { release = resolve })
+      nextTaskReadGate = { requested, wait }
+      return { started, release }
+    },
     environmentDetailReads, remoteListQueries, remoteFolderQueries, sharedResourceReads, structureRefreshCompletions, structureReads, attachmentUploads, attachmentCommentWrites, attachmentCommentMutations, historicalReads,
     failNextDescriptionWrite: () => { failNextDescriptionWrite = true },
     failNextAttachmentUpload: () => { failNextAttachmentUpload = true },
@@ -702,6 +728,7 @@ async function installWorkspaceMock(page: Page, options: { subtasks?: boolean; c
     emitTaskEvent: (data: Record<string, unknown>) => {
       if (!workspaceSocket) return false
       if (data.action === 'access_revoked' && data.target_type === 'task' && data.target_id === sharedTask.id) sharedResources = []
+      if (data.action === 'access_revoked' && data.target_type === 'task') revokedTaskIDs.add(String(data.target_id))
       workspaceSocket.send(JSON.stringify({ event: 'task_update', data }))
       return true
     },
@@ -723,6 +750,18 @@ async function drag(page: Page, source: Locator, target: Locator) {
   await page.waitForTimeout(250)
   await expect(page.locator('[data-task-hierarchy-container="container:folder-client"] [data-task-hierarchy-placeholder]')).toBeVisible()
   await page.mouse.up()
+}
+
+async function customizeWorkspaceView(page: Page, choice: string) {
+  await page.getByRole('button', { name: 'Personalizar vista', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Personalizar vista' })
+  await dialog.getByRole('button', { name: choice, exact: true }).click()
+  await dialog.getByRole('button', { name: 'Aplicar', exact: true }).click()
+}
+
+async function selectAdvancedWorkspaceView(page: Page, name: 'Gantt' | 'Resumen') {
+  await page.getByRole('button', { name: 'Más vistas', exact: true }).click()
+  await page.getByRole('menuitemradio', { name, exact: true }).click()
 }
 
 async function dragSortable(page: Page, source: Locator, target: Locator) {
@@ -783,6 +822,146 @@ async function dispatchTextPaste(target: Locator, value: string) {
 
 test.describe('Clarin Work workspace refinement', () => {
   test.describe.configure({ timeout: 60_000 })
+
+  test('integrity keeps full summary totals and sends task filters to agenda without filtering events', async ({ page }) => {
+    const mock = await installWorkspaceMock(page, { calendarItems: true, summaryTotal: 150 })
+    await page.clock.setFixedTime(new Date('2026-08-22T12:00:00.000Z'))
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    await expect(page.locator('[data-task-list-row="task-refinement"]')).toBeVisible({ timeout: 30_000 })
+    await selectAdvancedWorkspaceView(page, 'Resumen')
+    const total = page.getByText('Total', { exact: true }).locator('..')
+    await expect(page.getByRole('heading', { name: 'Distribución por estado' })).toBeVisible()
+    await expect(total).toContainText('150')
+    await expect(page.getByRole('heading', { name: 'Carga del equipo' }).locator('..')).toContainText('150 · 20 vencidas')
+    expect(mock.taskQueries.length).toBeGreaterThan(0)
+    expect(mock.summaryQueries.length).toBeGreaterThan(0)
+
+    await page.getByRole('button', { name: 'Calendario', exact: true }).click()
+    await expect(page.locator('[data-task-calendar]').getByTitle('Revisión del calendario')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Filtros de tareas', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Filtros de tareas', exact: true }).click()
+    const filter = page.getByRole('dialog', { name: 'Filtrar tareas' })
+    const requests = mock.agendaQueries.length
+    await filter.getByRole('checkbox', { name: 'Alta', exact: true }).click()
+    expect(mock.agendaQueries.length).toBe(requests)
+    await filter.getByRole('button', { name: /^Aplicar filtros/ }).click()
+    await expect.poll(() => mock.agendaQueries.at(-1)?.get('priorities')).toBe('high')
+    await page.getByRole('button', { name: 'Buscar tareas', exact: true }).click()
+    await page.locator('#task-search').fill('inexistente')
+    await expect.poll(() => mock.agendaQueries.at(-1)?.get('search')).toBe('inexistente')
+    await expect(page.locator('[data-task-calendar]').getByTitle('Revisión del calendario')).toBeVisible()
+    await expect(page.locator('[data-task-calendar]').getByTitle('Preparar propuesta profesional')).toHaveCount(0)
+    expect(mock.agendaQueries.at(-1)?.get('sources')).toBe('tasks,events')
+    expect(mock.agendaQueries.at(-1)?.get('from')).toBeTruthy()
+    expect(mock.agendaQueries.at(-1)?.get('to')).toBeTruthy()
+    // The task filter stays visible and independently reaches Summary too.
+    await selectAdvancedWorkspaceView(page, 'Resumen')
+    await expect.poll(() => mock.summaryQueries.at(-1)?.get('priorities')).toBe('high')
+    await expect.poll(() => mock.summaryQueries.at(-1)?.get('search')).toBe('inexistente')
+    await expect(page.getByRole('heading', { name: 'Carga del equipo' }).locator('..')).toContainText('150 · 20 vencidas')
+  })
+
+  test('integrity rejects a task page that completes after access revocation', async ({ page }) => {
+    const mock = await installWorkspaceMock(page)
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    const row = page.locator('[data-task-list-row="task-refinement"]')
+    await expect(row).toBeVisible({ timeout: 30_000 })
+    const gate = mock.holdNextTaskRead()
+    await page.keyboard.press('/')
+    await page.locator('#task-search').fill('Preparar')
+    await gate.started
+    expect(mock.emitTaskEvent({ action: 'access_revoked', target_type: 'task', target_id: 'task-refinement', operation_id: 'qa-revocation-pending' })).toBe(true)
+    await expect(row).toHaveCount(0)
+    gate.release()
+    await page.waitForTimeout(600)
+    await expect(row).toHaveCount(0)
+    await expect(page.getByText('Preparar propuesta profesional', { exact: true })).toHaveCount(0)
+  })
+
+  test('visual reference capture', async ({ page }, testInfo) => {
+    test.skip(process.env.CLARIN_VISUAL_REFERENCE !== '1', 'Explicit before/after visual comparison only')
+    await installWorkspaceMock(page)
+    for (const width of [375, 768, 1024, 1440]) {
+      await page.setViewportSize({ width, height: 900 })
+      await page.goto(`${baseURL}/dashboard/tasks`)
+      await expect(page.locator('[data-task-workspace-canvas]')).toBeVisible({ timeout: 30_000 })
+      await expect(page.locator('[data-task-list-row="task-refinement"]')).toBeVisible()
+      await page.screenshot({ path: testInfo.outputPath(`tasks-reference-${width}.png`), fullPage: true })
+    }
+  })
+
+  test('integrity keeps the calm toolbar and staged customization inside 375 768 1024 and 1440 viewports', async ({ page }, testInfo) => {
+    await installWorkspaceMock(page)
+    for (const width of [375, 768, 1024, 1440]) {
+      await page.setViewportSize({ width, height: 900 })
+      await page.goto(`${baseURL}/dashboard/tasks`)
+      await expect(page.locator('[data-task-workspace-canvas]')).toBeVisible({ timeout: 30_000 })
+      await expect(page.getByRole('button', { name: 'Nueva tarea', exact: true })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Más vistas', exact: true })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Gantt', exact: true })).toHaveCount(0)
+      await expect(page.getByRole('button', { name: 'Resumen', exact: true })).toHaveCount(0)
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+      expect(overflow, `global overflow at ${width}`).toBeLessThanOrEqual(1)
+      await page.screenshot({ path: testInfo.outputPath(`tasks-toolbar-${width}.png`), fullPage: true })
+      await page.getByRole('button', { name: 'Personalizar vista', exact: true }).click()
+      const dialog = page.getByRole('dialog', { name: 'Personalizar vista' })
+      const box = await dialog.boundingBox()
+      expect(box).not.toBeNull()
+      expect(box!.x).toBeGreaterThanOrEqual(0)
+      expect(box!.x + box!.width).toBeLessThanOrEqual(width + 1)
+      expect(box!.y + box!.height).toBeLessThanOrEqual(901)
+      await dialog.getByRole('button', { name: 'Prioridad', exact: true }).click()
+      await expect(page.locator('[data-task-list-group="medium"]')).toHaveCount(0)
+      await dialog.getByRole('button', { name: 'Cancelar', exact: true }).click()
+      await expect(page.getByRole('button', { name: 'Personalizar vista', exact: true })).toContainText('Estado')
+    }
+  })
+
+  test('integrity keeps task controls usable with docked Eros reduced motion and an emulated 125 percent viewport scale', async ({ page, browser }, testInfo) => {
+    await installWorkspaceMock(page)
+    await page.setViewportSize({ width: 1440, height: 1000 })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.goto(`${baseURL}/dashboard/tasks`)
+    const workspace = page.locator('[data-task-workspace-canvas]')
+    await expect(workspace).toBeVisible({ timeout: 30_000 })
+    const initial = await workspace.boundingBox()
+    await page.getByRole('button', { name: 'Abrir Eros', exact: true }).filter({ visible: true }).first().click()
+    const eros = page.getByLabel('Asistente Eros')
+    await expect(eros).toBeVisible()
+    const dock = eros.getByTitle('Acoplar a la derecha')
+    if (await dock.isVisible()) await dock.click()
+    await expect(eros.getByRole('separator', { name: 'Ajustar ancho del panel Eros' })).toBeVisible()
+    await expect.poll(async () => (await workspace.boundingBox())?.width || 0).toBeLessThan(initial!.width)
+    await expect(page.getByRole('button', { name: 'Nueva tarea', exact: true })).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('tasks-eros-reduced-motion.png'), fullPage: true })
+    await eros.getByTitle('Cerrar', { exact: true }).click()
+    // Emulate the CSS viewport and pixel ratio of a 1440x1000 surface scaled
+    // to 125%. This checks layout under scaling, not the browser's Ctrl+ UI.
+    const scaledContext = await browser.newContext({ viewport: { width: 1152, height: 800 }, deviceScaleFactor: 1.25, reducedMotion: 'reduce' })
+    try {
+      const scaledPage = await scaledContext.newPage()
+      await installWorkspaceMock(scaledPage)
+      await scaledPage.goto(`${baseURL}/dashboard/tasks`)
+      await expect(scaledPage.locator('[data-task-workspace-canvas]')).toBeVisible({ timeout: 30_000 })
+      for (const name of ['Nueva tarea', 'Personalizar vista', 'Vistas guardadas']) {
+        const button = scaledPage.getByRole('button', { name, exact: true })
+        await expect(button).toBeVisible()
+        const box = await button.boundingBox()
+        expect(box).not.toBeNull()
+        expect(box!.x).toBeGreaterThanOrEqual(0)
+        expect(box!.x + box!.width).toBeLessThanOrEqual(1153)
+      }
+      await scaledPage.getByRole('button', { name: 'Personalizar vista', exact: true }).click()
+      const dialog = scaledPage.getByRole('dialog', { name: 'Personalizar vista' })
+      await expect(dialog).toBeVisible()
+      await dialog.getByRole('button', { name: 'Cancelar', exact: true }).click()
+      await expect.poll(() => scaledPage.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
+      await scaledPage.screenshot({ path: testInfo.outputPath('tasks-emulated-scale-125.png'), fullPage: true })
+    } finally {
+      await scaledContext.close()
+    }
+  })
 
   test('opens the global overdue inbox with the dashboard predicate and then the real task', async ({ page }) => {
     await installWorkspaceMock(page)
@@ -1382,8 +1561,7 @@ test.describe('Clarin Work workspace refinement', () => {
     await page.setViewportSize({ width: 1280, height: 820 })
     await page.goto(`${baseURL}/dashboard/tasks`)
 
-    await page.getByRole('button', { name: /^Agrupar tareas:/ }).click()
-    await page.getByRole('button', { name: /^Responsable Agrupa por responsable/ }).click()
+    await customizeWorkspaceView(page, 'Responsable')
     const source = page.locator('[data-task-list-row="task-refinement"]')
     const analystGroup = page.locator('section[data-task-list-group="user-analyst"]')
     await expect(source).toBeVisible()
@@ -1524,7 +1702,8 @@ test.describe('Clarin Work workspace refinement', () => {
     await page.goto(`${baseURL}/dashboard/tasks`)
     await expect(page.locator('[data-task-view-tabs]')).toBeVisible({ timeout: 15_000 })
 
-    await page.getByRole('button', { name: 'Administrar Entorno' }).click()
+    await page.getByRole('button', { name: 'Entorno General', exact: true }).click()
+    await page.getByRole('dialog', { name: 'Seleccionar Entorno' }).getByRole('button', { name: 'Administrar', exact: true }).click()
     const environmentWindow = page.locator('[data-window-kind="task-environment-window"]')
     await expect(environmentWindow).toBeVisible()
     await environmentWindow.getByLabel('Nombre').fill('General QA')
@@ -1632,7 +1811,7 @@ test.describe('Clarin Work workspace refinement', () => {
     await expect(page.getByRole('button', { name: 'Expandir subtareas de Preparar propuesta profesional' })).toHaveAttribute('aria-expanded', 'false')
     expect(mock.subtaskReads).toHaveLength(1)
 
-    await page.getByRole('button', { name: 'Expandir todas las subtareas' }).click()
+    await customizeWorkspaceView(page, 'Expandidas')
     await expect(page.locator('[data-task-subtask-row="subtask-open"]')).toBeVisible()
     expect(mock.subtaskReads).toHaveLength(2)
     await expect.poll(() => page.evaluate(() => Object.entries(localStorage).find(([key]) => key.endsWith(':list-subtasks:v1'))?.[1])).toBe('expanded')
@@ -1646,7 +1825,7 @@ test.describe('Clarin Work workspace refinement', () => {
     const parentGrip = parentRow.locator('[data-task-row-grip]')
     const parentCompletion = parentRow.locator('[data-task-completion-control]')
     await expect(parentGrip).toHaveCSS('opacity', '0')
-    await expect(parentCompletion).toHaveCSS('opacity', '0')
+    await expect(parentCompletion).toHaveCSS('opacity', '1')
     await parentRow.hover()
     await expect(parentGrip).toHaveCSS('opacity', '1')
     await expect(parentCompletion).toHaveCSS('opacity', '1')
@@ -1712,15 +1891,14 @@ test.describe('Clarin Work workspace refinement', () => {
     await page.setViewportSize({ width: 1398, height: 760 })
     await page.goto(`${baseURL}/dashboard/tasks`)
 
-    const groupingTrigger = page.getByRole('button', { name: /^Agrupar tareas:/ })
+    const groupingTrigger = page.getByRole('button', { name: 'Personalizar vista', exact: true })
     await expect(groupingTrigger).toContainText('Estado')
-    await groupingTrigger.click()
-    await page.getByRole('button', { name: /^Prioridad Ordena por nivel de prioridad/ }).click()
+    await customizeWorkspaceView(page, 'Prioridad')
     await expect(page.locator('[data-task-list-group="medium"]')).toContainText('Media')
     await expect.poll(() => page.evaluate(() => localStorage.getItem('tasks:list-group-by'))).toBe('priority')
 
     await page.reload()
-    await expect(page.getByRole('button', { name: /^Agrupar tareas:/ })).toContainText('Prioridad')
+    await expect(page.getByRole('button', { name: 'Personalizar vista', exact: true })).toContainText('Prioridad')
     await expect(page.locator('[data-task-list-group="medium"]')).toBeVisible()
 
     await page.getByText('Preparar propuesta profesional', { exact: true }).click()
@@ -1750,7 +1928,7 @@ test.describe('Clarin Work workspace refinement', () => {
     await installWorkspaceMock(page)
     await page.setViewportSize({ width: 1398, height: 760 })
     await page.goto(`${baseURL}/dashboard/tasks`)
-    await page.getByRole('button', { name: 'Gantt' }).click()
+    await selectAdvancedWorkspaceView(page, 'Gantt')
     await expect(page.getByText('Cronograma del proyecto')).toBeVisible()
 
     let currentScale = 'Flexible'
@@ -1766,8 +1944,8 @@ test.describe('Clarin Work workspace refinement', () => {
     await expect(page.getByText('120px', { exact: true })).toBeVisible()
     for (let index = 0; index < 15; index += 1) await zoomOut.click()
     await expect(page.getByText('8px', { exact: true })).toBeVisible()
-    await page.getByText('Reprogramar dependencias').locator('input').check()
-    await expect(page.getByText('Reprogramar dependencias').locator('input')).toBeChecked()
+    await page.getByRole('checkbox', { name: 'Respetar dependencias al mover' }).check()
+    await expect(page.getByRole('checkbox', { name: 'Respetar dependencias al mover' })).toBeChecked()
     await expect(page.getByRole('button', { name: 'Cambiar inicio' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Cambiar entrega' })).toBeVisible()
   })
@@ -2027,7 +2205,7 @@ test.describe('Clarin Work workspace refinement', () => {
     await expect(detail).toHaveAttribute('data-qa-cross-view-inspector', 'yes')
     await expect(detail.getByPlaceholder('Escribe un comentario…')).toBeVisible()
 
-    await page.getByRole('button', { name: 'Gantt', exact: true }).click()
+    await selectAdvancedWorkspaceView(page, 'Gantt')
     const primaryGanttRow = page.locator('[data-task-gantt-row="task-refinement"]')
     await primaryGanttRow.locator('[data-task-gantt-open="task-refinement"]').click()
     await expect(detail.getByRole('textbox', { name: 'Título de la tarea' })).toHaveValue('Preparar propuesta profesional')

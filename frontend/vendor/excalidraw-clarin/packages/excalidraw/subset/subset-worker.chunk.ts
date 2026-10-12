@@ -8,15 +8,17 @@
  */
 
 import { Commands, subsetToBinary } from "./subset-shared.chunk";
+import { resolveClarinSubsetWorkerUrl } from "./clarinSubsetWorkerUrl";
 
 /**
  * Due to this export (and related dynamic import), this worker code will be included in the bundle automatically (as a separate chunk),
  * without the need for esbuild / vite /rollup plugins and special browser / server treatment.
  *
- * `import.meta.url` is undefined in nodejs
+ * Next rewrites import.meta.url to the package's build-time file:// location.
+ * Clarin publishes the worker as a self-contained, same-origin module instead.
  */
-export const WorkerUrl: URL | undefined = import.meta.url
-  ? new URL(import.meta.url)
+export const WorkerUrl: URL | undefined = typeof window !== "undefined"
+  ? resolveClarinSubsetWorkerUrl(window.EXCALIDRAW_ASSET_PATH, window.location.href)
   : undefined;
 
 // run only in the worker context

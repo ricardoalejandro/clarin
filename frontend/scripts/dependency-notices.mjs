@@ -4,7 +4,7 @@ import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const defaultRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const defaultSBOM = 'third_party/excalidraw/excalidraw-0.18.1-clarin.7.cdx.json'
+const defaultSBOM = 'third_party/excalidraw/excalidraw-0.18.1-clarin.8.cdx.json'
 const defaultEvidence = 'third_party/excalidraw/dependency-license-evidence.json'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const compare = (left, right) => left < right ? -1 : left > right ? 1 : 0

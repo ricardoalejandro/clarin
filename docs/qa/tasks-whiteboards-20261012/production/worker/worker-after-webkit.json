@@ -1,0 +1,14 @@
+{
+  "browser": "webkit",
+  "workerURLs": [
+    "http://localhost:3011/vendor/whiteboards-editor/0.18.1-clarin.8/subset-worker.js"
+  ],
+  "replies": [
+    {
+      "url": "http://localhost:3011/vendor/whiteboards-editor/0.18.1-clarin.8/subset-worker.js",
+      "bytes": 2248
+    }
+  ],
+  "consoleErrors": [],
+  "pageErrors": []
+}

@@ -20,25 +20,23 @@ describe('TaskWorkspace navigation actions', () => {
   it('keeps management actions in one row while expanded and preserves permission states', () => {
     const onTrash = vi.fn()
     const onArchive = vi.fn()
-    const onManage = vi.fn()
-    const { rerender } = render(<TaskWorkspaceManagementActions collapsed={false} canManage archiveSelected={false} trashSelected={false} onArchive={onArchive} onTrash={onTrash} onManage={onManage} />)
+    const { rerender } = render(<TaskWorkspaceManagementActions collapsed={false} canManage archiveSelected={false} trashSelected={false} onArchive={onArchive} onTrash={onTrash} />)
 
     const actions = screen.getByRole('button', { name: 'Papelera' }).parentElement
-    expect(actions).toHaveClass('grid-cols-3')
+    expect(actions).toHaveClass('grid-cols-2')
     fireEvent.click(screen.getByRole('button', { name: 'Archivo' }))
     fireEvent.click(screen.getByRole('button', { name: 'Papelera' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Administrar' }))
+    expect(screen.queryByRole('button', { name: 'Administrar' })).not.toBeInTheDocument()
     expect(onArchive).toHaveBeenCalledTimes(1)
     expect(onTrash).toHaveBeenCalledTimes(1)
-    expect(onManage).toHaveBeenCalledTimes(1)
 
-    rerender(<TaskWorkspaceManagementActions collapsed={false} canManage={false} archiveSelected={false} trashSelected={false} onArchive={onArchive} onTrash={onTrash} onManage={onManage} />)
+    rerender(<TaskWorkspaceManagementActions collapsed={false} canManage={false} archiveSelected={false} trashSelected={false} onArchive={onArchive} onTrash={onTrash} />)
     expect(screen.getByRole('button', { name: 'Papelera' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Administrar' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Administrar' })).not.toBeInTheDocument()
   })
 
   it('uses one collapsed management trigger, portals its menu and restores focus on Escape', async () => {
-    render(<TaskWorkspaceManagementActions collapsed canManage archiveSelected={false} trashSelected={false} onArchive={() => {}} onTrash={() => {}} onManage={() => {}} />)
+    render(<TaskWorkspaceManagementActions collapsed canManage archiveSelected={false} trashSelected={false} onArchive={() => {}} onTrash={() => {}} />)
     const trigger = screen.getByRole('button', { name: 'Gestión del Entorno' })
     fireEvent.click(trigger)
     const menu = screen.getByRole('menu', { name: 'Gestión del Entorno' })

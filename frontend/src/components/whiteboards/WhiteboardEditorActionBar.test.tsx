@@ -4,6 +4,7 @@ import type { ComponentProps } from 'react'
 import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import {
   WhiteboardEditorActionBar,
+  WhiteboardLibraryMenuItem,
   whiteboardLibrarySidebarToggle,
 } from './WhiteboardEditorActionBar'
 
@@ -38,19 +39,19 @@ describe('WhiteboardEditorActionBar', () => {
   it('renders one ordered action island without a duplicate manual-save button', () => {
     renderBar()
 
-    expect(screen.getAllByRole('button', { name: 'Biblioteca' })).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: 'Biblioteca' })).not.toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: 'Compartir desde Clarin' })).toHaveLength(1)
     expect(screen.getAllByLabelText('Guardado en Clarin')).toHaveLength(1)
     expect(screen.getAllByRole('button', { name: 'Más acciones de Pizarras' })).toHaveLength(1)
     expect(screen.queryByRole('button', { name: /Guardar ahora/ })).not.toBeInTheDocument()
     expect(Array.from(document.querySelectorAll('[data-whiteboard-action]')).map(node => node.getAttribute('data-whiteboard-action')))
-      .toEqual(['library', 'share', 'more'])
+      .toEqual(['share', 'more'])
   })
 
   it('moves Compartir out of the island when measured space is compact', () => {
     renderBar({ showShare: false })
     expect(screen.queryByRole('button', { name: 'Compartir desde Clarin' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Biblioteca' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Biblioteca' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Más acciones de Pizarras' })).toBeInTheDocument()
   })
 
@@ -67,8 +68,8 @@ describe('WhiteboardEditorActionBar', () => {
 
   it('owns the library sidebar toggle without relying on Excalidraw fallback controls', () => {
     const api = editorAPI()
-    renderBar({ editorAPI: api })
-    fireEvent.click(screen.getByRole('button', { name: 'Biblioteca' }))
+    render(<WhiteboardLibraryMenuItem editorAPI={api} onSelect={vi.fn()} />)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Biblioteca' }))
     expect(api.toggleSidebar).toHaveBeenCalledWith({ name: 'default', tab: 'library', force: true })
     expect(whiteboardLibrarySidebarToggle({ name: 'default', tab: 'library' })).toEqual({
       name: 'default', tab: 'library', force: false,
