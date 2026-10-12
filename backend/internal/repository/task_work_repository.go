@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -3199,40 +3198,47 @@ func (r *TaskWorkRepository) RestoreTask(ctx context.Context, accountID, actorID
 	return tx.Commit(ctx)
 }
 
-func (r *TaskWorkRepository) Summary(ctx context.Context, accountID, actorID uuid.UUID, environmentID, folderID, listID *uuid.UUID, sharedOnly bool) (map[string]any, error) {
-	conditions := []string{"t.account_id=$1", "t.deleted_at IS NULL", "t.parent_task_id IS NULL", taskActorCanViewSQL("t", "l", "$2")}
-	args := []any{accountID, actorID}
-	idx := 3
+func (r *TaskWorkRepository) Summary(ctx context.Context, accountID, actorID uuid.UUID, environmentID, folderID, listID *uuid.UUID, sharedOnly bool, queryFilters ...map[string]string) (map[string]any, error) {
+	filters := map[string]string{"include_closed": "true"}
+	if len(queryFilters) > 0 {
+		for key, value := range queryFilters[0] {
+			filters[key] = value
+		}
+	}
+	filters["_actor_user_id"] = actorID.String()
 	if environmentID != nil {
-		conditions = append(conditions, fmt.Sprintf("l.environment_id=$%d", idx))
-		args = append(args, *environmentID)
-		idx++
+		filters["environment_id"] = environmentID.String()
 	}
 	if folderID != nil {
-		conditions = append(conditions, fmt.Sprintf("l.folder_id=$%d", idx))
-		args = append(args, *folderID)
-		idx++
+		filters["folder_id"] = folderID.String()
 	}
 	if listID != nil {
-		conditions = append(conditions, fmt.Sprintf("t.list_id=$%d", idx))
-		args = append(args, *listID)
-		idx++
+		filters["list_id"] = listID.String()
 	}
 	if sharedOnly {
-		conditions = append(conditions, taskActorDirectSharedSQL("t", "l", fmt.Sprintf("$%d", idx)))
-		args = append(args, actorID)
+		filters["shared_with_me"] = "true"
 	}
-	where := strings.Join(conditions, " AND ")
-	query := fmt.Sprintf(`SELECT COUNT(*),COUNT(*) FILTER(WHERE s.category='done'),COUNT(*) FILTER(WHERE s.category='active'),
-		COUNT(*) FILTER(WHERE t.due_at<NOW() AND s.category NOT IN('done','cancelled')),
-		COUNT(DISTINCT t.assigned_to),COALESCE(AVG(CASE WHEN s.category='cancelled' THEN NULL ELSE t.progress END),0)
-		FROM tasks t JOIN task_lists l ON l.account_id=t.account_id AND l.id=t.list_id LEFT JOIN task_statuses s ON s.account_id=t.account_id AND s.id=t.status_id WHERE %s`, where)
-	var total, done, active, overdue, owners int
-	var progress float64
-	if err := r.db.QueryRow(ctx, query, args...).Scan(&total, &done, &active, &overdue, &owners, &progress); err != nil {
+	where, args := taskCollectionPredicate(accountID, filters)
+	query := `WITH filtered AS (SELECT t.id,t.status_id,COALESCE(ts.name,'Sin estado') AS status_name,COALESCE(ts.color,'#64748B') AS status_color,
+	 ` + taskEffectiveCategorySQL("t", "ts") + ` AS category,t.assigned_to,COALESCE(ua.display_name,ua.username,'Sin responsable') AS owner_name,t.due_at,
+	 CASE WHEN ` + taskEffectiveCategorySQL("t", "ts") + `='done' THEN 100
+	 WHEN COALESCE(t.progress_mode,'manual')='automatic' THEN COALESCE((SELECT ROUND(100.0*COUNT(*) FILTER(WHERE child_status.category='done')/NULLIF(COUNT(*),0)) FROM tasks child LEFT JOIN task_statuses child_status ON child_status.account_id=child.account_id AND child_status.id=child.status_id WHERE child.account_id=t.account_id AND child.parent_task_id=t.id AND child.deleted_at IS NULL),0)
+	 ELSE COALESCE(t.manual_progress,t.progress,0) END AS progress
+	 FROM tasks t ` + taskJoins + ` WHERE ` + where + `)
+	 SELECT jsonb_build_object('total',COUNT(*),'done',COUNT(*) FILTER(WHERE category='done'),'active',COUNT(*) FILTER(WHERE category='active'),
+	 'overdue',COUNT(*) FILTER(WHERE due_at<NOW() AND category NOT IN ('done','cancelled')),'owners',COUNT(DISTINCT assigned_to),
+	 'progress',COALESCE(AVG(progress) FILTER(WHERE category<>'cancelled'),0),
+	 'by_status',COALESCE((SELECT jsonb_agg(row_to_json(grouped) ORDER BY grouped.name,grouped.id) FROM (SELECT COALESCE(status_id::text,'none') AS id,status_name AS name,status_color AS color,COUNT(*) AS count FROM filtered GROUP BY status_id,status_name,status_color) grouped),'[]'::jsonb),
+	 'by_owner',COALESCE((SELECT jsonb_agg(row_to_json(grouped) ORDER BY grouped.name,grouped.id) FROM (SELECT assigned_to AS id,owner_name AS name,COUNT(*) AS count,COUNT(*) FILTER(WHERE due_at<NOW() AND category NOT IN('done','cancelled')) AS overdue FROM filtered GROUP BY assigned_to,owner_name) grouped),'[]'::jsonb)) FROM filtered`
+	var raw []byte
+	if err := r.db.QueryRow(ctx, query, args...).Scan(&raw); err != nil {
 		return nil, err
 	}
-	return map[string]any{"total": total, "done": done, "active": active, "overdue": overdue, "owners": owners, "progress": progress}, nil
+	var summary map[string]any
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		return nil, err
+	}
+	return summary, nil
 }
 
 func (r *TaskWorkRepository) GanttDependencies(ctx context.Context, accountID uuid.UUID, taskIDs []uuid.UUID) ([]*domain.TaskDependency, error) {

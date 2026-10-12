@@ -68,6 +68,17 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('TaskEditorModal', () => {
+  it('replays the same creation after an unknown commit outcome', async () => {
+    vi.mocked(apiPost).mockResolvedValueOnce({ success: false, error: 'Respuesta perdida' })
+      .mockResolvedValueOnce({ success: true, data: { task: savedTask } })
+    const { props } = renderEditor({ defaultTitle: 'Nueva tarea' })
+    fireEvent.click(screen.getByRole('button', { name: 'Crear tarea' }))
+    await waitFor(() => expect(screen.getByText(/No recibimos confirmación/)).toBeVisible())
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar creación' }))
+    await waitFor(() => expect(props.onSaved).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(apiPost).mock.calls[1]).toEqual(vi.mocked(apiPost).mock.calls[0])
+  })
+
   it('preserves a draft and blocks a new lead relation after policy revocation', async () => {
     const rendered = renderEditor({ relatedScope: { contactId: 'contact-1', leadId: 'lead-1' }, defaultTitle: 'Borrador comercial' })
     leadPolicy.enabled = false

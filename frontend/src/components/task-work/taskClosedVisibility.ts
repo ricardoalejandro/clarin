@@ -37,8 +37,9 @@ export function shouldPreserveConcurrentTask(
   tombstoned: boolean,
   filters: TaskFilters,
   view: TaskViewMode,
+  matchesActiveQuery = false,
 ) {
-  return !queryActive
+  return (!queryActive || matchesActiveQuery)
     && !tombstoned
     && (task.version || 0) > versionAtRequestStart
     && taskMatchesClosedVisibility(task, filters, view)

@@ -81,7 +81,8 @@ func (r *TaskWorkRepository) BulkUpdateTasks(ctx context.Context, accountID uuid
 		var version int64
 		var parentID *uuid.UUID
 		var currentAssignee uuid.UUID
-		if err := tx.QueryRow(ctx, `SELECT COALESCE(version,1),parent_task_id,assigned_to FROM tasks WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE`, accountID, item.ID).Scan(&version, &parentID, &currentAssignee); err != nil {
+		var startAt *time.Time
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(version,1),parent_task_id,assigned_to,start_at FROM tasks WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE`, accountID, item.ID).Scan(&version, &parentID, &currentAssignee, &startAt); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, ErrTaskBulkUpdateInvalid
 			}
@@ -92,6 +93,12 @@ func (r *TaskWorkRepository) BulkUpdateTasks(ctx context.Context, accountID uuid
 		}
 		if version != item.Version {
 			return nil, ErrTaskVersionConflict
+		}
+		if input.Property == "due_at" && input.Value != nil {
+			due, ok := input.Value.(time.Time)
+			if !ok || !validTaskDateRange(startAt, &due) {
+				return nil, ErrTaskBulkUpdateInvalid
+			}
 		}
 		currentAssignees[item.ID] = currentAssignee
 	}
@@ -158,6 +165,11 @@ func (r *TaskWorkRepository) BulkUpdateTasks(ctx context.Context, accountID uuid
 		}
 		if _, err := tx.Exec(ctx, command, accountID, item.ID, value); err != nil {
 			return nil, err
+		}
+		if input.Property == "due_at" || input.Property == "assigned_to" {
+			if err := syncTaskReminderTx(ctx, tx, item.ID); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -275,27 +287,64 @@ func (r *TaskWorkRepository) RescheduleTaskChain(ctx context.Context, accountID 
 	if err := lockAndRequireTaskAccessTx(ctx, tx, accountID, input.ActorID, ids, domain.TaskAccessEdit); err != nil {
 		return nil, err
 	}
-	var oldStart *time.Time
-	var version int64
-	if err := tx.QueryRow(ctx, `SELECT start_at,COALESCE(version,1) FROM tasks WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL`, accountID, input.TaskID).Scan(&oldStart, &version); err != nil {
-		return nil, err
+	schedules := make(map[uuid.UUID]taskSchedule, len(ids))
+	for _, id := range ids {
+		var schedule taskSchedule
+		var version int64
+		if err := tx.QueryRow(ctx, `SELECT start_at,due_at,COALESCE(version,1) FROM tasks WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL`, accountID, id).Scan(&schedule.Start, &schedule.Due, &version); err != nil {
+			return nil, err
+		}
+		if id == input.TaskID && version != input.Version {
+			return nil, ErrTaskVersionConflict
+		}
+		schedules[id] = schedule
 	}
-	if version != input.Version {
-		return nil, ErrTaskVersionConflict
+	previous := make(map[uuid.UUID]taskSchedule, len(schedules))
+	for id, value := range schedules {
+		previous[id] = value
 	}
-	if _, err := tx.Exec(ctx, `UPDATE tasks SET start_at=$3,due_at=$4,overdue_notified_at=NULL,updated_at=NOW(),version=version+1 WHERE account_id=$1 AND id=$2`, accountID, input.TaskID, input.StartAt, input.DueAt); err != nil {
-		return nil, err
-	}
-	if input.RescheduleDependencies && oldStart != nil {
-		delta := input.StartAt.Sub(*oldStart)
-		for _, id := range ids[1:] {
-			if _, err := tx.Exec(ctx, `UPDATE tasks SET start_at=CASE WHEN start_at IS NULL THEN NULL ELSE start_at+$3::interval END,due_at=CASE WHEN due_at IS NULL THEN NULL ELSE due_at+$3::interval END,overdue_notified_at=NULL,updated_at=NOW(),version=version+1 WHERE account_id=$1 AND id=$2`, accountID, id, delta.String()); err != nil {
+	schedules[input.TaskID] = taskSchedule{Start: &input.StartAt, Due: &input.DueAt}
+	if input.RescheduleDependencies {
+		rows, err := tx.Query(ctx, `SELECT predecessor_task_id,successor_task_id,lag_minutes FROM task_dependencies WHERE account_id=$1 AND predecessor_task_id=ANY($2::uuid[]) AND successor_task_id=ANY($2::uuid[]) AND dependency_type='finish_to_start'`, accountID, ids)
+		if err != nil {
+			return nil, err
+		}
+		edges := make([]taskScheduleEdge, 0)
+		for rows.Next() {
+			var edge taskScheduleEdge
+			if err := rows.Scan(&edge.From, &edge.To, &edge.LagMinutes); err != nil {
+				rows.Close()
 				return nil, err
 			}
+			edges = append(edges, edge)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		schedules, err = propagateTaskSchedule(schedules, edges)
+		if err != nil {
+			return nil, err
 		}
 	}
+	changed := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		next, old := schedules[id], previous[id]
+		if id != input.TaskID && equalTaskScheduleTime(next.Start, old.Start) && equalTaskScheduleTime(next.Due, old.Due) {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `UPDATE tasks SET start_at=$3,due_at=$4,overdue_notified_at=NULL,updated_at=NOW(),version=version+1 WHERE account_id=$1 AND id=$2`, accountID, id, next.Start, next.Due); err != nil {
+			return nil, err
+		}
+		if err := syncTaskReminderTx(ctx, tx, id); err != nil {
+			return nil, err
+		}
+		changed = append(changed, id)
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return &TaskBulkMutationResult{TaskIDs: ids}, nil
+	return &TaskBulkMutationResult{TaskIDs: changed}, nil
 }

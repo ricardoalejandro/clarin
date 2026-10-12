@@ -431,6 +431,8 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 	task.CollaboratorsActor = &userID
 	task.MutationActor = &userID
 	task.MutationOperationID = operationID
+	task.CreatePayloadHash, _ = taskCreatePayloadHash(c.Body())
+	task.CreatePayloadHash = "task:" + task.CreatePayloadHash
 	if err := s.services.Task.Create(c.Context(), task); err != nil {
 		var confirmation *repository.TaskParticipantAccessConfirmationError
 		if errors.As(err, &confirmation) {
@@ -439,7 +441,13 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 		}
 		return taskWorkError(c, err)
 	}
-	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, task.ID, &userID, "created", fiber.Map{"status_id": task.StatusID})
+	if task.CreateReplayed {
+		full, err := s.services.Task.GetByIDForActor(c.Context(), task.ID, accountID, userID)
+		if err != nil {
+			return taskWorkError(c, err)
+		}
+		return c.JSON(taskCreateResponse(full, *operationID, s.taskHierarchyCounts(c.Context(), accountID, userID)))
+	}
 
 	// Auto-create observation (interaction) when task is linked to a lead or contact
 	if task.LeadID != nil || task.ContactID != nil {

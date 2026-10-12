@@ -53,6 +53,8 @@ func taskWorkError(c *fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "El estado tiene tareas; selecciona un estado de reemplazo", "code": "status_replacement_required"})
 	case errors.Is(err, repository.ErrTaskWorkflowInvalid):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "El flujo debe conservar al menos un estado inicial y uno completado", "code": "workflow_invariant"})
+	case errors.Is(err, repository.ErrTaskOperationPayloadConflict):
+		return c.Status(409).JSON(fiber.Map{"success": false, "code": "operation_payload_conflict", "error": "La operación ya existe con otro contenido. Recupera la creación pendiente antes de continuar."})
 	case errors.Is(err, repository.ErrTaskVersionConflict):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La tarea cambió en otra sesión; recarga antes de guardar", "code": "version_conflict"})
 	case errors.Is(err, repository.ErrTaskOrderInvalid):
@@ -1536,6 +1538,8 @@ func (s *Server) handleCreateTaskChild(c *fiber.Ctx) error {
 	if child.StartAt != nil && child.DueAt != nil && child.DueAt.Before(*child.StartAt) {
 		return c.Status(422).JSON(fiber.Map{"success": false, "error": "La fecha final no puede ser anterior al inicio"})
 	}
+	child.CreatePayloadHash, _ = taskCreatePayloadHash(c.Body())
+	child.CreatePayloadHash = "child:" + parentID.String() + ":" + child.CreatePayloadHash
 	if err := s.services.Task.Create(c.Context(), child); err != nil {
 		var confirmation *repository.TaskParticipantAccessConfirmationError
 		if errors.As(err, &confirmation) {
@@ -1548,7 +1552,6 @@ func (s *Server) handleCreateTaskChild(c *fiber.Ctx) error {
 	if loadErr != nil {
 		return taskWorkError(c, loadErr)
 	}
-	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, parentID, &userID, "subtask_created", fiber.Map{"subtask_id": child.ID})
 	s.invalidateTasksCache(accountID)
 	counts := s.taskHierarchyCounts(c.Context(), accountID, userID)
 	return c.Status(fiber.StatusCreated).JSON(taskChildCreateResponse(full, *operationID, counts))
@@ -1994,8 +1997,12 @@ func (s *Server) handleGetTaskWorkSummary(c *fiber.Ctx) error {
 			return taskWorkError(c, accessErr)
 		}
 	}
-	sharedOnly := strings.EqualFold(strings.TrimSpace(c.Query("shared_with_me")), "true")
-	summary, err := s.repos.TaskWork.Summary(c.Context(), accountID, userID, environmentID, folderID, listID, sharedOnly)
+	filters := taskQueryFilters(c)
+	if !normalizeTaskQueryBooleanFilter(filters, "include_closed") || !normalizeTaskQueryBooleanFilter(filters, "shared_with_me") || invalidTaskQueryDateFilter(filters) != "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Filtros de tareas inválidos"})
+	}
+	sharedOnly := filters["shared_with_me"] == "true"
+	summary, err := s.repos.TaskWork.Summary(c.Context(), accountID, userID, environmentID, folderID, listID, sharedOnly, filters)
 	if err != nil {
 		return taskWorkError(c, err)
 	}

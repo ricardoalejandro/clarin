@@ -52,6 +52,8 @@ func workEventError(c *fiber.Ctx, err error) error {
 	case errors.As(err, &conflict):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "schedule_conflict_confirmation_required",
 			"error": "El horario se cruza con otro compromiso", "conflicts": conflict.Conflicts})
+	case errors.Is(err, repository.ErrWorkEventAgendaCapacity):
+		return c.Status(422).JSON(fiber.Map{"success": false, "error": "El rango contiene demasiados eventos. Reduce el rango o selecciona una lista.", "code": "agenda_capacity_exceeded"})
 	case errors.Is(err, repository.ErrWorkEventVersionConflict):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "version_conflict", "error": "El evento cambió en otra sesión"})
 	case errors.Is(err, repository.ErrWorkEventNotFound):
@@ -278,7 +280,11 @@ type agendaResponseItem struct {
 }
 
 func agendaItemSort(item agendaResponseItem) string {
-	return item.Sort + "|" + item.Key
+	value, err := time.Parse(time.RFC3339Nano, item.Sort)
+	if err != nil {
+		return item.Sort + "|" + item.Key
+	}
+	return value.UTC().Format("2006-01-02T15:04:05.000000000Z") + "|" + item.Key
 }
 
 func encodeAgendaCursor(item agendaResponseItem) string {
@@ -361,6 +367,12 @@ func (s *Server) handleGetTaskAgenda(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Fuentes de agenda inválidas"})
 	}
+	filters := taskQueryFilters(c)
+	delete(filters, "from")
+	delete(filters, "to")
+	if !normalizeTaskQueryBooleanFilter(filters, "include_closed") || !normalizeTaskQueryBooleanFilter(filters, "shared_with_me") || invalidTaskQueryDateFilter(filters) != "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Filtros de tareas inválidos"})
+	}
 	items := make([]agendaResponseItem, 0, limit+1)
 	var afterSort *time.Time
 	afterKey := ""
@@ -373,7 +385,7 @@ func (s *Server) handleGetTaskAgenda(c *fiber.Ctx) error {
 	}
 	if includeTasks {
 		tasks, taskErr := s.repos.Task.GetAgendaRangeForActor(c.Context(), accountID, actorID, from, to, environmentID, folderID, listID,
-			strings.EqualFold(c.Query("include_closed"), "true"), afterSort, afterKey, limit+1)
+			filters["include_closed"] == "true", afterSort, afterKey, limit+1, filters)
 		if taskErr != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo cargar la agenda"})
 		}
@@ -409,7 +421,7 @@ func (s *Server) handleGetTaskAgenda(c *fiber.Ctx) error {
 	}
 	sort.Slice(items, func(i, j int) bool { return agendaItemSort(items[i]) < agendaItemSort(items[j]) })
 	if cursor != nil {
-		cursorKey := cursor.Sort + "|" + cursor.Key
+		cursorKey := agendaItemSort(agendaResponseItem{Sort: cursor.Sort, Key: cursor.Key})
 		filtered := items[:0]
 		for _, item := range items {
 			if agendaItemSort(item) > cursorKey {

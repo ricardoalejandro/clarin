@@ -68,6 +68,7 @@ import { validateManualProgress } from './taskProgress'
 import TaskProgressControl from './TaskProgressControl'
 import TaskCompletionButton from './TaskCompletionButton'
 import TaskQuickSubtaskComposer, { createTaskQuickSubtaskDraft, type TaskQuickSubtaskDraft } from './TaskQuickSubtaskComposer'
+import { markTaskCreateUncertain, retainTaskCreateOperation, type TaskCreateOperation } from './taskCreateOperation'
 import { taskCompletionTransition } from './taskStatusTransition'
 import { resolveTaskDetailEscape, TASK_DETAIL_ESCAPE_LAYER_SELECTOR } from './taskDetailEscape'
 import { projectTaskVisualUpdate, type TaskVisualUpdate } from './taskVisualProjection'
@@ -286,6 +287,8 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
   const taskWriteQueuesRef = useRef(new Map<string, Promise<void>>())
   const taskSnapshotsRef = useRef(new Map<string, Task>())
   const draftsByTaskRef = useRef(new Map<string, TaskDetailDraft>())
+  const subtaskCreateOperationsRef = useRef(new Map<string, TaskCreateOperation>())
+  const subtaskCreateActiveRef = useRef(new Set<string>())
   const currentDraftRef = useRef<TaskDetailDraft | null>(null)
   const allTasksRef = useRef(allTasks)
   const listsRef = useRef(lists)
@@ -1454,15 +1457,13 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
   const createQuickSubtask = async (draft = subtaskDraft, confirmGrants = false) => {
     const currentTask = taskRef.current
     const title = draft.title.trim()
-    if (!currentTask || !canEditTask(currentTask) || !title || isPending('subtask-create')) return
+    if (!currentTask || !canEditTask(currentTask) || !title || subtaskCreateActiveRef.current.has(currentTask.id)) return
     if (draft.startAt && draft.dueAt && new Date(draft.dueAt) < new Date(draft.startAt)) {
       showFailure('La entrega de la subtarea no puede ser anterior al inicio.')
       return
     }
     const requestedTaskId = currentTask.id
-    const operationID = crypto.randomUUID()
-    beginPending('subtask-create', requestedTaskId)
-    const result = await apiPost<TaskMutationResponse>(`/api/tasks/${currentTask.id}/children`, {
+    const operation = retainTaskCreateOperation(subtaskCreateOperationsRef.current.get(requestedTaskId) || null, {
       title,
       assigned_to: draft.assignedTo,
       status_id: draft.statusId,
@@ -1470,10 +1471,20 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
       start_at: draft.startAt ? new Date(draft.startAt).toISOString() : '',
       due_at: draft.dueAt ? new Date(draft.dueAt).toISOString() : '',
       is_all_day: draft.isAllDay,
-      operation_id: operationID,
       confirm_grants: confirmGrants,
     })
+    subtaskCreateOperationsRef.current.set(requestedTaskId, operation)
+    subtaskCreateActiveRef.current.add(requestedTaskId)
+    const operationID = operation.operationID
+    beginPending('subtask-create', requestedTaskId)
+    const result = await apiPost<TaskMutationResponse>(`/api/tasks/${requestedTaskId}/children`, {
+      ...operation.payload,
+      operation_id: operationID,
+      confirm_grants: confirmGrants || operation.payload.confirm_grants,
+    })
     if (result.success && result.data?.task) {
+      subtaskCreateOperationsRef.current.delete(requestedTaskId)
+      clearFailure(requestedTaskId)
       const createdChild = result.data.task
       if (taskIdRef.current === requestedTaskId) {
         setChildren(current => current.some(item => item.id === createdChild.id) ? current : [...current, createdChild])
@@ -1492,7 +1503,12 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
         retry: () => { void createQuickSubtask(draft, true) },
       })
       else showFailure('La subtarea requiere confirmar acceso. Vuelve a la tarea para continuar.', () => onOpenTaskRef.current(requestedTaskId), requestedTaskId)
-    } else if (!result.success) showFailure(result.error || 'No se pudo crear la subtarea', () => { if (taskIdRef.current !== requestedTaskId) onOpenTaskRef.current(requestedTaskId); else void createQuickSubtask(draft) }, requestedTaskId)
+    } else {
+      const uncertain = !result.status || result.status >= 500 || result.status === 408
+      if (uncertain) subtaskCreateOperationsRef.current.set(requestedTaskId, markTaskCreateUncertain(operation))
+      showFailure(uncertain ? 'No recibimos confirmación. Reintenta para recuperar la misma subtarea sin duplicarla.' : result.error || 'No se pudo crear la subtarea', () => { if (taskIdRef.current !== requestedTaskId) onOpenTaskRef.current(requestedTaskId); else void createQuickSubtask(draft, confirmGrants) }, requestedTaskId)
+    }
+    subtaskCreateActiveRef.current.delete(requestedTaskId)
     endPending('subtask-create', requestedTaskId)
   }
 
@@ -1894,7 +1910,7 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
 
     {!task.parent_task_id && <section>
       <div className="mb-3 flex items-center justify-between"><div><h3 className="text-sm font-bold text-slate-800">Subtareas <span className="font-normal text-slate-400">{children.filter(item => item.status_detail?.category === 'done').length}/{children.length}</span></h3><p className="mt-1 text-[11px] text-slate-400">Crea pasos asignables sin perder el contexto.</p></div></div>
-      {canEdit && <div className="mb-3"><TaskQuickSubtaskComposer parent={task} value={subtaskDraft} statuses={statuses} users={users} pending={isPending('subtask-create')} onChange={draft => { subtaskDraftTouchedRef.current = true; setSubtaskDraft(draft) }} onSubmit={draft => createQuickSubtask(draft)} onCancel={() => { subtaskDraftTouchedRef.current = false; setSubtaskDraft(createTaskQuickSubtaskDraft(task, statuses)) }} onMoreOptions={draft => onCreateSubtask(task, draft)} /></div>}
+      {canEdit && <div className="mb-3"><TaskQuickSubtaskComposer parent={task} value={subtaskDraft} statuses={statuses} users={users} pending={isPending('subtask-create')} creationUncertain={Boolean(subtaskCreateOperationsRef.current.get(task.id)?.uncertain)} onChange={draft => { subtaskDraftTouchedRef.current = true; setSubtaskDraft(draft) }} onSubmit={draft => createQuickSubtask(draft)} onCancel={() => { subtaskDraftTouchedRef.current = false; setSubtaskDraft(createTaskQuickSubtaskDraft(task, statuses)) }} onMoreOptions={draft => onCreateSubtask(task, draft)} /></div>}
       <div className="space-y-2">{children.map(child => <div key={child.id} className="group flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5 transition hover:border-emerald-200 hover:bg-emerald-50/30"><TaskCompletionButton compact task={child} statuses={statuses} disabled={!canEdit} pending={isPending(`child:${child.id}`)} onChange={() => toggleChild(child)} /><button id={`task-child-link-${child.id}`} data-task-child-link={child.id} onClick={() => openChildTask(child.id)} className="min-w-0 flex-1 text-left"><span className={`block truncate text-sm font-medium ${child.status_detail?.category === 'done' ? 'text-slate-400 line-through' : 'text-slate-700'}`}>{child.title}</span><span className="mt-0.5 block truncate text-[10px] text-slate-400">{child.assigned_to_name || 'Sin responsable'} · {child.due_at ? dateFormatter.format(new Date(child.due_at)) : 'Sin fecha'}</span></button><span className="hidden shrink-0 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-500 sm:block">{child.status_detail?.name || 'Por hacer'}</span><ChevronRight className="h-4 w-4 shrink-0 text-slate-300 transition group-hover:translate-x-0.5" /></div>)}{!children.length && <div className="rounded-xl border border-dashed border-slate-300 px-4 py-5 text-center text-sm text-slate-400">Divide el trabajo en pasos pequeños y asignables.</div>}</div>
     </section>}
 

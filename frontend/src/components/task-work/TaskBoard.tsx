@@ -50,6 +50,7 @@ import {
   X,
 } from 'lucide-react'
 import { apiPost } from '@/lib/api'
+import { markTaskCreateUncertain, retainTaskCreateOperation, type TaskCreateOperation } from './taskCreateOperation'
 import { useKanbanPan } from '@/lib/useKanbanPan'
 import {
   TASK_PRIORITY_CONFIG,
@@ -467,6 +468,9 @@ function InlineCreate({
   const [priority, setPriority] = useState<TaskPriority>('medium')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [creationUncertain, setCreationUncertain] = useState(false)
+  const createOperationRef = useRef<TaskCreateOperation | null>(null)
+  const savingRef = useRef(false)
   const list = lists.find(item => item.id === listId)
   const targetStatus = resolvedCreateStatus(status, list, allStatuses)
 
@@ -487,15 +491,20 @@ function InlineCreate({
     }
   }
 
-  const close = () => { setOpen(false); setTitle(''); setDueDate(''); setPriority('medium'); setError('') }
+  const close = () => {
+    if (savingRef.current) return
+    setOpen(false)
+    if (createOperationRef.current?.uncertain) return
+    createOperationRef.current = null
+    setTitle(''); setDueDate(''); setPriority('medium'); setError('')
+  }
   const create = async () => {
-    if (!title.trim() || !ownerId || !list || !targetStatus || saving) return
+    if (!title.trim() || !ownerId || !list || !targetStatus || savingRef.current) return
+    savingRef.current = true
     setSaving(true)
     setError('')
-    const operationId = crypto.randomUUID()
     const dueAt = taskDueDateOnlyValue(dueDate)
-    onOperation(operationId, true)
-    const result = await apiPost<{ task: Task; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>('/api/tasks', {
+    createOperationRef.current = retainTaskCreateOperation(createOperationRef.current, {
       title: title.trim(),
       description: '',
       type: 'reminder',
@@ -509,15 +518,28 @@ function InlineCreate({
       recurrence_rule: '',
       reminder_minutes: 0,
       placement: 'top',
+    })
+    const operationId = createOperationRef.current.operationID
+    onOperation(operationId, true)
+    const result = await apiPost<{ task: Task; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>('/api/tasks', {
+      ...createOperationRef.current.payload,
       operation_id: operationId,
     })
     if (!result.success || !result.data?.task) {
-      setError(result.error || 'No se pudo crear la tarea')
+      if (!result.status || result.status >= 500 || result.status === 408) {
+        createOperationRef.current = markTaskCreateUncertain(createOperationRef.current)
+        setCreationUncertain(true)
+        setError('No recibimos confirmación. Reintenta para recuperar la misma tarea sin duplicarla.')
+      } else setError(result.error || 'No se pudo crear la tarea')
+      savingRef.current = false
       setSaving(false)
       onOperation(operationId, false)
       return
     }
     onCreated(result.data.task, result.data.operation_id || operationId, result.data.hierarchy_counts)
+    createOperationRef.current = null
+    setCreationUncertain(false)
+    savingRef.current = false
     setSaving(false)
     onOperation(operationId, false)
     close()
@@ -526,18 +548,18 @@ function InlineCreate({
   if (!open) return <button type="button" onClick={() => setOpen(true)} className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-xs font-semibold text-slate-500 transition hover:bg-white hover:text-emerald-700"><Plus className="h-3.5 w-3.5" />Agregar tarea</button>
 
   return <div className="rounded-xl border border-emerald-300 bg-white p-2.5 shadow-lg shadow-emerald-950/5">
-    <input autoFocus value={title} onChange={event => setTitle(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void create() } if (event.key === 'Escape') { event.preventDefault(); close() } }} placeholder="Nombre de la tarea…" className="w-full bg-transparent text-sm font-semibold text-slate-800 outline-none placeholder:text-slate-300" />
-    {lists.length > 1 && <select value={listId} onChange={event => setListId(event.target.value)} aria-label="Lista de la tarea" className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-[11px] font-semibold text-slate-600 outline-none focus:border-emerald-400"><option value="">Selecciona una lista…</option>{lists.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}
+    <input autoFocus disabled={saving || creationUncertain} value={title} onChange={event => setTitle(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void create() } if (event.key === 'Escape') { event.preventDefault(); close() } }} placeholder="Nombre de la tarea…" className="w-full bg-transparent text-sm font-semibold text-slate-800 outline-none placeholder:text-slate-300" />
+    {lists.length > 1 && <select disabled={saving || creationUncertain} value={listId} onChange={event => setListId(event.target.value)} aria-label="Lista de la tarea" className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-[11px] font-semibold text-slate-600 outline-none focus:border-emerald-400"><option value="">Selecciona una lista…</option>{lists.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}
     {!list && <p className="mt-2 rounded-lg bg-amber-50 px-2 py-1.5 text-[10px] font-medium text-amber-700">Selecciona una lista para crear desde el tablero.</p>}
     {list && !targetStatus && <p className="mt-2 rounded-lg bg-amber-50 px-2 py-1.5 text-[10px] font-medium text-amber-700">La lista no tiene un estado equivalente.</p>}
     <div className="mt-2 grid grid-cols-2 gap-1.5">
-      <TaskUserCombobox users={users} value={ownerId} onChange={setOwnerId} className="min-h-9 !rounded-lg !px-2 !py-1 text-xs" />
-      <TaskDateTimePicker label="Fecha de entrega" allDay value={taskDueDateOnlyValue(dueDate)} onChange={value => setDueDate(value ? value.slice(0, 10) : '')} className="!min-h-9 !rounded-lg !px-2" />
-      <select value={priority} onChange={event => setPriority(event.target.value as TaskPriority)} aria-label="Prioridad" className="rounded-lg border border-slate-200 px-2 py-2 text-[11px] font-medium text-slate-600 outline-none focus:border-emerald-400">{(Object.keys(TASK_PRIORITY_CONFIG) as TaskPriority[]).map(value => <option key={value} value={value}>{TASK_PRIORITY_CONFIG[value].label}</option>)}</select>
-      <button type="button" onClick={() => { const snapshot = draft(); const selectedStatusId = targetStatus?.id; close(); onMore(selectedStatusId, snapshot) }} className="rounded-lg border border-slate-200 px-2 py-2 text-[11px] font-semibold text-slate-500 hover:bg-slate-50">Abrir formulario completo</button>
+      <TaskUserCombobox disabled={saving || creationUncertain} users={users} value={ownerId} onChange={setOwnerId} className="min-h-9 !rounded-lg !px-2 !py-1 text-xs" />
+      <TaskDateTimePicker disabled={saving || creationUncertain} label="Fecha de entrega" allDay value={taskDueDateOnlyValue(dueDate)} onChange={value => setDueDate(value ? value.slice(0, 10) : '')} className="!min-h-9 !rounded-lg !px-2" />
+      <select disabled={saving || creationUncertain} value={priority} onChange={event => setPriority(event.target.value as TaskPriority)} aria-label="Prioridad" className="rounded-lg border border-slate-200 px-2 py-2 text-[11px] font-medium text-slate-600 outline-none focus:border-emerald-400">{(Object.keys(TASK_PRIORITY_CONFIG) as TaskPriority[]).map(value => <option key={value} value={value}>{TASK_PRIORITY_CONFIG[value].label}</option>)}</select>
+      <button type="button" disabled={saving || creationUncertain} onClick={() => { const snapshot = draft(); const selectedStatusId = targetStatus?.id; close(); onMore(selectedStatusId, snapshot) }} className="rounded-lg border border-slate-200 px-2 py-2 text-[11px] font-semibold text-slate-500 hover:bg-slate-50">Abrir formulario completo</button>
     </div>
     {error && <p className="mt-2 text-[10px] font-medium text-rose-600">{error}</p>}
-    <div className="mt-2 flex items-center justify-between"><span className="text-[9px] text-slate-400">Enter para guardar · Esc para cancelar</span><div className="flex gap-1"><button type="button" onClick={close} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100" aria-label="Cancelar"><X className="h-3.5 w-3.5" /></button><button type="button" disabled={!title.trim() || !ownerId || !list || !targetStatus || saving} onClick={() => void create()} className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-[11px] font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">{saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}Crear</button></div></div>
+    <div className="mt-2 flex items-center justify-between"><span className="text-[9px] text-slate-400">Enter para guardar · Esc para cancelar</span><div className="flex gap-1"><button type="button" disabled={saving} onClick={close} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100" aria-label="Cancelar"><X className="h-3.5 w-3.5" /></button><button type="button" disabled={!title.trim() || !ownerId || !list || !targetStatus || saving} onClick={() => void create()} className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-[11px] font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">{saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}{creationUncertain ? 'Reintentar creación' : 'Crear'}</button></div></div>
   </div>
 }
 

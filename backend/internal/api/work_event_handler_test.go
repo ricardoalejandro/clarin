@@ -1,6 +1,21 @@
 package api
 
-import "testing"
+import (
+	"sort"
+	"testing"
+)
+
+func TestAgendaOrderUsesChronologicalInstantAndStableKey(t *testing.T) {
+	items := []agendaResponseItem{
+		{Sort: "2026-08-10T09:30:00.1Z", Key: "task:b"},
+		{Sort: "2026-08-10T09:30:00Z", Key: "task:a"},
+		{Sort: "2026-08-10T04:30:00.100-05:00", Key: "event:a"},
+	}
+	sort.Slice(items, func(i, j int) bool { return agendaItemSort(items[i]) < agendaItemSort(items[j]) })
+	if items[0].Key != "task:a" || items[1].Key != "event:a" || items[2].Key != "task:b" {
+		t.Fatalf("fraction/offset/tie order incorrect: %#v", items)
+	}
+}
 
 func TestParseAgendaSourcesUsesExactAllowListedNames(t *testing.T) {
 	tests := []struct {

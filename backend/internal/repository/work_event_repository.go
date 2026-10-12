@@ -786,8 +786,8 @@ func (r *WorkEventRepository) ListAgenda(ctx context.Context, accountID, actorID
 	if limit < 1 {
 		limit = 50
 	}
-	if limit > 200 {
-		limit = 200
+	if limit > 201 {
+		limit = 201
 	}
 	query := `SELECT ` + workEventSelectFields("$4") + ` FROM work_events event_item ` + workEventJoins + `
 		WHERE event_item.account_id=$1 AND event_item.deleted_at IS NULL
@@ -805,7 +805,7 @@ func (r *WorkEventRepository) ListAgenda(ctx context.Context, accountID, actorID
 			OR (CASE WHEN event_item.is_all_day THEN event_item.start_date::timestamp AT TIME ZONE event_item.timezone ELSE event_item.start_at END < $3
 			AND CASE WHEN event_item.is_all_day THEN event_item.end_date_exclusive::timestamp AT TIME ZONE event_item.timezone ELSE event_item.end_at END > $2))
 		ORDER BY COALESCE(event_item.start_at,event_item.start_date::timestamp AT TIME ZONE event_item.timezone),event_item.id
-		LIMIT 5000`
+		LIMIT 5001`
 	rows, err := r.db.Query(ctx, query, accountID, from, to, actorID, environmentID, folderID, listID)
 	if err != nil {
 		return nil, err
@@ -823,6 +823,9 @@ func (r *WorkEventRepository) ListAgenda(ctx context.Context, accountID, actorID
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if len(events) > 5000 {
+		return nil, ErrWorkEventAgendaCapacity
 	}
 	attendeesByEvent, err := r.loadAttendees(ctx, accountID, ids)
 	if err != nil {
@@ -854,31 +857,17 @@ func (r *WorkEventRepository) ListAgenda(ctx context.Context, accountID, actorID
 		}
 	}
 	sort.Slice(result, func(i, j int) bool {
-		left, right := result[i], result[j]
-		if left.StartAt != nil && right.StartAt != nil {
-			if left.StartAt.Equal(*right.StartAt) {
-				return left.OccurrenceKey < right.OccurrenceKey
-			}
-			return left.StartAt.Before(*right.StartAt)
+		left, leftKey := workEventAgendaOrder(result[i])
+		right, rightKey := workEventAgendaOrder(result[j])
+		if left.Equal(right) {
+			return leftKey < rightKey
 		}
-		if left.StartDate != nil && right.StartDate != nil {
-			if *left.StartDate == *right.StartDate {
-				return left.OccurrenceKey < right.OccurrenceKey
-			}
-			return *left.StartDate < *right.StartDate
-		}
-		return left.StartDate != nil
+		return left.Before(right)
 	})
 	if after != nil {
 		filtered := result[:0]
 		for _, occurrence := range result {
-			var start time.Time
-			if occurrence.StartAt != nil {
-				start = occurrence.StartAt.UTC()
-			} else if occurrence.StartDate != nil {
-				start, _ = time.Parse("2006-01-02", *occurrence.StartDate)
-			}
-			key := "event:" + occurrence.Event.ID.String() + ":" + occurrence.OccurrenceKey
+			start, key := workEventAgendaOrder(occurrence)
 			if start.After(*after) || (start.Equal(*after) && key > afterKey) {
 				filtered = append(filtered, occurrence)
 			}

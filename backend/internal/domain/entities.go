@@ -1740,6 +1740,8 @@ type Task struct {
 	ConfirmParticipantGrants bool        `json:"-"`
 	MutationActor            *uuid.UUID  `json:"-"`
 	MutationOperationID      *uuid.UUID  `json:"-"`
+	CreatePayloadHash        string      `json:"-"`
+	CreateReplayed           bool        `json:"-"`
 	CreatedAt                time.Time   `json:"created_at"`
 	UpdatedAt                time.Time   `json:"updated_at"`
 

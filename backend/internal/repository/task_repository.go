@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -190,6 +191,11 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 // transaction so offline commands can commit the task, activity and receipt
 // atomically. It must never commit or emit external effects by itself.
 func (r *TaskRepository) CreateTx(ctx context.Context, tx pgx.Tx, t *domain.Task) error {
+	if replayed, err := r.claimTaskCreateReceiptTx(ctx, tx, t); err != nil {
+		return err
+	} else if replayed {
+		return nil
+	}
 	if t.LeadID != nil {
 		if err := requireLeadPolicyTx(ctx, tx, t.AccountID); err != nil {
 			return err
@@ -378,6 +384,26 @@ func (r *TaskRepository) CreateTx(ctx context.Context, tx pgx.Tx, t *domain.Task
 		}
 		if err := confirmTaskParticipantGrants(ctx, tx, t.AccountID, rootTaskID, actorID,
 			affectedParticipants, t.MutationOperationID); err != nil {
+			return err
+		}
+	}
+	if t.CreatePayloadHash != "" {
+		var operationID *string
+		if t.MutationOperationID != nil {
+			value := t.MutationOperationID.String()
+			operationID = &value
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO task_activity(account_id,task_id,actor_id,action,metadata) VALUES($1,$2,$3,'created',jsonb_strip_nulls(jsonb_build_object('operation_id',$4::text,'status_id',$5::uuid)))`, t.AccountID, t.ID, t.CreatedBy, operationID, t.StatusID); err != nil {
+			return err
+		}
+		if t.ParentTaskID != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO task_activity(account_id,task_id,actor_id,action,metadata) VALUES($1,$2,$3,'subtask_created',jsonb_build_object('subtask_id',$4::uuid))`, t.AccountID, *t.ParentTaskID, t.CreatedBy, t.ID); err != nil {
+				return err
+			}
+		}
+		// A receipt must not acknowledge a created task before its reminder is
+		// durable; a lost response may be retried after this process exits.
+		if err := syncTaskReminderTx(ctx, tx, t.ID); err != nil {
 			return err
 		}
 	}
@@ -856,7 +882,7 @@ func (r *TaskRepository) GetByAccount(ctx context.Context, accountID uuid.UUID, 
 	return r.getByAccount(ctx, accountID, filters, limit, offset, nil)
 }
 
-func (r *TaskRepository) getByAccount(ctx context.Context, accountID uuid.UUID, filters map[string]string, limit, offset int, cursor *TaskPageCursor) ([]*domain.Task, int, error) {
+func taskCollectionPredicate(accountID uuid.UUID, filters map[string]string) (string, []interface{}) {
 	where := []string{"t.account_id=$1"}
 	effectiveCategory := taskEffectiveCategorySQL("t", "ts")
 	lifecycle := strings.ToLower(strings.TrimSpace(filters["lifecycle"]))
@@ -1136,7 +1162,13 @@ func (r *TaskRepository) getByAccount(ctx context.Context, accountID uuid.UUID, 
 		idx++
 	}
 
-	whereClause := strings.Join(where, " AND ")
+	return strings.Join(where, " AND "), args
+
+}
+
+func (r *TaskRepository) getByAccount(ctx context.Context, accountID uuid.UUID, filters map[string]string, limit, offset int, cursor *TaskPageCursor) ([]*domain.Task, int, error) {
+	whereClause, args := taskCollectionPredicate(accountID, filters)
+	idx := len(args) + 1
 
 	// Count
 	var total int
@@ -1308,36 +1340,52 @@ func (r *TaskRepository) GetCalendarRangeForActor(ctx context.Context, accountID
 // GetAgendaRangeForActor is the range-backed task source for the Work calendar.
 // It is independent from the currently loaded task page and uses real interval
 // overlap so multi-day tasks remain visible throughout their duration.
-func taskAgendaOverlapSQL() string {
-	return `COALESCE(t.start_at,t.due_at) < $3
-		  AND (COALESCE(t.due_end_at,t.due_at,t.start_at) > $2 OR
-			(COALESCE(t.due_end_at,t.due_at,t.start_at)=COALESCE(t.start_at,t.due_at) AND COALESCE(t.start_at,t.due_at) >= $2))`
+func taskAgendaOverlapSQL(parameters ...int) string {
+	from, to := 2, 3
+	if len(parameters) == 2 {
+		from, to = parameters[0], parameters[1]
+	}
+	return fmt.Sprintf(`COALESCE(t.start_at,t.due_at) < $%d
+		  AND (COALESCE(t.due_end_at,t.due_at,t.start_at) > $%d OR
+			(COALESCE(t.due_end_at,t.due_at,t.start_at)=COALESCE(t.start_at,t.due_at) AND COALESCE(t.start_at,t.due_at) >= $%d))`, to, from, from)
 }
 
-func (r *TaskRepository) GetAgendaRangeForActor(ctx context.Context, accountID, actorID uuid.UUID, from, to time.Time, environmentID, folderID, listID *uuid.UUID, includeClosed bool, after *time.Time, afterKey string, limit int) ([]*domain.Task, error) {
+func (r *TaskRepository) GetAgendaRangeForActor(ctx context.Context, accountID, actorID uuid.UUID, from, to time.Time, environmentID, folderID, listID *uuid.UUID, includeClosed bool, after *time.Time, afterKey string, limit int, queryFilters ...map[string]string) ([]*domain.Task, error) {
 	if limit < 1 {
 		limit = 50
 	}
 	if limit > 201 {
 		limit = 201
 	}
-	closedPredicate := ` AND COALESCE(ts.category,CASE t.status WHEN 'completed' THEN 'done' WHEN 'cancelled' THEN 'cancelled' ELSE 'not_started' END) NOT IN ('done','cancelled')`
-	if includeClosed {
-		closedPredicate = ""
+	filters := map[string]string{"_actor_user_id": actorID.String(), "include_closed": strconv.FormatBool(includeClosed)}
+	if len(queryFilters) > 0 {
+		for key, value := range queryFilters[0] {
+			filters[key] = value
+		}
 	}
-	query := `SELECT ` + taskSelectFields + ` FROM tasks t ` + taskJoins + `
-		JOIN task_environments agenda_environment ON agenda_environment.account_id=tl.account_id AND agenda_environment.id=tl.environment_id
-		WHERE t.account_id=$1 AND t.deleted_at IS NULL AND t.parent_task_id IS NULL
-		  AND ` + taskAgendaOverlapSQL() + `
-		  AND ($5::uuid IS NULL OR tl.environment_id=$5)
-		  AND ($6::uuid IS NULL OR tl.folder_id=$6)
-		  AND ($7::uuid IS NULL OR tl.id=$7)
-		  AND ($8::timestamptz IS NULL OR COALESCE(t.start_at,t.due_at)>$8 OR
-			(COALESCE(t.start_at,t.due_at)=$8 AND ('task:' || t.id::text)>$9))
-		  AND agenda_environment.archived_at IS NULL AND agenda_environment.deleted_at IS NULL
-		  AND ` + taskActorCanViewSQL("t", "tl", "$4") + closedPredicate + `
-		ORDER BY COALESCE(t.start_at,t.due_at),t.id LIMIT $10`
-	rows, err := r.db.Query(ctx, query, accountID, from, to, actorID, environmentID, folderID, listID, after, afterKey, limit)
+	delete(filters, "from")
+	delete(filters, "to")
+	delete(filters, "lifecycle")
+	delete(filters, "deleted")
+	filters["_actor_user_id"] = actorID.String()
+	if environmentID != nil {
+		filters["environment_id"] = environmentID.String()
+	}
+	if folderID != nil {
+		filters["folder_id"] = folderID.String()
+	}
+	if listID != nil {
+		filters["list_id"] = listID.String()
+	}
+	where, args := taskCollectionPredicate(accountID, filters)
+	i := len(args) + 1
+	query := fmt.Sprintf(`SELECT %s FROM tasks t %s WHERE %s
+	 AND %s
+	 AND ($%d::timestamptz IS NULL OR COALESCE(t.start_at,t.due_at)>$%d::timestamptz OR
+	   (COALESCE(t.start_at,t.due_at)=$%d::timestamptz AND ('task:'||t.id::text)>$%d::text))
+	 ORDER BY COALESCE(t.start_at,t.due_at),t.id LIMIT $%d`, taskSelectFields, taskJoins, where, taskAgendaOverlapSQL(i, i+1), i+2, i+2, i+2, i+3, i+4)
+	args = append(args, from, to, after, afterKey, limit)
+	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1493,6 +1541,13 @@ func (r *TaskRepository) SyncReminder(ctx context.Context, taskID uuid.UUID) err
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := syncTaskReminderTx(ctx, tx, taskID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func syncTaskReminderTx(ctx context.Context, tx pgx.Tx, taskID uuid.UUID) error {
 	var accountID, assignedTo uuid.UUID
 	var dueAt, deletedAt *time.Time
 	var reminderMinutes *int
@@ -1519,7 +1574,7 @@ func (r *TaskRepository) SyncReminder(ctx context.Context, taskID uuid.UUID) err
 			}
 		}
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 // DeleteRemindersByTask deletes all reminders for a task

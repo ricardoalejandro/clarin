@@ -1,5 +1,7 @@
 'use client'
 
+import { markTaskCreateUncertain, retainTaskCreateOperation, type TaskCreateOperation } from './taskCreateOperation'
+
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState, type ClipboardEvent as ReactClipboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { CalendarRange, Check, FileImage, Flag, Loader2, Maximize2, Minimize2, Move, PanelRight, Paperclip, Repeat2, RotateCcw, Sparkles, X } from 'lucide-react'
@@ -130,6 +132,8 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
   const [dirty, setDirty] = useState(false)
   const [attachmentQueue, setAttachmentQueue] = useState<QueuedTaskAttachment[]>([])
   const [createdTask, setCreatedTask] = useState<Task | null>(null)
+  const [creationUncertain, setCreationUncertain] = useState(false)
+  const createOperationRef = useRef<TaskCreateOperation | null>(null)
   const [participantGrantPrompt, setParticipantGrantPrompt] = useState<string[]>([])
   const [catalogLists, setCatalogLists] = useState<TaskList[]>(lists)
   const [catalogFolders, setCatalogFolders] = useState<TaskFolder[]>(folders)
@@ -170,6 +174,8 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
     if (!open) return
     if (typeof URL.revokeObjectURL === 'function') for (const url of Array.from(attachmentObjectURLsRef.current.values())) URL.revokeObjectURL(url)
     attachmentObjectURLsRef.current.clear()
+    createOperationRef.current = null
+    setCreationUncertain(false)
     setTitle(task?.title || defaultTitle || '')
     setDescription(task?.description || '')
     setType(task?.type || 'reminder')
@@ -424,9 +430,7 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
       onClose()
       return true
     }
-    const operationId = crypto.randomUUID()
-    onOperation?.(operationId, true)
-    const body = {
+    const draftBody = {
       title: title.trim(), description, type, priority,
       assigned_to: ownerId, collaborator_ids: collaboratorIds,
       list_id: listId, status_id: statusId,
@@ -446,9 +450,12 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
         ...(relatedScope.eventId ? { event_id: relatedScope.eventId } : {}),
       } : {}),
       ...(task ? { version: editVersion } : {}),
-      operation_id: operationId,
       confirm_grants: confirmGrants,
     }
+    if (!task) createOperationRef.current = retainTaskCreateOperation(createOperationRef.current, draftBody)
+    const operationId = task ? crypto.randomUUID() : createOperationRef.current!.operationID
+    const body = { ...(!task ? createOperationRef.current!.payload as typeof draftBody : draftBody), operation_id: operationId, confirm_grants: confirmGrants }
+    onOperation?.(operationId, true)
     const result = task
       ? await apiPut<TaskMutationResponse>(`/api/tasks/${task.id}`, body)
       : parentTaskId
@@ -473,12 +480,24 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
         const latest = await apiGet<{ task: Task }>(`/api/tasks/${task.id}`)
         if (latest.success && latest.data?.task) setEditVersion(latest.data.task.version || editVersion)
         setError('La tarea cambió en otra sesión. Conservamos todos tus campos; revisa y vuelve a guardar sobre la versión más reciente.')
-      } else setError(result.error || 'No se pudo guardar la tarea')
+      } else if (!task && (!result.status || result.status >= 500 || result.status === 408)) {
+        createOperationRef.current = markTaskCreateUncertain(createOperationRef.current!)
+        setCreationUncertain(true)
+        setError('No recibimos confirmación. Conservamos este intento; reintenta para recuperar la misma tarea sin duplicarla.')
+      } else {
+        if (!task && result.data?.code !== 'operation_payload_conflict') {
+          createOperationRef.current = null
+          setCreationUncertain(false)
+        }
+        setError(result.error || 'No se pudo guardar la tarea')
+      }
       savingRef.current = false
       setSaving(false)
       onOperation?.(operationId, false)
       return false
     }
+    createOperationRef.current = null
+    setCreationUncertain(false)
     onSaved(result.data.task, result.data.operation_id || operationId, result.data.hierarchy_counts)
     onOperation?.(operationId, false)
     if (!task && attachmentQueue.length) {
@@ -526,7 +545,7 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
           <div data-no-window-drag className="flex items-center gap-1"><button type="button" title="Acoplar a la derecha" aria-label="Acoplar a la derecha" onClick={() => taskWindow.setMode('docked')} className={`rounded-xl p-2 transition ${taskWindow.effectiveMode === 'docked' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-400 hover:bg-slate-100'}`}><PanelRight className="h-4 w-4" /></button><button type="button" title="Ventana flotante" aria-label="Ventana flotante" onClick={() => taskWindow.setMode('floating')} className={`rounded-xl p-2 transition ${taskWindow.effectiveMode === 'floating' ? 'bg-emerald-50 text-emerald-700' : 'text-slate-400 hover:bg-slate-100'}`}><Move className="h-4 w-4" /></button>{taskWindow.effectiveMode === 'floating' && <button type="button" title="Restablecer tamaño" aria-label="Restablecer tamaño" onClick={taskWindow.resetGeometry} className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"><RotateCcw className="h-4 w-4" /></button>}<button type="button" title={taskWindow.effectiveMode === 'maximized' ? 'Restaurar' : 'Maximizar'} aria-label={taskWindow.effectiveMode === 'maximized' ? 'Restaurar' : 'Maximizar'} onClick={taskWindow.toggleMaximized} className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700">{taskWindow.effectiveMode === 'maximized' ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button><button disabled={saving} onClick={() => { void requestClose() }} className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40"><X className="h-5 w-5" /></button></div>
         </div>
 
-        <div inert={Boolean(createdTask)} aria-disabled={Boolean(createdTask)} className={`overflow-y-auto px-5 py-5 transition sm:px-7 ${createdTask ? 'opacity-70' : ''}`}>
+        <div inert={Boolean(createdTask) || creationUncertain} aria-disabled={Boolean(createdTask) || creationUncertain} className={`overflow-y-auto px-5 py-5 transition sm:px-7 ${createdTask ? 'opacity-70' : ''}`}>
           <input autoFocus value={title} onChange={event => { setTitle(event.target.value); markDirty() }} placeholder="¿Qué hay que lograr?" className="w-full border-0 bg-transparent p-0 text-2xl font-semibold text-slate-900 outline-none placeholder:text-slate-300" />
           <TaskDescriptionEditor value={description} onChange={value => { setDescription(value); markDirty() }} storageScope={storageScope} panelRef={dialogRef} disabled={saving || Boolean(createdTask)} pending={saving && !createdTask} onSubmit={save} className="mt-4" error={error && <div role="alert" className="mb-3 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2.5 text-xs font-medium text-rose-700">{error}</div>} />
 
@@ -569,7 +588,7 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
 
         <div className="flex items-center justify-between border-t border-slate-100 bg-slate-50 px-5 py-4 sm:px-7">
           <span className={`hidden text-xs sm:block ${createdTask ? 'font-semibold text-amber-700' : 'text-slate-400'}`}>{createdTask ? 'La tarea ya existe; sólo quedan adjuntos pendientes.' : 'Ctrl/⌘ + Enter guarda la tarea desde cualquier campo.'}</span>
-          <div className="ml-auto flex gap-2"><button disabled={saving} onClick={() => { void requestClose() }} className="rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40">{createdTask ? 'Cerrar' : 'Cancelar'}</button><button disabled={!canSave || saving} onClick={() => { void save() }} className="rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-300 transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">{saving ? createdTask ? 'Reintentando…' : attachmentQueue.length && !task ? 'Creando y adjuntando…' : parentTaskId && !task ? 'Creando subtarea…' : 'Guardando…' : createdTask ? `Reintentar ${queueProgress.pending} ${queueProgress.pending === 1 ? 'adjunto' : 'adjuntos'}` : task ? 'Guardar cambios' : parentTaskId ? 'Crear subtarea' : 'Crear tarea'}</button></div>
+          <div className="ml-auto flex gap-2"><button disabled={saving} onClick={() => { void requestClose() }} className="rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40">{createdTask ? 'Cerrar' : 'Cancelar'}</button><button disabled={!canSave || saving} onClick={() => { void save() }} className="rounded-xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-300 transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40">{saving ? createdTask ? 'Reintentando…' : attachmentQueue.length && !task ? 'Creando y adjuntando…' : parentTaskId && !task ? 'Creando subtarea…' : 'Guardando…' : createdTask ? `Reintentar ${queueProgress.pending} ${queueProgress.pending === 1 ? 'adjunto' : 'adjuntos'}` : creationUncertain ? 'Reintentar creación' : task ? 'Guardar cambios' : parentTaskId ? 'Crear subtarea' : 'Crear tarea'}</button></div>
         </div>
         {taskWindow.effectiveMode === 'floating' && resizeEdges.map(edge => <span key={edge} data-task-window-resize={edge} aria-hidden="true" onPointerDown={event => taskWindow.beginResize(edge, event)} className={`absolute z-10 ${edge === 'n' ? '-top-1 left-4 right-4 h-2 cursor-n-resize' : edge === 's' ? '-bottom-1 left-4 right-4 h-2 cursor-s-resize' : edge === 'e' ? '-right-1 bottom-4 top-4 w-2 cursor-e-resize' : edge === 'w' ? '-left-1 bottom-4 top-4 w-2 cursor-w-resize' : edge === 'ne' ? '-right-1 -top-1 h-4 w-4 cursor-ne-resize' : edge === 'nw' ? '-left-1 -top-1 h-4 w-4 cursor-nw-resize' : edge === 'se' ? '-bottom-1 -right-1 h-4 w-4 cursor-se-resize' : '-bottom-1 -left-1 h-4 w-4 cursor-sw-resize'}`} />)}
       </div>

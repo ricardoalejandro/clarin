@@ -1,13 +1,14 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgendaItem, Task, TaskList, TaskWorkflowStatus, WorkEventOccurrence } from '@/types/task'
 import TaskCalendarView from './TaskCalendarView'
+import { EMPTY_TASK_FILTERS } from './TaskFilters'
 
 const apiMocks = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
   put: vi.fn(),
-  subscribe: vi.fn(() => vi.fn()),
+  subscribe: vi.fn((_listener: (event: unknown) => void) => vi.fn()),
 }))
 
 vi.mock('@/lib/api', () => ({
@@ -114,6 +115,84 @@ afterEach(() => {
 })
 
 describe('TaskCalendarView schedule gestures', () => {
+  function revokeAccess() {
+    apiMocks.get.mockResolvedValue({ success: true, data: { items: [], next_cursor: '' } })
+    act(() => apiMocks.subscribe.mock.calls.at(-1)![0]({ event: 'task_update', data: { action: 'access_revoked', target_type: 'task', target_id: 'task-calendar-1' } }))
+  }
+
+  it('closes the overflow inventory immediately when access is revoked', async () => {
+    const tasks = Array.from({ length: 5 }, (_, index) => agendaItem({ ...scheduledTask(), id: `task-calendar-${index + 1}`, title: `Privada ${index + 1}` }))
+    renderCalendar(tasks[0].kind === 'task' ? tasks[0].task : scheduledTask(), {}, tasks)
+    fireEvent.click((await screen.findAllByRole('button', { name: /^\+\d+ más$/ }))[0])
+    expect(screen.getByTitle('Privada 5')).toBeVisible()
+    revokeAccess()
+    expect(screen.queryByTitle('Privada 5')).not.toBeInTheDocument()
+    expect(document.querySelector('[data-calendar-agenda-block]')).not.toBeInTheDocument()
+  })
+
+  it.each(['success', 'conflict', 'network'])('ignores a late schedule %s after revocation', async outcome => {
+    let finish!: (result: unknown) => void
+    let fail!: (error: Error) => void
+    apiMocks.put.mockImplementationOnce(() => new Promise((resolve, reject) => { finish = resolve; fail = reject }))
+    renderCalendar()
+    const trigger = (await calendarBlock()).querySelector('button')!
+    fireEvent.keyDown(trigger, { key: ' ', altKey: true })
+    fireEvent.keyDown(trigger, { key: 'ArrowRight' })
+    fireEvent.keyDown(trigger, { key: ' ', altKey: true })
+    await waitFor(() => expect(apiMocks.put).toHaveBeenCalledTimes(1))
+    revokeAccess()
+    await act(async () => {
+      if (outcome === 'network') fail(new Error('network'))
+      else finish(outcome === 'success' ? { success: true, data: { task: scheduledTask(2) } } : { success: false, data: { code: 'schedule_conflict_confirmation_required' } })
+    })
+    expect(screen.queryByRole('button', { name: 'Deshacer' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Guardar de todos modos' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Restauramos exactamente/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/se reprogramó/)).not.toBeInTheDocument()
+    expect(document.querySelector('[data-calendar-agenda-block]')).not.toBeInTheDocument()
+  })
+
+  it('does not reveal a quick-created task after access is revoked during its request', async () => {
+    let finish!: (result: unknown) => void
+    apiMocks.post.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const { props } = renderCalendar()
+    await calendarBlock()
+    fireEvent.click(document.querySelector('[data-calendar-month-day]') as HTMLElement)
+    fireEvent.click(screen.getByRole('button', { name: 'Tarea' }))
+    fireEvent.change(screen.getByPlaceholderText('¿Qué hay que lograr?'), { target: { value: 'Creación privada' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Crear' }))
+    await waitFor(() => expect(apiMocks.post).toHaveBeenCalledTimes(1))
+    revokeAccess()
+    await act(async () => { finish({ success: true, data: { task: scheduledTask(2) } }) })
+    expect(props.onCreated).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('retries quick task creation with the same immutable operation after a lost response', async () => {
+    const { props } = renderCalendar()
+    apiMocks.post.mockResolvedValueOnce({ success: false, error: 'Network' })
+      .mockResolvedValueOnce({ success: true, data: { task: scheduledTask() } })
+    await waitFor(() => expect(document.querySelector('[data-calendar-month-day]')).not.toBeNull())
+    fireEvent.click(document.querySelector('[data-calendar-month-day]') as HTMLElement)
+    fireEvent.click(screen.getByRole('button', { name: 'Tarea' }))
+    fireEvent.change(screen.getByPlaceholderText('¿Qué hay que lograr?'), { target: { value: 'Reintento seguro' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Crear' }))
+    await waitFor(() => expect(screen.getByText(/No recibimos confirmación/)).toBeVisible())
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar creación' }))
+    await waitFor(() => expect(props.onCreated).toHaveBeenCalledTimes(1))
+    expect(apiMocks.post.mock.calls[1]).toEqual(apiMocks.post.mock.calls[0])
+  })
+
+  it('sends settled task filters to agenda while retaining the event source', async () => {
+    renderCalendar(scheduledTask(), { search: 'Alfa', filters: { ...EMPTY_TASK_FILTERS, priorities: ['urgent'], include_closed: true } })
+    await waitFor(() => expect(apiMocks.get).toHaveBeenCalled())
+    const request = apiMocks.get.mock.calls.find(([url]) => String(url).includes('/agenda?'))!
+    const query = new URL(String(request[0]), 'http://localhost').searchParams
+    expect(query.get('search')).toBe('Alfa')
+    expect(query.get('priorities')).toBe('urgent')
+    expect(query.get('include_closed')).toBe('true')
+    expect(query.get('sources')).toBe('tasks,events')
+  })
   it('preserves the selected all-day interval when opening the full task form', async () => {
     const { props } = renderCalendar()
     const selectedDay = new Date()

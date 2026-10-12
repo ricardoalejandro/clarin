@@ -465,6 +465,41 @@ describe('TaskDetailDrawer simplified full-editor access', () => {
     expect(title).toHaveValue('')
   })
 
+  it('retains a quick-child operation per parent across a lost response and task navigation', async () => {
+    const otherTask = { ...task, id: 'task-other', title: 'Otro padre' }
+    const child = { ...task, id: 'child-once', title: 'Una sola subtarea', parent_task_id: task.id }
+    mockTaskDetailAPI([task, otherTask])
+    apiMocks.post
+      .mockResolvedValueOnce({ success: false, status: 503, error: 'Respuesta perdida' })
+      .mockResolvedValueOnce({ success: true, data: { task: child } })
+    const common = {
+      allTasks: [task, otherTask], users: [{ id: 'user-1', display_name: 'Usuario', username: 'usuario' }],
+      lists: [{ id: 'list-1', workflow_id: 'workflow-1', name: 'Seguridad' } as never], folders: [],
+      workflows: [{ id: 'workflow-1', is_default: true, statuses: [{ ...task.status_detail!, is_default: true }] } as never],
+      onClose: vi.fn(), onEdit: vi.fn(), onOpenTask: vi.fn(), onCreateSubtask: vi.fn(), onChanged: vi.fn(), onDeleted: vi.fn(() => true),
+    }
+    const { rerender } = render(<TaskDetailDrawer {...common} taskId={task.id} />)
+    const title = await screen.findByRole('textbox', { name: 'Nombre de la subtarea' })
+    fireEvent.focus(title)
+    fireEvent.change(title, { target: { value: child.title } })
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar' }))
+    await screen.findByRole('button', { name: 'Reintentar creación' })
+    const firstPayload = apiMocks.post.mock.calls[0][1]
+    expect(title).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Cancelar subtarea' })).toBeDisabled()
+
+    rerender(<TaskDetailDrawer {...common} taskId={otherTask.id} />)
+    await screen.findByDisplayValue(otherTask.title)
+    expect(screen.getByRole('textbox', { name: 'Nombre de la subtarea' })).not.toBeDisabled()
+    rerender(<TaskDetailDrawer {...common} taskId={task.id} />)
+    await screen.findByDisplayValue(task.title)
+    expect(screen.getByRole('textbox', { name: 'Nombre de la subtarea' })).toHaveValue(child.title)
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar creación' }))
+    await waitFor(() => expect(common.onChanged).toHaveBeenCalledWith(child, firstPayload.operation_id, undefined))
+    expect(apiMocks.post).toHaveBeenNthCalledWith(2, '/api/tasks/task-1/children', firstPayload)
+    expect(screen.getByRole('textbox', { name: 'Nombre de la subtarea' })).toHaveValue('')
+  })
+
   it('uses the task workflow as truth when its list catalog is hidden', async () => {
     const unrelatedDone = { ...task.status_detail!, id: 'other-done', workflow_id: 'other-workflow', name: 'Finalizada ajena', category: 'done' as const, sort_order: 2 }
     const sharedTask = { ...task, status_detail: { ...task.status_detail!, workflow_id: 'shared-workflow' } }
