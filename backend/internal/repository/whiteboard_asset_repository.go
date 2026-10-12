@@ -22,6 +22,32 @@ func whiteboardAssetReservationReusesObject(status string) bool {
 	return status == "active" || status == "whiteboard_upload_pending" || status == "whiteboard_gc_pending"
 }
 
+// Returned only before the scene transaction writes anything. Unlike an
+// interrupted ACK, this rejection lets the editor safely prepare a new write.
+type WhiteboardMissingAssetsError struct {
+	FileIDs []string
+}
+
+func (e *WhiteboardMissingAssetsError) Error() string { return "whiteboard scene assets are missing" }
+func (e *WhiteboardMissingAssetsError) Unwrap() error { return ErrWhiteboardInvalid }
+
+func requireWhiteboardSceneAssets(fileIDs []string, exists func(string) bool) error {
+	missing := make([]string, 0)
+	for _, fileID := range fileIDs {
+		if !exists(fileID) {
+			missing = append(missing, fileID)
+			// Keep error responses bounded even for a maximum-size imported scene.
+			if len(missing) == 200 {
+				break
+			}
+		}
+	}
+	if len(missing) > 0 {
+		return &WhiteboardMissingAssetsError{FileIDs: missing}
+	}
+	return nil
+}
+
 func reconcileWhiteboardSceneAssetsTx(ctx context.Context, tx pgx.Tx, accountID, boardID uuid.UUID, scene []byte) error {
 	liveFileIDs, err := whiteboardcore.ReferencedFileIDs(scene)
 	if err != nil {
@@ -53,10 +79,13 @@ func reconcileWhiteboardSceneAssetsTx(ctx context.Context, tx pgx.Tx, accountID,
 	}
 	rows.Close()
 	live := make(map[string]struct{}, len(liveFileIDs))
+	if err := requireWhiteboardSceneAssets(liveFileIDs, func(fileID string) bool {
+		_, exists := linked[fileID]
+		return exists
+	}); err != nil {
+		return err
+	}
 	for _, fileID := range liveFileIDs {
-		if _, exists := linked[fileID]; !exists {
-			return ErrWhiteboardInvalid
-		}
 		live[fileID] = struct{}{}
 	}
 	removed := make(map[uuid.UUID]struct{})

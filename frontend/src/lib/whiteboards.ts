@@ -733,11 +733,13 @@ export function closeWhiteboardElementPatch(
   changedElements: readonly unknown[],
 ) {
   const currentByID = new Map<string, unknown>()
+  const currentIDs = new Set<string>()
   const referencesByID = new Map<string, Set<string>>()
   for (const element of currentElements) {
     const revision = whiteboardElementRevision(element)
     if (!revision) continue
     currentByID.set(revision.id, element)
+    currentIDs.add(revision.id)
     for (const relatedID of whiteboardElementRelationshipIDs(element)) {
       const references = referencesByID.get(relatedID) || new Set<string>()
       references.add(revision.id)
@@ -756,8 +758,8 @@ export function closeWhiteboardElementPatch(
     }
   }
   const queue = Array.from(included)
-  while (queue.length > 0) {
-    const elementID = queue.shift() as string
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const elementID = queue[cursor]
     const element = currentByID.get(elementID)
     const relatedIDs = [
       ...whiteboardElementRelationshipIDs(element),
@@ -775,7 +777,7 @@ export function closeWhiteboardElementPatch(
       return Boolean(revision && included.has(revision.id))
     }),
     ...Array.from(currentByID.entries())
-      .filter(([id]) => included.has(id) && !currentElements.some(element => whiteboardElementRevision(element)?.id === id))
+      .filter(([id]) => included.has(id) && !currentIDs.has(id))
       .map(([, element]) => element),
     ...unkeyed,
   ]

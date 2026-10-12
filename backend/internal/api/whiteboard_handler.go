@@ -24,7 +24,10 @@ func whiteboardError(c *fiber.Ctx, err error) error {
 	}
 	var conflict *repository.WhiteboardConflictError
 	var trashEligibility *repository.WhiteboardTrashEligibilityError
+	var missingAssets *repository.WhiteboardMissingAssetsError
 	switch {
+	case errors.As(err, &missingAssets):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "Faltan imágenes por confirmar. Tus cambios siguen en pantalla; reintenta el guardado para prepararlas.", "code": "whiteboard_assets_missing", "missing_file_ids": missingAssets.FileIDs})
 	case errors.As(err, &conflict):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La pizarra cambió en otra sesión", "code": "whiteboard_conflict", "current_sequence": conflict.CurrentSequence, "current_version": conflict.CurrentVersion})
 	case errors.Is(err, repository.ErrWhiteboardNotFound):
@@ -68,7 +71,10 @@ func whiteboardError(c *fiber.Ctx, err error) error {
 
 func whiteboardWriteFailureCode(err error) string {
 	var conflict *repository.WhiteboardConflictError
+	var missingAssets *repository.WhiteboardMissingAssetsError
 	switch {
+	case errors.As(err, &missingAssets):
+		return "whiteboard_assets_missing"
 	case errors.As(err, &conflict), errors.Is(err, repository.ErrWhiteboardConflict):
 		return "whiteboard_conflict"
 	case errors.Is(err, repository.ErrWhiteboardNotFound):

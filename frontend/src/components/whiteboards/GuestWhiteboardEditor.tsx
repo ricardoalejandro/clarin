@@ -17,7 +17,6 @@ import {
   buildWhiteboardSceneWritePlan,
   buildWhiteboardGuestBootstrap,
   createWhiteboardOperationID,
-  hasWhiteboardDocumentMutation,
   mergeWhiteboardAcknowledgedElements,
   mergeWhiteboardFileRecords,
   mergeWhiteboardSessionAppState,
@@ -48,6 +47,7 @@ import {
   type WhiteboardSceneRecord,
   type WhiteboardScenePatch,
 } from '@/lib/whiteboards'
+import { applyWhiteboardProgrammaticScene, captureWhiteboardScene, observeWhiteboardScene, whiteboardMissingAssetIDs } from '@/lib/whiteboardSaveState'
 import {
   buildExcalidrawWhiteboardSavePayload,
   restoreClarinWhiteboardScene,
@@ -118,6 +118,7 @@ interface PendingGuestWhiteboardSave {
   capturedVersion: number
   acknowledgedElements: readonly unknown[]
   automaticFailures: number
+  rejectedMissingAssets?: boolean
   automaticRetryBlockReason: WhiteboardSaveRetryBlockReason
 }
 
@@ -178,8 +179,6 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
   const pendingSaveRef = useRef<PendingGuestWhiteboardSave | null>(null)
   const dirtyRef = useRef(false)
   const changeVersionRef = useRef(0)
-  const suppressRef = useRef(true)
-  const transientSceneSuppressionRef = useRef(0)
   const mountedRef = useRef(true)
 
   const [phase, setPhase] = useState<'checking' | 'join' | 'ready' | 'error'>('checking')
@@ -199,14 +198,9 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
   const [realtimeIssue, setRealtimeIssue] = useState<WhiteboardRealtimeIssue | null>(null)
 
   const runWithTransientSceneSuppressed = useCallback((update: () => void) => {
-    transientSceneSuppressionRef.current += 1
-    try {
-      update()
-    } finally {
-      requestAnimationFrame(() => {
-        transientSceneSuppressionRef.current = Math.max(0, transientSceneSuppressionRef.current - 1)
-      })
-    }
+    // Viewport/presence changes are excluded by the document comparator. Never
+    // suppress unrelated user edits until a future animation frame.
+    update()
   }, [])
 
 	const presentation = useWhiteboardPresentation({
@@ -217,13 +211,13 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
 	})
 
   const onHydratedGuestFile = useCallback((file: BinaryFileData) => {
-    runWithTransientSceneSuppressed(() => {
-      editorAPIRef.current?.addFiles([file])
-    })
     if (latestRef.current) latestRef.current = {
       ...latestRef.current,
       files: { ...latestRef.current.files, [file.id]: file } as BinaryFiles,
     }
+    runWithTransientSceneSuppressed(() => {
+      editorAPIRef.current?.addFiles([file])
+    })
   }, [runWithTransientSceneSuppressed])
 
   const {
@@ -258,9 +252,6 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
       }
     },
     onFile: onHydratedGuestFile,
-    onPersistedFileIDs: fileIDs => {
-      for (const fileID of fileIDs) persistedFileIDsRef.current.add(fileID)
-    },
   })
 
   const assetHydrationMessage = whiteboardAssetHydrationMessage(assetHydrationProgress)
@@ -314,7 +305,6 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
       appState: scene.appState as unknown as AppState,
       files,
     }
-    suppressRef.current = true
     dirtyRef.current = false
     changeVersionRef.current = 0
     setSession(payload.session)
@@ -361,12 +351,6 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
     }
     void resume()
   }, [resume])
-
-  useEffect(() => {
-    if (phase !== 'ready') return
-    const frame = requestAnimationFrame(() => { suppressRef.current = false })
-    return () => cancelAnimationFrame(frame)
-  }, [phase, initialData])
 
   const join = async (event: React.FormEvent) => {
     event.preventDefault()
@@ -438,7 +422,6 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
   }, [shareLinkID])
 
   const hydrateReferencedAssets = useCallback((elements: readonly unknown[]) => {
-    for (const fileID of referencedWhiteboardFileIDs(elements)) persistedFileIDsRef.current.add(fileID)
     const api = editorAPIRef.current
     requestAssetHydration(elements, api ? getVisibleSceneBounds(api.getAppState()) : null)
   }, [requestAssetHydration])
@@ -473,14 +456,12 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
         currentAppState as unknown as Record<string, unknown>,
         reconciled.appState,
       ) as unknown as AppState
-      const files = mergeWhiteboardFileRecords(
-        latest.files as unknown as Record<string, unknown>,
-        canonical.files,
+      const files = snapshotWhiteboardFiles(
+        (api?.getFiles() || latest.files) as unknown as Record<string, unknown>,
       ) as unknown as BinaryFiles
-      suppressRef.current = true
-      api?.updateScene({ elements, appState, captureUpdate: CaptureUpdateAction.NEVER })
-      latestRef.current = { elements, appState, files }
-      requestAnimationFrame(() => { suppressRef.current = false })
+      applyWhiteboardProgrammaticScene(latestRef, { elements, appState, files }, () => {
+        api?.updateScene({ elements, appState, captureUpdate: CaptureUpdateAction.NEVER })
+      })
       void hydrateReferencedAssets(elements)
     }
     sceneRootExtensionsRef.current = whiteboardSceneRootExtensions(canonical)
@@ -497,6 +478,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
     const response = await guestRequest<GuestSceneResponse>(whiteboardGuestScenePath(shareLinkID))
     if (!response.ok || !response.data.scene) return false
     const record = response.data.scene
+    if (record.sequence < sequenceRef.current) return true
     const confirmed = applyCanonicalWriteConfirmation(
       record.scene,
       acknowledgedElementsRef.current,
@@ -504,6 +486,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
     )
     sequenceRef.current = record.sequence
     acknowledgedElementsRef.current = confirmed.elements
+    persistedFileIDsRef.current = new Set(referencedWhiteboardFileIDs(confirmed.elements))
     acknowledgedAppStateRef.current = confirmed.appState
     dirtyRef.current = true
     return true
@@ -511,6 +494,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
 
   const save = useCallback(async (reason: 'autosave' | 'manual' = 'autosave') => {
     if (reason === 'autosave' && pendingSaveRef.current?.automaticRetryBlockReason) return
+    if (!savingRef.current && reason !== 'autosave' && pendingSaveRef.current?.rejectedMissingAssets) pendingSaveRef.current = null
     if (reason !== 'autosave' && pendingSaveRef.current) {
       pendingSaveRef.current.automaticFailures = 0
       pendingSaveRef.current.automaticRetryBlockReason = null
@@ -529,47 +513,44 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
     try {
       let pending = pendingSaveRef.current
       if (!pending) {
+        current = captureWhiteboardScene(current)
+        const capturedSequence = sequenceRef.current
+        const capturedRootExtensions = structuredClone(sceneRootExtensionsRef.current)
+        const capturedFileMetadata = structuredClone(sceneFileMetadataRef.current)
+        const writePlan = buildWhiteboardSceneWritePlan(current.elements, acknowledgedElementsRef.current)
         const files = await uploadPendingFiles(current.files, current.elements)
-        const latest = latestRef.current || current
-        current = {
-          ...latest,
-          files: snapshotWhiteboardFiles({
-            ...(latest.files as unknown as Record<string, unknown>),
-            ...(files as unknown as Record<string, unknown>),
-          }) as unknown as BinaryFiles,
-        }
-        latestRef.current = current
-        capturedVersion = changeVersionRef.current
+        current = { ...current, files }
+        // Later gestures stay in latestRef; this write contains only the
+        // immutable scene whose binary assets were just prepared.
         setSaveState('saving')
         const operationID = createWhiteboardOperationID()
-        const writePlan = buildWhiteboardSceneWritePlan(current.elements, acknowledgedElementsRef.current)
         const canPatch = reason === 'autosave' && writePlan.kind === 'patch'
         pending = retainWhiteboardPendingSave(pending, () => ({
           operationID,
           capturedVersion,
           payload: buildExcalidrawWhiteboardSavePayload({
-            sceneSequence: sequenceRef.current,
+            sceneSequence: capturedSequence,
             operationID,
             reason,
             elements: current.elements,
             appState: current.appState as unknown as Record<string, unknown>,
-            files: mergeWhiteboardFileRecords(current.files as unknown as Record<string, unknown>, sceneFileMetadataRef.current),
-            rootExtensions: sceneRootExtensionsRef.current,
+            files: mergeWhiteboardFileRecords(current.files as unknown as Record<string, unknown>, capturedFileMetadata),
+            rootExtensions: capturedRootExtensions,
             includePatch: canPatch,
             patchElements: writePlan.elements,
           }),
-          realtimePatch: canPatch ? buildWhiteboardRealtimePatch({
-            sceneSequence: sequenceRef.current,
-            operationID,
-            elements: writePlan.elements,
-            appState: current.appState as unknown as Record<string, unknown>,
-          }) : null,
-          acknowledgedElements: canPatch
-            ? mergeWhiteboardAcknowledgedElements(acknowledgedElementsRef.current, writePlan.elements)
-            : [...current.elements],
+          realtimePatch: null as WhiteboardScenePatch | null,
+          acknowledgedElements: [...current.elements],
           automaticFailures: 0,
           automaticRetryBlockReason: null,
         }))
+        // HTTP fallback and realtime must hash exactly the same immutable delta.
+        pending.realtimePatch = pending.payload.patch ? buildWhiteboardRealtimePatch({
+          sceneSequence: pending.payload.expected_sequence,
+          operationID: pending.operationID,
+          elements: pending.payload.patch.elements,
+          appState: pending.payload.patch.app_state,
+        }) : null
         pendingSaveRef.current = pending
       }
       capturedVersion = pending.capturedVersion
@@ -591,7 +572,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
       if (acknowledgement) {
         if (typeof acknowledgement.sequence !== 'number') throw new Error('Clarin no confirmó la secuencia guardada.')
         nextSequence = acknowledgement.sequence
-        if (acknowledgement.scene) {
+        if (acknowledgement.scene && nextSequence >= sequenceRef.current) {
           const confirmed = applyCanonicalWriteConfirmation(
             acknowledgement.scene,
             pending.acknowledgedElements,
@@ -601,11 +582,16 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
           nextAcknowledgedAppState = confirmed.appState
         }
       } else {
-        const response = await guestRequest<{ success?: boolean; error?: string; result?: { scene: WhiteboardSceneRecord } }>(whiteboardGuestScenePath(shareLinkID), {
+        const response = await guestRequest<{ success?: boolean; error?: string; code?: string; missing_file_ids?: string[]; result?: { scene: WhiteboardSceneRecord } }>(whiteboardGuestScenePath(shareLinkID), {
           method: whiteboardSceneSaveMethod(pending.payload),
           body: JSON.stringify(pending.payload),
         })
         if (!response.ok || !response.data.result?.scene) {
+          const missingAssets = whiteboardMissingAssetIDs(response.data.code, response.data.missing_file_ids)
+          if (missingAssets.length) {
+            for (const fileID of missingAssets) persistedFileIDsRef.current.delete(fileID)
+            pending.rejectedMissingAssets = true
+          }
           pending.automaticFailures += 1
           const action = whiteboardSaveFailureAction(response.status, pending.automaticFailures)
           pending.automaticRetryBlockReason = action === 'retry' ? null : action
@@ -623,18 +609,25 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
           throw new Error(response.data.error || 'No se pudieron guardar los cambios en Clarin.')
         }
         nextSequence = response.data.result.scene.sequence
-        const confirmed = applyCanonicalWriteConfirmation(
-          response.data.result.scene.scene,
-          pending.acknowledgedElements,
-          pending.payload.scene.appState,
-        )
-        nextAcknowledgedElements = confirmed.elements
-        nextAcknowledgedAppState = confirmed.appState
+        if (nextSequence >= sequenceRef.current) {
+          const confirmed = applyCanonicalWriteConfirmation(
+            response.data.result.scene.scene,
+            pending.acknowledgedElements,
+            pending.payload.scene.appState,
+          )
+          nextAcknowledgedElements = confirmed.elements
+          nextAcknowledgedAppState = confirmed.appState
+        }
+      }
+      if (nextSequence < sequenceRef.current) {
+        nextAcknowledgedElements = acknowledgedElementsRef.current
+        nextAcknowledgedAppState = acknowledgedAppStateRef.current
       }
       nextSequence = Math.max(sequenceRef.current, nextSequence)
       sequenceRef.current = nextSequence
       acknowledgedElementsRef.current = nextAcknowledgedElements
       acknowledgedAppStateRef.current = nextAcknowledgedAppState
+      persistedFileIDsRef.current = new Set(referencedWhiteboardFileIDs(nextAcknowledgedElements))
       if (pendingSaveRef.current === pending) pendingSaveRef.current = null
       const unchanged = capturedVersion === changeVersionRef.current
       dirtyRef.current = !unchanged
@@ -665,19 +658,8 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
   }, [applyCanonicalWriteConfirmation, reconcileWhiteboardWriteConflict, session?.access_level, shareLinkID, uploadPendingFiles])
 
   const onChange = useCallback((elements: readonly ExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
-    const previous = latestRef.current
-    const snapshottedElements = elements.map(element => ({ ...element })) as readonly ExcalidrawElement[]
-    const snapshottedFiles = snapshotWhiteboardFiles(files as unknown as Record<string, unknown>) as unknown as BinaryFiles
-    latestRef.current = { elements: snapshottedElements, appState, files: snapshottedFiles }
-    if (suppressRef.current || transientSceneSuppressionRef.current > 0 || session?.access_level !== 'edit') return
-    if (previous && !hasWhiteboardDocumentMutation({
-      currentElements: elements,
-      previousElements: previous.elements,
-      currentAppState: appState as unknown as Record<string, unknown>,
-      previousAppState: previous.appState as unknown as Record<string, unknown>,
-      currentFiles: files as unknown as Record<string, unknown>,
-      previousFiles: previous.files as unknown as Record<string, unknown>,
-    })) return
+    const changed = observeWhiteboardScene(latestRef, { elements, appState, files })
+    if (session?.access_level !== 'edit' || !changed) return
     changeVersionRef.current += 1
     dirtyRef.current = true
     const retryBlocked = Boolean(pendingSaveRef.current?.automaticRetryBlockReason)
@@ -702,6 +684,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
         throw new Error(response.data.error || 'No se pudo recargar la escena compartida por REST.')
       }
       const record = response.data.scene
+      if (record.sequence < sequenceRef.current) return
       if (record.sequence < requestedSequence) {
         throw new Error('La escena compartida todavía no alcanzó la secuencia solicitada. Clarin volverá a sincronizarla.')
       }
@@ -731,22 +714,16 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
       sceneRootExtensionsRef.current = whiteboardSceneRootExtensions(canonical)
       sceneFileMetadataRef.current = sanitizeWhiteboardFilesForPersistence(canonical.files)
       acknowledgedElementsRef.current = [...canonical.elements]
+      persistedFileIDsRef.current = new Set(referencedWhiteboardFileIDs(canonical.elements))
       acknowledgedAppStateRef.current = sanitizeWhiteboardAppState(canonical.appState)
       sequenceRef.current = record.sequence
-      suppressRef.current = true
-      api?.updateScene({
+      applyWhiteboardProgrammaticScene(latestRef, {
         elements,
         appState,
-        captureUpdate: CaptureUpdateAction.NEVER,
-      })
-      latestRef.current = {
-        elements,
-        appState,
-        files: mergeWhiteboardFileRecords(
-          latestRef.current?.files as unknown as Record<string, unknown> | undefined,
-          canonical.files,
+        files: snapshotWhiteboardFiles(
+          (api?.getFiles() || latestRef.current?.files) as unknown as Record<string, unknown> | undefined,
         ) as unknown as BinaryFiles,
-      }
+      }, () => { api?.updateScene({ elements, appState, captureUpdate: CaptureUpdateAction.NEVER }) })
       const feedback = whiteboardPermissionChangeFeedback({
         canEdit: response.data.session.access_level === 'edit',
         hasPendingChanges: preserveLocalChanges,
@@ -758,7 +735,6 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
       setPermissionNotice(feedback.notice)
       setSaveState(feedback.saveState || (preserveLocalChanges ? 'pending' : 'saved'))
       setError(null)
-      requestAnimationFrame(() => { suppressRef.current = false })
       void hydrateReferencedAssets(elements)
       canonicalSyncAppliedSequenceRef.current = Math.max(requestedSequence, record.sequence)
       if (preserveLocalChanges && response.data.session.access_level === 'edit') {
@@ -886,17 +862,15 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
             scene.appState,
           ) as unknown as AppState
           acknowledgedElementsRef.current = [...scene.elements]
+          persistedFileIDsRef.current = new Set(referencedWhiteboardFileIDs(scene.elements))
           acknowledgedAppStateRef.current = sanitizeWhiteboardAppState(scene.appState)
-          suppressRef.current = true
-          api.updateScene({ elements, appState, captureUpdate: CaptureUpdateAction.NEVER })
           sequenceRef.current = realtime.sequence
-          latestRef.current = {
+          applyWhiteboardProgrammaticScene(latestRef, {
             elements,
             appState,
-            files: mergeWhiteboardFileRecords(api.getFiles() as unknown as Record<string, unknown>, scene.files) as unknown as BinaryFiles,
-          }
+            files: snapshotWhiteboardFiles(api.getFiles() as unknown as Record<string, unknown>) as unknown as BinaryFiles,
+          }, () => { api.updateScene({ elements, appState, captureUpdate: CaptureUpdateAction.NEVER }) })
           setSaveState(dirtyRef.current ? 'pending' : 'saved')
-          requestAnimationFrame(() => { suppressRef.current = false })
           void hydrateReferencedAssets(scene.elements)
           if (dirtyRef.current && !savingRef.current) {
             if (timerRef.current) clearTimeout(timerRef.current)
@@ -908,15 +882,15 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
           const appState = api.getAppState()
           const elements = reconcileElements(api.getSceneElementsIncludingDeleted(), realtime.elements as never, appState)
           acknowledgedElementsRef.current = mergeWhiteboardAcknowledgedElements(acknowledgedElementsRef.current, realtime.elements)
+          persistedFileIDsRef.current = new Set(referencedWhiteboardFileIDs(acknowledgedElementsRef.current))
           acknowledgedAppStateRef.current = {
             ...acknowledgedAppStateRef.current,
             ...sanitizeWhiteboardAppState(realtime.app_state || {}),
           }
-          suppressRef.current = true
-          api.updateScene({ elements, appState: realtime.app_state as unknown as AppState, captureUpdate: CaptureUpdateAction.NEVER })
           sequenceRef.current = realtime.sequence
-          latestRef.current = { elements, appState: { ...appState, ...(realtime.app_state || {}) }, files: api.getFiles() } as GuestLatestScene
-          requestAnimationFrame(() => { suppressRef.current = false })
+          applyWhiteboardProgrammaticScene(latestRef, { elements, appState: { ...appState, ...(realtime.app_state || {}) }, files: api.getFiles() } as GuestLatestScene, () => {
+            api.updateScene({ elements, appState: realtime.app_state as unknown as AppState, captureUpdate: CaptureUpdateAction.NEVER })
+          })
           void hydrateReferencedAssets(elements)
         }
       },
@@ -1031,9 +1005,6 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
         excalidrawAPI={api => {
           editorAPIRef.current = api
           setEditorAPI(current => current === api ? current : api)
-          requestAnimationFrame(() => {
-            if (mountedRef.current && editorAPIRef.current === api) suppressRef.current = false
-          })
         }}
         initialData={initialData}
         onChange={onChange}

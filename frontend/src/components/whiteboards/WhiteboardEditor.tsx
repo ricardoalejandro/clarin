@@ -40,7 +40,6 @@ import {
   buildWhiteboardRealtimePatch,
   buildWhiteboardSceneWritePlan,
   createWhiteboardOperationID,
-  hasWhiteboardDocumentMutation,
   mergeWhiteboardAcknowledgedElements,
   mergeWhiteboardFileRecords,
   mergeWhiteboardSessionAppState,
@@ -91,6 +90,7 @@ import {
   type WhiteboardSceneRecord,
   type WhiteboardSummary,
 } from '@/lib/whiteboards'
+import { applyWhiteboardProgrammaticScene, captureWhiteboardScene, observeWhiteboardScene, whiteboardMissingAssetIDs } from '@/lib/whiteboardSaveState'
 import {
   buildExcalidrawWhiteboardSavePayload,
   restoreClarinWhiteboardScene,
@@ -230,6 +230,7 @@ interface PendingWhiteboardSave {
   capturedElements: readonly unknown[]
   capturedAppState: Record<string, unknown>
   automaticFailures: number
+  rejectedMissingAssets?: boolean
   automaticRetryBlockReason: WhiteboardSaveRetryBlockReason
   notFoundDiagnosed: boolean
 }
@@ -466,8 +467,6 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   const changeVersionRef = useRef(0)
   const lastSavedChangeVersionRef = useRef(0)
   const dirtyRef = useRef(false)
-  const suppressChangesRef = useRef(true)
-  const transientSceneSuppressionRef = useRef(0)
   const navigationInProgressRef = useRef(false)
   const sessionLogoutStartedRef = useRef(false)
   const mountedRef = useRef(true)
@@ -629,14 +628,9 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   }, [requireOnline])
 
   const runWithTransientSceneSuppressed = useCallback((update: () => void) => {
-    transientSceneSuppressionRef.current += 1
-    try {
-      update()
-    } finally {
-      requestAnimationFrame(() => {
-        transientSceneSuppressionRef.current = Math.max(0, transientSceneSuppressionRef.current - 1)
-      })
-    }
+    // Viewport/presence changes are excluded by the document comparator. Never
+    // suppress unrelated user edits until a future animation frame.
+    update()
   }, [])
 
   const presentation = useWhiteboardPresentation({
@@ -766,13 +760,11 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
         if (controller.signal.aborted) throw whiteboardAbortError()
         failures += result.failures
         if (Object.keys(result.files).length > 0) {
-          runWithTransientSceneSuppressed(() => {
-            editorAPIRef.current?.addFiles(Object.values(result.files) as BinaryFileData[])
-          })
           if (latestSceneRef.current) latestSceneRef.current = {
             ...latestSceneRef.current,
             files: { ...latestSceneRef.current.files, ...result.files },
           }
+          editorAPIRef.current?.addFiles(Object.values(result.files) as BinaryFileData[])
         }
       }
       libraryAssetsLoadedRef.current = failures === 0
@@ -857,13 +849,13 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   }, [runWithTransientSceneSuppressed])
 
   const onHydratedBoardFile = useCallback((file: BinaryFileData) => {
-    runWithTransientSceneSuppressed(() => {
-      editorAPIRef.current?.addFiles([file])
-    })
     if (latestSceneRef.current) latestSceneRef.current = {
       ...latestSceneRef.current,
       files: { ...latestSceneRef.current.files, [file.id]: file } as BinaryFiles,
     }
+    runWithTransientSceneSuppressed(() => {
+      editorAPIRef.current?.addFiles([file])
+    })
   }, [runWithTransientSceneSuppressed])
 
   const {
@@ -898,9 +890,6 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
       }
     },
     onFile: onHydratedBoardFile,
-    onPersistedFileIDs: fileIDs => {
-      for (const fileID of fileIDs) persistedFileIDsRef.current.add(fileID)
-    },
   })
 
   const assetHydrationMessage = whiteboardAssetHydrationMessage(assetHydrationProgress)
@@ -982,7 +971,6 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     dirtyRef.current = false
     changeVersionRef.current = 0
     lastSavedChangeVersionRef.current = 0
-    suppressChangesRef.current = true
     suppressLibraryChangesRef.current = true
     personalLibraryRef.current = null
     libraryDirtyRef.current = false
@@ -1072,7 +1060,6 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   useEffect(() => {
     if (phase !== 'ready' || !editorAPIRef.current) return
     const frame = requestAnimationFrame(() => {
-      suppressChangesRef.current = false
       suppressLibraryChangesRef.current = false
     })
     return () => cancelAnimationFrame(frame)
@@ -1761,7 +1748,6 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   }, [boardID])
 
   const hydrateReferencedAssets = useCallback((elements: readonly unknown[]) => {
-    for (const fileID of referencedWhiteboardFileIDs(elements)) persistedFileIDsRef.current.add(fileID)
     const api = editorAPIRef.current
     requestAssetHydration(elements, api ? getVisibleSceneBounds(api.getAppState()) : null)
   }, [requestAssetHydration])
@@ -1882,14 +1868,12 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
         currentAppState as unknown as Record<string, unknown>,
         reconciled.appState,
       ) as unknown as AppState
-      const files = mergeWhiteboardFileRecords(
-        current.files as unknown as Record<string, unknown>,
-        canonical.files,
+      const files = snapshotWhiteboardFiles(
+        (api?.getFiles() || current.files) as unknown as Record<string, unknown>,
       ) as unknown as BinaryFiles
-      suppressChangesRef.current = true
-      api?.updateScene({ elements, appState, captureUpdate: CaptureUpdateAction.NEVER })
-      latestSceneRef.current = { elements, appState, files }
-      requestAnimationFrame(() => { suppressChangesRef.current = false })
+      applyWhiteboardProgrammaticScene(latestSceneRef, { elements, appState, files }, () => {
+        api?.updateScene({ elements, appState, captureUpdate: CaptureUpdateAction.NEVER })
+      })
       void hydrateReferencedAssets(elements)
     }
     sceneRootExtensionsRef.current = whiteboardSceneRootExtensions(canonical)
@@ -1906,6 +1890,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     const response = await loadWhiteboardScene(boardID)
     if (!response.success || !response.data?.scene) return false
     const record = response.data.scene
+    if (record.sequence < sequenceRef.current) return true
     const confirmed = applyCanonicalWriteConfirmation(
       record.scene,
       acknowledgedElementsRef.current,
@@ -1913,6 +1898,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     )
     sequenceRef.current = record.sequence
     acknowledgedElementsRef.current = confirmed.elements
+    persistedFileIDsRef.current = new Set(referencedWhiteboardFileIDs(confirmed.elements))
     acknowledgedAppStateRef.current = confirmed.appState
     setBoard(current => current ? { ...current, scene_sequence: record.sequence, updated_at: record.updated_at } : current)
     dirtyRef.current = true
@@ -1922,6 +1908,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   const flushSave = useCallback(async (reason: 'autosave' | 'manual' | 'import' = 'autosave') => {
     if (!canEdit || !dirtyRef.current) return
     if (reason === 'autosave' && pendingSaveRef.current?.automaticRetryBlockReason) return
+    if (!savingRef.current && reason !== 'autosave' && pendingSaveRef.current?.rejectedMissingAssets) pendingSaveRef.current = null
     if (reason !== 'autosave' && pendingSaveRef.current) {
       pendingSaveRef.current.automaticFailures = 0
       pendingSaveRef.current.automaticRetryBlockReason = null
@@ -1945,41 +1932,33 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     try {
       let pending = pendingSaveRef.current
       if (!pending) {
+        scene = captureWhiteboardScene(scene)
+        const capturedSequence = sequenceRef.current
+        const capturedRootExtensions = structuredClone(sceneRootExtensionsRef.current)
+        const capturedFileMetadata = structuredClone(sceneFileMetadataRef.current)
+        const writePlan = buildWhiteboardSceneWritePlan(scene.elements, acknowledgedElementsRef.current)
         const files = await uploadPendingFiles(scene.files, scene.elements)
-        const currentScene = latestSceneRef.current || scene
-        scene = {
-          ...currentScene,
-          files: snapshotWhiteboardFiles({
-            ...(currentScene.files as unknown as Record<string, unknown>),
-            ...(files as unknown as Record<string, unknown>),
-          }) as unknown as BinaryFiles,
-        }
-        latestSceneRef.current = scene
-        capturedVersion = changeVersionRef.current
+        scene = { ...scene, files }
+        // Later gestures stay in latestSceneRef; this write contains only the
+        // immutable scene whose binary assets were just prepared.
         setSaveState('saving')
         const operationID = createWhiteboardOperationID()
-        const writePlan = buildWhiteboardSceneWritePlan(scene.elements, acknowledgedElementsRef.current)
         const canPatch = reason === 'autosave' && writePlan.kind === 'patch'
         pending = retainWhiteboardPendingSave(pending, () => ({
           operationID,
           capturedVersion,
           payload: buildExcalidrawWhiteboardSavePayload({
-            sceneSequence: sequenceRef.current,
+            sceneSequence: capturedSequence,
             operationID,
             reason,
             elements: scene.elements,
             appState: scene.appState as unknown as Record<string, unknown>,
-            files: mergeWhiteboardFileRecords(scene.files as unknown as Record<string, unknown>, sceneFileMetadataRef.current),
-            rootExtensions: sceneRootExtensionsRef.current,
+            files: mergeWhiteboardFileRecords(scene.files as unknown as Record<string, unknown>, capturedFileMetadata),
+            rootExtensions: capturedRootExtensions,
             includePatch: canPatch,
             patchElements: writePlan.elements,
           }),
-          realtimePatch: canPatch ? buildWhiteboardRealtimePatch({
-            sceneSequence: sequenceRef.current,
-            operationID,
-            elements: writePlan.elements,
-            appState: scene.appState as unknown as Record<string, unknown>,
-          }) : null,
+          realtimePatch: null as WhiteboardScenePatch | null,
           capturedElements: [],
           capturedAppState: {},
           automaticFailures: 0,
@@ -1988,6 +1967,13 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
         }))
         pending.capturedElements = [...pending.payload.scene.elements]
         pending.capturedAppState = sanitizeWhiteboardAppState(pending.payload.scene.appState)
+        // HTTP fallback and realtime must hash exactly the same immutable delta.
+        pending.realtimePatch = pending.payload.patch ? buildWhiteboardRealtimePatch({
+          sceneSequence: pending.payload.expected_sequence,
+          operationID: pending.operationID,
+          elements: pending.payload.patch.elements,
+          appState: pending.payload.patch.app_state,
+        }) : null
         pendingSaveRef.current = pending
       }
       capturedVersion = pending.capturedVersion
@@ -2011,7 +1997,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
       if (acknowledgement) {
         if (typeof acknowledgement.sequence !== 'number') throw new Error('Clarin no confirmó la secuencia guardada.')
         nextSequence = acknowledgement.sequence
-        if (acknowledgement.scene) {
+        if (acknowledgement.scene && nextSequence >= sequenceRef.current) {
           const confirmed = applyCanonicalWriteConfirmation(
             acknowledgement.scene,
             pending.capturedElements,
@@ -2032,6 +2018,11 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
         }
         const response = attempt.result
         if (!response.success || !response.data?.result.scene) {
+          const missingAssets = whiteboardMissingAssetIDs(response.data?.code, response.data?.missing_file_ids)
+          if (missingAssets.length) {
+            for (const fileID of missingAssets) persistedFileIDsRef.current.delete(fileID)
+            pending.rejectedMissingAssets = true
+          }
           pending.automaticFailures += 1
           const failureAction = whiteboardSaveFailureAction(response.status, pending.automaticFailures)
           if (failureAction === 'conflict') {
@@ -2061,18 +2052,25 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
         }
         nextSequence = response.data.result.scene.sequence
         updatedAt = response.data.result.scene.updated_at
-        const confirmed = applyCanonicalWriteConfirmation(
-          response.data.result.scene.scene,
-          pending.capturedElements,
-          pending.capturedAppState,
-        )
-        nextAcknowledgedElements = confirmed.elements
-        nextAcknowledgedAppState = confirmed.appState
+        if (nextSequence >= sequenceRef.current) {
+          const confirmed = applyCanonicalWriteConfirmation(
+            response.data.result.scene.scene,
+            pending.capturedElements,
+            pending.capturedAppState,
+          )
+          nextAcknowledgedElements = confirmed.elements
+          nextAcknowledgedAppState = confirmed.appState
+        }
+      }
+      if (nextSequence < sequenceRef.current) {
+        nextAcknowledgedElements = acknowledgedElementsRef.current
+        nextAcknowledgedAppState = acknowledgedAppStateRef.current
       }
       nextSequence = Math.max(sequenceRef.current, nextSequence)
       sequenceRef.current = nextSequence
       acknowledgedElementsRef.current = nextAcknowledgedElements
       acknowledgedAppStateRef.current = nextAcknowledgedAppState
+      persistedFileIDsRef.current = new Set(referencedWhiteboardFileIDs(nextAcknowledgedElements))
       lastSavedChangeVersionRef.current = Math.max(lastSavedChangeVersionRef.current, capturedVersion)
       if (pendingSaveRef.current === pending) pendingSaveRef.current = null
       const unchanged = capturedVersion === changeVersionRef.current
@@ -2108,19 +2106,8 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   const onChange = useCallback((elements: readonly ExcalidrawElement[], appState: AppState, files: BinaryFiles) => {
     const openSidebar = appState.openSidebar as { name?: string } | null
     if (openSidebar?.name === 'library') void loadLibraryAssets()
-    const previous = latestSceneRef.current
-    const snapshottedElements = elements.map(element => ({ ...element })) as readonly ExcalidrawElement[]
-    const snapshottedFiles = snapshotWhiteboardFiles(files as unknown as Record<string, unknown>) as unknown as BinaryFiles
-    latestSceneRef.current = { elements: snapshottedElements, appState, files: snapshottedFiles }
-    if (suppressChangesRef.current || transientSceneSuppressionRef.current > 0 || !canEdit) return
-    if (previous && !hasWhiteboardDocumentMutation({
-      currentElements: elements,
-      previousElements: previous.elements,
-      currentAppState: appState as unknown as Record<string, unknown>,
-      previousAppState: previous.appState as unknown as Record<string, unknown>,
-      currentFiles: files as unknown as Record<string, unknown>,
-      previousFiles: previous.files as unknown as Record<string, unknown>,
-    })) return
+    const changed = observeWhiteboardScene(latestSceneRef, { elements, appState, files })
+    if (!canEdit || !changed) return
     changeVersionRef.current += 1
     dirtyRef.current = true
     const retryBlocked = Boolean(pendingSaveRef.current?.automaticRetryBlockReason)
@@ -2130,14 +2117,14 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   }, [canEdit, flushSave, loadLibraryAssets, networkOrLocal])
 
   const applySceneRecord = useCallback((record: WhiteboardSceneRecord, preserveLocalChanges = false) => {
+    if (record.sequence < sequenceRef.current) return
     const api = editorAPIRef.current
     const scene = restoreClarinWhiteboardScene(record.scene)
-    for (const fileID of referencedWhiteboardFileIDs(scene.elements)) persistedFileIDsRef.current.add(fileID)
+    persistedFileIDsRef.current = new Set(referencedWhiteboardFileIDs(scene.elements))
     sceneRootExtensionsRef.current = whiteboardSceneRootExtensions(scene)
     sceneFileMetadataRef.current = sanitizeWhiteboardFilesForPersistence(scene.files)
-    const existingFiles = mergeWhiteboardFileRecords(
-      latestSceneRef.current?.files as unknown as Record<string, unknown> | undefined,
-      scene.files,
+    const existingFiles = snapshotWhiteboardFiles(
+      (api?.getFiles() || latestSceneRef.current?.files) as unknown as Record<string, unknown> | undefined,
     ) as unknown as BinaryFiles
     const remoteElements = scene.elements as readonly ExcalidrawElement[]
     const currentAppState = api?.getAppState()
@@ -2163,18 +2150,13 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     sequenceRef.current = record.sequence
     acknowledgedElementsRef.current = [...remoteElements]
     acknowledgedAppStateRef.current = sanitizeWhiteboardAppState(scene.appState)
-    suppressChangesRef.current = true
-    api?.updateScene({
-      elements,
-      appState,
-      captureUpdate: CaptureUpdateAction.NEVER,
+    applyWhiteboardProgrammaticScene(latestSceneRef, { elements, appState, files: existingFiles }, () => {
+      api?.updateScene({ elements, appState, captureUpdate: CaptureUpdateAction.NEVER })
     })
-    latestSceneRef.current = { elements, appState, files: existingFiles }
     setBoard(current => current ? { ...current, scene_sequence: record.sequence, updated_at: record.updated_at } : current)
     if (!preserveLocalChanges) dirtyRef.current = false
     setSaveState(preserveLocalChanges ? 'pending' : 'saved')
     setError(null)
-    requestAnimationFrame(() => { suppressChangesRef.current = false })
   }, [])
 
   const reloadCanonicalForRealtime = useCallback(async (event: WhiteboardRealtimeEvent, force = false) => {
@@ -2436,15 +2418,15 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
           const appState = api.getAppState()
           const elements = reconcileElements(local, event.elements as never, appState)
           acknowledgedElementsRef.current = mergeWhiteboardAcknowledgedElements(acknowledgedElementsRef.current, event.elements)
+          persistedFileIDsRef.current = new Set(referencedWhiteboardFileIDs(acknowledgedElementsRef.current))
           acknowledgedAppStateRef.current = {
             ...acknowledgedAppStateRef.current,
             ...sanitizeWhiteboardAppState(event.app_state || {}),
           }
-          suppressChangesRef.current = true
-          api.updateScene({ elements, appState: event.app_state as unknown as AppState, captureUpdate: CaptureUpdateAction.NEVER })
           sequenceRef.current = remoteSequence
-          latestSceneRef.current = { elements, appState: { ...appState, ...(event.app_state || {}) }, files: api.getFiles() } as LatestScene
-          requestAnimationFrame(() => { suppressChangesRef.current = false })
+          applyWhiteboardProgrammaticScene(latestSceneRef, { elements, appState: { ...appState, ...(event.app_state || {}) }, files: api.getFiles() } as LatestScene, () => {
+            api.updateScene({ elements, appState: event.app_state as unknown as AppState, captureUpdate: CaptureUpdateAction.NEVER })
+          })
           void hydrateReferencedAssets(elements)
         }
       },
@@ -2577,17 +2559,14 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
           : restored.files as unknown as Record<string, unknown>,
       )
       persistedFileIDsRef.current = new Set()
-      suppressChangesRef.current = true
       api.updateScene({ elements: restored.elements || [], appState: restored.appState || {}, captureUpdate: CaptureUpdateAction.IMMEDIATELY })
       api.addFiles(Object.values(files) as BinaryFileData[])
       latestSceneRef.current = { elements: restored.elements || [], appState: { ...api.getAppState(), ...(restored.appState || {}) }, files } as LatestScene
       changeVersionRef.current += 1
       dirtyRef.current = true
       setSaveState('pending')
-      requestAnimationFrame(() => { suppressChangesRef.current = false })
       await flushSave('import')
     } catch (importError) {
-      suppressChangesRef.current = false
       setError(importError instanceof Error ? importError.message : 'No se pudo importar la pizarra.')
     }
   }
@@ -2941,7 +2920,6 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
           setEditorAPI(current => current === api ? current : api)
           requestAnimationFrame(() => {
             if (!mountedRef.current || editorAPIRef.current !== api) return
-            suppressChangesRef.current = false
             suppressLibraryChangesRef.current = false
           })
         }}

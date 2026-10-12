@@ -192,7 +192,7 @@ export function loadWhiteboardScene(id: string, signal?: AbortSignal) {
 
 export function saveWhiteboard(id: string, payload: WhiteboardSavePayload) {
   const method = whiteboardSceneSaveMethod(payload)
-  return api<{ success?: boolean; rebased?: boolean; result: { scene: WhiteboardSceneRecord; idempotent: boolean } }>(
+  return api<{ success?: boolean; rebased?: boolean; code?: string; missing_file_ids?: string[]; result: { scene: WhiteboardSceneRecord; idempotent: boolean } }>(
     `${WHITEBOARDS_API_ROOT}/${encodeURIComponent(id)}/scene`,
     { method, body: JSON.stringify(payload) },
   )
