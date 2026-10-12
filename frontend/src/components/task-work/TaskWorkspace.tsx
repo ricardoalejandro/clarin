@@ -22,6 +22,7 @@ import TaskFilterToolbar, { EMPTY_TASK_FILTERS, TaskFilterChips, normalizeTaskFi
 import TaskGanttView from './TaskGanttView'
 import TaskListView from './TaskListView'
 import TaskCalendarView from './TaskCalendarView'
+import TaskSummaryView from './TaskSummaryView'
 import TaskHierarchyTree from './TaskHierarchyTree'
 import TaskStructureModal, { type TaskStructureModalHandle } from './TaskStructureModal'
 import TaskEnvironmentSwitcher from './TaskEnvironmentSwitcher'
@@ -115,6 +116,9 @@ import {
 	taskLocationViewSelectionError,
 	taskPurgedWhiteboardCount,
 } from '@/lib/taskLocationViews'
+import { appendTaskFilters, loadTaskSummary } from './taskQuery'
+import { collectTaskWindow } from './taskPageWindow'
+import { TaskAccessReconciliation } from './taskAccessReconciliation'
 import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider'
 
 const WorkWhiteboardEditor = dynamic(() => import('@/components/whiteboards/WhiteboardEditor'), {
@@ -166,32 +170,6 @@ export function overdueAttentionQuery(currentUserId: string) {
   params.set('include_closed', 'false')
   params.set('include_subtasks', 'false')
   return params
-}
-
-function appendTaskFilters(params: URLSearchParams, filters: TaskFilters) {
-  params.set('include_closed', String(filters.include_closed))
-  if (filters.status_ids.length) {
-    params.set('status_ids', filters.status_ids.join(','))
-    if (filters.status_ids.length === 1) params.set('status', filters.status_ids[0])
-  }
-  if (filters.assigned_to_ids.length) {
-    params.set('assigned_to_ids', filters.assigned_to_ids.join(','))
-    if (filters.assigned_to_ids.length === 1) params.set('assigned_to', filters.assigned_to_ids[0])
-  }
-  if (filters.collaborator_ids.length) params.set('collaborator_ids', filters.collaborator_ids.join(','))
-  if (filters.priorities.length) params.set('priorities', filters.priorities.join(','))
-  if (filters.types.length) params.set('types', filters.types.join(','))
-  if (filters.creator_ids.length) params.set('creator_ids', filters.creator_ids.join(','))
-  if (filters.due) params.set('due', filters.due)
-  if (filters.created_from) params.set('created_from', filters.created_from)
-  if (filters.created_to) params.set('created_to', filters.created_to)
-  if (filters.completed_from) params.set('completed_from', filters.completed_from)
-  if (filters.completed_to) params.set('completed_to', filters.completed_to)
-  if (filters.has_subtasks !== undefined) params.set('has_subtasks', String(filters.has_subtasks))
-  if (filters.has_comments !== undefined) params.set('has_comments', String(filters.has_comments))
-  if (filters.has_attachments !== undefined) params.set('has_attachments', String(filters.has_attachments))
-  if (filters.has_dependencies !== undefined) params.set('has_dependencies', String(filters.has_dependencies))
-  if (filters.starred !== undefined) params.set('starred', String(filters.starred))
 }
 
 function TaskCard({ task, compact = false, onOpen, onStar }: { task: Task; compact?: boolean; onOpen: () => void; onStar?: () => void }) {
@@ -248,26 +226,6 @@ function CalendarView({ tasks, onOpen }: { tasks: Task[]; onOpen: (task: Task) =
       {mode === 'month' && <div className="grid min-h-full grid-cols-7 grid-rows-[32px_repeat(6,minmax(100px,1fr))]">{['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'].map(day => <div key={day} className="flex items-center justify-center border-b border-r border-slate-100 text-[10px] font-bold uppercase text-slate-400">{day}</div>)}{monthDays.map(day => { const items = dayTasks(day); const activeMonth = day.getMonth() === cursor.getMonth(); const today = day.toDateString() === new Date().toDateString(); return <div key={day.toISOString()} className={`min-h-[100px] border-b border-r border-slate-100 p-1.5 ${activeMonth ? 'bg-white' : 'bg-slate-50/70'}`}><div className={`mb-1 flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-semibold ${today ? 'bg-emerald-600 text-white' : activeMonth ? 'text-slate-600' : 'text-slate-300'}`}>{day.getDate()}</div><div className="space-y-1">{items.slice(0,3).map(task => <button key={task.id} onClick={() => onOpen(task)} className="block w-full truncate rounded px-1.5 py-1 text-left text-[10px] font-medium text-white" style={{ backgroundColor: task.status_detail?.color || '#64748b' }}>{task.title}</button>)}{items.length > 3 && <span className="px-1 text-[9px] font-semibold text-slate-400">+{items.length - 3} más</span>}</div></div> })}</div>}
       {mode === 'week' && <div className="grid min-h-full grid-cols-7">{weekDays.map(day => <div key={day.toISOString()} className="border-r border-slate-100"><div className="sticky top-0 border-b border-slate-100 bg-white p-3 text-center"><p className="text-[10px] font-bold uppercase text-slate-400">{day.toLocaleDateString('es',{weekday:'short'})}</p><p className="mt-1 text-lg font-bold text-slate-700">{day.getDate()}</p></div><div className="space-y-2 p-2">{dayTasks(day).map(task => <TaskCard key={task.id} task={task} compact onOpen={() => onOpen(task)} />)}</div></div>)}</div>}
       {mode === 'day' && <div className="mx-auto max-w-3xl p-4"><h3 className="mb-4 text-sm font-bold capitalize text-slate-700">{dateLong.format(cursor)}</h3><div className="space-y-2">{dayTasks(cursor).sort((a,b) => new Date(a.due_at!).getTime()-new Date(b.due_at!).getTime()).map(task => <div key={task.id} className="grid grid-cols-[64px_1fr] items-start gap-3"><span className="pt-3 text-xs font-semibold text-slate-400">{new Date(task.due_at!).toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'})}</span><TaskCard task={task} onOpen={() => onOpen(task)} /></div>)}{!dayTasks(cursor).length && <div className="rounded-2xl border border-dashed border-slate-300 py-16 text-center text-sm text-slate-400">No hay tareas programadas.</div>}</div></div>}
-    </div>
-  </div>
-}
-
-function SummaryView({ tasks, summary, users }: { tasks: Task[]; summary: TaskWorkSummary | null; users: TaskAccountUser[] }) {
-  const statusGroups = Array.from(new Map(tasks.filter(task => task.status_detail).map(task => [task.status_id!, task.status_detail!])).values()).map(status => ({ ...status, count: tasks.filter(task => task.status_id === status.id).length }))
-  const maxStatus = Math.max(1, ...statusGroups.map(item => item.count))
-  const workload = users.map(user => ({ user, tasks: tasks.filter(task => task.assigned_to === user.id), overdue: tasks.filter(task => task.assigned_to === user.id && taskIsOverdue(task)).length })).filter(item => item.tasks.length).sort((a,b) => b.tasks.length-a.tasks.length)
-  const maxWork = Math.max(1, ...workload.map(item => item.tasks.length))
-  const completion = summary?.total ? Math.round((summary.done / summary.total) * 100) : 0
-  return <div className="space-y-5 pb-8">
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{[
-      ['Total', summary?.total || 0, 'text-slate-900'], ['Completadas', summary?.done || 0, 'text-emerald-600'],
-      ['En curso', summary?.active || 0, 'text-blue-600'], ['Vencidas', summary?.overdue || 0, 'text-rose-600'],
-      ['Progreso', `${Math.round(summary?.progress || 0)}%`, 'text-violet-600'],
-    ].map(([label,value,color]) => <div key={label} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><p className="text-xs font-semibold text-slate-400">{label}</p><p className={`mt-2 text-2xl font-black ${color}`}>{value}</p></div>)}</div>
-    <div className="grid gap-5 lg:grid-cols-[1fr_1fr_280px]">
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h3 className="text-sm font-bold text-slate-800">Distribución por estado</h3><div className="mt-5 space-y-4">{statusGroups.map(status => <div key={status.id}><div className="mb-1.5 flex justify-between text-xs"><span className="font-medium text-slate-600">{status.name}</span><span className="font-bold text-slate-500">{status.count}</span></div><div className="h-2 rounded-full bg-slate-100"><div className="h-full rounded-full" style={{ width: `${(status.count/maxStatus)*100}%`, backgroundColor: status.color }} /></div></div>)}</div></section>
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h3 className="text-sm font-bold text-slate-800">Carga del equipo</h3><div className="mt-5 space-y-4">{workload.map(item => <div key={item.user.id}><div className="mb-1.5 flex justify-between text-xs"><span className="font-medium text-slate-600">{item.user.display_name || item.user.username}</span><span className={item.overdue ? 'font-bold text-rose-600' : 'font-bold text-slate-500'}>{item.tasks.length}{item.overdue ? ` · ${item.overdue} vencidas` : ''}</span></div><div className="h-2 rounded-full bg-slate-100"><div className={`h-full rounded-full ${item.overdue ? 'bg-rose-400' : 'bg-blue-500'}`} style={{ width: `${(item.tasks.length/maxWork)*100}%` }} /></div></div>)}</div></section>
-      <section className="flex flex-col items-center justify-center rounded-2xl border border-slate-200 bg-slate-900 p-6 text-white shadow-sm"><div className="relative flex h-36 w-36 items-center justify-center rounded-full" style={{ background: `conic-gradient(#34d399 ${completion * 3.6}deg,#334155 0deg)` }}><div className="flex h-28 w-28 flex-col items-center justify-center rounded-full bg-slate-900"><span className="text-3xl font-black">{completion}%</span><span className="text-[10px] uppercase tracking-wider text-slate-400">completado</span></div></div><p className="mt-5 text-center text-xs leading-5 text-slate-400">{summary?.owners || 0} responsables participan en este ámbito.</p></section>
     </div>
   </div>
 }
@@ -556,6 +514,8 @@ export default function TaskWorkspace() {
   const [currentUserId, setCurrentUserId] = useState('')
   const [currentAccountId, setCurrentAccountId] = useState('')
   const [tasks, setTasks] = useState<Task[]>([])
+  const [summary, setSummary] = useState<TaskWorkSummary | null>(null)
+  const summaryQueryRef = useRef('')
   const [taskTotal, setTaskTotal] = useState(0)
   const [taskNextCursor, setTaskNextCursor] = useState<string | null>(null)
   const [taskLoadingMore, setTaskLoadingMore] = useState(false)
@@ -640,6 +600,7 @@ export default function TaskWorkspace() {
   const taskVersions = useRef(new Map<string, number>())
   const taskTombstones = useRef(new Map<string, number>())
   const authoritativeTaskAbsences = useRef(new Map<string, number>())
+  const taskAccessRef = useRef(new TaskAccessReconciliation())
   const pendingOperations = useRef(new Set<string>())
   const visualMutationLedgerRef = useRef<TaskVisualMutationLedger>({})
   const taskVisualWriteQueuesRef = useRef<TaskScopedWriteQueues>(new Map())
@@ -681,6 +642,7 @@ export default function TaskWorkspace() {
   }, [])
 
   const seedTaskWriteSnapshot = useCallback((task: Task) => {
+    if (!taskAccessRef.current.canAccept(task)) return
     const current = taskWriteSnapshotsRef.current.get(task.id)
     if (!current || Number(task.version || 0) > Number(current.version || 0)) {
       taskWriteSnapshotsRef.current.set(task.id, task)
@@ -767,6 +729,7 @@ export default function TaskWorkspace() {
 	}, [])
 
   const acceptCanonicalTask = useCallback((incoming: Task, action = 'updated') => {
+    if (!taskAccessRef.current.canAccept(incoming)) return false
     const incomingVersion = incoming.version || 0
     const knownVersion = taskVersions.current.get(incoming.id) || 0
     const deletedVersion = taskTombstones.current.get(incoming.id)
@@ -783,6 +746,7 @@ export default function TaskWorkspace() {
   const reconcileCanonicalTasks = useCallback((incoming: Task[], action = 'updated', order?: { list_id?: string; task_ids?: string[] }, operationID?: string) => {
     const reconciled: Task[] = []
     for (const canonical of incoming) {
+      if (!taskAccessRef.current.canAccept(canonical)) continue
       const current = tasksRef.current.find(task => task.id === canonical.id) || canonical
       const result = reconcileTaskVisualMutation(visualMutationLedgerRef.current, current, canonical, operationID)
       visualMutationLedgerRef.current = result.ledger
@@ -1610,6 +1574,7 @@ export default function TaskWorkspace() {
     taskLoadAbortRef.current = controller
     const sequence = ++loadSequence.current
     const versionsAtRequestStart = new Map(taskVersions.current)
+    const accessReadEpoch = taskAccessRef.current.epoch
     const authoritativeMissingIDs = new Set(authoritativeTaskAbsences.current.keys())
     if (showLoader && !loadedOnce.current) setLoading(true)
     if (myWorkActive) {
@@ -1625,6 +1590,19 @@ export default function TaskWorkspace() {
       : taskQueryFiltersForLifecycle(filters, view, scope.type === 'archive' || scope.type === 'trash' ? scope.type : 'active')
     if (!attentionOverdue) appendTaskFilters(params, queryFilters)
     const queryKey = taskPageQueryKey(params)
+    if (!attentionOverdue && !['trash', 'archive', 'shared'].includes(scope.type) && (view === 'calendar' || view === 'summary')) {
+      if (view === 'summary') {
+        if (summaryQueryRef.current !== queryKey) setSummary(null)
+        summaryQueryRef.current = queryKey
+        const result = await loadTaskSummary(params, controller.signal)
+        if (sequence !== loadSequence.current || controller.signal.aborted) return
+        if (result.success && result.data) setSummary(result.data)
+        else setError(result.error || 'No se pudo cargar el resumen')
+      }
+      loadedOnce.current = true
+      setLoading(false)
+      return
+    }
     const sameQuery = activeTaskQueryKeyRef.current === queryKey
     if (!sameQuery) {
       setTaskLoadingMore(false)
@@ -1634,10 +1612,22 @@ export default function TaskWorkspace() {
     if (debouncedSearch) ganttParams.set('search', debouncedSearch)
     appendTaskFilters(ganttParams, queryFilters)
     const queryActive = attentionOverdue || hasActiveTaskQuery(debouncedSearch, taskFilterCount(filters))
-    const taskRes = await apiGet<TaskPageResponse>(`/api/tasks?${taskPageParams(params)}`, { signal: controller.signal })
+    let taskRes: { success: boolean; data?: TaskPageResponse; error?: string }
+    try {
+      const data = await collectTaskWindow(async cursor => {
+        const result = await apiGet<TaskPageResponse>(`/api/tasks?${taskPageParams(params, cursor)}`, { signal: controller.signal })
+        if (sequence !== loadSequence.current || controller.signal.aborted) throw new DOMException('Aborted', 'AbortError')
+        if (!result.success || !result.data) throw new Error(result.error || 'No se pudieron cargar las tareas')
+        return result.data
+      }, sameQuery ? tasksRef.current.length : 0)
+      taskRes = { success: true, data }
+    } catch (cause) {
+      taskRes = { success: false, error: cause instanceof Error ? cause.message : 'No se pudieron cargar las tareas' }
+    }
     if (sequence !== loadSequence.current || controller.signal.aborted) return
     if (taskRes.success) {
       const loadedTasks = (taskRes.data?.tasks || []).flatMap(canonical => {
+        if (!taskAccessRef.current.confirmRead(canonical, accessReadEpoch)) return []
         const current = tasksRef.current.find(task => task.id === canonical.id) || canonical
         const result = reconcileTaskVisualMutation(visualMutationLedgerRef.current, current, canonical)
         visualMutationLedgerRef.current = result.ledger
@@ -1662,10 +1652,10 @@ export default function TaskWorkspace() {
           if (scope.type !== 'trash') taskTombstones.current.delete(task.id)
           return [task]
         })
-        const merged = mergeTaskPage(current, reconciled, sameQuery ? 'refresh' : 'replace', authoritativeMissingIDs)
-        if (!sameQuery) {
+        const merged = mergeTaskPage(current, reconciled, sameQuery ? 'refresh' : 'replace', authoritativeMissingIDs, { complete: true })
+        {
           const loadedIDs = new Set(loadedTasks.map(task => task.id))
-          for (const task of queryActive ? [] : current) {
+          for (const task of current) {
             if (!loadedIDs.has(task.id) && shouldPreserveConcurrentTask(
               task,
               versionsAtRequestStart.get(task.id) || 0,
@@ -1673,7 +1663,8 @@ export default function TaskWorkspace() {
               taskTombstones.current.get(task.id) !== undefined,
               queryFilters,
               view,
-            )) merged.push(task)
+              taskMatchesWorkspaceFilters(task, queryFilters, view, debouncedSearch),
+            ) && taskBelongsToWorkspaceScope(task, scope, activeEnvironmentId, folders, true) && taskMatchesWorkspaceFilters(task, queryFilters, view, debouncedSearch)) merged.push(task)
           }
         }
         return Array.from(new Map(merged.map(task => [task.id, task])).values())
@@ -1682,19 +1673,16 @@ export default function TaskWorkspace() {
       if (!Object.keys(visualMutationLedgerRef.current).length) setTaskTotal(taskRes.data?.total || 0)
       const loadedIDs = new Set(loadedTasks.map(task => task.id))
       Array.from(authoritativeMissingIDs).forEach(taskID => authoritativeTaskAbsences.current.delete(taskID))
-      const preservesLoadedTail = sameQuery && tasksRef.current.some(task => !loadedIDs.has(task.id) && !authoritativeMissingIDs.has(task.id))
-      if (!preservesLoadedTail) {
-        const nextCursor = taskRes.data?.next_cursor || null
-        taskNextCursorRef.current = nextCursor
-        setTaskNextCursor(nextCursor)
-      }
+      const nextCursor = taskRes.data?.next_cursor || null
+      taskNextCursorRef.current = nextCursor
+      setTaskNextCursor(nextCursor)
     }
     else if (!controller.signal.aborted) setError(taskRes.error || 'No se pudieron cargar las tareas')
     if (!attentionOverdue && view === 'gantt') {
       const ganttRes = await apiGet<TaskGanttData>(`/api/tasks/gantt?${ganttParams}`, { signal: controller.signal })
       if (sequence !== loadSequence.current || controller.signal.aborted) return
       if (ganttRes.success && ganttRes.data) setGantt({
-        tasks: (ganttRes.data.tasks || []).map(canonical => {
+        tasks: (ganttRes.data.tasks || []).filter(canonical => taskAccessRef.current.confirmRead(canonical, accessReadEpoch)).map(canonical => {
           const current = tasksRef.current.find(task => task.id === canonical.id) || canonical
           const result = reconcileTaskVisualMutation(visualMutationLedgerRef.current, current, canonical)
           visualMutationLedgerRef.current = result.ledger
@@ -1734,6 +1722,7 @@ export default function TaskWorkspace() {
     const controller = new AbortController()
     taskMoreAbortRef.current = controller
     const sequence = loadSequence.current
+    const accessReadEpoch = taskAccessRef.current.epoch
     setTaskLoadingMore(true)
     setTaskLoadMoreError('')
     const result = await apiGet<TaskPageResponse>(`/api/tasks?${taskPageParams(params, cursor)}`, { signal: controller.signal })
@@ -1745,6 +1734,7 @@ export default function TaskWorkspace() {
     }
     const currentIDs = new Set(tasksRef.current.map(task => task.id))
     const incoming = (result.data?.tasks || []).filter(task => {
+      if (!taskAccessRef.current.confirmRead(task, accessReadEpoch)) return false
       const knownVersion = taskVersions.current.get(task.id) || 0
       const deletedVersion = taskTombstones.current.get(task.id)
       const resolution = resolveTaskPageItem(task.version || 0, knownVersion, scope.type === 'trash' ? undefined : deletedVersion, currentIDs.has(task.id))
@@ -1959,6 +1949,36 @@ export default function TaskWorkspace() {
 			return
 		}
     if (action === 'access_revoked' && payload.target_id) {
+      const targetType = payload.target_type
+      if (targetType === 'task' || targetType === 'list' || targetType === 'folder' || targetType === 'environment') {
+        taskAccessRef.current.revoke(targetType, payload.target_id, [...taskWriteSnapshotsRef.current.values(), ...tasksRef.current])
+        const retainedLedger = { ...visualMutationLedgerRef.current }
+        for (const [id, task] of taskWriteSnapshotsRef.current) {
+          if (!taskAccessRef.current.canAccept(task)) {
+            taskWriteSnapshotsRef.current.delete(id)
+            taskVisualWriteIntentsRef.current.delete(id)
+            delete retainedLedger[id]
+          }
+        }
+        visualMutationLedgerRef.current = retainedLedger
+      }
+      // Invalidate immediately, before any awaited close or delayed refresh.
+      taskLoadAbortRef.current?.abort()
+      taskMoreAbortRef.current?.abort()
+      loadSequence.current += 1
+      setTaskLoadingMore(false)
+      setSummary(null)
+      if (payload.target_type === 'task') {
+        authoritativeTaskAbsences.current.set(payload.target_id, taskVersions.current.get(payload.target_id) || 0)
+        tasksRef.current = tasksRef.current.filter(task => task.id !== payload.target_id)
+        setTasks(tasksRef.current)
+        setGantt(current => ({ ...current, tasks: current.tasks.filter(task => task.id !== payload.target_id) }))
+      } else {
+        // A minimal revocation cannot safely describe every hidden descendant.
+        tasksRef.current = []
+        setTasks([])
+        setGantt(current => ({ ...current, tasks: [] }))
+      }
 		const openLocation = activeLocationViewRef.current
 		const revokedOpenLocation = Boolean(openLocation && (
 			(payload.target_type === 'environment' && openLocation.environment_id === payload.target_id)
@@ -2104,6 +2124,7 @@ export default function TaskWorkspace() {
       }
       const incoming = payload.task
       if (hasActiveTaskQuery(search, taskFilterCount(filters))) {
+        reconcileCanonicalTasks([incoming], action, payload.order, payload.operation_id)
         if (refreshTimer.current) clearTimeout(refreshTimer.current)
         refreshTimer.current = setTimeout(() => void loadTasks(false), 180)
         if (!countsApplied && (action === 'created' || action === 'restored' || payload.structure_changed)) void loadHierarchy()
@@ -2115,7 +2136,7 @@ export default function TaskWorkspace() {
         applyTaskHierarchyMutation(previous, incoming)
         void loadHierarchy()
       }
-      if (view === 'gantt' || debouncedSearch || taskFilterCount(filters)) {
+      if (view === 'gantt' || view === 'summary' || debouncedSearch || taskFilterCount(filters)) {
         if (refreshTimer.current) clearTimeout(refreshTimer.current)
         refreshTimer.current = setTimeout(() => void loadTasks(false), 180)
       }
@@ -2167,16 +2188,8 @@ export default function TaskWorkspace() {
   const allStatuses = useMemo(() => Array.from(new Map([...workflows.flatMap(workflow => workflow.statuses || []), ...statuses].map(status => [status.id, status])).values()), [statuses, workflows])
   const boardDefaultListId = activeList?.id || activeFolder?.lists[0]?.id || lists.find(list => list.is_default)?.id || lists[0]?.id
   const editorLists = editingTask || subtaskParent ? lists : scopedLists
-  const visibleSummary = useMemo<TaskWorkSummary>(() => ({
-    total: tasks.length,
-    done: tasks.filter(task => task.status_detail?.category === 'done').length,
-    active: tasks.filter(task => task.status_detail?.category === 'active').length,
-    overdue: tasks.filter(taskIsOverdue).length,
-    owners: new Set(tasks.map(task => task.assigned_to).filter(Boolean)).size,
-    progress: tasks.length ? tasks.reduce((sum, task) => sum + (task.progress || 0), 0) / tasks.length : 0,
-  }), [tasks])
-
   const projectTaskLocally = useCallback((projected: Task) => {
+    if (!taskAccessRef.current.canAccept(projected)) return
     const current = tasksRef.current
     const wasVisible = current.some(task => task.id === projected.id)
     const remainsVisible = taskBelongsToWorkspaceScope(projected, scope, activeEnvironmentId, folders, wasVisible)
@@ -2224,6 +2237,7 @@ export default function TaskWorkspace() {
     }
 
     return enqueueTaskScopedWrite(taskVisualWriteQueuesRef.current, task.id, async () => {
+      if (!taskAccessRef.current.canAccept(task)) return undefined
       clearTaskMutationFailure(task.id)
       const visibleTask = tasksRef.current.find(item => item.id === task.id)
       const rememberedTask = taskWriteSnapshotsRef.current.get(task.id)
@@ -2248,8 +2262,10 @@ export default function TaskWorkspace() {
       handleBoardOperation(operationID, true)
       try {
         const result = await apiPut<{ task: Task; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>(`/api/tasks/${task.id}`, { ...body, version: baseTask.version, operation_id: operationID })
+        if (!taskAccessRef.current.canAccept(task)) return undefined
         if (result.success && result.data?.task) {
           const canonical = result.data.task
+          if (!taskAccessRef.current.canAccept(canonical)) return undefined
           const canonicalOperationID = result.data.operation_id || operationID
           taskWriteSnapshotsRef.current.set(task.id, canonical)
           clearTaskMutationFailure(task.id)
@@ -2276,8 +2292,10 @@ export default function TaskWorkspace() {
         if (result.status === 409) {
           const conflictMessage = 'La tarea cambió en otra sesión. Actualizamos su versión para que puedas intentarlo nuevamente.'
           reportTaskMutationFailure(task, conflictMessage)
+          const accessReadEpoch = taskAccessRef.current.epoch
           const refreshed = await apiGet<{ task: Task }>(`/api/tasks/${task.id}`)
-          if (refreshed.success && refreshed.data?.task) {
+          if (accessReadEpoch !== taskAccessRef.current.epoch) return undefined
+          if (refreshed.success && refreshed.data?.task && taskAccessRef.current.confirmRead(refreshed.data.task, accessReadEpoch)) {
             taskWriteSnapshotsRef.current.set(task.id, refreshed.data.task)
             reconcileCanonicalTask(refreshed.data.task, 'updated')
           } else {
@@ -2286,6 +2304,7 @@ export default function TaskWorkspace() {
         } else reportTaskMutationFailure(task, result.error || 'No se pudo actualizar la tarea')
         return undefined
       } catch {
+        if (!taskAccessRef.current.canAccept(task)) return undefined
         if (hasVisualUpdate) {
           const current = tasksRef.current.find(item => item.id === task.id)
             || visualMutationLedgerRef.current[task.id]?.optimistic
@@ -2615,7 +2634,7 @@ export default function TaskWorkspace() {
   const setVisibleBoardTasks = useCallback((action: Task[] | ((current: Task[]) => Task[])) => {
     setTasks(current => {
       const next = typeof action === 'function' ? action(current) : action
-      return next.filter(task => taskMatchesClosedVisibility(task, filters, view))
+      return next.filter(task => taskAccessRef.current.canAccept(task) && taskMatchesClosedVisibility(task, filters, view))
     })
   }, [filters, view])
 
@@ -2701,14 +2720,14 @@ export default function TaskWorkspace() {
 						{!globalAttention && scope.type === 'shared' && <TaskSharedHub environmentId={activeEnvironmentId} refreshToken={sharedHubRevision} onOpenFolder={(id, name) => selectScope({ type: 'folder', id }, name)} onOpenList={(id, name) => selectScope({ type: 'list', id }, name)} onOpenTask={taskID => requestTaskDetail(taskID)} onOpenEvent={occurrence => { setFocusedWorkEvent(occurrence); setScope({ type: 'environment', id: activeEnvironmentId }); setView('calendar') }} />}
 						{!globalAttention && scope.type !== 'trash' && scope.type !== 'archive' && scope.type !== 'shared' && view === 'list' && <TaskListView tasks={tasks} statuses={allStatuses} lists={lists} folders={folders} users={users} groupBy={groupBy} groupDirection={groupDirection} collapsedGroupKeys={collapsedGroupKeys} scopeType={scope.type} subtaskDisplayMode={subtaskDisplayMode} subtaskScope={taskListSubtaskScope} subtaskRealtimeEvent={subtaskRealtimeEvent} activeTaskId={selectedTaskId || undefined} onGroupingChange={updateListGrouping} onOpen={(task, trigger) => requestTaskDetail(task.id, trigger)} onStatus={(task,statusId) => void updateTask(task,{status_id:statusId})} onStar={task => void toggleStar(task)} onAddSubtask={task => { if (!canEditTask(task) || task.parent_task_id) return; setSubtaskParent(task); setEditingTask(null); setCreateStatusId(''); setCreateDraft(null); setEditorOpen(true) }} onRenameTask={async (task, title) => { const saved = await updateTask(task, { title }); if (!saved) throw new Error('No se pudo cambiar el nombre. Conservamos tu texto para reintentar.') }} onCanonicalTasks={reconcileCanonicalTasks} onHierarchyCounts={applyHierarchySnapshot} onOperation={handleBoardOperation} onDragStateChange={handleBoardDragState} onExternalDropTargetChange={setTaskDropTarget} onRefresh={async () => { await Promise.all([loadTasks(false), loadHierarchy()]) }} onError={setError} />}
 						{!globalAttention && scope.type !== 'trash' && scope.type !== 'archive' && scope.type !== 'shared' && view === 'board' && <TaskBoard tasks={tasks} statuses={boardStatuses} allStatuses={allStatuses} lists={scopedLists} allLists={lists} folders={folders} users={users} currentUserId={currentUserId} defaultListId={boardDefaultListId} showListName={scope.type !== 'list'} collapsedStatusIds={collapsedStatusIds} activeTaskId={selectedTaskId || undefined} onCollapsedStatusIdsChange={setCollapsedStatusIds} onTasksChange={setVisibleBoardTasks} onCanonicalTask={reconcileCanonicalTask} onCanonicalTasks={reconcileCanonicalTasks} onHierarchyCounts={applyHierarchySnapshot} onOperation={handleBoardOperation} onTaskCreated={revealCreatedTask} recentlyCreatedTaskId={recentlyCreatedTaskId} onDragStateChange={handleBoardDragState} onExternalDropTargetChange={setTaskDropTarget} onOpen={(task, trigger) => requestTaskDetail(task.id, trigger)} onEdit={task => { if (!canEditTask(task)) return; setSubtaskParent(null); setEditingTask(task); setEditorOpen(true) }} onCreateSubtask={task => { if (!canEditTask(task)) return; setSubtaskParent(task); setEditingTask(null); setCreateStatusId(''); setCreateDraft(null); setEditorOpen(true) }} onCreateFull={openCreate} onConfigureStatuses={openStructureConfiguration} onStar={toggleStar} onQuickUpdate={updateTask} onRefresh={async () => { await Promise.all([loadTasks(false), loadHierarchy()]) }} onError={setError} canCreate={Boolean(activeEnvironmentId && activeEnvironment?.permissions?.can_edit === true)} canManageStructure={canManageActiveEnvironmentOnline} />}
-						{!globalAttention && scope.type !== 'trash' && scope.type !== 'archive' && scope.type !== 'shared' && view === 'calendar' && <TaskCalendarView lists={editorLists} folders={folders} statuses={allStatuses} users={users} currentUserID={currentUserId} environmentID={activeEnvironmentId} scopeFolderID={scope.type === 'folder' ? scope.id : undefined} scopeListID={scope.type === 'list' ? scope.id : undefined} storageScope={storageScope} createEventToken={createEventToken} focusEvent={focusedWorkEvent} activeTaskId={selectedTaskId || undefined} taskProjection={taskProjection} onOpenTaskDetail={(task, trigger) => requestTaskDetail(task.id, trigger)} onEditTask={task => { if (!canEditTask(task)) return; setSubtaskParent(null); setCreateDraft(null); setEditingTask(task); setEditorOpen(true) }} onCreated={revealCreatedTask} onOperation={handleBoardOperation} onMore={openCreate} canCreate={Boolean(activeEnvironmentId && activeEnvironment?.permissions?.can_edit === true)} />}
+						{!globalAttention && scope.type !== 'trash' && scope.type !== 'archive' && scope.type !== 'shared' && view === 'calendar' && <TaskCalendarView search={debouncedSearch} filters={filters} lists={editorLists} folders={folders} statuses={allStatuses} users={users} currentUserID={currentUserId} environmentID={activeEnvironmentId} scopeFolderID={scope.type === 'folder' ? scope.id : undefined} scopeListID={scope.type === 'list' ? scope.id : undefined} storageScope={storageScope} createEventToken={createEventToken} focusEvent={focusedWorkEvent} activeTaskId={selectedTaskId || undefined} taskProjection={taskProjection} onOpenTaskDetail={(task, trigger) => requestTaskDetail(task.id, trigger)} onEditTask={task => { if (!canEditTask(task)) return; setSubtaskParent(null); setCreateDraft(null); setEditingTask(task); setEditorOpen(true) }} onCreated={revealCreatedTask} onOperation={handleBoardOperation} onMore={openCreate} canCreate={Boolean(activeEnvironmentId && activeEnvironment?.permissions?.can_edit === true)} />}
 						{!globalAttention && scope.type !== 'trash' && scope.type !== 'archive' && scope.type !== 'shared' && view === 'gantt' && <TaskGanttView data={gantt} activeTaskId={selectedTaskId || undefined} taskProjection={taskProjection} onOpen={(task, trigger) => requestTaskDetail(task.id, trigger)} onMove={moveGantt} />}
-							{!globalAttention && scope.type !== 'trash' && scope.type !== 'archive' && scope.type !== 'shared' && view === 'summary' && <SummaryView tasks={tasks} summary={visibleSummary} users={users} />}
+							{!globalAttention && scope.type !== 'trash' && scope.type !== 'archive' && scope.type !== 'shared' && view === 'summary' && <TaskSummaryView summary={summary} />}
 							</div>
 							{activeLocationView && locationViewSecurityBlock && <div data-task-location-view-security-block className="absolute inset-0 z-[90] flex items-center justify-center bg-slate-950 p-5 text-white" role="alert" aria-live="assertive"><div className="flex max-w-md items-center gap-3 rounded-2xl border border-white/20 bg-slate-900 px-5 py-4 text-sm font-bold shadow-2xl"><Loader2 className="h-5 w-5 shrink-0 animate-spin text-emerald-400" /><span>{locationViewSecurityBlock}</span></div></div>}
         </div>}
       </div>
-      {!globalAttention && !activeLocationView && !loading && scope.type !== 'shared' && view !== 'gantt' && <TaskPageProgress loaded={tasks.length} total={taskTotal} hasMore={Boolean(taskNextCursor)} loadingMore={taskLoadingMore} error={taskLoadMoreError} onLoadMore={() => void loadMoreTasks()} />}
+      {!globalAttention && !activeLocationView && !loading && scope.type !== 'shared' && !['gantt', 'calendar', 'summary'].includes(view) && <TaskPageProgress loaded={tasks.length} total={taskTotal} hasMore={Boolean(taskNextCursor)} loadingMore={taskLoadingMore} error={taskLoadMoreError} onLoadMore={() => void loadMoreTasks()} />}
     </main>
 
     <TaskEditorModal ref={taskEditorRef} open={editorOpen} environmentId={activeEnvironmentId} task={editingTask?.id ? editingTask : null} parentTaskId={subtaskParent?.id} parentTaskTitle={subtaskParent?.title} defaultListId={subtaskParent?.list_id || createDraft?.listId || activeList?.id || activeFolder?.lists[0]?.id || (!activeFolder ? lists.find(list => list.is_default)?.id || lists[0]?.id : undefined)} defaultFolderId={!editingTask && !subtaskParent && scope.type === 'folder' ? activeFolder?.id : undefined} defaultStatusId={createStatusId} defaultOwnerId={subtaskParent?.assigned_to || createDraft?.ownerId || currentUserId} defaultTitle={createDraft?.title} defaultPriority={createDraft?.priority} defaultStartAt={createDraft?.startAt} defaultAllDay={createDraft?.isAllDay ?? Boolean(createDraft?.dueDate)} defaultDueAt={createDraft?.dueAt || (createDraft?.dueDate ? taskDueDateOnlyValue(createDraft.dueDate) : undefined)} initialDraftDirty={Boolean(createDraft)} lists={editorLists} folders={folders} workflows={workflows} users={users} storageScope={storageScope} onOperation={handleBoardOperation} onClose={() => { setEditorOpen(false); setEditingTask(null); setSubtaskParent(null); setCreateStatusId(''); setCreateDraft(null) }} onSaved={(saved, operationID, hierarchyCounts) => {

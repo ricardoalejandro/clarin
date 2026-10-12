@@ -68,6 +68,17 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('TaskEditorModal', () => {
+  it('replays the same creation after an unknown commit outcome', async () => {
+    vi.mocked(apiPost).mockResolvedValueOnce({ success: false, error: 'Respuesta perdida' })
+      .mockResolvedValueOnce({ success: true, data: { task: savedTask } })
+    const { props } = renderEditor({ defaultTitle: 'Nueva tarea' })
+    fireEvent.click(screen.getByRole('button', { name: 'Crear tarea' }))
+    await waitFor(() => expect(screen.getByText(/No recibimos confirmación/)).toBeVisible())
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar creación' }))
+    await waitFor(() => expect(props.onSaved).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(apiPost).mock.calls[1]).toEqual(vi.mocked(apiPost).mock.calls[0])
+  })
+
   it('preserves a draft and blocks a new lead relation after policy revocation', async () => {
     const rendered = renderEditor({ relatedScope: { contactId: 'contact-1', leadId: 'lead-1' }, defaultTitle: 'Borrador comercial' })
     leadPolicy.enabled = false
@@ -460,5 +471,35 @@ describe('TaskEditorModal', () => {
     }} />)
 
     await waitFor(() => expect(props.onClose).toHaveBeenCalledTimes(1))
+  })
+})
+
+
+describe('TaskEditorModal creation session', () => {
+  it.each(['success', 'unknown'])('ignores the previous session %s after a forced close and a new creation', async outcome => {
+    type CreationReply = Awaited<ReturnType<typeof apiPost>>
+    let finishPrevious!: (value: CreationReply) => void
+    let finishCurrent!: (value: CreationReply) => void
+    vi.mocked(apiPost).mockImplementationOnce(() => new Promise(resolve => { finishPrevious = resolve }))
+      .mockImplementationOnce(() => new Promise(resolve => { finishCurrent = resolve }))
+    const rendered = renderEditor({ defaultTitle: 'Anterior' })
+    fireEvent.click(screen.getByRole('button', { name: 'Crear tarea' }))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+    rendered.rerender(<TaskEditorModal {...rendered.props} open={false} />)
+    rendered.rerender(<TaskEditorModal {...rendered.props} defaultTitle="Actual" />)
+    expect(screen.getByPlaceholderText('¿Qué hay que lograr?')).toHaveValue('Actual')
+    fireEvent.click(screen.getByRole('button', { name: 'Crear tarea' }))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(2))
+    await act(async () => { finishPrevious(outcome === 'success' ? { success: true, data: { task: savedTask } } : { success: false, status: 503, error: 'unknown' }) })
+    expect(rendered.props.onSaved).not.toHaveBeenCalled()
+    expect(rendered.props.onClose).not.toHaveBeenCalled()
+    expect(screen.getByPlaceholderText('¿Qué hay que lograr?')).toHaveValue('Actual')
+    expect(screen.queryByText(/No recibimos confirmación/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Guardando…' })).toBeDisabled()
+    await act(async () => { finishCurrent({ success: true, data: { task: { ...savedTask, id: 'current', title: 'Actual' } } }) })
+    expect(rendered.props.onSaved).toHaveBeenCalledTimes(1)
+    const bodies = vi.mocked(apiPost).mock.calls.map(call => call[1]) as Array<{ title: string; operation_id: string }>
+    expect(bodies.map(body => body.title)).toEqual(['Anterior', 'Actual'])
+    expect(bodies[0].operation_id).not.toBe(bodies[1].operation_id)
   })
 })

@@ -4,8 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { createPortal } from 'react-dom'
 import { AlertTriangle, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Clock3, ExternalLink, GripHorizontal, GripVertical, ListTodo, Loader2, MapPin, Pencil, Plus, RefreshCw, Undo2, UserRound, X } from 'lucide-react'
 import { apiGet, apiPost, apiPut, subscribeWebSocket } from '@/lib/api'
-import type { AgendaItem, Task, TaskAgendaResponse, TaskFolder, TaskList, TaskWorkflowStatus, WorkEvent, WorkEventOccurrence } from '@/types/task'
+import type { AgendaItem, Task, TaskAgendaResponse, TaskFilters, TaskFolder, TaskList, TaskWorkflowStatus, WorkEvent, WorkEventOccurrence } from '@/types/task'
 import type { TaskAccountUser } from './TaskEditorModal'
+import { appendTaskFilters } from './taskQuery'
+import { markTaskCreateUncertain, retainTaskCreateOperation, type TaskCreateOperation } from './taskCreateOperation'
 import type { TaskInlineDraft } from './TaskBoard'
 import { TaskListPicker } from './TaskSelectPicker'
 import TaskUserCombobox from './TaskUserCombobox'
@@ -45,6 +47,8 @@ interface Props {
 	environmentID?: string
 	scopeFolderID?: string
 	scopeListID?: string
+	search?: string
+	filters?: TaskFilters
 	storageScope?: string
 	createEventToken?: number
 	focusEvent?: WorkEventOccurrence | null
@@ -469,7 +473,7 @@ function CalendarItemSummary({ item, lists, anchor, anchorElement, onClose, onOp
 	return createPortal(<><button type="button" aria-label="Cerrar resumen del calendario" onMouseDown={() => onClose()} className="fixed inset-0 cursor-default" style={{ zIndex: TASK_OVERLAY_LAYERS.workspacePopover - 1 }} /><section ref={panelRef} tabIndex={-1} role="dialog" aria-modal="false" aria-label={`Resumen de ${item.kind === 'task' ? 'tarea' : 'evento'}: ${title}`} data-task-calendar-summary style={style} className="fixed max-h-[calc(100vh-24px)] overflow-y-auto rounded-3xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/20 outline-none transition-opacity motion-reduce:transition-none"><header className="flex items-start gap-3 border-b border-slate-200 px-4 py-4"><span className="mt-0.5 h-4 w-4 shrink-0 rounded-md border-2 border-white shadow-sm ring-1 ring-slate-200" style={{ backgroundColor: color }} /><div className="min-w-0 flex-1"><p className="text-[10px] font-black uppercase tracking-[0.14em] text-emerald-700">{item.kind === 'task' ? 'Tarea' : event?.status === 'cancelled' ? 'Evento cancelado' : 'Evento'}</p><h3 className="mt-1 break-words text-lg font-black leading-6 text-slate-900">{title}</h3></div><button type="button" aria-label="Cerrar resumen" onClick={() => onClose()} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 hover:text-slate-800"><X className="h-4 w-4" /></button></header><div className="space-y-3 px-4 py-4"><div className="flex items-start gap-3"><Clock3 className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" /><p className="text-sm font-semibold leading-5 text-slate-700">{calendarSummaryDate(item)}{event?.timezone && !event.is_all_day ? <span className="block text-[10px] font-medium text-slate-400">{event.timezone}</span> : null}</p></div><div className="flex items-start gap-3"><ListTodo className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" /><div className="min-w-0 text-sm leading-5 text-slate-600"><p className="truncate font-semibold text-slate-700">{listLabel}</p>{task && <p className="text-[11px] text-slate-500">{task.status_detail?.name || 'Sin estado'} · Prioridad {priorityLabels[task.priority] || task.priority}</p>}{event && <p className="text-[11px] text-slate-500">{event.availability === 'free' ? 'Disponible' : 'Ocupado'}{event.status === 'cancelled' ? ' · Cancelado' : ''}</p>}</div></div><div className="flex items-start gap-3"><UserRound className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" /><p className="text-sm leading-5 text-slate-600">{task?.assigned_to_name || event?.organizer_name || 'Sin responsable'}</p></div>{location && <div className="flex items-start gap-3"><MapPin className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" /><p className="break-words text-sm leading-5 text-slate-600">{location}</p></div>}{description && <p className="line-clamp-4 rounded-2xl bg-slate-50 px-3 py-2.5 text-sm leading-5 text-slate-600">{description}</p>}</div><footer className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-slate-50/80 px-4 py-3">{task && <button type="button" onClick={() => { onClose(false); onOpenTaskDetail(task, anchorElement) }} className="inline-flex min-h-10 items-center gap-2 rounded-xl px-3 text-xs font-bold text-slate-600 hover:bg-white hover:text-slate-900"><ExternalLink className="h-3.5 w-3.5" />Abrir tarea</button>}{task && canEditTask(task) && <button type="button" onClick={() => { onClose(false); onEditTask(task) }} className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-xs font-black text-white shadow-sm hover:bg-emerald-700"><Pencil className="h-3.5 w-3.5" />Editar</button>}{event?.capabilities.can_edit && occurrence && <button type="button" onClick={() => { onClose(false); onEditEvent(event, occurrence) }} className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-xs font-black text-white shadow-sm hover:bg-emerald-700"><Pencil className="h-3.5 w-3.5" />Editar evento</button>}</footer></section></>, document.body)
 }
 
-export default function TaskCalendarView({ lists, folders, statuses, users, currentUserID, environmentID, scopeFolderID, scopeListID, storageScope, createEventToken = 0, focusEvent, activeTaskId, taskProjection, onOpenTaskDetail, onEditTask, onCreated, onOperation, onMore, canCreate = true }: Props) {
+export default function TaskCalendarView({ lists, folders, statuses, users, currentUserID, environmentID, scopeFolderID, scopeListID, search = '', filters, storageScope, createEventToken = 0, focusEvent, activeTaskId, taskProjection, onOpenTaskDetail, onEditTask, onCreated, onOperation, onMore, canCreate = true }: Props) {
 	const [mode, setMode] = useState<TaskCalendarMode>('month')
 	const [cursor, setCursor] = useState(new Date())
 	const [items, setItems] = useState<AgendaItem[]>([])
@@ -483,11 +487,14 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 	const [undoState, setUndoState] = useState<CalendarUndoState | null>(null)
 	const [announcement, setAnnouncement] = useState('')
 	const [composer, setComposer] = useState<Composer | null>(null)
+	const createOperationRef = useRef<TaskCreateOperation | null>(null)
+	const [creationUncertain, setCreationUncertain] = useState(false)
 	const [title, setTitle] = useState('')
 	const [lastListID, setLastListID] = useState('')
 	const [listID, setListID] = useState(() => calendarDefaultList(scopeListID, '', lists.map(list => list.id)))
 	const [ownerID, setOwnerID] = useState(currentUserID)
 	const [saving, setSaving] = useState(false)
+	const creatingRef = useRef(false)
 	const [error, setError] = useState('')
 	const [quickConflict, setQuickConflict] = useState(false)
 	const [eventEditorOpen, setEventEditorOpen] = useState(false)
@@ -501,6 +508,8 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 	const scrollRef = useRef<HTMLDivElement>(null)
 	const loadAbortRef = useRef<AbortController | null>(null)
 	const loadGeneration = useRef(0)
+	const accessEpochRef = useRef(0)
+	const reloadAgendaRef = useRef<() => Promise<void>>(async () => {})
 	const previousCreateToken = useRef(0)
 	const summaryRef = useRef<CalendarSummaryState | null>(null)
 	const composerReturnFocusRef = useRef<HTMLElement | null>(null)
@@ -566,19 +575,26 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 		}
 	}, [taskProjection])
 
+	const taskQuery = new URLSearchParams()
+	if (search) taskQuery.set('search', search)
+	if (filters) appendTaskFilters(taskQuery, filters)
+	const taskQueryString = taskQuery.toString()
+
 	const loadAgenda = useCallback(async () => {
 		loadAbortRef.current?.abort()
 		const controller = new AbortController(); loadAbortRef.current = controller
 		const generation = ++loadGeneration.current
 		setPhase(current => current === 'ready' ? 'ready' : 'loading'); setLoadError('')
 		const params = new URLSearchParams({ from: range.from.toISOString(), to: range.to.toISOString(), sources: 'tasks,events', limit: '200' })
+		new URLSearchParams(taskQueryString).forEach((value, key) => params.set(key, value))
 		if (environmentID) params.set('environment_id', environmentID)
 		if (scopeFolderID) params.set('folder_id', scopeFolderID)
 		if (scopeListID) params.set('list_id', scopeListID)
 		const loaded: AgendaItem[] = []
 		let nextCursor = ''
 		setRangeNotice('')
-		for (let page = 0; page < 10; page++) {
+		const seenCursors = new Set<string>()
+		for (;;) {
 			if (nextCursor) params.set('cursor', nextCursor); else params.delete('cursor')
 			const result = await apiGet<TaskAgendaResponse>(`/api/tasks/agenda?${params}`, { signal: controller.signal })
 			if (generation !== loadGeneration.current || controller.signal.aborted) return
@@ -589,18 +605,44 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 			loaded.push(...result.data.items)
 			nextCursor = result.data.next_cursor || ''
 			if (!nextCursor) break
-			if (page === 9) setRangeNotice('Este rango contiene más de 2.000 elementos. Acota el Entorno, carpeta o lista para verlos todos.')
+			if (seenCursors.has(nextCursor)) {
+				setPhase('error'); setLoadError('El servidor repitió una página del calendario. Reintenta la carga.')
+				return
+			}
+			seenCursors.add(nextCursor)
+			if (loaded.length >= 2000) setRangeNotice(`Cargando ${loaded.length} elementos del calendario…`)
 		}
+		setRangeNotice('')
 		const canonical = Array.from(new Map(loaded.map(item => [item.key, item])).values())
 		setItems(current => mergeCalendarInventory(current, canonical, taskProjectionsRef.current, pendingItemKeysRef.current)); setPhase('ready')
-	}, [environmentID, range.from.getTime(), range.to.getTime(), scopeFolderID, scopeListID]) // eslint-disable-line react-hooks/exhaustive-deps
+	}, [environmentID, range.from.getTime(), range.to.getTime(), scopeFolderID, scopeListID, taskQueryString]) // eslint-disable-line react-hooks/exhaustive-deps
 
+	reloadAgendaRef.current = loadAgenda
 	useEffect(() => { void loadAgenda(); return () => loadAbortRef.current?.abort() }, [loadAgenda])
+	useEffect(() => () => { accessEpochRef.current += 1 }, [])
 	useEffect(() => {
 		let timer: ReturnType<typeof setTimeout> | null = null
 		const unsubscribe = subscribeWebSocket((raw: unknown) => {
-			const envelope = raw as { event?: string }
+			const envelope = raw as { event?: string; data?: { action?: string; target_id?: string; target_type?: string } }
 			if (!['task_update', 'task_overdue', 'work_event_update', 'work_event_invitation', 'work_event_rsvp'].includes(envelope.event || '')) return
+			if (envelope.data?.action === 'access_revoked') {
+				loadAbortRef.current?.abort()
+				loadGeneration.current += 1
+				accessEpochRef.current += 1
+				taskProjectionsRef.current.clear()
+				pendingItemKeysRef.current.clear()
+				itemsRef.current = []
+				setItems([])
+				setPendingItemKeys([])
+				closeSummary(false)
+				setMorePopover(null); setInteractionPreview(null)
+				if (undoTimerRef.current) clearTimeout(undoTimerRef.current)
+				undoTimerRef.current = null
+				setUndoState(null); setScheduleConflict(null); setMutationError(''); setAnnouncement('')
+				setEventEditorOpen(false); setEditingEvent(null); setEditingOccurrence(null); setEventDraft(null)
+				setComposer(null); setTitle(''); setError(''); setQuickConflict(false); creatingRef.current = false; setSaving(false)
+				createOperationRef.current = null; setCreationUncertain(false); composerReturnFocusRef.current = null
+			}
 			if (timer) clearTimeout(timer)
 			timer = setTimeout(() => { void loadAgenda() }, 100)
 		})
@@ -627,6 +669,7 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 		if (sourceItem.kind === 'event' && (!sourceItem.event.event.capabilities.can_edit || !sourceItem.event.event.list_id)) return
 		const optimistic = applyCalendarSchedule(sourceItem, nextSchedule)
 		const operationID = crypto.randomUUID()
+		const accessEpoch = accessEpochRef.current
 		setMutationError(''); setScheduleConflict(null); setInteractionPreview(null)
 		setItemPending(sourceItem.key, true)
 		replaceAgendaItem(optimistic)
@@ -635,6 +678,7 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 			const result = sourceItem.kind === 'task'
 				? await apiPut<{ task?: Task; code?: string }>(`/api/tasks/${sourceItem.task.id}`, buildTaskSchedulePayload(sourceItem.task, nextSchedule, operationID))
 				: await apiPut<{ event?: WorkEvent; code?: string }>(`/api/tasks/events/${sourceItem.event.event.id}`, buildEventSchedulePayload(sourceItem.event, nextSchedule, operationID, options.confirmConflicts))
+			if (accessEpoch !== accessEpochRef.current) return
 			const response = result.data as { task?: Task; event?: WorkEvent; code?: string } | undefined
 			const saved = sourceItem.kind === 'task' ? response?.task : response?.event
 			if (!result.success || !saved) {
@@ -659,13 +703,14 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 			if (options.recordUndo !== false) storeUndo({ item: canonical, before, after: nextSchedule })
 			setAnnouncement(options.successLabel || `${eventTitle(sourceItem)} se reprogramó. Puedes deshacer el cambio.`)
 		} catch {
+			if (accessEpoch !== accessEpochRef.current) return
 			replaceAgendaItem(sourceItem)
 			setMutationError('Se perdió la conexión mientras guardábamos. Restauramos exactamente el horario anterior.')
 		} finally {
-			setItemPending(sourceItem.key, false)
+			if (accessEpoch === accessEpochRef.current) setItemPending(sourceItem.key, false)
 			onOperation(operationID, false)
 		}
-		await loadAgenda()
+		await reloadAgendaRef.current()
 	}
 	const commitCalendarInteraction = (item: AgendaItem, mode: CalendarInteractionMode, delta: CalendarInteractionDelta) => {
 		const schedule = calendarItemSchedule(item)
@@ -732,7 +777,9 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 		setInteractionPreview(null)
 	}
 	const move = (direction: number) => { dismissCalendarLayers(); setCursor(value => { const next = new Date(value); if (mode === 'month') next.setMonth(next.getMonth() + direction); else if (mode === 'week') next.setDate(next.getDate() + direction * 7); else next.setDate(next.getDate() + direction); return next }) }
-	const closeComposer = useCallback((restoreFocus = true) => {
+	const closeComposer = useCallback((restoreFocus = true, afterSave = false) => {
+		if (creatingRef.current && !afterSave) return
+		createOperationRef.current = null; setCreationUncertain(false)
 		setComposer(null); setTitle(''); setError(''); setQuickConflict(false)
 		const returnFocus = composerReturnFocusRef.current
 		composerReturnFocusRef.current = null
@@ -763,25 +810,40 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 	const selectedList = lists.find(list => list.id === listID)
 	const status = statuses.find(item => item.workflow_id === selectedList?.workflow_id && item.category === 'not_started')
 	const createQuick = async (confirmConflicts = false) => {
-		if (!canCreate || !composer || !title.trim() || !selectedList || saving) return
+		if (!canCreate || !composer || !title.trim() || !selectedList || creatingRef.current) return
+		creatingRef.current = true
 		setSaving(true); setError(''); if (!confirmConflicts) setQuickConflict(false)
-		const operationID = crypto.randomUUID(); onOperation(operationID, true)
+		const accessEpoch = accessEpochRef.current
+		const payload = { title: title.trim(), description: '', type: 'reminder', priority: 'medium', assigned_to: ownerID, list_id: listID, status_id: status?.id, start_at: composer.startAt, due_at: composer.dueAt, is_all_day: composer.allDay, recurrence_rule: '', reminder_minutes: 0, placement: 'top' }
+		const creationOperation = composer.type === 'task' ? retainTaskCreateOperation(createOperationRef.current, payload) : null
+		if (creationOperation) createOperationRef.current = creationOperation
+		const operationID = creationOperation?.operationID || crypto.randomUUID()
+		onOperation(operationID, true)
 		try {
 			if (composer.type === 'task') {
 				if (!status || !ownerID) return
-				const result = await apiPost<{ task: Task; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>('/api/tasks', { title: title.trim(), description: '', type: 'reminder', priority: 'medium', assigned_to: ownerID, list_id: listID, status_id: status.id, start_at: composer.startAt, due_at: composer.dueAt, is_all_day: composer.allDay, recurrence_rule: '', reminder_minutes: 0, placement: 'top', operation_id: operationID })
-				if (!result.success || !result.data?.task) { setError(result.error || 'No se pudo crear la tarea'); return }
+				const result = await apiPost<{ task: Task; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>('/api/tasks', { ...creationOperation!.payload, operation_id: operationID })
+				if (accessEpoch !== accessEpochRef.current) return
+				if (!result.success || !result.data?.task) {
+					if (!result.status || result.status >= 500 || result.status === 408) {
+						createOperationRef.current = markTaskCreateUncertain(creationOperation!)
+						setCreationUncertain(true)
+						setError('No recibimos confirmación. Reintenta para recuperar la misma tarea sin duplicarla.')
+					} else setError(result.error || 'No se pudo crear la tarea')
+					return
+				}
 				onCreated(result.data.task, result.data.operation_id || operationID, result.data.hierarchy_counts)
 			} else {
 				const start = new Date(composer.startAt); const end = new Date(composer.dueAt)
 				const result = await apiPost<{ event?: WorkEvent; code?: string }>('/api/tasks/events', { title: title.trim(), description: '', list_id: listID, availability: 'busy', is_all_day: composer.allDay, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Lima', recurrence_rule: '', attendees: [], color: null, operation_id: operationID, confirm_conflicts: confirmConflicts, ...(composer.allDay ? { start_date: dateKey(start), end_date_exclusive: dateKey(addDays(start, 1)) } : { start_at: start.toISOString(), end_at: end.toISOString() }) })
+				if (accessEpoch !== accessEpochRef.current) return
 				if (!result.success || !result.data?.event) {
 					if (result.data?.code === 'schedule_conflict_confirmation_required') { setQuickConflict(true); setError('Este horario se cruza con otro compromiso. Revisa la hora o guarda de todos modos.'); return }
 					setError(result.error || 'No se pudo crear el evento'); return
 				}
 			}
-			setLastListID(listID); closeComposer(); await loadAgenda()
-		} finally { setSaving(false); onOperation(operationID, false) }
+			setLastListID(listID); closeComposer(true, true); await reloadAgendaRef.current()
+		} finally { if (accessEpoch === accessEpochRef.current) { creatingRef.current = false; setSaving(false) }; onOperation(operationID, false) }
 	}
 	const more = () => {
 		if (!canCreate || !composer) return
@@ -860,13 +922,14 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 		{summary && <CalendarItemSummary item={summary.item} lists={lists} anchor={summary.anchor} anchorElement={summary.anchorElement} onClose={closeSummary} onOpenTaskDetail={onOpenTaskDetail} onEditTask={onEditTask} onEditEvent={editCalendarEvent} />}
 		{composer && <div className="fixed inset-0 z-[145] flex items-center justify-center bg-slate-950/25 p-4 backdrop-blur-[2px]" onMouseDown={event => event.target === event.currentTarget && closeComposer()}>
 			<div role="dialog" aria-modal="true" aria-labelledby="calendar-composer-title" className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl">
-				<div className="flex items-start justify-between"><div><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Calendario</p><h2 id="calendar-composer-title" className="mt-1 text-lg font-black text-slate-900">Crear en este horario</h2><p className="mt-1 text-xs text-slate-400">{new Date(composer.startAt).toLocaleString('es', composer.allDay ? { dateStyle: 'full' } : { dateStyle: 'medium', timeStyle: 'short' })}</p></div><button onClick={() => closeComposer()} className="rounded-xl p-2 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button></div>
-				<div className="mt-4 flex rounded-xl bg-slate-100 p-1"><button onClick={() => { setQuickConflict(false); setComposer(current => current ? { ...current, type: 'event' } : null) }} className={`min-h-9 flex-1 rounded-lg text-xs font-black ${composer.type === 'event' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>Evento</button><button onClick={() => { setQuickConflict(false); setComposer(current => current ? { ...current, type: 'task' } : null) }} className={`min-h-9 flex-1 rounded-lg text-xs font-black ${composer.type === 'task' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>Tarea</button></div>
+				<div className="flex items-start justify-between"><div><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Calendario</p><h2 id="calendar-composer-title" className="mt-1 text-lg font-black text-slate-900">Crear en este horario</h2><p className="mt-1 text-xs text-slate-400">{new Date(composer.startAt).toLocaleString('es', composer.allDay ? { dateStyle: 'full' } : { dateStyle: 'medium', timeStyle: 'short' })}</p></div><button disabled={saving} aria-label="Cerrar creación del calendario" onClick={() => closeComposer()} className="rounded-xl p-2 text-slate-400 hover:bg-slate-100 disabled:opacity-40"><X className="h-4 w-4" /></button></div>
+				<div inert={saving || creationUncertain}><div className="mt-4 flex rounded-xl bg-slate-100 p-1"><button onClick={() => { setQuickConflict(false); setComposer(current => current ? { ...current, type: 'event' } : null) }} className={`min-h-9 flex-1 rounded-lg text-xs font-black ${composer.type === 'event' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>Evento</button><button onClick={() => { setQuickConflict(false); setComposer(current => current ? { ...current, type: 'task' } : null) }} className={`min-h-9 flex-1 rounded-lg text-xs font-black ${composer.type === 'task' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>Tarea</button></div>
 				<input autoFocus value={title} onChange={event => { setTitle(event.target.value); setQuickConflict(false) }} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void createQuick(quickConflict) } }} placeholder={composer.type === 'event' ? 'Nombre del evento' : '¿Qué hay que lograr?'} className="mt-4 w-full rounded-2xl border border-slate-200 px-4 py-3 text-base font-semibold outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100" />
 				<div className={`mt-3 grid gap-3 ${composer.type === 'task' ? 'sm:grid-cols-2' : ''}`}><TaskListPicker value={listID} lists={lists} folders={folders} onChange={value => { setListID(value); setQuickConflict(false) }} />{composer.type === 'task' && <TaskUserCombobox users={users} value={ownerID} onChange={setOwnerID} />}</div>
 				{selectedList && <p className="mt-2 text-[10px] text-slate-400">Destino: {selectedList.folder_id ? `${folderByID.get(selectedList.folder_id)?.name || 'Carpeta'} / ` : ''}{selectedList.name}</p>}
+				</div>
 				{error && <p className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">{error}</p>}
-				<div className="mt-5 flex flex-wrap justify-end gap-2"><button onClick={more} className="min-h-11 rounded-xl px-4 text-sm font-bold text-slate-600 hover:bg-slate-100">Abrir formulario completo</button><button disabled={!title.trim() || !selectedList || (composer.type === 'task' && (!status || !ownerID)) || saving} onClick={() => void createQuick(quickConflict)} className={`inline-flex min-h-11 items-center gap-2 rounded-xl px-4 text-sm font-black text-white shadow-lg disabled:opacity-40 ${quickConflict && composer.type === 'event' ? 'bg-amber-500 shadow-amber-100 hover:bg-amber-600' : 'bg-emerald-600 shadow-emerald-100 hover:bg-emerald-700'}`}>{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : composer.type === 'event' ? <CalendarDays className="h-4 w-4" /> : <Plus className="h-4 w-4" />}{quickConflict && composer.type === 'event' ? 'Guardar de todos modos' : 'Crear'}</button></div>
+				<div className="mt-5 flex flex-wrap justify-end gap-2"><button disabled={saving || creationUncertain} onClick={more} className="min-h-11 rounded-xl px-4 text-sm font-bold text-slate-600 hover:bg-slate-100">Abrir formulario completo</button><button disabled={!title.trim() || !selectedList || (composer.type === 'task' && (!status || !ownerID)) || saving} onClick={() => void createQuick(quickConflict)} className={`inline-flex min-h-11 items-center gap-2 rounded-xl px-4 text-sm font-black text-white shadow-lg disabled:opacity-40 ${quickConflict && composer.type === 'event' ? 'bg-amber-500 shadow-amber-100 hover:bg-amber-600' : 'bg-emerald-600 shadow-emerald-100 hover:bg-emerald-700'}`}>{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : composer.type === 'event' ? <CalendarDays className="h-4 w-4" /> : <Plus className="h-4 w-4" />}{creationUncertain ? 'Reintentar creación' : quickConflict && composer.type === 'event' ? 'Guardar de todos modos' : 'Crear'}</button></div>
 			</div>
 		</div>}
 		<WorkEventEditor open={eventEditorOpen} event={editingEvent} occurrence={editingOccurrence} draft={eventDraft} lists={lists} folders={folders} users={users} currentUserID={currentUserID} defaultListID={scopeListID || lists.find(list => list.is_default)?.id} storageScope={storageScope} onClose={() => { setEventEditorOpen(false); setEditingEvent(null); setEditingOccurrence(null); setEventDraft(null) }} onSaved={() => { void loadAgenda() }} onDeleted={() => { void loadAgenda() }} />

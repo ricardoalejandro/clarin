@@ -23,16 +23,25 @@ func NewTaskService(repos *repository.Repositories, hub *ws.Hub) *TaskService {
 
 func (s *TaskService) Create(ctx context.Context, task *domain.Task) error {
 	operationID := task.MutationOperationID
+	durableCreateEffects := task.CreatePayloadHash != ""
 	if err := s.repos.Task.Create(ctx, task); err != nil {
 		return err
 	}
+	replayed := task.CreateReplayed
 	canonical := task
 	if loaded, err := s.GetByID(ctx, task.ID, task.AccountID); err == nil {
 		canonical = loaded
 		*task = *loaded
 	}
 
-	s.RebuildReminder(ctx, canonical)
+	task.CreateReplayed = replayed
+	if replayed {
+		return nil
+	}
+
+	if !durableCreateEffects {
+		s.RebuildReminder(ctx, canonical)
+	}
 
 	if s.hub != nil {
 		payload := taskCreatedEventPayload(canonical, operationID)

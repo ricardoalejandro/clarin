@@ -695,6 +695,8 @@ export interface TaskDependency {
 }
 
 export interface TaskWorkSummary {
+  by_status?: Array<{ id: string; name: string; color: string; count: number }>
+  by_owner?: Array<{ id: string; name: string; count: number; overdue: number }>
   total: number
   done: number
   active: number

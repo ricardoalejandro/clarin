@@ -7,6 +7,17 @@ function task(id: string, version = 1): Task {
 }
 
 describe('task cursor pagination', () => {
+  it('drops all absences from a complete canonical snapshot', () => {
+    expect(mergeTaskPage([task('head'), task('tail')], [], 'refresh', new Set(), { complete: true })).toEqual([])
+  })
+
+  it('rejects every obsolete page after access revocation regardless of task version', () => {
+    expect(resolveTaskPageItem(12, 11, undefined, false, true)).toBe('reject')
+  })
+
+  it('reevaluates preserved tail membership in the active query', () => {
+    expect(mergeTaskPage([task('matches'), task('moved')], [], 'refresh', new Set(), { canKeep: item => item.id === 'matches' }).map(item => item.id)).toEqual(['matches'])
+  })
   it('builds a bounded cursor request and removes legacy offset state', () => {
     const params = taskPageParams(new URLSearchParams('environment_id=env&offset=400'), 'opaque-cursor')
     expect(params.get('limit')).toBe(String(TASK_PAGE_SIZE))

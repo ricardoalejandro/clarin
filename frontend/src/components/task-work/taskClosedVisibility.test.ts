@@ -41,4 +41,11 @@ describe('closed task visibility', () => {
     expect(shouldPreserveConcurrentTask({ ...task('open', 'active'), version: 8 }, 7, false, false, filters(), 'board')).toBe(true)
     expect(shouldPreserveConcurrentTask({ ...task('open', 'active'), version: 8 }, 7, true, false, filters(), 'board')).toBe(false)
   })
+
+  it('preserves a newer matching task when a filtered snapshot finishes late', () => {
+    const newer = { ...task('open', 'active'), version: 8 }
+    expect(shouldPreserveConcurrentTask(newer, 7, true, false, filters(), 'list', true)).toBe(true)
+    expect(shouldPreserveConcurrentTask(newer, 7, true, true, filters(), 'list', true)).toBe(false)
+    expect(shouldPreserveConcurrentTask(newer, 7, true, false, filters(), 'list', false)).toBe(false)
+  })
 })

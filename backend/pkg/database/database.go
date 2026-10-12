@@ -4004,6 +4004,9 @@ func Migrate(db *pgxpool.Pool) error {
 	if err := migrateTaskWork(ctx, db); err != nil {
 		return err
 	}
+	if err := migrateTaskCreateReceipts(ctx, db); err != nil {
+		return err
+	}
 	if err := migrateTaskEnvironments(ctx, db); err != nil {
 		return err
 	}

@@ -42,7 +42,9 @@ export function resolveTaskPageItem(
   knownVersion: number,
   tombstoneVersion: number | undefined,
   hasCurrent: boolean,
+  accessRevoked = false,
 ): TaskPageItemResolution {
+  if (accessRevoked) return 'reject'
   if (tombstoneVersion !== undefined && incomingVersion <= tombstoneVersion) return 'reject'
   if (incomingVersion < knownVersion) return hasCurrent ? 'preserve-current' : 'reject'
   return 'accept'
@@ -63,6 +65,7 @@ export function mergeTaskPage(
   incoming: Task[],
   mode: 'replace' | 'refresh' | 'append',
   authoritativeMissingIDs: ReadonlySet<string> = new Set(),
+  evidence: { complete?: boolean; canKeep?: (task: Task) => boolean } = {},
 ) {
   if (mode === 'replace') return Array.from(new Map(incoming.map(task => [task.id, task])).values())
 
@@ -83,6 +86,7 @@ export function mergeTaskPage(
   const head = Array.from(incomingByID.values())
   const tail = current
     .filter(task => !incomingByID.has(task.id) && !authoritativeMissingIDs.has(task.id))
+    .filter(task => !evidence.complete && (evidence.canKeep?.(task) ?? true))
     .map(task => task)
   return [...head, ...tail]
 }
