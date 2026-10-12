@@ -3,6 +3,15 @@
 The fork is kept source-connected to Excalidraw `v0.18.1`. The maintained patch
 surface is:
 
+- `.8`: `element/clarinStrokeWidth.ts`, `actions/actionProperties.tsx` and the
+  native icon implement four semantic width presets. Amplio resolves to 16 for
+  constant free draw and 8 for other tools; historical numeric widths are never
+  rewritten. A mixed selection changes in one action and unmatched widths have
+  an honest custom-value readout. The former build-time fourth-option injection
+  is removed. `scene/clarinExportBounds.ts` adds the rendered stroke outline to
+  export-only bounds so thick strokes and taps fit PNG/SVG; editor hitboxes and
+  deliberate frame cropping remain unchanged. Focused fork tests cover both.
+
 - `packages/excalidraw/mermaid.ts`, `components/App.tsx` and
   `components/TTDDialog/TTDDialog.tsx`: `.7` closes implicit Mermaid clipboard
   conversion and dialog/parser loading when the host sets `aiEnabled={false}`.

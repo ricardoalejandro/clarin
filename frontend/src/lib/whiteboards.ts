@@ -384,7 +384,7 @@ export interface WhiteboardSavePayload {
     app_state: Record<string, unknown>
   }
   scene_schema_version: 'excalidraw'
-  editor_version: '0.18.1-clarin.7'
+  editor_version: '0.18.1-clarin.8'
 }
 
 export interface WhiteboardScenePatch {
@@ -613,7 +613,7 @@ export function buildWhiteboardSavePayload(input: {
     },
     ...(input.includePatch ? { patch: { elements: input.patchElements || input.elements, app_state: appState } } : {}),
     scene_schema_version: 'excalidraw',
-    editor_version: '0.18.1-clarin.7',
+    editor_version: '0.18.1-clarin.8',
   }
 }
 

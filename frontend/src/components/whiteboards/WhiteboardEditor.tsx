@@ -162,6 +162,7 @@ import WhiteboardLibraryDialog, {
 import WhiteboardShareDialog from './WhiteboardShareDialog'
 import {
   WhiteboardEditorActionBar,
+  WhiteboardLibraryMenuItem,
   type WhiteboardSaveState,
 } from './WhiteboardEditorActionBar'
 import { WhiteboardPresentationOverlay } from './WhiteboardPresentationControls'
@@ -2402,7 +2403,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
             scene: event.scene,
             sequence: remoteSequence,
             scene_schema_version: 'excalidraw',
-            editor_version: '0.18.1-clarin.7',
+            editor_version: '0.18.1-clarin.8',
             updated_at: new Date().toISOString(),
           }, preserveLocalChanges)
           void hydrateReferencedAssets(event.scene.elements)
@@ -2891,7 +2892,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     role="region"
     aria-label={focusModeActive ? 'Pizarra maximizada' : 'Editor de pizarra'}
     style={focusModeActive ? { zIndex: WHITEBOARD_OVERLAY_LAYERS.focusSurface } : undefined}
-    className={`whiteboard-editor-shell flex h-full min-h-0 flex-col overflow-hidden bg-slate-100${focusModeActive ? ' app-viewport fixed whiteboard-editor-shell--focused' : ''}`}
+    className={`whiteboard-editor-shell whiteboard-editor-shell--unified-actions flex h-full min-h-0 flex-col overflow-hidden bg-slate-100${focusModeActive ? ' app-viewport fixed whiteboard-editor-shell--focused' : ''}`}
   >
     <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{focusModeAnnouncement}</span>
     <input ref={importInputRef} type="file" accept=".excalidraw,.json,application/json" className="hidden" onChange={importScene} />
@@ -3007,7 +3008,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
 		onDecline={presentation.declineInvitation}
 		onLeave={presentation.leaveFollow}
 	  />
-      {showIntegratedTitle && <div className="whiteboard-integrated-title absolute left-16 top-2 z-30 flex h-11 min-w-0 items-center gap-1">
+      {showIntegratedTitle && <div className="whiteboard-integrated-title absolute left-2 top-2 z-30 flex h-11 min-w-0 items-center gap-1">
         <button type="button" onClick={requestBackFromWhiteboard} aria-label={backActionLabel} title={backActionLabel} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><ArrowLeft className="h-5 w-5" /></button>
         <span className="mx-1 h-8 w-px shrink-0 bg-slate-200" />
 		<label className="min-w-0"><span className="sr-only">Nombre de la pizarra</span><span className="block text-[9px] font-black uppercase tracking-[.14em] text-emerald-600">{isWorkOrigin ? 'Clarin Work · Pizarra' : 'Pizarras Clarin'}</span><span className="flex items-center gap-1"><input value={titleDraft} onChange={event => setTitleDraft(event.target.value)} onBlur={() => { if (!isWorkOrigin) void saveTitle() }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setTitleDraft(board.name); event.currentTarget.blur() } }} readOnly={isWorkOrigin || !canEdit} maxLength={200} aria-label="Nombre de la pizarra" title={isWorkOrigin ? 'Renombra esta vista desde el menú de su pestaña en Work.' : undefined} className="h-6 min-w-0 w-full truncate border-0 bg-transparent p-0 text-sm font-black text-slate-900 outline-none read-only:cursor-default" />{titleSaving && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-slate-400" />}</span></label>
@@ -3044,6 +3045,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
             else enterFocusMode(moreButtonRef.current)
           }}
         />
+        <WhiteboardLibraryMenuItem editorAPI={editorAPI} onSelect={() => setMoreOpen(false)} />
         <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); openClarinLibraries() }} className="whiteboard-more-item"><LibraryBig className="h-4 w-4" />Administrar bibliotecas</button>
         {canManageAccess && !showShareInToolbar && <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); openWhiteboardShare() }} className="whiteboard-more-item"><Share2 className="h-4 w-4" />Compartir</button>}
         <button type="button" role="menuitem" onClick={() => { setMoreOpen(false); void openHistory() }} className="whiteboard-more-item"><History className="h-4 w-4" />Historial</button>

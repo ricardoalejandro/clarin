@@ -68,6 +68,17 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('TaskEditorModal', () => {
+  it('keeps daily fields outside advanced options and preserves the draft when they expand', () => {
+    renderEditor({ defaultTitle: 'Trabajo diario' })
+    const advanced = screen.getByText('Opciones avanzadas').closest('details')!
+    expect(advanced).not.toHaveAttribute('open')
+    expect(screen.getByText('Colaboradores').closest('details')).toBe(advanced)
+    expect(screen.getByText('Responsable').closest('details')).toBeNull()
+    expect(screen.getByRole('button', { name: /Fecha de entrega:/ }).closest('details')).toBeNull()
+    fireEvent.click(advanced.querySelector('summary')!)
+    expect(screen.getByPlaceholderText('¿Qué hay que lograr?')).toHaveValue('Trabajo diario')
+  })
+
   it('replays the same creation after an unknown commit outcome', async () => {
     vi.mocked(apiPost).mockResolvedValueOnce({ success: false, error: 'Respuesta perdida' })
       .mockResolvedValueOnce({ success: true, data: { task: savedTask } })

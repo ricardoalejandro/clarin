@@ -160,7 +160,7 @@ for (let index = 0; index < definitions.length; index += 1) {
 
 const catalog = {
   schemaVersion: 1,
-  engineVersion: '0.18.1-clarin.7',
+  engineVersion: '0.18.1-clarin.8',
   officialSelectableFonts: 7,
   customSelectableFonts: entries.length,
   totalSelectableFonts: 7 + entries.length,

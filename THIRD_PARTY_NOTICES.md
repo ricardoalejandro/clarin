@@ -4,13 +4,13 @@ This file indexes notices that must accompany third-party software distributed b
 
 ## `@excalidraw/excalidraw`
 
-- Distributed version: `0.18.1-clarin.7`
-- Vendored source SHA-256: `47d97ccb4f8f03c694b8c082e4b42e539b0ad7094f2676972bde816738b07d80`
+- Distributed version: `0.18.1-clarin.8`
+- Vendored source SHA-256: `4e7a50f8c7f21fdeb88bb0206106b90f7ef31b0b406fc2aaea4055282c1785d1`
 - Upstream source: tag `v0.18.1`, commit `a2ec2889babf7d2295469c6d90ebe77fae57df84`
 - Editor license: MIT, Copyright (c) 2020 Excalidraw
 - Canonical component notice and current advisory record: [`frontend/THIRD_PARTY_EXCALIDRAW.md`](frontend/THIRD_PARTY_EXCALIDRAW.md)
 
-The frontend build serves the audited editor assets from `frontend/public/vendor/whiteboards-editor/0.18.1-clarin.7/`. The selector exposes 32 local families: 7 official selectable families plus 25 Clarin-catalog families represented by 49 independently hashed WOFF2 files. The upstream asset set also contains these licensed families:
+The frontend build serves the audited editor assets from `frontend/public/vendor/whiteboards-editor/0.18.1-clarin.8/`. The selector exposes 32 local families: 7 official selectable families plus 25 Clarin-catalog families represented by 49 independently hashed WOFF2 files. The upstream asset set also contains these licensed families:
 
 | Family | Recorded upstream license |
 | --- | --- |
@@ -30,7 +30,7 @@ This notice covers the public MIT-licensed Excalidraw project only. It grants no
 
 ## Reproducible Excalidraw dependency inventory
 
-The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1-clarin.7` is defined by `frontend/package-lock.json` and the [current candidate baseline](frontend/third_party/excalidraw/supply-chain-2026-10-11.json). The [archived CycloneDX 1.6 SBOM](frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.7.cdx.json) contains 248 components and has SHA-256 `bb736384226c43b192654bc8ff96fe90e2f907d328f2ce32654c3e99b74d3834`. It binds the vendored source to the exact upstream tag/commit plus the documented Clarin patches, including the `.7` Mermaid capability boundary and dependency fixes.
+The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1-clarin.8` is defined by `frontend/package-lock.json` and the [current candidate baseline](frontend/third_party/excalidraw/supply-chain-2026-10-12.json). The [archived CycloneDX 1.6 SBOM](frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.8.cdx.json) contains 248 components and has SHA-256 `238c495e5fe078465ec3b3d044576294329da2ccb6173ea2365764ef39eb741e`. It binds the vendored source to the exact upstream tag/commit plus the documented Clarin patches, including the `.7` Mermaid capability boundary and dependency fixes.
 
 Generate and verify it without contacting a third-party service:
 
@@ -38,8 +38,8 @@ Generate and verify it without contacting a third-party service:
 node .codex/skills/clarin-excalidraw-development/scripts/generate-supply-chain-sbom.mjs \
   --manifest frontend/package.json \
   --lockfile frontend/package-lock.json \
-  --baseline frontend/third_party/excalidraw/supply-chain-2026-10-11.json \
-  --verify frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.7.cdx.json \
+  --baseline frontend/third_party/excalidraw/supply-chain-2026-10-12.json \
+  --verify frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.8.cdx.json \
   --output /tmp/clarin-excalidraw-engine.cdx.json
 ```
 
@@ -67,7 +67,7 @@ network destination.
 - Upstream source: <https://github.com/rocicorp/fractional-indexing/tree/v3.2.0>
 - License: CC0 1.0 Universal (`CC0-1.0`; no rights reserved)
 
-Excalidraw `0.18.1-clarin.7` uses this exact package to generate fractional ordering keys. Clarin's backend ports the same key-generation rules for canonical scene reconciliation, and the differential golden generator imports the exact installed `3.2.0` source after verifying its SHA-256. CC0 applies to that fractional-indexing implementation; Excalidraw's surrounding reconciliation and index-grouping code remains under the Excalidraw MIT notice above.
+Excalidraw `0.18.1-clarin.8` uses this exact package to generate fractional ordering keys. Clarin's backend ports the same key-generation rules for canonical scene reconciliation, and the differential golden generator imports the exact installed `3.2.0` source after verifying its SHA-256. CC0 applies to that fractional-indexing implementation; Excalidraw's surrounding reconciliation and index-grouping code remains under the Excalidraw MIT notice above.
 
 ## Fabric compatibility adapter
 
@@ -77,6 +77,10 @@ Clarin uses `fabric@7.4.0`. The narrow legacy-gradient adapter derives from Fabr
 
 Clarin uses the unchanged official `xlsx@0.20.3` tarball, not the obsolete npm-registry release. Its Apache-2.0 license remains inside the vendored distribution. [Provenance and immutable SHA-256](frontend/vendor/sheetjs/README.md) identify the official CDN artifact; `frontend/package-lock.json` additionally fixes its SHA-512 integrity.
 
-## Dependency patch evidence — 2026-10-11
+## Historical dependency patch evidence — 2026-10-11
 
 The current lock uses Next 16.3.8, sharp 0.35.5, DOMPurify 3.4.16 and source-map-js 1.2.2. The refreshed npm audit reports 9 aggregate findings (6 high, 3 low) in all dependencies and 6 (3 high, 3 low) with development dependencies omitted. Remaining direct advisories concern braces and KaTeX; the current baseline records them as in triage, not fixed or proven unreachable. September scan results cited above are historical evidence only. The editor source is unchanged by this patch; its hash was reproduced independently from the committed Git archive and installed source. The SBOM and notices are regenerated from this lock and exact installed legal texts. These checks do not assert production deployment or approve unresolved runtime risks.
+
+## Clarin engine patch evidence — 2026-10-12
+
+The `.8` candidate adds semantic wide strokes and export-only ink bounds without changing persisted stroke values or the historical renderer. Its source digest identifies the complete candidate tree, including uncommitted changes; the recorded Git commit identifies the base checkout. The SBOM and complete notices were regenerated from an isolated Linux `npm ci` installation of the exact lock. Notices cover 247 of 248 components, with the explicit Darwin-only `fsevents` exclusion, and retain 123 complete legal texts. The production npm audit was repeated on October 12 and retains 6 aggregate findings (3 high, 3 low); no upstream dependency upgrade or new exhaustive OSV/GitHub scan is claimed. Final browser, egress, build and authorized release gates remain independent of this inventory.

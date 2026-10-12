@@ -200,7 +200,7 @@ describe('TaskListView compact interaction', () => {
     const add = screen.getByRole('button', { name: `Agregar subtarea a ${task.title}` })
     const rename = screen.getByRole('button', { name: `Cambiar nombre de ${task.title}` })
     expect(grip).toHaveClass('pointer-events-none', 'opacity-0', 'group-hover:pointer-events-auto', 'group-focus-within:opacity-100', '[@media(pointer:coarse)]:opacity-100', '[@media(pointer:coarse)]:w-11')
-    expect(completion).toHaveClass('pointer-events-none', 'opacity-0', '[@media(pointer:coarse)]:pointer-events-auto', '[@media(pointer:coarse)]:h-11', '[@media(pointer:coarse)]:w-11')
+    expect(completion).toHaveClass('pointer-events-auto', 'opacity-100', '[@media(pointer:coarse)]:h-11', '[@media(pointer:coarse)]:w-11')
     expect(actions).toHaveAttribute('data-task-row-action-mode', 'direct')
     expect(actions).toHaveClass('relative', 'w-[104px]', '[@media(pointer:coarse)]:w-11')
     expect(add).toHaveClass('pointer-events-none', 'opacity-0', 'group-hover:pointer-events-auto', '[@media(pointer:coarse)]:hidden')

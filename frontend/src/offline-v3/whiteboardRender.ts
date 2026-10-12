@@ -21,7 +21,7 @@ function rasterSignature(bytes: Uint8Array, mime: string) {
 /** Render-only copy. Never rewrite the canonical scene or resolve remote URLs. */
 export async function offlineWhiteboardRenderInput(board: OfflineWhiteboard) {
   if (!board.scene || !Array.isArray(board.scene.elements) || board.scene.elements.length > 50000) throw new Error('La escena de esta pizarra no está preparada.')
-  if (board.editor_version && !/^0\.18\.1(?:-clarin\.[1-7])?$/.test(board.editor_version)) throw new Error('Esta versión de pizarra necesita un lector actualizado.')
+  if (board.editor_version && !/^0\.18\.1(?:-clarin\.[1-8])?$/.test(board.editor_version)) throw new Error('Esta versión de pizarra necesita un lector actualizado.')
   const references = new Set<string>()
   const elements = board.scene.elements.map(value => {
     const element = record(value)

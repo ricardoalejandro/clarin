@@ -1109,6 +1109,16 @@ export const StrokeWidthExtraBoldIcon = createIcon(
   modifiedTablerIconProps,
 );
 
+export const StrokeWidthWideIcon = createIcon(
+  <path
+    d="M5 10h10"
+    stroke="currentColor"
+    strokeWidth="5.5"
+    strokeLinecap="round"
+  />,
+  modifiedTablerIconProps,
+);
+
 export const StrokeStyleSolidIcon = React.memo(({ theme }: { theme: Theme }) =>
   createIcon(
     <path

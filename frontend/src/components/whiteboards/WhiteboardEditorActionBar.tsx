@@ -1,6 +1,6 @@
 'use client'
 
-import { forwardRef, useEffect, useState } from 'react'
+import { forwardRef } from 'react'
 import {
   Check,
   Clock3,
@@ -95,8 +95,6 @@ export interface WhiteboardEditorActionBarProps {
 
 export const WhiteboardEditorActionBar = forwardRef<HTMLButtonElement, WhiteboardEditorActionBarProps>(
   function WhiteboardEditorActionBar({
-    editorAPI,
-    openSidebar,
     showShare,
     canManageAccess,
     canEdit,
@@ -107,29 +105,7 @@ export const WhiteboardEditorActionBar = forwardRef<HTMLButtonElement, Whiteboar
     onToggleMore,
     presentation,
   }, moreButtonRef) {
-    const [observedOpenSidebar, setObservedOpenSidebar] = useState<WhiteboardOpenSidebar>(
-      () => editorAPI?.getAppState().openSidebar || null,
-    )
-    const currentOpenSidebar = openSidebar === undefined ? observedOpenSidebar : openSidebar
-    const libraryActive = currentOpenSidebar?.name === 'default' && currentOpenSidebar.tab === 'library'
-
-    useEffect(() => {
-      if (openSidebar !== undefined || !editorAPI) return
-      setObservedOpenSidebar(editorAPI.getAppState().openSidebar)
-      return editorAPI.onChange((_elements, appState) => setObservedOpenSidebar(appState.openSidebar))
-    }, [editorAPI, openSidebar])
-
     return <div className="whiteboard-action-bar" role="group" aria-label="Acciones de Pizarras">
-      <button
-        type="button"
-        data-whiteboard-action="library"
-        onClick={() => editorAPI?.toggleSidebar(whiteboardLibrarySidebarToggle(editorAPI.getAppState().openSidebar))}
-        disabled={!editorAPI}
-        aria-label="Biblioteca"
-        title="Biblioteca"
-        aria-pressed={libraryActive}
-        className="whiteboard-action-bar__control whiteboard-library-action"
-      ><LibraryBig className="h-5 w-5" /></button>
       {presentation && <WhiteboardPresentationButton
         controlState={presentation.controlState}
         state={presentation.state}
@@ -160,3 +136,7 @@ export const WhiteboardEditorActionBar = forwardRef<HTMLButtonElement, Whiteboar
     </div>
   },
 )
+
+export function WhiteboardLibraryMenuItem({ editorAPI, onSelect }: { editorAPI: ExcalidrawImperativeAPI | null; onSelect: () => void }) {
+  return <button type="button" role="menuitem" disabled={!editorAPI} onClick={() => { if (editorAPI) editorAPI.toggleSidebar(whiteboardLibrarySidebarToggle(editorAPI.getAppState().openSidebar)); onSelect() }} className="whiteboard-more-item"><LibraryBig className="h-4 w-4" />Biblioteca</button>
+}

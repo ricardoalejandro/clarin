@@ -1,6 +1,6 @@
 CLARIN WHITEBOARD DEPENDENCY LICENSES
 Generated deterministically from installed license files and pinned official repository evidence.
-SBOM SHA-256: bb736384226c43b192654bc8ff96fe90e2f907d328f2ce32654c3e99b74d3834
+SBOM SHA-256: 43d3a239b16f8572ab9cac40335946834fd499f57c4998c14972d7e00c5bec0e
 SBOM components: 248; covered: 247; explicitly excluded: 1.
 Identical legal texts are included once, with every applicable component listed.
 This install closure over-approximates browser code; inclusion does not imply runtime execution.
@@ -352,7 +352,7 @@ SOFTWARE.
 ======================================================================
 SHA-256: 1352d204fdb90d5e482c13139d848bc2c9300a9a7de358a0a558a23e72d0d8be
 Components:
-  @excalidraw/excalidraw@0.18.1-clarin.7
+  @excalidraw/excalidraw@0.18.1-clarin.8
 Sources:
   vendor/excalidraw-clarin/packages/excalidraw/LICENSE
 

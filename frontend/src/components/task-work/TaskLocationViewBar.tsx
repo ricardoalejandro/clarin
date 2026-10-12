@@ -31,16 +31,9 @@ import {
 } from '@/lib/taskLocationViews'
 import { OPERATIONAL_OVERLAY_LAYERS } from '@/components/operational-overlay/operationalOverlayLayers'
 import { useWhiteboardDialogFocus } from '@/components/whiteboards/useWhiteboardDialogFocus'
+import TaskBuiltinViewSwitcher from './TaskBuiltinViewSwitcher'
 import TaskLocationViewVisibilityFields, { type TaskLocationViewSelectedMember } from './TaskLocationViewVisibilityFields'
 import TaskLocationViewAccessDialog from './TaskLocationViewAccessDialog'
-
-const BUILTIN_VIEWS: Array<{ id: TaskViewMode; label: string; icon: typeof LayoutList }> = [
-  { id: 'list', label: 'Lista', icon: LayoutList },
-  { id: 'board', label: 'Tablero', icon: Columns3 },
-  { id: 'calendar', label: 'Calendario', icon: CalendarDays },
-  { id: 'gantt', label: 'Gantt', icon: GanttChartSquare },
-  { id: 'summary', label: 'Resumen', icon: BarChart3 },
-]
 
 type ViewOperationModalState =
   | { kind: 'create'; operationID: string }
@@ -112,7 +105,7 @@ function ViewDialog({
   const dialogRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   useWhiteboardDialogFocus(dialogRef, onClose, state.kind === 'trash' ? undefined : inputRef)
-  const title = state.kind === 'create' ? 'Añadir vista' : state.kind === 'rename' ? 'Cambiar nombre' : state.kind === 'duplicate' ? 'Duplicar pizarra' : 'Mover pizarra a Papelera'
+  const title = state.kind === 'create' ? 'Añadir pizarra' : state.kind === 'rename' ? 'Cambiar nombre' : state.kind === 'duplicate' ? 'Duplicar pizarra' : 'Mover pizarra a Papelera'
   const description = state.kind === 'trash'
     ? 'La misma pizarra dejará de aparecer en Work y en el Hub. Podrás restaurarla desde Pizarras.'
     : state.kind === 'duplicate'
@@ -336,12 +329,12 @@ export default function TaskLocationViewBar({
 
   return <>
     <div ref={barRef} data-task-view-tabs className="flex min-w-0 flex-1 items-center overflow-hidden rounded-xl bg-slate-100 p-1">
-      <div className="flex min-w-0 shrink-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">{BUILTIN_VIEWS.map(option => { const Icon = option.icon; const active = !activeLocationView && builtinView === option.id; const hideLabel = layoutWidth < 520 || (layoutWidth < 900 && (Boolean(activeLocationView) || option.id !== builtinView)); return <button key={option.id} type="button" onClick={() => onSelectBuiltin(option.id)} aria-pressed={active} title={hideLabel ? option.label : undefined} className={`flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold transition ${layoutWidth >= 900 ? 'sm:px-3' : ''} ${active ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}><Icon className="h-3.5 w-3.5" /><span className={hideLabel ? 'sr-only' : ''}>{option.label}</span></button> })}</div>
+      <TaskBuiltinViewSwitcher value={builtinView} active={!activeLocationView} width={layoutWidth} onChange={onSelectBuiltin} />
       {(featureEnabled || locationViews.length > 0) && <span className="mx-1 h-6 w-px shrink-0 bg-slate-200" />}
       <div className="flex min-w-0 items-center gap-1 overflow-hidden">{split.visible.map(view => { const active = activeLocationView?.id === view.id; const hideName = layoutWidth < 520; const menuOpen = menu?.view.id === view.id; return <div key={view.id} className={`group flex min-w-0 shrink items-center rounded-lg ${active ? 'bg-white text-emerald-800 shadow-sm' : 'text-slate-500 hover:bg-white/70 hover:text-slate-800'}`}><button type="button" onClick={() => onSelectLocation(view)} aria-pressed={active} title={`${view.resource.whiteboard.name} · ${taskLocationViewBreadcrumb(view)}${view.visibility_mode === 'restricted' ? ' · Restringida' : ''}`} className="flex min-h-9 min-w-0 items-center gap-1.5 px-2.5 text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500"><PenTool className="h-3.5 w-3.5 shrink-0 text-emerald-600" /><span className={`${hideName ? 'sr-only' : 'max-w-32 truncate'}`}>{view.resource.whiteboard.name}</span>{view.visibility_mode === 'restricted' && <LockKeyhole aria-label="Pizarra restringida" className="h-3 w-3 shrink-0 text-violet-500" />}</button>{active && view.capabilities.can_manage && <button type="button" onClick={event => { if (menuOpen) closeMenu(); else openMenu(view, event.currentTarget) }} aria-label={`Acciones de ${view.resource.whiteboard.name}`} aria-haspopup="menu" aria-expanded={menuOpen} aria-controls={menuOpen ? 'task-location-view-actions' : undefined} className="flex h-9 w-8 shrink-0 items-center justify-center rounded-r-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"><MoreHorizontal className="h-3.5 w-3.5" /></button>}</div> })}
         {split.overflow.length > 0 && <div className="relative shrink-0"><button ref={overflowButtonRef} type="button" onClick={toggleOverflow} aria-label={`Más (${split.overflow.length})`} aria-haspopup="menu" aria-expanded={overflowOpen} className="flex min-h-9 items-center gap-1 rounded-lg px-2 text-xs font-bold text-slate-500 hover:bg-white">{layoutWidth < 430 ? <><MoreHorizontal aria-hidden="true" className="h-3.5 w-3.5" /><span aria-hidden="true">{split.overflow.length}</span></> : <><span aria-hidden="true">Más ({split.overflow.length})</span><ChevronDown aria-hidden="true" className="h-3.5 w-3.5" /></>}</button></div>}
       </div>
-      {featureEnabled && <button type="button" disabled={!canCreate || loading || busy} onClick={() => openModal({ kind: 'create', operationID: createTaskLocationViewOperationAttempt('create').operationID })} title={!canCreate ? 'Necesitas Administrar en esta Lista o Carpeta y acceso al módulo Pizarras.' : `Añadir una vista a ${locationLabel}`} className="ml-auto flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg border border-transparent px-2.5 text-xs font-black text-emerald-700 transition hover:border-emerald-200 hover:bg-white disabled:cursor-not-allowed disabled:text-slate-300"><Plus className="h-3.5 w-3.5" /><span className={layoutWidth < 780 ? 'sr-only' : ''}>Vista</span></button>}
+      {featureEnabled && <button type="button" disabled={!canCreate || loading || busy} onClick={() => openModal({ kind: 'create', operationID: createTaskLocationViewOperationAttempt('create').operationID })} aria-label="Añadir pizarra" title={!canCreate ? 'Necesitas Administrar en esta Lista o Carpeta y acceso al módulo Pizarras.' : `Añadir pizarra a ${locationLabel}`} className="ml-auto flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg border border-transparent px-2.5 text-xs font-black text-emerald-700 transition hover:border-emerald-200 hover:bg-white disabled:cursor-not-allowed disabled:text-slate-300"><Plus className="h-3.5 w-3.5" /><span className={layoutWidth < 780 ? 'sr-only' : ''}>Añadir pizarra</span></button>}
       {loading && <Loader2 className="mx-2 h-3.5 w-3.5 shrink-0 animate-spin text-slate-400" aria-label="Actualizando vistas" />}
     </div>
 

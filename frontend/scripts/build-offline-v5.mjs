@@ -9,7 +9,7 @@ const nextRoot = path.join(root, '.next')
 const outputRoot = path.join(root, 'public', 'offline-v5')
 const buildID = (process.env.NEXT_PUBLIC_BUILD_VERSION || 'dev').trim() || 'dev'
 const appOrigin = new URL(process.env.NEXT_PUBLIC_APP_URL || 'https://clarin.naperu.cloud').origin
-const whiteboardVersion = '0.18.1-clarin.7'
+const whiteboardVersion = '0.18.1-clarin.8'
 const maximumBytes = 64 * 1024 * 1024
 
 const routeSources = {

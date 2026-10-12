@@ -11,7 +11,7 @@ const recoveryEntry = path.join(sourceRoot, 'offline-v3', 'recovery.ts')
 const outputRoot = path.join(root, 'public', 'offline-v3')
 const buildID = (process.env.NEXT_PUBLIC_BUILD_VERSION || 'dev').trim() || 'dev'
 const appOrigin = new URL(process.env.NEXT_PUBLIC_APP_URL || 'https://clarin.naperu.cloud').origin
-const whiteboardVersion = '0.18.1-clarin.7'
+const whiteboardVersion = '0.18.1-clarin.8'
 
 async function assertNoNextRuntimeImports(directory) {
   const entries = await fs.readdir(directory, { withFileTypes: true })

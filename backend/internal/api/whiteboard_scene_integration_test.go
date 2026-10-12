@@ -661,6 +661,9 @@ func TestWhiteboardSceneRouterPersistsAndReloadsRepresentativeElements(t *testin
 	if status != http.StatusNotFound {
 		t.Fatalf("cross-account comment detail did not return 404: status=%d body=%s", status, responseBody)
 	}
+	t.Run("real storage asset durability", func(t *testing.T) {
+		runWhiteboardAssetDurabilityIntegration(t, db, accountID, actorID, foreignAccountID, foreignActorID)
+	})
 }
 
 // TestWhiteboardDeployedRuntimePersistsControlledScene verifies the running

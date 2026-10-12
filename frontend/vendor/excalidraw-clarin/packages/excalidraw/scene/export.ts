@@ -7,7 +7,7 @@ import type {
   NonDeletedSceneElementsMap,
 } from "../element/types";
 import type { Bounds } from "../element/bounds";
-import { getCommonBounds, getElementAbsoluteCoords } from "../element/bounds";
+import { getElementAbsoluteCoords } from "../element/bounds";
 import { renderSceneToSvg } from "../renderer/staticSvgScene";
 import { arrayToMap, distance, getFontString, toBrandedType } from "../utils";
 import type { AppState, BinaryFiles } from "../types";
@@ -42,6 +42,7 @@ import { syncInvalidIndices } from "../fractionalIndex";
 import { renderStaticScene } from "../renderer/staticScene";
 import { Fonts } from "../fonts";
 import { base64ToString, decode, encode, stringToBase64 } from "../data/encode";
+import { getClarinExportBounds } from "./clarinExportBounds";
 
 const truncateText = (element: ExcalidrawTextElement, maxWidth: number) => {
   if (element.width <= maxWidth) {
@@ -538,11 +539,15 @@ const getCanvasSize = (
   elements: readonly NonDeletedExcalidrawElement[],
   exportPadding: number,
 ): Bounds => {
-  const [minX, minY, maxX, maxY] = getCommonBounds(elements);
+  const [minX, minY, maxX, maxY] = getClarinExportBounds(elements);
   const width = distance(minX, maxX) + exportPadding * 2;
   const height = distance(minY, maxY) + exportPadding * 2;
-
-  return [minX, minY, width, height];
+  // Canvas dimensions truncate fractions. Round ink exports outward so a
+  // fractional edge cannot be clipped even when callers request zero padding.
+  // Explicit frame crops use a frame-only input and retain upstream sizing.
+  return elements.some((element) => element.type === "freedraw")
+    ? [minX, minY, Math.ceil(width), Math.ceil(height)]
+    : [minX, minY, width, height];
 };
 
 export const getExportSize = (

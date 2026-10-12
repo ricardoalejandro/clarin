@@ -37,13 +37,13 @@ test('neutralizes external URLs in literals and dynamic template helpers', () =>
 test('keeps XML namespaces and rewrites the audited font fallback to an absolute same-origin URL', () => {
   const source = [
     'const svg = "http://www.w3.org/2000/svg";',
-    'const pkg = { name: "@excalidraw/excalidraw", version: "0.18.1-clarin.7" };',
+    'const pkg = { name: "@excalidraw/excalidraw", version: "0.18.1-clarin.8" };',
     'const fallback = `https://esm.sh/${pkg.name}@${pkg.version}/dist/prod/`;',
     'const fontURL = (asset) => new URL(asset, fallback).href;',
   ].join('\n')
   const result = hardenEditorBundle(source, 'hardening-local-fixture.js')
   assert.match(result.hardened, /http:\/\/www\.w3\.org\/2000\/svg/)
-  assert.match(result.hardened, /\/vendor\/whiteboards-editor\/0\.18\.1-clarin\.7\//)
+  assert.match(result.hardened, /\/vendor\/whiteboards-editor\/0\.18\.1-clarin\.8\//)
   assert.doesNotMatch(result.hardened, /\/dist\/prod\//)
   assert.equal(result.localFallbacks, 1)
   const resolveFont = new Function(
@@ -52,14 +52,14 @@ test('keeps XML namespaces and rewrites the audited font fallback to an absolute
   )
   assert.equal(
     resolveFont({ location: { origin: 'https://clarin.example.invalid' } }),
-    'https://clarin.example.invalid/vendor/whiteboards-editor/0.18.1-clarin.7/fonts/Excalifont/Excalifont-Regular.woff2',
+    'https://clarin.example.invalid/vendor/whiteboards-editor/0.18.1-clarin.8/fonts/Excalifont/Excalifont-Regular.woff2',
   )
 })
 
 test('repairs bundles transformed with a relative fork fallback', () => {
   const source = [
-    'const pkg = { name: "@excalidraw/excalidraw", version: "0.18.1-clarin.7" };',
-    'const fallback = `/vendor/whiteboards-editor/0.18.1-clarin.7/${pkg.name}@${pkg.version}/dist/prod/`;',
+    'const pkg = { name: "@excalidraw/excalidraw", version: "0.18.1-clarin.8" };',
+    'const fallback = `/vendor/whiteboards-editor/0.18.1-clarin.8/${pkg.name}@${pkg.version}/dist/prod/`;',
     'const fontURL = (asset) => new URL(asset, fallback).href;',
   ].join('\n')
   const result = hardenEditorBundle(source, 'hardening-legacy-local-fixture.js')
@@ -70,7 +70,7 @@ test('repairs bundles transformed with a relative fork fallback', () => {
   assert.equal(result.localFallbacks, 1)
   assert.equal(
     resolveFont({ location: { origin: 'https://clarin.example.invalid' } }),
-    'https://clarin.example.invalid/vendor/whiteboards-editor/0.18.1-clarin.7/fonts/Virgil/Virgil.woff2',
+    'https://clarin.example.invalid/vendor/whiteboards-editor/0.18.1-clarin.8/fonts/Virgil/Virgil.woff2',
   )
 })
 
@@ -241,7 +241,7 @@ test('adds one native, idempotent highlighter tool while preserving freedraw sce
   assert.match(normalizedIcon.hardened, /icon: "laser",\s*className: "clarin-highlighter-tool"/u)
 })
 
-test('adds one native, idempotent 8 px stroke option after the upstream levels', () => {
+test('leaves native semantic stroke presets to the source fork', () => {
   const source = [
     'const STROKE_WIDTH = { thin: 1, bold: 2, extraBold: 4 };',
     'const thinIcon = "thin";',
@@ -251,24 +251,16 @@ test('adds one native, idempotent 8 px stroke option after the upstream levels',
     '  { value: STROKE_WIDTH.thin, text: "Fino", icon: thinIcon, testId: "strokeWidth-thin" },',
     '  { value: STROKE_WIDTH.bold, text: "Grueso", icon: boldIcon, testId: "strokeWidth-bold" },',
     '  { value: STROKE_WIDTH.extraBold, text: "Muy grueso upstream", icon: extraBoldIcon, testId: "strokeWidth-extraBold" },',
+    '  { value: "wide", text: "Amplio", icon: "wide", testId: "strokeWidth-ultraBold" },',
     '];',
   ].join('\n')
 
   const result = hardenEditorBundle(source, 'stroke-width-fixture.js')
-  assert.equal(result.ultraBoldStrokeWidths, 1)
-  assert.match(result.hardened, /clarin-ultra-bold-stroke/u)
-  assert.match(result.hardened, /value: 8/u)
-  assert.match(result.hardened, /text: "Muy grueso"/u)
-  assert.match(result.hardened, /icon: extraBoldIcon/u)
-  assert.match(result.hardened, /testId: "strokeWidth-ultraBold"/u)
-
+  assert.equal(result.hardened, source)
   const runtime = new Function(`${result.hardened}\nreturn options`)()
-  assert.deepEqual(runtime.map(option => option.value), [1, 2, 4, 8])
-  assert.equal(runtime.at(-1).text, 'Muy grueso')
-  assert.equal(runtime.at(-1).icon, 'extra-bold')
+  assert.deepEqual(runtime.map(option => option.value), [1, 2, 4, 'wide'])
 
   const repeated = hardenEditorBundle(result.hardened, 'stroke-width-fixture-repeated.js')
-  assert.equal(repeated.ultraBoldStrokeWidths, 0)
   assert.equal(repeated.hardened, result.hardened)
 })
 

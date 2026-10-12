@@ -4,7 +4,7 @@ import { extname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { parse } from 'acorn'
 
-export const EXPECTED_EDITOR_VERSION = '0.18.1-clarin.7'
+export const EXPECTED_EDITOR_VERSION = '0.18.1-clarin.8'
 export const LOCAL_EDITOR_ASSET_PATH = `/vendor/whiteboards-editor/${EXPECTED_EDITOR_VERSION}/`
 const LOCAL_EDITOR_ASSET_BASE_EXPRESSION = `new URL(${JSON.stringify(LOCAL_EDITOR_ASSET_PATH)}, globalThis.location.origin).href`
 
@@ -229,7 +229,6 @@ export function hardenEditorBundle(source, fileLabel = 'bundle', fontCatalog = [
   let highlighterMenus = 0
   let highlighterToolLifecycles = 0
   let hiddenGenerateSections = 0
-  let ultraBoldStrokeWidths = 0
   let customFontFamilyCatalogs = 0
   let customFontLazyRegistrations = 0
   let customFontMetadataCatalogs = 0
@@ -243,7 +242,6 @@ export function hardenEditorBundle(source, fileLabel = 'bundle', fontCatalog = [
   const highlighterLifecycleCandidates = []
   const highlighterTriggerCandidates = []
   const generateSectionCandidates = []
-  const strokeWidthOptionCandidates = []
   const fontFamilyCandidates = []
   const fontMetadataCandidates = []
   const fontRegistrationCandidates = []
@@ -321,21 +319,6 @@ export function hardenEditorBundle(source, fileLabel = 'bundle', fontCatalog = [
       if (bodySource.includes('font-family-show-fonts')
         && (bodySource.includes('labels.showFonts') || bodySource.includes('Más fuentes · 32'))) {
         fontPickerTriggerCandidates.push(node)
-      }
-    }
-    if (node.type === 'ArrayExpression') {
-      const options = node.elements.flatMap(element => {
-        if (element?.type !== 'ObjectExpression') return []
-        const properties = element.properties.filter(property => property?.type === 'Property')
-        const testID = properties.find(property => propertyName(property) === 'testId')
-        const value = staticString(testID?.value)
-        return value ? [{ element, properties, testID: value }] : []
-      })
-      const testIDs = new Set(options.map(option => option.testID))
-      if (testIDs.has('strokeWidth-thin')
-        && testIDs.has('strokeWidth-bold')
-        && testIDs.has('strokeWidth-extraBold')) {
-        strokeWidthOptionCandidates.push({ node, options })
       }
     }
     if (node.type === 'ObjectExpression') {
@@ -868,41 +851,6 @@ if (${JSON.stringify(fontCatalog.map(entry => entry.cssFamily))}.includes(this.f
     }
   }
 
-  if (strokeWidthOptionCandidates.length > 0) {
-    if (strokeWidthOptionCandidates.length !== 1) {
-      throw new Error(`No se pudo resolver de forma unívoca el selector de grosor en ${fileLabel}: ${strokeWidthOptionCandidates.length} candidatos.`)
-    }
-    const candidate = strokeWidthOptionCandidates[0]
-    const existing = candidate.options.find(option => option.testID === 'strokeWidth-ultraBold')
-    if (existing) {
-      const value = existing.properties.find(property => propertyName(property) === 'value')?.value
-      const text = existing.properties.find(property => propertyName(property) === 'text')?.value
-      if (value?.type !== 'Literal' || value.value !== 8 || staticString(text) !== 'Muy grueso') {
-        throw new Error(`El nivel máximo de grosor existente no coincide con el contrato de Clarin en ${fileLabel}.`)
-      }
-    } else {
-      const extraBold = candidate.options.find(option => option.testID === 'strokeWidth-extraBold')
-      const icon = extraBold?.properties.find(property => propertyName(property) === 'icon')?.value
-      if (!icon) throw new Error(`No se encontró el icono nativo de grosor máximo en ${fileLabel}.`)
-      const lastElement = candidate.node.elements.at(-1)
-      const trailingSource = lastElement
-        ? source.slice(lastElement.end, candidate.node.end - 1)
-        : ''
-      const separator = trailingSource.includes(',') ? '' : ','
-      replacements.push({
-        start: candidate.node.end - 1,
-        end: candidate.node.end - 1,
-        value: `${separator} /* clarin-ultra-bold-stroke */ {
-          value: 8,
-          text: "Muy grueso",
-          icon: ${source.slice(icon.start, icon.end)},
-          testId: "strokeWidth-ultraBold"
-        }`,
-      })
-      ultraBoldStrokeWidths = 1
-    }
-  }
-
   if (hasHighlighterMenu) {
     if (highlighterMenuCandidates.length !== 1 || existingHighlighterIconValues.length !== 1) {
       throw new Error(`No se pudo verificar el icono nativo de Resaltador en ${fileLabel}: laser=${highlighterMenuCandidates.length}, highlighter=${existingHighlighterIconValues.length}.`)
@@ -1017,7 +965,6 @@ if (${JSON.stringify(fontCatalog.map(entry => entry.cssFamily))}.includes(this.f
     localFallbacks,
     rewrittenLibraryBrowseMessages,
     securedLibraryBrowseTargets,
-    ultraBoldStrokeWidths,
   }
 }
 
@@ -1035,7 +982,6 @@ export async function hardenJavaScriptTree(root, { fontCatalog = [] } = {}) {
   let hiddenGenerateSections = 0
   let highlighterMenus = 0
   let highlighterToolLifecycles = 0
-  let ultraBoldStrokeWidths = 0
   let customFontFamilyCatalogs = 0
   let customFontLazyRegistrations = 0
   let customFontMetadataCatalogs = 0
@@ -1060,7 +1006,6 @@ export async function hardenJavaScriptTree(root, { fontCatalog = [] } = {}) {
     hiddenGenerateSections += result.hiddenGenerateSections
     highlighterMenus += result.highlighterMenus
     highlighterToolLifecycles += result.highlighterToolLifecycles
-    ultraBoldStrokeWidths += result.ultraBoldStrokeWidths
     fontPickerCategoryFilters += result.fontPickerCategoryFilters
     fontPickerVisiblePreviews += result.fontPickerVisiblePreviews
     fontPickerTriggers += result.fontPickerTriggers
@@ -1094,7 +1039,6 @@ export async function hardenJavaScriptTree(root, { fontCatalog = [] } = {}) {
     maps: maps.length,
     rewrittenLibraryBrowseMessages,
     securedLibraryBrowseTargets,
-    ultraBoldStrokeWidths,
   }
 }
 
