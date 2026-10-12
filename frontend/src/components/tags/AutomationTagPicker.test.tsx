@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '@/lib/api'
+import { useState } from 'react'
 import AutomationTagPicker from './AutomationTagPicker'
 vi.mock('@/lib/api',()=>({api:vi.fn()}))
 beforeEach(()=>{vi.useFakeTimers();vi.mocked(api).mockReset()})
@@ -14,6 +15,18 @@ describe('AutomationTagPicker',()=>{
   expect(api).toHaveBeenCalledWith('/api/tags/search?context_type=automation&q=&limit=20&ids=saved',expect.objectContaining({signal:expect.any(AbortSignal)}))
   fireEvent.click(screen.getByRole('button',{name:'Quitar etiqueta Prioridad'}))
   expect(onChange).toHaveBeenCalledExactlyOnceWith('')
+ })
+ it('keeps a just-selected label visible without a second hydration request', async()=>{
+  const tag={id:'chosen',name:'Prioridad',color:'#2563EB'}
+  vi.mocked(api).mockResolvedValue({success:true,data:{success:true,tags:[tag],can_create:false}})
+  function Controlled(){const [data,setData]=useState<Record<string,unknown>>({tag_id:''});return <AutomationTagPicker sessionKey="node-1" data={data} onChange={tag_id=>setData({tag_id})}/>}
+  render(<Controlled/> )
+  fireEvent.change(screen.getByRole('combobox'),{target:{value:'prio'}})
+  await act(async()=>{await vi.advanceTimersByTimeAsync(500)})
+  fireEvent.click(screen.getByRole('option',{name:'Prioridad'}))
+  expect(screen.getByRole('button',{name:'Quitar etiqueta Prioridad'})).toBeInTheDocument()
+  expect(screen.queryByText('Cargando etiqueta…')).not.toBeInTheDocument()
+  expect(api).toHaveBeenCalledTimes(1)
  })
  it('shows unavailable selection honestly and ignores hydration from another node',async()=>{
   let old!:(value:any)=>void

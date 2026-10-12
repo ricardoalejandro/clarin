@@ -178,6 +178,11 @@ export function whiteboardRealtimeIssueFromEvent(
   return null
 }
 
+// Metadata confirms access, while a rate notice still needs canonical scene sync.
+export function whiteboardRealtimeIssueAfterAccessRevalidation(issue: WhiteboardRealtimeIssue | null) {
+  return issue?.kind === 'rate_limited' ? issue : null
+}
+
 export function whiteboardRealtimeConnectionNotice(input: {
   connection: 'connecting' | 'open' | 'closed'
   hasOpened: boolean

@@ -124,6 +124,7 @@ import {
   whiteboardPermissionChangeFeedback,
   whiteboardRealtimeAccessLevel,
   whiteboardRealtimeConnectionNotice,
+  whiteboardRealtimeIssueAfterAccessRevalidation,
   type WhiteboardRealtimeIssue,
 } from '@/lib/whiteboardRealtimeConnection'
 import {
@@ -2290,7 +2291,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     setBoard(metadata)
     setPermissionNotice(feedback.notice)
     if (feedback.saveState) setSaveState(feedback.saveState)
-    setRealtimeIssue(null)
+    setRealtimeIssue(whiteboardRealtimeIssueAfterAccessRevalidation)
   }, [boardID, hostContext])
 
   useEffect(() => {
