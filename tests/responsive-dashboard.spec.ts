@@ -3396,8 +3396,13 @@ test.describe('Tag pointer association regression', () => {
       await page.getByRole('button', { name: 'Ver detalles de la conversación' }).click()
     } },
     { quick: false, name: 'Difusiones', route: '/dashboard/broadcasts', open: async (page: Page) => {
-      await page.getByText('Difusión móvil QA', { exact: true }).first().click()
-      await page.getByRole('button', { name: 'Ver Destinatarios', exact: true }).click()
+      if ((page.viewportSize()?.width || 1280) < 640) {
+        await page.getByRole('button', { name: 'Acciones de Difusión móvil QA', exact: true }).click()
+        await page.getByRole('button', { name: 'Ver detalles', exact: true }).click()
+      } else {
+        await page.getByText('Difusión móvil QA', { exact: true }).first().click()
+        await page.getByRole('button', { name: 'Ver Destinatarios', exact: true }).click()
+      }
       await page.getByRole('button', { name: /^Destinatarios \(/ }).click()
       await page.getByTitle('Editar destinatario').click()
     } },
@@ -3485,7 +3490,10 @@ test.describe('Tag pointer association regression', () => {
       await expect(remove).toBeVisible()
       failNext = true
       await remove.click()
-      await expect(controls.getByText('Guardado de prueba temporalmente no disponible', { exact: true }).last()).toBeVisible()
+      const saveError = surface.name === 'Difusiones'
+        ? controls.getByRole('alert').filter({ hasText: 'Guardado de prueba temporalmente no disponible' })
+        : controls.getByText('Guardado de prueba temporalmente no disponible', { exact: true }).last()
+      await expect(saveError).toBeVisible()
       await expect(remove).toBeVisible()
       await expect.poll(() => writes).toBe(2)
       await remove.click()
@@ -3494,21 +3502,39 @@ test.describe('Tag pointer association regression', () => {
     })
   }
 
-  test('tag pointer: full edit stays a draft in floating and maximized windows', async ({ page }) => {
+  test('tag pointer: full edit keeps tags in explicit drafts in floating and maximized windows', async ({ page }) => {
     test.setTimeout(120_000)
     // Both projects exercise the desktop operational-window contract at this width.
     await page.setViewportSize({ width: 1440, height: 900 })
     await authenticate(page)
+    const availableTags = [
+      { id: 'tag-priority', name: 'Prioridad', color: '#f59e0b' },
+      ...mockCanonicalContact.structured_tags,
+    ]
+    let assignedTags = mockCanonicalContact.structured_tags
+    await page.route(/\/api\/contact-profiles\/contact-1(?:\?.*)?$/, async route => {
+      const request = route.request()
+      const body = request.method() === 'PATCH' ? request.postDataJSON() : undefined
+      const payload: any = mockApiPayload(new URL(request.url()), request.method(), body)
+      if (Array.isArray(body?.tag_ids)) assignedTags = body.tag_ids.map((id: string) => availableTags.find(tag => tag.id === id))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+        ...payload,
+        contact: { ...payload.contact, structured_tags: assignedTags, tags: assignedTags.map(tag => tag.name) },
+      }) })
+    })
     await page.route(/\/api\/contact-profiles\/contact-1\/tags(?:\?.*)?$/, async route => {
       const query = (new URL(route.request().url()).searchParams.get('q') || '').toLocaleLowerCase('es')
-      const tags = [
-        { id: 'tag-priority', name: 'Prioridad', color: '#f59e0b' },
-        ...mockCanonicalContact.structured_tags,
-      ].filter(tag => query && tag.name.toLocaleLowerCase('es').includes(query))
+      const tags = availableTags.filter(tag => query && tag.name.toLocaleLowerCase('es').includes(query))
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, tags, total: tags.length }) })
     })
     let writes = 0
-    page.on('request', request => { if (new URL(request.url()).pathname === '/api/contact-profiles/contact-1' && request.method() === 'PATCH') writes++ })
+    let savedContact: { tag_ids?: string[] } | undefined
+    page.on('request', request => {
+      if (new URL(request.url()).pathname === '/api/contact-profiles/contact-1' && request.method() === 'PATCH') {
+        writes++
+        savedContact = request.postDataJSON()
+      }
+    })
     await page.goto(`${baseURL}/dashboard/contacts`, { waitUntil: 'domcontentloaded' })
     await page.getByText('Contacto móvil', { exact: true }).first().click()
     await page.getByRole('button', { name: 'Ventana flotante', exact: true }).click()
@@ -3549,26 +3575,47 @@ test.describe('Tag pointer association regression', () => {
       return element.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2))
     })).toBe(true)
     await priority.click()
-    expect(writes).toBe(0)
-    await page.getByRole('button', { name: 'Maximizar', exact: true }).click()
-    await expect(form.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true })).toBeVisible()
-    await form.getByRole('button', { name: 'Quitar etiqueta Comunidad', exact: true }).click()
-    await input.fill('Comunidad')
-    await expect(menu.getByRole('option', { name: 'Comunidad', exact: true })).toBeVisible()
-    await expectInsideVisualViewport(page, menu)
-    await input.press('Escape')
-    await expect(menu).toHaveCount(0)
-    await expect(input).toBeFocused()
-    await expect(form).toBeVisible()
-    expect(writes).toBe(0)
-    await input.press('ArrowDown')
-    await expect(menu.getByRole('option', { name: 'Comunidad', exact: true })).toBeVisible()
-    await input.press('Enter')
-    await expect(form.getByRole('button', { name: 'Quitar etiqueta Comunidad', exact: true })).toBeVisible()
-    await expect(form.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true })).toBeVisible()
+    const reselectCommunityByKeyboard = async () => {
+      await form.getByRole('button', { name: 'Quitar etiqueta Comunidad', exact: true }).click()
+      await input.fill('Comunidad')
+      const community = menu.getByRole('option', { name: 'Comunidad', exact: true })
+      await expect(community).toBeVisible()
+      await expectInsideVisualViewport(page, menu)
+      expect(await community.evaluate(element => {
+        const rect = element.getBoundingClientRect()
+        return element.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2))
+      })).toBe(true)
+      await input.press('Escape')
+      await expect(menu).toHaveCount(0)
+      await expect(input).toBeFocused()
+      await expect(form).toBeVisible()
+      await input.press('ArrowDown')
+      await expect(community).toBeVisible()
+      await input.press('Enter')
+      await expect(form.getByRole('button', { name: 'Quitar etiqueta Comunidad', exact: true })).toBeVisible()
+      await expect(form.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true })).toBeVisible()
+    }
+    await reselectCommunityByKeyboard()
     expect(writes).toBe(0)
     await form.getByRole('button', { name: 'Guardar contacto', exact: true }).click()
     await expect.poll(() => writes).toBe(1)
+    expect(savedContact?.tag_ids?.slice().sort()).toEqual(['tag-community', 'tag-priority'].sort())
+    await expect(form).toHaveCount(0)
+    // The blocking Contact editor owns its backdrop; change window mode between edits.
+    await page.getByRole('button', { name: 'Maximizar', exact: true }).click()
+    await page.getByRole('button', { name: 'Editar', exact: true }).last().click()
+    await expect(form).toBeVisible()
+    await expect(form.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true })).toBeVisible()
+    await reselectCommunityByKeyboard()
+    // Keyboard changes in the reopened editor remain local without a second save.
+    expect(writes).toBe(1)
+    page.once('dialog', async dialog => {
+      expect(dialog.message()).toContain('sin guardar')
+      await dialog.accept()
+    })
+    await form.getByRole('button', { name: 'Cancelar', exact: true }).click()
+    await expect(form).toHaveCount(0)
+    expect(writes).toBe(1)
   })
 
   test('tag pointer: creation catalogs support pointer, keyboard and bounded import selection', async ({ page }, testInfo) => {

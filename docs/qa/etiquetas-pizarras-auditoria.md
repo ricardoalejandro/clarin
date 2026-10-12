@@ -121,12 +121,12 @@ Runtime local: Node 24.21.0, descarga oficial con SHA256 verificado, dependencia
 
 | Comprobación | Resultado |
 | --- | --- |
-| `node node_modules/typescript/bin/tsc --noEmit` | PASS antes del último ajuste de anclaje; revalidación de la fuente final en curso. |
-| `npm run build` | PASS antes del último ajuste de anclaje; revalidación en curso. Preparación del editor/PDF, shell offline v4, Next webpack, TypeScript de producción, generación de páginas, CSS interactivo, shell offline v5 y verificación del editor. |
+| `node node_modules/typescript/bin/tsc --noEmit` | PASS sobre la fuente final, después del ajuste de anclaje. Exit 0. |
+| `npm run build` | PASS sobre la fuente final, después del ajuste de anclaje. Exit 0. Preparación del editor/PDF, shell offline v4, Next webpack, TypeScript de producción, 34 páginas estáticas, CSS interactivo, shell offline v5 (671 artefactos) y verificación del editor. |
 | `npm run verify:whiteboards:fixtures` | PASS: JSON base 4/4 y ciclo de archivo con adaptador Clarin 4/4. |
 | Verificación final de motor y branding dentro del build | PASS: `0.18.1-clarin.8`, 946 artefactos sin rutas operativas upstream; 33 artefactos estáticos y seis avisos legales preservados. |
 
-Logs locales: `local-tsc-final2.log`, `local-build-final.log` y `local-compat-fixtures.log`. El build de QA se sirve como standalone en `127.0.0.1:3018` únicamente para las comprobaciones del navegador. No equivale a un despliegue de Clarin en el VPS.
+Logs locales de la fuente final: `local-tsc-final-geometry.log`, `local-build-final-geometry.log` y `local-compat-fixtures.log`. Las ejecuciones previas `local-tsc-final2.log` y `local-build-final.log` se conservan. El build de QA se sirve como standalone en `127.0.0.1:3018` únicamente para las comprobaciones del navegador. No equivale a un despliegue de Clarin en el VPS.
 
 
 ## Navegador — pizarras
@@ -155,4 +155,41 @@ Las capturas de Contactos en escritorio y móvil confirmaron que el puntero alca
 
 El helper ahora fija el borde inferior del menú a 6 px del campo usando `translateY(-100%)` al abrir hacia arriba. El porcentaje usa la altura efectiva del menú; se conserva el máximo según el espacio disponible y los offsets del viewport, sin añadir observers ni ciclos de medición. Abrir hacia abajo mantiene el anclaje al borde inferior del campo. Las pruebas puras cubren alturas pequeñas y máximas, offsets, bordes y clamping; la prueba del portal conserva puntero y transform. Pasaron 16/16 focales con Node 24: `contactExperience` 8 y `TagPicker` 8.
 
-La matriz de navegador exige además una separación entre 0 y 8 px antes del clic o toque y guarda PNGs del menú de Contactos. La compilación y la matriz completas de esta última fuente se registran al finalizar; las capturas anteriores se conservan como evidencia del defecto visual.
+La matriz de navegador exige además una separación entre 0 y 8 px antes del clic o toque y guarda PNGs del menú de Contactos. Sobre la fuente final se comprobaron los 22 casos únicos descritos a continuación, y las dos capturas finales fueron inspeccionadas: menú junto al campo y dentro del viewport, sin el hueco previo. Las capturas anteriores se conservan como evidencia del defecto visual.
+
+
+## Navegador — etiquetas
+
+Chromium ejecutado con Node 24.21.0 contra el standalone del build final en `http://127.0.0.1:3018`, con `CLARIN_E2E_MOCK_AUTH=1`, un worker por ejecución y `PLAYWRIGHT_LOCAL_SERVER` ausente. Las API y los mensajes WebSocket usan fixtures sintéticos; no se modificaron datos ni se ejerció una sesión real del VPS. Los tests no usan clics forzados. Estas comprobaciones de interacción se complementan con la integración backend real de PostgreSQL documentada antes.
+
+Se comprobaron **22 casos únicos: 11 del proyecto de escritorio y 11 del proyecto con capacidad táctil**. Los resultados se reconstruyen con las ejecuciones parciales y focales de la tabla; la primera ejecución agrupada terminó con exit 1 y no se declara completamente verde.
+
+| Caso | Escritorio | Proyecto táctil | Anchura y evidencia |
+| --- | --- | --- | --- |
+| Contactos, Leads, Eventos, Programas, Chats y Chats incrustados | 6/6 PASS | 6/6 PASS | 1280 px con ratón y 375 px con toque. `elementFromPoint` alcanza la opción; separación campo–menú entre 0 y 8 px; asignación, persistencia tras recarga, error de guardado, rollback y reintento de retirada. |
+| Difusiones: destinatario con Lead y Contact vinculados | PASS | PASS | 1280/375 px. Mismas comprobaciones de puntero, persistencia y rollback. La navegación usa el resumen en escritorio y el menú de acciones de la tarjeta a 375 px. |
+| Editor completo del Contact en ventana flotante y maximizada | PASS | PASS | **1440 px en ambos proyectos**. Arrastre real de la ventana al borde inferior/derecho, scroll con rueda, picker visible y hit test; Escape conserva foco y Enter reasocia Comunidad. El borrador contiene Comunidad y Prioridad antes de un único PATCH, cuyo `tag_ids` se comprueba. Se guarda y cierra el editor bloqueante antes de maximizar su ventana propietaria; se reabre el editor y se comprueba de nuevo el selector y el descarte sin un segundo PATCH. No acredita ventana flotante a 375 px. |
+| Crear Contact, crear Lead e importación | PASS | PASS | 1280/375 px. Selección por ratón o toque y por Enter; los formularios mantienen el borrador hasta guardar. Importación reemplaza la selección única sin conservar el ID anterior. Los formularios de alta se cancelan; sus payloads y persistencia se verifican en las pruebas cercanas y backend, no mediante este caso de navegador. |
+| Dos sesiones del mismo Contact | PASS | PASS | 1280 px en ambas ejecuciones; la segunda sesión recibe el aviso WebSocket controlado y reconcilia el Contact canónico sin navegación ni F5. No acredita un proveedor WebSocket externo. |
+| Automatización: asignar y quitar etiqueta | PASS | PASS | **1280 px en ambos proyectos** por tratarse del diseñador. Las opciones se seleccionan con ratón en escritorio y `tap()` en el proyecto táctil; el guardado conserva el ID seleccionado en ambos nodos. No acredita el diseño del editor a 375 px. |
+
+| Log local conservado | Resultado y contribución a los 22 casos |
+| --- | --- |
+| `local-tag-final-geometry.log` | Exit 1: seis superficies de escritorio PASS; Difusiones falló al buscar el texto exacto del error en un contenedor que también tiene el botón Reintentar. Aporta 6 casos. |
+| `local-tag-final-geometry-desktop.log` | Exit 1: Difusiones de escritorio PASS; el primer flujo de edición intentaba maximizar la ventana bajo el editor bloqueante. Aporta 1 caso. |
+| `local-tag-final-geometry-desktop-rest.log` | Exit 1: el fixture devolvía la semilla de una sola etiqueta al recargar el Contact después del PATCH. Se corrigió el estado simulado para que GET y PATCH conserven las dos etiquetas guardadas; no aporta casos pasados. |
+| `local-tag-final-geometry-mobile.log` | Exit 1: seis superficies táctiles PASS; el nombre de la tarjeta de Difusiones a 375 px no tiene acción de apertura. Se corrigió la navegación al menú Acciones → Ver detalles. Aporta 6 casos. |
+| `local-tag-final-geometry-edit.log` | Exit 0: editor completo 2/2 PASS, 30,9 s. Aporta 2 casos. |
+| `local-tag-final-geometry-desktop-last.log` | Exit 0: creación/importación, dos sesiones y automatizaciones 3/3 PASS, 42,3 s. Aporta 3 casos. |
+| `local-tag-final-geometry-mobile-last.log` | Exit 0: Difusiones, creación/importación, dos sesiones y automatizaciones 4/4 PASS, 44,0 s. Aporta 4 casos. |
+
+Los intentos fallidos, sus snapshots y sus trazas se conservan en los directorios `local-tag-final-geometry*-results`. Las ejecuciones detenidas por el primer fallo también registraron un contador de error fuera de test sin detalle adicional; no se oculta ese resultado. Las correcciones posteriores fueron exclusivamente del fixture y del flujo de prueba: navegación responsive real, locator del error, respeto al modal que protege el borrador y estado canónico simulado. No se cambió producto ni se debilitó el hit test para hacerlos pasar.
+
+Capturas finales inspeccionadas, relativas al árbol aislado de QA de Windows:
+
+- Escritorio: `local-tag-final-geometry-results/responsive-dashboard-Tag-p-19da2-restores-errors-and-reloads-responsive-desktop/menu-etiquetas-responsive-desktop.png`.
+- Móvil: `local-tag-final-geometry-mobile-results/responsive-dashboard-Tag-p-19da2-restores-errors-and-reloads-responsive-mobile-chrome/menu-etiquetas-responsive-mobile-chrome.png`.
+
+El viewport móvil es de 375 CSS px; la resolución del PNG incluye el factor de escala del dispositivo. La revisión visual confirma el anclaje junto al campo y ausencia de recorte horizontal; el test comprueba la separación y el puntero sobre la opción. El archivo final `tests/responsive-dashboard.spec.ts` fue editado en el VPS y copiado exactamente al árbol de QA: SHA256 coincidente `0d763e3b3a071803e8f08786c53619891ecf20ce9114b14a00b1799b10e40222`. `git diff --check` pasó tras el cierre. No se ejecutó despliegue, merge ni verificación de salud del sistema en producción.
+
+Al terminar se cerró el standalone local de QA después de verificar su PID `57012` y la ruta del runtime Node propio. Se comprobó la ausencia del listener en `127.0.0.1:3018`; las sesiones de prueba habían finalizado. Se conservaron logs, capturas y trazas, sin detener servicios ni contenedores de producción.
