@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import {act,cleanup,fireEvent,render,screen,waitFor} from '@testing-library/react'
-import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest'
+import {afterEach,beforeEach,describe,expect,it,vi,type Mock} from 'vitest'
 import EventLogbooksWorkspace from './EventLogbooksWorkspace'
 import type {EventLogbook} from './logbookWorkspace'
 const state=vi.hoisted(()=>({socket:null as null|((message:unknown)=>void),download:vi.fn()}))
@@ -9,7 +9,7 @@ vi.mock('@/components/responsive/useContainerWidth',()=>({useContainerWidth:()=>
 vi.mock('@/components/operational-window/OperationalWindowShell',()=>({default:({children,footer,title,onRequestClose}:any)=><div role="dialog" aria-label={title}><button onClick={onRequestClose}>Cerrar ventana</button>{children}{footer}</div>}))
 vi.mock('@/components/operational-date/OperationalDatePicker',()=>({default:({label,value,onChange}:any)=><input aria-label={label} value={value} onChange={e=>onChange(e.target.value)}/>}))
 let book:EventLogbook
-let transport:ReturnType<typeof vi.fn>
+let transport:Mock<(url:string,init?:RequestInit)=>Promise<Response>>
 const entry={id:'entry-a',participant_id:'p',participant_name:'Ana',participant_phone:'555',stage_name:'Invitados',stage_color:'#123456',capture_stage_key:'stage',stage_position:0,notes:'Original'}
 const response=(data:unknown,status=200)=>Promise.resolve(new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json'}}))
 beforeEach(()=>{book={id:'book-a',event_id:'event-a',title:'Mi bitácora',date:'2026-10-12',status:'active',version:2,general_notes:'',total_participants:1,stage_snapshot:{stage:{name:'Invitados',color:'#123456',count:1,position:0}},captured_at:'2026-10-12T14:00:00Z'};transport=vi.fn((url:string,init?:RequestInit)=>{if(init?.method&&init.method!=='GET'){book={...book,version:book.version+1,...(url.endsWith('/reopen')?{status:'active' as const}:{})};return response(book)};if(url.includes('/entries?')||url.includes('/preview?'))return response({items:[entry],total:1});if(url.includes('/logbooks?'))return response({items:[book],total:1});if(url.endsWith('/logbooks/book-a'))return response(book);if(url.endsWith('/api/events/event-a'))return response({event:{}});return response([])});state.download.mockReset();vi.stubGlobal('fetch',vi.fn(()=>{throw new Error('Use the shared authenticated API client')}))})
