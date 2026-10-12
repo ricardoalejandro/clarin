@@ -218,4 +218,21 @@ describe('guest editor save interleavings', () => {
     expect(writes[2].scene.elements[0].version).toBe(2)
     expect(writes[2].operation_id).not.toBe(writes[0].operation_id)
   })
+  it('keeps an editable guest scene open during transient rate feedback', async () => {
+    await openEditor()
+    edit([rectangle(2)])
+    act(() => {
+      harness.events.onIssue({ kind: 'rate_limited', retryable: true, message: 'Colaboración temporalmente limitada', rateLimit: { event: 'cursor.update', scope: 'connection', retry_after_ms: 1_000 } })
+      harness.events.onEvent({ event: 'error', code: 'rate_limited', error: 'Demasiados eventos de colaboración' })
+    })
+    expect(screen.getByRole('button', { name: 'Guardar ahora' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(harness.elements).toEqual([rectangle(2)])
+    act(() => harness.events.onIssue(null))
+    expect(screen.queryByText(/Colaboración temporalmente limitada/)).not.toBeInTheDocument()
+    manualSave()
+    await waitFor(() => expect(writes).toHaveLength(1))
+    expect(writes[0].scene.elements).toEqual([rectangle(2)])
+  })
+
 })

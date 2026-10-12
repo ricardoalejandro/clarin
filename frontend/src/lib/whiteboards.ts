@@ -325,6 +325,12 @@ export interface WhiteboardShareLink {
   created_at: string
 }
 
+export interface WhiteboardRealtimeRateLimit {
+  event?: string
+  scope: 'connection' | 'room'
+  retry_after_ms: number
+}
+
 export interface WhiteboardRealtimeEvent {
 	event: 'scene.patch' | 'scene.snapshot' | 'sync.required' | 'ack' | 'presence.snapshot' | 'presence.update' | 'cursor.update' | 'room.ready' | 'presentation.snapshot' | 'presentation.changed' | 'follow.change' | 'viewport.update' | 'comment.changed' | 'access.revoked' | 'error'
   sequence?: number

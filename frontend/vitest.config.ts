@@ -78,6 +78,7 @@ export default defineConfig({
       'src/components/operational-window/**/*.test.{ts,tsx}',
       'src/components/operational-overlay/**/*.test.{ts,tsx}',
       'src/components/contact-details/**/*.test.{ts,tsx}',
+      'src/components/tags/**/*.test.{ts,tsx}',
       'src/components/programs/**/*.test.{ts,tsx}',
       'src/components/whiteboards/**/*.test.{ts,tsx}',
       'src/components/admin/**/*.test.{ts,tsx}',

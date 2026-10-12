@@ -11,7 +11,10 @@ import FormulaEditor from '@/components/FormulaEditor'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import ImportCSVModal from '@/components/ImportCSVModal'
 import ContactSelector, { type SelectedPerson } from '@/components/ContactSelector'
-import TagInput from '@/components/TagInput'
+import CatalogTagPicker from '@/components/tags/CatalogTagPicker'
+import { tagSelectionIds } from '@/components/tags/tagFormAdapters'
+import type { TagPickerItem } from '@/components/tags/TagPicker'
+import { subscribeAuthScope } from '@/lib/authScope'
 import CreateCampaignModal, { CampaignFormResult } from '@/components/CreateCampaignModal'
 import { useRouter } from 'next/navigation'
 import { api, subscribeWebSocket } from '@/lib/api'
@@ -454,6 +457,10 @@ export default function LeadsPage() {
   const [appliedFormulaType, setAppliedFormulaType] = useState<'simple' | 'advanced'>('simple')
   const [appliedFormulaText, setAppliedFormulaText] = useState('')
   const [showAddModal, setShowAddModal] = useState(false)
+  const [creatingTag, setCreatingTag] = useState(false)
+  const [newLeadTags, setNewLeadTags] = useState<TagPickerItem[]>([])
+  useEffect(() => { if (!showAddModal) setNewLeadTags([]) }, [showAddModal])
+  useEffect(() => subscribeAuthScope(() => setNewLeadTags([])), [])
   const [creatingLead, setCreatingLead] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null)
@@ -1389,7 +1396,7 @@ export default function LeadsPage() {
     : stages
 
   const handleCreateLead = async (confirmDuplicate = false) => {
-    if (!formData.title.trim() || !formData.name.trim() || creatingLead) return
+    if (!formData.title.trim() || !formData.name.trim() || creatingLead || creatingTag) return
     const token = localStorage.getItem('token')
     setCreatingLead(true)
     try {
@@ -1408,7 +1415,7 @@ export default function LeadsPage() {
           notes: formData.notes,
           dni: formData.dni || undefined,
           birth_date: formData.birth_date || undefined,
-          tags: formData.tags.split(',').map(t => t.trim()).filter(Boolean),
+          tag_ids: tagSelectionIds(newLeadTags),
           stage_id: stageId || undefined,
           confirm_duplicate: confirmDuplicate,
         }),
@@ -4052,13 +4059,7 @@ export default function LeadsPage() {
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-600 mb-1">Etiquetas</label>
-                <input
-                  type="text"
-                  value={formData.tags}
-                  onChange={(e) => setFormData({ ...formData, tags: e.target.value })}
-                  className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-500"
-                  placeholder="ventas, premium (separadas por coma)"
-                />
+                <CatalogTagPicker contextType="lead_create" selected={newLeadTags} onChange={setNewLeadTags} onCreatingChange={setCreatingTag} disabled={creatingLead} />
               </div>
               <div>
                 <label className="block text-xs font-medium text-slate-600 mb-1">Notas</label>
@@ -4083,7 +4084,7 @@ export default function LeadsPage() {
               </button>
               <button
                 onClick={() => handleCreateLead()}
-                disabled={!formData.title.trim() || !formData.name.trim() || creatingLead}
+                disabled={!formData.title.trim() || !formData.name.trim() || creatingLead || creatingTag}
                 className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50"
               >
                 {creatingLead ? 'Creando…' : 'Crear oportunidad'}

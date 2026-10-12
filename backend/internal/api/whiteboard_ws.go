@@ -568,33 +568,31 @@ func (s *Server) handleWhiteboardWebSocket(conn *websocket.Conn) {
 		return conn.SetReadDeadline(time.Now().Add(whiteboardPongWait))
 	})
 	limiter := whiteboardcore.NewEventRateLimiter()
-	violations := 0
+	violations := whiteboardcore.RealtimeViolationCounter{}
 	for {
 		messageType, payload, readErr := conn.ReadMessage()
 		if readErr != nil {
 			break
 		}
 		if messageType != websocket.TextMessage {
-			violations++
 			s.queueWhiteboardError(client, "text_messages_only", "Solo se admiten mensajes JSON de texto")
-			if violations >= 5 {
+			if violations.RejectInvalid() {
 				break
 			}
 			continue
 		}
 		incoming, decodeErr := whiteboardcore.DecodeIncoming(payload)
 		if decodeErr != nil {
-			violations++
 			s.queueWhiteboardError(client, "invalid_message", "Mensaje de colaboración inválido")
-			if violations >= 5 {
+			if violations.RejectInvalid() {
 				break
 			}
 			continue
 		}
-		if !limiter.Allow(incoming.Event, time.Now()) {
-			violations++
-			s.queueWhiteboardOperationError(client, incoming.OperationID, "rate_limited", "Demasiados eventos de colaboración")
-			if violations >= 5 {
+		now := time.Now()
+		if decision := limiter.Check(incoming.Event, now); !decision.Allowed {
+			s.queueWhiteboardRateLimit(client, incoming, "connection", decision.RetryAfter)
+			if violations.RejectRate(now) {
 				break
 			}
 			continue
@@ -605,7 +603,7 @@ func (s *Server) handleWhiteboardWebSocket(conn *websocket.Conn) {
 		eventCancel()
 		if handleErr != nil {
 			if errors.Is(handleErr, errWhiteboardRealtimeRateLimited) {
-				s.queueWhiteboardOperationError(client, incoming.OperationID, "rate_limited", "La sala está recibiendo demasiados cambios")
+				s.queueWhiteboardRateLimit(client, incoming, "room", whiteboardcore.EventRateWindow)
 				continue
 			}
 			if isWhiteboardRealtimeAuthorizationFailure(handleErr) {
@@ -929,15 +927,22 @@ func (s *Server) syncWhiteboardRealtimeClient(ctx context.Context, principal *wh
 		s.queueWhiteboardMessage(client, whiteboardSceneSnapshotMessage(scene))
 		return nil
 	}
+	s.queueWhiteboardSyncReplay(client, operations, scene.Sequence)
+	return nil
+}
+
+// The final ACK confirms that the entire delta reached the ordered send queue.
+// Saturation or an oversized patch must request a snapshot instead of claiming sync.
+func (s *Server) queueWhiteboardSyncReplay(client *whiteboardcore.RealtimeClient, operations []*domain.WhiteboardOperation, canonicalSequence int64) {
 	for _, operation := range operations {
 		operationID := operation.OperationID
 		if !s.queueWhiteboardReplayOperation(client, whiteboardcore.OutgoingMessage{
 			Event: whiteboardcore.EventScenePatch, OperationID: &operationID, Sequence: operation.Sequence, Data: json.RawMessage(operation.Patch),
-		}, scene.Sequence) {
-			return nil
+		}, canonicalSequence) {
+			return
 		}
 	}
-	return nil
+	s.queueWhiteboardReplayOperation(client, whiteboardcore.OutgoingMessage{Event: whiteboardcore.EventAck, Sequence: canonicalSequence}, canonicalSequence)
 }
 
 func whiteboardOperationReplayComplete(baseSequence, canonicalSequence int64, operations []*domain.WhiteboardOperation) bool {
@@ -961,7 +966,7 @@ func whiteboardOperationReplayComplete(baseSequence, canonicalSequence int64, op
 // replay must stop.
 func (s *Server) queueWhiteboardReplayOperation(client *whiteboardcore.RealtimeClient, message whiteboardcore.OutgoingMessage, canonicalSequence int64) bool {
 	bounded := whiteboardRealtimeBroadcastMessage(message)
-	if bounded.Event == whiteboardcore.EventScenePatch && s.queueWhiteboardMessage(client, bounded) {
+	if (bounded.Event == whiteboardcore.EventScenePatch || bounded.Event == whiteboardcore.EventAck) && s.queueWhiteboardMessage(client, bounded) {
 		return true
 	}
 	syncRequired := whiteboardSceneSyncRequiredMessage(canonicalSequence, "operation_replay_requires_snapshot")
@@ -1179,6 +1184,18 @@ func (s *Server) queueWhiteboardMessage(client *whiteboardcore.RealtimeClient, m
 
 func (s *Server) queueWhiteboardError(client *whiteboardcore.RealtimeClient, code, message string) {
 	s.queueWhiteboardMessage(client, whiteboardcore.OutgoingMessage{Event: whiteboardcore.EventError, Code: code, Error: message})
+}
+
+func (s *Server) queueWhiteboardRateLimit(client *whiteboardcore.RealtimeClient, incoming whiteboardcore.IncomingMessage, scope string, retryAfter time.Duration) {
+	if retryAfter <= 0 || retryAfter > whiteboardcore.EventRateWindow {
+		retryAfter = whiteboardcore.EventRateWindow
+	}
+	retryMS := int64((retryAfter + time.Millisecond - 1) / time.Millisecond)
+	s.queueWhiteboardMessage(client, whiteboardcore.OutgoingMessage{
+		Event: whiteboardcore.EventError, OperationID: incoming.OperationID,
+		Code: "rate_limited", Error: "La colaboración está ajustando su ritmo; Clarin reintentará automáticamente",
+		Data: whiteboardcore.RateLimitData{Event: incoming.Event, Scope: scope, RetryAfterMS: retryMS},
+	})
 }
 
 func (s *Server) queueWhiteboardOperationError(client *whiteboardcore.RealtimeClient, operationID *uuid.UUID, code, message string) {

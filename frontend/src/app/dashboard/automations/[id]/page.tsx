@@ -27,6 +27,8 @@ function apiFetch(url: string, options?: RequestInit) {
   })
 }
 
+import { automationTagPatch } from '@/components/tags/tagFormAdapters'
+import AutomationTagPicker from '@/components/tags/AutomationTagPicker'
 import { nodeTypes, PALETTE } from '@/components/automation/AutoNodes'
 import type {
   Automation,
@@ -93,9 +95,10 @@ interface NodeConfigProps {
   node: Node
   onUpdate: (id: string, data: Record<string, unknown>) => void
   onDelete: (id: string) => void
+  onTagCreatingChange: (creating: boolean) => void
 }
 
-function NodeConfig({ node, onUpdate, onDelete }: NodeConfigProps) {
+function NodeConfig({ node, onUpdate, onDelete, onTagCreatingChange }: NodeConfigProps) {
   const d = node.data as unknown as Record<string, unknown>
   const type = node.type as AutoNodeType
 
@@ -164,7 +167,7 @@ function NodeConfig({ node, onUpdate, onDelete }: NodeConfigProps) {
       {type === 'change_stage' && field('stage_id', 'ID de la etapa', 'uuid de la etapa')}
 
       {(type === 'assign_tag' || type === 'remove_tag') && (
-        field('tag_id', 'ID de la etiqueta', 'uuid de la etiqueta')
+        <AutomationTagPicker sessionKey={node.id} data={d} onCreatingChange={onTagCreatingChange} onChange={tagId => onUpdate(node.id, automationTagPatch(d, tagId))} />
       )}
 
       {type === 'delay' && (
@@ -303,6 +306,7 @@ function AutomationEditorInner() {
   const [automation, setAutomation] = useState<Automation | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [creatingTag, setCreatingTag] = useState(false)
   const [saveOk, setSaveOk] = useState(false)
   const [triggering, setTriggering] = useState(false)
   const [sidePanel, setSidePanel] = useState<'palette' | 'config' | 'executions'>('palette')
@@ -383,7 +387,7 @@ function AutomationEditorInner() {
   }
 
   async function handleSave() {
-    if (!automation) return
+    if (!automation || saving || creatingTag) return
     setSaving(true); setError('')
     try {
       const graph = {
@@ -464,7 +468,7 @@ function AutomationEditorInner() {
             {triggering ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
             Probar
           </button>
-          <button onClick={handleSave} disabled={saving}
+          <button onClick={handleSave} disabled={saving || creatingTag}
             className={`flex items-center gap-1.5 font-medium px-4 py-2 rounded-lg text-xs transition-all shadow-sm ${saveOk ? 'bg-emerald-500 text-white' : 'bg-emerald-600 hover:bg-emerald-700 text-white'} disabled:opacity-60`}>
             {saving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
             {saveOk ? '¡Guardado!' : 'Guardar'}
@@ -559,7 +563,7 @@ function AutomationEditorInner() {
 
             {sidePanel === 'config' && (
               selectedNode ? (
-                <NodeConfig node={selectedNode} onUpdate={updateNodeData} onDelete={deleteNode} />
+                <NodeConfig node={selectedNode} onUpdate={updateNodeData} onDelete={deleteNode} onTagCreatingChange={setCreatingTag} />
               ) : (
                 <div className="flex flex-col items-center justify-center py-12 text-center">
                   <Settings2 className="w-8 h-8 text-slate-300 mb-2" />

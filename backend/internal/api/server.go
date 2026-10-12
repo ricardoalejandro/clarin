@@ -194,6 +194,20 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 		whiteboardCheckpoints: make(map[string]*whiteboardCheckpointEntry),
 	}
 
+	if services != nil && services.Automation != nil {
+		services.Automation.SetContactTagsChanged(func(ctx context.Context, accountID, contactID uuid.UUID) {
+			if _, err := server.services.Event.ReconcileContactEventMembership(ctx, accountID, contactID); err != nil {
+				log.Printf("[EVENT-SYNC] Automation tag reconciliation failed contact=%s", contactID)
+			} else {
+				server.invalidateEventsCache(accountID)
+			}
+			contact, err := server.repos.ContactProfile.Get(ctx, accountID, contactID)
+			if err == nil {
+				server.afterCanonicalContactProfileChange(accountID, contact)
+			}
+		})
+	}
+
 	app.Use(server.validateBrowserOrigin)
 
 	// Version header middleware — adds X-Clarin-Version to all API responses
@@ -620,6 +634,7 @@ func (s *Server) setupRoutes() {
 	pipelines.Delete("/:id/stages/:stageId", s.handleDeletePipelineStageSafe)
 
 	// Tag routes
+	protected.Get("/tags/search", s.handleSearchTags)
 	protected.Get("/tags", func(c *fiber.Ctx) error {
 		if s.contactAvatarCallerHasPermission(c, domain.PermContacts) || s.contactAvatarCallerHasPermission(c, domain.PermTags) {
 			return c.Next()
@@ -6274,23 +6289,32 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 
 	var req struct {
-		Name      string     `json:"name"`
-		Phone     string     `json:"phone"`
-		Email     string     `json:"email"`
-		Source    string     `json:"source"`
-		Notes     string     `json:"notes"`
-		DNI       string     `json:"dni"`
-		BirthDate *string    `json:"birth_date"`
-		Address   string     `json:"address"`
-		Distrito  string     `json:"distrito"`
-		Ocupacion string     `json:"ocupacion"`
-		StageID   *uuid.UUID `json:"stage_id"`
-		Tags      []string   `json:"tags"`
+		Name      string          `json:"name"`
+		Phone     string          `json:"phone"`
+		Email     string          `json:"email"`
+		Source    string          `json:"source"`
+		Notes     string          `json:"notes"`
+		DNI       string          `json:"dni"`
+		BirthDate *string         `json:"birth_date"`
+		Address   string          `json:"address"`
+		Distrito  string          `json:"distrito"`
+		Ocupacion string          `json:"ocupacion"`
+		StageID   *uuid.UUID      `json:"stage_id"`
+		Tags      []string        `json:"tags"`
+		TagIDs    json.RawMessage `json:"tag_ids"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
 
+	var tagIDs *[]uuid.UUID
+	if req.TagIDs != nil {
+		parsed, err := parseContactProfileTagIDs(req.TagIDs)
+		if err != nil {
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": err.Error()})
+		}
+		tagIDs = &parsed
+	}
 	phone := kommo.NormalizePhone(req.Phone)
 	jid := ""
 	if phone != "" {
@@ -6357,81 +6381,28 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 		lead.StageID = stageID
 	}
 
-	// Auto-link or auto-create contact by JID
-	contact, _ := s.repos.Contact.GetByJID(c.Context(), accountID, jid)
-	if contact != nil {
-		lead.ContactID = &contact.ID
-		// Copy contact fields to lead if lead fields are empty
-		if lead.Name == nil || *lead.Name == "" {
-			dn := contact.DisplayName()
-			lead.Name = &dn
+	contact, err := s.repos.Lead.CreateManualWithTags(c.Context(), lead, phone, tagIDs, req.Tags, s.contactAvatarCallerHasPermission(c, domain.PermTags))
+	if err != nil {
+		switch {
+		case errors.Is(err, repository.ErrLeadsDisabled), errors.Is(err, repository.ErrLeadAutomationDisabled), errors.Is(err, repository.ErrLeadPolicyConflict):
+			return writeLeadPolicyError(c, err)
+		case errors.Is(err, repository.ErrManualLeadDuplicate):
+			return c.Status(409).JSON(fiber.Map{"success": false, "error": "Ya existe una oportunidad con este teléfono"})
+		case errors.Is(err, repository.ErrGlobalTagCreationForbidden):
+			return c.Status(403).JSON(fiber.Map{"success": false, "error": "Crear etiquetas requiere permiso de Etiquetas"})
+		case errors.Is(err, repository.ErrContactProfileCollectionInvalid):
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": "Una etiqueta es inválida o ajena a la cuenta"})
+		case errors.Is(err, repository.ErrContactIdentityConflict):
+			return c.Status(409).JSON(fiber.Map{"success": false, "error": "La identidad pertenece a otro contacto"})
+		default:
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo crear la oportunidad con sus etiquetas"})
 		}
-		if (lead.Phone == nil || *lead.Phone == "") && contact.Phone != nil {
-			lead.Phone = contact.Phone
-		}
-		if (lead.Email == nil || *lead.Email == "") && contact.Email != nil {
-			lead.Email = contact.Email
-		}
-		if lead.DNI == nil || *lead.DNI == "" {
-			lead.DNI = contact.DNI
-		}
-		if lead.BirthDate == nil {
-			lead.BirthDate = contact.BirthDate
-		}
-		if lead.Address == nil || *lead.Address == "" {
-			lead.Address = contact.Address
-		}
-		lead.LastName = contact.LastName
-		lead.ShortName = contact.ShortName
-		lead.Company = contact.Company
-		lead.Age = contact.Age
-
-		// Propagate new lead data back to existing contact
-		contact.Email = lead.Email
-		contact.Notes = lead.Notes
-		contact.DNI = lead.DNI
-		contact.BirthDate = lead.BirthDate
-		contact.Address = lead.Address
-		if lead.Name != nil && *lead.Name != "" {
-			contact.CustomName = lead.Name
-		}
-		_ = s.repos.Contact.Update(c.Context(), contact)
+	}
+	s.afterCanonicalContactProfileChange(accountID, contact)
+	if _, err := s.services.Event.ReconcileContactEventMembership(c.Context(), accountID, contact.ID); err != nil {
+		log.Printf("[EVENT-SYNC] Manual lead tag reconciliation failed contact=%s", contact.ID)
 	} else {
-		// Auto-create contact from lead data (for both real phone and manual leads)
-		var contactErr error
-		contact, contactErr = s.repos.Contact.GetOrCreate(c.Context(), accountID, nil, jid, phone, req.Name, "", false)
-		if contactErr != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "error": contactErr.Error()})
-		}
-		if contact != nil {
-			lead.ContactID = &contact.ID
-			// Update contact with extra fields from lead
-			contact.Email = lead.Email
-			contact.Notes = lead.Notes
-			contact.Source = strPtr("manual")
-			contact.DNI = lead.DNI
-			contact.BirthDate = lead.BirthDate
-			contact.Address = lead.Address
-			if req.Name != "" {
-				contact.CustomName = &req.Name
-			}
-			_ = s.repos.Contact.Update(c.Context(), contact)
-			log.Printf("[API] Auto-created contact %s for new lead (jid=%s)", contact.ID, jid)
-		}
-	}
-	if lead.ContactID == nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo asegurar contacto para el lead"})
-	}
-
-	if err := s.services.Lead.Create(c.Context(), lead); err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-
-	// Assign tags if provided
-	if len(req.Tags) > 0 {
-		if err := s.repos.Tag.SyncLeadTagsByNames(c.Context(), accountID, lead.ID, req.Tags); err != nil {
-			log.Printf("[API] Failed to sync tags for new lead %s: %v", lead.ID, err)
-		}
+		s.invalidateEventsCache(accountID)
 	}
 
 	// Push new lead to Kommo (async, only if pipeline is Kommo-connected)
@@ -7804,8 +7775,9 @@ type csvImportRecord struct {
 }
 
 type csvImportPlan struct {
-	Summary csvImportSummary
-	Records []csvImportRecord
+	Summary       csvImportSummary
+	Records       []csvImportRecord
+	SelectedTagID *uuid.UUID
 }
 
 var kommoStatusTagNames = []string{
@@ -7844,10 +7816,15 @@ func (s *Server) handlePreviewImportCSV(c *fiber.Ctx) error {
 		}
 		c.Context().SetUserValue("clarin.leads_policy_version", p.Version)
 	}
+	selectedTagID, err := s.resolveCSVImportTag(c.Context(), accountID, importTag)
+	if err != nil {
+		return err
+	}
 	plan, err := s.buildCSVImportPlan(c.Context(), accountID, importType, importTag, fileName, rawBytes, importType != "contacts")
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	plan.SelectedTagID = selectedTagID
 	return c.JSON(fiber.Map{"success": true, "preview": plan.Summary})
 }
 
@@ -7874,10 +7851,15 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 		}
 		c.Context().SetUserValue("clarin.leads_policy_version", p.Version)
 	}
+	selectedTagID, err := s.resolveCSVImportTag(c.Context(), accountID, importTag)
+	if err != nil {
+		return err
+	}
 	plan, err := s.buildCSVImportPlan(c.Context(), accountID, importType, importTag, fileName, rawBytes, importType != "contacts")
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
+	plan.SelectedTagID = selectedTagID
 	if plan.Summary.NewContacts > 0 {
 		if err := s.enforcePlanLimit(c.Context(), accountID, "max_contacts", plan.Summary.NewContacts); err != nil {
 			return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "plan_limit_reached", "limit": "max_contacts"})
@@ -8412,7 +8394,7 @@ func (s *Server) executeCSVImportPlan(ctx context.Context, accountID, userID uui
 					return
 				}
 			}
-			if err := s.createCSVImportLead(ctx, accountID, userID, record, contact, plan.Summary.ImportTag, syncKommoMetadata); err != nil {
+			if err := s.createCSVImportLead(ctx, accountID, userID, record, contact, plan.SelectedTagID, syncKommoMetadata); err != nil {
 				result.Skipped++
 				result.ErrorCount++
 				result.Errors = append(result.Errors, fmt.Sprintf("fila %d: lead: %s", record.RowNum, err.Error()))
@@ -8440,13 +8422,15 @@ func markCSVImportRuntimeDuplicate(result *csvImportSummary, record csvImportRec
 	}
 }
 
-func (s *Server) createCSVImportLead(ctx context.Context, accountID, userID uuid.UUID, record csvImportRecord, contact *domain.Contact, importTag string, syncKommoMetadata bool) error {
+func (s *Server) createCSVImportLead(ctx context.Context, accountID, userID uuid.UUID, record csvImportRecord, contact *domain.Contact, importTagID *uuid.UUID, syncKommoMetadata bool) error {
 	pipelineID, stageID, err := s.repos.Pipeline.ResolveIncomingLeadDestination(ctx, accountID)
 	if err != nil {
 		return err
 	}
 	source := "kommo_csv_import"
-	tags := appendImportTag(record.Tags, importTag)
+	// File tags retain their Kommo compatibility semantics. The manually
+	// selected tag is already account-validated and must never create a catalog entry.
+	tags := record.Tags
 	lead := &domain.Lead{
 		AccountID:    accountID,
 		Title:        record.LeadTitle,
@@ -8476,6 +8460,11 @@ func (s *Server) createCSVImportLead(ctx context.Context, accountID, userID uuid
 	if len(tags) > 0 {
 		if err := s.repos.Tag.SyncLeadTagsByNames(ctx, accountID, lead.ID, tags); err != nil {
 			log.Printf("[CSV Import] Failed to sync tags for lead %s: %v", lead.ID, err)
+		}
+	}
+	if importTagID != nil {
+		if _, err := s.repos.Tag.MutateLeadTagForAccount(ctx, accountID, lead.ID, *importTagID, true); err != nil {
+			return fmt.Errorf("no se pudo asociar la etiqueta de importación seleccionada: %w", err)
 		}
 	}
 	if syncKommoMetadata {

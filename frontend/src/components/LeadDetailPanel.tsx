@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import { formatDistanceToNow, format, parseISO } from 'date-fns'
 import { es } from 'date-fns/locale'
-import TagInput from '@/components/TagInput'
+import CanonicalContactTags from '@/components/tags/CanonicalContactTags'
 import ObservationHistoryModal from '@/components/ObservationHistoryModal'
 import TaskList from '@/components/TaskList'
 import TaskFormModal from '@/components/TaskFormModal'
@@ -1226,18 +1226,17 @@ export default function LeadDetailPanel({
               )) : <span className="text-xs italic text-slate-400">Sin etiquetas</span>}
             </div>
           ) : (
-            <TagInput
-              entityType={contactMode || eventMode ? "contact" : "lead"}
-              entityId={(contactMode || eventMode) && (contactId || lead.contact_id) ? (contactId || lead.contact_id)! : lead.id}
-              assignedTags={lead.structured_tags || []}
-              onTagsChange={(newTags) => {
-                const updated = { ...lead, structured_tags: newTags }
-                setLead(updated)
-                onLeadChange(updated)
+            (contactId || lead.contact_id) ? <CanonicalContactTags
+              contactId={(contactId || lead.contact_id)!}
+              context={{ type: resolvedAvatarContextType, id: resolvedAvatarContextId || lead.id }}
+              initialTags={lead.structured_tags || []}
+              onChange={newTags => {
+                const updated = { ...lead, structured_tags: newTags, tags: newTags.map(tag => tag.name) }
+                setLead(updated); onLeadChange(updated)
               }}
               onBeforeAssign={eventMode ? onBeforeTagAssign : undefined}
               onBeforeRemove={eventMode ? onBeforeTagRemove : undefined}
-            />
+            /> : <div><div className="flex flex-wrap gap-1.5">{(lead.structured_tags || []).map(tag => <span key={tag.id} className="rounded-full px-2 py-1 text-xs text-white" style={{ backgroundColor: tag.color || '#64748B' }}>{tag.name}</span>)}</div><p className="mt-2 text-xs text-slate-400">Etiquetas históricas de solo lectura: este registro no tiene un Contact vinculado.</p></div>
           )}
         </div>}
         </>}

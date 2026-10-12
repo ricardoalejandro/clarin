@@ -737,6 +737,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
       setError(null)
       void hydrateReferencedAssets(elements)
       canonicalSyncAppliedSequenceRef.current = Math.max(requestedSequence, record.sequence)
+      roomRef.current?.confirmSync?.()
       if (preserveLocalChanges && response.data.session.access_level === 'edit') {
         // A reconnect sync must not replace an unacknowledged operation with a
         // new one. The existing payload remains safe to retry idempotently and
@@ -770,7 +771,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
 
   const handleRealtimeIssue = useCallback((issue: WhiteboardRealtimeIssue | null) => {
     setRealtimeIssue(issue)
-    if (!issue || issue.kind === 'authorization_unavailable') return
+    if (!issue || issue.retryable) return
     setError(issue.kind === 'access_revoked' ? issue.message : 'Esta sesión compartida expiró.')
     setPhase('error')
   }, [])
@@ -820,7 +821,7 @@ export default function GuestWhiteboardEditor({ shareLinkID }: { shareLinkID: st
             void reloadCanonicalForRealtime(realtime, true)
             return
           }
-          if (realtime.code === 'session_expired' || realtime.code === 'authorization_unavailable' || realtime.code === 'presence_unavailable') return
+          if (realtime.code === 'session_expired' || realtime.code === 'authorization_unavailable' || realtime.code === 'presence_unavailable' || realtime.code === 'rate_limited') return
           if (!realtime.operation_id) setError(realtime.error || 'La colaboración en tiempo real encontró un error.')
           return
         }

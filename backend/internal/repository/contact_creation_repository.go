@@ -76,6 +76,18 @@ func (r *ContactProfileRepository) CreateManual(ctx context.Context, accountID u
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1::text))`, accountID); err != nil {
 		return nil, err
 	}
+	contact, err := r.createManualTx(ctx, tx, accountID, jid, phone, patch, names, canCreate, true)
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return contact, nil
+}
+
+// createManualTx shares canonical Contact creation with compound CRM writes.
+func (r *ContactProfileRepository) createManualTx(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, jid, phone string, patch ContactProfilePatch, names []string, canCreate, setManualSource bool) (*domain.Contact, error) {
 	owner, err := findContactAliasID(ctx, tx, accountID, jid, phone)
 	if err != nil {
 		return nil, err
@@ -113,14 +125,13 @@ func (r *ContactProfileRepository) CreateManual(ctx context.Context, accountID u
 			return nil, err
 		}
 	}
-	if _, err = tx.Exec(ctx, `UPDATE contacts SET source='manual' WHERE account_id=$1 AND id=$2`, accountID, id); err != nil {
-		return nil, err
+	if setManualSource {
+		if _, err = tx.Exec(ctx, `UPDATE contacts SET source='manual' WHERE account_id=$1 AND id=$2`, accountID, id); err != nil {
+			return nil, err
+		}
 	}
 	contact, err := r.UpdateTx(ctx, tx, accountID, id, patch)
 	if err != nil {
-		return nil, err
-	}
-	if err = tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return contact, nil

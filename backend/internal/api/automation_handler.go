@@ -94,6 +94,9 @@ func (s *Server) handleCreateAutomation(c *fiber.Ctx) error {
 	if err := s.requireCommercialAutomationModule(c, a); err != nil {
 		return writeLeadPolicyError(c, err)
 	}
+	if err := s.validateAutomationTagActions(c, a); err != nil {
+		return err
+	}
 	if err := s.repos.Automation.Create(c.Context(), a); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -141,6 +144,9 @@ func (s *Server) handleUpdateAutomation(c *fiber.Ctx) error {
 		return writeLeadPolicyError(c, err)
 	}
 
+	if err := s.validateAutomationTagActions(c, existing); err != nil {
+		return err
+	}
 	if err := s.repos.Automation.Update(c.Context(), existing); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -186,6 +192,10 @@ func (s *Server) handleToggleAutomation(c *fiber.Ctx) error {
 	}
 	if err := s.requireCommercialAutomationModule(c, existing); err != nil {
 		return writeLeadPolicyError(c, err)
+	}
+	existing.IsActive = req.IsActive
+	if err := s.validateAutomationTagActions(c, existing); err != nil {
+		return err
 	}
 	if err := s.repos.Automation.SetActive(c.Context(), id, accountID, req.IsActive); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
