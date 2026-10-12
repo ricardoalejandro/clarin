@@ -6,12 +6,13 @@ import ContactTagEditor from '@/components/contact-details/ContactTagEditor'
 import { subscribeAuthScope } from '@/lib/authScope'
 import { useContactProfile } from '@/components/contact-details/useContactProfile'
 import type { ContactProfileAvailableTag, ContactProfileContext } from '@/types/contact-profile'
+import type { StructuredTag } from '@/types/contact'
 
 interface Props {
   contactId: string
   context: ContactProfileContext
-  initialTags: ContactProfileAvailableTag[]
-  onChange: (tags: ContactProfileAvailableTag[]) => void
+  initialTags: StructuredTag[]
+  onChange: (tags: StructuredTag[]) => void
   onBeforeAssign?: (tagId: string) => Promise<boolean>
   onBeforeRemove?: (tagId: string) => Promise<boolean>
 }
@@ -19,7 +20,7 @@ export default function CanonicalContactTags({ contactId, context, initialTags, 
   const [tags, setTags] = useState(initialTags)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
-  const [retryTags, setRetryTags] = useState<ContactProfileAvailableTag[] | null>(null)
+  const [retryTags, setRetryTags] = useState<StructuredTag[] | null>(null)
   const key = `${contactId}:${context.type}:${context.id}`
   const activeKey = useRef(key); activeKey.current = key
   const onChangeRef = useRef(onChange); onChangeRef.current = onChange
@@ -29,8 +30,10 @@ export default function CanonicalContactTags({ contactId, context, initialTags, 
   useEffect(() => { generation.current++; busy.current = false; setPending(false); setTags(initialTags); setError(''); setRetryTags(null); return () => { generation.current++ } }, [key])
   useEffect(() => subscribeAuthScope(() => { generation.current++; busy.current = false; setPending(false); setTags([]); setError(''); setRetryTags(null) }), [])
   useEffect(() => { if (!busy.current && profile.contact) setTags(profile.contact.structured_tags) }, [profile.contact])
-  const update = async (next: ContactProfileAvailableTag[]) => {
-    if (busy.current || !profile.capabilities.can_edit) return
+  const update = async (selection: ContactProfileAvailableTag[]) => {
+    const accountId = profile.contact?.account_id
+    if (busy.current || !profile.capabilities.can_edit || !accountId) return
+    const next: StructuredTag[] = selection.map(tag => ({ ...tag, account_id: accountId }))
     const previous = tags, requestKey = key, requestGeneration = generation.current
     busy.current = true; setPending(true); setError(''); setRetryTags(null)
     try {
@@ -53,7 +56,7 @@ export default function CanonicalContactTags({ contactId, context, initialTags, 
   }
   return <div aria-busy={pending}>
     {pending && <p role="status" className="flex items-center gap-2 text-xs text-slate-500"><Loader2 className="h-3.5 w-3.5 animate-spin" />Actualizando etiquetas…</p>}
-    <ContactTagEditor contactId={contactId} context={context} selected={tags} canCreate={profile.capabilities.can_create_tags} disabled={pending || profile.loading || !profile.capabilities.can_edit} onChange={next => { void update(next) }} />
+    <ContactTagEditor contactId={contactId} context={context} selected={tags} canCreate={profile.capabilities.can_create_tags} disabled={pending || profile.loading || !profile.capabilities.can_edit || !profile.contact?.account_id} onChange={next => { void update(next) }} />
     {(error || profile.error) && <p role="alert" className="mt-2 text-xs text-red-600">{error || profile.error}<button type="button" disabled={pending} className="ml-2 min-h-11 px-2 font-semibold underline" onClick={() => { if (retryTags) void update(retryTags); else profile.refresh() }}>Reintentar</button></p>}
   </div>
 }

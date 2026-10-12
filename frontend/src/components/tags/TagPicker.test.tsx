@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '@/lib/api'
@@ -17,9 +18,12 @@ describe('shared TagPicker', () => {
     const host = document.createElement('div'); host.style.pointerEvents = 'none'; document.body.appendChild(host)
     const onChange = vi.fn(), release = vi.fn()
     const { unmount } = render(<OperationalOverlayProvider portalTarget={host} registerOverlay={() => release}><TagPicker contactId="c1" context={{ type: 'lead', id: 'l1' }} selected={[]} onChange={onChange} /></OperationalOverlayProvider>)
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'prio' } }); await delay()
+    const input = screen.getByRole('combobox')
+    vi.spyOn(input, 'getBoundingClientRect').mockReturnValue({ x: 950, y: 730, left: 950, top: 730, right: 1250, bottom: 774, width: 300, height: 44, toJSON: () => ({}) })
+    fireEvent.change(input, { target: { value: 'prio' } }); await delay()
     expect(screen.getByRole('listbox').parentElement).toBe(host)
     expect(screen.getByRole('listbox')).toHaveClass('pointer-events-auto')
+    expect(screen.getByRole('listbox')).toHaveStyle({ top: '724px', transform: 'translateY(-100%)', maxHeight: '280px' })
     const option = screen.getByRole('option', { name: tag.name })
     fireEvent.pointerDown(option); fireEvent.mouseDown(option); fireEvent.mouseUp(option); fireEvent.click(option)
     expect(onChange).toHaveBeenCalledExactlyOnceWith([tag])
@@ -80,6 +84,34 @@ describe('shared TagPicker', () => {
     await act(async () => { complete({ success: true, data: { success: true, tag: created } }) })
     expect(oldChange).not.toHaveBeenCalled()
     expect(currentChange).toHaveBeenCalledExactlyOnceWith([second, created])
+  })
+  it('returns keyboard focus after creation and the owning mutation enable the input', async () => {
+    let complete!: (result: any) => void
+    vi.mocked(api).mockResolvedValueOnce({ success: true, data: { success: true, tags: [], can_create: true } }).mockReturnValueOnce(new Promise(resolve => { complete = resolve }))
+    const onChange = vi.fn()
+    let finishOwner!: () => void
+    function Owner() {
+      const [disabled, setDisabled] = useState(false)
+      finishOwner = () => setDisabled(false)
+      return <CatalogTagPicker contextType="contact_create" selected={[]} disabled={disabled} onChange={tags => { onChange(tags); setDisabled(true) }} />
+    }
+    render(<Owner />)
+    const input = screen.getByRole('combobox')
+    input.focus()
+    fireEvent.change(input, { target: { value: 'Nueva' } }); await delay()
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(input).toBeDisabled()
+    // Model the browser's disabled-input blur using a temporary focus target.
+    const blurTarget = document.createElement('button'); document.body.appendChild(blurTarget); blurTarget.focus(); blurTarget.remove()
+    expect(input).not.toHaveFocus()
+    const created = { id: 'new', name: 'Nueva', color: '#6366F1' }
+    await act(async () => { complete({ success: true, data: { success: true, tag: created } }) })
+    expect(onChange).toHaveBeenCalledExactlyOnceWith([created])
+    expect(input).toBeDisabled()
+    act(() => { finishOwner() })
+    expect(input).toBeEnabled()
+    expect(input).toHaveFocus()
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
   })
   it('aborts pending search work immediately when authentication changes', async () => {
     vi.mocked(api).mockReturnValue(new Promise(() => {}))

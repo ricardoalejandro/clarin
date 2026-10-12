@@ -120,6 +120,31 @@ func (r *LeadRepository) CreateManualWithTags(ctx context.Context, lead *domain.
 	return contact, nil
 }
 
+// CreateWithSelectedTag commits an imported Lead and its manually selected
+// existing Contact tag together. Contact creation and file metadata stay owned
+// by the existing import workflow.
+func (r *LeadRepository) CreateWithSelectedTag(ctx context.Context, lead *domain.Lead, tagID uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = requireLeadPolicyTx(ctx, tx, lead.AccountID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1::text))`, lead.AccountID); err != nil {
+		return err
+	}
+	if err = r.createLeadWith(ctx, tx, lead); err != nil {
+		return err
+	}
+	tags := &TagRepository{db: r.db}
+	if _, err = tags.mutateLeadTagForAccountTx(ctx, tx, lead.AccountID, lead.ID, tagID, true); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // GetByIDsForAccount hydrates only the bounded selected catalog entries.
 func (r *TagRepository) GetByIDsForAccount(ctx context.Context, accountID uuid.UUID, ids []uuid.UUID) ([]*domain.Tag, error) {
 	rows, err := r.db.Query(ctx, `SELECT id,account_id,name,color,created_at FROM tags WHERE account_id=$1 AND id=ANY($2::uuid[]) ORDER BY name,id`, accountID, ids)
@@ -151,8 +176,19 @@ func (r *TagRepository) MutateLeadTagForAccount(ctx context.Context, accountID, 
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1::text))`, accountID); err != nil {
 		return nil, err
 	}
+	contactID, err := r.mutateLeadTagForAccountTx(ctx, tx, accountID, leadID, tagID, assign)
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return contactID, nil
+}
+
+func (r *TagRepository) mutateLeadTagForAccountTx(ctx context.Context, tx pgx.Tx, accountID, leadID, tagID uuid.UUID, assign bool) (*uuid.UUID, error) {
 	var contact uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT contact_id FROM leads WHERE account_id=$1 AND id=$2 AND contact_id IS NOT NULL AND deleted_at IS NULL`, accountID, leadID).Scan(&contact)
+	err := tx.QueryRow(ctx, `SELECT contact_id FROM leads WHERE account_id=$1 AND id=$2 AND contact_id IS NOT NULL AND deleted_at IS NULL`, accountID, leadID).Scan(&contact)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrCRMNotFound
 	}
@@ -160,12 +196,15 @@ func (r *TagRepository) MutateLeadTagForAccount(ctx context.Context, accountID, 
 		return nil, err
 	}
 	contactID := &contact
-	var valid bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tags WHERE account_id=$1 AND id=$2)`, accountID, tagID).Scan(&valid); err != nil {
-		return nil, err
-	}
-	if !valid {
+	// Keep a selected catalog entry alive until the association commits. A
+	// concurrent catalog deletion must wait, or win first and roll back the Lead.
+	var selected uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT id FROM tags WHERE account_id=$1 AND id=$2 FOR KEY SHARE`, accountID, tagID).Scan(&selected)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrCRMNotFound
+	}
+	if err != nil {
+		return nil, err
 	}
 	if assign {
 		_, err = tx.Exec(ctx, `INSERT INTO contact_tags(contact_id,tag_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, *contactID, tagID)
@@ -196,9 +235,6 @@ func (r *TagRepository) MutateLeadTagForAccount(ctx context.Context, accountID, 
 		return nil, err
 	}
 	if _, err = profile.UpdateTx(ctx, tx, accountID, *contactID, ContactProfilePatch{TagIDsSet: true, TagIDs: ids}); err != nil {
-		return nil, err
-	}
-	if err = tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return contactID, nil

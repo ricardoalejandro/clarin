@@ -1,10 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
+	"mime/multipart"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
 )
@@ -62,5 +66,44 @@ func TestAutomationTagConfigurationDraftAndActive(t *testing.T) {
 	a.Config.Nodes[0].Data["tag_id"] = "not-a-uuid"
 	if _, err := automationTagActionIDs(a); err == nil {
 		t.Fatal("malformed tag accepted")
+	}
+}
+
+func TestSelectedImportTagPreservesCatalogName(t *testing.T) {
+	name := "\"Campaña `especial`\""
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("import_tag", "  "+name+"  "); err != nil {
+		t.Fatal(err)
+	}
+	file, err := writer.CreateFormFile("file", "synthetic.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = file.Write([]byte("telefono\n51999777000\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var selected string
+	app := fiber.New()
+	app.Post("/upload", func(c *fiber.Ctx) error {
+		_, value, _, _, status, message := readCSVImportUpload(c)
+		selected = value
+		if message != "" {
+			return fiber.NewError(status, message)
+		}
+		return c.SendStatus(204)
+	})
+	request := httptest.NewRequest("POST", "/upload", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	response, err := app.Test(request, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != 204 || selected != name {
+		t.Fatalf("selected catalog name changed: status=%d name=%q", response.StatusCode, selected)
 	}
 }

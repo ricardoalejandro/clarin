@@ -7904,7 +7904,7 @@ func readCSVImportUpload(c *fiber.Ctx) (string, string, string, []byte, int, str
 	if importType != "leads" && importType != "contacts" && importType != "both" {
 		return "", "", "", nil, fiber.StatusBadRequest, "import_type must be 'leads', 'contacts', or 'both'"
 	}
-	importTag := cleanCSVValue(c.FormValue("import_tag"))
+	importTag := strings.TrimSpace(c.FormValue("import_tag"))
 	file, err := c.FormFile("file")
 	if err != nil {
 		return "", "", "", nil, fiber.StatusBadRequest, "CSV file is required"
@@ -8454,17 +8454,16 @@ func (s *Server) createCSVImportLead(ctx context.Context, accountID, userID uuid
 	if contact != nil {
 		lead.ContactID = &contact.ID
 	}
-	if err := s.services.Lead.Create(ctx, lead); err != nil {
+	if importTagID != nil {
+		if err := s.repos.Lead.CreateWithSelectedTag(ctx, lead, *importTagID); err != nil {
+			return fmt.Errorf("no se pudo crear el lead con la etiqueta de importación seleccionada: %w", err)
+		}
+	} else if err := s.services.Lead.Create(ctx, lead); err != nil {
 		return err
 	}
 	if len(tags) > 0 {
 		if err := s.repos.Tag.SyncLeadTagsByNames(ctx, accountID, lead.ID, tags); err != nil {
 			log.Printf("[CSV Import] Failed to sync tags for lead %s: %v", lead.ID, err)
-		}
-	}
-	if importTagID != nil {
-		if _, err := s.repos.Tag.MutateLeadTagForAccount(ctx, accountID, lead.ID, *importTagID, true); err != nil {
-			return fmt.Errorf("no se pudo asociar la etiqueta de importación seleccionada: %w", err)
 		}
 	}
 	if syncKommoMetadata {

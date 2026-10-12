@@ -114,6 +114,7 @@ func TestTagAssociationAPIIntegration(t *testing.T) {
 	if status != 201 {
 		t.Fatalf("configured tag action rejected: %d %v", status, data)
 	}
+	configuredID := data["automation"].(map[string]any)["id"].(string)
 	saved := data["automation"].(map[string]any)["graph"].(map[string]any)["nodes"].([]any)[0].(map[string]any)["data"].(map[string]any)
 	if saved["nodeType"] != "assign_tag" || saved["config"].(map[string]any)["tag_id"] != own.String() {
 		t.Fatal("editor tag shape did not persist executable compatibility config")
@@ -153,13 +154,60 @@ func TestTagAssociationAPIIntegration(t *testing.T) {
 		t.Fatalf("selected import tag/file metadata not assigned: %v", err)
 	}
 	exec(`DELETE FROM tags WHERE account_id=$1 AND id=$2`, account, own)
+	status, _ = call("PATCH", "/automations/"+configuredID+"/toggle", map[string]any{"active": false}, domain.PermAutomations)
+	if status != 200 {
+		t.Fatal("removed tag prevented deactivating automation")
+	}
+	status, _ = call("PATCH", "/automations/"+configuredID+"/toggle", map[string]any{"active": true}, domain.PermAutomations)
+	if status != 422 {
+		t.Fatal("removed tag automation reactivated")
+	}
+
 	if _, err := s.resolveCSVImportTag(ctx, account, "Visible tag"); err == nil {
 		t.Fatal("deleted selected import tag resolved")
 	}
 	if err := s.createCSVImportLead(ctx, account, user, record, canonical, &own, false); err == nil {
 		t.Fatal("selected import tag deleted after preview reported success")
 	}
+	var importedLeads int
+	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM leads WHERE account_id=$1 AND contact_id=$2`, account, contact).Scan(&importedLeads); err != nil || importedLeads != 1 {
+		t.Fatalf("failed selected-tag import left an unlabelled Lead: count=%d err=%v", importedLeads, err)
+	}
+	if err := s.createCSVImportLead(ctx, account, user, record, canonical, &foreign, false); err == nil {
+		t.Fatal("foreign selected import tag accepted")
+	}
+	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM leads WHERE account_id=$1 AND contact_id=$2`, account, contact).Scan(&importedLeads); err != nil || importedLeads != 1 {
+		t.Fatalf("foreign selected-tag import left a Lead: count=%d err=%v", importedLeads, err)
+	}
 	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM tags WHERE account_id=$1 AND name='Visible tag'`, account).Scan(&assigned); err != nil || assigned != 0 {
 		t.Fatal("manual import choice recreated a deleted catalog tag")
+	}
+
+	// A failed imported row remains retryable: no committed open Lead may
+	// cause the next attempt to skip the row as an existing opportunity.
+	retryContact := uuid.New()
+	retryJID := retryContact.String() + "@test.invalid"
+	exec(`INSERT INTO contacts(id,account_id,jid,name) VALUES($1,$2,$3,'Retry synthetic')`, retryContact, account, retryJID)
+	plan := &csvImportPlan{
+		Summary:       csvImportSummary{ImportType: "leads", Source: "kommo_csv", New: 1, NewOpportunities: 1},
+		Records:       []csvImportRecord{{RowNum: 2, Action: "create", JID: retryJID, Name: "Retry synthetic"}},
+		SelectedTagID: &own,
+	}
+	failedImport := s.executeCSVImportPlan(ctx, account, user, plan)
+	if failedImport.Created != 0 || failedImport.Skipped != 1 || failedImport.ErrorCount != 1 {
+		t.Fatalf("failed selected-tag row result: %+v", failedImport)
+	}
+	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM leads WHERE account_id=$1 AND contact_id=$2`, account, retryContact).Scan(&importedLeads); err != nil || importedLeads != 0 {
+		t.Fatal("failed imported row committed an open Lead")
+	}
+	retryTag := uuid.New()
+	exec(`INSERT INTO tags(id,account_id,name,color) VALUES($1,$2,'Retry selection','#123456')`, retryTag, account)
+	plan.SelectedTagID = &retryTag
+	retriedImport := s.executeCSVImportPlan(ctx, account, user, plan)
+	if retriedImport.Created != 1 || retriedImport.Skipped != 0 || retriedImport.ErrorCount != 0 || retriedImport.DuplicateContactLeads != 0 {
+		t.Fatalf("corrected selected-tag retry was skipped: %+v", retriedImport)
+	}
+	if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM leads l JOIN contact_tags ct ON ct.contact_id=l.contact_id WHERE l.account_id=$1 AND l.contact_id=$2 AND ct.tag_id=$3`, account, retryContact, retryTag).Scan(&importedLeads); err != nil || importedLeads != 1 {
+		t.Fatal("retry did not commit exactly one selected-tag Lead")
 	}
 }

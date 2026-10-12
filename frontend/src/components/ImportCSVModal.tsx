@@ -6,6 +6,7 @@ import CatalogTagPicker from '@/components/tags/CatalogTagPicker'
 import { importTagName } from '@/components/tags/tagFormAdapters'
 import type { TagPickerItem } from '@/components/tags/TagPicker'
 import { subscribeAuthScope } from '@/lib/authScope'
+import { SearchRequestLifecycle } from '@/lib/searchRequestLifecycle'
 
 interface ImportCSVModalProps {
   open: boolean
@@ -144,20 +145,24 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
   const [formatDiagnostic, setFormatDiagnostic] = useState('')
   const [previewFilter, setPreviewFilter] = useState<'all' | 'create' | 'existing' | 'duplicate' | 'invalid'>('all')
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const importRequests = useRef(new SearchRequestLifecycle())
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
 
   useEffect(() => {
+    importRequests.current.invalidate()
+    setPreviewing(false); setUploading(false); setPreview(null); setResult(null)
     if (!open) return
     setImportTagMode('none')
     setImportTag('')
     setSelectedImportTags([])
-    const h = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) onCloseRef.current() }
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) { importRequests.current.invalidate(); onCloseRef.current() } }
     document.addEventListener('keydown', h)
-    return () => document.removeEventListener('keydown', h)
+    return () => { importRequests.current.invalidate(); document.removeEventListener('keydown', h) }
   }, [open, defaultType])
 
   useEffect(() => subscribeAuthScope(() => {
+    importRequests.current.invalidate(); setPreviewing(false); setUploading(false)
     setSelectedImportTags([]); setImportTag(''); setPreview(null); setResult(null)
   }), [])
 
@@ -219,6 +224,9 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
   }
 
   const handleFileChange = async (nextFile: File | null) => {
+    const lifecycle = importRequests.current, lease = lifecycle.begin()
+    setPreviewing(false); setUploading(false)
+    setFile(null)
     setPreview(null)
     setResult(null)
     setError('')
@@ -236,8 +244,10 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     }
     try {
       await excelToCSVFile(nextFile)
+      if (!lifecycle.isCurrent(lease)) return
       setFile(nextFile)
     } catch (err) {
+      if (!lifecycle.isCurrent(lease)) return
       const message = err instanceof Error ? err.message : 'No se pudo validar el formato del Excel.'
       setFile(null)
       if (message.startsWith('FORMATO_KOMMO_INCOMPATIBLE')) {
@@ -251,7 +261,8 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
   }
 
   const handlePreview = async () => {
-    if (!file || creatingTag) return
+    if (!file || creatingTag || previewing || uploading) return
+    const lifecycle = importRequests.current, lease = lifecycle.begin()
     setPreviewing(true)
     setError('')
     setPreview(null)
@@ -260,13 +271,15 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     const token = localStorage.getItem('token')
     try {
       const formData = await buildFormData()
-      if (!formData) return
+      if (!formData || !lifecycle.isCurrent(lease)) return
       const res = await fetch('/api/import/csv/preview', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
+        signal: lease.signal,
       })
       const data = await res.json()
+      if (!lifecycle.isCurrent(lease)) return
       if (data.success) {
         setPreview(normalizeImportSummary(data.preview))
         setPreviewFilter('all')
@@ -274,14 +287,15 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
         setError(data.error || 'No se pudo analizar el Excel')
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'No se pudo leer el Excel')
+      if (lifecycle.isCurrent(lease)) setError(err instanceof Error ? err.message : 'No se pudo leer el Excel')
     } finally {
-      setPreviewing(false)
+      if (lifecycle.finish(lease)) setPreviewing(false)
     }
   }
 
   const handleUpload = async () => {
-    if (!file || creatingTag) return
+    if (!file || creatingTag || previewing || uploading) return
+    const lifecycle = importRequests.current, lease = lifecycle.begin()
     setUploading(true)
     setError('')
     setFormatDiagnostic('')
@@ -289,13 +303,15 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
     const token = localStorage.getItem('token')
     try {
       const formData = await buildFormData()
-      if (!formData) return
+      if (!formData || !lifecycle.isCurrent(lease)) return
       const res = await fetch('/api/import/csv', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
+        signal: lease.signal,
       })
       const data = await res.json()
+      if (!lifecycle.isCurrent(lease)) return
       if (data.success) {
         setResult(normalizeImportSummary(data.summary))
         setPreview(null)
@@ -304,13 +320,14 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
         setError(data.error || 'Error desconocido')
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Error de conexión')
+      if (lifecycle.isCurrent(lease)) setError(err instanceof Error ? err.message : 'Error de conexión')
     } finally {
-      setUploading(false)
+      if (lifecycle.finish(lease)) setUploading(false)
     }
   }
 
   const handleClose = () => {
+    importRequests.current.invalidate()
     setFile(null)
     setPreview(null)
     setResult(null)
@@ -522,7 +539,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
             )}
 
             <div className="flex gap-3 pt-1">
-              <button onClick={() => setPreview(null)} className="min-h-11 flex-1 rounded-xl border border-gray-200 px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-50">
+              <button onClick={() => setPreview(null)} disabled={uploading} className="min-h-11 flex-1 rounded-xl border border-gray-200 px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-50">
                 Volver
               </button>
               <button onClick={handleUpload} disabled={uploading || preview.total_rows === 0} className="min-h-11 flex-1 rounded-xl bg-green-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-green-700 disabled:opacity-50">
@@ -540,12 +557,14 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
               <input
                 ref={fileInputRef}
                 type="file"
+                disabled={previewing || uploading || creatingTag}
                 accept={defaultType === 'contacts' ? EXCEL_ACCEPT : '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}
                 className="hidden"
                 onChange={e => handleFileChange(e.target.files?.[0] || null)}
               />
               <button
                 onClick={() => fileInputRef.current?.click()}
+                disabled={previewing || uploading || creatingTag}
                 className="w-full border-2 border-dashed border-gray-200 rounded-xl p-8 text-center hover:border-green-400 hover:bg-green-50/30 transition group"
               >
                 {file ? (
@@ -602,6 +621,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
                 <div className="mt-2 grid grid-cols-2 gap-2">
                   <button
                     type="button"
+                    disabled={previewing || uploading || creatingTag}
                     onClick={() => { setImportTagMode('none'); setImportTag(''); setSelectedImportTags([]); setPreview(null); setResult(null) }}
                     className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${
                       importTagMode === 'none'
@@ -613,6 +633,7 @@ export default function ImportCSVModal({ open, onClose, onSuccess, defaultType =
                   </button>
                   <button
                     type="button"
+                    disabled={previewing || uploading || creatingTag}
                     onClick={() => setImportTagMode('custom')}
                     className={`rounded-lg border px-3 py-2 text-sm font-medium transition ${
                       importTagMode === 'custom'

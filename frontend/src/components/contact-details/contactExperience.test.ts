@@ -14,15 +14,42 @@ describe('Contact experience geometry and drafts', () => {
     expect(clearSubmittedNote('Texto posterior', 'Texto enviado')).toBe('Texto posterior')
     expect(clearSubmittedNote('Texto enviado', 'Texto enviado')).toBe('')
   })
-  it('flips and clamps a picker above the Android keyboard and inside viewport offsets', () => {
+  it.each([54, 280])('anchors an upward picker with content height %i to the input', contentHeight => {
+    const rect = { left: 950, top: 730, bottom: 774, width: 300 }
+    const viewport = { left: 0, top: 0, width: 1280, height: 900 }
+    const geometry = contactTagMenuPosition(rect, viewport)
+    const renderedHeight = Math.min(contentHeight, geometry.maxHeight)
+    expect(geometry.transform).toBe('translateY(-100%)')
+    const renderedTop = geometry.top - renderedHeight
+    expect(geometry.top).toBe(rect.top - 6)
+    expect(renderedTop).toBeGreaterThanOrEqual(8)
+    expect(geometry.top - renderedTop).toBe(renderedHeight)
+    expect(rect.top - (renderedTop + renderedHeight)).toBe(6)
+  })
+  it('flips above the Android keyboard and clamps rendered bounds inside viewport offsets', () => {
     const viewport = { left: 8, top: 40, width: 360, height: 280 }
-    const geometry = contactTagMenuPosition({ left: 310, top: 270, bottom: 314, width: 260 }, viewport)
-    expect(geometry.left).toBeGreaterThanOrEqual(16)
-    expect(geometry.left + geometry.width).toBeLessThanOrEqual(360)
-    expect(geometry.top).toBeGreaterThanOrEqual(48)
-    expect(geometry.top + geometry.maxHeight).toBeLessThanOrEqual(312)
-    const offscreen = contactTagMenuPosition({ left: 20, top: 500, bottom: 544, width: 300 }, viewport)
-    expect(offscreen.top + offscreen.maxHeight).toBeLessThanOrEqual(312)
+    for (const rect of [
+      { left: 310, top: 270, bottom: 314, width: 260 },
+      { left: 20, top: 500, bottom: 544, width: 300 },
+    ]) {
+      const geometry = contactTagMenuPosition(rect, viewport)
+      expect(geometry.transform).toBe('translateY(-100%)')
+      expect(geometry.left).toBeGreaterThanOrEqual(16)
+      expect(geometry.left + geometry.width).toBeLessThanOrEqual(360)
+      for (const contentHeight of [54, 280]) {
+        const renderedHeight = Math.min(contentHeight, geometry.maxHeight)
+        expect(geometry.top - renderedHeight).toBeGreaterThanOrEqual(48)
+        expect(geometry.top).toBeLessThanOrEqual(312)
+      }
+    }
+  })
+  it('anchors downward pickers without a transform and clamps the left corner', () => {
+    const rect = { left: -40, top: 60, bottom: 104, width: 260 }
+    const geometry = contactTagMenuPosition(rect, { left: 8, top: 40, width: 360, height: 640 })
+    expect(geometry.left).toBe(16)
+    expect(geometry.top).toBe(rect.bottom + 6)
+    expect(geometry.transform).toBeUndefined()
+    expect(geometry.maxHeight).toBe(280)
   })
   it('keeps tag names readable on light and dark identity colors', () => {
     expect(contactTagForeground('#FFFF00')).toBe('#0F172A')

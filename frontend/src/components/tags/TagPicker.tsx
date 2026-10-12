@@ -51,6 +51,7 @@ export default function TagPicker({ contactId, context, catalogContext, sessionK
   const searchTimerRef = useRef<number | undefined>(undefined)
   const creationAbortRef = useRef<AbortController | null>(null)
   const creationBusyRef = useRef(false)
+  const creationFocusRef = useRef<{ key: string; scope: string } | null>(null)
   const menuId = useId()
   const portalTarget = useOperationalOverlayPortal()
   const key = `${sessionKey}:${contactId || ''}:${context?.type || catalogContext || ''}:${context?.id || ''}`
@@ -78,13 +79,13 @@ export default function TagPicker({ contactId, context, catalogContext, sessionK
 
   useEffect(() => {
     setQuery(''); setResults([]); setOpen(false); setError(''); setCreating(false); setCatalogCanCreate(false)
-    creationBusyRef.current = false
-    return () => { requestSequence.current += 1; creationAbortRef.current?.abort() }
+    creationBusyRef.current = false; creationFocusRef.current = null
+    return () => { requestSequence.current += 1; creationAbortRef.current?.abort(); creationFocusRef.current = null }
   }, [key])
   useEffect(() => subscribeAuthScope(() => {
     requestSequence.current += 1; searchAbortRef.current?.abort(); window.clearTimeout(searchTimerRef.current); creationAbortRef.current?.abort()
     setQuery(''); setResults([]); setOpen(false); setError(''); setCreating(false); setSearching(false); setCatalogCanCreate(false)
-    creationBusyRef.current = false
+    creationBusyRef.current = false; creationFocusRef.current = null
   }), [])
   useEffect(() => {
     const sequence = ++requestSequence.current
@@ -137,10 +138,18 @@ export default function TagPicker({ contactId, context, catalogContext, sessionK
   useEffect(() => { setActiveIndex(current => Math.min(current, Math.max(0, optionCount - 1))) }, [optionCount])
   useEffect(() => { if (visible) document.getElementById(`${menuId}-${activeIndex}`)?.scrollIntoView?.({ block: 'nearest' }) }, [activeIndex, menuId, visible])
 
+  useLayoutEffect(() => {
+    const request = creationFocusRef.current
+    if (creating || disabled || !request) return
+    creationFocusRef.current = null
+    if (!disabled && request.key === key && request.scope === getAuthScope() && !isAuthIdentityChanging(request.scope)) inputRef.current?.focus({ preventScroll: true })
+  }, [creating, disabled, key])
+
   const selectTag = (tag: TagPickerItem) => {
-    if (disabledRef.current || selectedRef.current.some(item => item.id === tag.id)) return
+    if (disabledRef.current || selectedRef.current.some(item => item.id === tag.id)) return false
     onChangeRef.current(modeRef.current === 'single' ? [tag] : [...selectedRef.current.filter(item => item.id !== tag.id), tag]); setQuery(''); setResults([]); setError(''); setOpen(false)
     inputRef.current?.focus({ preventScroll: true })
+    return true
   }
   const createTag = async () => {
     if (disabled || !allowCreation || creationBusyRef.current) return
@@ -148,12 +157,13 @@ export default function TagPicker({ contactId, context, catalogContext, sessionK
     const scope = getAuthScope()
     const controller = new AbortController()
     creationAbortRef.current?.abort(); creationAbortRef.current = controller
+    creationFocusRef.current = null
     creationBusyRef.current = true; setCreating(true); setError('')
     try {
       const result = await api<{ success: boolean; tag: TagPickerItem }>('/api/tags', { method: 'POST', body: JSON.stringify({ name: cleanQuery, color: '#6366F1' }), signal: controller.signal })
       if (controller.signal.aborted || activeKeyRef.current !== requestKey || scope !== getAuthScope()) return
       if (!result.success || !result.data?.success || !result.data.tag) { setError(result.error || 'No se pudo crear la etiqueta.'); return }
-      selectTag(result.data.tag)
+      if (selectTag(result.data.tag)) creationFocusRef.current = { key: requestKey, scope }
     } catch {
       if (!controller.signal.aborted && activeKeyRef.current === requestKey && scope === getAuthScope()) setError('No se pudo crear la etiqueta.')
     } finally {

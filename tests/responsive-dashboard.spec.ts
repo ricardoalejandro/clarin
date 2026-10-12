@@ -257,6 +257,9 @@ function mockAcademicConfig() {
 
 function mockApiPayload(url: URL, method = 'GET', requestBody?: any) {
   const path = url.pathname
+  if (path === '/api/settings/lead-policy') {
+    return { success: true, policy: { account_id: 'account-responsive', leads_enabled: true, lead_automation_enabled: true, leads_policy_version: 1 } }
+  }
   if (path === '/api/me') {
     return {
       success: true,
@@ -3387,8 +3390,15 @@ test.describe('Tag pointer association regression', () => {
       const details = page.getByRole('button', { name: 'Ver detalles de la conversación' })
       if (await details.isVisible()) await details.click()
     } },
+    { quick: true, name: 'Chats incrustados', route: '/dashboard/leads', open: async (page: Page) => {
+      await page.getByText('Snapshot de lead desactualizado', { exact: true }).first().click()
+      await page.getByRole('button', { name: 'Enviar mensaje a Contacto móvil' }).click()
+      await page.getByRole('button', { name: 'Ver detalles de la conversación' }).click()
+    } },
     { quick: false, name: 'Difusiones', route: '/dashboard/broadcasts', open: async (page: Page) => {
       await page.getByText('Difusión móvil QA', { exact: true }).first().click()
+      await page.getByRole('button', { name: 'Ver Destinatarios', exact: true }).click()
+      await page.getByRole('button', { name: /^Destinatarios \(/ }).click()
       await page.getByTitle('Editar destinatario').click()
     } },
   ]
@@ -3424,16 +3434,20 @@ test.describe('Tag pointer association regression', () => {
         }
         await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...payload, contact: { ...payload.contact, structured_tags: tags, tags: tags.map((tag: any) => tag.name) } }) })
       })
+      // The embedded chat and its CRM sibling can show the same Contact at once.
+      const controls = surface.name === 'Chats incrustados' ? page.getByRole('region', { name: 'Conversación', exact: true }) : page
       const openSurface = async () => {
         await page.goto(`${baseURL}${surface.route}`, { waitUntil: 'domcontentloaded' })
         await surface.open(page)
-        await expect(surface.quick ? page.getByRole('button', { name: 'Etiqueta', exact: true }).last() : page.getByRole('combobox', { name: 'Buscar o crear etiqueta' }).last()).toBeVisible({ timeout: 30_000 })
+        await expect(surface.quick ? controls.getByRole('button', { name: 'Etiqueta', exact: true }).last() : controls.getByRole('combobox', { name: 'Buscar o crear etiqueta' }).last()).toBeVisible({ timeout: 30_000 })
       }
       const pick = async () => {
-        if (surface.quick) await page.getByRole('button', { name: 'Etiqueta', exact: true }).last().click()
-        const input = page.getByRole('combobox', { name: 'Buscar o crear etiqueta' }).last()
+        if (surface.quick) await controls.getByRole('button', { name: 'Etiqueta', exact: true }).last().click()
+        const input = controls.getByRole('combobox', { name: 'Buscar o crear etiqueta' }).last()
         await input.fill('Prioridad')
-        const option = page.getByRole('option', { name: 'Prioridad', exact: true })
+        await expect(input).toHaveAttribute('aria-controls', /.+/)
+        const menuId = await input.getAttribute('aria-controls')
+        const option = page.locator(`[id="${menuId}"]`).getByRole('option', { name: 'Prioridad', exact: true })
         await expect(option).toBeVisible()
         await expect.poll(() => option.evaluate(element => getComputedStyle(element).pointerEvents)).toBe('auto')
         const hit = await option.evaluate(element => {
@@ -3441,6 +3455,21 @@ test.describe('Tag pointer association regression', () => {
           return element.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2))
         })
         expect(hit).toBe(true)
+        const inputRect = await input.boundingBox()
+        const menuRect = await page.locator(`[id="${menuId}"]`).boundingBox()
+        expect(inputRect).not.toBeNull()
+        expect(menuRect).not.toBeNull()
+        const separation = menuRect!.y >= inputRect!.y + inputRect!.height
+          ? menuRect!.y - inputRect!.y - inputRect!.height
+          : inputRect!.y - menuRect!.y - menuRect!.height
+        expect(separation).toBeGreaterThanOrEqual(0)
+        expect(separation).toBeLessThanOrEqual(8)
+        if (surface.name === 'Contactos') {
+          const screenshotName = 'menu-etiquetas-' + testInfo.project.name
+          const screenshotPath = testInfo.outputPath(screenshotName + '.png')
+          await page.screenshot({ path: screenshotPath })
+          await testInfo.attach(screenshotName, { path: screenshotPath, contentType: 'image/png' })
+        }
         const rect = await option.boundingBox()
         expect(rect).not.toBeNull()
         if (testInfo.project.name.includes('mobile')) await page.touchscreen.tap(rect!.x + rect!.width / 2, rect!.y + rect!.height / 2)
@@ -3448,7 +3477,7 @@ test.describe('Tag pointer association regression', () => {
       }
       await openSurface()
       await pick()
-      const remove = page.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true }).last()
+      const remove = controls.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true }).last()
       await expect(remove).toBeVisible()
       await expect.poll(() => writes).toBe(1)
       // A canonical reload retains the association.
@@ -3456,7 +3485,7 @@ test.describe('Tag pointer association regression', () => {
       await expect(remove).toBeVisible()
       failNext = true
       await remove.click()
-      await expect(page.getByText('Guardado de prueba temporalmente no disponible', { exact: true }).last()).toBeVisible()
+      await expect(controls.getByText('Guardado de prueba temporalmente no disponible', { exact: true }).last()).toBeVisible()
       await expect(remove).toBeVisible()
       await expect.poll(() => writes).toBe(2)
       await remove.click()
@@ -3467,22 +3496,77 @@ test.describe('Tag pointer association regression', () => {
 
   test('tag pointer: full edit stays a draft in floating and maximized windows', async ({ page }) => {
     test.setTimeout(120_000)
+    // Both projects exercise the desktop operational-window contract at this width.
     await page.setViewportSize({ width: 1440, height: 900 })
     await authenticate(page)
+    await page.route(/\/api\/contact-profiles\/contact-1\/tags(?:\?.*)?$/, async route => {
+      const query = (new URL(route.request().url()).searchParams.get('q') || '').toLocaleLowerCase('es')
+      const tags = [
+        { id: 'tag-priority', name: 'Prioridad', color: '#f59e0b' },
+        ...mockCanonicalContact.structured_tags,
+      ].filter(tag => query && tag.name.toLocaleLowerCase('es').includes(query))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, tags, total: tags.length }) })
+    })
     let writes = 0
     page.on('request', request => { if (new URL(request.url()).pathname === '/api/contact-profiles/contact-1' && request.method() === 'PATCH') writes++ })
     await page.goto(`${baseURL}/dashboard/contacts`, { waitUntil: 'domcontentloaded' })
     await page.getByText('Contacto móvil', { exact: true }).first().click()
     await page.getByRole('button', { name: 'Ventana flotante', exact: true }).click()
+    const panel = page.getByRole('dialog', { name: 'Ficha de contacto', exact: true })
+    const heading = panel.locator(':scope > header').getByRole('heading', { name: 'Ficha de contacto', exact: true })
+    await heading.hover()
+    const beforeDrag = await expectInsideVisualViewport(page, panel)
+    const handle = await heading.boundingBox()
+    expect(handle).not.toBeNull()
+    await page.mouse.move(handle!.x + handle!.width / 2, handle!.y + handle!.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(1408, 868, { steps: 12 })
+    await page.mouse.up()
+    await expect.poll(async () => (await panel.boundingBox())!.x - beforeDrag.x).toBeGreaterThan(5)
+    await expect.poll(async () => (await panel.boundingBox())!.y - beforeDrag.y).toBeGreaterThan(5)
+    const moved = await expectInsideVisualViewport(page, panel)
+    expect(1440 - moved.x - moved.width).toBeLessThanOrEqual(20)
+    expect(900 - moved.y - moved.height).toBeLessThanOrEqual(20)
     await page.getByRole('button', { name: 'Editar', exact: true }).last().click()
     const form = page.getByRole('form', { name: 'Editar contacto' })
     await expect(form).toBeVisible()
     const input = form.getByRole('combobox', { name: 'Buscar o crear etiqueta' })
+    const scrollOwner = form.locator('xpath=..')
+    const scrollBox = await scrollOwner.boundingBox()
+    expect(scrollBox).not.toBeNull()
+    const beforeScroll = await scrollOwner.evaluate(element => element.scrollTop)
+    await page.mouse.move(scrollBox!.x + scrollBox!.width / 2, scrollBox!.y + scrollBox!.height / 2)
+    await page.mouse.wheel(0, 520)
+    await expect.poll(() => scrollOwner.evaluate(element => element.scrollTop)).toBeGreaterThan(beforeScroll)
+    await input.scrollIntoViewIfNeeded()
     await input.fill('Prioridad')
-    await page.getByRole('option', { name: 'Prioridad', exact: true }).click()
+    const menu = page.getByRole('listbox', { name: 'Etiquetas disponibles' })
+    const priority = menu.getByRole('option', { name: 'Prioridad', exact: true })
+    await expect(priority).toBeVisible()
+    await expectInsideVisualViewport(page, menu)
+    expect(await priority.evaluate(element => {
+      const rect = element.getBoundingClientRect()
+      return element.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2))
+    })).toBe(true)
+    await priority.click()
     expect(writes).toBe(0)
     await page.getByRole('button', { name: 'Maximizar', exact: true }).click()
     await expect(form.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true })).toBeVisible()
+    await form.getByRole('button', { name: 'Quitar etiqueta Comunidad', exact: true }).click()
+    await input.fill('Comunidad')
+    await expect(menu.getByRole('option', { name: 'Comunidad', exact: true })).toBeVisible()
+    await expectInsideVisualViewport(page, menu)
+    await input.press('Escape')
+    await expect(menu).toHaveCount(0)
+    await expect(input).toBeFocused()
+    await expect(form).toBeVisible()
+    expect(writes).toBe(0)
+    await input.press('ArrowDown')
+    await expect(menu.getByRole('option', { name: 'Comunidad', exact: true })).toBeVisible()
+    await input.press('Enter')
+    await expect(form.getByRole('button', { name: 'Quitar etiqueta Comunidad', exact: true })).toBeVisible()
+    await expect(form.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true })).toBeVisible()
+    expect(writes).toBe(0)
     await form.getByRole('button', { name: 'Guardar contacto', exact: true }).click()
     await expect.poll(() => writes).toBe(1)
   })
@@ -3560,8 +3644,9 @@ test.describe('Tag pointer association regression', () => {
     } finally { await observerContext.close() }
   })
 
-  test('tag pointer: automation assigns and removes with a visual single choice', async ({ page }) => {
+  test('tag pointer: automation assigns and removes with a visual single choice', async ({ page }, testInfo) => {
     test.setTimeout(120_000)
+    // The designer stays at desktop width; projects verify mouse and touch selection.
     await page.setViewportSize({ width: 1280, height: 900 })
     await authenticate(page)
     const automation = { id: 'auto-tags-qa', account_id: 'account-responsive', name: 'Etiquetas QA', description: '', trigger: 'manual', trigger_config: {}, is_active: false, execution_count: 0, created_at: mockNow, updated_at: mockNow, graph: { nodes: [
@@ -3577,12 +3662,16 @@ test.describe('Tag pointer association regression', () => {
     await page.locator('.react-flow__node[data-id="assign-qa"]').click()
     await expect(page.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true })).toBeVisible()
     await page.getByRole('combobox', { name: 'Buscar o crear etiqueta' }).fill('Comunidad')
-    await page.getByRole('option', { name: 'Comunidad', exact: true }).click()
+    const community = page.getByRole('option', { name: 'Comunidad', exact: true })
+    if (testInfo.project.name.includes('mobile')) await community.tap()
+    else await community.click()
     await expect(page.getByRole('button', { name: 'Quitar etiqueta Prioridad', exact: true })).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Quitar etiqueta Comunidad', exact: true })).toBeVisible()
     await page.locator('.react-flow__node[data-id="remove-qa"]').click()
     await page.getByRole('combobox', { name: 'Buscar o crear etiqueta' }).fill('Prioridad')
-    await page.getByRole('option', { name: 'Prioridad', exact: true }).click()
+    const priority = page.getByRole('option', { name: 'Prioridad', exact: true })
+    if (testInfo.project.name.includes('mobile')) await priority.tap()
+    else await priority.click()
     await page.getByRole('button', { name: 'Guardar', exact: true }).click()
     await expect.poll(() => saved?.graph?.nodes?.find((node: any) => node.id === 'assign-qa')?.data.tag_id).toBe('tag-community')
     expect(saved.graph.nodes.find((node: any) => node.id === 'remove-qa').data.tag_id).toBe('tag-priority')

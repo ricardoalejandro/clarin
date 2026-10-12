@@ -20,6 +20,7 @@ El menú compartido `TagPicker` restaura explícitamente los eventos de puntero.
 | Contactos: crear Contact | Selector propio con búsqueda acotada en endpoint genérico y nuevas etiquetas temporales por nombre | `CatalogTagPicker`, selección múltiple local; consulta `contact_create`; envía `tag_ids` canónicos al crear. Selección, borrado y texto responden de inmediato. |
 | Leads: crear oportunidad | Texto separado por comas | `CatalogTagPicker`, selección múltiple local; consulta `lead_create`; envía `tag_ids`, incluidos `[]`. Backend aplica unión aditiva con las etiquetas previas del Contact. |
 | Importación Excel desde Contactos o Leads, modos Leads/Ambos | Selector propio, catálogo completo y creación duplicada | `CatalogTagPicker`, selección única; consulta `lead_import`; mantiene `import_tag` por nombre según contrato del importador. Cambiar/quitar etiqueta invalida la vista previa. “Sin etiqueta” limpia selección. No altera formato estricto Kommo ni reanima sincronización. |
+| Contactos: Pegar desde Excel | Tabla de datos por fila, sin selector global de asociación | Conserva sus columnas de etiquetas como metadata de importación; no introduce un catálogo interactivo adicional. |
 | Importación Excel en modo Contactos | Sin etiqueta global opcional del importador de Leads | Se mantiene ese alcance. Las columnas de cada fila siguen el contrato propio del importador. |
 | Automatizaciones: asignar/quitar etiqueta | Campo de UUID manual | Selector visual único, consulta `automation`, hidratación acotada por ID para flujos guardados. Conserva `data.tag_id` y compatibilidad con `data.config.tag_id`; un valor vacío explícito prevalece sobre el antiguo. Un borrador inactivo puede estar incompleto; activar exige ID válido. |
 | Difusiones: detalle de destinatario con Lead vinculado | Bloque activo de `LeadDetailPanel` → `TagInput`, catálogo completo y endpoints legado | `CanonicalContactTags` → editor compartido y API canónica de Contact con contexto del Lead. Capabilities efectivas, pending, bloqueo de doble escritura, rollback exacto, error y reintento; ignora respuestas de otra identidad. El resto del panel permanece intacto. |
@@ -56,6 +57,102 @@ No se encontró una acción masiva productiva adicional que escriba etiquetas de
 
 Las pruebas unitarias cercanas cubren el contrato de puntero dentro de un host transparente, foco y cierre, modo único/múltiple, debounce exacto, carrera A-B-A, cambio de sesión, permisos, doble creación, hidratación, adapters de payload, selección de importación y rollback/reintento canónico. JSDOM verifica contrato y eventos, pero no realiza hit testing real CSS; por eso la matriz de navegador usa un navegador real y `elementFromPoint`, además de clic de Playwright.
 
-Resultados de ejecución de etiquetas: focales de ocho archivos, 38 pruebas pasadas con Node 24 y dependencias reconstruidas (`vitest run src/components/tags src/components/contact-details/ContactTagEditor.test.tsx src/components/contact-details/quickTagMutation.test.ts src/components/contact-details/CreateContactModal.test.tsx --maxWorkers=1`). La primera ejecución encontró un timeout de 5 s en el flujo largo de importación bajo compilación simultánea; la repetición con presupuesto de integración de 10 s pasó. La suite completa, las dos regresiones finales del editor y el typecheck/build se registrarán al terminar la integración. No se declaran pasadas las ejecuciones interrumpidas durante la reinstalación. Las pruebas de navegador con respuestas controladas verifican interacción, portal y payload; no sustituyen una sesión autenticada real ni una comprobación de producción. El informe final debe indicar qué escenarios se ejecutaron efectivamente.
+Las focales iniciales de etiquetas pasaron en ocho archivos (38 pruebas). El suplemento sobre los últimos ajustes pasó en tres archivos (17 pruebas), con casos compartidos entre ejecuciones; no se suman como pruebas distintas. La primera ejecución focal agotó un plazo de 5 s en el flujo largo de importación bajo compilación simultánea; la repetición con presupuesto de integración de 10 s pasó. La tabla de la suite final conserva los resultados completos y sus reintentos. Las ejecuciones interrumpidas durante reinstalación o carga inicial no se declaran pasadas.
 
-Pizarras: el aviso reportado fue “Demasiados eventos de colaboración”. La corrección de scheduler/transporte y sus pruebas se revisan junto a esta matriz, conservando pruebas de idempotencia, colaboración e aislamiento existentes. Los resultados finales de backend, navegador y build deben constar antes de solicitar revisión del PR.
+Pizarras: el aviso reportado fue “Demasiados eventos de colaboración”. Se corrigieron el scheduler y el transporte conservando las pruebas de idempotencia, colaboración, imágenes y aislamiento existentes. Los resultados efectivos se registran en las secciones de verificación.
+
+## Backend — verificación final
+
+Verificación ejecutada con Go 1.25.11, `GOTOOLCHAIN=local`, `GOMAXPROCS=2`, `GOCACHE=/tmp/clarin-etiquetas-go-cache` y paralelismo de paquetes `-p 1`. Se cargaron las credenciales privadas de QA sin imprimirlas. Para el helper de integración API se exportó `DATABASE_URL` desde `INTEGRITY_TEST_DATABASE_URL` y se habilitaron `CLARIN_RUN_TAG_ASSOCIATION_INTEGRATION=1` y `CLARIN_STORAGE_QA_POSTGRES_PORT=15457`.
+
+| Comprobación | Resultado |
+| --- | --- |
+| `go test -p 1 ./... -count=1` | PASS en todos los paquetes; incluye API con integración PostgreSQL (125,890 s), Repository con integración PostgreSQL (119,401 s), Service (3,388 s), Whiteboard (3,396 s), WebSocket (0,022 s) y Database (1,579 s). |
+| `go test -p 1 ./internal/api -count=1` después del último ajuste de `import_tag` | PASS (121,181 s). Revalida la API completa y la integración PostgreSQL, incluida la prueba multipart de conservación exacta del nombre elegido con comillas, backticks y Unicode. |
+| `go test -p 1 ./internal/repository ./internal/api ./internal/service -count=1` tras la corrección final de importación | PASS: Repository con PG (62,878 s), API con PG (62,589 s), Service (3,013 s). Ejecutado después del delta final de Lead + etiqueta elegida atómicos. |
+| `go build -buildvcs=false -p 1 -o /tmp/clarin-etiquetas-backend ./cmd/server` | PASS; repetido tras la corrección final de importación. Compila las rutas nuevas y la conexión de callbacks de automatizaciones. |
+| `git diff --check` | PASS al terminar los cambios backend. |
+
+La suite global `./...` se ejecutó antes del último ajuste de atomicidad del importador; las suites completas de Repository, API y Service y el build se repitieron sobre ese último delta. También pasaron antes sus focales de etiquetas con PG: Repository (20,798 s) y API (63,098 s). `TestImportedLeadSelectedTagIsAtomicAndAccountScoped` comprueba rollback sin Lead ante etiqueta ajena, ausente o borrada, aislamiento de Contact y bloqueo del DELETE concurrente hasta finalizar la transacción (`55P03` por `lock_timeout`). `TestTagAssociationAPIIntegration` prueba el ejecutor real: fallo de fila sin oportunidad parcial y reintento corregido que crea exactamente un Lead etiquetado sin omitirlo como duplicado.
+
+El build estándar falló al obtener el estado VCS, antes de la compilación. El diagnóstico `go build -x` mostró que Go intentaba `cd /root/proyect; git status --porcelain`, fuera del worktree, y recibía exit status 128. `git status`, `git rev-parse` y `git log` sí funcionaron desde el worktree. Se desactivó únicamente el stamping VCS para el build de QA; no se modificó la metadata del directorio padre. El binario compilado no acredita despliegue ni salud de producción.
+
+La integración usó exclusivamente PostgreSQL local de QA en `127.0.0.1:15457`, contenedor `clarin-etiquetas-pizarras-qa-postgres`, base `program_survey_integrity_test`. Los tests de Repository crean cuentas y datos sintéticos que eliminan al finalizar. El test API exige host, puerto y base permitidos, crea una base independiente con prefijo `clarin_tags_qa_`, ejecuta las migraciones reales y la elimina al terminar. La simulación del fallo del contador de observaciones fijadas cambia temporalmente una columna únicamente en esa base descartable; confirma que el PATCH falla antes de guardar las etiquetas. No se modificó el esquema ni los datos de producción, ni se activaron comunicaciones externas de Kommo o WhatsApp.
+
+Las regresiones comprobadas cubren búsqueda por permiso de contexto y aislamiento de cuenta; hidratación acotada de IDs; `tag_ids: []` explícito y rechazo de `null`; precedencia de IDs frente a nombres legado; permiso `PermTags` para crear catálogo; unión aditiva con etiquetas previas; conservación de notas omitidas, procedencia y nombre canónico de Contact; rollback de Contact, Lead y etiquetas ante una oportunidad inválida; duplicados; ejecución de acciones de etiqueta ligada a `exec.AccountID`; asignación/quita idempotente y rechazo de etiquetas ajenas o eliminadas. Se verificó la compatibilidad de acciones de automatización guardadas como `data.tag_id` o `data.config.tag_id`, sin ampliar esa normalización a otros tipos de nodos.
+
+Un borrador de automatización inactivo admite una acción de etiqueta vacía; activarla exige configuración válida de la cuenta. Si se elimina la etiqueta de una automatización activa, desactivarla continúa respondiendo 200; reactivarla se rechaza con 422 hasta corregir la selección. El callback de reconciliación de etiquetas usa un `RWMutex`, porque los workers pueden estar activos cuando `NewServer` configura dicho callback.
+
+La etiqueta elegida manualmente para importar se valida por nombre exacto y cuenta en preview/import. La creación del Lead y la asociación aditiva de esa etiqueta por ID comparten una sola transacción; la fila de catálogo se bloquea con `FOR KEY SHARE` hasta el commit. Si la eliminación de la etiqueta gana primero o falla la asociación, el Lead se revierte y la fila puede reintentarse sin encontrar una oportunidad creada parcialmente. Una elección eliminada no recrea el catálogo y produce un error visible de fila. Contact puede haberse creado o actualizado previamente; su creación y las etiquetas, observaciones y metadata del archivo conservan el flujo legado fuera de esta transacción. La atomicidad integral del importador queda fuera del alcance y la sincronización Kommo permanece dormida. La alta manual mediante `POST /leads` guarda Contact, oportunidad y etiquetas dentro de una sola transacción.
+
+También pasaron los casos backend de pizarras de presupuesto temporal independiente, distinción de tráfico temporal e inválido, preservación del `operation_id` y plazo de rate limit, y ACK final de replay únicamente tras encolar el delta completo. La saturación de la cola o un frame excesivo solicitan sincronización sin emitir un ACK falso de finalización.
+
+
+Al cerrar la verificación backend se retiró exclusivamente el contenedor `clarin-etiquetas-pizarras-qa-postgres`, después de comprobar su nombre exacto y label `codex.task=etiquetas-pizarras`, y se eliminó `/tmp/clarin-etiquetas-qa.env`. Se comprobó su ausencia; se conservaron documentos, logs y el binario de QA. No se tocaron contenedores ni bases de producción.
+
+## Frontend — suite final
+
+Verificación con Node 24.21.0 y Vitest 4.1.11, usando las dependencias reconstruidas del worktree y un máximo de dos workers. El VPS presentó una elevada contención de CPU; se conservaron los resultados fallidos y se repitieron únicamente los archivos necesarios para investigar sus causas. No se modificó código de documentos, offline, historial de chat ni Work para hacer pasar estas comprobaciones.
+
+| Comprobación | Resultado observado |
+| --- | --- |
+| `npm run test:unit -- --maxWorkers=2`, primera fase del fork | 8 archivos, 61 pruebas: 60 PASS y un timeout de 5 s de Mermaid. El encadenado se detuvo antes de scripts y aplicación. |
+| Repetición de `clarinMermaidSecurity.test.ts` con un worker y timeout de 15 s | 1 archivo, 5/5 PASS; incluye el caso que agotó el plazo anterior. El fork conserva 61 casos únicos comprobados, sin sumar los repetidos. |
+| Fase de scripts de `test:unit` (`node --test` de hardening, fuentes, dependencias, Tailwind, avisos y branding) | 47/47 PASS. |
+| Suite de aplicación completa, `vitest run --maxWorkers=2 --testTimeout=15000` | 375 archivos: 370 PASS y 5 fallidos. 2216 pruebas: 2209 PASS y 7 fallidas. Un error no controlado adicional: un timer de `useDebouncedValue` después de destruir el entorno de `TaskMyWork.test.tsx`. Duración: 2243,97 s. Exit 1. |
+| Aislamiento de los cinco archivos fallidos y `TaskMyWork.test.tsx`, un worker, timeout de 60 s | 6 archivos: 5 PASS y 1 fallido. 42 pruebas: 40 PASS y 2 fallidas. Los dos timeouts de `offline-v4/engine`, el panel offline, la exportación de documentos y Back del historial de chat pasaron. No se repitió el error del timer de Work. Persistieron dos esperas en `documents/[id]/page.test.tsx`. |
+| Comparación exacta del archivo `documents/[id]/page.test.tsx` solo | Se extrajo `4cdf929e98817a08bdd6e140f38828f0edbfd1a9` con `git archive` a un directorio temporal, se enlazó el mismo `node_modules` y se usaron runtime, configuración, setup, worker y timeout equivalentes. Base: 4/4 PASS, 19,69 s. Rama actual: 4/4 PASS, 21,09 s. Ambos exit 0. |
+| Suplemento final de selectores después de los últimos ajustes | 3 archivos, 17/17 PASS: `TagPicker` 8, `ImportTagPicker` 5 y `CanonicalContactTags` 4. Node 24.21.0, dos workers y timeout de 15 s. Complementa la suite; no se suma otra vez a sus casos coincidentes. |
+
+Los siete casos fallidos de la ejecución completa obtuvieron un resultado correcto en las repeticiones. La comparación de documentos no reprodujo una regresión entre base y rama ni un fallo estable de la base. El patrón es sensible a carga u orden; su causa exacta no quedó demostrada. La ejecución completa conserva su exit 1 y no se declara una suite global completamente verde. Los resultados de navegador, typecheck y build son comprobaciones distintas y deben registrarse por separado.
+
+Las 43 pruebas directas del cambio de pizarras pasaron en la suite de aplicación: transporte 21, clasificación de incidencias 11, scheduler 4 y guardado de invitados 7. Cubren timers vencidos, última posición del cursor, ráfagas de despertares, cooldown, cierre y reconexión; aviso hasta confirmación canónica, ACK final de delta, escena grande que requiere REST, prioridad de revocación y conservación del guardado pendiente con el mismo `operation_id`. Se mantiene el motor `0.18.1-clarin.8` y el contrato de guardado congelado de PR13.
+
+La implementación evita dos fuentes identificadas de ráfagas: callbacks de un timer anterior que podían sobrevivir a un envío inmediato y solicitudes repetidas de recuperación al volver a la pestaña. Cursor y viewport comparten el mismo contrato de scheduler, con un valor pendiente por canal y separación mínima de 50 ms; sincronización y presencia se combinan en un lote de control cada 1 s. El rate limit incluye canal y espera, aplaza el envío y programa recuperación canónica. El timer despierta el reintento; el aviso solo desaparece tras una confirmación canónica aplicable. No se aumentaron los presupuestos de eventos del servidor.
+
+Logs conservados en QA: `/tmp/clarin-etiquetas-frontend-tests.log`, `/tmp/clarin-etiquetas-frontend-tests-remainder.log`, `/tmp/clarin-etiquetas-unit-isolated.log`, `/tmp/clarin-documents-baseline-test.log` y `/tmp/clarin-documents-branch-test.log`. La base temporal está en `/tmp/clarin-documents-baseline.t5sowc`; no contiene credenciales y reutiliza las dependencias existentes sin reinstalarlas.
+
+
+## Frontend — compilación y procedencia de QA
+
+La fuente y las modificaciones proceden del checkout aislado del VPS. La elevada contención de CPU del VPS llevó a descargar una copia exclusivamente para QA en Windows, sin modificar el proyecto local como fuente del producto. Se compararon SHA256 de 2382 archivos elegibles de esa copia y el VPS, incluidos los tipos distribuidos del editor y los últimos componentes modificados: todos coincidieron. Los ajustes posteriores de los dos archivos de pruebas de navegador se copiaron desde el VPS y se compararon individualmente por SHA256. No se copiaron archivos de entorno ni credenciales. Los artefactos de build y referencias de tipos generadas por Next son salidas de QA.
+
+Runtime local: Node 24.21.0, descarga oficial con SHA256 verificado, dependencias instaladas con el lockfile del VPS. El build y TypeScript se ejecutaron por separado de los navegadores después de cerrar el servidor de desarrollo propio para evitar presión de memoria. Se conservan logs en la carpeta aislada de QA.
+
+| Comprobación | Resultado |
+| --- | --- |
+| `node node_modules/typescript/bin/tsc --noEmit` | PASS antes del último ajuste de anclaje; revalidación de la fuente final en curso. |
+| `npm run build` | PASS antes del último ajuste de anclaje; revalidación en curso. Preparación del editor/PDF, shell offline v4, Next webpack, TypeScript de producción, generación de páginas, CSS interactivo, shell offline v5 y verificación del editor. |
+| `npm run verify:whiteboards:fixtures` | PASS: JSON base 4/4 y ciclo de archivo con adaptador Clarin 4/4. |
+| Verificación final de motor y branding dentro del build | PASS: `0.18.1-clarin.8`, 946 artefactos sin rutas operativas upstream; 33 artefactos estáticos y seis avisos legales preservados. |
+
+Logs locales: `local-tsc-final2.log`, `local-build-final.log` y `local-compat-fixtures.log`. El build de QA se sirve como standalone en `127.0.0.1:3018` únicamente para las comprobaciones del navegador. No equivale a un despliegue de Clarin en el VPS.
+
+
+## Navegador — pizarras
+
+Se ejecutaron seis casos Chromium contra el standalone local de Next en `http://127.0.0.1:3018`, con Node 24.21.0, un worker, `PLAYWRIGHT_LOCAL_SERVER` ausente y sin bypass de CSP. Las API y salas son fixtures controlados: esta comprobación acredita la compilación y la interacción local, no un despliegue ni una sesión real de producción.
+
+| Caso | Resultado |
+| --- | --- |
+| Referencia visual 375, 768, 1024 y 1440 px | PASS, 11,2 s; cuatro PNG generados e inspeccionados. |
+| Miembro abre antes de las imágenes, hidratación progresiva y guardado | PASS, 23,9 s. |
+| Invitado abre antes de descargar la imagen | PASS, 6,4 s. |
+| Presentación, consentimiento, viewport y entrada tardía | PASS, 38,9 s. |
+| ACK perdido, error correlacionado, fallback idempotente, reconexión, revocación, aislamiento de red y adaptación responsive | PASS, 2,0 min. |
+| Sesenta despertares, rate limit y aviso hasta confirmación canónica | PASS en repetición focal, 9,1 s; exit 0, 12,6 s total. La edición y el guardado posteriores pasan y el harness no registra rechazos adicionales del presupuesto. |
+
+La primera ejecución agrupada terminó con cinco PASS y un fallo del locator global `getByRole('alert')`: la traza demuestra que encontraba el `__next-route-announcer__` de Next dentro de su shadow DOM, fuera del editor. Se acotaron aviso y alertas a `.whiteboard-editor-shell` y se repitió únicamente el caso afectado. No se cambió producto, servidor, CSP ni se añadió force click para resolverlo. El resumen inicial también contó un error fuera de cualquier test sin detalle adicional; se conserva esa evidencia. La repetición focal terminó sin ese contador. Son seis casos únicos comprobados; no se declara que la primera ejecución agrupada haya terminado con exit 0.
+
+Se completó el fixture de Work con GET `/api/tasks/environments/:id` para el Entorno sintético exacto, usando los mismos datos que el índice. El deep link de la pizarra puede pedir el detalle antes de que termine de cargar la lista; el fallback genérico anterior no incluía `environment`. La prueba larga de Work pasó con la respuesta corregida.
+
+Artefactos en el árbol QA de Windows: `local-whiteboard-production.log`, `local-whiteboard-production-rate.log` y `local-whiteboard-production-results/whiteboards-isolation-refe-3d917-Pizarras-en-cuatro-anchuras-chromium/pizarra-reference-{375,768,1024,1440}px.png`. La primera traza fallida se conserva en `local-whiteboard-production-results/whiteboards-isolation-cola-74819-solo-después-de-sincronizar-chromium/trace.zip`. El texto de muestra conserva el ancho de 110 px del fixture original “Entrada” al reemplazarlo por “Fuente local al abrir”; su recorte en las capturas no se presenta como una regresión del texto real del editor.
+
+
+## Anclaje del selector tras inspección visual
+
+Las capturas de Contactos en escritorio y móvil confirmaron que el puntero alcanzaba las opciones. También mostraron una separación de unos 230 px entre campo y menú cuando se abría hacia arriba con un solo resultado. El cálculo restaba el máximo de 280 px aunque la altura real del menú era de unos 54 px.
+
+El helper ahora fija el borde inferior del menú a 6 px del campo usando `translateY(-100%)` al abrir hacia arriba. El porcentaje usa la altura efectiva del menú; se conserva el máximo según el espacio disponible y los offsets del viewport, sin añadir observers ni ciclos de medición. Abrir hacia abajo mantiene el anclaje al borde inferior del campo. Las pruebas puras cubren alturas pequeñas y máximas, offsets, bordes y clamping; la prueba del portal conserva puntero y transform. Pasaron 16/16 focales con Node 24: `contactExperience` 8 y `TagPicker` 8.
+
+La matriz de navegador exige además una separación entre 0 y 8 px antes del clic o toque y guarda PNGs del menú de Contactos. La compilación y la matriz completas de esta última fuente se registran al finalizar; las capturas anteriores se conservan como evidencia del defecto visual.

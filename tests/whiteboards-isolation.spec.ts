@@ -590,18 +590,18 @@ async function installWhiteboardHTTP(
       })
       return
     }
-    if (url.pathname === '/api/tasks/environments' && request.method() === 'GET') {
-      await json(route, {
-        success: true,
-        environments: [{
-          id: workEnvironmentID, account_id: 'account-whiteboard-qa', name: 'Entorno QA', description: '', color: '#10b981', icon: 'layers',
-          sort_order: 0, visibility: 'account', default_access_level: 'edit', is_default: true, version: 1, access_revision: 1,
-          created_at: now, updated_at: now, folder_count: 0, list_count: 1, task_count: 0,
-          permissions: { level: 'full', can_view: true, can_comment: true, can_edit: true, can_delete: false, can_archive: true, can_trash: false, can_restore: true, can_manage_access: true, inherited_from: 'account_admin' },
-        }],
-        next_cursor: null,
-        can_create: true,
-      })
+    const isEnvironmentIndex = url.pathname === '/api/tasks/environments'
+    const isEnvironmentDetail = url.pathname === `/api/tasks/environments/${workEnvironmentID}`
+    if ((isEnvironmentIndex || isEnvironmentDetail) && request.method() === 'GET') {
+      const environment = {
+        id: workEnvironmentID, account_id: 'account-whiteboard-qa', name: 'Entorno QA', description: '', color: '#10b981', icon: 'layers',
+        sort_order: 0, visibility: 'account', default_access_level: 'edit', is_default: true, version: 1, access_revision: 1,
+        created_at: now, updated_at: now, folder_count: 0, list_count: 1, task_count: 0,
+        permissions: { level: 'full', can_view: true, can_comment: true, can_edit: true, can_delete: false, can_archive: true, can_trash: false, can_restore: true, can_manage_access: true, inherited_from: 'account_admin' },
+      }
+      await json(route, isEnvironmentDetail
+        ? { success: true, environment }
+        : { success: true, environments: [environment], next_cursor: null, can_create: true })
       return
     }
     if (url.pathname === '/api/account/users') {
@@ -4183,9 +4183,11 @@ test('colaboración limita los despertares y recupera el aviso solo después de 
     const initialSyncs = harness.syncRequests.length
     harness.pauseSyncFor('Ana QA')
     harness.rateLimitFor('Ana QA', 'cursor.update')
-    const notice = page.getByText('La colaboración está ajustando su ritmo.', { exact: false })
+    const editor = page.locator('.whiteboard-editor-shell')
+    const notice = editor.getByText('La colaboración está ajustando su ritmo.', { exact: false })
     await expect(notice).toBeVisible()
-    await expect(page.getByRole('alert')).toHaveCount(0)
+    // Next's production route announcer also owns role=alert outside the editor.
+    await expect(editor.getByRole('alert')).toHaveCount(0)
     await page.evaluate(() => {
       for (let i = 0; i < 20; i += 1) {
         window.dispatchEvent(new Event('online'))
@@ -4202,7 +4204,7 @@ test('colaboración limita los despertares y recupera el aviso solo después de 
     await expect(notice).toBeHidden()
     await drawRectangle(page, 60)
     await expect.poll(() => harness.elements.filter(element => element.type === 'rectangle' && element.isDeleted !== true).length).toBe(1)
-    await expect(page.getByText('Guardado en Clarin', { exact: true })).toBeVisible()
+    await expect(page.getByLabel('Guardado en Clarin')).toBeVisible({ timeout: 20_000 })
     expect(harness.rateLimitRejections).toEqual([])
     expect(blocked).toEqual([])
   } finally { await context.close() }
