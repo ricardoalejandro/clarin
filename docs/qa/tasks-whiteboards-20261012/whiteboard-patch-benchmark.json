@@ -1,0 +1,266 @@
+{
+  "date": "2026-10-12",
+  "environment": "Isolated QA checkout on VPS; other QA jobs ran concurrently, so timings are noisy.",
+  "method": "One warmup + seven samples, pure closeWhiteboardElementPatch helper. Rectangles only. No render/network/storage time. Baseline 50k intentionally omitted.",
+  "script": "frontend/scripts/benchmark-whiteboard-patch.mjs",
+  "cases": {
+    "node_baseline": {
+      "runtime": "Node v20.20.0",
+      "source": "d349f386f62739a81379338761780e71c721e552",
+      "results": [
+        {
+          "count": 1000,
+          "changed": "all",
+          "samples_ms": [
+            31.01,
+            32.96,
+            35.63,
+            40.83,
+            57.69,
+            59.24,
+            81.45
+          ],
+          "median_ms": 40.83,
+          "maximum_ms": 81.45
+        },
+        {
+          "count": 1000,
+          "changed": "one",
+          "samples_ms": [
+            0.31,
+            0.31,
+            0.35,
+            0.44,
+            0.52,
+            3.23,
+            7.53
+          ],
+          "median_ms": 0.44,
+          "maximum_ms": 7.53
+        },
+        {
+          "count": 10000,
+          "changed": "all",
+          "samples_ms": [
+            2359.6,
+            2544.44,
+            2560.28,
+            2794.93,
+            2925.02,
+            2952.58,
+            4950.13
+          ],
+          "median_ms": 2794.93,
+          "maximum_ms": 4950.13
+        },
+        {
+          "count": 10000,
+          "changed": "one",
+          "samples_ms": [
+            5.89,
+            6.78,
+            6.91,
+            7.21,
+            8.01,
+            9.28,
+            21.07
+          ],
+          "median_ms": 7.21,
+          "maximum_ms": 21.07
+        }
+      ]
+    },
+    "node_current": {
+      "runtime": "Node v20.20.0",
+      "source": "working-tree",
+      "results": [
+        {
+          "count": 1000,
+          "changed": "all",
+          "samples_ms": [
+            0.97,
+            1.04,
+            3.7,
+            5.13,
+            5.4,
+            6.3,
+            8.22
+          ],
+          "median_ms": 5.13,
+          "maximum_ms": 8.22
+        },
+        {
+          "count": 1000,
+          "changed": "one",
+          "samples_ms": [
+            0.31,
+            0.35,
+            0.38,
+            0.38,
+            0.4,
+            0.56,
+            2.5
+          ],
+          "median_ms": 0.38,
+          "maximum_ms": 2.5
+        },
+        {
+          "count": 10000,
+          "changed": "all",
+          "samples_ms": [
+            12.18,
+            13.11,
+            15.29,
+            15.29,
+            15.33,
+            51.88,
+            84.89
+          ],
+          "median_ms": 15.29,
+          "maximum_ms": 84.89
+        },
+        {
+          "count": 10000,
+          "changed": "one",
+          "samples_ms": [
+            6.57,
+            7.47,
+            8.66,
+            8.67,
+            8.9,
+            11.59,
+            13.23
+          ],
+          "median_ms": 8.67,
+          "maximum_ms": 13.23
+        },
+        {
+          "count": 50000,
+          "changed": "all",
+          "samples_ms": [
+            131.05,
+            157.38,
+            177.08,
+            210.29,
+            257.81,
+            263.72,
+            337.09
+          ],
+          "median_ms": 210.29,
+          "maximum_ms": 337.09
+        },
+        {
+          "count": 50000,
+          "changed": "one",
+          "samples_ms": [
+            72.07,
+            91.84,
+            95.61,
+            112.24,
+            115.58,
+            144,
+            165.12
+          ],
+          "median_ms": 112.24,
+          "maximum_ms": 165.12
+        }
+      ]
+    },
+    "chromium_current": {
+      "runtime": "Chromium 145.0.7632.6",
+      "source": "working-tree",
+      "results": [
+        {
+          "count": 1000,
+          "changed": "all",
+          "samples_ms": [
+            2.2,
+            3.2,
+            3.7,
+            5.6,
+            8,
+            10.8,
+            19.8
+          ],
+          "median_ms": 5.6,
+          "maximum_ms": 19.8
+        },
+        {
+          "count": 1000,
+          "changed": "one",
+          "samples_ms": [
+            0.4,
+            0.4,
+            0.4,
+            0.7,
+            1.4,
+            3.8,
+            5
+          ],
+          "median_ms": 0.7,
+          "maximum_ms": 5
+        },
+        {
+          "count": 10000,
+          "changed": "all",
+          "samples_ms": [
+            19.7,
+            23,
+            24.8,
+            27.3,
+            28,
+            39.1,
+            47.7
+          ],
+          "median_ms": 27.3,
+          "maximum_ms": 47.7
+        },
+        {
+          "count": 10000,
+          "changed": "one",
+          "samples_ms": [
+            7.3,
+            9.8,
+            11.4,
+            12,
+            18.1,
+            23.8,
+            28.9
+          ],
+          "median_ms": 12,
+          "maximum_ms": 28.9
+        },
+        {
+          "count": 50000,
+          "changed": "all",
+          "samples_ms": [
+            63.4,
+            126.6,
+            132.2,
+            136.9,
+            160.5,
+            174.8,
+            180.8
+          ],
+          "median_ms": 136.9,
+          "maximum_ms": 180.8
+        },
+        {
+          "count": 50000,
+          "changed": "one",
+          "samples_ms": [
+            19.4,
+            21.7,
+            24.9,
+            29.4,
+            29.7,
+            36,
+            46.8
+          ],
+          "median_ms": 29.4,
+          "maximum_ms": 46.8
+        }
+      ]
+    }
+  }
+}

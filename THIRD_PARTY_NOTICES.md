@@ -30,7 +30,7 @@ This notice covers the public MIT-licensed Excalidraw project only. It grants no
 
 ## Reproducible Excalidraw dependency inventory
 
-The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1-clarin.8` is defined by `frontend/package-lock.json` and the [current candidate baseline](frontend/third_party/excalidraw/supply-chain-2026-10-12.json). The [archived CycloneDX 1.6 SBOM](frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.8.cdx.json) contains 248 components and has SHA-256 `238c495e5fe078465ec3b3d044576294329da2ccb6173ea2365764ef39eb741e`. It binds the vendored source to the exact upstream tag/commit plus the documented Clarin patches, including the `.7` Mermaid capability boundary and dependency fixes.
+The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1-clarin.8` is defined by `frontend/package-lock.json` and the [current candidate baseline](frontend/third_party/excalidraw/supply-chain-2026-10-12.json). The [archived CycloneDX 1.6 SBOM](frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.8.cdx.json) contains 248 components and has SHA-256 `43d3a239b16f8572ab9cac40335946834fd499f57c4998c14972d7e00c5bec0e`. It binds the vendored source to the exact upstream tag/commit plus the documented Clarin patches, including the `.7` Mermaid capability boundary and dependency fixes.
 
 Generate and verify it without contacting a third-party service:
 

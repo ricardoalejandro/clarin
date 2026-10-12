@@ -6,7 +6,7 @@ Base: `d349f386f62739a81379338761780e71c721e552`. Implementación y verificació
 
 1. PR #13: integridad y rendimiento de Pizarras, conservando el motor `.7`.
 2. PR #14: contratos, reconciliación autorizada, agenda, métricas y escrituras de Tareas. Apilado sobre #13.
-3. PR visual: navegación diaria, configuración progresiva y motor `0.18.1-clarin.8`. Apilado sobre #14.
+3. PR #15: navegación diaria, configuración progresiva y motor `0.18.1-clarin.8`. Apilado sobre #14.
 
 Los PR se revisan en ese orden. Merge y despliegue son pasos posteriores, fuera de esta implementación.
 
@@ -34,6 +34,8 @@ Los PR se revisan en ese orden. Merge y despliegue son pasos posteriores, fuera 
 - Chromium usa la aplicación real y un servidor Next aislado, con API/WebSocket simulados para controlar latencia, respuestas invertidas y permisos. No es prueba contra la API de producción.
 - PostgreSQL, Redis y MinIO de QA están aislados. Que un servicio esté saludable no prueba que cada caso lo haya ejercitado.
 - Las pruebas unitarias, TypeScript y builds complementan la evidencia de navegador; no la sustituyen.
+- La prueba HTTP de Tareas usa login con contraseña, JWT, middleware de autorización y sesiones Redis reales: descarta la primera respuesta después del commit y comprueba que el reintento recupera la misma tarea. Verifica dos cuentas, conflicto de contenido, dos migraciones consecutivas y ausencia de resurrección después de purgar.
+- La prueba HTTP de Pizarras usa handlers y PostgreSQL/MinIO reales, con identidad inyectada por el fixture del router: 422 sin avance ni recibo, PNG físico, save/replay, borrar/deshacer/reanexar, descarga, inventario y 404 entre cuentas. Las cuatro pruebas de fanout/autoridad/presentación ejercitan Redis real. No equivalen a una sesión de navegador conectada a esos servicios.
 
 ## Límites relevantes para revisión
 
@@ -44,7 +46,13 @@ Los PR se revisan en ese orden. Merge y despliegue son pasos posteriores, fuera 
 
 ## Ejecuciones
 
-Resultados finales, perfiles y capturas se incorporan al terminar la validación del conjunto.
+- `GOCACHE=/tmp/go-build go test ./...`: aprobado sobre el candidato.
+- Integración Tareas: siete pruebas de repositorio PostgreSQL aprobadas y una prueba HTTP PostgreSQL/Redis aprobada (14,75 s).
+- Integración Pizarras: router PostgreSQL aprobado (11,45 s), subcaso MinIO aprobado (0,24 s) y cuatro pruebas Redis aprobadas.
+- Primera suite frontend completa: motor 37/37, scripts 45/45 y aplicación 2.085/2.087 (354/355 archivos). Dos esperas de la página de Documentos expiraron durante compilaciones y navegadores simultáneos; la repetición aislada de Documentos pasó 15/15 sin cambios en su código. Se repite el conjunto final con menos carga antes del cierre.
+- Chromium de guardado: tres casos aprobados (ráfagas en una y dos sesiones, imagen fallida/reintento), con transporte simulado y comparación de contenido reabierto.
+- Captura comparativa: dos casos aprobados antes y después, con idénticos fixtures y viewports 375/768/1024/1440. Se sustituyeron temporalmente ocho fuentes de interfaz por `d349f386` sólo en QA y se restauraron automáticamente. El motor `.8` y los activos fueron comunes: esta comparación mide la interfaz, no recrea un despliegue histórico completo.
+- La primera pasada completa de Pizarras en desarrollo fue interrumpida por el indicador de Next que cubría el botón móvil Editar. Se registraron el aviso de hidratación de dimensiones y el fallback del worker de fuentes; se valida de nuevo sobre el build de producción aislado.
 
 ### Perfil del cierre de parches
 
@@ -60,3 +68,14 @@ Resultados finales, perfiles y capturas se incorporan al terminar la validación
 | 1.000 / uno | — | — | 0,70 ms |
 
 La mejora corresponde al caso que hacía búsquedas repetidas para muchos elementos cambiados. No se alega aceleración del cambio de un solo elemento: allí domina recorrer la escena.
+
+### Comparación visual reproducible
+
+| Módulo | 375 px | 768 px | 1024 px | 1440 px |
+|---|---|---|---|---|
+| Tareas antes | [PNG](tasks-whiteboards-20261012/before/tasks-reference-375.png) | [PNG](tasks-whiteboards-20261012/before/tasks-reference-768.png) | [PNG](tasks-whiteboards-20261012/before/tasks-reference-1024.png) | [PNG](tasks-whiteboards-20261012/before/tasks-reference-1440.png) |
+| Tareas después | [PNG](tasks-whiteboards-20261012/after/tasks-reference-375.png) | [PNG](tasks-whiteboards-20261012/after/tasks-reference-768.png) | [PNG](tasks-whiteboards-20261012/after/tasks-reference-1024.png) | [PNG](tasks-whiteboards-20261012/after/tasks-reference-1440.png) |
+| Pizarras antes | [PNG](tasks-whiteboards-20261012/before/pizarra-reference-375px.png) | [PNG](tasks-whiteboards-20261012/before/pizarra-reference-768px.png) | [PNG](tasks-whiteboards-20261012/before/pizarra-reference-1024px.png) | [PNG](tasks-whiteboards-20261012/before/pizarra-reference-1440px.png) |
+| Pizarras después | [PNG](tasks-whiteboards-20261012/after/pizarra-reference-375px.png) | [PNG](tasks-whiteboards-20261012/after/pizarra-reference-768px.png) | [PNG](tasks-whiteboards-20261012/after/pizarra-reference-1024px.png) | [PNG](tasks-whiteboards-20261012/after/pizarra-reference-1440px.png) |
+
+Las capturas comparativas se hicieron en desarrollo y pueden incluir su indicador de diagnóstico, ajeno a la interfaz publicada. Los tests funcionales finales se ejecutan sobre el servidor standalone de producción en QA.
