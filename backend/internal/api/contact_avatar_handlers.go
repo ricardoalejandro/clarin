@@ -100,6 +100,11 @@ func parseAvatarContext(contextType, contextID string) (contactAvatarContext, er
 }
 
 func (s *Server) authorizeContactAvatarContext(c *fiber.Ctx, contactID uuid.UUID, avatarContext contactAvatarContext) error {
+	if avatarContext.Type == "lead" {
+		if err := s.repos.Account.RequireLeadsEnabled(c.Context(), c.Locals("account_id").(uuid.UUID)); err != nil {
+			return fiber.NewError(fiber.StatusForbidden, "Leads esta desactivado para esta cuenta")
+		}
+	}
 	accountID := c.Locals("account_id").(uuid.UUID)
 	requiredPermission := map[string]string{
 		"contact":             domain.PermContacts,

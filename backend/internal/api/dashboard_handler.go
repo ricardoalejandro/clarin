@@ -257,8 +257,12 @@ func (s *Server) handleGetDashboardSummary(c *fiber.Ctx) error {
 			isAdmin = currentRole == domain.RoleAdmin || currentRole == domain.RoleSuperAdmin
 		}
 	}
+	leadPolicy, policyErr := s.repos.Account.GetLeadPolicy(c.Context(), claims.AccountID)
+	if policyErr != nil {
+		return writeLeadPolicyError(c, policyErr)
+	}
 	sections := dashboardSections{
-		Leads:   isAdmin || dashboardHasPermission(claims, domain.PermLeads),
+		Leads:   leadPolicy.LeadsEnabled && (isAdmin || dashboardHasPermission(claims, domain.PermLeads)),
 		Chats:   isAdmin || dashboardHasPermission(claims, domain.PermChats),
 		Tasks:   isAdmin || dashboardHasPermission(claims, domain.PermTasks),
 		Events:  isAdmin || dashboardHasPermission(claims, domain.PermEvents),

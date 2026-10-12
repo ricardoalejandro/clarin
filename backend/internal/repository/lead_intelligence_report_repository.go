@@ -42,13 +42,21 @@ func scanLeadIntelligenceRun(scanner leadIntelligenceRunScanner) (*domain.LeadIn
 }
 
 func (r *LeadIntelligenceReportRepository) CreateRun(ctx context.Context, run *domain.LeadIntelligenceReportRun) (*domain.LeadIntelligenceReportRun, bool, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback(ctx)
+	if err = requireLeadPolicyTx(ctx, tx, run.AccountID); err != nil {
+		return nil, false, err
+	}
 	if run.ID == uuid.Nil {
 		run.ID = uuid.New()
 	}
 	if run.ReportType == "" {
 		run.ReportType = domain.LeadIntelligenceReportType
 	}
-	created, err := scanLeadIntelligenceRun(r.db.QueryRow(ctx, `
+	created, err := scanLeadIntelligenceRun(tx.QueryRow(ctx, `
 		INSERT INTO lead_intelligence_report_runs (
 			id, account_id, user_id, report_type, parameters, selected_reasoning,
 			recommended_reasoning, idempotency_key
@@ -59,10 +67,16 @@ func (r *LeadIntelligenceReportRepository) CreateRun(ctx context.Context, run *d
 		run.SelectedReasoning, run.RecommendedReasoning, run.IdempotencyKey,
 	))
 	if err == pgx.ErrNoRows {
-		existing, getErr := scanLeadIntelligenceRun(r.db.QueryRow(ctx, `SELECT `+leadIntelligenceRunColumns+` FROM lead_intelligence_report_runs WHERE account_id=$1 AND user_id=$2 AND idempotency_key=$3`, run.AccountID, run.UserID, run.IdempotencyKey))
-		return existing, false, getErr
+		existing, getErr := scanLeadIntelligenceRun(tx.QueryRow(ctx, `SELECT `+leadIntelligenceRunColumns+` FROM lead_intelligence_report_runs WHERE account_id=$1 AND user_id=$2 AND idempotency_key=$3`, run.AccountID, run.UserID, run.IdempotencyKey))
+		if getErr != nil {
+			return nil, false, getErr
+		}
+		return existing, false, tx.Commit(ctx)
 	}
-	return created, true, err
+	if err != nil {
+		return nil, false, err
+	}
+	return created, true, tx.Commit(ctx)
 }
 
 func (r *LeadIntelligenceReportRepository) GetRun(ctx context.Context, accountID, userID, runID uuid.UUID) (*domain.LeadIntelligenceReportRun, error) {
@@ -134,6 +148,16 @@ func (r *LeadIntelligenceReportRepository) ReplaceItems(ctx context.Context, run
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = requireLeadPolicyTx(ctx, tx, run.AccountID); err != nil {
+		return err
+	}
+	var active bool
+	if err = tx.QueryRow(ctx, `SELECT status='running' AND NOT cancel_requested FROM lead_intelligence_report_runs WHERE id=$1 AND account_id=$2 FOR UPDATE`, run.ID, run.AccountID).Scan(&active); err != nil {
+		return err
+	}
+	if !active {
+		return ErrLeadPolicyConflict
+	}
 	if _, err = tx.Exec(ctx, `DELETE FROM lead_intelligence_report_items WHERE run_id=$1 AND account_id=$2`, run.ID, run.AccountID); err != nil {
 		return err
 	}
@@ -148,16 +172,31 @@ func (r *LeadIntelligenceReportRepository) ReplaceItems(ctx context.Context, run
 }
 
 func (r *LeadIntelligenceReportRepository) Complete(ctx context.Context, runID uuid.UUID, summary, warnings json.RawMessage, withWarnings bool) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var accountID uuid.UUID
+	if err = tx.QueryRow(ctx, `SELECT account_id FROM lead_intelligence_report_runs WHERE id=$1`, runID).Scan(&accountID); err != nil {
+		return err
+	}
+	if err = requireLeadPolicyTx(ctx, tx, accountID); err != nil {
+		return err
+	}
 	status := domain.LeadIntelligenceRunCompleted
 	if withWarnings {
 		status = domain.LeadIntelligenceRunCompletedWithWarnings
 	}
-	_, err := r.db.Exec(ctx, `UPDATE lead_intelligence_report_runs SET
+	_, err = tx.Exec(ctx, `UPDATE lead_intelligence_report_runs SET
 		status=CASE WHEN cancel_requested THEN 'cancelled' ELSE $2 END,
 		phase=CASE WHEN cancel_requested THEN 'cancelled' ELSE 'completed' END,
 		summary=$3::jsonb,warnings=$4::jsonb,processed_items=total_items,completed_at=NOW(),heartbeat_at=NULL,updated_at=NOW()
 		WHERE id=$1 AND status='running'`, runID, status, normalizedJSONRaw(summary, "{}"), normalizedJSONRaw(warnings, "[]"))
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *LeadIntelligenceReportRepository) Fail(ctx context.Context, runID uuid.UUID, code, safeError string) error {

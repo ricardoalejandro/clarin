@@ -182,6 +182,8 @@ If a task touches multiple areas, read all matching skills before editing.
 
 ## Git And Safety
 
+- Follow the review workflow for future changes: work on a focused `codex/` branch, implement the requested scope, run the applicable checks, and create a pull request with the concrete behavior, validation results, and remaining limitations. Attach the PR to the Codex chat. A draft PR is appropriate while verification is still in progress; never mark unrun checks as passed.
+- Keep implementation, PR review, merge, and deployment as separate steps. Do not commit directly to `main`, merge the PR, or deploy unless the user explicitly requests that step. If deployment is subsequently requested, follow the Mandatory Deployment Rule and its runtime checks.
 - Do not revert unrelated work in the tree. Treat existing dirty files as active user work unless the user explicitly asks to discard them.
 - Do not print or commit secrets, `.env` contents, JWTs, cookies, API keys, MinIO credentials, WhatsApp session material, or raw imported personal data.
 - Keep changes focused and explain any remaining risk or unverified area clearly.

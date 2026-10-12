@@ -485,6 +485,10 @@ func (s *MCPServer) toolListAutomations(ctx context.Context, req mcp.CallToolReq
 	if err != nil {
 		return mcpAccountStructuredError(err), nil
 	}
+	policy, err := s.repos.Account.GetLeadPolicy(ctx, accountID)
+	if err != nil {
+		return mcpStructuredError("LEAD_POLICY_UNAVAILABLE", "No se pudo verificar la configuración de la cuenta.", nil), nil
+	}
 
 	automations, err := s.repos.Automation.List(ctx, accountID)
 	if err != nil {
@@ -502,6 +506,9 @@ func (s *MCPServer) toolListAutomations(ctx context.Context, req mcp.CallToolReq
 
 	results := make([]autoResult, 0, len(automations))
 	for _, a := range automations {
+		if !automationVisibleForLeadPolicy(a, policy.LeadsEnabled) {
+			continue
+		}
 		ar := autoResult{
 			ID:             a.ID.String(),
 			Name:           a.Name,
@@ -537,6 +544,13 @@ func (s *MCPServer) toolGetAutomationDetail(ctx context.Context, req mcp.CallToo
 	if err != nil || automation == nil {
 		return errResult("automatización no encontrada"), nil
 	}
+	policy, err := s.repos.Account.GetLeadPolicy(ctx, accountID)
+	if err != nil {
+		return mcpStructuredError("LEAD_POLICY_UNAVAILABLE", "No se pudo verificar la configuración de la cuenta.", nil), nil
+	}
+	if !automationVisibleForLeadPolicy(automation, policy.LeadsEnabled) {
+		return mcpStructuredError("LEADS_MODULE_DISABLED", "Esta automatización pertenece a Leads, que está desactivado en la cuenta.", nil), nil
+	}
 
 	detail := map[string]interface{}{
 		"id":              automation.ID.String(),
@@ -562,6 +576,9 @@ func (s *MCPServer) toolGetAutomationDetail(ctx context.Context, req mcp.CallToo
 		}
 		execs := make([]execResult, 0, len(executions))
 		for _, e := range executions {
+			if !policy.LeadsEnabled && domain.IsCommercialAutomation(e.LeadID != nil, "", e.ConfigSnapshot) {
+				continue
+			}
 			er := execResult{
 				ID:        e.ID.String(),
 				Status:    e.Status,
@@ -579,12 +596,18 @@ func (s *MCPServer) toolGetAutomationDetail(ctx context.Context, req mcp.CallToo
 	}
 
 	// Stats
-	stats, err := s.repos.Automation.GetStats(ctx, automationID)
-	if err == nil && stats != nil {
-		detail["stats"] = stats
+	if policy.LeadsEnabled {
+		stats, err := s.repos.Automation.GetStats(ctx, automationID)
+		if err == nil && stats != nil {
+			detail["stats"] = stats
+		}
 	}
 
 	return jsonResult(detail), nil
+}
+
+func automationVisibleForLeadPolicy(automation *domain.Automation, leadsEnabled bool) bool {
+	return automation != nil && (leadsEnabled || !domain.IsCommercialAutomation(false, automation.TriggerType, &automation.Config))
 }
 
 // ──── get_contact_detail ────
@@ -659,10 +682,17 @@ func (s *MCPServer) toolGetContactDetail(ctx context.Context, req mcp.CallToolRe
 	}
 
 	// Check linked lead
-	var leadID *uuid.UUID
-	_ = s.repos.DB().QueryRow(ctx, `SELECT id FROM leads WHERE contact_id = $1 AND account_id = $2 LIMIT 1`, contact.ID, accountID).Scan(&leadID)
-	if leadID != nil {
-		detail["linked_lead_id"] = leadID.String()
+	policy, policyErr := s.repos.Account.GetLeadPolicy(ctx, accountID)
+	if policyErr != nil {
+		return mcpStructuredError("LEAD_POLICY_UNAVAILABLE", "No se pudo verificar la configuración de la cuenta.", nil), nil
+	}
+	detail["leads_enabled"] = policy.LeadsEnabled
+	if policy.LeadsEnabled {
+		var leadID *uuid.UUID
+		_ = s.repos.DB().QueryRow(ctx, `SELECT id FROM leads WHERE contact_id = $1 AND account_id = $2 LIMIT 1`, contact.ID, accountID).Scan(&leadID)
+		if leadID != nil {
+			detail["linked_lead_id"] = leadID.String()
+		}
 	}
 
 	// Last message

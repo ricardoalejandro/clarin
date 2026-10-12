@@ -20,6 +20,11 @@ func (r *ErosResultSetRepository) Save(ctx context.Context, set *domain.ErosResu
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if set.EntityType == "lead" || domain.ToolRequiresLeadModule(set.SourceTool, nil) {
+		if err = requireLeadPolicyTx(ctx, tx, set.AccountID); err != nil {
+			return nil, err
+		}
+	}
 	var filters []byte
 	err = tx.QueryRow(ctx, `INSERT INTO eros_result_sets (id,account_id,user_id,conversation_id,run_id,entity_type,source_tool,fields,filters,returned_count,has_more,next_cursor)
 		SELECT $1,$2,$3,r.conversation_id,$4,$5,$6,$7,$8::jsonb,$9,$10,$11 FROM eros_runs r

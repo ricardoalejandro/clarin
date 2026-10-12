@@ -34,13 +34,15 @@ type AutomationJob struct {
 
 // AutomationService runs the automation engine: triggers, worker pool, delay scheduler.
 type AutomationService struct {
-	repos  *repository.Repositories
-	pool   *whatsapp.DevicePool
-	hub    *ws.Hub
-	cache  *cache.Cache
-	jobs   chan AutomationJob
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	repos             *repository.Repositories
+	pool              *whatsapp.DevicePool
+	hub               *ws.Hub
+	cache             *cache.Cache
+	jobs              chan AutomationJob
+	stopCh            chan struct{}
+	wg                sync.WaitGroup
+	policyMu          sync.Mutex
+	commercialRunning map[uuid.UUID]commercialExecutionCancel
 }
 
 // NewAutomationService creates the service and spawns the worker pool.
@@ -136,6 +138,15 @@ func (s *AutomationService) TriggerManual(ctx context.Context, automationID, acc
 	if a == nil {
 		return fmt.Errorf("automation not found")
 	}
+	if domain.IsCommercialAutomation(leadID != nil, a.TriggerType, &a.Config) {
+		policy, policyErr := s.repos.Account.GetLeadPolicy(ctx, accountID)
+		if policyErr != nil {
+			return policyErr
+		}
+		if !policy.AutomationEnabled() {
+			return repository.ErrLeadAutomationDisabled
+		}
+	}
 	s.enqueueExecution(ctx, a, leadID, map[string]interface{}{"triggered_by": "manual"})
 	return nil
 }
@@ -195,6 +206,21 @@ func (s *AutomationService) enqueueExecution(
 	leadID *uuid.UUID,
 	contextData map[string]interface{},
 ) {
+	if domain.IsCommercialAutomation(leadID != nil, a.TriggerType, &a.Config) {
+		var err error
+		ctx, err = s.repos.Account.CaptureLeadAutomationContext(ctx, a.AccountID, time.Now().UTC())
+		if err != nil {
+			return
+		}
+		policy, err := s.repos.Account.GetLeadPolicy(ctx, a.AccountID)
+		if err != nil {
+			return
+		}
+		if contextData == nil {
+			contextData = map[string]interface{}{}
+		}
+		contextData["leads_policy_version"] = policy.Version
+	}
 	// Rate limit check via Redis (or in-memory fallback)
 	if !s.checkRateLimit(ctx, a.AccountID) {
 		log.Printf("[AUTO] Rate limit reached for account %s — skipping automation %s", a.AccountID, a.Name)
@@ -286,8 +312,27 @@ func (s *AutomationService) processExecution(ctx context.Context, execID uuid.UU
 		return // already done/paused
 	}
 
+	if domain.IsCommercialAutomation(exec.LeadID != nil, "", exec.ConfigSnapshot) {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		s.policyMu.Lock()
+		if s.commercialRunning == nil {
+			s.commercialRunning = map[uuid.UUID]commercialExecutionCancel{}
+		}
+		s.commercialRunning[exec.ID] = commercialExecutionCancel{accountID: exec.AccountID, cancel: cancel}
+		s.policyMu.Unlock()
+		defer func() { cancel(); s.policyMu.Lock(); delete(s.commercialRunning, exec.ID); s.policyMu.Unlock() }()
+		var policyErr error
+		ctx, policyErr = s.commercialExecutionContext(ctx, exec)
+		if policyErr != nil {
+			s.stopForCommercialPolicy(exec, policyErr)
+			return
+		}
+	}
 	exec.Status = domain.AutoExecRunning
-	_ = s.repos.Automation.UpdateExecution(ctx, exec)
+	if err := s.repos.Automation.UpdateExecution(ctx, exec); err != nil {
+		return
+	}
 
 	graph := exec.ConfigSnapshot
 	if graph == nil {
@@ -315,6 +360,13 @@ func (s *AutomationService) walkGraph(ctx context.Context, exec *domain.Automati
 	current := nodeID
 
 	for current != "" {
+		var policyErr error
+		ctx, policyErr = s.commercialExecutionContext(ctx, exec)
+		if policyErr != nil || ctx.Err() != nil {
+			s.stopForCommercialPolicy(exec, policyErr)
+			return
+		}
+
 		if visited[current] {
 			break // cycle guard
 		}
@@ -375,9 +427,9 @@ func (s *AutomationService) walkGraph(ctx context.Context, exec *domain.Automati
 	exec.Status = domain.AutoExecCompleted
 	exec.CompletedAt = &now
 	exec.CurrentNodeID = ""
-	_ = s.repos.Automation.UpdateExecution(ctx, exec)
-
-	s.broadcastUpdate(exec.AccountID, exec.ID, domain.AutoExecCompleted)
+	if err := s.repos.Automation.UpdateExecution(ctx, exec); err == nil {
+		s.broadcastUpdate(exec.AccountID, exec.ID, domain.AutoExecCompleted)
+	}
 }
 
 // executeNode dispatches to the correct action handler.
@@ -465,6 +517,13 @@ func (s *AutomationService) execSendWhatsApp(ctx context.Context, exec *domain.A
 	}
 
 	// Send message via device pool
+	ctx, err = s.commercialExecutionContext(ctx, exec)
+	if err != nil {
+		return err
+	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
 	_, err = s.pool.SendMessage(ctx, deviceID, lead.JID, message)
 	return err
 }
@@ -628,12 +687,19 @@ func (s *AutomationService) resumePausedExecutions() {
 	log.Printf("[AUTO] Scheduler resuming %d paused executions", len(paused))
 
 	for _, exec := range paused {
+		if _, policyErr := s.commercialExecutionContext(ctx, exec); policyErr != nil {
+			s.stopForCommercialPolicy(exec, policyErr)
+			continue
+		}
+
 		// Mark as pending again and set current_node_id to next_node_id
 		exec.Status = domain.AutoExecPending
 		exec.CurrentNodeID = exec.NextNodeID
 		exec.NextNodeID = ""
 		exec.ResumeAt = nil
-		_ = s.repos.Automation.UpdateExecution(ctx, exec)
+		if err := s.repos.Automation.UpdateExecution(ctx, exec); err != nil {
+			continue
+		}
 
 		select {
 		case s.jobs <- AutomationJob{AutomationID: exec.AutomationID, ExecutionID: exec.ID, AccountID: exec.AccountID}:

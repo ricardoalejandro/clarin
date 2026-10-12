@@ -76,6 +76,7 @@ func Migrate(db *pgxpool.Pool) error {
 		)`,
 
 		// Users table
+		leadPolicyMigration,
 		`CREATE TABLE IF NOT EXISTS users (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,

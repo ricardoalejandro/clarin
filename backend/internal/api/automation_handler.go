@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/repository"
 )
 
 // ─── Automation CRUD ──────────────────────────────────────────────────────────
@@ -89,6 +91,9 @@ func (s *Server) handleCreateAutomation(c *fiber.Ctx) error {
 		Config:        req.Config,
 		IsActive:      req.IsActive,
 	}
+	if err := s.requireCommercialAutomationModule(c, a); err != nil {
+		return writeLeadPolicyError(c, err)
+	}
 	if err := s.repos.Automation.Create(c.Context(), a); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
@@ -106,6 +111,9 @@ func (s *Server) handleUpdateAutomation(c *fiber.Ctx) error {
 	existing, err := s.repos.Automation.GetByID(c.Context(), id, accountID)
 	if err != nil || existing == nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Not found"})
+	}
+	if err := s.requireCommercialAutomationModule(c, existing); err != nil {
+		return writeLeadPolicyError(c, err)
 	}
 
 	var req struct {
@@ -129,6 +137,9 @@ func (s *Server) handleUpdateAutomation(c *fiber.Ctx) error {
 	if existing.TriggerConfig == nil {
 		existing.TriggerConfig = map[string]interface{}{}
 	}
+	if err := s.requireCommercialAutomationModule(c, existing); err != nil {
+		return writeLeadPolicyError(c, err)
+	}
 
 	if err := s.repos.Automation.Update(c.Context(), existing); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -142,6 +153,13 @@ func (s *Server) handleDeleteAutomation(c *fiber.Ctx) error {
 	id, err := uuid.Parse(c.Params("id"))
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid ID"})
+	}
+	existing, getErr := s.repos.Automation.GetByID(c.Context(), id, accountID)
+	if getErr != nil || existing == nil {
+		return c.SendStatus(404)
+	}
+	if err := s.requireCommercialAutomationModule(c, existing); err != nil {
+		return writeLeadPolicyError(c, err)
 	}
 	if err := s.repos.Automation.Delete(c.Context(), id, accountID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -162,11 +180,33 @@ func (s *Server) handleToggleAutomation(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	existing, getErr := s.repos.Automation.GetByID(c.Context(), id, accountID)
+	if getErr != nil || existing == nil {
+		return c.SendStatus(404)
+	}
+	if err := s.requireCommercialAutomationModule(c, existing); err != nil {
+		return writeLeadPolicyError(c, err)
+	}
 	if err := s.repos.Automation.SetActive(c.Context(), id, accountID, req.IsActive); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	s.invalidateAutomationsCache(accountID)
 	return c.JSON(fiber.Map{"success": true})
+}
+
+func (s *Server) requireCommercialAutomationModule(c *fiber.Ctx, a *domain.Automation) error {
+	if !domain.IsCommercialAutomation(false, a.TriggerType, &a.Config) {
+		return nil
+	}
+	p, err := s.repos.Account.GetLeadPolicy(c.Context(), a.AccountID)
+	if err != nil {
+		return err
+	}
+	if !p.LeadsEnabled {
+		return repository.ErrLeadsDisabled
+	}
+	c.Context().SetUserValue("clarin.leads_policy_version", p.Version)
+	return nil
 }
 
 // ─── Manual trigger ───────────────────────────────────────────────────────────
@@ -193,6 +233,9 @@ func (s *Server) handleTriggerAutomation(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Automation.TriggerManual(c.Context(), id, accountID, leadID); err != nil {
+		if errors.Is(err, repository.ErrLeadsDisabled) || errors.Is(err, repository.ErrLeadAutomationDisabled) || errors.Is(err, repository.ErrLeadPolicyConflict) {
+			return writeLeadPolicyError(c, err)
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true, "message": "Automation triggered"})
@@ -237,30 +280,58 @@ func (s *Server) handleGetExecutionLogs(c *fiber.Ctx) error {
 
 // ─── Trigger helpers called by other handlers (tag assign/remove, lead created, stage changed) ──
 
-func (s *Server) triggerAutomationLeadCreated(accountID, leadID uuid.UUID) {
+func (s *Server) triggerAutomationLeadCreated(source context.Context, accountID, leadID uuid.UUID) {
 	if s.services.Automation == nil {
 		return
 	}
-	go s.services.Automation.TriggerLeadCreated(context.Background(), accountID, leadID)
+	ctx, err := s.captureCommercialActivity(source, accountID)
+	if err != nil {
+		return
+	}
+	go s.services.Automation.TriggerLeadCreated(ctx, accountID, leadID)
 }
 
-func (s *Server) triggerAutomationLeadStageChanged(accountID, leadID, stageID uuid.UUID) {
+func (s *Server) triggerAutomationLeadStageChanged(source context.Context, accountID, leadID, stageID uuid.UUID) {
 	if s.services.Automation == nil {
 		return
 	}
-	go s.services.Automation.TriggerLeadStageChanged(context.Background(), accountID, leadID, stageID)
+	ctx, err := s.captureCommercialActivity(source, accountID)
+	if err != nil {
+		return
+	}
+	go s.services.Automation.TriggerLeadStageChanged(ctx, accountID, leadID, stageID)
 }
 
-func (s *Server) triggerAutomationTagAssigned(accountID, leadID, tagID uuid.UUID) {
+func (s *Server) triggerAutomationTagAssigned(source context.Context, accountID, leadID, tagID uuid.UUID) {
 	if s.services.Automation == nil {
 		return
 	}
-	go s.services.Automation.TriggerTagAssigned(context.Background(), accountID, leadID, tagID)
+	ctx, err := s.captureCommercialActivity(source, accountID)
+	if err != nil {
+		return
+	}
+	go s.services.Automation.TriggerTagAssigned(ctx, accountID, leadID, tagID)
 }
 
-func (s *Server) triggerAutomationTagRemoved(accountID, leadID, tagID uuid.UUID) {
+func (s *Server) triggerAutomationTagRemoved(source context.Context, accountID, leadID, tagID uuid.UUID) {
 	if s.services.Automation == nil {
 		return
 	}
-	go s.services.Automation.TriggerTagRemoved(context.Background(), accountID, leadID, tagID)
+	ctx, err := s.captureCommercialActivity(source, accountID)
+	if err != nil {
+		return
+	}
+	go s.services.Automation.TriggerTagRemoved(ctx, accountID, leadID, tagID)
+}
+
+// Copy only immutable activity metadata; fasthttp request contexts are pooled
+// and must never survive in the asynchronous automation goroutine.
+func (s *Server) captureCommercialActivity(source context.Context, accountID uuid.UUID) (context.Context, error) {
+	version, hasVersion := source.Value("clarin.leads_policy_version").(int64)
+	at, hasTime := source.Value("clarin.leads_activity_at").(time.Time)
+	if !hasVersion || !hasTime {
+		return nil, repository.ErrLeadPolicyConflict
+	}
+	ctx := repository.WithLeadAutomationPolicy(context.Background(), version, at)
+	return s.repos.Account.CaptureLeadAutomationContext(ctx, accountID, at)
 }

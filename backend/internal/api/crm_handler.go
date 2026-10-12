@@ -12,7 +12,6 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/kommo"
 	"github.com/naperu/clarin/internal/repository"
@@ -88,6 +87,9 @@ func pipelineStagesToDrafts(stages []*domain.PipelineStage) []repository.Pipelin
 }
 
 func writeCRMError(c *fiber.Ctx, err error) error {
+	if errors.Is(err, repository.ErrLeadsDisabled) || errors.Is(err, repository.ErrLeadAutomationDisabled) || errors.Is(err, repository.ErrLeadPolicyConflict) {
+		return writeLeadPolicyError(c, err)
+	}
 	switch {
 	case errors.Is(err, repository.ErrCRMNotFound), errors.Is(err, pgx.ErrNoRows):
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Recurso no encontrado"})
@@ -525,7 +527,7 @@ func (s *Server) handleCreateLeadProfessional(c *fiber.Ctx) error {
 	s.invalidateContactsCache(accountID)
 	s.invalidateLeadsCache(accountID)
 	s.broadcastLeadDelta(accountID, "created", lead)
-	s.triggerAutomationLeadCreated(accountID, lead.ID)
+	s.triggerAutomationLeadCreated(c.Context(), accountID, lead.ID)
 	return c.Status(201).JSON(fiber.Map{"success": true, "lead": lead})
 }
 
@@ -582,7 +584,7 @@ func (s *Server) handleMoveLeadToStage(c *fiber.Ctx) error {
 		})
 	}
 	if stageID != nil {
-		s.triggerAutomationLeadStageChanged(accountID, leadID, *stageID)
+		s.triggerAutomationLeadStageChanged(c.Context(), accountID, leadID, *stageID)
 	}
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID, "lead": lead})
 }
@@ -692,16 +694,11 @@ func (s *Server) handleArchiveLeadSafe(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Solicitud inválida"})
 	}
-	var tag pgconn.CommandTag
-	if req.Archive {
-		tag, err = s.repos.DB().Exec(c.Context(), `UPDATE leads SET is_archived=TRUE, archived_at=NOW(), archive_reason=$3, updated_at=NOW() WHERE id=$1 AND account_id=$2 AND deleted_at IS NULL`, leadID, accountID, strings.TrimSpace(req.Reason))
-	} else {
-		tag, err = s.repos.DB().Exec(c.Context(), `UPDATE leads SET is_archived=FALSE, archived_at=NULL, archive_reason='', updated_at=NOW() WHERE id=$1 AND account_id=$2 AND deleted_at IS NULL`, leadID, accountID)
-	}
+	count, err := s.repos.Lead.ArchiveActiveForAccount(c.Context(), accountID, []uuid.UUID{leadID}, req.Archive, strings.TrimSpace(req.Reason))
 	if err != nil {
 		return writeCRMError(c, err)
 	}
-	if tag.RowsAffected() == 0 {
+	if count == 0 {
 		return writeCRMError(c, repository.ErrCRMNotFound)
 	}
 	s.invalidateLeadsCache(accountID)
@@ -719,18 +716,12 @@ func (s *Server) handleArchiveLeadsBatchSafe(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil || len(req.IDs) == 0 {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "IDs obligatorios"})
 	}
-	var tag pgconn.CommandTag
-	var err error
-	if req.Archive {
-		tag, err = s.repos.DB().Exec(c.Context(), `UPDATE leads SET is_archived=TRUE, archived_at=NOW(), archive_reason=$3, updated_at=NOW() WHERE account_id=$1 AND id=ANY($2) AND deleted_at IS NULL`, accountID, req.IDs, strings.TrimSpace(req.Reason))
-	} else {
-		tag, err = s.repos.DB().Exec(c.Context(), `UPDATE leads SET is_archived=FALSE, archived_at=NULL, archive_reason='', updated_at=NOW() WHERE account_id=$1 AND id=ANY($2) AND deleted_at IS NULL`, accountID, req.IDs)
-	}
+	count, err := s.repos.Lead.ArchiveActiveForAccount(c.Context(), accountID, req.IDs, req.Archive, strings.TrimSpace(req.Reason))
 	if err != nil {
 		return writeCRMError(c, err)
 	}
 	s.invalidateLeadsCache(accountID)
-	return c.JSON(fiber.Map{"success": true, "count": tag.RowsAffected()})
+	return c.JSON(fiber.Map{"success": true, "count": count})
 }
 
 func (s *Server) handleBlockLeadCompatibility(c *fiber.Ctx) error {

@@ -281,6 +281,9 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 	}
 
 	if req.LeadID != nil && *req.LeadID != "" {
+		if err := s.repos.Account.RequireLeadsEnabled(c.Context(), accountID); err != nil {
+			return writeLeadPolicyError(c, err)
+		}
 		id, parseErr := uuid.Parse(*req.LeadID)
 		if parseErr != nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": "Lead inválido"})
@@ -389,7 +392,7 @@ func (s *Server) handleCreateTask(c *fiber.Ctx) error {
 		}
 	}
 	// Auto-link lead if task created directly on a contact
-	if task.ContactID != nil && task.LeadID == nil {
+	if task.ContactID != nil && task.LeadID == nil && s.leadAutomationAvailable(c, accountID) {
 		if lead, err := s.repos.Lead.GetByContactID(c.Context(), *task.ContactID); err == nil && lead != nil {
 			task.LeadID = &lead.ID
 		}
@@ -979,6 +982,11 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 			if validationErr != nil || !valid {
 				return c.Status(422).JSON(fiber.Map{"success": false, "error": "El lead no pertenece a esta cuenta"})
 			}
+			if existing.LeadID == nil || *existing.LeadID != id {
+				if err := s.repos.Account.RequireLeadsEnabled(c.Context(), accountID); err != nil {
+					return writeLeadPolicyError(c, err)
+				}
+			}
 			existing.LeadID = &id
 		}
 	}
@@ -1164,7 +1172,7 @@ func (s *Server) handleUpdateTask(c *fiber.Ctx) error {
 			existing.ContactID = lead.ContactID
 		}
 	}
-	if existing.ContactID != nil && existing.LeadID == nil {
+	if existing.ContactID != nil && existing.LeadID == nil && req.LeadID == nil && s.leadAutomationAvailable(c, accountID) {
 		if lead, err := s.repos.Lead.GetByContactID(c.Context(), *existing.ContactID); err == nil && lead != nil {
 			existing.LeadID = &lead.ID
 		}

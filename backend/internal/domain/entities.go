@@ -2065,13 +2065,14 @@ const (
 
 // EventFilter defines filter options for listing events
 type EventFilter struct {
-	Search       string
-	Status       string
-	FolderFilter string // "": all events, "root": folder_id IS NULL, "<uuid>": specific folder
-	DateFrom     *time.Time
-	DateTo       *time.Time
-	Limit        int
-	Offset       int
+	Search           string
+	Status           string
+	ExcludeCancelled bool   // Applies only when no specific status is selected.
+	FolderFilter     string // "": all events, "root": folder_id IS NULL, "<uuid>": specific folder
+	DateFrom         *time.Time
+	DateTo           *time.Time
+	Limit            int
+	Offset           int
 }
 
 // InteractionFilter defines filter options for listing interactions

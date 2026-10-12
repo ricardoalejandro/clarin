@@ -988,7 +988,18 @@ func (s *MCPServer) auditToolCallMiddleware() server.ToolHandlerMiddleware {
 					return errResult("Eros no tiene permiso para usar esta herramienta en la cuenta actual"), nil
 				}
 			}
-			result, err := next(ctx, request)
+			var result *mcp.CallToolResult
+			var err error
+			policyCtx, policyError := s.leadPolicyToolContext(ctx, request)
+			ctx = policyCtx
+			if policyError != nil {
+				result = policyError
+			} else {
+				result, err = next(ctx, request)
+				if completionError := s.leadPolicyCompletionError(ctx); completionError != nil {
+					result, err = completionError, nil
+				}
+			}
 			if err == nil && result != nil && !result.IsError && erosClaims != nil {
 				s.captureGenericErosResultSet(ctx, erosClaims, request, result)
 			}
@@ -1183,6 +1194,10 @@ func (s *MCPServer) toolGetCRMStats(ctx context.Context, req mcp.CallToolRequest
 	if err != nil {
 		return mcpAccountStructuredError(err), nil
 	}
+	policy, err := s.repos.Account.GetLeadPolicy(ctx, accountID)
+	if err != nil {
+		return mcpStructuredError("LEAD_POLICY_UNAVAILABLE", "No se pudo verificar la configuración de la cuenta.", nil), nil
+	}
 
 	type statResult struct {
 		Label string
@@ -1204,12 +1219,18 @@ func (s *MCPServer) toolGetCRMStats(ctx context.Context, req mcp.CallToolRequest
 
 	stats := make(map[string]int)
 	for _, q := range queries {
+		if q.label == "total_leads" && !policy.LeadsEnabled {
+			continue
+		}
 		var count int
 		_ = s.repos.DB().QueryRow(ctx, q.query, accountID).Scan(&count)
 		stats[q.label] = count
 	}
 
 	// Lead counts by pipeline stage
+	if !policy.LeadsEnabled {
+		return jsonResult(map[string]any{"totals": stats, "leads_enabled": false}), nil
+	}
 	stageRows, err := s.repos.DB().Query(ctx, `
 		SELECT COALESCE(ps.name, 'Sin etapa') as stage_name, COUNT(*) as cnt
 		FROM leads l

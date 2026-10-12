@@ -190,7 +190,17 @@ WHERE p.account_id = $1`
 	}
 	defer rows.Close()
 
-	var programs []*domain.Program
+	return scanProgramList(rows)
+}
+
+type programListRows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+}
+
+func scanProgramList(rows programListRows) ([]*domain.Program, error) {
+	programs := make([]*domain.Program, 0)
 	for rows.Next() {
 		p := &domain.Program{}
 		err := rows.Scan(
@@ -205,6 +215,9 @@ WHERE p.account_id = $1`
 			return nil, err
 		}
 		programs = append(programs, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return programs, nil
 }
