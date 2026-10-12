@@ -282,6 +282,10 @@ func (s *MCPServer) toolGetAnalysisCapabilities(ctx context.Context, req mcp.Cal
 	if err != nil {
 		return mcpAccountStructuredError(err), nil
 	}
+	policy, err := s.repos.Account.GetLeadPolicy(ctx, accountID)
+	if err != nil {
+		return mcpStructuredError("LEAD_POLICY_UNAVAILABLE", "No se pudo verificar la configuración de la cuenta.", nil), nil
+	}
 
 	counts := map[string]int{}
 	countQueries := map[string]string{
@@ -298,11 +302,19 @@ func (s *MCPServer) toolGetAnalysisCapabilities(ctx context.Context, req mcp.Cal
 		"interactions": `SELECT COUNT(*) FROM interactions WHERE account_id = $1`,
 	}
 	for key, sql := range countQueries {
+		if key == "leads" && !policy.LeadsEnabled {
+			continue
+		}
 		var count int
 		_ = s.repos.DB().QueryRow(ctx, sql, accountID).Scan(&count)
 		counts[key] = count
 	}
 
+	if !policy.LeadsEnabled {
+		return jsonResult(map[string]any{"account_id": accountID.String(), "leads_enabled": false, "counts": counts,
+			"available_tools":      []string{"search_contacts", "get_contact_detail", "list_chats", "search_chat_messages", "list_events", "list_programs", "list_surveys"},
+			"recommended_workflow": []string{"Leads está desactivado. Utiliza las herramientas independientes de Contactos, Chats, Eventos y Programas."}}), nil
+	}
 	return jsonResult(map[string]any{
 		"account_id": accountID.String(),
 		"counts":     counts,
@@ -1518,6 +1530,10 @@ func (s *MCPServer) toolExportMessagesForAnalysis(ctx context.Context, req mcp.C
 	if err != nil {
 		return mcpAccountStructuredError(err), nil
 	}
+	policy, err := s.repos.Account.GetLeadPolicy(ctx, accountID)
+	if err != nil {
+		return mcpStructuredError("LEAD_POLICY_UNAVAILABLE", "No se pudo verificar la configuración de la cuenta.", nil), nil
+	}
 	limit := intArg(req, "limit", 1000, 5000)
 	offset, err := decodeAnalysisCursor(stringArg(req, "cursor"))
 	if err != nil {
@@ -1587,8 +1603,7 @@ func (s *MCPServer) toolExportMessagesForAnalysis(ctx context.Context, req mcp.C
 			m.id::text, ch.id::text, COALESCE(ch.contact_id::text, ''),
 			COALESCE(c.custom_name, c.name, c.push_name, ch.name, '') AS contact_name,
 			COALESCE(c.phone, '') AS phone,
-			COALESCE((SELECT array_agg(l.id::text ORDER BY l.created_at DESC)
-				FROM leads l WHERE l.account_id = $1 AND l.contact_id = ch.contact_id), ARRAY[]::text[]) AS lead_ids,
+			` + messageExportLeadIDsSQL(policy.LeadsEnabled) + ` AS lead_ids,
 			m.message_id,
 			CASE WHEN m.is_from_me THEN 'outbound' ELSE 'inbound' END AS direction,
 			COALESCE(m.from_name, ''),
@@ -1617,12 +1632,11 @@ func (s *MCPServer) toolExportMessagesForAnalysis(ctx context.Context, req mcp.C
 		if err := rows.Scan(&id, &chatID, &contactID, &contactName, &phone, &leadIDs, &messageID, &direction, &fromName, &body, &msgType, &status, &ts, &provider, &templateName, &mediaURL, &mediaMime, &mediaFilename, &quotedBody); err != nil {
 			return errResult("error leyendo mensajes: " + err.Error()), nil
 		}
-		messages = append(messages, map[string]any{
+		item := map[string]any{
 			"message_row_id": id,
 			"message_id":     messageID,
 			"chat_id":        chatID,
 			"contact_id":     contactID,
-			"lead_ids":       leadIDs,
 			"contact_name":   contactName,
 			"phone":          phone,
 			"direction":      direction,
@@ -1637,7 +1651,11 @@ func (s *MCPServer) toolExportMessagesForAnalysis(ctx context.Context, req mcp.C
 			"media_mimetype": mediaMime,
 			"media_filename": mediaFilename,
 			"quoted_body":    quotedBody,
-		})
+		}
+		if policy.LeadsEnabled {
+			item["lead_ids"] = leadIDs
+		}
+		messages = append(messages, item)
 	}
 	nextOffset := offset + len(messages)
 	nextCursor := ""
@@ -1654,6 +1672,13 @@ func (s *MCPServer) toolExportMessagesForAnalysis(ctx context.Context, req mcp.C
 		"messages":        messages,
 		"pagination_note": "Llama de nuevo con next_cursor hasta que has_more=false para recorrer todos los mensajes filtrados.",
 	}), nil
+}
+
+func messageExportLeadIDsSQL(leadsEnabled bool) string {
+	if !leadsEnabled {
+		return `ARRAY[]::text[]`
+	}
+	return `COALESCE((SELECT array_agg(l.id::text ORDER BY l.created_at DESC) FROM leads l WHERE l.account_id = $1 AND l.contact_id = ch.contact_id), ARRAY[]::text[])`
 }
 
 func decodeToolResultJSON(result *mcp.CallToolResult) (any, error) {

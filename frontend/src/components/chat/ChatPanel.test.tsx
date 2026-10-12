@@ -87,6 +87,45 @@ function jsonResponse(body: unknown, ok = true, status = ok ? 200 : 400): Respon
 }
 
 describe('ChatPanel canonical device truth', () => {
+  it('accepts a deliberately confirmed sender in the same chat only with a new explicit session and preserves its draft', async () => {
+    let serverDevice = device('connected')
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => Promise.resolve(jsonResponse(String(input) === '/api/chats/chat-1'
+      ? { success: true, chat: { ...chat, device_id: serverDevice.id }, device: serverDevice }
+      : { success: true, messages: [], stickers: [], quick_replies: [] }))))
+    const { rerender } = render(<ChatPanel chatId="chat-1" deviceId="device-1" device={serverDevice} initialChat={chat} explicitSenderSession={0} />)
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Draft test editor' }), { target: { value: 'Borrador antes de confirmar' } })
+    serverDevice = { ...device('connected'), id: 'device-2' }
+    rerender(<ChatPanel chatId="chat-1" deviceId="device-2" device={serverDevice} initialChat={{ ...chat, device_id: 'device-2' }} explicitSenderSession={0} />)
+    act(() => websocket.listeners.forEach(listener => listener({ event: 'chat_sender_changed', data: { chat_id: 'chat-1' } })))
+    expect(await screen.findByText(/El canal de esta conversación cambió/)).toBeVisible()
+    rerender(<ChatPanel chatId="chat-1" deviceId="device-2" device={serverDevice} initialChat={{ ...chat, device_id: 'device-2' }} explicitSenderSession={1} />)
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue('Borrador antes de confirmar'))
+  })
+
+  it('blocks a different sender returned after another session changed the chat', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => Promise.resolve(jsonResponse(String(input) === '/api/chats/chat-1'
+      ? { success: true, chat: { ...chat, device_id: 'device-2' }, device: { ...device('connected'), id: 'device-2' } }
+      : { success: true, messages: [], stickers: [], quick_replies: [] }))))
+    render(<ChatPanel chatId="chat-1" deviceId="device-1" device={device('connected')} initialChat={chat} />)
+    expect(await screen.findByText(/El canal de esta conversación cambió/)).toBeVisible()
+    expect(screen.queryByRole('textbox', { name: 'Draft test editor' })).toBeNull()
+  })
+
+  it.each(['device_status', 'chat_sender_changed'])('preserves a draft when %s detects a sender change and restores it only for the same sender', async (eventType) => {
+    let serverDevice = device('connected')
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => Promise.resolve(jsonResponse(String(input) === '/api/chats/chat-1'
+      ? { success: true, chat, device: serverDevice }
+      : { success: true, messages: [], stickers: [], quick_replies: [] }))))
+    render(<ChatPanel chatId="chat-1" deviceId="device-1" device={device('connected')} initialChat={chat} />)
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Draft test editor' }), { target: { value: 'No perder este borrador' } })
+    serverDevice = { ...device('connected'), id: 'device-2' }
+    act(() => websocket.listeners.forEach(listener => listener({ event: eventType, data: { chat_id: 'chat-1', device_id: 'device-1', status: 'connected' } })))
+    expect(await screen.findByText(/El canal de esta conversación cambió/)).toBeVisible()
+    serverDevice = device('connected')
+    act(() => websocket.listeners.forEach(listener => listener({ event: 'device_status', data: { device_id: 'device-1', status: 'connected' } })))
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue('No perder este borrador'))
+  })
+
   beforeEach(() => {
     localStorage.setItem('token', 'test-token')
     websocket.listeners.clear()

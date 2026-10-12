@@ -99,8 +99,11 @@ type WhatsAppGroupCoverageSummary struct {
 }
 
 type WhatsAppGroupCoverageReport struct {
-	GeneratedAt time.Time `json:"generated_at"`
-	Device      struct {
+	AccountID          uuid.UUID `json:"account_id"`
+	LeadsEnabled       bool      `json:"leads_enabled"`
+	LeadsPolicyVersion int64     `json:"leads_policy_version"`
+	GeneratedAt        time.Time `json:"generated_at"`
+	Device             struct {
 		ID    uuid.UUID `json:"id"`
 		Name  string    `json:"name"`
 		Phone string    `json:"phone"`

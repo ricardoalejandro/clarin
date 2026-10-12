@@ -5,6 +5,8 @@ import { createPortal } from 'react-dom'
 import { useRouter, usePathname } from 'next/navigation'
 import Link from 'next/link'
 import NotificationProvider from '@/components/NotificationProvider'
+import { LeadPolicyProvider, LeadModuleUnavailable, useAccountLeadPolicy } from '@/components/LeadPolicyProvider'
+import { isLeadModulePath } from '@/lib/leadPolicy'
 import ErosAssistant from '@/components/ErosAssistant'
 import TaskBadge from '@/components/TaskBadge'
 import AccountSwitcher from '@/components/AccountSwitcher'
@@ -132,6 +134,7 @@ function DashboardLayoutContent({
   const { snapshot: offlineRuntime, isOffline, activity: registerOfflineActivity, requireOnline } = useClarinRuntime()
   const { ready: pwaReady, mobileApp: mobileAppMode } = usePwaRuntime()
   const [user, setUser] = useState<User | null>(null)
+  const leadPolicy = useAccountLeadPolicy(user?.account_id, isOffline)
   const [accountCount, setAccountCount] = useState(1)
   const [loading, setLoading] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -557,6 +560,7 @@ function DashboardLayoutContent({
 
   function hasPermission(href: string): boolean {
     if (!user) return false
+    if (isLeadModulePath(href) && !leadPolicy.leadsEnabled) return false
     if (href === '/dashboard/storage') return true
     if (user.is_admin || user.is_super_admin) return true
     const module = MODULE_PERMS[href]
@@ -676,6 +680,7 @@ function DashboardLayoutContent({
   }
 
   return (
+    <LeadPolicyProvider value={leadPolicy}>
     <NotificationProvider accountId={user.account_id} mobileAppMode={mobileAppMode}>
     <ChatMobileChromeProvider value={chatMobileChromeContextValue}>
     <div className="app-viewport bg-slate-50 flex overflow-hidden">
@@ -912,7 +917,7 @@ function DashboardLayoutContent({
             <MobileUnavailableSurface returnHref="" noModules />
           ) : mobilePathUnavailable ? (
             <MobileUnavailableSurface returnHref={mobileDefaultHref} permissionDenied={mobilePermissionDenied} />
-          ) : children}
+          ) : isLeadModulePath(pathname) && !leadPolicy.leadsEnabled ? <LeadModuleUnavailable state={leadPolicy} /> : children}
         </main>
 
         {mobileAppMode && (
@@ -1023,5 +1028,6 @@ function DashboardLayoutContent({
 
     </ChatMobileChromeProvider>
     </NotificationProvider>
+    </LeadPolicyProvider>
   )
 }

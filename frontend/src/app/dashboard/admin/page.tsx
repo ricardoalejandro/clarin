@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 import { getPasswordIssues } from '@/components/PasswordStrengthChecklist'
 import { AdminFormDialog, AdminPasswordFields } from '@/components/admin'
+import AccountLeadPolicyDialog from '@/components/admin/AccountLeadPolicyDialog'
 import OfflineAccessAdminV5 from '@/components/admin/OfflineAccessAdminV5'
 import { apiDelete, apiGet, apiPost, logoutFromBrowser, tryRefreshToken } from '@/lib/api'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
@@ -431,6 +432,7 @@ export default function AdminPage() {
   const [accountFormError, setAccountFormError] = useState<AccountFormError | null>(null)
   const [accountSubmitting, setAccountSubmitting] = useState(false)
   const [accountAdvancedOpen, setAccountAdvancedOpen] = useState(false)
+  const [leadPolicyAccount, setLeadPolicyAccount] = useState<Account | null>(null)
   const accountNameInputRef = useRef<HTMLInputElement>(null)
   const [showUserModal, setShowUserModal] = useState(false)
   const [editingUser, setEditingUser] = useState<User | null>(null)
@@ -2065,6 +2067,7 @@ export default function AdminPage() {
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
+      <AccountLeadPolicyDialog account={leadPolicyAccount} onClose={() => setLeadPolicyAccount(null)} />
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6">
         <div>
@@ -2380,6 +2383,7 @@ export default function AdminPage() {
                   </td>
 	                  <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-1">
+                      <button type="button" onClick={() => setLeadPolicyAccount(a)} className="min-h-11 rounded-lg px-2 text-xs font-medium text-slate-600 hover:bg-emerald-50 hover:text-emerald-700" aria-label={`Configurar Leads de ${a.name}`}>Leads</button>
                       <button onClick={() => openEditAccount(a)} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded" title="Editar">
                         <Pencil className="w-4 h-4" />
                       </button>

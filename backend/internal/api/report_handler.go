@@ -6,6 +6,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/service"
 )
 
@@ -52,11 +53,18 @@ func (s *Server) handleGenerateWhatsAppGroupCoverage(c *fiber.Ctx) error {
 	if err != nil {
 		return writeWhatsAppReportError(c, err)
 	}
+	release, err := s.repos.Report.AcquireWhatsAppCoveragePublication(c.Context(), accountID, report)
+	if err != nil {
+		return writeWhatsAppReportError(c, err)
+	}
+	defer release()
 	return c.JSON(fiber.Map{"success": true, "report": report})
 }
 
 func writeWhatsAppReportError(c *fiber.Ctx, err error) error {
 	switch {
+	case errors.Is(err, repository.ErrLeadPolicyConflict):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "lead_policy_conflict", "error": "La configuración de la cuenta cambió. Genera nuevamente el reporte."})
 	case errors.Is(err, service.ErrReportDeviceNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "code": "device_not_found", "error": "Dispositivo no encontrado"})
 	case errors.Is(err, service.ErrReportUnsupportedDevice):

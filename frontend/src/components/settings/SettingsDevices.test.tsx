@@ -1,7 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ params: new URLSearchParams('tab=devices'), listeners: new Set<(value: unknown) => void>(), router: { replace: vi.fn(), push: vi.fn() } }))
+const mocks = vi.hoisted(() => ({ leadsEnabled: true, params: new URLSearchParams('tab=devices'), listeners: new Set<(value: unknown) => void>(), router: { replace: vi.fn(), push: vi.fn() } }))
+vi.mock('@/components/LeadPolicyProvider', () => ({ useLeadPolicy: () => ({ leadsEnabled: mocks.leadsEnabled }) }))
 vi.mock('next/navigation', () => ({ useSearchParams: () => mocks.params, useRouter: () => mocks.router }))
 vi.mock('@/lib/api', () => ({ logoutFromBrowser: vi.fn(), subscribeWebSocket: (listener: (value: unknown) => void) => { mocks.listeners.add(listener); return () => mocks.listeners.delete(listener) } }))
 vi.mock('@/components/NotificationProvider', () => ({ useNotifications: () => ({ refreshSettings: vi.fn() }) }))
@@ -17,6 +18,8 @@ import { CLOUD_DELETION_UNAVAILABLE, LOCAL_DEVICE_DELETION_MESSAGE } from './dev
 const json = (body: unknown, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body }) as Response
 const device = { id: 'device-1', name: 'Synthetic channel', status: 'connected', provider: 'whatsapp_web', receive_messages: true, phone: '', jid: '', qr_code: '', last_seen_at: '' }
 beforeEach(() => {
+  mocks.leadsEnabled = true
+  mocks.params = new URLSearchParams('tab=devices')
   localStorage.clear()
   localStorage.setItem('token', 'synthetic-settings-token')
   mocks.router.push.mockClear()
@@ -36,6 +39,18 @@ function fixture(devices: unknown[], mutation: (input: string, options: RequestI
   return request
 }
 describe('device administration controls', () => {
+  it('keeps account controls but hides commercial settings and queries when Leads is disabled', async () => {
+    mocks.leadsEnabled = false
+    mocks.params = new URLSearchParams('tab=account')
+    const request = fixture([], async () => json({ success: false }))
+    render(<SettingsPage />)
+    expect(await screen.findByText('Zona de Peligro')).toBeInTheDocument()
+    expect(screen.queryByText('Etapa de Leads Entrantes')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Mover oportunidades a papelera' })).not.toBeInTheDocument()
+    expect(request.mock.calls.some(([url]) => String(url).startsWith('/api/pipelines'))).toBe(false)
+    expect(request.mock.calls.some(([url]) => String(url).startsWith('/api/leads'))).toBe(false)
+  })
+
   it('routes official signup to Meta without offering a rejected manual POST', async () => {
     const request = fixture([], async () => json({ success: false }))
     render(<SettingsPage />)

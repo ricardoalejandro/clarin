@@ -6,7 +6,7 @@ import {
   CalendarDays, Plus, Search, MapPin, Users, Clock, Edit2, Trash2,
   Eye, LayoutGrid, List, ChevronRight, Home, FolderPlus, MoreHorizontal,
   LayoutTemplate, FolderOpen, ArrowLeft, MoveRight, Tag, X, ChevronDown, Check,
-  Code, FileText, AlertCircle, CheckCircle2, Copy, GripVertical,
+  Code, FileText, EyeOff, Copy, GripVertical,
   Loader2, ArrowUp, ArrowDown,
 } from 'lucide-react'
 import { format } from 'date-fns'
@@ -16,6 +16,7 @@ import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 import { resolveEventsResponsiveLayout, type EventsViewMode } from '@/lib/eventsResponsive'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 import { eventDetailPayload, eventLocalDateTime, isEventContextReadOnly } from './eventForm'
+import { eventListQuery } from './eventListFilters'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -172,7 +173,7 @@ export default function EventsPage() {
   const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(search, SEARCH_DEBOUNCE_MS)
   const searchPending = search !== debouncedSearch
   const [statusFilter, setStatusFilter] = useState('active')
-  const [hideCancelled, setHideCancelled] = useState(true)
+  const [includeCancelled, setIncludeCancelled] = useState(false)
   const [viewMode, setViewMode] = useState<EventsViewMode>('list')
 
   // Sort state for list view
@@ -259,12 +260,8 @@ export default function EventsPage() {
         offsetRef.current = 0
         hasMoreRef.current = true
       }
-      const params = new URLSearchParams()
-      if (debouncedSearch) params.set('search', debouncedSearch)
-      if (statusFilter) params.set('status', statusFilter)
-      params.set('folder', currentFolderID ?? 'root')
-      params.set('limit', String(EVENTS_PAGE_SIZE))
-      params.set('offset', String(offsetRef.current))
+      const params = eventListQuery({ search: debouncedSearch, status: statusFilter, includeCancelled,
+        folderID: currentFolderID, limit: EVENTS_PAGE_SIZE, offset: offsetRef.current })
       const res = await fetch(`/api/events?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal,
@@ -304,7 +301,7 @@ export default function EventsPage() {
         loadingMoreRef.current = false
       }
     }
-  }, [token, debouncedSearch, statusFilter, currentFolderID])
+  }, [token, debouncedSearch, statusFilter, currentFolderID, includeCancelled])
 
   useEffect(() => () => {
     eventsRequestRef.current += 1
@@ -420,8 +417,8 @@ export default function EventsPage() {
     currentFolderID ? f.parent_id === currentFolderID : !f.parent_id
   )
 
-  // Filter out cancelled events when hideCancelled is true
-  const filteredEvents = hideCancelled && !statusFilter ? events.filter(ev => ev.status !== 'cancelled') : events
+  // The server applies status visibility before counting and pagination.
+  const filteredEvents = events
 
   // Sorted events for list view
   const sortedEvents = useMemo(() => {
@@ -1380,21 +1377,23 @@ export default function EventsPage() {
             <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" aria-label="Buscando eventos" />
           )}
         </div>
-        <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
+        <select aria-label="Estado de eventos" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
           className="px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-slate-900">
           <option value="">Todos los estados</option>
           {STATUS_OPTIONS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
         </select>
-        <button
-          onClick={() => setHideCancelled(!hideCancelled)}
-          className={`flex items-center gap-1.5 px-3 py-2 border rounded-lg text-sm transition-colors whitespace-nowrap ${
-            hideCancelled ? 'border-red-200 bg-red-50 text-red-600' : 'border-slate-300 text-slate-600 hover:bg-slate-50'
+        {!statusFilter && <button
+          type="button"
+          aria-pressed={includeCancelled}
+          onClick={() => setIncludeCancelled(value => !value)}
+          className={`flex min-h-11 items-center justify-center gap-1.5 px-3 py-2 border rounded-xl text-sm transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
+            includeCancelled ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
           }`}
-          title={hideCancelled ? 'Mostrar cancelados' : 'Ocultar cancelados'}
+          title={includeCancelled ? 'Los resultados incluyen eventos cancelados' : 'Los resultados excluyen eventos cancelados'}
         >
-          {hideCancelled ? <AlertCircle className="w-3.5 h-3.5" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
-          {hideCancelled ? 'Cancelados ocultos' : 'Todos visibles'}
-        </button>
+          {includeCancelled ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+          Incluir cancelados
+        </button>}
         <div className="flex self-stretch rounded-xl bg-slate-100 p-0.5 sm:self-auto" role="group" aria-label="Vista de eventos">
           <button type="button" data-events-view-option="grid" onClick={() => setViewMode('grid')} title="Cuadrícula" aria-label="Vista de cuadrícula" aria-pressed={viewMode === 'grid'}
             className={`flex min-h-11 min-w-11 flex-1 items-center justify-center rounded-lg transition-colors sm:flex-none ${viewMode === 'grid' ? 'bg-white text-slate-900 shadow' : 'text-slate-500 hover:text-slate-700'}`}>
@@ -1484,11 +1483,8 @@ export default function EventsPage() {
       {eventsError && filteredEvents.length === 0 && visibleFolders.length === 0 ? null : filteredEvents.length === 0 && visibleFolders.length === 0 ? (
         <div className="text-center py-16 bg-white rounded-xl border border-slate-200">
           <CalendarDays className="w-12 h-12 text-slate-300 mx-auto mb-3" />
-          <p className="text-slate-500 font-medium">No hay eventos{hideCancelled && events.length > 0 ? ' visibles' : ''}</p>
-          <p className="text-slate-400 text-sm mt-1">{hideCancelled && events.length > 0 ? 'Hay eventos cancelados ocultos' : 'Crea tu primer evento para empezar'}</p>
-          {hideCancelled && events.length > 0 && (
-            <button onClick={() => setHideCancelled(false)} className="mt-2 text-sm text-emerald-600 hover:text-emerald-700 font-medium">Mostrar cancelados</button>
-          )}
+          <p className="text-slate-500 font-medium">No hay eventos en esta vista</p>
+          <p className="text-slate-400 text-sm mt-1">{debouncedSearch ? 'Prueba con otra búsqueda o cambia el estado.' : !statusFilter && !includeCancelled ? 'Puedes incluir los cancelados o crear un nuevo evento.' : 'Cambia el estado o crea un nuevo evento para empezar.'}</p>
         </div>
       ) : filteredEvents.length === 0 ? (
         <div className="text-center py-10 bg-white rounded-xl border border-dashed border-slate-200">

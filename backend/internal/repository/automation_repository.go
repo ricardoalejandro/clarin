@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/naperu/clarin/internal/domain"
 )
@@ -18,14 +19,26 @@ type AutomationRepository struct {
 // ─── Automation CRUD ──────────────────────────────────────────────────────────
 
 func (r *AutomationRepository) Create(ctx context.Context, a *domain.Automation) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = requireAutomationMutationTx(ctx, tx, a.AccountID, uuid.Nil, a); err != nil {
+		return err
+	}
 	configJSON, _ := json.Marshal(a.Config)
 	triggerConfigJSON, _ := json.Marshal(a.TriggerConfig)
-	return r.db.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO automations (account_id, name, description, trigger_type, trigger_config, config, is_active)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id, created_at, updated_at
 	`, a.AccountID, a.Name, a.Description, a.TriggerType, triggerConfigJSON, configJSON, a.IsActive).
 		Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *AutomationRepository) GetByID(ctx context.Context, id, accountID uuid.UUID) (*domain.Automation, error) {
@@ -60,24 +73,79 @@ func (r *AutomationRepository) List(ctx context.Context, accountID uuid.UUID) ([
 }
 
 func (r *AutomationRepository) Update(ctx context.Context, a *domain.Automation) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = requireAutomationMutationTx(ctx, tx, a.AccountID, a.ID, a); err != nil {
+		return err
+	}
 	configJSON, _ := json.Marshal(a.Config)
 	triggerConfigJSON, _ := json.Marshal(a.TriggerConfig)
-	_, err := r.db.Exec(ctx, `
+	_, err = tx.Exec(ctx, `
 		UPDATE automations
 		SET name=$1, description=$2, trigger_type=$3, trigger_config=$4, config=$5, is_active=$6, updated_at=NOW()
 		WHERE id=$7 AND account_id=$8
 	`, a.Name, a.Description, a.TriggerType, triggerConfigJSON, configJSON, a.IsActive, a.ID, a.AccountID)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *AutomationRepository) Delete(ctx context.Context, id, accountID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `DELETE FROM automations WHERE id=$1 AND account_id=$2`, id, accountID)
-	return err
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = requireAutomationMutationTx(ctx, tx, accountID, id, nil); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM automations WHERE id=$1 AND account_id=$2`, id, accountID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *AutomationRepository) SetActive(ctx context.Context, id, accountID uuid.UUID, active bool) error {
-	_, err := r.db.Exec(ctx, `UPDATE automations SET is_active=$1, updated_at=NOW() WHERE id=$2 AND account_id=$3`, active, id, accountID)
-	return err
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = requireAutomationMutationTx(ctx, tx, accountID, id, nil); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE automations SET is_active=$1, updated_at=NOW() WHERE id=$2 AND account_id=$3`, active, id, accountID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func requireAutomationMutationTx(ctx context.Context, tx pgx.Tx, accountID, id uuid.UUID, next *domain.Automation) error {
+	policy, err := readLeadPolicy(ctx, tx, accountID, true)
+	if err != nil {
+		return err
+	}
+	commercial := next != nil && domain.IsCommercialAutomation(false, next.TriggerType, &next.Config)
+	if id != uuid.Nil {
+		var trigger string
+		var raw []byte
+		if err = tx.QueryRow(ctx, `SELECT trigger_type,config FROM automations WHERE id=$1 AND account_id=$2`, id, accountID).Scan(&trigger, &raw); err != nil {
+			return err
+		}
+		var graph domain.AutomationGraph
+		if err = json.Unmarshal(raw, &graph); err != nil {
+			return err
+		}
+		commercial = commercial || domain.IsCommercialAutomation(false, trigger, &graph)
+	}
+	if commercial {
+		return validateLeadPolicy(ctx, *policy)
+	}
+	return nil
 }
 
 // GetByTrigger returns all active automations for an account with the given trigger type.
@@ -133,26 +201,53 @@ func (r *AutomationRepository) HasActiveExecutionRecent(ctx context.Context, aut
 // ─── Execution CRUD ───────────────────────────────────────────────────────────
 
 func (r *AutomationRepository) CreateExecution(ctx context.Context, e *domain.AutomationExecution) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if domain.IsCommercialAutomation(e.LeadID != nil, "", e.ConfigSnapshot) {
+		policy, policyErr := readLeadPolicy(ctx, tx, e.AccountID, true)
+		if policyErr != nil {
+			return policyErr
+		}
+		if !policy.AutomationEnabled() {
+			return ErrLeadAutomationDisabled
+		}
+		if err = validateLeadPolicy(ctx, *policy); err != nil {
+			return err
+		}
+	}
 	snapshotJSON, _ := json.Marshal(e.ConfigSnapshot)
 	ctxJSON, _ := json.Marshal(e.ContextData)
-	return r.db.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO automation_executions
 		  (automation_id, account_id, lead_id, status, current_node_id, config_snapshot, context_data)
 		VALUES ($1,$2,$3,$4,$5,$6,$7)
 		RETURNING id, created_at, started_at
 	`, e.AutomationID, e.AccountID, e.LeadID, e.Status, e.CurrentNodeID, snapshotJSON, ctxJSON).
 		Scan(&e.ID, &e.CreatedAt, &e.StartedAt)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *AutomationRepository) UpdateExecution(ctx context.Context, e *domain.AutomationExecution) error {
 	ctxJSON, _ := json.Marshal(e.ContextData)
-	_, err := r.db.Exec(ctx, `
+	tag, err := r.db.Exec(ctx, `
 		UPDATE automation_executions
 		SET status=$1, current_node_id=$2, next_node_id=$3, resume_at=$4,
 		    context_data=$5, error_message=$6, completed_at=$7
-		WHERE id=$8
-	`, e.Status, e.CurrentNodeID, e.NextNodeID, e.ResumeAt, ctxJSON, e.ErrorMessage, e.CompletedAt, e.ID)
-	return err
+		WHERE id=$8 AND account_id=$9 AND NOT (status='failed' AND error_message='lead_policy_paused')
+	`, e.Status, e.CurrentNodeID, e.NextNodeID, e.ResumeAt, ctxJSON, e.ErrorMessage, e.CompletedAt, e.ID, e.AccountID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrLeadAutomationDisabled
+	}
+	return nil
 }
 
 // GetPausedDue returns executions with status='paused' and resume_at <= now (max 100).

@@ -190,6 +190,11 @@ func (r *TaskRepository) Create(ctx context.Context, t *domain.Task) error {
 // transaction so offline commands can commit the task, activity and receipt
 // atomically. It must never commit or emit external effects by itself.
 func (r *TaskRepository) CreateTx(ctx context.Context, tx pgx.Tx, t *domain.Task) error {
+	if t.LeadID != nil {
+		if err := requireLeadPolicyTx(ctx, tx, t.AccountID); err != nil {
+			return err
+		}
+	}
 	// Offline retries use a client-generated UUID as the durable idempotency
 	// anchor. Ordinary callers still receive a fresh server UUID.
 	ensureTaskCreateID(t)
@@ -404,6 +409,18 @@ func (r *TaskRepository) Update(ctx context.Context, t *domain.Task) error {
 // UpdateTx shares all Work ACL, workflow, ordering and progress invariants with
 // normal online writes; the surrounding command owns commit and side effects.
 func (r *TaskRepository) UpdateTx(ctx context.Context, tx pgx.Tx, t *domain.Task) error {
+	if t.LeadID != nil {
+		var oldLeadID *uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT lead_id FROM tasks WHERE id=$1 AND account_id=$2`, t.ID, t.AccountID).Scan(&oldLeadID); err != nil {
+			return err
+		}
+		if oldLeadID == nil || *oldLeadID != *t.LeadID {
+			if err := requireLeadPolicyTx(ctx, tx, t.AccountID); err != nil {
+				return err
+			}
+		}
+	}
+
 	t.UpdatedAt = time.Now()
 	actorID := t.CreatedBy
 	if t.MutationActor != nil {

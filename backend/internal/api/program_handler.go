@@ -178,14 +178,19 @@ func (s *Server) handleListPrograms(c *fiber.Ctx) error {
 		}
 		programsCacheKey = fmt.Sprintf("programs:%s:%s", accountID.String(), cacheStatus)
 		if cached, err := s.cache.Get(c.Context(), programsCacheKey); err == nil && cached != nil {
-			c.Set("Content-Type", "application/json")
-			return c.Send(cached)
+			if canonical, valid := canonicalProgramListCache(cached); valid {
+				c.Set("Content-Type", "application/json")
+				return c.Send(canonical)
+			}
 		}
 	}
 
 	programs, err := s.services.Program.ListPrograms(c.Context(), accountID, status)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	if programs == nil {
+		programs = make([]*domain.Program, 0)
 	}
 
 	if programsCacheKey != "" && s.cache != nil {

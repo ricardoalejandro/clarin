@@ -956,6 +956,7 @@ func (p *DevicePool) extractMessageContent(ctx context.Context, instance *Device
 
 // handleMessage processes incoming messages
 func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance, evt *events.Message) {
+	leadPolicy, leadPolicyErr := p.repos.Account.GetLeadPolicy(ctx, instance.AccountID)
 	// Statuses are a separate domain. Persist only statuses sent by this
 	// account's own device and deliberately discard every contact status. A
 	// revoke is processed before the broadcast early return so remote deletion
@@ -1190,7 +1191,6 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 		return
 	}
 	chatJID := identity.JID.ToNonAD().String()
-	phone := identity.phone()
 	if !isFromMe && !identity.JID.IsEmpty() {
 		senderJID = identity.JID.ToNonAD().String()
 	}
@@ -1361,46 +1361,22 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 		go p.FetchInitialContactAvatar(instance, contact.ID, contactJID)
 	}
 
-	// Auto-create lead if not exists and is incoming message
-	if !isFromMe {
-		lead, _ := p.repos.Lead.GetByJID(ctx, instance.AccountID, contactJID)
-		if lead == nil {
-			contactID := chat.ContactID
-			if contactID == nil && contact != nil {
-				contactID = &contact.ID
+	// Automatic opportunity work is optional; never interrupt message persistence/broadcast.
+	if !isFromMe && leadPolicyErr == nil && leadPolicy.AllowsAutomaticEvent(leadPolicy.Version, evt.Info.Timestamp) && chat.ContactID != nil {
+		newLead := &domain.Lead{AccountID: instance.AccountID, ContactID: chat.ContactID, JID: contactJID, Source: strPtr("whatsapp")}
+		if pipelineID, stageID, err := p.repos.Pipeline.ResolveIncomingLeadDestination(ctx, instance.AccountID); err == nil {
+			newLead.PipelineID = pipelineID
+			newLead.StageID = stageID
+		}
+		created, err := p.repos.Lead.EnsureAutomaticLead(ctx, newLead, leadPolicy.Version, evt.Info.Timestamp)
+		if err != nil {
+			log.Printf("[Lead] Automatic opportunity skipped account=%s: %v", instance.AccountID, err)
+		}
+		if created {
+			if p.cache != nil {
+				_ = p.cache.Del(context.Background(), "leads:"+instance.AccountID.String())
 			}
-			if contactID == nil {
-				log.Printf("[Lead] Skipping auto-create for %s: contact_id could not be resolved", contactJID)
-				return
-			}
-			newLead := &domain.Lead{
-				AccountID: instance.AccountID,
-				JID:       contactJID,
-				Name:      strPtr(senderName),
-				Status:    strPtr(domain.LeadStatusNew),
-				Source:    strPtr("whatsapp"),
-				ContactID: contactID,
-			}
-			if phone != "" {
-				newLead.Phone = strPtr(phone)
-			}
-			if pipelineID, stageID, err := p.repos.Pipeline.ResolveIncomingLeadDestination(ctx, instance.AccountID); err == nil {
-				newLead.PipelineID = pipelineID
-				newLead.StageID = stageID
-			}
-			if err := p.repos.Lead.Create(ctx, newLead); err == nil {
-				log.Printf("[Lead] Auto-created lead for %s (pipeline=%v, stage=%v, contact=%v)", contactJID, newLead.PipelineID, newLead.StageID, newLead.ContactID)
-				// Invalidate leads cache so the API returns fresh data
-				if p.cache != nil {
-					_ = p.cache.Del(context.Background(), "leads:"+instance.AccountID.String())
-				}
-				// Notify frontend via WebSocket
-				p.hub.BroadcastToAccount(instance.AccountID, ws.EventLeadUpdate, map[string]interface{}{
-					"action": "created",
-				})
-			} else {
-				log.Printf("[Lead] Failed to auto-create lead for %s: %v", contactJID, err)
-			}
+			p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermLeads, ws.EventLeadUpdate, map[string]interface{}{"action": "created", "lead_id": newLead.ID, "policy_version": leadPolicy.Version})
 		}
 	}
 

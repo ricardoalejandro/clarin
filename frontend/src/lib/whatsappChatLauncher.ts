@@ -15,6 +15,8 @@ export interface WhatsAppDeviceOption {
   matches_historical?: boolean
   has_different_number?: boolean
   history_unknown?: boolean
+  history_revision?: string
+  requires_confirmation?: boolean
 }
 
 export interface WhatsAppChatResolution {
@@ -23,6 +25,7 @@ export interface WhatsAppChatResolution {
   phone: string
   jid: string
   historical_phone?: string
+  history_revision?: string
   devices: WhatsAppDeviceOption[]
   mode: 'read_only' | 'open_direct' | 'choose_device' | 'no_device'
   error?: string
@@ -35,6 +38,20 @@ function authHeaders() {
 interface WhatsAppChatRequestOptions {
   contactId?: string | null
   signal?: AbortSignal
+  senderConfirmation?: { device_id: string; device_phone: string; history_revision: string }
+}
+
+export function senderConfirmation(device: WhatsAppDeviceOption) {
+  return device.history_revision ? {
+    device_id: device.id,
+    device_phone: device.normalized_phone || cleanWhatsAppPhone(device.phone || device.jid?.split('@')[0] || ''),
+    history_revision: device.history_revision,
+  } : undefined
+}
+
+export function usableWhatsAppDevice(device: WhatsAppDeviceOption) {
+  return !isDeviceDeleting(device) && device.status === 'connected' && device.provider !== 'whatsapp_cloud_api'
+    && device.runtime_capabilities?.can_start_chat === true && device.runtime_capabilities?.can_check_whatsapp === true
 }
 
 export function cleanWhatsAppPhone(phone: string) {
@@ -62,14 +79,14 @@ export async function resolveWhatsAppChat(phone: string, options: WhatsAppChatRe
     }
   }
   const resolution = data as WhatsAppChatResolution
-  const devices = (resolution.devices || []).filter(device => !isDeviceDeleting(device))
+  const devices = (resolution.devices || []).filter(usableWhatsAppDevice)
   return {
     ...resolution, devices,
     mode: devices.length === 0 && resolution.mode !== 'read_only' ? (resolution.chat ? 'read_only' : 'no_device') : resolution.mode,
   }
 }
 
-export async function createWhatsAppChat(deviceID: string, phone: string, options: WhatsAppChatRequestOptions = {}): Promise<{ success: boolean; chat?: Chat; error?: string }> {
+export async function createWhatsAppChat(deviceID: string, phone: string, options: WhatsAppChatRequestOptions = {}): Promise<{ success: boolean; chat?: Chat; error?: string; code?: string }> {
   const res = await fetch('/api/chats/new', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -77,11 +94,12 @@ export async function createWhatsAppChat(deviceID: string, phone: string, option
       device_id: deviceID,
       phone: cleanWhatsAppPhone(phone),
       ...(options.contactId ? { contact_id: options.contactId } : {}),
+      ...(options.senderConfirmation ? { sender_confirmation: options.senderConfirmation } : {}),
     }),
     signal: options.signal,
   })
-  const data = await res.json().catch(() => ({})) as { success?: boolean; chat?: Chat; error?: string }
-  if (!res.ok || !data.success) return { success: false, chat: data.chat, error: data.error || 'No se pudo abrir la conversación' }
+  const data = await res.json().catch(() => ({})) as { success?: boolean; chat?: Chat; error?: string; code?: string }
+  if (!res.ok || !data.success) return { success: false, chat: data.chat, error: data.error || 'No se pudo abrir la conversación', code: data.code }
   return data as { success: boolean; chat?: Chat; error?: string }
 }
 

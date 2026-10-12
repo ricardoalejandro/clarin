@@ -14,6 +14,9 @@ import type {
 } from '@/types/report'
 import { exportWhatsAppGroupReportCSV, exportWhatsAppGroupReportExcel } from '@/utils/whatsappGroupReportExport'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
+import { useLeadPolicy } from '@/components/LeadPolicyProvider'
+import { parseLeadPolicy, type LeadPolicy } from '@/lib/leadPolicy'
+import { isCurrentCoverageReport } from './reportPolicy'
 
 const PAGE_SIZE = 50
 
@@ -69,6 +72,16 @@ function MetricCard({ label, value, detail, tone = 'slate' }: { label: string; v
 }
 
 export default function WhatsAppGroupCoveragePage() {
+  const state = useLeadPolicy()
+  if (!state.ready || !state.policy) return <div role="status" className="p-6 text-sm text-slate-500">
+    <p>{state.error || 'Comprobando la configuración de la cuenta…'}</p>
+    {state.error && <button type="button" onClick={state.refresh} className="mt-3 min-h-11 rounded-xl border border-slate-200 bg-white px-4 font-semibold text-slate-700">Reintentar</button>}
+  </div>
+  return <WhatsAppGroupCoverageContent key={`${state.policy.account_id}:${state.policy.leads_policy_version}`} policy={state.policy} refreshPolicy={state.refresh} />
+}
+
+function WhatsAppGroupCoverageContent({ policy, refreshPolicy }: { policy: LeadPolicy; refreshPolicy: () => void }) {
+  const leadsEnabled = policy.leads_enabled
   const [devices, setDevices] = useState<ReportDevice[]>([])
   const [devicesLoading, setDevicesLoading] = useState(true)
   const [devicesError, setDevicesError] = useState('')
@@ -87,33 +100,44 @@ export default function WhatsAppGroupCoveragePage() {
   const [page, setPage] = useState(1)
   const groupRequestRef = useRef<AbortController | null>(null)
   const reportRequestRef = useRef<AbortController | null>(null)
+  const deviceRequestRef = useRef<AbortController | null>(null)
+  const exportRequestRef = useRef<AbortController | null>(null)
+  const [exporting, setExporting] = useState(false)
 
   const loadDevices = useCallback(async () => {
+    deviceRequestRef.current?.abort()
+    const controller = new AbortController()
+    deviceRequestRef.current = controller
     setDevicesLoading(true)
     setDevicesError('')
     try {
-      const response = await fetch('/api/devices', { headers: authHeaders(), credentials: 'include' })
+      const response = await fetch('/api/devices', { headers: authHeaders(), credentials: 'include', signal: controller.signal })
       const data = await response.json()
+      if (controller.signal.aborted || deviceRequestRef.current !== controller) return
       if (!response.ok || !data.success) throw new Error(data.error || 'No se pudieron cargar los dispositivos')
       const eligible = (data.devices || []).filter((device: ReportDevice) => (device.provider || 'whatsapp_web') === 'whatsapp_web' && device.status === 'connected')
       setDevices(eligible)
       setSelectedDeviceID(current => eligible.some((device: ReportDevice) => device.id === current) ? current : (eligible[0]?.id || ''))
     } catch (error) {
-      setDevicesError(error instanceof Error ? error.message : 'No se pudieron cargar los dispositivos')
+      if (!controller.signal.aborted) setDevicesError(error instanceof Error ? error.message : 'No se pudieron cargar los dispositivos')
     } finally {
-      setDevicesLoading(false)
+      if (!controller.signal.aborted && deviceRequestRef.current === controller) setDevicesLoading(false)
     }
   }, [])
 
   useEffect(() => {
     loadDevices()
     return () => {
+      deviceRequestRef.current?.abort()
+      exportRequestRef.current?.abort()
       groupRequestRef.current?.abort()
       reportRequestRef.current?.abort()
     }
   }, [loadDevices])
 
   const loadGroups = useCallback(async (deviceID: string) => {
+    exportRequestRef.current?.abort()
+    setExporting(false)
     groupRequestRef.current?.abort()
     reportRequestRef.current?.abort()
     reportRequestRef.current = null
@@ -131,6 +155,7 @@ export default function WhatsAppGroupCoveragePage() {
         headers: authHeaders(), credentials: 'include', signal: controller.signal,
       })
       const data = await response.json()
+      if (controller.signal.aborted || groupRequestRef.current !== controller) return
       if (!response.ok || !data.success) throw new Error(data.error || 'No se pudieron cargar los grupos')
       setGroups(data.groups || [])
     } catch (error) {
@@ -146,6 +171,8 @@ export default function WhatsAppGroupCoveragePage() {
 
   const generateReport = async () => {
     if (!selectedDeviceID || !selectedGroupID) return
+    exportRequestRef.current?.abort()
+    setExporting(false)
     reportRequestRef.current?.abort()
     const controller = new AbortController()
     reportRequestRef.current = controller
@@ -157,7 +184,12 @@ export default function WhatsAppGroupCoveragePage() {
         body: JSON.stringify({ device_id: selectedDeviceID, group_id: selectedGroupID }),
       })
       const data = await response.json()
+      if (controller.signal.aborted || reportRequestRef.current !== controller) return
       if (!response.ok || !data.success) throw new Error(data.error || 'No se pudo generar el reporte')
+      if (!isCurrentCoverageReport(data.report, policy)) {
+        refreshPolicy()
+        throw new Error('La configuración de la cuenta cambió. Genera nuevamente el reporte.')
+      }
       setReport(data.report)
       setSearch('')
       setDebouncedSearch('')
@@ -170,7 +202,36 @@ export default function WhatsAppGroupCoveragePage() {
     }
   }
 
+  const exportReport = async (format: 'csv' | 'excel') => {
+    if (!report || exporting) return
+    exportRequestRef.current?.abort()
+    const controller = new AbortController()
+    exportRequestRef.current = controller
+    setExporting(true)
+    setGenerateError('')
+    try {
+      const response = await fetch('/api/settings/lead-policy', { headers: authHeaders(), credentials: 'include', cache: 'no-store', signal: controller.signal })
+      const data = await response.json()
+      if (controller.signal.aborted || exportRequestRef.current !== controller) return
+      const current = parseLeadPolicy(data.policy)
+      if (!response.ok || !data.success || !current) throw new Error('No pudimos verificar la configuración. Vuelve a intentar la exportación.')
+      if (!isCurrentCoverageReport(report, current)) {
+        setReport(null)
+        refreshPolicy()
+        throw new Error('La configuración de la cuenta cambió. Genera nuevamente el reporte.')
+      }
+      if (format === 'csv') exportWhatsAppGroupReportCSV(report)
+      else exportWhatsAppGroupReportExcel(report)
+    } catch (error) {
+      if (!controller.signal.aborted) setGenerateError(error instanceof Error ? error.message : 'No se pudo exportar el reporte')
+    } finally {
+      if (!controller.signal.aborted && exportRequestRef.current === controller) setExporting(false)
+    }
+  }
+
   const selectGroup = (group: WhatsAppGroupOption) => {
+    exportRequestRef.current?.abort()
+    setExporting(false)
     reportRequestRef.current?.abort()
     reportRequestRef.current = null
     setGenerating(false)
@@ -213,7 +274,7 @@ export default function WhatsAppGroupCoveragePage() {
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-700"><UsersRound className="h-6 w-6" /></div>
               <div>
                 <h1 className="text-2xl font-bold tracking-tight text-slate-900">Cobertura de integrantes de WhatsApp</h1>
-                <p className="mt-1 text-sm text-slate-500">Identifica quién existe como contacto y quién tiene una oportunidad activa en Clarin.</p>
+                <p className="mt-1 text-sm text-slate-500">{leadsEnabled ? 'Identifica quién existe como contacto y quién tiene una oportunidad activa en Clarin.' : 'Compara los integrantes de un grupo con los contactos de Clarin.'}</p>
               </div>
             </div>
           </div>
@@ -287,11 +348,11 @@ export default function WhatsAppGroupCoveragePage() {
                   <p className="mt-0.5 text-xs text-slate-500">{report.summary.total_group_members} integrantes en WhatsApp · {report.summary.evaluated_members} evaluados, excluyendo el dispositivo propio</p>
                 </div>
               </div>
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+              <div className={`grid gap-3 sm:grid-cols-2 ${leadsEnabled ? 'xl:grid-cols-6' : 'xl:grid-cols-4'}`}>
                 <MetricCard label="Cobertura CRM" value={report.summary.registration_coverage_percent == null ? '—' : `${report.summary.registration_coverage_percent}%`} detail={`${report.summary.registered_members} registrados`} tone="emerald" />
-                <MetricCard label="Gestión activa" value={report.summary.active_management_members} detail={report.summary.management_coverage_percent == null ? 'Sin base verificable' : `${report.summary.management_coverage_percent}% de cobertura`} tone="emerald" />
-                <MetricCard label="Con historial" value={report.summary.historical_only_members} detail="Sin oportunidad activa" tone="violet" />
-                <MetricCard label="Solo contacto" value={report.summary.contact_only_members} detail="Sin oportunidad" />
+                {leadsEnabled && <MetricCard label="Gestión activa" value={report.summary.active_management_members} detail={report.summary.management_coverage_percent == null ? 'Sin base verificable' : `${report.summary.management_coverage_percent}% de cobertura`} tone="emerald" />}
+                {leadsEnabled && <MetricCard label="Con historial" value={report.summary.historical_only_members} detail="Sin oportunidad activa" tone="violet" />}
+                <MetricCard label={leadsEnabled ? 'Solo contacto' : 'Contactos registrados'} value={report.summary.contact_only_members} detail={leadsEnabled ? 'Sin oportunidad' : 'Identidad verificada en Clarin'} />
                 <MetricCard label="No registrados" value={report.summary.not_registered_members} detail="Fuera de Clarin" tone="rose" />
                 <MetricCard label="Por revisar" value={report.summary.unidentifiable_members + report.summary.ambiguous_members} detail={`${report.summary.unidentifiable_members} ocultos · ${report.summary.ambiguous_members} duplicados`} tone="amber" />
               </div>
@@ -310,12 +371,12 @@ export default function WhatsAppGroupCoveragePage() {
                   </div>
                   <select value={statusFilter} onChange={event => setStatusFilter(event.target.value as 'all' | CoverageStatus)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 outline-none focus:border-emerald-400">
                     <option value="all">Todos los estados</option>
-                    {Object.entries(statusMeta).map(([key, meta]) => <option key={key} value={key}>{meta.label}</option>)}
+                    {Object.entries(statusMeta).filter(([key]) => leadsEnabled || !['active_management', 'historical_only'].includes(key)).map(([key, meta]) => <option key={key} value={key}>{!leadsEnabled && key === 'contact_only' ? 'Registrado' : meta.label}</option>)}
                   </select>
                 </div>
                 <div className="flex gap-2">
-                  <button type="button" onClick={() => exportWhatsAppGroupReportCSV(report)} className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 transition hover:border-emerald-300 hover:text-emerald-700"><Download className="h-4 w-4" /> CSV</button>
-                  <button type="button" onClick={() => exportWhatsAppGroupReportExcel(report)} className="inline-flex h-10 items-center gap-2 rounded-xl bg-slate-800 px-3 text-xs font-bold text-white transition hover:bg-slate-900"><FileSpreadsheet className="h-4 w-4" /> Excel</button>
+                  <button type="button" disabled={exporting} onClick={() => exportReport('csv')} className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 transition hover:border-emerald-300 hover:text-emerald-700 disabled:opacity-50"><Download className="h-4 w-4" /> CSV</button>
+                  <button type="button" disabled={exporting} onClick={() => exportReport('excel')} className="inline-flex h-10 items-center gap-2 rounded-xl bg-slate-800 px-3 text-xs font-bold text-white transition hover:bg-slate-900 disabled:opacity-50"><FileSpreadsheet className="h-4 w-4" /> Excel</button>
                 </div>
               </div>
 
@@ -326,10 +387,10 @@ export default function WhatsAppGroupCoveragePage() {
                       <th className="px-4 py-3">Integrante de WhatsApp</th>
                       <th className="px-4 py-3">Teléfono</th>
                       <th className="px-4 py-3">¿Existe en Clarin?</th>
-                      <th className="px-4 py-3">Estado de gestión</th>
+                      <th className="px-4 py-3">{leadsEnabled ? 'Estado de gestión' : 'Estado de registro'}</th>
                       <th className="px-4 py-3">Contacto en Clarin</th>
                       <th className="px-4 py-3">Etiquetas</th>
-                      <th className="px-4 py-3">Oportunidades activas</th>
+                      {leadsEnabled && <th className="px-4 py-3">Oportunidades activas</th>}
                       <th className="px-4 py-3">Última actividad directa</th>
                       <th className="px-4 py-3">Restricción</th>
                     </tr>
@@ -360,7 +421,7 @@ export default function WhatsAppGroupCoveragePage() {
                               <span className="inline-flex items-center gap-1 text-xs font-bold text-rose-700"><UserRoundX className="h-3.5 w-3.5" /> No</span>
                             )}
                           </td>
-                          <td className="px-4 py-3"><span className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-bold ${statusMeta[member.coverage_status].className}`}>{statusMeta[member.coverage_status].label}</span></td>
+                          <td className="px-4 py-3"><span className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-bold ${statusMeta[member.coverage_status].className}`}>{!leadsEnabled && member.coverage_status === 'contact_only' ? 'Registrado' : statusMeta[member.coverage_status].label}</span></td>
                           <td className="px-4 py-3">
                             {member.contact ? (
                               <Link href={`/dashboard/contacts?contact_id=${member.contact.id}`} className="group inline-flex max-w-[220px] items-center gap-2 text-sm font-semibold text-slate-700 hover:text-emerald-700">
@@ -376,14 +437,14 @@ export default function WhatsAppGroupCoveragePage() {
                               </div>
                             ) : <span className="text-xs text-slate-400">Sin etiquetas</span>}
                           </td>
-                          <td className="px-4 py-3">
+                          {leadsEnabled && <td className="px-4 py-3">
                             {activeLead ? (
                               <div className="max-w-[240px]">
                                 <p className="truncate text-xs font-bold text-slate-700">{[activeLead.pipeline_name, activeLead.stage_name].filter(Boolean).join(' · ') || activeLead.title}</p>
                                 <p className="mt-0.5 truncate text-[11px] text-slate-400">{activeLead.assigned_to_name || 'Sin responsable'}{member.contact!.active_leads.length > 1 ? ` · +${member.contact!.active_leads.length - 1} más` : ''}</p>
                               </div>
                             ) : <span className="text-xs text-slate-400">Sin oportunidad activa</span>}
-                          </td>
+                          </td>}
                           <td className="px-4 py-3 text-xs text-slate-500">{formatDateTime(member.contact?.last_direct_activity_at)}</td>
                           <td className="px-4 py-3">{member.contact?.do_not_contact ? <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-[10px] font-bold text-amber-700"><ShieldAlert className="h-3 w-3" /> No contactar</span> : <span className="text-xs text-slate-400">—</span>}</td>
                         </tr>
@@ -404,7 +465,7 @@ export default function WhatsAppGroupCoveragePage() {
               </div>
             </section>
 
-            <p className="mt-4 text-xs leading-5 text-slate-400">“Existe en Clarin” se calcula por identidad telefónica dentro de la cuenta. “Gestión activa” requiere al menos una oportunidad abierta. Los números ocultos y las coincidencias duplicadas se excluyen de los porcentajes para evitar conclusiones incorrectas.</p>
+            <p className="mt-4 text-xs leading-5 text-slate-400">“Existe en Clarin” se calcula por identidad telefónica dentro de la cuenta. {leadsEnabled && '“Gestión activa” requiere al menos una oportunidad abierta. '}Los números ocultos y las coincidencias duplicadas se excluyen de los porcentajes para evitar conclusiones incorrectas.</p>
           </>
         )}
       </div>

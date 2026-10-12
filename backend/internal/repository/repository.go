@@ -3083,6 +3083,10 @@ func (r *ContactRepository) SyncToLead(ctx context.Context, contact *domain.Cont
 			distrito=NULL, ocupacion=NULL,
 			updated_at = NOW()
 		WHERE contact_id = $1 AND account_id = $2
+		  AND (name IS NOT NULL OR last_name IS NOT NULL OR short_name IS NOT NULL
+		       OR phone IS NOT NULL OR email IS NOT NULL OR company IS NOT NULL
+		       OR age IS NOT NULL OR dni IS NOT NULL OR birth_date IS NOT NULL
+		       OR address IS NOT NULL OR distrito IS NOT NULL OR ocupacion IS NOT NULL)
 	`, contact.ID, contact.AccountID)
 	if err != nil {
 		log.Printf("[SYNC] Error syncing contact %s to leads: %v", contact.ID, err)
@@ -4443,11 +4447,26 @@ type LeadRepository struct {
 }
 
 func (r *LeadRepository) Create(ctx context.Context, lead *domain.Lead) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = requireLeadPolicyTx(ctx, tx, lead.AccountID); err != nil {
+		return err
+	}
+	if err = r.createLeadWith(ctx, tx, lead); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *LeadRepository) createLeadWith(ctx context.Context, q leadPolicyQueryer, lead *domain.Lead) error {
 	if lead.ContactID == nil {
 		return fmt.Errorf("lead contact_id is required")
 	}
 	var contactExists bool
-	if err := r.db.QueryRow(ctx, `
+	if err := q.QueryRow(ctx, `
 		SELECT EXISTS(
 			SELECT 1 FROM contacts WHERE id = $1 AND account_id = $2 AND is_group=FALSE
 		)
@@ -4469,7 +4488,7 @@ func (r *LeadRepository) Create(ctx context.Context, lead *domain.Lead) error {
 	if lead.StageID != nil {
 		var pipelineID uuid.UUID
 		var stageType string
-		if err := r.db.QueryRow(ctx, `
+		if err := q.QueryRow(ctx, `
 			SELECT ps.pipeline_id, ps.stage_type FROM pipeline_stages ps JOIN pipelines p ON p.id=ps.pipeline_id
 			WHERE ps.id=$1 AND p.account_id=$2
 		`, *lead.StageID, lead.AccountID).Scan(&pipelineID, &stageType); err != nil {
@@ -4492,7 +4511,7 @@ func (r *LeadRepository) Create(ctx context.Context, lead *domain.Lead) error {
 		lead.Status = &status
 	} else if lead.PipelineID != nil {
 		var valid bool
-		if err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pipelines WHERE id=$1 AND account_id=$2)`, *lead.PipelineID, lead.AccountID).Scan(&valid); err != nil {
+		if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pipelines WHERE id=$1 AND account_id=$2)`, *lead.PipelineID, lead.AccountID).Scan(&valid); err != nil {
 			return err
 		}
 		if !valid {
@@ -4501,14 +4520,14 @@ func (r *LeadRepository) Create(ctx context.Context, lead *domain.Lead) error {
 	}
 	if lead.AssignedTo != nil {
 		var valid bool
-		if err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM user_accounts WHERE account_id=$1 AND user_id=$2)`, lead.AccountID, *lead.AssignedTo).Scan(&valid); err != nil {
+		if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM user_accounts WHERE account_id=$1 AND user_id=$2)`, lead.AccountID, *lead.AssignedTo).Scan(&valid); err != nil {
 			return err
 		}
 		if !valid {
 			return fmt.Errorf("lead assignee does not belong to account")
 		}
 	}
-	return r.db.QueryRow(ctx, `
+	return q.QueryRow(ctx, `
 		INSERT INTO leads (account_id, contact_id, title, jid, name, phone, email, notes, dni, birth_date, status, source, pipeline_id, stage_id, tags, custom_fields, assigned_to, kommo_id, kommo_synced_tags, closed_at, closed_by, close_reason)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
 		        CASE WHEN $18::bigint IS NOT NULL THEN COALESCE($15::text[], '{}'::text[]) ELSE '{}'::text[] END,
@@ -4614,8 +4633,22 @@ func (r *LeadRepository) GetByJID(ctx context.Context, accountID uuid.UUID, jid 
 }
 
 func (r *LeadRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
-	_, err := r.db.Exec(ctx, `UPDATE leads SET status = $1, updated_at = NOW() WHERE id = $2`, status, id)
-	return err
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var accountID uuid.UUID
+	if err = tx.QueryRow(ctx, `SELECT account_id FROM leads WHERE id=$1`, id).Scan(&accountID); err != nil {
+		return err
+	}
+	if err = requireLeadPolicyTx(ctx, tx, accountID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE leads SET status = $1, updated_at = NOW() WHERE id = $2 AND account_id=$3`, status, id, accountID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *LeadRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Lead, error) {
@@ -4670,6 +4703,9 @@ func (r *LeadRepository) Update(ctx context.Context, lead *domain.Lead) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = requireLeadPolicyTx(ctx, tx, lead.AccountID); err != nil {
+		return err
+	}
 	var contactID *uuid.UUID
 	if err := tx.QueryRow(ctx, `
 		SELECT contact_id FROM leads WHERE id=$1 AND account_id=$2 FOR UPDATE
@@ -4883,42 +4919,22 @@ func (r *LeadRepository) DeleteAll(ctx context.Context, accountID uuid.UUID) err
 
 // ArchiveLead sets or clears the archived flag on a lead.
 func (r *LeadRepository) ArchiveLead(ctx context.Context, id uuid.UUID, archive bool, reason string) error {
-	if archive {
-		_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = true, archived_at = NOW(), archive_reason = $2, updated_at = NOW() WHERE id = $1`, id, reason)
-		return err
-	}
-	_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = false, archived_at = NULL, archive_reason = '', updated_at = NOW() WHERE id = $1`, id)
-	return err
+	return r.mutateLeadFlags(ctx, []uuid.UUID{id}, "archived", archive, reason)
 }
 
 // ArchiveLeadsBatch sets or clears the archived flag on multiple leads.
 func (r *LeadRepository) ArchiveLeadsBatch(ctx context.Context, ids []uuid.UUID, archive bool, reason string) error {
-	if archive {
-		_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = true, archived_at = NOW(), archive_reason = $2, updated_at = NOW() WHERE id = ANY($1)`, ids, reason)
-		return err
-	}
-	_, err := r.db.Exec(ctx, `UPDATE leads SET is_archived = false, archived_at = NULL, archive_reason = '', updated_at = NOW() WHERE id = ANY($1)`, ids)
-	return err
+	return r.mutateLeadFlags(ctx, ids, "archived", archive, reason)
 }
 
 // BlockLead sets or clears the blocked flag on a lead.
 func (r *LeadRepository) BlockLead(ctx context.Context, id uuid.UUID, block bool, reason string) error {
-	if block {
-		_, err := r.db.Exec(ctx, `UPDATE leads SET is_blocked = true, blocked_at = NOW(), block_reason = $2, updated_at = NOW() WHERE id = $1`, id, reason)
-		return err
-	}
-	_, err := r.db.Exec(ctx, `UPDATE leads SET is_blocked = false, blocked_at = NULL, block_reason = '', updated_at = NOW() WHERE id = $1`, id)
-	return err
+	return r.mutateLeadFlags(ctx, []uuid.UUID{id}, "blocked", block, reason)
 }
 
 // BlockLeadsBatch sets or clears the blocked flag on multiple leads.
 func (r *LeadRepository) BlockLeadsBatch(ctx context.Context, ids []uuid.UUID, block bool, reason string) error {
-	if block {
-		_, err := r.db.Exec(ctx, `UPDATE leads SET is_blocked = true, blocked_at = NOW(), block_reason = $2, updated_at = NOW() WHERE id = ANY($1)`, ids, reason)
-		return err
-	}
-	_, err := r.db.Exec(ctx, `UPDATE leads SET is_blocked = false, blocked_at = NULL, block_reason = '', updated_at = NOW() WHERE id = ANY($1)`, ids)
-	return err
+	return r.mutateLeadFlags(ctx, ids, "blocked", block, reason)
 }
 
 // GetArchivedBlockedCounts returns the count of archived and blocked leads for an account.
@@ -5077,6 +5093,9 @@ func (r *PipelineRepository) DeleteForAccount(ctx context.Context, id, accountID
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = requireLeadPolicyForAccountUpdateTx(ctx, tx, accountID); err != nil {
+		return err
+	}
 
 	var leadCount int
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM leads WHERE pipeline_id=$1 AND account_id=$2`, id, accountID).Scan(&leadCount); err != nil {
@@ -5679,19 +5698,10 @@ func (r *TagRepository) RecalculateContactTags(ctx context.Context, contactID uu
 }
 
 func (r *TagRepository) AssignToLead(ctx context.Context, leadID, tagID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `
-		INSERT INTO contact_tags (contact_id, tag_id)
-		SELECT l.contact_id, $2 FROM leads l WHERE l.id = $1 AND l.contact_id IS NOT NULL
-		ON CONFLICT DO NOTHING
-	`, leadID, tagID)
-	return err
+	return r.mutateLeadTag(ctx, leadID, tagID, true)
 }
-
 func (r *TagRepository) RemoveFromLead(ctx context.Context, leadID, tagID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `
-		DELETE FROM contact_tags WHERE contact_id = (SELECT contact_id FROM leads WHERE id = $1) AND tag_id = $2
-	`, leadID, tagID)
-	return err
+	return r.mutateLeadTag(ctx, leadID, tagID, false)
 }
 
 func (r *TagRepository) AssignToChat(ctx context.Context, chatID, tagID uuid.UUID) error {
@@ -6349,42 +6359,7 @@ func (r *EventRepository) Create(ctx context.Context, e *domain.Event) error {
 }
 
 func (r *EventRepository) GetByAccountID(ctx context.Context, accountID uuid.UUID, filter domain.EventFilter) ([]*domain.Event, int, error) {
-	baseQuery := ` FROM events WHERE account_id = $1`
-	args := []interface{}{accountID}
-	argNum := 2
-
-	if filter.Status != "" {
-		baseQuery += fmt.Sprintf(" AND status = $%d", argNum)
-		args = append(args, filter.Status)
-		argNum++
-	}
-	if filter.Search != "" {
-		baseQuery += fmt.Sprintf(" AND (name ILIKE $%d OR description ILIKE $%d OR location ILIKE $%d)", argNum, argNum, argNum)
-		args = append(args, "%"+filter.Search+"%")
-		argNum++
-	}
-	if filter.DateFrom != nil {
-		baseQuery += fmt.Sprintf(" AND event_date >= $%d", argNum)
-		args = append(args, *filter.DateFrom)
-		argNum++
-	}
-	if filter.DateTo != nil {
-		baseQuery += fmt.Sprintf(" AND event_date <= $%d", argNum)
-		args = append(args, *filter.DateTo)
-		argNum++
-	}
-	switch filter.FolderFilter {
-	case "root":
-		baseQuery += " AND folder_id IS NULL"
-	case "":
-		// no filter – return all
-	default:
-		// assume it's a UUID
-		baseQuery += fmt.Sprintf(" AND folder_id = $%d", argNum)
-		args = append(args, filter.FolderFilter)
-		argNum++
-	}
-	_ = argNum // suppress unused warning
+	baseQuery, args := eventListConditions(accountID, filter)
 
 	var total int
 	if err := r.db.QueryRow(ctx, "SELECT COUNT(*) "+baseQuery, args...).Scan(&total); err != nil {

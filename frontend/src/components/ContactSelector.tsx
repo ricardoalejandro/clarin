@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { Search, X, Filter, Users, CheckCircle2, User, Tag, ChevronDown, CheckSquare, FileText, Code, Calendar, Smartphone, AlertCircle, Loader2, Eye, UserCheck, RotateCcw } from 'lucide-react'
 import FormulaEditor from '@/components/FormulaEditor'
+import { useLeadPolicy } from '@/components/LeadPolicyProvider'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 
@@ -154,6 +155,8 @@ export default function ContactSelector({
   errorMessage = '',
   refreshKey = 0,
 }: ContactSelectorProps) {
+  const { leadsEnabled } = useLeadPolicy()
+  const forcedLeadUnavailable = sourceFilter === 'lead' && !leadsEnabled
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(search)
   const [results, setResults] = useState<PersonResult[]>([])
@@ -173,6 +176,18 @@ export default function ContactSelector({
 
   // Basic Filters
   const [sourceType, setSourceType] = useState<'all' | 'contact' | 'lead'>(sourceFilter || 'all')
+  useEffect(() => {
+    if (!leadsEnabled) {
+      peopleRequestRef.current += 1
+      peopleAbortRef.current?.abort()
+      setSourceType(sourceFilter === 'lead' ? 'lead' : 'contact')
+      setSelected(current => sourceFilter === 'lead' ? new Map() : new Map([...current].filter(([, person]) => person.source_type === 'contact')))
+      setResults(current => sourceFilter === 'lead' ? [] : current.filter(person => person.source_type === 'contact'))
+      setLoading(false)
+      setLoadingMore(false)
+      setHasMore(false)
+    }
+  }, [leadsEnabled, sourceFilter])
   const [showFilterDropdown, setShowFilterDropdown] = useState(false)
   const [allTags, setAllTags] = useState<TagItem[]>([])
   const [filterTagIds, setFilterTagIds] = useState<Set<string>>(new Set())
@@ -274,7 +289,7 @@ export default function ContactSelector({
   useEffect(() => {
     if (!open) return
     fetchPeople()
-  }, [debouncedSearch, sourceType, filterTagIds, hasPhone, open, filterTagNames, excludeFilterTagNames, tagFilterMode, filterDevice, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, formulaType, formulaText])
+  }, [debouncedSearch, sourceType, leadsEnabled, sourceFilter, filterTagIds, hasPhone, open, filterTagNames, excludeFilterTagNames, tagFilterMode, filterDevice, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, formulaType, formulaText])
 
   useEffect(() => {
     if (refreshKeyRef.current === refreshKey) return
@@ -314,6 +329,7 @@ export default function ContactSelector({
   }, [token])
 
   const fetchPeople = useCallback(async (offset = 0, append = false) => {
+    if (sourceFilter === 'lead' && !leadsEnabled) return
     if (search !== debouncedSearch) return
     peopleAbortRef.current?.abort()
     const abortController = new AbortController()
@@ -433,7 +449,7 @@ export default function ContactSelector({
         params.set('limit', String(pageLimit))
         params.set('offset', String(offset))
         params.set('has_phone', 'false')
-        if (withoutActiveLead) params.set('without_active_lead', 'true')
+        if (leadsEnabled && withoutActiveLead) params.set('without_active_lead', 'true')
 
         const res = await fetch(`/api/contacts?${params}`, {
           headers: { Authorization: `Bearer ${token}` },
@@ -460,7 +476,8 @@ export default function ContactSelector({
         // Basic path: use /api/people/search
         const params = new URLSearchParams()
         if (debouncedSearch) params.set('search', debouncedSearch)
-        if (sourceType !== 'all') params.set('type', sourceType)
+        if (!leadsEnabled) params.set('type', 'contact')
+        else if (sourceType !== 'all') params.set('type', sourceType)
         if (filterTagIds.size > 0) params.set('tag_ids', Array.from(filterTagIds).join(','))
         if (hasPhone) params.set('has_phone', 'true')
         params.set('limit', String(pageLimit))
@@ -504,12 +521,13 @@ export default function ContactSelector({
         setLoadingMore(false)
       }
     }
-  }, [search, debouncedSearch, sourceType, filterTagIds, hasPhone, token, excludeIds, excludeLabels, eventId, useAdvanced, filterDevice, filterTagNames, excludeFilterTagNames, tagFilterMode, formulaType, formulaText, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, withoutActiveLead])
+  }, [search, debouncedSearch, sourceType, leadsEnabled, sourceFilter, filterTagIds, hasPhone, token, excludeIds, excludeLabels, eventId, useAdvanced, filterDevice, filterTagNames, excludeFilterTagNames, tagFilterMode, formulaType, formulaText, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, withoutActiveLead])
 
   const isSelectable = useCallback((person: PersonResult) => {
+    if (forcedLeadUnavailable || (!leadsEnabled && person.source_type === 'lead')) return false
     if (eventId) return person.can_add === true
     return !person.excluded
-  }, [eventId])
+  }, [eventId, forcedLeadUnavailable, leadsEnabled])
 
   const toggleSelect = (person: PersonResult) => {
     if (!isSelectable(person)) return
@@ -565,8 +583,10 @@ export default function ContactSelector({
   }
 
   const handleConfirm = () => {
-    if (submitting) return
-    onConfirm(Array.from(selected.values()))
+    if (submitting || forcedLeadUnavailable) return
+    const allowed = Array.from(selected.values()).filter(person => leadsEnabled || person.source_type === 'contact')
+    if (allowed.length === 0) return
+    onConfirm(allowed)
   }
 
   const activeFilterCount = useAdvanced
@@ -597,7 +617,7 @@ export default function ContactSelector({
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div>
             <h2 id="contact-selector-title" className="text-lg font-semibold text-gray-900">{title}</h2>
-            <p id="contact-selector-description" className="text-sm text-gray-500 mt-0.5">{subtitle}</p>
+            <p id="contact-selector-description" className="text-sm text-gray-500 mt-0.5">{leadsEnabled ? subtitle : sourceFilter === 'lead' ? 'Leads está desactivado en esta cuenta.' : 'Busca entre tus contactos'}</p>
           </div>
           <button onClick={onClose} disabled={submitting} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar selector de contactos">
             <X className="w-5 h-5" />
@@ -877,7 +897,7 @@ export default function ContactSelector({
                     /* ====== BASIC FILTER PANEL (original) ====== */
                     <>
                       {/* Source type filter */}
-                      {!sourceFilter && (
+                      {!sourceFilter && leadsEnabled && (
                       <div className="p-3 border-b border-gray-100">
                         <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Tipo</p>
                         <div className="flex flex-wrap gap-1.5">
@@ -1129,7 +1149,7 @@ export default function ContactSelector({
                 {Array.from(selected.values()).map(p => (
                   <span key={p.id} className="inline-flex items-center gap-1 px-2.5 py-1 bg-green-100 text-green-700 rounded-full text-xs font-medium">
                     {p.name || p.phone || 'Sin nombre'}
-                    {sourceFilter !== 'contact' && (
+                    {sourceFilter !== 'contact' && leadsEnabled && (
                       <span className={`px-1 py-0 rounded text-[9px] font-bold ${p.source_type === 'contact' ? 'bg-blue-100 text-blue-600' : 'bg-purple-100 text-purple-600'}`}>
                         {p.source_type === 'contact' ? 'C' : 'L'}
                       </span>
@@ -1151,7 +1171,9 @@ export default function ContactSelector({
 
           {/* Results list */}
           <div className="flex-1 overflow-y-auto px-6 py-2">
-            {loading ? (
+            {forcedLeadUnavailable ? (
+              <div role="status" className="mx-auto max-w-sm py-16 text-center text-sm text-slate-500">La selección de oportunidades estará disponible cuando se habilite Leads para esta cuenta.</div>
+            ) : loading ? (
               <div className="space-y-2 py-2">
                 {[...Array(6)].map((_, i) => (
                   <div key={i} className="h-14 bg-gray-100 rounded-lg animate-pulse" />
@@ -1170,7 +1192,7 @@ export default function ContactSelector({
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <Users className="w-12 h-12 text-gray-300 mb-3" />
                 <p className="text-gray-500 font-medium">
-                  {debouncedSearch || activeFilterCount > 0 ? 'No se encontraron coincidencias' : eventId || sourceFilter === 'contact' ? 'Busca un contacto para añadirlo' : 'Escribe para buscar contactos y leads'}
+                  {debouncedSearch || activeFilterCount > 0 ? 'No se encontraron coincidencias' : eventId || sourceFilter === 'contact' || !leadsEnabled ? 'Busca un contacto para añadirlo' : 'Escribe para buscar contactos y leads'}
                 </p>
                 <p className="text-gray-400 text-sm mt-1">
                   {debouncedSearch ? 'Prueba con otro nombre, teléfono o correo' : 'Puedes buscar por nombre, teléfono o email'}
@@ -1295,7 +1317,7 @@ export default function ContactSelector({
           </button>
           <button
             onClick={handleConfirm}
-            disabled={selected.size === 0 || submitting || eventIsFrozen}
+            disabled={selected.size === 0 || submitting || eventIsFrozen || forcedLeadUnavailable}
             className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-green-600 px-6 text-sm font-medium text-white shadow-sm transition-colors hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-500 focus-visible:ring-offset-2"
           >
             {submitting && <Loader2 className="h-4 w-4 animate-spin" />}

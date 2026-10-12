@@ -144,6 +144,14 @@ func (r *ErosRunRepository) WaitForInput(ctx context.Context, run *domain.ErosRu
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err = requireErosPublicationTx(ctx, tx, run.AccountID); err != nil {
+		return nil, err
+	}
+	if _, requiresLeads := ctx.Value(leadPolicyContextKey{}).(leadPolicyExpectation); requiresLeads {
+		if err = requireLeadPolicyTx(ctx, tx, run.AccountID); err != nil {
+			return nil, err
+		}
+	}
 	var active bool
 	if err = tx.QueryRow(ctx, `SELECT status IN ('starting','running') AND cancel_requested=FALSE FROM eros_runs WHERE id=$1 FOR UPDATE`, run.ID).Scan(&active); err != nil {
 		return nil, err
@@ -291,6 +299,14 @@ func (r *ErosRunRepository) Complete(ctx context.Context, run *domain.ErosRun, c
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err = requireErosPublicationTx(ctx, tx, run.AccountID); err != nil {
+		return nil, err
+	}
+	if _, requiresLeads := ctx.Value(leadPolicyContextKey{}).(leadPolicyExpectation); requiresLeads {
+		if err = requireLeadPolicyTx(ctx, tx, run.AccountID); err != nil {
+			return nil, err
+		}
+	}
 	var completable bool
 	if err = tx.QueryRow(ctx, `SELECT status IN ('starting','running') AND cancel_requested=FALSE FROM eros_runs WHERE id=$1 FOR UPDATE`, run.ID).Scan(&completable); err != nil {
 		return nil, err

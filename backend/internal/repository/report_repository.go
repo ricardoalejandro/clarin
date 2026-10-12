@@ -144,6 +144,7 @@ func (r *ReportRepository) GetWhatsAppReportContacts(ctx context.Context, accoun
 				LIMIT 1
 			) assignee ON TRUE
 			WHERE l.account_id = $1 AND l.contact_id = ANY($2::uuid[]) AND l.deleted_at IS NULL
+			  AND (SELECT leads_enabled FROM accounts WHERE id = $1)
 		), lead_agg AS (
 			SELECT contact_id,
 			       COALESCE(JSONB_AGG(JSONB_BUILD_OBJECT(
@@ -200,4 +201,29 @@ func (r *ReportRepository) GetWhatsAppReportContacts(ctx context.Context, accoun
 		result[contact.ID] = contact
 	}
 	return result, rows.Err()
+}
+
+// Hold only while serializing the local response, never during provider calls.
+// Mixed reports remain available with Leads disabled under the same snapshot.
+func (r *ReportRepository) AcquireWhatsAppCoveragePublication(ctx context.Context, accountID uuid.UUID, report *domain.WhatsAppGroupCoverageReport) (func(), error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := readLeadPolicy(ctx, tx, accountID, true)
+	if err == nil {
+		err = validateWhatsAppCoveragePublication(accountID, *policy, report)
+	}
+	if err != nil {
+		_ = tx.Rollback(context.Background())
+		return nil, err
+	}
+	return func() { _ = tx.Rollback(context.Background()) }, nil
+}
+
+func validateWhatsAppCoveragePublication(accountID uuid.UUID, policy domain.LeadPolicy, report *domain.WhatsAppGroupCoverageReport) error {
+	if report == nil || report.AccountID != accountID || report.LeadsPolicyVersion != policy.Version || report.LeadsEnabled != policy.LeadsEnabled {
+		return ErrLeadPolicyConflict
+	}
+	return nil
 }

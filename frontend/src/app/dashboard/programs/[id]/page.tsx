@@ -4057,7 +4057,12 @@ export default function ProgramDetailPage() {
                   onContactChange={handleParticipantContactChange}
                   onSendMessage={showInlineChat ? undefined : handleSendWhatsApp}
                   sendingMessage={whatsappChat.pending}
-                  messageError={whatsappChat.error}
+                messageError={whatsappChat.error}
+                messageNotice={whatsappChat.notice}
+                messageDisabled={whatsappChat.messageDisabled}
+                checkingMessage={whatsappChat.checkingAvailability}
+                messageLabel={whatsappChat.messageLabel}
+                onPrepareMessage={whatsappChat.prepare}
                   onRetryMessage={whatsappChat.canRetry ? whatsappChat.retry : undefined}
                   contextContent={(
                     <div className="pb-[calc(1rem+env(safe-area-inset-bottom))]">

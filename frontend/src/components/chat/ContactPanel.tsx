@@ -4,6 +4,7 @@ import { forwardRef, useState, useEffect, useRef, useCallback, useImperativeHand
 import { createPortal } from 'react-dom'
 import { X, User, Smartphone, Check, Archive, ShieldBan, ShieldOff, AlertCircle, CheckCircle2, Loader2, RotateCcw, BriefcaseBusiness, Plus, RefreshCw, Search } from 'lucide-react'
 import LeadDetailPanel from '@/components/LeadDetailPanel'
+import { useLeadPolicy } from '@/components/LeadPolicyProvider'
 import ContactDetailSurface, { type ContactDetailSurfaceHandle } from '@/components/contact-details/ContactDetailSurface'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import type { Lead, PipelineStage, StructuredTag } from '@/types/contact'
@@ -81,6 +82,11 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
   const [contact, setContact] = useState<Contact | null>(null)
   const [chatDevice, setChatDevice] = useState<ChatDevice | null>(null)
   const [lead, setLead] = useState<Lead | null>(null)
+  const { leadsEnabled } = useLeadPolicy()
+  const leadsEnabledRef = useRef(leadsEnabled)
+  const leadPolicyEpochRef = useRef(0)
+  if (leadsEnabledRef.current !== leadsEnabled) leadPolicyEpochRef.current += 1
+  leadsEnabledRef.current = leadsEnabled
   const [opportunities, setOpportunities] = useState<Lead[]>([])
   const [loadingOpportunity, setLoadingOpportunity] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -99,6 +105,7 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
   const createMutationAbortRef = useRef<AbortController | null>(null)
   const preferenceMutationAbortRef = useRef<AbortController | null>(null)
   const restoreMutationAbortRef = useRef<AbortController | null>(null)
+  const archiveMutationAbortRef = useRef<AbortController | null>(null)
   const mutationEpochRef = useRef(0)
 	const activeContactIdRef = useRef<string | null>(null)
   const contactSearchAbortRef = useRef<AbortController | null>(null)
@@ -246,6 +253,7 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
   useAccessibleDialog(showArchiveModal, archiveDialogRef, closeArchiveModal, archiveCancelRef)
 
   const openArchiveModal = (leadId: string) => {
+    if (!leadsEnabledRef.current) return
     setArchiveTargetId(leadId)
     setArchiveReason('')
     setArchiveError('')
@@ -253,9 +261,12 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
   }
 
   const confirmArchive = async () => {
-    if (!archiveReason.trim() || !archiveTargetId || savingArchiveRef.current) return
+    if (!leadsEnabledRef.current || !archiveReason.trim() || !archiveTargetId || savingArchiveRef.current) return
     const targetChatId = activeChatIdRef.current
     if (!targetChatId) return
+    archiveMutationAbortRef.current?.abort()
+    const controller = new AbortController()
+    archiveMutationAbortRef.current = controller
     savingArchiveRef.current = true
     setSavingArchive(true)
     setArchiveError('')
@@ -264,23 +275,28 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
         body: JSON.stringify({ archive: true, reason: archiveReason.trim() }),
+        signal: controller.signal,
       })
       const data = await response.json().catch(() => null)
       if (!response.ok || !data?.success) throw new Error(data?.error || 'No se pudo archivar la oportunidad.')
-      if (activeChatIdRef.current !== targetChatId) return
+      if (controller.signal.aborted || !leadsEnabledRef.current || activeChatIdRef.current !== targetChatId) return
       setShowArchiveModal(false)
       await fetchDetails(targetChatId)
     } catch (err) {
-      if (activeChatIdRef.current === targetChatId) {
+      if (!controller.signal.aborted && leadsEnabledRef.current && activeChatIdRef.current === targetChatId) {
         setArchiveError(err instanceof Error ? err.message : 'No se pudo archivar la oportunidad.')
       }
     } finally {
-      savingArchiveRef.current = false
-      setSavingArchive(false)
+      if (archiveMutationAbortRef.current === controller) {
+        archiveMutationAbortRef.current = null
+        savingArchiveRef.current = false
+        setSavingArchive(false)
+      }
     }
   }
 
   const handleRestoreLead = async (leadId: string) => {
+	if (!leadsEnabledRef.current) return
 	const targetChatId = activeChatIdRef.current
 	const epoch = mutationEpochRef.current
 	if (!targetChatId) return
@@ -370,6 +386,7 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
   useAccessibleDialog(showBlockModal, blockDialogRef, closeBlockModal, blockCancelRef)
 
   const applyOpportunityStage = async (targetLead: Lead, stage: PipelineStage, closeReason = '') => {
+	if (!leadsEnabledRef.current) return
 	const targetChatId = activeChatIdRef.current
 	if (!targetChatId) return
 	const epoch = mutationEpochRef.current
@@ -392,6 +409,7 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
   }
 
   const requestOpportunityStageChange = (targetLead: Lead, stage: PipelineStage) => {
+    if (!leadsEnabledRef.current) return
     if (stage.stage_type !== 'won' && stage.stage_type !== 'lost' && targetLead.status !== 'won' && targetLead.status !== 'lost') {
       void applyOpportunityStage(targetLead, stage).catch(error => console.error('Failed to update opportunity stage:', error))
       return
@@ -411,7 +429,8 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
   useAccessibleDialog(Boolean(stageChangeRequest), stageChangeDialogRef, closeStageChangeDialog)
 
   const confirmOpportunityStageChange = async () => {
-    if (!stageChangeRequest || savingStageChange) return
+    if (!leadsEnabledRef.current || !stageChangeRequest || savingStageChange) return
+    const policyEpoch = leadPolicyEpochRef.current
     if (stageChangeRequest.mode === 'lost' && !stageChangeReason.trim()) {
       setStageChangeError('Indica por qué se perdió esta oportunidad.')
       return
@@ -422,14 +441,14 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
 	const epoch = mutationEpochRef.current
     try {
       await applyOpportunityStage(stageChangeRequest.lead, stageChangeRequest.stage, stageChangeRequest.mode === 'lost' ? stageChangeReason.trim() : '')
-	  if (mutationEpochRef.current !== epoch || activeChatIdRef.current !== targetChatId) return
+	  if (leadPolicyEpochRef.current !== policyEpoch || mutationEpochRef.current !== epoch || activeChatIdRef.current !== targetChatId) return
       setStageChangeRequest(null)
       setStageChangeReason('')
     } catch (error) {
-	  if (mutationEpochRef.current !== epoch || activeChatIdRef.current !== targetChatId || (error instanceof DOMException && error.name === 'AbortError')) return
+	  if (leadPolicyEpochRef.current !== policyEpoch || mutationEpochRef.current !== epoch || activeChatIdRef.current !== targetChatId || (error instanceof DOMException && error.name === 'AbortError')) return
       setStageChangeError(error instanceof Error ? error.message : 'No se pudo actualizar la oportunidad.')
     } finally {
-	  if (mutationEpochRef.current === epoch && activeChatIdRef.current === targetChatId) setSavingStageChange(false)
+	  if (leadPolicyEpochRef.current === policyEpoch && mutationEpochRef.current === epoch && activeChatIdRef.current === targetChatId) setSavingStageChange(false)
     }
   }
 
@@ -452,6 +471,10 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
 	preferenceMutationAbortRef.current?.abort()
 	restoreMutationAbortRef.current?.abort()
     activeChatIdRef.current = isOpen ? chatId : null
+    archiveMutationAbortRef.current?.abort()
+    archiveMutationAbortRef.current = null
+    savingArchiveRef.current = false
+    setSavingArchive(false)
     if (isOpen && chatId) {
       detailsAbortRef.current?.abort()
       opportunityAbortRef.current?.abort()
@@ -493,6 +516,7 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
 	  createMutationAbortRef.current?.abort()
 	  preferenceMutationAbortRef.current?.abort()
 	  restoreMutationAbortRef.current?.abort()
+      archiveMutationAbortRef.current?.abort()
       activeChatIdRef.current = null
       detailsAbortRef.current?.abort()
       opportunityAbortRef.current?.abort()
@@ -501,6 +525,34 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
   // fetchDetails deliberately uses an explicit chat id and guards late responses.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, chatId])
+
+  const previousLeadsEnabledRef = useRef(leadsEnabled)
+  useEffect(() => {
+    if (previousLeadsEnabledRef.current === leadsEnabled) return
+    previousLeadsEnabledRef.current = leadsEnabled
+    opportunityAbortRef.current?.abort()
+    stageMutationAbortRef.current?.abort()
+    createMutationAbortRef.current?.abort()
+    restoreMutationAbortRef.current?.abort()
+    archiveMutationAbortRef.current?.abort()
+    archiveMutationAbortRef.current = null
+    savingArchiveRef.current = false
+    setSavingArchive(false)
+    setLead(null)
+    setOpportunities([])
+    selectedOpportunityIdRef.current = null
+    setLoadingOpportunity(false)
+    setOpportunitySelectionError(null)
+    setOpportunitiesError('')
+    setStageChangeRequest(null)
+    setSavingStageChange(false)
+    setShowArchiveModal(false)
+    setShowCreateOpportunity(false)
+    setCreatingOpportunity(false)
+    if (isOpen && chatId) void fetchDetails(chatId)
+  // Preserve the Contact editor and its drafts while commercial access changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leadsEnabled, isOpen, chatId])
 
   const fetchDetails = async (targetChatId: string = chatId) => {
     detailsAbortRef.current?.abort()
@@ -522,12 +574,12 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
       })
       const data = await res.json().catch(() => null)
       if (!res.ok || !data?.success) throw new Error(data?.error || 'No se pudieron cargar los detalles del chat.')
-      if (activeChatIdRef.current !== targetChatId) return
+      if (controller.signal.aborted || activeChatIdRef.current !== targetChatId) return
       const nextContact = data.contact || null
       setContact(nextContact)
       setChatDevice(data.device || null)
-      let nextOpportunities: Lead[] = Array.isArray(data.opportunities) ? data.opportunities : data.lead ? [data.lead] : []
-      if (nextContact?.id && !Array.isArray(data.opportunities)) {
+      let nextOpportunities: Lead[] = leadsEnabledRef.current && data.leads_enabled !== false ? (Array.isArray(data.opportunities) ? data.opportunities : data.lead ? [data.lead] : []) : []
+      if (leadsEnabledRef.current && data.leads_enabled !== false && nextContact?.id && !Array.isArray(data.opportunities)) {
         try {
           const opportunitiesResponse = await fetch(`/api/contacts/${nextContact.id}/leads`, {
             headers: { Authorization: `Bearer ${token}` },
@@ -543,6 +595,7 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
         }
       }
       if (activeChatIdRef.current !== targetChatId || controller.signal.aborted) return
+      if (!leadsEnabledRef.current) nextOpportunities = []
       setOpportunities(nextOpportunities)
       const preferredId = selectedOpportunityIdRef.current || data.active_opportunity_id || data.lead?.id
       const selectedSummary = nextOpportunities.find(item => item.id === preferredId)
@@ -567,7 +620,7 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
           })
           const opportunityData = await opportunityResponse.json().catch(() => null)
           if (!opportunityResponse.ok || !opportunityData?.success || !opportunityData.lead) throw new Error(opportunityData?.error || 'No se pudo abrir la oportunidad.')
-          if (activeChatIdRef.current !== targetChatId || selectedOpportunityIdRef.current !== selectedSummary.id) return
+          if (controller.signal.aborted || !leadsEnabledRef.current || activeChatIdRef.current !== targetChatId || selectedOpportunityIdRef.current !== selectedSummary.id) return
           setLead(opportunityData.lead)
           setOpportunities(current => current.map(item => item.id === selectedSummary.id ? { ...item, ...opportunityData.lead } : item))
         } catch (error) {
@@ -593,6 +646,7 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
   }
 
   const selectOpportunity = async (opportunityId: string, force = false) => {
+    if (!leadsEnabledRef.current) return
     if (!force && opportunityId === lead?.id) return
     const targetChatId = activeChatIdRef.current
     if (!targetChatId) return
@@ -631,6 +685,7 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
   if (!isOpen) return null
 
   const createOpportunity = async () => {
+    if (!leadsEnabledRef.current) return
     if (!contact || !newOpportunityTitle.trim() || creatingOpportunity) return
 	const targetChatId = activeChatIdRef.current
 	const targetContactId = contact.id
@@ -661,7 +716,7 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
     } catch (error) {
 	  if (!controller.signal.aborted && mutationEpochRef.current === epoch && activeChatIdRef.current === targetChatId) setCreateOpportunityError(error instanceof Error ? error.message : 'No se pudo crear la oportunidad.')
     } finally {
-	  if (mutationEpochRef.current === epoch && activeChatIdRef.current === targetChatId) setCreatingOpportunity(false)
+	  if (!controller.signal.aborted && createMutationAbortRef.current === controller && mutationEpochRef.current === epoch && activeChatIdRef.current === targetChatId) setCreatingOpportunity(false)
     }
   }
 
@@ -708,7 +763,7 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
       <div className="flex min-h-[64px] shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4">
         <div>
           <h3 className="text-base font-bold text-slate-900">Detalles</h3>
-          <p className="text-[11px] text-slate-500">Contacto y contexto comercial</p>
+          <p className="text-[11px] text-slate-500">{leadsEnabled ? 'Contacto y contexto comercial' : 'Información del contacto'}</p>
         </div>
         <button type="button" onClick={requestClose} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar detalles">
           <X className="h-5 w-5" />
@@ -846,6 +901,7 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
                   )}
                 />
 
+                {leadsEnabled && <>
                 <div className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-slate-50/70 px-4 py-2">
                   <div className="flex min-w-0 items-center gap-2"><BriefcaseBusiness className="h-4 w-4 shrink-0 text-emerald-700" /><div><h4 className="text-xs font-bold text-slate-800">Contexto comercial</h4><p className="text-[10px] text-slate-500">{opportunities.length} oportunidad{opportunities.length === 1 ? '' : 'es'}</p></div></div>
                   <button type="button" onClick={() => setShowCreateOpportunity(value => !value)} className="inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-xl border border-emerald-200 bg-white px-3 text-xs font-bold text-emerald-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Plus className="h-3.5 w-3.5" /> Crear</button>
@@ -953,6 +1009,7 @@ function ContactPanelImpl({ chatId, isOpen, onClose, onFocusConversation, focusC
                   )}
                   </>
                 )}
+                </>}
               </>
             )}
           </div>

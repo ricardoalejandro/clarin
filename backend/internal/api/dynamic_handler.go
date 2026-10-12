@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/kommo"
+	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/ws"
 )
 
@@ -1320,45 +1321,36 @@ func dynamicWhatsAppFailureHTTPStatus(msg string) int {
 // ensureLeadForRegistration makes sure there is a Contact + Lead for the given
 // phone under accountID. It also merges the dynamic tag. Returns contactID, leadID.
 func (s *Server) ensureLeadForRegistration(ctx context.Context, accountID uuid.UUID, jid, phone, fullName, dynamicTag string) (*uuid.UUID, *uuid.UUID, error) {
+	occurredAt := time.Now().UTC()
+	policy, policyErr := s.repos.Account.GetLeadPolicy(ctx, accountID)
 	contact, err := s.repos.Contact.GetOrCreate(ctx, accountID, nil, jid, phone, fullName, "", false)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	// Update contact name if empty
-	if contact != nil && (contact.CustomName == nil || *contact.CustomName == "") && fullName != "" {
+	if contact.CustomName == nil && fullName != "" {
 		contact.CustomName = &fullName
 		_ = s.repos.Contact.Update(ctx, contact)
 	}
-
-	// Try to find existing lead by JID
-	existingLead, _ := s.services.Lead.GetByJID(ctx, accountID, jid)
-	if existingLead != nil {
-		if dynamicTag != "" {
-			_ = s.repos.Tag.SyncLeadTagsByNames(ctx, accountID, existingLead.ID, []string{dynamicTag})
+	// The participation tag belongs to Contact, independently of a commercial opportunity.
+	if dynamicTag != "" {
+		if err = s.repos.Tag.AddContactTagByName(ctx, accountID, contact.ID, dynamicTag); err != nil {
+			return &contact.ID, nil, err
 		}
-		return &contact.ID, &existingLead.ID, nil
 	}
-
-	// Create lead with the account incoming pipeline/stage.
-	lead := &domain.Lead{
-		AccountID: accountID,
-		JID:       jid,
-		Name:      strPtr(fullName),
-		Phone:     strPtr(phone),
-		Source:    strPtr("dinamica"),
-		Status:    strPtr(domain.LeadStatusNew),
-		ContactID: &contact.ID,
+	if policyErr != nil || !policy.AutomationEnabled() {
+		return &contact.ID, nil, nil
 	}
-	if pipelineID, stageID, err := s.repos.Pipeline.ResolveIncomingLeadDestination(ctx, accountID); err == nil {
+	lead := &domain.Lead{AccountID: accountID, ContactID: &contact.ID, JID: jid, Source: strPtr("dinamica")}
+	if pipelineID, stageID, destinationErr := s.repos.Pipeline.ResolveIncomingLeadDestination(ctx, accountID); destinationErr == nil {
 		lead.PipelineID = pipelineID
 		lead.StageID = stageID
 	}
-	if err := s.services.Lead.Create(ctx, lead); err != nil {
-		return &contact.ID, nil, err
+	_, err = s.repos.Lead.EnsureAutomaticLead(ctx, lead, policy.Version, occurredAt)
+	if err == repository.ErrLeadsDisabled || err == repository.ErrLeadAutomationDisabled || err == repository.ErrLeadPolicyConflict {
+		return &contact.ID, nil, nil
 	}
-	if dynamicTag != "" {
-		_ = s.repos.Tag.SyncLeadTagsByNames(ctx, accountID, lead.ID, []string{dynamicTag})
+	if err != nil {
+		return &contact.ID, nil, err
 	}
 	return &contact.ID, &lead.ID, nil
 }

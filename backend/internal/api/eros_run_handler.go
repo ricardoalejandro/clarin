@@ -92,12 +92,17 @@ func canUseQuickTask(permissions []string, definition service.ErosQuickTaskDefin
 }
 
 func (s *Server) handleListErosQuickTasks(c *fiber.Ctx) error {
+	accountID := c.Locals("account_id").(uuid.UUID)
+	policy, err := s.repos.Account.GetLeadPolicy(c.Context(), accountID)
+	if err != nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "lead_policy_unavailable"})
+	}
 	claims, _ := c.Locals("claims").(*service.JWTClaims)
 	permissions := claimsPermissions(claims)
 	catalog := service.ErosQuickTaskCatalog()
 	tasks := make([]service.ErosQuickTaskDefinition, 0, len(catalog))
 	for _, task := range catalog {
-		if canUseQuickTask(permissions, task) {
+		if canUseQuickTask(permissions, task) && (policy.LeadsEnabled || !quickTaskRequiresLeads(task)) {
 			tasks = append(tasks, task)
 		}
 	}
@@ -149,6 +154,11 @@ func (s *Server) handleCreateErosRun(c *fiber.Ctx) error {
 		task, found := service.ErosQuickTaskByID(strings.TrimSpace(req.TaskKey))
 		if !found || !task.ReadOnly || !canUseQuickTask(permissions, task) {
 			return c.Status(403).JSON(fiber.Map{"success": false, "error": "quick_task_not_allowed"})
+		}
+		if quickTaskRequiresLeads(task) {
+			if err := s.repos.Account.RequireLeadsEnabled(c.Context(), accountID); err != nil {
+				return c.Status(403).JSON(fiber.Map{"success": false, "error": "leads_module_disabled"})
+			}
 		}
 		if message == "" {
 			message = task.Title
@@ -442,7 +452,7 @@ func (s *Server) processErosRun(parent context.Context, run *domain.ErosRun) {
 	if err == nil {
 		return
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, repository.ErrErosRunCancelled) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, repository.ErrErosRunCancelled) || errors.Is(err, repository.ErrLeadPolicyConflict) || errors.Is(err, repository.ErrLeadsDisabled) {
 		_ = s.repos.ErosRun.MarkCancelled(context.Background(), run.ID)
 		return
 	}
@@ -485,6 +495,10 @@ func decodeStoredRunParameters(run *domain.ErosRun) erosStoredRunParameters {
 }
 
 func (s *Server) processErosChatRun(ctx context.Context, run *domain.ErosRun) error {
+	leadPolicy, err := s.repos.Account.GetLeadPolicy(ctx, run.AccountID)
+	if err != nil {
+		return err
+	}
 	select {
 	case s.erosRunSem <- struct{}{}:
 		defer func() { <-s.erosRunSem }()
@@ -504,13 +518,14 @@ func (s *Server) processErosChatRun(ctx context.Context, run *domain.ErosRun) er
 		return err
 	}
 	params := decodeStoredRunParameters(run)
-	history := make([]aiChatMessage, 0, len(conv.Messages))
+	historyMessages := make([]domain.ErosMessage, 0, len(conv.Messages))
 	for _, message := range conv.Messages {
 		if message.RunID != nil && *message.RunID == run.ID {
 			continue
 		}
-		history = append(history, aiChatMessage{Role: message.Role, Content: message.Content})
+		historyMessages = append(historyMessages, message)
 	}
+	history := s.erosHistoryForPolicy(ctx, run.AccountID, run.UserID, historyMessages, leadPolicy.LeadsEnabled)
 	if max := settings.MaxHistoryMessages; max > 0 && len(history) > max {
 		history = history[len(history)-max:]
 	}
@@ -519,6 +534,18 @@ func (s *Server) processErosChatRun(ctx context.Context, run *domain.ErosRun) er
 		return err
 	}
 	resultMemory, _ := s.repos.ErosResultSet.ListRecent(ctx, run.AccountID, run.UserID, run.ConversationID, 5)
+	resultMemory = visibleErosResultMemory(resultMemory, leadPolicy.LeadsEnabled)
+	inputRequiresLeads := leadPolicy.LeadsEnabled && s.erosHistoryRequiresLeads(ctx, run.AccountID, run.UserID, historyMessages)
+	for _, set := range resultMemory {
+		inputRequiresLeads = inputRequiresLeads || leadResultSet(set)
+	}
+	snapshot, err := s.erosRunPolicySnapshot(ctx, run, *leadPolicy, inputRequiresLeads)
+	if err != nil {
+		return err
+	}
+	if snapshot.Required && (snapshot.Version != leadPolicy.Version || !leadPolicy.LeadsEnabled) {
+		return repository.ErrLeadPolicyConflict
+	}
 	bridgePayload := erosBridgeChatRequest{
 		AccountID:      run.AccountID.String(),
 		UserID:         run.UserID.String(),
@@ -598,6 +625,10 @@ func (s *Server) processErosChatRun(ctx context.Context, run *domain.ErosRun) er
 		return fmt.Errorf("Codex turn %s: %s", strings.TrimSpace(bridgeResp.Status), strings.TrimSpace(bridgeResp.Error))
 	}
 	duration := time.Since(started).Milliseconds()
+	required, sensitive := erosResponseLeadRequirement(snapshot, bridgeResp.ToolCalls)
+	if sensitive {
+		ctx = repository.WithErosPublicationPolicy(ctx, snapshot.Version, required)
+	}
 	if !bridgeResp.Success || strings.TrimSpace(bridgeResp.Response) == "" {
 		return fmt.Errorf("bridge failed: %s", strings.TrimSpace(bridgeResp.Error))
 	}
@@ -606,6 +637,7 @@ func (s *Server) processErosChatRun(ctx context.Context, run *domain.ErosRun) er
 	run.CodexTurnID = bridgeResp.CodexTurnID
 	response := displayErosFileExportResponse(strings.TrimSpace(bridgeResp.Response), bridgeResp.FileExports)
 	metadata, model, effort := buildErosExecutionSnapshot(bridgeResp.Metadata, settings.CodexModel, params.ReasoningEffort, duration, bridgeResp.ToolCalls)
+	metadata = erosPolicyMetadata(metadata, required, snapshot.Version)
 	if params.ReasoningReason != "" {
 		var values map[string]any
 		_ = json.Unmarshal(metadata, &values)
@@ -808,6 +840,26 @@ func quickResultMarkdown(title string, payload any) string {
 }
 
 func (s *Server) processErosQuickTask(ctx context.Context, run *domain.ErosRun) error {
+	var policyErr error
+	ctx, policyErr = s.bindErosLeadPolicy(ctx, run)
+	if policyErr != nil {
+		return policyErr
+	}
+	required, err := s.erosRunRequiresLeads(ctx, run, map[uuid.UUID]bool{})
+	if err != nil {
+		return err
+	}
+	policy, err := s.repos.Account.GetLeadPolicy(ctx, run.AccountID)
+	if err != nil {
+		return err
+	}
+	snapshot, err := s.erosRunPolicySnapshot(ctx, run, *policy, required)
+	if err != nil {
+		return err
+	}
+	if required {
+		ctx = repository.WithErosPublicationPolicy(ctx, snapshot.Version, true)
+	}
 	definition, ok := service.ErosQuickTaskByID(run.TaskKey)
 	if !ok || !definition.ReadOnly || !canUseQuickTask(run.Permissions, definition) {
 		return errors.New("invalid quick task")
@@ -856,7 +908,7 @@ func (s *Server) processErosQuickTask(ctx context.Context, run *domain.ErosRun) 
 		return err
 	}
 	content := quickResultMarkdown(definition.Title, payload)
-	_, err = s.repos.ErosRun.Complete(ctx, run, content, "deterministic", "none", time.Since(started).Milliseconds(), json.RawMessage(`{"execution":"quick_task"}`), json.RawMessage(`[]`), resultJSON, func(messageID uuid.UUID) *domain.ErosFile {
+	_, err = s.repos.ErosRun.Complete(ctx, run, content, "deterministic", "none", time.Since(started).Milliseconds(), erosPolicyMetadata(json.RawMessage(`{"execution":"quick_task"}`), required, snapshot.Version), json.RawMessage(`[]`), resultJSON, func(messageID uuid.UUID) *domain.ErosFile {
 		if exportHint == nil {
 			return nil
 		}
@@ -902,6 +954,9 @@ func (s *Server) quickExportResult(ctx context.Context, run *domain.ErosRun, val
 	source, err := s.repos.ErosRun.Get(ctx, run.AccountID, run.UserID, sourceID)
 	if err != nil || source.Status != domain.ErosRunCompleted {
 		return nil, nil, errors.New("la ejecución fuente no está disponible")
+	}
+	if _, err := s.bindErosLeadPolicy(ctx, source); err != nil {
+		return nil, nil, err
 	}
 	format := normalizeErosFileFormat(fmt.Sprint(values["format"]))
 	if format != "csv" && format != "xlsx" && format != "pdf" {

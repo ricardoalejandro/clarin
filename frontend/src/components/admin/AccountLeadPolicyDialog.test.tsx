@@ -1,0 +1,121 @@
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ReactNode } from 'react'
+import { beginAuthIdentityChange, completeAuthIdentityChange } from '@/lib/authScope'
+import AccountLeadPolicyDialog from './AccountLeadPolicyDialog'
+
+vi.mock('./AdminFormDialog', () => ({ AdminFormDialog: ({ open, children, footer, onClose }: { open: boolean; children: ReactNode; footer: ReactNode; onClose: () => void }) => open ? <div role="dialog"><button type="button" onClick={onClose}>Cerrar</button>{children}{footer}</div> : null }))
+const account = { id: 'a', name: 'Cuenta A' }
+const policy = (id = 'a', version = 1, enabled = true, automation = true) => ({ account_id: id, leads_enabled: enabled, lead_automation_enabled: automation, leads_policy_version: version })
+const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
+function deferred() { let resolve!: (value: Response) => void; const promise = new Promise<Response>(next => { resolve = next }); return { promise, resolve } }
+beforeEach(() => { completeAuthIdentityChange() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+
+describe('account Leads configuration', () => {
+  it('stages changes and writes once with the loaded version only after Save', async () => {
+    const save = deferred()
+    const fetchMock = vi.fn().mockResolvedValueOnce(response({ success: true, policy: policy() })).mockReturnValueOnce(save.promise)
+    vi.stubGlobal('fetch', fetchMock)
+    const onClose = vi.fn()
+    render(<AccountLeadPolicyDialog account={account} onClose={onClose} />)
+    fireEvent.click(await screen.findByRole('switch', { name: 'Automatización de Leads' }))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const button = screen.getByRole('button', { name: 'Guardar configuración' })
+    fireEvent.click(button); fireEvent.click(button)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1].body))).toEqual({ leads_enabled: true, lead_automation_enabled: false, expected_version: 1 })
+    expect(button).toBeDisabled()
+    await act(async () => { save.resolve(response({ success: true, policy: policy('a', 2, true, false) })); await save.promise })
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('disables automation with the module without deleting its stored preference', async () => {
+    const fetchMock = vi.fn(async () => response({ success: true, policy: policy() }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<AccountLeadPolicyDialog account={account} onClose={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('switch', { name: 'Módulo Leads' }))
+    expect(screen.getByRole('switch', { name: 'Automatización de Leads' })).toBeDisabled()
+    expect(screen.getByRole('switch', { name: 'Automatización de Leads' })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(screen.getByRole('switch', { name: 'Módulo Leads' }))
+    expect(screen.getByRole('switch', { name: 'Automatización de Leads' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Guardar configuración' })).toBeDisabled()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves dirty changes on cancelled discard and never saves through close', async () => {
+    const fetchMock = vi.fn(async () => response({ success: true, policy: policy() }))
+    vi.stubGlobal('fetch', fetchMock)
+    const close = vi.fn()
+    render(<AccountLeadPolicyDialog account={account} onClose={close} />)
+    fireEvent.click(await screen.findByRole('switch', { name: 'Módulo Leads' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }))
+    expect(screen.getByText('Hay cambios sin guardar.')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Seguir editando' })).toHaveFocus()
+    expect(close).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Seguir editando' }))
+    expect(screen.getByRole('switch', { name: 'Módulo Leads' })).toHaveAttribute('aria-checked', 'false')
+    fireEvent.click(screen.getByRole('button', { name: 'Cerrar' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Descartar cambios' }))
+    expect(close).toHaveBeenCalledOnce()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('requires a fresh load after conflict and does not silently overwrite another version', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(response({ success: true, policy: policy() })).mockResolvedValueOnce(response({ success: false }, 409)).mockResolvedValueOnce(response({ success: true, policy: policy('a', 4, false, false) }))
+    vi.stubGlobal('fetch', fetchMock)
+    const close = vi.fn()
+    render(<AccountLeadPolicyDialog account={account} onClose={close} />)
+    fireEvent.click(await screen.findByRole('switch', { name: 'Automatización de Leads' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar configuración' }))
+    expect(await screen.findByText(/La configuración cambió en otra sesión/)).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Guardar configuración' })).toBeDisabled()
+    expect(close).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Actualizar configuración' }))
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Módulo Leads' })).toHaveAttribute('aria-checked', 'false'))
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(screen.getByRole('button', { name: 'Guardar configuración' })).toBeDisabled()
+  })
+
+  it('fails a wrong-account GET and supports retry without exposing editable defaults', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(response({ success: true, policy: policy('b') })).mockResolvedValueOnce(response({ success: true, policy: policy() }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<AccountLeadPolicyDialog account={account} onClose={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('No pudimos consultar')
+    expect(screen.queryByRole('switch')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Actualizar configuración' }))
+    expect(await screen.findByRole('switch', { name: 'Módulo Leads' })).toBeVisible()
+  })
+
+  it('ignores an old-account save and leaves the new account independently usable', async () => {
+    const oldSave = deferred()
+    const fetchMock = vi.fn().mockResolvedValueOnce(response({ success: true, policy: policy() })).mockReturnValueOnce(oldSave.promise).mockResolvedValueOnce(response({ success: true, policy: policy('b') }))
+    vi.stubGlobal('fetch', fetchMock)
+    const close = vi.fn()
+    const view = render(<AccountLeadPolicyDialog account={account} onClose={close} />)
+    fireEvent.click(await screen.findByRole('switch', { name: 'Módulo Leads' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar configuración' }))
+    view.rerender(<AccountLeadPolicyDialog account={{ id: 'b', name: 'Cuenta B' }} onClose={close} />)
+    expect(await screen.findByRole('switch', { name: 'Módulo Leads' })).toHaveAttribute('aria-checked', 'true')
+    expect((fetchMock.mock.calls[1][1] as RequestInit).signal?.aborted).toBe(true)
+    await act(async () => { oldSave.resolve(response({ success: true, policy: policy('a', 2, false) })); await oldSave.promise })
+    expect(close).not.toHaveBeenCalled()
+    expect(screen.getByRole('switch', { name: 'Módulo Leads' })).toBeEnabled()
+  })
+
+  it('aborts an in-flight save when authentication changes', async () => {
+    const oldSave = deferred()
+    const fetchMock = vi.fn().mockResolvedValueOnce(response({ success: true, policy: policy() })).mockReturnValueOnce(oldSave.promise).mockResolvedValueOnce(response({ success: true, policy: policy('a', 3) }))
+    vi.stubGlobal('fetch', fetchMock)
+    const close = vi.fn()
+    render(<AccountLeadPolicyDialog account={account} onClose={close} />)
+    fireEvent.click(await screen.findByRole('switch', { name: 'Módulo Leads' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar configuración' }))
+    act(() => { beginAuthIdentityChange() })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    await act(async () => { oldSave.resolve(response({ success: true, policy: policy('a', 2, false) })); await oldSave.promise })
+    expect(close).not.toHaveBeenCalled()
+    act(() => { completeAuthIdentityChange() })
+    expect(await screen.findByRole('switch', { name: 'Módulo Leads' })).toHaveAttribute('aria-checked', 'true')
+  })
+})

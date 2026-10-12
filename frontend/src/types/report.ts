@@ -175,6 +175,9 @@ export interface WhatsAppGroupCoverageSummary {
 }
 
 export interface WhatsAppGroupCoverageReport {
+  account_id: string
+  leads_enabled: boolean
+  leads_policy_version: number
   generated_at: string
   device: { id: string; name: string; phone: string }
   group: { id: string; name: string; participant_count: number; kind: WhatsAppGroupOption['kind']; suspended: boolean }

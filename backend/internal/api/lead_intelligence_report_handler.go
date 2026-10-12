@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/repository"
 )
 
 type leadIntelligenceRequest struct {
@@ -693,6 +694,23 @@ func (s *Server) callLeadIntelligenceSummaryAI(ctx context.Context, run *domain.
 }
 
 func (s *Server) processLeadIntelligenceRun(ctx context.Context, run *domain.LeadIntelligenceReportRun) {
+	policy, policyErr := s.repos.Account.GetLeadPolicy(ctx, run.AccountID)
+	if policyErr != nil || !policy.LeadsEnabled {
+		_ = s.repos.LeadIntelligence.MarkCancelled(ctx, run.ID)
+		return
+	}
+	ctx = repository.WithLeadPolicyVersion(ctx, policy.Version)
+	canContinue := func() bool {
+		cancelled, err := s.repos.LeadIntelligence.IsCancellationRequested(ctx, run.ID)
+		if err != nil || cancelled || s.repos.Account.RequireLeadsEnabled(ctx, run.AccountID) != nil {
+			_ = s.repos.LeadIntelligence.MarkCancelled(ctx, run.ID)
+			return false
+		}
+		return true
+	}
+	if !canContinue() {
+		return
+	}
 	var params leadIntelligenceParameters
 	if err := json.Unmarshal(run.Parameters, &params); err != nil {
 		_ = s.repos.LeadIntelligence.Fail(ctx, run.ID, "invalid_parameters", "Los parámetros guardados no son válidos.")
@@ -743,6 +761,9 @@ func (s *Server) processLeadIntelligenceRun(ctx context.Context, run *domain.Lea
 		var aiResult leadIntelligenceAIResult
 		var aiErr error
 		for attempt := 0; attempt < 2; attempt++ {
+			if !canContinue() {
+				return
+			}
 			aiResult, aiErr = s.callLeadIntelligenceAI(ctx, run, settings, params, batch)
 			if aiErr == nil {
 				break
@@ -770,6 +791,9 @@ func (s *Server) processLeadIntelligenceRun(ctx context.Context, run *domain.Lea
 	summary := buildLeadIntelligenceSummary(rows, len(indices), processed, params)
 	_ = s.repos.LeadIntelligence.UpdateProgress(ctx, run.ID, "building_summary", len(rows), len(rows), len(indices), processed)
 	if settings != nil {
+		if !canContinue() {
+			return
+		}
 		if aiSummary, summaryErr := s.callLeadIntelligenceSummaryAI(ctx, run, settings, summary); summaryErr != nil {
 			warnings = append(warnings, "La síntesis ejecutiva de IA no estuvo disponible; se utilizó el resumen calculado por el backend.")
 		} else {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Plus, Search, Users, Calendar, Trash2, GraduationCap, Clock, CheckCircle2, Archive, BarChart3, X, Edit2, FolderPlus, Home, ChevronRight, ChevronDown, MoreHorizontal, LayoutGrid, LayoutTemplate, List, AlertCircle, Settings2, BookOpenText, Loader2 } from 'lucide-react';
+import { Plus, Search, Users, Calendar, Trash2, GraduationCap, Clock, CheckCircle2, Archive, BarChart3, X, Edit2, FolderPlus, Home, ChevronRight, ChevronDown, MoreHorizontal, LayoutGrid, LayoutTemplate, List, Info, AlertCircle, Settings2, BookOpenText, Loader2 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Program, ProgramDashboardSummary, ProgramFolder, ProgramGoal } from '@/types/program';
 import Link from 'next/link';
@@ -162,14 +162,14 @@ export default function ProgramsPage() {
     const controller = new AbortController();
     programsRequestRef.current = controller;
     const requestID = ++programsRequestSequence.current;
-    if (!programsLoaded) setLoading(true);
+    setLoading(true);
     setProgramsError('');
 
     const response = await api<Program[]>(programScopeUrls(statusScope).programs, { signal: controller.signal });
     if (controller.signal.aborted || requestID !== programsRequestSequence.current) return;
 
     if (!response.success || !Array.isArray(response.data)) {
-      setProgramsError(response.error || 'No se pudo cargar la lista de programas.');
+      setProgramsError(response.status === 403 ? 'No tienes acceso a los programas de esta cuenta.' : 'No pudimos cargar tus programas. Puedes volver a intentarlo.');
     } else {
       setPrograms(response.data);
       setProgramsLoaded(true);
@@ -182,7 +182,7 @@ export default function ProgramsPage() {
     const controller = new AbortController();
     dashboardRequestRef.current = controller;
     const requestID = ++dashboardRequestSequence.current;
-    if (!dashboard) setLoadingDashboard(true);
+    setLoadingDashboard(true);
     setDashboardError('');
 
     const params = new URLSearchParams();
@@ -193,7 +193,7 @@ export default function ProgramsPage() {
 
     const data = response.data;
     if (!response.success || !data?.success || !data.dashboard) {
-      setDashboardError(response.error || 'No se pudo cargar la salud general.');
+      setDashboardError('La salud general no está disponible en este momento. Puedes volver a intentarlo.');
     } else {
       setDashboard(data.dashboard);
       setGoalForm({
@@ -234,7 +234,7 @@ export default function ProgramsPage() {
     const controller = new AbortController();
     foldersRequestRef.current = controller;
     const requestID = ++foldersRequestSequence.current;
-    setFoldersLoading(previous => foldersLoaded ? previous : true);
+    setFoldersLoading(true);
     setFoldersError('');
 
     const response = await api<{ success: boolean; folders: ProgramFolder[] }>(programScopeUrls(statusScope).folders, { signal: controller.signal });
@@ -242,7 +242,7 @@ export default function ProgramsPage() {
 
     const data = response.data;
     if (!response.success || !data?.success || !Array.isArray(data.folders)) {
-      setFoldersError(response.error || 'No se pudieron cargar las carpetas.');
+      setFoldersError(response.status === 403 ? 'No tienes acceso a las carpetas de esta cuenta.' : 'No pudimos cargar tus carpetas. Puedes volver a intentarlo.');
     } else {
       setFolders(data.folders);
       setFoldersLoaded(true);
@@ -497,6 +497,11 @@ export default function ProgramsPage() {
       (p.description || '').toLowerCase().includes(debouncedSearchQuery.toLowerCase());
     return inFolder && matchesSearch;
   });
+
+  const hasLoadedContent = programs.length > 0 || folders.length > 0;
+  const initialLoading = !hasLoadedContent && ((loading && !programsLoaded) || (foldersLoading && !foldersLoaded));
+  const initialLoadFailed = !initialLoading && !hasLoadedContent && (!programsLoaded || !foldersLoaded);
+  const loadNotice = [programsError, foldersError].filter(Boolean).join(' ');
 
   const formatPct = (value?: number | null) => value == null ? '—' : `${Math.round(value)}%`;
   const healthClass = (health?: string) => {
@@ -767,7 +772,7 @@ export default function ProgramsPage() {
                 Traspaso {formatPct(dashboard.transfer_rate)} / {dashboard.transfer_goal_percent}%
               </span>
               <span className="hidden sm:inline text-slate-300">·</span>
-              <span className="text-xs text-red-600 font-semibold">{dashboard.critical_participants} alertas</span>
+              <span className={`text-xs font-semibold ${dashboard.critical_participants > 0 ? 'text-red-600' : 'text-slate-500'}`}>{dashboard.critical_participants > 0 ? `${dashboard.critical_participants} alertas` : 'Sin alertas'}</span>
             </>
           )}
           <span className="ml-auto flex items-center gap-2 text-xs text-slate-500">
@@ -777,9 +782,9 @@ export default function ProgramsPage() {
         </button>
 
         {dashboardError && !healthExpanded && (
-          <div role="alert" className="flex flex-col gap-2 border-t border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700 sm:flex-row sm:items-center sm:justify-between">
-            <span className="flex items-start gap-2"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{dashboardError}</span>
-            <button type="button" onClick={() => { void fetchDashboard(); }} className="min-h-11 shrink-0 rounded-lg border border-red-200 bg-white px-3 text-xs font-semibold hover:bg-red-100">Reintentar</button>
+          <div role="status" className="flex flex-col gap-2 border-t border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 sm:flex-row sm:items-center sm:justify-between">
+            <span className="flex items-start gap-2"><Info className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />{dashboardError}</span>
+            <button type="button" disabled={loadingDashboard} onClick={() => { void fetchDashboard(); }} className="min-h-11 shrink-0 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50">Reintentar</button>
           </div>
         )}
 
@@ -798,13 +803,13 @@ export default function ProgramsPage() {
             </div>
 
             {dashboardError && (
-              <div role="alert" className="mb-3 flex flex-col gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-700 sm:flex-row sm:items-center sm:justify-between">
-                <span className="flex items-start gap-2"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{dashboardError}</span>
-                <button type="button" onClick={() => { void fetchDashboard(); }} className="min-h-11 shrink-0 rounded-lg border border-red-200 bg-white px-3 text-xs font-semibold hover:bg-red-100">Reintentar</button>
+              <div role="status" className="mb-3 flex flex-col gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-600 sm:flex-row sm:items-center sm:justify-between">
+                <span className="flex items-start gap-2"><Info className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />{dashboardError}</span>
+                <button type="button" disabled={loadingDashboard} onClick={() => { void fetchDashboard(); }} className="min-h-11 shrink-0 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50">Reintentar</button>
               </div>
             )}
 
-            {loadingDashboard ? (
+            {loadingDashboard && !dashboard ? (
               <div className="h-20 bg-slate-50 rounded-lg animate-pulse" />
             ) : dashboard && dashboard.groups.length > 0 ? (
               <>
@@ -842,12 +847,7 @@ export default function ProgramsPage() {
               </>
             ) : dashboard ? (
               <div className="rounded-xl bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">No hay grupos con actividad para este período.</div>
-            ) : (
-              <div className="rounded-xl border border-red-100 bg-red-50 px-4 py-5 text-center text-sm text-red-700">
-                No se pudo cargar la salud general.
-                <button type="button" onClick={() => { void fetchDashboard(); }} className="ml-2 min-h-11 font-semibold underline underline-offset-2">Reintentar</button>
-              </div>
-            )}
+            ) : null}
           </div>
         )}
       </section>}
@@ -900,13 +900,13 @@ export default function ProgramsPage() {
         </div>}
       </div>
 
-      {(programsError || foldersError) && (programsLoaded || foldersLoaded) && (
-        <div role="alert" className="flex shrink-0 flex-col gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 sm:flex-row sm:items-center sm:justify-between">
+      {loadNotice && !initialLoadFailed && !initialLoading && (
+        <div role="status" className="flex shrink-0 flex-col gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 items-start gap-2">
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>{[programsError, foldersError].filter(Boolean).join(' ')}</span>
+            <Info className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
+            <span>{loadNotice}{hasLoadedContent ? ' Conservamos la información que ya estaba cargada.' : ''}</span>
           </div>
-          <button type="button" onClick={() => { void fetchPrograms(); void fetchFolders(); }} className="min-h-11 shrink-0 rounded-xl border border-red-200 bg-white px-4 font-semibold text-red-700 hover:bg-red-100">
+          <button type="button" disabled={loading || foldersLoading} onClick={() => { void fetchPrograms(); void fetchFolders(); }} className="min-h-11 shrink-0 rounded-xl border border-slate-200 bg-white px-4 font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50">
             Reintentar
           </button>
         </div>
@@ -945,7 +945,7 @@ export default function ProgramsPage() {
 
       {/* Content — scrollable */}
       <div className="min-h-0">
-      {(loading && !programsLoaded) || (foldersLoading && !foldersLoaded) ? (
+      {initialLoading ? (
         <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${programGridColumns}, minmax(0, 1fr))` }}>
           {[1, 2, 3, 4, 5, 6, 7, 8].map(i => (
             <div key={i} className="bg-white rounded-xl border border-slate-200 p-5 animate-pulse">
@@ -962,12 +962,12 @@ export default function ProgramsPage() {
             </div>
           ))}
         </div>
-      ) : (!programsLoaded || !foldersLoaded) ? (
-        <div role="alert" className="rounded-2xl border border-red-200 bg-white px-5 py-14 text-center">
-          <AlertCircle className="mx-auto h-10 w-10 text-red-400" />
-          <h3 className="mt-4 text-lg font-semibold text-slate-800">No se pudieron cargar los programas</h3>
-          <p className="mx-auto mt-2 max-w-lg text-sm text-slate-500">{[programsError, foldersError].filter(Boolean).join(' ') || 'Ocurrió un problema al consultar la información.'}</p>
-          <button type="button" onClick={() => { void fetchPrograms(); void fetchFolders(); }} className="mt-5 min-h-11 rounded-xl bg-emerald-600 px-5 text-sm font-semibold text-white hover:bg-emerald-700">
+      ) : initialLoadFailed ? (
+        <div role="status" className="rounded-2xl border border-slate-200 bg-white px-5 py-14 text-center">
+          <Info className="mx-auto h-10 w-10 text-slate-400" />
+          <h3 className="mt-4 text-lg font-semibold text-slate-800">La información no está disponible en este momento</h3>
+          <p className="mx-auto mt-2 max-w-lg text-sm text-slate-500">{loadNotice || 'Puedes volver a intentarlo en un momento.'}</p>
+          <button type="button" disabled={loading || foldersLoading} onClick={() => { void fetchPrograms(); void fetchFolders(); }} className="mt-5 min-h-11 rounded-xl bg-emerald-600 px-5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50">
             Reintentar
           </button>
         </div>

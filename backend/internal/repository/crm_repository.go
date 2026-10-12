@@ -181,6 +181,9 @@ func (r *PipelineRepository) CreateWithStages(ctx context.Context, pipeline *dom
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = requireLeadPolicyTx(ctx, tx, pipeline.AccountID); err != nil {
+		return err
+	}
 
 	pipeline.ID = uuid.New()
 	pipeline.Name = strings.TrimSpace(pipeline.Name)
@@ -220,7 +223,15 @@ func (r *PipelineRepository) UpdateForAccount(ctx context.Context, pipeline *dom
 	if pipeline.Name == "" {
 		return fmt.Errorf("el nombre del pipeline es obligatorio")
 	}
-	tag, err := r.db.Exec(ctx, `
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = requireLeadPolicyTx(ctx, tx, pipeline.AccountID); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `
 		UPDATE pipelines SET name=$1, description=$2, updated_at=NOW()
 		WHERE id=$3 AND account_id=$4
 	`, pipeline.Name, pipeline.Description, pipeline.ID, pipeline.AccountID)
@@ -231,7 +242,7 @@ func (r *PipelineRepository) UpdateForAccount(ctx context.Context, pipeline *dom
 		return ErrCRMNotFound
 	}
 	pipeline.UpdatedAt = time.Now()
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (r *PipelineRepository) SaveStageLayout(ctx context.Context, accountID, pipelineID uuid.UUID, stages []PipelineStageDraft, deletions []PipelineStageDeletion, defaultIncomingStageID *uuid.UUID) (*domain.Pipeline, error) {
@@ -244,6 +255,9 @@ func (r *PipelineRepository) SaveStageLayout(ctx context.Context, accountID, pip
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if err = requireLeadPolicyForAccountUpdateTx(ctx, tx, accountID); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(ctx, `SET CONSTRAINTS ALL DEFERRED`); err != nil {
 		return nil, err
 	}
@@ -507,6 +521,9 @@ func (r *LeadRepository) MoveToStage(ctx context.Context, accountID, leadID uuid
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = requireLeadPolicyTx(ctx, tx, accountID); err != nil {
+		return err
+	}
 	var pipelineID uuid.UUID
 	var stageType string
 	if stageID != nil {
@@ -555,41 +572,77 @@ func (r *LeadRepository) MoveToStage(ctx context.Context, accountID, leadID uuid
 }
 
 func (r *LeadRepository) SoftDelete(ctx context.Context, accountID, id uuid.UUID, deletedBy *uuid.UUID, reason string) error {
-	tag, err := r.db.Exec(ctx, `UPDATE leads SET deleted_at=NOW(), deleted_by=$3, delete_reason=$4, updated_at=NOW() WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL`, accountID, id, deletedBy, strings.TrimSpace(reason))
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = requireLeadPolicyTx(ctx, tx, accountID); err != nil {
+		return err
+	}
+
+	tag, err := tx.Exec(ctx, `UPDATE leads SET deleted_at=NOW(), deleted_by=$3, delete_reason=$4, updated_at=NOW() WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL`, accountID, id, deletedBy, strings.TrimSpace(reason))
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrCRMNotFound
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (r *LeadRepository) SoftDeleteBatch(ctx context.Context, accountID uuid.UUID, ids []uuid.UUID, deletedBy *uuid.UUID, reason string) (int64, error) {
-	tag, err := r.db.Exec(ctx, `UPDATE leads SET deleted_at=NOW(), deleted_by=$3, delete_reason=$4, updated_at=NOW() WHERE account_id=$1 AND id=ANY($2) AND deleted_at IS NULL`, accountID, ids, deletedBy, strings.TrimSpace(reason))
+	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return tag.RowsAffected(), nil
+	defer tx.Rollback(ctx)
+	if err = requireLeadPolicyTx(ctx, tx, accountID); err != nil {
+		return 0, err
+	}
+
+	tag, err := tx.Exec(ctx, `UPDATE leads SET deleted_at=NOW(), deleted_by=$3, delete_reason=$4, updated_at=NOW() WHERE account_id=$1 AND id=ANY($2) AND deleted_at IS NULL`, accountID, ids, deletedBy, strings.TrimSpace(reason))
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), tx.Commit(ctx)
 }
 
 func (r *LeadRepository) SoftDeleteAll(ctx context.Context, accountID uuid.UUID, deletedBy *uuid.UUID, reason string) (int64, error) {
-	tag, err := r.db.Exec(ctx, `UPDATE leads SET deleted_at=NOW(), deleted_by=$2, delete_reason=$3, updated_at=NOW() WHERE account_id=$1 AND deleted_at IS NULL`, accountID, deletedBy, strings.TrimSpace(reason))
+	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return tag.RowsAffected(), nil
+	defer tx.Rollback(ctx)
+	if err = requireLeadPolicyTx(ctx, tx, accountID); err != nil {
+		return 0, err
+	}
+
+	tag, err := tx.Exec(ctx, `UPDATE leads SET deleted_at=NOW(), deleted_by=$2, delete_reason=$3, updated_at=NOW() WHERE account_id=$1 AND deleted_at IS NULL`, accountID, deletedBy, strings.TrimSpace(reason))
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), tx.Commit(ctx)
 }
 
 func (r *LeadRepository) Restore(ctx context.Context, accountID, id uuid.UUID) error {
-	tag, err := r.db.Exec(ctx, `UPDATE leads SET deleted_at=NULL, deleted_by=NULL, delete_reason='', updated_at=NOW() WHERE account_id=$1 AND id=$2 AND deleted_at IS NOT NULL`, accountID, id)
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = requireLeadPolicyTx(ctx, tx, accountID); err != nil {
+		return err
+	}
+
+	tag, err := tx.Exec(ctx, `UPDATE leads SET deleted_at=NULL, deleted_by=NULL, delete_reason='', updated_at=NOW() WHERE account_id=$1 AND id=$2 AND deleted_at IS NOT NULL`, accountID, id)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrCRMNotFound
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (r *LeadRepository) Purge(ctx context.Context, accountID, id uuid.UUID) error {
@@ -598,6 +651,9 @@ func (r *LeadRepository) Purge(ctx context.Context, accountID, id uuid.UUID) err
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = requireLeadPolicyTx(ctx, tx, accountID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE interactions i SET contact_id=l.contact_id
 		FROM leads l WHERE l.id=$2 AND l.account_id=$1 AND i.lead_id=l.id AND i.contact_id IS NULL AND l.contact_id IS NOT NULL
@@ -616,18 +672,54 @@ func (r *LeadRepository) Purge(ctx context.Context, accountID, id uuid.UUID) err
 
 func (r *LeadRepository) PurgeExpired(ctx context.Context, retention time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-retention)
+	rows, err := r.db.Query(ctx, `SELECT id FROM accounts WHERE leads_enabled ORDER BY id`)
+	if err != nil {
+		return 0, err
+	}
+	var accounts []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		accounts = append(accounts, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, accountID := range accounts {
+		count, purgeErr := r.purgeExpiredForAccount(ctx, accountID, cutoff)
+		if errors.Is(purgeErr, ErrLeadsDisabled) {
+			continue
+		}
+		if purgeErr != nil {
+			return total, purgeErr
+		}
+		total += count
+	}
+	return total, nil
+}
+
+func (r *LeadRepository) purgeExpiredForAccount(ctx context.Context, accountID uuid.UUID, cutoff time.Time) (int64, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `
-		UPDATE interactions i SET contact_id=l.contact_id
-		FROM leads l WHERE l.deleted_at IS NOT NULL AND l.deleted_at<$1 AND i.lead_id=l.id AND i.contact_id IS NULL AND l.contact_id IS NOT NULL
-	`, cutoff); err != nil {
+	if err = requireLeadPolicyTx(ctx, tx, accountID); err != nil {
 		return 0, err
 	}
-	tag, err := tx.Exec(ctx, `DELETE FROM leads WHERE deleted_at IS NOT NULL AND deleted_at<$1`, cutoff)
+	if _, err := tx.Exec(ctx, `
+		UPDATE interactions i SET contact_id=l.contact_id
+		FROM leads l WHERE l.account_id=$2 AND l.deleted_at IS NOT NULL AND l.deleted_at<$1 AND i.lead_id=l.id AND i.contact_id IS NULL AND l.contact_id IS NOT NULL
+	`, cutoff, accountID); err != nil {
+		return 0, err
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM leads WHERE account_id=$2 AND deleted_at IS NOT NULL AND deleted_at<$1`, cutoff, accountID)
 	if err != nil {
 		return 0, err
 	}

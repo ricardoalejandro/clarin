@@ -5,10 +5,13 @@ import Link from 'next/link'
 import { ArrowRight, BarChart3, Loader2, Search, ShieldAlert, Sparkles, UsersRound } from 'lucide-react'
 import { REPORT_CATALOG } from '@/lib/reportCatalog'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
+import { useLeadPolicy } from '@/components/LeadPolicyProvider'
+import { isLeadModulePath } from '@/lib/leadPolicy'
 
 type AccessState = 'loading' | 'allowed' | 'denied'
 
 export default function ReportsPage() {
+  const { leadsEnabled } = useLeadPolicy()
   const [access, setAccess] = useState<AccessState>('loading')
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(search)
@@ -33,6 +36,7 @@ export default function ReportsPage() {
   }, [])
 
   const reports = REPORT_CATALOG.filter(report => {
+    if (!leadsEnabled && isLeadModulePath(report.href)) return false
     const term = debouncedSearch.trim().toLocaleLowerCase('es')
     return !term || `${report.title} ${report.description} ${report.category}`.toLocaleLowerCase('es').includes(term)
   })
@@ -92,7 +96,7 @@ export default function ReportsPage() {
                         {report.usesAI && <span className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-violet-700"><Sparkles className="h-3 w-3" /> Usa IA</span>}
                       </div>
                       <h3 className="mt-3 text-base font-bold text-slate-800 group-hover:text-emerald-700">{report.title}</h3>
-                      <p className="mt-1.5 text-sm leading-6 text-slate-500">{report.description}</p>
+                      <p className="mt-1.5 text-sm leading-6 text-slate-500">{!leadsEnabled && report.id === 'whatsapp-group-coverage' ? 'Compara los integrantes de un grupo con los contactos de Clarin.' : report.description}</p>
                       <div className="mt-4 flex items-center gap-1.5 text-xs font-bold text-emerald-600">Abrir reporte <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" /></div>
                     </div>
                   </div>

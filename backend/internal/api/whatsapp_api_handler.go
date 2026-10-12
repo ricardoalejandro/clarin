@@ -378,6 +378,7 @@ func cloudFallbackEventID(kind string, parts ...string) string {
 }
 
 func (s *Server) processCloudAPIMessage(ctx context.Context, device *domain.Device, contactName string, message cloudWebhookMessage) error {
+	leadPolicy, leadPolicyErr := s.repos.Account.GetLeadPolicy(ctx, device.AccountID)
 	phone := kommo.NormalizePhone(message.From)
 	if phone == "" {
 		phone = message.From
@@ -436,26 +437,19 @@ func (s *Server) processCloudAPIMessage(ctx context.Context, device *domain.Devi
 	_ = s.repos.Chat.UpdateLastMessage(ctx, device.AccountID, chat.ID, body, timestamp, true)
 	_ = s.repos.WhatsAppAPI.UpdateChatServiceWindow(ctx, chat.ID, provider, true, timestamp)
 
-	lead, _ := s.repos.Lead.GetByJID(ctx, device.AccountID, jid)
-	if lead == nil {
-		if contactID == nil {
-			return fmt.Errorf("failed to ensure contact for lead: %s", jid)
-		}
-		newLead := &domain.Lead{
-			AccountID: device.AccountID,
-			ContactID: contactID,
-			JID:       jid,
-			Name:      strPtr(contactName),
-			Phone:     strPtr(phone),
-			Status:    strPtr(domain.LeadStatusNew),
-			Source:    strPtr("whatsapp_api"),
-		}
+	if leadPolicyErr == nil && leadPolicy.AllowsAutomaticEvent(leadPolicy.Version, timestamp) && contactID != nil {
+		newLead := &domain.Lead{AccountID: device.AccountID, ContactID: contactID, JID: jid, Source: strPtr("whatsapp_api")}
 		if pipelineID, stageID, err := s.repos.Pipeline.ResolveIncomingLeadDestination(ctx, device.AccountID); err == nil {
 			newLead.PipelineID = pipelineID
 			newLead.StageID = stageID
 		}
-		if err := s.repos.Lead.Create(ctx, newLead); err != nil {
-			log.Printf("[WhatsApp Cloud] Failed to auto-create lead for %s: %v", jid, err)
+		created, err := s.repos.Lead.EnsureAutomaticLead(ctx, newLead, leadPolicy.Version, timestamp)
+		if err != nil {
+			log.Printf("[WhatsApp Cloud] Automatic opportunity skipped account=%s: %v", device.AccountID, err)
+		}
+		if created {
+			s.invalidateLeadsCache(device.AccountID)
+			s.broadcastLeadDelta(device.AccountID, "created", newLead)
 		}
 	}
 

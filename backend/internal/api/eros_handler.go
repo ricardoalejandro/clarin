@@ -292,11 +292,25 @@ func (s *Server) handleErosChat(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "could_not_bind_eros_context"})
 	}
 	bridgeStart := time.Now()
+	leadPolicy, policyErr := s.repos.Account.GetLeadPolicy(c.Context(), accountID)
+	if policyErr != nil {
+		return c.Status(503).JSON(fiber.Map{"success": false, "error": "lead_policy_unavailable"})
+	}
+	threadID := conv.CodexThreadID
+	if !leadPolicy.LeadsEnabled {
+		threadID = ""
+		messages := conv.Messages
+		if max := settings.MaxHistoryMessages; max > 0 && len(messages) > max {
+			messages = messages[len(messages)-max:]
+		}
+		history = s.erosHistoryForPolicy(c.Context(), accountID, userID, messages, false)
+	}
+	inputRequiresLeads := leadPolicy.LeadsEnabled && s.erosHistoryRequiresLeads(c.Context(), accountID, userID, conv.Messages)
 	bridgeResp, err := s.callErosBridge(c.Context(), settings, erosBridgeChatRequest{
 		AccountID:          accountID.String(),
 		UserID:             userID.String(),
 		ConversationID:     conv.ID.String(),
-		CodexThreadID:      conv.CodexThreadID,
+		CodexThreadID:      threadID,
 		CodexModel:         settings.CodexModel,
 		ReasoningEffort:    reasoningEffort,
 		Message:            req.Message,
@@ -339,6 +353,16 @@ func (s *Server) handleErosChat(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadGateway).JSON(resp)
 	}
 	bridgeResp.Response = strings.ReplaceAll(bridgeResp.Response, erosContextToken, "[contexto protegido]")
+	// Legacy chat may still be called by older clients. Serialize only the short
+	// local publish step; never hold an account lock during a model request.
+	required, sensitive := erosResponseLeadRequirement(erosLeadSnapshot{Version: leadPolicy.Version, Enabled: leadPolicy.LeadsEnabled, Required: inputRequiresLeads}, bridgeResp.ToolCalls)
+	if sensitive {
+		release, policyErr := s.repos.Account.AcquireErosPublication(c.Context(), accountID, leadPolicy.Version, required)
+		if policyErr != nil {
+			return c.Status(409).JSON(fiber.Map{"success": false, "error": "lead_policy_changed"})
+		}
+		defer release()
+	}
 
 	response := displayErosFileExportResponse(strings.TrimSpace(bridgeResp.Response), bridgeResp.FileExports)
 	metadata, codexModel, savedReasoningEffort := buildErosExecutionSnapshot(
@@ -348,6 +372,7 @@ func (s *Server) handleErosChat(c *fiber.Ctx) error {
 		bridgeDurationMS,
 		bridgeResp.ToolCalls,
 	)
+	metadata = erosPolicyMetadata(metadata, required, leadPolicy.Version)
 	toolCallsJSON := marshalErosJSON(bridgeResp.ToolCalls, "[]")
 	assistantMsg, saveErr := s.repos.ErosConversation.AddMessageWithMetadata(
 		c.Context(),

@@ -2,9 +2,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { StrictMode, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ reset: vi.fn(), width: 1200, listeners: new Set<(value: unknown) => void>() }))
+const mocks = vi.hoisted(() => ({ reset: vi.fn(), width: 1200, leadsEnabled: true, virtualRows: false, listeners: new Set<(value: unknown) => void>() }))
+vi.mock('@/components/LeadPolicyProvider', () => ({ useLeadPolicy: () => ({ leadsEnabled: mocks.leadsEnabled }) }))
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }))
-vi.mock('@tanstack/react-virtual', () => ({ useVirtualizer: () => ({ getVirtualItems: () => [], getTotalSize: () => 0, measureElement: () => {} }) }))
+vi.mock('@tanstack/react-virtual', () => ({ useVirtualizer: ({ count }: { count: number }) => ({ getVirtualItems: () => mocks.virtualRows ? Array.from({ length: count }, (_, index) => ({ index, key: index, start: index * 72, size: 72, end: (index + 1) * 72 })) : [], getTotalSize: () => count * 72, measureElement: () => {}, scrollToIndex: () => {} }) }))
 vi.mock('@/components/offline-v5/ClarinRuntimeProvider', () => ({ useClarinRuntime: () => ({ requireOnline: () => true }) }))
 vi.mock('@/components/responsive/useContainerWidth', () => ({ useContainerWidth: () => ({ ref: { current: null }, width: mocks.width }) }))
 vi.mock('@/components/crm-detail/useCrmWindowStorageScope', () => ({ default: () => 'synthetic-scope' }))
@@ -30,6 +31,8 @@ const definition = { id: 'synthetic-field-1', name: 'Calidad QA', slug: 'calidad
 let requestUrls: string[] = []
 beforeEach(() => {
   mocks.width = 1200
+  mocks.leadsEnabled = true
+  mocks.virtualRows = false
   window.history.replaceState({}, '', '/dashboard/contacts')
   localStorage.clear()
   localStorage.setItem('token', 'synthetic-audit-token')
@@ -92,6 +95,57 @@ describe('Contact deep links and identity initialization', () => {
   })
 })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); mocks.listeners.clear() })
+
+describe('Contact lead module policy', () => {
+  it('keeps canonical Contact detail available without querying disabled opportunities', async () => {
+    mocks.leadsEnabled = false
+    window.history.replaceState({}, '', '/dashboard/contacts?contact_id=synthetic-contact')
+    const original = globalThis.fetch
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => String(input) === '/api/contacts/synthetic-contact'
+      ? { ok: true, json: async () => ({ success: true, contact: { id: 'synthetic-contact', name: 'Contact without CRM', tags: [], structured_tags: [], lead_count: 4 } }) } as Response
+      : original(input, init)))
+    render(<ContactsPage />)
+    expect(await screen.findByTestId('canonical-contact-detail')).toHaveTextContent('synthetic-contact')
+    expect(screen.queryByText('Leads')).not.toBeInTheDocument()
+    expect(requestUrls.some(url => /\/contacts\/[^/]+\/leads/.test(url))).toBe(false)
+  })
+
+  it('removes commercial sorting immediately when policy is disabled', async () => {
+    const rendered = render(<ContactsPage />)
+    const header = await screen.findByText('Leads')
+    fireEvent.click(header)
+    await waitFor(() => expect(requestUrls.some(url => url.includes('sort_by=lead_count'))).toBe(true))
+    mocks.leadsEnabled = false
+    rendered.rerender(<ContactsPage />)
+    expect(screen.queryByText('Leads')).not.toBeInTheDocument()
+    await waitFor(() => expect(requestUrls.filter(url => url.startsWith('/api/contacts?')).at(-1)).not.toContain('sort_by=lead_count'))
+  })
+})
+
+describe('Contact row actions portal', () => {
+  it.each([1200, 375])('opens one menu outside the row at width %s and preserves contact targeting through mousedown', async width => {
+    mocks.width = width
+    mocks.virtualRows = true
+    const base = vi.mocked(fetch).getMockImplementation()!
+    const contacts = [{ id: 'contact-a', name: 'Contacto primero', phone: '51912345678', tags: [], structured_tags: [] }, { id: 'contact-b', name: 'Contacto segundo', phone: '51912345679', tags: [], structured_tags: [] }]
+    vi.mocked(fetch).mockImplementation((input, options) => String(input).startsWith('/api/contacts?')
+      ? Promise.resolve({ ok: true, json: async () => ({ success: true, contacts, total: 2 }) } as Response)
+      : base(input, options))
+    render(<ContactsPage />)
+    const trigger = await screen.findByRole('button', { name: 'Acciones de Contacto primero' })
+    fireEvent.click(trigger)
+    const menu = screen.getByRole('menu', { name: 'Acciones de Contacto primero' })
+    expect(menu.parentElement).toBe(document.body)
+    expect(menu.closest('[data-contact-id]')).toBeNull()
+    expect(screen.queryByTestId('canonical-contact-detail')).not.toBeInTheDocument()
+    fireEvent.mouseOver(screen.getByText('Contacto segundo'))
+    fireEvent.mouseDown(within(menu).getByRole('menuitem', { name: 'Ver detalle' }))
+    expect(menu).toBeInTheDocument()
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Ver detalle' }))
+    expect(await screen.findByTestId('canonical-contact-detail')).toHaveTextContent('contact-a')
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  })
+})
 
 describe('mobile Contact actions portal', () => {
   it('keeps a portaled action mounted through mousedown and opens the export dialog on click', async () => {
@@ -247,10 +301,10 @@ describe('Contact list continuity and deletion feedback', () => {
     render(<ContactsPage />)
     await screen.findByText('Persona segura')
     fireEvent.click(screen.getByRole('button', { name: 'Acciones de Persona segura' }))
-    fireEvent.click(screen.getByRole('button', { name: /^Eliminar$/ }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Eliminar$/ }))
     expect(screen.getByRole('status')).toHaveTextContent('Eliminando')
     fireEvent.click(screen.getByRole('button', { name: 'Acciones de Persona segura' }))
-    const secondDelete = screen.getByRole('button', { name: /^Eliminar$/ })
+    const secondDelete = screen.getByRole('menuitem', { name: /^Eliminar$/ })
     expect(secondDelete).toBeDisabled()
     fireEvent.click(secondDelete)
     expect(deleteRequests).toBe(1)

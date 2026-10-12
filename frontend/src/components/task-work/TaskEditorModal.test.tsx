@@ -5,6 +5,9 @@ import { apiGet, apiPost, apiPut, apiUpload } from '@/lib/api'
 import type { Task, TaskAttachment, TaskList, TaskWorkflow, TaskWorkflowStatus } from '@/types/task'
 import TaskEditorModal, { type TaskEditorModalHandle } from './TaskEditorModal'
 
+const leadPolicy = vi.hoisted(() => ({ enabled: true }))
+vi.mock('@/components/LeadPolicyProvider', () => ({ useLeadPolicy: () => ({ leadsEnabled: leadPolicy.enabled, ready: true }) }))
+
 vi.mock('@/lib/api', () => ({
   apiGet: vi.fn(),
   apiPost: vi.fn(),
@@ -54,6 +57,7 @@ function renderEditor(overrides: Partial<React.ComponentProps<typeof TaskEditorM
 }
 
 beforeEach(() => {
+  leadPolicy.enabled = true
   vi.mocked(apiGet).mockReset()
   vi.mocked(apiPost).mockReset()
   vi.mocked(apiPut).mockReset()
@@ -64,6 +68,38 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('TaskEditorModal', () => {
+  it('preserves a draft and blocks a new lead relation after policy revocation', async () => {
+    const rendered = renderEditor({ relatedScope: { contactId: 'contact-1', leadId: 'lead-1' }, defaultTitle: 'Borrador comercial' })
+    leadPolicy.enabled = false
+    rendered.rerender(<TaskEditorModal {...rendered.props} />)
+    expect(screen.getByPlaceholderText('¿Qué hay que lograr?')).toHaveValue('Borrador comercial')
+    expect(screen.getByRole('button', { name: 'Crear tarea' })).toBeDisabled()
+    expect(screen.getByRole('status')).toHaveTextContent('Conservamos este borrador')
+    fireEvent.keyDown(document, { key: 'Enter', ctrlKey: true })
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  it('allows editing historical linked tasks without changing their lead relation', async () => {
+    leadPolicy.enabled = false
+    const historical = { ...savedTask, lead_id: 'lead-1', permissions: { can_edit: true } } as Task
+    vi.mocked(apiPut).mockResolvedValue({ success: true, data: { task: historical } })
+    renderEditor({ task: historical, relatedScope: { contactId: 'contact-1', leadId: 'lead-1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }))
+    await waitFor(() => expect(apiPut).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(apiPut).mock.calls[0][1]).not.toHaveProperty('lead_id')
+    expect(vi.mocked(apiPut).mock.calls[0][1]).not.toHaveProperty('contact_id')
+  })
+
+  it('allows Contact task creation while Leads is disabled', async () => {
+    leadPolicy.enabled = false
+    vi.mocked(apiPost).mockResolvedValue({ success: true, data: { task: savedTask } })
+    renderEditor({ relatedScope: { contactId: 'contact-1' }, defaultTitle: 'Seguimiento de contacto' })
+    fireEvent.click(screen.getByRole('button', { name: 'Crear tarea' }))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(apiPost).mock.calls[0][1]).toMatchObject({ contact_id: 'contact-1' })
+    expect(vi.mocked(apiPost).mock.calls[0][1]).not.toHaveProperty('lead_id')
+  })
+
   it('requires an explicit discard decision before an external surface can close a dirty draft', async () => {
     const ref = React.createRef<TaskEditorModalHandle>()
     const onClose = vi.fn()

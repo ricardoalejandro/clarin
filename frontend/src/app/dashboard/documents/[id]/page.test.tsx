@@ -82,7 +82,8 @@ describe('document image loading lifecycle', () => {
     mocks.load.mockRejectedValueOnce(failedImages())
     render(<DocumentEditorPage />)
 
-    const alert = await screen.findByRole('alert')
+    // The first editor render also loads the real Fabric runtime through a cold dynamic import.
+    const alert = await screen.findByRole('alert', {}, { timeout: 5000 })
     expect(alert).toHaveTextContent(/2 imágenes/)
     expect(screen.getByText('Logo CATM (2).png')).toBeVisible()
     expect(screen.getByText('NA_logo_Escuela de Filosofía.png')).toBeVisible()

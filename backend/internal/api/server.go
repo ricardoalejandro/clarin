@@ -450,10 +450,13 @@ func (s *Server) setupRoutes() {
 	offlineV5.Post("/grants/:grantId/prepare/challenge", s.handleOfflineV5GrantChallenge)
 	offlineV5.Post("/grants/:grantId/prepare", s.handleOfflineV5Prepare)
 
+	protected.Use(s.leadPolicyRouteMiddleware)
+
 	// Settings routes
 	protected.Get("/plans", s.handleListPlans)
 	protected.Get("/subscription", s.handleGetSubscription)
 	protected.Get("/settings", s.handleGetSettings)
+	protected.Get("/settings/lead-policy", s.handleGetLeadPolicy)
 	protected.Put("/settings/profile", s.handleUpdateProfile)
 	protected.Put("/settings/account", s.handleUpdateAccount)
 	protected.Get("/storage/usage", s.handleStorageSelfServiceUsage)
@@ -1278,6 +1281,8 @@ func (s *Server) setupRoutes() {
 	adminAccounts := admin.Group("/accounts")
 	adminAccounts.Get("/", s.handleAdminGetAccounts)
 	adminAccounts.Post("/", s.handleAdminCreateAccount)
+	adminAccounts.Get("/:id/lead-policy", s.handleAdminGetLeadPolicy)
+	adminAccounts.Put("/:id/lead-policy", s.handleAdminUpdateLeadPolicy)
 	adminAccounts.Get("/:id/subscription", s.handleAdminGetAccountSubscription)
 	adminAccounts.Put("/:id/subscription", s.handleAdminUpdateAccountSubscription)
 	adminAccounts.Post("/:id/extend-trial", s.handleAdminExtendTrial)
@@ -2572,6 +2577,15 @@ func (s *Server) handleGetChatDetails(c *fiber.Ctx) error {
 		}
 	}
 
+	leadPolicy, policyErr := s.repos.Account.GetLeadPolicy(c.Context(), accountID)
+	if policyErr != nil {
+		return writeLeadPolicyError(c, policyErr)
+	}
+	if !leadPolicy.LeadsEnabled {
+		details.Lead = nil
+		details.Opportunities = []*domain.OpportunitySummary{}
+		details.ActiveOpportunityID = nil
+	}
 	// Load structured tags for contact
 	if details.Contact != nil {
 		tags, tagErr := s.services.Tag.GetByEntity(c.Context(), "contact", details.Contact.ID)
@@ -2598,6 +2612,7 @@ func (s *Server) handleGetChatDetails(c *fiber.Ctx) error {
 		"contact":               details.Contact,
 		"lead":                  details.Lead,
 		"opportunities":         details.Opportunities,
+		"leads_enabled":         leadPolicy.LeadsEnabled,
 		"active_opportunity_id": details.ActiveOpportunityID,
 		"device":                details.Device,
 		"chat_state":            state,
@@ -3000,6 +3015,10 @@ func whatsAppChatResolutionMode(hasChat bool, usableDeviceCount int) string {
 
 func classifyWhatsAppChatCreationError(err error) (int, string, string) {
 	switch {
+	case errors.Is(err, repository.ErrWhatsAppSenderUnavailable):
+		return fiber.StatusConflict, "device_unavailable", "El dispositivo ya no está conectado. Actualiza los canales disponibles para continuar."
+	case errors.Is(err, repository.ErrWhatsAppSenderConfirmation):
+		return fiber.StatusConflict, "sender_confirmation_required", "El canal o el historial cambió. Confirma desde qué número deseas continuar."
 	case errors.Is(err, pgx.ErrNoRows):
 		return fiber.StatusNotFound, "chat_context_not_found", "El contacto o dispositivo ya no está disponible"
 	case errors.Is(err, repository.ErrChatContactConflict):
@@ -3181,7 +3200,15 @@ func (s *Server) handleResolveWhatsAppChat(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	historicalPhone := s.chatHistoricalPhone(c.Context(), chat)
+	historicalPhone := ""
+	historyRevision := ""
+	if chat != nil {
+		history, historyErr := s.repos.Chat.WhatsAppSenderContext(c.Context(), accountID, chat.ID)
+		if historyErr != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo comprobar el historial de la conversación"})
+		}
+		historicalPhone, historyRevision = history.HistoricalPhone, history.Revision
+	}
 	usableDevices := make([]fiber.Map, 0)
 	for _, device := range devices {
 		s.applyDeviceRuntimePolicy(device)
@@ -3201,22 +3228,27 @@ func (s *Server) handleResolveWhatsAppChat(c *fiber.Ctx) error {
 			}
 		}
 		usableDevices = append(usableDevices, fiber.Map{
-			"id":                   device.ID,
-			"name":                 device.Name,
-			"phone":                device.Phone,
-			"jid":                  device.JID,
-			"status":               device.Status,
-			"provider":             getDeviceProvider(device),
-			"runtime_capabilities": device.RuntimeCapabilities,
-			"normalized_phone":     devicePhone,
-			"historical_relation":  relation,
-			"matches_historical":   historicalPhone != "" && devicePhone == historicalPhone,
-			"has_different_number": chat != nil && historicalPhone != "" && devicePhone != "" && devicePhone != historicalPhone,
-			"history_unknown":      chat != nil && historicalPhone == "",
+			"id":                    device.ID,
+			"name":                  device.Name,
+			"phone":                 device.Phone,
+			"jid":                   device.JID,
+			"status":                device.Status,
+			"provider":              getDeviceProvider(device),
+			"runtime_capabilities":  device.RuntimeCapabilities,
+			"normalized_phone":      devicePhone,
+			"historical_relation":   relation,
+			"matches_historical":    historicalPhone != "" && devicePhone == historicalPhone,
+			"has_different_number":  chat != nil && historicalPhone != "" && devicePhone != "" && devicePhone != historicalPhone,
+			"history_unknown":       chat != nil && historicalPhone == "",
+			"history_revision":      historyRevision,
+			"requires_confirmation": chat != nil && (historicalPhone == "" || devicePhone == "" || devicePhone != historicalPhone),
 		})
 	}
 
 	mode := whatsAppChatResolutionMode(chat != nil, len(usableDevices))
+	if mode == "open_direct" && usableDevices[0]["requires_confirmation"] == true {
+		mode = "choose_device"
+	}
 	var resolvedContactID *uuid.UUID
 	if selectedContact != nil {
 		resolvedContactID = &selectedContact.ID
@@ -3228,6 +3260,7 @@ func (s *Server) handleResolveWhatsAppChat(c *fiber.Ctx) error {
 		"phone":            normalized,
 		"jid":              jid,
 		"historical_phone": historicalPhone,
+		"history_revision": historyRevision,
 		"contact_id":       resolvedContactID,
 		"devices":          usableDevices,
 		"mode":             mode,
@@ -3238,10 +3271,11 @@ func (s *Server) handleCreateNewChat(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 
 	var req struct {
-		DeviceID       string `json:"device_id"`
-		Phone          string `json:"phone"`
-		ContactID      string `json:"contact_id,omitempty"`
-		InitialMessage string `json:"initial_message,omitempty"`
+		DeviceID           string                                 `json:"device_id"`
+		Phone              string                                 `json:"phone"`
+		ContactID          string                                 `json:"contact_id,omitempty"`
+		InitialMessage     string                                 `json:"initial_message,omitempty"`
+		SenderConfirmation *repository.WhatsAppSenderConfirmation `json:"sender_confirmation,omitempty"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
@@ -3342,15 +3376,27 @@ func (s *Server) handleCreateNewChat(c *fiber.Ctx) error {
 	}
 
 	// Create or reuse the canonical WhatsApp chat.
-	var chat *domain.Chat
+	var selectedContactID *uuid.UUID
+	contactName := ""
 	if selectedContact != nil {
-		chat, err = s.services.Chat.CreateNewChatForContact(c.Context(), accountID, deviceID, selectedContact.ID, canonicalJID, canonicalPhone, selectedContact.DisplayName())
-	} else {
-		chat, err = s.services.Chat.CreateNewChat(c.Context(), accountID, deviceID, canonicalJID)
+		selectedContactID = &selectedContact.ID
+		contactName = selectedContact.DisplayName()
 	}
+	// Number validation can wait on WhatsApp. Recheck the local channel state
+	// immediately before persistence; the repository rechecks under its lock.
+	if _, err := s.requireManualDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
+		if apiErr, ok := err.(*fiber.Error); ok {
+			return c.Status(apiErr.Code).JSON(fiber.Map{"success": false, "error": apiErr.Message, "code": "device_unavailable"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo comprobar el dispositivo"})
+	}
+	chat, err := s.repos.Chat.OpenManualWhatsAppChat(c.Context(), accountID, deviceID, selectedContactID, canonicalJID, canonicalPhone, contactName, req.SenderConfirmation)
 	if err != nil {
 		status, code, message := classifyWhatsAppChatCreationError(err)
 		return c.Status(status).JSON(fiber.Map{"success": false, "error": message, "code": code})
+	}
+	if s.hub != nil {
+		s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, "chat_sender_changed", fiber.Map{"chat_id": chat.ID, "device_id": deviceID})
 	}
 
 	// Send initial message if provided
@@ -6386,7 +6432,7 @@ func (s *Server) handleCreateLead(c *fiber.Ctx) error {
 	s.broadcastLeadDelta(accountID, "created", lead)
 
 	// Fire lead_created automation trigger
-	s.triggerAutomationLeadCreated(accountID, lead.ID)
+	s.triggerAutomationLeadCreated(c.Context(), accountID, lead.ID)
 
 	return c.Status(201).JSON(fiber.Map{"success": true, "lead": lead})
 }
@@ -6534,7 +6580,7 @@ func (s *Server) handleCreateLeadsFromContacts(c *fiber.Ctx) error {
 		}
 		createdLeads = append(createdLeads, lead)
 		s.broadcastLeadDelta(accountID, "created", lead)
-		s.triggerAutomationLeadCreated(accountID, lead.ID)
+		s.triggerAutomationLeadCreated(c.Context(), accountID, lead.ID)
 	}
 
 	if len(createdLeads) > 0 {
@@ -7474,7 +7520,7 @@ func (s *Server) handleUpdateLeadStage(c *fiber.Ctx) error {
 
 	// Fire lead_stage_changed automation trigger
 	if stageID != nil {
-		s.triggerAutomationLeadStageChanged(accountID, leadID, *stageID)
+		s.triggerAutomationLeadStageChanged(c.Context(), accountID, leadID, *stageID)
 	}
 
 	return c.JSON(fiber.Map{"success": true, "operation_id": operationID, "lead": canonicalLead})
@@ -7777,6 +7823,16 @@ func (s *Server) handlePreviewImportCSV(c *fiber.Ctx) error {
 	if errMsg != "" {
 		return c.Status(status).JSON(fiber.Map{"success": false, "error": errMsg})
 	}
+	if importType != "contacts" {
+		p, err := s.repos.Account.GetLeadPolicy(c.Context(), accountID)
+		if err != nil {
+			return writeLeadPolicyError(c, err)
+		}
+		if !p.LeadsEnabled {
+			return writeLeadPolicyError(c, repository.ErrLeadsDisabled)
+		}
+		c.Context().SetUserValue("clarin.leads_policy_version", p.Version)
+	}
 	plan, err := s.buildCSVImportPlan(c.Context(), accountID, importType, importTag, fileName, rawBytes, importType != "contacts")
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -7797,6 +7853,16 @@ func (s *Server) handleImportCSV(c *fiber.Ctx) error {
 	}
 	defer releaseImportLock()
 
+	if importType != "contacts" {
+		p, err := s.repos.Account.GetLeadPolicy(c.Context(), accountID)
+		if err != nil {
+			return writeLeadPolicyError(c, err)
+		}
+		if !p.LeadsEnabled {
+			return writeLeadPolicyError(c, repository.ErrLeadsDisabled)
+		}
+		c.Context().SetUserValue("clarin.leads_policy_version", p.Version)
+	}
 	plan, err := s.buildCSVImportPlan(c.Context(), accountID, importType, importTag, fileName, rawBytes, importType != "contacts")
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -8239,87 +8305,111 @@ func (s *Server) executeCSVImportPlan(ctx context.Context, accountID, userID uui
 	result.Updated = 0
 	syncKommoMetadata := plan.Summary.Source == "kommo_csv"
 	for _, record := range plan.Records {
-		if record.Action == "skip" || record.Action == "duplicate_contact_lead" {
-			continue
+		if plan.Summary.ImportType != "contacts" {
+			if err := s.repos.Account.RequireLeadsEnabled(ctx, accountID); err != nil {
+				result.ErrorCount++
+				result.Errors = append(result.Errors, "Importacion detenida: la configuracion de Leads cambio.")
+				break
+			}
 		}
-		if record.Action == "update_existing" {
-			if record.ExistingLeadID != nil {
-				changed := false
-				if syncKommoMetadata {
-					statusChanged, err := s.syncCSVImportExistingLeadStatusTag(ctx, accountID, *record.ExistingLeadID, record.KommoStatus)
-					if err != nil {
-						result.Skipped++
-						result.ErrorCount++
-						result.Errors = append(result.Errors, fmt.Sprintf("fila %d: etiqueta de estado: %s", record.RowNum, err.Error()))
-						continue
-					}
-					changed = changed || statusChanged
-					fechaChanged, err := s.repos.Tag.SyncKommoFechaTagForLead(ctx, accountID, *record.ExistingLeadID, record.KommoFechaTag)
-					if err != nil {
-						result.Skipped++
-						result.ErrorCount++
-						result.Errors = append(result.Errors, fmt.Sprintf("fila %d: etiqueta fecha: %s", record.RowNum, err.Error()))
-						continue
-					}
-					changed = changed || fechaChanged
+		func() {
+			rowCtx := ctx
+			if plan.Summary.ImportType != "contacts" {
+				var release func()
+				var err error
+				rowCtx, release, err = s.repos.Account.AcquireLeadMutation(ctx, accountID)
+				if err != nil {
+					result.ErrorCount++
+					result.Errors = append(result.Errors, "La configuracion de Leads cambio.")
+					return
 				}
-				if changed {
+				defer release()
+			}
+			ctx := rowCtx
+
+			if record.Action == "skip" || record.Action == "duplicate_contact_lead" {
+				return
+			}
+			if record.Action == "update_existing" {
+				if record.ExistingLeadID != nil {
+					changed := false
+					if syncKommoMetadata {
+						statusChanged, err := s.syncCSVImportExistingLeadStatusTag(ctx, accountID, *record.ExistingLeadID, record.KommoStatus)
+						if err != nil {
+							result.Skipped++
+							result.ErrorCount++
+							result.Errors = append(result.Errors, fmt.Sprintf("fila %d: etiqueta de estado: %s", record.RowNum, err.Error()))
+							return
+						}
+						changed = changed || statusChanged
+						fechaChanged, err := s.repos.Tag.SyncKommoFechaTagForLead(ctx, accountID, *record.ExistingLeadID, record.KommoFechaTag)
+						if err != nil {
+							result.Skipped++
+							result.ErrorCount++
+							result.Errors = append(result.Errors, fmt.Sprintf("fila %d: etiqueta fecha: %s", record.RowNum, err.Error()))
+							return
+						}
+						changed = changed || fechaChanged
+					}
+					if changed {
+						result.Updated++
+					}
+				}
+				return
+			}
+			if syncKommoMetadata {
+				_, activeCount, err := s.findCSVImportContactState(ctx, accountID, record.JID)
+				if err != nil {
+					result.Skipped++
+					result.ErrorCount++
+					result.Errors = append(result.Errors, fmt.Sprintf("fila %d: revalidación de contacto: %s", record.RowNum, err.Error()))
+					return
+				}
+				if activeCount > 0 {
+					markCSVImportRuntimeDuplicate(&result, record)
+					return
+				}
+			}
+			contact, contactCreated, _, err := s.ensureCSVImportContact(ctx, accountID, record)
+			if err != nil {
+				result.Skipped++
+				result.ErrorCount++
+				result.Errors = append(result.Errors, fmt.Sprintf("fila %d: contacto: %s", record.RowNum, err.Error()))
+				return
+			}
+			if contactCreated {
+				// Already included in preview NewContacts; no extra counter needed here.
+			}
+			if plan.Summary.ImportType == "contacts" {
+				if contactCreated {
+					result.Created++
+				} else {
 					result.Updated++
 				}
+				return
 			}
-			continue
-		}
-		if syncKommoMetadata {
-			_, activeCount, err := s.findCSVImportContactState(ctx, accountID, record.JID)
-			if err != nil {
+			if syncKommoMetadata && contact != nil {
+				activeCount, err := s.countOpenCSVImportLeads(ctx, accountID, contact.ID)
+				if err != nil {
+					result.Skipped++
+					result.ErrorCount++
+					result.Errors = append(result.Errors, fmt.Sprintf("fila %d: validación de duplicado: %s", record.RowNum, err.Error()))
+					return
+				}
+				if activeCount > 0 {
+					markCSVImportRuntimeDuplicate(&result, record)
+					return
+				}
+			}
+			if err := s.createCSVImportLead(ctx, accountID, userID, record, contact, plan.Summary.ImportTag, syncKommoMetadata); err != nil {
 				result.Skipped++
 				result.ErrorCount++
-				result.Errors = append(result.Errors, fmt.Sprintf("fila %d: revalidación de contacto: %s", record.RowNum, err.Error()))
-				continue
+				result.Errors = append(result.Errors, fmt.Sprintf("fila %d: lead: %s", record.RowNum, err.Error()))
+				return
 			}
-			if activeCount > 0 {
-				markCSVImportRuntimeDuplicate(&result, record)
-				continue
-			}
-		}
-		contact, contactCreated, _, err := s.ensureCSVImportContact(ctx, accountID, record)
-		if err != nil {
-			result.Skipped++
-			result.ErrorCount++
-			result.Errors = append(result.Errors, fmt.Sprintf("fila %d: contacto: %s", record.RowNum, err.Error()))
-			continue
-		}
-		if contactCreated {
-			// Already included in preview NewContacts; no extra counter needed here.
-		}
-		if plan.Summary.ImportType == "contacts" {
-			if contactCreated {
-				result.Created++
-			} else {
-				result.Updated++
-			}
-			continue
-		}
-		if syncKommoMetadata && contact != nil {
-			activeCount, err := s.countOpenCSVImportLeads(ctx, accountID, contact.ID)
-			if err != nil {
-				result.Skipped++
-				result.ErrorCount++
-				result.Errors = append(result.Errors, fmt.Sprintf("fila %d: validación de duplicado: %s", record.RowNum, err.Error()))
-				continue
-			}
-			if activeCount > 0 {
-				markCSVImportRuntimeDuplicate(&result, record)
-				continue
-			}
-		}
-		if err := s.createCSVImportLead(ctx, accountID, userID, record, contact, plan.Summary.ImportTag, syncKommoMetadata); err != nil {
-			result.Skipped++
-			result.ErrorCount++
-			result.Errors = append(result.Errors, fmt.Sprintf("fila %d: lead: %s", record.RowNum, err.Error()))
-			continue
-		}
-		result.Created++
+			result.Created++
+
+		}()
 	}
 	return result
 }
@@ -10089,6 +10179,11 @@ func (s *Server) handleAssignTag(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	if req.EntityType == "lead" {
+		if err := s.requireLeadsForActivity(c, accountID); err != nil {
+			return writeLeadPolicyError(c, err)
+		}
+	}
 	entityID, err := uuid.Parse(req.EntityID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid entity ID"})
@@ -10122,7 +10217,7 @@ func (s *Server) handleAssignTag(c *fiber.Ctx) error {
 	}
 	if req.EntityType == "lead" {
 		// Fire tag_assigned automation trigger
-		s.triggerAutomationTagAssigned(accountID, entityID, tagID)
+		s.triggerAutomationTagAssigned(c.Context(), accountID, entityID, tagID)
 	}
 
 	return c.JSON(fiber.Map{"success": true, "event_participants_added": eventParticipantsAdded})
@@ -10137,6 +10232,11 @@ func (s *Server) handleRemoveTag(c *fiber.Ctx) error {
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	}
+	if req.EntityType == "lead" {
+		if err := s.requireLeadsForActivity(c, accountID); err != nil {
+			return writeLeadPolicyError(c, err)
+		}
 	}
 	entityID, err := uuid.Parse(req.EntityID)
 	if err != nil {
@@ -10170,7 +10270,7 @@ func (s *Server) handleRemoveTag(c *fiber.Ctx) error {
 	}
 	if req.EntityType == "lead" {
 		// Fire tag_removed automation trigger
-		s.triggerAutomationTagRemoved(accountID, entityID, tagID)
+		s.triggerAutomationTagRemoved(c.Context(), accountID, entityID, tagID)
 	}
 
 	return c.JSON(fiber.Map{"success": true})
@@ -11175,6 +11275,17 @@ func (s *Server) handleSearchPeople(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	search := c.Query("search", "")
 	sourceType := c.Query("type", "all") // "all", "contact", "lead"
+	policy, policyErr := s.repos.Account.GetLeadPolicy(c.Context(), accountID)
+	if policyErr != nil {
+		return writeLeadPolicyError(c, policyErr)
+	}
+	if !policy.LeadsEnabled {
+		if sourceType == "lead" {
+			return writeLeadPolicyError(c, repository.ErrLeadsDisabled)
+		}
+		sourceType = "contact"
+	}
+
 	limit := c.QueryInt("limit", 50)
 	offset := c.QueryInt("offset", 0)
 	hasPhone := c.QueryBool("has_phone", false)
@@ -11348,15 +11459,16 @@ func (s *Server) handleSearchPeople(c *fiber.Ctx) error {
 func (s *Server) handleGetEvents(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	filter := domain.EventFilter{
-		Search:       c.Query("search"),
-		Status:       c.Query("status"),
-		FolderFilter: c.Query("folder"),
-		Limit:        c.QueryInt("limit", 50),
-		Offset:       c.QueryInt("offset", 0),
+		Search:           c.Query("search"),
+		Status:           c.Query("status"),
+		ExcludeCancelled: c.QueryBool("exclude_cancelled", false),
+		FolderFilter:     c.Query("folder"),
+		Limit:            c.QueryInt("limit", 50),
+		Offset:           c.QueryInt("offset", 0),
 	}
 
 	// Redis cache for default load — 30s TTL
-	isDefaultEventsLoad := filter.Search == "" && filter.Status == "" && filter.FolderFilter == ""
+	isDefaultEventsLoad := filter.Search == "" && filter.Status == "" && !filter.ExcludeCancelled && filter.FolderFilter == ""
 	eventsCacheKey := ""
 	if isDefaultEventsLoad && s.cache != nil {
 		eventsCacheKey = fmt.Sprintf("events:%s:%d:%d", accountID.String(), filter.Limit, filter.Offset)
@@ -14815,6 +14927,11 @@ func (s *Server) handleLogInteraction(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	if req.LeadID != nil && *req.LeadID != "" {
+		if err := s.repos.Account.RequireLeadsEnabled(c.Context(), accountID); err != nil {
+			return writeLeadPolicyError(c, err)
+		}
+	}
 	if req.Type == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Type is required"})
 	}
@@ -14954,6 +15071,11 @@ func (s *Server) handleLogInteraction(c *fiber.Ctx) error {
 
 func (s *Server) handleGetInteractions(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	if c.Query("lead_id") != "" {
+		if err := s.repos.Account.RequireLeadsEnabled(c.Context(), accountID); err != nil {
+			return writeLeadPolicyError(c, err)
+		}
+	}
 	limit := c.QueryInt("limit", 50)
 	offset := c.QueryInt("offset", 0)
 
@@ -15188,6 +15310,11 @@ func (s *Server) handleDeleteInteraction(c *fiber.Ctx) error {
 	var interactionType string
 	if err := s.repos.DB().QueryRow(c.Context(), `SELECT contact_id, lead_id, event_id, participant_id, program_id, type FROM interactions WHERE id=$1 AND account_id=$2`, id, accountID).Scan(&interactionContactID, &interactionLeadID, &interactionEventID, &interactionParticipantID, &interactionProgramID, &interactionType); err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Interaction not found"})
+	}
+	if interactionLeadID != nil {
+		if err := s.repos.Account.RequireLeadsEnabled(c.Context(), accountID); err != nil {
+			return writeLeadPolicyError(c, err)
+		}
 	}
 	if interactionProgramID != nil {
 		if handled, guardErr := s.rejectMigratedProgramMutation(c, accountID, *interactionProgramID); handled {
