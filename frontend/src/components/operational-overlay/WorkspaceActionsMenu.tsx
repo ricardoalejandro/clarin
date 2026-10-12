@@ -46,9 +46,9 @@ export default function WorkspaceActionsMenu({ anchor, id, label, compact = fals
     }
     reposition()
     const frame = requestAnimationFrame(() => menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus({ preventScroll: true }))
-    const observer = new ResizeObserver(reposition)
-    if (menuRef.current) observer.observe(menuRef.current)
-    observer.observe(anchor)
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(reposition) : null
+    if (menuRef.current) observer?.observe(menuRef.current)
+    observer?.observe(anchor)
     document.addEventListener('pointerdown', outside, true)
     document.addEventListener('mousedown', outside, true)
     document.addEventListener('keydown', keyboard, true)
@@ -57,7 +57,7 @@ export default function WorkspaceActionsMenu({ anchor, id, label, compact = fals
     window.visualViewport?.addEventListener('resize', reposition)
     window.visualViewport?.addEventListener('scroll', reposition)
     return () => {
-      cancelAnimationFrame(frame); observer.disconnect()
+      cancelAnimationFrame(frame); observer?.disconnect()
       document.removeEventListener('pointerdown', outside, true); document.removeEventListener('mousedown', outside, true); document.removeEventListener('keydown', keyboard, true)
       window.removeEventListener('resize', reposition); window.removeEventListener('scroll', reposition, true)
       window.visualViewport?.removeEventListener('resize', reposition); window.visualViewport?.removeEventListener('scroll', reposition)

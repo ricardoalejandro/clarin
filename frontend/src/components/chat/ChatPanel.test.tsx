@@ -99,7 +99,7 @@ describe('ChatPanel canonical device truth', () => {
     act(() => websocket.listeners.forEach(listener => listener({ event: 'chat_sender_changed', data: { chat_id: 'chat-1' } })))
     expect(await screen.findByText(/El canal de esta conversación cambió/)).toBeVisible()
     rerender(<ChatPanel chatId="chat-1" deviceId="device-2" device={serverDevice} initialChat={{ ...chat, device_id: 'device-2' }} explicitSenderSession={1} />)
-    expect(await screen.findByRole('textbox', { name: 'Draft test editor' })).toHaveValue('Borrador antes de confirmar')
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue('Borrador antes de confirmar'))
   })
 
   it('blocks a different sender returned after another session changed the chat', async () => {
@@ -123,7 +123,7 @@ describe('ChatPanel canonical device truth', () => {
     expect(await screen.findByText(/El canal de esta conversación cambió/)).toBeVisible()
     serverDevice = device('connected')
     act(() => websocket.listeners.forEach(listener => listener({ event: 'device_status', data: { device_id: 'device-1', status: 'connected' } })))
-    expect(await screen.findByRole('textbox', { name: 'Draft test editor' })).toHaveValue('No perder este borrador')
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue('No perder este borrador'))
   })
 
   beforeEach(() => {
