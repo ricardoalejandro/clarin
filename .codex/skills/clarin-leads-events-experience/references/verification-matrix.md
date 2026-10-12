@@ -38,6 +38,15 @@
 - Move one card and an Eventos multi-selection both into and out of a visible `Sin etapa` bucket; assert a nullable payload, explicit canonical nulls, exact counters, one logical write, rollback, and remote-session reconciliation.
 - For Eventos, drag an existing selected group and confirm one bulk request and a true-count stack overlay.
 
+## Event Configuration, Selection And Bitácoras
+
+- Reorder stages by pointer, keyboard and direct position; cancel dirty drafts, switch sections, receive a remote event closure, and retry a version conflict. Test shared pipelines with both another Evento and a Programa, explicit deletion transfer, atomic rollback and remapping of board/detail/filter state.
+- Verify saved bitácora filters follow stage cloning and transfer without broadening unmatched filters; captured filters, stage snapshots and annotated entries remain unchanged. Cover account/event isolation, version conflicts and audit rollback against PostgreSQL.
+- Page contacts, select all filtered results with exclusions, review, confirm, lose the response and recover the same receipt. Test expired review, double click, event closure, rule changes, cross-actor access, blank-name identity fallback and A-to-B-to-A searches at exactly 500 ms.
+- Exercise a large account and fresh snapshot with real query plans, not only mocked timing. Ensure transactional planner changes do not escape into other queries or alter global settings.
+- Create pending bitácora, preview/capture, save multiline notes, recapture with and without annotated exclusions, complete/reopen, page history and export CSV/XLSX. Verify literal formula-like values, unknown legacy scope, stale responses, failed saves and dirty-note preservation under WebSocket updates.
+- Use `tests/events-experience-smoke.mjs` only with its isolated synthetic QA backend; do not point its fixture creation at production. Check operational windows and bitácora pages at narrow and wide measured widths with reachable actions and no horizontal clipping.
+
 ## Baseline
 
 - Add unit tests for deterministic geometry, responsive view selection, activity query construction, tag mutation state, drag snapshot/reducer, rollback, and count reconciliation.

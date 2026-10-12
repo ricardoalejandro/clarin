@@ -37,6 +37,7 @@ npm run build
 - Extract pure helpers instead of testing timing, geometry, selection, ordering, reconciliation, or payload rules only through a browser.
 - A build, TypeScript pass, manual click-through, or Playwright scenario never substitutes for the nearest-layer unit test.
 - Verify success, empty, conflict/error and rollback behavior when the change can mutate persisted state. Multi-item operations must also prove atomicity, deduplication and one-write semantics.
+- For paginated collection changes, verify repository/API serialization and client reconciliation for an empty first page, an empty final page with a positive total, removal of the last item, and switching from populated to empty scope. Malformed/error responses remain retryable errors; delayed previous-scope responses cannot restore stale rows or counters.
 - Keep focused browser tests for integration, animation, accessibility, drag sensors and real layout; do not duplicate every pure permutation there.
 - Geometry- or layer-driven UI must expose deterministic helpers/constants for unit coverage, then add a focused browser assertion for real pointer coordinates, clipping, focus restoration and overlay order.
 - Grouped and bulk task interactions must unit-test every grouping key, stable relative order, confirmation staging, cursor ownership, optimistic rollback and the exact one-write payload. Preview work must test format classification, anchor normalization, job retries, account isolation and derivative reference safety.
@@ -79,6 +80,7 @@ git diff --check
 ## Deployment When Requested
 
 - If the user asks to deploy, says "despliega", "aplícalo", "producción", "main", or clearly expects the running system to be updated, run the deploy flow. Tests/builds alone are not enough.
+- `make deploy` copies root `CHANGELOG.md` over `backend/CHANGELOG.md`. If the latter already contains unrelated dirty work, preserve its exact bytes before checkout/build and restore them after the build, including a failed deployment; verify the preserved hash. Do not commit that unrelated content as part of the release.
 - Deploy from the repository root with:
 
 ```bash
