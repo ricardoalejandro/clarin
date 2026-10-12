@@ -500,6 +500,38 @@ describe('TaskDetailDrawer simplified full-editor access', () => {
     expect(screen.getByRole('textbox', { name: 'Nombre de la subtarea' })).toHaveValue('')
   })
 
+  it('keeps a parent count received before the child HTTP response and reconciles canonical progress', async () => {
+    const parent = { ...task, progress_mode: 'automatic' as const }
+    const child = { ...task, id: 'child-once', title: 'Subtarea confirmada', parent_task_id: task.id }
+    mockTaskDetailAPI([parent])
+    const creation = deferred<{ success: boolean; data: { task: Task } }>()
+    const parentRead = deferred<{ success: boolean; data: { task: Task } }>()
+    apiMocks.post.mockReturnValue(creation.promise)
+    render(<TaskDetailDrawer taskId={parent.id} allTasks={[parent]} users={[{ id: 'user-1', display_name: 'Usuario', username: 'usuario' }]} lists={[{ id: 'list-1', workflow_id: 'workflow-1', name: 'Seguridad' } as never]} folders={[]} workflows={[{ id: 'workflow-1', is_default: true, statuses: [{ ...task.status_detail!, is_default: true }] } as never]} onClose={vi.fn()} onEdit={vi.fn()} onOpenTask={vi.fn()} onCreateSubtask={vi.fn()} onChanged={vi.fn()} onDeleted={vi.fn(() => true)} />)
+    const title = await screen.findByRole('textbox', { name: 'Nombre de la subtarea' })
+    fireEvent.focus(title)
+    fireEvent.change(title, { target: { value: child.title } })
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar' }))
+    await waitFor(() => expect(apiMocks.post).toHaveBeenCalledTimes(1))
+    const listener = apiMocks.subscribe.mock.calls.at(-1)![0]
+    await act(async () => listener({ event: 'task_update', data: { action: 'updated', task: { ...parent, version: 2, subtask_count: 1 } } }))
+    expect(screen.getByText('0/1 subtareas')).toBeInTheDocument()
+    const previousGet = apiMocks.get.getMockImplementation()!
+    apiMocks.get.mockImplementation((endpoint: string, ...args: unknown[]) => endpoint === `/api/tasks/${parent.id}` ? parentRead.promise : previousGet(endpoint, ...args))
+    await act(async () => {
+      creation.resolve({ success: true, data: { task: child } })
+      await creation.promise
+    })
+    expect(screen.getByText('0/1 subtareas')).toBeInTheDocument()
+    expect(screen.queryByText('0/2 subtareas')).not.toBeInTheDocument()
+    await act(async () => {
+      parentRead.resolve({ success: true, data: { task: { ...parent, version: 3, subtask_count: 2, subtask_done: 1, progress: 50 } } })
+      await parentRead.promise
+    })
+    expect(screen.getByText('1/2 subtareas')).toBeInTheDocument()
+    expect(screen.getByText('50% calculado')).toBeInTheDocument()
+  })
+
   it('uses the task workflow as truth when its list catalog is hidden', async () => {
     const unrelatedDone = { ...task.status_detail!, id: 'other-done', workflow_id: 'other-workflow', name: 'Finalizada ajena', category: 'done' as const, sort_order: 2 }
     const sharedTask = { ...task, status_detail: { ...task.status_detail!, workflow_id: 'shared-workflow' } }

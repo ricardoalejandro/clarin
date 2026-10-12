@@ -1490,7 +1490,9 @@ const TaskDetailDrawer = forwardRef<TaskDetailDrawerHandle, Props>(function Task
         setChildren(current => current.some(item => item.id === createdChild.id) ? current : [...current, createdChild])
         subtaskDraftTouchedRef.current = false
         setSubtaskDraft(createTaskQuickSubtaskDraft(currentTask, statuses))
-        setTask(current => current ? { ...current, subtask_count: (current.subtask_count || 0) + 1 } : current)
+        // A realtime parent snapshot may already count this child. Reload its
+        // derived count/progress instead of incrementing the same create twice.
+        void refreshTask()
         window.setTimeout(() => { void refreshActivity() }, 120)
       }
       const saved = draftsByTaskRef.current.get(requestedTaskId)

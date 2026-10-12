@@ -134,6 +134,7 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
   const [createdTask, setCreatedTask] = useState<Task | null>(null)
   const [creationUncertain, setCreationUncertain] = useState(false)
   const createOperationRef = useRef<TaskCreateOperation | null>(null)
+  const creationSessionRef = useRef(0)
   const [participantGrantPrompt, setParticipantGrantPrompt] = useState<string[]>([])
   const [catalogLists, setCatalogLists] = useState<TaskList[]>(lists)
   const [catalogFolders, setCatalogFolders] = useState<TaskFolder[]>(folders)
@@ -171,6 +172,9 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
   }, [open, taskEditable])
 
   useEffect(() => {
+    creationSessionRef.current += 1
+    savingRef.current = false
+    setSaving(false)
     if (!open) return
     if (typeof URL.revokeObjectURL === 'function') for (const url of Array.from(attachmentObjectURLsRef.current.values())) URL.revokeObjectURL(url)
     attachmentObjectURLsRef.current.clear()
@@ -209,10 +213,10 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
     setCatalogLists(lists)
     setCatalogFolders(folders)
     if (fileRef.current) fileRef.current.value = ''
-  // Initialize only when the dialog/task changes. Late structure/user loads
+  // Initialize only when the dialog/task/creation parent changes. Late structure/user loads
   // are filled by the focused effects below and never wipe what was typed.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, task?.id])
+  }, [open, task?.id, parentTaskId])
 
   useEffect(() => {
     setCatalogLists(current => mergeTaskCatalogPage(current, lists))
@@ -223,6 +227,7 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
   }, [folders])
 
   useEffect(() => () => {
+    creationSessionRef.current += 1
     if (typeof URL.revokeObjectURL === 'function') for (const url of Array.from(attachmentObjectURLsRef.current.values())) URL.revokeObjectURL(url)
     attachmentObjectURLsRef.current.clear()
   }, [])
@@ -332,13 +337,15 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
     addAttachments(files)
   }
 
-  const uploadCreationAttachments = async (taskID: string) => {
+  const uploadCreationAttachments = async (taskID: string, creationSession: number) => {
     const pendingItems = attachmentQueue.filter(item => item.status === 'pending' || item.status === 'failed')
     let failed = 0
     for (const item of pendingItems) {
+      if (creationSession !== creationSessionRef.current) return failed
       setAttachmentQueue(current => markTaskAttachmentQueueItem(current, item.id, 'uploading'))
       const form = taskAttachmentUploadForm(item.file, crypto.randomUUID())
       const result = await apiUpload<{ success?: boolean; attachment: TaskAttachment; deduped?: boolean; operation_id?: string }>(taskAttachmentUploadEndpoint(taskID), form)
+      if (creationSession !== creationSessionRef.current) return failed
       if (result.success && result.data?.attachment) {
         setAttachmentQueue(current => markTaskAttachmentQueueItem(current, item.id, 'uploaded'))
       } else {
@@ -416,11 +423,13 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
 
   const save = async (confirmGrants = false) => {
     if (!taskEditable || !canSave || savingRef.current) return false
+    const creationSession = creationSessionRef.current
     savingRef.current = true
     setSaving(true)
     setError('')
     if (saveIntent === 'retry-attachments' && createdTask) {
-      const failed = await uploadCreationAttachments(createdTask.id)
+      const failed = await uploadCreationAttachments(createdTask.id, creationSession)
+      if (creationSession !== creationSessionRef.current) return false
       savingRef.current = false
       setSaving(false)
       if (failed) {
@@ -452,9 +461,10 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
       ...(task ? { version: editVersion } : {}),
       confirm_grants: confirmGrants,
     }
-    if (!task) createOperationRef.current = retainTaskCreateOperation(createOperationRef.current, draftBody)
-    const operationId = task ? crypto.randomUUID() : createOperationRef.current!.operationID
-    const body = { ...(!task ? createOperationRef.current!.payload as typeof draftBody : draftBody), operation_id: operationId, confirm_grants: confirmGrants }
+    const creationOperation = !task ? retainTaskCreateOperation(createOperationRef.current, draftBody) : null
+    if (creationOperation) createOperationRef.current = creationOperation
+    const operationId = creationOperation?.operationID || crypto.randomUUID()
+    const body = { ...(!task ? creationOperation!.payload as typeof draftBody : draftBody), operation_id: operationId, confirm_grants: confirmGrants }
     onOperation?.(operationId, true)
     const result = task
       ? await apiPut<TaskMutationResponse>(`/api/tasks/${task.id}`, body)
@@ -472,6 +482,10 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
             confirm_grants: body.confirm_grants,
           })
         : await apiPost<TaskMutationResponse>('/api/tasks', body)
+    if (!task && creationSession !== creationSessionRef.current) {
+      onOperation?.(operationId, false)
+      return false
+    }
     if (!result.success || !result.data?.task) {
       if (result.status === 409 && result.data?.code === 'access_change_confirmation_required') {
         setParticipantGrantPrompt(result.data.affected_user_ids || [])
@@ -481,7 +495,7 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
         if (latest.success && latest.data?.task) setEditVersion(latest.data.task.version || editVersion)
         setError('La tarea cambió en otra sesión. Conservamos todos tus campos; revisa y vuelve a guardar sobre la versión más reciente.')
       } else if (!task && (!result.status || result.status >= 500 || result.status === 408)) {
-        createOperationRef.current = markTaskCreateUncertain(createOperationRef.current!)
+        createOperationRef.current = markTaskCreateUncertain(creationOperation!)
         setCreationUncertain(true)
         setError('No recibimos confirmación. Conservamos este intento; reintenta para recuperar la misma tarea sin duplicarla.')
       } else {
@@ -503,7 +517,8 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
     if (!task && attachmentQueue.length) {
       setCreatedTask(result.data.task)
       setDirty(false)
-      const failed = await uploadCreationAttachments(result.data.task.id)
+      const failed = await uploadCreationAttachments(result.data.task.id, creationSession)
+      if (creationSession !== creationSessionRef.current) return false
       savingRef.current = false
       setSaving(false)
       if (failed) {

@@ -116,7 +116,7 @@ import {
 	taskLocationViewSelectionError,
 	taskPurgedWhiteboardCount,
 } from '@/lib/taskLocationViews'
-import { appendTaskFilters } from './taskQuery'
+import { appendTaskFilters, loadTaskSummary } from './taskQuery'
 import { collectTaskWindow } from './taskPageWindow'
 import { TaskAccessReconciliation } from './taskAccessReconciliation'
 import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider'
@@ -1594,7 +1594,7 @@ export default function TaskWorkspace() {
       if (view === 'summary') {
         if (summaryQueryRef.current !== queryKey) setSummary(null)
         summaryQueryRef.current = queryKey
-        const result = await apiGet<TaskWorkSummary>(`/api/tasks/summary?${params}`, { signal: controller.signal })
+        const result = await loadTaskSummary(params, controller.signal)
         if (sequence !== loadSequence.current || controller.signal.aborted) return
         if (result.success && result.data) setSummary(result.data)
         else setError(result.error || 'No se pudo cargar el resumen')
@@ -1952,13 +1952,15 @@ export default function TaskWorkspace() {
       const targetType = payload.target_type
       if (targetType === 'task' || targetType === 'list' || targetType === 'folder' || targetType === 'environment') {
         taskAccessRef.current.revoke(targetType, payload.target_id, [...taskWriteSnapshotsRef.current.values(), ...tasksRef.current])
+        const retainedLedger = { ...visualMutationLedgerRef.current }
         for (const [id, task] of taskWriteSnapshotsRef.current) {
           if (!taskAccessRef.current.canAccept(task)) {
             taskWriteSnapshotsRef.current.delete(id)
             taskVisualWriteIntentsRef.current.delete(id)
-            delete visualMutationLedgerRef.current[id]
+            delete retainedLedger[id]
           }
         }
+        visualMutationLedgerRef.current = retainedLedger
       }
       // Invalidate immediately, before any awaited close or delayed refresh.
       taskLoadAbortRef.current?.abort()

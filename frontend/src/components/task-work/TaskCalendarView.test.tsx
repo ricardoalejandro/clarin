@@ -168,6 +168,28 @@ describe('TaskCalendarView schedule gestures', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
+  it('keeps the pending quick creation mounted through Escape and backdrop until its outcome is known', async () => {
+    let finish!: (result: unknown) => void
+    apiMocks.post.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+      .mockResolvedValueOnce({ success: true, data: { task: scheduledTask() } })
+    const { props } = renderCalendar()
+    await calendarBlock()
+    fireEvent.click(document.querySelector('[data-calendar-month-day]') as HTMLElement)
+    fireEvent.click(screen.getByRole('button', { name: 'Tarea' }))
+    fireEvent.change(screen.getByPlaceholderText('¿Qué hay que lograr?'), { target: { value: 'Creación pendiente' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Crear' }))
+    await waitFor(() => expect(apiMocks.post).toHaveBeenCalledTimes(1))
+    fireEvent.keyDown(window, { key: 'Escape' })
+    const dialog = screen.getByRole('dialog')
+    fireEvent.mouseDown(dialog.parentElement!)
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cerrar creación del calendario' })).toBeDisabled()
+    await act(async () => { finish({ success: false, status: 503, error: 'unknown' }) })
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar creación' }))
+    await waitFor(() => expect(props.onCreated).toHaveBeenCalledTimes(1))
+    expect(apiMocks.post.mock.calls[1]).toEqual(apiMocks.post.mock.calls[0])
+  })
+
   it('retries quick task creation with the same immutable operation after a lost response', async () => {
     const { props } = renderCalendar()
     apiMocks.post.mockResolvedValueOnce({ success: false, error: 'Network' })

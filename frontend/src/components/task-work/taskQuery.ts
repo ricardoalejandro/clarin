@@ -1,4 +1,10 @@
-import type { TaskFilters } from '@/types/task'
+import { apiGet } from '@/lib/api'
+import type { TaskFilters, TaskWorkSummary } from '@/types/task'
+
+export async function loadTaskSummary(params: URLSearchParams, signal: AbortSignal) {
+  const response = await apiGet<{ summary: TaskWorkSummary }>(`/api/tasks/summary?${params}`, { signal })
+  return { ...response, data: response.data?.summary }
+}
 
 export function appendTaskFilters(params: URLSearchParams, filters: TaskFilters) {
   params.set('include_closed', String(filters.include_closed))

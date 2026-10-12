@@ -159,7 +159,7 @@ func (r *TaskWorkRepository) BulkUpdateTasks(ctx context.Context, accountID uuid
 			}
 			command = `UPDATE tasks SET assigned_to=$3,updated_at=NOW(),version=version+1 WHERE account_id=$1 AND id=$2`
 		case "due_at":
-			command = `UPDATE tasks SET due_at=$3::timestamptz,overdue_notified_at=NULL,updated_at=NOW(),version=version+1 WHERE account_id=$1 AND id=$2`
+			command = `UPDATE tasks SET due_at=$3::timestamptz,due_end_at=NULL,overdue_notified_at=NULL,updated_at=NOW(),version=version+1 WHERE account_id=$1 AND id=$2`
 		default:
 			return nil, ErrTaskBulkUpdateInvalid
 		}
@@ -334,7 +334,7 @@ func (r *TaskWorkRepository) RescheduleTaskChain(ctx context.Context, accountID 
 		if id != input.TaskID && equalTaskScheduleTime(next.Start, old.Start) && equalTaskScheduleTime(next.Due, old.Due) {
 			continue
 		}
-		if _, err := tx.Exec(ctx, `UPDATE tasks SET start_at=$3,due_at=$4,overdue_notified_at=NULL,updated_at=NOW(),version=version+1 WHERE account_id=$1 AND id=$2`, accountID, id, next.Start, next.Due); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE tasks SET start_at=$3,due_at=$4,due_end_at=NULL,overdue_notified_at=NULL,updated_at=NOW(),version=version+1 WHERE account_id=$1 AND id=$2`, accountID, id, next.Start, next.Due); err != nil {
 			return nil, err
 		}
 		if err := syncTaskReminderTx(ctx, tx, id); err != nil {

@@ -494,6 +494,7 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 	const [listID, setListID] = useState(() => calendarDefaultList(scopeListID, '', lists.map(list => list.id)))
 	const [ownerID, setOwnerID] = useState(currentUserID)
 	const [saving, setSaving] = useState(false)
+	const creatingRef = useRef(false)
 	const [error, setError] = useState('')
 	const [quickConflict, setQuickConflict] = useState(false)
 	const [eventEditorOpen, setEventEditorOpen] = useState(false)
@@ -639,7 +640,7 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 				undoTimerRef.current = null
 				setUndoState(null); setScheduleConflict(null); setMutationError(''); setAnnouncement('')
 				setEventEditorOpen(false); setEditingEvent(null); setEditingOccurrence(null); setEventDraft(null)
-				setComposer(null); setTitle(''); setError(''); setQuickConflict(false); setSaving(false)
+				setComposer(null); setTitle(''); setError(''); setQuickConflict(false); creatingRef.current = false; setSaving(false)
 				createOperationRef.current = null; setCreationUncertain(false); composerReturnFocusRef.current = null
 			}
 			if (timer) clearTimeout(timer)
@@ -776,7 +777,8 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 		setInteractionPreview(null)
 	}
 	const move = (direction: number) => { dismissCalendarLayers(); setCursor(value => { const next = new Date(value); if (mode === 'month') next.setMonth(next.getMonth() + direction); else if (mode === 'week') next.setDate(next.getDate() + direction * 7); else next.setDate(next.getDate() + direction); return next }) }
-	const closeComposer = useCallback((restoreFocus = true) => {
+	const closeComposer = useCallback((restoreFocus = true, afterSave = false) => {
+		if (creatingRef.current && !afterSave) return
 		createOperationRef.current = null; setCreationUncertain(false)
 		setComposer(null); setTitle(''); setError(''); setQuickConflict(false)
 		const returnFocus = composerReturnFocusRef.current
@@ -808,21 +810,23 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 	const selectedList = lists.find(list => list.id === listID)
 	const status = statuses.find(item => item.workflow_id === selectedList?.workflow_id && item.category === 'not_started')
 	const createQuick = async (confirmConflicts = false) => {
-		if (!canCreate || !composer || !title.trim() || !selectedList || saving) return
+		if (!canCreate || !composer || !title.trim() || !selectedList || creatingRef.current) return
+		creatingRef.current = true
 		setSaving(true); setError(''); if (!confirmConflicts) setQuickConflict(false)
 		const accessEpoch = accessEpochRef.current
 		const payload = { title: title.trim(), description: '', type: 'reminder', priority: 'medium', assigned_to: ownerID, list_id: listID, status_id: status?.id, start_at: composer.startAt, due_at: composer.dueAt, is_all_day: composer.allDay, recurrence_rule: '', reminder_minutes: 0, placement: 'top' }
-		if (composer.type === 'task') createOperationRef.current = retainTaskCreateOperation(createOperationRef.current, payload)
-		const operationID = composer.type === 'task' ? createOperationRef.current!.operationID : crypto.randomUUID()
+		const creationOperation = composer.type === 'task' ? retainTaskCreateOperation(createOperationRef.current, payload) : null
+		if (creationOperation) createOperationRef.current = creationOperation
+		const operationID = creationOperation?.operationID || crypto.randomUUID()
 		onOperation(operationID, true)
 		try {
 			if (composer.type === 'task') {
 				if (!status || !ownerID) return
-				const result = await apiPost<{ task: Task; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>('/api/tasks', { ...createOperationRef.current!.payload, operation_id: operationID })
+				const result = await apiPost<{ task: Task; operation_id?: string; hierarchy_counts?: TaskHierarchyCounts }>('/api/tasks', { ...creationOperation!.payload, operation_id: operationID })
 				if (accessEpoch !== accessEpochRef.current) return
 				if (!result.success || !result.data?.task) {
 					if (!result.status || result.status >= 500 || result.status === 408) {
-						createOperationRef.current = markTaskCreateUncertain(createOperationRef.current!)
+						createOperationRef.current = markTaskCreateUncertain(creationOperation!)
 						setCreationUncertain(true)
 						setError('No recibimos confirmación. Reintenta para recuperar la misma tarea sin duplicarla.')
 					} else setError(result.error || 'No se pudo crear la tarea')
@@ -838,8 +842,8 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 					setError(result.error || 'No se pudo crear el evento'); return
 				}
 			}
-			setLastListID(listID); closeComposer(); await reloadAgendaRef.current()
-		} finally { if (accessEpoch === accessEpochRef.current) setSaving(false); onOperation(operationID, false) }
+			setLastListID(listID); closeComposer(true, true); await reloadAgendaRef.current()
+		} finally { if (accessEpoch === accessEpochRef.current) { creatingRef.current = false; setSaving(false) }; onOperation(operationID, false) }
 	}
 	const more = () => {
 		if (!canCreate || !composer) return
@@ -918,7 +922,7 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 		{summary && <CalendarItemSummary item={summary.item} lists={lists} anchor={summary.anchor} anchorElement={summary.anchorElement} onClose={closeSummary} onOpenTaskDetail={onOpenTaskDetail} onEditTask={onEditTask} onEditEvent={editCalendarEvent} />}
 		{composer && <div className="fixed inset-0 z-[145] flex items-center justify-center bg-slate-950/25 p-4 backdrop-blur-[2px]" onMouseDown={event => event.target === event.currentTarget && closeComposer()}>
 			<div role="dialog" aria-modal="true" aria-labelledby="calendar-composer-title" className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl">
-				<div className="flex items-start justify-between"><div><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Calendario</p><h2 id="calendar-composer-title" className="mt-1 text-lg font-black text-slate-900">Crear en este horario</h2><p className="mt-1 text-xs text-slate-400">{new Date(composer.startAt).toLocaleString('es', composer.allDay ? { dateStyle: 'full' } : { dateStyle: 'medium', timeStyle: 'short' })}</p></div><button onClick={() => closeComposer()} className="rounded-xl p-2 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button></div>
+				<div className="flex items-start justify-between"><div><p className="text-[10px] font-black uppercase tracking-[.16em] text-emerald-600">Calendario</p><h2 id="calendar-composer-title" className="mt-1 text-lg font-black text-slate-900">Crear en este horario</h2><p className="mt-1 text-xs text-slate-400">{new Date(composer.startAt).toLocaleString('es', composer.allDay ? { dateStyle: 'full' } : { dateStyle: 'medium', timeStyle: 'short' })}</p></div><button disabled={saving} aria-label="Cerrar creación del calendario" onClick={() => closeComposer()} className="rounded-xl p-2 text-slate-400 hover:bg-slate-100 disabled:opacity-40"><X className="h-4 w-4" /></button></div>
 				<div inert={saving || creationUncertain}><div className="mt-4 flex rounded-xl bg-slate-100 p-1"><button onClick={() => { setQuickConflict(false); setComposer(current => current ? { ...current, type: 'event' } : null) }} className={`min-h-9 flex-1 rounded-lg text-xs font-black ${composer.type === 'event' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>Evento</button><button onClick={() => { setQuickConflict(false); setComposer(current => current ? { ...current, type: 'task' } : null) }} className={`min-h-9 flex-1 rounded-lg text-xs font-black ${composer.type === 'task' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}>Tarea</button></div>
 				<input autoFocus value={title} onChange={event => { setTitle(event.target.value); setQuickConflict(false) }} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void createQuick(quickConflict) } }} placeholder={composer.type === 'event' ? 'Nombre del evento' : '¿Qué hay que lograr?'} className="mt-4 w-full rounded-2xl border border-slate-200 px-4 py-3 text-base font-semibold outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100" />
 				<div className={`mt-3 grid gap-3 ${composer.type === 'task' ? 'sm:grid-cols-2' : ''}`}><TaskListPicker value={listID} lists={lists} folders={folders} onChange={value => { setListID(value); setQuickConflict(false) }} />{composer.type === 'task' && <TaskUserCombobox users={users} value={ownerID} onChange={setOwnerID} />}</div>

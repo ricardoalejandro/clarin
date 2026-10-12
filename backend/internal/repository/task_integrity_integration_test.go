@@ -196,6 +196,15 @@ func TestTaskIntegrityCreateReceiptRollbackActorScopeAndDeletedReplay(t *testing
 	if err := f.pool.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE account_id=$1`, f.account).Scan(&tasks); err != nil || tasks != 2 {
 		t.Fatalf("deleted replay recreated: %d %v", tasks, err)
 	}
+	if _, err := f.pool.Exec(ctx, `DELETE FROM tasks WHERE account_id=$1 AND id=$2`, f.account, valid.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Create(ctx, retry); !errors.Is(err, ErrTaskWorkNotFound) {
+		t.Fatalf("purged result recreated or exposed: %v", err)
+	}
+	if err := f.pool.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE account_id=$1`, f.account).Scan(&tasks); err != nil || tasks != 1 {
+		t.Fatalf("purged replay recreated: %d %v", tasks, err)
+	}
 }
 
 func TestTaskIntegrityChildCreateRetryRecordsParentActivityOnce(t *testing.T) {
@@ -242,6 +251,8 @@ func TestTaskIntegrityBulkDatesRollbackAndReminderReschedule(t *testing.T) {
 	for _, task := range tasks {
 		task.StartAt = &start
 		task.DueAt = &due
+		legacyEnd := due.Add(time.Hour)
+		task.DueEndAt = &legacyEnd
 		task.ReminderMinutes = &minutes
 		if err := repo.Create(ctx, task); err != nil {
 			t.Fatal(err)
@@ -261,6 +272,10 @@ func TestTaskIntegrityBulkDatesRollbackAndReminderReschedule(t *testing.T) {
 	next := due.Add(24 * time.Hour)
 	if _, err := work.BulkUpdateTasks(ctx, f.account, TaskBulkUpdateInput{Items: items, Property: "due_at", Value: next, ActorID: f.actor}); err != nil {
 		t.Fatal(err)
+	}
+	var legacyEnds int
+	if err := f.pool.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE account_id=$1 AND due_end_at IS NOT NULL`, f.account).Scan(&legacyEnds); err != nil || legacyEnds != 0 {
+		t.Fatalf("bulk retained stale legacy date: %d %v", legacyEnds, err)
 	}
 	var reminders int
 	if err := f.pool.QueryRow(ctx, `SELECT COUNT(*) FROM task_reminders WHERE account_id=$1 AND reminder_at=$2 AND NOT delivered`, f.account, next.Add(-30*time.Minute)).Scan(&reminders); err != nil || reminders != 2 {
@@ -358,6 +373,8 @@ func TestTaskIntegrityGanttEndResizePropagatesLagAndRemindersAtomically(t *testi
 	root, child := f.task("Predecessor"), f.task("Successor")
 	root.StartAt, root.DueAt, root.ReminderMinutes = &start, &rootDue, &minutes
 	child.StartAt, child.DueAt, child.ReminderMinutes = &childStart, &childDue, &minutes
+	legacyEnd := childDue.Add(time.Hour)
+	root.DueEndAt, child.DueEndAt = &legacyEnd, &legacyEnd
 	for _, task := range []*domain.Task{root, child} {
 		if err := repo.Create(ctx, task); err != nil {
 			t.Fatal(err)
@@ -376,6 +393,10 @@ func TestTaskIntegrityGanttEndResizePropagatesLagAndRemindersAtomically(t *testi
 	}
 	if len(result.TaskIDs) != 2 {
 		t.Fatalf("unchanged-start end resize changed %d tasks", len(result.TaskIDs))
+	}
+	var legacyEnds int
+	if err := f.pool.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE account_id=$1 AND due_end_at IS NOT NULL`, f.account).Scan(&legacyEnds); err != nil || legacyEnds != 0 {
+		t.Fatalf("Gantt retained stale legacy date: %d %v", legacyEnds, err)
 	}
 	var gotStart, gotDue, reminder time.Time
 	var version int64
