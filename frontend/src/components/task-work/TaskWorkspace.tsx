@@ -46,7 +46,7 @@ import type { TaskExternalDropTarget } from './taskDropTargets'
 import { taskListDensity } from './taskListDensity'
 import { taskAccordionVisualState } from './taskInteractionVisuals'
 import { taskLocationLabel } from './taskBreadcrumbVisibility'
-import { mergeTaskPage, resolveTaskPageItem, taskPageParams, taskPageQueryKey, type TaskPageResponse } from './taskPagination'
+import { mergeTaskPage, normalizeTaskPageResponse, resolveTaskPageItem, taskPageParams, taskPageQueryKey, type TaskPageResponse } from './taskPagination'
 import {
   folderChildrenShouldLoad, mergeFolderListPage, mergeFolderPage, mergeRootListPage,
   removeTaskContainerFromActiveHierarchy, taskContainerLifecycleMutationFromEvent,
@@ -1731,8 +1731,16 @@ export default function TaskWorkspace() {
       setTaskLoadingMore(false)
       return
     }
+    let page: TaskPageResponse
+    try {
+      page = normalizeTaskPageResponse(result.data)
+    } catch (cause) {
+      setTaskLoadMoreError(cause instanceof Error ? cause.message : 'No se pudo cargar la siguiente página de tareas.')
+      setTaskLoadingMore(false)
+      return
+    }
     const currentIDs = new Set(tasksRef.current.map(task => task.id))
-    const incoming = (result.data?.tasks || []).filter(task => {
+    const incoming = page.tasks.filter(task => {
       if (!taskAccessRef.current.confirmRead(task, accessReadEpoch)) return false
       const knownVersion = taskVersions.current.get(task.id) || 0
       const deletedVersion = taskTombstones.current.get(task.id)
@@ -1744,8 +1752,8 @@ export default function TaskWorkspace() {
       return true
     })
     setTasks(current => mergeTaskPage(current, incoming, 'append'))
-    if (!Object.keys(visualMutationLedgerRef.current).length) setTaskTotal(result.data?.total || 0)
-    const nextCursor = result.data?.next_cursor || null
+    if (!Object.keys(visualMutationLedgerRef.current).length) setTaskTotal(page.total)
+    const nextCursor = page.next_cursor || null
     taskNextCursorRef.current = nextCursor
     setTaskNextCursor(nextCursor)
     setTaskLoadingMore(false)

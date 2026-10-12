@@ -1,9 +1,9 @@
-import { TASK_PAGE_SIZE, type TaskPageResponse } from './taskPagination'
+import { normalizeTaskPageResponse, TASK_PAGE_SIZE, type TaskPageResponse } from './taskPagination'
 
 /** Refresh the visible cursor window as a whole. Absence from just the first
  * page cannot distinguish a filtered-out row from one moved to the next page. */
 export async function collectTaskWindow(
-  load: (cursor?: string) => Promise<TaskPageResponse>,
+  load: (cursor?: string) => Promise<unknown>,
   visibleCount: number,
 ): Promise<TaskPageResponse> {
   const pageCount = Math.max(1, Math.ceil(visibleCount / TASK_PAGE_SIZE))
@@ -12,7 +12,7 @@ export async function collectTaskWindow(
   let cursor: string | undefined
   let response: TaskPageResponse = { tasks: [], total: 0 }
   for (let page = 0; page < pageCount; page++) {
-    response = await load(cursor)
+    response = normalizeTaskPageResponse(await load(cursor))
     for (const task of response.tasks) {
       const current = rows.get(task.id)
       if (!current || (task.version || 0) >= (current.version || 0)) rows.set(task.id, task)

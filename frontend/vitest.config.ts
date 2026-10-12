@@ -72,6 +72,7 @@ export default defineConfig({
       'src/components/surveys/**/*.test.{ts,tsx}',
       'src/components/task-work/**/*.test.{ts,tsx}',
       'src/components/crm-detail/**/*.test.{ts,tsx}',
+      'src/components/events/**/*.test.{ts,tsx}',
       'src/components/drag-interaction/**/*.test.{ts,tsx}',
       'src/components/operational-date/**/*.test.{ts,tsx}',
       'src/components/operational-window/**/*.test.{ts,tsx}',

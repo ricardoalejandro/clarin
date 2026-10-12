@@ -3941,6 +3941,7 @@ func Migrate(db *pgxpool.Pool) error {
 	migrations = append(migrations, storageUploadOwnershipMigrations()...)
 	migrations = append(migrations, storageAdminCleanupMigrations()...)
 	migrations = append(migrations, automationRuntimeMigration)
+	migrations = append(migrations, eventParticipantSelectionMigrations()...)
 
 	var dataTx pgx.Tx
 	skipDataMigration := false
@@ -3997,6 +3998,12 @@ func Migrate(db *pgxpool.Pool) error {
 	if dataTx != nil {
 		_ = dataTx.Rollback(ctx)
 		return fmt.Errorf("event/contact data migration was not closed")
+	}
+	if err := MigrateEventStageLayout(db); err != nil {
+		return err
+	}
+	if err := MigrateEventLogbookWorkspace(db); err != nil {
+		return err
 	}
 	if err := migrateLegacyProgramEvents(ctx, db); err != nil {
 		return fmt.Errorf("program event retirement migration failed: %w", err)

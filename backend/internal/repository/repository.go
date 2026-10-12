@@ -6366,7 +6366,7 @@ func (r *EventRepository) GetByAccountID(ctx context.Context, accountID uuid.UUI
 		return nil, 0, err
 	}
 
-	selectQuery := `SELECT id, account_id, folder_id, pipeline_id, name, description, event_date, event_end, location, status, color, tag_formula_mode, tag_formula, tag_formula_type, rule_revision, created_by, created_at, updated_at` + baseQuery + ` ORDER BY COALESCE(event_date, created_at) DESC`
+	selectQuery := `SELECT id, account_id, folder_id, pipeline_id, name, description, event_date, event_end, location, status, color, tag_formula_mode, tag_formula, tag_formula_type, rule_revision, created_by, created_at, updated_at` + baseQuery + eventListOrder(filter)
 	if filter.Limit > 0 {
 		selectQuery += fmt.Sprintf(" LIMIT %d", filter.Limit)
 		if filter.Offset > 0 {
@@ -6389,12 +6389,12 @@ func (r *EventRepository) GetByAccountID(ctx context.Context, accountID uuid.UUI
 		events = append(events, ev)
 	}
 
-	// Load participant counts for each event
-	for _, ev := range events {
-		counts, total, _ := r.GetParticipantCounts(ctx, ev.ID)
-		ev.ParticipantCounts = counts
-		ev.TotalParticipants = total
-		ev.StageCounts, _ = r.GetStageNameCounts(ctx, ev.ID)
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	rows.Close()
+	if err := r.hydrateEventSummaries(ctx, accountID, events); err != nil {
+		return nil, 0, err
 	}
 
 	return events, total, nil
@@ -6457,7 +6457,8 @@ func (r *EventRepository) UpdateWithExpectedStatus(ctx context.Context, e *domai
 		return false, err
 	}
 	var currentStatus string
-	if err := tx.QueryRow(ctx, `SELECT status FROM events WHERE id=$1 AND account_id=$2 FOR UPDATE`, e.ID, e.AccountID).Scan(&currentStatus); err != nil {
+	var currentUpdatedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT status,updated_at FROM events WHERE id=$1 AND account_id=$2 FOR UPDATE`, e.ID, e.AccountID).Scan(&currentStatus, &currentUpdatedAt); err != nil {
 		if err == pgx.ErrNoRows {
 			return false, nil
 		}
@@ -6466,7 +6467,10 @@ func (r *EventRepository) UpdateWithExpectedStatus(ctx context.Context, e *domai
 	if currentStatus != expectedStatus {
 		return false, nil
 	}
-	e.UpdatedAt = time.Now()
+	if !eventConfigurationMatches(e.ExpectedUpdatedAt, currentUpdatedAt) {
+		return false, ErrEventConfigurationConflict
+	}
+	e.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
 	result, err := tx.Exec(ctx, `
 		UPDATE events SET name=$1,description=$2,event_date=$3,event_end=$4,location=$5,status=$6,color=$7,pipeline_id=$8,updated_at=$9
 		WHERE id=$10 AND account_id=$11 AND status=$12

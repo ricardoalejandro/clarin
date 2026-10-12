@@ -9,6 +9,20 @@ export interface TaskPageResponse {
   has_more?: boolean
 }
 
+/** Older servers encode an empty Go slice as null. Normalize that successful
+ * empty page at the boundary so a refresh can remove the previous scope's rows.
+ * A malformed non-empty payload is an error, never evidence to clear the board. */
+export function normalizeTaskPageResponse(value: unknown): TaskPageResponse {
+  if (!value || typeof value !== 'object') throw new Error('No se pudo interpretar la página de tareas. Reintenta la carga.')
+  const page = value as Record<string, unknown>
+  if (!('tasks' in page) || (page.tasks !== null && !Array.isArray(page.tasks))
+    || typeof page.total !== 'number' || !Number.isFinite(page.total) || page.total < 0
+    || (page.next_cursor != null && typeof page.next_cursor !== 'string')) {
+    throw new Error('No se pudo interpretar la página de tareas. Reintenta la carga.')
+  }
+  return { ...page, tasks: page.tasks === null ? [] : page.tasks, total: page.total } as TaskPageResponse
+}
+
 export function taskPageParams(base: URLSearchParams, cursor?: string | null) {
   const params = new URLSearchParams(base)
   params.delete('offset')

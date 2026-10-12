@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -33,6 +34,7 @@ type EventParticipantCandidatePage struct {
 	Total       int                                 `json:"total"`
 	Limit       int                                 `json:"limit"`
 	Offset      int                                 `json:"offset"`
+	NextCursor  string                              `json:"next_cursor,omitempty"`
 	HasMore     bool                                `json:"has_more"`
 	HasRules    bool                                `json:"has_rules"`
 	EventStatus string                              `json:"event_status"`
@@ -48,11 +50,15 @@ type EventParticipantCandidateCounts struct {
 }
 
 type EventParticipantCandidateFilter struct {
-	Search   string
-	TagIDs   []uuid.UUID
-	HasPhone *bool
-	Limit    int
-	Offset   int
+	Membership  string
+	Cursor      string
+	SelectionID *uuid.UUID
+	ActorID     uuid.UUID
+	Search      string
+	TagIDs      []uuid.UUID
+	HasPhone    *bool
+	Limit       int
+	Offset      int
 }
 
 type EventParticipantAddResult struct {
@@ -351,84 +357,36 @@ func (r *EventRepository) ListParticipantCandidates(ctx context.Context, account
 	page.EventStatus = state.Status
 	page.HasRules = state.Config.HasRules()
 
+	// New mass writes can outpace autovacuum statistics. Avoid repeatedly
+	// scanning the account for every Contact when the estimate is still one.
+	bulkPlan, err := configureEventCandidateBulkPlan(ctx, tx, accountID)
+	if err != nil {
+		return page, err
+	}
+
 	args := []interface{}{accountID, eventID}
-	where := `c.account_id=$1 AND c.is_group=FALSE`
-	rawPattern, rawDigitsPattern, normalizedDigitsPattern := candidateSearchTerms(filter.Search)
-	if rawPattern != "" {
-		rawArg, rawDigitsArg, normalizedDigitsArg := len(args)+1, len(args)+2, len(args)+3
-		where += fmt.Sprintf(` AND (
-			COALESCE(c.custom_name,c.name,c.push_name,'') ILIKE $%d
-			OR COALESCE(c.last_name,'') ILIKE $%d
-			OR COALESCE(c.email,'') ILIKE $%d
-			OR c.jid ILIKE $%d
-			OR ($%d<>'' AND (
-				REGEXP_REPLACE(COALESCE(c.phone,''),'[^0-9]','','g') LIKE $%d
-				OR (LOWER(c.jid) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$'
-					AND REGEXP_REPLACE(SPLIT_PART(c.jid,'@',1),'[^0-9]','','g') LIKE $%d)
-				OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.contact_id=c.id AND REGEXP_REPLACE(cp.phone,'[^0-9]','','g') LIKE $%d)
-				OR EXISTS (
-					SELECT 1 FROM contact_aliases ca
-					WHERE ca.account_id=$1 AND ca.contact_id=c.id
-					  AND ((LOWER(ca.alias_type)='phone' AND REGEXP_REPLACE(ca.normalized_value,'[^0-9]','','g') LIKE $%d)
-					       OR (LOWER(ca.alias_type)='jid' AND LOWER(ca.normalized_value) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$'
-					           AND REGEXP_REPLACE(SPLIT_PART(ca.normalized_value,'@',1),'[^0-9]','','g') LIKE $%d))
-				)
-			))
-			OR ($%d<>'' AND (
-				REGEXP_REPLACE(COALESCE(c.phone,''),'[^0-9]','','g') LIKE $%d
-				OR (LOWER(c.jid) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$'
-					AND REGEXP_REPLACE(SPLIT_PART(c.jid,'@',1),'[^0-9]','','g') LIKE $%d)
-				OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.contact_id=c.id AND REGEXP_REPLACE(cp.phone,'[^0-9]','','g') LIKE $%d)
-				OR EXISTS (
-					SELECT 1 FROM contact_aliases ca
-					WHERE ca.account_id=$1 AND ca.contact_id=c.id
-					  AND ((LOWER(ca.alias_type)='phone' AND REGEXP_REPLACE(ca.normalized_value,'[^0-9]','','g') LIKE $%d)
-					       OR (LOWER(ca.alias_type)='jid' AND LOWER(ca.normalized_value) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$'
-					           AND REGEXP_REPLACE(SPLIT_PART(ca.normalized_value,'@',1),'[^0-9]','','g') LIKE $%d))
-				)
-			))
-		)`, rawArg, rawArg, rawArg, rawArg,
-			rawDigitsArg, rawDigitsArg, rawDigitsArg, rawDigitsArg, rawDigitsArg, rawDigitsArg,
-			normalizedDigitsArg, normalizedDigitsArg, normalizedDigitsArg, normalizedDigitsArg, normalizedDigitsArg, normalizedDigitsArg)
-		args = append(args, rawPattern, rawDigitsPattern, normalizedDigitsPattern)
-	}
-	if len(filter.TagIDs) > 0 {
-		tagArg := len(args) + 1
-		where += fmt.Sprintf(` AND EXISTS (
-			SELECT 1 FROM contact_tags ct JOIN tags t ON t.id=ct.tag_id AND t.account_id=$1
-			WHERE ct.contact_id=c.id AND ct.tag_id=ANY($%d::uuid[])
-		)`, tagArg)
-		args = append(args, filter.TagIDs)
-	}
-	if filter.HasPhone != nil {
-		if *filter.HasPhone {
-			where += ` AND (NULLIF(REGEXP_REPLACE(COALESCE(c.phone,''),'[^0-9]','','g'),'') IS NOT NULL
-				OR (LOWER(c.jid) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$'
-					AND NULLIF(REGEXP_REPLACE(SPLIT_PART(c.jid,'@',1),'[^0-9]','','g'),'') IS NOT NULL)
-				OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.contact_id=c.id AND NULLIF(REGEXP_REPLACE(cp.phone,'[^0-9]','','g'),'') IS NOT NULL)
-				OR EXISTS (
-					SELECT 1 FROM contact_aliases ca
-					WHERE ca.account_id=$1 AND ca.contact_id=c.id
-					  AND ((LOWER(ca.alias_type)='phone' AND NULLIF(REGEXP_REPLACE(ca.normalized_value,'[^0-9]','','g'),'') IS NOT NULL)
-					       OR (LOWER(ca.alias_type)='jid' AND LOWER(ca.normalized_value) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$'))
-				))`
-		} else {
-			where += ` AND NULLIF(REGEXP_REPLACE(COALESCE(c.phone,''),'[^0-9]','','g'),'') IS NULL
-				AND NOT (LOWER(c.jid) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$')
-				AND NOT EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.contact_id=c.id AND NULLIF(REGEXP_REPLACE(cp.phone,'[^0-9]','','g'),'') IS NOT NULL)
-				AND NOT EXISTS (
-					SELECT 1 FROM contact_aliases ca
-					WHERE ca.account_id=$1 AND ca.contact_id=c.id
-					  AND ((LOWER(ca.alias_type)='phone' AND NULLIF(REGEXP_REPLACE(ca.normalized_value,'[^0-9]','','g'),'') IS NOT NULL)
-					       OR (LOWER(ca.alias_type)='jid' AND LOWER(ca.normalized_value) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$'))
-				)`
-		}
-	}
+	where, args := eventCandidateWhere(filter, args)
 
 	eligibilitySQL, args, err := candidateEligibilityPredicate(state.Config, args, accountID)
 	if err != nil {
 		return page, err
 	}
+
+	switch filter.Membership {
+	case "available":
+		where += " AND (" + eligibilitySQL + ") AND ep.membership_state IS DISTINCT FROM 'active'"
+	case "active":
+		where += " AND ep.membership_state='active'"
+	case "inactive":
+		where += " AND ep.membership_state='inactive'"
+	case "ineligible":
+		where += " AND NOT (" + eligibilitySQL + ")"
+	}
+	if filter.SelectionID != nil {
+		args = append(args, *filter.SelectionID, filter.ActorID)
+		where += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM event_participant_selection_items si JOIN event_participant_selections sel ON sel.id=si.selection_id AND sel.account_id=si.account_id WHERE si.contact_id=c.id AND si.account_id=$1 AND sel.event_id=$2 AND sel.id=$%d AND sel.actor_id=$%d)`, len(args)-1, len(args))
+	}
+
 	// Counters remain authoritative, but PostgreSQL aggregates them without
 	// sending every Contact/tag tuple to the application. The no-rule path uses
 	// the constant TRUE predicate and is therefore a single filtered scan.
@@ -457,8 +415,19 @@ func (r *EventRepository) ListParticipantCandidates(ctx context.Context, account
 		page.Counts.Ineligible = 0
 	}
 
-	limitArg, offsetArg := len(args)+1, len(args)+2
-	dataArgs := append(append([]interface{}{}, args...), filter.Limit, filter.Offset)
+	dataWhere := where
+	dataArgs := append([]interface{}{}, args...)
+	if filter.Cursor != "" {
+		cursor, cursorErr := decodeEventCandidateCursor(filter.Cursor)
+		if cursorErr != nil {
+			return page, cursorErr
+		}
+		dataArgs = append(dataArgs, cursor.Name, cursor.ID)
+		dataWhere += fmt.Sprintf(" AND ("+eventCandidateSortName+",c.id)>($%d::text,$%d::uuid)", len(dataArgs)-1, len(dataArgs))
+	}
+	limitArg, offsetArg := len(dataArgs)+1, len(dataArgs)+2
+	dataArgs = append(dataArgs, filter.Limit+1, filter.Offset)
+
 	rows, err := tx.Query(ctx, fmt.Sprintf(`
 		SELECT c.id,c.account_id,c.jid,c.phone,c.name,c.last_name,c.short_name,c.custom_name,c.push_name,c.email,c.company,
 		       c.is_group,c.do_not_contact,c.created_at,c.updated_at,
@@ -468,9 +437,9 @@ func (r *EventRepository) ListParticipantCandidates(ctx context.Context, account
 		LEFT JOIN event_participants ep ON ep.event_id=$2 AND ep.contact_id=c.id
 		LEFT JOIN event_pipeline_stages eps ON eps.id=ep.stage_id
 		WHERE %s
-		ORDER BY COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),c.phone,c.jid),c.id
+		ORDER BY %s,c.id
 		LIMIT $%d OFFSET $%d
-	`, eligibilitySQL, where, limitArg, offsetArg), dataArgs...)
+	`, eligibilitySQL, dataWhere, eventCandidateSortName, limitArg, offsetArg), dataArgs...)
 	if err != nil {
 		return page, err
 	}
@@ -503,6 +472,17 @@ func (r *EventRepository) ListParticipantCandidates(ctx context.Context, account
 	}
 	rows.Close()
 
+	hasExtra := len(page.Candidates) > filter.Limit
+	if hasExtra {
+		page.Candidates = page.Candidates[:filter.Limit]
+		pageContactIDs = pageContactIDs[:filter.Limit]
+	}
+	if bulkPlan {
+		// Relations are bounded to the visible page and benefit from indexed lookups.
+		if _, err = tx.Exec(ctx, "SET LOCAL enable_nestloop=DEFAULT; SET LOCAL plan_cache_mode=DEFAULT"); err != nil {
+			return page, err
+		}
+	}
 	// Load relations only for the visible page. Both joins re-assert account
 	// ownership so an invalid relation can never expose another account's data.
 	if len(pageContactIDs) > 0 {
@@ -557,7 +537,29 @@ func (r *EventRepository) ListParticipantCandidates(ctx context.Context, account
 		phoneRows.Close()
 	}
 	page.HasMore = filter.Offset+len(page.Candidates) < page.Total
+	if hasExtra {
+		last := page.Candidates[len(page.Candidates)-1].Contact
+		page.NextCursor = encodeEventCandidateCursor(last)
+	}
+	if filter.Cursor != "" {
+		page.HasMore = hasExtra
+	}
+
 	return page, tx.Commit(ctx)
+}
+
+// Probe at most 501 account-owned contacts; cardinality never sizes a response.
+func configureEventCandidateBulkPlan(ctx context.Context, tx pgx.Tx, accountID uuid.UUID) (bool, error) {
+	var large bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM contacts WHERE account_id=$1 AND is_group=FALSE OFFSET 500 LIMIT 1)`, accountID).Scan(&large); err != nil {
+		return false, err
+	}
+	if large {
+		if _, err := tx.Exec(ctx, "SET LOCAL enable_nestloop=off; SET LOCAL plan_cache_mode=force_custom_plan"); err != nil {
+			return false, err
+		}
+	}
+	return large, nil
 }
 
 func loadParticipantContactSnapshotsTx(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, contactIDs []uuid.UUID) (map[uuid.UUID]eventParticipantContactSnapshot, error) {
@@ -1221,4 +1223,118 @@ func (r *EventRepository) ReconcileContactMembership(ctx context.Context, accoun
 
 func (i ContactMembershipImpact) String() string {
 	return fmt.Sprintf("event=%s created=%d reactivated=%d deactivated=%d", i.EventID, i.Created, i.Reactivated, i.Deactivated)
+}
+
+// eventCandidateWhere is shared by browsing and frozen bulk selections.
+func eventCandidateWhere(filter EventParticipantCandidateFilter, args []interface{}) (string, []interface{}) {
+	where := `c.account_id=$1 AND c.is_group=FALSE`
+	rawPattern, rawDigitsPattern, normalizedDigitsPattern := candidateSearchTerms(filter.Search)
+	if rawPattern != "" {
+		rawArg, rawDigitsArg, normalizedDigitsArg := len(args)+1, len(args)+2, len(args)+3
+		where += fmt.Sprintf(` AND (
+			(COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),'') ILIKE $%d OR COALESCE(c.short_name,'') ILIKE $%d)
+			OR COALESCE(c.last_name,'') ILIKE $%d
+			OR COALESCE(c.email,'') ILIKE $%d
+			OR c.jid ILIKE $%d
+			OR ($%d<>'' AND (
+				REGEXP_REPLACE(COALESCE(c.phone,''),'[^0-9]','','g') LIKE $%d
+				OR (LOWER(c.jid) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$'
+					AND REGEXP_REPLACE(SPLIT_PART(c.jid,'@',1),'[^0-9]','','g') LIKE $%d)
+				OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.contact_id=c.id AND REGEXP_REPLACE(cp.phone,'[^0-9]','','g') LIKE $%d)
+				OR EXISTS (
+					SELECT 1 FROM contact_aliases ca
+					WHERE ca.account_id=$1 AND ca.contact_id=c.id
+					  AND ((LOWER(ca.alias_type)='phone' AND REGEXP_REPLACE(ca.normalized_value,'[^0-9]','','g') LIKE $%d)
+					       OR (LOWER(ca.alias_type)='jid' AND LOWER(ca.normalized_value) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$'
+					           AND REGEXP_REPLACE(SPLIT_PART(ca.normalized_value,'@',1),'[^0-9]','','g') LIKE $%d))
+				)
+			))
+			OR ($%d<>'' AND (
+				REGEXP_REPLACE(COALESCE(c.phone,''),'[^0-9]','','g') LIKE $%d
+				OR (LOWER(c.jid) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$'
+					AND REGEXP_REPLACE(SPLIT_PART(c.jid,'@',1),'[^0-9]','','g') LIKE $%d)
+				OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.contact_id=c.id AND REGEXP_REPLACE(cp.phone,'[^0-9]','','g') LIKE $%d)
+				OR EXISTS (
+					SELECT 1 FROM contact_aliases ca
+					WHERE ca.account_id=$1 AND ca.contact_id=c.id
+					  AND ((LOWER(ca.alias_type)='phone' AND REGEXP_REPLACE(ca.normalized_value,'[^0-9]','','g') LIKE $%d)
+					       OR (LOWER(ca.alias_type)='jid' AND LOWER(ca.normalized_value) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$'
+					           AND REGEXP_REPLACE(SPLIT_PART(ca.normalized_value,'@',1),'[^0-9]','','g') LIKE $%d))
+				)
+			))
+		)`, rawArg, rawArg, rawArg, rawArg, rawArg,
+			rawDigitsArg, rawDigitsArg, rawDigitsArg, rawDigitsArg, rawDigitsArg, rawDigitsArg,
+			normalizedDigitsArg, normalizedDigitsArg, normalizedDigitsArg, normalizedDigitsArg, normalizedDigitsArg, normalizedDigitsArg)
+		args = append(args, rawPattern, rawDigitsPattern, normalizedDigitsPattern)
+	}
+	if len(filter.TagIDs) > 0 {
+		tagArg := len(args) + 1
+		where += fmt.Sprintf(` AND EXISTS (
+			SELECT 1 FROM contact_tags ct JOIN tags t ON t.id=ct.tag_id AND t.account_id=$1
+			WHERE ct.contact_id=c.id AND ct.tag_id=ANY($%d::uuid[])
+		)`, tagArg)
+		args = append(args, filter.TagIDs)
+	}
+	if filter.HasPhone != nil {
+		if *filter.HasPhone {
+			where += ` AND (NULLIF(REGEXP_REPLACE(COALESCE(c.phone,''),'[^0-9]','','g'),'') IS NOT NULL
+				OR (LOWER(c.jid) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$'
+					AND NULLIF(REGEXP_REPLACE(SPLIT_PART(c.jid,'@',1),'[^0-9]','','g'),'') IS NOT NULL)
+				OR EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.contact_id=c.id AND NULLIF(REGEXP_REPLACE(cp.phone,'[^0-9]','','g'),'') IS NOT NULL)
+				OR EXISTS (
+					SELECT 1 FROM contact_aliases ca
+					WHERE ca.account_id=$1 AND ca.contact_id=c.id
+					  AND ((LOWER(ca.alias_type)='phone' AND NULLIF(REGEXP_REPLACE(ca.normalized_value,'[^0-9]','','g'),'') IS NOT NULL)
+					       OR (LOWER(ca.alias_type)='jid' AND LOWER(ca.normalized_value) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$'))
+				))`
+		} else {
+			where += ` AND NULLIF(REGEXP_REPLACE(COALESCE(c.phone,''),'[^0-9]','','g'),'') IS NULL
+				AND NOT (LOWER(c.jid) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$')
+				AND NOT EXISTS (SELECT 1 FROM contact_phones cp WHERE cp.contact_id=c.id AND NULLIF(REGEXP_REPLACE(cp.phone,'[^0-9]','','g'),'') IS NOT NULL)
+				AND NOT EXISTS (
+					SELECT 1 FROM contact_aliases ca
+					WHERE ca.account_id=$1 AND ca.contact_id=c.id
+					  AND ((LOWER(ca.alias_type)='phone' AND NULLIF(REGEXP_REPLACE(ca.normalized_value,'[^0-9]','','g'),'') IS NOT NULL)
+					       OR (LOWER(ca.alias_type)='jid' AND LOWER(ca.normalized_value) ~ '^[0-9]+(:[0-9]+)?@(s[.]whatsapp[.]net|c[.]us)$'))
+				)`
+		}
+	}
+
+	return where, args
+}
+
+const eventCandidateSortName = `COALESCE(NULLIF(BTRIM(c.custom_name),''),NULLIF(BTRIM(c.name),''),NULLIF(BTRIM(c.push_name),''),NULLIF(BTRIM(c.short_name),''),NULLIF(BTRIM(c.phone),''),c.jid,'')`
+
+type eventCandidateCursor struct {
+	Name string    `json:"name"`
+	ID   uuid.UUID `json:"id"`
+}
+
+func decodeEventCandidateCursor(raw string) (eventCandidateCursor, error) {
+	var value eventCandidateCursor
+	if len(raw) > 4096 {
+		return value, ErrEventSelectionInvalid
+	}
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return value, ErrEventSelectionInvalid
+	}
+	if json.Unmarshal(data, &value) != nil || value.ID == uuid.Nil {
+		return value, ErrEventSelectionInvalid
+	}
+	return value, nil
+}
+func encodeEventCandidateCursor(contact *domain.Contact) string {
+	data, _ := json.Marshal(contact)
+	var fields map[string]interface{}
+	_ = json.Unmarshal(data, &fields)
+	name := ""
+	for _, key := range []string{"custom_name", "name", "push_name", "short_name", "phone", "jid"} {
+		if value, ok := fields[key].(string); ok && strings.TrimSpace(value) != "" {
+			name = strings.TrimSpace(value)
+			break
+		}
+	}
+	data, _ = json.Marshal(eventCandidateCursor{Name: name, ID: contact.ID})
+	return base64.RawURLEncoding.EncodeToString(data)
 }

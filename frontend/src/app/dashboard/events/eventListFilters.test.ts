@@ -26,3 +26,11 @@ describe('event list visibility queries', () => {
     expect(Object.fromEntries(query)).toEqual({ search: 'A & B', exclude_cancelled: 'true', folder: 'folder-a', limit: '50', offset: '50' })
   })
 })
+
+
+it('sends stable global ordering on every page',()=>{
+ const params=eventListQuery({...defaults,offset:50,sort:'participants',direction:'desc'})
+ expect(params.get('sort')).toBe('participants')
+ expect(params.get('direction')).toBe('desc')
+ expect(params.get('offset')).toBe('50')
+})

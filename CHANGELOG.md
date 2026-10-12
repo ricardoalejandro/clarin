@@ -1,5 +1,16 @@
 # Changelog — Clarin CRM
 
+## 2026-10-12
+
+### Eventos: configuración, contactos y bitácoras
+
+- Configuración del evento desde su tablero con Datos, Etapas y Reglas, borradores independientes y avisos de cambios simultáneos.
+- Etapas compactas con arrastre, teclado y posición directa; eliminación con reasignación explícita y protección de pipelines compartidos.
+- Incorporación de contactos con búsqueda paginada, selección de todos los resultados disponibles, revisión previa y confirmación recuperable sin duplicados.
+- Listado de eventos con orden global y distribución por sus etapas reales, incluido «Sin etapa».
+- Bitácoras con capturas verificables, notas conservadas al actualizar, cierre y reapertura explícitos, historial y exportación CSV/XLSX.
+- Work corrige la carga de listas vacías y evita conservar tareas de una vista anterior después de mover la última tarea.
+
 ## 2026-10-11
 
 ### Diagnóstico de imágenes en Plantillas

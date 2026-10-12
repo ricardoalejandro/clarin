@@ -5,14 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/naperu/clarin/internal/domain"
-	"github.com/naperu/clarin/internal/formula"
 )
 
 // SnapshotFilter contains optional filter parameters for logbook snapshot capture.
@@ -71,6 +69,8 @@ func validLogbookStatus(status string) bool {
 // LogbookPatch distinguishes omitted fields from explicit edits. A supplied
 // null saved_filter clears the filter; required date/status/text are non-null.
 type LogbookPatch struct {
+	ExpectedVersion    int64
+	ActorID            *uuid.UUID
 	Title              *string
 	GeneralNotes       *string
 	Date               *time.Time
@@ -81,31 +81,47 @@ type LogbookPatch struct {
 
 // Create inserts a new logbook entry for an event date.
 func (r *LogbookRepository) Create(ctx context.Context, lb *domain.EventLogbook) error {
-	if lb.Date.IsZero() || !validLogbookStatus(lb.Status) {
+	return r.CreateWithCapture(ctx, lb, false)
+}
+func (r *LogbookRepository) CreateWithCapture(ctx context.Context, lb *domain.EventLogbook, capture bool) error {
+	if lb.Date.IsZero() || lb.Status != domain.LogbookStatusPending {
 		return ErrLogbookInvalid
+	}
+	filter, err := savedSnapshotFilter(lb.SavedFilter)
+	if err != nil {
+		return err
+	}
+	if _, _, err = snapshotPredicate(lb.EventID, filter); err != nil {
+		return err
 	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if err := lockWritableLogbookEvent(ctx, tx, lb.AccountID, lb.EventID); err != nil {
+	if err = lockWritableLogbookEvent(ctx, tx, lb.AccountID, lb.EventID); err != nil {
 		return err
 	}
-	snapshotJSON, _ := json.Marshal(lb.StageSnapshot)
-	var savedFilterJSON []byte
-	if len(lb.SavedFilter) > 0 {
-		savedFilterJSON = lb.SavedFilter
-	}
-	err = tx.QueryRow(ctx, `
-		INSERT INTO event_logbooks (event_id, account_id, date, title, status, general_notes, stage_snapshot, total_participants, captured_at, created_by, saved_filter)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		RETURNING id, created_at, updated_at
-	`, lb.EventID, lb.AccountID, lb.Date, lb.Title, lb.Status, lb.GeneralNotes, snapshotJSON, lb.TotalParticipants, lb.CapturedAt, lb.CreatedBy, savedFilterJSON).Scan(&lb.ID, &lb.CreatedAt, &lb.UpdatedAt)
+	err = tx.QueryRow(ctx, `INSERT INTO event_logbooks(event_id,account_id,date,title,status,general_notes,created_by,saved_filter) VALUES($1,$2,$3,$4,'pending',$5,$6,$7) RETURNING id,created_at,updated_at,version`, lb.EventID, lb.AccountID, lb.Date, lb.Title, lb.GeneralNotes, lb.CreatedBy, lb.SavedFilter).Scan(&lb.ID, &lb.CreatedAt, &lb.UpdatedAt, &lb.Version)
 	if err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err = recordLogbookAction(ctx, tx, lb.AccountID, lb.EventID, lb.ID, "created", lb.CreatedBy); err != nil {
+		return err
+	}
+	if capture {
+		if err = r.captureSnapshotTx(ctx, tx, lb.AccountID, lb.EventID, lb.ID, filter, LogbookWriteOptions{ActorID: lb.CreatedBy}); err != nil {
+			return err
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
+	canonical, err := r.GetByIDForEvent(ctx, lb.AccountID, lb.EventID, lb.ID)
+	if err == nil {
+		*lb = *canonical
+	}
+	return err
 }
 
 // GetByID returns a logbook with its entries populated.
@@ -128,7 +144,7 @@ func (r *LogbookRepository) getByID(ctx context.Context, accountID, eventID, log
 		SELECT l.id, l.event_id, l.account_id, l.date, l.title, l.status,
 		       l.general_notes, l.stage_snapshot, l.total_participants,
 		       l.captured_at, l.created_by, l.created_at, l.updated_at,
-		       u.display_name, l.saved_filter
+		       u.display_name, l.saved_filter, l.version, l.captured_by, l.completed_at, l.completed_by,l.captured_filter
 		FROM event_logbooks l
 		JOIN events event_scope ON event_scope.id=l.event_id AND event_scope.account_id=l.account_id
 		LEFT JOIN users u ON u.id = l.created_by
@@ -137,7 +153,7 @@ func (r *LogbookRepository) getByID(ctx context.Context, accountID, eventID, log
 		&lb.ID, &lb.EventID, &lb.AccountID, &lb.Date, &lb.Title, &lb.Status,
 		&lb.GeneralNotes, &snapshotJSON, &lb.TotalParticipants,
 		&lb.CapturedAt, &lb.CreatedBy, &lb.CreatedAt, &lb.UpdatedAt,
-		&lb.CreatedByName, &savedFilterJSON,
+		&lb.CreatedByName, &savedFilterJSON, &lb.Version, &lb.CapturedBy, &lb.CompletedAt, &lb.CompletedBy, &lb.CapturedFilter,
 	)
 	if err != nil {
 		return nil, err
@@ -149,12 +165,14 @@ func (r *LogbookRepository) getByID(ctx context.Context, accountID, eventID, log
 		lb.SavedFilter = savedFilterJSON
 	}
 
-	// Load entries
-	entries, err := r.getEntries(ctx, lb.AccountID, lb.EventID, logbookID)
+	// Detail is deliberately bounded. Dedicated entry/export paths own pagination.
+	page, err := r.EntriesPage(ctx, lb.AccountID, lb.EventID, logbookID, LogbookPageOptions{})
 	if err != nil {
 		return nil, err
 	}
-	lb.Entries = entries
+	lb.Entries = page.Items
+	lb.EntriesNextCursor = page.NextCursor
+
 	return lb, nil
 }
 
@@ -168,7 +186,7 @@ func (r *LogbookRepository) GetByEventIDForAccount(ctx context.Context, accountI
 		SELECT l.id, l.event_id, l.account_id, l.date, l.title, l.status,
 		       l.general_notes, l.stage_snapshot, l.total_participants,
 		       l.captured_at, l.created_by, l.created_at, l.updated_at,
-		       u.display_name, l.saved_filter
+		       u.display_name, l.saved_filter, l.version, l.captured_by, l.completed_at, l.completed_by,l.captured_filter
 		FROM event_logbooks l
 		JOIN events event_scope ON event_scope.id=l.event_id AND event_scope.account_id=l.account_id
 		LEFT JOIN users u ON u.id = l.created_by
@@ -189,7 +207,7 @@ func (r *LogbookRepository) GetByEventIDForAccount(ctx context.Context, accountI
 			&lb.ID, &lb.EventID, &lb.AccountID, &lb.Date, &lb.Title, &lb.Status,
 			&lb.GeneralNotes, &snapshotJSON, &lb.TotalParticipants,
 			&lb.CapturedAt, &lb.CreatedBy, &lb.CreatedAt, &lb.UpdatedAt,
-			&lb.CreatedByName, &savedFilterJSON,
+			&lb.CreatedByName, &savedFilterJSON, &lb.Version, &lb.CapturedBy, &lb.CompletedAt, &lb.CompletedBy, &lb.CapturedFilter,
 		); err != nil {
 			return nil, err
 		}
@@ -206,6 +224,18 @@ func (r *LogbookRepository) GetByEventIDForAccount(ctx context.Context, accountI
 
 // Update applies only supplied editable fields to the freshly locked logbook.
 func (r *LogbookRepository) Update(ctx context.Context, accountID, eventID, logbookID uuid.UUID, patch LogbookPatch) (*domain.EventLogbook, error) {
+	if patch.Status != nil {
+		return nil, ErrLogbookTransition
+	}
+	if patch.SavedFilterPresent {
+		filter, err := savedSnapshotFilter(patch.SavedFilter)
+		if err != nil {
+			return nil, err
+		}
+		if _, _, err = snapshotPredicate(eventID, filter); err != nil {
+			return nil, err
+		}
+	}
 	if (patch.Date != nil && patch.Date.IsZero()) || (patch.Status != nil && !validLogbookStatus(*patch.Status)) || (patch.SavedFilterPresent && patch.SavedFilter != nil && !json.Valid(patch.SavedFilter)) {
 		return nil, ErrLogbookInvalid
 	}
@@ -214,7 +244,7 @@ func (r *LogbookRepository) Update(ctx context.Context, accountID, eventID, logb
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	if err := lockWritableLogbookEvent(ctx, tx, accountID, eventID); err != nil {
+	if _, _, err := lockLogbook(ctx, tx, accountID, eventID, logbookID, patch.ExpectedVersion, false); err != nil {
 		return nil, err
 	}
 	var lb domain.EventLogbook
@@ -240,7 +270,7 @@ func (r *LogbookRepository) Update(ctx context.Context, accountID, eventID, logb
 	}
 	result, err := tx.Exec(ctx, `
 		UPDATE event_logbooks
-		SET title=$1, general_notes=$2, status=$3, saved_filter=$4, date=$5, updated_at=NOW()
+		SET title=$1, general_notes=$2, status=$3, saved_filter=$4, date=$5, version=version+1, updated_at=NOW()
 		WHERE id=$6 AND account_id=$7 AND event_id=$8
 	`, lb.Title, lb.GeneralNotes, lb.Status, lb.SavedFilter, lb.Date, logbookID, accountID, eventID)
 	if err != nil {
@@ -249,6 +279,9 @@ func (r *LogbookRepository) Update(ctx context.Context, accountID, eventID, logb
 	if result.RowsAffected() != 1 {
 		return nil, pgx.ErrNoRows
 	}
+	if err := recordLogbookAction(ctx, tx, accountID, eventID, logbookID, "updated", patch.ActorID); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
@@ -256,13 +289,13 @@ func (r *LogbookRepository) Update(ctx context.Context, accountID, eventID, logb
 }
 
 // Delete removes a logbook and its cascade-deleted entries.
-func (r *LogbookRepository) Delete(ctx context.Context, accountID, eventID, logbookID uuid.UUID) error {
+func (r *LogbookRepository) Delete(ctx context.Context, accountID, eventID, logbookID uuid.UUID, options ...LogbookWriteOptions) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if err := lockWritableLogbookEvent(ctx, tx, accountID, eventID); err != nil {
+	if _, _, err := lockLogbook(ctx, tx, accountID, eventID, logbookID, logbookWriteOption(options).ExpectedVersion, false); err != nil {
 		return err
 	}
 	result, err := tx.Exec(ctx, `DELETE FROM event_logbooks WHERE id=$1 AND account_id=$2 AND event_id=$3`, logbookID, accountID, eventID)
@@ -276,173 +309,87 @@ func (r *LogbookRepository) Delete(ctx context.Context, accountID, eventID, logb
 }
 
 // CaptureSnapshot takes a snapshot of all participants' current state, saves entries,
-// computes stage counts, and marks the logbook as completed.
-// If filter is nil, captures ALL participants. Otherwise, applies the same filter logic
-// used by handleGetEventParticipants.
-func (r *LogbookRepository) CaptureSnapshot(ctx context.Context, accountID, eventID, logbookID uuid.UUID, filter *SnapshotFilter) (*domain.EventLogbook, error) {
+// computes stage counts and opens the logbook for review. A nil filter uses the
+// saved selection; an explicit empty filter captures all active participants.
+func captureStageKey(id *uuid.UUID) string {
+	if id == nil {
+		return "unassigned"
+	}
+	return id.String()
+}
+func (r *LogbookRepository) CaptureSnapshot(ctx context.Context, accountID, eventID, logbookID uuid.UUID, filter *SnapshotFilter, options ...LogbookWriteOptions) (*domain.EventLogbook, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	if err := lockWritableLogbookEvent(ctx, tx, accountID, eventID); err != nil {
 		return nil, err
 	}
-
-	// Get logbook with event_id
+	defer tx.Rollback(ctx)
+	if err = r.captureSnapshotTx(ctx, tx, accountID, eventID, logbookID, filter, logbookWriteOption(options)); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return r.GetByIDForEvent(ctx, accountID, eventID, logbookID)
+}
+func (r *LogbookRepository) captureSnapshotTx(ctx context.Context, tx pgx.Tx, accountID, eventID, logbookID uuid.UUID, filter *SnapshotFilter, options LogbookWriteOptions) error {
 	var lb domain.EventLogbook
-	var snapshotJSON []byte
-	err = tx.QueryRow(ctx, `
-		SELECT id, event_id, account_id, date, title, status, general_notes,
-		       stage_snapshot, total_participants, captured_at, created_by, created_at, updated_at
-		FROM event_logbooks WHERE id=$1 AND account_id=$2 AND event_id=$3 FOR UPDATE
-	`, logbookID, accountID, eventID).Scan(
-		&lb.ID, &lb.EventID, &lb.AccountID, &lb.Date, &lb.Title, &lb.Status,
-		&lb.GeneralNotes, &snapshotJSON, &lb.TotalParticipants,
-		&lb.CapturedAt, &lb.CreatedBy, &lb.CreatedAt, &lb.UpdatedAt,
-	)
+	lb.ID, lb.EventID, lb.AccountID = logbookID, eventID, accountID
+	if _, _, err := lockLogbook(ctx, tx, accountID, eventID, logbookID, options.ExpectedVersion, false); err != nil {
+		return err
+	}
+	// Read the saved audience under the same lock as the capture.
+	if filter == nil {
+		var raw []byte
+		if err := tx.QueryRow(ctx, `SELECT saved_filter FROM event_logbooks WHERE id=$1 AND account_id=$2`, logbookID, accountID).Scan(&raw); err != nil {
+			return err
+		}
+		var err error
+		filter, err = savedSnapshotFilter(raw)
+		if err != nil {
+			return err
+		}
+	}
+	if filter == nil {
+		filter = &SnapshotFilter{}
+	}
+	whereSQL, args, err := snapshotPredicate(eventID, filter)
 	if err != nil {
-		return nil, fmt.Errorf("get logbook: %w", err)
+		return err
 	}
-
-	// Build dynamic WHERE clause for participants
-	args := []interface{}{lb.EventID}
-	argIdx := 2
-	whereClauses := []string{"ep.event_id = $1", "ep.membership_state = 'active'"}
-
-	if filter != nil {
-		// Tag formula (advanced mode)
-		if filter.TagFormula != "" {
-			ast, parseErr := formula.Parse(filter.TagFormula)
-			if parseErr == nil && ast != nil {
-				innerSQL, innerArgs, buildErr := formula.BuildSQLForParticipants(ast, lb.EventID)
-				if buildErr == nil && innerSQL != "" {
-					remappedSQL := formula.RemapSQLParams(innerSQL, len(innerArgs), argIdx)
-					whereClauses = append(whereClauses, fmt.Sprintf("ep.id IN (%s)", remappedSQL))
-					args = append(args, innerArgs...)
-					argIdx += len(innerArgs)
-				}
-			}
-		} else if len(filter.TagNames) > 0 || len(filter.ExcludeTagNames) > 0 {
-			// Simple tag mode
-			tagMode := strings.ToUpper(filter.TagMode)
-			if tagMode == "" {
-				tagMode = "OR"
-			}
-			if len(filter.TagNames) > 0 {
-				if tagMode == "AND" {
-					whereClauses = append(whereClauses, fmt.Sprintf(
-						"ep.id IN (SELECT p2.id FROM event_participants p2 JOIN contact_tags ct ON ct.contact_id = p2.contact_id JOIN tags t ON t.id = ct.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d) GROUP BY p2.id HAVING COUNT(DISTINCT t.name) = $%d)",
-						argIdx, argIdx+1,
-					))
-					args = append(args, filter.TagNames, len(filter.TagNames))
-					argIdx += 2
-				} else {
-					whereClauses = append(whereClauses, fmt.Sprintf(
-						"ep.id IN (SELECT p2.id FROM event_participants p2 JOIN contact_tags ct ON ct.contact_id = p2.contact_id JOIN tags t ON t.id = ct.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
-						argIdx,
-					))
-					args = append(args, filter.TagNames)
-					argIdx++
-				}
-			}
-			if len(filter.ExcludeTagNames) > 0 {
-				whereClauses = append(whereClauses, fmt.Sprintf(
-					"ep.id NOT IN (SELECT p2.id FROM event_participants p2 JOIN contact_tags ct ON ct.contact_id = p2.contact_id JOIN tags t ON t.id = ct.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
-					argIdx,
-				))
-				args = append(args, filter.ExcludeTagNames)
-				argIdx++
-			}
-		}
-
-		// Has phone
-		if filter.HasPhone {
-			whereClauses = append(whereClauses, "ep.phone IS NOT NULL AND ep.phone != ''")
-		}
-
-		// Stage IDs
-		if filter.StageIDs != "" {
-			var validStageIDs []uuid.UUID
-			for _, sid := range strings.Split(filter.StageIDs, ",") {
-				if id, err := uuid.Parse(strings.TrimSpace(sid)); err == nil {
-					validStageIDs = append(validStageIDs, id)
-				}
-			}
-			if len(validStageIDs) > 0 {
-				whereClauses = append(whereClauses, fmt.Sprintf("ep.stage_id = ANY($%d)", argIdx))
-				args = append(args, validStageIDs)
-				argIdx++
-			}
-		}
-
-		// Date filters
-		if filter.DateField != "" && snapshotDateFields[filter.DateField] {
-			col := "ep." + filter.DateField
-			if filter.DateFrom != "" {
-				if t, err := time.Parse(time.RFC3339, filter.DateFrom); err == nil {
-					whereClauses = append(whereClauses, fmt.Sprintf("%s >= $%d", col, argIdx))
-					args = append(args, t)
-					argIdx++
-				}
-			}
-			if filter.DateTo != "" {
-				if t, err := time.Parse(time.RFC3339, filter.DateTo); err == nil {
-					whereClauses = append(whereClauses, fmt.Sprintf("%s < $%d", col, argIdx))
-					args = append(args, t)
-					argIdx++
-				}
-			}
-		}
-
-		// Text Search
-		if filter.TextSearch != "" {
-			term := "%" + filter.TextSearch + "%"
-			whereClauses = append(whereClauses, fmt.Sprintf("(ep.name ILIKE $%d OR ep.phone ILIKE $%d OR ep.email ILIKE $%d)", argIdx, argIdx, argIdx))
-			args = append(args, term)
-			argIdx++
-		}
-	}
-
-	whereSQL := strings.Join(whereClauses, " AND ")
-
 	// Pre-populate stageCount with ALL pipeline stages (so stages with 0 participants appear)
 	stageCount := make(map[string]map[string]interface{})
 	var eventPipelineID *uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT pipeline_id FROM events WHERE id = $1`, lb.EventID).Scan(&eventPipelineID); err == nil && eventPipelineID != nil {
-		stageRows, stageErr := tx.Query(ctx, `
-			SELECT id, name, color FROM event_pipeline_stages
-			WHERE pipeline_id = $1 ORDER BY position
-		`, *eventPipelineID)
-		if stageErr == nil {
-			for stageRows.Next() {
-				var sID uuid.UUID
-				var sName, sColor string
-				if err := stageRows.Scan(&sID, &sName, &sColor); err == nil {
-					stageCount[sID.String()] = map[string]interface{}{
-						"name":  sName,
-						"color": sColor,
-						"count": 0,
-					}
-				}
+	if err := tx.QueryRow(ctx, `SELECT pipeline_id FROM events WHERE id=$1 AND account_id=$2`, eventID, accountID).Scan(&eventPipelineID); err != nil {
+		return err
+	}
+	if eventPipelineID != nil {
+		stageRows, err := tx.Query(ctx, `SELECT s.id,s.name,s.color,s.position FROM event_pipeline_stages s JOIN event_pipelines p ON p.id=s.pipeline_id WHERE s.pipeline_id=$1 AND p.account_id=$2 ORDER BY s.position`, *eventPipelineID, accountID)
+		if err != nil {
+			return err
+		}
+		for stageRows.Next() {
+			var id uuid.UUID
+			var name, color string
+			var position int
+			if err := stageRows.Scan(&id, &name, &color, &position); err != nil {
+				stageRows.Close()
+				return err
 			}
-			stageRows.Close()
+			stageCount[id.String()] = map[string]interface{}{"name": name, "color": color, "position": position, "count": 0}
+		}
+		err = stageRows.Err()
+		stageRows.Close()
+		if err != nil {
+			return err
 		}
 	}
 
 	// Query participants with their stage info using dynamic WHERE
-	query := fmt.Sprintf(`
-		SELECT ep.id, ep.stage_id,
-		       COALESCE(eps.name, ''), COALESCE(eps.color, ''),
-		       COALESCE(ep.name, ''), ep.phone
-		FROM event_participants ep
-		LEFT JOIN event_pipeline_stages eps ON eps.id = ep.stage_id
-		WHERE %s
-		ORDER BY eps.position ASC NULLS LAST, ep.name ASC
-	`, whereSQL)
+	query := fmt.Sprintf(`SELECT ep.id,ep.stage_id,COALESCE(eps.name,''),COALESCE(eps.color,''),%s,%s,eps.position`+logbookParticipantFrom+` WHERE %s ORDER BY eps.position ASC NULLS LAST,ep.id`, logbookNameSQL, logbookPhoneSQL, whereSQL)
+
 	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query participants: %w", err)
+		return fmt.Errorf("query participants: %w", err)
 	}
 	defer rows.Close()
 
@@ -453,13 +400,14 @@ func (r *LogbookRepository) CaptureSnapshot(ctx context.Context, accountID, even
 		stageColor    string
 		name          string
 		phone         *string
+		position      *int
 	}
 	var entries []entryData
 
 	for rows.Next() {
 		var e entryData
-		if err := rows.Scan(&e.participantID, &e.stageID, &e.stageName, &e.stageColor, &e.name, &e.phone); err != nil {
-			return nil, fmt.Errorf("scan participant: %w", err)
+		if err := rows.Scan(&e.participantID, &e.stageID, &e.stageName, &e.stageColor, &e.name, &e.phone, &e.position); err != nil {
+			return fmt.Errorf("scan participant: %w", err)
 		}
 		entries = append(entries, e)
 		// Aggregate stage counts
@@ -469,15 +417,16 @@ func (r *LogbookRepository) CaptureSnapshot(ctx context.Context, accountID, even
 		}
 		if _, ok := stageCount[key]; !ok {
 			stageCount[key] = map[string]interface{}{
-				"name":  e.stageName,
-				"color": e.stageColor,
-				"count": 0,
+				"name":     e.stageName,
+				"position": e.position,
+				"color":    e.stageColor,
+				"count":    0,
 			}
 		}
 		stageCount[key]["count"] = stageCount[key]["count"].(int) + 1
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read participants: %w", err)
+		return fmt.Errorf("read participants: %w", err)
 	}
 	rows.Close()
 	participantIDs := make([]uuid.UUID, 0, len(entries))
@@ -489,47 +438,66 @@ func (r *LogbookRepository) CaptureSnapshot(ctx context.Context, accountID, even
 	var excludesNotes bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM event_logbook_entries
 		WHERE logbook_id=$1 AND NOT(participant_id=ANY($2::uuid[])) AND notes<>'')`, logbookID, participantIDs).Scan(&excludesNotes); err != nil {
-		return nil, err
+		return err
 	}
 	if excludesNotes {
-		return nil, ErrLogbookNotesOutsideSnapshot
+		return ErrLogbookNotesOutsideSnapshot
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM event_logbook_entries WHERE logbook_id=$1 AND NOT(participant_id=ANY($2::uuid[])) AND notes=''`, logbookID, participantIDs); err != nil {
-		return nil, err
+		return err
 	}
 
-	// Bulk insert entries
-	for _, e := range entries {
-		_, err := tx.Exec(ctx, `
-			INSERT INTO event_logbook_entries (logbook_id, participant_id, stage_id, stage_name, stage_color)
-			VALUES ($1, $2, $3, $4, $5)
-			ON CONFLICT (logbook_id, participant_id) DO UPDATE
-			SET stage_id = EXCLUDED.stage_id, stage_name = EXCLUDED.stage_name, stage_color = EXCLUDED.stage_color
-		`, logbookID, e.participantID, e.stageID, e.stageName, e.stageColor)
+	// Batch upserts preserve note/entry identity without one query per participant.
+	for offset := 0; offset < len(entries); offset += 500 {
+		end := offset + 500
+		if end > len(entries) {
+			end = len(entries)
+		}
+		ids := []uuid.UUID{}
+		stageIDs := []string{}
+		names := []string{}
+		colors := []string{}
+		keys := []string{}
+		positions := []int32{}
+		for _, entry := range entries[offset:end] {
+			ids = append(ids, entry.participantID)
+			sid := ""
+			if entry.stageID != nil {
+				sid = entry.stageID.String()
+			}
+			stageIDs = append(stageIDs, sid)
+			names = append(names, entry.stageName)
+			colors = append(colors, entry.stageColor)
+			keys = append(keys, captureStageKey(entry.stageID))
+			pos := int32(-1)
+			if entry.position != nil {
+				pos = int32(*entry.position)
+			}
+			positions = append(positions, pos)
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO event_logbook_entries(logbook_id,participant_id,stage_id,stage_name,stage_color,capture_stage_key,stage_position)
+  SELECT $1,pid,NULLIF(sid,'')::uuid,name,color,key,NULLIF(position,-1) FROM unnest($2::uuid[],$3::text[],$4::text[],$5::text[],$6::text[],$7::int[]) AS x(pid,sid,name,color,key,position)
+  ON CONFLICT(logbook_id,participant_id) DO UPDATE SET stage_id=EXCLUDED.stage_id,stage_name=EXCLUDED.stage_name,stage_color=EXCLUDED.stage_color,capture_stage_key=EXCLUDED.capture_stage_key,stage_position=EXCLUDED.stage_position`, logbookID, ids, stageIDs, names, colors, keys, positions)
 		if err != nil {
-			return nil, fmt.Errorf("insert entry: %w", err)
+			return fmt.Errorf("upsert capture batch: %w", err)
 		}
 	}
 
 	// Update logbook with snapshot
 	now := time.Now()
 	snapshotOut, _ := json.Marshal(stageCount)
+	filterJSON, _ := json.Marshal(filter)
 	_, err = tx.Exec(ctx, `
 		UPDATE event_logbooks
-		SET status = CASE WHEN status = 'pending' THEN 'completed' ELSE status END, stage_snapshot = $1, total_participants = $2,
-		    captured_at = $3, updated_at = NOW()
+		SET status = 'active', stage_snapshot = $1, total_participants = $2,
+		    captured_at = $3, captured_by=$7, saved_filter=$8,captured_filter=$8,version=version+1,updated_at = NOW()
 		WHERE id=$4 AND account_id=$5 AND event_id=$6
-	`, snapshotOut, len(entries), now, logbookID, accountID, eventID)
+	`, snapshotOut, len(entries), now, logbookID, accountID, eventID, options.ActorID, filterJSON)
 	if err != nil {
-		return nil, fmt.Errorf("update logbook: %w", err)
+		return fmt.Errorf("update logbook: %w", err)
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
-	}
-
-	// Return full logbook
-	return r.GetByIDForEvent(ctx, accountID, eventID, logbookID)
+	return recordLogbookAction(ctx, tx, accountID, eventID, logbookID, "captured", options.ActorID)
 }
 
 // GetEntries returns all entries for a logbook with participant info.
@@ -538,45 +506,31 @@ func (r *LogbookRepository) GetEntries(ctx context.Context, logbookID uuid.UUID)
 }
 
 func (r *LogbookRepository) getEntries(ctx context.Context, accountID, eventID, logbookID uuid.UUID) ([]*domain.EventLogbookEntry, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT e.id, e.logbook_id, e.participant_id, e.stage_id, e.stage_name,
-		       e.stage_color, e.notes, e.created_at,
-		       COALESCE(ep.name, ''), ep.phone
-		FROM event_logbook_entries e
-		JOIN event_logbooks lb ON lb.id=e.logbook_id
-		JOIN events event_scope ON event_scope.id=lb.event_id AND event_scope.account_id=lb.account_id
-		JOIN event_participants ep ON ep.id=e.participant_id AND ep.event_id=lb.event_id
-		WHERE e.logbook_id=$1 AND ($2::uuid IS NULL OR lb.account_id=$2) AND ($3::uuid IS NULL OR lb.event_id=$3)
-		ORDER BY e.stage_name ASC, ep.name ASC
-	`, logbookID, optionalLogbookScope(accountID), optionalLogbookScope(eventID))
+	rows, err := r.db.Query(ctx, logbookEntrySelect+` WHERE e.logbook_id=$1 AND ($2::uuid IS NULL OR lb.account_id=$2) AND ($3::uuid IS NULL OR lb.event_id=$3) ORDER BY COALESCE(e.stage_position,2147483647),e.capture_stage_key,e.id`, logbookID, optionalLogbookScope(accountID), optionalLogbookScope(eventID))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
-	var entries []*domain.EventLogbookEntry
+	out := []*domain.EventLogbookEntry{}
 	for rows.Next() {
-		entry := &domain.EventLogbookEntry{}
-		if err := rows.Scan(
-			&entry.ID, &entry.LogbookID, &entry.ParticipantID, &entry.StageID,
-			&entry.StageName, &entry.StageColor, &entry.Notes, &entry.CreatedAt,
-			&entry.ParticipantName, &entry.ParticipantPhone,
-		); err != nil {
+		e, err := scanLogbookEntry(rows)
+		if err != nil {
 			return nil, err
 		}
-		entries = append(entries, entry)
+		out = append(out, e)
 	}
-	return entries, rows.Err()
+	return out, rows.Err()
 }
 
 // UpdateEntryNotes updates the notes for a specific logbook entry.
-func (r *LogbookRepository) UpdateEntryNotes(ctx context.Context, accountID, eventID, logbookID, entryID uuid.UUID, notes string) error {
+func (r *LogbookRepository) UpdateEntryNotes(ctx context.Context, accountID, eventID, logbookID, entryID uuid.UUID, notes string, options ...LogbookWriteOptions) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if err := lockWritableLogbookEvent(ctx, tx, accountID, eventID); err != nil {
+	option := logbookWriteOption(options)
+	if _, _, err := lockLogbook(ctx, tx, accountID, eventID, logbookID, option.ExpectedVersion, false); err != nil {
 		return err
 	}
 	var ownedLogbook uuid.UUID
@@ -593,13 +547,19 @@ func (r *LogbookRepository) UpdateEntryNotes(ctx context.Context, accountID, eve
 	if result.RowsAffected() != 1 {
 		return pgx.ErrNoRows
 	}
+	if _, err = tx.Exec(ctx, `UPDATE event_logbooks SET version=version+1,updated_at=NOW() WHERE id=$1 AND account_id=$2 AND event_id=$3`, logbookID, accountID, eventID); err != nil {
+		return err
+	}
+	if err = recordLogbookAction(ctx, tx, accountID, eventID, logbookID, "entry_updated", option.ActorID); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
 // AutoCreateFromDateRange creates pending logbooks for each day in the event's date range.
 // Skips dates that already have a logbook. Returns the list of created logbooks.
 func (r *LogbookRepository) AutoCreateFromDateRange(ctx context.Context, eventID, accountID uuid.UUID, startDate, endDate time.Time, createdBy *uuid.UUID) ([]*domain.EventLogbook, error) {
-	if startDate.IsZero() || endDate.Before(startDate) {
+	if startDate.IsZero() || endDate.Before(startDate) || endDate.Sub(startDate) > 366*24*time.Hour {
 		return nil, ErrLogbookInvalid
 	}
 	tx, err := r.db.Begin(ctx)
@@ -629,8 +589,8 @@ func (r *LogbookRepository) AutoCreateFromDateRange(ctx context.Context, eventID
 			INSERT INTO event_logbooks (event_id, account_id, date, title, status, created_by)
 			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (event_id, date) DO NOTHING
-			RETURNING id, created_at, updated_at
-		`, lb.EventID, lb.AccountID, lb.Date, lb.Title, lb.Status, lb.CreatedBy).Scan(&lb.ID, &lb.CreatedAt, &lb.UpdatedAt)
+			RETURNING id, created_at, updated_at,version
+		`, lb.EventID, lb.AccountID, lb.Date, lb.Title, lb.Status, lb.CreatedBy).Scan(&lb.ID, &lb.CreatedAt, &lb.UpdatedAt, &lb.Version)
 		if err != nil {
 			if err == pgx.ErrNoRows {
 				continue // already exists
@@ -648,143 +608,13 @@ func (r *LogbookRepository) AutoCreateFromDateRange(ctx context.Context, eventID
 // PreviewParticipants returns the participants that would match the saved filter
 // for a pending logbook. This is a dynamic preview — it re-queries current participants.
 func (r *LogbookRepository) PreviewParticipants(ctx context.Context, accountID, eventID, logbookID uuid.UUID) ([]map[string]interface{}, error) {
-	lb, err := r.GetByIDForEvent(ctx, accountID, eventID, logbookID)
+	page, err := r.PreviewPage(ctx, accountID, eventID, logbookID, LogbookPageOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("get logbook: %w", err)
+		return nil, err
 	}
-
-	// Parse saved filter
-	var filter *SnapshotFilter
-	if len(lb.SavedFilter) > 0 {
-		filter = &SnapshotFilter{}
-		if err := json.Unmarshal(lb.SavedFilter, filter); err != nil {
-			filter = nil
-		}
+	out := []map[string]interface{}{}
+	for _, e := range page.Items {
+		out = append(out, map[string]interface{}{"id": e.ParticipantID, "name": e.ParticipantName, "phone": e.ParticipantPhone, "stage_id": e.StageID, "stage_name": e.StageName, "stage_color": e.StageColor})
 	}
-
-	// Build dynamic WHERE clause (same logic as CaptureSnapshot)
-	args := []interface{}{lb.EventID}
-	argIdx := 2
-	whereClauses := []string{"ep.event_id = $1", "ep.membership_state = 'active'"}
-
-	if filter != nil {
-		if filter.TagFormula != "" {
-			ast, parseErr := formula.Parse(filter.TagFormula)
-			if parseErr == nil && ast != nil {
-				innerSQL, innerArgs, buildErr := formula.BuildSQLForParticipants(ast, lb.EventID)
-				if buildErr == nil && innerSQL != "" {
-					remappedSQL := formula.RemapSQLParams(innerSQL, len(innerArgs), argIdx)
-					whereClauses = append(whereClauses, fmt.Sprintf("ep.id IN (%s)", remappedSQL))
-					args = append(args, innerArgs...)
-					argIdx += len(innerArgs)
-				}
-			}
-		} else if len(filter.TagNames) > 0 || len(filter.ExcludeTagNames) > 0 {
-			tagMode := strings.ToUpper(filter.TagMode)
-			if tagMode == "" {
-				tagMode = "OR"
-			}
-			if len(filter.TagNames) > 0 {
-				if tagMode == "AND" {
-					whereClauses = append(whereClauses, fmt.Sprintf(
-						"ep.id IN (SELECT p2.id FROM event_participants p2 JOIN contact_tags ct ON ct.contact_id = p2.contact_id JOIN tags t ON t.id = ct.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d) GROUP BY p2.id HAVING COUNT(DISTINCT t.name) = $%d)",
-						argIdx, argIdx+1,
-					))
-					args = append(args, filter.TagNames, len(filter.TagNames))
-					argIdx += 2
-				} else {
-					whereClauses = append(whereClauses, fmt.Sprintf(
-						"ep.id IN (SELECT p2.id FROM event_participants p2 JOIN contact_tags ct ON ct.contact_id = p2.contact_id JOIN tags t ON t.id = ct.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
-						argIdx,
-					))
-					args = append(args, filter.TagNames)
-					argIdx++
-				}
-			}
-			if len(filter.ExcludeTagNames) > 0 {
-				whereClauses = append(whereClauses, fmt.Sprintf(
-					"ep.id NOT IN (SELECT p2.id FROM event_participants p2 JOIN contact_tags ct ON ct.contact_id = p2.contact_id JOIN tags t ON t.id = ct.tag_id WHERE p2.event_id = $1 AND t.name = ANY($%d))",
-					argIdx,
-				))
-				args = append(args, filter.ExcludeTagNames)
-				argIdx++
-			}
-		}
-
-		if filter.HasPhone {
-			whereClauses = append(whereClauses, "ep.phone IS NOT NULL AND ep.phone != ''")
-		}
-
-		if filter.StageIDs != "" {
-			var validStageIDs []uuid.UUID
-			for _, sid := range strings.Split(filter.StageIDs, ",") {
-				if id, err := uuid.Parse(strings.TrimSpace(sid)); err == nil {
-					validStageIDs = append(validStageIDs, id)
-				}
-			}
-			if len(validStageIDs) > 0 {
-				whereClauses = append(whereClauses, fmt.Sprintf("ep.stage_id = ANY($%d)", argIdx))
-				args = append(args, validStageIDs)
-				argIdx++
-			}
-		}
-
-		if filter.DateField != "" && snapshotDateFields[filter.DateField] {
-			col := "ep." + filter.DateField
-			if filter.DateFrom != "" {
-				if t, err := time.Parse(time.RFC3339, filter.DateFrom); err == nil {
-					whereClauses = append(whereClauses, fmt.Sprintf("%s >= $%d", col, argIdx))
-					args = append(args, t)
-					argIdx++
-				}
-			}
-			if filter.DateTo != "" {
-				if t, err := time.Parse(time.RFC3339, filter.DateTo); err == nil {
-					whereClauses = append(whereClauses, fmt.Sprintf("%s < $%d", col, argIdx))
-					args = append(args, t)
-					argIdx++
-				}
-			}
-		}
-	}
-
-	whereSQL := strings.Join(whereClauses, " AND ")
-
-	query := fmt.Sprintf(`
-		SELECT ep.id, COALESCE(ep.name, ''), ep.phone,
-		       COALESCE(eps.name, ''), COALESCE(eps.color, ''),
-		       ep.stage_id
-		FROM event_participants ep
-		LEFT JOIN event_pipeline_stages eps ON eps.id = ep.stage_id
-		WHERE %s
-		ORDER BY eps.position ASC NULLS LAST, ep.name ASC
-	`, whereSQL)
-
-	rows, err := r.db.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("query preview participants: %w", err)
-	}
-	defer rows.Close()
-
-	var results []map[string]interface{}
-	for rows.Next() {
-		var id uuid.UUID
-		var name string
-		var phone *string
-		var stageName, stageColor string
-		var stageID *uuid.UUID
-		if err := rows.Scan(&id, &name, &phone, &stageName, &stageColor, &stageID); err != nil {
-			return nil, fmt.Errorf("scan preview participant: %w", err)
-		}
-		entry := map[string]interface{}{
-			"id":          id,
-			"name":        name,
-			"phone":       phone,
-			"stage_name":  stageName,
-			"stage_color": stageColor,
-			"stage_id":    stageID,
-		}
-		results = append(results, entry)
-	}
-	return results, rows.Err()
+	return out, nil
 }
