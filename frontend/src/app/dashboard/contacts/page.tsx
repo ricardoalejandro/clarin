@@ -2,6 +2,7 @@
 
 import { useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
+import WorkspaceActionsMenu from '@/components/operational-overlay/WorkspaceActionsMenu'
 import { useRouter } from 'next/navigation'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
@@ -37,6 +38,7 @@ import { fetchContactExportPages } from '@/components/contact-details/contactExp
 import { refreshContactWindow, refreshedContactAnchor, type ContactScrollAnchor } from '@/components/contact-details/contactListRefresh'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider'
+import { useLeadPolicy } from '@/components/LeadPolicyProvider'
 import type { Lead } from '@/types/contact'
 import type { CustomFieldDefinition, CustomFieldValue, CustomFieldFilter } from '@/types/custom-field'
 
@@ -318,6 +320,7 @@ function ContactOpportunitySummary({
 }
 
 export default function ContactsPage() {
+  const { leadsEnabled } = useLeadPolicy()
   const { requireOnline } = useClarinRuntime()
   const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>()
   const crmWindowStorageScope = useCrmWindowStorageScope('contacts')
@@ -423,9 +426,6 @@ export default function ContactsPage() {
       if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node) && !moreMenuPortalRef.current?.contains(e.target as Node)) {
         setShowMoreMenu(false)
       }
-      if (actionsMenuRef.current && !actionsMenuRef.current.contains(e.target as Node)) {
-        setActionsMenuId(null)
-      }
       if (cfColumnPickerRef.current && !cfColumnPickerRef.current.contains(e.target as Node)) {
         setShowCfColumnPicker(false)
       }
@@ -501,17 +501,20 @@ export default function ContactsPage() {
   const [contactLeadsTarget, setContactLeadsTarget] = useState<Contact | null>(null)
   const [contactLeads, setContactLeads] = useState<any[]>([])
   const [contactLeadsLoading, setContactLeadsLoading] = useState(false)
+  const contactLeadsAbortRef = useRef<AbortController | null>(null)
   const contactOpportunitiesDialogRef = useRef<HTMLDivElement>(null)
   const closeContactOpportunities = useCallback(() => {
+    contactLeadsAbortRef.current?.abort()
     setShowContactLeads(false)
     setContactLeads([])
     setContactLeadsTarget(null)
+    setContactLeadsLoading(false)
   }, [])
   useAccessibleDialog(showContactLeads, contactOpportunitiesDialogRef, closeContactOpportunities)
 
   // Actions dropdown
   const [actionsMenuId, setActionsMenuId] = useState<string | null>(null)
-  const actionsMenuRef = useRef<HTMLDivElement>(null)
+  const [actionsMenuAnchor, setActionsMenuAnchor] = useState<HTMLButtonElement | null>(null)
 
   // Export
   const [showExportModal, setShowExportModal] = useState(false)
@@ -537,9 +540,9 @@ export default function ContactsPage() {
   const contactQuery = useMemo(() => {
     const params = new URLSearchParams(filterQuery)
     if (cfVisibleIds.size) params.set('include_custom_fields', 'true')
-    if (sortBy) { params.set('sort_by', sortBy); params.set('sort_order', sortOrder) }
+    if (sortBy && (leadsEnabled || sortBy !== 'lead_count')) { params.set('sort_by', sortBy); params.set('sort_order', sortOrder) }
     return params.toString()
-  }, [filterQuery, cfVisibleIds.size > 0, sortBy, sortOrder])
+  }, [filterQuery, cfVisibleIds.size > 0, sortBy, sortOrder, leadsEnabled])
   const queryKey = `${authScope}:${contactQuery}:${settledSearchRevision}`
   const queryKeyRef = useRef(queryKey)
   queryKeyRef.current = queryKey
@@ -581,6 +584,7 @@ export default function ContactsPage() {
     setDetailOpportunities([])
     setSelectedDetailOpportunityId('')
     setDetailOpportunitiesError('')
+    if (!leadsEnabled) { setDetailOpportunitiesLoading(false); return }
     setDetailOpportunitiesLoading(true)
 
     try {
@@ -605,7 +609,24 @@ export default function ContactsPage() {
         setDetailOpportunitiesLoading(false)
       }
     }
-  }, [token])
+  }, [token, leadsEnabled])
+
+  useEffect(() => {
+    if (leadsEnabled) return
+    closeContactOpportunities()
+    detailOpportunitiesRequestRef.current += 1
+    detailOpportunitiesAbortRef.current?.abort()
+    setDetailOpportunities([])
+    setSelectedDetailOpportunityId('')
+    setDetailOpportunitiesError('')
+    setDetailOpportunitiesLoading(false)
+    if (sortBy === 'lead_count') setSortBy('')
+    if (draftSortBy === 'lead_count') setDraftSortBy('')
+  }, [leadsEnabled, closeContactOpportunities, sortBy, draftSortBy])
+  useEffect(() => {
+    if (leadsEnabled && activeContactIdRef.current) void loadDetailOpportunities(activeContactIdRef.current)
+  }, [leadsEnabled, loadDetailOpportunities])
+  useEffect(() => () => contactLeadsAbortRef.current?.abort(), [])
 
   const closeDetailPanel = useCallback(() => {
     contactDetailRequestRef.current += 1
@@ -1254,21 +1275,27 @@ export default function ContactsPage() {
 
   // Fetch leads for a contact
   const fetchContactLeads = async (contact: Contact) => {
+    if (!leadsEnabled) return
+    contactLeadsAbortRef.current?.abort()
+    const controller = new AbortController()
+    contactLeadsAbortRef.current = controller
     setContactLeadsTarget(contact)
     setShowContactLeads(true)
     setContactLeadsLoading(true)
     try {
       const res = await fetch(`/api/contacts/${contact.id}/leads`, {
         headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
       })
       const data = await res.json()
+      if (controller.signal.aborted) return
       if (data.success) {
         setContactLeads(data.leads || [])
       }
     } catch {
       console.error('Failed to fetch contact leads')
     } finally {
-      setContactLeadsLoading(false)
+      if (!controller.signal.aborted) setContactLeadsLoading(false)
     }
   }
 
@@ -1926,7 +1953,7 @@ export default function ContactsPage() {
                     >
                       <option value="">Orden original</option>
                       <option value="name">Nombre</option>
-                      <option value="lead_count">Oportunidades</option>
+                      {leadsEnabled && <option value="lead_count">Oportunidades</option>}
                       <option value="created_at">Creación</option>
                     </select>
                     <button type="button" onClick={() => setDraftSortOrder(order => order === 'asc' ? 'desc' : 'asc')} disabled={!draftSortBy} className="inline-flex h-11 min-w-11 items-center justify-center rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 disabled:opacity-40" aria-label={draftSortOrder === 'asc' ? 'Orden ascendente; cambiar a descendente' : 'Orden descendente; cambiar a ascendente'}>
@@ -2182,7 +2209,7 @@ export default function ContactsPage() {
                           <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
                             {kommoEnabled ? (contact.source || 'whatsapp') : 'whatsapp'}
                           </span>
-                          {(contact.lead_count ?? 0) > 0 && (
+                          {leadsEnabled && (contact.lead_count ?? 0) > 0 && (
                             <button
                               type="button"
                               onClick={(event) => { event.stopPropagation(); fetchContactLeads(contact) }}
@@ -2200,9 +2227,12 @@ export default function ContactsPage() {
                       {!selectionMode && (
                         <button
                           type="button"
-                          onClick={(event) => { event.stopPropagation(); setActionsMenuId(contact.id) }}
+                          onClick={(event) => { event.stopPropagation(); setActionsMenuAnchor(event.currentTarget); setActionsMenuId(actionsMenuId === contact.id ? null : contact.id) }}
                           className="absolute right-2 top-2 inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
                           aria-label={`Acciones de ${getDisplayName(contact)}`}
+                          aria-haspopup="menu"
+                          aria-expanded={actionsMenuId === contact.id}
+                          aria-controls={actionsMenuId === contact.id ? 'contact-row-actions' : undefined}
                         >
                           <MoreVertical className="h-5 w-5" />
                         </button>
@@ -2223,9 +2253,9 @@ export default function ContactsPage() {
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden md:table-cell">Nombre corto</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden lg:table-cell">Etiquetas</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden md:table-cell">Fuente</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden md:table-cell cursor-pointer select-none hover:text-slate-700" onClick={() => { if (sortBy === 'lead_count') { setSortOrder(o => o === 'asc' ? 'desc' : 'asc') } else { setSortBy('lead_count'); setSortOrder('desc') } }}>
+                  {leadsEnabled && <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden md:table-cell cursor-pointer select-none hover:text-slate-700" onClick={() => { if (sortBy === 'lead_count') { setSortOrder(o => o === 'asc' ? 'desc' : 'asc') } else { setSortBy('lead_count'); setSortOrder('desc') } }}>
                     <span className="inline-flex items-center gap-1">Leads {sortBy === 'lead_count' ? <ChevronUp className={`w-3 h-3 transition-transform ${sortOrder === 'desc' ? 'rotate-180' : ''}`} /> : <ArrowUpDown className="w-3 h-3 opacity-40" />}</span>
-                  </th>
+                  </th>}
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider hidden lg:table-cell cursor-pointer select-none hover:text-slate-700" onClick={() => { if (sortBy === 'created_at') { setSortOrder(o => o === 'asc' ? 'desc' : 'asc') } else { setSortBy('created_at'); setSortOrder('desc') } }}>
                     <span className="inline-flex items-center gap-1">Creación {sortBy === 'created_at' ? <ChevronUp className={`w-3 h-3 transition-transform ${sortOrder === 'desc' ? 'rotate-180' : ''}`} /> : <ArrowUpDown className="w-3 h-3 opacity-40" />}</span>
                   </th>
@@ -2268,7 +2298,7 @@ export default function ContactsPage() {
               <tbody style={{ height: contacts.length > 0 ? contactsVirtualizer.getTotalSize() : undefined, position: 'relative', display: 'block' }}>
                 {contacts.length === 0 && !loading && !contactsError ? (
                   <tr style={{ display: 'table-row' }}>
-                    <td colSpan={(selectionMode ? 8 : 7) + cfDefs.filter(d => cfVisibleIds.has(d.id)).length} className="text-center py-12 text-slate-500">
+                    <td colSpan={(selectionMode ? 8 : 7) - (leadsEnabled ? 0 : 1) + cfDefs.filter(d => cfVisibleIds.has(d.id)).length} className="text-center py-12 text-slate-500">
                       <Users className="w-12 h-12 mx-auto mb-3 text-slate-300" />
                       <p className="text-base font-medium">No hay contactos</p>
                       <p className="text-sm mt-1">Los contactos se sincronizan automáticamente desde tus dispositivos WhatsApp</p>
@@ -2352,7 +2382,7 @@ export default function ContactsPage() {
                         {kommoEnabled ? (contact.source || 'whatsapp') : 'whatsapp'}
                       </span>
                     </td>
-                    <td className="px-4 py-3 hidden md:table-cell">
+                    {leadsEnabled && <td className="px-4 py-3 hidden md:table-cell">
                       {(contact.lead_count ?? 0) > 0 ? (
                         <button
                           onClick={(e) => { e.stopPropagation(); fetchContactLeads(contact) }}
@@ -2365,7 +2395,7 @@ export default function ContactsPage() {
                       ) : (
                         <span className="text-xs text-slate-300">0</span>
                       )}
-                    </td>
+                    </td>}
                     <td className="px-4 py-3 text-sm text-slate-400 hidden lg:table-cell">
                       {contact.created_at ? (
                         <span title={format(new Date(contact.created_at), 'dd/MM/yyyy HH:mm', { locale: es })}>
@@ -2381,71 +2411,18 @@ export default function ContactsPage() {
                       </td>
                     ))}
                     <td className="px-4 py-3 relative">
-                      <div ref={actionsMenuId === contact.id ? actionsMenuRef : undefined}>
+                      <div>
                         <button
-                          onClick={(e) => { e.stopPropagation(); setActionsMenuId(actionsMenuId === contact.id ? null : contact.id) }}
-                          className="p-1 text-slate-400 hover:text-slate-600 rounded hover:bg-slate-100"
+                          type="button"
+                          aria-label={`Acciones de ${getDisplayName(contact)}`}
+                          aria-haspopup="menu"
+                          aria-expanded={actionsMenuId === contact.id}
+                          aria-controls={actionsMenuId === contact.id ? 'contact-row-actions' : undefined}
+                          onClick={(e) => { e.stopPropagation(); setActionsMenuAnchor(e.currentTarget); setActionsMenuId(actionsMenuId === contact.id ? null : contact.id) }}
+                          className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
                         >
                           <MoreVertical className="w-4 h-4" />
                         </button>
-                        {actionsMenuId === contact.id && (
-                          <div className="absolute right-4 top-full mt-1 w-48 bg-white border border-slate-200 rounded-xl shadow-xl z-20 py-1">
-                            <button
-                              onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); openDetail(contact); setActionsMenuId(null) }}
-                              className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                            >
-                              <Eye className="w-4 h-4 text-slate-400" /> Ver detalle
-                            </button>
-                            <button
-                              onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); openDetail(contact); setActionsMenuId(null) }}
-                              className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                            >
-                              <Edit2 className="w-4 h-4 text-slate-400" /> Editar en ficha
-                            </button>
-                            <button
-                              onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); fetchContactLeads(contact); setActionsMenuId(null) }}
-                              className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                            >
-                              <Users className="w-4 h-4 text-slate-400" /> Ver leads ({contact.lead_count ?? 0})
-                            </button>
-                            <button
-                              onMouseDown={(e) => {
-                                e.preventDefault(); e.stopPropagation()
-                                setSelectedContact(contact)
-                                const phone = contact.phone || contact.jid?.replace(/@.*$/, '') || ''
-                                if (phone) {
-                                  handleSendWhatsApp(phone, contact)
-                                } else {
-                                  alert('Este contacto no tiene número de teléfono')
-                                }
-                                setActionsMenuId(null)
-                              }}
-                              className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                            >
-                              <MessageSquare className="w-4 h-4 text-slate-400" /> Enviar mensaje
-                            </button>
-                            {googleConnected && (
-                              <button
-                                onMouseDown={(e) => {
-                                  e.preventDefault(); e.stopPropagation()
-                                  handleGoogleSyncSingle(contact.id)
-                                  setActionsMenuId(null)
-                                }}
-                                className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                              >
-                                <Upload className="w-4 h-4 text-blue-400" />
-                                {contact.google_sync ? 'Re-sincronizar Google' : 'Sync a Google'}
-                              </button>
-                            )}
-                            <div className="my-1 border-t border-slate-100" />
-                            <button
-                              disabled={deletingContacts} onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteContact(contact.id); setActionsMenuId(null) }}
-                              className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-red-600 hover:bg-red-50"
-                            >
-                              <Trash2 className="w-4 h-4 text-red-400" /> Eliminar
-                            </button>
-                          </div>
-                        )}
                       </div>
                     </td>
                   </tr>
@@ -2530,16 +2507,13 @@ export default function ContactsPage() {
         document.body,
       )}
 
-      {typeof document !== 'undefined' && isCompactWorkspace && mobileActionContact && createPortal(
-        <div className="app-viewport fixed inset-0 z-[90] flex items-end bg-slate-950/40" onMouseDown={() => setActionsMenuId(null)}>
-          <div role="dialog" aria-modal="true" aria-label={`Acciones de ${getDisplayName(mobileActionContact)}`} className="max-h-[80dvh] w-full overflow-y-auto rounded-t-3xl bg-white px-3 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-300" />
-            <p className="truncate px-2 pb-2 text-sm font-semibold text-slate-800">{getDisplayName(mobileActionContact)}</p>
-            <button type="button" onClick={() => { setActionsMenuId(null); openDetail(mobileActionContact) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Eye className="h-5 w-5 text-slate-400" />Ver detalle</button>
-            <button type="button" onClick={() => { setActionsMenuId(null); openDetail(mobileActionContact) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Edit2 className="h-5 w-5 text-slate-400" />Editar en ficha</button>
-            <button type="button" onClick={() => { setActionsMenuId(null); fetchContactLeads(mobileActionContact) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Users className="h-5 w-5 text-slate-400" />Ver oportunidades ({mobileActionContact.lead_count ?? 0})</button>
+      {mobileActionContact && <WorkspaceActionsMenu anchor={actionsMenuAnchor} id="contact-row-actions" label={`Acciones de ${getDisplayName(mobileActionContact)}`} compact={isCompactWorkspace} onClose={() => setActionsMenuId(null)}>
+            <button type="button" role="menuitem" onClick={() => { setActionsMenuId(null); openDetail(mobileActionContact) }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Eye className="h-4 w-4 shrink-0 text-slate-400" />Ver detalle</button>
+            <button type="button" role="menuitem" onClick={() => { setActionsMenuId(null); openDetail(mobileActionContact) }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Edit2 className="h-4 w-4 shrink-0 text-slate-400" />Editar en ficha</button>
+            {leadsEnabled && <button type="button" role="menuitem" onClick={() => { setActionsMenuId(null); fetchContactLeads(mobileActionContact) }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Users className="h-4 w-4 shrink-0 text-slate-400" />{isCompactWorkspace ? 'Ver oportunidades' : 'Ver leads'} ({mobileActionContact.lead_count ?? 0})</button>}
             <button
               type="button"
+              role="menuitem"
               onClick={() => {
                 setActionsMenuId(null)
                 setSelectedContact(mobileActionContact)
@@ -2547,17 +2521,15 @@ export default function ContactsPage() {
                 if (phone) handleSendWhatsApp(phone, mobileActionContact)
                 else alert('Este contacto no tiene número de teléfono')
               }}
-              className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"
+              className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
             >
-              <MessageSquare className="h-5 w-5 text-slate-400" />Enviar mensaje
+              <MessageSquare className="h-4 w-4 shrink-0 text-slate-400" />Enviar mensaje
             </button>
-            {googleConnected && <button type="button" onClick={() => { setActionsMenuId(null); handleGoogleSyncSingle(mobileActionContact.id) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-slate-700 hover:bg-slate-50"><Upload className="h-5 w-5 text-blue-500" />{mobileActionContact.google_sync ? 'Re-sincronizar Google' : 'Sincronizar con Google'}</button>}
-            <button type="button" disabled={deletingContacts} onClick={() => { setActionsMenuId(null); handleDeleteContact(mobileActionContact.id) }} className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 text-sm text-red-600 hover:bg-red-50"><Trash2 className="h-5 w-5" />Eliminar</button>
-            <button type="button" onClick={() => setActionsMenuId(null)} className="mt-2 min-h-12 w-full rounded-xl border border-slate-200 text-sm font-semibold text-slate-600">Cancelar</button>
-          </div>
-        </div>,
-        document.body,
-      )}
+            {googleConnected && <button type="button" role="menuitem" onClick={() => { setActionsMenuId(null); handleGoogleSyncSingle(mobileActionContact.id) }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Upload className="h-4 w-4 shrink-0 text-blue-500" />{mobileActionContact.google_sync ? 'Re-sincronizar Google' : 'Sincronizar con Google'}</button>}
+            <div role="separator" className="my-1 border-t border-slate-100" />
+            <button type="button" role="menuitem" disabled={deletingContacts} onClick={() => { setActionsMenuId(null); handleDeleteContact(mobileActionContact.id) }} className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm text-red-600 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:opacity-50"><Trash2 className="h-4 w-4 shrink-0" />Eliminar</button>
+            {isCompactWorkspace && <button type="button" role="menuitem" onClick={() => { setActionsMenuId(null); actionsMenuAnchor?.focus({ preventScroll: true }) }} className="mt-2 min-h-11 w-full rounded-xl border border-slate-200 text-sm font-semibold text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">Cancelar</button>}
+      </WorkspaceActionsMenu>}
 
       {/* Operational Contact detail: preserves the canonical profile while chat temporarily maximizes the window. */}
       {(showDetailPanel || showInlineChat) && selectedContact && (
@@ -2617,12 +2589,17 @@ export default function ContactsPage() {
                 onSendMessage={showInlineChat ? undefined : (phone: string) => handleSendWhatsApp(phone)}
                 sendingMessage={whatsappChat.pending}
                 messageError={whatsappChat.error}
+                messageNotice={whatsappChat.notice}
+                messageDisabled={whatsappChat.messageDisabled}
+                checkingMessage={whatsappChat.checkingAvailability}
+                messageLabel={whatsappChat.messageLabel}
+                onPrepareMessage={whatsappChat.prepare}
                 onRetryMessage={whatsappChat.canRetry ? whatsappChat.retry : undefined}
                 onContactChange={(contact) => {
                   setSelectedContact(current => current?.id === contact.id ? { ...current, ...contact } as Contact : current)
                   setContacts(current => current.map(item => item.id === contact.id ? { ...item, ...contact } as Contact : item))
                 }}
-                contextContent={detailOpportunitiesLoading || detailOpportunitiesError || detailOpportunities.length > 0 ? (
+                contextContent={leadsEnabled && (detailOpportunitiesLoading || detailOpportunitiesError || detailOpportunities.length > 0) ? (
                   <ContactOpportunitySummary
                     contactId={selectedContact.id}
                     opportunities={detailOpportunities}
@@ -2855,7 +2832,7 @@ export default function ContactsPage() {
       />
 
       {/* Opportunity history for a contact */}
-      {showContactLeads && contactLeadsTarget && (
+      {leadsEnabled && showContactLeads && contactLeadsTarget && (
         <div className="app-viewport fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/55 p-0 backdrop-blur-sm sm:p-4" onMouseDown={event => { if (event.target === event.currentTarget) closeContactOpportunities() }}>
           <div ref={contactOpportunitiesDialogRef} role="dialog" aria-modal="true" aria-labelledby="contact-opportunities-title" aria-describedby="contact-opportunities-description" tabIndex={-1} className="flex h-full w-full max-w-3xl flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[88vh] sm:rounded-3xl">
             <header className="flex items-start gap-3 border-b border-slate-200 px-5 py-5 sm:px-6">

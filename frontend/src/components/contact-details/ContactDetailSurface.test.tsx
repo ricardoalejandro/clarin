@@ -90,6 +90,25 @@ beforeEach(() => {
 })
 
 describe('ContactDetailSurface date editing', () => {
+  it('checks message availability and presents no-channel guidance without an error alert', () => {
+    const prepare = vi.fn()
+    const retry = vi.fn()
+    render(<ContactDetailSurface contactId="contact-1" context={{ type: 'contact', id: 'contact-1' }} initialContact={contact} onClose={vi.fn()} onSendMessage={vi.fn()} onPrepareMessage={prepare} messageDisabled messageNotice="Para enviar mensajes, conecta un dispositivo de WhatsApp Web." onRetryMessage={retry} />)
+    expect(prepare).toHaveBeenCalledWith(contact.phone)
+    expect(screen.getByRole('button', { name: /Enviar mensaje a/ })).toBeDisabled()
+    expect(screen.getByRole('status')).toHaveTextContent('conecta un dispositivo')
+    expect(screen.queryByRole('alert')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Actualizar disponibilidad' }))
+    expect(retry).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the historical conversation action available without a sending channel', () => {
+    const open = vi.fn()
+    render(<ContactDetailSurface contactId="contact-1" context={{ type: 'contact', id: 'contact-1' }} initialContact={contact} onClose={vi.fn()} onSendMessage={open} messageLabel="Ver conversación" messageNotice="Puedes consultar esta conversación." />)
+    fireEvent.click(screen.getByRole('button', { name: /Ver conversación de/ }))
+    expect(open).toHaveBeenCalledWith(contact.phone)
+  })
+
   it('renders assigned tag text with contrast without changing its saved background', () => {
     mocks.profileOverrides = { contact: { ...contact, structured_tags: [
       { id: 'indigo-tag', name: 'Seguimiento', color: '#6366f1' },

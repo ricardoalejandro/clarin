@@ -24,6 +24,62 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('ProgramsPage lifecycle scopes and preservation', () => {
+  it('shows the real empty state only for a successful array response', async () => {
+    fixture.api.mockImplementation(async (endpoint: string) => endpoint.startsWith('/api/programs/folders') ? folders
+      : endpoint.startsWith('/api/programs/dashboard') ? { success: false }
+        : { success: true, data: [] })
+    render(<ProgramsPage />)
+    expect(await screen.findByText('Crea tu primer grupo de clases')).toBeInTheDocument()
+    expect(screen.queryByText('La información no está disponible en este momento')).not.toBeInTheDocument()
+  })
+
+  it('shows one calm initial notice for an invalid response and recovers on retry', async () => {
+    let attempts = 0
+    fixture.api.mockImplementation(async (endpoint: string) => endpoint.startsWith('/api/programs/folders') ? folders
+      : endpoint.startsWith('/api/programs/dashboard') ? new Promise(() => {})
+        : { success: true, data: ++attempts === 1 ? null : [] })
+    render(<ProgramsPage />)
+    expect(await screen.findByText('La información no está disponible en este momento')).toBeInTheDocument()
+    expect(screen.getAllByText('No pudimos cargar tus programas. Puedes volver a intentarlo.')).toHaveLength(1)
+    expect(screen.queryByText('Crea tu primer grupo de clases')).not.toBeInTheDocument()
+    expect(screen.getByRole('status').className).not.toContain('red-')
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar' }))
+    expect(await screen.findByText('Crea tu primer grupo de clases')).toBeInTheDocument()
+    expect(screen.queryByText('No pudimos cargar tus programas. Puedes volver a intentarlo.')).not.toBeInTheDocument()
+  })
+
+  it('preserves loaded rows when folders and later refreshes fail', async () => {
+    let attempts = 0
+    fixture.api.mockImplementation(async (endpoint: string) => endpoint.startsWith('/api/programs/folders') ? { success: false }
+      : endpoint.startsWith('/api/programs/dashboard') ? new Promise(() => {})
+        : ++attempts === 1 ? { success: true, data: [program('Preserved group')] } : { success: false })
+    render(<ProgramsPage />)
+    expect(await screen.findByText('Preserved group')).toBeInTheDocument()
+    expect(screen.queryByText('La información no está disponible en este momento')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar' }))
+    expect(await screen.findByText(/No pudimos cargar tus programas/)).toBeInTheDocument()
+    expect(screen.getByText('Preserved group')).toBeInTheDocument()
+    expect(screen.getAllByRole('status')).toHaveLength(1)
+  })
+
+  it('shows one health failure when expanded and never invents zero alerts', async () => {
+    render(<ProgramsPage />)
+    expect(await screen.findByText('La salud general no está disponible en este momento. Puedes volver a intentarlo.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Salud general/ }))
+    expect(screen.getAllByText('La salud general no está disponible en este momento. Puedes volver a intentarlo.')).toHaveLength(1)
+    expect(screen.queryByText('Sin alertas')).not.toBeInTheDocument()
+  })
+
+  it('renders a neutral zero only from a valid health snapshot', async () => {
+    fixture.api.mockImplementation(async (endpoint: string) => endpoint.startsWith('/api/programs/folders') ? folders
+      : endpoint.startsWith('/api/programs/dashboard') ? { success: true, data: { success: true, dashboard: { groups: [], critical_participants: 0, attendance_goal_percent: 80, transfer_goal_percent: 70, attendance_rate: null, transfer_rate: 0 } } }
+        : { success: true, data: [] })
+    render(<ProgramsPage />)
+    const label = await screen.findByText('Sin alertas')
+    expect(label.className).toContain('text-slate-500')
+    expect(label.className).not.toContain('red-')
+  })
+
   it('switches programs and folders together, rejects old rows, and leaves dashboard request alive', async () => {
     let resolveOld!: (response: unknown) => void
     let dashboardSignal: AbortSignal | undefined

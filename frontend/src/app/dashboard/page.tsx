@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import { api, subscribeWebSocket } from '@/lib/api'
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
+import { useLeadPolicy } from '@/components/LeadPolicyProvider'
 
 type PeriodPreset = '7d' | '30d' | '90d'
 
@@ -371,6 +372,7 @@ function DashboardSkeleton() {
 }
 
 export default function DashboardPage() {
+  const { leadsEnabled } = useLeadPolicy()
   const [period, setPeriod] = useState<PeriodPreset>('30d')
   const [dashboard, setDashboard] = useState<DashboardSummary | null>(null)
   const [loading, setLoading] = useState(true)
@@ -414,7 +416,7 @@ export default function DashboardPage() {
 
   useEffect(() => subscribeWebSocket(raw => {
     const message = raw as { event?: string }
-    if (!['chat_update', 'new_message', 'task_update', 'task_overdue'].includes(message.event || '')) return
+    if (!['chat_update', 'new_message', 'task_update', 'task_overdue', 'account_capabilities_changed'].includes(message.event || '')) return
     if (realtimeRefreshRef.current) clearTimeout(realtimeRefreshRef.current)
     realtimeRefreshRef.current = setTimeout(() => {
       realtimeRefreshRef.current = null
@@ -472,7 +474,8 @@ export default function DashboardPage() {
     )
   }
 
-  const { sections, leads, chats, tasks, events, devices } = dashboard
+  const { leads, chats, tasks, events, devices } = dashboard
+  const sections = { ...dashboard.sections, leads: dashboard.sections.leads && leadsEnabled }
   const hasAttention = sections.chats || sections.tasks || sections.events || sections.devices
   const hasAgenda = sections.tasks || sections.events
   const hasAnySection = Object.values(sections).some(Boolean)

@@ -16,6 +16,7 @@ import {
   CreditCard,
   Edit2,
   FileText,
+  Info,
   Loader2,
   ListTodo,
   Mail,
@@ -68,6 +69,11 @@ interface ContactDetailSurfaceProps {
   onSendMessage?: (phone: string) => void
   sendingMessage?: boolean
   messageError?: string
+  messageNotice?: string
+  messageDisabled?: boolean
+  checkingMessage?: boolean
+  messageLabel?: string
+  onPrepareMessage?: (phone: string) => void
   onRetryMessage?: () => void
   onDeleteContact?: (contact: ContactProfileContact) => void
   /** Context-specific content follows the shared CRM accordion stack in every module. */
@@ -264,6 +270,11 @@ function ContactDetailSurfaceImpl({
   onSendMessage,
   sendingMessage = false,
   messageError,
+  messageNotice,
+  messageDisabled = false,
+  checkingMessage = false,
+  messageLabel = 'Mensaje',
+  onPrepareMessage,
   onRetryMessage,
   onDeleteContact,
   contextContent,
@@ -279,6 +290,9 @@ function ContactDetailSurfaceImpl({
   className = '',
 }: ContactDetailSurfaceProps, forwardedRef: ForwardedRef<ContactDetailSurfaceHandle>) {
   const profile = useContactProfile({ contactId, context, initialContact, onContactChange })
+  useEffect(() => {
+    if (profile.contact?.phone) onPrepareMessage?.(profile.contact.phone)
+  }, [contactId, profile.contact?.phone, onPrepareMessage])
   const surfaceSessionKey = profile.sessionKey || `${contactId}:${context.type}:${context.id}`
   const surfaceKeyRef = useRef(surfaceSessionKey)
   surfaceKeyRef.current = surfaceSessionKey
@@ -761,10 +775,10 @@ function ContactDetailSurfaceImpl({
                     {profile.contact.do_not_contact && <div className="mt-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"><span className="font-bold">No contactar.</span>{profile.contact.do_not_contact_reason ? ` ${profile.contact.do_not_contact_reason}` : ''}</div>}
                     <div className="mt-3 grid grid-cols-3 gap-2" aria-label="Acciones prioritarias">
                       <button type="button" disabled={contextActivity ? contextActionsDisabled : !canManageObservations} onClick={() => { if (contextActivity) openContextAction('activity', '[data-crm-activity-add]'); else focusObservationComposer() }} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50/70 px-2 text-xs font-bold text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-45"><MessageSquarePlus className="h-4 w-4" />Observación</button>
-                      <button data-crm-message-action type="button" onClick={() => profile.contact?.phone && onSendMessage?.(profile.contact.phone)} disabled={!onSendMessage || !profile.contact.phone || sendingMessage} aria-label={`Enviar mensaje a ${displayName(profile.contact)}`} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-2 text-xs font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45">{sendingMessage ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}{sendingMessage ? 'Abriendo…' : 'Mensaje'}</button>
+                      <button data-crm-message-action type="button" onClick={() => profile.contact?.phone && onSendMessage?.(profile.contact.phone)} disabled={!onSendMessage || !profile.contact.phone || sendingMessage || checkingMessage || messageDisabled} aria-label={`${messageLabel === 'Ver conversación' ? 'Ver conversación de' : 'Enviar mensaje a'} ${displayName(profile.contact)}`} aria-busy={sendingMessage || checkingMessage} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-2 text-xs font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-45">{sendingMessage || checkingMessage ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}{checkingMessage ? 'Comprobando…' : sendingMessage ? 'Abriendo…' : messageLabel}</button>
                       <button type="button" onClick={enterEditMode} disabled={!canEdit} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2 text-xs font-bold text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-45"><Edit2 className="h-4 w-4" />Editar</button>
                     </div>
-                    {messageError && <div role="alert" className="mt-2 flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"><AlertCircle className="h-4 w-4 shrink-0" /><span className="min-w-0 flex-1">{messageError}</span>{onRetryMessage && <button type="button" onClick={onRetryMessage} className="min-h-9 shrink-0 rounded-lg px-2 font-bold hover:bg-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500">Reintentar</button>}</div>}
+                    {(messageError || messageNotice) && <div role={messageError ? 'alert' : 'status'} className="mt-2 flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600"><Info className="h-4 w-4 shrink-0 text-sky-600" /><span className="min-w-0 flex-1">{messageError || messageNotice}</span>{onRetryMessage && <button type="button" disabled={checkingMessage} onClick={onRetryMessage} className="min-h-11 shrink-0 rounded-lg px-2 font-semibold text-slate-700 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-50">{messageError ? 'Reintentar' : 'Actualizar disponibilidad'}</button>}</div>}
                     {quickActions && <div className="mt-2">{quickActions}</div>}
                   </section>
 

@@ -4,6 +4,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import { createPortal } from 'react-dom'
 import { CalendarRange, Check, FileImage, Flag, Loader2, Maximize2, Minimize2, Move, PanelRight, Paperclip, Repeat2, RotateCcw, Sparkles, X } from 'lucide-react'
 import { apiGet, apiPost, apiPut, apiUpload } from '@/lib/api'
+import { useLeadPolicy } from '@/components/LeadPolicyProvider'
 import {
   REMINDER_OPTIONS,
   TASK_PRIORITY_CONFIG,
@@ -102,6 +103,7 @@ function localDateTime(value?: string) {
 }
 
 const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEditorModal({ open, environmentId, task, defaultListId, defaultFolderId, defaultStatusId, defaultOwnerId, defaultTitle, defaultPriority, defaultDueAt, defaultStartAt, defaultAllDay, initialDraftDirty = false, parentTaskId, parentTaskTitle, lists, folders, workflows, users, relatedScope, storageScope, onClose, onSaved, onOperation }, forwardedRef) {
+  const { leadsEnabled, ready: leadPolicyReady } = useLeadPolicy()
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [type, setType] = useState<TaskType>('reminder')
@@ -347,7 +349,8 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
   const baseCanSave = Boolean(taskEditable && title.trim() && ownerId && listId && statusId && progressValid && (!startAt || !dueAt || new Date(dueAt) >= new Date(startAt)))
   const queueProgress = taskAttachmentQueueProgress(attachmentQueue)
   const saveIntent = taskCreationAttachmentSaveIntent(createdTask?.id, attachmentQueue, baseCanSave)
-  const canSave = task ? baseCanSave : saveIntent !== 'none'
+  const leadCreationBlocked = !task && !createdTask && Boolean(relatedScope?.leadId) && !leadsEnabled
+  const canSave = !leadCreationBlocked && (task ? baseCanSave : saveIntent !== 'none')
 
   const settleCloseDecision = useCallback((allowed: boolean) => {
     const resolve = closeDecisionRef.current
@@ -560,6 +563,7 @@ const TaskEditorModal = forwardRef<TaskEditorModalHandle, Props>(function TaskEd
               {!parentTaskId && <div className="grid grid-cols-1 gap-3 sm:grid-cols-2"><div className="text-xs font-semibold text-slate-500"><Repeat2 className="mr-1 inline h-3.5 w-3.5" />Recurrencia<div className="mt-1.5"><TaskSelectPicker value={recurrence} options={recurrenceOptions} onChange={value => { setRecurrence(value); markDirty() }} label="Seleccionar recurrencia" /></div></div><div className="text-xs font-semibold text-slate-500">Recordatorio<div className="mt-1.5"><TaskSelectPicker value={String(reminder)} options={reminderOptions} onChange={value => { setReminder(Number(value)); markDirty() }} label="Seleccionar recordatorio" /></div></div></div>}
             </section>
           </div>
+          {leadCreationBlocked && <div role="status" className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">{leadPolicyReady ? 'Leads está desactivado.' : 'Estamos comprobando la disponibilidad de Leads.'} Conservamos este borrador; no se pueden crear nuevas tareas vinculadas a una oportunidad.</div>}
           {error && <div className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">{error}</div>}
         </div>
 

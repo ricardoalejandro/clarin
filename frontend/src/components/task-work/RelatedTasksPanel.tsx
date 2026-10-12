@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, Circle, ListTodo, Loader2, Plus, RefreshCw } from 'lucide-react'
 import { apiGet, subscribeWebSocket } from '@/lib/api'
+import { useLeadPolicy } from '@/components/LeadPolicyProvider'
 import type { RelatedTaskScope } from '@/types/crm-detail'
 import type { Task, TaskEnvironment, TaskFolder, TaskList, TaskWorkflow } from '@/types/task'
 import TaskDetailDrawer from './TaskDetailDrawer'
@@ -46,6 +47,8 @@ function isClosed(task: Task) {
 }
 
 export default function RelatedTasksPanel({ scope, title = 'Tareas relacionadas', readOnly = false, embedded = false, onCountChange }: Props) {
+  const { leadsEnabled } = useLeadPolicy()
+  const canCreate = !readOnly && (!scope.leadId || leadsEnabled)
   const scopeKey = relatedTaskScopeKey(scope)
   const [tasks, setTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
@@ -154,6 +157,7 @@ export default function RelatedTasksPanel({ scope, title = 'Tareas relacionadas'
   }, [metadata])
 
   const openCreate = async (trigger: HTMLButtonElement) => {
+    if (!canCreate) return
     triggerRef.current = trigger
     const ready = await ensureMetadata()
     if (ready) { setEditingTask(null); setEditorOpen(true) }
@@ -178,7 +182,7 @@ export default function RelatedTasksPanel({ scope, title = 'Tareas relacionadas'
 
   return (
     <section data-related-tasks-panel className={embedded ? 'scroll-mt-24' : 'scroll-mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm'} aria-labelledby={`related-tasks-${scopeKey}`}>
-      <div className="flex items-start justify-between gap-3"><div className="min-w-0"><h3 id={`related-tasks-${scopeKey}`} className="flex items-center gap-2 text-sm font-bold text-slate-900"><ListTodo className="h-4 w-4 text-emerald-600" />{title}</h3><p className="mt-1 text-xs text-slate-500">{openTasks.length} abierta{openTasks.length === 1 ? '' : 's'} · {closedTasks.length} finalizada{closedTasks.length === 1 ? '' : 's'}</p></div>{!readOnly && <button data-related-task-add type="button" onClick={event => { void openCreate(event.currentTarget) }} disabled={metadataLoading} className="inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-xl bg-emerald-600 px-3 text-xs font-bold text-white hover:bg-emerald-700 disabled:opacity-50">{metadataLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}Nueva tarea</button>}</div>
+      <div className="flex items-start justify-between gap-3"><div className="min-w-0"><h3 id={`related-tasks-${scopeKey}`} className="flex items-center gap-2 text-sm font-bold text-slate-900"><ListTodo className="h-4 w-4 text-emerald-600" />{title}</h3><p className="mt-1 text-xs text-slate-500">{openTasks.length} abierta{openTasks.length === 1 ? '' : 's'} · {closedTasks.length} finalizada{closedTasks.length === 1 ? '' : 's'}</p></div>{canCreate && <button data-related-task-add type="button" onClick={event => { void openCreate(event.currentTarget) }} disabled={metadataLoading} className="inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-xl bg-emerald-600 px-3 text-xs font-bold text-white hover:bg-emerald-700 disabled:opacity-50">{metadataLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}Nueva tarea</button>}</div>
       {refreshing && <p role="status" className="mt-2 flex items-center gap-1.5 text-[10px] font-semibold text-emerald-700"><Loader2 className="h-3 w-3 animate-spin" />Actualizando sin interrumpir la vista…</p>}
       {error && <div role="alert" className="mt-3 flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1">{error}</span><button type="button" onClick={() => void load()} aria-label="Reintentar tareas" className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg hover:bg-red-100"><RefreshCw className="h-4 w-4" /></button></div>}
       {loading ? <div className="flex min-h-24 items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-emerald-600" /></div> : visible.length ? <div className="mt-3 space-y-2">{visible.map(task => <button key={task.id} type="button" onClick={event => { void openTask(task, event.currentTarget) }} className="group flex min-h-12 w-full items-center gap-3 rounded-xl border border-slate-200 bg-slate-50/60 px-3 py-2 text-left transition hover:border-emerald-200 hover:bg-emerald-50/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">{isClosed(task) ? <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" /> : <Circle className="h-4 w-4 shrink-0 text-slate-300 group-hover:text-emerald-500" />}<span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold text-slate-800">{task.title}</span><span className="mt-0.5 block truncate text-[10px] text-slate-400">{task.list_name || 'Lista de tareas'}{task.assigned_to_name ? ` · ${task.assigned_to_name}` : ''}</span></span></button>)}</div> : <p className="mt-3 rounded-xl border border-dashed border-slate-200 px-3 py-6 text-center text-xs text-slate-400">No hay tareas abiertas relacionadas.</p>}

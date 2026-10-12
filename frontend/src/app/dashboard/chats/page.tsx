@@ -104,6 +104,7 @@ export default function ChatsPage() {
   }, [])
   const [devices, setDevices] = useState<Device[]>([])
   const [selectedChat, setSelectedChat] = useState<Chat | null>(null)
+  const [explicitSenderSession, setExplicitSenderSession] = useState(0)
   const chatCacheRef = useRef(new Map<string, Chat>())
   for (const row of chats) chatCacheRef.current.set(row.id, row)
   if (selectedChat) chatCacheRef.current.set(selectedChat.id, selectedChat)
@@ -1061,7 +1062,7 @@ export default function ChatsPage() {
     }
   }
 
-  const handleChatCreated = (chatId: string) => {
+  const handleChatCreated = (chatId: string, confirmedDeviceId?: string) => {
     const generation = ++navigationGenerationRef.current
     void fetchChats(true, { silent: true })
     const token = localStorage.getItem('token')
@@ -1069,7 +1070,11 @@ export default function ChatsPage() {
       .then(response => response.json()).then(data => {
         if (generation !== navigationGenerationRef.current) return
         if (!data.success || !data.chat) throw new Error('No se pudo abrir la conversación creada.')
-        openChat(applyChatState(data.chat, data.chat_state))
+        if (confirmedDeviceId && data.chat.device_id !== confirmedDeviceId) {
+          setListFeedback('El canal cambió en otra sesión. Vuelve a elegir el número de envío; tu borrador se conserva.')
+          return
+        }
+        if (openChat(applyChatState(data.chat, data.chat_state))) setExplicitSenderSession(value => value + 1)
       }).catch(() => {
         if (generation === navigationGenerationRef.current) setListFeedback('La conversación se creó, pero no se pudo abrir. Búscala en la lista para volver a intentarlo.')
       })
@@ -1435,6 +1440,7 @@ export default function ChatsPage() {
               <div className={compactSurface === 'list' ? 'hidden' : 'flex min-h-0 min-w-0 flex-1 flex-col'}>
 	            <ChatPanel
 	                chatId={selectedChat.id}
+                    explicitSenderSession={explicitSenderSession}
 	                deviceId={selectedChat.device_id || ''}
 	                device={selectedDevice}
 	                initialChat={selectedChat}

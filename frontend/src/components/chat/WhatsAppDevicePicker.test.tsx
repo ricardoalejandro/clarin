@@ -49,6 +49,16 @@ function PickerHarness({ onSelect = vi.fn() }: { onSelect?: (value: WhatsAppDevi
 }
 
 describe('WhatsAppDevicePicker', () => {
+  it('requires a deliberate confirmation for one channel with different or unknown history', () => {
+    const onSelect = vi.fn()
+    render(<WhatsAppDevicePicker open idPrefix="confirm" phone="51911111111" devices={[{ ...device, requires_confirmation: true, historical_relation: 'different_number' }]} historicalPhone="51922222222" existingChat={{ id: 'history', jid: '51911111111@s.whatsapp.net', name: 'History', last_message: '', last_message_at: '', unread_count: 0 }} onSelect={onSelect} onCancel={vi.fn()} />)
+    expect(screen.getByRole('dialog', { name: 'Confirmar canal de WhatsApp' })).toBeVisible()
+    expect(screen.getByText(/El historial está asociado al número 51922222222/)).toBeVisible()
+    expect(onSelect).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: /Confirmar y usar WhatsApp principal/ }))
+    expect(onSelect).toHaveBeenCalledOnce()
+  })
+
   it('excludes deleting devices even when a stale snapshot says connected', () => {
     render(<WhatsAppDevicePicker open idPrefix="deletion" phone="51999999999" devices={[{ ...device, deletion: { operation_id: 'pending-operation', phase: 'pending', attempts: 0 } }]} onSelect={vi.fn()} onCancel={vi.fn()} />)
     expect(screen.queryByRole('button', { name: /Usar WhatsApp principal/ })).toBeNull()

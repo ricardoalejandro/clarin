@@ -14,6 +14,7 @@ import { es } from 'date-fns/locale'
 import { Chat, ChatState, Device, Message } from '@/types/chat'
 import { subscribeWebSocket } from '@/lib/api'
 import { messageBelongsToChat } from './chatEventScope'
+import { chatSenderPhone, validatePinnedChatSender, type ChatSenderSession } from './chatSenderSession'
 import { hasSameMessageIdentity, mergeCanonicalMessage, mergeFetchedMessages, orderChatMessages, reconcileOptimisticMessage } from './messageState'
 import { applyDeviceDeletionResult, isDeviceDeleting } from '@/components/settings/deviceLifecycle'
 import type { DeviceDeletionResult } from '@/types/chat'
@@ -185,11 +186,13 @@ interface ChatPanelProps {
   onNext?: () => string | void | Promise<string | void>
   focusRequest?: number
   attentionMode?: boolean
+  /** Changes only after this user explicitly confirms a new sender. */
+  explicitSenderSession?: number
 }
 
-type DeviceValidationState = 'validating' | 'ready' | 'error'
+type DeviceValidationState = 'validating' | 'ready' | 'error' | 'changed'
 
-export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, initialChat, onClose, className = '', readOnly = false, readOnlyReason: explicitReadOnlyReason, onContactInfoToggle, contactInfoOpen, onRequestDelete, isActive = true, onRead, onNext, attentionMode, focusRequest }: ChatPanelProps) {
+export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, initialChat, onClose, className = '', readOnly = false, readOnlyReason: explicitReadOnlyReason, onContactInfoToggle, contactInfoOpen, onRequestDelete, isActive = true, onRead, onNext, attentionMode, focusRequest, explicitSenderSession = 0 }: ChatPanelProps) {
   const { ref: panelRef, width: panelWidth } = useContainerWidth<HTMLDivElement>()
   const { setComposerAccessoryOpen } = useChatMobileChrome()
   const compactActions = panelWidth > 0 && panelWidth < 640
@@ -203,9 +206,16 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }, [])
   const operationalPortal = useOperationalOverlayPortal()
   const [canonicalDevice, setCanonicalDevice] = useState<Device | null>(device || null)
+  const pinnedSenderRef = useRef<ChatSenderSession>({ chatId: chatId || null, deviceId: initialDeviceId || device?.id || null, phone: chatSenderPhone(device) })
+  const pinnedSenderSessionRef = useRef(explicitSenderSession)
+  if (pinnedSenderRef.current.chatId !== (chatId || null) || pinnedSenderSessionRef.current !== explicitSenderSession) {
+    pinnedSenderRef.current = { chatId: chatId || null, deviceId: initialDeviceId || device?.id || null, phone: chatSenderPhone(device) }
+    pinnedSenderSessionRef.current = explicitSenderSession
+  }
   const [deviceValidationState, setDeviceValidationState] = useState<DeviceValidationState>(chatId ? 'validating' : 'ready')
   const [validatedDeviceChatId, setValidatedDeviceChatId] = useState<string | null>(null)
-  const activeDeviceValidationState: DeviceValidationState = chatId && validatedDeviceChatId !== chatId
+  const [validatedSenderSession, setValidatedSenderSession] = useState<number | null>(null)
+  const activeDeviceValidationState: DeviceValidationState = chatId && (validatedDeviceChatId !== chatId || validatedSenderSession !== explicitSenderSession)
     ? 'validating'
     : deviceValidationState
   const deviceId = activeDeviceValidationState === 'ready' ? canonicalDevice?.id : undefined
@@ -221,6 +231,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       ? 'Validando canal de WhatsApp…'
       : activeDeviceValidationState === 'error'
         ? 'No se pudo validar el canal de WhatsApp. Vuelve a abrir el chat para reintentar.'
+        : activeDeviceValidationState === 'changed'
+          ? 'El canal de esta conversación cambió. Vuelve a elegir desde qué número enviar. Tu borrador se conserva.'
         : !deviceId
           ? 'Esta conversación no tiene un dispositivo asociado.'
           : isDeviceDeleting(canonicalDevice)
@@ -1233,7 +1245,6 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     setActivePopup(null)
     setShowAttachments(false)
     setShowContactPicker(false)
-    setEditingMsg(null)
     // A temporary channel validation disables sending; it must not discard drafts.
   }, [effectiveReadOnly])
 
@@ -1417,6 +1428,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     deviceRefreshRequestSequenceRef.current += 1
     setCanonicalDevice(device && (!initialDeviceId || device.id === initialDeviceId) ? device : null)
     setValidatedDeviceChatId(null)
+    setValidatedSenderSession(explicitSenderSession)
     setDeviceValidationState(chatId ? 'validating' : 'ready')
     if (historySyncTimeoutRef.current) {
       window.clearTimeout(historySyncTimeoutRef.current)
@@ -1447,9 +1459,23 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         setHasMoreMessages(true)
     }
 	return () => chatDetailsRequestRef.current?.abort()
-    // Read counters and previews change initialChat often. Only a new chat or
-    // channel may restart validation and replace the active composer.
-  }, [chatId, initialDeviceId])
+    // Read counters, previews and shared sender changes are not a new session.
+    // A new chat or deliberate sender confirmation may replace its pinned sender.
+    // Draft ownership remains chat-scoped and survives this revalidation.
+  }, [chatId, explicitSenderSession])
+
+  function acceptCanonicalSender(next: Device | null) {
+    setValidatedSenderSession(explicitSenderSession)
+    const validation = validatePinnedChatSender(pinnedSenderRef.current, next)
+    if (validation === 'changed') {
+      setDeviceValidationState('changed')
+      return
+    }
+    if (!pinnedSenderRef.current.deviceId && next?.id) pinnedSenderRef.current.deviceId = next.id
+    if (!pinnedSenderRef.current.phone && next?.phone) pinnedSenderRef.current.phone = chatSenderPhone(next)
+    setCanonicalDevice(next)
+    setDeviceValidationState('ready')
+  }
 
   async function refreshCanonicalDevice(targetChatId: string) {
     deviceRefreshRequestRef.current?.abort()
@@ -1471,9 +1497,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       ) return
       if (!response.ok || !data.success) throw new Error('No se pudo validar el canal')
       reconcileChatSnapshot(data.chat, data.chat_state)
-      setCanonicalDevice(data.device || null)
+      acceptCanonicalSender(data.device || null)
       setValidatedDeviceChatId(targetChatId)
-      setDeviceValidationState('ready')
     } catch (error) {
       if (controller.signal.aborted || activeChatIdRef.current !== targetChatId) return
       console.error('Failed to refresh chat device', error)
@@ -1529,11 +1554,16 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
             )
             return { ...previous, replies: reconciled.replies, total: reconciled.total }
           })
+        } else if (eventType === 'chat_sender_changed' && payload?.chat_id === chatId) {
+          // A different session may reopen the shared chat through another channel.
+          // Revalidate against this session's pinned sender; never adopt the event.
+          setDeviceValidationState('validating')
+          void refreshCanonicalDevice(chatId)
         } else if (eventType === 'device_deletion' && payload?.device_id === canonicalDevice?.id) {
           const deletion = payload as DeviceDeletionResult
           setCanonicalDevice(previous => previous ? applyDeviceDeletionResult([previous], deletion)[0] || null : null)
           void fetchChatDetails()
-        } else if (eventType === 'device_status' && payload?.device_id === deviceId) {
+        } else if (eventType === 'device_status' && payload?.device_id === pinnedSenderRef.current.deviceId) {
           const nextStatus = typeof payload.status === 'string' ? payload.status : 'disconnected'
           if (nextStatus !== 'connected') {
             setCanonicalDevice(previous => previous ? {
@@ -1766,9 +1796,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 	  if (controller.signal.aborted || requestSequence !== chatDetailsRequestSequenceRef.current || activeChatIdRef.current !== targetChatId) return
       if (res.ok && data.success) {
         reconcileChatSnapshot(data.chat, data.chat_state)
-        setCanonicalDevice(data.device || null)
+        acceptCanonicalSender(data.device || null)
         setValidatedDeviceChatId(targetChatId)
-        setDeviceValidationState('ready')
         deviceWasValidated = true
       } else {
         setCanonicalDevice(null)

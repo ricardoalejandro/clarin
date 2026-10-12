@@ -21,6 +21,7 @@ import {
 } from '@/lib/notificationSounds'
 import { useNotifications } from '@/components/NotificationProvider'
 import PipelineStageManager from '@/components/pipelines/PipelineStageManager'
+import { useLeadPolicy } from '@/components/LeadPolicyProvider'
 import PipelineManagementDialog from '@/components/pipelines/PipelineManagementDialog'
 import type { Pipeline } from '@/types/contact'
 import OfflineAccessPanel from '@/components/settings/OfflineAccessPanelV5'
@@ -1020,6 +1021,11 @@ function CustomFieldsPanel() {
 }
 
 export default function SettingsPage() {
+  const { leadsEnabled } = useLeadPolicy()
+  const leadsEnabledRef = useRef(leadsEnabled)
+  leadsEnabledRef.current = leadsEnabled
+  const pipelineStagesAbortRef = useRef<AbortController | null>(null)
+  const pipelinesAbortRef = useRef<AbortController | null>(null)
   const [account, setAccount] = useState<Account | null>(null)
   const [user, setUser] = useState<UserProfile | null>(null)
   const [loading, setLoading] = useState(true)
@@ -1183,10 +1189,15 @@ export default function SettingsPage() {
   }, [router, searchParams])
 
   const fetchPipelineStages = useCallback(async () => {
+    if (!leadsEnabledRef.current) return
+    pipelineStagesAbortRef.current?.abort()
+    const controller = new AbortController()
+    pipelineStagesAbortRef.current = controller
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch('/api/pipelines', { headers: { Authorization: `Bearer ${token}` } })
+      const res = await fetch('/api/pipelines', { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
       const data = await res.json()
+      if (controller.signal.aborted || !leadsEnabledRef.current) return
       if (data.success && data.pipelines) {
         const stages: { id: string; name: string; color: string; pipeline_name: string }[] = []
         for (const p of data.pipelines) {
@@ -1202,25 +1213,42 @@ export default function SettingsPage() {
   }, [])
 
   useEffect(() => {
-    if (activeTab === 'account') {
+    if (activeTab === 'account' && leadsEnabled) {
       fetchPipelineStages()
       fetchManagedPipelines()
     }
-  }, [activeTab, fetchPipelineStages])
+    return () => { pipelineStagesAbortRef.current?.abort(); pipelinesAbortRef.current?.abort() }
+  }, [activeTab, fetchPipelineStages, leadsEnabled])
+
+  useEffect(() => {
+    if (leadsEnabled) return
+    setManagedPipelines([])
+    setPipelineStages([])
+    setShowPipelineManagement(false)
+    setStageManagerPipeline(null)
+    setEditingPipelineId(null)
+    setLoadingPipelines(false)
+  }, [leadsEnabled])
 
   const fetchManagedPipelines = async () => {
+    if (!leadsEnabledRef.current) return
+    pipelinesAbortRef.current?.abort()
+    const controller = new AbortController()
+    pipelinesAbortRef.current = controller
     setLoadingPipelines(true)
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch('/api/pipelines', { headers: { Authorization: `Bearer ${token}` } })
+      const res = await fetch('/api/pipelines', { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
       const data = await res.json()
+      if (controller.signal.aborted || !leadsEnabledRef.current) return
       if (data.success && data.pipelines) {
         setManagedPipelines(data.pipelines)
       }
-    } catch {} finally { setLoadingPipelines(false) }
+    } catch {} finally { if (!controller.signal.aborted) setLoadingPipelines(false) }
   }
 
   const handleUpdatePipeline = async (id: string) => {
+    if (!leadsEnabledRef.current) return
     if (!editPipelineName.trim()) return
     const token = localStorage.getItem('token')
     try {
@@ -1242,6 +1270,7 @@ export default function SettingsPage() {
   }
 
   const handleDeletePipeline = async (id: string, name: string) => {
+    if (!leadsEnabledRef.current) return
     if (!confirm(`¿Eliminar el pipeline "${name}" y todas sus etapas?\n\nEsta acción es irreversible. Los leads asociados perderán su pipeline y etapa actual, y quedarán sin pipeline/etapa asignada.`)) return
     const token = localStorage.getItem('token')
     try {
@@ -1261,6 +1290,7 @@ export default function SettingsPage() {
   }
 
   const handleSaveIncomingStage = async (stageId: string) => {
+    if (!leadsEnabledRef.current) return
     setSavingStage(true)
     const token = localStorage.getItem('token')
     try {
@@ -1927,6 +1957,7 @@ export default function SettingsPage() {
               </button>
 
               {/* Default Incoming Stage Selector */}
+              {leadsEnabled && <>
               <div className="pt-6 border-t border-slate-200">
                 <div className="flex items-center gap-2 mb-1">
                   <Inbox className="w-4 h-4 text-emerald-600" />
@@ -2082,14 +2113,16 @@ export default function SettingsPage() {
                 )}
               </div>
 
+              </>}
               <div className="pt-6 border-t border-slate-200">
                 <h3 className="text-sm font-medium text-red-600 mb-2">Zona de Peligro</h3>
                 <p className="text-xs text-slate-500 mb-4">
-                  Las oportunidades se moverán a la papelera y podrán restaurarse durante 30 días. El borrado total de contactos sí afecta sus relaciones.
+                  {leadsEnabled ? 'Las oportunidades se moverán a la papelera y podrán restaurarse durante 30 días. ' : ''}El borrado total de contactos sí afecta sus relaciones.
                 </p>
                 <div className="flex flex-wrap gap-3">
-                  <button
+                  {leadsEnabled && <button
                     onClick={async () => {
+                      if (!leadsEnabled) return
                       const confirmText = prompt('Para mover TODAS las oportunidades de esta cuenta a la papelera, escribe "PAPELERA" (en mayúsculas). No se eliminarán contactos ni chats:')
                       if (confirmText !== 'PAPELERA') {
                         if (confirmText !== null) showMessage('error', 'Texto incorrecto. Escribe PAPELERA para confirmar.')
@@ -2115,7 +2148,7 @@ export default function SettingsPage() {
                     className="px-4 py-2 border border-red-200 text-red-600 rounded-xl hover:bg-red-50 text-sm transition"
                   >
                     Mover oportunidades a papelera
-                  </button>
+                  </button>}
                   <button
                     onClick={async () => {
                       const confirmText = prompt('Para eliminar TODOS los contactos de esta cuenta, junto con sus leads, chats y mensajes, escribe "ELIMINAR" (en mayúsculas):')
@@ -2921,20 +2954,22 @@ export default function SettingsPage() {
       </div>
 
       <PipelineManagementDialog
-        open={showPipelineManagement}
+        open={leadsEnabled && showPipelineManagement}
         onClose={() => setShowPipelineManagement(false)}
         onChanged={async (nextPipelines) => {
+          if (!leadsEnabledRef.current) return
           setManagedPipelines(nextPipelines)
           await fetchPipelineStages()
         }}
       />
 
       <PipelineStageManager
-        open={Boolean(stageManagerPipeline)}
+        open={leadsEnabled && Boolean(stageManagerPipeline)}
         pipeline={stageManagerPipeline}
         incomingStageId={incomingStageId}
         onClose={() => setStageManagerPipeline(null)}
         onSaved={async (updatedPipeline) => {
+          if (!leadsEnabledRef.current) return
           setStageManagerPipeline(updatedPipeline)
           await Promise.all([fetchManagedPipelines(), fetchPipelineStages()])
         }}

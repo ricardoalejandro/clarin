@@ -27,6 +27,7 @@ import {
   X,
 } from 'lucide-react'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
+import { senderConfirmation, type WhatsAppDeviceOption } from '@/lib/whatsappChatLauncher'
 
 interface Device {
   id: string
@@ -61,7 +62,7 @@ interface NewChatModalProps {
   isOpen: boolean
   onClose: () => void
   devices: Device[]
-  onChatCreated: (chatId: string) => void
+  onChatCreated: (chatId: string, confirmedDeviceId?: string) => void
 }
 
 type RecipientMode = 'search' | 'manual'
@@ -75,6 +76,8 @@ interface PhoneValidation {
   verifiedName?: string
   existingChat?: ExistingChat | null
   message?: string
+  senderChoice?: WhatsAppDeviceOption
+  historicalPhone?: string
 }
 
 interface WindowGeometry {
@@ -593,15 +596,19 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
         || undefined
       let existingChat: ExistingChat | null = result.chat?.id ? result.chat : null
 
-      if (!existingChat) {
+      let senderChoice: WhatsAppDeviceOption | undefined
+      let historicalPhone = ''
+      {
         try {
           const resolveResponse = await fetch(`/api/chats/resolve-whatsapp/${normalizedPhone}`, {
             headers: authHeaders(),
             signal: controller.signal,
           })
           const resolveData = await resolveResponse.json().catch(() => ({}))
-          if (resolveResponse.ok && resolveData.success && resolveData.chat?.id) {
-            existingChat = { id: resolveData.chat.id }
+          if (resolveResponse.ok && resolveData.success) {
+            if (resolveData.chat?.id) existingChat = { id: resolveData.chat.id }
+            senderChoice = resolveData.devices?.find((candidate: { id: string }) => candidate.id === selectedDevice)
+            historicalPhone = resolveData.historical_phone || ''
           }
         } catch (error) {
           if (controller.signal.aborted) throw error
@@ -617,6 +624,8 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
         jid: result.jid || data.jid,
         verifiedName,
         existingChat,
+        senderChoice,
+        historicalPhone,
       })
     } catch (error) {
       if (controller.signal.aborted || requestId !== validationRequestRef.current) return
@@ -657,19 +666,26 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
           contact_id: mode === 'search' ? selectedContact?.id : undefined,
           phone: validation.normalizedPhone,
           initial_message: message || undefined,
+          sender_confirmation: validation.senderChoice?.requires_confirmation ? senderConfirmation(validation.senderChoice) : undefined,
         }),
         signal: controller.signal,
       })
       const data = await response.json().catch(() => ({}))
       if (controller.signal.aborted || requestId !== submitRequestRef.current || !isOpenRef.current) return
       if (!response.ok || !data.success) {
+        if (data.code === 'sender_confirmation_required') {
+          await validatePhone()
+          if (controller.signal.aborted || requestId !== submitRequestRef.current || !isOpenRef.current) return
+          setSubmitError('El canal o el historial cambió. Revisa el número de envío y confirma nuevamente.')
+          return
+        }
         throw new Error(data.error || 'No pudimos iniciar la conversación')
       }
 
       const chatId = data.chat?.id || data.chat_id || validation.existingChat?.id
       if (!chatId) throw new Error('El servidor no devolvió la conversación creada')
 
-      onChatCreated(chatId)
+      onChatCreated(chatId, selectedDevice)
       if (data.warning) {
         const canonicalRecipient = String(data.chat?.jid || data.jid || validation.jid || '').trim()
         setCompletion({
@@ -720,7 +736,7 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
       const data = await response.json().catch(() => ({}))
       if (requestId !== submitRequestRef.current || !isOpenRef.current) return
       if (!response.ok || !data.success) throw new Error(data.error || 'No se pudo reenviar el mensaje inicial.')
-      onChatCreated(completion.chatId)
+      onChatCreated(completion.chatId, completion.deviceId)
       onCloseRef.current()
     } catch (error) {
       if (requestId !== submitRequestRef.current || !isOpenRef.current) return
@@ -1244,6 +1260,7 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
                       </p>
                     </div>
                   )}
+                  {validation.status === 'valid' && validation.senderChoice?.requires_confirmation && <div role="status" className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-xs leading-5 text-slate-600">{validation.historicalPhone ? `El historial está asociado al número ${validation.historicalPhone}.` : 'No pudimos identificar el número usado anteriormente.'} Al continuar, confirmas que deseas usar {validation.senderChoice.name || 'este canal'} ({validation.senderChoice.normalized_phone || validation.senderChoice.phone || 'número no disponible'}). El historial se conserva.</div>}
                 </div>
               </section>
 
@@ -1290,6 +1307,8 @@ export default function NewChatModal({ isOpen, onClose, devices, onChatCreated }
               >
                 {submitting ? (
                   <><Loader2 className="h-4 w-4 animate-spin" /> Iniciando…</>
+                ) : validation.senderChoice?.requires_confirmation ? (
+                  <><Send className="h-4 w-4" /> {initialMessage.trim() ? 'Confirmar canal y enviar' : 'Confirmar canal y abrir'}</>
                 ) : isExistingWithoutMessage ? (
                   <><MessageCircle className="h-4 w-4" /> Abrir conversación</>
                 ) : validation.existingChat ? (

@@ -4,68 +4,14 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type 
 import { createPortal } from 'react-dom'
 import { ArchiveRestore, CheckCircle2, MoreHorizontal, Trash2, XCircle } from 'lucide-react'
 import { OPERATIONAL_OVERLAY_LAYERS } from '@/components/operational-overlay/operationalOverlayLayers'
+import { workspaceMenuPosition as leadCardMenuPosition, type WorkspaceMenuPosition as LeadCardMenuPosition, type WorkspaceMenuViewport as LeadCardMenuViewport } from '@/components/operational-overlay/workspaceMenuPosition'
+export { workspaceMenuPosition as leadCardMenuPosition } from '@/components/operational-overlay/workspaceMenuPosition'
+export type { WorkspaceMenuAnchor as LeadCardMenuAnchor, WorkspaceMenuPosition as LeadCardMenuPosition, WorkspaceMenuViewport as LeadCardMenuViewport } from '@/components/operational-overlay/workspaceMenuPosition'
 
 const DESKTOP_MENU_WIDTH = 192
-const VIEWPORT_MARGIN = 8
-const MENU_GAP = 8
 const COMPACT_MENU_QUERY = '(max-width: 1023px), (hover: none), (pointer: coarse)'
 
 export type LeadCardLifecycleAction = 'won' | 'lost' | 'reopen'
-
-export type LeadCardMenuAnchor = {
-  left: number
-  right: number
-  top: number
-  bottom: number
-}
-
-export type LeadCardMenuViewport = {
-  left: number
-  top: number
-  width: number
-  height: number
-}
-
-export type LeadCardMenuPosition = {
-  left: number
-  top: number
-  width: number
-  maxHeight: number
-  placement: 'top' | 'bottom'
-}
-
-export function leadCardMenuPosition(
-  anchor: LeadCardMenuAnchor,
-  menu: { width: number; height: number },
-  viewport: LeadCardMenuViewport,
-): LeadCardMenuPosition | null {
-  const viewportRight = viewport.left + viewport.width
-  const viewportBottom = viewport.top + viewport.height
-  if (anchor.bottom < viewport.top || anchor.top > viewportBottom || anchor.right < viewport.left || anchor.left > viewportRight) return null
-
-  const width = Math.min(menu.width, Math.max(1, viewport.width - VIEWPORT_MARGIN * 2))
-  const viewportMaxHeight = Math.max(1, viewport.height - VIEWPORT_MARGIN * 2)
-  const desiredHeight = Math.min(Math.max(1, menu.height), viewportMaxHeight)
-  const spaceBelow = Math.max(0, viewportBottom - VIEWPORT_MARGIN - MENU_GAP - anchor.bottom)
-  const spaceAbove = Math.max(0, anchor.top - MENU_GAP - (viewport.top + VIEWPORT_MARGIN))
-  const placement = spaceBelow >= desiredHeight || spaceBelow >= spaceAbove ? 'bottom' : 'top'
-  const maxHeight = Math.max(1, placement === 'bottom' ? spaceBelow : spaceAbove)
-  const height = Math.min(desiredHeight, maxHeight)
-  const preferredTop = placement === 'bottom' ? anchor.bottom + MENU_GAP : anchor.top - MENU_GAP - height
-  const minTop = viewport.top + VIEWPORT_MARGIN
-  const maxTop = Math.max(minTop, viewportBottom - VIEWPORT_MARGIN - height)
-  const preferredLeft = anchor.right - width
-  const minLeft = viewport.left + VIEWPORT_MARGIN
-  const maxLeft = Math.max(minLeft, viewportRight - VIEWPORT_MARGIN - width)
-
-  return {
-    left: Math.round(Math.max(minLeft, Math.min(preferredLeft, maxLeft))),
-    top: Math.round(Math.max(minTop, Math.min(preferredTop, maxTop))),
-    width: Math.round(width),
-    maxHeight: Math.round(maxHeight),
-    placement,
-  }
-}
 
 function currentViewport(): LeadCardMenuViewport {
   const viewport = window.visualViewport

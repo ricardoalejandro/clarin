@@ -82,7 +82,7 @@ export default function WhatsAppDevicePicker({
             <Phone className="h-5 w-5" />
           </span>
           <div className="min-w-0 flex-1">
-            <h2 id={titleId} className="text-base font-bold text-slate-900">Elegir canal de WhatsApp</h2>
+            <h2 id={titleId} className="text-base font-bold text-slate-900">{sortedDevices.length === 1 && sortedDevices[0].requires_confirmation ? 'Confirmar canal de WhatsApp' : 'Elegir canal de WhatsApp'}</h2>
             <p className="mt-1 break-words text-xs leading-5 text-slate-500">Selecciona el dispositivo que enviará mensajes a {phone}.</p>
           </div>
           <button type="button" aria-label="Cerrar selección de dispositivo" disabled={busy} onClick={onCancel} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-40">
@@ -91,8 +91,8 @@ export default function WhatsAppDevicePicker({
         </div>
 
         {existingChat && (
-          <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-3.5 py-3 text-xs leading-5 text-amber-800">
-            Existe historial{historicalPhone ? ` asociado al número ${historicalPhone}` : ' cuyo número anterior no pudo confirmarse'}.
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-xs leading-5 text-slate-600">
+            {historicalPhone ? `El historial está asociado al número ${historicalPhone}.` : 'No pudimos identificar el número usado anteriormente.'} Elige expresamente desde qué número deseas continuar. El historial se conserva.
           </div>
         )}
 
@@ -110,7 +110,7 @@ export default function WhatsAppDevicePicker({
                 type="button"
                 disabled={busy}
                 onClick={() => onSelect(device)}
-                aria-label={`Usar ${device.name || 'dispositivo'}${deviceDisplayPhone(device) ? `, ${deviceDisplayPhone(device)}` : ''}`}
+                aria-label={`${device.requires_confirmation ? 'Confirmar y usar' : 'Usar'} ${device.name || 'dispositivo'}${deviceDisplayPhone(device) ? `, ${deviceDisplayPhone(device)}` : ''}`}
                 className={`group flex min-h-16 w-full items-center gap-3 rounded-2xl border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-wait disabled:opacity-55 ${ownsHistory ? 'border-emerald-200 bg-emerald-50/70 hover:bg-emerald-50' : 'border-slate-200 bg-white hover:border-emerald-200 hover:bg-emerald-50/50'}`}
               >
                 <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl ${ownsHistory ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600 group-hover:bg-emerald-100 group-hover:text-emerald-700'}`}>
@@ -123,6 +123,7 @@ export default function WhatsAppDevicePicker({
                     <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${relationClassName(device)}`}>{relationLabel(device)}</span>
                   </span>
                   <span className="mt-1 block truncate text-xs text-slate-500">{deviceDisplayPhone(device) || 'Número no disponible'}</span>
+                  {device.requires_confirmation && <span className="mt-1 block text-xs font-semibold text-emerald-700">Confirmar y continuar con este canal</span>}
                 </span>
               </button>
             )

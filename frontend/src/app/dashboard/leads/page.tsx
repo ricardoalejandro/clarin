@@ -4329,7 +4329,12 @@ export default function LeadsPage() {
                     onClose={() => { setShowDetailPanel(false); resetInlineChatState(); setScrollToTasks(false) }}
                     onSendMessage={(phone: string) => handleSendWhatsApp(phone)}
                     sendingMessage={whatsappChat.pending}
-                    messageError={whatsappChat.error}
+                messageError={whatsappChat.error}
+                messageNotice={whatsappChat.notice}
+                messageDisabled={whatsappChat.messageDisabled}
+                checkingMessage={whatsappChat.checkingAvailability}
+                messageLabel={whatsappChat.messageLabel}
+                onPrepareMessage={whatsappChat.prepare}
                     onRetryMessage={whatsappChat.canRetry ? whatsappChat.retry : undefined}
                     onContactChange={reconcileContactProfile}
                     onObservationChange={() => {

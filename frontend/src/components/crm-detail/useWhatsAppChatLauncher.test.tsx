@@ -39,6 +39,84 @@ const connectedDevice = {
 }
 
 describe('useWhatsAppChatLauncher', () => {
+  it('preflights availability without opening, writing or reporting missing devices as an error', async () => {
+    const onError = vi.fn()
+    const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => response({ success: true, phone: '51911111111', devices: [], mode: 'no_device' }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { result } = renderHook(() => useWhatsAppChatLauncher({ sessionKey: 'contact-1', contactId: 'contact-1', onError }))
+    await act(async () => { await result.current.prepare('51911111111') })
+    expect(result.current.availability).toBe('unavailable')
+    expect(result.current.messageDisabled).toBe(true)
+    expect(result.current.notice).toContain('conecta un dispositivo')
+    expect(result.current.error).toBe('')
+    expect(result.current.crmPhase).toBe('idle')
+    expect(result.current.chatOpen).toBe(false)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][0]).toContain('/resolve-whatsapp/')
+    expect(onError).not.toHaveBeenCalled()
+    await act(async () => { await result.current.open('51911111111') })
+    expect(result.current.phase).toBe('no_device')
+    expect(onError).not.toHaveBeenCalled()
+  })
+
+  it('keeps existing history accessible without a connected channel', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => response({ success: true, phone: '51911111111', devices: [], mode: 'read_only', chat: { id: 'history', jid: '51911111111@s.whatsapp.net' } })))
+    const { result } = renderHook(() => useWhatsAppChatLauncher({ sessionKey: 'contact-1', contactId: 'contact-1' }))
+    await act(async () => { await result.current.prepare('51911111111') })
+    expect(result.current.messageDisabled).toBe(false)
+    expect(result.current.messageLabel).toBe('Ver conversación')
+    expect(result.current.chatOpen).toBe(false)
+    await act(async () => { await result.current.open('51911111111') })
+    expect(result.current.readOnly).toBe(true)
+    expect(result.current.chat?.id).toBe('history')
+  })
+
+  it('requires an explicit choice for two connected channels and binds confirmation to that choice', async () => {
+    const other = { ...connectedDevice, id: 'device-2', phone: '51988888888', normalized_phone: '51988888888', historical_relation: 'different_number', requires_confirmation: true, history_revision: 'history-v1' }
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => response({ success: true, phone: '51911111111', devices: [connectedDevice, other], mode: 'choose_device', historical_phone: connectedDevice.phone }))
+      .mockImplementationOnce(() => response({ success: true, chat: { id: 'chat-1', device_id: other.id, jid: '51911111111@s.whatsapp.net' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { result } = renderHook(() => useWhatsAppChatLauncher({ sessionKey: 'contact-1', contactId: 'contact-1' }))
+    await act(async () => { await result.current.open('51911111111') })
+    expect(result.current.showDeviceSelector).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    act(() => result.current.selectDevice(result.current.devices[1]))
+    await waitFor(() => expect(result.current.phase).toBe('chat'))
+    const body = JSON.parse(String(fetchMock.mock.calls[1][1].body))
+    expect(body.device_id).toBe('device-2')
+    expect(body.sender_confirmation).toEqual({ device_id: 'device-2', device_phone: '51988888888', history_revision: 'history-v1' })
+  })
+
+  it('renews a stale confirmation without retrying a write or choosing another channel', async () => {
+    const choice = { ...connectedDevice, requires_confirmation: true, history_revision: 'old', normalized_phone: connectedDevice.phone }
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => response({ success: true, phone: '51911111111', devices: [choice], mode: 'choose_device' }))
+      .mockImplementationOnce(() => response({ success: false, code: 'sender_confirmation_required' }, 409))
+      .mockImplementationOnce(() => response({ success: true, phone: '51911111111', devices: [{ ...choice, history_revision: 'new' }], mode: 'choose_device' }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { result } = renderHook(() => useWhatsAppChatLauncher({ sessionKey: 'contact-1', contactId: 'contact-1' }))
+    await act(async () => { await result.current.open('51911111111') })
+    act(() => result.current.selectDevice(result.current.devices[0]))
+    await waitFor(() => expect(result.current.devices[0]?.history_revision).toBe('new'))
+    expect(result.current.phase).toBe('choosing_device')
+    expect(result.current.device).toBeNull()
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('refreshes missing availability after reconnection without opening a chat', async () => {
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => response({ success: true, phone: '51911111111', devices: [], mode: 'no_device' }))
+      .mockImplementationOnce(() => response({ success: true, phone: '51911111111', devices: [connectedDevice], mode: 'open_direct' }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { result } = renderHook(() => useWhatsAppChatLauncher({ sessionKey: 'contact-1', contactId: 'contact-1' }))
+    await act(async () => { await result.current.prepare('51911111111') })
+    act(() => { ws.listeners.forEach(listener => listener({ event: 'device_status', data: { device_id: connectedDevice.id, status: 'connected' } })) })
+    await waitFor(() => expect(result.current.availability).toBe('available'))
+    expect(result.current.chatOpen).toBe(false)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   beforeEach(() => {
     localStorage.setItem('token', 'test-token')
   })
