@@ -223,7 +223,7 @@ func (r *AccountRepository) UpdateLeadPolicy(ctx context.Context, accountID, act
 		_, err = tx.Exec(ctx, `UPDATE automation_executions SET status='failed',error_message='lead_policy_paused',completed_at=NOW(),resume_at=NULL
 		 WHERE account_id=$1 AND status IN ('pending','running','paused') AND
 		 (lead_id IS NOT NULL OR EXISTS (
-		   SELECT 1 FROM jsonb_array_elements(COALESCE(config_snapshot->'nodes','[]'::jsonb)) AS node
+		   SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(config_snapshot->'nodes')='array' THEN config_snapshot->'nodes' ELSE '[]'::jsonb END) AS node
 		   WHERE node->'data'->>'nodeType' IN ('send_whatsapp','change_stage','assign_tag','remove_tag','condition','lead_created','lead_stage_changed','tag_assigned','tag_removed')
 		 ))`, accountID)
 		if err != nil {

@@ -143,7 +143,7 @@ func (r *ChatRepository) OpenManualWhatsAppChat(ctx context.Context, accountID, 
 	if _, err = applyDurableSuppressionToContact(ctx, tx, accountID, *contactID); err != nil {
 		return nil, err
 	}
-	inserted, err := tx.Exec(ctx, `INSERT INTO chats(account_id,device_id,jid,name,channel_key) VALUES($1,$2,$3,NULLIF($4,''),'whatsapp_web') ON CONFLICT(account_id,channel_key,jid) DO NOTHING`, accountID, deviceID, jid, name)
+	inserted, err := tx.Exec(ctx, `INSERT INTO chats(account_id,device_id,jid,name,channel_key,contact_id) VALUES($1,$2,$3,NULLIF($4,''),'whatsapp_web',$5) ON CONFLICT(account_id,channel_key,jid) DO NOTHING`, accountID, deviceID, jid, name, *contactID)
 	if err != nil {
 		return nil, err
 	}

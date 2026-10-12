@@ -37,6 +37,10 @@ func leadPolicyTestPool(t *testing.T) *pgxpool.Pool {
 	if leadPolicyMigrationErr != nil {
 		t.Fatalf("startup migration: %v", leadPolicyMigrationErr)
 	}
+	var automationSchemaReady bool
+	if err = pool.QueryRow(context.Background(), `SELECT to_regclass('automations') IS NOT NULL AND to_regclass('automation_executions') IS NOT NULL AND to_regclass('automation_execution_logs') IS NOT NULL`).Scan(&automationSchemaReady); err != nil || !automationSchemaReady {
+		t.Fatalf("Migrate without SeedAdmin must include automation runtime schema: %v", err)
+	}
 	return pool
 }
 
@@ -323,5 +327,86 @@ func TestLeadPolicyIntegrationCommercialConfigurationGatePreservesNeutralAutomat
 	}
 	if err := repo.Delete(ctx, neutral.ID, account); err != nil {
 		t.Fatalf("neutral deletion blocked: %v", err)
+	}
+}
+
+func TestLeadPolicyIntegrationRuntimeMigrationPreservesAutomationHistory(t *testing.T) {
+	pool := leadPolicyTestPool(t)
+	ctx := context.Background()
+	account, contact := leadPolicyFixture(t, pool)
+	lead := &domain.Lead{AccountID: account, ContactID: &contact}
+	if err := (&LeadRepository{db: pool}).Create(ctx, lead); err != nil {
+		t.Fatal(err)
+	}
+	workflowID, executionID, logID := uuid.New(), uuid.New(), uuid.New()
+	historicalTime := time.Date(2020, 2, 3, 4, 5, 6, 0, time.UTC)
+	integrityExec(t, pool, `INSERT INTO automations
+		(id,account_id,name,description,trigger_type,trigger_config,config,is_active,execution_count,last_triggered_at,created_at,updated_at)
+		VALUES($1,$2,'Synthetic historical automation','Preserve historical configuration','lead_created',
+		'{"origin":"synthetic","nested":{"enabled":true}}',
+		'{"nodes":[{"id":"historical-delay","type":"delay","data":{"nodeType":"delay","delay":15}}],"edges":[]}',
+		FALSE,7,$3,$3,$3)`, workflowID, account, historicalTime)
+	integrityExec(t, pool, `INSERT INTO automation_executions
+		(id,automation_id,account_id,lead_id,status,current_node_id,next_node_id,resume_at,config_snapshot,context_data,error_message,started_at,completed_at,created_at)
+		VALUES($1,$2,$3,$4,'completed','historical-delay','',NULL,
+		'{"nodes":[{"id":"historical-delay","data":{"nodeType":"delay"}}],"edges":[]}',
+		'{"origin":"synthetic","values":[1,"historia",true],"leads_policy_version":1}','',$5,$5,$5)`,
+		executionID, workflowID, account, lead.ID, historicalTime)
+	integrityExec(t, pool, `INSERT INTO automation_execution_logs
+		(id,execution_id,node_id,node_type,status,duration_ms,error,created_at)
+		VALUES($1,$2,'historical-delay','delay','completed',125,'',$3)`, logID, executionID, historicalTime)
+	readHistory := func() [3]string {
+		t.Helper()
+		var snapshot [3]string
+		if err := pool.QueryRow(ctx, `SELECT to_jsonb(a)::text,to_jsonb(e)::text,to_jsonb(l)::text
+			FROM automations a JOIN automation_executions e ON e.automation_id=a.id
+			JOIN automation_execution_logs l ON l.execution_id=e.id
+			WHERE a.id=$1 AND a.account_id=$2 AND e.id=$3 AND e.account_id=$2 AND l.id=$4`,
+			workflowID, account, executionID, logID).Scan(&snapshot[0], &snapshot[1], &snapshot[2]); err != nil {
+			t.Fatalf("read preserved automation history: %v", err)
+		}
+		return snapshot
+	}
+	before := readHistory()
+	for pass := 1; pass <= 2; pass++ {
+		if err := database.Migrate(pool); err != nil {
+			t.Fatalf("repeat startup migration %d: %v", pass, err)
+		}
+		if after := readHistory(); after != before {
+			t.Fatalf("startup migration %d changed automation history, IDs, status or payload", pass)
+		}
+		var indexes int
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM pg_indexes WHERE schemaname=current_schema() AND (tablename,indexname) IN (
+			('automations','idx_automations_account'),('automations','idx_automations_trigger'),
+			('automation_executions','idx_auto_exec_paused'),('automation_executions','idx_auto_exec_dedup'),
+			('automation_executions','idx_auto_exec_account'),('automation_execution_logs','idx_auto_exec_logs'))`).Scan(&indexes); err != nil || indexes != 6 {
+			t.Fatalf("startup migration %d must preserve all six runtime indexes: count=%d err=%v", pass, indexes, err)
+		}
+	}
+
+	// A nil Go graph slice persists as nodes:null. Such neutral work must not
+	// make the account's commercial-policy cancellation query fail.
+	repo := &AutomationRepository{db: pool}
+	neutral := &domain.Automation{AccountID: account, Name: "Synthetic null-node automation", TriggerType: domain.AutoTriggerManual, Config: domain.AutomationGraph{}}
+	if err := repo.Create(ctx, neutral); err != nil {
+		t.Fatal(err)
+	}
+	pending := &domain.AutomationExecution{AutomationID: neutral.ID, AccountID: account, Status: domain.AutoExecPending, ConfigSnapshot: &neutral.Config, ContextData: map[string]interface{}{"origin": "synthetic"}}
+	if err := repo.CreateExecution(ctx, pending); err != nil {
+		t.Fatal(err)
+	}
+	var nodesAreNull bool
+	if err := pool.QueryRow(ctx, `SELECT config_snapshot->'nodes'='null'::jsonb FROM automation_executions WHERE id=$1 AND account_id=$2`, pending.ID, account).Scan(&nodesAreNull); err != nil || !nodesAreNull {
+		t.Fatalf("fixture must exercise nodes:null: %v", err)
+	}
+	if _, err := (&AccountRepository{db: pool}).UpdateLeadPolicy(ctx, account, uuid.New(), 1, false, true); err != nil {
+		t.Fatalf("nodes:null must not prevent disabling Leads: %v", err)
+	}
+	stored, err := repo.GetExecutionByID(ctx, pending.ID)
+	if err != nil || stored.Status != domain.AutoExecPending {
+		t.Fatalf("neutral pending work changed when disabling Leads: %+v %v", stored, err)
+	}
+	if after := readHistory(); after != before {
+		t.Fatal("disabling Leads changed completed automation history")
 	}
 }
