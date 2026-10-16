@@ -26,3 +26,12 @@ export const shouldResetClarinFontFace = ({
   familyFailed: boolean;
   status: FontFaceLoadStatus;
 }) => retryFailed && familyFailed && status === "error";
+
+export const clarinFontPreloadTerminalPhase = ({
+  failedCount,
+  online,
+}: {
+  failedCount: number;
+  online: boolean;
+}): "complete" | "offline" | "error" =>
+  failedCount === 0 ? "complete" : online ? "error" : "offline";

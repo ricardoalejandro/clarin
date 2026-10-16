@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { calendarDefaultList, calendarPopoverPosition, calendarSlot, shouldCloseCalendarComposerOnEscape, TASK_CALENDAR_MODE_LABELS } from './taskCalendarState'
+import { calendarDefaultList, calendarPopoverPosition, calendarRangeNotice, calendarSlot, shouldCloseCalendarComposerOnEscape, TASK_CALENDAR_MODE_LABELS } from './taskCalendarState'
 
 describe('task calendar composer', () => {
+  it('keeps offline source limitations visible for empty and fully loaded ranges', () => {
+    const notice = 'Los eventos requieren conexión.'
+    expect(calendarRangeNotice(notice, 0, false)).toBe(notice)
+    expect(calendarRangeNotice(notice, 2000, true)).toBe(`${notice} Cargando 2000 elementos del calendario…`)
+    expect(calendarRangeNotice(notice, 2000, false)).toBe(notice)
+    expect(calendarRangeNotice('', 2000, false)).toBe('')
+  })
   it('creates one-hour slots and all-day bounds', () => {
     const date = new Date('2026-07-30T12:00:00Z')
     expect(new Date(calendarSlot(date, 9).dueAt).getTime() - new Date(calendarSlot(date, 9).startAt).getTime()).toBe(3_600_000)

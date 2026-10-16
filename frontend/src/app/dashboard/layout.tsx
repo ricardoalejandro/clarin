@@ -14,6 +14,7 @@ import ClarinBrandMark from '@/components/branding/ClarinBrandMark'
 import { ClarinRuntimeProvider, useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider'
 import OfflineConnectionBannerV5 from '@/components/offline-v5/OfflineConnectionBannerV5'
 import OfflineRuntimeIndicator from '@/components/offline-v5/OfflineRuntimeIndicator'
+import OfflinePreparedDownloads from '@/components/offline-v5/OfflinePreparedDownloads'
 import { offlineV5DashboardPathAllowed, runtimeNeedsOfflineUnlock } from '@/components/offline-v5/runtimeState'
 import { CHAT_CONVERSATION_ACTIVE_EVENT, ChatMobileChromeProvider } from '@/components/chat/ChatMobileChromeContext'
 import {
@@ -908,6 +909,7 @@ function DashboardLayoutContent({
         {mobileAppMode && !isOffline && <MobileOfflineStatus />}
         {user && <OfflineConnectionBannerV5 key={`${user.id}:${user.account_id}`} userId={user.id} accountId={user.account_id} username={user.username} />}
         <OfflineRuntimeIndicator />
+        <OfflinePreparedDownloads />
 
         {/* Page content */}
         <main className={`flex-1 flex flex-col overflow-hidden min-h-0 ${

@@ -440,6 +440,10 @@ func (r *OfflineV5Repository) prepare(ctx context.Context, grantID, userID uuid.
 		if len(payload) > offlineV3MaxSnapshotBytes {
 			return nil, ErrOfflineSnapshotTooLarge
 		}
+		if selection.Module == domain.OfflineModuleTasks {
+			binaryBytes, err = offlineV5PreparedAttachmentBytes(payload)
+			if err != nil { return nil, err }
+		}
 		resourceBytes := int64(len(payload)) + binaryBytes
 		if resourceBytes < int64(len(payload)) || selectedBytes > record.QuotaBytes-resourceBytes {
 			return nil, ErrOfflineV4QuotaExceeded

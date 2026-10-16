@@ -5,6 +5,8 @@ const acknowledgeConflicts = vi.fn()
 const sync = vi.fn()
 const beginOnlineReauthentication = vi.fn().mockResolvedValue(true)
 const push = vi.fn()
+const conflicts = vi.fn().mockResolvedValue([])
+const resolveConflict = vi.fn().mockResolvedValue(undefined)
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push }) }))
 
@@ -16,6 +18,8 @@ vi.mock('./ClarinRuntimeProvider', () => ({
       pendingCount: 0, conflictCount: 1,
     },
     acknowledgeConflicts,
+    conflicts,
+    resolveConflict,
     beginOnlineReauthentication,
     sync,
     notice: '',
@@ -28,11 +32,13 @@ import OfflineRuntimeIndicator from './OfflineRuntimeIndicator'
 afterEach(() => { cleanup(); vi.clearAllMocks() })
 
 describe('OfflineRuntimeIndicator conflict policy', () => {
-  it('states that the server won and closes the notice without a parallel conflict screen', () => {
+  it('preserves local variants and opens explicit review instead of accepting every server version', async () => {
     render(<OfflineRuntimeIndicator />)
-    expect(screen.getByText(/se conservó la versión del servidor/i)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Aceptar versión del servidor' }))
-    expect(acknowledgeConflicts).toHaveBeenCalledOnce()
+    expect(screen.getByText(/tu versión local sigue guardada/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Revisar conflictos' }))
+    await vi.waitFor(() => expect(conflicts).toHaveBeenCalledOnce())
+    expect(acknowledgeConflicts).not.toHaveBeenCalled()
+    expect(resolveConflict).not.toHaveBeenCalled()
     expect(sync).not.toHaveBeenCalled()
   })
 

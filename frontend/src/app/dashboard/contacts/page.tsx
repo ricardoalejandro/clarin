@@ -34,6 +34,7 @@ import { subscribeWebSocket } from '@/lib/api'
 import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
 import { contactFilterCount, contactFilterParams, emptyContactListFilters, type ContactListFilters } from '@/components/contact-details/contactListFilters'
 import { fetchContactExportPages } from '@/components/contact-details/contactExportPages'
+import { contactReadTransportReady } from '@/components/contact-details/contactReadTransport'
 import { refreshContactWindow, refreshedContactAnchor, type ContactScrollAnchor } from '@/components/contact-details/contactListRefresh'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider'
@@ -320,7 +321,7 @@ function ContactOpportunitySummary({
 
 export default function ContactsPage() {
   const { leadsEnabled } = useLeadPolicy()
-  const { requireOnline } = useClarinRuntime()
+  const { requireOnline, snapshot } = useClarinRuntime()
   const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>()
   const crmWindowStorageScope = useCrmWindowStorageScope('contacts')
   const isCompactWorkspace = workspaceWidth > 0 && workspaceWidth < 1024
@@ -535,6 +536,7 @@ export default function ContactsPage() {
   const [cfFilters, setCfFilters] = useState<CustomFieldFilter[]>([])
 
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+  const contactReadsReady = contactReadTransportReady(token, snapshot)
   const filterQuery = useMemo(() => contactFilterParams(appliedFilters, debouncedSearch).toString(), [appliedFilters, debouncedSearch])
   const contactQuery = useMemo(() => {
     const params = new URLSearchParams(filterQuery)
@@ -658,7 +660,7 @@ export default function ContactsPage() {
   })
 
   const fetchContacts = useCallback(async (reset: boolean = true, silent = false) => {
-    if (!token || isAuthIdentityChanging(authScope) || searchPending) return
+    if (!contactReadsReady || isAuthIdentityChanging(authScope) || searchPending) return
     const requestScope = getAuthScope()
     const requestKey = queryKey
     if (requestScope !== authScope) return
@@ -680,7 +682,7 @@ export default function ContactsPage() {
       const fetchPage = async (pageOffset: number, limit: number) => {
         const params = new URLSearchParams(contactQuery)
         params.set('limit', String(limit)); params.set('offset', String(pageOffset)); params.set('has_phone', 'false')
-        const res = await fetch(`/api/contacts?${params}`, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
+        const res = await fetch(`/api/contacts?${params}`, { headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: controller.signal })
         const data = await res.json().catch(() => ({}))
         if (!current()) throw new DOMException('Aborted', 'AbortError')
         if (!res.ok || !data.success) throw new Error(data.error || 'No se pudieron cargar los contactos')
@@ -731,7 +733,7 @@ export default function ContactsPage() {
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, authScope, searchPending, contactQuery, queryKey])
+  }, [token, contactReadsReady, authScope, searchPending, contactQuery, queryKey])
   latestFetchContactsRef.current = fetchContacts
 
   useLayoutEffect(() => {
@@ -966,7 +968,7 @@ export default function ContactsPage() {
 
   // Auto-open contact detail from URL params (e.g. ?contact_id=UUID&scroll=tasks)
   useEffect(() => {
-    if (!token || isAuthIdentityChanging(authScope) || authScope !== getAuthScope()) return
+    if (!contactReadsReady || isAuthIdentityChanging(authScope) || authScope !== getAuthScope()) return
     const params = new URLSearchParams(window.location.search)
     const cId = params.get('contact_id')
     if (!cId) return
@@ -981,7 +983,7 @@ export default function ContactsPage() {
       void loadDetailOpportunities(cId)
       try {
         const res = await fetch(`/api/contacts/${cId}`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
           signal: controller.signal,
         })
         const data = await res.json()
@@ -1002,7 +1004,7 @@ export default function ContactsPage() {
     }
     void fetchAndOpenContact()
     return () => controller.abort()
-  }, [authScope, token, loadDetailOpportunities, resetInlineChatState])
+  }, [authScope, token, contactReadsReady, loadDetailOpportunities, resetInlineChatState])
 
   // Close modals on Escape (topmost first)
   useEffect(() => {

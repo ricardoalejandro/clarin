@@ -509,6 +509,10 @@ async function offlineNavigation(request, reason) {
     if (reason === 'infrastructure') await updateMeta('v5', meta => ({ ...meta, fallback_offer: true }));
     const response = await offlineV5Route(request, false);
     if (response) return response;
+    // A prepared canonical profile must never silently switch to the retired
+    // parallel UI. Keep its vault/queue intact and show the public recovery
+    // surface until a verified canonical generation is available again.
+    return (await matchBase(FALLBACK_SHELL)) || Response.error();
   }
   const v4 = await readMeta('v4');
   if (v4.enabled && (isAccountNavigation(new URL(request.url).pathname) || v4.mode === 'offline')) {

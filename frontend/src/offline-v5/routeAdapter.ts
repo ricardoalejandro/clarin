@@ -1,6 +1,12 @@
 import { OfflineV5Engine } from './engine'
+import { preparedTaskAttachments, readPreparedTaskAttachment } from './taskAttachmentReads'
 import { offlineV5WhiteboardAssetDescriptors } from './manifest'
+import { assertOfflineWhiteboardFilesPrepared, offlineWhiteboardMetadata, offlineWhiteboardSceneRecord } from './whiteboardContract'
+import { offlineCanonicalContact, offlineContactOptimisticValue, offlineObservationPage, offlineProgramContactContext } from './contactContract'
+import { offlineProgramAttendanceHistory, offlineProgramAttendanceStats, offlineProgramDashboard, offlineProgramDerivedState } from './programDerivedState'
 import { OfflineV5Error, type OfflineV5MutationInput, type OfflineV5RouteRequest, type OfflineV5RouteResponse, type OfflineV5Snapshot } from './types'
+import { filterOfflineTasks, offlineStructureKey, offlineTaskAgenda, offlineTaskCommentPage, offlineTaskDataset, offlineTaskGantt, offlineTaskPage, offlineTaskSummary } from './taskQueries'
+import { offlineTaskMutationInput } from './taskMutationInput'
 
 type JsonObject = Record<string, unknown>
 const limaDayFormatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Lima', year: 'numeric', month: '2-digit', day: '2-digit' })
@@ -171,7 +177,7 @@ export class OfflineV5RouteAdapter {
     const overlays = await this.engine.overlays(portID, generation, 'contact')
     const contacts: JsonObject[] = mergedOverlays<JsonObject>(snapshots.flatMap(snapshot => {
       const contact = item(snapshot.payload, 'contact')
-      return contact ? [{ ...contact, phones: list(snapshot.payload, 'phones'), tags: list(snapshot.payload, 'tags'), direct_observations: list(snapshot.payload, 'direct_observations'), custom_fields: list(snapshot.payload, 'custom_fields') }] : []
+      return contact ? [offlineCanonicalContact(contact, snapshot.payload)] : []
     }), overlays, 'contact')
     if (url.pathname === '/api/contacts' && method === 'GET') {
       const query = (url.searchParams.get('search') || url.searchParams.get('q') || '').trim().toLocaleLowerCase()
@@ -207,11 +213,11 @@ export class OfflineV5RouteAdapter {
     if (!contact || !snapshot) return routeError('not_prepared', 'Este contacto no está incluido en la copia offline.', 404)
     if (method === 'GET') return json(200, { success: true, contact })
     if (!['PUT', 'PATCH'].includes(method)) return routeError('online_required', 'Esta acción administrativa requiere conexión.')
-    const change = body(request), optimistic = { ...contact, ...change, id: contactID, account_id: contact.account_id ?? this.engine.sessions.require(portID, generation).identity.account_id, offline_pending: true }
+    const change = body(request), optimistic = { ...offlineContactOptimisticValue(contact, snapshot.payload, change), id: contactID, account_id: contact.account_id ?? this.engine.sessions.require(portID, generation).identity.account_id, offline_pending: true }
     const result = await this.engine.queueMutation(portID, generation, {
       operation_id: typeof change.operation_id === 'string' ? change.operation_id : undefined,
       action: 'contacts.update', selection_id: snapshot.root_selection_id, resource_id: contactID, entity_type: 'contact', entity_id: contactID,
-      base_version: Number(contact.version ?? snapshot.head_version) || 0, payload: change, optimistic_value: optimistic,
+      base_version: versionFor(this.engine.sessions.require(portID, generation).manifest, contactID, Number(contact.version) || micros(contact.updated_at)), base: contact, payload: change, optimistic_value: optimistic,
     })
     return json(200, { success: true, contact: result.entity.value, operation_id: result.operation_id, offline_pending: true })
   }
@@ -222,37 +228,29 @@ export class OfflineV5RouteAdapter {
     if (!match) return routeError('online_required', 'Esta operación del contacto requiere conexión.')
     const contactID = decodeURIComponent(match[1]), suffix = match[2] || ''
     const snapshots = await this.engine.aggregates(portID, generation, 'contacts')
-    const snapshot = snapshots.find(value => value.root_resource_id === contactID)
-    if (!snapshot) return routeError('not_prepared', 'Este contacto no está incluido en la copia offline.', 404)
+    const directSnapshot = snapshots.find(value => value.root_resource_id === contactID)
+    const requestedContext = { type: url.searchParams.get('context_type') || 'contact', id: url.searchParams.get('context_id') || contactID }
+    const programContext = requestedContext.type === 'program_participant'
+      ? offlineProgramContactContext(await this.engine.aggregates(portID, generation, 'programs'), contactID, requestedContext.id, await this.engine.overlays(portID, generation, 'program_participant')) : undefined
+    if (!(requestedContext.type === 'contact' && requestedContext.id === contactID && directSnapshot) && !programContext) return routeError('not_prepared', 'Este contexto del contacto no fue incluido en la copia offline.', 404)
+    const snapshot = directSnapshot || (programContext?.profile ? { ...programContext.snapshot, payload: programContext.profile } : undefined)
+    if (!snapshot) return routeError('not_prepared', 'La identidad de este participante no fue preparada. Actualiza la copia con conexión.', 404)
     const source = item(snapshot.payload, 'contact')
     if (!source) return routeError('invalid_snapshot', 'La copia local del contacto está incompleta.', 500)
     const contactOverlays = await this.engine.overlays(portID, generation, 'contact')
     const contactOverlay = contactOverlays.find(value => value.entity_id === contactID && value.root_selection_id === snapshot.root_selection_id)
     const baseContact = (contactOverlay?.value && typeof contactOverlay.value === 'object' ? contactOverlay.value : source) as JsonObject
-    const tags = list(snapshot.payload, 'tags')
-    const phones = list(snapshot.payload, 'phones')
-    const customFields = list(snapshot.payload, 'custom_fields')
-    const contact: JsonObject = {
-      ...baseContact,
-      id: contactID,
-      structured_tags: Array.isArray(baseContact.structured_tags) ? baseContact.structured_tags : tags,
-      extra_phones: Array.isArray(baseContact.extra_phones) ? baseContact.extra_phones : phones,
-      custom_field_values: Array.isArray(baseContact.custom_field_values) ? baseContact.custom_field_values : customFields,
-    }
+    const contact = offlineCanonicalContact({ ...baseContact, id: contactID }, snapshot.payload)
     const session = this.engine.sessions.require(portID, generation)
-    const canEdit = session.manifest.capabilities.some(value => value.action === 'contacts.update' && value.selection_id === snapshot.root_selection_id)
-    const canObserve = session.manifest.capabilities.some(value => value.action === 'contacts.observations.create' && value.selection_id === snapshot.root_selection_id)
-    const requestedContext = { type: url.searchParams.get('context_type') || 'contact', id: url.searchParams.get('context_id') || contactID }
-    // A selected Contact root proves only the canonical Contact context. Other
-    // CRM contexts must have their own prepared root/dependency before use.
-    if (requestedContext.type !== 'contact' || requestedContext.id !== contactID) return routeError('not_prepared', 'Este contexto del contacto no fue incluido en la copia offline.', 404)
-    const observations = await this.contactObservations(portID, generation, snapshot)
+    const canEdit = !!directSnapshot && session.manifest.capabilities.some(value => value.action === 'contacts.update' && value.selection_id === directSnapshot.root_selection_id)
+    const canObserve = !!directSnapshot && session.manifest.capabilities.some(value => value.action === 'contacts.observations.create' && value.selection_id === directSnapshot.root_selection_id)
+    const observations = directSnapshot ? await this.contactObservations(portID, generation, directSnapshot) : []
     const profile = (nextContact: JsonObject = contact) => ({
       success: true,
       contact: nextContact,
       context: requestedContext,
       capabilities: { can_view: true, can_edit: canEdit, can_manage_avatar: false, can_manage_observations: canObserve, can_create_tags: false },
-      available_tags: list(snapshot.payload, 'available_tags'),
+      available_tags: list(snapshot.payload, 'tags'),
       custom_field_definitions: list(snapshot.payload, 'custom_field_definitions'),
       observation_count: Math.max(Number(snapshot.payload.observation_count) || 0, observations.length),
       pinned_observation_count: observations.filter(value => value.type === 'note' && value.is_pinned).length,
@@ -263,17 +261,21 @@ export class OfflineV5RouteAdapter {
       if (method !== 'PATCH') return routeError('online_required', 'Esta acción del contacto requiere conexión.')
       if (!canEdit) return routeError('offline_action_denied', 'No tienes permiso para editar este contacto offline.', 403)
       const change = body(request)
-      const optimistic = { ...contact, ...change, id: contactID, account_id: contact.account_id ?? session.identity.account_id, offline_pending: true }
+      const optimistic = { ...offlineContactOptimisticValue(contact, snapshot.payload, change), id: contactID, account_id: contact.account_id ?? session.identity.account_id, offline_pending: true }
       const result = await this.engine.queueMutation(portID, generation, {
         operation_id: typeof change.operation_id === 'string' ? change.operation_id : undefined,
         action: 'contacts.update', selection_id: snapshot.root_selection_id, resource_id: contactID, entity_type: 'contact', entity_id: contactID,
-        base_version: Number(contact.version ?? snapshot.head_version) || 0, payload: change, optimistic_value: optimistic,
+        base_version: versionFor(session.manifest, contactID, Number(contact.version) || micros(contact.updated_at)), base: contact, payload: change, optimistic_value: optimistic,
       })
       return json(200, { ...profile(result.entity.value as JsonObject), operation_id: result.operation_id, offline_pending: true })
     }
 
     if (suffix === 'observations') {
-      if (method === 'GET') return json(200, { success: true, observations, total: observations.length })
+      if (method === 'GET') {
+        if (!directSnapshot) return routeError('not_prepared', 'El historial general no fue preparado. Selecciona también este contacto con conexión.', 404)
+        const page = offlineObservationPage(observations, url)
+        return page ? json(200, page) : routeError('invalid_cursor', 'La página de observaciones no es válida.', 400)
+      }
       if (method !== 'POST') return routeError('online_required', 'Editar o eliminar observaciones existentes requiere conexión.')
       if (!canObserve) return routeError('offline_action_denied', 'No tienes permiso para añadir observaciones offline.', 403)
       const change = body(request), notes = typeof change.notes === 'string' ? change.notes.trim() : ''
@@ -291,7 +293,7 @@ export class OfflineV5RouteAdapter {
 
     if (suffix === 'tags' && method === 'GET') {
       const query = (url.searchParams.get('q') || '').trim().toLocaleLowerCase('es')
-      const tags = list(snapshot.payload, 'available_tags').filter(value => !query || String(value.name || '').toLocaleLowerCase('es').includes(query))
+      const tags = list(snapshot.payload, 'tags').filter(value => !query || String(value.name || '').toLocaleLowerCase('es').includes(query))
       const limit = numberParam(url, 'limit', 20)
       return json(200, { success: true, tags: tags.slice(0, limit), total: tags.length })
     }
@@ -309,16 +311,12 @@ export class OfflineV5RouteAdapter {
   private async programs(portID: string, generation: number, url: URL, method: string, request: OfflineV5RouteRequest) {
     const snapshots = await this.engine.aggregates(portID, generation, 'programs')
     const allOverlays = await this.engine.overlays(portID, generation)
-    const overlays = allOverlays.filter(value => value.entity_type === 'program')
     const session = this.engine.sessions.require(portID, generation)
-    const programs: JsonObject[] = mergedOverlays<JsonObject>(snapshots.flatMap(snapshot => {
-      const program = item(snapshot.payload, 'program')
-      const active = list(snapshot.payload, 'active_roster'), history = list(snapshot.payload, 'historical_participations')
-      return program ? [{ ...program, participants: [...active, ...history], active_roster: active, historical_participations: history, sessions: list(snapshot.payload, 'sessions'), eligible_attendance: list(snapshot.payload, 'eligible_attendance'), out_of_window_history: list(snapshot.payload, 'out_of_window_history') }] : []
-    }), overlays, 'program')
+    const states = snapshots.map(snapshot => offlineProgramDerivedState(snapshot, allOverlays, limaDateKey(new Date())))
+    const programs: JsonObject[] = states.map(state => ({ ...state.program, participant_count: state.health.active_count, session_count: state.sessions.length }))
     if (url.pathname === '/api/programs' && method === 'GET') return json(200, programs)
     if (url.pathname === '/api/programs/folders' && method === 'GET') return json(200, { success: true, folders: [] })
-    if (url.pathname === '/api/programs/dashboard' && method === 'GET') return json(200, { success: true, dashboard: programDashboard(snapshots) })
+    if (url.pathname === '/api/programs/dashboard' && method === 'GET') return json(200, { success: true, dashboard: offlineProgramDashboard(states, url) })
     if (url.pathname === '/api/programs/goals' || url.pathname.startsWith('/api/programs/courses')) return routeError('online_required', 'El catálogo y la configuración global de Programas requieren conexión.')
     const match = url.pathname.match(/^\/api\/programs\/([^/]+)(?:\/(.*))?$/)
     if (!match) return routeError('online_required', 'Esta operación de Programas requiere conexión.')
@@ -326,36 +324,17 @@ export class OfflineV5RouteAdapter {
     const snapshot = snapshots.find(value => value.root_resource_id === programID)
     if (!program || !snapshot) return routeError('not_prepared', 'Este programa no está incluido en la copia offline.', 404)
 
-    const participants = mergedOverlays<JsonObject>([
-      ...list(snapshot.payload, 'active_roster'),
-      ...list(snapshot.payload, 'historical_participations'),
-    ], allOverlays, 'program_participant').filter(value => value.program_id === programID)
-    const sessionTopics = list(snapshot.payload, 'session_topics')
-    const sessions = mergedOverlays<JsonObject>(list(snapshot.payload, 'sessions').map(value => ({
-      ...value,
-      topics: Array.isArray(value.topics) ? value.topics : sessionTopics.filter(topic => topic.session_id === value.id),
-    })), allOverlays, 'program_session').filter(value => value.program_id === programID)
-    const attendances = mergeRowsBy(
-      list(snapshot.payload, 'eligible_attendance'),
-      allOverlays,
-      'program_attendance',
-      value => `${String(value.session_id || '')}\0${String(value.participant_id || '')}`,
-    ).filter(value => value.program_id === undefined || value.program_id === programID)
-    const goalsOverlay = allOverlays.find(value => value.entity_type === 'program_goal' && value.root_selection_id === snapshot.root_selection_id)
-    const goals = goalsOverlay?.value && typeof goalsOverlay.value === 'object' ? goalsOverlay.value as JsonObject : item(snapshot.payload, 'goals')
-    const programObservations = allOverlays.filter(value => value.entity_type === 'program_observation' && value.root_selection_id === snapshot.root_selection_id)
-    const sessionObservations = mergedOverlays<JsonObject>(list(snapshot.payload, 'session_observations'), programObservations, 'program_observation')
-    const attendanceObservations = mergedOverlays<JsonObject>(list(snapshot.payload, 'attendance_observations'), programObservations, 'program_observation')
-    const participantNotes = mergedOverlays<JsonObject>(list(snapshot.payload, 'participant_notes'), programObservations, 'program_observation')
+    const state = states.find(value => value.snapshot.root_selection_id === snapshot.root_selection_id)!
+    const { participants, sessions, attendances, goals, sessionObservations, attendanceObservations, participantNotes } = state
 
     if (method === 'GET') {
       if (!suffix) return json(200, program)
       if (suffix === 'participants') return json(200, participants)
       if (suffix === 'sessions') return json(200, sessions)
       if (suffix === 'academic-config') return json(200, snapshot.payload.academic_config || {})
-      if (suffix === 'health') return snapshot.payload.health ? json(200, { success: true, health: snapshot.payload.health }) : routeError('not_prepared', 'La salud del programa no se incluyó en la copia.', 404)
+      if (suffix === 'health') return json(200, { success: true, health: state.health })
       if (suffix === 'goals') return goals ? json(200, { success: true, goals }) : routeError('not_prepared', 'Las metas del programa no se incluyeron en la copia.', 404)
-      if (suffix === 'attendance-stats') return json(200, programAttendanceStats(sessions, participants, attendances))
+      if (suffix === 'attendance-stats') return json(200, offlineProgramAttendanceStats(state, url))
       const rosterMatch = suffix.match(/^sessions\/([^/]+)\/roster$/)
       if (rosterMatch) {
         const sessionID = decodeURIComponent(rosterMatch[1]), selectedSession = sessions.find(value => value.id === sessionID)
@@ -388,7 +367,7 @@ export class OfflineV5RouteAdapter {
       if (attendanceHistoryMatch) {
         const participantID = decodeURIComponent(attendanceHistoryMatch[1]), participant = participants.find(value => value.id === participantID)
         if (!participant) return routeError('not_prepared', 'El participante no pertenece a este programa.', 404)
-        return json(200, programAttendanceHistory(participant, sessions, attendances, attendanceObservations, goals))
+        return json(200, offlineProgramAttendanceHistory(state, participant, url))
       }
       const participantNotesMatch = suffix.match(/^participants\/([^/]+)\/observations$/)
       if (participantNotesMatch) return json(200, { success: true, observations: participantNotes.filter(value => value.participant_id === decodeURIComponent(participantNotesMatch[1])) })
@@ -424,7 +403,7 @@ export class OfflineV5RouteAdapter {
       const enrolledAt = typeof change.enrolled_at === 'string' ? change.enrolled_at : ''
       if (!participant || !calendarDate(enrolledAt)) return routeError('invalid_request_body', 'La fecha de incorporación no es válida.', 400)
       const optimistic = { ...participant, enrolled_at: enrolledAt, account_id: session.identity.account_id, program_id: programID, offline_pending: true }
-      const result = await this.engine.queueMutation(portID, generation, { action: 'programs.participants.lifecycle.update', selection_id: snapshot.root_selection_id, resource_id: participantID, entity_type: 'program_participant', entity_id: participantID, base_version: versionFor(session.manifest, participantID, Number(participant.version) || micros(participant.dropped_at || participant.completed_at || participant.enrolled_at)), payload: { program_id: programID, mode: 'enrollment_date', enrolled_at: enrolledAt }, optimistic_value: optimistic })
+      const result = await this.engine.queueMutation(portID, generation, { action: 'programs.participants.lifecycle.update', selection_id: snapshot.root_selection_id, resource_id: participantID, entity_type: 'program_participant', entity_id: participantID, base_version: versionFor(session.manifest, participantID, Number(participant.version) || micros(participant.dropped_at || participant.completed_at || participant.enrolled_at)), base: participant, payload: { program_id: programID, mode: 'enrollment_date', enrolled_at: enrolledAt }, optimistic_value: optimistic })
       return json(200, { success: true, enrolled_at: enrolledAt, participant: result.entity.value, operation_id: result.operation_id, offline_pending: true })
     }
 
@@ -437,7 +416,7 @@ export class OfflineV5RouteAdapter {
       const payload: JsonObject = { program_id: programID, mode: 'outcome', status, ended_on: endedOn }
       for (const name of ['drop_reason', 'drop_notes', 'transferred_to_level']) if (typeof change[name] === 'string') payload[name] = change[name]
       const optimistic = { ...participant, status, ...(status === 'completed' ? { completed_at: endedOn, dropped_at: null } : { dropped_at: endedOn, completed_at: null }), ...pick(change, ['drop_reason', 'drop_notes', 'transferred_to_level']), account_id: session.identity.account_id, program_id: programID, offline_pending: true }
-      const result = await this.engine.queueMutation(portID, generation, { action: 'programs.participants.lifecycle.update', selection_id: snapshot.root_selection_id, resource_id: participantID, entity_type: 'program_participant', entity_id: participantID, base_version: versionFor(session.manifest, participantID, Number(participant.version) || micros(participant.enrolled_at)), payload, optimistic_value: optimistic })
+      const result = await this.engine.queueMutation(portID, generation, { action: 'programs.participants.lifecycle.update', selection_id: snapshot.root_selection_id, resource_id: participantID, entity_type: 'program_participant', entity_id: participantID, base_version: versionFor(session.manifest, participantID, Number(participant.version) || micros(participant.enrolled_at)), base: participant, payload, optimistic_value: optimistic })
       return json(200, { success: true, participant: result.entity.value, operation_id: result.operation_id, offline_pending: true })
     }
     if (/^participants\/[^/]+\/outcome-date$/.test(suffix)) return routeError('online_required', 'Modificar una fecha de cierre ya sincronizada requiere conexión.')
@@ -450,7 +429,7 @@ export class OfflineV5RouteAdapter {
       const sessionPayload = normalizeProgramSessionPayload(change, programID)
       if (!sessionPayload) return routeError('invalid_request_body', 'Los datos de la sesión no son válidos.', 400)
       const optimistic = { ...existingSession, ...sessionPayload, id: sessionID, account_id: session.identity.account_id, program_id: programID, created_at: existingSession?.created_at || new Date().toISOString(), updated_at: new Date().toISOString(), offline_pending: true }
-      const result = await this.engine.queueMutation(portID, generation, { action: 'programs.sessions.upsert', selection_id: snapshot.root_selection_id, resource_id: sessionID, entity_type: 'program_session', entity_id: sessionID, base_version: existingSession ? versionFor(session.manifest, sessionID, Number(existingSession.version) || micros(existingSession.updated_at)) : 0, payload: sessionPayload, optimistic_value: optimistic })
+      const result = await this.engine.queueMutation(portID, generation, { action: 'programs.sessions.upsert', selection_id: snapshot.root_selection_id, resource_id: sessionID, entity_type: 'program_session', entity_id: sessionID, base_version: existingSession ? versionFor(session.manifest, sessionID, Number(existingSession.version) || micros(existingSession.updated_at)) : 0, base: existingSession, payload: sessionPayload, optimistic_value: optimistic })
       return json(existingSession ? 200 : 201, { success: true, session: result.entity.value, operation_id: result.operation_id, offline_pending: true })
     }
 
@@ -465,7 +444,8 @@ export class OfflineV5RouteAdapter {
         const participantID = String(record.participant_id || ''), current = attendances.find(value => value.session_id === sessionID && value.participant_id === participantID)
         if (seenParticipants.has(participantID)) return routeError('invalid_request_body', 'Cada participante debe aparecer una sola vez en el lote.', 400)
         seenParticipants.add(participantID)
-        if (!participants.some(value => value.id === participantID) || !attendanceStatus(record.status) || !attendanceStatus(record.expected_status) || String(current?.status || '') !== String(record.expected_status || '')) conflicts.push({ participant_id: participantID, current_status: String(current?.status || '') })
+        if (!eligibleProgramParticipants(participants, selectedSession).some(value => value.id === participantID)) return routeError('attendance_ineligible', 'La sesión está fuera del periodo de participación.', 409)
+        if (!attendanceStatus(record.status) || !attendanceStatus(record.expected_status) || String(current?.status || '') !== String(record.expected_status || '')) conflicts.push({ participant_id: participantID, current_status: String(current?.status || '') })
       }
       if (conflicts.length) return json(409, { success: false, code: 'attendance_conflict', error: 'La asistencia cambió desde que abriste la sesión.', conflicts })
       const mutations: OfflineV5MutationInput[] = []
@@ -473,7 +453,7 @@ export class OfflineV5RouteAdapter {
         const participantID = String(record.participant_id), current = attendances.find(value => value.session_id === sessionID && value.participant_id === participantID)
         const entityID = `attendance:${sessionID}:${participantID}`
         const optimistic: JsonObject = { ...current, id: entityID, account_id: session.identity.account_id, program_id: programID, session_id: sessionID, participant_id: participantID, status: record.status, updated_at: new Date().toISOString(), offline_pending: true }
-        mutations.push({ action: 'programs.attendance.set', selection_id: snapshot.root_selection_id, resource_id: participantID, entity_type: 'program_attendance', entity_id: entityID, base_version: current ? versionFor(session.manifest, `${sessionID}:${participantID}`, Number(current.version) || micros(current.updated_at)) : 0, payload: { program_id: programID, session_id: sessionID, status: record.status }, optimistic_value: optimistic })
+        mutations.push({ action: 'programs.attendance.set', selection_id: snapshot.root_selection_id, resource_id: participantID, entity_type: 'program_attendance', entity_id: entityID, base_version: current ? versionFor(session.manifest, `${sessionID}:${participantID}`, Number(current.version) || micros(current.updated_at)) : 0, base: current ?? { status: '' }, payload: { program_id: programID, session_id: sessionID, status: record.status }, optimistic_value: optimistic })
       }
       await this.engine.queueMutations(portID, generation, mutations)
       return json(200, { success: true, count: records.length, offline_pending: true })
@@ -506,7 +486,7 @@ export class OfflineV5RouteAdapter {
       const payload = pick(change, ['attendance_goal_percent', 'transfer_goal_percent'])
       if (Object.keys(payload).length !== 2) return routeError('invalid_request_body', 'Las dos metas porcentuales son obligatorias.', 400)
       const optimistic = { ...current, ...payload, id: current.id || programID, program_id: programID, account_id: current.account_id ?? session.identity.account_id, offline_pending: true }
-      const result = await this.engine.queueMutation(portID, generation, { operation_id: typeof change.operation_id === 'string' ? change.operation_id : undefined, action: 'programs.goals.update', selection_id: snapshot.root_selection_id, resource_id: programID, entity_type: 'program_goal', entity_id: String(optimistic.id), base_version: versionFor(session.manifest, String(current.id || ''), 0), payload, optimistic_value: optimistic })
+      const result = await this.engine.queueMutation(portID, generation, { operation_id: typeof change.operation_id === 'string' ? change.operation_id : undefined, action: 'programs.goals.update', selection_id: snapshot.root_selection_id, resource_id: programID, entity_type: 'program_goal', entity_id: String(optimistic.id), base_version: versionFor(session.manifest, String(current.id || ''), 0), base: current, payload, optimistic_value: optimistic })
       return json(200, { success: true, goals: result.entity.value, operation_id: result.operation_id, offline_pending: true })
     }
     if (suffix || !['PUT', 'PATCH'].includes(method)) return routeError('online_required', 'Esta acción del programa requiere conexión.')
@@ -516,7 +496,7 @@ export class OfflineV5RouteAdapter {
     const result = await this.engine.queueMutation(portID, generation, {
       operation_id: typeof change.operation_id === 'string' ? change.operation_id : undefined,
       action: 'programs.update', selection_id: snapshot.root_selection_id, resource_id: programID, entity_type: 'program', entity_id: programID,
-      base_version: versionFor(session.manifest, programID, Number(program.version ?? snapshot.head_version) || 0), payload, optimistic_value: optimistic,
+      base_version: versionFor(session.manifest, programID, Number(program.version) || micros(program.updated_at)), base: program, payload, optimistic_value: optimistic,
     })
     return json(200, result.entity.value)
   }
@@ -537,7 +517,10 @@ export class OfflineV5RouteAdapter {
       const board = item(snapshot.payload, 'whiteboard')
       return board ? [{ ...board, scene: snapshot.payload.scene ?? board.scene, referenced_assets: list(snapshot.payload, 'referenced_assets') }] : []
     }), overlays, 'whiteboard')
-    if (url.pathname === '/api/whiteboards' && method === 'GET') return json(200, { success: true, whiteboards: boards, permissions: { can_create: false, can_create_folder: false }, counts: { active: boards.length }, work_whiteboard_views_enabled: false })
+    const session = this.engine.sessions.require(portID, generation)
+    const metadata = (snapshot: OfflineV5Snapshot, board: JsonObject) => offlineWhiteboardMetadata(snapshot, board,
+      session.manifest.capabilities.some(capability => capability.action === 'whiteboards.scene.update' && capability.selection_id === snapshot.root_selection_id))
+    if (url.pathname === '/api/whiteboards' && method === 'GET') return json(200, { success: true, whiteboards: boards.map(board => metadata(snapshots.find(snapshot => snapshot.root_resource_id === board.id)!, board)), permissions: { can_create: false, can_create_folder: false }, counts: { active: boards.length }, work_whiteboard_views_enabled: false })
     const match = url.pathname.match(/^\/api\/whiteboards\/([^/]+)(?:\/(.*))?$/)
     if (!match) return routeError('online_required', 'Esta operación de Pizarras requiere conexión.')
     const boardID = decodeURIComponent(match[1]), suffix = match[2] || '', board = boards.find(value => value.id === boardID)
@@ -545,8 +528,8 @@ export class OfflineV5RouteAdapter {
     if (!board || !snapshot) return routeError('not_prepared', 'Esta pizarra no está incluida en la copia offline.', 404)
     const assets = offlineV5WhiteboardAssetDescriptors(snapshot)
     if (method === 'GET') {
-      if (!suffix) return json(200, { success: true, whiteboard: board })
-      if (suffix === 'scene') return json(200, { success: true, scene: board.scene || snapshot.payload.scene })
+      if (!suffix) return json(200, { success: true, whiteboard: metadata(snapshot, board) })
+      if (suffix === 'scene') return json(200, { success: true, scene: offlineWhiteboardSceneRecord(snapshot, board) })
       if (suffix === 'assets') return json(200, {
         success: true,
         assets: assets.map(asset => ({
@@ -573,38 +556,48 @@ export class OfflineV5RouteAdapter {
       return routeError('online_required', 'Esta función de la pizarra requiere conexión.')
     }
     if (suffix !== 'scene' || !['PUT', 'PATCH'].includes(method)) return routeError('online_required', 'Compartir y administrar pizarras requiere conexión.')
-    const change = body(request), scene = (change.scene || change) as JsonObject
-    const optimistic = { ...board, scene, id: boardID, account_id: board.account_id ?? this.engine.sessions.require(portID, generation).identity.account_id, offline_pending: true }
+    if (!metadata(snapshot, board).effective_access.can_edit) return routeError('offline_action_denied', 'No tienes permiso para editar esta pizarra offline.', 403)
+    const current = offlineWhiteboardSceneRecord(snapshot, board)
+    const change = body(request), scene = change.scene as JsonObject
+    assertOfflineWhiteboardFilesPrepared(scene, new Set(assets.map(asset => asset.file_id)))
+    if (!Number.isSafeInteger(change.expected_sequence) || change.expected_sequence !== current.sequence || typeof change.operation_id !== 'string' || !change.operation_id) return routeError('invalid_request_body', 'La escena no corresponde a la versión preparada.', 409)
+    const optimistic = { ...board, scene, id: boardID, account_id: session.identity.account_id, sequence: current.sequence, updated_at: new Date().toISOString(), offline_pending: true }
     const result = await this.engine.queueMutation(portID, generation, {
       operation_id: typeof change.operation_id === 'string' ? change.operation_id : undefined,
       action: 'whiteboards.scene.update', selection_id: snapshot.root_selection_id, resource_id: boardID, entity_type: 'whiteboard', entity_id: boardID,
-      base_version: Number(change.expected_sequence ?? board.sequence ?? snapshot.head_version) || 0, payload: change, optimistic_value: optimistic,
+      base_version: current.sequence, base: { scene: current.scene }, payload: change, optimistic_value: optimistic,
     })
-    return json(200, { success: true, rebased: false, result: { scene: result.entity.value.scene, idempotent: result.state === 'duplicate' }, operation_id: result.operation_id, offline_pending: true })
+    return json(200, { success: true, rebased: false, result: { scene: offlineWhiteboardSceneRecord(snapshot, result.entity.value), idempotent: result.state === 'duplicate' }, operation_id: result.operation_id, offline_pending: true })
   }
 
-  private async tasks(portID: string, generation: number, url: URL, method: string, request: OfflineV5RouteRequest) {
+  private async tasks(portID: string, generation: number, url: URL, method: string, request: OfflineV5RouteRequest): Promise<OfflineV5RouteResponse> {
     const snapshots = await this.engine.aggregates(portID, generation, 'tasks')
-    const overlays = await this.engine.overlays(portID, generation, 'task')
-    const lists: JsonObject[] = snapshots.flatMap(snapshot => {
-      const value = item(snapshot.payload, 'list')
-      return value ? [{ ...value, statuses: list(snapshot.payload, 'statuses'), selection_id: snapshot.root_selection_id }] : []
-    })
-    const tasks: JsonObject[] = mergedOverlays<JsonObject>(snapshots.flatMap(snapshot => list(snapshot.payload, 'tasks')), overlays, 'task')
+    const overlays = await this.engine.overlays(portID, generation)
+    const { lists, tasks, folders, environments, dependencies } = offlineTaskDataset(snapshots, overlays)
+    const page = (items: JsonObject[], structure = false) => offlineTaskPage(items, url, structure ? offlineStructureKey : undefined)
+    const structureSearch = (items: JsonObject[]) => {
+      const query = (url.searchParams.get('search') || '').trim().toLocaleLowerCase('es')
+      return query ? items.filter(value => `${value.name || ''}\n${value.description || ''}`.toLocaleLowerCase('es').includes(query)) : items
+    }
     if (url.pathname === '/api/tasks/environments' && method === 'GET') {
-      const environments = new Map<string, JsonObject>()
-      for (const value of lists) if (value.environment_id) environments.set(String(value.environment_id), { id: value.environment_id, name: value.environment_name || 'Entorno preparado', capabilities: { can_view: true, can_edit: true, can_manage: false }, effective_access_level: 'edit' })
-      return json(200, { environments: [...environments.values()], can_create: false })
+      const result = page(structureSearch(environments), true)
+      return json(200, { environments: result.items, next_cursor: result.next_cursor, can_create: false })
     }
     const environmentMatch = url.pathname.match(/^\/api\/tasks\/environments\/([^/]+)(?:\/(.*))?$/)
     if (environmentMatch && method === 'GET') {
       const environmentID = decodeURIComponent(environmentMatch[1]), suffix = environmentMatch[2] || ''
       const environmentLists = lists.filter(value => value.environment_id === environmentID)
       if (!environmentLists.length) return routeError('not_prepared', 'Este Entorno no forma parte de la copia offline.', 404)
-      if (!suffix) return json(200, { environment: { id: environmentID, name: environmentLists[0].environment_name || 'Entorno preparado' } })
-      if (suffix === 'folders') return json(200, { folders: [], next_cursor: null })
-      if (suffix === 'lists') return json(200, { lists: environmentLists, next_cursor: null })
-      if (suffix === 'hierarchy') return json(200, { folders: [], root_lists: environmentLists })
+      if (url.searchParams.get('lifecycle') === 'archive') return routeError('online_required', 'El archivo histórico no está incluido en las listas preparadas.')
+      if (!suffix) return json(200, { environment: environments.find(value => value.id === environmentID) })
+      const environmentFolders = folders.filter(value => value.environment_id === environmentID)
+      if (suffix === 'folders') { const result = page(structureSearch(environmentFolders), true); return json(200, { folders: result.items, next_cursor: result.next_cursor }) }
+      if (suffix === 'lists') {
+        const folderID = url.searchParams.get('folder_id')
+        const result = page(structureSearch(environmentLists.filter(value => url.searchParams.get('all') === 'true' || (folderID ? value.folder_id === folderID : !value.folder_id))), true)
+        return json(200, { lists: result.items, next_cursor: result.next_cursor })
+      }
+      if (suffix === 'hierarchy') return json(200, { folders: environmentFolders, root_lists: environmentLists.filter(value => !value.folder_id) })
       return routeError('online_required', 'Esta estructura no está preparada offline.')
     }
     if (url.pathname === '/api/tasks/workflows' && method === 'GET') {
@@ -614,19 +607,31 @@ export class OfflineV5RouteAdapter {
       return json(200, { workflows: [...workflows.values()] })
     }
     if (url.pathname === '/api/tasks' && method === 'GET') {
-      const listID = url.searchParams.get('list_id'), environmentID = url.searchParams.get('environment_id'), query = (url.searchParams.get('search') || '').toLocaleLowerCase()
-      let filtered = tasks.filter(task => !listID || task.list_id === listID)
-      if (environmentID) { const ids = new Set(lists.filter(value => value.environment_id === environmentID).map(value => value.id)); filtered = filtered.filter(task => ids.has(task.list_id)) }
-      if (query) filtered = filtered.filter(task => String(task.title || '').toLocaleLowerCase().includes(query) || String(task.description || '').toLocaleLowerCase().includes(query))
-      const cursor = numberParam(url, 'cursor', 0, Number.MAX_SAFE_INTEGER), limit = numberParam(url, 'limit', 50)
-      return json(200, { tasks: filtered.slice(cursor, cursor + limit), next_cursor: cursor + limit < filtered.length ? String(cursor + limit) : null, total: filtered.length })
+      const result = page(filterOfflineTasks(tasks, url.searchParams))
+      return json(200, { tasks: result.items, next_cursor: result.next_cursor, total: result.total })
+    }
+    if (url.pathname === '/api/tasks/summary' && method === 'GET') {
+      return json(200, { summary: offlineTaskSummary(filterOfflineTasks(tasks, url.searchParams)) })
+    }
+    if (url.pathname === '/api/tasks/agenda' && method === 'GET') return json(200, offlineTaskAgenda(tasks, url))
+    if (url.pathname === '/api/tasks/gantt' && method === 'GET') {
+      const params = new URLSearchParams(url.search); params.set('include_subtasks', 'true')
+      const filtered = filterOfflineTasks(tasks, params)
+      if (filtered.length > 5000) return routeError('gantt_scope_too_large', 'Filtra por carpeta, lista, estado o fechas para mostrar el Gantt.', 422)
+      return json(200, offlineTaskGantt(filtered, dependencies))
     }
     if (url.pathname === '/api/tasks' && method === 'POST') {
       const change = body(request), listID = String(change.list_id || ''), snapshot = snapshots.find(value => value.root_resource_id === listID)
       if (!snapshot) return routeError('not_prepared', 'La lista elegida no está preparada para uso offline.', 403)
       const taskID = typeof change.id === 'string' && change.id ? change.id : crypto.randomUUID()
-      const optimistic = { ...change, id: taskID, account_id: this.engine.sessions.require(portID, generation).identity.account_id, list_id: listID, version: 0, offline_pending: true, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
-      const createPayload = pick(change, ['title', 'description', 'parent_task_id', 'start_at', 'due_at', 'due_end_at', 'is_all_day', 'priority'])
+      const normalized = offlineTaskMutationInput(change)
+      if (normalized.unsupported.length) return routeError('online_required', 'La creación contiene campos que requieren conexión. No se ha guardado ningún cambio.')
+      const createPayload = normalized.payload, session = this.engine.sessions.require(portID, generation)
+      const targetList = lists.find(value => value.id === listID)!, statuses = list(snapshot.payload, 'statuses')
+      const status = createPayload.status_id ? statuses.find(value => value.id === createPayload.status_id) : statuses.find(value => value.category === 'not_started' && value.is_default) || statuses.find(value => value.category === 'not_started')
+      if (!status) return routeError('invalid_status', 'El estado no pertenece al flujo preparado de esta lista.', 400)
+      const now = new Date().toISOString()
+      const optimistic = { title: '', description: '', priority: 'medium', type: 'reminder', assigned_to: session.identity.user_id, ...createPayload, id: taskID, account_id: session.identity.account_id, created_by: session.identity.user_id, list_id: listID, environment_id: targetList.environment_id, status_id: status.id, status_category: status.category, status_detail: status, status: status.category === 'done' ? 'completed' : status.category === 'cancelled' ? 'cancelled' : 'pending', progress: status.category === 'done' ? 100 : 0, progress_mode: 'manual', manual_progress: 0, collaborators: [], version: 0, sort_order: Math.max(0, ...tasks.filter(value => value.list_id === listID).map(value => Number(value.sort_order || 0))) + 1024, offline_pending: true, created_at: now, updated_at: now, capabilities: targetList.capabilities, permissions: targetList.permissions }
       const result = await this.engine.queueMutation(portID, generation, { operation_id: typeof change.operation_id === 'string' ? change.operation_id : undefined, action: 'tasks.create', selection_id: snapshot.root_selection_id, resource_id: taskID, entity_type: 'task', entity_id: taskID, base_version: 0, payload: createPayload, optimistic_value: optimistic })
       return json(201, { task: result.entity.value, operation_id: result.operation_id, offline_pending: true })
     }
@@ -637,18 +642,24 @@ export class OfflineV5RouteAdapter {
     const snapshot = snapshots.find(value => value.root_resource_id === task.list_id)
     if (!snapshot) return routeError('not_prepared', 'La lista de esta tarea no está preparada.', 404)
     if (method === 'GET') {
+      const attachmentResponse = await readPreparedTaskAttachment(snapshot, taskID, suffix, id => this.engine.getBlob(portID, generation, id))
+      if (attachmentResponse) return attachmentResponse
       if (!suffix) return json(200, { task })
       if (suffix === 'children') return json(200, { tasks: tasks.filter(value => value.parent_task_id === taskID) })
       if (suffix === 'comments') {
         const commentOverlays = await this.engine.overlays(portID, generation, 'task_comment')
         const comments = mergedOverlays<JsonObject>(list(snapshot.payload, 'comments').filter(value => value.task_id === taskID), commentOverlays.filter(value => value.root_selection_id === snapshot.root_selection_id), 'task_comment').filter(value => value.task_id === taskID)
         const offset = numberParam(url, 'offset', 0, Number.MAX_SAFE_INTEGER), limit = numberParam(url, 'limit', 100)
-        return json(200, { comments: comments.slice(offset, offset + limit), has_more: offset + limit < comments.length, next_offset: Math.min(comments.length, offset + limit) })
+        return json(200, offlineTaskCommentPage(comments, offset, limit))
       }
       if (suffix === 'activity') return json(200, { activity: list(snapshot.payload, 'activity').filter(value => value.task_id === taskID) })
-      if (suffix === 'attachments') return json(200, { attachments: list(snapshot.payload, 'attachments').filter(value => value.task_id === taskID) })
-      if (suffix === 'dependencies') return json(200, { dependencies: list(snapshot.payload, 'dependencies').filter(value => value.task_id === taskID || value.successor_task_id === taskID) })
+      if (suffix === 'attachments') return json(200, { attachments: preparedTaskAttachments(snapshot, taskID) })
+      if (suffix === 'dependencies') return json(200, { dependencies: dependencies.filter(value => value.predecessor_task_id === taskID || value.successor_task_id === taskID) })
       return routeError('online_required', 'Estos datos de la tarea no se prepararon offline.')
+    }
+    if (suffix === 'children' && method === 'POST') {
+      if (task.parent_task_id) return routeError('invalid_request_body', 'Las subtareas tienen un solo nivel.', 400)
+      return this.tasks(portID, generation, new URL('/api/tasks', url), method, { ...request, body: JSON.stringify({ ...body(request), list_id: task.list_id, parent_task_id: taskID }) })
     }
     if (suffix === 'comments' && method === 'POST') {
       const change = body(request), text = typeof change.body === 'string' ? change.body.trim() : ''
@@ -661,19 +672,28 @@ export class OfflineV5RouteAdapter {
       const result = await this.engine.queueMutation(portID, generation, { operation_id: typeof change.operation_id === 'string' ? change.operation_id : undefined, action: 'tasks.comments.create', selection_id: snapshot.root_selection_id, resource_id: commentID, entity_type: 'task_comment', entity_id: commentID, base_version: 0, payload: { task_id: taskID, body: text }, optimistic_value: optimistic })
       return json(201, { comment: result.entity.value, operation_id: result.operation_id, offline_pending: true })
     }
-    if (suffix || !['PUT', 'PATCH'].includes(method)) return routeError('online_required', 'Esta acción de Tareas requiere conexión.')
-    const change = body(request), optimistic = { ...task, ...change, id: taskID, account_id: task.account_id ?? this.engine.sessions.require(portID, generation).identity.account_id, list_id: task.list_id, version: Number(task.version || 0), offline_pending: true, updated_at: new Date().toISOString() }
+    const star = suffix === 'star' && method === 'POST'
+    if (!star && (suffix || !['PUT', 'PATCH'].includes(method))) return routeError('online_required', 'Esta acción de Tareas requiere conexión.')
+    const rawChange: JsonObject = star ? { ...body(request), starred: !task.starred } : body(request)
+    const normalized = offlineTaskMutationInput(rawChange, task)
+    if (normalized.unsupported.length) return routeError('online_required', 'Los campos solicitados requieren conexión. No se ha guardado ningún cambio.')
+    const change: JsonObject = { ...normalized.payload, version: rawChange.version, operation_id: rawChange.operation_id }
     const statuses = list(snapshot.payload, 'statuses'), targetStatus = typeof change.status_id === 'string' ? statuses.find(value => value.id === change.status_id) : undefined
     const requestedCategory = String(targetStatus?.category || change.status_category || change.status || '')
     const currentCategory = String(task.status_category || '')
     let action: OfflineV5MutationInput['action'] = 'tasks.update'
-    let payload: JsonObject = pick(change, ['title', 'description', 'start_at', 'due_at', 'due_end_at', 'is_all_day', 'priority', 'starred', 'progress', 'manual_progress', 'progress_mode', 'is_milestone', 'notes'])
-    if (requestedCategory === 'done' || requestedCategory === 'completed') { action = 'tasks.complete'; payload = {} }
-    else if ((currentCategory === 'done' || currentCategory === 'completed') && requestedCategory === 'not_started') { action = 'tasks.reopen'; payload = {} }
-    else if (change.status_id !== undefined || change.status_category !== undefined || change.status !== undefined) return routeError('online_required', 'Este cambio de estado requiere conexión; offline puedes completar o reabrir la tarea.')
+    let payload: JsonObject = { ...normalized.payload }
+    delete payload.status; delete payload.status_category
+    if (change.status_id !== undefined && !targetStatus) return routeError('invalid_status', 'El estado no pertenece al flujo preparado de esta lista.', 400)
+    const onlyStatus = Object.keys(payload).every(key => key === 'status_id')
+    if (onlyStatus && (requestedCategory === 'done' || requestedCategory === 'completed')) { action = 'tasks.complete'; payload = {} }
+    else if (onlyStatus && (currentCategory === 'done' || currentCategory === 'completed') && requestedCategory === 'not_started') { action = 'tasks.reopen'; payload = {} }
+    else if ((change.status_category !== undefined || change.status !== undefined) && !targetStatus) return routeError('online_required', 'El cambio requiere un estado del flujo preparado.')
     if (action === 'tasks.update' && !Object.keys(payload).length) return routeError('online_required', 'Los campos solicitados de la tarea requieren conexión.')
-    const result = await this.engine.queueMutation(portID, generation, { operation_id: typeof change.operation_id === 'string' ? change.operation_id : undefined, action, selection_id: snapshot.root_selection_id, resource_id: taskID, entity_type: 'task', entity_id: taskID, base_version: Number(change.version ?? task.version) || 0, payload, optimistic_value: optimistic })
-    return json(200, { task: result.entity.value, operation_id: result.operation_id, offline_pending: true })
+    const status = targetStatus || (action === 'tasks.complete' ? statuses.find(value => value.category === 'done') : action === 'tasks.reopen' ? statuses.find(value => value.category === 'not_started') : undefined)
+    const optimistic = { ...task, ...payload, ...(status ? { status_id: status.id, status_detail: status, status_category: status.category, status: status.category === 'done' ? 'completed' : status.category === 'cancelled' ? 'cancelled' : 'pending', completed_at: status.category === 'done' ? new Date().toISOString() : null, progress: status.category === 'done' ? 100 : task.manual_progress || 0 } : {}), id: taskID, account_id: task.account_id ?? this.engine.sessions.require(portID, generation).identity.account_id, list_id: task.list_id, version: Number(task.version || 0), offline_pending: true, updated_at: new Date().toISOString() }
+    const result = await this.engine.queueMutation(portID, generation, { operation_id: typeof change.operation_id === 'string' ? change.operation_id : undefined, action, selection_id: snapshot.root_selection_id, resource_id: taskID, entity_type: 'task', entity_id: taskID, base_version: Number(change.version ?? task.version) || 0, base: task, payload, optimistic_value: optimistic })
+    return json(200, { task: result.entity.value, ...(star ? { starred: payload.starred } : {}), operation_id: result.operation_id, offline_pending: true })
   }
 }
 
@@ -826,6 +846,6 @@ function pick(value: JsonObject, names: readonly string[]): JsonObject {
   return result
 }
 
-function versionFor(manifest: { entity_versions: Array<{ entity_id: string; version: number }> }, entityID: string, fallback: number): number {
-  return manifest.entity_versions.find(value => value.entity_id === entityID)?.version ?? fallback
+function versionFor(manifest: { entity_versions?: Array<{ entity_id: string; version: number }> }, entityID: string, fallback: number): number {
+  return manifest.entity_versions?.find(value => value.entity_id === entityID)?.version ?? fallback
 }

@@ -20,6 +20,8 @@ import {
   type TaskAttachmentPreviewPhase,
 } from './taskAttachmentPreviewState'
 import { loadTaskPdfRuntime } from './taskPdfRuntime'
+import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider'
+import { taskAttachmentCommentingAvailable } from './taskAttachmentPreviewState'
 
 interface Props {
   taskId: string
@@ -41,7 +43,9 @@ type ViewerResources = {
   pollTimer?: number
 }
 
-export default function TaskAttachmentViewer({ taskId, attachment, users, canComment = true, historicalReadOnly = false, onClose }: Props) {
+export default function TaskAttachmentViewer({ taskId, attachment, users, canComment: requestedCanComment = true, historicalReadOnly = false, onClose }: Props) {
+  const { isOffline } = useClarinRuntime()
+  const canComment = taskAttachmentCommentingAvailable(requestedCanComment, isOffline)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const dialogRef = useRef<HTMLElement>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
