@@ -9,7 +9,7 @@ import { OfflineV5SessionRegistry, type OfflineV5ActiveSession } from '@/offline
 import { MemoryOfflineV5Storage, rotateOfflineV5StoredSessionEpoch } from '@/offline-v5/storage'
 import { clearOfflineV5BootMarker, markOfflineV5Boot, readOfflineV5BootMarker, type OfflineV5BootStorage } from '@/lib/offlineV5Boot'
 import { beginOfflineV5OnlineTransition, bootstrapOfflineV5Runtime, cancelOfflineV5OnlineTransition, getOfflineV5RuntimeSnapshot, offlineV5RuntimeAtBoot, offlineV5ShouldBlockEgress, refreshOfflineV5FallbackOffer, refreshOfflineV5FallbackState, replaceStaleOfflineLoginWithOnline, runtimeAfterOfflineV5Bootstrap, setOfflineV5RuntimeClientForTests, shouldCloseOfflineV5OnlineTransition, shouldOfferOfflineV5, type RuntimeSnapshot } from '@/lib/offlineV5Runtime'
-import { OfflineV5Error, type OfflineV5Identity, type OfflineV5Manifest, type OfflineV5Operation, type OfflineV5VaultEnvelope, type OfflineV5VaultMetadata } from '@/offline-v5/types'
+import { OfflineV5Error, type OfflineV5Conflict, type OfflineV5Identity, type OfflineV5Manifest, type OfflineV5Operation, type OfflineV5StoredCipher, type OfflineV5VaultEnvelope, type OfflineV5VaultMetadata } from '@/offline-v5/types'
 
 const origin = 'https://clarin.test'
 
@@ -513,7 +513,9 @@ describe('Offline v5 encrypted browser engine', () => {
   it('resolves one field conflict atomically into a new intent while retaining independent local fields', async () => {
     const storage = new MemoryOfflineV5Storage(), engine = new OfflineV5Engine(origin, storage)
     await storage.commit([{ store: 'schema', key: 'auth:browser-1', value: 'epoch' }])
-    const session = engine.sessions.open('port', await active(identity('user', 'account')))
+    const candidate = await active(identity('user', 'account'))
+    candidate.manifest.max_storage_bytes = 8 * 1024 * 1024
+    const session = engine.sessions.open('port', candidate)
     await engine.queueMutation('port', session.generation, { operation_id: 'conflicted', action: 'tasks.update', selection_id: 'selection-grant-user-account', resource_id: 'task-1', entity_type: 'task', entity_id: 'task-1', base_version: 2,
       base: { title: 'Before', description: 'Before' }, payload: { title: 'Mine', description: 'Local note' }, optimistic_value: { id: 'task-1', account_id: 'account', list_id: 'list-account', title: 'Mine', description: 'Local note' } })
     await engine.applyReceipts('port', session.generation, [{ operation_id: 'conflicted', status: 'conflict', resource_id: 'task-1', server_version: 3, conflict: { fields: ['title'], server: { title: 'Theirs', description: 'Before' } } }])
@@ -549,6 +551,65 @@ describe('Offline v5 encrypted browser engine', () => {
     await engine.applyReceipts('port', session.generation, [{ operation_id: 'accept-server', status: 'conflict', resource_id: 'task-1', server_version: 3, conflict: { fields: ['title'], server: { title: 'Theirs' } } }])
     await engine.resolveConflict('port', session.generation, { operation_id: 'accept-server', choice: 'server' })
     expect(await engine.overlays('port', session.generation, 'task')).toMatchObject([{ version: 3, value: { title: 'Theirs', version: 3, offline_pending: false } }])
+    expect(await engine.conflicts('port', session.generation)).toEqual([])
+  })
+
+  it('materializes and resolves a conflict at the reserved quota without changing the original command', async () => {
+    const storage = new MemoryOfflineV5Storage(), engine = new OfflineV5Engine(origin, storage)
+    await storage.commit([{ store: 'schema', key: 'auth:browser-1', value: 'epoch' }])
+    const candidate = await active(identity('user', 'account'))
+    const session = engine.sessions.open('port', candidate)
+    const input = { operation_id: 'quota-conflict', action: 'tasks.update' as const, selection_id: 'selection-grant-user-account', resource_id: 'task-1', entity_type: 'task', entity_id: 'task-1', base_version: 2,
+      base: { title: 'Before' }, payload: { title: 'Mine' }, optimistic_value: { id: 'task-1', account_id: 'account', list_id: 'list-account', title: 'Mine', version: 2 } }
+    await engine.queueMutation('port', session.generation, input)
+    const [original] = await engine.outbox('port', session.generation)
+    const quota = await storage.totalBytes(candidate.envelope.namespace)
+    expect(quota).toBeLessThan(20_000)
+    candidate.manifest.max_storage_bytes = quota
+    expect(await engine.queueMutation('port', session.generation, input)).toMatchObject({ state: 'duplicate' })
+    await expect(engine.queueMutation('port', session.generation, { ...input, operation_id: 'one-too-many' })).rejects.toMatchObject({ code: 'storage_quota' })
+    expect(await engine.outbox('port', session.generation)).toEqual([original])
+    const receipt = { operation_id: input.operation_id, status: 'conflict' as const, resource_id: input.resource_id, server_version: 3,
+      conflict: { fields: ['title'], base: input.base, local: input.payload, server: { title: '\u0000'.repeat(499) + '😀', description: 'Server text unrelated to this edit'.repeat(6000) } } }
+    await engine.applyReceipts('port', session.generation, [receipt])
+    const [conflict] = await engine.conflicts('port', session.generation)
+    expect(conflict).toMatchObject({ operation: original, base: input.base, local: input.payload, server_version: 3, server: { title: receipt.conflict.server.title } })
+    expect(conflict.server).not.toHaveProperty('description')
+    const [cipher] = await storage.scan<OfflineV5StoredCipher>('conflicts', { index: 'namespace', key: candidate.envelope.namespace })
+    const persisted = await decryptOfflineV5Value<{ conflict: OfflineV5Conflict }>(candidate.keys.content, candidate.identity, 'conflicts', cipher.storage_key, cipher.ciphertext)
+    expect(persisted.conflict).not.toHaveProperty('base')
+    expect(persisted.conflict).not.toHaveProperty('local')
+    expect(persisted.conflict.operation).toEqual(original)
+    expect(await engine.outbox('port', session.generation)).toEqual([])
+    expect(await storage.totalBytes(candidate.envelope.namespace)).toBeLessThanOrEqual(quota)
+    await engine.applyReceipts('port', session.generation, [receipt])
+    expect(await engine.conflicts('port', session.generation)).toHaveLength(1)
+    // A new retry needs its own reservation. If no space remains, the explicit
+    // choice fails without removing the reviewable original or its variants.
+    await expect(engine.resolveConflict('port', session.generation, { operation_id: input.operation_id, choice: 'fields', fields: { title: 'local' } })).rejects.toMatchObject({ code: 'storage_quota' })
+    expect(await engine.conflicts('port', session.generation)).toEqual([conflict])
+    await engine.resolveConflict('port', session.generation, { operation_id: input.operation_id, choice: 'server' })
+    expect(await engine.overlays('port', session.generation, 'task')).toMatchObject([{ value: { title: receipt.conflict.server.title, version: 3 } }])
+    expect(await engine.conflicts('port', session.generation)).toEqual([])
+    expect(await storage.totalBytes(candidate.envelope.namespace)).toBeLessThanOrEqual(quota)
+  })
+
+  it('keeps an unbounded scene conflict pending without truncating its immutable command when quota is exhausted', async () => {
+    const storage = new MemoryOfflineV5Storage(), engine = new OfflineV5Engine(origin, storage)
+    await storage.commit([{ store: 'schema', key: 'auth:browser-1', value: 'epoch' }])
+    const candidate = await active(identity('user', 'account')), selection_id = 'whiteboard-selection'
+    candidate.manifest.roots = [{ selection_id, module: 'whiteboards', resource_type: 'whiteboard', resource_id: 'board' }]
+    candidate.manifest.capabilities = [{ action: 'whiteboards.scene.update', selection_id, root_resource_id: 'board', resource_type: 'whiteboard', resource_id: 'board' }]
+    const session = engine.sessions.open('port', candidate)
+    await engine.queueMutation('port', session.generation, { operation_id: 'scene-edit', action: 'whiteboards.scene.update', selection_id, resource_id: 'board', entity_type: 'whiteboard', entity_id: 'board', base_version: 2,
+      base: { scene: { elements: [] } }, payload: { expected_sequence: 2, scene: { elements: [{ id: 'local' }] } }, optimistic_value: { id: 'board', account_id: 'account', sequence: 2, scene: { elements: [{ id: 'local' }] } } })
+    const before = await engine.outbox('port', session.generation)
+    const overlays = await engine.overlays('port', session.generation, 'whiteboard')
+    candidate.manifest.max_storage_bytes = await storage.totalBytes(candidate.envelope.namespace)
+    await expect(engine.applyReceipts('port', session.generation, [{ operation_id: 'scene-edit', status: 'conflict', server_version: 3,
+      conflict: { fields: ['scene'], server: { scene: { elements: [{ id: 'server', text: 'Unbounded scene'.repeat(1000) }] } } } }])).rejects.toMatchObject({ code: 'storage_quota' })
+    expect(await engine.outbox('port', session.generation)).toEqual(before)
+    expect(await engine.overlays('port', session.generation, 'whiteboard')).toEqual(overlays)
     expect(await engine.conflicts('port', session.generation)).toEqual([])
   })
 

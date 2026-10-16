@@ -132,6 +132,45 @@ describe('shared general WebSocket lifecycle', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/tasks')
   })
+
+  it.each(['/api/tasks/task/attachments/file/download', '/api/tasks/task/attachments/file/preview/download?historical=true', '/api/whiteboards/board/assets/file'])('reads a prepared binary through the local adapter without an online session: %s', async path => {
+    setSharedWebSocketOfflineSuppressed(true)
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('prepared bytes', { status: 200, headers: { 'Content-Type': 'text/plain' } }))
+    const result = await apiBlob(path)
+    expect(result).toMatchObject({ success: true, status: 200 })
+    const bytes = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result))
+      reader.onerror = () => reject(reader.error)
+      reader.readAsText(result.blob!)
+    })
+    expect(bytes).toBe('prepared bytes')
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith(path, expect.objectContaining({ credentials: 'include' }))
+    expect(localStorage.getItem('token')).toBeNull()
+    expect(localStorage.getItem(LAST_ACTIVITY_KEY)).toBeNull()
+  })
+
+  it('does not refresh online credentials after a refused local binary read', async () => {
+    setSharedWebSocketOfflineSuppressed(true)
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"error":"locked"}', { status: 401 }))
+    await expect(apiBlob('/api/tasks/task/attachments/file/download')).resolves.toMatchObject({ success: false, status: 401, error: 'locked' })
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(localStorage.getItem('clarin:logout_at')).toBeNull()
+  })
+
+  it('blocks binary writes, unprepared paths and foreign origins before transport in local mode', async () => {
+    setSharedWebSocketOfflineSuppressed(true)
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    for (const [path, options] of [
+      ['/api/tasks/task/attachments/file/download', { method: 'POST' }],
+      ['/api/tasks/task/attachments/file/download', { body: 'new bytes' }],
+      ['/api/tasks/export', {}],
+      ['https://foreign.example.test/api/tasks/task/attachments/file/download', {}],
+    ] as const) {
+      await expect(apiBlob(path, options)).resolves.toMatchObject({ success: false, status: 503 })
+    }
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
 })
 
 describe('logout navigation', () => {

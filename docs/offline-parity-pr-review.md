@@ -21,6 +21,32 @@ La compilación QA contiene direcciones locales. Una futura publicación requier
 una compilación de producción nueva mediante el flujo habitual, después de una
 autorización de despliegue independiente.
 
+## Factibilidad e intento anterior
+
+Es viable reutilizar las páginas, ventanas y editores actuales con una capa local
+de datos. La equivalencia cubre los recursos preparados y las operaciones que
+pueden validarse localmente; los servicios externos y las acciones no preparadas
+necesitan conexión. La selección, la vigencia y el estado de sincronización deben
+permanecer visibles para que una copia parcial no parezca toda la cuenta.
+
+La revisión del punto de partida encontró dos problemas distintos:
+
+- `frontend/src/offline-v4/OfflineRuntimeApp.tsx` montaba vistas separadas de
+  `components/offline-v3`. `OfflineProgramsView.tsx` era de sólo lectura y
+  `OfflineTasksView.tsx` tenía un formulario reducido. El documento
+  `docs/offline-v4-verificacion-2026-09-15.md` reconoce que las descripciones se
+  probaron por RPC porque su interfaz offline no incluía ese campo.
+- v5 ya empaquetaba las páginas canónicas, pero su adaptador no siempre respetaba
+  sus contratos: la ruta de Pizarras devolvía la escena cruda cuando el editor
+  esperaba un registro con `scene` y `sequence`. Las pruebas de shell comprobaban
+  HTML y cabeceras sin abrir, editar y recargar los módulos con datos preparados.
+
+Por eso esta rama conserva los componentes actuales y prueba sus flujos reales.
+Chromium permite simular la desconexión con Playwright `context.setOffline(true)`;
+el laboratorio corta además la autoridad HTTP sintética para que un Service Worker
+no pueda seguir consultándola. El almacenamiento, el cifrado y los workers del
+navegador son reales. Esta prueba no necesita desconectar ni intervenir el VPS.
+
 ## Comportamiento que debe revisar el PR
 
 La interfaz sigue siendo la canónica. El adaptador local conserva la jerarquía
@@ -44,6 +70,13 @@ eventos de calendario y colaboración remota requieren conexión. Los indicadore
 offline describen sólo la selección preparada y su fecha de actualización.
 Se mantienen la autorización existente, 20 raíces y vigencia máxima de 24 horas.
 
+Los cambios de campos acotados reservan espacio para poder materializar sus
+conflictos dentro de la misma cuota, sin duplicar las variantes cifradas. Una
+escena no acotada, una operación anterior sin reserva o un nuevo reintento sin
+espacio pueden fallar explícitamente por cuota; el fallo es atómico y conserva
+la operación, el borrador o el conflicto para recuperarlos. No truncar variantes
+ni borrar pendientes para liberar espacio forma parte de este contrato.
+
 ## Verificación y aceptación
 
 Ejecutar en la copia aislada:
@@ -58,6 +91,11 @@ NEXT_PUBLIC_API_URL=http://127.0.0.1:19445 \
 NEXT_PUBLIC_BUILD_VERSION=offline-pr-review npm run build
 cd ../backend
 GOCACHE=/tmp/go-build go test ./...
+cd ..
+OFFLINE_QA_ORIGIN=http://127.0.0.1:19445 \
+  npx playwright test --config=playwright.offline-isolated.config.ts
+node scripts/offline/qa-conflict-dialog.mjs
+node --test scripts/offline/isolated-qa-guard.test.mjs
 ```
 
 Las integraciones PostgreSQL exigen `OFFLINE_V5_TEST_DATABASE_URL` apuntando a la
@@ -67,6 +105,15 @@ guardado, F5, reapertura, conflictos y ausencia de llamadas remotas. Un fixture
 HTTP sintético comprueba cliente/almacenamiento/UI, mientras las integraciones
 PostgreSQL comprueban autorización/persistencia del backend. No confundir estos
 dos alcances con una prueba autenticada sobre datos reales.
+
+El recorrido de módulos rechaza cualquier intento de red para sus datos o
+archivos. Permite registrar exclusivamente las comprobaciones fallidas de
+`GET /login`, `GET /sw.js`, `GET /api/public/security-config` y el intento
+explícito de `POST /api/auth/login`: el login existente busca primero una
+respuesta online para recuperar su CSP y el navegador comprueba actualizaciones
+del Service Worker. La autoridad HTTP destruye también esas conexiones, sin
+servir respuestas. El informe adjunta las rutas rechazadas y el estado de red
+del navegador; no presenta «cero respuestas online» como «cero intentos de red».
 
 Los resultados ejecutados se registran en la descripción del PR. No aprobar la
 equivalencia completa de todas las operaciones sólo por obtener un build o una

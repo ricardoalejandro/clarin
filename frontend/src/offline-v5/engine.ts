@@ -100,6 +100,57 @@ class ReusedV4ProfileProvider implements OfflineV5ProfileProvider {
 
 const encoder = new TextEncoder()
 
+// JSON string escaping can use six bytes per character. These bounds follow
+// the three patch contracts in offline_v5_operation_repository.go; only fields
+// actually changed reserve space, so a title edit never reserves a whole task.
+const patchConflictFieldBytes: Record<string, Record<string, number>> = {
+  'tasks.update': { title: 500 * 6 + 2, description: 200000 * 6 + 2, notes: 200000 * 6 + 2,
+    start_at: 40, due_at: 40, due_end_at: 40, is_all_day: 5, starred: 5, is_milestone: 5,
+    priority: 8, progress: 3, manual_progress: 3, progress_mode: 11, status_id: 38, assigned_to: 38, type: 10, color: 9 },
+  'contacts.update': { name: 255 * 6 + 2, custom_name: 255 * 6 + 2, last_name: 255 * 6 + 2, short_name: 100 * 6 + 2,
+    phone: 50 * 6 + 2, email: 255 * 6 + 2, company: 255 * 6 + 2, age: 4, dni: 50 * 6 + 2, birth_date: 40,
+    address: 2000 * 6 + 2, distrito: 255 * 6 + 2, ocupacion: 255 * 6 + 2, notes: 10000 * 6 + 2 },
+  'programs.update': { name: 200 * 6 + 2, description: 10000 * 6 + 2, status: 11, color: 32 * 6 + 2,
+    schedule_start_date: 40, schedule_end_date: 40, schedule_days: 16, schedule_start_time: 7, schedule_end_time: 7, health_view_columns: 128 },
+}
+
+function conflictStorageValue(conflict: OfflineV5Conflict): OfflineV5Conflict {
+  const compact = { ...conflict }
+  // The immutable operation already retains these exact variants. Hydrate them
+  // on read, including for old conflict records that stored them separately.
+  if (conflict.operation && deepEqual(conflict.base, conflict.operation.base)) delete compact.base
+  if (conflict.operation && deepEqual(conflict.local, conflict.operation.payload)) delete compact.local
+  const payload = conflict.operation?.payload
+  if (patchConflictFieldBytes[conflict.action] && conflict.fields?.length && payload && typeof payload === 'object' && !Array.isArray(payload)
+      && conflict.server && typeof conflict.server === 'object' && !Array.isArray(conflict.server)) {
+    const fields = new Set([...Object.keys(payload), ...(conflict.fields || [])])
+    compact.server = Object.fromEntries(Object.entries(conflict.server).filter(([key]) => fields.has(key)))
+  }
+  return compact
+}
+
+function conflictFromStorage(conflict: OfflineV5Conflict): OfflineV5Conflict {
+  return { ...conflict,
+    base: conflict.base === undefined ? conflict.operation?.base : conflict.base,
+    local: conflict.local === undefined ? conflict.operation?.payload : conflict.local,
+  }
+}
+
+function conflictReserveBytes(operation: OfflineV5Operation): number {
+  const bounds = patchConflictFieldBytes[operation.action]
+  if (!bounds || !operation.payload || typeof operation.payload !== 'object' || Array.isArray(operation.payload)) return 0
+  const fields = Object.keys(operation.payload)
+  const metadata = JSON.stringify({ operation_id: operation.operation_id, action: operation.action,
+    selection_id: operation.selection_id, resource_id: operation.resource_id, fields })
+  const serverBytes = fields.reduce((size, field) => size + encoder.encode(JSON.stringify(field)).byteLength + 2
+    + (Object.prototype.hasOwnProperty.call(bounds, field) ? bounds[field] : 0), 2)
+  // Account for base64 expansion, receipt metadata and overlay status. This is
+  // a reservation within the existing quota, not extra quota or filler bytes.
+  // Legacy/unknown fields and oversized server values still fail atomically;
+  // neither an immutable command nor an unbounded scene is ever truncated.
+  return Math.ceil((serverBytes + encoder.encode(metadata).byteLength + 2048) / 3) * 4
+}
+
 function confirmedOfflineV5Entity(entity: OfflineV5CanonicalEntity, receipt: OfflineV5Receipt): OfflineV5CanonicalEntity {
   const version = receipt.server_version ?? entity.version
   const value = entity.value
@@ -858,7 +909,7 @@ export class OfflineV5Engine {
           optimistic_entity: stored.optimistic_entity,
         }
         const conflictKey = await blindIndex(session.keys.blindIndex, 'conflict', receipt.operation_id)
-        mutations.push(await this.encryptRecord(session, 'conflicts', conflictKey, 'conflict', { identity: canonicalOfflineV5Identity(session.identity), conflict } satisfies StoredConflictRecord, { status: receipt.status, sequence: record.sequence, root_selection_id: stored.operation.selection_id, created_at: Date.now() }))
+        mutations.push(await this.encryptRecord(session, 'conflicts', conflictKey, 'conflict', { identity: canonicalOfflineV5Identity(session.identity), conflict: conflictStorageValue(conflict) } satisfies StoredConflictRecord, { status: receipt.status, sequence: record.sequence, root_selection_id: stored.operation.selection_id, created_at: Date.now() }))
         if (!hasLaterPending) mutations.push(await this.encryptRecord(session, 'entities', entityKey, `overlay:${stored.optimistic_entity.entity_type}`, {
           kind: 'overlay', identity: canonicalOfflineV5Identity(session.identity), entity: stored.optimistic_entity, local_confirmation: 'conflict',
         } satisfies StoredEntityRecord, { root_selection_id: stored.operation.selection_id, sequence: record.sequence, created_at: Date.now() }))
@@ -968,7 +1019,7 @@ export class OfflineV5Engine {
     for (const record of records) {
       const stored = await this.decryptRecord<StoredConflictRecord>(session, 'conflicts', record)
       if (stored.identity !== canonicalOfflineV5Identity(session.identity)) throw new OfflineV5Error('wrong_record_identity', 'Se bloqueó un conflicto de otra identidad.')
-      conflicts.push(stored.conflict)
+      conflicts.push(conflictFromStorage(stored.conflict))
     }
     return conflicts.sort((a, b) => a.created_at.localeCompare(b.created_at))
   }
@@ -991,6 +1042,7 @@ export class OfflineV5Engine {
     if (!record) throw new OfflineV5Error('conflict_missing', 'Este conflicto ya fue resuelto. Actualiza la revisión.')
     const stored = await this.decryptRecord<StoredConflictRecord>(session, 'conflicts', record)
     if (stored.identity !== canonicalOfflineV5Identity(session.identity)) throw new OfflineV5Error('wrong_record_identity', 'Se bloqueó un conflicto de otra identidad.')
+    stored.conflict = conflictFromStorage(stored.conflict)
     const retry = offlineV5ConflictRetry(stored.conflict, resolution)
     if (retry) {
       await this.queueMutationsLocked(portID, generation, [retry], conflictKey)
@@ -1272,7 +1324,8 @@ export class OfflineV5Engine {
 
   private async encryptRecord(session: OfflineV5ActiveSession, store: 'entities' | 'operations' | 'conflicts', key: string, recordType: string, value: unknown, metadata: Partial<OfflineV5StoredCipher> = {}): Promise<OfflineV5StoreMutation> {
     const ciphertext = await encryptOfflineV5Value(session.keys.content, session.identity, store, key, value)
-    return { store, key, value: { storage_key: key, namespace: session.envelope.namespace, record_type: recordType, byte_size: storedCipherBytes({ ciphertext }), ciphertext, ...metadata } satisfies OfflineV5StoredCipher }
+    const reserve = store === 'operations' ? conflictReserveBytes((value as StoredOperationRecord).operation) : 0
+    return { store, key, value: { storage_key: key, namespace: session.envelope.namespace, record_type: recordType, byte_size: storedCipherBytes({ ciphertext }) + reserve, ciphertext, ...metadata } satisfies OfflineV5StoredCipher }
   }
 
   private decryptRecord<T>(session: OfflineV5ActiveSession, store: 'entities' | 'operations' | 'conflicts', record: OfflineV5StoredCipher): Promise<T> {
