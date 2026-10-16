@@ -64,6 +64,12 @@ Las imágenes existentes de Pizarras conservan su transporte cifrado. Un perfil
 v5 no cae automáticamente en la interfaz paralela v4 si falta su shell; sus
 pendientes se conservan. Las copias exclusivamente v4 mantienen su recuperación.
 
+El editor carga también sus 32 familias tipográficas desde la caché preparada:
+`navigator.onLine` no sustituye la comprobación real de `FontFace.load()`.
+La preparación termina sólo después de cargar las familias disponibles; una
+fuente que realmente falte conserva el estado de fallo y su reintento. Se
+mantienen el catálogo, las rutas locales, la concurrencia y la política de red.
+
 Límites que siguen siendo explícitos: movimientos entre listas/Entornos,
 administración de estructura/acceso, cambios de colaboradores, recurrencia,
 eventos de calendario y colaboración remota requieren conexión. Los indicadores
@@ -114,6 +120,11 @@ respuesta online para recuperar su CSP y el navegador comprueba actualizaciones
 del Service Worker. La autoridad HTTP destruye también esas conexiones, sin
 servir respuestas. El informe adjunta las rutas rechazadas y el estado de red
 del navegador; no presenta «cero respuestas online» como «cero intentos de red».
+La comprobación de fuentes incluye HTTP del contexto y del Service Worker, y
+WebSockets de página y workers inspeccionados. No certifica captura de WebSockets
+del SharedWorker: adjuntar ese inspector alteró su ciclo de acceso en Chromium,
+por lo que el recorrido funcional lo deja sin inspección. El cargador modificado
+usa `window.document.fonts`; no introduce transporte de fuentes en ese worker.
 
 Los resultados ejecutados se registran en la descripción del PR. No aprobar la
 equivalencia completa de todas las operaciones sólo por obtener un build o una

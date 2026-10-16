@@ -1,9 +1,52 @@
-import {expect,test,type Page} from '@playwright/test'
+import {expect,test,type Browser,type BrowserContext,type Page} from '@playwright/test'
 import {labAttachmentText,labIDs,labLogin,startOfflineModuleLab} from './fixtures/offline-v5-module-lab'
 
 let lab:Awaited<ReturnType<typeof startOfflineModuleLab>>
+let stopNetworkObservation:(()=>Promise<void>)|undefined
+let networkEvidence:(()=>unknown)|undefined
 test.beforeAll(async()=>{lab=await startOfflineModuleLab()})
 test.afterAll(async()=>{await lab?.close()})
+test.afterEach(async({page})=>{if(networkEvidence)await test.info().attach('offline-network-observation',{body:Buffer.from(JSON.stringify(networkEvidence(),null,2)),contentType:'application/json'});if(test.info().status!=='passed')await test.info().attach('offline-failure-state',{body:Buffer.from(JSON.stringify(await page.evaluate(async()=>({online:navigator.onLine,registrations:(await navigator.serviceWorker.getRegistrations()).map(reg=>({scope:reg.scope,active:reg.active?.scriptURL})),databases:await indexedDB.databases(),cacheNames:await caches.keys()})).catch(error=>({error:String(error)})),null,2)),contentType:'application/json'});await stopNetworkObservation?.();stopNetworkObservation=undefined;networkEvidence=undefined})
+
+async function observeNetwork(browser:Browser,context:BrowserContext) {
+  let disconnected=false,sequence=0
+  const requests:Array<{method:string;url:string;owner:string}>=[]
+  const sockets:Array<{url:string;owner:string}>=[]
+  const errors:string[]=[],workerKinds=new Set<string>(),sessions=new Map<string,string>()
+  const pending=new Map<number,{resolve:()=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>}>()
+  context.on('request',request=>{if(disconnected)requests.push({method:request.method(),url:request.url(),owner:request.serviceWorker()?'service_worker':'page_or_shared_worker'})})
+  const observePage=(page:Page)=>page.on('websocket',socket=>{if(disconnected)sockets.push({url:socket.url(),owner:'page'})})
+  context.pages().forEach(observePage);context.on('page',observePage)
+  const observer=await browser.newBrowserCDPSession()
+  observer.on('Target.receivedMessageFromTarget',event=>{
+    const message=JSON.parse(event.message)
+    if(message.id&&pending.has(message.id)) {const command=pending.get(message.id)!;clearTimeout(command.timer);pending.delete(message.id);if(message.error)command.reject(new Error(message.error.message));else command.resolve()}
+    if(disconnected&&message.method==='Network.requestWillBeSent')requests.push({method:message.params.request.method,url:message.params.request.url,owner:sessions.get(event.sessionId)||'worker'})
+    if(disconnected&&message.method==='Network.webSocketCreated')sockets.push({url:message.params.url,owner:sessions.get(event.sessionId)||'worker'})
+  })
+  const command=(sessionId:string,method:string)=>new Promise<void>((resolve,reject)=>{
+    const id=++sequence
+    const timer=setTimeout(()=>{pending.delete(id);reject(new Error(`Worker network observation timed out: ${method}`))},10_000)
+    pending.set(id,{resolve,reject,timer})
+    void observer.send('Target.sendMessageToTarget',{sessionId,message:JSON.stringify({id,method})}).catch(error=>{clearTimeout(timer);pending.delete(id);reject(error)})
+  })
+  const targets=new Set<string>(),setups:Promise<void>[]=[]
+  const attach=(target:{targetId:string;type:string})=>{
+    // Debugger attachment changes a SharedWorker's lifetime across navigation.
+    // Observe its HTTP through BrowserContext without pinning that worker alive.
+    // Worker WebSocket coverage is deliberately limited to service/dedicated workers.
+    if(!['service_worker','worker'].includes(target.type)||targets.has(target.targetId))return
+    targets.add(target.targetId)
+    setups.push((async()=>{try{const {sessionId}=await observer.send('Target.attachToTarget',{targetId:target.targetId,flatten:false});sessions.set(sessionId,target.type);await command(sessionId,'Network.enable');workerKinds.add(target.type)}catch(error){errors.push(String(error))}})())
+  }
+  observer.on('Target.targetCreated',event=>attach(event.targetInfo))
+  // BrowserContext records worker HTTP requests. Per-target CDP additionally
+  // observes worker WebSockets; finish attachment before cutting the network.
+  await observer.send('Target.setDiscoverTargets',{discover:true})
+  for(const target of (await observer.send('Target.getTargets')).targetInfos)attach(target)
+  stopNetworkObservation=async()=>{await observer.detach();for(const value of pending.values())clearTimeout(value.timer);pending.clear()}
+  return {requests,sockets,errors,workerKinds,ready:()=>Promise.all(setups),cut(){disconnected=true}}
+}
 
 async function unlock(page:Page) {
   await page.getByPlaceholder('usuario o correo').fill(labLogin.username)
@@ -42,10 +85,31 @@ async function readPreparedAttachment(page:Page) {
   await expect(viewer.locator('pre')).toHaveText(labAttachmentText)
   await viewer.getByRole('button',{name:'Cerrar',exact:true}).click()
 }
+async function assertPreparedFonts(page:Page) {
+  await page.getByTestId('toolbar-text').check({force:true})
+  const showFonts=page.getByTestId('font-family-show-fonts')
+  await expect(showFonts).toHaveAttribute('aria-label','Más fuentes · 32')
+  await expect(showFonts).toBeEnabled()
+  await expect(page.getByText(/Preparando fuentes|fuentes? no pud/)).toHaveCount(0)
+  await showFonts.click()
+  const options=page.locator('.dropdown-menu.fonts button.dropdown-menu-item')
+  await expect(options).toHaveCount(32)
+  await expect(page.locator('.dropdown-menu.fonts [aria-label*="Fuente no disponible"]')).toHaveCount(0)
+  await expect(page.locator('.dropdown-menu.fonts button.dropdown-menu-item:disabled')).toHaveCount(0)
+  const families=await options.locator('.dropdown-menu-item__text').evaluateAll(elements=>elements.map(element=>getComputedStyle(element).fontFamily.split(',')[0].replace(/^['"]|['"]$/g,'')))
+  expect(new Set(families).size).toBe(32)
+  await expect.poll(()=>page.evaluate(expected=>expected.filter(family=>family!=='Helvetica').every(family=>{const faces=Array.from(document.fonts).filter(face=>face.family.replace(/^['"]|['"]$/g,'')===family);return faces.length>0&&faces.every(face=>face.status==='loaded')}),families)).toBe(true)
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.dropdown-menu.fonts')).not.toBeVisible()
+  // Used fonts legitimately move into the recent-font group after editing.
+  return families.sort()
+}
 
-test('canonical modules save and reopen an encrypted prepared copy with the network disconnected',async({page,context})=>{
+test('canonical modules save and reopen an encrypted prepared copy with the network disconnected',async({page,context,browser})=>{
   test.setTimeout(300_000)
   const errors:string[]=[];page.on('pageerror',error=>errors.push(error.message))
+  const network=await observeNetwork(browser,context)
+  networkEvidence=()=>({requests:network.requests,sockets:network.sockets,workerKinds:[...network.workerKinds],observationErrors:network.errors,pageErrors:errors,rejectedNetworkProbes:lab.disconnectedRequests})
   const cdp=await context.newCDPSession(page)
   const {targetInfo}=await cdp.send('Target.getTargetInfo')
   await cdp.send('Browser.grantPermissions',{origin:lab.origin,permissions:['durableStorage'],browserContextId:targetInfo.browserContextId})
@@ -53,13 +117,15 @@ test('canonical modules save and reopen an encrypted prepared copy with the netw
   expect(await page.evaluate(async()=>await navigator.storage.persist())).toBe(true)
   expect(await page.evaluate(async()=>await navigator.storage.persisted())).toBe(true)
   await page.evaluate(async({grant,password})=>{await (window as any).__qaClient.prepare(grant,password)},{grant:labIDs.grant,password:labLogin.password})
+  expect(await page.evaluate(async username=>(window as any).__qaClient.hasPreparedCopyForUsername(username),labLogin.username)).toBe(true)
   expect(lab.apiCalls).toContain(`POST /api/offline/v5/grants/${labIDs.grant}/prepare`)
   // A first installation controls the next navigation, as in an ordinary reopen.
   await page.goto(lab.origin+'/login',{waitUntil:'domcontentloaded'})
   await expect.poll(()=>page.evaluate(()=>Boolean(navigator.serviceWorker.controller))).toBe(true)
   // Both browser emulation and a disconnected HTTP authority: no route.fulfill,
   // IndexedDB seeding, alternate component, or intercepted offline response.
-  await context.setOffline(true);lab.cutNetwork()
+  await network.ready()
+  await context.setOffline(true);lab.cutNetwork();network.cut()
   await page.goto(lab.origin+'/login',{waitUntil:'domcontentloaded'})
   await unlock(page)
 
@@ -107,6 +173,7 @@ test('canonical modules save and reopen an encrypted prepared copy with the netw
   await navigate(page,'whiteboards')
   await page.getByText('Pizarra QA offline',{exact:true}).first().click()
   await expect(page.locator('canvas.interactive')).toBeVisible()
+  const preparedFontFamilies=await assertPreparedFonts(page)
   const surface=await page.locator('.whiteboard-editor-shell .excalidraw').first().boundingBox()
   expect(surface).not.toBeNull()
   await page.getByTestId('toolbar-text').check({force:true})
@@ -118,13 +185,18 @@ test('canonical modules save and reopen an encrypted prepared copy with the netw
   await reopen(page,'whiteboards')
   await page.getByText('Pizarra QA offline',{exact:true}).first().click()
   await expect(page.locator('canvas.interactive')).toBeVisible()
+  expect(await assertPreparedFonts(page)).toEqual(preparedFontFamilies)
   expect(JSON.stringify(await scene())).toContain('Pizarra persistente sin red')
   // Chromium can still issue ServiceWorker update/login probes while its page
   // context is offline. The HTTP authority destroys every such connection.
   // Permit only those explicit login/update probes, never module or asset IO.
   const probes=new Set(['GET /login','GET /sw.js','GET /api/public/security-config','POST /api/auth/login'])
   expect(lab.disconnectedRequests.filter(request=>!probes.has(request))).toEqual([])
+  expect(network.requests.filter(request=>/^https?:/.test(request.url)&&new URL(request.url).origin!==lab.origin)).toEqual([])
+  expect(network.sockets).toEqual([])
+  expect(network.errors).toEqual([])
+  expect([...network.workerKinds]).toEqual(expect.arrayContaining(['service_worker']))
   expect(errors).toEqual([])
-  await test.info().attach('offline-module-evidence',{body:Buffer.from(JSON.stringify({modules:['tasks','programs','contacts','whiteboards'],preparedAttachment:'archivo-preparado.txt',browserOffline:await page.evaluate(()=>!navigator.onLine),rejectedNetworkProbes:lab.disconnectedRequests,pageErrors:errors},null,2)),contentType:'application/json'})
+  await test.info().attach('offline-module-evidence',{body:Buffer.from(JSON.stringify({modules:['tasks','programs','contacts','whiteboards'],preparedAttachment:'archivo-preparado.txt',preparedFontFamilies,browserOffline:await page.evaluate(()=>!navigator.onLine),rejectedNetworkProbes:lab.disconnectedRequests,observedRequests:network.requests,observedWebSockets:network.sockets,observedWorkerKinds:[...network.workerKinds],pageErrors:errors},null,2)),contentType:'application/json'})
   await test.info().attach('canonical-whiteboard-after-offline-reload',{body:await page.screenshot(),contentType:'image/png'})
 })

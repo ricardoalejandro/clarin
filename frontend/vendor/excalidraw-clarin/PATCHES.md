@@ -53,7 +53,10 @@ surface is:
 - `packages/excalidraw/renderer/*` plus text measurement/wrapping: run-aware and
   paragraph-alignment-aware canvas and SVG rendering.
 - `packages/excalidraw/fonts/Fonts.ts` and `clarinFontPreload.ts`: eager,
-  bounded, retryable local font preload.
+  bounded, retryable local font preload. FontFace loading also runs without
+  browser connectivity so the same local shell cache can satisfy it; completion
+  depends on actual font results. Missing offline fonts retain the existing
+  reconnection retry. Asset URLs, origin restrictions and catalog are unchanged.
 - `packages/excalidraw/types.ts` and `components/App.tsx`: opt-in and imperative API.
 - `packages/excalidraw/wysiwygTarget.ts`, `utils.ts` and `components/App.tsx`:
   WYSIWYG clipboard ownership for nested `contenteditable` nodes, preventing

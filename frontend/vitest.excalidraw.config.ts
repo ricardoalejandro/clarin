@@ -41,6 +41,7 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./vitest.setup.ts'],
     include: [
+      'vendor/excalidraw-clarin/packages/excalidraw/tests/clarinFontPreload.test.ts',
       'vendor/excalidraw-clarin/packages/excalidraw/tests/clarinSubsetWorkerUrl.test.ts',
       'vendor/excalidraw-clarin/packages/excalidraw/tests/clarinSubsetWorkerLifetime.test.ts',
       'vendor/excalidraw-clarin/packages/excalidraw/tests/clarinCspBindings.test.ts',

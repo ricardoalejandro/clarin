@@ -33,6 +33,7 @@ import type Scene from "../scene/Scene";
 import type { ValueOf } from "../utility-types";
 import { charWidth } from "../element/textMeasurements";
 import {
+  clarinFontPreloadTerminalPhase,
   selectClarinFontPreloadTargets,
   shouldResetClarinFontFace,
 } from "./clarinFontPreload";
@@ -173,10 +174,8 @@ export class Fonts {
       const rightPriority = sceneFamilies.has(right) ? 0 : 1;
       return leftPriority - rightPriority || left - right;
     });
-    if (typeof navigator !== "undefined" && !navigator.onLine) {
-      Fonts.publishClarinPreloadProgress("offline", total);
-      return Fonts.clarinPreloadProgress;
-    }
+    // Browser connectivity does not describe availability in the local shell
+    // cache. Let FontFace.load() determine whether each family can be used.
     const targetFamilies = new Set(
       selectClarinFontPreloadTargets({
         orderedFamilyIds: ordered.map(([family]) => family),
@@ -188,7 +187,10 @@ export class Fonts {
     const targets = ordered.filter(([family]) => targetFamilies.has(family));
     if (!targets.length) {
       Fonts.publishClarinPreloadProgress(
-        Fonts.clarinFailedFamilies.size ? "error" : "complete",
+        clarinFontPreloadTerminalPhase({
+          failedCount: Fonts.clarinFailedFamilies.size,
+          online: typeof navigator === "undefined" || navigator.onLine,
+        }),
         total,
       );
       return Fonts.clarinPreloadProgress;
@@ -245,13 +247,11 @@ export class Fonts {
       if (loadedFaces.length) {
         this.onLoaded(loadedFaces);
       }
-      const offline = typeof navigator !== "undefined" && !navigator.onLine;
       Fonts.publishClarinPreloadProgress(
-        offline
-          ? "offline"
-          : Fonts.clarinFailedFamilies.size
-          ? "error"
-          : "complete",
+        clarinFontPreloadTerminalPhase({
+          failedCount: Fonts.clarinFailedFamilies.size,
+          online: typeof navigator === "undefined" || navigator.onLine,
+        }),
         total,
       );
       return Fonts.clarinPreloadProgress;
