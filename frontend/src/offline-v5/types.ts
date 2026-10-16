@@ -158,8 +158,19 @@ export interface OfflineV5WhiteboardAssetDescriptor {
   size_bytes: number
 }
 
+export interface OfflineV5TaskAttachmentDescriptor {
+  kind: 'task_attachment'
+  id: string
+  root_resource_id: string
+  task_id: string
+  file_id: string
+  content_hash: string
+  content_type: string
+  size_bytes: number
+}
+
 export interface OfflineV5PreparedAsset {
-  descriptor: OfflineV5WhiteboardAssetDescriptor
+  descriptor: OfflineV5WhiteboardAssetDescriptor | OfflineV5TaskAttachmentDescriptor
   root_selection_id: string
   bytes: Blob
 }
@@ -253,6 +264,8 @@ export interface OfflineV5Operation {
   credential_epoch: number
   authority_epoch: number
   base_version: number
+  /** Entity fields before this edit, for field-level three-way reconciliation. */
+  base?: unknown
   depends_on_operation_id?: string
   occurred_at: string
   payload: unknown
@@ -271,7 +284,14 @@ export interface OfflineV5Conflict {
   server?: unknown
   server_version?: number
   created_at: string
+  /** Encrypted with the conflict; retained until an explicit resolution. */
+  operation?: OfflineV5Operation
+  optimistic_entity?: OfflineV5CanonicalEntity
 }
+
+export type OfflineV5ConflictResolution =
+  | { operation_id: string; choice: 'server' }
+  | { operation_id: string; choice: 'fields'; fields: Record<string, 'local' | 'server'> }
 
 export interface OfflineV5Receipt {
   operation_id: string
@@ -332,6 +352,7 @@ export interface OfflineV5MutationInput<T = unknown> {
   entity_type: string
   entity_id: string
   base_version: number
+  base?: unknown
   depends_on_operation_id?: string
   payload: unknown
   /** Canonical optimistic value returned by the existing online component. */

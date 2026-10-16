@@ -98,10 +98,9 @@ func offlineV5EnrichTaskSnapshot(ctx context.Context, tx pgx.Tx, accountID, user
 	object["activity"] = []any{}
 	object["attachments"] = []any{}
 	object["dependencies"] = []any{}
-	if len(taskIDs) == 0 {
-		return offlineV5MarshalSnapshot(object)
+	if err := offlineV5EnrichTaskHierarchy(ctx, tx, accountID, userID, listID, object, canEdit, canComment); err != nil {
+		return nil, err
 	}
-
 	// Add the fields consumed by TaskWorkspace without replacing the v4/v3
 	// projection. The same actor visibility expression that selected the task is
 	// repeated here so an enrichment can never widen the root.
@@ -114,7 +113,9 @@ func offlineV5EnrichTaskSnapshot(ctx context.Context, tx pgx.Tx, accountID, user
 		task.created_at,
 		(SELECT COUNT(*)::int FROM tasks child WHERE child.account_id=task.account_id AND child.parent_task_id=task.id AND child.deleted_at IS NULL),
 		(SELECT COUNT(*)::int FROM task_comments comment WHERE comment.account_id=task.account_id AND comment.task_id=task.id AND comment.deleted_at IS NULL),
-		(SELECT COUNT(*)::int FROM task_attachments attachment WHERE attachment.account_id=task.account_id AND attachment.task_id=task.id AND attachment.attachment_scope='task' AND attachment.storage_removed_at IS NULL)
+		(SELECT COUNT(*)::int FROM task_attachments attachment WHERE attachment.account_id=task.account_id AND attachment.task_id=task.id AND attachment.attachment_scope='task' AND attachment.storage_removed_at IS NULL),
+		(`+taskActorAccessRankSQL("task", "list_item", "$4")+`),
+		(`+taskActorDirectSharedSQL("task", "list_item", "$4")+`)
 		FROM tasks task JOIN task_lists list_item ON list_item.account_id=task.account_id AND list_item.id=task.list_id
 		WHERE task.account_id=$1 AND task.list_id=$2 AND task.id=ANY($3::uuid[]) AND task.deleted_at IS NULL
 		  AND `+taskActorCanViewSQL("task", "list_item", "$4")+`
@@ -122,7 +123,8 @@ func offlineV5EnrichTaskSnapshot(ctx context.Context, tx pgx.Tx, accountID, user
 	if err != nil {
 		return nil, err
 	}
-	userIDs := make(map[uuid.UUID]struct{})
+	// The creator must be selectable even when the prepared list has no tasks.
+	userIDs := map[uuid.UUID]struct{}{userID: {}}
 	for rows.Next() {
 		var id, createdBy, assignedTo uuid.UUID
 		var taskType, status, progressMode, recurrenceRule, notes, resolvedColor, colorSource string
@@ -130,13 +132,14 @@ func offlineV5EnrichTaskSnapshot(ctx context.Context, tx pgx.Tx, accountID, user
 		var completedAt *time.Time
 		var completedBy, leadID, eventID, programID, contactID, recurrenceParentID *uuid.UUID
 		var starred, milestone bool
-		var manualProgress, subtaskCount, commentCount, attachmentCount int
+		var manualProgress, subtaskCount, commentCount, attachmentCount, accessRank int
+		var directShared bool
 		var reminderMinutes *int
 		var createdAt time.Time
 		if err := rows.Scan(&id, &createdBy, &assignedTo, &taskType, &status, &completedAt, &completedBy,
 			&leadID, &eventID, &programID, &contactID, &starred, &progressMode, &manualProgress, &milestone,
 			&recurrenceRule, &recurrenceParentID, &reminderMinutes, &notes, &color, &resolvedColor, &colorSource,
-			&createdAt, &subtaskCount, &commentCount, &attachmentCount); err != nil {
+			&createdAt, &subtaskCount, &commentCount, &attachmentCount, &accessRank, &directShared); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -149,8 +152,9 @@ func offlineV5EnrichTaskSnapshot(ctx context.Context, tx pgx.Tx, accountID, user
 		task["notes"], task["created_at"] = notes, createdAt
 		task["color"], task["resolved_color"], task["color_source"] = color, resolvedColor, colorSource
 		task["subtask_count"], task["comment_count"], task["attachment_count"] = subtaskCount, commentCount, attachmentCount
-		task["capabilities"] = map[string]any{"can_view": true, "can_edit": canEdit, "can_complete": canEdit,
-			"can_comment": canComment, "can_attach": false}
+		access := offlineV5TaskAccess(accessRank, canEdit, canComment)
+		task["capabilities"], task["permissions"], task["effective_access_level"] = access, access, access.Level
+		task["can_complete"], task["can_manage_access"], task["direct_shared"] = access.CanEdit, false, directShared
 		userIDs[createdBy], userIDs[assignedTo] = struct{}{}, struct{}{}
 	}
 	if err := rows.Err(); err != nil {
@@ -280,7 +284,7 @@ func offlineV5TaskComments(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, 
 		}
 		out = append(out, map[string]any{"id": id, "task_id": taskID, "author_id": authorID, "author_name": author,
 			"body": body, "edited_at": editedAt, "created_at": createdAt, "updated_at": updatedAt,
-			"mentions": []any{}, "attachments": []any{}, "can_edit": canWrite, "can_delete": canWrite})
+			"mentions": []any{}, "attachments": []any{}, "can_edit": false, "can_delete": false})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -325,7 +329,7 @@ func offlineV5TaskActivity(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, 
 
 func offlineV5TaskAttachments(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, taskIDs []uuid.UUID) ([]map[string]any, error) {
 	rows, err := tx.Query(ctx, `SELECT attachment.id,attachment.task_id,attachment.media_asset_id,media.filename,media.content_type,
-		media.media_type,media.size_bytes,media.content_hash,attachment.uploaded_by,attachment.created_at
+		media.media_type,media.size_bytes,media.content_hash,attachment.uploaded_by,attachment.created_at,media.object_key
 		FROM task_attachments attachment JOIN media_assets media ON media.account_id=attachment.account_id AND media.id=attachment.media_asset_id
 		WHERE attachment.account_id=$1 AND attachment.task_id=ANY($2::uuid[]) AND attachment.attachment_scope='task' AND attachment.storage_removed_at IS NULL
 		  AND media.status='active' AND media.deleted_at IS NULL
@@ -337,16 +341,17 @@ func offlineV5TaskAttachments(ctx context.Context, tx pgx.Tx, accountID uuid.UUI
 	out := make([]map[string]any, 0)
 	for rows.Next() {
 		var id, taskID, mediaID uuid.UUID
-		var filename, contentType, mediaType, contentHash string
+		var filename, contentType, mediaType, contentHash, objectKey string
 		var size int64
 		var uploadedBy *uuid.UUID
 		var createdAt time.Time
-		if err := rows.Scan(&id, &taskID, &mediaID, &filename, &contentType, &mediaType, &size, &contentHash, &uploadedBy, &createdAt); err != nil {
+		if err := rows.Scan(&id, &taskID, &mediaID, &filename, &contentType, &mediaType, &size, &contentHash, &uploadedBy, &createdAt, &objectKey); err != nil {
 			return nil, err
 		}
+		contentHash = offlineV5AttachmentContentHash(contentHash)
 		out = append(out, map[string]any{"id": id, "task_id": taskID, "media_asset_id": mediaID, "filename": filename,
 			"content_type": contentType, "media_type": mediaType, "size_bytes": size, "content_hash": contentHash,
-			"uploaded_by": uploadedBy, "created_at": createdAt, "available_offline": false})
+			"uploaded_by": uploadedBy, "created_at": createdAt, "available_offline": offlineV5AttachmentCanPrepare(accountID.String(), objectKey, contentHash, contentType, size)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -458,6 +463,11 @@ func offlineV5EnrichProgramSnapshot(ctx context.Context, tx pgx.Tx, accountID, p
 	if err := offlineV5EnrichProgramParticipants(ctx, tx, accountID, programID, object); err != nil {
 		return nil, err
 	}
+	contactProfiles, err := offlineV5ProgramContactProfiles(ctx, tx, accountID, programID)
+	if err != nil {
+		return nil, err
+	}
+	object["contact_profiles"] = contactProfiles
 	goal, err := offlineV5ProgramGoal(ctx, tx, accountID, programID)
 	if err != nil {
 		return nil, err
@@ -476,6 +486,9 @@ func offlineV5EnrichProgramSnapshot(ctx context.Context, tx pgx.Tx, accountID, p
 	}
 	goalView["version"] = goalVersion
 	object["goals"] = goalView
+	globalGoal, err := offlineV5ProgramGoal(ctx, tx, accountID, uuid.Nil)
+	if err != nil { return nil, err }
+	object["global_goals"] = map[string]any{"attendance_goal_percent": globalGoal.AttendanceGoalPercent, "transfer_goal_percent": globalGoal.TransferGoalPercent}
 	academic, err := offlineV5ProgramAcademic(ctx, tx, accountID, programID)
 	if err != nil {
 		return nil, err

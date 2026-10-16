@@ -312,6 +312,8 @@ export type AgendaItem =
 export interface TaskAgendaResponse {
 	items: AgendaItem[]
 	next_cursor?: string
+	offline_notice?: string
+	offline_sources?: { available: Array<'tasks' | 'events'>; unavailable: Array<'tasks' | 'events'> }
 }
 
 export type TaskDueFilter = '' | 'overdue' | 'today' | 'this_week' | 'no_date'

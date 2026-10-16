@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { AlertTriangle, CheckCircle2, CloudOff, Loader2, RefreshCw, Wifi, X } from 'lucide-react'
 import { useClarinRuntime } from './ClarinRuntimeProvider'
 import { offlineRuntimeIndicatorState } from './runtimeState'
+import OfflineConflictDialog from './OfflineConflictDialog'
 
 const tones = {
   emerald: 'border-emerald-200 bg-emerald-50 text-emerald-800',
@@ -15,8 +16,9 @@ const tones = {
 
 export default function OfflineRuntimeIndicator() {
   const router = useRouter()
-  const { snapshot, sync, acknowledgeConflicts, beginOnlineReauthentication, notice, clearNotice } = useClarinRuntime()
+  const { snapshot, sync, beginOnlineReauthentication, notice, clearNotice } = useClarinRuntime()
   const [switchingOnline, setSwitchingOnline] = useState(false)
+  const [reviewing, setReviewing] = useState(false)
   const state = offlineRuntimeIndicatorState(snapshot)
   if (!state && !notice) return null
 
@@ -36,7 +38,7 @@ export default function OfflineRuntimeIndicator() {
         ? CloudOff
         : CheckCircle2
 
-  return <aside
+  return <><aside
     data-testid="offline-v5-runtime-indicator"
     data-offline-mode={snapshot.mode}
     role={notice ? 'alert' : 'status'}
@@ -48,10 +50,10 @@ export default function OfflineRuntimeIndicator() {
     {notice && <span className="min-w-[220px] flex-1 font-medium">{notice}</span>}
     {snapshot.conflictCount > 0 && <button
       type="button"
-      onClick={() => void acknowledgeConflicts()}
+      onClick={() => setReviewing(true)}
       className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-current/15 bg-white/70 px-2.5 font-bold outline-none transition hover:bg-white focus-visible:ring-2 focus-visible:ring-current/30"
-    >Aceptar versión del servidor</button>}
-    {state?.canSync && snapshot.conflictCount === 0 && <button
+    >Revisar conflictos</button>}
+    {state?.canSync && <button
       type="button"
       onClick={() => void sync()}
       className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-current/15 bg-white/70 px-2.5 font-bold outline-none transition hover:bg-white focus-visible:ring-2 focus-visible:ring-current/30"
@@ -65,5 +67,5 @@ export default function OfflineRuntimeIndicator() {
       title="Comprobar la conexión y autenticar la misma identidad antes de salir del modo offline"
     >{switchingOnline ? <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" /> : <Wifi className="h-3.5 w-3.5" />}Volver online</button>}
     {notice && <button type="button" onClick={clearNotice} className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-white/70" aria-label="Cerrar aviso"><X className="h-3.5 w-3.5" /></button>}
-  </aside>
+  </aside>{reviewing && <OfflineConflictDialog onClose={() => setReviewing(false)} />}</>
 }

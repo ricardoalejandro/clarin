@@ -24,7 +24,8 @@ import {
   verifyOfflineV5LeaseAvailability,
 } from './crypto'
 import { canonicalOfflineLogin, canonicalOfflineV5Identity, sameOfflineV5Identity } from './identity'
-import { offlineV5WhiteboardAssetDescriptors, validateOfflineV5Bundle } from './manifest'
+import { offlineV5ConflictCanMerge, offlineV5ConflictRetry } from './conflicts'
+import { offlineV5PreparedAssetDescriptors, validateOfflineV5Bundle } from './manifest'
 import { OfflineV5SessionRegistry, type OfflineV5ActiveSession } from './session'
 import { BrowserOfflineV5Storage, hasOfflineV5Database, storedCipherBytes, type OfflineV5Storage, type OfflineV5StoreMutation } from './storage'
 import {
@@ -35,6 +36,7 @@ import {
   OfflineV5Error,
   type OfflineV5CanonicalEntity,
   type OfflineV5Conflict,
+  type OfflineV5ConflictResolution,
   type OfflineV5Identity,
   type OfflineV5LocalGrantSummary,
   type OfflineV5Manifest,
@@ -98,6 +100,23 @@ class ReusedV4ProfileProvider implements OfflineV5ProfileProvider {
 
 const encoder = new TextEncoder()
 
+function confirmedOfflineV5Entity(entity: OfflineV5CanonicalEntity, receipt: OfflineV5Receipt): OfflineV5CanonicalEntity {
+  const version = receipt.server_version ?? entity.version
+  const value = entity.value
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { ...entity, version }
+  const object = value as Record<string, unknown>
+  const projectionKey: Record<string, string> = { task: 'task', contact: 'contact', program: 'program', program_session: 'session', program_goal: 'goal', program_attendance: 'attendance' }
+  const projection = receipt.result?.[projectionKey[entity.entity_type]]
+  const canonical = projection && typeof projection === 'object' && !Array.isArray(projection)
+    && (projection as Record<string, unknown>).id === object.id ? projection as Record<string, unknown> : {}
+  if (entity.entity_type === 'whiteboard') {
+    const scene = receipt.result?.scene as Record<string, unknown> | undefined
+    const canonicalScene = scene?.board_id === entity.entity_id && scene.scene && typeof scene.scene === 'object' ? scene : {}
+    return { ...entity, version, value: { ...object, ...canonicalScene, version, sequence: version, scene_sequence: version, offline_pending: false } }
+  }
+  return { ...entity, version, value: { ...object, ...canonical, version, offline_pending: false } }
+}
+
 export const OFFLINE_V5_CLOCK_ROLLBACK_TOLERANCE_MS = 60_000
 export const OFFLINE_V5_HIGH_WATER_INTERVAL_MS = 60_000
 
@@ -119,6 +138,7 @@ export class OfflineV5Engine {
   private readonly blobStore: OfflineV5OpaqueBlobStore
   private readonly highWaterWrites = new Map<string, Promise<void>>()
   private readonly highWaterScheduledAt = new Map<string, number>()
+  private readonly namespaceWrites = new Map<string, Promise<void>>()
   private readonly now: () => number
 
   constructor(
@@ -132,6 +152,19 @@ export class OfflineV5Engine {
     this.blobStore = blobStore
     this.now = now
     this.sessions = new OfflineV5SessionRegistry(now)
+  }
+
+  private withNamespaceWrite<T>(portID: string, generation: number, work: () => Promise<T>): Promise<T> {
+    const namespace = this.sessions.require(portID, generation).envelope.namespace
+    const prior = this.namespaceWrites.get(namespace) || Promise.resolve()
+    const operation = prior.then(async (): Promise<T> => {
+      const locks = globalThis.navigator?.locks
+      return locks ? await locks.request(`clarin-offline-v5-write:${namespace}`, { mode: 'exclusive' }, work) : await work()
+    })
+    const settled = operation.then(() => undefined, () => undefined)
+    this.namespaceWrites.set(namespace, settled)
+    void settled.then(() => { if (this.namespaceWrites.get(namespace) === settled) this.namespaceWrites.delete(namespace) })
+    return operation
   }
 
   async profile(): Promise<{ browser_profile_id: string; public_jwk: JWK; request_ids: string[] }> {
@@ -636,9 +669,20 @@ export class OfflineV5Engine {
    * half-applied local result when quota, identity epoch or storage fails.
    */
   async queueMutations(portID: string, generation: number, inputs: readonly OfflineV5MutationInput[]): Promise<OfflineV5MutationResult[]> {
+    return this.withNamespaceWrite(portID, generation, () => this.queueMutationsLocked(portID, generation, inputs))
+  }
+
+  private async queueMutationsLocked(portID: string, generation: number, inputs: readonly OfflineV5MutationInput[], resolvedConflictKey?: string): Promise<OfflineV5MutationResult[]> {
     if (!inputs.length || inputs.length > 200) throw new OfflineV5Error('invalid_operation_batch', 'El lote local debe contener entre 1 y 200 cambios.')
     const session = await this.checkedSession(portID, generation)
     const pendingBefore = await this.pendingCount(session)
+    const pendingRecords: StoredOperationRecord[] = []
+    for (const record of (await this.records(session.envelope.namespace, 'operations')).sort((a, b) => (a.sequence || 0) - (b.sequence || 0))) {
+      const stored = await this.decryptRecord<StoredOperationRecord>(session, 'operations', record)
+      this.assertOperationIdentity(session, stored.operation)
+      pendingRecords.push(stored)
+      session.sequence = Math.max(session.sequence, record.sequence || 0)
+    }
     const seenOperationIDs = new Set<string>()
     const seenEntityKeys = new Set<string>()
     const results = new Array<OfflineV5MutationResult>(inputs.length)
@@ -656,7 +700,7 @@ export class OfflineV5Engine {
       const capability = session.manifest.capabilities.find(item => item.action === action && item.selection_id === input.selection_id && item.root_resource_id === root?.resource_id && item.resource_id === root?.resource_id)
       if (!root || !capability) throw new OfflineV5Error('offline_action_denied', 'Este cambio no está autorizado para el recurso seleccionado.')
       if (!Number.isSafeInteger(input.base_version) || input.base_version < 0 || !input.entity_id || !input.entity_type || !input.resource_id) throw new OfflineV5Error('invalid_operation', 'El cambio local no corresponde al recurso seleccionado.')
-      validateManifestMembership(session.manifest, root, action, input)
+      validateManifestMembership(session.manifest, root, action, input, pendingRecords)
       validateMutationScope({
         value: input.optimistic_value,
         action,
@@ -670,6 +714,19 @@ export class OfflineV5Engine {
       const operationID = input.operation_id || crypto.randomUUID()
       if (seenOperationIDs.has(operationID)) throw new OfflineV5Error('duplicate_operation', 'El lote local contiene identificadores de operación repetidos.')
       seenOperationIDs.add(operationID)
+      const previousDelivery = pendingRecords.find(value => value.operation.operation_id === operationID)
+      const predecessor = [...pendingRecords].reverse().find(value => value.operation.operation_id !== operationID
+        && value.optimistic_entity.entity_type === input.entity_type && value.optimistic_entity.entity_id === input.entity_id
+        && value.operation.selection_id === input.selection_id)
+      const payloadObject = input.payload && typeof input.payload === 'object' ? input.payload as Record<string, unknown> : {}
+      const parentID = action === 'tasks.comments.create' ? payloadObject.task_id : action === 'tasks.create' ? payloadObject.parent_task_id : undefined
+      const parentCreation = pendingRecords.find(value => value.operation.action === 'tasks.create'
+        && value.operation.selection_id === input.selection_id && value.operation.resource_id === parentID)
+      const dependency = previousDelivery ? previousDelivery.operation.depends_on_operation_id : predecessor?.operation.operation_id || input.depends_on_operation_id || parentCreation?.operation.operation_id
+      const rawBase = input.base ?? (previousDelivery ? previousDelivery.operation.base : predecessor?.optimistic_entity.value)
+      const base = ['tasks.update', 'contacts.update', 'programs.update'].includes(action) && rawBase && typeof rawBase === 'object'
+        ? Object.fromEntries(Object.keys(payloadObject).filter(key => Object.prototype.hasOwnProperty.call(rawBase, key)).map(key => [key, (rawBase as Record<string, unknown>)[key]]))
+        : rawBase
       const operation: OfflineV5Operation = {
         protocol_version: 5,
         grant_id: session.identity.grant_id,
@@ -686,7 +743,8 @@ export class OfflineV5Engine {
         credential_epoch: session.manifest.credential_epoch,
         authority_epoch: session.manifest.authority_epoch,
         base_version: input.base_version,
-        ...(input.depends_on_operation_id ? { depends_on_operation_id: input.depends_on_operation_id } : {}),
+        ...(base === undefined ? {} : { base }),
+        ...(dependency ? { depends_on_operation_id: dependency } : {}),
         occurred_at: new Date().toISOString(),
         payload: input.payload,
       }
@@ -715,6 +773,7 @@ export class OfflineV5Engine {
 
     if (pendingBefore + prepared.length > OFFLINE_V5_MAX_OUTBOX) throw new OfflineV5Error('outbox_full', 'Hay demasiados cambios pendientes. Conecta y sincroniza antes de guardar más.')
     const mutations: OfflineV5StoreMutation[] = []
+    if (resolvedConflictKey) mutations.push({ store: 'conflicts', key: resolvedConflictKey, remove: true })
     for (const value of prepared) {
       const sequence = this.sessions.nextSequence(portID, generation)
       mutations.push(await this.encryptRecord(session, 'operations', value.operationKey, 'operation', { identity: canonicalOfflineV5Identity(session.identity), operation: value.operation, optimistic_entity: value.entity } satisfies StoredOperationRecord, { status: 'pending', sequence, created_at: Date.parse(value.operation.occurred_at) }))
@@ -725,6 +784,11 @@ export class OfflineV5Engine {
       this.sessions.activity(portID, generation)
     }
     session.pendingCount = mutations.length ? await this.pendingCount(session) : pendingBefore
+    if (resolvedConflictKey) {
+      session.conflictCount = (await this.records(session.envelope.namespace, 'conflicts')).length
+      session.syncState = session.conflictCount ? 'conflict' : 'idle'
+      this.sessions.emit(portID)
+    }
     for (const value of prepared) results[value.index] = { operation_id: value.operation.operation_id, state: 'queued', entity: value.entity, pending_count: session.pendingCount }
     for (const result of results) result.pending_count = session.pendingCount
     return results
@@ -743,11 +807,26 @@ export class OfflineV5Engine {
   }
 
   async applyReceipts(portID: string, generation: number, receipts: OfflineV5Receipt[]): Promise<void> {
+    return this.withNamespaceWrite(portID, generation, () => this.applyReceiptsLocked(portID, generation, receipts))
+  }
+
+  private async applyReceiptsLocked(portID: string, generation: number, receipts: OfflineV5Receipt[]): Promise<void> {
     const session = await this.checkedSession(portID, generation)
     if (!Array.isArray(receipts) || receipts.length > 1000) throw new OfflineV5Error('invalid_receipts', 'La sincronización devolvió recibos inválidos.')
     const mutations: OfflineV5StoreMutation[] = []
-    for (const receipt of receipts) {
+    const pending = new Map<string, { record: OfflineV5StoredCipher; stored: StoredOperationRecord }>()
+    for (const record of await this.records(session.envelope.namespace, 'operations')) {
+      const stored = await this.decryptRecord<StoredOperationRecord>(session, 'operations', record)
+      this.assertOperationIdentity(session, stored.operation)
+      pending.set(stored.operation.operation_id, { record, stored })
+    }
+    const terminal = new Set(receipts.filter(receipt => receipt.status !== 'pending').map(receipt => receipt.operation_id))
+    const seenReceipts = new Set<string>()
+    for (const receipt of [...receipts].sort((a, b) => (pending.get(a.operation_id)?.record.sequence || 0) - (pending.get(b.operation_id)?.record.sequence || 0))) {
       if (!receipt?.operation_id || !['applied', 'merged', 'noop', 'conflict', 'pending', 'rejected'].includes(receipt.status)) throw new OfflineV5Error('invalid_receipt', 'La sincronización devolvió un recibo desconocido.')
+      if (receipt.server_version !== undefined && (!Number.isSafeInteger(receipt.server_version) || receipt.server_version < 0)) throw new OfflineV5Error('invalid_receipt', 'La sincronización devolvió una versión inválida.')
+      if (seenReceipts.has(receipt.operation_id)) throw new OfflineV5Error('invalid_receipts', 'La sincronización devolvió un recibo repetido.')
+      seenReceipts.add(receipt.operation_id)
       const operationKey = await blindIndex(session.keys.blindIndex, 'operation', receipt.operation_id)
       const record = await this.storage.get<OfflineV5StoredCipher>('operations', operationKey)
       if (!record) continue
@@ -757,6 +836,10 @@ export class OfflineV5Engine {
       if (receipt.status === 'pending') continue
       mutations.push({ store: 'operations', key: operationKey, remove: true })
       const entityKey = await blindIndex(session.keys.blindIndex, 'entity', stored.optimistic_entity.entity_type, stored.optimistic_entity.entity_id)
+      const hasLaterPending = [...pending.values()].some(value => !terminal.has(value.stored.operation.operation_id)
+        && (value.record.sequence || 0) > (record.sequence || 0)
+        && value.stored.optimistic_entity.entity_type === stored.optimistic_entity.entity_type
+        && value.stored.optimistic_entity.entity_id === stored.optimistic_entity.entity_id)
       if (receipt.status === 'conflict' || receipt.status === 'rejected') {
         const conflict: OfflineV5Conflict = {
           operation_id: receipt.operation_id,
@@ -766,22 +849,23 @@ export class OfflineV5Engine {
           status: receipt.status,
           error_code: receipt.error_code,
           fields: receipt.conflict?.fields,
-          base: receipt.conflict?.base,
+          base: receipt.conflict?.base ?? stored.operation.base,
           local: receipt.conflict?.local ?? stored.operation.payload,
           server: receipt.conflict?.server ?? receipt.result,
           server_version: receipt.server_version,
           created_at: new Date().toISOString(),
+          operation: stored.operation,
+          optimistic_entity: stored.optimistic_entity,
         }
         const conflictKey = await blindIndex(session.keys.blindIndex, 'conflict', receipt.operation_id)
-        mutations.push(await this.encryptRecord(session, 'conflicts', conflictKey, 'conflict', { identity: canonicalOfflineV5Identity(session.identity), conflict } satisfies StoredConflictRecord, { status: receipt.status, root_selection_id: stored.operation.selection_id, created_at: Date.now() }))
-        // Pilot conflict policy is server-wins. Keep the encrypted notice for
-        // audit/acknowledgement, but never let stale optimistic data obscure the
-        // canonical snapshot returned by this sync.
-        mutations.push({ store: 'entities', key: entityKey, remove: true })
+        mutations.push(await this.encryptRecord(session, 'conflicts', conflictKey, 'conflict', { identity: canonicalOfflineV5Identity(session.identity), conflict } satisfies StoredConflictRecord, { status: receipt.status, sequence: record.sequence, root_selection_id: stored.operation.selection_id, created_at: Date.now() }))
+        if (!hasLaterPending) mutations.push(await this.encryptRecord(session, 'entities', entityKey, `overlay:${stored.optimistic_entity.entity_type}`, {
+          kind: 'overlay', identity: canonicalOfflineV5Identity(session.identity), entity: stored.optimistic_entity, local_confirmation: 'conflict',
+        } satisfies StoredEntityRecord, { root_selection_id: stored.operation.selection_id, sequence: record.sequence, created_at: Date.now() }))
       } else {
         const resultEntity = receipt.result?.entity as OfflineV5CanonicalEntity | undefined
-        const entity = resultEntity && resultEntity.entity_id === stored.optimistic_entity.entity_id ? resultEntity : { ...stored.optimistic_entity, version: receipt.server_version ?? stored.optimistic_entity.version }
-        mutations.push(await this.encryptRecord(session, 'entities', entityKey, `overlay:${entity.entity_type}`, { kind: 'overlay', identity: canonicalOfflineV5Identity(session.identity), entity, local_confirmation: 'confirmed' } satisfies StoredEntityRecord, { root_selection_id: stored.operation.selection_id, created_at: Date.now() }))
+        const entity = resultEntity && resultEntity.entity_id === stored.optimistic_entity.entity_id ? resultEntity : confirmedOfflineV5Entity(stored.optimistic_entity, receipt)
+        if (!hasLaterPending) mutations.push(await this.encryptRecord(session, 'entities', entityKey, `overlay:${entity.entity_type}`, { kind: 'overlay', identity: canonicalOfflineV5Identity(session.identity), entity, local_confirmation: 'confirmed' } satisfies StoredEntityRecord, { root_selection_id: stored.operation.selection_id, created_at: Date.now() }))
       }
     }
     await this.storage.commit(mutations, { namespace: session.envelope.namespace, quotaBytes: session.manifest.max_storage_bytes, expectedEpoch: { key: epochKey(session.identity.browser_profile_id), value: session.authEpoch } })
@@ -792,6 +876,10 @@ export class OfflineV5Engine {
   }
 
   async refreshPreparedBundle(portID: string, generation: number, bundle: OfflineV5PrepareBundle, assets: readonly OfflineV5PreparedAsset[] = []): Promise<OfflineV5SessionSnapshot> {
+    return this.withNamespaceWrite(portID, generation, () => this.refreshPreparedBundleLocked(portID, generation, bundle, assets))
+  }
+
+  private async refreshPreparedBundleLocked(portID: string, generation: number, bundle: OfflineV5PrepareBundle, assets: readonly OfflineV5PreparedAsset[]): Promise<OfflineV5SessionSnapshot> {
     const session = await this.checkedSession(portID, generation)
     const identity = await validateOfflineV5Bundle(this.origin, bundle, session.identity)
     if (!sameOfflineV5Identity(identity, session.identity) || bundle.manifest.selection_revision !== session.manifest.selection_revision || bundle.manifest.revision < session.manifest.revision) {
@@ -886,17 +974,60 @@ export class OfflineV5Engine {
   }
 
   async acknowledgeServerWinsConflicts(portID: string, generation: number): Promise<OfflineV5SessionSnapshot> {
+    // Compatibility API: still an explicit server choice, never called by sync.
+    for (const conflict of await this.conflicts(portID, generation)) await this.resolveConflict(portID, generation, { operation_id: conflict.operation_id, choice: 'server' })
+    return this.runtimeSnapshot(portID)
+  }
+
+  async resolveConflict(portID: string, generation: number, resolution: OfflineV5ConflictResolution): Promise<OfflineV5SessionSnapshot> {
+    return this.withNamespaceWrite(portID, generation, () => this.resolveConflictLocked(portID, generation, resolution))
+  }
+
+  private async resolveConflictLocked(portID: string, generation: number, resolution: OfflineV5ConflictResolution): Promise<OfflineV5SessionSnapshot> {
     const session = await this.checkedSession(portID, generation)
-    const records = await this.records(session.envelope.namespace, 'conflicts', 'namespace', session.envelope.namespace, 1000)
-    const mutations: OfflineV5StoreMutation[] = []
-    for (const record of records) {
-      const stored = await this.decryptRecord<StoredConflictRecord>(session, 'conflicts', record)
-      if (stored.identity !== canonicalOfflineV5Identity(session.identity)) throw new OfflineV5Error('wrong_record_identity', 'Se bloqueó un conflicto de otra identidad.')
-      mutations.push({ store: 'conflicts', key: record.storage_key, remove: true })
+    if (!resolution?.operation_id || !['server', 'fields'].includes(resolution.choice)) throw new OfflineV5Error('invalid_conflict_resolution', 'La decisión de conflicto no es válida.')
+    const conflictKey = await blindIndex(session.keys.blindIndex, 'conflict', resolution.operation_id)
+    const record = await this.storage.get<OfflineV5StoredCipher>('conflicts', conflictKey)
+    if (!record) throw new OfflineV5Error('conflict_missing', 'Este conflicto ya fue resuelto. Actualiza la revisión.')
+    const stored = await this.decryptRecord<StoredConflictRecord>(session, 'conflicts', record)
+    if (stored.identity !== canonicalOfflineV5Identity(session.identity)) throw new OfflineV5Error('wrong_record_identity', 'Se bloqueó un conflicto de otra identidad.')
+    const retry = offlineV5ConflictRetry(stored.conflict, resolution)
+    if (retry) {
+      await this.queueMutationsLocked(portID, generation, [retry], conflictKey)
+      return this.runtimeSnapshot(portID)
+    }
+
+    const mutations: OfflineV5StoreMutation[] = [{ store: 'conflicts', key: conflictKey, remove: true }]
+    const target = stored.conflict.optimistic_entity
+    if (target) {
+      const alternatives: Array<{ sequence: number; entity: OfflineV5CanonicalEntity; state: 'pending' | 'conflict' }> = []
+      for (const other of await this.records(session.envelope.namespace, 'operations')) {
+        const value = await this.decryptRecord<StoredOperationRecord>(session, 'operations', other)
+        if (value.optimistic_entity.entity_type === target.entity_type && value.optimistic_entity.entity_id === target.entity_id) alternatives.push({ sequence: other.sequence || 0, entity: value.optimistic_entity, state: 'pending' })
+      }
+      for (const other of await this.records(session.envelope.namespace, 'conflicts')) {
+        if (other.storage_key === conflictKey) continue
+        const value = await this.decryptRecord<StoredConflictRecord>(session, 'conflicts', other)
+        if (value.conflict.optimistic_entity?.entity_type === target.entity_type && value.conflict.optimistic_entity.entity_id === target.entity_id) alternatives.push({ sequence: other.sequence || 0, entity: value.conflict.optimistic_entity, state: 'conflict' })
+      }
+      const latest = alternatives.sort((a, b) => b.sequence - a.sequence)[0]
+      const entityKey = await blindIndex(session.keys.blindIndex, 'entity', target.entity_type, target.entity_id)
+      if (latest) mutations.push(await this.encryptRecord(session, 'entities', entityKey, `overlay:${target.entity_type}`, {
+        kind: 'overlay', identity: canonicalOfflineV5Identity(session.identity), entity: latest.entity, local_confirmation: latest.state,
+      } satisfies StoredEntityRecord, { root_selection_id: latest.entity.root_selection_id, sequence: latest.sequence }))
+      else if (offlineV5ConflictCanMerge(stored.conflict)) {
+        const entity = { ...target, version: stored.conflict.server_version!, value: {
+          ...(target.value as Record<string, unknown>), ...(stored.conflict.server as Record<string, unknown>), version: stored.conflict.server_version!, offline_pending: false,
+        } }
+        mutations.push(await this.encryptRecord(session, 'entities', entityKey, `overlay:${target.entity_type}`, {
+          kind: 'overlay', identity: canonicalOfflineV5Identity(session.identity), entity, local_confirmation: 'confirmed',
+        } satisfies StoredEntityRecord, { root_selection_id: target.root_selection_id }))
+      }
+      else mutations.push({ store: 'entities', key: entityKey, remove: true })
     }
     await this.storage.commit(mutations, { namespace: session.envelope.namespace, quotaBytes: session.manifest.max_storage_bytes, expectedEpoch: { key: epochKey(session.identity.browser_profile_id), value: session.authEpoch } })
-    session.conflictCount = 0
-    session.syncState = 'idle'
+    session.conflictCount = (await this.records(session.envelope.namespace, 'conflicts')).length
+    session.syncState = session.conflictCount ? 'conflict' : 'idle'
     session.error = undefined
     return this.sessions.emit(portID)
   }
@@ -984,8 +1115,8 @@ export class OfflineV5Engine {
     supplied: readonly OfflineV5PreparedAsset[],
     stagedDirectories: string[],
   ): Promise<OfflineV5StoreMutation[]> {
-    const expected = new Map<string, { descriptor: ReturnType<typeof offlineV5WhiteboardAssetDescriptors>[number]; rootSelectionID: string }>()
-    for (const snapshot of bundle.snapshots) for (const descriptor of offlineV5WhiteboardAssetDescriptors(snapshot)) {
+    const expected = new Map<string, { descriptor: ReturnType<typeof offlineV5PreparedAssetDescriptors>[number]; rootSelectionID: string }>()
+    for (const snapshot of bundle.snapshots) for (const descriptor of offlineV5PreparedAssetDescriptors(snapshot)) {
       if (expected.has(descriptor.id)) throw new OfflineV5Error('duplicate_asset', 'Una imagen aparece más de una vez en la copia offline.')
       expected.set(descriptor.id, { descriptor, rootSelectionID: snapshot.root_selection_id })
     }
@@ -1027,7 +1158,7 @@ export class OfflineV5Engine {
       const descriptor = {
         identity: canonicalOfflineV5Identity(identity),
         blob_id: signed.descriptor.id,
-        entity_type: 'whiteboard_asset',
+        entity_type: 'kind' in signed.descriptor ? signed.descriptor.kind : 'whiteboard_asset',
         entity_id: signed.descriptor.root_resource_id,
         root_selection_id: signed.rootSelectionID,
         name: signed.descriptor.file_id,
@@ -1040,7 +1171,7 @@ export class OfflineV5Engine {
       const ciphertext = await encryptOfflineV5Value(content, identity, 'blobs', key, descriptor)
       const stored: OfflineV5StoredBlob = {
         storage_key: key, namespace, record_type: 'blob', root_selection_id: signed.rootSelectionID,
-        entity_type: 'whiteboard_asset', entity_id: signed.descriptor.root_resource_id,
+        entity_type: 'kind' in signed.descriptor ? signed.descriptor.kind : 'whiteboard_asset', entity_id: signed.descriptor.root_resource_id,
         chunk_count: chunks.length, plaintext_bytes: signed.descriptor.size_bytes, opfs_directory: directory,
         ciphertext, byte_size: chunks.reduce((sum, chunk) => sum + chunk.ciphertext_bytes, 0) + storedCipherBytes({ ciphertext }),
       }
@@ -1272,16 +1403,19 @@ function validateMutationScope(input: {
   if (module === 'whiteboards' && (entityType !== 'whiteboard' || entityID !== rootResourceID || resourceID !== rootResourceID)) throw new OfflineV5Error('wrong_whiteboard_root', 'Solo puede modificarse la pizarra seleccionada.')
 }
 
-function validateManifestMembership(manifest: OfflineV5Manifest, root: OfflineV5Root, action: string, input: OfflineV5MutationInput) {
+function validateManifestMembership(manifest: OfflineV5Manifest, root: OfflineV5Root, action: string, input: OfflineV5MutationInput, pending: readonly StoredOperationRecord[] = []) {
   const payload = input.payload && typeof input.payload === 'object' && !Array.isArray(input.payload) ? input.payload as Record<string, unknown> : {}
   const dependency = (type: string, id: unknown) => typeof id === 'string' && manifest.dependencies.some(item => item.root_selection_id === root.selection_id && item.resource_type === type && item.resource_id === id)
   if (root.module === 'tasks') {
+    const knownTask = (id: unknown) => dependency('task', id) || pending.some(value => value.operation.action === 'tasks.create'
+      && value.operation.selection_id === root.selection_id && value.operation.resource_id === id
+      && value.optimistic_entity.root_resource_id === root.resource_id)
     if (action === 'tasks.create') {
-      if (payload.parent_task_id != null && !dependency('task', payload.parent_task_id)) throw new OfflineV5Error('outside_selection', 'La tarea padre no pertenece a la lista seleccionada.')
+      if (payload.parent_task_id != null && !knownTask(payload.parent_task_id)) throw new OfflineV5Error('outside_selection', 'La tarea padre no pertenece a la lista seleccionada.')
       return
     }
     const taskID = action === 'tasks.comments.create' ? payload.task_id : input.resource_id
-    if (!dependency('task', taskID)) throw new OfflineV5Error('outside_selection', 'La tarea no pertenece a la lista seleccionada.')
+    if (!knownTask(taskID)) throw new OfflineV5Error('outside_selection', 'La tarea no pertenece a la lista seleccionada.')
     return
   }
   if (root.module === 'contacts') {

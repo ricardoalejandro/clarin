@@ -36,3 +36,7 @@ export function canRetryTaskAttachmentConversion(preview: Pick<TaskAttachmentPre
 export function taskAttachmentPreviewPollDelay(attempt: number) {
   return Math.min(2_000 * (2 ** Math.max(0, attempt)), ATTACHMENT_PREVIEW_POLL_MAX_MS)
 }
+
+export function taskAttachmentCommentingAvailable(canComment: boolean, isOffline: boolean) {
+  return canComment && !isOffline
+}

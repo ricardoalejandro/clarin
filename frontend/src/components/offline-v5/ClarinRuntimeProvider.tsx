@@ -18,10 +18,12 @@ import {
   getOfflineV5RuntimeSnapshot,
   installOfflineV5FetchInterceptor,
   requestOfflineV5Sync,
+  resolveOfflineV5Conflict,
   subscribeOfflineV5Runtime,
   type RuntimeSnapshot,
 } from '@/lib/offlineV5Runtime'
 import { browserOfflineV5Client } from '@/offline-v5/client'
+import type { OfflineV5Conflict, OfflineV5ConflictResolution } from '@/offline-v5/types'
 import { clearOfflineReauthExpectation, storeOfflineReauthExpectation } from '@/offline-v3/offlineReauth'
 import { onlineOnlyActionReason, runtimeUsesLocalData } from './runtimeState'
 
@@ -33,6 +35,8 @@ interface ClarinRuntimeValue {
   requireOnline: (label: string) => boolean
   sync: () => Promise<void>
   acknowledgeConflicts: () => Promise<void>
+  conflicts: () => Promise<OfflineV5Conflict[]>
+  resolveConflict: (resolution: OfflineV5ConflictResolution) => Promise<void>
   beginOnlineReauthentication: () => Promise<boolean>
   activity: () => void
   notice: string
@@ -60,6 +64,8 @@ const fallbackValue: ClarinRuntimeValue = {
   requireOnline: () => true,
   sync: async () => {},
   acknowledgeConflicts: async () => {},
+  conflicts: async () => [],
+  resolveConflict: async () => {},
   beginOnlineReauthentication: async () => false,
   activity: () => {},
   notice: '',
@@ -139,6 +145,11 @@ export function ClarinRuntimeProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  const conflicts = useCallback(() => browserOfflineV5Client.conflicts(), [])
+  const resolveConflict = useCallback(async (resolution: OfflineV5ConflictResolution) => {
+    await resolveOfflineV5Conflict(resolution)
+  }, [])
+
   const beginOnlineReauthentication = useCallback(async () => {
     if (!runtimeUsesLocalData(snapshot) || !snapshot.userId || !snapshot.accountId) {
       setNotice('No hay una identidad offline activa que pueda volver al modo online.')
@@ -170,11 +181,13 @@ export function ClarinRuntimeProvider({ children }: { children: ReactNode }) {
     requireOnline,
     sync,
     acknowledgeConflicts,
+    conflicts,
+    resolveConflict,
     beginOnlineReauthentication,
     activity,
     notice,
     clearNotice: () => setNotice(''),
-  }), [acknowledgeConflicts, activity, beginOnlineReauthentication, can, explain, notice, requireOnline, snapshot, sync])
+  }), [acknowledgeConflicts, activity, beginOnlineReauthentication, can, conflicts, explain, notice, requireOnline, resolveConflict, snapshot, sync])
 
   return <ClarinRuntimeContext.Provider value={value}>{children}</ClarinRuntimeContext.Provider>
 }

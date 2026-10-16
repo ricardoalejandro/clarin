@@ -1,7 +1,7 @@
 import { clearOfflineV5FallbackOffer, clearOfflineV5LocalAuthority, enableOfflineV5Shell, setOfflineV5ServiceWorkerMode } from '../lib/offlineV5ServiceWorker'
 import { clearOfflineV5BootMarker, markOfflineV5Boot } from '../lib/offlineV5Boot'
 import { invalidateOfflineV5StoredSessionEpoch } from './storage'
-import { OFFLINE_V5_PROTOCOL, OFFLINE_V5_SCHEMA, OFFLINE_V5_WORKER_URL, OfflineV5Error, type OfflineV5LocalGrantSummary, type OfflineV5MutationInput, type OfflineV5MutationResult, type OfflineV5Root, type OfflineV5RouteRequest, type OfflineV5RouteResponse, type OfflineV5SessionSnapshot, type OfflineV5Snapshot } from './types'
+import { OFFLINE_V5_PROTOCOL, OFFLINE_V5_SCHEMA, OFFLINE_V5_WORKER_URL, OfflineV5Error, type OfflineV5Conflict, type OfflineV5ConflictResolution, type OfflineV5LocalGrantSummary, type OfflineV5MutationInput, type OfflineV5MutationResult, type OfflineV5Root, type OfflineV5RouteRequest, type OfflineV5RouteResponse, type OfflineV5SessionSnapshot, type OfflineV5Snapshot } from './types'
 
 const OFFLINE_V5_CLIENT_BUILD = process.env.NEXT_PUBLIC_BUILD_VERSION || 'dev'
 const OFFLINE_V5_WORKER_RECOVERY_PREFIX = 'clarin:offline-v5-worker-recovery:'
@@ -232,7 +232,12 @@ export class BrowserOfflineV5Client {
   route(request: OfflineV5RouteRequest) { return this.request<OfflineV5RouteResponse>('route.request', [request], true) }
   aggregates(module?: string) { return this.request<OfflineV5Snapshot[]>('data.aggregates', [module], true) }
   mutate<T>(input: OfflineV5MutationInput<T>) { return this.request<OfflineV5MutationResult<T>>('data.mutate', [input], true) }
-  conflicts() { return this.request('data.conflicts', [], true) }
+  conflicts() { return this.request<OfflineV5Conflict[]>('data.conflicts', [], true) }
+  async resolveConflict(resolution: OfflineV5ConflictResolution) {
+    const snapshot = await this.request<OfflineV5SessionSnapshot>('data.conflicts.resolve', [resolution], true)
+    this.publish(snapshot)
+    return snapshot
+  }
   async acknowledgeServerWinsConflicts() {
     const snapshot = await this.request<OfflineV5SessionSnapshot>('data.conflicts.acknowledge-server-wins', [], true)
     this.publish(snapshot)
