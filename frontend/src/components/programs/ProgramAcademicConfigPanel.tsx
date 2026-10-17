@@ -26,6 +26,8 @@ import type { ProgramAcademicConfig, ProgramCourse, ProgramCourseCatalogResponse
 
 interface ProgramAcademicConfigPanelProps {
   programId: string
+  /** Preserve the desktop draft while its surface is unavailable. */
+  suspended?: boolean
   config: ProgramAcademicConfig | null
   loading: boolean
   error?: string
@@ -46,6 +48,7 @@ const sameIDs = (left: string[], right: string[]) => left.length === right.lengt
 
 export default function ProgramAcademicConfigPanel({
   programId,
+  suspended = false,
   config,
   loading,
   error = '',
@@ -55,6 +58,13 @@ export default function ProgramAcademicConfigPanel({
   onDirtyChange,
   onNavigateToCatalog,
 }: ProgramAcademicConfigPanelProps) {
+  const suspendedRef = useRef(suspended)
+  suspendedRef.current = suspended
+  const initializedProgramRef = useRef<string | null>(null)
+  const programRef = useRef(programId)
+  programRef.current = programId
+  const sessionRef = useRef(0)
+  useEffect(() => () => { sessionRef.current += 1 }, [])
   const [courses, setCourses] = useState<ProgramCourse[]>([])
   const [instructors, setInstructors] = useState<ProgramInstructor[]>([])
   const [savedCourseIDs, setSavedCourseIDs] = useState<string[]>([])
@@ -84,21 +94,13 @@ export default function ProgramAcademicConfigPanel({
     setCourseOptionsLoading(false)
   }, [])
 
-  useAccessibleDialog(coursePickerOpen, courseDialogRef, closeCoursePicker, courseSearchRef)
+  useAccessibleDialog(coursePickerOpen && !suspended, courseDialogRef, closeCoursePicker, courseSearchRef)
 
   useEffect(() => {
-    setCourses(config?.courses || [])
-    setInstructors(config?.instructors || [])
-    setSavedCourseIDs(config?.courses.map(course => course.id) || [])
-    setSavedInstructorIDs(config?.instructors.map(instructor => instructor.contact_id) || [])
-    setConfigVersion(config?.updated_at || '')
-    setConflictConfig(null)
-  }, [config])
-
-  useEffect(() => {
+    if (suspended) return
     const timer = window.setTimeout(() => setDebouncedCourseSearch(courseSearch.trim()), SEARCH_DEBOUNCE_MS)
     return () => window.clearTimeout(timer)
-  }, [courseSearch])
+  }, [courseSearch, suspended])
 
   const courseSearchPending = courseSearch.trim() !== debouncedCourseSearch
 
@@ -111,7 +113,7 @@ export default function ProgramAcademicConfigPanel({
   }
 
   const loadCourseOptions = useCallback(async () => {
-    if (!coursePickerOpen) return
+    if (!coursePickerOpen || suspendedRef.current || courseSearch.trim() !== debouncedCourseSearch) return
     courseOptionsRequestRef.current?.abort()
     const controller = new AbortController()
     courseOptionsRequestRef.current = controller
@@ -129,13 +131,19 @@ export default function ProgramAcademicConfigPanel({
       setCourseOptionsTotal(response.data.total)
     }
     setCourseOptionsLoading(false)
-  }, [coursePickerOpen, debouncedCourseSearch])
+  }, [coursePickerOpen, courseSearch, debouncedCourseSearch])
 
   useEffect(() => {
-    if (!coursePickerOpen) return
+    if (!coursePickerOpen || suspended) {
+      setCourseOptionsLoading(false)
+      return
+    }
     void loadCourseOptions()
-    return () => courseOptionsRequestRef.current?.abort()
-  }, [coursePickerOpen, loadCourseOptions])
+    return () => {
+      courseOptionsRequestRef.current?.abort()
+      courseOptionsSequenceRef.current += 1
+    }
+  }, [coursePickerOpen, suspended, loadCourseOptions])
 
   const associatedCourseIDs = useMemo(() => new Set(courses.map(course => course.id)), [courses])
   const excludedInstructorIDs = useMemo(() => new Set(instructors.map(instructor => instructor.contact_id)), [instructors])
@@ -151,6 +159,25 @@ export default function ProgramAcademicConfigPanel({
   const courseChanges = !sameIDs(courseIDs, savedCourseIDs)
   const instructorChanges = !sameIDs(instructorIDs, savedInstructorIDs)
   const dirty = courseChanges || instructorChanges
+  const draftRef = useRef({ dirty, version: configVersion })
+  draftRef.current = { dirty, version: configVersion }
+
+  useEffect(() => {
+    if (!config || config.program_id !== programId) return
+    const sameProgram = initializedProgramRef.current === programId
+    initializedProgramRef.current = programId
+    const preserveDraft = sameProgram && draftRef.current.dirty
+    if (!preserveDraft) {
+      setCourses(config.courses)
+      setInstructors(config.instructors)
+      setConflictConfig(null)
+    } else if (draftRef.current.version !== config.updated_at) {
+      setConflictConfig(config)
+    }
+    setSavedCourseIDs(config.courses.map(course => course.id))
+    setSavedInstructorIDs(config.instructors.map(instructor => instructor.contact_id))
+    setConfigVersion(config.updated_at)
+  }, [config, programId])
 
   useEffect(() => {
     onDirtyChange(dirty)
@@ -159,6 +186,7 @@ export default function ProgramAcademicConfigPanel({
   useEffect(() => () => onDirtyChange(false), [onDirtyChange])
 
   const moveCourse = (index: number, direction: -1 | 1) => {
+    if (suspendedRef.current) return
     const target = index + direction
     if (target < 0 || target >= courses.length) return
     setCourses(current => {
@@ -170,12 +198,13 @@ export default function ProgramAcademicConfigPanel({
   }
 
   const addCourse = (course: ProgramCourse) => {
+    if (suspendedRef.current) return
     setCourses(current => [...current, { ...course, position: current.length }])
     closeCoursePicker()
   }
 
   const addInstructors = (selected: SelectedPerson[]) => {
-    if (selected.length === 0) return
+    if (suspendedRef.current || selected.length === 0) return
     setInstructors(current => {
       const existing = new Set(current.map(instructor => instructor.contact_id))
       const additions = selected
@@ -194,11 +223,14 @@ export default function ProgramAcademicConfigPanel({
   }
 
   const saveConfiguration = async () => {
-    if (savingCourses || savingInstructors || (!courseChanges && !instructorChanges)) return
+    if (suspendedRef.current || savingCourses || savingInstructors || (!courseChanges && !instructorChanges)) return
     if (!configVersion) {
       onToast('La configuración cambió o está incompleta. Recárgala antes de guardar.', 'error')
       return
     }
+    const requestProgram = programId
+    const requestSession = sessionRef.current
+    const isCurrent = () => programRef.current === requestProgram && sessionRef.current === requestSession
     setSavingCourses(courseChanges)
     setSavingInstructors(instructorChanges)
     try {
@@ -210,9 +242,11 @@ export default function ProgramAcademicConfigPanel({
           expected_updated_at: configVersion,
         }),
       })
+      if (!isCurrent()) return
       if (!response.success || !response.data) {
         if (response.status === 409) {
           const latest = await api<ProgramAcademicConfig>(`/api/programs/${programId}/academic-config`)
+          if (!isCurrent()) return
           if (latest.success && latest.data) {
             setConfigVersion(latest.data.updated_at)
             setSavedCourseIDs(latest.data.courses.map(course => course.id))
@@ -225,15 +259,25 @@ export default function ProgramAcademicConfigPanel({
         throw new Error(response.error || 'No se pudo guardar la configuración académica.')
       }
       setConflictConfig(null)
+      setCourses(response.data.courses)
+      setInstructors(response.data.instructors)
+      setSavedCourseIDs(response.data.courses.map(course => course.id))
+      setSavedInstructorIDs(response.data.instructors.map(instructor => instructor.contact_id))
+      setConfigVersion(response.data.updated_at)
       onChange(response.data)
       onToast(courseChanges && instructorChanges ? 'Plan e instructores actualizados' : courseChanges ? 'Plan de clases actualizado' : 'Instructores actualizados', 'success')
     } catch (saveError) {
+      if (!isCurrent()) return
       onToast(saveError instanceof Error ? saveError.message : 'No se pudo guardar la configuración académica.', 'error')
     } finally {
-      setSavingCourses(false)
-      setSavingInstructors(false)
+      if (isCurrent()) {
+        setSavingCourses(false)
+        setSavingInstructors(false)
+      }
     }
   }
+
+  if (suspended && !config) return null
 
   if (loading && !config) {
     return <div className="flex h-full items-center justify-center rounded-2xl border border-slate-200 bg-white"><Loader2 className="h-7 w-7 animate-spin text-emerald-600" /><span className="ml-3 text-sm text-slate-500">Cargando plan e instructores…</span></div>
@@ -251,7 +295,7 @@ export default function ProgramAcademicConfigPanel({
   }
 
   return (
-    <div className="h-full overflow-y-auto pb-3">
+    <div hidden={suspended} inert={suspended} className="h-full overflow-y-auto pb-3">
       {error && <div role="alert" className="mb-3 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1">{error}</span><button type="button" onClick={onRetry} className="shrink-0 font-semibold underline">Reintentar</button></div>}
       {conflictConfig && (
         <div role="alert" className="mb-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
@@ -317,7 +361,7 @@ export default function ProgramAcademicConfigPanel({
               <div className="rounded-xl border border-dashed border-slate-300 px-4 py-8 text-center"><UserRoundCheck className="mx-auto h-8 w-8 text-slate-300" /><p className="mt-2 text-sm font-semibold text-slate-600">Sin instructores asignados</p><p className="mt-1 text-xs text-slate-400">Puedes asociar uno o varios contactos.</p></div>
             ) : instructors.map(instructor => (
               <div key={instructor.contact_id} className="flex min-h-16 items-center gap-3 rounded-xl border border-slate-200 p-3">
-                <ContactPhotoPreview url={instructor.avatar_url} name={instructor.contact_name || 'Sin nombre'} sizeClassName="h-10 w-10" fallbackClassName="bg-blue-50 text-blue-700 ring-1 ring-blue-100" />
+                <ContactPhotoPreview suspended={suspended} url={instructor.avatar_url} name={instructor.contact_name || 'Sin nombre'} sizeClassName="h-10 w-10" fallbackClassName="bg-blue-50 text-blue-700 ring-1 ring-blue-100" />
                 <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-slate-800">{instructor.contact_name || 'Sin nombre'}</p><p className="truncate text-xs text-slate-500">{instructor.contact_phone || 'Sin teléfono'}</p></div>
                 <button type="button" onClick={() => setInstructors(current => current.filter(item => item.contact_id !== instructor.contact_id).map((item, position) => ({ ...item, position })))} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-red-50 hover:text-red-600" aria-label={`Quitar a ${instructor.contact_name}`}><Trash2 className="h-4 w-4" /></button>
               </div>
@@ -330,7 +374,7 @@ export default function ProgramAcademicConfigPanel({
         </section>
       </div>
 
-      {coursePickerOpen && typeof document !== 'undefined' && createPortal(
+      {coursePickerOpen && !suspended && typeof document !== 'undefined' && createPortal(
         <div className="app-viewport fixed inset-0 z-[80] flex items-stretch justify-center bg-slate-950/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
           <div ref={courseDialogRef} role="dialog" aria-modal="true" aria-labelledby="course-picker-title" tabIndex={-1} className="flex h-full w-full max-w-2xl flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[85vh] sm:rounded-2xl">
             <div className="flex shrink-0 items-center justify-between border-b border-slate-100 p-4"><div><h2 id="course-picker-title" className="font-bold text-slate-800">Agregar curso al programa</h2><p className="text-xs text-slate-500">Solo se muestran cursos activos.</p></div><button type="button" onClick={closeCoursePicker} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-slate-100" aria-label="Cerrar"><X className="h-5 w-5" /></button></div>
@@ -364,6 +408,7 @@ export default function ProgramAcademicConfigPanel({
       {typeof document !== 'undefined' && createPortal(
         <ContactSelector
           open={instructorPickerOpen}
+          suspended={suspended}
           onClose={() => setInstructorPickerOpen(false)}
           onConfirm={addInstructors}
           title="Asignar instructores"

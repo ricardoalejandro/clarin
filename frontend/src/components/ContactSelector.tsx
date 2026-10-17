@@ -110,6 +110,8 @@ function resolveDatePreset(preset: string, customFrom?: string, customTo?: strin
 
 interface ContactSelectorProps {
   open: boolean
+  /** Hide a desktop session without closing it or losing its selection and filters. */
+  suspended?: boolean
   onClose: () => void
   onConfirm: (selected: SelectedPerson[]) => void
   title?: string
@@ -139,6 +141,7 @@ interface ContactSelectorProps {
 
 export default function ContactSelector({
   open,
+  suspended = false,
   onClose,
   onConfirm,
   title = 'Seleccionar Personas',
@@ -155,6 +158,9 @@ export default function ContactSelector({
   errorMessage = '',
   refreshKey = 0,
 }: ContactSelectorProps) {
+  const visible = open && !suspended
+  const visibleRef = useRef(visible)
+  visibleRef.current = visible
   const { leadsEnabled } = useLeadPolicy()
   const forcedLeadUnavailable = sourceFilter === 'lead' && !leadsEnabled
   const [search, setSearch] = useState('')
@@ -226,7 +232,7 @@ export default function ContactSelector({
     if (!submitting) onClose()
   }, [onClose, showFilterDropdown, submitting])
 
-  useAccessibleDialog(open, dialogRef, handleDialogEscape, searchRef)
+  useAccessibleDialog(visible, dialogRef, handleDialogEscape, searchRef)
 
   const updateSearch = useCallback((value: string) => {
     peopleRequestRef.current += 1
@@ -240,12 +246,9 @@ export default function ContactSelector({
     if (!value) setDebouncedSearch('')
   }, [setDebouncedSearch])
 
-  // Focus search on open
+  // Only a real close discards the session. Responsive suspension preserves it.
   useEffect(() => {
-    if (open) {
-      fetchTags()
-      if (useAdvanced) fetchDevices()
-    } else {
+    if (!open) {
       peopleRequestRef.current += 1
       peopleAbortRef.current?.abort()
       peopleAbortRef.current = null
@@ -285,24 +288,59 @@ export default function ContactSelector({
     }
   }, [open])
 
+  useEffect(() => {
+    if (!visible) {
+      peopleRequestRef.current += 1
+      peopleAbortRef.current?.abort()
+      peopleAbortRef.current = null
+      setLoading(false)
+      setLoadingMore(false)
+      return
+    }
+    return () => {
+      peopleRequestRef.current += 1
+      peopleAbortRef.current?.abort()
+      peopleAbortRef.current = null
+    }
+  }, [visible])
+
+  useEffect(() => {
+    if (!visible) return
+    const controller = new AbortController()
+    let current = true
+    const loadMetadata = async (path: string, apply: (data: any) => void) => {
+      try {
+        const res = await fetch(path, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
+        const data = await res.json()
+        if (current && !controller.signal.aborted && data.success) apply(data)
+      } catch (error) {
+        if (!controller.signal.aborted) console.error(error)
+      }
+    }
+    void loadMetadata('/api/tags', data => setAllTags(data.tags || []))
+    if (useAdvanced) void loadMetadata('/api/devices', data => setAdvDevices(data.devices || []))
+    return () => { current = false; controller.abort() }
+  }, [visible, token, useAdvanced])
+
   // Fetch people when search/filters change
   useEffect(() => {
-    if (!open) return
+    if (!visible) return
     fetchPeople()
-  }, [debouncedSearch, sourceType, leadsEnabled, sourceFilter, filterTagIds, hasPhone, open, filterTagNames, excludeFilterTagNames, tagFilterMode, filterDevice, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, formulaType, formulaText])
+  }, [debouncedSearch, sourceType, leadsEnabled, sourceFilter, filterTagIds, hasPhone, visible, filterTagNames, excludeFilterTagNames, tagFilterMode, filterDevice, filterDatePreset, filterDateField, filterDateFrom, filterDateTo, formulaType, formulaText])
 
   useEffect(() => {
     if (refreshKeyRef.current === refreshKey) return
+    if (!visible) return
     refreshKeyRef.current = refreshKey
-    if (!open) return
     setSelected(new Map())
     setSelectionNotice('')
     fetchPeople(0, false)
-  }, [refreshKey, open])
+  }, [refreshKey, visible])
 
   // Click outside to close filter dropdown
   useEffect(() => {
     if (!showFilterDropdown) { setTagSearch(''); setDebouncedTagSearch(''); return }
+    if (!visible) return
     const handler = (e: MouseEvent) => {
       if (filterRef.current && !filterRef.current.contains(e.target as Node)) {
         setShowFilterDropdown(false)
@@ -310,25 +348,10 @@ export default function ContactSelector({
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
-  }, [showFilterDropdown])
-
-  const fetchTags = useCallback(async () => {
-    try {
-      const res = await fetch('/api/tags', { headers: { Authorization: `Bearer ${token}` } })
-      const data = await res.json()
-      if (data.success) setAllTags(data.tags || [])
-    } catch (e) { console.error(e) }
-  }, [token])
-
-  const fetchDevices = useCallback(async () => {
-    try {
-      const res = await fetch('/api/devices', { headers: { Authorization: `Bearer ${token}` } })
-      const data = await res.json()
-      if (data.success) setAdvDevices(data.devices || [])
-    } catch (e) { console.error(e) }
-  }, [token])
+  }, [showFilterDropdown, visible])
 
   const fetchPeople = useCallback(async (offset = 0, append = false) => {
+    if (!visibleRef.current) return
     if (sourceFilter === 'lead' && !leadsEnabled) return
     if (search !== debouncedSearch) return
     peopleAbortRef.current?.abort()
@@ -583,7 +606,7 @@ export default function ContactSelector({
   }
 
   const handleConfirm = () => {
-    if (submitting || forcedLeadUnavailable) return
+    if (!visibleRef.current || submitting || forcedLeadUnavailable) return
     const allowed = Array.from(selected.values()).filter(person => leadsEnabled || person.source_type === 'contact')
     if (allowed.length === 0) return
     onConfirm(allowed)
@@ -608,7 +631,7 @@ export default function ContactSelector({
   const selectableResults = results.filter(isSelectable)
   const eventIsFrozen = candidateEventStatus === 'completed' || candidateEventStatus === 'cancelled'
 
-  if (!open) return null
+  if (!visible) return null
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/50 p-0 backdrop-blur-sm sm:p-4">

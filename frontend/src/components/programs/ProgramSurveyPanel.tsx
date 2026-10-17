@@ -17,11 +17,13 @@ interface ProgramSurveyPanelProps {
   programId: string;
   programName: string;
   canManageSurveys?: boolean;
+  suspended?: boolean;
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 const statusLabel: Record<string, string> = { draft: 'Borrador', active: 'Activa', closed: 'Cerrada' };
 
-export default function ProgramSurveyPanel({ programId, programName, canManageSurveys = false }: ProgramSurveyPanelProps) {
+export default function ProgramSurveyPanel({ programId, programName, canManageSurveys = false, suspended = false, onDirtyChange }: ProgramSurveyPanelProps) {
   const [instances, setInstances] = useState<SurveyInstanceSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -36,40 +38,74 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
   const [conflictSuggestion, setConflictSuggestion] = useState('');
   const [recipientInstance, setRecipientInstance] = useState<SurveyInstanceSummary | null>(null);
   const [showArchived, setShowArchived] = useState(false);
+  const instancesRequestRef = useRef<AbortController | null>(null);
+  const instancesSequenceRef = useRef(0);
+  const templatesRequestRef = useRef<AbortController | null>(null);
+  const templatesSequenceRef = useRef(0);
+  const suspendedRef = useRef(suspended);
+  const creatingRef = useRef(false);
+  const programRef = useRef<string | null>(programId);
+  suspendedRef.current = suspended;
+  programRef.current = programId;
+
+  useEffect(() => { programRef.current = programId; return () => { programRef.current = null; }; }, [programId]);
+  useEffect(() => {
+    onDirtyChange?.(createOpen && (!!selectedTemplateId || !!instanceName.trim() || creating));
+  }, [createOpen, creating, instanceName, onDirtyChange, selectedTemplateId]);
+  useEffect(() => () => { onDirtyChange?.(false); }, [onDirtyChange]);
 
   const loadInstances = useCallback(async () => {
+    if (suspendedRef.current) return;
+    const controller = new AbortController();
+    instancesRequestRef.current?.abort();
+    instancesRequestRef.current = controller;
+    const sequence = ++instancesSequenceRef.current;
     setLoading(true);
     setLoadError('');
     try {
-      const response = await api<SurveyInstanceSummary[]>(`/api/programs/${programId}/surveys?include_archived=true`);
+      const response = await api<SurveyInstanceSummary[]>(`/api/programs/${programId}/surveys?include_archived=true`, { signal: controller.signal });
+      if (controller.signal.aborted || sequence !== instancesSequenceRef.current || programRef.current !== programId) return;
       if (!response.success) throw new Error(response.error || 'No se pudieron cargar las encuestas.');
       setInstances(response.data || []);
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : 'No se pudieron cargar las encuestas.');
+      if (!controller.signal.aborted && sequence === instancesSequenceRef.current) setLoadError(error instanceof Error ? error.message : 'No se pudieron cargar las encuestas.');
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted && sequence === instancesSequenceRef.current) setLoading(false);
     }
   }, [programId]);
 
-  useEffect(() => { void loadInstances(); }, [loadInstances]);
+  useEffect(() => {
+    if (!suspended) void loadInstances();
+    return () => { instancesRequestRef.current?.abort(); instancesSequenceRef.current += 1; };
+  }, [loadInstances, suspended]);
 
-  const openCreate = async () => {
+  const openCreate = () => {
+    if (suspendedRef.current || !canManageSurveys) return;
     setCreateOpen(true);
     setCreateError(''); setConflictSuggestion('');
-    if (templates.length > 0) return;
+  };
+
+  useEffect(() => {
+    if (suspended || !createOpen || templates.length > 0) return;
+    const controller = new AbortController();
+    templatesRequestRef.current?.abort();
+    templatesRequestRef.current = controller;
+    const sequence = ++templatesSequenceRef.current;
     setTemplatesLoading(true);
-    try {
-      const response = await api<SurveyTemplate[]>('/api/survey-templates');
+    void (async () => { try {
+      const response = await api<SurveyTemplate[]>('/api/survey-templates', { signal: controller.signal });
+      if (controller.signal.aborted || sequence !== templatesSequenceRef.current || programRef.current !== programId) return;
       if (!response.success) throw new Error(response.error || 'No se pudieron cargar las plantillas.');
       const available = (response.data || []).filter(template => template.status === 'active' && template.question_count > 0);
       setTemplates(available);
-      if (available.length > 0) setSelectedTemplateId(available[0].id);
+      if (available.length > 0) setSelectedTemplateId(current => current || available[0].id);
     } catch (error) {
-      setCreateError(error instanceof Error ? error.message : 'No se pudieron cargar las plantillas.');
+      if (!controller.signal.aborted && sequence === templatesSequenceRef.current) setCreateError(error instanceof Error ? error.message : 'No se pudieron cargar las plantillas.');
     } finally {
-      setTemplatesLoading(false);
-    }
-  };
+      if (!controller.signal.aborted && sequence === templatesSequenceRef.current) setTemplatesLoading(false);
+    } })();
+    return () => { controller.abort(); templatesSequenceRef.current += 1; };
+  }, [createOpen, programId, suspended, templates.length]);
 
   const selectedTemplate = useMemo(
     () => templates.find(template => template.id === selectedTemplateId) || null,
@@ -78,8 +114,16 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
   const partitionedInstances = useMemo(() => partitionSurveyInstances(instances), [instances]);
   const visibleInstances = showArchived ? partitionedInstances.archived : partitionedInstances.active;
 
+  const reconcileInstances = (update: (current: SurveyInstanceSummary[]) => SurveyInstanceSummary[]) => {
+    instancesRequestRef.current?.abort();
+    instancesSequenceRef.current += 1;
+    setLoading(false);
+    setInstances(update);
+  };
+
   const createInstance = async () => {
-    if (!selectedTemplate) return;
+    if (!selectedTemplate || suspendedRef.current || creatingRef.current || !canManageSurveys) return;
+    creatingRef.current = true;
     setCreating(true);
     setCreateError('');
     try {
@@ -92,18 +136,23 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
           audience_mode: 'program_participants',
         }),
       });
+      if (programRef.current !== programId) return;
       if (!response.success || !response.data) {
         if (response.status === 409 && response.data?.suggested_name) setConflictSuggestion(response.data.suggested_name);
         throw new Error(response.error || 'No se pudo crear la encuesta.');
       }
-      setInstances(current => [response.data!, ...current]);
+      instancesRequestRef.current?.abort();
+      instancesSequenceRef.current += 1;
+      setLoading(false);
+      setInstances(current => [response.data!, ...current.filter(instance => instance.id !== response.data!.id)]);
       setCreateOpen(false);
       setInstanceName('');
       setRecipientInstance(response.data);
     } catch (error) {
-      setCreateError(error instanceof Error ? error.message : 'No se pudo crear la encuesta.');
+      if (programRef.current === programId) setCreateError(error instanceof Error ? error.message : 'No se pudo crear la encuesta.');
     } finally {
-      setCreating(false);
+      creatingRef.current = false;
+      if (programRef.current === programId) setCreating(false);
     }
   };
 
@@ -125,10 +174,11 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
       </div>
 
       <div className="p-4 sm:p-5">
-        {!loading && !loadError && instances.length > 0 && <div className="mb-4 grid min-h-11 grid-cols-2 rounded-xl bg-slate-100 p-1" role="group" aria-label="Filtrar encuestas del programa"><button type="button" onClick={() => setShowArchived(false)} className={`rounded-lg text-sm font-medium ${!showArchived ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}>Activas ({partitionedInstances.active.length})</button><button type="button" onClick={() => setShowArchived(true)} className={`rounded-lg text-sm font-medium ${showArchived ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}>Archivadas ({partitionedInstances.archived.length})</button></div>}
-        {loading ? (
+        {instances.length > 0 && <div className="mb-4 grid min-h-11 grid-cols-2 rounded-xl bg-slate-100 p-1" role="group" aria-label="Filtrar encuestas del programa"><button type="button" onClick={() => setShowArchived(false)} className={`rounded-lg text-sm font-medium ${!showArchived ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}>Activas ({partitionedInstances.active.length})</button><button type="button" onClick={() => setShowArchived(true)} className={`rounded-lg text-sm font-medium ${showArchived ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}>Archivadas ({partitionedInstances.archived.length})</button></div>}
+        {loadError && instances.length > 0 && <div role="alert" className="mb-3 rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{loadError}<button type="button" onClick={() => void loadInstances()} className="ml-2 min-h-11 font-semibold underline">Reintentar</button></div>}
+        {loading && instances.length === 0 ? (
           <div className="flex min-h-32 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-emerald-600" /></div>
-        ) : loadError ? (
+        ) : loadError && instances.length === 0 ? (
           <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
             <p>{loadError}</p><button type="button" onClick={() => void loadInstances()} className="mt-3 min-h-11 font-semibold underline">Reintentar</button>
           </div>
@@ -154,7 +204,7 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
                       </div>
                       <p className="mt-1 text-xs text-slate-500">Plantilla v{instance.template_revision} · {instance.question_count} preguntas</p>
                     </div>
-                    <div className="flex shrink-0 items-center gap-2">{canManageSurveys && <SurveyApplicationLifecycleActions target={instance} onUpdated={updated => setInstances(current => replaceSurveyInstance(current, updated))} onDeleted={id => setInstances(current => removeSurveyInstance(current, id))} />}<Link href={`/dashboard/surveys/${instance.id}?mode=instance&tab=analytics`} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50" aria-label={`Ver resultados de ${instance.name}`}><BarChart3 className="h-4 w-4" /></Link></div>
+                    <div className="flex shrink-0 items-center gap-2">{canManageSurveys && <SurveyApplicationLifecycleActions target={instance} suspended={suspended} onUpdated={updated => reconcileInstances(current => replaceSurveyInstance(current, updated))} onDeleted={id => reconcileInstances(current => removeSurveyInstance(current, id))} />}<Link href={`/dashboard/surveys/${instance.id}?mode=instance&tab=analytics`} className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-slate-50" aria-label={`Ver resultados de ${instance.name}`}><BarChart3 className="h-4 w-4" /></Link></div>
                   </div>
                   <div className="mt-4 grid grid-cols-3 gap-2 text-center">
                     <Metric value={instance.recipient_count} label="Invitados" />
@@ -178,8 +228,8 @@ export default function ProgramSurveyPanel({ programId, programName, canManageSu
         )}
       </div>
 
-      {createOpen && <CreateSurveyDialog programId={programId} templates={templates} loading={templatesLoading} selectedId={selectedTemplateId} setSelectedId={setSelectedTemplateId} name={instanceName} setName={setInstanceName} nameAvailable={nameAvailable} setNameAvailable={setNameAvailable} conflictSuggestion={conflictSuggestion} error={createError} creating={creating} onClose={() => setCreateOpen(false)} onCreate={() => void createInstance()} />}
-      {recipientInstance && <RecipientLinksDialog programId={programId} instance={recipientInstance} onClose={() => setRecipientInstance(null)} />}
+      {createOpen && <CreateSurveyDialog suspended={suspended} programId={programId} templates={templates} loading={templatesLoading} selectedId={selectedTemplateId} setSelectedId={setSelectedTemplateId} name={instanceName} setName={setInstanceName} nameAvailable={nameAvailable} setNameAvailable={setNameAvailable} conflictSuggestion={conflictSuggestion} error={createError} creating={creating} onClose={() => { if (!suspendedRef.current && !creatingRef.current) setCreateOpen(false); }} onCreate={() => void createInstance()} />}
+      {recipientInstance && <RecipientLinksDialog key={recipientInstance.id} suspended={suspended} programId={programId} instance={recipientInstance} onClose={() => { if (!suspendedRef.current) setRecipientInstance(null); }} />}
     </section>
   );
 }
@@ -197,13 +247,14 @@ function CopyPublicLink({ slug }: { slug: string }) {
   return <button type="button" onClick={() => void copy()} className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-slate-100 px-3 text-sm font-semibold text-slate-700">{copied ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}{copied ? 'Copiado' : 'Copiar enlace'}</button>;
 }
 
-function CreateSurveyDialog({ programId, templates, loading, selectedId, setSelectedId, name, setName, nameAvailable, setNameAvailable, conflictSuggestion, error, creating, onClose, onCreate }: {
+function CreateSurveyDialog({ programId, suspended = false, templates, loading, selectedId, setSelectedId, name, setName, nameAvailable, setNameAvailable, conflictSuggestion, error, creating, onClose, onCreate }: {
   programId: string;
+  suspended?: boolean;
   templates: SurveyTemplate[]; loading: boolean; selectedId: string; setSelectedId: (id: string) => void;
   name: string; setName: (value: string) => void; nameAvailable: boolean | null; setNameAvailable: (value: boolean | null) => void; conflictSuggestion: string; error: string; creating: boolean; onClose: () => void; onCreate: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-[90] flex items-end justify-center bg-slate-950/45 sm:items-center sm:p-4" role="dialog" aria-modal="true" aria-labelledby="create-program-survey-title">
+    <div hidden={suspended} inert={suspended} style={suspended ? { display: 'none' } : undefined} className="fixed inset-0 z-[90] flex items-end justify-center bg-slate-950/45 sm:items-center sm:p-4" role="dialog" aria-modal={!suspended} aria-labelledby="create-program-survey-title">
       <div className="flex max-h-[100dvh] w-full flex-col bg-white shadow-2xl sm:max-h-[88vh] sm:max-w-xl sm:rounded-2xl">
         <header className="flex shrink-0 items-center justify-between border-b border-slate-200 px-4 py-3.5 sm:px-5">
           <div><h3 id="create-program-survey-title" className="font-semibold text-slate-900">Crear encuesta</h3><p className="text-xs text-slate-500">Elige una plantilla reutilizable</p></div>
@@ -213,7 +264,7 @@ function CreateSurveyDialog({ programId, templates, loading, selectedId, setSele
           {loading ? <div className="flex min-h-48 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-emerald-600" /></div> : templates.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-slate-200 p-6 text-center"><p className="font-medium text-slate-700">No hay plantillas listas</p><p className="mt-1 text-sm text-slate-500">Crea una plantilla con al menos una pregunta en Encuestas.</p></div>
           ) : <div className="space-y-2">{templates.map(template => <button key={template.id} type="button" onClick={() => setSelectedId(template.id)} className={`flex min-h-16 w-full items-center gap-3 rounded-xl border p-3 text-left transition ${selectedId === template.id ? 'border-emerald-500 bg-emerald-50 ring-1 ring-emerald-500' : 'border-slate-200 hover:border-slate-300'}`}><span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${selectedId === template.id ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'}`}><ClipboardList className="h-4 w-4" /></span><span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold text-slate-800">{template.name}</span><span className="block text-xs text-slate-500">{template.question_count} preguntas · {template.instance_count} aplicaciones</span></span>{selectedId === template.id && <Check className="h-5 w-5 text-emerald-600" />}</button>)}</div>}
-          {templates.length > 0 && selectedId && <div className="mt-5"><SurveyInstanceNameField templateId={selectedId} programId={programId} value={name} onChange={setName} onAvailabilityChange={setNameAvailable} /></div>}
+          {templates.length > 0 && selectedId && <div className="mt-5"><SurveyInstanceNameField suspended={suspended} templateId={selectedId} programId={programId} value={name} onChange={setName} onAvailabilityChange={setNameAvailable} /></div>}
           {error && <div className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700"><p>{error}</p>{conflictSuggestion && <button type="button" onClick={() => setName(conflictSuggestion)} className="mt-2 min-h-9 rounded-lg bg-white px-3 text-xs font-semibold shadow-sm">Usar “{conflictSuggestion}”</button>}</div>}
         </div>
         <footer className="flex shrink-0 gap-3 border-t border-slate-200 bg-white p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:rounded-b-2xl"><button type="button" onClick={onClose} className="min-h-11 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700">Cancelar</button><button type="button" onClick={onCreate} disabled={!selectedId || !name.trim() || nameAvailable === false || creating} className="inline-flex min-h-11 flex-[1.4] items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white disabled:opacity-50">{creating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}Crear y obtener enlaces</button></footer>
@@ -222,9 +273,11 @@ function CreateSurveyDialog({ programId, templates, loading, selectedId, setSele
   );
 }
 
-export function RecipientLinksDialog({ programId, instance, onClose }: { programId: string; instance: SurveyInstanceSummary; onClose: () => void }) {
+export function RecipientLinksDialog({ programId, instance, suspended = false, onClose }: { programId: string; instance: SurveyInstanceSummary; suspended?: boolean; onClose: () => void }) {
   const [query, setQuery] = useState('');
   const [appliedQuery, setAppliedQuery] = useState('');
+  const queryRef = useRef(query);
+  queryRef.current = query;
   const [recipients, setRecipients] = useState<SurveyInstanceRecipient[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -234,8 +287,12 @@ export function RecipientLinksDialog({ programId, instance, onClose }: { program
   const requestRef = useRef<AbortController | null>(null);
   const requestSequenceRef = useRef(0);
   const [requestRevision, setRequestRevision] = useState(0);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => { if (copyTimerRef.current) clearTimeout(copyTimerRef.current); }, [suspended]);
 
   const updateQuery = (value: string) => {
+    if (suspended) return;
     requestRef.current?.abort();
     requestSequenceRef.current += 1;
     setLoading(false);
@@ -248,16 +305,19 @@ export function RecipientLinksDialog({ programId, instance, onClose }: { program
   };
 
   useEffect(() => {
-    if (!query.trim()) return;
+    if (suspended || !query.trim()) return;
     const timer = window.setTimeout(() => {
       setAppliedQuery(query.trim());
       setOffset(0);
       setRequestRevision(current => current + 1);
     }, SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [query]);
+  }, [query, suspended]);
 
   useEffect(() => {
+    // A pending typed filter resumes its debounce before issuing any request;
+    // it must not briefly reload the previously applied search.
+    if (suspended || queryRef.current.trim() !== appliedQuery) return;
     const controller = new AbortController();
     requestRef.current?.abort();
     requestRef.current = controller;
@@ -287,19 +347,21 @@ export function RecipientLinksDialog({ programId, instance, onClose }: { program
       }
     };
     void load();
-    return () => controller.abort();
-  }, [appliedQuery, instance.id, offset, programId, requestRevision]);
+    return () => { controller.abort(); requestSequenceRef.current += 1; };
+  }, [appliedQuery, instance.id, offset, programId, requestRevision, suspended]);
 
   const searchPending = query.trim() !== appliedQuery;
 
   const copy = async (recipient: SurveyInstanceRecipient) => {
+    if (suspended) return;
     await navigator.clipboard.writeText(`${window.location.origin}/f/${instance.slug}?recipient=${recipient.recipient_token}`);
     setCopiedId(recipient.id);
-    window.setTimeout(() => setCopiedId(''), 1500);
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => setCopiedId(''), 1500);
   };
 
   return (
-    <div className="fixed inset-0 z-[95] flex items-end justify-center bg-slate-950/45 sm:items-center sm:p-4" role="dialog" aria-modal="true" aria-labelledby="program-survey-recipient-links-title">
+    <div hidden={suspended} inert={suspended} style={suspended ? { display: 'none' } : undefined} className="fixed inset-0 z-[95] flex items-end justify-center bg-slate-950/45 sm:items-center sm:p-4" role="dialog" aria-modal={!suspended} aria-labelledby="program-survey-recipient-links-title">
       <div className="flex h-[100dvh] w-full flex-col bg-white sm:h-auto sm:max-h-[88vh] sm:max-w-xl sm:rounded-2xl">
         <header className="flex items-center justify-between border-b border-slate-200 px-4 py-3.5">
           <div className="min-w-0"><h3 id="program-survey-recipient-links-title" className="truncate font-semibold text-slate-900">Enlaces por participante</h3><p className="text-xs text-slate-500">{instance.name} · {total} destinatarios</p></div>

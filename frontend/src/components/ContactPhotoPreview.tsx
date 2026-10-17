@@ -9,6 +9,7 @@ interface ContactPhotoPreviewProps {
   name: string
   sizeClassName?: string
   fallbackClassName?: string
+  suspended?: boolean
 }
 
 export default function ContactPhotoPreview({
@@ -16,16 +17,21 @@ export default function ContactPhotoPreview({
   name,
   sizeClassName = 'h-11 w-11',
   fallbackClassName = 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100',
+  suspended = false,
 }: ContactPhotoPreviewProps) {
   const [open, setOpen] = useState(false)
   const [failed, setFailed] = useState(false)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const suspendedRef = useRef(suspended)
+  suspendedRef.current = suspended
+  const visible = open && !suspended
 
   useEffect(() => setFailed(false), [url])
+  useEffect(() => { if (suspended) setOpen(false) }, [suspended])
 
   useEffect(() => {
-    if (!open) return
+    if (!visible) return
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     closeButtonRef.current?.focus()
@@ -43,9 +49,12 @@ export default function ContactPhotoPreview({
     return () => {
       document.removeEventListener('keydown', onKeyDown, true)
       document.body.style.overflow = previousOverflow
-      window.setTimeout(() => triggerRef.current?.focus(), 0)
+      window.setTimeout(() => {
+        const trigger = triggerRef.current
+        if (!suspendedRef.current && trigger?.isConnected && !trigger.closest('[hidden], [inert]')) trigger.focus()
+      }, 0)
     }
-  }, [open])
+  }, [visible])
 
   const initials = name.trim().split(/\s+/).filter(Boolean).slice(0, 2).map(part => part[0]).join('').toUpperCase() || '?'
   const hasPhoto = Boolean(url) && !failed
@@ -56,6 +65,7 @@ export default function ContactPhotoPreview({
         <button
           ref={triggerRef}
           type="button"
+          disabled={suspended}
           onClick={event => { event.stopPropagation(); setOpen(true) }}
           className={`${sizeClassName} shrink-0 overflow-hidden rounded-full bg-slate-100 shadow-sm ring-1 ring-slate-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2`}
           aria-label={`Ampliar foto de ${name}`}
@@ -67,7 +77,7 @@ export default function ContactPhotoPreview({
         <span className={`${sizeClassName} ${fallbackClassName} flex shrink-0 items-center justify-center rounded-full text-xs font-bold`} aria-hidden="true">{initials}</span>
       )}
 
-      {open && url && typeof document !== 'undefined' && createPortal(
+      {visible && url && typeof document !== 'undefined' && createPortal(
         <div role="dialog" aria-modal="true" aria-label={`Foto de ${name}`} className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm" onMouseDown={() => setOpen(false)}>
           <div className="relative flex max-h-[92vh] max-w-[92vw] flex-col items-center" onMouseDown={event => event.stopPropagation()}>
             <button ref={closeButtonRef} type="button" onClick={() => setOpen(false)} className="absolute right-2 top-2 z-10 flex h-11 w-11 items-center justify-center rounded-full bg-black/55 text-white shadow-lg hover:bg-black/75 focus:outline-none focus-visible:ring-2 focus-visible:ring-white" aria-label="Cerrar foto">
