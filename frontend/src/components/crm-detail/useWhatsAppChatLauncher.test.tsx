@@ -39,6 +39,83 @@ const connectedDevice = {
 }
 
 describe('useWhatsAppChatLauncher', () => {
+  it('pauses a late direct resolution and creates only after a resumed explicit channel choice', async () => {
+    const resolution = deferredResponse()
+    const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => response({ success: true, chat: { id: 'chat-paused', device_id: connectedDevice.id, jid: '51911111111@s.whatsapp.net' } }))
+      .mockImplementationOnce(() => resolution.promise)
+    vi.stubGlobal('fetch', fetchMock)
+    const { result, rerender } = renderHook(
+      ({ suspended }) => useWhatsAppChatLauncher({ sessionKey: 'participant-1', contactId: 'contact-1', suspended }),
+      { initialProps: { suspended: false } },
+    )
+    const desktopOpen = result.current.open
+    const desktopSelect = result.current.selectDevice
+    let opening!: Promise<void>
+    act(() => { opening = desktopOpen('51911111111') })
+    rerender({ suspended: true })
+    await act(async () => {
+      resolution.resolve(new Response(JSON.stringify({ success: true, phone: '51911111111', devices: [connectedDevice], mode: 'open_direct' })))
+      await opening
+    })
+    expect(result.current.phase).toBe('choosing_device')
+    expect(result.current.devices.map(device => device.id)).toEqual([connectedDevice.id])
+    expect(result.current.chatOpen).toBe(false)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await act(async () => { await desktopOpen('51922222222'); desktopSelect(result.current.devices[0]) })
+    expect(result.current.phone).toBe('51911111111')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    rerender({ suspended: false })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    act(() => result.current.selectDevice(result.current.devices[0]))
+    await waitFor(() => expect(result.current.chat?.id).toBe('chat-paused'))
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1)
+  })
+
+  it('blocks current and saved launch callbacks while already suspended without clearing a channel choice', async () => {
+    const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => response({ success: true, phone: '51911111111', devices: [connectedDevice], mode: 'choose_device' }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { result, rerender } = renderHook(
+      ({ suspended }) => useWhatsAppChatLauncher({ sessionKey: 'participant-1', contactId: 'contact-1', suspended }),
+      { initialProps: { suspended: true } },
+    )
+    await act(async () => { await result.current.open('51911111111') })
+    expect(fetchMock).not.toHaveBeenCalled()
+    rerender({ suspended: false })
+    await act(async () => { await result.current.open('51911111111') })
+    const select = result.current.selectDevice
+    const open = result.current.open
+    rerender({ suspended: true })
+    await act(async () => { select(result.current.devices[0]); await open('sin teléfono') })
+    expect(result.current.phase).toBe('choosing_device')
+    expect(result.current.devices).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('reconciles a chat creation already sent before suspension without aborting or repeating it', async () => {
+    const creation = deferredResponse()
+    const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => creation.promise)
+      .mockImplementationOnce(() => response({ success: true, phone: '51911111111', devices: [connectedDevice], mode: 'open_direct' }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { result, rerender } = renderHook(
+      ({ suspended }) => useWhatsAppChatLauncher({ sessionKey: 'participant-1', contactId: 'contact-1', suspended }),
+      { initialProps: { suspended: false } },
+    )
+    let opening!: Promise<void>
+    act(() => { opening = result.current.open('51911111111') })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    const signal = fetchMock.mock.calls[1][1]?.signal as AbortSignal
+    rerender({ suspended: true })
+    expect(signal.aborted).toBe(false)
+    await act(async () => {
+      creation.resolve(new Response(JSON.stringify({ success: true, chat: { id: 'chat-in-flight', device_id: connectedDevice.id, jid: '51911111111@s.whatsapp.net' } })))
+      await opening
+    })
+    expect(result.current.chat?.id).toBe('chat-in-flight')
+    rerender({ suspended: false })
+    expect(result.current.chatOpen).toBe(true)
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1)
+  })
+
   it('preflights availability without opening, writing or reporting missing devices as an error', async () => {
     const onError = vi.fn()
     const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => response({ success: true, phone: '51911111111', devices: [], mode: 'no_device' }))

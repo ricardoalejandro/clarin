@@ -18,6 +18,7 @@ interface ProgramParticipantAttendanceSectionProps {
   droppedAt?: string | null
   completedAt?: string | null
   participationStatus?: string
+  mutationMode?: 'manage' | 'append-only' | 'read-only'
 }
 
 const EMPTY_SUMMARY: ProgramParticipantAttendanceHistorySummary = {
@@ -70,6 +71,7 @@ export default function ProgramParticipantAttendanceSection({
   droppedAt,
   completedAt,
   participationStatus,
+  mutationMode = 'manage',
 }: ProgramParticipantAttendanceSectionProps) {
   const [summary, setSummary] = useState(EMPTY_SUMMARY)
   const [sessions, setSessions] = useState<ProgramParticipantAttendanceHistorySession[]>([])
@@ -195,7 +197,7 @@ export default function ProgramParticipantAttendanceSection({
 
   const openObservations = (session: ProgramParticipantAttendanceHistorySession, openComposer: boolean) => {
     setSelectedSession(session)
-    setComposerInitiallyOpen(openComposer)
+    setComposerInitiallyOpen(openComposer && mutationMode !== 'read-only')
     const preview = session.observation_preview || session.latest_observation
     setObservations(preview ? [observationToHistory(preview)] : [])
     void loadObservations(session)
@@ -246,7 +248,7 @@ export default function ProgramParticipantAttendanceSection({
 
         <div className="mt-2 flex justify-end">
           <button type="button" onClick={() => openObservations(session, !preview)} className="inline-flex min-h-11 items-center gap-2 rounded-xl px-3 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
-            <MessageSquarePlus className="h-4 w-4" />{session.observation_count > 0 ? `Observaciones (${session.observation_count})` : 'Añadir observación'}
+            <MessageSquarePlus className="h-4 w-4" />{session.observation_count > 0 ? `Observaciones (${session.observation_count})` : mutationMode === 'read-only' ? 'Consultar observaciones' : 'Añadir observación'}
           </button>
         </div>
       </div>
@@ -317,7 +319,8 @@ export default function ProgramParticipantAttendanceSection({
       errorMessage={observationsError}
       onRetry={() => { if (selectedSession) void loadObservations(selectedSession) }}
       onObservationChange={() => { if (selectedSession) void loadObservations(selectedSession); void loadHistory(true, true) }}
-      mutationMode="manage"
+      mutationMode={mutationMode}
+      allowedNewTypes={['note']}
       initialComposerOpen={composerInitiallyOpen}
     />
   </>

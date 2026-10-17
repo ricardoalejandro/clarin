@@ -29,6 +29,8 @@ interface ProgramConflictPayload {
 
 interface ProgramSettingsDialogProps {
   open: boolean;
+  suspended?: boolean;
+  onDirtyChange?: (dirty: boolean) => void;
   program: Program | null;
   onClose: () => void;
   onSaved: (program: Program) => void;
@@ -57,14 +59,29 @@ function draftSignature(draft: ProgramDraft): string {
 
 export function ProgramSettingsDialog({
   open,
+  suspended = false,
+  onDirtyChange,
   program,
   onClose,
   onSaved,
   onCanonicalReload,
 }: ProgramSettingsDialogProps) {
+  const visible = open && !suspended;
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const sessionRef = useRef(0);
+  const identity = `${program?.account_id || ''}:${program?.id || ''}`;
+  const identityRef = useRef(identity);
+  identityRef.current = identity;
+  const previousOpenRef = useRef(false);
+  const initializedIdentityRef = useRef('');
+  const busyRef = useRef(false);
+  const reloadRef = useRef<AbortController | null>(null);
+  useEffect(() => () => { sessionRef.current += 1; reloadRef.current?.abort(); }, []);
   const dialogRef = useRef<HTMLDivElement>(null);
   const discardDialogRef = useRef<HTMLDivElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
+  const lastFocusRef = useRef<HTMLElement | null>(null);
   const discardCancelRef = useRef<HTMLButtonElement>(null);
   const [canonicalProgram, setCanonicalProgram] = useState<Program | null>(program);
   const [draft, setDraft] = useState<ProgramDraft | null>(program ? draftFromProgram(program) : null);
@@ -73,25 +90,43 @@ export function ProgramSettingsDialog({
   const [error, setError] = useState('');
   const [conflict, setConflict] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
+  useEffect(() => { if (!visible) { reloadRef.current?.abort(); setReloading(false); } }, [visible]);
 
   useEffect(() => {
     if (!open || !program) return;
+    const initialize = !previousOpenRef.current || initializedIdentityRef.current !== identity;
+    previousOpenRef.current = open;
+    initializedIdentityRef.current = identity;
+    if (!initialize && draftStateRef.current.dirty) {
+      if (draftStateRef.current.version !== program.updated_at) {
+        setCanonicalProgram(program);
+        setConflict(true);
+        setError('El programa cambió mientras lo editabas. Tu borrador se conservó.');
+      }
+      return;
+    }
     setCanonicalProgram(program);
+    if (initialize) lastFocusRef.current = null;
     setDraft(draftFromProgram(program));
     setSaving(false);
     setReloading(false);
     setError('');
     setConflict(false);
     setDiscardOpen(false);
-  }, [open, program?.id, program?.updated_at]);
+  }, [open, identity, program?.updated_at]);
+  useEffect(() => { if (!open) previousOpenRef.current = false; }, [open]);
 
   const dirty = useMemo(() => {
     if (!draft || !canonicalProgram) return false;
     return draftSignature(draft) !== draftSignature(draftFromProgram(canonicalProgram));
   }, [canonicalProgram, draft]);
+  const draftStateRef = useRef({ dirty, version: canonicalProgram?.updated_at });
+  draftStateRef.current = { dirty, version: canonicalProgram?.updated_at };
+  useEffect(() => { onDirtyChange?.(open && dirty); }, [dirty, open, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   const requestClose = () => {
-    if (saving || reloading) return;
+    if (!visibleRef.current || saving || reloading) return;
     if (dirty) {
       setDiscardOpen(true);
       return;
@@ -99,11 +134,12 @@ export function ProgramSettingsDialog({
     onClose();
   };
 
-  useAccessibleDialog(open, dialogRef, () => {
+  useEffect(() => { if (visible && !lastFocusRef.current) lastFocusRef.current = nameRef.current; }, [visible, identity]);
+  useAccessibleDialog(visible, dialogRef, () => {
     if (discardOpen) setDiscardOpen(false);
     else requestClose();
-  }, nameRef);
-  useAccessibleDialog(discardOpen, discardDialogRef, () => setDiscardOpen(false), discardCancelRef);
+  }, lastFocusRef);
+  useAccessibleDialog(visible && discardOpen, discardDialogRef, () => setDiscardOpen(false), discardCancelRef);
 
   if (!open || !program || !draft || !canonicalProgram || typeof document === 'undefined') return null;
 
@@ -127,9 +163,14 @@ export function ProgramSettingsDialog({
   };
 
   const reloadCanonical = async () => {
+    if (!visibleRef.current || identityRef.current !== identity || busyRef.current) return;
+    const controller = new AbortController();
+    reloadRef.current?.abort(); reloadRef.current = controller;
+    const requestIdentity = identityRef.current;
     setReloading(true);
     setError('');
-    const response = await api<Program>(`/api/programs/${canonicalProgram.id}`);
+    const response = await api<Program>(`/api/programs/${canonicalProgram.id}`, { signal: controller.signal });
+    if (controller.signal.aborted || requestIdentity !== identityRef.current) return;
     setReloading(false);
     if (!response.success || !response.data) {
       setError(response.error || 'No se pudo recargar la versión actual del programa.');
@@ -140,7 +181,10 @@ export function ProgramSettingsDialog({
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
-    if (!draft.name.trim() || saving || reloading || conflict) return;
+    if (!visibleRef.current || identityRef.current !== identity || busyRef.current || !draft.name.trim() || saving || reloading || conflict) return;
+    busyRef.current = true;
+    const requestIdentity = identityRef.current;
+    const requestSession = sessionRef.current;
     setSaving(true);
     setError('');
     setConflict(false);
@@ -155,6 +199,8 @@ export function ProgramSettingsDialog({
         expected_updated_at: canonicalProgram.updated_at,
       }),
     });
+    busyRef.current = false;
+    if (requestIdentity !== identityRef.current || requestSession !== sessionRef.current) return;
     setSaving(false);
 
     if (response.success && response.data && 'id' in response.data) {
@@ -174,6 +220,9 @@ export function ProgramSettingsDialog({
 
   return createPortal(
     <div
+      hidden={suspended}
+      inert={suspended || undefined}
+      style={suspended ? { display: 'none' } : undefined}
       className="app-viewport fixed inset-0 z-[90] flex items-stretch justify-center bg-slate-950/50 p-0 backdrop-blur-[2px] sm:items-center sm:p-4"
       onMouseDown={event => {
         if (event.target === event.currentTarget) requestClose();
@@ -181,6 +230,7 @@ export function ProgramSettingsDialog({
     >
       <div
         ref={dialogRef}
+        onFocusCapture={event => { if (visibleRef.current) lastFocusRef.current = event.target as HTMLElement; }}
         role="dialog"
         aria-modal="true"
         aria-labelledby="program-settings-title"

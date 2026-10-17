@@ -15,12 +15,21 @@ interface Props {
   chatId: string
   onClose: () => void
   onSuccess: () => void
+  suspended?: boolean
 }
 
 const MAX_FORWARD = 5
 const PAGE_SIZE = 50
 
-export default function ForwardMessageModal({ message, deviceId, chatId, onClose, onSuccess }: Props) {
+export default function ForwardMessageModal({ message, deviceId, chatId, onClose, onSuccess, suspended = false }: Props) {
+  const suspendedRef = useRef(suspended)
+  suspendedRef.current = suspended
+  const sendingRef = useRef(false)
+  const mountedRef = useRef(true)
+  const sourceKey = `${chatId}:${message.id}`
+  const sourceKeyRef = useRef(sourceKey)
+  sourceKeyRef.current = sourceKey
+  const currentSource = () => mountedRef.current && sourceKey === sourceKeyRef.current
   const [chats, setChats] = useState<Chat[]>([])
   const [search, setSearch] = useState('')
   const [settledSearch, setSettledSearch] = useState('')
@@ -34,9 +43,10 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
   const searchRef = useRef<HTMLInputElement>(null)
   const searchLifecycleRef = useRef(new SearchRequestLifecycle())
   const operationalPortal = useOperationalOverlayPortal()
-  useOperationalOverlayRegistration(true, `forward-message:${message.id}`)
+  useOperationalOverlayRegistration(!suspended, `forward-message:${message.id}`)
 
   useEffect(() => {
+    if (suspended) return
     const focusTimer = window.setTimeout(() => searchRef.current?.focus(), 100)
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !sending) {
@@ -50,7 +60,7 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
       window.clearTimeout(focusTimer)
       document.removeEventListener('keydown', handleKeyDown)
     }
-  }, [onClose, sending])
+  }, [onClose, sending, suspended])
 
   const fetchChats = useCallback(async (offset: number, append: boolean, query: string, lease: SearchRequestLease) => {
     const token = localStorage.getItem('token')
@@ -85,11 +95,13 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
   }, [])
 
   const runSearch = useCallback((offset: number, append: boolean, query = settledSearch) => {
+    if (suspendedRef.current) return
     const lease = searchLifecycleRef.current.begin()
     void fetchChats(offset, append, query, lease)
   }, [fetchChats, settledSearch])
 
   const updateSearch = (value: string) => {
+    if (suspendedRef.current) return
     searchLifecycleRef.current.invalidate()
     setLoading(false)
     setLoadingMore(false)
@@ -98,6 +110,7 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
   }
 
   useEffect(() => {
+    if (suspended) { searchLifecycleRef.current.invalidate(); return }
     const timer = window.setTimeout(() => {
       const query = search.trim()
       setSettledSearch(query)
@@ -107,13 +120,17 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
     return () => {
       window.clearTimeout(timer)
     }
-  }, [fetchChats, search])
+  }, [fetchChats, search, suspended])
 
-  useEffect(() => () => searchLifecycleRef.current.invalidate(), [])
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false; searchLifecycleRef.current.invalidate() }
+  }, [])
 
   const searchPending = search.trim() !== settledSearch
 
   const toggleSelect = (chat: Chat) => {
+    if (suspendedRef.current) return
     setSelectedChats(previous => {
       if (previous.some(item => item.id === chat.id)) return previous.filter(item => item.id !== chat.id)
       if (previous.length >= MAX_FORWARD) return previous
@@ -122,7 +139,8 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
   }
 
   const handleForwardAll = async () => {
-    if (selectedChats.length === 0 || sending) return
+    if (!currentSource() || suspendedRef.current || selectedChats.length === 0 || sendingRef.current) return
+    sendingRef.current = true
     setSending(true)
     setSendError('')
 
@@ -130,7 +148,10 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
     let successCount = 0
     const failedTargets: Chat[] = []
 
-    for (const target of selectedChats) {
+    for (let index = 0; index < selectedChats.length; index++) {
+      if (!currentSource()) return
+      if (suspendedRef.current) { failedTargets.push(...selectedChats.slice(index)); break }
+      const target = selectedChats[index]
       try {
         const res = await fetch('/api/messages/forward', {
           method: 'POST',
@@ -154,15 +175,17 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
       }
     }
 
+    if (!currentSource()) return
     if (successCount === selectedChats.length) {
       onSuccess()
       onClose()
     } else {
       setSelectedChats(failedTargets)
-      setSendError(successCount > 0
+      setSendError(suspendedRef.current ? 'El reenvío está pausado. Confirma los destinos pendientes al volver a escritorio.' : successCount > 0
         ? `Se reenvió a ${successCount}; quedan ${failedTargets.length} chat${failedTargets.length === 1 ? '' : 's'} por reintentar.`
         : 'No se pudo reenviar el mensaje. Revisa la conexión e inténtalo otra vez.')
     }
+    sendingRef.current = false
     setSending(false)
   }
 
@@ -180,6 +203,8 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
   const preview = getMessagePreview()
   const selectedIds = new Set(selectedChats.map(chat => chat.id))
   const hasMore = chats.length < total
+
+  if (suspended) return null
 
   return createPortal(
     <div data-chat-overlay="forward-message" className="app-viewport pointer-events-auto fixed inset-0 flex items-end justify-center bg-black/50 sm:items-center sm:p-4" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog }} onMouseDown={event => { if (event.target === event.currentTarget && !sending) onClose() }}>

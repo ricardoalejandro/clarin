@@ -122,6 +122,53 @@ describe('contactAvatarCanvasDisplacement', () => {
   })
 })
 
+describe('Contact avatar responsive capability changes', () => {
+  it('pauses an opened removal dialog and rejects a retained desktop confirmation', async () => {
+    const view = render(<ContactAvatarControl {...defaultProps} />)
+    await openMenu()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Quitar foto' }))
+    const button = await screen.findByRole('button', { name: 'Quitar foto' })
+    const key = Object.keys(button).find(value => value.startsWith('__reactProps$'))!
+    const confirm = (button as any)[key].onClick
+    view.rerender(<ContactAvatarControl {...defaultProps} disabled />)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(document.querySelector('[data-contact-avatar-dialog][hidden][inert]')).not.toBeNull()
+    await act(async () => { await confirm() })
+    expect(apiMocks.api.mock.calls.filter(([, init]) => init?.method === 'DELETE')).toHaveLength(0)
+    view.rerender(<ContactAvatarControl {...defaultProps} />)
+    expect(await screen.findByRole('button', { name: 'Quitar foto' })).toBeInTheDocument()
+  })
+
+  it('reconciles a removal already sent before suspension exactly once', async () => {
+    let resolve!: (result: unknown) => void
+    apiMocks.api.mockImplementation(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'DELETE') return new Promise(done => { resolve = done })
+      return { success: true, data: { success: true, avatar, devices: [] } }
+    })
+    const onChange = vi.fn()
+    const view = render(<ContactAvatarControl {...defaultProps} onChange={onChange} />)
+    await openMenu()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Quitar foto' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Quitar foto' }))
+    view.rerender(<ContactAvatarControl {...defaultProps} onChange={onChange} disabled />)
+    await act(async () => resolve({ success: true, data: { success: true, avatar: { ...avatar, avatar_url: null, revision: 3 } } }))
+    expect(onChange).toHaveBeenCalledOnce()
+    expect(apiMocks.api.mock.calls.filter(([, init]) => init?.method === 'DELETE')).toHaveLength(1)
+    view.rerender(<ContactAvatarControl {...defaultProps} onChange={onChange} />)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('continues to allow photo consultation without opening management', async () => {
+    render(<ContactAvatarControl {...defaultProps} disabled />)
+    await waitFor(() => expect(apiMocks.api).toHaveBeenCalled())
+    expect(screen.queryByRole('button', { name: 'Gestionar foto del contacto' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: `Ampliar foto de ${defaultProps.displayName}` }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Usar esta foto' })).not.toBeInTheDocument()
+    expect(apiMocks.api.mock.calls.some(([, init]) => init?.method && init.method !== 'GET')).toBe(false)
+  })
+})
+
 describe('contactAvatarMenuPosition', () => {
   const viewport = { left: 100, top: 50, width: 320, height: 400 }
 

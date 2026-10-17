@@ -19,7 +19,7 @@ import ChatPanel from '@/components/chat/ChatPanel';
 import WhatsAppDevicePicker from '@/components/WhatsAppDevicePicker';
 import ObservationHistoryModal, { HistoryObservation } from '@/components/ObservationHistoryModal';
 import ContactPhotoPreview from '@/components/ContactPhotoPreview';
-import ContactDetailSurface from '@/components/contact-details/ContactDetailSurface';
+import ContactDetailSurface, { type ContactDetailSurfaceHandle } from '@/components/contact-details/ContactDetailSurface';
 import CrmDetailWorkspace from '@/components/crm-detail/CrmDetailWorkspace';
 import OperationalOverlayBoundary from '@/components/operational-window/OperationalOverlayBoundary';
 import useWhatsAppChatLauncher from '@/hooks/useWhatsAppChatLauncher';
@@ -41,7 +41,8 @@ import { ProgramSettingsDialog } from '@/components/programs/ProgramSettingsDial
 import ProgramAttendanceRoster from '@/components/programs/ProgramAttendanceRoster';
 import ProgramAttendanceSearchBar from '@/components/programs/ProgramAttendanceSearchBar';
 import { isDialogFocusableVisible, restoreDialogFocus, useDialogTabTrap } from '@/components/programs/useDialogTabTrap';
-import { mobileProgramTab, programSections, programWorkspacePolicy, type ProgramDetailTab, type ProgramMobileTab } from '@/components/programs/programWorkspacePolicy';
+import { mobileProgramTab, programSections, type ProgramDetailTab, type ProgramMobileTab } from '@/components/programs/programWorkspacePolicy';
+import { useProgramWorkspacePolicy } from '@/components/programs/useProgramWorkspacePolicy';
 import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider';
 import {
   acceptProgramAttendanceConflicts,
@@ -195,12 +196,12 @@ export default function ProgramDetailPage() {
   const router = useRouter();
   const programId = canonicalResourceID(params.id, 'programs');
   const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>();
-  const [coarsePointer, setCoarsePointer] = useState(false);
-  const [layoutViewportHeight, setLayoutViewportHeight] = useState(900);
-  const { compact: compactWorkspace, touch: touchWorkspace, mobile: mobileWorkspace, desktopActions: desktopWorkspaceActions } = programWorkspacePolicy(workspaceWidth, coarsePointer, layoutViewportHeight);
+  const { compact: compactWorkspace, touch: touchWorkspace, mobile: mobileWorkspace, desktopActions } = useProgramWorkspacePolicy(workspaceWidth);
+  const adminAllowedRef = useRef(desktopActions);
+  const rootAdminAllowedRef = useRef(desktopActions);
+  adminAllowedRef.current = desktopActions;
 
   const [program, setProgram] = useState<Program | null>(null);
-  const desktopActions = desktopWorkspaceActions || program?.type === 'event';
   const [participants, setParticipants] = useState<ProgramParticipant[]>([]);
   const [sessions, setSessions] = useState<ProgramSession[]>([]);
   const [academicConfig, setAcademicConfig] = useState<ProgramAcademicConfig | null>(null);
@@ -216,7 +217,7 @@ export default function ProgramDetailPage() {
   const [movingStageParticipantIDs, setMovingStageParticipantIDs] = useState<Set<string>>(() => new Set());
   const [activeTab, setActiveTab] = useState<ProgramDetailTab>('health');
   const [mobileTab, setMobileTab] = useState<ProgramMobileTab>('health');
-  const visibleTab = mobileWorkspace && program?.type !== 'event' ? mobileTab : activeTab;
+  const visibleTab = mobileWorkspace ? (program?.type === 'event' && mobileTab === 'health' ? 'participants' : mobileTab) : activeTab;
   const wasMobileWorkspace = useRef(mobileWorkspace);
   const desktopFocusRef = useRef<HTMLElement | null>(null);
   const mobileTabRef = useRef<HTMLButtonElement | null>(null);
@@ -225,7 +226,20 @@ export default function ProgramDetailPage() {
   const [currentAccountID, setCurrentAccountID] = useState('');
   const effectiveAccountID = runtimeSnapshot?.accountId || currentAccountID;
   const programIdentityRef = useRef('');
-  programIdentityRef.current = `${effectiveAccountID}:${programId}`;
+  const programIdentity = `${effectiveAccountID}:${programId}`;
+  programIdentityRef.current = programIdentity;
+  const adminRequestsRef = useRef(new Map<string, object>());
+  const adminMountedRef = useRef(true);
+  useEffect(() => { adminMountedRef.current = true; return () => { adminMountedRef.current = false; adminRequestsRef.current.clear(); } }, []);
+  const beginAdminRequest = (key: string) => {
+    if (!adminAllowedRef.current || (key !== 'participant-outcome' && !rootAdminAllowedRef.current) || programIdentityRef.current !== programIdentity || adminRequestsRef.current.has(key)) return null;
+    const request = { key, identity: programIdentityRef.current };
+    adminRequestsRef.current.set(key, request);
+    return request;
+  };
+  const adminRequestIsCurrent = (request: { key: string; identity: string }) => adminMountedRef.current && request.identity === programIdentityRef.current && adminRequestsRef.current.get(request.key) === request;
+  const finishAdminRequest = (request: { key: string; identity: string }) => { if (adminRequestsRef.current.get(request.key) === request) adminRequestsRef.current.delete(request.key); };
+
   const [healthSummaryExpanded, setHealthSummaryExpanded] = useState(false);
   const [showSectionPicker, setShowSectionPicker] = useState(false);
   const [participantSearch, setParticipantSearch] = useState('');
@@ -279,7 +293,7 @@ export default function ProgramDetailPage() {
   const [addingParticipants, setAddingParticipants] = useState(false);
   const [addParticipantError, setAddParticipantError] = useState('');
   const [participantSelectorRevision, setParticipantSelectorRevision] = useState(0);
-  const hasUnsavedDesktopWork = academicDirty || surveyDirty || isAddParticipantOpen;
+
 
   // Form state
   const [newSession, setNewSession] = useState<SessionFormState>({ title: '', date: localDateInputValue(), topics: [], session_type: 'regular', start_time: '', end_time: '', location: '' });
@@ -386,6 +400,7 @@ export default function ProgramDetailPage() {
   // Toast state
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [toastType, setToastType] = useState<'success' | 'error'>('success');
+  const [persistentToast, setPersistentToast] = useState(false);
 
   // Confirmation dialog state
   const [confirmAction, setConfirmAction] = useState<{ message: string; onConfirm: () => void } | null>(null);
@@ -413,6 +428,20 @@ export default function ProgramDetailPage() {
   // Edit program state
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [showHeaderMenu, setShowHeaderMenu] = useState(false);
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const [enrollmentDirty, setEnrollmentDirty] = useState(false);
+  const [outcomeDateDirty, setOutcomeDateDirty] = useState(false);
+  const [adminConfirmAction, setAdminConfirmAction] = useState<{ message: string; onConfirm: () => void; root?: boolean } | null>(null);
+  const adminConfirmDialogRef = useRef<HTMLDivElement>(null);
+  const createSessionDialogRef = useRef<HTMLDivElement>(null);
+  const editSessionDialogRef = useRef<HTMLDivElement>(null);
+  const generateSessionDialogRef = useRef<HTMLDivElement>(null);
+  const requestCloseAdminSurface = (discard: () => void, pending = false, root = true) => {
+    if (!adminAllowedRef.current || (root && !rootAdminAllowedRef.current) || pending || adminRequestsRef.current.size > 0) return;
+    setAdminConfirmAction({ root, message: 'Hay una edición abierta. ¿Descartar sus cambios?', onConfirm: () => { if (!adminAllowedRef.current || (root && !rootAdminAllowedRef.current) || programIdentityRef.current !== programIdentity) return; setAdminConfirmAction(null); discard(); } });
+  };
+
+
   const programLifecycleRequest = useRef(false);
   const [programLifecyclePending, setProgramLifecyclePending] = useState(false);
 
@@ -425,6 +454,7 @@ export default function ProgramDetailPage() {
   const participantDetailRequestRef = useRef<AbortController | null>(null);
   const participantDetailSequence = useRef(0);
   const participantDetailDialogRef = useRef<HTMLDivElement>(null);
+  const participantSurfaceRef = useRef<ContactDetailSurfaceHandle>(null);
   const participantDetailReturnFocusRef = useRef<HTMLElement | null>(null);
   const participantContextByContactRef = useRef(new Map<string, string>());
   const contactRefreshSequenceRef = useRef(new Map<string, number>());
@@ -491,10 +521,12 @@ export default function ProgramDetailPage() {
 
   // WhatsApp inline chat
   const whatsappChat = useWhatsAppChatLauncher({
+    suspended: mobileWorkspace,
     sessionKey: selectedParticipantID,
     contactId: selectedContact?.id || null,
   });
   const showInlineChat = whatsappChat.chatOpen;
+  const visibleInlineChat = showInlineChat && !mobileWorkspace;
   const showDeviceSelector = whatsappChat.showDeviceSelector;
   const inlineChatId = whatsappChat.chat?.id || '';
   const inlineChatDeviceId = whatsappChat.device?.id || whatsappChat.chat?.device_id || '';
@@ -513,6 +545,9 @@ export default function ProgramDetailPage() {
     assign_course_topics: false,
   });
   const [generating, setGenerating] = useState(false);
+
+
+
 
   // Stats
   const [statsData, setStatsData] = useState<ProgramAttendanceStatsResponse | null>(null);
@@ -537,6 +572,29 @@ export default function ProgramDetailPage() {
   const [outcomeParticipant, setOutcomeParticipant] = useState<ProgramParticipant | null>(null);
   const [outcomeForm, setOutcomeForm] = useState({ status: 'completed', ended_on: limaDateInputValue(), transferred_to_level: '', drop_reason: '', drop_notes: '' });
   const [savingOutcome, setSavingOutcome] = useState(false);
+  const hasUnsavedDesktopWork = Boolean(outcomeParticipant) || settingsDirty || Boolean(adminConfirmAction) || showCampaignModal || academicDirty || surveyDirty || isAddParticipantOpen || isCreateSessionOpen || isGenerateSessionsOpen || Boolean(editingSession) || isEditModalOpen || enrollmentDirty || outcomeDateDirty;
+  const administrationSuspended = mobileWorkspace || isAttendanceOpen || Boolean(attendanceObservationParticipant) || Boolean(observationParticipant);
+  const rootAdministrationSuspended = administrationSuspended || participantDetailOpen;
+  const adminConfirmationSuspended = administrationSuspended || Boolean(adminConfirmAction?.root && participantDetailOpen);
+  adminAllowedRef.current = !administrationSuspended;
+  rootAdminAllowedRef.current = !rootAdministrationSuspended;
+  useDialogTabTrap(isCreateSessionOpen && !rootAdministrationSuspended && !adminConfirmAction, createSessionDialogRef);
+  useDialogTabTrap(Boolean(editingSession && !rootAdministrationSuspended && !adminConfirmAction), editSessionDialogRef);
+  useDialogTabTrap(isGenerateSessionsOpen && !rootAdministrationSuspended && !adminConfirmAction, generateSessionDialogRef);
+  useDialogTabTrap(Boolean(adminConfirmAction && !adminConfirmationSuspended), adminConfirmDialogRef);
+  useEffect(() => {
+    if (!adminConfirmAction || adminConfirmationSuspended) return;
+    const frame = requestAnimationFrame(() => adminConfirmDialogRef.current?.querySelector<HTMLButtonElement>('button')?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [adminConfirmAction, adminConfirmationSuspended]);
+  useEffect(() => {
+    if (rootAdministrationSuspended) return;
+    const target = isCreateSessionOpen ? createSessionDialogRef : editingSession ? editSessionDialogRef : isGenerateSessionsOpen ? generateSessionDialogRef : null;
+    if (!target) return;
+    const frame = requestAnimationFrame(() => { if (!target.current?.contains(document.activeElement)) target.current?.focus({ preventScroll: true }); });
+    return () => cancelAnimationFrame(frame);
+  }, [rootAdministrationSuspended, isCreateSessionOpen, editingSession, isGenerateSessionsOpen]);
+
 
   const normalizedParticipantQuery = useMemo(
     () => normalizeParticipantSearch(debouncedParticipantSearch),
@@ -567,7 +625,7 @@ export default function ProgramDetailPage() {
   );
 
   const handleExportParticipants = async () => {
-    if (!desktopActions || !program || exportingParticipants) return;
+    if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity || !program || exportingParticipants) return;
     setExportingParticipants(true);
     try {
       const { exportProgramParticipants } = await import('@/utils/programParticipantsExport');
@@ -581,7 +639,7 @@ export default function ProgramDetailPage() {
     }
   };
 
-  const closeAttendanceModal = useCallback(() => {
+  const closeAttendanceModal = useCallback((restoreFocus = true) => {
     const returnFocus = attendanceReturnFocusRef.current;
     attendanceSessionGenerationRef.current += 1;
     attendanceSessionIDRef.current = '';
@@ -615,7 +673,7 @@ export default function ProgramDetailPage() {
     attendanceReturnFocusRef.current = null;
     attendanceObservationReturnFocusRef.current = null;
     attendanceConflictReturnFocusRef.current = null;
-    window.setTimeout(() => returnFocus?.focus({ preventScroll: true }), 0);
+    if (restoreFocus) window.setTimeout(() => returnFocus?.focus({ preventScroll: true }), 0);
   }, []);
 
   const closeAttendanceConflicts = useCallback((restoreFocus = true) => {
@@ -655,7 +713,7 @@ export default function ProgramDetailPage() {
     setObservationComposerInitiallyOpen(false);
   }, []);
 
-  const closeParticipantDetail = useCallback(() => {
+  const forceCloseParticipantDetail = useCallback(() => {
     participantDetailRequestRef.current?.abort();
     participantDetailSequence.current += 1;
     setParticipantDetailOpen(false);
@@ -668,32 +726,29 @@ export default function ProgramDetailPage() {
     window.setTimeout(() => returnTarget?.focus(), 0);
   }, [resetWhatsAppChat]);
 
+  const closeParticipantDetailAfterContactCheck = useCallback(() => {
+    if (enrollmentDirty || outcomeDateDirty) {
+      setConfirmAction({ message: 'Hay cambios de fechas sin guardar. ¿Deseas descartarlos?', onConfirm: () => { setConfirmAction(null); setEnrollmentDirty(false); setOutcomeDateDirty(false); forceCloseParticipantDetail(); } });
+      return;
+    }
+    forceCloseParticipantDetail();
+  }, [enrollmentDirty, outcomeDateDirty, forceCloseParticipantDetail]);
+  const closeParticipantDetail = useCallback(() => {
+    if (participantSurfaceRef.current?.canClose() === false) return;
+    closeParticipantDetailAfterContactCheck();
+  }, [closeParticipantDetailAfterContactCheck]);
+
   // Toast auto-dismiss
   useEffect(() => {
-    if (!toastMessage) return;
+    if (!toastMessage || persistentToast) return;
     const t = setTimeout(() => setToastMessage(null), 3000);
     return () => clearTimeout(t);
-  }, [toastMessage]);
+  }, [toastMessage, persistentToast]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedParticipantSearch(participantSearch), SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [participantSearch]);
-
-  useEffect(() => {
-    const media = window.matchMedia('(hover: none), (pointer: coarse)');
-    const update = () => {
-      setCoarsePointer(media.matches);
-      setLayoutViewportHeight(window.innerHeight);
-    };
-    update();
-    media.addEventListener('change', update);
-    window.addEventListener('resize', update);
-    return () => {
-      media.removeEventListener('change', update);
-      window.removeEventListener('resize', update);
-    };
-  }, []);
 
   useEffect(() => {
     if (!mobileWorkspace) {
@@ -702,14 +757,8 @@ export default function ProgramDetailPage() {
     }
     setShowHeaderMenu(false);
     setHealthSummaryExpanded(false);
-    setConfirmAction(null);
-    setOutcomeParticipant(null);
-    setIsEditModalOpen(false);
-    setShowCampaignModal(false);
     setShowColumnPicker(false);
-    resetWhatsAppChat();
-    setMaximizedSessionDialog(null);
-  }, [mobileWorkspace, resetWhatsAppChat]);
+  }, [mobileWorkspace]);
 
   useEffect(() => {
     if (wasMobileWorkspace.current === mobileWorkspace) return;
@@ -735,7 +784,7 @@ export default function ProgramDetailPage() {
     window.setTimeout(() => participantDetailDialogRef.current?.focus(), 0);
     const trapFocus = (event: KeyboardEvent) => {
       if (event.key !== 'Tab') return;
-      const focusable = Array.from(participantDetailDialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || []);
+      const focusable = Array.from(participantDetailDialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') || []).filter(element => isDialogFocusableVisible(element));
       if (focusable.length === 0) {
         event.preventDefault();
         participantDetailDialogRef.current?.focus();
@@ -753,14 +802,15 @@ export default function ProgramDetailPage() {
     };
   }, [participantDetailOpen]);
 
-  const showToast = (message: string, type: 'success' | 'error') => {
+  const showToast = (message: string, type: 'success' | 'error', persistent = false) => {
+    setPersistentToast(persistent);
     setToastMessage(message);
     setToastType(type);
   };
 
   const requestTabChange = useCallback((nextTab: ProgramDetailTab) => {
     setShowSectionPicker(false);
-    if (mobileWorkspace && program?.type !== 'event') {
+    if (mobileWorkspace) {
       const nextMobileTab = mobileProgramTab(nextTab);
       setMobileTab(nextMobileTab);
       // Shared sections follow the current activity; paused desktop work keeps
@@ -773,10 +823,12 @@ export default function ProgramDetailPage() {
       setActiveTab(nextTab);
       return;
     }
-    setConfirmAction({
+    setAdminConfirmAction({
+      root: true,
       message: academicDirty ? 'Hay cambios sin guardar en el plan o los instructores. Si cambias de sección, se perderán.' : 'Hay una encuesta sin guardar. Si cambias de sección, se perderá.',
       onConfirm: () => {
-        setConfirmAction(null);
+        if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
+        setAdminConfirmAction(null);
         setAcademicDirty(false);
         setSurveyDirty(false);
         setActiveTab(nextTab);
@@ -878,6 +930,8 @@ export default function ProgramDetailPage() {
       setProgram(null);
       setProgramNotFound(true);
       setDetailError('');
+      closeAttendanceModal(false);
+      setToastMessage(null);
       programSnapshotRef.current = false;
       setLoading(false);
       setLoadingHealth(false);
@@ -976,6 +1030,8 @@ export default function ProgramDetailPage() {
       participantContextByContactRef.current.clear();
       attendanceRequestRef.current?.abort();
       attendanceRequestSequence.current += 1;
+      closeAttendanceModal(false);
+      setToastMessage(null);
       programSnapshotRef.current = false;
       setProgram(null);
       setParticipants([]);
@@ -994,6 +1050,18 @@ export default function ProgramDetailPage() {
       setSurveyDirty(false);
       setActiveTab('health');
       setMobileTab('health');
+      setIsCreateSessionOpen(false);
+      setIsGenerateSessionsOpen(false);
+      setEditingSession(null);
+      setIsEditModalOpen(false);
+      setOutcomeParticipant(null);
+      setAdminConfirmAction(null);
+      setConfirmAction(null);
+      setShowCampaignModal(false);
+      setSettingsDirty(false); setEnrollmentDirty(false); setOutcomeDateDirty(false);
+      setCreatingSession(false); setSavingSession(false); setGenerating(false); setSavingOutcome(false);
+      adminRequestsRef.current.clear(); programLifecycleRequest.current = false;
+      forceCloseParticipantDetail();
       setIsAddParticipantOpen(false);
       setAddingParticipants(false);
       setAddParticipantError('');
@@ -1021,7 +1089,7 @@ export default function ProgramDetailPage() {
       attendanceObservationRequestRef.current?.abort();
       observationHistoryRequestRef.current?.abort();
     };
-  }, [programId, effectiveAccountID, fetchProgramData]);
+  }, [programId, effectiveAccountID, fetchProgramData, closeAttendanceModal]);
 
   useEffect(() => {
     if (!program || program.type === 'event') {
@@ -1040,12 +1108,13 @@ export default function ProgramDetailPage() {
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       if (confirmAction) { setConfirmAction(null); return; }
+      if (adminConfirmAction && !adminConfirmationSuspended) { setAdminConfirmAction(null); return; }
       if (showSectionPicker) { setShowSectionPicker(false); return; }
-      if (showDeviceSelector || showInlineChat) { closeWhatsAppChat(); return; }
+      if (!mobileWorkspace && (showDeviceSelector || showInlineChat)) { closeWhatsAppChat(); return; }
       if (attendanceConflicts.length > 0) { closeAttendanceConflicts(); return; }
       if (attendanceObservationParticipant) { closeAttendanceObservationHistory(); return; }
       if (observationParticipant) { closeObservationHistory(); return; }
-      if (outcomeParticipant) { setOutcomeParticipant(null); return; }
+      if (outcomeParticipant && adminAllowedRef.current) { requestCloseAdminSurface(() => setOutcomeParticipant(null), savingOutcome, false); return; }
       if (attendanceDragging) return;
       if (isAttendanceOpen) {
         if (attendanceSaveRequestRef.current) return;
@@ -1054,21 +1123,24 @@ export default function ProgramDetailPage() {
         } else closeAttendanceModal();
         return;
       }
-      if (isGenerateSessionsOpen) { setIsGenerateSessionsOpen(false); setMaximizedSessionDialog(null); return; }
-      if (isCreateSessionOpen) { setIsCreateSessionOpen(false); setMaximizedSessionDialog(null); return; }
-      if (editingSession) { setEditingSession(null); setMaximizedSessionDialog(null); return; }
-      if (isAddParticipantOpen && desktopActions) { if (!addingParticipants) setIsAddParticipantOpen(false); return; }
-      if (isEditModalOpen) { setIsEditModalOpen(false); return; }
-      if (showCampaignModal) { setShowCampaignModal(false); return; }
+      if (isGenerateSessionsOpen && rootAdminAllowedRef.current) { requestCloseAdminSurface(() => { setIsGenerateSessionsOpen(false); setMaximizedSessionDialog(null); }, generating); return; }
+      if (isCreateSessionOpen && rootAdminAllowedRef.current) { requestCloseAdminSurface(() => { setIsCreateSessionOpen(false); setMaximizedSessionDialog(null); }, creatingSession); return; }
+      if (editingSession && rootAdminAllowedRef.current) { requestCloseAdminSurface(() => { setEditingSession(null); setMaximizedSessionDialog(null); }, savingSession); return; }
+      if (isAddParticipantOpen && rootAdminAllowedRef.current) { if (!addingParticipants) setIsAddParticipantOpen(false); return; }
+      if (isEditModalOpen && rootAdminAllowedRef.current) { setIsEditModalOpen(false); return; }
+      if (showCampaignModal && rootAdminAllowedRef.current) { setShowCampaignModal(false); return; }
       if (participantDetailOpen) { closeParticipantDetail(); return; }
     };
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
-  }, [desktopActions, addingParticipants, confirmAction, showSectionPicker, showDeviceSelector, showInlineChat, attendanceConflicts.length, attendanceObservationParticipant, observationParticipant, outcomeParticipant, attendanceDragging, isAttendanceOpen, dirtyAttendanceParticipantIDs.length, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, participantDetailOpen, closeParticipantDetail, closeAttendanceConflicts, closeAttendanceModal, closeAttendanceObservationHistory, closeObservationHistory, closeWhatsAppChat]);
+  }, [desktopActions, mobileWorkspace, addingParticipants, adminConfirmAction, adminConfirmationSuspended, confirmAction, showSectionPicker, showDeviceSelector, showInlineChat, attendanceConflicts.length, attendanceObservationParticipant, observationParticipant, outcomeParticipant, attendanceDragging, isAttendanceOpen, dirtyAttendanceParticipantIDs.length, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, participantDetailOpen, closeParticipantDetail, closeAttendanceConflicts, closeAttendanceModal, closeAttendanceObservationHistory, closeObservationHistory, closeWhatsAppChat]);
 
   const fetchHealth = useCallback(() => fetchProgramData(), [fetchProgramData]);
 
   const saveProgramGoals = async () => {
+    if (!adminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
+    const request = beginAdminRequest('program-goals');
+    if (!request) return;
     setSavingGoals(true);
     try {
       const res = await api<{ success: boolean; goals: ProgramGoal }>(`/api/programs/${programId}/goals`, {
@@ -1078,6 +1150,7 @@ export default function ProgramDetailPage() {
           transfer_goal_percent: Number(programGoals.transfer_goal_percent) || 70,
         })
       });
+      if (!adminRequestIsCurrent(request)) return;
       if (res.success) {
         showToast('Metas del grupo actualizadas', 'success');
         fetchHealth();
@@ -1085,10 +1158,12 @@ export default function ProgramDetailPage() {
         showToast(res.error || 'Error al guardar metas', 'error');
       }
     } catch (e) {
+      if (!adminRequestIsCurrent(request)) return;
       console.error(e);
       showToast('Error al guardar metas', 'error');
     } finally {
-      setSavingGoals(false);
+      if (adminRequestIsCurrent(request)) setSavingGoals(false);
+      finishAdminRequest(request);
     }
   };
 
@@ -1122,6 +1197,7 @@ export default function ProgramDetailPage() {
   };
 
   const openOutcomeModal = (participantId: string, status: 'completed' | 'dropped') => {
+    if (!adminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     const participant = participants.find(p => p.id === participantId);
     if (!participant) return;
     setOutcomeParticipant(participant);
@@ -1135,7 +1211,10 @@ export default function ProgramDetailPage() {
   };
 
   const saveParticipantOutcome = async () => {
+    if (!adminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     if (!outcomeParticipant || savingOutcome) return;
+    const request = beginAdminRequest('participant-outcome');
+    if (!request) return;
     setSavingOutcome(true);
     try {
       const payload = outcomeForm.status === 'completed'
@@ -1155,6 +1234,7 @@ export default function ProgramDetailPage() {
         method: 'PATCH',
         body: JSON.stringify(payload)
       });
+      if (!adminRequestIsCurrent(request)) return;
       if (res.success) {
         showToast(outcomeForm.status === 'completed' ? 'Participación completada y movida al historial' : 'Participante retirado; su historial se conserva', 'success');
         setOutcomeParticipant(null);
@@ -1164,10 +1244,12 @@ export default function ProgramDetailPage() {
         showToast(res.error || 'Error al actualizar participante', 'error');
       }
     } catch (e) {
+      if (!adminRequestIsCurrent(request)) return;
       console.error(e);
       showToast('Error al actualizar participante', 'error');
     } finally {
-      setSavingOutcome(false);
+      if (adminRequestIsCurrent(request)) setSavingOutcome(false);
+      finishAdminRequest(request);
     }
   };
 
@@ -1222,7 +1304,7 @@ export default function ProgramDetailPage() {
   }, [visibleTab, fetchStats, selectedMonthsKey]);
 
   const handleAddParticipants = async (selected: SelectedPerson[]) => {
-    if (!desktopActions || selected.length === 0 || addingParticipants) return;
+    if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity || selected.length === 0 || addingParticipants) return;
     if (!program || program.status !== 'active') {
       setAddParticipantError('Solo puedes agregar participantes a un programa activo.');
       return;
@@ -1275,6 +1357,7 @@ export default function ProgramDetailPage() {
 
   // Edit program
   const openEditModal = () => {
+    if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     if (program) {
       setIsEditModalOpen(true);
       setShowHeaderMenu(false);
@@ -1282,16 +1365,22 @@ export default function ProgramDetailPage() {
   };
 
   const handleDeleteProgram = async () => {
+    if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     setShowHeaderMenu(false);
-    setConfirmAction({
+    setAdminConfirmAction({
+      root: true,
       message: PROGRAM_DELETE_CONFIRMATION,
       onConfirm: async () => {
-        setConfirmAction(null);
+        if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
         if (programLifecycleRequest.current) return;
+        const request = beginAdminRequest('program-lifecycle');
+        if (!request) return;
+        setAdminConfirmAction(null);
         programLifecycleRequest.current = true;
         setProgramLifecyclePending(true);
         try {
           const res = await api(`/api/programs/${programId}`, { method: 'DELETE' });
+          if (!adminRequestIsCurrent(request)) return;
           if (res.success) {
             showToast('Programa eliminado', 'success');
             router.push('/dashboard/programs');
@@ -1299,11 +1388,12 @@ export default function ProgramDetailPage() {
             showToast(res.error || 'Error al eliminar programa', 'error');
           }
         } catch (error) {
+          if (!adminRequestIsCurrent(request)) return;
           console.error('Error deleting program:', error);
           showToast('Error al eliminar programa', 'error');
         } finally {
-          programLifecycleRequest.current = false;
-          setProgramLifecyclePending(false);
+          if (adminRequestIsCurrent(request)) { programLifecycleRequest.current = false; setProgramLifecyclePending(false); }
+          finishAdminRequest(request);
         }
       },
     });
@@ -1311,6 +1401,8 @@ export default function ProgramDetailPage() {
 
   const handleArchiveProgram = async () => {
     if (!program || programLifecycleRequest.current) return;
+    const request = beginAdminRequest('program-lifecycle');
+    if (!request) return;
     programLifecycleRequest.current = true;
     setProgramLifecyclePending(true);
     const newStatus = program.status === 'archived' ? 'active' : 'archived';
@@ -1319,6 +1411,7 @@ export default function ProgramDetailPage() {
         method: 'PUT',
         body: JSON.stringify(programArchivePayload(program))
       });
+      if (!adminRequestIsCurrent(request)) return;
       if (res.success) {
         showToast(newStatus === 'archived' ? 'Programa archivado' : 'Programa desarchivado', 'success');
         await fetchProgramData();
@@ -1328,11 +1421,12 @@ export default function ProgramDetailPage() {
       }
       setShowHeaderMenu(false);
     } catch (error) {
+      if (!adminRequestIsCurrent(request)) return;
       console.error('Error archiving program:', error);
       showToast('Error al cambiar estado del programa', 'error');
     } finally {
-      programLifecycleRequest.current = false;
-      setProgramLifecyclePending(false);
+      if (adminRequestIsCurrent(request)) { programLifecycleRequest.current = false; setProgramLifecyclePending(false); }
+      finishAdminRequest(request);
     }
   };
 
@@ -1466,11 +1560,13 @@ export default function ProgramDetailPage() {
 
   // WhatsApp chat
   const handleSendWhatsApp = (phone: string) => {
+    if (!adminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     if (!requireOnline('Abrir WhatsApp')) return;
     void whatsappChat.open(phone);
   };
 
   const openCreateSession = (sessionType: 'regular' | 'recovery' = 'regular') => {
+    if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     const topics: ProgramSessionTopic[] = sessionType === 'recovery' ? [{ kind: 'free', title: 'Clase de recuperación' }] : [];
     const fallbackTitle = `Sesión ${sessions.length + 1}`;
     setNewSession({
@@ -1487,20 +1583,23 @@ export default function ProgramDetailPage() {
   };
 
   const handleCreateSession = async (e: React.FormEvent) => {
+    if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     e.preventDefault();
     if (creatingSession) return;
     if (!newSession.title.trim()) {
-      showToast('Escribe un título para la sesión.', 'error');
+      showToast('Escribe un título para la sesión.', 'error', true);
       return;
     }
     if (newSession.topics.length === 0 || newSession.topics.some(topic => !topic.title.trim())) {
-      showToast('Escribe o selecciona al menos un tema para la sesión.', 'error');
+      showToast('Escribe o selecciona al menos un tema para la sesión.', 'error', true);
       return;
     }
     if (newSession.start_time && newSession.end_time && newSession.end_time <= newSession.start_time) {
-      showToast('La hora de fin debe ser posterior a la hora de inicio.', 'error');
+      showToast('La hora de fin debe ser posterior a la hora de inicio.', 'error', true);
       return;
     }
+    const request = beginAdminRequest('create-session');
+    if (!request) return;
     setCreatingSession(true);
     try {
       const res = await api(`/api/programs/${programId}/sessions`, {
@@ -1514,6 +1613,7 @@ export default function ProgramDetailPage() {
           location: newSession.location || undefined,
         })
       });
+      if (!adminRequestIsCurrent(request)) return;
       if (res.success) {
         setIsCreateSessionOpen(false);
         setMaximizedSessionDialog(null);
@@ -1522,17 +1622,20 @@ export default function ProgramDetailPage() {
         showToast('Sesión creada', 'success');
         fetchProgramData();
       } else {
-        showToast(res.error || 'Error al crear sesión', 'error');
+        showToast(res.error || 'Error al crear sesión', 'error', true);
       }
     } catch (error) {
+      if (!adminRequestIsCurrent(request)) return;
       console.error('Error creating session:', error);
-      showToast('Error al crear sesión', 'error');
+      showToast('Error al crear sesión', 'error', true);
     } finally {
-      setCreatingSession(false);
+      if (adminRequestIsCurrent(request)) setCreatingSession(false);
+      finishAdminRequest(request);
     }
   };
 
   const openEditSession = (session: ProgramSession) => {
+    if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     const topics = normalizedSessionTopics(session);
     const sessionIndex = sessions.findIndex(candidate => candidate.id === session.id);
     const title = sessionDisplayTitle(session, `Sesión ${sessionIndex >= 0 ? sessionIndex + 1 : 1}`);
@@ -1552,20 +1655,23 @@ export default function ProgramDetailPage() {
   };
 
   const handleUpdateSession = async (e: React.FormEvent) => {
+    if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     e.preventDefault();
     if (!editingSession) return;
     if (!editSessionForm.title.trim()) {
-      showToast('Escribe un título para la sesión.', 'error');
+      showToast('Escribe un título para la sesión.', 'error', true);
       return;
     }
     if (editSessionForm.topics.length === 0 || editSessionForm.topics.some(topic => !topic.title.trim())) {
-      showToast('Escribe o selecciona al menos un tema para la sesión.', 'error');
+      showToast('Escribe o selecciona al menos un tema para la sesión.', 'error', true);
       return;
     }
     if (editSessionForm.start_time && editSessionForm.end_time && editSessionForm.end_time <= editSessionForm.start_time) {
-      showToast('La hora de fin debe ser posterior a la hora de inicio.', 'error');
+      showToast('La hora de fin debe ser posterior a la hora de inicio.', 'error', true);
       return;
     }
+    const request = beginAdminRequest('edit-session');
+    if (!request) return;
     setSavingSession(true);
     try {
       const res = await api(`/api/programs/${programId}/sessions/${editingSession.id}`, {
@@ -1579,29 +1685,38 @@ export default function ProgramDetailPage() {
           location: editSessionForm.location || undefined,
         })
       });
+      if (!adminRequestIsCurrent(request)) return;
       if (res.success) {
         setEditingSession(null);
         setMaximizedSessionDialog(null);
         showToast('Sesión actualizada', 'success');
         fetchProgramData();
       } else {
-        showToast(res.error || 'Error al actualizar sesión', 'error');
+        showToast(res.error || 'Error al actualizar sesión', 'error', true);
       }
     } catch (error) {
+      if (!adminRequestIsCurrent(request)) return;
       console.error('Error updating session:', error);
-      showToast('Error al actualizar sesión', 'error');
+      showToast('Error al actualizar sesión', 'error', true);
     } finally {
-      setSavingSession(false);
+      if (adminRequestIsCurrent(request)) setSavingSession(false);
+      finishAdminRequest(request);
     }
   };
 
   const handleDeleteSession = async (sessionId: string) => {
-    setConfirmAction({
+    if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
+    setAdminConfirmAction({
+      root: true,
       message: '¿Estás seguro de eliminar esta sesión?',
       onConfirm: async () => {
-        setConfirmAction(null);
+        if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
+        const request = beginAdminRequest('delete-session');
+        if (!request) return;
+        setAdminConfirmAction(null);
         try {
           const res = await api(`/api/programs/${programId}/sessions/${sessionId}`, { method: 'DELETE' });
+          if (!adminRequestIsCurrent(request)) return;
           if (res.success) {
             showToast('Sesión eliminada', 'success');
             fetchProgramData();
@@ -1609,14 +1724,18 @@ export default function ProgramDetailPage() {
             showToast('Error al eliminar sesión', 'error');
           }
         } catch (error) {
+          if (!adminRequestIsCurrent(request)) return;
           console.error('Error deleting session:', error);
           showToast('Error al eliminar sesión', 'error');
+        } finally {
+          finishAdminRequest(request);
         }
       },
     });
   };
 
   const openAttendance = async (session: ProgramSession, trigger?: HTMLElement | null) => {
+    if (programIdentityRef.current !== programIdentity || (session.program_id && session.program_id !== programId)) return;
     if (attendanceSaveRequestRef.current) return;
     attendanceRequestRef.current?.abort();
     const controller = new AbortController();
@@ -1729,6 +1848,8 @@ export default function ProgramDetailPage() {
   };
 
   const saveAttendance = async (expectedStatusOverrides: Readonly<Record<string, ProgramAttendanceStatus>> = {}) => {
+    if (programIdentityRef.current !== programIdentity) return;
+    const saveProgramIdentity = programIdentityRef.current;
     if (!selectedSession || attendanceSaveRequestRef.current) return;
     const saveIdentity: ProgramAttendanceSaveIdentity = {
       generation: attendanceSessionGenerationRef.current,
@@ -1741,6 +1862,7 @@ export default function ProgramDetailPage() {
     attendanceSaveRequestRef.current = saveIdentity;
     const requestIsCurrent = () => (
       attendanceSaveRequestRef.current === saveIdentity
+      && programIdentityRef.current === saveProgramIdentity
       && isProgramAttendanceSaveCurrent(saveIdentity, attendanceSessionGenerationRef.current, attendanceSessionIDRef.current)
     );
     try {
@@ -1806,6 +1928,7 @@ export default function ProgramDetailPage() {
 
   // Kanban drag/drop handlers
   const handleStageDragStart = (e: React.DragEvent, participantID: string) => {
+    if (!adminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     setDraggedParticipantID(participantID);
     try { e.dataTransfer.effectAllowed = 'move'; } catch {}
   };
@@ -1816,11 +1939,13 @@ export default function ProgramDetailPage() {
   };
   const handleStageDragLeave = () => setDragOverStageID(null);
   const moveParticipantToStage = async (pid: string, stageID: string | null) => {
-    if (!pid) return;
+    if (!adminAllowedRef.current || !pid) return;
     if (movingStageParticipantIDs.has(pid)) return;
     const participant = participants.find(p => p.id === pid);
     if (!participant) return;
     if ((participant.stage_id || null) === (stageID || null)) return;
+    const request = beginAdminRequest(`stage:${pid}`);
+    if (!request) return;
     const previousStage = {
       stage_id: participant.stage_id,
       stage_name: participant.stage_name,
@@ -1837,6 +1962,7 @@ export default function ProgramDetailPage() {
         method: 'PATCH',
         body: JSON.stringify({ stage_id: stageID }),
       });
+      if (!adminRequestIsCurrent(request)) return;
       if (!res.success) {
         rollback();
         showToast((res as any).error || 'Error al mover participante', 'error');
@@ -1845,11 +1971,13 @@ export default function ProgramDetailPage() {
         showToast('Participante movido', 'success');
       }
     } catch (err) {
+      if (!adminRequestIsCurrent(request)) return;
       console.error(err);
       rollback();
       showToast('Error al mover participante', 'error');
       void fetchProgramData();
     } finally {
+      finishAdminRequest(request);
       setMovingStageParticipantIDs(current => {
         const next = new Set(current);
         next.delete(pid);
@@ -1868,22 +1996,25 @@ export default function ProgramDetailPage() {
 
   // Generate Sessions
   const handleGenerateSessions = async () => {
+    if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     if (!genForm.start_date || !genForm.end_date || genForm.days_of_week.length === 0) {
-      showToast('Completa la fecha de inicio, fin y al menos un día de la semana.', 'error');
+      showToast('Completa la fecha de inicio, fin y al menos un día de la semana.', 'error', true);
       return;
     }
     if (genForm.end_date < genForm.start_date) {
-      showToast('La fecha de fin debe ser igual o posterior a la fecha de inicio.', 'error');
+      showToast('La fecha de fin debe ser igual o posterior a la fecha de inicio.', 'error', true);
       return;
     }
     if (schedulePreview.error) {
-      showToast(schedulePreview.error, 'error');
+      showToast(schedulePreview.error, 'error', true);
       return;
     }
     if (genForm.start_time && genForm.end_time && genForm.end_time <= genForm.start_time) {
-      showToast('La hora de fin debe ser posterior a la hora de inicio.', 'error');
+      showToast('La hora de fin debe ser posterior a la hora de inicio.', 'error', true);
       return;
     }
+    const request = beginAdminRequest('generate-sessions');
+    if (!request) return;
     setGenerating(true);
     try {
       const res = await fetch(`/api/programs/${programId}/sessions/generate`, {
@@ -1903,6 +2034,7 @@ export default function ProgramDetailPage() {
         warning?: string;
         error?: string;
       };
+      if (!adminRequestIsCurrent(request)) return;
       if (data.success) {
         const generatedCount = data.count || data.sessions?.length || 0;
         const assignmentSummary = genForm.assign_course_topics
@@ -1913,13 +2045,15 @@ export default function ProgramDetailPage() {
         setMaximizedSessionDialog(null);
         fetchProgramData();
       } else {
-        showToast(data.error || 'Error al generar sesiones', 'error');
+        showToast(data.error || 'Error al generar sesiones', 'error', true);
       }
     } catch (e) {
+      if (!adminRequestIsCurrent(request)) return;
       console.error(e);
-      showToast('Error de conexión', 'error');
+      showToast('Error de conexión', 'error', true);
     } finally {
-      setGenerating(false);
+      if (adminRequestIsCurrent(request)) setGenerating(false);
+      finishAdminRequest(request);
     }
   };
 
@@ -1939,7 +2073,10 @@ export default function ProgramDetailPage() {
   );
 
   const handleCreateCampaign = async (formResult: CampaignFormResult) => {
+    if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     if (!requireOnline('Crear una campaña masiva')) return;
+    const request = beginAdminRequest('campaign');
+    if (!request) return;
     setCreatingCampaign(true);
     let createdCampaignId: string | null = null;
     try {
@@ -1959,6 +2096,7 @@ export default function ProgramDetailPage() {
         campaign?: { id?: string };
         error?: string;
       } | null;
+      if (!adminRequestIsCurrent(request)) return;
       if (!res.ok || !data?.success || !data.campaign?.id) {
         throw new Error(data?.error || 'No se pudo crear la campaña');
       }
@@ -1984,6 +2122,7 @@ export default function ProgramDetailPage() {
           count?: number;
           error?: string;
         } | null;
+        if (!adminRequestIsCurrent(request)) return;
         if (!recipientsResponse.ok || !recipientsData?.success || typeof recipientsData.count !== 'number') {
           throw new Error(recipientsData?.error || 'No se pudieron confirmar los destinatarios pegados');
         }
@@ -1999,6 +2138,7 @@ export default function ProgramDetailPage() {
           success?: boolean;
           error?: string;
         } | null;
+        if (!adminRequestIsCurrent(request)) return;
         if (!scheduleResponse.ok || !scheduleData?.success) {
           throw new Error(scheduleData?.error || 'Los destinatarios se guardaron, pero no se pudo programar la campaña');
         }
@@ -2021,21 +2161,24 @@ export default function ProgramDetailPage() {
         console.warn('No se pudo confirmar el total de destinatarios de la campaña', error);
       }
 
-      alert(canonicalRecipientCount === null
+      if (!adminRequestIsCurrent(request)) return;
+      showToast(canonicalRecipientCount === null
         ? 'Campaña creada correctamente. Puedes verla en Envíos Masivos.'
-        : `Campaña creada con ${canonicalRecipientCount} destinatarios. Puedes verla en Envíos Masivos.`);
+        : `Campaña creada con ${canonicalRecipientCount} destinatarios. Puedes verla en Envíos Masivos.`, 'success');
       setShowCampaignModal(false);
     } catch (e) {
+      if (!adminRequestIsCurrent(request)) return;
       console.error(e);
       const message = e instanceof Error ? e.message : 'Error de conexión';
       if (createdCampaignId) {
-        alert(`La campaña quedó creada, pero no se pudo completar: ${message}. Revísala en Envíos Masivos antes de iniciarla.`);
+        showToast(`La campaña quedó creada, pero no se pudo completar: ${message}. Revísala en Envíos Masivos antes de iniciarla.`, 'error');
         setShowCampaignModal(false);
       } else {
-        alert(message);
+        showToast(message, 'error');
       }
     } finally {
-      setCreatingCampaign(false);
+      if (adminRequestIsCurrent(request)) setCreatingCampaign(false);
+      finishAdminRequest(request);
     }
   };
 
@@ -2242,13 +2385,6 @@ export default function ProgramDetailPage() {
           </div>
           <p className="text-slate-500 text-xs truncate">{program.description || 'Sin descripción'}</p>
         </div>
-        {mobileWorkspace && <button type="button" onClick={openEditModal} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Editar programa">
-          <Edit2 className="h-4 w-4" />
-        </button>}
-        {mobileWorkspace && program.type === 'event' && <button type="button" onClick={() => setShowSectionPicker(true)} className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 shadow-sm transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label={`Cambiar sección. Actual: ${activeTab === 'sessions' ? 'Sesiones' : activeTab === 'stats' ? 'Estadísticas' : activeTab === 'academic' ? 'Plan e instructores' : activeTab === 'surveys' ? 'Encuestas' : activeTab === 'kanban' ? 'Tablero' : 'Participantes'}`} aria-haspopup="dialog" aria-expanded={showSectionPicker}>
-          {activeTab === 'sessions' ? <Calendar className="h-5 w-5" /> : activeTab === 'stats' ? <BarChart3 className="h-5 w-5" /> : activeTab === 'academic' ? <GraduationCap className="h-5 w-5" /> : activeTab === 'surveys' ? <ClipboardList className="h-5 w-5" /> : activeTab === 'kanban' ? <LayoutGrid className="h-5 w-5" /> : <Users className="h-5 w-5" />}
-          <ChevronDown className="absolute bottom-1 right-1 h-2.5 w-2.5 text-slate-400" />
-        </button>}
         {!mobileWorkspace && <div className="flex items-center gap-2">
           <button
             onClick={() => { if (requireOnline('Crear una campaña masiva')) setShowCampaignModal(true); }}
@@ -2306,9 +2442,9 @@ export default function ProgramDetailPage() {
         </div>}
       </div>
 
-      {mobileWorkspace && program.type !== 'event' && <div role="tablist" aria-label="Secciones del programa" className="grid shrink-0 grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1">
+      {mobileWorkspace && <div role="tablist" aria-label="Secciones del programa" className="grid shrink-0 grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1">
         {programSections(true, canUseSurveys).map(tab => {
-          const selected = visibleTab === tab;
+          const selected = visibleTab === tab || (tab === 'health' && visibleTab === 'participants');
           const Icon = tab === 'sessions' ? Calendar : Users;
           return <button key={tab} ref={selected ? mobileTabRef : undefined} id={`program-mobile-tab-${tab}`} type="button" role="tab" aria-selected={selected} aria-controls="program-visible-content" tabIndex={selected ? 0 : -1} onClick={() => requestTabChange(tab)} onKeyDown={event => {
             if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
@@ -2430,7 +2566,6 @@ export default function ProgramDetailPage() {
           </div>
         </div>
         {desktopActions && <button type="button" onClick={() => { void handleExportParticipants(); }} disabled={participantSearchPending || exportingParticipants || filteredProgramParticipants.length === 0} className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-white px-3 text-sm font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40" title="Exportar exactamente la lista filtrada a Excel" aria-label="Exportar participantes filtrados a Excel">{exportingParticipants ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}<span className={program.type === 'event' ? 'hidden sm:inline' : undefined}>Exportar Excel</span></button>}
-        {mobileWorkspace && program.type === 'event' && <button type="button" onClick={() => setIsAddParticipantOpen(true)} disabled={program.status !== 'active'} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-sm disabled:opacity-40" aria-label="Agregar participantes"><UserPlus className="h-4 w-4" /></button>}
       </div>}
 
       {(visibleTab === 'health' || visibleTab === 'participants') && <div className="grid shrink-0 grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1" role="tablist" aria-label="Estado de participantes">
@@ -2439,12 +2574,12 @@ export default function ProgramDetailPage() {
       </div>}
 
       {/* Content */}
-      <div id="program-visible-content" role={mobileWorkspace && program.type !== 'event' ? 'tabpanel' : undefined} aria-labelledby={mobileWorkspace && program.type !== 'event' ? `program-mobile-tab-${visibleTab}` : undefined} className="flex-1 min-h-0 overflow-hidden">
-        {activeTab === 'academic' && <div key={`${effectiveAccountID}:${programId}:academic`} hidden={mobileWorkspace} inert={mobileWorkspace} style={mobileWorkspace ? { display: 'none' } : undefined} className="h-full">
-          <ProgramAcademicConfigPanel programId={programId} config={academicConfig} loading={academicLoading} error={academicError} onRetry={() => { void fetchAcademicData(); }} onChange={setAcademicConfig} onToast={showToast} onDirtyChange={setAcademicDirty} suspended={mobileWorkspace} onNavigateToCatalog={() => { if (requireOnline('Administrar el catálogo de cursos')) requestProgramNavigation('/dashboard/programs/courses'); }} />
+      <div id="program-visible-content" role={mobileWorkspace ? 'tabpanel' : undefined} aria-labelledby={mobileWorkspace ? `program-mobile-tab-${visibleTab === 'participants' ? 'health' : visibleTab}` : undefined} className="flex-1 min-h-0 overflow-hidden">
+        {activeTab === 'academic' && <div key={`${effectiveAccountID}:${programId}:academic`} hidden={rootAdministrationSuspended} inert={rootAdministrationSuspended} style={rootAdministrationSuspended ? { display: 'none' } : undefined} className="h-full">
+          <ProgramAcademicConfigPanel programId={programId} config={academicConfig} loading={academicLoading} error={academicError} onRetry={() => { void fetchAcademicData(); }} onChange={setAcademicConfig} onToast={showToast} onDirtyChange={setAcademicDirty} suspended={rootAdministrationSuspended} onNavigateToCatalog={() => { if (requireOnline('Administrar el catálogo de cursos')) requestProgramNavigation('/dashboard/programs/courses'); }} />
         </div>}
-        {activeTab === 'surveys' && canUseSurveys && <div key={`${effectiveAccountID}:${programId}:surveys`} hidden={mobileWorkspace} inert={mobileWorkspace} style={mobileWorkspace ? { display: 'none' } : undefined} className="h-full overflow-y-auto pb-3">
-          <ProgramSurveyPanel programId={programId} programName={program.name} canManageSurveys={!isOffline} suspended={mobileWorkspace} onDirtyChange={setSurveyDirty} />
+        {activeTab === 'surveys' && canUseSurveys && <div key={`${effectiveAccountID}:${programId}:surveys`} hidden={rootAdministrationSuspended} inert={rootAdministrationSuspended} style={rootAdministrationSuspended ? { display: 'none' } : undefined} className="h-full overflow-y-auto pb-3">
+          <ProgramSurveyPanel programId={programId} programName={program.name} canManageSurveys={!isOffline} suspended={rootAdministrationSuspended} onDirtyChange={setSurveyDirty} />
         </div>}
         {visibleTab !== 'academic' && visibleTab !== 'surveys' && (
       visibleTab === 'health' ? (
@@ -2466,8 +2601,8 @@ export default function ProgramDetailPage() {
                     <div className="flex flex-wrap items-end gap-2">
                       <label className="text-xs text-slate-500">Meta asistencia<input type="number" min={1} max={100} value={programGoals.attendance_goal_percent} onChange={(e) => setProgramGoals(prev => ({ ...prev, attendance_goal_percent: Number(e.target.value) }))} className="mt-1 w-28 px-2.5 py-1.5 border border-slate-200 rounded-lg text-sm" /></label>
                       <label className="text-xs text-slate-500">Meta traspaso<input type="number" min={1} max={100} value={programGoals.transfer_goal_percent} onChange={(e) => setProgramGoals(prev => ({ ...prev, transfer_goal_percent: Number(e.target.value) }))} className="mt-1 w-28 px-2.5 py-1.5 border border-slate-200 rounded-lg text-sm" /></label>
-                      <button onClick={saveProgramGoals} disabled={savingGoals} className="min-h-11 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50">{savingGoals ? 'Guardando...' : 'Guardar metas'}</button>
-                      <button onClick={() => openCreateSession('recovery')} className="min-h-11 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100">Recuperación</button>
+                      <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} onClick={saveProgramGoals} disabled={savingGoals} className="min-h-11 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50">{savingGoals ? 'Guardando...' : 'Guardar metas'}</button>
+                      <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} onClick={() => openCreateSession('recovery')} className="min-h-11 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100">Recuperación</button>
                     </div>
                   </div>
                 )}
@@ -2514,14 +2649,14 @@ export default function ProgramDetailPage() {
                   <h3 className="text-sm font-semibold text-slate-800">Participantes</h3>
                   <div className="flex items-center gap-2">
                     <button onClick={fetchHealth} disabled={loadingHealth} className="min-h-11 rounded-lg px-2 text-xs text-emerald-600 hover:bg-emerald-50 hover:underline">Actualizar</button>
-                    <button onClick={() => setIsAddParticipantOpen(true)} disabled={program?.status !== 'active'} className="inline-flex min-h-11 items-center gap-1.5 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"><Plus className="w-3.5 h-3.5" /> Agregar</button>
+                    <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} onClick={() => setIsAddParticipantOpen(true)} disabled={program?.status !== 'active'} className="inline-flex min-h-11 items-center gap-1.5 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"><Plus className="w-3.5 h-3.5" /> Agregar</button>
                   </div>
                 </div>}
                 <div>
                   {compactWorkspace ? (
                     <div className="divide-y divide-slate-100">
                       {filteredHealthParticipants.length === 0 ? (
-                        <div className="px-4 py-10 text-center text-sm text-slate-400"><p>{normalizedParticipantQuery ? 'No hay participantes que coincidan con la búsqueda.' : 'Sin inscritos para evaluar'}</p>{mobileWorkspace && !normalizedParticipantQuery && (program.type === 'event' ? <button type="button" onClick={() => setIsAddParticipantOpen(true)} disabled={program.status !== 'active'} className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 font-semibold text-white disabled:opacity-40"><UserPlus className="h-4 w-4" />Agregar participantes</button> : <p className="mt-2 text-xs">Puedes agregar participantes desde la vista de escritorio.</p>)}</div>
+                        <div className="px-4 py-10 text-center text-sm text-slate-400"><p>{normalizedParticipantQuery ? 'No hay participantes que coincidan con la búsqueda.' : 'Sin inscritos para evaluar'}</p>{mobileWorkspace && !normalizedParticipantQuery && <p className="mt-2 text-xs">Puedes agregar participantes desde la vista de escritorio.</p>}</div>
                       ) : filteredHealthParticipants.map(p => mobileWorkspace ? (
                         <div key={p.participant_id} data-testid="mobile-program-participant-row" className="flex min-h-[78px] items-center gap-2 px-3 py-2 transition-colors hover:bg-slate-50">
                           <button type="button" onClick={event => { void openParticipantDetail(p.participant_id, p.contact_id, event.currentTarget); }} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
@@ -2536,7 +2671,7 @@ export default function ProgramDetailPage() {
                             <NotebookPen className="h-4 w-4" />
                             {p.notes_count > 0 && <span className="absolute right-0.5 top-0.5 min-w-4 rounded-full bg-emerald-600 px-1 text-center text-[9px] font-bold leading-4 text-white">{p.notes_count > 99 ? '99+' : p.notes_count}</span>}
                           </button>
-                          <button type="button" onClick={() => openOutcomeModal(p.participant_id, 'dropped')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400" aria-label={`Retirar del programa a ${p.name || 'participante'}`}><XCircle className="h-4 w-4" /></button>
+                          <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} type="button" onClick={() => openOutcomeModal(p.participant_id, 'dropped')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400" aria-label={`Retirar del programa a ${p.name || 'participante'}`}><XCircle className="h-4 w-4" /></button>
                         </div>
                       ) : (
                         <div key={p.participant_id} onClick={() => { void openParticipantDetail(p.participant_id, p.contact_id) }} className="cursor-pointer space-y-3 p-4 transition-colors hover:bg-slate-50">
@@ -2549,8 +2684,8 @@ export default function ProgramDetailPage() {
                             </button>
                             <div onClick={event => event.stopPropagation()} className="flex shrink-0 items-center gap-0.5">
                               <button onClick={() => openObservationHistory(p.participant_id)} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-emerald-50 hover:text-emerald-600" title="Abrir observaciones"><NotebookPen className="h-4 w-4" /></button>
-                              <><button onClick={() => openOutcomeModal(p.participant_id, 'completed')} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-blue-50 hover:text-blue-600" title="Completar y traspasar"><Target className="h-4 w-4" /></button>
-                              <button onClick={() => openOutcomeModal(p.participant_id, 'dropped')} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-red-50 hover:text-red-600" title="Retirar del programa"><XCircle className="h-4 w-4" /></button></>
+                              <><button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} onClick={() => openOutcomeModal(p.participant_id, 'completed')} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-blue-50 hover:text-blue-600" title="Completar y traspasar"><Target className="h-4 w-4" /></button>
+                              <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} onClick={() => openOutcomeModal(p.participant_id, 'dropped')} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 hover:bg-red-50 hover:text-red-600" title="Retirar del programa"><XCircle className="h-4 w-4" /></button></>
                             </div>
                           </div>
                           <div className="grid grid-cols-2 gap-3 rounded-xl bg-slate-50 p-3">
@@ -2596,10 +2731,10 @@ export default function ProgramDetailPage() {
                                 <button onClick={() => openObservationHistory(p.participant_id)} className="p-1.5 rounded-lg hover:bg-emerald-50 text-slate-400 hover:text-emerald-600" title="Abrir observaciones">
                                   <NotebookPen className="w-4 h-4" />
                                 </button>
-                                <button onClick={() => openOutcomeModal(p.participant_id, 'completed')} className="p-1.5 rounded-lg hover:bg-blue-50 text-slate-400 hover:text-blue-600" title="Completar y traspasar">
+                                <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} onClick={() => openOutcomeModal(p.participant_id, 'completed')} className="p-1.5 rounded-lg hover:bg-blue-50 text-slate-400 hover:text-blue-600" title="Completar y traspasar">
                                   <Target className="w-4 h-4" />
                                 </button>
-                                <button onClick={() => openOutcomeModal(p.participant_id, 'dropped')} className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-600" title="Retirar del programa">
+                                <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} onClick={() => openOutcomeModal(p.participant_id, 'dropped')} className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-600" title="Retirar del programa">
                                   <XCircle className="w-4 h-4" />
                                 </button>
                               </div>
@@ -2620,7 +2755,7 @@ export default function ProgramDetailPage() {
             <h2 className="text-base font-semibold text-slate-800">Lista de Participantes</h2>
             <div className="flex items-center gap-2">
               {!compactWorkspace && <div className="relative">
-                <button
+                <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined}
                   onClick={() => setShowColumnPicker(v => !v)}
                   className="flex items-center gap-2 px-3 py-2 border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 transition-all text-sm font-medium"
                   title="Personalizar columnas"
@@ -2656,7 +2791,7 @@ export default function ProgramDetailPage() {
                   </>
                 )}
               </div>}
-              {!mobileWorkspace && <button
+              {!mobileWorkspace && <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined}
                 onClick={() => setIsAddParticipantOpen(true)}
                 disabled={program?.status !== 'active'}
                 title={program?.status !== 'active' ? 'Solo disponible para programas activos' : 'Agregar participantes'}
@@ -2677,7 +2812,7 @@ export default function ProgramDetailPage() {
                   <Users className="mx-auto mb-3 h-10 w-10 text-slate-300" />
                   <p className="font-medium text-slate-500">{normalizedParticipantQuery ? 'Sin coincidencias' : 'Sin participantes'}</p>
                   <p className="mt-1 text-xs text-slate-400">{normalizedParticipantQuery ? 'Prueba con otro nombre o teléfono.' : 'Todavía no hay participantes para consultar.'}</p>
-                  {!normalizedParticipantQuery && (program.type === 'event' ? <button type="button" onClick={() => setIsAddParticipantOpen(true)} disabled={program.status !== 'active'} className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white disabled:opacity-40"><UserPlus className="h-4 w-4" />Agregar participantes</button> : <p className="mt-2 text-xs text-slate-400">Puedes agregar participantes desde la vista de escritorio.</p>)}
+                  {!normalizedParticipantQuery && (desktopActions ? <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} type="button" onClick={() => setIsAddParticipantOpen(true)} disabled={program.status !== 'active'} className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white disabled:opacity-40"><UserPlus className="h-4 w-4" />Agregar participantes</button> : <p className="mt-2 text-xs text-slate-400">Puedes agregar participantes desde la vista de escritorio.</p>)}
                 </div>
               ) : filteredProgramParticipants.map(p => (
                 <div key={p.id} data-testid="mobile-program-participant-row" className={`flex min-h-[78px] items-center gap-2 px-3 py-2 transition-colors ${selectedParticipantID === p.id ? 'bg-emerald-50' : 'bg-white'}`}>
@@ -2692,7 +2827,7 @@ export default function ProgramDetailPage() {
                     </div>
                   </button>
                   <button type="button" onClick={() => openObservationHistory(p.id)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-emerald-50 hover:text-emerald-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label={`Abrir observaciones de ${p.contact_name || 'participante'}`}><NotebookPen className="h-4 w-4" /></button>
-                  <button type="button" onClick={() => openOutcomeModal(p.id, 'dropped')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400" aria-label={`Retirar del programa a ${p.contact_name || 'participante'}`}><XCircle className="h-4 w-4" /></button>
+                  <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} type="button" onClick={() => openOutcomeModal(p.id, 'dropped')} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400" aria-label={`Retirar del programa a ${p.contact_name || 'participante'}`}><XCircle className="h-4 w-4" /></button>
                 </div>
               ))) : (filteredProgramParticipants.length === 0 ? (
                 <div className="px-5 py-12 text-center">
@@ -2715,7 +2850,7 @@ export default function ProgramDetailPage() {
                       </div>
                     </div>
                   </button>
-                  <div className="mt-3 flex justify-end gap-2 border-t border-slate-100 pt-2"><button type="button" onClick={() => openOutcomeModal(p.id, 'completed')} className="flex min-h-11 items-center gap-2 rounded-xl px-3 text-sm font-medium text-blue-700 hover:bg-blue-50"><Target className="h-4 w-4" /> Completar</button><button type="button" onClick={() => openOutcomeModal(p.id, 'dropped')} className="flex min-h-11 items-center gap-2 rounded-xl px-3 text-sm font-medium text-red-600 hover:bg-red-50"><XCircle className="h-4 w-4" /> Retirar</button></div>
+                  <div className="mt-3 flex justify-end gap-2 border-t border-slate-100 pt-2"><button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} type="button" onClick={() => openOutcomeModal(p.id, 'completed')} className="flex min-h-11 items-center gap-2 rounded-xl px-3 text-sm font-medium text-blue-700 hover:bg-blue-50"><Target className="h-4 w-4" /> Completar</button><button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} type="button" onClick={() => openOutcomeModal(p.id, 'dropped')} className="flex min-h-11 items-center gap-2 rounded-xl px-3 text-sm font-medium text-red-600 hover:bg-red-50"><XCircle className="h-4 w-4" /> Retirar</button></div>
                 </div>
               )))}
             </div>}
@@ -2791,8 +2926,8 @@ export default function ProgramDetailPage() {
                             if (col.id === 'actions') {
                               return (
                                 <td key={col.id} className="px-5 py-3 text-right">
-                                  <button onClick={(e) => { e.stopPropagation(); openOutcomeModal(p.id, 'completed'); }} className="rounded-lg p-1.5 text-slate-400 transition-all hover:bg-blue-50 hover:text-blue-600" title="Completar participación"><Target className="h-4 w-4" /></button>
-                                  <button onClick={(e) => { e.stopPropagation(); openOutcomeModal(p.id, 'dropped'); }} className="rounded-lg p-1.5 text-slate-400 transition-all hover:bg-red-50 hover:text-red-600" title="Retirar del programa"><XCircle className="h-4 w-4" /></button>
+                                  <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} onClick={(e) => { e.stopPropagation(); openOutcomeModal(p.id, 'completed'); }} className="rounded-lg p-1.5 text-slate-400 transition-all hover:bg-blue-50 hover:text-blue-600" title="Completar participación"><Target className="h-4 w-4" /></button>
+                                  <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} onClick={(e) => { e.stopPropagation(); openOutcomeModal(p.id, 'dropped'); }} className="rounded-lg p-1.5 text-slate-400 transition-all hover:bg-red-50 hover:text-red-600" title="Retirar del programa"><XCircle className="h-4 w-4" /></button>
                                 </td>
                               );
                             }
@@ -2812,7 +2947,7 @@ export default function ProgramDetailPage() {
         <div className="h-full flex flex-col gap-3">
           <div className="flex shrink-0 items-center justify-between gap-3">
             <h2 className="text-base font-semibold text-slate-800">Kanban de Participantes</h2>
-            {!mobileWorkspace && <button
+            {!mobileWorkspace && <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined}
               onClick={() => setIsAddParticipantOpen(true)}
               disabled={program?.status !== 'active'}
               title={program?.status !== 'active' ? 'Solo disponible para programas activos' : 'Agregar participantes'}
@@ -2958,14 +3093,14 @@ export default function ProgramDetailPage() {
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 shrink-0">
             <h2 className="text-base font-semibold text-slate-800">Sesiones y Asistencia</h2>
             <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:flex-nowrap">
-              <button
+              <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined}
                 onClick={() => setIsGenerateSessionsOpen(true)}
                 className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition-all hover:bg-emerald-100 sm:flex-none"
               >
                 <Repeat className="w-4 h-4" />
                 Generar Horario
               </button>
-              <button
+              <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined}
                 onClick={() => openCreateSession()}
                 className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-emerald-700 sm:flex-none"
               >
@@ -2983,17 +3118,17 @@ export default function ProgramDetailPage() {
               </div>
               <h3 className="text-lg font-semibold text-slate-800 mb-2">Sin sesiones programadas</h3>
               <p className="text-slate-500 mb-5 max-w-md mx-auto text-sm">
-                Crea sesiones individuales o genera un horario recurrente. El plan de clases siempre será una sugerencia editable.
+                {desktopActions ? 'Crea sesiones individuales o genera un horario recurrente. El plan de clases siempre será una sugerencia editable.' : 'Las sesiones se programan desde la vista de escritorio. Cuando estén disponibles podrás consultar y registrar su asistencia aquí.'}
               </p>
               <div className="flex flex-wrap justify-center gap-3">
-                <button
+                <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined}
                   onClick={() => setIsGenerateSessionsOpen(true)}
                   className="flex min-h-11 items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition-all hover:bg-emerald-100"
                 >
                   <Repeat className="w-4 h-4" />
                   Generar Horario
                 </button>
-                <button
+                <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined}
                   onClick={() => openCreateSession()}
                   className="flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-emerald-700"
                 >
@@ -3090,18 +3225,18 @@ export default function ProgramDetailPage() {
                       <div className="flex w-full shrink-0 items-center justify-end gap-1 border-t border-slate-100 pt-2 sm:w-auto sm:border-0 sm:pt-0">
                         <button
                           onClick={event => openAttendance(session, event.currentTarget)}
-                          className="min-h-11 flex-1 rounded-xl bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-200 md:min-h-0 md:flex-none md:rounded-lg"
+                          className={`min-h-11 flex-1 rounded-xl px-3 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 ${mobileWorkspace ? 'bg-emerald-600 text-white hover:bg-emerald-700' : 'bg-slate-100 text-slate-700 hover:bg-slate-200 md:min-h-0 md:flex-none md:rounded-lg'}`}
                         >
                           Asistencia
                         </button>
-                        <button
+                        <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined}
                           onClick={() => openEditSession(session)}
                           className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 opacity-100 transition-all hover:bg-slate-100 hover:text-slate-700 md:h-8 md:w-8 md:rounded-lg md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100"
                           title="Editar sesión"
                         >
                           <Edit2 className="w-4 h-4" />
                         </button>
-                        <button
+                        <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined}
                           onClick={() => handleDeleteSession(session.id)}
                           className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 opacity-100 transition-all hover:bg-red-50 hover:text-red-500 md:h-8 md:w-8 md:rounded-lg md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100"
                           title="Eliminar sesión"
@@ -3356,7 +3491,7 @@ export default function ProgramDetailPage() {
       <ContactSelector
         key={`${effectiveAccountID}:${programId}:enrollment`}
         open={isAddParticipantOpen}
-        suspended={mobileWorkspace && program.type !== 'event'}
+        suspended={rootAdministrationSuspended}
         onClose={closeAddParticipantSelector}
         onConfirm={handleAddParticipants}
         title="Agregar participantes"
@@ -3371,44 +3506,14 @@ export default function ProgramDetailPage() {
       />
 
       {/* Create Session Modal */}
-      {showSectionPicker && mobileWorkspace && program.type === 'event' && typeof document !== 'undefined' && createPortal(
-        <div className="app-viewport fixed inset-0 z-[90] flex flex-col bg-white" role="dialog" aria-modal="true" aria-labelledby="program-mobile-sections-title">
-          <div className="safe-area-top flex min-h-16 shrink-0 items-center justify-between border-b border-slate-200 px-4">
-            <div><h2 id="program-mobile-sections-title" className="font-bold text-slate-900">Secciones del programa</h2><p className="text-xs text-slate-500">Elige qué quieres ver o administrar</p></div>
-            <button type="button" onClick={() => setShowSectionPicker(false)} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Cerrar selector"><X className="h-5 w-5" /></button>
-          </div>
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5">
-            {(program.type === 'event'
-              ? [
-                  { id: 'kanban' as const, label: 'Tablero', detail: `${stages.length} etapas`, icon: LayoutGrid },
-                  { id: 'participants' as const, label: 'Participantes', detail: `${activeParticipants.length} activos`, icon: Users },
-                ]
-              : [
-                  { id: 'health' as const, label: 'Participantes', detail: `${activeParticipants.length} activos`, icon: Users },
-                  { id: 'academic' as const, label: 'Plan e instructores', detail: `${academicConfig?.courses.length || 0} cursos · ${academicConfig?.instructors.length || 0} instructores`, icon: GraduationCap },
-                  { id: 'sessions' as const, label: 'Sesiones', detail: `${sessions.length} registradas`, icon: Calendar },
-                  { id: 'stats' as const, label: 'Estadísticas', detail: 'Asistencia y evolución', icon: BarChart3 },
-                  ...(canUseSurveys ? [{ id: 'surveys' as const, label: 'Encuestas', detail: 'Aplicaciones y resultados', icon: ClipboardList }] : []),
-                ]
-            ).map(section => {
-              const Icon = section.icon
-              const selected = activeTab === section.id
-              return <button key={section.id} type="button" onClick={() => requestTabChange(section.id)} className={`mb-2 flex min-h-16 w-full items-center gap-3 rounded-2xl border px-4 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${selected ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white hover:bg-slate-50'}`} aria-current={selected ? 'page' : undefined}><span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${selected ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'}`}><Icon className="h-5 w-5" /></span><span className="min-w-0 flex-1"><span className={`block font-semibold ${selected ? 'text-emerald-800' : 'text-slate-800'}`}>{section.label}</span><span className="block text-xs text-slate-500">{section.detail}</span></span>{selected && <Check className="h-5 w-5 text-emerald-600" />}</button>
-            })}
-          </div>
-          <div className="safe-area-bottom shrink-0 border-t border-slate-200 p-4"><button type="button" onClick={() => setShowSectionPicker(false)} className="min-h-12 w-full rounded-xl border border-slate-200 text-sm font-semibold text-slate-600">Cerrar</button></div>
-        </div>,
-        document.body,
-      )}
-
       {isCreateSessionOpen && (
-        <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
-          <div role="dialog" aria-modal="true" aria-labelledby="create-session-title" className={`flex w-full flex-col overflow-hidden bg-white shadow-2xl ${maximizedSessionDialog === 'create' ? 'h-full max-w-none rounded-none sm:rounded-xl' : 'h-[var(--app-height)] max-w-2xl rounded-none sm:h-auto sm:max-h-[90vh] sm:rounded-2xl'}`}>
+        <div hidden={rootAdministrationSuspended} inert={rootAdministrationSuspended} style={rootAdministrationSuspended ? { display: 'none' } : undefined} className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
+          <div ref={createSessionDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="create-session-title" className={`flex w-full flex-col overflow-hidden bg-white shadow-2xl ${maximizedSessionDialog === 'create' ? 'h-full max-w-none rounded-none sm:rounded-xl' : 'h-[var(--app-height)] max-w-2xl rounded-none sm:h-auto sm:max-h-[90vh] sm:rounded-2xl'}`}>
             <div className="flex justify-between items-center px-5 py-4 border-b border-slate-100 shrink-0">
               <h2 id="create-session-title" className="text-xl font-bold text-slate-800">Nueva Sesión</h2>
-              <div className="flex items-center gap-1"><button type="button" onClick={() => setMaximizedSessionDialog(value => value === 'create' ? null : 'create')} className="hidden sm:inline-flex p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title={maximizedSessionDialog === 'create' ? 'Restaurar' : 'Maximizar'}>{maximizedSessionDialog === 'create' ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}</button><button type="button" onClick={() => { setIsCreateSessionOpen(false); setMaximizedSessionDialog(null); }} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" aria-label="Cerrar nueva sesión"><X className="w-5 h-5" /></button></div>
+              <div className="flex items-center gap-1"><button type="button" onClick={() => setMaximizedSessionDialog(value => value === 'create' ? null : 'create')} className="hidden sm:inline-flex p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title={maximizedSessionDialog === 'create' ? 'Restaurar' : 'Maximizar'}>{maximizedSessionDialog === 'create' ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}</button><button type="button" onClick={() => { requestCloseAdminSurface(() => { setIsCreateSessionOpen(false); setMaximizedSessionDialog(null); }, creatingSession); }} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" aria-label="Cerrar nueva sesión"><X className="w-5 h-5" /></button></div>
             </div>
-            <form onSubmit={handleCreateSession} className="flex flex-1 min-h-0 flex-col">
+            <form inert={creatingSession} onSubmit={handleCreateSession} className="flex flex-1 min-h-0 flex-col">
               <div className="overflow-y-auto p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="sm:col-span-2">
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha</label>
@@ -3494,7 +3599,7 @@ export default function ProgramDetailPage() {
               <div className="flex shrink-0 gap-3 border-t border-slate-100 px-4 py-4 pb-[calc(1rem+env(safe-area-inset-bottom))] sm:justify-end sm:px-5 sm:pb-4">
                 <button
                   type="button"
-                  onClick={() => { setIsCreateSessionOpen(false); setMaximizedSessionDialog(null); }}
+                  onClick={() => { requestCloseAdminSurface(() => { setIsCreateSessionOpen(false); setMaximizedSessionDialog(null); }, creatingSession); }}
                   className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 sm:flex-none"
                 >
                   Cancelar
@@ -3514,13 +3619,13 @@ export default function ProgramDetailPage() {
 
       {/* Edit Session Modal */}
       {editingSession && (
-        <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
-          <div role="dialog" aria-modal="true" aria-labelledby="edit-session-title" className={`flex w-full flex-col overflow-hidden bg-white shadow-2xl ${maximizedSessionDialog === 'edit' ? 'h-full max-w-none rounded-none sm:rounded-xl' : 'h-[var(--app-height)] max-w-2xl rounded-none sm:h-auto sm:max-h-[90vh] sm:rounded-2xl'}`}>
+        <div hidden={rootAdministrationSuspended} inert={rootAdministrationSuspended} style={rootAdministrationSuspended ? { display: 'none' } : undefined} className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
+          <div ref={editSessionDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="edit-session-title" className={`flex w-full flex-col overflow-hidden bg-white shadow-2xl ${maximizedSessionDialog === 'edit' ? 'h-full max-w-none rounded-none sm:rounded-xl' : 'h-[var(--app-height)] max-w-2xl rounded-none sm:h-auto sm:max-h-[90vh] sm:rounded-2xl'}`}>
             <div className="flex justify-between items-center px-5 py-4 border-b border-slate-100 shrink-0">
               <h2 id="edit-session-title" className="text-xl font-bold text-slate-800">Editar Sesión</h2>
-              <div className="flex items-center gap-1"><button type="button" onClick={() => setMaximizedSessionDialog(value => value === 'edit' ? null : 'edit')} className="hidden sm:inline-flex p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title={maximizedSessionDialog === 'edit' ? 'Restaurar' : 'Maximizar'}>{maximizedSessionDialog === 'edit' ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}</button><button onClick={() => { setEditingSession(null); setMaximizedSessionDialog(null); }} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"><X className="w-5 h-5" /></button></div>
+              <div className="flex items-center gap-1"><button type="button" onClick={() => setMaximizedSessionDialog(value => value === 'edit' ? null : 'edit')} className="hidden sm:inline-flex p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title={maximizedSessionDialog === 'edit' ? 'Restaurar' : 'Maximizar'}>{maximizedSessionDialog === 'edit' ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}</button><button onClick={() => { requestCloseAdminSurface(() => { setEditingSession(null); setMaximizedSessionDialog(null); }, savingSession); }} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"><X className="w-5 h-5" /></button></div>
             </div>
-            <form onSubmit={handleUpdateSession} className="flex flex-1 min-h-0 flex-col">
+            <form inert={savingSession} onSubmit={handleUpdateSession} className="flex flex-1 min-h-0 flex-col">
               <div className="overflow-y-auto p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="sm:col-span-2">
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha</label>
@@ -3607,7 +3712,7 @@ export default function ProgramDetailPage() {
               <div className="flex shrink-0 gap-3 border-t border-slate-100 px-4 py-4 pb-[calc(1rem+env(safe-area-inset-bottom))] sm:justify-end sm:px-5 sm:pb-4">
                 <button
                   type="button"
-                  onClick={() => { setEditingSession(null); setMaximizedSessionDialog(null); }}
+                  onClick={() => { requestCloseAdminSurface(() => { setEditingSession(null); setMaximizedSessionDialog(null); }, savingSession); }}
                   className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 sm:flex-none"
                 >
                   Cancelar
@@ -3627,8 +3732,8 @@ export default function ProgramDetailPage() {
 
       {/* Generate Sessions Modal - Google Calendar Style */}
       {isGenerateSessionsOpen && (
-        <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
-          <div role="dialog" aria-modal="true" aria-labelledby="recurring-session-title" className={`flex w-full flex-col overflow-hidden bg-white shadow-2xl ${maximizedSessionDialog === 'recurring' ? 'h-full max-w-none rounded-none sm:rounded-xl' : 'h-[var(--app-height)] max-w-3xl rounded-none sm:h-auto sm:max-h-[90vh] sm:rounded-2xl'}`}>
+        <div hidden={rootAdministrationSuspended} inert={rootAdministrationSuspended} style={rootAdministrationSuspended ? { display: 'none' } : undefined} className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
+          <div ref={generateSessionDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="recurring-session-title" className={`flex w-full flex-col overflow-hidden bg-white shadow-2xl ${maximizedSessionDialog === 'recurring' ? 'h-full max-w-none rounded-none sm:rounded-xl' : 'h-[var(--app-height)] max-w-3xl rounded-none sm:h-auto sm:max-h-[90vh] sm:rounded-2xl'}`}>
             <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-4 py-4 sm:px-5 shrink-0">
               <div className="flex min-w-0 flex-1 items-center gap-3">
                 <div className="w-10 h-10 rounded-xl bg-emerald-50 flex items-center justify-center">
@@ -3639,7 +3744,7 @@ export default function ProgramDetailPage() {
                   <p className="truncate text-xs text-slate-500">Configura la recurrencia y genera todas las sesiones</p>
                 </div>
               </div>
-              <div className="flex shrink-0 items-center gap-1"><button type="button" onClick={() => setMaximizedSessionDialog(value => value === 'recurring' ? null : 'recurring')} className="hidden sm:inline-flex p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title={maximizedSessionDialog === 'recurring' ? 'Restaurar' : 'Maximizar'}>{maximizedSessionDialog === 'recurring' ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}</button><button onClick={() => { setIsGenerateSessionsOpen(false); setMaximizedSessionDialog(null); }} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"><X className="w-5 h-5" /></button></div>
+              <div className="flex shrink-0 items-center gap-1"><button type="button" onClick={() => setMaximizedSessionDialog(value => value === 'recurring' ? null : 'recurring')} className="hidden sm:inline-flex p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title={maximizedSessionDialog === 'recurring' ? 'Restaurar' : 'Maximizar'}>{maximizedSessionDialog === 'recurring' ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}</button><button onClick={() => { requestCloseAdminSurface(() => { setIsGenerateSessionsOpen(false); setMaximizedSessionDialog(null); }, generating); }} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"><X className="w-5 h-5" /></button></div>
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -3774,7 +3879,7 @@ export default function ProgramDetailPage() {
 
             <div className="flex shrink-0 gap-3 border-t border-slate-100 px-4 py-4 pb-[calc(1rem+env(safe-area-inset-bottom))] sm:justify-end sm:px-5 sm:pb-4">
               <button
-                onClick={() => { setIsGenerateSessionsOpen(false); setMaximizedSessionDialog(null); }}
+                onClick={() => { requestCloseAdminSurface(() => { setIsGenerateSessionsOpen(false); setMaximizedSessionDialog(null); }, generating); }}
                 className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 sm:flex-none"
               >
                 Cancelar
@@ -3839,7 +3944,7 @@ export default function ProgramDetailPage() {
                 <h3 className="flex items-center gap-2 text-sm font-bold text-emerald-900"><BookOpen className="h-4 w-4"/>Temas programados</h3>
                 {normalizedSessionTopics(selectedSession).length === 0 ? <p className="mt-2 text-xs text-emerald-800/70">No hay temas programados para esta sesión.</p> : <div className="mt-2 flex flex-wrap gap-2">{normalizedSessionTopics(selectedSession).map(topic => <span key={topic.id || topic.course_topic_id || topic.title} className="rounded-lg border border-emerald-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-emerald-800">{topic.course_name ? `${topic.course_name} · ` : ''}{topic.title}</span>)}</div>}
               </section>
-              <SessionObservationPanel programId={programId} sessionId={selectedSession.id} disabled={savingAttendance} onChanged={() => void fetchProgramData()} />
+              <SessionObservationPanel mutationMode={mobileWorkspace ? 'append-only' : 'manage'} programId={programId} sessionId={selectedSession.id} disabled={savingAttendance} onChanged={() => void fetchProgramData()} />
               {attendanceSaveError && <div className="mb-4 flex flex-col gap-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 sm:flex-row sm:items-center" role="alert"><div className="min-w-0 flex-1"><p className="text-sm font-semibold text-red-800">No se pudo guardar la asistencia</p><p className="mt-0.5 text-xs leading-5 text-red-700">{attendanceSaveError} El borrador sigue disponible.</p></div><button type="button" disabled={savingAttendance} onClick={() => { void saveAttendance(attendanceRetryExpectedStatuses); }} className="min-h-11 shrink-0 rounded-xl border border-red-200 bg-white px-4 text-sm font-semibold text-red-700 hover:bg-red-100 disabled:opacity-40">Reintentar</button></div>}
               {attendanceLoadState === 'loading' ? (
                 <div className="flex min-h-64 items-center justify-center px-4 py-10 text-center" role="status">
@@ -3925,7 +4030,7 @@ export default function ProgramDetailPage() {
         errorMessage={attendanceObservationError}
         onRetry={() => { if (attendanceObservationParticipant) void loadAttendanceObservationHistory(attendanceObservationParticipant); }}
         onObservationChange={() => { if (attendanceObservationParticipant) void loadAttendanceObservationHistory(attendanceObservationParticipant); }}
-        mutationMode="manage"
+        mutationMode={mobileWorkspace ? 'append-only' : 'manage'}
         initialComposerOpen={attendanceObservationComposerOpen}
       />
 
@@ -3950,7 +4055,7 @@ export default function ProgramDetailPage() {
 
       {/* Participant Outcome Modal */}
       {outcomeParticipant && (
-        <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
+        <div hidden={administrationSuspended} inert={administrationSuspended} style={administrationSuspended ? { display: 'none' } : undefined} className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
           <div role="dialog" aria-modal="true" aria-labelledby="participant-outcome-title" className="h-[var(--app-height)] w-full max-w-md overflow-y-auto rounded-none bg-white p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-2xl sm:p-6">
             <div className="flex justify-between items-start mb-5">
               <div>
@@ -3959,7 +4064,7 @@ export default function ProgramDetailPage() {
                 </h2>
                 <p className="text-sm text-slate-500">{outcomeParticipant.contact_name || 'Participante sin nombre'}</p>
               </div>
-              <button onClick={() => setOutcomeParticipant(null)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600">
+              <button onClick={() => requestCloseAdminSurface(() => setOutcomeParticipant(null), savingOutcome, false)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600">
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -4009,7 +4114,7 @@ export default function ProgramDetailPage() {
               <p className="mt-2 text-xs leading-5 text-slate-500">Es el primer día fuera del programa. Si existe una sesión en esa fecha, el participante no aparecerá en su lista.</p>
             </div>
             <div className="sticky bottom-0 -mx-4 mt-6 flex gap-3 border-t border-slate-100 bg-white px-4 pb-[env(safe-area-inset-bottom)] pt-4 sm:static sm:mx-0 sm:justify-end sm:px-0 sm:pb-0">
-              <button onClick={() => setOutcomeParticipant(null)} disabled={savingOutcome} className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 disabled:opacity-50 sm:flex-none">
+              <button onClick={() => requestCloseAdminSurface(() => setOutcomeParticipant(null), savingOutcome, false)} disabled={savingOutcome} className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 disabled:opacity-50 sm:flex-none">
                 Cancelar
               </button>
               <button onClick={saveParticipantOutcome} disabled={savingOutcome || !outcomeForm.ended_on || outcomeForm.ended_on < calendarDateKey(outcomeParticipant.enrolled_at) || outcomeForm.ended_on > limaDateInputValue()} className={`min-h-11 flex-1 rounded-xl px-5 py-2.5 font-medium text-white shadow-sm transition-all disabled:cursor-not-allowed disabled:opacity-60 sm:flex-none ${outcomeForm.status === 'dropped' ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
@@ -4022,7 +4127,8 @@ export default function ProgramDetailPage() {
 
       {/* Campaign Modal */}
       <CreateCampaignModal
-        open={showCampaignModal && !mobileWorkspace}
+        open={showCampaignModal}
+        suspended={rootAdministrationSuspended}
         onClose={() => setShowCampaignModal(false)}
         onSubmit={handleCreateCampaign}
         devices={devices}
@@ -4048,7 +4154,10 @@ export default function ProgramDetailPage() {
       />
 
       <ProgramSettingsDialog
+        key={`${effectiveAccountID}:${programId}:settings`}
         open={isEditModalOpen}
+        suspended={rootAdministrationSuspended}
+        onDirtyChange={setSettingsDirty}
         program={program}
         onClose={() => setIsEditModalOpen(false)}
         onCanonicalReload={canonical => setProgram(canonical)}
@@ -4067,10 +4176,11 @@ export default function ProgramDetailPage() {
             className="absolute inset-0 bg-black/30"
             onClick={closeParticipantDetail}
           />
-          <div ref={participantDetailDialogRef} role="dialog" aria-modal="true" aria-label="Detalle del participante" tabIndex={-1} className={`relative h-[var(--app-height,100dvh)] border-l border-slate-200 bg-white pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] shadow-2xl outline-none transition-[width] duration-200 motion-reduce:transition-none lg:pl-0 lg:pr-0 ${showInlineChat ? 'w-full pt-[env(safe-area-inset-top)] lg:w-[85vw] lg:max-w-6xl lg:pt-0' : 'w-full max-w-md'}`}>
+          <div ref={participantDetailDialogRef} role="dialog" aria-modal="true" aria-label="Detalle del participante" tabIndex={-1} className={`relative h-[var(--app-height,100dvh)] border-l border-slate-200 bg-white pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] shadow-2xl outline-none transition-[width] duration-200 motion-reduce:transition-none lg:pl-0 lg:pr-0 ${visibleInlineChat ? 'w-full pt-[env(safe-area-inset-top)] lg:w-[85vw] lg:max-w-6xl lg:pt-0' : 'w-full max-w-md'}`}>
             <OperationalOverlayBoundary hostZIndex={95}>
               <CrmDetailWorkspace
                 chatOpen={showInlineChat && Boolean(inlineChatId)}
+                chatSuspended={mobileWorkspace}
                 onBackToDetail={closeWhatsAppChat}
                 chat={showInlineChat && inlineChatId ? (
                   <ChatPanel
@@ -4078,7 +4188,9 @@ export default function ProgramDetailPage() {
                     deviceId={inlineChatDeviceId}
                     device={whatsappChat.device || undefined}
                     initialChat={whatsappChat.chat || undefined}
-                    readOnly={whatsappChat.readOnly}
+                    suspended={mobileWorkspace}
+                    isActive={!mobileWorkspace}
+                    readOnly={mobileWorkspace || whatsappChat.readOnly}
                     readOnlyReason={whatsappChat.readOnlyReason}
                     onClose={closeWhatsAppChat}
                     className="h-full"
@@ -4098,22 +4210,25 @@ export default function ProgramDetailPage() {
                 </div>
               ) : selectedContact && selectedParticipantID ? (
                 <ContactDetailSurface
+                  ref={participantSurfaceRef}
                   contactId={selectedContact.id}
                   context={{ type: 'program_participant', id: selectedParticipantID }}
                   initialContact={selectedContact}
                   title="Detalle del participante"
                   subtitle={program.name}
-                  onClose={closeParticipantDetail}
+                  onClose={closeParticipantDetailAfterContactCheck}
+                  readOnly={mobileWorkspace}
+                  onAddContextObservation={mobileWorkspace ? () => { void openObservationHistory(selectedParticipantID, true); } : undefined}
                   onContactChange={handleParticipantContactChange}
-                  onSendMessage={showInlineChat ? undefined : handleSendWhatsApp}
+                  onSendMessage={mobileWorkspace || showInlineChat ? undefined : handleSendWhatsApp}
                   sendingMessage={whatsappChat.pending}
                 messageError={whatsappChat.error}
                 messageNotice={whatsappChat.notice}
                 messageDisabled={whatsappChat.messageDisabled}
                 checkingMessage={whatsappChat.checkingAvailability}
                 messageLabel={whatsappChat.messageLabel}
-                onPrepareMessage={whatsappChat.prepare}
-                  onRetryMessage={whatsappChat.canRetry ? whatsappChat.retry : undefined}
+                onPrepareMessage={mobileWorkspace ? undefined : whatsappChat.prepare}
+                  onRetryMessage={!mobileWorkspace && whatsappChat.canRetry ? whatsappChat.retry : undefined}
                   contextContent={(
                     <div className="pb-[calc(1rem+env(safe-area-inset-bottom))]">
                       <section className="border-b border-slate-200 px-4 py-4" aria-labelledby="program-participation-title">
@@ -4138,14 +4253,14 @@ export default function ProgramDetailPage() {
                         </div>
                         {selectedProgramParticipant && (
                           <div className="mt-3 grid grid-cols-1 gap-2 text-xs text-slate-600 sm:grid-cols-2">
-                            <ProgramParticipantEnrollmentDate programId={programId} participant={selectedProgramParticipant} onChange={enrolledAt => handleParticipantEnrollmentChange(selectedProgramParticipant.id, enrolledAt)} />
-                            <ProgramParticipantOutcomeDate programId={programId} participant={selectedProgramParticipant} onChange={endedOn => handleParticipantOutcomeDateChange(selectedProgramParticipant.id, endedOn)} />
+                            <ProgramParticipantEnrollmentDate key={`${effectiveAccountID}:${selectedParticipantID}:enrollment`} readOnly={mobileWorkspace} onDirtyChange={setEnrollmentDirty} programId={programId} participant={selectedProgramParticipant} onChange={enrolledAt => handleParticipantEnrollmentChange(selectedProgramParticipant.id, enrolledAt)} />
+                            <ProgramParticipantOutcomeDate key={`${effectiveAccountID}:${selectedParticipantID}:outcome`} readOnly={mobileWorkspace} onDirtyChange={setOutcomeDateDirty} programId={programId} participant={selectedProgramParticipant} onChange={endedOn => handleParticipantOutcomeDateChange(selectedProgramParticipant.id, endedOn)} />
                           </div>
                         )}
                         {selectedProgramParticipant?.status === 'active' ? (
                           <div className="mt-3 grid grid-cols-2 gap-2">
-                            <button type="button" onClick={() => openOutcomeModal(selectedProgramParticipant.id, 'completed')} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 text-xs font-semibold text-blue-700 transition hover:bg-blue-100"><Target className="h-4 w-4" />Completar</button>
-                            <button type="button" onClick={() => openOutcomeModal(selectedProgramParticipant.id, 'dropped')} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 text-xs font-semibold text-red-700 transition hover:bg-red-100"><XCircle className="h-4 w-4" />Retirar</button>
+                            <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} type="button" onClick={() => openOutcomeModal(selectedProgramParticipant.id, 'completed')} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 text-xs font-semibold text-blue-700 transition hover:bg-blue-100"><Target className="h-4 w-4" />Completar</button>
+                            <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} type="button" onClick={() => openOutcomeModal(selectedProgramParticipant.id, 'dropped')} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-3 text-xs font-semibold text-red-700 transition hover:bg-red-100"><XCircle className="h-4 w-4" />Retirar</button>
                           </div>
                         ) : (
                           <p className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-500">Esta participación está en el historial y no afecta el padrón ni la salud actual del programa.</p>
@@ -4153,6 +4268,7 @@ export default function ProgramDetailPage() {
                       </section>
                       <div className="px-4">
                         <ProgramParticipantAttendanceSection
+                              mutationMode={mobileWorkspace ? 'append-only' : 'manage'}
                           programId={programId}
                           participantId={selectedParticipantID}
                           participantName={selectedProgramParticipant?.contact_name || selectedContact.custom_name || selectedContact.name || selectedContact.phone || 'Participante'}
@@ -4175,15 +4291,15 @@ export default function ProgramDetailPage() {
       )}
 
       <WhatsAppDevicePicker
-        open={showDeviceSelector}
+        open={showDeviceSelector && !mobileWorkspace}
         idPrefix="program-participant"
         phone={whatsappChat.phone}
         devices={whatsappChat.devices}
         existingChat={whatsappChat.chat}
         historicalPhone={whatsappChat.historicalPhone}
         busy={whatsappChat.pending}
-        onSelect={whatsappChat.selectDevice}
-        onOpenHistorical={whatsappChat.chat ? whatsappChat.openHistorical : undefined}
+        onSelect={option => { if (adminAllowedRef.current && programIdentityRef.current === programIdentity) void whatsappChat.selectDevice(option); }}
+        onOpenHistorical={whatsappChat.chat ? () => { if (adminAllowedRef.current && programIdentityRef.current === programIdentity) whatsappChat.openHistorical(); } : undefined}
         onCancel={closeWhatsAppChat}
       />
 
@@ -4197,6 +4313,15 @@ export default function ProgramDetailPage() {
           <button onClick={() => setToastMessage(null)} className="ml-1 shrink-0 rounded p-0.5 hover:bg-white/20">
             <X className="w-3.5 h-3.5" />
           </button>
+        </div>
+      )}
+
+      {adminConfirmAction && !adminConfirmationSuspended && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4">
+          <div ref={adminConfirmDialogRef} tabIndex={-1} role="alertdialog" aria-modal="true" aria-label="Confirmar administración" className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl">
+            <p className="text-sm text-slate-700">{adminConfirmAction.message}</p>
+            <div className="mt-4 flex justify-end gap-3"><button type="button" onClick={() => setAdminConfirmAction(null)} className="min-h-11 rounded-xl px-4">Cancelar</button><button type="button" onClick={() => { if (adminAllowedRef.current && (!adminConfirmAction.root || rootAdminAllowedRef.current)) adminConfirmAction.onConfirm(); }} className="min-h-11 rounded-xl bg-red-600 px-4 text-white">Confirmar</button></div>
+          </div>
         </div>
       )}
 

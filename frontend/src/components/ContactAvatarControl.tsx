@@ -172,6 +172,8 @@ export default function ContactAvatarControl({
   compact = false,
   onChange,
 }: ContactAvatarControlProps) {
+  const disabledRef = useRef(disabled)
+  disabledRef.current = disabled
   const [avatar, setAvatar] = useState<ContactAvatarInfo>({ avatar_url: avatarUrl, revision: 0 })
   const [devices, setDevices] = useState<AvatarDevice[]>([])
   const [menuOpen, setMenuOpen] = useState(false)
@@ -208,10 +210,14 @@ export default function ContactAvatarControl({
   const identityKey = `${authScope}:${contactId}:${contextType}:${contextId}`
   const identityRef = useRef(identityKey)
   identityRef.current = identityKey
+  const mountedRef = useRef(true)
+  const canManage = () => mountedRef.current && !disabledRef.current && identityKey === identityRef.current
+    && authScope === getAuthScope() && !isAuthIdentityChanging()
   const operationalPortal = useOperationalOverlayPortal()
   const overlayTarget = operationalPortal ?? (typeof document !== 'undefined' ? document.body : null)
-  const dialogOpen = dialog !== 'none'
-  useOperationalOverlayRegistration(menuOpen, `contact-avatar-menu:${identityKey}`)
+  const dialogOpen = dialog !== 'none' && (!disabled || dialog === 'view')
+  const pausedDialogFocusRef = useRef<HTMLElement | null>(null)
+  useOperationalOverlayRegistration(menuOpen && !disabled, `contact-avatar-menu:${identityKey}`)
   useOperationalOverlayRegistration(dialogOpen, `contact-avatar-dialog:${identityKey}`)
 
   const updateBusy = useCallback((value: boolean) => {
@@ -284,6 +290,7 @@ export default function ContactAvatarControl({
   }, [releaseEditorResource])
 
   useEffect(() => {
+    mountedRef.current = true
     identityRef.current = identityKey
     operationRequestRef.current++
     operationControllerRef.current?.abort()
@@ -314,6 +321,7 @@ export default function ContactAvatarControl({
       setDevices(result.data.devices || [])
     })
     return () => {
+      mountedRef.current = false
       controller.abort()
       metadataRequestRef.current++
       operationRequestRef.current++
@@ -362,7 +370,7 @@ export default function ContactAvatarControl({
   }, [])
 
   useEffect(() => {
-    if (!menuOpen) return
+    if (!menuOpen || disabled) return
     const close = (event: MouseEvent) => {
       const target = event.target as Node
       if (!menuRef.current?.contains(target) && !menuPopupRef.current?.contains(target)) {
@@ -405,10 +413,10 @@ export default function ContactAvatarControl({
       window.visualViewport?.removeEventListener('resize', reposition)
       window.visualViewport?.removeEventListener('scroll', reposition)
     }
-  }, [menuOpen, positionMenu, identityKey, authScope, cancelMenuFrames])
+  }, [menuOpen, disabled, positionMenu, identityKey, authScope, cancelMenuFrames])
 
   useLayoutEffect(() => {
-    if (!menuOpen) { menuEntryFocusedRef.current = false; return }
+    if (!menuOpen || disabled) { menuEntryFocusedRef.current = false; return }
     if (!menuPosition || menuEntryFocusedRef.current || isAuthIdentityChanging(authScope) || authScope !== getAuthScope()) return
     const popup = menuPopupRef.current
     if (!popup || popup.style.visibility !== 'visible') return
@@ -416,7 +424,16 @@ export default function ContactAvatarControl({
     // Repositioning must preserve the user's current keyboard selection.
     menuEntryFocusedRef.current = true
     popup.querySelector<HTMLButtonElement>('[role="menuitem"]:not([disabled])')?.focus({ preventScroll: true })
-  }, [menuOpen, menuPosition, authScope])
+  }, [menuOpen, disabled, menuPosition, authScope])
+
+  useLayoutEffect(() => {
+    if (!disabled || dialog === 'view') return
+    const active = document.activeElement
+    if (active instanceof HTMLElement && (dialogRef.current?.contains(active) || menuPopupRef.current?.contains(active))) {
+      pausedDialogFocusRef.current = active
+      active.blur()
+    }
+  }, [disabled, dialog])
 
   const closeDialog = useCallback(() => {
     if (busyRef.current) return
@@ -435,7 +452,10 @@ export default function ContactAvatarControl({
     const focusableSelector = 'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
     const frame = window.requestAnimationFrame(() => {
       const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(focusableSelector)
-      focusable?.[0]?.focus()
+      const paused = pausedDialogFocusRef.current
+      if (paused?.isConnected && dialogRef.current?.contains(paused)) paused.focus()
+      else focusable?.[0]?.focus()
+      pausedDialogFocusRef.current = null
     })
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -469,6 +489,7 @@ export default function ContactAvatarControl({
     return () => {
       window.cancelAnimationFrame(frame)
       document.removeEventListener('keydown', handleKeyDown, true)
+      if (disabledRef.current) return
       const target = returnFocus?.isConnected ? returnFocus : menuTriggerRef.current
       dialogReturnFocusRef.current = null
       if (target?.isConnected) window.requestAnimationFrame(() => target.focus({ preventScroll: true }))
@@ -476,6 +497,7 @@ export default function ContactAvatarControl({
   }, [closeDialog, dialogOpen])
 
   const requestWhatsAppPreview = async (deviceId?: string) => {
+    if (!canManage() || busyRef.current) return
     const operation = beginOperation()
     updateBusy(true)
     setError('')
@@ -510,6 +532,7 @@ export default function ContactAvatarControl({
   }
 
   const beginWhatsAppRefresh = () => {
+    if (!canManage() || busyRef.current) return
     dialogReturnFocusRef.current = menuTriggerRef.current
     setMenuOpen(false)
     setMenuPosition(null)
@@ -525,7 +548,7 @@ export default function ContactAvatarControl({
   }
 
   const confirmWhatsAppAvatar = async () => {
-    if (!candidate) return
+    if (!canManage() || busyRef.current || !candidate) return
     const operation = beginOperation()
     updateBusy(true)
     setError('')
@@ -551,6 +574,7 @@ export default function ContactAvatarControl({
   }
 
   const openFilePicker = () => {
+    if (!canManage() || busyRef.current) return
     dialogReturnFocusRef.current = menuTriggerRef.current
     setMenuOpen(false)
     setMenuPosition(null)
@@ -559,7 +583,7 @@ export default function ContactAvatarControl({
   }
 
   const loadEditorFile = (file: File) => {
-    if (filePickerIdentityRef.current !== identityRef.current || busyRef.current || isAuthIdentityChanging()) return
+    if (!canManage() || filePickerIdentityRef.current !== identityRef.current || busyRef.current) return
     resetEditor()
     setError('')
     setDialog('editor')
@@ -668,13 +692,13 @@ export default function ContactAvatarControl({
   }
 
   const saveManualAvatar = async () => {
-    if (!editorImage || busyRef.current || isAuthIdentityChanging()) return
+    if (!canManage() || !editorImage || busyRef.current) return
     const operation = beginOperation()
     updateBusy(true)
     setError('')
     try {
       const blob = await exportEditorBlob(operation.signal)
-      if (!operationIsCurrent(operation)) return
+      if (!operationIsCurrent(operation) || !canManage()) return
       if (!blob) {
         updateBusy(false)
         setError('No se pudo preparar la imagen')
@@ -703,6 +727,7 @@ export default function ContactAvatarControl({
   }
 
   const removeAvatar = async () => {
+    if (!canManage() || busyRef.current) return
     const operation = beginOperation()
     updateBusy(true)
     setError('')
@@ -775,7 +800,7 @@ export default function ContactAvatarControl({
         </div>
       </div>
 
-      {menuOpen && overlayTarget && createPortal(
+      {menuOpen && !disabled && overlayTarget && createPortal(
         <div
           data-contact-avatar-menu
           ref={menuPopupRef}
@@ -824,15 +849,17 @@ export default function ContactAvatarControl({
         onChange={event => {
           const file = event.target.files?.[0]
           event.target.value = ''
-          if (file) loadEditorFile(file)
+          if (file && !disabledRef.current) loadEditorFile(file)
         }}
       />
 
       {dialog !== 'none' && overlayTarget && createPortal(
         <div
           data-contact-avatar-dialog
+          hidden={!dialogOpen}
+          inert={!dialogOpen}
+          style={{ display: dialogOpen ? undefined : 'none', zIndex: operationalPortal ? OPERATIONAL_OVERLAY_LAYERS.dialog : 100 }}
           className="pointer-events-auto fixed inset-0 flex items-center justify-center bg-slate-950/55 p-3 backdrop-blur-[2px]"
-          style={{ zIndex: operationalPortal ? OPERATIONAL_OVERLAY_LAYERS.dialog : 100 }}
           role="dialog"
           aria-modal="true"
           aria-label="Gestionar foto del contacto"

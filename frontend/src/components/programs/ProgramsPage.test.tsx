@@ -2,16 +2,18 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProgramsPage from '@/app/dashboard/programs/page'
 
-const fixture = vi.hoisted(() => ({ api: vi.fn() }))
+const fixture = vi.hoisted(() => ({ api: vi.fn(), width: 1100 }))
 vi.mock('@/lib/api', () => ({ api: fixture.api }))
 vi.mock('@/components/offline-v5/ClarinRuntimeProvider', () => ({ useClarinRuntime: () => ({ isOffline: false, requireOnline: () => true }) }))
-vi.mock('@/components/responsive/useContainerWidth', () => ({ useContainerWidth: () => ({ ref: { current: null }, width: 1100 }) }))
+vi.mock('@/components/responsive/useContainerWidth', () => ({ useContainerWidth: () => ({ ref: { current: null }, width: fixture.width }) }))
+vi.mock('@/components/programs/useProgramWorkspacePolicy', () => ({ useProgramWorkspacePolicy: (width: number) => ({ mobile: width < 700, desktopActions: width >= 700, touch: width < 820 }) }))
 vi.mock('@/components/programs/ProgramSettingsDialog', () => ({ ProgramSettingsDialog: () => null }))
 
 const program = (id: string, status = 'active') => ({ id, account_id: 'account-1', name: id, type: 'course', status, color: '#10b981' })
 const folders = { success: true, data: { success: true, folders: [] } }
 
 beforeEach(() => {
+  fixture.width = 1100
   fixture.api.mockReset()
   window.matchMedia = vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })) as unknown as typeof window.matchMedia
   fixture.api.mockImplementation(async (endpoint: string, options?: RequestInit) => {
@@ -19,6 +21,118 @@ beforeEach(() => {
     if (endpoint.startsWith('/api/programs/dashboard')) return { success: false, error: 'Dashboard unavailable' }
     if (options?.method === 'DELETE') return { success: false, status: 409, error: 'Este programa contiene datos o actividad. Archívalo para conservar su historial.' }
     return { success: true, data: [program('Retained group')] }
+  })
+})
+
+describe('ProgramsPage mobile consultation policy', () => {
+  it('hides all administration for normal and legacy programs while preserving consultation', async () => {
+    fixture.width = 522
+    fixture.api.mockImplementation(async (endpoint: string) => endpoint.startsWith('/api/programs/folders') ? folders
+      : endpoint.startsWith('/api/programs/dashboard') ? { success: false }
+        : { success: true, data: [program('Class group'), { ...program('Legacy group'), type: 'event' }] })
+    render(<ProgramsPage />)
+    expect(await screen.findByRole('link', { name: /Class group/ })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Legacy group/ })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Administrar cursos' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Nuevo|Crear|Editar|Eliminar|Acciones|Carpeta|Metas/ })).not.toBeInTheDocument()
+    expect(screen.getByPlaceholderText('Buscar programas...')).toBeInTheDocument()
+    expect(fixture.api.mock.calls.every(([, options]) => !options?.method || options.method === 'GET')).toBe(true)
+  })
+
+  it('uses a consultation empty state without hidden creation affordances', async () => {
+    fixture.width = 320
+    fixture.api.mockImplementation(async (endpoint: string) => endpoint.startsWith('/api/programs/folders') ? folders
+      : endpoint.startsWith('/api/programs/dashboard') ? { success: false }
+        : { success: true, data: [] })
+    render(<ProgramsPage />)
+    expect(await screen.findByText('No hay grupos de clases')).toBeInTheDocument()
+    expect(screen.getByText(/Los grupos se administran desde la vista de escritorio/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Nuevo|Crear/ })).not.toBeInTheDocument()
+  })
+
+  it('pauses creation without losing its draft and rejects an old submit until desktop resumes', async () => {
+    const view = render(<ProgramsPage />)
+    await screen.findByText('Retained group')
+    fireEvent.click(screen.getByRole('button', { name: /^Nuevo grupo/ }))
+    const name = screen.getByPlaceholderText('Ej: Taller de Verano 2024')
+    fireEvent.change(name, { target: { value: 'Draft group' } })
+    const form = name.closest('form')!
+    fixture.width = 522
+    view.rerender(<ProgramsPage />)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(name.closest('[inert]')).not.toBeNull()
+    fireEvent.submit(form)
+    expect(fixture.api.mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(0)
+    fixture.width = 1100
+    view.rerender(<ProgramsPage />)
+    expect(screen.getByPlaceholderText('Ej: Taller de Verano 2024')).toHaveValue('Draft group')
+    fireEvent.submit(form)
+    await waitFor(() => expect(fixture.api.mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(1))
+  })
+
+  it('preserves delete confirmation through mobile and never writes from its suspended callback', async () => {
+    const view = render(<ProgramsPage />)
+    await screen.findByText('Retained group')
+    fireEvent.click(screen.getByRole('button', { name: 'Acciones de Retained group' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Eliminar' }))
+    const confirm = screen.getByRole('button', { name: 'Confirmar' })
+    fixture.width = 522
+    view.rerender(<ProgramsPage />)
+    fireEvent.click(confirm)
+    expect(fixture.api.mock.calls.filter(([, options]) => options?.method === 'DELETE')).toHaveLength(0)
+    fixture.width = 1100
+    view.rerender(<ProgramsPage />)
+    fireEvent.click(screen.getByRole('button', { name: 'Confirmar' }))
+    await waitFor(() => expect(fixture.api.mock.calls.filter(([, options]) => options?.method === 'DELETE')).toHaveLength(1))
+  })
+
+  it('does not duplicate a creation already in flight when the viewport changes', async () => {
+    let resolveCreate!: (value: unknown) => void
+    const baseMock = fixture.api.getMockImplementation()!
+    fixture.api.mockImplementation((endpoint: string, options?: RequestInit) => options?.method === 'POST'
+      ? new Promise(resolve => { resolveCreate = resolve }) : baseMock(endpoint, options))
+    const view = render(<ProgramsPage />)
+    await screen.findByText('Retained group')
+    fireEvent.click(screen.getByRole('button', { name: /^Nuevo grupo/ }))
+    const form = screen.getByPlaceholderText('Ej: Taller de Verano 2024').closest('form')!
+    fireEvent.change(screen.getByPlaceholderText('Ej: Taller de Verano 2024'), { target: { value: 'One create' } })
+    fireEvent.submit(form)
+    fireEvent.submit(form)
+    fixture.width = 522
+    view.rerender(<ProgramsPage />)
+    await act(async () => resolveCreate({ success: true }))
+    fixture.width = 1100
+    view.rerender(<ProgramsPage />)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(fixture.api.mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(1)
+  })
+
+  it('retains an in-flight creation error and draft until desktop resumes', async () => {
+    let resolveCreate!: (value: unknown) => void
+    const baseMock = fixture.api.getMockImplementation()!
+    fixture.api.mockImplementation((endpoint: string, options?: RequestInit) => options?.method === 'POST'
+      ? new Promise(resolve => { resolveCreate = resolve }) : baseMock(endpoint, options))
+    const view = render(<ProgramsPage />)
+    await screen.findByText('Retained group')
+    fireEvent.click(screen.getByRole('button', { name: /^Nuevo grupo/ }))
+    const name = screen.getByPlaceholderText('Ej: Taller de Verano 2024')
+    fireEvent.change(name, { target: { value: 'Borrador recuperable' } })
+    fireEvent.submit(name.closest('form')!)
+    fixture.width = 522
+    view.rerender(<ProgramsPage />)
+    vi.useFakeTimers()
+    try {
+      await act(async () => resolveCreate({ success: false, error: 'Creación interrumpida' }))
+      expect(screen.queryByText('Creación interrumpida')).not.toBeInTheDocument()
+      act(() => vi.advanceTimersByTime(5000))
+    } finally {
+      vi.useRealTimers()
+    }
+    fixture.width = 1100
+    view.rerender(<ProgramsPage />)
+    expect(screen.getByText('Creación interrumpida')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('Ej: Taller de Verano 2024')).toHaveValue('Borrador recuperable')
+    expect(fixture.api.mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(1)
   })
 })
 afterEach(cleanup)
