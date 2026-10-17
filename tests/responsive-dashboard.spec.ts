@@ -2315,9 +2315,8 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
     await expect(page.getByRole('heading', { name: 'Programa sin sesiones' })).toBeVisible({ timeout: 30_000 })
     await expect(page.getByTitle('Editar programa')).toHaveCount(0)
-    await page.getByRole('button', { name: /Cambiar sección\. Actual: Participantes/ }).click()
-    await page.getByRole('button', { name: /Sesiones 0 registradas/ }).click()
-    await expect(page.getByRole('button', { name: /Cambiar sección\. Actual: Sesiones/ })).toBeVisible()
+    await page.getByRole('tab', { name: 'Sesiones', exact: true }).click()
+    await expect(page.getByRole('tab', { name: 'Sesiones', exact: true })).toHaveAttribute('aria-selected', 'true')
     await expect(page.getByRole('heading', { name: 'Sin sesiones programadas' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Nueva Sesión' })).toBeVisible()
     await expect(page.getByText('No se pudieron cargar las sesiones.', { exact: true })).toHaveCount(0)
@@ -2350,7 +2349,11 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expect(page.getByRole('heading', { name: 'Programa sin sesiones' })).toBeVisible({ timeout: 30_000 })
     await expect(page.getByText('No se pudieron cargar los participantes.', { exact: true })).toHaveCount(0)
     await expect(page.getByLabel('0 participantes')).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Agregar participantes' }).first()).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Agregar participantes' })).toHaveCount(0)
+    await expect(page.getByText('Puedes agregar participantes desde la vista de escritorio', { exact: false })).toBeVisible()
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await expect(page.getByRole('button', { name: 'Agregar', exact: true })).toBeVisible()
   })
 
   test('Sesiones permite un tema por cada plan y sugiere la continuidad anterior', async ({ page }) => {
@@ -2369,8 +2372,7 @@ test.describe('Clarin responsive authenticated matrix', () => {
     })
     await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
 
-    await page.getByRole('button', { name: /Cambiar sección\. Actual: Participantes/ }).click()
-    await page.getByRole('button', { name: /Sesiones 1 registradas/ }).click()
+    await page.getByRole('tab', { name: 'Sesiones', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Sesión de apertura' })).toBeVisible()
     await expect(page.getByText('Formación inicial · Bienvenida', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Nueva Sesión' }).click()
@@ -2454,8 +2456,7 @@ test.describe('Clarin responsive authenticated matrix', () => {
     }))
     await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
 
-    await page.getByRole('button', { name: /Cambiar sección\. Actual: Participantes/ }).click()
-    await page.getByRole('button', { name: /Sesiones 1 registradas/ }).click()
+    await page.getByRole('tab', { name: 'Sesiones', exact: true }).click()
     await page.getByRole('button', { name: 'Asistencia', exact: true }).click()
     const attendanceDialog = page.getByRole('dialog', { name: 'Tomar asistencia' })
     await expectInsideVisualViewport(page, attendanceDialog)
@@ -2559,8 +2560,7 @@ test.describe('Clarin responsive authenticated matrix', () => {
     })
 
     await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
-    await page.getByRole('button', { name: /Cambiar sección\. Actual: Participantes/ }).click()
-    await page.getByRole('button', { name: /Sesiones 1 registradas/ }).click()
+    await page.getByRole('tab', { name: 'Sesiones', exact: true }).click()
     await page.setViewportSize({ width: 1510, height: 987 })
     await page.getByRole('button', { name: 'Asistencia', exact: true }).click()
 
@@ -2697,8 +2697,7 @@ test.describe('Clarin responsive authenticated matrix', () => {
     })
     await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
 
-    await page.getByRole('button', { name: /Cambiar sección\. Actual: Participantes/ }).click()
-    await page.getByRole('button', { name: /Sesiones 1 registradas/ }).click()
+    await page.getByRole('tab', { name: 'Sesiones', exact: true }).click()
     const openAttendanceButton = page.getByRole('button', { name: 'Asistencia', exact: true })
     await openAttendanceButton.click()
     const dialog = page.getByRole('dialog', { name: 'Tomar asistencia' })
@@ -2826,6 +2825,94 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
   })
 
+  test('Programas a 522x655 muestra dos secciones y conserva búsqueda sin acciones de escritorio', async ({ page }, testInfo) => {
+    test.setTimeout(90_000)
+    await page.setViewportSize({ width: 522, height: 655 })
+    await authenticate(page)
+    await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
+
+    const participantsTab = page.getByRole('tab', { name: 'Participantes', exact: true })
+    const sessionsTab = page.getByRole('tab', { name: 'Sesiones', exact: true })
+    await expect(participantsTab).toHaveAttribute('aria-selected', 'true', { timeout: 30_000 })
+    await expect(sessionsTab).toBeVisible()
+    for (const tab of [participantsTab, sessionsTab]) {
+      const box = await tab.boundingBox()
+      expect(box?.height).toBeGreaterThanOrEqual(44)
+    }
+    for (const name of ['Agregar participantes', 'Exportar participantes filtrados a Excel', 'Plan e instructores', 'Estadísticas', 'Encuestas']) {
+      await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0)
+    }
+    await expect(page.getByRole('button', { name: /Cambiar sección/ })).toHaveCount(0)
+    const search = page.getByRole('textbox', { name: 'Buscar participante por nombre o teléfono' })
+    const searchBox = await search.boundingBox()
+    expect(searchBox?.width).toBeGreaterThan(450)
+    await search.fill('sin coincidencias')
+    await expect(page.getByTestId('mobile-program-participant-row')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Agregar participantes' })).toHaveCount(0)
+    await search.fill('')
+    await expect(page.getByTestId('mobile-program-participant-row')).toHaveCount(6)
+    if (captureVisuals) await page.screenshot({ path: testInfo.outputPath('programas-522x655-participantes.png'), fullPage: false, style: 'nextjs-portal { display: none !important; }' })
+
+    await sessionsTab.click()
+    await expect(sessionsTab).toHaveAttribute('aria-selected', 'true')
+    await expect(page.getByRole('heading', { name: 'Sin sesiones programadas' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Nueva Sesión' })).toBeVisible()
+    await participantsTab.click()
+    await expect(search).toHaveValue('')
+    await expect(page.getByTestId('mobile-program-participant-row')).toHaveCount(6)
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await expect(page.getByRole('button', { name: 'Plan e instructores' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Estadísticas', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Encuestas', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Agregar', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Exportar participantes filtrados a Excel' })).toBeVisible()
+    if (captureVisuals) await page.screenshot({ path: testInfo.outputPath('programas-1440x900-escritorio.png'), fullPage: false, style: 'nextjs-portal { display: none !important; }' })
+  })
+
+  test('Programas conserva selección y búsqueda del alta al estrechar y escribe solo al confirmar', async ({ page }) => {
+    test.setTimeout(90_000)
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await authenticate(page)
+    const participantWrites: unknown[] = []
+    await page.route(/\/api\/people\/search(?:\?.*)?$/, route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true, total: 1, people: [{ id: 'contact-new-program', name: 'Contacto para incorporar', phone: '5192300999', email: 'nuevo@example.test', source_type: 'contact', tags: [] }] }),
+    }))
+    await page.route('**/api/programs/program-1/participants/bulk', async route => {
+      participantWrites.push(route.request().postDataJSON())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, summary: { requested: 1, created: 1, already_present: 0, rejected: 0 } }) })
+    })
+    await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
+    await page.getByRole('button', { name: 'Agregar', exact: true }).click()
+    const selector = page.getByRole('dialog', { name: 'Agregar participantes', exact: true })
+    await expectInsideVisualViewport(page, selector)
+    const search = selector.getByPlaceholder('Buscar por nombre, teléfono, email...')
+    await expect(search).toBeFocused()
+    await search.fill('incorporar')
+    await selector.getByRole('button', { name: /Contacto para incorporar.*5192300999/ }).click()
+    await expect(selector.getByText('1 seleccionado', { exact: true })).toBeVisible()
+
+    await page.setViewportSize({ width: 522, height: 655 })
+    await expect(selector).toBeHidden()
+    await expect(page.getByRole('tab', { name: 'Participantes', exact: true })).toHaveAttribute('aria-selected', 'true')
+    await expect(page.getByRole('tab', { name: 'Participantes', exact: true })).toBeFocused()
+    await page.getByRole('tab', { name: 'Sesiones', exact: true }).click()
+    await page.keyboard.press('Escape')
+    expect(participantWrites).toEqual([])
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await expectInsideVisualViewport(page, selector)
+    await expect(search).toHaveValue('incorporar')
+    await expect(selector.getByText('1 seleccionado', { exact: true })).toBeVisible()
+    await expect(selector.getByRole('button', { name: 'Agregar seleccionados (1)', exact: true })).toBeEnabled()
+    expect(participantWrites).toEqual([])
+    await selector.getByRole('button', { name: 'Agregar seleccionados (1)', exact: true }).click()
+    await expect(selector).toBeHidden()
+    expect(participantWrites).toEqual([{ contact_ids: ['contact-new-program'] }])
+  })
+
   test('Programas móvil prioriza búsqueda, filas densas y detalle enfocado sin alterar escritorio', async ({ page }) => {
     test.setTimeout(180_000)
     await page.setViewportSize({ width: 375, height: 812 })
@@ -2834,19 +2921,14 @@ test.describe('Clarin responsive authenticated matrix', () => {
 
     await expect(page.getByRole('heading', { name: 'Programa sin sesiones' })).toBeVisible({ timeout: 30_000 })
     await expect(page.getByLabel('6 participantes')).toBeVisible()
-    await expect(page.getByRole('button', { name: /Cambiar sección\. Actual: Participantes/ })).toBeVisible()
+    await expect(page.getByRole('tab', { name: 'Participantes', exact: true })).toHaveAttribute('aria-selected', 'true')
+    await expect(page.getByRole('tab', { name: 'Sesiones', exact: true })).toBeVisible()
     const search = page.getByRole('textbox', { name: 'Buscar participante por nombre o teléfono' })
     await expect(search).toBeVisible()
     await search.focus()
     await expect(search).toBeFocused()
-    const addParticipantsButton = page.getByRole('button', { name: 'Agregar participantes' })
-    await expect(addParticipantsButton).toBeVisible()
-    await addParticipantsButton.click()
-    const participantSelector = page.getByRole('dialog', { name: 'Agregar participantes' })
-    await expectInsideVisualViewport(page, participantSelector)
-    await expect(participantSelector.getByPlaceholder('Buscar por nombre, teléfono, email...')).toBeFocused()
-    await participantSelector.getByRole('button', { name: 'Cerrar selector de contactos' }).click()
-    await expect(participantSelector).toBeHidden()
+    await expect(page.getByRole('button', { name: 'Agregar participantes' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Exportar participantes filtrados a Excel' })).toHaveCount(0)
     await expect(page.getByText('Salud', { exact: true })).toHaveCount(0)
     await expect(page.getByText('Asistencia', { exact: true })).toHaveCount(0)
 
@@ -2863,12 +2945,7 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expect(page.getByText('Álexis Tarillo Mejio', { exact: true })).toBeVisible()
     await search.press('Enter')
     await search.blur()
-    await expect(page.getByRole('button', { name: 'Exportar participantes filtrados a Excel' })).toBeEnabled()
-    const [participantsDownload] = await Promise.all([
-      page.waitForEvent('download'),
-      page.getByRole('button', { name: 'Exportar participantes filtrados a Excel' }).click(),
-    ])
-    expect(participantsDownload.suggestedFilename()).toBe('Programa_sin_sesiones_participantes.xlsx')
+    await expect(page.getByRole('button', { name: 'Exportar participantes filtrados a Excel' })).toHaveCount(0)
     await page.getByRole('button', { name: /Álexis Tarillo Mejio.*5192300100.*Activo/ }).click()
 
     const participantDetail = page.getByRole('dialog', { name: 'Detalle del participante' })
@@ -2961,6 +3038,16 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expect(page.getByText('Asistencia', { exact: true }).first()).toBeVisible()
     await expect(page.getByRole('textbox', { name: 'Buscar participante por nombre o teléfono' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Exportar participantes filtrados a Excel' })).toBeVisible()
+
+    await page.getByRole('button', { name: /Participantes \(6\)/ }).click()
+    await page.getByRole('textbox', { name: 'Buscar participante por nombre o teléfono' }).fill('alexis')
+    const exportButton = page.getByRole('button', { name: 'Exportar participantes filtrados a Excel' })
+    await expect(exportButton).toBeEnabled()
+    const [participantsDownload] = await Promise.all([
+      page.waitForEvent('download'),
+      exportButton.click(),
+    ])
+    expect(participantsDownload.suggestedFilename()).toBe('Programa_sin_sesiones_participantes.xlsx')
   })
 
   test('Programas móvil explica con precisión los registros anteriores a la incorporación', async ({ page }) => {
@@ -3139,13 +3226,13 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expect(editor).toBeVisible()
   })
 
-  test('Programa administra plan e instructores también en móvil', async ({ page }) => {
-    await page.setViewportSize({ width: 375, height: 812 })
+  test('Programa administra plan e instructores en escritorio y conserva el borrador al estrechar', async ({ page }) => {
+    test.setTimeout(90_000)
+    await page.setViewportSize({ width: 1440, height: 900 })
     await authenticate(page)
     await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
     await expect(page.getByRole('heading', { name: 'Programa sin sesiones' })).toBeVisible({ timeout: 30_000 })
-    await page.getByRole('button', { name: /Cambiar sección\. Actual: Participantes/ }).click()
-    await page.getByRole('button', { name: /Plan e instructores 1 cursos · 1 instructores/ }).click()
+    await page.getByRole('button', { name: 'Plan e instructores', exact: true }).click()
 
     await expect(page.getByRole('heading', { name: 'Plan de clases' })).toBeVisible()
     await expect(page.getByText('Formación inicial', { exact: true })).toBeVisible()
@@ -3157,6 +3244,20 @@ test.describe('Clarin responsive authenticated matrix', () => {
 
     await page.getByRole('button', { name: 'Desasociar Formación inicial' }).click()
     await expect(page.getByText('Tienes cambios sin guardar', { exact: false })).toBeVisible()
+
+    await page.setViewportSize({ width: 522, height: 655 })
+    await expect(page.getByRole('heading', { name: 'Plan de clases' })).toBeHidden()
+    await expect(page.getByRole('button', { name: 'Guardar plan' })).toBeHidden()
+    await expect(page.getByRole('tab', { name: 'Participantes', exact: true })).toHaveAttribute('aria-selected', 'true')
+    await page.getByRole('tab', { name: 'Sesiones', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Sin sesiones programadas' })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('alertdialog', { name: 'Confirmar acción' })).toHaveCount(0)
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await expect(page.getByRole('heading', { name: 'Plan de clases' })).toBeVisible()
+    await expect(page.getByText('Tienes cambios sin guardar', { exact: false })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Desasociar Formación inicial' })).toHaveCount(0)
     const academicSaveRequest = page.waitForRequest(request => request.url().endsWith('/api/programs/program-1/academic-config') && request.method() === 'PUT')
     await page.getByRole('button', { name: 'Guardar plan' }).click()
     expect((await academicSaveRequest).postDataJSON()).toMatchObject({
@@ -3168,8 +3269,7 @@ test.describe('Clarin responsive authenticated matrix', () => {
 
     await page.getByRole('button', { name: 'Desasociar Formación inicial' }).click()
     await expect(page.getByText('Tienes cambios sin guardar', { exact: false })).toBeVisible()
-    await page.getByRole('button', { name: /Cambiar sección\. Actual: Plan e instructores/ }).click()
-    await page.getByRole('button', { name: /Sesiones 0 registradas/ }).click()
+    await page.getByRole('button', { name: 'Sesiones (0)', exact: true }).click()
     const sectionConfirm = page.getByRole('alertdialog', { name: 'Confirmar acción' })
     await expect(sectionConfirm).toContainText('Si cambias de sección')
     await sectionConfirm.getByRole('button', { name: 'Cancelar' }).click()
@@ -3182,22 +3282,36 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expect(page).toHaveURL(/\/dashboard\/programs\/courses/)
   })
 
-  test('Programa móvil instancia una plantilla de encuesta y conserva resultados por programa', async ({ page }) => {
+  test('Programa instancia encuestas en escritorio y conserva nombre y plantilla al estrechar', async ({ page }) => {
     test.setTimeout(60_000)
-    await page.setViewportSize({ width: 320, height: 568 })
+    await page.setViewportSize({ width: 1440, height: 900 })
     await authenticate(page)
     await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
     await expect(page.getByRole('heading', { name: 'Programa sin sesiones' })).toBeVisible({ timeout: 30_000 })
 
-    await page.getByRole('button', { name: /Cambiar sección\. Actual: Participantes/ }).click()
-    await page.getByRole('button', { name: /Encuestas Aplicaciones y resultados/ }).click()
+    await page.getByRole('button', { name: 'Encuestas', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Encuestas del programa' })).toBeVisible()
     await expect(page.getByText('Encuesta inicial', { exact: true })).toBeVisible()
     await expect(page.getByText('2', { exact: true }).first()).toBeVisible()
 
-    await page.getByRole('button', { name: 'Crear', exact: true }).click()
+    await page.getByRole('button', { name: 'Crear encuesta', exact: true }).click()
     const createDialog = page.getByRole('dialog', { name: 'Crear encuesta' })
     await expectInsideVisualViewport(page, createDialog)
+    await expect(createDialog.getByText('Satisfacción del programa', { exact: true })).toBeVisible()
+    const instanceName = createDialog.getByRole('textbox', { name: 'Nombre de esta aplicación' })
+    await expect(instanceName).not.toHaveValue('')
+    await instanceName.fill('Encuesta con borrador conservado')
+
+    await page.setViewportSize({ width: 522, height: 655 })
+    await expect(createDialog).toBeHidden()
+    await expect(page.getByRole('heading', { name: 'Encuestas del programa' })).toBeHidden()
+    await page.getByRole('tab', { name: 'Sesiones', exact: true }).click()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('dialog', { name: 'Crear encuesta' })).toBeHidden()
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await expectInsideVisualViewport(page, createDialog)
+    await expect(instanceName).toHaveValue('Encuesta con borrador conservado')
     await expect(createDialog.getByText('Satisfacción del programa', { exact: true })).toBeVisible()
     const createRequest = page.waitForRequest(request => request.url().endsWith('/api/programs/program-1/surveys') && request.method() === 'POST')
     await createDialog.getByRole('button', { name: 'Crear y obtener enlaces' }).click()
@@ -3205,6 +3319,7 @@ test.describe('Clarin responsive authenticated matrix', () => {
       template_id: 'survey-template-1',
       status: 'active',
       audience_mode: 'program_participants',
+      name: 'Encuesta con borrador conservado',
     })
 
     const linksDialog = page.getByRole('dialog', { name: 'Enlaces por participante' })

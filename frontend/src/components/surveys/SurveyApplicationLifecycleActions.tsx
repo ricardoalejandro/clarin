@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { Archive, Loader2, RotateCcw, Trash2, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import type { SurveyDeletionBlockReason, SurveyInstanceSummary } from '@/types/survey-template';
+import { restoreDialogFocus } from '@/components/programs/useDialogTabTrap';
 
 export interface SurveyApplicationLifecycleTarget {
   id: string;
@@ -36,9 +37,10 @@ export function surveyDeletionExplanation(target: SurveyApplicationLifecycleTarg
     : 'Esta aplicación debe conservarse como historial.';
 }
 
-export default function SurveyApplicationLifecycleActions({ target, labeled = false, onUpdated, onDeleted }: {
+export default function SurveyApplicationLifecycleActions({ target, labeled = false, suspended = false, onUpdated, onDeleted }: {
   target: SurveyApplicationLifecycleTarget;
   labeled?: boolean;
+  suspended?: boolean;
   onUpdated: (instance: SurveyInstanceSummary) => void;
   onDeleted: (id: string) => void;
 }) {
@@ -46,10 +48,16 @@ export default function SurveyApplicationLifecycleActions({ target, labeled = fa
   const [action, setAction] = useState<LifecycleAction | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
+  const suspendedRef = useRef(suspended);
+  const pendingRef = useRef(false);
+  const targetRef = useRef<string | null>(target.id);
+  suspendedRef.current = suspended;
+  targetRef.current = target.id;
 
-  useEffect(() => setMounted(true), []);
+  useEffect(() => { targetRef.current = target.id; setMounted(true); return () => { targetRef.current = null; }; }, [target.id]);
 
   const open = (next: LifecycleAction) => {
+    if (suspendedRef.current || pendingRef.current) return;
     if (next === 'delete' && !target.can_delete) return;
     if (next === 'archive' && target.can_archive === false) return;
     if (next === 'restore' && target.can_restore === false) return;
@@ -58,19 +66,27 @@ export default function SurveyApplicationLifecycleActions({ target, labeled = fa
   };
 
   const confirm = async () => {
-    if (!action || pending) return;
+    if (!action || pendingRef.current || suspendedRef.current) return;
+    pendingRef.current = true;
     setPending(true);
     setError('');
     const endpoint = action === 'delete' ? `/api/surveys/${target.id}` : `/api/surveys/${target.id}/${action}`;
-    const response = await api<SurveyInstanceSummary>(endpoint, { method: action === 'delete' ? 'DELETE' : 'POST' });
-    setPending(false);
-    if (!response.success) {
-      setError(response.error || 'No se pudo actualizar la aplicación.');
-      return;
+    try {
+      const response = await api<SurveyInstanceSummary>(endpoint, { method: action === 'delete' ? 'DELETE' : 'POST' });
+      if (targetRef.current !== target.id) return;
+      if (!response.success) {
+        setError(response.error || 'No se pudo actualizar la aplicación.');
+        return;
+      }
+      if (action === 'delete') onDeleted(target.id);
+      else if (response.data) onUpdated(response.data);
+      setAction(null);
+    } catch (cause) {
+      if (targetRef.current === target.id) setError(cause instanceof Error ? cause.message : 'No se pudo actualizar la aplicación.');
+    } finally {
+      pendingRef.current = false;
+      if (targetRef.current === target.id) setPending(false);
     }
-    if (action === 'delete') onDeleted(target.id);
-    else if (response.data) onUpdated(response.data);
-    setAction(null);
   };
 
   const archiveLabel = target.archived_at ? 'Restaurar aplicación' : 'Archivar aplicación';
@@ -82,16 +98,16 @@ export default function SurveyApplicationLifecycleActions({ target, labeled = fa
 
   return <>
     <div className="flex shrink-0 items-center gap-2">
-      <button type="button" disabled={!lifecycleAllowed} onClick={() => open(target.archived_at ? 'restore' : 'archive')} className={`${buttonBase} disabled:cursor-not-allowed disabled:opacity-45`} aria-label={archiveLabel} title={archiveLabel}>
+      <button type="button" disabled={suspended || !lifecycleAllowed} onClick={() => open(target.archived_at ? 'restore' : 'archive')} className={`${buttonBase} disabled:cursor-not-allowed disabled:opacity-45`} aria-label={archiveLabel} title={archiveLabel}>
         <ArchiveIcon className="h-4 w-4" />{labeled && <span>{target.archived_at ? 'Restaurar' : 'Archivar'}</span>}
       </button>
       <span title={surveyDeletionExplanation(target)}>
-        <button type="button" onClick={() => open('delete')} disabled={!target.can_delete} className={`${buttonBase} text-rose-600 disabled:cursor-not-allowed disabled:text-slate-300 disabled:opacity-70`} aria-label={surveyDeletionExplanation(target)}>
+        <button type="button" onClick={() => open('delete')} disabled={suspended || !target.can_delete} className={`${buttonBase} text-rose-600 disabled:cursor-not-allowed disabled:text-slate-300 disabled:opacity-70`} aria-label={surveyDeletionExplanation(target)}>
           <Trash2 className="h-4 w-4" />{labeled && <span>Eliminar</span>}
         </button>
       </span>
     </div>
-    {mounted && action && createPortal(
+    {mounted && action && !suspended && createPortal(
       <SurveyApplicationLifecycleDialog target={target} action={action} pending={pending} error={error} onClose={() => !pending && setAction(null)} onConfirm={() => void confirm()} />,
       document.body,
     )}
@@ -138,7 +154,7 @@ function SurveyApplicationLifecycleDialog({ target, action, pending, error, onCl
     return () => {
       cancelAnimationFrame(frame);
       window.removeEventListener('keydown', keydown);
-      previous?.focus({ preventScroll: true });
+      restoreDialogFocus([previous]);
     };
   }, [onClose, pending]);
 

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '@/lib/api';
 import SurveyApplicationLifecycleActions from './SurveyApplicationLifecycleActions';
@@ -53,5 +53,38 @@ describe('SurveyApplicationLifecycleActions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Eliminar' }));
     await waitFor(() => expect(onDeleted).toHaveBeenCalledWith('survey-1'));
     expect(api).toHaveBeenCalledWith('/api/surveys/survey-1', { method: 'DELETE' });
+  });
+
+  it('hides a prepared confirmation and releases Escape while preserving it for resume', async () => {
+    const props = { target, onUpdated: vi.fn(), onDeleted: vi.fn() };
+    const view = render(<SurveyApplicationLifecycleActions {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Archivar aplicación' }));
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    view.rerender(<SurveyApplicationLifecycleActions {...props} suspended />);
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Archivar aplicación' })).toBeDisabled();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.click(screen.getByRole('button', { name: 'Archivar aplicación' }));
+    expect(api).not.toHaveBeenCalled();
+    view.rerender(<SurveyApplicationLifecycleActions {...props} />);
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Archivar' })).toBeEnabled();
+  });
+
+  it('finishes an already-sent mutation once while suspended without reopening a portal', async () => {
+    let finish!: (value: unknown) => void;
+    vi.mocked(api).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }) as never);
+    const onDeleted = vi.fn();
+    const props = { target, onUpdated: vi.fn(), onDeleted };
+    const view = render(<SurveyApplicationLifecycleActions {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Eliminar aplicación' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Eliminar' }));
+    view.rerender(<SurveyApplicationLifecycleActions {...props} suspended />);
+    await act(async () => finish({ success: true, status: 204 }));
+    expect(onDeleted).toHaveBeenCalledExactlyOnceWith('survey-1');
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    view.rerender(<SurveyApplicationLifecycleActions {...props} />);
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(api).toHaveBeenCalledTimes(1);
   });
 });

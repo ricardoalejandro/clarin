@@ -17,66 +17,91 @@ interface SurveyInstanceNameFieldProps {
   onChange: (value: string) => void;
   onAvailabilityChange?: (available: boolean | null) => void;
   autoFocus?: boolean;
+  suspended?: boolean;
 }
 
-export default function SurveyInstanceNameField({ templateId, programId, value, onChange, onAvailabilityChange, autoFocus }: SurveyInstanceNameFieldProps) {
+export default function SurveyInstanceNameField({ templateId, programId, value, onChange, onAvailabilityChange, autoFocus, suspended = false }: SurveyInstanceNameFieldProps) {
   const [state, setState] = useState<NameAvailability | null>(null);
   const [checking, setChecking] = useState(false);
-  const requestRef = useRef<AbortController | null>(null);
-  const sequenceRef = useRef(0);
+  const suggestionIdentityRef = useRef('');
+  const suggestionDoneRef = useRef(false);
+  const automaticNameRef = useRef('');
+  const suggestionSequenceRef = useRef(0);
+  const validationSequenceRef = useRef(0);
+  const valueRef = useRef(value);
+  const onChangeRef = useRef(onChange);
+  valueRef.current = value;
+  onChangeRef.current = onChange;
 
   useEffect(() => { onAvailabilityChange?.(state?.available ?? null); }, [onAvailabilityChange, state]);
 
   useEffect(() => {
-    if (!templateId) return;
+    const identity = `${programId || ''}:${templateId}`;
+    if (suggestionIdentityRef.current !== identity) {
+      suggestionIdentityRef.current = identity;
+      suggestionDoneRef.current = false;
+    }
+    if (!templateId || suspended || suggestionDoneRef.current) return;
     const controller = new AbortController();
-    requestRef.current?.abort();
-    requestRef.current = controller;
-    const sequence = ++sequenceRef.current;
+    const sequence = ++suggestionSequenceRef.current;
     setChecking(true);
     const suffix = programId ? `&program_id=${encodeURIComponent(programId)}` : '';
     void api<NameAvailability>(`/api/survey-templates/${templateId}/instance-name?name=${suffix}`, { signal: controller.signal }).then(response => {
-      if (controller.signal.aborted || sequence !== sequenceRef.current) return;
+      if (controller.signal.aborted || sequence !== suggestionSequenceRef.current || suggestionIdentityRef.current !== identity) return;
+      suggestionDoneRef.current = true;
       if (response.success && response.data && typeof response.data.suggested_name === 'string') {
-        onChange(response.data.suggested_name);
-        setState(response.data);
-      } else {
-        setState(null);
+        // A new template may replace the prior automatic name, never a custom
+        // draft. Resuming this identity only revalidates its existing name.
+        if (!valueRef.current.trim() || valueRef.current === automaticNameRef.current) {
+          automaticNameRef.current = response.data.suggested_name;
+          onChangeRef.current(response.data.suggested_name);
+          setState(response.data);
+        }
       }
       setChecking(false);
+    }).catch(() => {
+      if (!controller.signal.aborted && sequence === suggestionSequenceRef.current && suggestionIdentityRef.current === identity) {
+        setState(null); setChecking(false);
+      }
     });
-    return () => controller.abort();
-  }, [onChange, programId, templateId]);
+    return () => { controller.abort(); suggestionSequenceRef.current += 1; };
+  }, [programId, suspended, templateId]);
 
   useEffect(() => {
+    const controller = new AbortController();
+    const sequence = ++validationSequenceRef.current;
+    if (suspended) {
+      setChecking(false);
+      return () => controller.abort();
+    }
     if (!templateId || !value.trim()) {
       setState(null);
-      return;
+      return () => controller.abort();
     }
+    setState(null);
     const timer = window.setTimeout(() => {
-      const controller = new AbortController();
-      requestRef.current?.abort();
-      requestRef.current = controller;
-      const sequence = ++sequenceRef.current;
       setChecking(true);
       const suffix = programId ? `&program_id=${encodeURIComponent(programId)}` : '';
       void api<NameAvailability>(`/api/survey-templates/${templateId}/instance-name?name=${encodeURIComponent(value)}${suffix}`, { signal: controller.signal }).then(response => {
-        if (controller.signal.aborted || sequence !== sequenceRef.current) return;
+        if (controller.signal.aborted || sequence !== validationSequenceRef.current) return;
         setState(response.success && response.data ? response.data : null);
         setChecking(false);
+      }).catch(() => {
+        if (!controller.signal.aborted && sequence === validationSequenceRef.current) { setState(null); setChecking(false); }
       });
     }, SEARCH_DEBOUNCE_MS);
-    return () => window.clearTimeout(timer);
-  }, [programId, templateId, value]);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [programId, suspended, templateId, value]);
 
   return (
     <label className="block">
       <span className="mb-1.5 block text-sm font-medium text-slate-700">Nombre de esta aplicación</span>
       <div className="relative">
         <input
-          autoFocus={autoFocus}
+          autoFocus={autoFocus && !suspended}
+          disabled={suspended}
           value={value}
-          onChange={event => onChange(event.target.value)}
+          onChange={event => { if (!suspended) onChange(event.target.value); }}
           maxLength={180}
           aria-describedby="survey-instance-name-help"
           aria-invalid={state?.available === false}
@@ -89,7 +114,7 @@ export default function SurveyInstanceNameField({ templateId, programId, value, 
       <div id="survey-instance-name-help" className="mt-1.5 min-h-5 text-xs" aria-live="polite">
         {state?.available === false ? (
           <span className="flex flex-wrap items-center gap-2 text-rose-600">Ese nombre ya existe en esta plantilla.
-            <button type="button" onClick={() => onChange(state.suggested_name)} className="inline-flex min-h-8 items-center gap-1 rounded-lg bg-rose-50 px-2 font-semibold text-rose-700 hover:bg-rose-100"><WandSparkles className="h-3.5 w-3.5" />Usar “{state.suggested_name}”</button>
+            <button type="button" disabled={suspended} onClick={() => { if (!suspended) onChange(state.suggested_name); }} className="inline-flex min-h-8 items-center gap-1 rounded-lg bg-rose-50 px-2 font-semibold text-rose-700 hover:bg-rose-100"><WandSparkles className="h-3.5 w-3.5" />Usar “{state.suggested_name}”</button>
           </span>
         ) : <span className="text-slate-400">El nombre identifica esta aplicación en resultados e historial.</span>}
       </div>

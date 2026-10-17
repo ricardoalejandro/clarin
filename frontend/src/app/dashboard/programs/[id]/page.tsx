@@ -40,7 +40,8 @@ import SessionObservationPanel from '@/components/programs/SessionObservationPan
 import { ProgramSettingsDialog } from '@/components/programs/ProgramSettingsDialog';
 import ProgramAttendanceRoster from '@/components/programs/ProgramAttendanceRoster';
 import ProgramAttendanceSearchBar from '@/components/programs/ProgramAttendanceSearchBar';
-import { restoreDialogFocus, useDialogTabTrap } from '@/components/programs/useDialogTabTrap';
+import { isDialogFocusableVisible, restoreDialogFocus, useDialogTabTrap } from '@/components/programs/useDialogTabTrap';
+import { mobileProgramTab, programSections, programWorkspacePolicy, type ProgramDetailTab, type ProgramMobileTab } from '@/components/programs/programWorkspacePolicy';
 import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider';
 import {
   acceptProgramAttendanceConflicts,
@@ -109,7 +110,6 @@ const DAY_NAMES = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
 const DAY_NAMES_FULL = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 const MAX_GENERATED_SESSIONS = 500;
 const MAX_SCHEDULE_RANGE_DAYS = 732;
-type ProgramDetailTab = 'health' | 'participants' | 'sessions' | 'stats' | 'kanban' | 'academic' | 'surveys';
 type ParticipantLifecycleView = 'active' | 'history';
 
 const suggestedSessionTitle = (topics: ProgramSessionTopic[]) => topics[0]?.title?.trim() || '';
@@ -196,18 +196,18 @@ export default function ProgramDetailPage() {
   const programId = canonicalResourceID(params.id, 'programs');
   const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>();
   const [coarsePointer, setCoarsePointer] = useState(false);
-  const [visualViewportHeight, setVisualViewportHeight] = useState(900);
-  const compactWorkspace = workspaceWidth === 0 || workspaceWidth < 820;
-  const touchWorkspace = compactWorkspace || coarsePointer;
-  const mobileWorkspace = workspaceWidth === 0 || workspaceWidth < 700 || (coarsePointer && visualViewportHeight < 600);
+  const [layoutViewportHeight, setLayoutViewportHeight] = useState(900);
+  const { compact: compactWorkspace, touch: touchWorkspace, mobile: mobileWorkspace, desktopActions: desktopWorkspaceActions } = programWorkspacePolicy(workspaceWidth, coarsePointer, layoutViewportHeight);
 
   const [program, setProgram] = useState<Program | null>(null);
+  const desktopActions = desktopWorkspaceActions || program?.type === 'event';
   const [participants, setParticipants] = useState<ProgramParticipant[]>([]);
   const [sessions, setSessions] = useState<ProgramSession[]>([]);
   const [academicConfig, setAcademicConfig] = useState<ProgramAcademicConfig | null>(null);
   const [academicLoading, setAcademicLoading] = useState(false);
   const [academicError, setAcademicError] = useState('');
   const [academicDirty, setAcademicDirty] = useState(false);
+  const [surveyDirty, setSurveyDirty] = useState(false);
   const academicRequestRef = useRef<AbortController | null>(null);
   const academicRequestSequence = useRef(0);
   const [stages, setStages] = useState<Array<{ id: string; name: string; color: string; position: number }>>([]);
@@ -215,6 +215,11 @@ export default function ProgramDetailPage() {
   const [dragOverStageID, setDragOverStageID] = useState<string | null>(null);
   const [movingStageParticipantIDs, setMovingStageParticipantIDs] = useState<Set<string>>(() => new Set());
   const [activeTab, setActiveTab] = useState<ProgramDetailTab>('health');
+  const [mobileTab, setMobileTab] = useState<ProgramMobileTab>('health');
+  const visibleTab = mobileWorkspace && program?.type !== 'event' ? mobileTab : activeTab;
+  const wasMobileWorkspace = useRef(mobileWorkspace);
+  const desktopFocusRef = useRef<HTMLElement | null>(null);
+  const mobileTabRef = useRef<HTMLButtonElement | null>(null);
   const [canUseSurveys, setCanUseSurveys] = useState(false);
   const [currentActorID, setCurrentActorID] = useState('');
   const [currentAccountID, setCurrentAccountID] = useState('');
@@ -226,7 +231,6 @@ export default function ProgramDetailPage() {
   const [participantSearch, setParticipantSearch] = useState('');
   const [debouncedParticipantSearch, setDebouncedParticipantSearch] = useState('');
   const [participantLifecycleView, setParticipantLifecycleView] = useState<ParticipantLifecycleView>('active');
-  const [participantSearchFocused, setParticipantSearchFocused] = useState(false);
   const [exportingParticipants, setExportingParticipants] = useState(false);
   const [loading, setLoading] = useState(true);
   const [detailError, setDetailError] = useState('');
@@ -275,6 +279,7 @@ export default function ProgramDetailPage() {
   const [addingParticipants, setAddingParticipants] = useState(false);
   const [addParticipantError, setAddParticipantError] = useState('');
   const [participantSelectorRevision, setParticipantSelectorRevision] = useState(0);
+  const hasUnsavedDesktopWork = academicDirty || surveyDirty || isAddParticipantOpen;
 
   // Form state
   const [newSession, setNewSession] = useState<SessionFormState>({ title: '', date: localDateInputValue(), topics: [], session_type: 'regular', start_time: '', end_time: '', location: '' });
@@ -538,7 +543,6 @@ export default function ProgramDetailPage() {
     [debouncedParticipantSearch],
   );
   const participantSearchPending = participantSearch !== debouncedParticipantSearch;
-  const participantExportCollapsed = mobileWorkspace && !exportingParticipants && (participantSearchFocused || participantSearchPending);
   const activeParticipants = useMemo(() => participants.filter(participant => participant.status === 'active'), [participants]);
   const historicalParticipants = useMemo(() => participants.filter(participant => participant.status !== 'active'), [participants]);
   const lifecycleParticipants = participantLifecycleView === 'active' ? activeParticipants : historicalParticipants;
@@ -563,7 +567,7 @@ export default function ProgramDetailPage() {
   );
 
   const handleExportParticipants = async () => {
-    if (!program || exportingParticipants) return;
+    if (!desktopActions || !program || exportingParticipants) return;
     setExportingParticipants(true);
     try {
       const { exportProgramParticipants } = await import('@/utils/programParticipantsExport');
@@ -680,16 +684,14 @@ export default function ProgramDetailPage() {
     const media = window.matchMedia('(hover: none), (pointer: coarse)');
     const update = () => {
       setCoarsePointer(media.matches);
-      setVisualViewportHeight(window.visualViewport?.height || window.innerHeight);
+      setLayoutViewportHeight(window.innerHeight);
     };
     update();
     media.addEventListener('change', update);
     window.addEventListener('resize', update);
-    window.visualViewport?.addEventListener('resize', update);
     return () => {
       media.removeEventListener('change', update);
       window.removeEventListener('resize', update);
-      window.visualViewport?.removeEventListener('resize', update);
     };
   }, []);
 
@@ -708,6 +710,23 @@ export default function ProgramDetailPage() {
     resetWhatsAppChat();
     setMaximizedSessionDialog(null);
   }, [mobileWorkspace, resetWhatsAppChat]);
+
+  useEffect(() => {
+    if (wasMobileWorkspace.current === mobileWorkspace) return;
+    wasMobileWorkspace.current = mobileWorkspace;
+    if (mobileWorkspace) setMobileTab(mobileProgramTab(activeTab));
+    const frame = window.requestAnimationFrame(() => {
+      const previous = desktopFocusRef.current;
+      if (mobileWorkspace) {
+        if (previous && (!previous.isConnected || !isDialogFocusableVisible(previous))) {
+          restoreDialogFocus([mobileTabRef.current]);
+        }
+      } else {
+        restoreDialogFocus([previous]);
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeTab, mobileWorkspace]);
 
   useEffect(() => {
     if (!participantDetailOpen) return;
@@ -741,49 +760,58 @@ export default function ProgramDetailPage() {
 
   const requestTabChange = useCallback((nextTab: ProgramDetailTab) => {
     setShowSectionPicker(false);
+    if (mobileWorkspace && program?.type !== 'event') {
+      const nextMobileTab = mobileProgramTab(nextTab);
+      setMobileTab(nextMobileTab);
+      // Shared sections follow the current activity; paused desktop work keeps
+      // its original section until the wider workspace is restored.
+      if (!hasUnsavedDesktopWork && (activeTab === 'health' || activeTab === 'sessions')) setActiveTab(nextMobileTab);
+      return;
+    }
     if (nextTab === activeTab) return;
-    if (!academicDirty) {
+    if (!academicDirty && !surveyDirty) {
       setActiveTab(nextTab);
       return;
     }
     setConfirmAction({
-      message: 'Hay cambios sin guardar en el plan o los instructores. Si cambias de sección, se perderán.',
+      message: academicDirty ? 'Hay cambios sin guardar en el plan o los instructores. Si cambias de sección, se perderán.' : 'Hay una encuesta sin guardar. Si cambias de sección, se perderá.',
       onConfirm: () => {
         setConfirmAction(null);
         setAcademicDirty(false);
+        setSurveyDirty(false);
         setActiveTab(nextTab);
       },
     });
-  }, [academicDirty, activeTab]);
+  }, [academicDirty, surveyDirty, activeTab, hasUnsavedDesktopWork, mobileWorkspace, program?.type]);
 
   const requestProgramNavigation = useCallback((destination: string) => {
-    if (!academicDirty) {
+    if (!hasUnsavedDesktopWork) {
       router.push(destination);
       return;
     }
     setShowSectionPicker(false);
     setConfirmAction({
-      message: 'Hay cambios sin guardar en el plan o los instructores. Si sales de esta página, se perderán.',
+      message: academicDirty ? 'Hay cambios sin guardar en el plan o los instructores. Si sales de esta página, se perderán.' : 'Hay trabajo sin guardar. Si sales de esta página, se perderá.',
       onConfirm: () => {
         setConfirmAction(null);
         setAcademicDirty(false);
         router.push(destination);
       },
     });
-  }, [academicDirty, router]);
+  }, [academicDirty, hasUnsavedDesktopWork, router]);
 
   useEffect(() => {
-    if (!academicDirty) return;
+    if (!hasUnsavedDesktopWork) return;
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = '';
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [academicDirty]);
+  }, [hasUnsavedDesktopWork]);
 
   useEffect(() => {
-    if (!academicDirty) return;
+    if (!hasUnsavedDesktopWork) return;
     const handleInternalNavigation = (event: MouseEvent) => {
       if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       const target = event.target;
@@ -800,7 +828,7 @@ export default function ProgramDetailPage() {
     };
     document.addEventListener('click', handleInternalNavigation, true);
     return () => document.removeEventListener('click', handleInternalNavigation, true);
-  }, [academicDirty, requestProgramNavigation]);
+  }, [hasUnsavedDesktopWork, requestProgramNavigation]);
 
   const fetchAcademicData = useCallback(async () => {
     if (!programId) return;
@@ -953,15 +981,27 @@ export default function ProgramDetailPage() {
       setParticipants([]);
       setSessions([]);
       setHealth(null);
+      statsRequestRef.current?.abort();
+      statsRequestSequence.current += 1;
+      setStatsData(null);
+      setStatsStatus('idle');
+      setStatsError('');
+      setSelectedMonths([]);
       setLoadingHealth(false);
       setAcademicConfig(null);
       setAcademicError('');
       setAcademicDirty(false);
+      setSurveyDirty(false);
+      setActiveTab('health');
+      setMobileTab('health');
+      setIsAddParticipantOpen(false);
+      setAddingParticipants(false);
+      setAddParticipantError('');
+      desktopFocusRef.current = null;
       academicRequestRef.current?.abort();
       setStages([]);
       setParticipantSearch('');
       setDebouncedParticipantSearch('');
-      setParticipantSearchFocused(false);
       setIsAttendanceOpen(false);
       setSelectedSession(null);
       setAttendanceLoadState('idle');
@@ -1017,14 +1057,14 @@ export default function ProgramDetailPage() {
       if (isGenerateSessionsOpen) { setIsGenerateSessionsOpen(false); setMaximizedSessionDialog(null); return; }
       if (isCreateSessionOpen) { setIsCreateSessionOpen(false); setMaximizedSessionDialog(null); return; }
       if (editingSession) { setEditingSession(null); setMaximizedSessionDialog(null); return; }
-      if (isAddParticipantOpen) { setIsAddParticipantOpen(false); return; }
+      if (isAddParticipantOpen && desktopActions) { if (!addingParticipants) setIsAddParticipantOpen(false); return; }
       if (isEditModalOpen) { setIsEditModalOpen(false); return; }
       if (showCampaignModal) { setShowCampaignModal(false); return; }
       if (participantDetailOpen) { closeParticipantDetail(); return; }
     };
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
-  }, [confirmAction, showSectionPicker, showDeviceSelector, showInlineChat, attendanceConflicts.length, attendanceObservationParticipant, observationParticipant, outcomeParticipant, attendanceDragging, isAttendanceOpen, dirtyAttendanceParticipantIDs.length, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, participantDetailOpen, closeParticipantDetail, closeAttendanceConflicts, closeAttendanceModal, closeAttendanceObservationHistory, closeObservationHistory, closeWhatsAppChat]);
+  }, [desktopActions, addingParticipants, confirmAction, showSectionPicker, showDeviceSelector, showInlineChat, attendanceConflicts.length, attendanceObservationParticipant, observationParticipant, outcomeParticipant, attendanceDragging, isAttendanceOpen, dirtyAttendanceParticipantIDs.length, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, participantDetailOpen, closeParticipantDetail, closeAttendanceConflicts, closeAttendanceModal, closeAttendanceObservationHistory, closeObservationHistory, closeWhatsAppChat]);
 
   const fetchHealth = useCallback(() => fetchProgramData(), [fetchProgramData]);
 
@@ -1144,6 +1184,7 @@ export default function ProgramDetailPage() {
     const controller = new AbortController();
     statsRequestRef.current = controller;
     const requestID = ++statsRequestSequence.current;
+    const identity = programIdentityRef.current;
     setStatsStatus('loading');
     setStatsError('');
     try {
@@ -1158,7 +1199,7 @@ export default function ProgramDetailPage() {
       if (!res.ok || !data.success) {
         throw new Error(data.error || 'No se pudieron cargar las estadísticas.');
       }
-      if (requestID !== statsRequestSequence.current) return;
+      if (controller.signal.aborted || requestID !== statsRequestSequence.current || identity !== programIdentityRef.current) return;
       setStatsData({
         success: true,
         session_stats: data.session_stats || [],
@@ -1166,26 +1207,27 @@ export default function ProgramDetailPage() {
       });
       setStatsStatus('success');
     } catch (error) {
-      if (controller.signal.aborted || requestID !== statsRequestSequence.current) return;
+      if (controller.signal.aborted || requestID !== statsRequestSequence.current || identity !== programIdentityRef.current) return;
       setStatsError(error instanceof Error ? error.message : 'No se pudieron cargar las estadísticas.');
       setStatsStatus('error');
     }
-  }, [programId]);
+  }, [programId, effectiveAccountID]);
 
   const selectedMonthsKey = useMemo(() => [...selectedMonths].sort().join(','), [selectedMonths]);
 
   useEffect(() => {
-    if (activeTab !== 'stats') return;
+    if (visibleTab !== 'stats') return;
     void fetchStats(selectedMonthsKey ? selectedMonthsKey.split(',') : []);
     return () => statsRequestRef.current?.abort();
-  }, [activeTab, fetchStats, selectedMonthsKey]);
+  }, [visibleTab, fetchStats, selectedMonthsKey]);
 
   const handleAddParticipants = async (selected: SelectedPerson[]) => {
-    if (selected.length === 0 || addingParticipants) return;
+    if (!desktopActions || selected.length === 0 || addingParticipants) return;
     if (!program || program.status !== 'active') {
       setAddParticipantError('Solo puedes agregar participantes a un programa activo.');
       return;
     }
+    const identity = programIdentityRef.current;
     setAddingParticipants(true);
     setAddParticipantError('');
     try {
@@ -1196,6 +1238,7 @@ export default function ProgramDetailPage() {
         method: 'POST',
         body: JSON.stringify({ contact_ids: selected.map(person => person.id) }),
       });
+      if (identity !== programIdentityRef.current) return;
       if (!response.success || !response.data?.success) {
         setAddParticipantError(response.error || 'No pudimos agregar los contactos. Inténtalo nuevamente.');
         return;
@@ -1216,10 +1259,11 @@ export default function ProgramDetailPage() {
       setIsAddParticipantOpen(false);
       showToast(`${summary.created} participante${summary.created === 1 ? '' : 's'} agregado${summary.created === 1 ? '' : 's'}`, 'success');
     } catch (error) {
+      if (identity !== programIdentityRef.current) return;
       console.error('Error adding participants:', error);
       setAddParticipantError('No pudimos conectar con el servidor. Inténtalo nuevamente.');
     } finally {
-      setAddingParticipants(false);
+      if (identity === programIdentityRef.current) setAddingParticipants(false);
     }
   };
 
@@ -1367,10 +1411,10 @@ export default function ProgramDetailPage() {
     setToastType('success');
     setToastMessage('Fecha de incorporación actualizada.');
     void fetchHealth();
-    if (activeTab === 'stats') {
+    if (visibleTab === 'stats') {
       void fetchStats(selectedMonthsKey ? selectedMonthsKey.split(',') : []);
     }
-  }, [activeTab, fetchHealth, fetchStats, selectedMonthsKey]);
+  }, [visibleTab, fetchHealth, fetchStats, selectedMonthsKey]);
 
   const handleParticipantOutcomeDateChange = (participantID: string, endedOn: string) => {
     setParticipants(current => current.map(participant => {
@@ -1381,7 +1425,7 @@ export default function ProgramDetailPage() {
     }));
     showToast('Fecha de cierre actualizada; el periodo y las métricas fueron recalculados.', 'success');
     void fetchProgramData();
-    if (activeTab === 'stats') void fetchStats(selectedMonthsKey ? selectedMonthsKey.split(',') : []);
+    if (visibleTab === 'stats') void fetchStats(selectedMonthsKey ? selectedMonthsKey.split(',') : []);
   };
 
   useEffect(() => {
@@ -2167,7 +2211,9 @@ export default function ProgramDetailPage() {
   ) : null;
 
   return (
-    <div ref={workspaceRef} className="h-full min-h-0 overflow-hidden flex flex-col gap-3">
+    <div ref={workspaceRef} className="h-full min-h-0 overflow-hidden flex flex-col gap-3" onFocusCapture={event => {
+      if (!mobileWorkspace && event.target instanceof HTMLElement) desktopFocusRef.current = event.target;
+    }}>
       {detailError && (
         <div role="alert" className="flex shrink-0 flex-col gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 sm:flex-row sm:items-center sm:justify-between">
           <span className="flex min-w-0 items-start gap-2"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{detailError}</span>
@@ -2199,7 +2245,7 @@ export default function ProgramDetailPage() {
         {mobileWorkspace && <button type="button" onClick={openEditModal} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Editar programa">
           <Edit2 className="h-4 w-4" />
         </button>}
-        {mobileWorkspace && <button type="button" onClick={() => setShowSectionPicker(true)} className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 shadow-sm transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label={`Cambiar sección. Actual: ${activeTab === 'sessions' ? 'Sesiones' : activeTab === 'stats' ? 'Estadísticas' : activeTab === 'academic' ? 'Plan e instructores' : activeTab === 'surveys' ? 'Encuestas' : activeTab === 'kanban' ? 'Tablero' : 'Participantes'}`} aria-haspopup="dialog" aria-expanded={showSectionPicker}>
+        {mobileWorkspace && program.type === 'event' && <button type="button" onClick={() => setShowSectionPicker(true)} className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 shadow-sm transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label={`Cambiar sección. Actual: ${activeTab === 'sessions' ? 'Sesiones' : activeTab === 'stats' ? 'Estadísticas' : activeTab === 'academic' ? 'Plan e instructores' : activeTab === 'surveys' ? 'Encuestas' : activeTab === 'kanban' ? 'Tablero' : 'Participantes'}`} aria-haspopup="dialog" aria-expanded={showSectionPicker}>
           {activeTab === 'sessions' ? <Calendar className="h-5 w-5" /> : activeTab === 'stats' ? <BarChart3 className="h-5 w-5" /> : activeTab === 'academic' ? <GraduationCap className="h-5 w-5" /> : activeTab === 'surveys' ? <ClipboardList className="h-5 w-5" /> : activeTab === 'kanban' ? <LayoutGrid className="h-5 w-5" /> : <Users className="h-5 w-5" />}
           <ChevronDown className="absolute bottom-1 right-1 h-2.5 w-2.5 text-slate-400" />
         </button>}
@@ -2259,6 +2305,21 @@ export default function ProgramDetailPage() {
           </div>
         </div>}
       </div>
+
+      {mobileWorkspace && program.type !== 'event' && <div role="tablist" aria-label="Secciones del programa" className="grid shrink-0 grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1">
+        {programSections(true, canUseSurveys).map(tab => {
+          const selected = visibleTab === tab;
+          const Icon = tab === 'sessions' ? Calendar : Users;
+          return <button key={tab} ref={selected ? mobileTabRef : undefined} id={`program-mobile-tab-${tab}`} type="button" role="tab" aria-selected={selected} aria-controls="program-visible-content" tabIndex={selected ? 0 : -1} onClick={() => requestTabChange(tab)} onKeyDown={event => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const next = event.key === 'Home' ? 'health' : event.key === 'End' ? 'sessions' : tab === 'health' ? 'sessions' : 'health';
+            requestTabChange(next);
+            window.requestAnimationFrame(() => document.getElementById(`program-mobile-tab-${next}`)?.focus());
+          }} className={`flex min-h-11 items-center justify-center gap-2 rounded-lg px-3 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${selected ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}><Icon className="h-4 w-4" />{tab === 'sessions' ? 'Sesiones' : 'Participantes'}</button>;
+        })}
+      </div>}
+      {mobileWorkspace && hasUnsavedDesktopWork && <p role="status" className="shrink-0 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">Tu edición está pausada. Se conservará mientras permanezcas en este programa y podrás continuar en la vista de escritorio.</p>}
 
       {/* Tabs */}
       {mobileWorkspace ? null : <div className="flex shrink-0 gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
@@ -2348,15 +2409,13 @@ export default function ProgramDetailPage() {
         )}
       </div>}
 
-      {(activeTab === 'health' || activeTab === 'participants') && <div className="flex shrink-0 items-center gap-2">
+      {(visibleTab === 'health' || visibleTab === 'participants') && <div className="flex shrink-0 items-center gap-2">
         <div className="relative min-w-0 flex-1">
           <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
           <input
             type="text"
             value={participantSearch}
             onChange={event => setParticipantSearch(event.target.value)}
-            onFocus={() => setParticipantSearchFocused(true)}
-            onBlur={() => setParticipantSearchFocused(false)}
             onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }}
             enterKeyHint="search"
             placeholder="Buscar participante por nombre o teléfono"
@@ -2370,20 +2429,25 @@ export default function ProgramDetailPage() {
             {participantSearch && <button type="button" onClick={() => { setParticipantSearch(''); setDebouncedParticipantSearch(''); }} className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Limpiar búsqueda"><X className="h-4 w-4" /></button>}
           </div>
         </div>
-        <div aria-hidden={participantExportCollapsed} className={`shrink-0 overflow-hidden transition-[max-width,opacity] duration-150 ease-out motion-reduce:transition-none ${participantExportCollapsed ? 'pointer-events-none max-w-0 opacity-0' : 'max-w-[10rem] opacity-100'}`}>
-          <button type="button" tabIndex={participantExportCollapsed ? -1 : 0} onClick={() => { void handleExportParticipants(); }} disabled={participantSearchPending || exportingParticipants || filteredProgramParticipants.length === 0} className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-white px-3 text-sm font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40" title="Exportar exactamente la lista filtrada a Excel" aria-label="Exportar participantes filtrados a Excel">{exportingParticipants ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}<span className="hidden sm:inline">Exportar Excel</span></button>
-        </div>
-        {mobileWorkspace && <button type="button" onClick={() => setIsAddParticipantOpen(true)} disabled={program?.status !== 'active'} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40" aria-label="Agregar participantes" title={program?.status !== 'active' ? 'Solo disponible para programas activos' : 'Agregar participantes'}><UserPlus className="h-4 w-4" /></button>}
+        {desktopActions && <button type="button" onClick={() => { void handleExportParticipants(); }} disabled={participantSearchPending || exportingParticipants || filteredProgramParticipants.length === 0} className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-white px-3 text-sm font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40" title="Exportar exactamente la lista filtrada a Excel" aria-label="Exportar participantes filtrados a Excel">{exportingParticipants ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}<span className={program.type === 'event' ? 'hidden sm:inline' : undefined}>Exportar Excel</span></button>}
+        {mobileWorkspace && program.type === 'event' && <button type="button" onClick={() => setIsAddParticipantOpen(true)} disabled={program.status !== 'active'} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-sm disabled:opacity-40" aria-label="Agregar participantes"><UserPlus className="h-4 w-4" /></button>}
       </div>}
 
-      {(activeTab === 'health' || activeTab === 'participants') && <div className="grid shrink-0 grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1" role="tablist" aria-label="Estado de participantes">
+      {(visibleTab === 'health' || visibleTab === 'participants') && <div className="grid shrink-0 grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1" role="tablist" aria-label="Estado de participantes">
         <button type="button" role="tab" aria-selected={participantLifecycleView === 'active'} onClick={() => setParticipantLifecycleView('active')} className={`min-h-11 rounded-lg px-3 text-sm font-semibold transition-colors ${participantLifecycleView === 'active' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Activos <span className="ml-1 tabular-nums text-xs">{activeParticipants.length}</span></button>
         <button type="button" role="tab" aria-selected={participantLifecycleView === 'history'} onClick={() => setParticipantLifecycleView('history')} className={`min-h-11 rounded-lg px-3 text-sm font-semibold transition-colors ${participantLifecycleView === 'history' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Historial <span className="ml-1 tabular-nums text-xs">{historicalParticipants.length}</span></button>
       </div>}
 
       {/* Content */}
-      <div className="flex-1 min-h-0 overflow-hidden">
-      {activeTab === 'health' ? (
+      <div id="program-visible-content" role={mobileWorkspace && program.type !== 'event' ? 'tabpanel' : undefined} aria-labelledby={mobileWorkspace && program.type !== 'event' ? `program-mobile-tab-${visibleTab}` : undefined} className="flex-1 min-h-0 overflow-hidden">
+        {activeTab === 'academic' && <div key={`${effectiveAccountID}:${programId}:academic`} hidden={mobileWorkspace} inert={mobileWorkspace} style={mobileWorkspace ? { display: 'none' } : undefined} className="h-full">
+          <ProgramAcademicConfigPanel programId={programId} config={academicConfig} loading={academicLoading} error={academicError} onRetry={() => { void fetchAcademicData(); }} onChange={setAcademicConfig} onToast={showToast} onDirtyChange={setAcademicDirty} suspended={mobileWorkspace} onNavigateToCatalog={() => { if (requireOnline('Administrar el catálogo de cursos')) requestProgramNavigation('/dashboard/programs/courses'); }} />
+        </div>}
+        {activeTab === 'surveys' && canUseSurveys && <div key={`${effectiveAccountID}:${programId}:surveys`} hidden={mobileWorkspace} inert={mobileWorkspace} style={mobileWorkspace ? { display: 'none' } : undefined} className="h-full overflow-y-auto pb-3">
+          <ProgramSurveyPanel programId={programId} programName={program.name} canManageSurveys={!isOffline} suspended={mobileWorkspace} onDirtyChange={setSurveyDirty} />
+        </div>}
+        {visibleTab !== 'academic' && visibleTab !== 'surveys' && (
+      visibleTab === 'health' ? (
         <div className="h-full overflow-y-auto space-y-4 pb-3">
           {loadingHealth && <div role="status" className="flex items-center gap-2 px-1 text-xs text-slate-500">
             <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> Actualizando programa…
@@ -2457,7 +2521,7 @@ export default function ProgramDetailPage() {
                   {compactWorkspace ? (
                     <div className="divide-y divide-slate-100">
                       {filteredHealthParticipants.length === 0 ? (
-                        <div className="px-4 py-10 text-center text-sm text-slate-400"><p>{normalizedParticipantQuery ? 'No hay participantes que coincidan con la búsqueda.' : 'Sin inscritos para evaluar'}</p>{mobileWorkspace && !normalizedParticipantQuery && <button type="button" onClick={() => setIsAddParticipantOpen(true)} disabled={program?.status !== 'active'} className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 font-semibold text-white disabled:opacity-40"><UserPlus className="h-4 w-4" />Agregar participantes</button>}</div>
+                        <div className="px-4 py-10 text-center text-sm text-slate-400"><p>{normalizedParticipantQuery ? 'No hay participantes que coincidan con la búsqueda.' : 'Sin inscritos para evaluar'}</p>{mobileWorkspace && !normalizedParticipantQuery && (program.type === 'event' ? <button type="button" onClick={() => setIsAddParticipantOpen(true)} disabled={program.status !== 'active'} className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 font-semibold text-white disabled:opacity-40"><UserPlus className="h-4 w-4" />Agregar participantes</button> : <p className="mt-2 text-xs">Puedes agregar participantes desde la vista de escritorio.</p>)}</div>
                       ) : filteredHealthParticipants.map(p => mobileWorkspace ? (
                         <div key={p.participant_id} data-testid="mobile-program-participant-row" className="flex min-h-[78px] items-center gap-2 px-3 py-2 transition-colors hover:bg-slate-50">
                           <button type="button" onClick={event => { void openParticipantDetail(p.participant_id, p.contact_id, event.currentTarget); }} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
@@ -2550,7 +2614,7 @@ export default function ProgramDetailPage() {
               </div>}
           </>
         </div>
-      ) : activeTab === 'participants' ? (
+      ) : visibleTab === 'participants' ? (
         <div className="h-full flex flex-col gap-3">
           {!mobileWorkspace && <div className="flex shrink-0 items-center justify-between gap-3">
             <h2 className="text-base font-semibold text-slate-800">Lista de Participantes</h2>
@@ -2613,7 +2677,7 @@ export default function ProgramDetailPage() {
                   <Users className="mx-auto mb-3 h-10 w-10 text-slate-300" />
                   <p className="font-medium text-slate-500">{normalizedParticipantQuery ? 'Sin coincidencias' : 'Sin participantes'}</p>
                   <p className="mt-1 text-xs text-slate-400">{normalizedParticipantQuery ? 'Prueba con otro nombre o teléfono.' : 'Todavía no hay participantes para consultar.'}</p>
-                  {!normalizedParticipantQuery && <button type="button" onClick={() => setIsAddParticipantOpen(true)} disabled={program?.status !== 'active'} className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white disabled:opacity-40"><UserPlus className="h-4 w-4" />Agregar participantes</button>}
+                  {!normalizedParticipantQuery && (program.type === 'event' ? <button type="button" onClick={() => setIsAddParticipantOpen(true)} disabled={program.status !== 'active'} className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white disabled:opacity-40"><UserPlus className="h-4 w-4" />Agregar participantes</button> : <p className="mt-2 text-xs text-slate-400">Puedes agregar participantes desde la vista de escritorio.</p>)}
                 </div>
               ) : filteredProgramParticipants.map(p => (
                 <div key={p.id} data-testid="mobile-program-participant-row" className={`flex min-h-[78px] items-center gap-2 px-3 py-2 transition-colors ${selectedParticipantID === p.id ? 'bg-emerald-50' : 'bg-white'}`}>
@@ -2744,7 +2808,7 @@ export default function ProgramDetailPage() {
             </div>}
           </div>}
         </div>
-      ) : activeTab === 'kanban' ? (
+      ) : visibleTab === 'kanban' ? (
         <div className="h-full flex flex-col gap-3">
           <div className="flex shrink-0 items-center justify-between gap-3">
             <h2 className="text-base font-semibold text-slate-800">Kanban de Participantes</h2>
@@ -2889,23 +2953,7 @@ export default function ProgramDetailPage() {
             </div>
           )}
         </div>
-      ) : activeTab === 'academic' ? (
-        <ProgramAcademicConfigPanel
-          programId={programId}
-          config={academicConfig}
-          loading={academicLoading}
-          error={academicError}
-          onRetry={() => { void fetchAcademicData(); }}
-          onChange={setAcademicConfig}
-          onToast={showToast}
-          onDirtyChange={setAcademicDirty}
-          onNavigateToCatalog={() => { if (requireOnline('Administrar el catálogo de cursos')) requestProgramNavigation('/dashboard/programs/courses'); }}
-        />
-      ) : activeTab === 'surveys' && canUseSurveys ? (
-        <div className="h-full overflow-y-auto pb-3">
-          <ProgramSurveyPanel programId={programId} programName={program.name} canManageSurveys={!isOffline} />
-        </div>
-      ) : activeTab === 'sessions' ? (
+      ) : visibleTab === 'sessions' ? (
         <div className="h-full flex flex-col gap-3">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 shrink-0">
             <h2 className="text-base font-semibold text-slate-800">Sesiones y Asistencia</h2>
@@ -3299,14 +3347,16 @@ export default function ProgramDetailPage() {
             </div>
           )}
         </div>
-      )}
+      ))}
       </div>
 
       {/* =================== MODALS =================== */}
 
       {/* Add Participant Selector */}
       <ContactSelector
+        key={`${effectiveAccountID}:${programId}:enrollment`}
         open={isAddParticipantOpen}
+        suspended={mobileWorkspace && program.type !== 'event'}
         onClose={closeAddParticipantSelector}
         onConfirm={handleAddParticipants}
         title="Agregar participantes"
@@ -3321,7 +3371,7 @@ export default function ProgramDetailPage() {
       />
 
       {/* Create Session Modal */}
-      {showSectionPicker && mobileWorkspace && typeof document !== 'undefined' && createPortal(
+      {showSectionPicker && mobileWorkspace && program.type === 'event' && typeof document !== 'undefined' && createPortal(
         <div className="app-viewport fixed inset-0 z-[90] flex flex-col bg-white" role="dialog" aria-modal="true" aria-labelledby="program-mobile-sections-title">
           <div className="safe-area-top flex min-h-16 shrink-0 items-center justify-between border-b border-slate-200 px-4">
             <div><h2 id="program-mobile-sections-title" className="font-bold text-slate-900">Secciones del programa</h2><p className="text-xs text-slate-500">Elige qué quieres ver o administrar</p></div>
