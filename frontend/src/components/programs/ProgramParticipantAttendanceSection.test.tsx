@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProgramParticipantAttendanceSection from './ProgramParticipantAttendanceSection'
 
-vi.mock('@/components/ObservationHistoryModal', () => ({ default: () => null }))
+vi.mock('@/components/ObservationHistoryModal', () => ({ default: (props: { isOpen: boolean; mutationMode: string; attendanceContext?: { participantId: string } }) => props.isOpen ? <div data-testid="history-mode">{props.mutationMode}:{props.attendanceContext?.participantId}</div> : null }))
 
 const fetchMock = vi.fn()
 const props = { programId: 'program-1', participantId: 'participant-1', participantName: 'Participant', enrolledAt: '2026-10-01', participationStatus: 'dropped', droppedAt: '2026-10-07' }
@@ -14,6 +14,17 @@ beforeEach(() => { fetchMock.mockReset(); vi.stubGlobal('fetch', fetchMock) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 describe('participant attendance participation window reconciliation', () => {
+  it('forwards the current observation mode without removing consultation', async () => {
+    fetchMock.mockResolvedValue(result(50))
+    const view = render(<ProgramParticipantAttendanceSection {...props} mutationMode="append-only" />)
+    await screen.findByText('50%')
+    fireEvent.click(screen.getByRole('button', { name: 'Añadir observación' }))
+    expect(screen.getByTestId('history-mode')).toHaveTextContent('append-only:participant-1')
+    view.rerender(<ProgramParticipantAttendanceSection {...props} mutationMode="read-only" />)
+    expect(screen.getByTestId('history-mode')).toHaveTextContent('read-only:participant-1')
+    view.rerender(<ProgramParticipantAttendanceSection {...props} />)
+    expect(screen.getByTestId('history-mode')).toHaveTextContent('manage:participant-1')
+  })
   it('refreshes a corrected withdrawal, preserves mounted metrics, and moves actual records into history', async () => {
     let resolve!: (value: Response) => void
     fetchMock.mockResolvedValueOnce(result(50)).mockImplementationOnce(() => new Promise<Response>(done => { resolve = done }))

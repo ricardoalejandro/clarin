@@ -182,6 +182,8 @@ interface ChatPanelProps {
   contactInfoOpen?: boolean
   onRequestDelete?: () => void
   isActive?: boolean
+  /** Keeps this mounted conversation and its drafts inert while another responsive surface is active. */
+  suspended?: boolean
   onRead?: (chatId: string, unreadCount: number, state?: ChatState) => void
   onNext?: () => string | void | Promise<string | void>
   focusRequest?: number
@@ -192,9 +194,39 @@ interface ChatPanelProps {
 
 type DeviceValidationState = 'validating' | 'ready' | 'error' | 'changed'
 
-export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, initialChat, onClose, className = '', readOnly = false, readOnlyReason: explicitReadOnlyReason, onContactInfoToggle, contactInfoOpen, onRequestDelete, isActive = true, onRead, onNext, attentionMode, focusRequest, explicitSenderSession = 0 }: ChatPanelProps) {
+export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, initialChat, onClose, className = '', readOnly = false, readOnlyReason: explicitReadOnlyReason, onContactInfoToggle, contactInfoOpen, onRequestDelete, isActive: requestedActive = true, suspended = false, onRead, onNext, attentionMode, focusRequest, explicitSenderSession = 0 }: ChatPanelProps) {
+  const suspendedRef = useRef(suspended)
+  suspendedRef.current = suspended
+  const isActive = requestedActive && !suspended
+  const suspendedFocusRef = useRef<HTMLElement | null>(null)
+  const chatRequest = useCallback((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const method = (init?.method || 'GET').toUpperCase()
+    if (suspendedRef.current && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+      return Promise.reject(new Error('La conversación está pausada. Continúa desde la vista de escritorio.'))
+    }
+    return fetch(input, init)
+  }, [])
   const { ref: panelRef, width: panelWidth } = useContainerWidth<HTMLDivElement>()
   const { setComposerAccessoryOpen } = useChatMobileChrome()
+  useLayoutEffect(() => {
+    if (suspended) {
+      const active = document.activeElement
+      if (active instanceof HTMLElement && panelRef.current?.contains(active)) {
+        suspendedFocusRef.current = active
+        active.blur()
+      }
+      return
+    }
+    const previous = suspendedFocusRef.current
+    if (!previous) return
+    const frame = requestAnimationFrame(() => {
+      if (suspendedRef.current) return
+      if (previous.isConnected && !previous.closest('[hidden], [inert]')) previous.focus({ preventScroll: true })
+      else inputRef.current?.focus()
+      suspendedFocusRef.current = null
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [suspended, panelRef])
   const compactActions = panelWidth > 0 && panelWidth < 640
   const [touchKeyboard, setTouchKeyboard] = useState(false)
   useEffect(() => {
@@ -221,7 +253,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const deviceId = activeDeviceValidationState === 'ready' ? canonicalDevice?.id : undefined
   const deviceProvider = canonicalDevice?.provider || 'whatsapp_web'
   const deviceUnavailable = Boolean(canonicalDevice && (isDeviceDeleting(canonicalDevice) || canonicalDevice.status !== 'connected' || deviceProvider !== 'whatsapp_web'))
-  const effectiveReadOnly = readOnly || activeDeviceValidationState !== 'ready' || !deviceId || deviceUnavailable
+  const effectiveReadOnly = suspended || readOnly || activeDeviceValidationState !== 'ready' || !deviceId || deviceUnavailable
   const canSendStickers = !effectiveReadOnly && (
     canonicalDevice?.runtime_capabilities?.can_send_sticker === true
   )
@@ -308,7 +340,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const [quoteNavigationLoading, setQuoteNavigationLoading] = useState(false)
   const [showHeaderMenu, setShowHeaderMenu] = useState(false)
   const headerMenuTriggerRef = useRef<HTMLButtonElement>(null)
-  useOperationalOverlayRegistration(showHeaderMenu, 'chat-header-menu')
+  useOperationalOverlayRegistration(showHeaderMenu && !suspended, 'chat-header-menu')
 
   // Compact message selection
   const [selectedMessage, setSelectedMessage] = useState<Message | null>(null)
@@ -317,7 +349,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const [showSelectionMenu, setShowSelectionMenu] = useState(false)
   const selectionMenuTriggerRef = useRef<HTMLButtonElement>(null)
   const selectionSheetRef = useRef<HTMLDivElement>(null)
-  useOperationalOverlayRegistration(showSelectionMenu, 'chat-selection-menu')
+  useOperationalOverlayRegistration(showSelectionMenu && !suspended, 'chat-selection-menu')
   const [messageActionPending, setMessageActionPending] = useState<'delete' | null>(null)
   const [infoMessage, setInfoMessage] = useState<Message | null>(null)
 
@@ -337,9 +369,9 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const [quickReplyError, setQuickReplyError] = useState('')
   const [quickReplyReviewOpen, setQuickReplyReviewOpen] = useState(false)
   const quickReplyReviewRef = useRef<HTMLDivElement>(null)
-  useAccessibleDialog(quickReplyReviewOpen, quickReplyReviewRef, () => setQuickReplyReviewOpen(false))
-  useChatHistoryLayer(quickReplyReviewOpen, '__clarinQuickReplyReview', () => setQuickReplyReviewOpen(false))
-  useChatHistoryLayer(Boolean(viewDocument), '__clarinDocumentViewer', () => setViewDocument(null))
+  useAccessibleDialog(quickReplyReviewOpen && !suspended, quickReplyReviewRef, () => setQuickReplyReviewOpen(false))
+  useChatHistoryLayer(quickReplyReviewOpen && !suspended, '__clarinQuickReplyReview', () => setQuickReplyReviewOpen(false))
+  useChatHistoryLayer(Boolean(viewDocument) && !suspended, '__clarinDocumentViewer', () => setViewDocument(null))
   const [quickReplyDraft, setQuickReplyDraft] = useState<QuickReplyComposerDraft | null>(null)
   const draftCacheRef = useRef(new Map<string, { text: string; quick: QuickReplyComposerDraft | null; quote: Message | null; attachment: AttachmentDraft | null }>())
   const draftOwnerRef = useRef(chatId)
@@ -357,7 +389,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     }
     if (chatId) draftCacheRef.current.set(chatId, snapshot)
   }, [chatId, messageText, quickReplyDraft, replyingTo, attachmentDraft])
-  useOperationalOverlayRegistration(showQuickReply, 'chat-quick-replies')
+  useOperationalOverlayRegistration(showQuickReply && !suspended, 'chat-quick-replies')
 
   // Typing indicator
   const [contactTyping, setContactTyping] = useState<string | null>(null) // null | 'composing' | 'recording'
@@ -439,7 +471,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const [nextPending, setNextPending] = useState(false)
   const nextPendingRef = useRef(false)
   useEffect(() => {
-    if (focusRequest && isActive) requestAnimationFrame(() => inputRef.current?.focus())
+    if (focusRequest && isActive) requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() })
   }, [focusRequest, isActive])
   const readInFlightRef = useRef(new Map<string, string>())
   isActiveRef.current = isActive
@@ -465,7 +497,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       const snapshot = chatSnapshotRef.current
       const unreadIncoming = displayedMessages.filter(message => !message.is_from_me && !message.is_read && !message.is_revoked && !message.id.startsWith('optimistic-'))
       if (snapshot?.id === targetChatId && snapshot.device_id && snapshot.jid && unreadIncoming.length) {
-        void fetch('/api/messages/read-receipt', {
+        void chatRequest('/api/messages/read-receipt', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({
@@ -476,7 +508,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
           }),
         }).catch(() => {})
       }
-      const response = await fetch(`/api/chats/${targetChatId}/read`, {
+      const response = await chatRequest(`/api/chats/${targetChatId}/read`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ through_message_id: through }),
@@ -596,6 +628,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }, [])
 
   const focusMessageComposer = useCallback(() => {
+    if (suspendedRef.current) return
     const editor = panelRef.current?.querySelector<HTMLElement>('[data-chat-keyboard-target="true"]')
     editor?.focus({ preventScroll: true })
     inputRef.current?.focus()
@@ -784,7 +817,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     setActivePopup(null)
   }, [touchKeyboard])
 
-  useAccessibleDialog(showSelectionMenu, selectionSheetRef, () => clearMessageSelection())
+  useAccessibleDialog(showSelectionMenu && !suspended, selectionSheetRef, () => clearMessageSelection())
 
   useEffect(() => {
     const handlePopState = (event: PopStateEvent) => {
@@ -845,10 +878,10 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     setActivePopup(null)
     setShowQuickReply(false)
     setQuickReplyFilter('')
-    setShowContactPicker(false)
+    if (!suspendedRef.current) setShowContactPicker(false)
     setViewImage(null)
     setViewDocument(null)
-    setForwardingMsg(null)
+    if (!suspendedRef.current) setForwardingMsg(null)
     clearMessageSelection(false)
     setInfoMessage(null)
   }, [clearMessageSelection, closeSearch, isActive])
@@ -906,7 +939,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     } else if (historyOffset >= 0) {
       const token = localStorage.getItem('token')
       const windowOffset = Math.max(0, historyOffset - 25)
-      const response = await fetch(`/api/chats/${targetChatId}/messages?limit=50&offset=${windowOffset}`, {
+      const response = await chatRequest(`/api/chats/${targetChatId}/messages?limit=50&offset=${windowOffset}`, {
         headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal,
       })
@@ -950,7 +983,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
     try {
       const token = localStorage.getItem('token')
-      const response = await fetch(`/api/chats/${targetChatId}/messages/${encodeURIComponent(quotedMessageId)}/context?limit=50`, {
+      const response = await chatRequest(`/api/chats/${targetChatId}/messages/${encodeURIComponent(quotedMessageId)}/context?limit=50`, {
         headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal,
       })
@@ -1000,7 +1033,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     try {
       const token = localStorage.getItem('token')
       const params = new URLSearchParams({ q: query, limit: '1', offset: String(index) })
-      const response = await fetch(`/api/chats/${chatId}/messages/search?${params}`, {
+      const response = await chatRequest(`/api/chats/${chatId}/messages/search?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal,
       })
@@ -1034,7 +1067,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }, [chatId, reconcileAuthoritativeMessages, revealSearchMessage])
 
   useEffect(() => {
-    if (!showSearch) return
+    if (!showSearch || suspended) return
     searchRequestSequenceRef.current += 1
     searchRequestRef.current?.abort()
     searchRequestRef.current = null
@@ -1071,7 +1104,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     }
     window.addEventListener('keydown', handleEscape, true)
     return () => window.removeEventListener('keydown', handleEscape, true)
-  }, [closeSearch, showSearch])
+  }, [closeSearch, showSearch, suspended])
 
   useEffect(() => () => {
     searchRequestRef.current?.abort()
@@ -1082,7 +1115,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }, [])
 
   useEffect(() => {
-    if (!showHeaderMenu && !showSelectionMenu) return
+    if (suspended || (!showHeaderMenu && !showSelectionMenu)) return
     const closeHeaderMenu = () => setShowHeaderMenu(false)
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
@@ -1097,11 +1130,11 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       event.stopImmediatePropagation()
       if (showSelectionMenu) {
         clearMessageSelection()
-        requestAnimationFrame(() => selectionMenuTriggerRef.current?.focus())
+        requestAnimationFrame(() => { if (!suspendedRef.current) selectionMenuTriggerRef.current?.focus() })
         return
       }
       closeHeaderMenu()
-      requestAnimationFrame(() => headerMenuTriggerRef.current?.focus())
+      requestAnimationFrame(() => { if (!suspendedRef.current) headerMenuTriggerRef.current?.focus() })
     }
     if (showHeaderMenu) document.addEventListener('pointerdown', closeHeaderMenu)
     document.addEventListener('keydown', handleKeyDown, true)
@@ -1109,7 +1142,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       if (showHeaderMenu) document.removeEventListener('pointerdown', closeHeaderMenu)
       document.removeEventListener('keydown', handleKeyDown, true)
     }
-  }, [showHeaderMenu, showSelectionMenu])
+  }, [showHeaderMenu, showSelectionMenu, suspended])
 
   const releaseRetryableMedia = useCallback((tempId: string, canonicalMediaUrl?: string) => {
     const media = mediaRetryRef.current.get(tempId)
@@ -1165,7 +1198,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
     try {
       const token = localStorage.getItem('token')
-      const response = await fetch('/api/stickers/saved', {
+      const response = await chatRequest('/api/stickers/saved', {
         headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal,
       })
@@ -1188,6 +1221,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }, [])
 
   const handleToggleSavedSticker = useCallback(async (url: string) => {
+    if (suspendedRef.current) return
     if (!url) return
     const identity = chatMediaIdentity(url)
     if (savingStickerUrlsRef.current.has(identity)) return
@@ -1205,7 +1239,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
     try {
       const token = localStorage.getItem('token')
-      const response = await fetch('/api/stickers/saved', {
+      const response = await chatRequest('/api/stickers/saved', {
         method: wasSaved ? 'DELETE' : 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ media_url: url }),
@@ -1244,7 +1278,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     if (!effectiveReadOnly) return
     setActivePopup(null)
     setShowAttachments(false)
-    setShowContactPicker(false)
+    if (!suspendedRef.current) setShowContactPicker(false)
     // A temporary channel validation disables sending; it must not discard drafts.
   }, [effectiveReadOnly])
 
@@ -1275,9 +1309,10 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
   // Helper: send typing/composing presence to recipient
   const sendPresence = useCallback((composing: boolean, media: string = '') => {
+    if (suspendedRef.current) return
     if (!chat || !deviceId) return
     const token = localStorage.getItem('token')
-    fetch('/api/messages/typing', {
+    chatRequest('/api/messages/typing', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ device_id: deviceId, to: chat.jid, composing, media })
@@ -1309,13 +1344,14 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
   // Request history sync for current chat
   const handleRequestHistorySync = useCallback(async () => {
+    if (suspendedRef.current) return
     if (!chatId || syncingHistory || effectiveReadOnly) return
     setSyncingHistory(true)
     setHistorySyncFeedback({ kind: 'info', message: 'Solicitando a WhatsApp los mensajes anteriores…' })
     if (historySyncTimeoutRef.current) window.clearTimeout(historySyncTimeoutRef.current)
     try {
       const token = localStorage.getItem('token')
-      const res = await fetch(`/api/chats/${chatId}/sync-history`, {
+      const res = await chatRequest(`/api/chats/${chatId}/sync-history`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` }
       })
@@ -1349,7 +1385,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       if (query) params.set('query', query)
       if (cursor) params.set('cursor', cursor)
       const token = localStorage.getItem('token')
-      const response = await fetch(`/api/quick-replies?${params.toString()}`, {
+      const response = await chatRequest(`/api/quick-replies?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal,
       })
@@ -1485,7 +1521,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     setDeviceValidationState('validating')
     try {
       const token = localStorage.getItem('token')
-      const response = await fetch(`/api/chats/${targetChatId}`, {
+      const response = await chatRequest(`/api/chats/${targetChatId}`, {
         headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal,
       })
@@ -1788,7 +1824,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     const token = localStorage.getItem('token')
     let deviceWasValidated = false
     try {
-      const res = await fetch(`/api/chats/${targetChatId}`, {
+      const res = await chatRequest(`/api/chats/${targetChatId}`, {
         headers: { Authorization: `Bearer ${token}` },
 		signal: controller.signal,
       })
@@ -1806,7 +1842,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       }
 
       // Fetch messages from dedicated endpoint
-      const msgRes = await fetch(`/api/chats/${targetChatId}/messages?limit=50`, {
+      const msgRes = await chatRequest(`/api/chats/${targetChatId}/messages?limit=50`, {
 		headers: { Authorization: `Bearer ${token}` },
 		signal: controller.signal,
       })
@@ -1871,7 +1907,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     setHistoryRetryMode('older')
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch(`/api/chats/${targetChatId}/messages?limit=50&offset=${offset}`, {
+      const res = await chatRequest(`/api/chats/${targetChatId}/messages?limit=50&offset=${offset}`, {
         headers: { Authorization: `Bearer ${token}` }
       })
       const data = await res.json()
@@ -1932,6 +1968,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }
 
   const handleSendMessage = async () => {
+    if (suspendedRef.current) return
     if (quickReplyDraft) {
       await handleSendQuickReplyDraft()
       return
@@ -1969,7 +2006,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       const token = localStorage.getItem('token')
       let editSucceeded = false
       try {
-        const res = await fetch('/api/messages/edit', {
+        const res = await chatRequest('/api/messages/edit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({
@@ -2000,7 +2037,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       setEditingMsg(null)
       setMessageText('')
       inputRef.current?.clear()
-      requestAnimationFrame(() => inputRef.current?.focus())
+      requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() })
       return
     }
 
@@ -2017,7 +2054,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     if (inputRef.current) {
         inputRef.current.clear()
         // Use rAF to ensure focus happens after React re-render
-        requestAnimationFrame(() => inputRef.current?.focus())
+        requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() })
     }
 
     // Optimistic UI
@@ -2059,7 +2096,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
             })
     textSendPayloadsRef.current.set(tempId, frozenPayload)
     try {
-        const res = await fetch('/api/messages/send', {
+        const res = await chatRequest('/api/messages/send', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
             body: frozenPayload,
@@ -2103,7 +2140,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         formData.append('file', media.file)
         formData.append('folder', 'uploads')
 
-        const uploadRes = await fetch('/api/media/upload', {
+        const uploadRes = await chatRequest('/api/media/upload', {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}` },
           body: formData,
@@ -2134,7 +2171,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
           quoted_is_from_me: media.quotedIsFromMe,
         })
       updateMessagesForChat(targetChatId, previous => previous.map(message => message.id === tempId ? { ...message, send_phase: 'sending' } : message))
-      const res = await fetch('/api/messages/send', {
+      const res = await chatRequest('/api/messages/send', {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: media.frozenPayload,
 
       })
@@ -2170,6 +2207,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }
 
   const handleRetrySend = async (failedMsg: Message) => {
+    if (suspendedRef.current) return
     if (effectiveReadOnly || !chat || !deviceId || !chatId) return
     const targetChatId = chatId
     const targetChatJid = chat.jid
@@ -2182,7 +2220,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       setSendingMessage(true)
       updateMessagesForChat(targetChatId, previous => previous.map(message => message.id === failedMsg.id ? { ...message, status: 'sending' } : message))
       try {
-        const response = await fetch('/api/messages/send', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` }, body: frozenPayload })
+        const response = await chatRequest('/api/messages/send', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` }, body: frozenPayload })
         const data = await response.json().catch(() => ({}))
         if (!response.ok || !data.success) throw new Error(data.error || 'No se pudo enviar. Puedes reintentar sin duplicar el mensaje.')
         textSendPayloadsRef.current.delete(failedMsg.id)
@@ -2216,7 +2254,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
     const token = localStorage.getItem('token')
     try {
-      const res = await fetch('/api/messages/send', {
+      const res = await chatRequest('/api/messages/send', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -2251,6 +2289,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }
 
   const handleSendMedia = async (file: File, mediaType: OutgoingMediaType, caption?: string): Promise<boolean> => {
+    if (suspendedRef.current) return false
     if (effectiveReadOnly || (mediaType === 'sticker' && !canSendStickers) || !chat || !deviceId || !chatId) return false
     const targetChatId = chatId
     const targetChatJid = chat.jid
@@ -2268,6 +2307,12 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       } catch (err) {
         console.warn('[ImageCompress] Compression failed, using original:', err)
       }
+    }
+
+    if (suspendedRef.current) {
+      sendingChatsRef.current.delete(targetChatId)
+      if (activeChatIdRef.current === targetChatId) setSendingMessage(false)
+      return false
     }
 
     if (!mediaMountedRef.current || activeChatIdRef.current !== targetChatId) { sendingChatsRef.current.delete(targetChatId); return false }
@@ -2320,7 +2365,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
   const acknowledgeAttention = async (targetChatId: string, through: string) => {
     if (!through) return
-    const response = await fetch(`/api/chats/${targetChatId}/attention`, {
+    const response = await chatRequest(`/api/chats/${targetChatId}/attention`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
       body: JSON.stringify({ through_message_id: through }),
     })
@@ -2331,6 +2376,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }
 
   const handleSendQuickReplyDraft = async () => {
+    if (suspendedRef.current) return
     if (!quickReplyDraft || effectiveReadOnly || !chat || !deviceId || !chatId || activeMessageSendRef.current !== null || sendingChatsRef.current.has(chatId)) return
     if (!quickReplyDraft.items?.some(item => item.type === 'media' || item.text?.trim()) && !messageText.trim()) { setComposerFeedback({ kind: 'info', message: 'Añade un mensaje antes de enviar la respuesta rápida.' }); return }
     const targetChatId = chatId
@@ -2360,7 +2406,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         publish(progress)
         const optimistic: Message = { id: tempId, message_id: tempId, is_from_me: true, is_read: false, status: 'sending', timestamp: new Date().toISOString(), body: String(payload.body || ''), message_type: String(payload.media_type || 'text'), media_url: payload.media_url as string, media_filename: payload.media_filename as string, quoted_message_id: payload.quoted_message_id as string, quoted_body: payload.quoted_body as string, quoted_sender: payload.quoted_sender as string, quoted_is_from_me: payload.quoted_is_from_me as boolean }
         updateMessagesForChat(targetChatId, current => current.some(row => row.id === tempId) ? current.map(row => row.id === tempId ? optimistic : row) : [...current, optimistic])
-        const response = await fetch('/api/messages/send', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` }, body: JSON.stringify(payload) })
+        const response = await chatRequest('/api/messages/send', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` }, body: JSON.stringify(payload) })
         const data = await response.json().catch(() => ({}))
         if (!response.ok || !data.success || !data.message) {
           updateMessagesForChat(targetChatId, current => current.map(row => row.id === tempId ? { ...row, status: 'failed' } : row))
@@ -2372,7 +2418,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       }
       await acknowledgeAttention(targetChatId, progress.throughMessageId || '')
       publish(null)
-      if (activeChatIdRef.current === targetChatId) { scrollToBottom(); requestAnimationFrame(() => inputRef.current?.focus()) }
+      if (activeChatIdRef.current === targetChatId) { scrollToBottom(); requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() }) }
     } catch (error) {
       progress = { ...progress, error: error instanceof Error ? error.message : 'No pudimos confirmar el envío. Reintenta para verificarlo.' }
       publish(progress)
@@ -2384,6 +2430,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }
 
   const handleSendSticker = async (stickerUrl: string, file?: File) => {
+    if (suspendedRef.current) return
       if (!canSendStickers || !chat || !deviceId || !chatId) return
 
       if (file) {
@@ -2420,7 +2467,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
       const token = localStorage.getItem('token')
       try {
-        const res = await fetch('/api/messages/send', {
+        const res = await chatRequest('/api/messages/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({
@@ -2461,6 +2508,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }
 
   const beginAttachmentDraft = (files: File[], forceDocument = false) => {
+    if (suspendedRef.current) return
     if (effectiveReadOnly || files.length === 0) return
     if (editingMsg) {
       setComposerFeedback({ kind: 'info', message: 'Termina o cancela la edición antes de adjuntar un archivo.' })
@@ -2502,7 +2550,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     if (files.length > 1) {
       setComposerFeedback({ kind: 'info', message: 'Se adjuntó el primer archivo. Los demás deben enviarse por separado.' })
     }
-    window.setTimeout(() => captionInputRef.current?.focus(), 100)
+    window.setTimeout(() => { if (!suspendedRef.current) captionInputRef.current?.focus() }, 100)
   }
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>, pickerType: 'media' | 'document') => {
@@ -2512,6 +2560,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }
 
   const handleSendContact = async (contacts: SelectedPerson[]) => {
+    if (suspendedRef.current) return
     if (effectiveReadOnly || !chat || !deviceId || !chatId) return
     const targetChatId = chatId
     const targetChatJid = chat.jid
@@ -2539,7 +2588,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       updateMessagesForChat(targetChatId, prev => [...prev, optimisticMsg])
       if (activeChatIdRef.current === targetChatId) scrollToBottom()
       try {
-        const res = await fetch('/api/messages/send-contact', {
+        const res = await chatRequest('/api/messages/send-contact', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({
@@ -2562,6 +2611,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }
 
   const handleSendPendingMedia = async () => {
+    if (suspendedRef.current) return
     const draft = attachmentDraftRef.current
     if (effectiveReadOnly || !draft || attachmentSendingRef.current) return
 
@@ -2590,7 +2640,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     setAttachmentDraft(null)
     setMessageText(draft.caption)
     captionInputRef.current?.clear()
-    requestAnimationFrame(() => inputRef.current?.focus())
+    requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() })
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -2643,7 +2693,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
      setShowQuickReply(false)
      setQuickReplyFilter('')
      setQuickReplyError('')
-     requestAnimationFrame(() => inputRef.current?.focus())
+     requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() })
   }
 
   const removeQuickReplyDraftAttachment = (index: number) => {
@@ -2659,7 +2709,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     if (sendingMessage) return
     setQuickReplyDraft(null)
     setComposerFeedback(null)
-    requestAnimationFrame(() => inputRef.current?.focus())
+    requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() })
   }
 
   const isCanonicalMessage = (message: Message) => Boolean(message.message_id) && !message.id.startsWith('optimistic-') && !message.is_revoked
@@ -2712,25 +2762,29 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }
 
   const handleBeginReply = (message: Message) => {
+    if (suspendedRef.current) return
     clearMessageSelection()
     setReplyingTo(message)
-    requestAnimationFrame(() => inputRef.current?.focus())
+    requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() })
   }
 
   const handleBeginForward = (message: Message) => {
+    if (suspendedRef.current) return
     clearMessageSelection()
     setForwardingMsg(message)
   }
 
   const handleBeginEdit = (message: Message) => {
+    if (suspendedRef.current) return
     if (!canEditMessage(message)) return
     clearMessageSelection()
     setEditingMsg(message)
     setMessageText(message.body || '')
-    requestAnimationFrame(() => inputRef.current?.focus())
+    requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() })
   }
 
   const handleDeleteChatMessage = async (message: Message) => {
+    if (suspendedRef.current) return
     if (!deviceId || !chat || !canDeleteMessage(message) || messageActionPending) return
     if (!window.confirm('¿Eliminar este mensaje para todos? WhatsApp puede rechazar la solicitud si el plazo ya venció.')) return
     const targetChatId = chat.id
@@ -2738,7 +2792,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     setShowSelectionMenu(false)
     try {
       const token = localStorage.getItem('token')
-      const response = await fetch('/api/messages/delete', {
+      const response = await chatRequest('/api/messages/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
@@ -2776,7 +2830,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
     try {
       const token = localStorage.getItem('token')
-      const response = await fetch('/api/messages/react', {
+      const response = await chatRequest('/api/messages/react', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
@@ -2853,6 +2907,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   }
 
   const handleReactMessage = (message: Message, emoji: string) => {
+    if (suspendedRef.current) return
     if (!chat) return
     const targetChatId = chat.id
     const latestMessage = (messagesCacheRef.current.get(targetChatId)?.messages || messages)
@@ -2861,7 +2916,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       message: latestMessage,
       device: canonicalDevice,
       deviceValidated: activeDeviceValidationState === 'ready',
-      chatReadOnly: readOnly,
+      chatReadOnly: readOnly || suspended,
     })
     if (!availability.allowed) {
       if (availability.reason) setComposerFeedback({ kind: 'info', message: availability.reason })
@@ -2918,7 +2973,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
   if (!chat && loading) {
        return (
-        <div className={`flex items-center justify-center bg-slate-50 h-full ${className}`}>
+        <div hidden={suspended} inert={suspended} style={suspended ? { display: 'none' } : undefined} className={`flex items-center justify-center bg-slate-50 h-full ${className}`}>
            <div className="animate-spin rounded-full h-8 w-8 border-2 border-emerald-200 border-t-emerald-600" />
         </div>
        )
@@ -2926,7 +2981,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
   if (!chat) {
       return (
-          <div className={`flex flex-col items-center justify-center gap-3 bg-slate-50 h-full ${className}`}>
+          <div hidden={suspended} inert={suspended} style={suspended ? { display: 'none' } : undefined} className={`flex flex-col items-center justify-center gap-3 bg-slate-50 h-full ${className}`}>
              <p className="text-slate-500" role={historyError ? 'alert' : undefined}>{historyError || 'Chat no encontrado'}</p>
              {historyError && <button type="button" onClick={() => void fetchChatDetails()} className="min-h-11 rounded-xl px-4 text-sm font-semibold text-emerald-700 hover:bg-emerald-50">Reintentar historial</button>}
           </div>
@@ -2939,12 +2994,12 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         message: selectedMessage,
         device: canonicalDevice,
         deviceValidated: activeDeviceValidationState === 'ready',
-        chatReadOnly: readOnly,
+        chatReadOnly: readOnly || suspended,
       })
     : null
 
   return (
-    <div ref={panelRef} className={`relative flex-1 flex flex-col min-h-0 overflow-hidden h-full ${className}`}>
+    <div ref={panelRef} onFocusCapture={event => { if (!suspendedRef.current && event.target instanceof HTMLElement) suspendedFocusRef.current = event.target }} hidden={suspended} inert={suspended} style={suspended ? { display: 'none' } : undefined} className={`relative flex-1 flex flex-col min-h-0 overflow-hidden h-full ${className}`}>
          {/* Chat header */}
          <div className="flex min-h-14 shrink-0 items-center justify-between gap-2 border-b border-slate-200 bg-white px-2 sm:px-4">
               <div className="flex min-w-0 items-center gap-2 sm:gap-3">
@@ -3022,7 +3077,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
               </div>
          </div>
 
-         {showSelectionMenu && selectedMessage && touchKeyboard && typeof document !== 'undefined' && createPortal(
+         {!suspended && showSelectionMenu && selectedMessage && touchKeyboard && typeof document !== 'undefined' && createPortal(
            <>
              <button type="button" data-chat-overlay="selection-backdrop" className="app-viewport pointer-events-auto fixed inset-0 bg-slate-950/20" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.sheet }} onClick={() => clearMessageSelection()} aria-label="Cerrar acciones del mensaje" />
              <div ref={selectionSheetRef} tabIndex={-1} data-chat-overlay="selection-menu" role="menu" aria-label="Acciones del mensaje seleccionado" className="pointer-events-auto fixed inset-x-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] max-h-[min(72dvh,28rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog }}>
@@ -3189,7 +3244,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                           message: msg,
                           device: canonicalDevice,
                           deviceValidated: activeDeviceValidationState === 'ready',
-                          chatReadOnly: readOnly,
+                          chatReadOnly: readOnly || suspended,
                         })
 
                       return (
@@ -3243,7 +3298,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
              )}
 
              {/* Right Panel (Contact/Search) - Overlay/Sidebar — only when NOT parent-controlled */}
-             {showContactInfo && !onContactInfoToggle && (
+             {!suspended && showContactInfo && !onContactInfoToggle && (
                 <div
                    className="absolute inset-y-0 right-0 z-20 w-full border-l border-slate-200 bg-white shadow-xl md:w-[380px] md:max-w-[45%]"
                 >
@@ -3355,7 +3410,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                 }} className="min-h-11 rounded-xl bg-emerald-50 px-4 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-40">{nextPending ? 'Buscando…' : 'Siguiente pendiente →'}</button>
               </div>}
 
-         {quickReplyReviewOpen && quickReplyDraft && typeof document !== 'undefined' && createPortal(
+         {!suspended && quickReplyReviewOpen && quickReplyDraft && typeof document !== 'undefined' && createPortal(
            <div ref={quickReplyReviewRef} role="dialog" aria-modal="true" aria-label="Revisar respuesta rápida" tabIndex={-1} className="app-viewport pointer-events-auto fixed inset-0 flex flex-col bg-white" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog }}>
              <div className="flex min-h-14 shrink-0 items-center justify-between border-b border-slate-200 px-4"><h2 className="text-sm font-bold text-slate-900">/{quickReplyDraft.shortcut} · Revisar mensajes</h2><button type="button" onClick={() => setQuickReplyReviewOpen(false)} className="flex h-11 w-11 items-center justify-center rounded-xl hover:bg-slate-100" aria-label="Cerrar revisión"><X className="h-5 w-5" /></button></div>
              <div className="min-h-0 flex-1 overflow-y-auto p-3">
@@ -3516,7 +3571,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                       anchorRef={quickReplyAnchorRef}
                       portalTarget={operationalPortal || undefined}
                       onSelect={handleQuickReplySelect}
-                      onClose={() => { setShowQuickReply(false); setQuickReplyFilter(''); requestAnimationFrame(() => inputRef.current?.focus()) }}
+                      onClose={() => { setShowQuickReply(false); setQuickReplyFilter(''); requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() }) }}
                       onLoadMore={() => void loadQuickReplies({ query: quickReplySettledQueryRef.current, cursor: quickReplyPage.nextCursor, append: true })}
                       onRetry={() => void loadQuickReplies({ query: quickReplySettledQueryRef.current })}
                     />
@@ -3601,23 +3656,24 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
          )}
 
          {/* Image Viewer */}
-         {viewImage && (
+         {!suspended && viewImage && (
              <ImageViewer src={viewImage} isOpen={!!viewImage} onClose={() => setViewImage(null)} />
          )}
 
-         {viewDocument && (
+         {!suspended && viewDocument && (
            <ChatDocumentViewer key={viewDocument.sessionId} document={viewDocument} onClose={closeMessageDocument} />
          )}
 
-         {infoMessage && (
+         {!suspended && infoMessage && (
            <MessageInfoDialog message={messages.find(message => message.id === infoMessage.id || message.message_id === infoMessage.message_id) || infoMessage} onClose={() => setInfoMessage(null)} />
          )}
 
          {/* Forward Modal */}
-         {!effectiveReadOnly && forwardingMsg && chat && deviceId && (
+         {forwardingMsg && chat && (suspended || (!effectiveReadOnly && deviceId)) && (
              <ForwardMessageModal
                message={forwardingMsg}
-               deviceId={deviceId}
+               deviceId={deviceId || initialDeviceId || device?.id || ''}
+               suspended={suspended}
                chatId={chat.id}
                onClose={() => setForwardingMsg(null)}
                onSuccess={() => setForwardingMsg(null)}
@@ -3626,7 +3682,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
          {/* Contact Picker for sending contact vCard */}
          <ContactSelector
-           open={!effectiveReadOnly && showContactPicker}
+           open={(suspended || !effectiveReadOnly) && showContactPicker}
+           suspended={suspended}
            onClose={() => setShowContactPicker(false)}
            onConfirm={handleSendContact}
            title="Enviar Contacto"

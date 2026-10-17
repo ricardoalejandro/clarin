@@ -43,6 +43,8 @@ interface UseWhatsAppChatLauncherOptions {
   sessionKey: string | null | undefined
   contactId?: string | null
   onError?: (message: string) => void
+  /** Pauses new launches without discarding a resolved choice or an in-flight creation. */
+  suspended?: boolean
 }
 
 interface OpenWhatsAppChatOptions {
@@ -79,7 +81,9 @@ export function whatsappLauncherIsPending(phase: WhatsAppChatLauncherPhase) {
   return phase === 'resolving' || phase === 'opening_chat'
 }
 
-export default function useWhatsAppChatLauncher({ sessionKey, contactId, onError }: UseWhatsAppChatLauncherOptions) {
+export default function useWhatsAppChatLauncher({ sessionKey, contactId, onError, suspended = false }: UseWhatsAppChatLauncherOptions) {
+  const suspendedRef = useRef(suspended)
+  suspendedRef.current = suspended
   const authScope = useSyncExternalStore(subscribeAuthScope, getAuthScope, () => 'server')
   const [state, setState] = useState<WhatsAppChatLauncherState>(INITIAL_STATE)
   const requestRef = useRef<{ generation: number; controller: AbortController | null; authScope: string }>({ generation: 0, controller: null, authScope })
@@ -137,7 +141,7 @@ export default function useWhatsAppChatLauncher({ sessionKey, contactId, onError
     request?: ReturnType<typeof beginRequest>,
     confirmed = false,
   ) => {
-    if (isAuthIdentityChanging() || isDeviceDeleting(deviceOption) || deletingDeviceIdsRef.current.has(deviceOption.id) || disconnectedDeviceIdsRef.current.has(deviceOption.id)) return
+    if (suspendedRef.current || isAuthIdentityChanging() || isDeviceDeleting(deviceOption) || deletingDeviceIdsRef.current.has(deviceOption.id) || disconnectedDeviceIdsRef.current.has(deviceOption.id)) return
     const activeRequest = request || beginRequest()
     setState(current => ({
       ...current,
@@ -187,7 +191,7 @@ export default function useWhatsAppChatLauncher({ sessionKey, contactId, onError
   }, [beginRequest, isCurrent, reportError])
 
   const open = useCallback(async (rawPhone: string, options: OpenWhatsAppChatOptions = {}) => {
-    if (isAuthIdentityChanging()) return
+    if (suspendedRef.current || isAuthIdentityChanging()) return
     if (options.sessionKey !== undefined) sessionKeyRef.current = options.sessionKey
     if (options.contactId !== undefined) contactIdRef.current = options.contactId
     invokerRef.current = options.invoker || (document.activeElement instanceof HTMLElement ? document.activeElement : null)
@@ -233,6 +237,10 @@ export default function useWhatsAppChatLauncher({ sessionKey, contactId, onError
         return
       }
       if (resolution.mode === 'open_direct' && resolution.devices[0]) {
+        if (suspendedRef.current) {
+          setState({ ...base, phase: 'choosing_device', notice: 'La apertura está pausada. Confirma el canal cuando vuelvas a la vista de escritorio.' })
+          return
+        }
         setState({ ...base, phase: 'opening_chat', device: chatDeviceFromOption(resolution.devices[0]) })
         await openWithDevice(resolution.devices[0], phone, request)
         return
@@ -249,11 +257,11 @@ export default function useWhatsAppChatLauncher({ sessionKey, contactId, onError
   }, [beginRequest, invalidate, isCurrent, openWithDevice, reportError])
 
   const selectDevice = useCallback((device: WhatsAppDeviceOption) => {
-    if (stateRef.current.phase !== 'choosing_device') return
+    if (suspendedRef.current || stateRef.current.phase !== 'choosing_device') return
     const current = stateRef.current.devices.find(candidate => candidate.id === device.id)
     if (!current || !usableWhatsAppDevice(current)) return
-    void openWithDevice(current, state.phone, undefined, true)
-  }, [openWithDevice, state.phone])
+    void openWithDevice(current, stateRef.current.phone, undefined, true)
+  }, [openWithDevice])
 
   const prepare = useCallback(async (rawPhone: string) => {
     const phone = cleanWhatsAppPhone(rawPhone)

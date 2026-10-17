@@ -12,6 +12,8 @@ import { useDebouncedValue } from '@/lib/useDebouncedValue';
 import { ProgramSettingsDialog } from '@/components/programs/ProgramSettingsDialog';
 import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider';
 import { programScopeUrls, PROGRAM_DELETE_CONFIRMATION, type ProgramStatusScope } from '@/lib/programLifecycle';
+import { useProgramWorkspacePolicy } from '@/components/programs/useProgramWorkspacePolicy';
+import { isDialogFocusableVisible, restoreDialogFocus } from '@/components/programs/useDialogTabTrap';
 
 const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; icon: React.ReactNode }> = {
   active: { label: 'Activo', bg: 'bg-emerald-50', text: 'text-emerald-700', icon: <CheckCircle2 className="w-3 h-3" /> },
@@ -27,6 +29,12 @@ export default function ProgramsPage() {
   const [statusScope, setStatusScope] = useState<ProgramStatusScope>('active');
   const { isOffline, requireOnline } = useClarinRuntime();
   const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>();
+  const { mobile: mobileWorkspace, touch: touchWorkspace, desktopActions } = useProgramWorkspacePolicy(workspaceWidth);
+  const desktopActionsRef = useRef(desktopActions);
+  desktopActionsRef.current = desktopActions;
+  const mutationKeysRef = useRef(new Set<string>());
+  const desktopFocusRef = useRef<HTMLElement | null>(null);
+  const mobileSearchRef = useRef<HTMLInputElement | null>(null);
   const measuredWorkspaceWidth = workspaceWidth || 320;
   const programGridColumns = Math.max(1, Math.min(4, Math.floor((measuredWorkspaceWidth + 16) / 276)));
   const folderGridColumns = Math.max(1, Math.min(5, Math.floor((measuredWorkspaceWidth + 12) / 192)));
@@ -56,8 +64,13 @@ export default function ProgramsPage() {
   const [savingGoals, setSavingGoals] = useState(false);
   const [healthExpanded, setHealthExpanded] = useState(false);
   const [goalsOpen, setGoalsOpen] = useState(false);
+  const goalsOpenRef = useRef(goalsOpen);
+  goalsOpenRef.current = goalsOpen;
   const [deleting, setDeleting] = useState<string | null>(null);
   const [editingProgram, setEditingProgram] = useState<Program | null>(null);
+  const [editingProgramDirty, setEditingProgramDirty] = useState(false);
+  const [creatingProgram, setCreatingProgram] = useState(false);
+  const [savingFolder, setSavingFolder] = useState(false);
 
   // Folder state
   const [folders, setFolders] = useState<ProgramFolder[]>([]);
@@ -72,8 +85,6 @@ export default function ProgramsPage() {
   const [editFolder, setEditFolder] = useState<ProgramFolder | null>(null);
   const [folderForm, setFolderForm] = useState({ name: '', color: '#10b981', icon: '📁' });
   const [menuID, setMenuID] = useState<string | null>(null);
-  const [coarsePointer, setCoarsePointer] = useState(false);
-  const [visualViewportHeight, setVisualViewportHeight] = useState(900);
 
   // View mode
   const [viewMode, setViewMode] = useState<'grid' | 'list' | 'compact'>('grid');
@@ -92,27 +103,66 @@ export default function ProgramsPage() {
 
   // Toast auto-dismiss
   useEffect(() => {
-    if (!toastMessage) return;
+    if (!toastMessage || !desktopActions) return;
     const t = setTimeout(() => setToastMessage(null), 3000);
     return () => clearTimeout(t);
-  }, [toastMessage]);
+  }, [toastMessage, desktopActions]);
 
   const showToast = (message: string, type: 'success' | 'error') => {
     setToastMessage(message);
     setToastType(type);
   };
 
-  const compactWorkspace = workspaceWidth === 0 || workspaceWidth < 768;
-  const touchWorkspace = compactWorkspace || coarsePointer;
-  const mobileWorkspace = workspaceWidth === 0 || workspaceWidth < 700 || (coarsePointer && visualViewportHeight < 600);
   const effectiveViewMode = mobileWorkspace ? 'grid' : viewMode;
+  const compactWorkspace = workspaceWidth === 0 || workspaceWidth < 768;
+  const hasDesktopDraft = editingProgramDirty
+    || (isCreateModalOpen && Boolean(newProgram.name.trim() || newProgram.description.trim() || newProgram.color !== COLORS[0]))
+    || (showFolderModal && (folderForm.name !== (editFolder?.name || '') || folderForm.color !== (editFolder?.color || COLORS[0]) || folderForm.icon !== (editFolder?.icon || FOLDER_ICONS[0])))
+    || (goalsOpen && (goalForm.attendance_goal_percent !== (dashboard?.attendance_goal_percent || 80) || goalForm.transfer_goal_percent !== (dashboard?.transfer_goal_percent || 70)));
+  const desktopWorkOpen = isCreateModalOpen || Boolean(editingProgram) || showFolderModal || goalsOpen || Boolean(confirmAction);
+
+  const beginMutation = (key: string) => {
+    if (!desktopActionsRef.current || mutationKeysRef.current.has(key)) return false;
+    mutationKeysRef.current.add(key);
+    return true;
+  };
 
   useEffect(() => {
     if (!mobileWorkspace) return;
     setMenuID(null);
-    setShowFolderModal(false);
-    setConfirmAction(null);
+    dragProgramIDRef.current = null;
+    setDragOverFolderID(null);
+    setDragOverRoot(false);
   }, [mobileWorkspace]);
+
+  useEffect(() => {
+    const previous = desktopFocusRef.current;
+    if (!previous) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (mobileWorkspace && !isDialogFocusableVisible(previous)) restoreDialogFocus([mobileSearchRef.current]);
+      else if (!mobileWorkspace) restoreDialogFocus([previous]);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [mobileWorkspace]);
+
+  useEffect(() => {
+    if (!hasDesktopDraft) return;
+    const beforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    const protectNavigation = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+      const anchor = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[href]') : null;
+      if (!anchor || anchor.target || anchor.hasAttribute('download')) return;
+      const destination = new URL(anchor.href, window.location.href);
+      if (destination.origin !== window.location.origin || destination.href === window.location.href) return;
+      if (mutationKeysRef.current.size > 0 || !window.confirm('Hay cambios sin guardar en Programas. ¿Deseas descartarlos y salir?')) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    window.addEventListener('beforeunload', beforeUnload);
+    document.addEventListener('click', protectNavigation, true);
+    return () => { window.removeEventListener('beforeunload', beforeUnload); document.removeEventListener('click', protectNavigation, true); };
+  }, [hasDesktopDraft]);
 
   useEffect(() => {
     void fetchPrograms();
@@ -127,23 +177,6 @@ export default function ProgramsPage() {
     void fetchDashboard();
     return () => dashboardRequestRef.current?.abort();
   }, [dateFrom, dateTo]);
-
-  useEffect(() => {
-    const media = window.matchMedia('(hover: none), (pointer: coarse)');
-    const update = () => {
-      setCoarsePointer(media.matches);
-      setVisualViewportHeight(window.visualViewport?.height || window.innerHeight);
-    };
-    update();
-    media.addEventListener('change', update);
-    window.addEventListener('resize', update);
-    window.visualViewport?.addEventListener('resize', update);
-    return () => {
-      media.removeEventListener('change', update);
-      window.removeEventListener('resize', update);
-      window.visualViewport?.removeEventListener('resize', update);
-    };
-  }, []);
 
   // Close menus on outside click
   useEffect(() => {
@@ -196,7 +229,7 @@ export default function ProgramsPage() {
       setDashboardError('La salud general no está disponible en este momento. Puedes volver a intentarlo.');
     } else {
       setDashboard(data.dashboard);
-      setGoalForm({
+      if (!goalsOpenRef.current) setGoalForm({
         attendance_goal_percent: data.dashboard.attendance_goal_percent || 80,
         transfer_goal_percent: data.dashboard.transfer_goal_percent || 70,
       });
@@ -205,7 +238,7 @@ export default function ProgramsPage() {
   };
 
   const saveGlobalGoals = async () => {
-    if (!requireOnline('Administrar las metas globales de Programas')) return;
+    if (!desktopActionsRef.current || !requireOnline('Administrar las metas globales de Programas') || !beginMutation('goals')) return;
     setSavingGoals(true);
     try {
       const res = await api<{ success: boolean; goals: ProgramGoal }>('/api/programs/goals', {
@@ -225,6 +258,7 @@ export default function ProgramsPage() {
       console.error('Error saving program goals:', error);
       showToast('Error al guardar metas', 'error');
     } finally {
+      mutationKeysRef.current.delete('goals');
       setSavingGoals(false);
     }
   };
@@ -261,7 +295,8 @@ export default function ProgramsPage() {
 
   const handleCreateProgram = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!requireOnline('Crear un grupo de clases')) return;
+    if (!desktopActionsRef.current || !requireOnline('Crear un grupo de clases') || !beginMutation('create-program')) return;
+    setCreatingProgram(true);
     try {
       const payload: any = {
         name: newProgram.name,
@@ -289,16 +324,21 @@ export default function ProgramsPage() {
     } catch (error) {
       console.error('Error creating program:', error);
       showToast('Error al crear programa', 'error');
+    } finally {
+      mutationKeysRef.current.delete('create-program');
+      setCreatingProgram(false);
     }
   };
 
   const handleDeleteProgram = (id: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    if (!desktopActionsRef.current) return;
     setMenuID(null);
     setConfirmAction({
       message: PROGRAM_DELETE_CONFIRMATION,
       onConfirm: async () => {
+        if (!beginMutation(`delete-program:${id}`)) return;
         setConfirmAction(null);
         setDeleting(id);
         try {
@@ -313,6 +353,7 @@ export default function ProgramsPage() {
           console.error('Error deleting program:', error);
           showToast('Error al eliminar programa', 'error');
         } finally {
+          mutationKeysRef.current.delete(`delete-program:${id}`);
           setDeleting(null);
         }
       },
@@ -322,6 +363,7 @@ export default function ProgramsPage() {
   const openEditProgram = (program: Program, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    if (!desktopActionsRef.current) return;
     setMenuID(null);
     setEditingProgram(program);
   };
@@ -352,7 +394,7 @@ export default function ProgramsPage() {
 
   // Folder CRUD
   const openCreateFolder = () => {
-    if (!requireOnline('Crear una carpeta de Programas')) return;
+    if (!desktopActionsRef.current || !requireOnline('Crear una carpeta de Programas')) return;
     setEditFolder(null);
     setFolderForm({ name: '', color: '#10b981', icon: '📁' });
     setShowFolderModal(true);
@@ -360,7 +402,7 @@ export default function ProgramsPage() {
 
   const openEditFolder = (folder: ProgramFolder, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!requireOnline('Administrar carpetas de Programas')) return;
+    if (!desktopActionsRef.current || !requireOnline('Administrar carpetas de Programas')) return;
     setMenuID(null);
     setEditFolder(folder);
     setFolderForm({ name: folder.name, color: folder.color, icon: folder.icon });
@@ -368,7 +410,8 @@ export default function ProgramsPage() {
   };
 
   const handleSaveFolder = async () => {
-    if (!requireOnline('Administrar carpetas de Programas')) return;
+    if (!desktopActionsRef.current || !requireOnline('Administrar carpetas de Programas') || !beginMutation('save-folder')) return;
+    setSavingFolder(true);
     try {
       const endpoint = editFolder ? `/api/programs/folders/${editFolder.id}` : '/api/programs/folders';
       const method = editFolder ? 'PUT' : 'POST';
@@ -385,16 +428,20 @@ export default function ProgramsPage() {
     } catch (error) {
       console.error('Error saving folder:', error);
       showToast('Error al guardar carpeta', 'error');
+    } finally {
+      mutationKeysRef.current.delete('save-folder');
+      setSavingFolder(false);
     }
   };
 
   const handleDeleteFolder = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!requireOnline('Administrar carpetas de Programas')) return;
+    if (!desktopActionsRef.current || !requireOnline('Administrar carpetas de Programas')) return;
     setMenuID(null);
     setConfirmAction({
       message: '¿Eliminar carpeta? Los programas se moverán a la carpeta padre.',
       onConfirm: async () => {
+        if (!beginMutation(`delete-folder:${id}`)) return;
         setConfirmAction(null);
         try {
           const res = await api(`/api/programs/folders/${id}`, { method: 'DELETE' });
@@ -408,13 +455,16 @@ export default function ProgramsPage() {
         } catch (error) {
           console.error('Error deleting folder:', error);
           showToast('Error al eliminar carpeta', 'error');
+        } finally {
+          mutationKeysRef.current.delete(`delete-folder:${id}`);
         }
       },
     });
   };
 
   const moveProgramToFolder = async (programId: string, folderId: string | null) => {
-    if (!requireOnline('Mover programas entre carpetas')) return;
+    const mutationKey = `move-program:${programId}`;
+    if (!desktopActionsRef.current || !requireOnline('Mover programas entre carpetas') || !beginMutation(mutationKey)) return;
     try {
       const res = await api(`/api/programs/${programId}/move-folder`, {
         method: 'PATCH',
@@ -429,6 +479,8 @@ export default function ProgramsPage() {
     } catch (error) {
       console.error('Error moving program:', error);
       showToast('Error al mover programa', 'error');
+    } finally {
+      mutationKeysRef.current.delete(mutationKey);
     }
   };
 
@@ -442,9 +494,9 @@ export default function ProgramsPage() {
   // ─── Drag & Drop ──────────────────────────────────────────────────────────
 
   const handleProgramDragStart = (e: React.DragEvent, programId: string) => {
-    if (isOffline) {
+    if (!desktopActionsRef.current || isOffline) {
       e.preventDefault();
-      requireOnline('Mover programas entre carpetas');
+      if (desktopActionsRef.current) requireOnline('Mover programas entre carpetas');
       return;
     }
     dragProgramIDRef.current = programId;
@@ -460,7 +512,7 @@ export default function ProgramsPage() {
   };
 
   const handleFolderDragOver = (e: React.DragEvent, folderID: string) => {
-    if (!dragProgramIDRef.current) return;
+    if (!desktopActionsRef.current || !dragProgramIDRef.current) return;
     e.preventDefault();
     e.stopPropagation();
     e.dataTransfer.dropEffect = 'move';
@@ -481,7 +533,7 @@ export default function ProgramsPage() {
   };
 
   const handleRootDragOver = (e: React.DragEvent) => {
-    if (!dragProgramIDRef.current) return;
+    if (!desktopActionsRef.current || !dragProgramIDRef.current) return;
     e.preventDefault();
     e.stopPropagation();
     e.dataTransfer.dropEffect = 'move';
@@ -517,7 +569,7 @@ export default function ProgramsPage() {
     return 'Saludable';
   };
 
-  const renderProgramMenu = (program: Program) => (
+  const renderProgramMenu = (program: Program) => desktopActions && (
     <div className="relative shrink-0">
       <button
         type="button"
@@ -709,7 +761,7 @@ export default function ProgramsPage() {
   };
 
   return (
-    <div ref={workspaceRef} className="h-full min-h-0 overflow-y-auto flex flex-col gap-4 pr-1">
+    <div ref={workspaceRef} className="h-full min-h-0 overflow-y-auto flex flex-col gap-4 pr-1" onFocusCapture={event => { if (desktopActions && event.target instanceof HTMLElement) desktopFocusRef.current = event.target; }}>
       {/* Header */}
       <div className="flex shrink-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
@@ -721,10 +773,10 @@ export default function ProgramsPage() {
             <p className="text-xs text-slate-500">Grupos de clases, temarios y asistencia</p>
           </div>
         </div>
-        <div className="flex items-center gap-2 sm:shrink-0">
+        {desktopActions && <div className="flex items-center gap-2 sm:shrink-0">
           <Link
             href="/dashboard/programs/courses"
-            onClick={event => { if (!requireOnline('Administrar el catálogo de cursos')) event.preventDefault(); }}
+            onClick={event => { if (!desktopActionsRef.current || !requireOnline('Administrar el catálogo de cursos')) event.preventDefault(); }}
             title={isOffline ? 'El catálogo global de cursos necesita conexión' : undefined}
             className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700 transition-all hover:border-emerald-300 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 sm:flex-none"
             aria-label="Administrar cursos"
@@ -742,15 +794,17 @@ export default function ProgramsPage() {
             </button>
           )}
           <button
-            onClick={() => { if (requireOnline('Crear un grupo de clases')) setIsCreateModalOpen(true); }}
+            onClick={() => { if (desktopActionsRef.current && requireOnline('Crear un grupo de clases')) setIsCreateModalOpen(true); }}
             className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-emerald-700 sm:flex-none"
           >
             <Plus className="w-4 h-4" />
             <span className="hidden sm:inline">Nuevo grupo</span>
             <span className="sm:hidden">Nuevo</span>
           </button>
-        </div>
+        </div>}
       </div>
+
+      {mobileWorkspace && desktopWorkOpen && <p role="status" className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">Tu administración está pausada. Puedes continuar en la vista de escritorio; tus cambios sin guardar se conservarán mientras permanezcas aquí.</p>}
 
       {/* General health dashboard */}
       {!mobileWorkspace && <section className="bg-white border border-slate-200 rounded-xl shrink-0 overflow-hidden">
@@ -853,14 +907,14 @@ export default function ProgramsPage() {
       </section>}
 
       {goalsOpen && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/40 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) setGoalsOpen(false); }}>
+        <div hidden={!desktopActions} inert={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/40 p-4" onMouseDown={(event) => { if (desktopActionsRef.current && event.target === event.currentTarget) setGoalsOpen(false); }}>
           <div role="dialog" aria-modal="true" aria-labelledby="program-goals-title" className="w-full max-w-sm rounded-2xl bg-white shadow-2xl border border-slate-200 overflow-hidden">
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100"><h2 id="program-goals-title" className="text-sm font-semibold text-slate-800">Metas globales</h2><button type="button" onClick={() => setGoalsOpen(false)} className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100"><X className="w-4 h-4" /></button></div>
             <div className="grid grid-cols-1 gap-3 p-5 sm:grid-cols-2">
               <label className="text-xs text-slate-500">Asistencia %<input type="number" min={1} max={100} value={goalForm.attendance_goal_percent} onChange={(e) => setGoalForm(prev => ({ ...prev, attendance_goal_percent: Number(e.target.value) }))} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></label>
               <label className="text-xs text-slate-500">Traspaso %<input type="number" min={1} max={100} value={goalForm.transfer_goal_percent} onChange={(e) => setGoalForm(prev => ({ ...prev, transfer_goal_percent: Number(e.target.value) }))} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></label>
             </div>
-            <div className="flex justify-end gap-2 px-5 py-3 border-t border-slate-100"><button type="button" onClick={() => setGoalsOpen(false)} className="px-3 py-2 text-sm text-slate-600 rounded-lg hover:bg-slate-50">Cancelar</button><button type="button" onClick={async () => { await saveGlobalGoals(); setGoalsOpen(false); }} disabled={savingGoals} className="px-3 py-2 text-sm font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50">{savingGoals ? 'Guardando...' : 'Guardar metas'}</button></div>
+            <div className="flex justify-end gap-2 px-5 py-3 border-t border-slate-100"><button type="button" onClick={() => setGoalsOpen(false)} className="px-3 py-2 text-sm text-slate-600 rounded-lg hover:bg-slate-50">Cancelar</button><button type="button" onClick={async () => { if (!desktopActionsRef.current) return; await saveGlobalGoals(); setGoalsOpen(false); }} disabled={savingGoals} className="px-3 py-2 text-sm font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50">{savingGoals ? 'Guardando...' : 'Guardar metas'}</button></div>
           </div>
         </div>
       )}
@@ -870,6 +924,7 @@ export default function ProgramsPage() {
         <div className="flex-1 relative">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
+            ref={mobileSearchRef}
             type="text"
             placeholder="Buscar programas..."
             value={searchQuery}
@@ -977,12 +1032,12 @@ export default function ProgramsPage() {
             <GraduationCap className="w-10 h-10 text-emerald-400" />
           </div>
           <h3 className="text-lg font-semibold text-slate-800 mb-2">
-            {debouncedSearchQuery ? 'Sin resultados' : folderPath.length > 0 ? 'Carpeta vacía' : 'Crea tu primer grupo de clases'}
+            {debouncedSearchQuery ? 'Sin resultados' : folderPath.length > 0 ? 'Carpeta vacía' : mobileWorkspace ? 'No hay grupos de clases' : 'Crea tu primer grupo de clases'}
           </h3>
           <p className="text-slate-500 mb-6 max-w-md mx-auto">
             {debouncedSearchQuery
               ? 'No se encontraron programas activos con esa búsqueda.'
-              : 'Organiza grupos, asigna planes de clases y controla la asistencia de sus participantes.'}
+              : mobileWorkspace ? 'Los grupos se administran desde la vista de escritorio. Aquí podrás consultar participantes, registrar asistencia y añadir observaciones.' : 'Organiza grupos, asigna planes de clases y controla la asistencia de sus participantes.'}
           </p>
           {!debouncedSearchQuery && !mobileWorkspace && (
             <button
@@ -1070,7 +1125,7 @@ export default function ProgramsPage() {
 
       {/* Create Modal */}
       {isCreateModalOpen && (
-        <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
+        <div hidden={!desktopActions} inert={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center sm:p-4">
           <div role="dialog" aria-modal="true" aria-labelledby="create-program-title" className="h-[var(--app-height)] w-full max-w-md overflow-y-auto rounded-none bg-white p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-2xl sm:p-6">
             <div className="flex justify-between items-center mb-5">
               <h2 id="create-program-title" className="text-xl font-bold text-slate-800">Nuevo grupo de clases</h2>
@@ -1143,9 +1198,10 @@ export default function ProgramsPage() {
                 </button>
                 <button
                   type="submit"
+                  disabled={creatingProgram}
                   className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 sm:flex-none"
                 >
-                  Crear grupo
+                  {creatingProgram ? 'Creando…' : 'Crear grupo'}
                 </button>
               </div>
             </form>
@@ -1155,6 +1211,8 @@ export default function ProgramsPage() {
 
       <ProgramSettingsDialog
         open={Boolean(editingProgram)}
+        suspended={!desktopActions}
+        onDirtyChange={setEditingProgramDirty}
         program={editingProgram}
         onClose={() => setEditingProgram(null)}
         onCanonicalReload={canonical => {
@@ -1171,7 +1229,7 @@ export default function ProgramsPage() {
 
       {/* Folder Modal */}
       {showFolderModal && (
-        <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 sm:items-center sm:p-4" onClick={() => setShowFolderModal(false)}>
+        <div hidden={!desktopActions} inert={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 sm:items-center sm:p-4" onClick={() => { if (desktopActionsRef.current && !savingFolder) setShowFolderModal(false); }}>
           <div role="dialog" aria-modal="true" aria-labelledby="folder-dialog-title" className="h-[var(--app-height)] w-full max-w-sm overflow-y-auto rounded-none bg-white shadow-xl sm:h-auto sm:max-h-[92vh] sm:rounded-xl" onClick={e => e.stopPropagation()}>
             <div className="p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] sm:p-6">
               <h2 id="folder-dialog-title" className="text-lg font-semibold text-slate-900 mb-4">
@@ -1208,7 +1266,7 @@ export default function ProgramsPage() {
               </div>
               <div className="sticky bottom-0 -mx-4 mt-6 flex gap-3 bg-white px-4 pb-[env(safe-area-inset-bottom)] pt-3 sm:static sm:mx-0 sm:justify-end sm:px-0 sm:pb-0">
                 <button onClick={() => setShowFolderModal(false)} className="min-h-11 flex-1 rounded-lg px-4 py-2 text-slate-600 transition-colors hover:bg-slate-100 sm:flex-none">Cancelar</button>
-                <button disabled={!folderForm.name} onClick={handleSaveFolder}
+                <button disabled={!folderForm.name || savingFolder} onClick={handleSaveFolder}
                   className="min-h-11 flex-1 rounded-lg bg-emerald-600 px-6 py-2 text-white transition-colors hover:bg-emerald-700 disabled:opacity-50 sm:flex-none">
                   {editFolder ? 'Guardar' : 'Crear'}
                 </button>
@@ -1219,7 +1277,7 @@ export default function ProgramsPage() {
       )}
 
       {/* Toast */}
-      {toastMessage && (
+      {toastMessage && desktopActions && (
         <div className={`fixed bottom-6 right-6 z-[70] flex items-center gap-2 px-4 py-3 rounded-xl shadow-lg text-white text-sm font-medium transition-all ${
           toastType === 'success' ? 'bg-emerald-600' : 'bg-red-600'
         }`}>
@@ -1233,7 +1291,7 @@ export default function ProgramsPage() {
 
       {/* Confirmation Dialog */}
       {confirmAction && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[70] p-4">
+        <div hidden={!desktopActions} inert={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} className="fixed inset-0 bg-black/50 flex items-center justify-center z-[70] p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center shrink-0">
@@ -1249,7 +1307,7 @@ export default function ProgramsPage() {
                 Cancelar
               </button>
               <button
-                onClick={confirmAction.onConfirm}
+                onClick={() => { if (desktopActionsRef.current) confirmAction.onConfirm(); }}
                 className="px-5 py-2.5 bg-red-600 text-white rounded-xl hover:bg-red-700 transition-all shadow-sm font-medium text-sm"
               >
                 Confirmar

@@ -52,7 +52,14 @@ vi.mock('./ChatDocumentViewer', () => ({
     </div>
   ),
 }))
-vi.mock('../ContactSelector', () => ({ default: () => null }))
+vi.mock('../ContactSelector', async () => {
+  const { useEffect, useState } = await import('react')
+  return { default: ({ open, suspended }: { open: boolean; suspended?: boolean }) => {
+    const [value, setValue] = useState('')
+    useEffect(() => { if (!open) setValue('') }, [open])
+    return open && !suspended ? <div role="dialog" aria-label="Selector de contacto simulado"><input aria-label="Selección de contacto pendiente" value={value} onChange={event => setValue(event.target.value)} /></div> : null
+  } }
+})
 
 import ChatPanel from './ChatPanel'
 import CrmDetailWorkspace from '@/components/crm-detail/CrmDetailWorkspace'
@@ -94,11 +101,86 @@ function jsonResponse(body: unknown, ok = true, status = ok ? 200 : 400): Respon
 describe('ChatPanel experience invariants', () => {
   beforeEach(() => {
     localStorage.setItem('token', 'test-token'); websocket.listeners.clear()
+    compression.compress.mockReset().mockImplementation(async (file: File) => file)
     vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600)
     vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1200)
   })
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
   const message = { id: 'canonical-z', message_id: 'wa-z', body: 'Último saliente', is_from_me: true, is_read: false, status: 'sent', timestamp: '2026-10-11T12:00:00Z' }
+  it('retains an opened contact selector instead of closing its selection on suspension', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => Promise.resolve(jsonResponse(String(input) === '/api/chats/chat-1'
+      ? { success: true, chat, device: device('connected') }
+      : { success: true, messages: [], stickers: [], quick_replies: [] }))))
+    const panel = (suspended: boolean) => <ChatPanel chatId={chat.id} initialChat={chat} suspended={suspended} />
+    const view = render(panel(false))
+    await screen.findByRole('textbox', { name: 'Draft test editor' })
+    fireEvent.click(screen.getByRole('button', { name: 'Adjuntar archivo' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Contacto' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Selección de contacto pendiente' }), { target: { value: 'Contacto elegido' } })
+    view.rerender(panel(true))
+    expect(screen.queryByRole('dialog', { name: 'Selector de contacto simulado' })).not.toBeInTheDocument()
+    view.rerender(panel(false))
+    expect(screen.getByRole('textbox', { name: 'Selección de contacto pendiente' })).toHaveValue('Contacto elegido')
+  })
+  it('keeps a desktop message draft through mobile suspension and blocks a saved send callback', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/chats/chat-1') return Promise.resolve(jsonResponse({ success: true, chat, device: device('connected') }))
+      if (url.includes('/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: [] }))
+      if (url === '/api/messages/send') return Promise.resolve(jsonResponse({ success: true, message: { ...message, body: 'Borrador conservado' } }))
+      return Promise.resolve(jsonResponse({ success: true, stickers: [], quick_replies: [] }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const consult = vi.fn()
+    const panel = (suspended: boolean) => <CrmDetailWorkspace chatOpen chatSuspended={suspended} detail={<button onClick={consult}>Consultar asistencia</button>} chat={<ChatPanel chatId={chat.id} initialChat={chat} suspended={suspended} />} />
+    const view = render(panel(false))
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Draft test editor' }), { target: { value: 'Borrador conservado' } })
+    const button = screen.getByRole('button', { name: 'Enviar mensaje' })
+    const send = (button as any)[Object.keys(button).find(key => key.startsWith('__reactProps$'))!].onClick
+    const before = fetchMock.mock.calls.length
+    view.rerender(panel(true))
+    expect(screen.queryByRole('textbox', { name: 'Draft test editor' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Consultar asistencia' }))
+    expect(consult).toHaveBeenCalledOnce()
+    await act(async () => { await send() })
+    expect(fetchMock.mock.calls.slice(before).filter(([url]) => String(url) === '/api/messages/send')).toHaveLength(0)
+    view.rerender(panel(false))
+    expect(await screen.findByRole('textbox', { name: 'Draft test editor' })).toHaveValue('Borrador conservado')
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar mensaje' }))
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/messages/send')).toHaveLength(1))
+  })
+
+  it('preserves an attachment and caption when image preparation finishes during suspension', async () => {
+    const NativeURL = URL
+    const revoke = vi.fn()
+    vi.stubGlobal('URL', class extends NativeURL { static createObjectURL = vi.fn(() => 'blob:suspended-image'); static revokeObjectURL = revoke })
+    let finishCompression!: (file: File) => void
+    compression.compress.mockImplementationOnce(() => new Promise<File>(resolve => { finishCompression = resolve }))
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/chats/chat-1') return Promise.resolve(jsonResponse({ success: true, chat, device: device('connected') }))
+      if (url.includes('/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: [] }))
+      return Promise.resolve(jsonResponse({ success: true, stickers: [], quick_replies: [] }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const panel = (suspended: boolean) => <ChatPanel chatId={chat.id} initialChat={chat} suspended={suspended} />
+    const view = render(panel(false))
+    await screen.findByRole('textbox', { name: 'Draft test editor' })
+    const file = new File(['image'], 'foto.png', { type: 'image/png' })
+    fireEvent.change(view.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*"]')!, { target: { files: [file] } })
+    fireEvent.change(screen.getAllByRole('textbox', { name: 'Draft test editor' })[0], { target: { value: 'Pie de foto pendiente' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar adjunto' }))
+    await waitFor(() => expect(finishCompression).toBeTypeOf('function'))
+    view.rerender(panel(true))
+    await act(async () => finishCompression(file))
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === '/api/media/upload' || String(url) === '/api/messages/send')).toHaveLength(0)
+    expect(revoke).not.toHaveBeenCalled()
+    view.rerender(panel(false))
+    expect((await screen.findAllByRole('textbox', { name: 'Draft test editor' }))[0]).toHaveValue('Pie de foto pendiente')
+    expect(screen.getByAltText('Vista previa del adjunto')).toHaveAttribute('src', 'blob:suspended-image')
+    expect(screen.getByRole('button', { name: 'Enviar adjunto' })).toBeEnabled()
+  })
+
   it('waits for measurable layout before reading and follows late media without pulling a reader out of history', async () => {
     let height = 0
     let contentHeight = 1200

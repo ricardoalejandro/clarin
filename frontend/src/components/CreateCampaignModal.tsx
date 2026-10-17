@@ -69,6 +69,7 @@ export interface CampaignFormResult {
 
 interface CreateCampaignModalProps {
   open: boolean
+  suspended?: boolean
   onClose: () => void
   onSubmit: (data: CampaignFormResult) => Promise<void>
   devices: Device[]
@@ -209,6 +210,7 @@ function parsePastedText(
 
 export default function CreateCampaignModal({
   open,
+  suspended = false,
   onClose,
   onSubmit,
   devices,
@@ -221,6 +223,9 @@ export default function CreateCampaignModal({
   initialName = '',
   initialData,
 }: CreateCampaignModalProps) {
+  const activeRef = useRef(open && !suspended)
+  activeRef.current = open && !suspended
+  const submittingRef = useRef(false)
   const [formData, setFormData] = useState({
     name: '',
     device_id: '',
@@ -264,12 +269,13 @@ export default function CreateCampaignModal({
   const closeButtonRef = useRef<HTMLButtonElement>(null)
 
   const handleCampaignEscape = useCallback(() => {
+    if (!activeRef.current) return
     if (showAttachMenu) { setShowAttachMenu(false); return }
     if (showEmoji) { setShowEmoji(false); return }
     if (showAddCol) { setShowAddCol(false); setNewColName(''); return }
     onClose()
   }, [onClose, showAddCol, showAttachMenu, showEmoji])
-  useAccessibleDialog(open, dialogRef, handleCampaignEscape, closeButtonRef)
+  useAccessibleDialog(open && !suspended, dialogRef, handleCampaignEscape, closeButtonRef)
 
   // Reset form when modal opens
   useEffect(() => {
@@ -331,6 +337,7 @@ export default function CreateCampaignModal({
   }
 
   const handleAttachFile = async (file: File, mediaType: string) => {
+    if (!activeRef.current) return
     if (attachments.length >= 10) { alert('Máximo 10 adjuntos por campaña'); return }
     if (file.size > 32 * 1024 * 1024) { alert('El archivo es demasiado grande. Máximo 32MB.'); return }
     if (mediaType === 'video' && file.size > 15 * 1024 * 1024) { alert('El video es demasiado grande. Máximo 15 MB.'); return }
@@ -338,6 +345,7 @@ export default function CreateCampaignModal({
     if (mediaType === 'image') {
       try { fileToSend = await compressImageStandard(file) } catch (err) { console.warn('[Campaign] Image compression failed, using original:', err) }
     }
+    if (!activeRef.current) return
     const localPreview = ['image', 'video'].includes(mediaType) ? URL.createObjectURL(fileToSend) : undefined
     const tempAttachment: CampaignAttachment = {
       media_url: '', media_type: mediaType, caption: '', file_name: fileToSend.name,
@@ -472,6 +480,7 @@ export default function CreateCampaignModal({
     !attachments.some(a => a._uploading) && !submitting
 
   const handleSubmit = async () => {
+    if (!activeRef.current || !canSubmit || submittingRef.current) return
     let scheduledAt: string | undefined
     if (hasSchedule) {
       const dt = new Date(`${formData.scheduled_date}T${formData.scheduled_time}:00`)
@@ -495,7 +504,8 @@ export default function CreateCampaignModal({
         metadata: Object.keys(meta).length > 0 ? meta : undefined,
       }
     })
-    await onSubmit({
+    submittingRef.current = true
+    try { await onSubmit({
       name: formData.name,
       device_id: formData.device_id,
       message_template: formData.message_template,
@@ -516,7 +526,7 @@ export default function CreateCampaignModal({
       },
       scheduled_at: scheduledAt,
       recipients: recipients.length > 0 ? recipients : undefined,
-    })
+    }) } finally { submittingRef.current = false }
   }
 
   const personalizeText = (text: string) => {
@@ -541,7 +551,7 @@ export default function CreateCampaignModal({
   if (!open) return null
 
   return (
-    <div className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 lg:items-center lg:p-3">
+    <div hidden={suspended} inert={suspended || undefined} style={suspended ? { display: 'none' } : undefined} className="app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 lg:items-center lg:p-3">
       <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="campaign-modal-title" className="campaign-dialog flex h-[var(--app-height)] w-full max-w-6xl flex-col overflow-hidden rounded-none bg-white pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] shadow-2xl outline-none lg:h-auto lg:max-h-[95vh] lg:rounded-xl lg:pl-0 lg:pr-0">
         {/* ─── Header ──────────────────────────────────────── */}
         <div className="campaign-dialog-header flex shrink-0 items-center justify-between gap-3 border-b border-gray-200 px-4 pb-3 pt-[max(.75rem,env(safe-area-inset-top))] lg:px-6 lg:py-3">
@@ -625,13 +635,13 @@ export default function CreateCampaignModal({
                   </button>
                 ))}
               </div>
-              <WhatsAppTextInput
+              {!suspended && <WhatsAppTextInput
                 ref={textareaRef}
                 value={formData.message_template}
                 onChange={v => setFormData({ ...formData, message_template: v })}
                 rows={5}
                 placeholder="Hola {{nombre}}, te escribimos para..."
-              />
+              />}
               <div className="mt-1 flex items-start justify-between gap-2">
                 <div className="flex min-w-0 items-start gap-1">
                   <p className="min-w-0 break-words pt-2 text-[10px] text-gray-400">
@@ -643,7 +653,7 @@ export default function CreateCampaignModal({
                       else setFormData(f => ({ ...f, message_template: f.message_template + emoji }))
                       setShowEmoji(false)
                     }}
-                    isOpen={showEmoji}
+                    isOpen={showEmoji && !suspended}
                     onToggle={() => setShowEmoji(!showEmoji)}
                     portalTarget={dialogRef.current}
                     buttonClassName="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-gray-400 hover:bg-gray-100 hover:text-gray-600 lg:h-8 lg:w-8"

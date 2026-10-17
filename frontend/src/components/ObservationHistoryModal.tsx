@@ -1,10 +1,13 @@
 'use client'
 
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { X, Clock, FileText, Phone, Trash2, Plus, XCircle, ChevronDown, Filter, SlidersHorizontal, CalendarCheck2 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { useDialogTabTrap } from '@/components/programs/useDialogTabTrap'
+import { OPERATIONAL_OVERLAY_LAYERS } from '@/components/operational-overlay/operationalOverlayLayers'
+import { useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
 export interface HistoryObservation {
   id: string
@@ -20,6 +23,8 @@ export interface HistoryObservation {
   program_session_id?: string | null
   program_participant_id?: string | null
   source_label?: string | null
+  event_id?: string | null
+  event_name?: string | null
 }
 
 interface ObservationHistoryModalProps {
@@ -88,9 +93,17 @@ export default function ObservationHistoryModal({
 
   // Add observation form
   const [newType, setNewType] = useState<'note' | 'call'>(defaultNewType)
-  const [newText, setNewText] = useState('')
+  // Keep each type's draft independent. A desktop call draft is paused while a
+  // note-only mobile view is active, rather than silently becoming a note.
+  const [textDrafts, setTextDrafts] = useState({ note: '', call: '' })
+  const effectiveNewType = attendanceContext || !allowedNewTypes.includes(newType) ? allowedNewTypes[0] || 'note' : newType
+  const newText = textDrafts[effectiveNewType]
+  const setNewText = (text: string) => setTextDrafts(current => ({ ...current, [effectiveNewType]: text }))
   const [saving, setSaving] = useState(false)
   const [actionError, setActionError] = useState('')
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
+  const deleteDialogRef = useRef<HTMLDivElement>(null)
+  const deleteReturnFocusRef = useRef<HTMLElement | null>(null)
 
   // Infinite scroll
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
@@ -103,6 +116,7 @@ export default function ObservationHistoryModal({
   const isOpenRef = useRef(isOpen)
   const viewIdentityRef = useRef('')
   const viewGenerationRef = useRef(0)
+  const mutationRef = useRef<{ generation: number } | null>(null)
 
   const viewIdentity = !isOpen
     ? 'closed'
@@ -110,6 +124,8 @@ export default function ObservationHistoryModal({
     ? `attendance:${attendanceContext.programId}:${attendanceContext.sessionId}:${attendanceContext.participantId}`
     : participantId
     ? `participant:${participantId}`
+    : programId && programParticipantId
+    ? `program:${programId}:${programParticipantId}:${contactId || ''}`
     : contactId
     ? `contact:${contactId}`
     : leadId
@@ -120,15 +136,44 @@ export default function ObservationHistoryModal({
     viewIdentityRef.current = viewIdentity
     viewGenerationRef.current += 1
   }
-  useDialogTabTrap(isOpen, modalRef)
+  const policyRef = useRef({ identity: viewIdentity, mutationMode, allowedNewTypes })
+  policyRef.current = { identity: viewIdentity, mutationMode, allowedNewTypes }
+  const canMutate = (manage = false, type?: 'note' | 'call') => isOpenRef.current
+    && policyRef.current.identity === viewIdentity
+    && policyRef.current.mutationMode !== 'read-only'
+    && (!manage || policyRef.current.mutationMode === 'manage')
+    && (!type || Boolean(attendanceContext) || policyRef.current.allowedNewTypes.includes(type))
+  const deleteConfirmationVisible = Boolean(pendingDeleteId) && isOpen && mutationMode === 'manage'
+  useDialogTabTrap(isOpen && !deleteConfirmationVisible, modalRef)
+  useDialogTabTrap(deleteConfirmationVisible, deleteDialogRef)
+  useOperationalOverlayRegistration(deleteConfirmationVisible, `observation-history-delete:${viewIdentity}`)
+  useEffect(() => {
+    isOpenRef.current = isOpen
+    return () => {
+      isOpenRef.current = false
+      viewGenerationRef.current += 1
+    }
+    // The current open state is also written during every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Sync observations when prop changes
   useEffect(() => { setObservations(initialObservations) }, [initialObservations])
 
+  useEffect(() => {
+    setTextDrafts({ note: '', call: '' })
+    setNewType(defaultNewType)
+    setSaving(false)
+    setActionError('')
+    setPendingDeleteId(null)
+    // Capability/viewport changes deliberately do not change this identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewIdentity])
+
   // Reset state when modal closes
   useEffect(() => {
     if (!isOpen) {
-      setFilterType(''); setFilterFrom(''); setFilterTo(''); setNewText(''); setNewType(defaultNewType)
+      setFilterType(''); setFilterFrom(''); setFilterTo(''); setTextDrafts({ note: '', call: '' }); setNewType(defaultNewType)
       setFiltersOpen(false); setComposerOpen(false); setVisibleCount(PAGE_SIZE); setActionError('')
     }
   }, [defaultNewType, isOpen])
@@ -142,10 +187,10 @@ export default function ObservationHistoryModal({
   }, [initialComposerOpen, isOpen])
 
   useEffect(() => {
-    if (!composerOpen) return
+    if (!composerOpen || mutationMode === 'read-only') return
     const frame = window.requestAnimationFrame(() => composerTextareaRef.current?.focus())
     return () => window.cancelAnimationFrame(frame)
-  }, [composerOpen])
+  }, [composerOpen, mutationMode])
 
   useEffect(() => {
     if (!isOpen) return
@@ -157,13 +202,30 @@ export default function ObservationHistoryModal({
   useEffect(() => {
     if (!isOpen) return
     const h = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); onClose() }
+      if (e.key === 'Escape') {
+        e.stopImmediatePropagation(); e.preventDefault()
+        if (deleteConfirmationVisible) { if (!mutationRef.current) setPendingDeleteId(null) }
+        else onClose()
+      }
     }
     document.addEventListener('keydown', h, true)
     return () => document.removeEventListener('keydown', h, true)
-  }, [isOpen, onClose])
+  }, [deleteConfirmationVisible, isOpen, onClose])
+
+  useEffect(() => {
+    if (!deleteConfirmationVisible) return
+    const frame = requestAnimationFrame(() => deleteDialogRef.current?.focus())
+    return () => {
+      cancelAnimationFrame(frame)
+      if (policyRef.current.mutationMode === 'manage') requestAnimationFrame(() => {
+        const target = deleteReturnFocusRef.current
+        if (target?.isConnected && !target.closest('[hidden], [inert]')) target.focus()
+      })
+    }
+  }, [deleteConfirmationVisible])
 
   const fetchObservations = useCallback(async () => {
+    const generation = viewGenerationRef.current
     const token = localStorage.getItem('token')
     try {
       const url = attendanceContext
@@ -178,7 +240,7 @@ export default function ObservationHistoryModal({
       if (!url) return
       const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
       const data = await res.json()
-      if (data.success) {
+      if (data.success && isOpenRef.current && generation === viewGenerationRef.current) {
         const next = attendanceContext
           ? (data.observations || []).map((observation: any) => ({ ...observation, contact_id: null, lead_id: null, type: 'attendance', direction: null, outcome: null }))
           : (data.interactions || [])
@@ -209,8 +271,13 @@ export default function ObservationHistoryModal({
   }, [isOpen, observations.length, filterType, filterFrom, filterTo])
 
   const handleAdd = async () => {
-    if (!newText.trim() || (!attendanceContext && !participantId && !contactId && !leadId)) return
+    if (!canMutate(false, effectiveNewType) || mutationRef.current?.generation === viewGenerationRef.current
+      || !newText.trim() || (!attendanceContext && !participantId && !contactId && !leadId)) return
     const operationGeneration = viewGenerationRef.current
+    const operation = { generation: operationGeneration }
+    mutationRef.current = operation
+    const submittedText = newText
+    const submittedType = effectiveNewType
     setSaving(true)
     setActionError('')
     const token = localStorage.getItem('token')
@@ -218,10 +285,10 @@ export default function ObservationHistoryModal({
       const body = attendanceContext
         ? { notes: newText.trim() }
         : participantId
-        ? { event_id: eventId || undefined, participant_id: participantId, contact_id: contactId || undefined, type: newType, notes: newText.trim() }
+        ? { event_id: eventId || undefined, participant_id: participantId, contact_id: contactId || undefined, type: submittedType, notes: submittedText.trim() }
         : contactId
-        ? { contact_id: contactId, program_id: programId || undefined, program_participant_id: programParticipantId || undefined, type: newType, notes: newText.trim() }
-        : { lead_id: leadId, type: newType, notes: newText.trim() }
+        ? { contact_id: contactId, program_id: programId || undefined, program_participant_id: programParticipantId || undefined, type: submittedType, notes: submittedText.trim() }
+        : { lead_id: leadId, type: submittedType, notes: submittedText.trim() }
       const url = attendanceContext
         ? `/api/programs/${attendanceContext.programId}/sessions/${attendanceContext.sessionId}/participants/${attendanceContext.participantId}/attendance-observations`
         : '/api/interactions'
@@ -233,8 +300,8 @@ export default function ObservationHistoryModal({
       const data = await res.json()
       if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo guardar la observación.')
       if (!isOpenRef.current || operationGeneration !== viewGenerationRef.current) return
-      setNewText('')
-      window.requestAnimationFrame(() => composerTextareaRef.current?.focus())
+      setTextDrafts(current => current[submittedType] === submittedText ? { ...current, [submittedType]: '' } : current)
+      window.requestAnimationFrame(() => { if (policyRef.current.mutationMode !== 'read-only') composerTextareaRef.current?.focus() })
       if (onObservationChange) onObservationChange()
       else await fetchObservations()
     } catch (err) {
@@ -243,13 +310,24 @@ export default function ObservationHistoryModal({
         setActionError(err instanceof Error ? err.message : 'No se pudo guardar la observación.')
       }
     } finally {
-      setSaving(false)
+      if (mutationRef.current === operation) mutationRef.current = null
+      if (operationGeneration === viewGenerationRef.current) setSaving(false)
     }
   }
 
+  const requestDelete = (obsId: string) => {
+    if (!canMutate(true) || mutationRef.current?.generation === viewGenerationRef.current) return
+    deleteReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setActionError('')
+    setPendingDeleteId(obsId)
+  }
+
   const handleDelete = async (obsId: string) => {
-    if (!confirm('¿Eliminar esta observación?')) return
+    if (!canMutate(true) || mutationRef.current?.generation === viewGenerationRef.current) return
     const operationGeneration = viewGenerationRef.current
+    const operation = { generation: operationGeneration }
+    mutationRef.current = operation
+    setSaving(true)
     const token = localStorage.getItem('token')
     try {
       const url = attendanceContext
@@ -262,6 +340,7 @@ export default function ObservationHistoryModal({
       const data = await res.json()
       if (!res.ok || !data.success) throw new Error(data.error || 'No se pudo eliminar la observación.')
       if (!isOpenRef.current || operationGeneration !== viewGenerationRef.current) return
+      setPendingDeleteId(null)
       if (onObservationChange) onObservationChange()
       else await fetchObservations()
     } catch (err) {
@@ -269,6 +348,9 @@ export default function ObservationHistoryModal({
       if (isOpenRef.current && operationGeneration === viewGenerationRef.current) {
         setActionError(err instanceof Error ? err.message : 'No se pudo eliminar la observación.')
       }
+    } finally {
+      if (mutationRef.current === operation) mutationRef.current = null
+      if (operationGeneration === viewGenerationRef.current) setSaving(false)
     }
   }
 
@@ -313,6 +395,7 @@ export default function ObservationHistoryModal({
             <div className="min-w-0">
               <h2 id="observation-history-modal-title" className="text-sm font-semibold text-slate-900">{attendanceContext ? 'Observaciones de asistencia' : 'Historial de Observaciones'}</h2>
               <p className="truncate text-[11px] text-slate-500">{name || 'Sin nombre'} · {observations.length} registro{observations.length !== 1 ? 's' : ''}</p>
+              {programId && !attendanceContext && <p className="mt-1 text-[11px] text-slate-500">Historial del contacto por origen. Las nuevas notas pertenecen a este programa.</p>}
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
@@ -381,7 +464,7 @@ export default function ObservationHistoryModal({
                   type="button"
                   onClick={() => setNewType('note')}
                   className={`flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-md transition font-medium ${
-                    newType === 'note' ? 'bg-yellow-100 text-yellow-700 ring-1 ring-yellow-300' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                    effectiveNewType === 'note' ? 'bg-yellow-100 text-yellow-700 ring-1 ring-yellow-300' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
                   }`}
                 >
                   <FileText className="w-3 h-3" /> Nota
@@ -390,7 +473,7 @@ export default function ObservationHistoryModal({
                   type="button"
                   onClick={() => setNewType('call')}
                   className={`flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-md transition font-medium ${
-                    newType === 'call' ? 'bg-blue-100 text-blue-700 ring-1 ring-blue-300' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                    effectiveNewType === 'call' ? 'bg-blue-100 text-blue-700 ring-1 ring-blue-300' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
                   }`}
                 >
                   <Phone className="w-3 h-3" /> Llamada
@@ -407,7 +490,7 @@ export default function ObservationHistoryModal({
                       handleAdd()
                     }
                   }}
-                  placeholder={attendanceContext ? 'Escribir observación de asistencia... (Ctrl+Enter)' : newType === 'call' ? 'Resultado de llamada... (Ctrl+Enter)' : 'Escribir observación... (Ctrl+Enter)'}
+                  placeholder={attendanceContext ? 'Escribir observación de asistencia... (Ctrl+Enter)' : effectiveNewType === 'call' ? 'Resultado de llamada... (Ctrl+Enter)' : 'Escribir observación... (Ctrl+Enter)'}
                   rows={2}
                   className="min-w-0 w-full flex-1 px-3 py-1.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-emerald-500 text-sm text-slate-900 placeholder:text-slate-400 resize-none"
                 />
@@ -480,9 +563,9 @@ export default function ObservationHistoryModal({
                         {kommoEnabled && obs.notes?.startsWith('(sinc)') && <span className="px-1.5 py-px bg-emerald-50 text-emerald-600 text-[9px] rounded-full font-medium border border-emerald-100">Kommo</span>}
                       </div>
                       <p className="text-sm text-slate-700 whitespace-pre-wrap break-words leading-relaxed">{obs.notes?.startsWith('(sinc) ') ? obs.notes.slice(7) : (obs.notes || '(sin contenido)')}</p>
-                      {obs.program_id && obs.source_label && <p className={`mt-1.5 flex items-center gap-1.5 text-[11px] font-medium ${obs.type === 'attendance' ? 'text-emerald-700' : 'text-slate-500'}`}><CalendarCheck2 className="h-3 w-3" />{obs.source_label}</p>}
+                      {(obs.source_label || programId) && <p className={`mt-1.5 flex items-center gap-1.5 text-[11px] font-medium ${obs.type === 'attendance' ? 'text-emerald-700' : 'text-slate-500'}`}><CalendarCheck2 className="h-3 w-3" />{obs.source_label || (obs.program_id ? obs.program_id === programId ? 'Este programa' : 'Otro programa' : obs.event_id ? obs.event_name ? `Evento: ${obs.event_name}` : 'Evento' : obs.lead_id ? 'Oportunidad' : 'Contacto · observación general')}</p>}
                     </div>
-                    {mutationMode === 'manage' && (obs.type !== 'attendance' || attendanceContext) && <button onClick={() => handleDelete(obs.id)} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-300 transition-all hover:bg-red-50 hover:text-red-500 sm:h-7 sm:w-7 sm:opacity-0 sm:group-hover:opacity-100" title="Eliminar"><Trash2 className="w-3 h-3" /></button>}
+                    {mutationMode === 'manage' && (obs.type !== 'attendance' || attendanceContext) && <button disabled={saving} onClick={() => requestDelete(obs.id)} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-300 transition-all hover:bg-red-50 hover:text-red-500 sm:h-7 sm:w-7 sm:opacity-0 sm:group-hover:opacity-100" title="Eliminar"><Trash2 className="w-3 h-3" /></button>}
                   </div>
                 </div>
               ))}
@@ -500,6 +583,16 @@ export default function ObservationHistoryModal({
           )}
         </div>
       </div>
+      {deleteConfirmationVisible && pendingDeleteId && typeof document !== 'undefined' && createPortal(
+        <div className="fixed inset-0 flex items-center justify-center bg-slate-950/50 p-4" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.confirmation }} onClick={event => event.stopPropagation()}>
+          <div ref={deleteDialogRef} tabIndex={-1} role="alertdialog" aria-modal="true" aria-label="Eliminar observación" className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl outline-none">
+            <h3 className="text-base font-bold text-slate-900">Eliminar observación</h3>
+            <p className="mt-2 text-sm text-slate-600">Esta observación se eliminará de su historial. Esta acción no se puede deshacer.</p>
+            {actionError && <p role="alert" className="mt-3 text-sm text-red-700">{actionError}</p>}
+            <div className="mt-4 flex justify-end gap-2"><button type="button" disabled={saving} onClick={() => setPendingDeleteId(null)} className="min-h-11 rounded-xl px-3 text-sm font-semibold text-slate-600 disabled:opacity-50">Cancelar</button><button type="button" disabled={saving} onClick={() => void handleDelete(pendingDeleteId)} className="min-h-11 rounded-xl bg-red-600 px-4 text-sm font-semibold text-white disabled:opacity-50">{saving ? 'Eliminando…' : 'Eliminar observación'}</button></div>
+          </div>
+        </div>, document.body,
+      )}
     </div>
   )
 }

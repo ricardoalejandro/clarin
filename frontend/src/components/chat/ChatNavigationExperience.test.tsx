@@ -51,7 +51,7 @@ describe('Android navigation and staged filters',()=>{
   let finish!:(response:Response)=>void;let hold=false;
   install(url=>url.startsWith('/api/chats?')&&hold?new Promise<Response>(resolve=>{finish=resolve}):undefined);
   render(<ChatsPage/>);fireEvent.click(await screen.findByRole('button',{name:'Conversación con Persona A'}));hold=true;fireEvent.click(screen.getByText('Siguiente QA'));
-  fireEvent.click(screen.getByText('Volver QA'));await act(async()=>{await new Promise(r=>setTimeout(r,20));finish(json({success:true,chats:[pendingB],total:1}))});
+  fireEvent.click(screen.getByText('Volver QA'));await waitFor(()=>expect(window.history.state.clarinChatId).toBeUndefined());await act(async()=>{finish(json({success:true,chats:[pendingB],total:1}))});
   expect(window.history.state.clarinChatId).toBeUndefined();expect(screen.getByLabelText('Panel de prueba')).toHaveTextContent('chat-a');expect(screen.getByLabelText('Panel de prueba').parentElement).toHaveClass('hidden');
  });
  it('builds a Back-to-list entry for a direct link in an empty inbox',async()=>{

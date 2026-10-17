@@ -94,6 +94,115 @@ beforeEach(() => {
 })
 
 describe('ContactDetailSurface date editing', () => {
+  it('keeps Contact identity read-only while Observation opens only the module composer', () => {
+    const prepare = vi.fn()
+    const contextObservation = vi.fn()
+    render(<ContactDetailSurface contactId="contact-1" context={{ type: 'program_participant', id: 'participant-1' }} initialContact={contact} onClose={vi.fn()} readOnly onAddContextObservation={contextObservation} onPrepareMessage={prepare} onSendMessage={vi.fn()} onDeleteContact={vi.fn()} />)
+    expect(prepare).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'Editar' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Enviar mensaje a/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Eliminar contacto' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Integraciones/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Añadir nota general' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Observación' }))
+    expect(contextObservation).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('textbox', { name: 'Nota general del contacto' })).not.toBeInTheDocument()
+    expect(mocks.createObservation).not.toHaveBeenCalled()
+    expect(screen.getByText('Gaby')).toBeInTheDocument()
+  })
+
+  it('blocks stale general-note and message callbacks and restores the desktop note draft', async () => {
+    const send = vi.fn()
+    const props = { contactId: 'contact-1', context: { type: 'program_participant' as const, id: 'participant-1' }, initialContact: contact, onClose: vi.fn(), onSendMessage: send }
+    const view = render(<ContactDetailSurface {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Observación' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Nota general del contacto' }), { target: { value: 'Nota general pendiente' } })
+    const callback = (element: HTMLElement) => (element as any)[Object.keys(element).find(key => key.startsWith('__reactProps$'))!].onClick
+    const save = callback(screen.getByRole('button', { name: 'Guardar nota' }))
+    const message = callback(screen.getByRole('button', { name: /Enviar mensaje a/ }))
+    view.rerender(<ContactDetailSurface {...props} readOnly onAddContextObservation={vi.fn()} />)
+    await act(async () => { await save(); message() })
+    expect(mocks.createObservation).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+    expect(screen.queryByRole('textbox', { name: 'Nota general del contacto' })).not.toBeInTheDocument()
+    view.rerender(<ContactDetailSurface {...props} />)
+    expect(screen.getByRole('textbox', { name: 'Nota general del contacto' })).toHaveValue('Nota general pendiente')
+  })
+
+  it('retains a hidden inert contact editor, blocks its saved submit, and restores its fields', async () => {
+    const props = { contactId: 'contact-1', context: { type: 'program_participant' as const, id: 'participant-1' }, initialContact: contact, onClose: vi.fn() }
+    const view = render(<ContactDetailSurface {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
+    fireEvent.change(screen.getByLabelText('Nombre visible'), { target: { value: 'Nombre sin guardar' } })
+    const form = screen.getByRole('form', { name: 'Editar contacto' })
+    const key = Object.keys(form).find(value => value.startsWith('__reactProps$'))!
+    const submit = (form as any)[key].onSubmit
+    view.rerender(<ContactDetailSurface {...props} readOnly onAddContextObservation={vi.fn()} />)
+    expect(form.closest('[hidden][inert]')).not.toBeNull()
+    expect(screen.queryByRole('form', { name: 'Editar contacto' })).not.toBeInTheDocument()
+    await act(async () => submit({ preventDefault: vi.fn() }))
+    expect(mocks.updateContact).not.toHaveBeenCalled()
+    view.rerender(<ContactDetailSurface {...props} />)
+    expect(screen.getByLabelText('Nombre visible')).toHaveValue('Nombre sin guardar')
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar contacto' }))
+    await waitFor(() => expect(mocks.updateContact).toHaveBeenCalledOnce())
+    expect(mocks.updateContact.mock.calls[0][0]).toMatchObject({ custom_name: 'Nombre sin guardar' })
+  })
+
+  it('protects a paused Contact draft through its public close handle', () => {
+    const ref = createRef<ContactDetailSurfaceHandle>()
+    const onClose = vi.fn()
+    const props = { contactId: 'contact-1', context: { type: 'program_participant' as const, id: 'participant-1' }, onClose }
+    const view = render(<ContactDetailSurface {...props} ref={ref} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
+    fireEvent.change(screen.getByLabelText('Nombre visible'), { target: { value: 'Pendiente en escritorio' } })
+    view.rerender(<ContactDetailSurface {...props} ref={ref} readOnly />)
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    expect(ref.current?.canClose()).toBe(false)
+    expect(ref.current?.requestClose()).toBe(false)
+    expect(onClose).not.toHaveBeenCalled()
+    view.rerender(<ContactDetailSurface {...props} ref={ref} />)
+    expect(screen.getByLabelText('Nombre visible')).toHaveValue('Pendiente en escritorio')
+  })
+
+  it('pauses a general-note deletion confirmation and rejects its saved desktop callback', async () => {
+    const remove = vi.fn().mockResolvedValue({ success: true })
+    mocks.profileOverrides = { observationsLoaded: true, deleteObservation: remove, observations: [
+      { id: 'owned-note', type: 'note', notes: 'Nota general', created_at: '2026-01-02T00:00:00Z', can_pin: true, can_edit: true, can_delete: true },
+    ] }
+    const props = { contactId: 'contact-1', context: { type: 'program_participant' as const, id: 'participant-1' }, onClose: vi.fn() }
+    const view = render(<ContactDetailSurface {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: /Historial general del contacto/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Eliminar nota' }))
+    const button = screen.getByRole('button', { name: 'Confirmar' })
+    const confirm = (button as any)[Object.keys(button).find(key => key.startsWith('__reactProps$'))!].onClick
+    view.rerender(<ContactDetailSurface {...props} readOnly />)
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    await act(async () => { confirm() })
+    expect(remove).not.toHaveBeenCalled()
+    view.rerender(<ContactDetailSurface {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Confirmar' }))
+    await waitFor(() => expect(remove).toHaveBeenCalledOnce())
+  })
+
+  it('pauses Google removal until an explicit desktop confirmation', async () => {
+    const desync = vi.fn().mockResolvedValue(undefined)
+    mocks.googleSync.mockReturnValue({ statusLoading: false, connected: true, permissionDenied: false, synced: true, mutation: null, statusError: '', actionError: '', feedback: '', retryStatus: vi.fn(), sync: vi.fn(), desync })
+    const props = { contactId: 'contact-1', context: { type: 'program_participant' as const, id: 'participant-1' }, onClose: vi.fn() }
+    const view = render(<ContactDetailSurface {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: /Integraciones Google Contacts sincronizado/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Quitar contacto de Google Contacts' }))
+    const button = screen.getByRole('button', { name: 'Confirmar' })
+    const confirm = (button as any)[Object.keys(button).find(key => key.startsWith('__reactProps$'))!].onClick
+    view.rerender(<ContactDetailSurface {...props} readOnly />)
+    await act(async () => { confirm() })
+    expect(desync).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    view.rerender(<ContactDetailSurface {...props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Confirmar' }))
+    await waitFor(() => expect(desync).toHaveBeenCalledOnce())
+  })
+
   it('checks message availability and presents no-channel guidance without an error alert', () => {
     const prepare = vi.fn()
     const retry = vi.fn()

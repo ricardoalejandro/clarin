@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Program } from '@/types/program';
 import { api } from '@/lib/api';
@@ -23,6 +23,17 @@ const baseProgram: Program = {
 afterEach(cleanup);
 beforeEach(() => mockedAPI.mockReset());
 
+it('restores the same settings field after mobile suspension', async () => {
+  const props = { open: true, program: baseProgram, onClose: vi.fn(), onSaved: vi.fn() };
+  const view = render(<ProgramSettingsDialog {...props} />);
+  const description = screen.getByRole('textbox', { name: 'Descripción' });
+  description.focus();
+  view.rerender(<ProgramSettingsDialog {...props} suspended />);
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  view.rerender(<ProgramSettingsDialog {...props} />);
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Descripción' })).toHaveFocus());
+});
+
 function renderDialog(program: Program = baseProgram) {
   const onClose = vi.fn();
   const onSaved = vi.fn();
@@ -40,6 +51,40 @@ function renderDialog(program: Program = baseProgram) {
 }
 
 describe('ProgramSettingsDialog', () => {
+  it('preserves a draft and discard confirmation while suspended and detects newer canonical data', () => {
+    const props = { open: true, program: baseProgram, onClose: vi.fn(), onSaved: vi.fn(), onDirtyChange: vi.fn() };
+    const view = render(<ProgramSettingsDialog {...props} />);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Nombre' }), { target: { value: 'Mi borrador' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }));
+    view.rerender(<ProgramSettingsDialog {...props} suspended />);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(props.onClose).not.toHaveBeenCalled();
+    view.rerender(<ProgramSettingsDialog {...props} />);
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Seguir editando' }));
+    view.rerender(<ProgramSettingsDialog {...props} program={{ ...baseProgram, name: 'Otra persona', updated_at: '2026-10-17T12:00:00Z' }} suspended />);
+    view.rerender(<ProgramSettingsDialog {...props} program={{ ...baseProgram, name: 'Otra persona', updated_at: '2026-10-17T12:00:00Z' }} />);
+    expect(screen.getByRole('textbox', { name: 'Nombre' })).toHaveValue('Mi borrador');
+    expect(screen.getByRole('button', { name: 'Guardar cambios' })).toBeDisabled();
+    expect(props.onDirtyChange).toHaveBeenLastCalledWith(true);
+    expect(mockedAPI).not.toHaveBeenCalled();
+  });
+
+  it('reconciles one save already sent during suspension without a duplicate write', async () => {
+    let finish!: (value: unknown) => void;
+    mockedAPI.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }) as never);
+    const props = { open: true, program: baseProgram, onClose: vi.fn(), onSaved: vi.fn() };
+    const view = render(<ProgramSettingsDialog {...props} />);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Nombre' }), { target: { value: 'Programa guardado' } });
+    const form = screen.getByRole('button', { name: 'Guardar cambios' }).closest('form')!;
+    fireEvent.submit(form);
+    view.rerender(<ProgramSettingsDialog {...props} suspended />);
+    fireEvent.submit(form);
+    await act(async () => { finish({ success: true, data: { ...baseProgram, name: 'Programa guardado' } }); });
+    expect(mockedAPI).toHaveBeenCalledTimes(1);
+    expect(props.onSaved).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ name: 'Programa guardado' }));
+  });
   it('uses defaults and exposes fixed columns as checked disabled controls', () => {
     renderDialog();
 

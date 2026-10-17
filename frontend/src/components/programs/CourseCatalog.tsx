@@ -27,6 +27,8 @@ import {
 import { useContainerWidth } from '@/components/responsive/useContainerWidth'
 import { api } from '@/lib/api'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
+import { useProgramWorkspacePolicy } from './useProgramWorkspacePolicy'
+import { isDialogFocusableVisible, restoreDialogFocus } from './useDialogTabTrap'
 import type {
   Course,
   CourseInput,
@@ -60,6 +62,7 @@ interface CourseDraft {
 type CourseDeleteTarget = Pick<Course, 'id' | 'name' | 'usage_count' | 'updated_at'>
 
 interface ConfirmState {
+  allowWhilePaused?: boolean
   title: string
   message: string
   confirmLabel: string
@@ -240,6 +243,8 @@ function StatusBadge({ status }: { status: CourseStatus }) {
 }
 
 interface CourseEditorProps {
+  suspended?: boolean
+  returnFocusID?: string
   draft: CourseDraft
   setDraft: (draft: CourseDraft) => void
   compact: boolean
@@ -255,6 +260,8 @@ interface CourseEditorProps {
 }
 
 function CourseEditor({
+  suspended = false,
+  returnFocusID,
   draft,
   setDraft,
   compact,
@@ -273,9 +280,13 @@ function CourseEditor({
   const nameInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
-    const timer = window.setTimeout(() => nameInputRef.current?.focus(), 80)
+    if (suspended) return
+    const timer = window.setTimeout(() => {
+      const previous = returnFocusID ? document.getElementById(returnFocusID) : null
+      restoreDialogFocus([previous, nameInputRef.current])
+    }, 80)
     return () => window.clearTimeout(timer)
-  }, [draft.id])
+  }, [draft.id, suspended])
 
   const updateTopic = (key: string, patch: Partial<DraftTopic>) => {
     setDraft({
@@ -337,6 +348,9 @@ function CourseEditor({
 
   return (
     <form
+      hidden={suspended}
+      inert={suspended}
+      style={suspended ? { display: 'none' } : undefined}
       className={surfaceClass}
       onSubmit={event => {
         event.preventDefault()
@@ -658,6 +672,11 @@ function CourseEditor({
 }
 
 interface CourseCardProps {
+  readOnly?: boolean
+  details?: Course | null
+  detailsLoading?: boolean
+  detailsError?: string
+  onRetryDetails?: () => void
   course: Course
   selected: boolean
   busy: boolean
@@ -669,7 +688,7 @@ interface CourseCardProps {
   onDelete: () => void
 }
 
-function CourseCard({ course, selected, busy, compact, expanded, onToggle, onEdit, onStatusChange, onDelete }: CourseCardProps) {
+function CourseCard({ course, selected, busy, compact, expanded, onToggle, onEdit, onStatusChange, onDelete, readOnly = false, details, detailsLoading, detailsError, onRetryDetails }: CourseCardProps) {
   const topicPreview = course.topic_preview || activeTopics(course).slice(0, 3).map(topic => topic.title)
   const activeTopicCount = course.active_topic_count ?? activeTopics(course).length
   const archivedCount = Math.max(0, (course.topic_count ?? course.topics?.length ?? 0) - activeTopicCount)
@@ -731,7 +750,7 @@ function CourseCard({ course, selected, busy, compact, expanded, onToggle, onEdi
             <p className="mt-3 border-t border-slate-100 pt-3 text-xs italic text-slate-400">Sin descripción</p>
           ))}
 
-          {topicPreview.length > 0 && (
+          {!readOnly && topicPreview.length > 0 && (
             <ol className={`mt-3 space-y-1.5 ${compact ? '' : 'border-t border-slate-100 pt-3'}`}>
               {topicPreview.map((title, index) => (
                 <li key={`${course.id}-preview-${index}`} className="flex min-w-0 items-center gap-2 text-xs text-slate-600">
@@ -743,7 +762,17 @@ function CourseCard({ course, selected, busy, compact, expanded, onToggle, onEdi
             </ol>
           )}
 
-          <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-3">
+          {readOnly && <div className="mt-3 border-t border-slate-100 pt-3">
+            {detailsLoading ? <p role="status" className="inline-flex items-center gap-2 text-xs text-slate-500"><Loader2 className="h-4 w-4 animate-spin" />Cargando plan completo…</p>
+              : detailsError ? <div role="alert" className="text-xs text-red-700"><p>{detailsError}</p><button type="button" onClick={onRetryDetails} className="mt-2 min-h-11 rounded-xl border border-red-200 px-3 font-semibold">Reintentar plan completo</button></div>
+                : details && <div>
+                  <h4 className="text-xs font-bold text-slate-700">Plan completo · {details.topics.length} temas</h4>
+                  {details.description && <p className="mt-2 whitespace-pre-wrap break-words text-xs leading-5 text-slate-600">{details.description}</p>}
+                  {details.topics.length === 0 ? <p className="mt-2 text-xs text-slate-500">Este curso no tiene temas registrados.</p> : <ol className="mt-3 space-y-3">{[...details.topics].sort((a, b) => a.position - b.position).map((topic, index) => <li key={topic.id} className="text-xs leading-5"><p className="break-words font-semibold text-slate-700">{index + 1}. {topic.title}{topic.status === 'archived' && <span className="ml-2 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-normal text-slate-500">Retirado</span>}</p>{topic.description && <p className="mt-1 whitespace-pre-wrap break-words text-slate-500">{topic.description}</p>}</li>)}</ol>}
+                </div>}
+          </div>}
+
+          {!readOnly && <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-3">
             <button
               type="button"
               onClick={onEdit}
@@ -775,7 +804,7 @@ function CourseCard({ course, selected, busy, compact, expanded, onToggle, onEdi
                 <Trash2 className="h-4 w-4" />
               </button>
             )}
-          </div>
+          </div>}
         </div>
       </div>
     </article>
@@ -785,7 +814,13 @@ function CourseCard({ course, selected, busy, compact, expanded, onToggle, onEdi
 export default function CourseCatalog() {
   const router = useRouter()
   const { ref: workspaceRef, width: workspaceWidth } = useContainerWidth<HTMLDivElement>()
-  const compact = workspaceWidth === 0 || workspaceWidth < 900
+  const { mobile, desktopActions } = useProgramWorkspacePolicy(workspaceWidth)
+  const compact = mobile || workspaceWidth === 0 || workspaceWidth < 900
+  const desktopActionsRef = useRef(desktopActions)
+  desktopActionsRef.current = desktopActions
+  const mutationInFlightRef = useRef(false)
+  const desktopFocusRef = useRef<HTMLElement | null>(null)
+  const searchInputRef = useRef<HTMLInputElement | null>(null)
   const [courses, setCourses] = useState<Course[]>([])
   const [expandedCourseID, setExpandedCourseID] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -805,6 +840,11 @@ export default function CourseCatalog() {
   const [toast, setToast] = useState<ToastState | null>(null)
   const listRequestRef = useRef<AbortController | null>(null)
   const listSequenceRef = useRef(0)
+  const [consultationCourse, setConsultationCourse] = useState<Course | null>(null)
+  const [consultationLoadingID, setConsultationLoadingID] = useState('')
+  const [consultationError, setConsultationError] = useState('')
+  const consultationRequestRef = useRef<AbortController | null>(null)
+  const consultationSequenceRef = useRef(0)
 
   const dirty = Boolean(draft && comparableDraft(draft) !== baseline)
   const totalPages = Math.max(1, Math.ceil(totalCourses / PAGE_SIZE))
@@ -817,6 +857,42 @@ export default function CourseCatalog() {
     setSearch(value)
     if (!value) setDebouncedSearch('')
   }
+
+  const loadConsultation = useCallback(async (courseID: string) => {
+    consultationRequestRef.current?.abort()
+    const controller = new AbortController()
+    consultationRequestRef.current = controller
+    const sequence = ++consultationSequenceRef.current
+    setConsultationCourse(null)
+    setConsultationLoadingID(courseID)
+    setConsultationError('')
+    try {
+      const response = await api<CourseResponse>(`/api/programs/courses/${courseID}`, { signal: controller.signal })
+      if (controller.signal.aborted || sequence !== consultationSequenceRef.current) return
+      if (!response.success || !response.data?.course) throw new Error(response.error || 'No se pudo cargar el plan completo del curso.')
+      setConsultationCourse(response.data.course)
+    } catch (error) {
+      if (!controller.signal.aborted && sequence === consultationSequenceRef.current) setConsultationError(error instanceof Error ? error.message : 'No se pudo cargar el plan completo del curso.')
+    } finally {
+      if (!controller.signal.aborted && sequence === consultationSequenceRef.current) setConsultationLoadingID('')
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!mobile || !expandedCourseID) return
+    void loadConsultation(expandedCourseID)
+    return () => { consultationRequestRef.current?.abort(); consultationSequenceRef.current += 1 }
+  }, [mobile, expandedCourseID, loadConsultation])
+
+  useEffect(() => {
+    const previous = desktopFocusRef.current
+    if (!previous) return
+    const frame = window.requestAnimationFrame(() => {
+      if (mobile && !isDialogFocusableVisible(previous)) restoreDialogFocus([searchInputRef.current])
+      else if (!mobile) restoreDialogFocus([previous])
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [mobile])
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), SEARCH_DEBOUNCE_MS)
@@ -836,19 +912,19 @@ export default function CourseCatalog() {
   }, [page, totalPages])
 
   useEffect(() => {
-    if (!toast) return
+    if (!toast || !desktopActions) return
     const timer = window.setTimeout(() => setToast(null), 3500)
     return () => window.clearTimeout(timer)
-  }, [toast])
+  }, [toast, desktopActions])
 
   useEffect(() => {
-    if (!confirm) return
+    if (!confirm || (!desktopActions && !confirm.allowWhilePaused)) return
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setConfirm(null)
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [confirm])
+  }, [confirm, desktopActions])
 
   useEffect(() => {
     if (!dirty) return
@@ -881,6 +957,7 @@ export default function CourseCatalog() {
       }
       const destination = `${url.pathname}${url.search}${url.hash}`
       setConfirm({
+        allowWhilePaused: true,
         title: 'Salir sin guardar',
         message: 'Hay cambios sin guardar. Si navegas a otra sección, se perderán.',
         confirmLabel: 'Salir de todos modos',
@@ -936,6 +1013,7 @@ export default function CourseCatalog() {
   }, [])
 
   const requestCloseEditor = useCallback(() => {
+    if (!desktopActionsRef.current) return
     if (!draft) return
     if (saving) return
     if (!dirty) {
@@ -952,13 +1030,13 @@ export default function CourseCatalog() {
   }, [closeEditorNow, dirty, draft, saving])
 
   useEffect(() => {
-    if (!compact || !draft || confirm) return
+    if (!desktopActions || !compact || !draft || confirm) return
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') requestCloseEditor()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [compact, confirm, draft, requestCloseEditor])
+  }, [compact, confirm, draft, requestCloseEditor, desktopActions])
 
   const openDraft = useCallback((next: CourseDraft) => {
     setDraft(next)
@@ -968,7 +1046,7 @@ export default function CourseCatalog() {
   }, [])
 
   const requestOpenDraft = (next: CourseDraft) => {
-    if (saving || busyCourseID) return
+    if (!desktopActionsRef.current || saving || busyCourseID) return
     if (draft && dirty) {
       setConfirm({
         title: 'Cambios sin guardar',
@@ -983,7 +1061,7 @@ export default function CourseCatalog() {
   }
 
   const loadCourseForEditing = async (course: Course) => {
-    if (saving || busyCourseID) return
+    if (!desktopActionsRef.current || saving || busyCourseID) return
     setBusyCourseID(course.id)
     const response = await api<CourseResponse>(`/api/programs/courses/${course.id}`)
     setBusyCourseID(null)
@@ -995,7 +1073,7 @@ export default function CourseCatalog() {
   }
 
   const requestEditCourse = (course: Course) => {
-    if (saving || busyCourseID) return
+    if (!desktopActionsRef.current || saving || busyCourseID) return
     if (draft && dirty) {
       setConfirm({
         title: 'Cambios sin guardar',
@@ -1010,7 +1088,7 @@ export default function CourseCatalog() {
   }
 
   const handleSave = async () => {
-    if (!draft || saving) return
+    if (!desktopActionsRef.current || !draft || saving || mutationInFlightRef.current) return
     setEditorError('')
     if (!draft.name.trim()) {
       setEditorError('Escribe un nombre para el curso.')
@@ -1023,106 +1101,132 @@ export default function CourseCatalog() {
       return
     }
 
-    setSaving(true)
-    const response = await api<CourseResponse>(draft.id ? `/api/programs/courses/${draft.id}` : '/api/programs/courses', {
-      method: draft.id ? 'PUT' : 'POST',
-      body: JSON.stringify(draftToInput(draft)),
-    })
+    mutationInFlightRef.current = true
+    try {
+      setSaving(true)
+      const response = await api<CourseResponse>(draft.id ? `/api/programs/courses/${draft.id}` : '/api/programs/courses', {
+        method: draft.id ? 'PUT' : 'POST',
+        body: JSON.stringify(draftToInput(draft)),
+      })
 
-    if (!response.success || !response.data?.course) {
-      if (draft.id && isCourseConflict(response)) {
-        const latest = await refreshLatestCourse(draft.id)
-        setSaving(false)
-        if (latest) {
-          setSaveConflict({ latest })
-          setEditorError('')
-        } else {
-          setEditorError('El curso cambió y no pudimos recuperar su versión vigente. Conservamos tu borrador; actualiza el catálogo e inténtalo nuevamente.')
+      if (!response.success || !response.data?.course) {
+        if (draft.id && isCourseConflict(response)) {
+          const latest = await refreshLatestCourse(draft.id)
+          setSaving(false)
+          if (latest) {
+            setSaveConflict({ latest })
+            setEditorError('')
+          } else {
+            setEditorError('El curso cambió y no pudimos recuperar su versión vigente. Conservamos tu borrador; actualiza el catálogo e inténtalo nuevamente.')
+          }
+          return
         }
+        setSaving(false)
+        setEditorError(response.error || 'No se pudo guardar el curso. Revisa los datos e inténtalo nuevamente.')
         return
       }
+
       setSaving(false)
-      setEditorError(response.error || 'No se pudo guardar el curso. Revisa los datos e inténtalo nuevamente.')
-      return
-    }
+      const saved = response.data.course
+      const savedDraft = draftFromCourse(saved)
+      setSaveConflict(null)
+      setToast({ message: draft.id ? 'Curso actualizado' : 'Curso creado', tone: 'success' })
 
-    setSaving(false)
-    const saved = response.data.course
-    const savedDraft = draftFromCourse(saved)
-    setSaveConflict(null)
-    setToast({ message: draft.id ? 'Curso actualizado' : 'Curso creado', tone: 'success' })
-
-    if (saved.status !== statusFilter) {
-      closeEditorNow()
-    } else {
-      setCourses(current => {
-        const exists = current.some(course => course.id === saved.id)
-        if (!exists) return [saved, ...current]
-        return current.map(course => course.id === saved.id ? saved : course)
-      })
-      setDraft(savedDraft)
-      setBaseline(comparableDraft(savedDraft))
+      if (saved.status !== statusFilter) {
+        closeEditorNow()
+      } else {
+        setCourses(current => {
+          const exists = current.some(course => course.id === saved.id)
+          if (!exists) return [saved, ...current]
+          return current.map(course => course.id === saved.id ? saved : course)
+        })
+        setDraft(savedDraft)
+        setBaseline(comparableDraft(savedDraft))
+      }
+      void loadCourses()
+    } catch {
+      setEditorError('No se pudo guardar el curso. Tu borrador se conserva; vuelve a intentarlo.')
+    } finally {
+      mutationInFlightRef.current = false
+      setSaving(false)
     }
-    void loadCourses()
   }
 
   const runStatusChange = async (
     course: Course,
     requestedStatus?: CourseStatus,
   ) => {
-    const nextStatus: CourseStatus = requestedStatus || (course.status === 'active' ? 'archived' : 'active')
-    setBusyCourseID(course.id)
-    const currentResponse = await api<CourseResponse>(`/api/programs/courses/${course.id}`)
-    if (!currentResponse.success || !currentResponse.data?.course) {
-      setBusyCourseID(null)
-      setToast({ message: currentResponse.error || 'No se pudo cargar la versión vigente del curso.', tone: 'error' })
-      return
-    }
-    const currentCourse = currentResponse.data.course
-    if (currentCourse.status === nextStatus) {
-      if (draft?.id === course.id) closeEditorNow()
-      setCourses(current => current.filter(item => item.id !== course.id))
-      setToast({ message: nextStatus === 'archived' ? 'El curso ya estaba archivado' : 'El curso ya estaba activo', tone: 'success' })
-      setBusyCourseID(null)
-      void loadCourses()
-      return
-    }
-    const response = await api<CourseResponse>(`/api/programs/courses/${course.id}`, {
-      method: 'PUT',
-      body: JSON.stringify(courseToInput(currentCourse, nextStatus)),
-    })
-
-    if (!response.success || !response.data?.course) {
-      if (isCourseConflict(response)) {
-        const latest = await refreshLatestCourse(course.id)
+    if (!desktopActionsRef.current || mutationInFlightRef.current) return
+    mutationInFlightRef.current = true
+    try {
+      const nextStatus: CourseStatus = requestedStatus || (course.status === 'active' ? 'archived' : 'active')
+      setBusyCourseID(course.id)
+      const currentResponse = await api<CourseResponse>(`/api/programs/courses/${course.id}`)
+      if (!currentResponse.success || !currentResponse.data?.course) {
         setBusyCourseID(null)
-        if (!latest) {
-          setToast({ message: 'El curso cambió y no pudimos recuperar su versión vigente. El catálogo fue actualizado.', tone: 'error' })
-          return
-        }
-        const action = nextStatus === 'archived' ? 'archivar' : 'restaurar'
-        const alreadyApplied = latest.status === nextStatus
+        setToast({ message: currentResponse.error || 'No se pudo cargar la versión vigente del curso.', tone: 'error' })
+        return
+      }
+      const currentCourse = currentResponse.data.course
+      if (!desktopActionsRef.current) {
         setConfirm({
-          title: `El curso cambió antes de ${action}`,
-          message: `No aplicamos la operación sobre datos antiguos. La versión vigente “${latest.name}” está ${latest.status === 'active' ? 'activa' : 'archivada'}, tiene ${activeTopics(latest).length} temas activos y ${latest.usage_count || 0} usos. ${alreadyApplied ? 'El estado solicitado ya fue aplicado por otra persona.' : `Puedes revisar estos datos y ${action} ahora la versión vigente.`}`,
-          confirmLabel: alreadyApplied ? 'Aceptar estado vigente' : `${nextStatus === 'archived' ? 'Archivar' : 'Restaurar'} versión vigente`,
-          onConfirm: () => void runStatusChange(latest, nextStatus),
+          title: 'Cambio de estado pausado',
+          message: 'La operación quedó preparada sin modificar el curso. Puedes continuar en escritorio.',
+          confirmLabel: nextStatus === 'archived' ? 'Archivar' : 'Restaurar',
+          onConfirm: () => void runStatusChange(currentCourse, nextStatus),
         })
         return
       }
+      if (currentCourse.status === nextStatus) {
+        if (draft?.id === course.id) closeEditorNow()
+        setCourses(current => current.filter(item => item.id !== course.id))
+        setToast({ message: nextStatus === 'archived' ? 'El curso ya estaba archivado' : 'El curso ya estaba activo', tone: 'success' })
+        setBusyCourseID(null)
+        void loadCourses()
+        return
+      }
+      const response = await api<CourseResponse>(`/api/programs/courses/${course.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(courseToInput(currentCourse, nextStatus)),
+      })
+
+      if (!response.success || !response.data?.course) {
+        if (isCourseConflict(response)) {
+          const latest = await refreshLatestCourse(course.id)
+          setBusyCourseID(null)
+          if (!latest) {
+            setToast({ message: 'El curso cambió y no pudimos recuperar su versión vigente. El catálogo fue actualizado.', tone: 'error' })
+            return
+          }
+          const action = nextStatus === 'archived' ? 'archivar' : 'restaurar'
+          const alreadyApplied = latest.status === nextStatus
+          setConfirm({
+            title: `El curso cambió antes de ${action}`,
+            message: `No aplicamos la operación sobre datos antiguos. La versión vigente “${latest.name}” está ${latest.status === 'active' ? 'activa' : 'archivada'}, tiene ${activeTopics(latest).length} temas activos y ${latest.usage_count || 0} usos. ${alreadyApplied ? 'El estado solicitado ya fue aplicado por otra persona.' : `Puedes revisar estos datos y ${action} ahora la versión vigente.`}`,
+            confirmLabel: alreadyApplied ? 'Aceptar estado vigente' : `${nextStatus === 'archived' ? 'Archivar' : 'Restaurar'} versión vigente`,
+            onConfirm: () => void runStatusChange(latest, nextStatus),
+          })
+          return
+        }
+        setBusyCourseID(null)
+        setToast({ message: response.error || 'No se pudo cambiar el estado del curso.', tone: 'error' })
+        return
+      }
       setBusyCourseID(null)
-      setToast({ message: response.error || 'No se pudo cambiar el estado del curso.', tone: 'error' })
-      return
+      if (draft?.id === course.id) closeEditorNow()
+      setCourses(current => current.filter(item => item.id !== course.id))
+      setToast({ message: nextStatus === 'archived' ? 'Curso archivado' : 'Curso restaurado', tone: 'success' })
+      void loadCourses()
+    } catch {
+      setToast({ message: 'No se pudo cambiar el estado del curso. Vuelve a intentarlo.', tone: 'error' })
+    } finally {
+      mutationInFlightRef.current = false
+      setBusyCourseID(null)
     }
-    setBusyCourseID(null)
-    if (draft?.id === course.id) closeEditorNow()
-    setCourses(current => current.filter(item => item.id !== course.id))
-    setToast({ message: nextStatus === 'archived' ? 'Curso archivado' : 'Curso restaurado', tone: 'success' })
-    void loadCourses()
   }
 
   const requestStatusChange = (course: Course) => {
-    if (busyCourseID || saving) return
+    if (!desktopActionsRef.current || busyCourseID || saving) return
     const continueAction = () => {
       if (course.status === 'active') {
         setConfirm({
@@ -1153,48 +1257,57 @@ export default function CourseCatalog() {
   }
 
   const runDelete = async (course: CourseDeleteTarget) => {
-    setBusyCourseID(course.id)
-    const response = await api<DeleteCourseResponse>(`/api/programs/courses/${course.id}?expected_updated_at=${encodeURIComponent(course.updated_at)}`, { method: 'DELETE' })
+    if (!desktopActionsRef.current || mutationInFlightRef.current) return
+    mutationInFlightRef.current = true
+    try {
+      setBusyCourseID(course.id)
+      const response = await api<DeleteCourseResponse>(`/api/programs/courses/${course.id}?expected_updated_at=${encodeURIComponent(course.updated_at)}`, { method: 'DELETE' })
 
-    if (!response.success) {
-      if (isCourseConflict(response)) {
-        const latest = await refreshLatestCourse(course.id)
-        setBusyCourseID(null)
-        if (!latest) {
-          setToast({ message: 'El curso cambió o ya no está disponible. No se eliminó nada y el catálogo fue actualizado.', tone: 'error' })
+      if (!response.success) {
+        if (isCourseConflict(response)) {
+          const latest = await refreshLatestCourse(course.id)
+          setBusyCourseID(null)
+          if (!latest) {
+            setToast({ message: 'El curso cambió o ya no está disponible. No se eliminó nada y el catálogo fue actualizado.', tone: 'error' })
+            return
+          }
+          const willArchive = latest.usage_count > 0
+          setConfirm({
+            title: 'El curso cambió antes de eliminarlo',
+            message: `No aplicamos la eliminación sobre datos antiguos. La versión vigente “${latest.name}” tiene ${activeTopics(latest).length} temas activos y ${latest.usage_count || 0} usos. ${willArchive ? 'Para proteger programas y sesiones, al continuar se archivará en lugar de eliminarse.' : 'Puedes revisar estos datos y confirmar nuevamente la eliminación permanente.'}`,
+            confirmLabel: willArchive ? 'Archivar versión vigente' : 'Eliminar versión vigente',
+            tone: willArchive ? 'default' : 'danger',
+            onConfirm: () => void runDelete(latest),
+          })
           return
         }
-        const willArchive = latest.usage_count > 0
-        setConfirm({
-          title: 'El curso cambió antes de eliminarlo',
-          message: `No aplicamos la eliminación sobre datos antiguos. La versión vigente “${latest.name}” tiene ${activeTopics(latest).length} temas activos y ${latest.usage_count || 0} usos. ${willArchive ? 'Para proteger programas y sesiones, al continuar se archivará en lugar de eliminarse.' : 'Puedes revisar estos datos y confirmar nuevamente la eliminación permanente.'}`,
-          confirmLabel: willArchive ? 'Archivar versión vigente' : 'Eliminar versión vigente',
-          tone: willArchive ? 'default' : 'danger',
-          onConfirm: () => void runDelete(latest),
-        })
+        setBusyCourseID(null)
+        setToast({ message: friendlyDeleteError(response.error), tone: 'error' })
         return
       }
       setBusyCourseID(null)
-      setToast({ message: friendlyDeleteError(response.error), tone: 'error' })
-      return
-    }
-    setBusyCourseID(null)
 
-    if (draft?.id === course.id) closeEditorNow()
-    setCourses(current => current.filter(item => item.id !== course.id))
-    if (response.data?.archived) {
-      setToast({
-        message: 'El curso adquirió usos mientras se eliminaba, por lo que fue archivado para proteger el historial.',
-        tone: 'success',
-      })
-    } else {
-      setToast({ message: 'Curso eliminado permanentemente', tone: 'success' })
+      if (draft?.id === course.id) closeEditorNow()
+      setCourses(current => current.filter(item => item.id !== course.id))
+      if (response.data?.archived) {
+        setToast({
+          message: 'El curso adquirió usos mientras se eliminaba, por lo que fue archivado para proteger el historial.',
+          tone: 'success',
+        })
+      } else {
+        setToast({ message: 'Curso eliminado permanentemente', tone: 'success' })
+      }
+      void loadCourses()
+    } catch {
+      setToast({ message: 'No se pudo eliminar el curso. Vuelve a intentarlo.', tone: 'error' })
+    } finally {
+      mutationInFlightRef.current = false
+      setBusyCourseID(null)
     }
-    void loadCourses()
   }
 
   const requestDelete = (course: CourseDeleteTarget) => {
-    if (busyCourseID || saving) return
+    if (!desktopActionsRef.current || busyCourseID || saving) return
     const willArchive = course.usage_count > 0
     setConfirm({
       title: willArchive ? 'Archivar curso en uso' : 'Eliminar curso permanentemente',
@@ -1208,7 +1321,7 @@ export default function CourseCatalog() {
   }
 
   const reviewSaveConflict = () => {
-    if (!draft || !saveConflict) return
+    if (!desktopActionsRef.current || !draft || !saveConflict) return
     const latest = saveConflict.latest
     const latestDraft = draftFromCourse(latest)
     const latestTopicCount = activeTopics(latest).length
@@ -1243,6 +1356,7 @@ export default function CourseCatalog() {
       return
     }
     setConfirm({
+      allowWhilePaused: true,
       title: 'Salir sin guardar',
       message: 'Hay cambios sin guardar. Si vuelves a Programas, se perderán.',
       confirmLabel: 'Salir de todos modos',
@@ -1253,8 +1367,10 @@ export default function CourseCatalog() {
 
   const editor = draft ? (
     <CourseEditor
+      suspended={!desktopActions}
+      returnFocusID={desktopFocusRef.current?.id}
       draft={draft}
-      setDraft={setDraft}
+      setDraft={next => { if (desktopActionsRef.current) setDraft(next) }}
       compact={compact}
       dirty={dirty}
       saving={saving}
@@ -1271,7 +1387,7 @@ export default function CourseCatalog() {
   ) : null
 
   return (
-    <div ref={workspaceRef} className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+    <div ref={workspaceRef} className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden" onFocusCapture={event => { if (desktopActions && event.target instanceof HTMLElement) desktopFocusRef.current = event.target }}>
       <header className="shrink-0 border-b border-slate-200 bg-white px-3 py-3 sm:rounded-t-2xl sm:px-5 sm:py-4">
         <div className="flex min-w-0 flex-wrap items-center gap-3">
           <button
@@ -1291,7 +1407,7 @@ export default function CourseCatalog() {
               <p className="hidden truncate text-xs text-slate-500 sm:block">Planes de clases reutilizables para tus programas</p>
             </div>
           </div>
-          <button
+          {desktopActions && <button
             type="button"
             onClick={() => requestOpenDraft(emptyDraft())}
             className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-3.5 text-sm font-semibold text-white shadow-sm shadow-emerald-600/20 transition hover:bg-emerald-700 sm:px-4"
@@ -1299,8 +1415,9 @@ export default function CourseCatalog() {
             <Plus className="h-4 w-4" />
             <span className="hidden min-[380px]:inline">Nuevo curso</span>
             <span className="min-[380px]:hidden">Nuevo</span>
-          </button>
+          </button>}
         </div>
+        {mobile && draft && <p role="status" className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">Tu edición está pausada. Puedes consultar el catálogo y continuar en escritorio; el borrador se conserva mientras permanezcas aquí.</p>}
       </header>
 
       <div className="min-h-0 flex-1 overflow-hidden bg-slate-50/70">
@@ -1311,6 +1428,7 @@ export default function CourseCatalog() {
               <div className="relative">
                 <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                 <input
+                  ref={searchInputRef}
                   value={search}
                   onChange={event => updateSearch(event.target.value)}
                   placeholder="Buscar por nombre o descripción…"
@@ -1391,16 +1509,16 @@ export default function CourseCatalog() {
                     {debouncedSearch ? <Search className="h-5 w-5" /> : statusFilter === 'archived' ? <Archive className="h-5 w-5" /> : <BookOpen className="h-5 w-5" />}
                   </div>
                   <p className="mt-3 text-sm font-semibold text-slate-800">
-                    {debouncedSearch ? 'No encontramos coincidencias' : statusFilter === 'archived' ? 'No hay cursos archivados' : 'Crea tu primer curso'}
+                    {debouncedSearch ? 'No encontramos coincidencias' : statusFilter === 'archived' ? 'No hay cursos archivados' : mobile ? 'No hay cursos registrados' : 'Crea tu primer curso'}
                   </p>
                   <p className="mt-1 max-w-xs text-xs leading-5 text-slate-500">
                     {debouncedSearch
                       ? 'Prueba con otro nombre o limpia la búsqueda.'
                       : statusFilter === 'archived'
                         ? 'Los cursos que archives aparecerán aquí y podrán restaurarse.'
-                        : 'Organiza un plan con temas y úsalo como guía flexible en tus programas.'}
+                        : mobile ? 'Los cursos se administran desde la vista de escritorio.' : 'Organiza un plan con temas y úsalo como guía flexible en tus programas.'}
                   </p>
-                  {!debouncedSearch && statusFilter === 'active' && (
+                  {desktopActions && !debouncedSearch && statusFilter === 'active' && (
                     <button
                       type="button"
                       onClick={() => requestOpenDraft(emptyDraft())}
@@ -1420,6 +1538,11 @@ export default function CourseCatalog() {
                       selected={draft?.id === course.id}
                       busy={busyCourseID === course.id}
                       compact={compact}
+                      readOnly={!desktopActions}
+                      details={consultationCourse?.id === course.id ? consultationCourse : null}
+                      detailsLoading={consultationLoadingID === course.id}
+                      detailsError={expandedCourseID === course.id ? consultationError : ''}
+                      onRetryDetails={() => { void loadConsultation(course.id) }}
                       expanded={expandedCourseID === course.id}
                       onToggle={() => setExpandedCourseID(current => current === course.id ? null : course.id)}
                       onEdit={() => requestEditCourse(course)}
@@ -1491,10 +1614,13 @@ export default function CourseCatalog() {
 
       {confirm && typeof document !== 'undefined' && createPortal(
         <div
+          hidden={!desktopActions && !confirm.allowWhilePaused}
+          inert={!desktopActions && !confirm.allowWhilePaused}
+          style={!desktopActions && !confirm.allowWhilePaused ? { display: 'none' } : undefined}
           className="app-viewport fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm"
           role="presentation"
           onMouseDown={event => {
-            if (event.target === event.currentTarget) setConfirm(null)
+            if ((desktopActionsRef.current || confirm.allowWhilePaused) && event.target === event.currentTarget) setConfirm(null)
           }}
         >
           <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl" role="alertdialog" aria-modal="true" aria-labelledby="course-confirm-title" aria-describedby="course-confirm-message">
@@ -1516,6 +1642,7 @@ export default function CourseCatalog() {
                 <button
                   type="button"
                   onClick={() => {
+                    if (!desktopActionsRef.current && !confirm.allowWhilePaused) return
                     const action = confirm.onSecondary
                     setConfirm(null)
                     action?.()
@@ -1528,6 +1655,7 @@ export default function CourseCatalog() {
               <button
                 type="button"
                 onClick={() => {
+                  if (!desktopActionsRef.current && !confirm.allowWhilePaused) return
                   const action = confirm.onConfirm
                   setConfirm(null)
                   action()
@@ -1542,7 +1670,7 @@ export default function CourseCatalog() {
         document.body,
       )}
 
-      {toast && typeof document !== 'undefined' && createPortal(
+      {toast && desktopActions && typeof document !== 'undefined' && createPortal(
         <div className="pointer-events-none fixed inset-x-0 bottom-[max(1rem,env(safe-area-inset-bottom))] z-[110] flex justify-center px-4" role="status" aria-live="polite">
           <div className={`flex max-w-lg items-start gap-2.5 rounded-xl border bg-white px-4 py-3 text-sm font-medium shadow-xl ${toast.tone === 'success' ? 'border-emerald-200 text-emerald-800' : 'border-red-200 text-red-700'}`}>
             {toast.tone === 'success' ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" /> : <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />}
