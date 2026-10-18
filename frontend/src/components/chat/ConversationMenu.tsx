@@ -1,12 +1,18 @@
 'use client'
-import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal } from '@/components/operational-window/OperationalOverlayContext'
 
-export default function ConversationMenu({ anchor, children }: { anchor: RefObject<HTMLButtonElement | null>; children: ReactNode }) {
+export default function ConversationMenu({ anchor, children, label = 'Acciones de la conversación', onClose }: { anchor: RefObject<HTMLButtonElement | null>; children: ReactNode; label?: string; onClose?: () => void }) {
   const root = useRef<HTMLDivElement>(null)
   const portal = useOperationalOverlayPortal()
   const [position, setPosition] = useState({ top: 8, left: 8, maxHeight: 400 })
+  useEffect(() => {
+    if (!onClose) return
+    const outside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node) && !anchor.current?.contains(event.target as Node)) onClose() }
+    document.addEventListener('pointerdown', outside)
+    return () => document.removeEventListener('pointerdown', outside)
+  }, [anchor, onClose])
   useLayoutEffect(() => {
     const place = () => {
       const rect = anchor.current?.getBoundingClientRect(); if (!rect || !root.current) return
@@ -18,7 +24,9 @@ export default function ConversationMenu({ anchor, children }: { anchor: RefObje
     window.addEventListener('resize', place); window.addEventListener('scroll', place, true); window.visualViewport?.addEventListener('resize', place)
     return () => { window.removeEventListener('resize', place); window.removeEventListener('scroll', place, true); window.visualViewport?.removeEventListener('resize', place) }
   }, [anchor])
-  return createPortal(<div ref={root} data-chat-overlay="conversation-menu" role="menu" aria-label="Acciones de la conversación" style={{ ...position, width: 'min(256px, calc(100vw - 16px))', zIndex: portal ? OPERATIONAL_OVERLAY_LAYERS.menu : 80 }} className="fixed overflow-y-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl" onPointerDown={event => event.stopPropagation()} onKeyDown={event => {
+  return createPortal(<div ref={root} data-chat-overlay="conversation-menu" role="menu" aria-label={label} style={{ ...position, width: 'min(256px, calc(100vw - 16px))', zIndex: portal ? OPERATIONAL_OVERLAY_LAYERS.menu : 80 }} className="fixed overflow-y-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl" onPointerDown={event => event.stopPropagation()} onKeyDown={event => {
+    if (event.key === 'Escape' && onClose) { event.preventDefault(); event.stopPropagation(); onClose(); anchor.current?.focus(); return }
+    if (event.key === 'Tab' && onClose) { onClose(); anchor.current?.focus(); return }
     if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
     event.preventDefault(); const buttons = Array.from(root.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') || []), index = buttons.indexOf(document.activeElement as HTMLButtonElement)
     buttons[event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus()

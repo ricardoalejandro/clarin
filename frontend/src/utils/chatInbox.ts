@@ -13,9 +13,13 @@ export function applyChatState(chat: Chat, state?: ChatState): Chat {
   return { ...chat, ...(state.last_incoming_message_id !== undefined ? { last_incoming_message_id: state.last_incoming_message_id, last_incoming_at: state.last_incoming_at } : {}), unread_count: state.unread_count, waiting_since: state.waiting_since, needs_reply: state.needs_reply, state_version: state.state_version }
 }
 export function orderInbox(chats: Chat[], view: InboxView): Chat[] {
+  const activity = (value?: string) => {
+    const timestamp = Date.parse(value || '')
+    return Number.isFinite(timestamp) ? timestamp : Number.NEGATIVE_INFINITY
+  }
   return [...chats].sort((a, b) => view === 'pending'
     ? Date.parse(a.waiting_since || '') - Date.parse(b.waiting_since || '') || a.id.localeCompare(b.id)
-    : compareChatPins(a, b) || Date.parse(b.last_message_at || '') - Date.parse(a.last_message_at || '') || a.id.localeCompare(b.id))
+    : compareChatPins(a, b) || activity(b.last_message_at) - activity(a.last_message_at) || a.id.localeCompare(b.id))
 }
 export function reconcileInboxPage(current: Chat[], page: Chat[], states: Map<string, ChatState>, view: InboxView, retainTail: boolean) {
   const previous = new Map(current.map(chat => [chat.id, chat]))

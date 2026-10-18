@@ -1,6 +1,6 @@
 import { Chat } from '@/types/chat'
 import { isGroupChat } from './chatGroups'
-import { compareChatPins } from './chatPins'
+import { orderInbox } from './chatInbox'
 
 // Clean synced names that start with dots/punctuation
 export const cleanName = (name?: string | null) => name?.replace(/^[\s.\u00b7\u2022\-]+/, '').trim() || ''
@@ -54,17 +54,21 @@ export type ChatIdentityReconciliation = {
   canonical_chat: Chat
 }
 
+export const mergeReconciledChatIdentity = (current: Chat[], reconciliation: ChatIdentityReconciliation): Chat => {
+  const local = current.filter(chat => chat.id === reconciliation.source_chat_id || chat.id === reconciliation.canonical_chat.id)
+  const pinned = local.filter(chat => chat.is_pinned)
+  const pinnedAt = pinned.map(chat => chat.pinned_at).filter((value): value is string => Boolean(value))
+    .sort((a, b) => Date.parse(b) - Date.parse(a))[0] || null
+  // Identity broadcasts contain account-level identity, never the current actor's pin projection.
+  return { ...reconciliation.canonical_chat, is_pinned: pinned.length > 0, pinned_at: pinnedAt, pin_version: Math.max(0, ...local.map(chat => chat.pin_version || 0)) }
+}
+
 export const reconcileChatIdentity = (current: Chat[], reconciliation: ChatIdentityReconciliation): Chat[] => {
   const { source_chat_id: sourceChatId, canonical_chat: canonicalChat } = reconciliation
   if (!sourceChatId || !canonicalChat?.id) return current
   const next = current.filter(chat => chat.id !== sourceChatId && chat.id !== canonicalChat.id)
-  next.push(canonicalChat)
-  next.sort((a, b) => {
-    const pinned = compareChatPins(a, b)
-    if (pinned !== 0) return pinned
-    return new Date(b.last_message_at || 0).getTime() - new Date(a.last_message_at || 0).getTime()
-  })
-  return next
+  next.push(mergeReconciledChatIdentity(current, reconciliation))
+  return orderInbox(next, 'all')
 }
 
 // WhatsApp-style date label for message separators

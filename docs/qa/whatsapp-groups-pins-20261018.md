@@ -25,6 +25,7 @@ Antes del despliegue se conserva una imagen inmutable y respaldo consistente. La
 - PostgreSQL aislado: activar `CLARIN_RUN_CHAT_PREFERENCES_INTEGRATION=1` y `CLARIN_RUN_CHAT_GROUP_INTEGRATION=1`, con `DATABASE_URL` entregada exclusivamente por entorno. Cada prueba crea y elimina su propia base QA.
 - Frontend: suite de unidades, `npx tsc --noEmit`, build de producción y `tests/groups-pins.spec.ts` en navegador con datos sintéticos.
 - El navegador cubre bandeja, filtros, autores/citas, menciones, fijar/desfijar, rollback con mensajes concurrentes y anchos 320/375/768/1440.
+- La cabecera usa tres filas compactas: dispositivo/acciones, búsqueda/filtros y vistas/tipo. Las opciones de reacción se abren bajo demanda con borrador y Aplicar; no ocupan filas permanentes. El navegador mide un máximo de 184 px de cabecera en escritorio y 200 px en móvil, con objetivos táctiles de 44 px.
 - Los envíos reales de aceptación se restringen a los destinos privados designados expresamente por el titular. No se registran credenciales, contenido privado de otras conversaciones ni material de sesiones en reportes.
 
 Los resultados ejecutados y cualquier limitación restante se anotan al cerrar la aceptación; esta lista por sí sola no acredita ejecución ni salud del despliegue.

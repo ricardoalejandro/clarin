@@ -52,6 +52,54 @@ describe('Chat list canonical membership',()=>{
   await waitFor(()=>expect(screen.queryByRole('button',{name:'Conversación con Pendiente ya leído'})).not.toBeInTheDocument());
   expect(within(screen.getByRole('button',{name:'Conversación con Pendiente sin leer'})).getByText('3')).toBeInTheDocument();
  });
+ it('leaves pending mode for groups and keeps unread filtering available',async()=>{
+  const requests:URLSearchParams[]=[];
+  vi.stubGlobal('fetch',vi.fn((input:RequestInfo|URL)=>{
+   const url=String(input);
+   if(url.startsWith('/api/chats?')) {requests.push(new URL(url,'http://test.invalid').searchParams);return Promise.resolve(json({success:true,chats:[chat],total:1}))}
+   return Promise.resolve(json({success:true,devices:[]}));
+  }));
+  render(<ChatsPage/>);
+  await screen.findByText('Nombre filtro QA');
+  const pending=screen.getByRole('button',{name:'Pendientes'});
+  fireEvent.click(pending);
+  await waitFor(()=>expect(requests.at(-1)?.get('pending_only')).toBe('true'));
+  fireEvent.click(screen.getByRole('button',{name:/^Tipo de conversación:/}));
+  fireEvent.click(screen.getByRole('menuitemradio',{name:'Grupos'}));
+  await waitFor(()=>expect(requests.at(-1)?.get('kind')).toBe('group'));
+  expect(requests.at(-1)?.has('pending_only')).toBe(false);
+  expect(requests.some(params=>params.get('kind')==='group'&&params.has('pending_only'))).toBe(false);
+  expect(pending).toBeDisabled();
+  expect(pending).toHaveAccessibleDescription('Los grupos no generan pendientes.');
+  const inbox=screen.getByRole('group',{name:'Vista de la bandeja'});
+  expect(within(inbox).getByRole('button',{name:'Todos'})).toHaveAttribute('aria-pressed','true');
+  fireEvent.click(within(inbox).getByRole('button',{name:'No leídos'}));
+  await waitFor(()=>expect(requests.at(-1)?.get('unread_only')).toBe('true'));
+  expect(requests.at(-1)?.get('kind')).toBe('group');
+  fireEvent.click(screen.getByRole('button',{name:'Abrir filtros de chats'}));
+  fireEvent.click(screen.getByTestId('mobile-filter-reaction-toggle'));
+  expect(screen.getByRole('button',{name:'Otros'})).toBeInTheDocument();
+  expect(screen.getByRole('button',{name:'Mi número'})).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:'Cancelar'}));
+  fireEvent.click(screen.getByRole('button',{name:/^Tipo de conversación:/}));
+  fireEvent.click(screen.getByRole('menuitemradio',{name:'Individuales'}));
+  expect(pending).toBeEnabled();
+  expect(screen.queryByText('Los grupos no generan pendientes.')).not.toBeInTheDocument();
+ });
+ it.each([false,true])('honors the group discovery capability in secondary actions: %s',async(capability)=>{
+  const fetchMock=vi.fn((input:RequestInfo|URL)=>{
+   const url=String(input);
+   if(url==='/api/devices') return Promise.resolve(json({success:true,devices:[{id:'device-audit',name:'Canal QA',status:'connected',provider:'whatsapp_web',runtime_capabilities:{can_list_groups:capability}}]}));
+   return Promise.resolve(json(url.startsWith('/api/chats?')?{success:true,chats:[chat],total:1}:{success:true,synced:1}));
+  });
+  vi.stubGlobal('fetch',fetchMock);render(<ChatsPage/>);await screen.findByText('Nombre filtro QA');
+  expect(screen.queryByRole('menuitem',{name:/Actualizar grupos de WhatsApp/})).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:'Más acciones de chats'}));
+  const sync=screen.getByRole('menuitem',{name:/Actualizar grupos de WhatsApp/});
+  if(!capability){expect(sync).toBeDisabled();expect(sync).toHaveAccessibleDescription('La sincronización de grupos no está disponible para estos dispositivos.');return}
+  expect(sync).toBeEnabled();fireEvent.click(sync);
+  await waitFor(()=>expect(fetchMock.mock.calls.some(([input])=>String(input)==='/api/devices/device-audit/groups/sync')).toBe(true));
+ });
  it('removes a chat after its last matching reaction is removed',async()=>{
   let matches=true;
   const fetchMock=vi.fn((input:RequestInfo|URL)=>{
@@ -61,7 +109,11 @@ describe('Chat list canonical membership',()=>{
    return Promise.resolve(json({success:true,devices:[]}));
   });
   vi.stubGlobal('fetch',fetchMock);render(<ChatsPage/>);
-  await screen.findByText('Nombre filtro QA');fireEvent.click(screen.getByTestId('filter-reaction-toggle'));
+  await screen.findByText('Nombre filtro QA');
+  expect(screen.queryByText('Con reacción')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:'Abrir filtros de chats'}));
+  fireEvent.click(screen.getByTestId('mobile-filter-reaction-toggle'));
+  fireEvent.click(screen.getByRole('button',{name:'Aplicar'}));
   await waitFor(()=>expect(fetchMock.mock.calls.some(([url])=>String(url).includes('has_reaction=true'))).toBe(true));
   const calls=fetchMock.mock.calls.length;matches=false;
   await act(async()=>{emit('chat_update',{chat_id:chat.id,unread_count:0,needs_reply:false,waiting_since:null,state_version:1});emit('message_reaction',{chat_id:chat.id,target_message_id:'provider-audit',removed:true,emoji:'',is_from_me:false,timestamp:'2026-10-08T00:00:00Z'});await new Promise(r=>setTimeout(r,450))});

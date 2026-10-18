@@ -14,9 +14,10 @@ interface DeviceSelectorProps {
   mode?: 'single' | 'multi'
   placeholder?: string
   className?: string
+  compact?: boolean
 }
 
-export default function DeviceSelector({ devices, selectedDeviceIds, onDeviceChange, mode = 'multi', placeholder = 'Todos los dispositivos', className = '' }: DeviceSelectorProps) {
+export default function DeviceSelector({ devices, selectedDeviceIds, onDeviceChange, mode = 'multi', placeholder = 'Todos los dispositivos', className = '', compact = false }: DeviceSelectorProps) {
   const [isOpen, setIsOpen] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
   const [position, setPosition] = useState<CSSProperties>({})
@@ -109,7 +110,7 @@ export default function DeviceSelector({ devices, selectedDeviceIds, onDeviceCha
       if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
       event.preventDefault()
       open(event.key === 'ArrowUp')
-    }} className="flex h-11 w-full min-w-0 items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 transition-colors hover:border-emerald-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-haspopup="listbox" aria-expanded={isOpen} aria-controls={isOpen ? menuId : undefined}>
+    }} className={`flex h-11 w-full min-w-0 items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 transition-colors hover:border-emerald-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${compact ? 'sm:h-10' : ''}`} aria-haspopup="listbox" aria-expanded={isOpen} aria-controls={isOpen ? menuId : undefined}>
       <Smartphone className="h-4 w-4 shrink-0 text-emerald-600" aria-hidden />
       <span className="min-w-0 flex-1 truncate text-left text-sm font-semibold text-slate-700">{chatDeviceSelectionLabel(available, selectedDeviceIds, placeholder)}</span>
       <ChevronDown className={`h-4 w-4 shrink-0 text-slate-500 transition-transform duration-150 motion-reduce:transition-none ${isOpen ? 'rotate-180' : ''}`} aria-hidden />

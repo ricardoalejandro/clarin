@@ -9,6 +9,8 @@ import { getAuthScope, isAuthIdentityChanging } from '@/lib/authScope'
 import { subscribeWebSocket } from '@/lib/api'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import DeviceSelector from '@/components/chat/DeviceSelector'
+import ChatKindSelector from '@/components/chat/ChatKindSelector'
+import ConversationMenu from '@/components/chat/ConversationMenu'
 import NewChatModal from '@/components/chat/NewChatModal'
 import ChatPanel from '@/components/chat/ChatPanel'
 import GroupDetailsPanel from '@/components/chat/GroupDetailsPanel'
@@ -21,7 +23,7 @@ import { useChatHistoryLayer } from '@/components/chat/useChatHistoryLayer'
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog'
 import { Chat, ChatState, Device, Message } from '@/types/chat'
 import { applyChatState, matchesInbox, nextPendingChat, orderInbox, reconcileInboxPage, type InboxView } from '@/utils/chatInbox'
-import { getChatDisplayName, formatPhone, isPendingChatIdentity, reconcileChatIdentity, type ChatIdentityReconciliation } from '@/utils/chat'
+import { getChatDisplayName, formatPhone, isPendingChatIdentity, mergeReconciledChatIdentity, reconcileChatIdentity, type ChatIdentityReconciliation } from '@/utils/chat'
 import { announceChatConversationActive, useChatMobileChrome } from '@/components/chat/ChatMobileChromeContext'
 import { reconcileChatDeviceFilters } from '@/components/chat/deviceFilters'
 
@@ -125,7 +127,17 @@ export default function ChatsPage() {
   const [inboxView, setInboxViewState] = useState<InboxView>('all')
   const viewStorageRef = useRef('')
   const viewTouchedRef = useRef(false)
-  const setInboxView = (view: InboxView) => { viewTouchedRef.current = true; setInboxViewState(view); if (viewStorageRef.current) localStorage.setItem(viewStorageRef.current, view) }
+  const setInboxView = (view: InboxView) => {
+    const nextView = chatKind === 'group' && view === 'pending' ? 'all' : view
+    viewTouchedRef.current = true; setInboxViewState(nextView); if (viewStorageRef.current) localStorage.setItem(viewStorageRef.current, nextView)
+  }
+  const selectChatKind = (kind: 'all' | 'direct' | 'group') => {
+    setChatKind(kind)
+    if (kind === 'group') {
+      viewTouchedRef.current = true
+      if (inboxView === 'pending') setInboxView('all')
+    }
+  }
   useEffect(() => {
     const controller = new AbortController()
     void fetch('/api/me', { signal: controller.signal, headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } }).then(response => response.json()).then(data => {
@@ -176,7 +188,9 @@ export default function ChatsPage() {
   const [listSearchFocused, setListSearchFocused] = useState(false)
   const [listKeyboardOpen, setListKeyboardOpen] = useState(false)
   const rowMenuTriggerRef = useRef<HTMLButtonElement | null>(null)
-  const toolbarMenuRef = useRef<HTMLDivElement>(null)
+  const toolbarMenuTriggerRef = useRef<HTMLButtonElement>(null)
+  const filterTriggerRef = useRef<HTMLButtonElement>(null)
+  const [filterPosition, setFilterPosition] = useState({ top: 8, left: 8, width: 360, maxHeight: 700 })
   const searchInputRef = useRef<HTMLInputElement>(null)
   const deleteDialogRef = useRef<HTMLDivElement>(null)
   const deleteCancelRef = useRef<HTMLButtonElement>(null)
@@ -269,8 +283,7 @@ export default function ChatsPage() {
     }
   }, [compactSurface, selectedChat, setConversationActive])
   const chatListWidth = layoutMode === 'compact' ? containerWidth : leftPanelWidth
-  const showExpandedToolbar = chatListWidth >= 400
-  const activeMobileFilterCount = Number(filterUnread) + Number(filterHasReaction)
+  const activeMobileFilterCount = Number(filterHasReaction)
   const collapseMobileListToolbar = layoutMode === 'compact' && compactSurface === 'list' && listKeyboardOpen
 
   useEffect(() => {
@@ -478,6 +491,19 @@ export default function ChatsPage() {
     if (layoutMode !== 'compact') setShowMobileFilters(false)
   }, [layoutMode])
 
+  useLayoutEffect(() => {
+    if (!showMobileFilters) return
+    const place = () => {
+      const rect = filterTriggerRef.current?.getBoundingClientRect(), panel = filterDialogRef.current
+      if (!rect || !panel) return
+      const viewport = window.visualViewport, left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0, width = viewport?.width || window.innerWidth, height = viewport?.height || window.innerHeight
+      const panelWidth = Math.min(380, width - 16), panelHeight = Math.min(panel.scrollHeight, height - 16)
+      setFilterPosition({ left: Math.max(left + 8, Math.min(rect.right - panelWidth, left + width - panelWidth - 8)), top: layoutMode === 'compact' ? Math.max(top + 8, top + height - panelHeight - 8) : Math.max(top + 8, Math.min(rect.bottom + 6, top + height - panelHeight - 8)), width: panelWidth, maxHeight: height - 16 })
+    }
+    place(); window.addEventListener('resize', place); window.addEventListener('scroll', place, true); window.visualViewport?.addEventListener('resize', place)
+    return () => { window.removeEventListener('resize', place); window.removeEventListener('scroll', place, true); window.visualViewport?.removeEventListener('resize', place) }
+  }, [showMobileFilters, filterDraft.reaction, filterDraft.range, layoutMode])
+
   const closeDeleteDialog = useCallback(() => {
     if (!deleting) setDeleteRequest(null)
   }, [deleting])
@@ -495,26 +521,6 @@ export default function ChatsPage() {
       window.removeEventListener('scroll', closeMenu, true)
     }
   }, [closeRowMenu, openRowMenuId])
-
-  useEffect(() => {
-    if (!showToolbarMenu) return
-    const closeMenu = (event: PointerEvent) => {
-      if (!toolbarMenuRef.current?.contains(event.target as Node)) setShowToolbarMenu(false)
-    }
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setShowToolbarMenu(false)
-    }
-    document.addEventListener('pointerdown', closeMenu)
-    document.addEventListener('keydown', closeOnEscape)
-    return () => {
-      document.removeEventListener('pointerdown', closeMenu)
-      document.removeEventListener('keydown', closeOnEscape)
-    }
-  }, [showToolbarMenu])
-
-  useEffect(() => {
-    if (showExpandedToolbar) setShowToolbarMenu(false)
-  }, [showExpandedToolbar])
 
   // Auto-open logic
   const autoOpenProcessedRef = useRef(false)
@@ -877,7 +883,7 @@ export default function ChatsPage() {
           setSelectedChat(current => {
             if (!current) return current
             if (current.id === reconciliation.source_chat_id || current.id === reconciliation.canonical_chat.id) {
-              return reconciliation.canonical_chat
+              return mergeReconciledChatIdentity([...chatsRef.current.filter(chat => chat.id !== current.id), current], reconciliation)
             }
             return current
           })
@@ -1106,12 +1112,15 @@ export default function ChatsPage() {
       })
   }
 
+  const groupSyncDevices = devices.filter(device => !filterDevices.length || filterDevices.includes(device.id))
+  const groupSyncTargets = groupSyncDevices.filter(device => device.status === 'connected' && device.runtime_capabilities?.can_list_groups === true && (device.provider || 'whatsapp_web') === 'whatsapp_web')
+  const groupSyncUnavailableReason = groupSyncDevices.some(device => device.runtime_capabilities?.can_list_groups === true && (device.provider || 'whatsapp_web') === 'whatsapp_web') ? 'Conecta un dispositivo de WhatsApp con soporte de grupos.' : 'La sincronización de grupos no está disponible para estos dispositivos.'
   const syncGroups = async () => {
     if (syncingGroups) return
     setSyncingGroups(true); setListFeedback('')
-    const targets = devices.filter(device => device.status === 'connected' && device.runtime_capabilities?.can_list_groups === true && (device.provider || 'whatsapp_web') === 'whatsapp_web' && (!filterDevices.length || filterDevices.includes(device.id)))
+    const targets = groupSyncTargets
     try {
-      if (!targets.length) throw new Error('Conecta un dispositivo de WhatsApp para actualizar tus grupos.')
+      if (!targets.length) throw new Error(groupSyncUnavailableReason)
       for (const device of targets) {
         const response = await fetch('/api/devices/' + device.id + '/groups/sync', { method: 'POST', headers: { Authorization: 'Bearer ' + localStorage.getItem('token') } })
         const data = await response.json(); if (!response.ok || !data.success) throw new Error(data.error || 'No se pudieron actualizar los grupos.')
@@ -1141,62 +1150,42 @@ export default function ChatsPage() {
         className={`min-h-0 shrink-0 flex-col overflow-hidden border-r border-slate-200 bg-white ${layoutMode === 'compact' && compactSurface !== 'list' ? 'hidden' : 'flex'}`}
         style={{ width: layoutMode === 'compact' ? '100%' : leftPanelWidth }}
       >
-         <div className="p-3 border-b border-slate-200/70 bg-white/95 backdrop-blur space-y-3">
-            {/* Header / Selection Mode. Search gets the full compact viewport while the software keyboard is open. */}
+         <div data-chat-list-header className="shrink-0 space-y-2 border-b border-slate-200/70 bg-white px-3 py-2.5">
             {!collapseMobileListToolbar && (selectionMode ? (
-                <div className="flex min-h-11 items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                <button type="button" onClick={() => { setSelectionMode(false); setSelectedChats(new Set()) }} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Salir de selección"><X className="w-4 h-4" /></button>
-                        <div>
-                          <p className="text-xs font-semibold text-slate-700">{selectedChats.size} seleccionados</p>
-                          <p className="text-[10px] text-slate-400">Solo chats cargados ({chats.length})</p>
-                        </div>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                <button type="button" onClick={toggleSelectAll} disabled={chats.length === 0} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-40" aria-label={selectedChats.size === chats.length && chats.length > 0 ? 'Quitar selección de chats cargados' : 'Seleccionar todos los chats cargados'} title="Seleccionar todos los chats cargados"><CheckSquare className="w-4 h-4" /></button>
-                <button type="button" onClick={requestSelectedChatsDeletion} disabled={deleting || selectedChats.size === 0} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:opacity-40" aria-label="Eliminar chats seleccionados"><Trash2 className="w-4 h-4" /></button>
-                    </div>
-                </div>
+              <div className="flex h-11 items-center justify-between gap-2 sm:h-10">
+                <div className="flex min-w-0 items-center gap-1"><button type="button" onClick={() => { setSelectionMode(false); setSelectedChats(new Set()) }} className="flex h-10 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100" aria-label="Salir de selección"><X className="h-4 w-4" /></button><span className="text-xs font-semibold text-slate-700">{selectedChats.size} seleccionados</span></div>
+                <div className="flex items-center gap-1"><button type="button" onClick={toggleSelectAll} disabled={chats.length === 0} className="flex h-10 w-10 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 disabled:opacity-40" aria-label={selectedChats.size === chats.length && chats.length > 0 ? 'Quitar selección de chats cargados' : 'Seleccionar todos los chats cargados'} title={'Solo chats cargados (' + chats.length + ')'}><CheckSquare className="h-4 w-4" /></button><button type="button" onClick={requestSelectedChatsDeletion} disabled={deleting || selectedChats.size === 0} className="flex h-10 w-10 items-center justify-center rounded-lg text-red-600 hover:bg-red-50 disabled:opacity-40" aria-label="Eliminar chats seleccionados"><Trash2 className="h-4 w-4" /></button></div>
+              </div>
             ) : (
-                <div className="flex min-h-11 min-w-0 items-center gap-1.5">
-                    <DeviceSelector
-                        devices={devices}
-                        selectedDeviceIds={filterDevices}
-                        onDeviceChange={setFilterDevices}
-                        className="min-w-0 flex-1"
-                    />
-                    {showExpandedToolbar && (
-                      <>
-                        <button type="button" onClick={() => { setSelectionMode(true); setSelectedChats(new Set()) }} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 transition hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Seleccionar chats" title="Seleccionar chats">
-                            <ListChecks className="w-4 h-4" />
-                        </button>
-                        <button type="button" onClick={() => setShowOwnStatuses(true)} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 transition hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Mis estados" title="Mis estados">
-                            <Sparkles className="w-4 h-4" />
-                        </button>
-                      </>
-                    )}
-                    <button type="button" onClick={() => setShowNewChatModal(true)} className={`flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-600 text-xs font-semibold text-white shadow-sm shadow-emerald-600/20 transition hover:bg-emerald-700 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 active:scale-[0.98] ${showExpandedToolbar ? 'px-3' : 'w-11'}`} aria-label="Nuevo chat" title="Nuevo chat">
-                        <Plus className="w-4 h-4" />
-                        {showExpandedToolbar && <span>Nuevo chat</span>}
-                    </button>
-                    {!showExpandedToolbar && (
-                      <div ref={toolbarMenuRef} className="relative shrink-0">
-                        <button type="button" onClick={() => setShowToolbarMenu(value => !value)} className="inline-flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 transition hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Más acciones de chats" aria-haspopup="menu" aria-expanded={showToolbarMenu}>
-                          <MoreVertical className="h-4 w-4" />
-                        </button>
-                        {showToolbarMenu && (
-                          <div role="menu" className="fixed inset-x-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] z-[70] max-h-[min(70dvh,24rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl shadow-slate-900/15 sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:top-12 sm:w-52">
-                            <button type="button" role="menuitem" onClick={() => { setShowOwnStatuses(true); setShowToolbarMenu(false) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Sparkles className="h-4 w-4 text-emerald-600" /> Mis estados</button>
-                            <button type="button" role="menuitem" onClick={() => { setSelectionMode(true); setSelectedChats(new Set()); setShowToolbarMenu(false) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><ListChecks className="h-4 w-4 text-slate-500" /> Seleccionar chats</button>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                </div>
+              <div className="flex h-11 min-w-0 items-center gap-1.5 sm:h-10">
+                <DeviceSelector devices={devices} selectedDeviceIds={filterDevices} onDeviceChange={setFilterDevices} className="min-w-0 flex-1" compact />
+                <button type="button" onClick={() => setShowNewChatModal(true)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white transition hover:bg-emerald-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 sm:h-10 sm:w-10" aria-label="Nuevo chat" title="Nuevo chat"><Plus className="h-4 w-4" /></button>
+                <button ref={toolbarMenuTriggerRef} type="button" onClick={() => setShowToolbarMenu(value => !value)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 sm:h-10 sm:w-9" aria-label="Más acciones de chats" aria-haspopup="menu" aria-expanded={showToolbarMenu}>{syncingGroups ? <Loader2 className="h-4 w-4 animate-spin" /> : <MoreVertical className="h-4 w-4" />}</button>
+                {showToolbarMenu && <ConversationMenu anchor={toolbarMenuTriggerRef} label="Acciones de chats" onClose={() => setShowToolbarMenu(false)}>
+                  <button type="button" role="menuitem" onClick={() => { setShowOwnStatuses(true); setShowToolbarMenu(false) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm text-slate-700 hover:bg-emerald-50"><Sparkles className="h-4 w-4 text-slate-500" />Mis estados</button>
+                  <button type="button" role="menuitem" onClick={() => { setSelectionMode(true); setSelectedChats(new Set()); setShowToolbarMenu(false) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm text-slate-700 hover:bg-slate-50"><ListChecks className="h-4 w-4 text-slate-500" />Seleccionar chats</button>
+                  <button type="button" role="menuitem" disabled={syncingGroups || !groupSyncTargets.length} aria-describedby={!groupSyncTargets.length ? 'group-sync-unavailable' : undefined} onClick={() => { setShowToolbarMenu(false); void syncGroups() }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40"><RefreshCw className="h-4 w-4 shrink-0 text-slate-500" /><span>Actualizar grupos de WhatsApp{!groupSyncTargets.length && <span id="group-sync-unavailable" className="mt-1 block text-xs font-normal leading-4">{groupSyncUnavailableReason}</span>}</span></button>
+                </ConversationMenu>}
+              </div>
             ))}
-
-            {!selectionMode && !collapseMobileListToolbar && <div className="flex items-center gap-1"><div className="flex min-w-0 flex-1 rounded-xl bg-slate-100 p-1" role="group" aria-label="Tipo de conversación">{([['all', 'Todos'], ['direct', 'Individuales'], ['group', 'Grupos']] as const).map(([kind, label]) => <button key={kind} type="button" aria-pressed={chatKind === kind} onClick={() => setChatKind(kind)} className={'min-h-10 flex-1 rounded-lg px-1 text-xs font-semibold transition ' + (chatKind === kind ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-800')}>{label}</button>)}</div><button type="button" onClick={() => void syncGroups()} disabled={syncingGroups} aria-label="Actualizar grupos de WhatsApp" title="Actualizar grupos de WhatsApp" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 disabled:opacity-40"><RefreshCw className={'h-4 w-4 ' + (syncingGroups ? 'animate-spin' : '')} /></button></div>}
-            {pins.error && <p role="alert" className="rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{pins.error}</p>}
+            <div className="flex h-11 min-w-0 items-center gap-1.5 sm:h-10">
+              <div className="relative min-w-0 flex-1">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <input ref={searchInputRef} type="text" placeholder="Buscar chats..." value={searchTerm} onChange={event => updateSearchTerm(event.target.value)} onFocus={() => setListSearchFocused(true)} onBlur={() => setListSearchFocused(false)} aria-busy={searchPending || loading} className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-14 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:bg-white focus:ring-2 focus:ring-emerald-500/20 sm:h-10" />
+                {searchPending && <Loader2 aria-label="Esperando para buscar chats" className="absolute right-9 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-emerald-500" />}
+                {searchTerm && <button type="button" onClick={() => updateSearchTerm('')} aria-label="Limpiar búsqueda de chats" className="absolute right-0.5 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button>}
+              </div>
+              <button ref={filterTriggerRef} type="button" onClick={openFilterDraft} aria-label={'Abrir filtros de chats' + (activeMobileFilterCount ? ', ' + activeMobileFilterCount + ' activos' : '')} aria-haspopup="dialog" aria-expanded={showMobileFilters} className={'relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 sm:h-10 sm:w-9 ' + (activeMobileFilterCount ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-100')}><SlidersHorizontal className="h-4 w-4" />{activeMobileFilterCount > 0 && <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-emerald-600" aria-hidden />}</button>
+            </div>
+            {!collapseMobileListToolbar && <div className="flex min-w-0 items-center gap-1">
+              <div className="flex min-w-0 flex-1 items-center gap-0.5" role="group" aria-label="Vista de la bandeja">
+                {([['all', 'Todos'], ['unread', 'No leídos'], ['pending', 'Pendientes']] as const).map(([view, label]) => <button key={view} type="button" onClick={() => setInboxView(view)} disabled={chatKind === 'group' && view === 'pending'} aria-describedby={chatKind === 'group' && view === 'pending' ? 'group-pending-hint' : undefined} aria-pressed={inboxView === view} title={view === 'pending' ? 'Primero quienes esperan más tiempo. Leer no marca la conversación como atendida.' : undefined} className={'h-11 min-w-0 flex-1 rounded-lg px-1 text-[11px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-35 sm:h-9 ' + (inboxView === view ? 'bg-emerald-50 text-emerald-700' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800')}>{label}</button>)}
+              </div>
+              <span aria-hidden className="h-4 w-px shrink-0 bg-slate-200" />
+              <ChatKindSelector value={chatKind} onChange={selectChatKind} />
+            </div>}
+            {chatKind === 'group' && !collapseMobileListToolbar && <p id="group-pending-hint" className="text-[11px] leading-4 text-slate-400">Los grupos no generan pendientes.</p>}
+                        {pins.error && <p role="alert" className="rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{pins.error}</p>}
             {listFeedback && (
               <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-xs font-medium text-red-700" role="alert">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -1213,58 +1202,7 @@ export default function ChatsPage() {
               </div>
             )}
 
-              <div className="flex rounded-xl bg-slate-100 p-1" role="group" aria-label="Vista de la bandeja">
-                {([['all', 'Todos'], ['unread', 'No leídos'], ['pending', 'Pendientes']] as const).map(([view, label]) => <button key={view} type="button" onClick={() => setInboxView(view)} aria-pressed={inboxView === view} className={`min-h-10 flex-1 rounded-lg px-2 text-xs font-semibold transition ${inboxView === view ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}
-              </div>
-              {filterPending && <p className="text-[11px] leading-4 text-slate-500">Primero quienes esperan más tiempo. Leer no marca la conversación como atendida.</p>}
-            {/* Search */}
-             <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                <input
-                ref={searchInputRef}
-                type="text"
-                placeholder="Buscar chats..."
-                value={searchTerm}
-                onChange={(e) => updateSearchTerm(e.target.value)}
-                onFocus={() => setListSearchFocused(true)}
-                onBlur={() => setListSearchFocused(false)}
-                aria-busy={searchPending || loading}
-                className={`w-full pl-9 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-800 focus:bg-white focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-400 outline-none transition-all placeholder:text-slate-400 ${layoutMode === 'compact' ? 'pr-24' : 'pr-16'}`}
-                />
-                {searchPending && <Loader2 aria-label="Esperando para buscar chats" className={`absolute top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500 ${layoutMode === 'compact' ? 'right-20' : 'right-10'}`} />}
-                {searchTerm && <button type="button" onClick={() => updateSearchTerm('')} aria-label="Limpiar búsqueda de chats" className={`absolute top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 ${layoutMode === 'compact' ? 'right-11' : 'right-1'}`}><X className="h-4 w-4" /></button>}
-                {layoutMode === 'compact' && (
-                  <button
-                    type="button"
-                    onClick={openFilterDraft}
-                    className="absolute right-0 top-0 inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-                    aria-label={`Abrir filtros de chats${activeMobileFilterCount ? `, ${activeMobileFilterCount} activos` : ''}`}
-                  >
-                    <SlidersHorizontal className="h-4.5 w-4.5" />
-                    {activeMobileFilterCount > 0 && <span className="absolute right-1.5 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-600 px-1 text-[9px] font-bold text-white">{activeMobileFilterCount}</span>}
-                  </button>
-                )}
-            </div>
 
-              {/* Quick filters */}
-              {layoutMode !== 'compact' && <div className="flex flex-wrap items-center gap-2">
-
-                <button
-                    data-testid="filter-reaction-toggle"
-                    onClick={() => setFilterHasReaction(!filterHasReaction)}
-                  className={`flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg border px-3 text-xs font-medium transition-all duration-200 active:scale-[0.98] ${
-                        filterHasReaction
-                      ? 'bg-emerald-50 text-emerald-700 border-emerald-300 shadow-sm'
-                            : 'bg-white text-slate-500 border-slate-200 hover:border-slate-300 hover:text-slate-700'
-                    }`}
-                    title="Filtrar chats con reacciones"
-                >
-                  <Heart className={`w-3.5 h-3.5 ${filterHasReaction ? 'fill-emerald-500 text-emerald-500' : ''}`} />
-                    Con reacción
-                </button>
-            </div>}
-
-            {layoutMode !== 'compact' && filterHasReaction && <button type="button" data-testid="filter-reaction-advanced" onClick={openFilterDraft} className="flex min-h-11 w-full items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-700"><span>Opciones de reacción</span><SlidersHorizontal className="h-4 w-4" /></button>}
          </div>
 
          {/* Chat List Items */}
@@ -1295,7 +1233,7 @@ export default function ChatsPage() {
                 <MessageCircle className="w-7 h-7 text-slate-400" />
               </div>
               <h3 className="text-sm font-semibold text-slate-700 mb-1">{filterPending ? 'No hay conversaciones pendientes' : filterUnread ? 'Todo leído' : 'No se encontraron chats'}</h3>
-              <p className="text-xs leading-5 text-slate-500 max-w-[220px]">{filterUnread ? 'Los mensajes ya leídos salen de esta vista. Revisa Pendientes para ver a quién falta responder.' : filterPending ? 'Las conversaciones que requieran atención aparecerán aquí.' : 'Prueba con otra búsqueda o desactiva algún filtro para ampliar los resultados.'}</p>
+              <p className="text-xs leading-5 text-slate-500 max-w-[220px]">{filterUnread ? chatKind === 'group' ? 'Los grupos sin mensajes por leer salen de esta vista.' : 'Los mensajes ya leídos salen de esta vista. Revisa Pendientes para ver a quién falta responder.' : filterPending ? 'Las conversaciones que requieran atención aparecerán aquí.' : 'Prueba con otra búsqueda o desactiva algún filtro para ampliar los resultados.'}</p>
             </div>
             ) : (
                 <div style={{ height: chatVirtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
@@ -1577,8 +1515,8 @@ export default function ChatsPage() {
       )}
 
       {showMobileFilters && typeof document !== 'undefined' && createPortal(
-        <div className="app-viewport fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/30 p-0 sm:p-4"><div ref={filterDialogRef} tabIndex={-1} className="flex h-full w-full flex-col bg-white shadow-2xl sm:max-h-[min(760px,92dvh)] sm:max-w-lg sm:rounded-2xl" role="dialog" aria-modal="true" aria-labelledby="mobile-chat-filters-title">
-          <div className="safe-area-top flex min-h-16 shrink-0 items-center justify-between border-b border-slate-200 px-4">
+        <div className="fixed inset-0 z-[90]" onMouseDown={event => { if (event.target === event.currentTarget) setShowMobileFilters(false) }}><div ref={filterDialogRef} tabIndex={-1} style={filterPosition} className="fixed flex flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/15" role="dialog" aria-modal="true" aria-labelledby="mobile-chat-filters-title">
+          <div className="flex min-h-14 shrink-0 items-center justify-between border-b border-slate-200 px-4">
             <div className="min-w-0">
               <h2 id="mobile-chat-filters-title" className="font-bold text-slate-900">Filtros de chats</h2>
               <p className="text-xs text-slate-500">{activeMobileFilterCount ? `${activeMobileFilterCount} activo${activeMobileFilterCount === 1 ? '' : 's'}` : 'Sin filtros activos'}</p>
@@ -1604,7 +1542,7 @@ export default function ChatsPage() {
                 <div>
                   <p className="mb-2 text-xs font-semibold text-slate-600">¿De quién?</p>
                   <div className="grid grid-cols-3 gap-2">
-                    {([{ v: 'client' as const, label: 'Cliente' }, { v: 'me' as const, label: 'Operador' }, { v: 'any' as const, label: 'Cualquiera' }]).map(option => (
+                    {([{ v: 'client' as const, label: chatKind === 'group' ? 'Otros' : 'Cliente' }, { v: 'me' as const, label: chatKind === 'group' ? 'Mi número' : 'Operador' }, { v: 'any' as const, label: 'Cualquiera' }]).map(option => (
                       <button key={option.v} type="button" onClick={() => setFilterDraft(draft => ({ ...draft, from: option.v }))} className={`min-h-11 rounded-xl border px-2 text-xs font-semibold ${filterDraft.from === option.v ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-200 bg-white text-slate-600'}`}>{option.label}</button>
                     ))}
                   </div>
@@ -1630,7 +1568,7 @@ export default function ChatsPage() {
               </section>
             )}
           </div>
-          <div className="safe-area-bottom flex shrink-0 gap-2 border-t border-slate-200 bg-white p-4">
+          <div className="flex shrink-0 gap-2 border-t border-slate-200 bg-white p-3">
             <button type="button" onClick={() => setFilterDraft({ view: 'all', reaction: false, from: 'client', emojis: [], range: '30d', customFrom: '', customTo: '' })} className="min-h-12 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600">Limpiar</button>
             <button type="button" onClick={() => setShowMobileFilters(false)} className="min-h-12 flex-1 rounded-xl border border-slate-200 text-sm font-semibold text-slate-600">Cancelar</button>
             <button type="button" onClick={applyFilterDraft} className="min-h-12 flex-1 rounded-xl bg-emerald-600 text-sm font-bold text-white hover:bg-emerald-700">Aplicar</button>
