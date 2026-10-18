@@ -13,6 +13,7 @@ import { dedupeReactions } from '@/utils/chatReactions'
 import styles from './MessageBubble.module.css'
 import { displayMentionText, groupMessageAuthor, participantName } from '@/utils/chatGroups'
 import ChatMessageMedia from './ChatMessageMedia'
+import { hasUnavailableGroupText } from './messageContent'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
 /** Reconstruct WhatsApp-formatted text from DOM nodes (preserves *, _, ~, ` markers on copy) */
@@ -90,6 +91,7 @@ function MessageBubble({ message, contactName, isGroup = false, onMediaClick, on
   const [recoveringMedia, setRecoveringMedia] = useState(false)
   const [recoverMediaError, setRecoverMediaError] = useState('')
   const mediaTooLarge = isGroup && message.media_unavailable_reason === 'group_media_too_large'
+  const unavailableGroupText = hasUnavailableGroupText(message, isGroup)
   const recoverInFlight = useRef(false)
   const recoverMedia = async () => {
     if (!onRecoverMedia || mediaTooLarge || recoverInFlight.current) return
@@ -797,7 +799,8 @@ function MessageBubble({ message, contactName, isGroup = false, onMediaClick, on
         {renderContactCard()}
 
         {/* Text body */}
-        {message.body && message.message_type !== 'sticker' && message.message_type !== 'poll' && (
+        {unavailableGroupText && <p className="text-sm italic text-slate-500">Mensaje no disponible</p>}
+        {!unavailableGroupText && message.body && message.message_type !== 'sticker' && message.message_type !== 'poll' && (
           isEmojiOnly ? (
             <div className={`flex flex-wrap gap-1 ${message.is_from_me ? 'justify-end' : 'justify-start'}`}>
               {splitEmojiSegments(message.body.trim()).filter(s => s.type === 'emoji').map((seg, i) => (

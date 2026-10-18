@@ -9,6 +9,20 @@ const group: Chat = { id: 'group', kind: 'group', jid: '120000@g.us', name: 'Com
 const response = (body: unknown) => ({ ok: true, json: async () => body }) as Response
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers() })
 describe('group surfaces', () => {
+  it('labels unavailable group text while retaining its author, timestamp and quoted context', () => {
+    const message = Object.freeze({ id: 'empty-text', message_id: 'provider-empty', from_jid: '51@s.whatsapp.net', from_name: 'María', is_from_me: false, is_read: true, status: 'read', body: ' \n ', message_type: 'text', timestamp: '2026-10-18T12:00:00Z', quoted_message_id: 'quote', quoted_sender: '52@s.whatsapp.net', quoted_sender_name: 'José', quoted_body: 'Mensaje anterior' } as Message)
+    const { rerender } = render(<MessageBubble message={message} isGroup />)
+    expect(screen.getByText('Mensaje no disponible')).toBeInTheDocument()
+    expect(screen.getByText('María')).toBeInTheDocument()
+    expect(screen.getByText('José')).toBeInTheDocument()
+    expect(screen.getByText('Mensaje anterior')).toBeInTheDocument()
+    const timestamp = new Date(message.timestamp).toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit', hour12: false })
+    expect(screen.getByText(timestamp)).toBeInTheDocument()
+    expect(message.body).toBe(' \n ')
+    rerender(<MessageBubble message={{ ...message, body: 'Texto recuperado' }} isGroup />)
+    expect(screen.queryByText('Mensaje no disponible')).not.toBeInTheDocument()
+    expect(screen.getByText('Texto recuperado')).toBeInTheDocument()
+  })
   it('renders participant authors and quoted authors instead of the group name, including emoji', () => {
     const message = { id: 'message', message_id: 'provider', from_jid: '51@s.whatsapp.net', from_name: 'María', is_from_me: false, body: 'Hola', message_type: 'text', timestamp: '2026-10-18T12:00:00Z', quoted_message_id: 'quote', quoted_sender: '52@s.whatsapp.net', quoted_sender_name: 'José', quoted_body: 'Mensaje anterior' } as Message
     render(<MessageBubble message={message} isGroup contactName="No mostrar grupo" />)
