@@ -50,3 +50,8 @@ export function calendarDefaultList(scopeListID: string | undefined, lastListID:
 export function shouldCloseCalendarComposerOnEscape(defaultPrevented: boolean, nestedLayerOpen: boolean) {
   return !defaultPrevented && !nestedLayerOpen
 }
+
+/** Keep source limitations visible after pagination finishes; loading text is temporary. */
+export function calendarRangeNotice(sourceNotice: string, loaded: number, loading: boolean) {
+  return [sourceNotice, loading && loaded >= 2000 ? `Cargando ${loaded} elementos del calendario…` : ''].filter(Boolean).join(' ')
+}

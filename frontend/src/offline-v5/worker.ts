@@ -2,7 +2,7 @@
 
 import { OfflineV5Controller } from './controller'
 import { OfflineV5Engine } from './engine'
-import { OFFLINE_V5_IDLE_MS, OFFLINE_V5_PROTOCOL, OFFLINE_V5_SCHEMA, OfflineV5Error, type OfflineV5MutationInput, type OfflineV5RouteRequest, type OfflineV5WorkerRequest } from './types'
+import { OFFLINE_V5_IDLE_MS, OFFLINE_V5_PROTOCOL, OFFLINE_V5_SCHEMA, OfflineV5Error, type OfflineV5ConflictResolution, type OfflineV5MutationInput, type OfflineV5RouteRequest, type OfflineV5WorkerRequest } from './types'
 
 declare const __CLARIN_OFFLINE_BUILD__: string
 
@@ -49,6 +49,7 @@ async function dispatch(portID: string, request: OfflineV5WorkerRequest): Promis
     case 'data.overlays': return controller.engine.overlays(portID, request.generation, request.args[0] ? String(request.args[0]) : undefined)
     case 'data.mutate': return controller.engine.queueMutation(portID, request.generation, request.args[0] as OfflineV5MutationInput)
     case 'data.conflicts': return controller.engine.conflicts(portID, request.generation)
+    case 'data.conflicts.resolve': return controller.engine.resolveConflict(portID, request.generation, request.args[0] as OfflineV5ConflictResolution)
     case 'data.conflicts.acknowledge-server-wins': return controller.engine.acknowledgeServerWinsConflicts(portID, request.generation)
     case 'blob.put': return controller.engine.putBlob(portID, request.generation, request.args[0] as never)
     case 'blob.get': return controller.engine.getBlob(portID, request.generation, String(request.args[0] || ''))

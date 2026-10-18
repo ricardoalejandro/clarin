@@ -6,7 +6,7 @@ import SharedWhiteboardPage from '@/app/shared/whiteboards/[id]/page'
 
 const route = vi.hoisted(() => ({ id: 'first-board' }))
 
-vi.mock('next/navigation', () => ({ useParams: () => route }))
+vi.mock('next/navigation', () => ({ useParams: () => route, usePathname: () => `/dashboard/whiteboards/${route.id}` }))
 vi.mock('next/dynamic', () => ({
   default: () => function EditorProbe({ boardID, shareLinkID }: { boardID?: string; shareLinkID?: string }) {
     const id = boardID ?? shareLinkID

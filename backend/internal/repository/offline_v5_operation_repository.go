@@ -166,6 +166,55 @@ func offlineV5OperationIntentHash(operation domain.OfflineV5Operation) (string, 
 	return hex.EncodeToString(digest[:]), nil
 }
 
+// Only versions of the same canonical entity may continue a local edit chain.
+// The original command is never rewritten: its exact receipt hash survives a
+// lost acknowledgement and a later manifest renewal.
+func offlineV5DependencyBaseVersion(operation domain.OfflineV5Operation, predecessor offlineV5StoredReceipt) int64 {
+	if predecessor.SelectionID != operation.SelectionID || predecessor.ResourceID != operation.ResourceID || predecessor.ServerVersion < 0 ||
+		(predecessor.Status != "applied" && predecessor.Status != "merged" && predecessor.Status != "noop") {
+		return operation.BaseVersion
+	}
+	// Attendance versions belong to the participant/session pair. Two marks for
+	// the same participant in different sessions must never share a version.
+	if operation.Action == domain.OfflineV5ActionProgramsAttendance && predecessor.Action == operation.Action {
+		var payload struct {
+			SessionID uuid.UUID `json:"session_id"`
+		}
+		var receipt domain.OfflineV5OperationResult
+		var result struct {
+			SessionID  uuid.UUID `json:"session_id"`
+			Attendance struct {
+				SessionID uuid.UUID `json:"session_id"`
+			} `json:"attendance"`
+		}
+		if json.Unmarshal(operation.Payload, &payload) == nil && payload.SessionID != uuid.Nil &&
+			json.Unmarshal(predecessor.Result, &receipt) == nil && json.Unmarshal(receipt.Result, &result) == nil &&
+			(result.SessionID == payload.SessionID || result.Attendance.SessionID == payload.SessionID) {
+			return predecessor.ServerVersion
+		}
+		return operation.BaseVersion
+	}
+	if predecessor.ServerVersion < 1 {
+		return operation.BaseVersion
+	}
+	family := func(action string) string {
+		switch action {
+		case domain.OfflineV5ActionTasksCreate, domain.OfflineV5ActionTasksUpdate, domain.OfflineV5ActionTasksComplete, domain.OfflineV5ActionTasksReopen:
+			return "task"
+		case domain.OfflineV5ActionProgramsParticipantAdd, domain.OfflineV5ActionProgramsParticipantLifecycle:
+			return "program_participant"
+		case domain.OfflineV5ActionContactsUpdate, domain.OfflineV5ActionProgramsUpdate, domain.OfflineV5ActionProgramsSessionUpsert, domain.OfflineV5ActionProgramsGoals, domain.OfflineV5ActionBoardsScene:
+			return action
+		default:
+			return ""
+		}
+	}
+	if current := family(operation.Action); current != "" && current == family(predecessor.Action) && operation.Action != domain.OfflineV5ActionTasksCreate && operation.Action != domain.OfflineV5ActionProgramsParticipantAdd {
+		return predecessor.ServerVersion
+	}
+	return operation.BaseVersion
+}
+
 func offlineV5SyncWritesGate(receiptRecovery bool, operationCount int, globalWrites, grantWrites bool) error {
 	if operationCount > 0 && !receiptRecovery && (!globalWrites || !grantWrites) {
 		return ErrOfflineV5WritesDisabled
@@ -1160,6 +1209,11 @@ func (r *OfflineV5Repository) applyProgramParticipantLifecycleTx(ctx context.Con
 			WHERE program.account_id=$2 AND program.id=$3 AND participant.program_id=program.id AND participant.id=$4 RETURNING participant.enrolled_at`,
 			*newDate, record.AccountID, programID, operation.ResourceID).Scan(&enrolledAt)
 		result.ServerVersion = enrolledAt.UnixMicro()
+		if droppedAt != nil {
+			result.ServerVersion = droppedAt.UnixMicro()
+		} else if completedAt != nil {
+			result.ServerVersion = completedAt.UnixMicro()
+		}
 	case "outcome":
 		if status != "active" {
 			result.ErrorCode = "participant_already_ended"
@@ -1450,6 +1504,7 @@ func (r *OfflineV5Repository) applyProgramAttendanceTx(ctx context.Context, tx p
 				WHERE attendance.session_id=$1 AND attendance.participant_id=$2 AND session.id=attendance.session_id
 				AND program.id=session.program_id AND program.account_id=$3 AND program.id=$4`, sessionID, operation.ResourceID, record.AccountID, programID)
 			result.Status, result.ServerVersion = "applied", 0
+			result.Result, _ = json.Marshal(map[string]any{"session_id": sessionID, "participant_id": operation.ResourceID})
 		}
 	} else {
 		var id uuid.UUID
@@ -1909,6 +1964,8 @@ func (r *OfflineV5Repository) recoverV5ReceiptsTx(ctx context.Context, tx pgx.Tx
 type OfflineV5OperationPreprocessor func(context.Context, *OfflineV5AuthRecord, *domain.OfflineV5Operation) error
 
 func (r *OfflineV5Repository) applyV5OperationTx(ctx context.Context, tx pgx.Tx, record *OfflineV5AuthRecord, manifest *domain.OfflineV5Manifest, operation domain.OfflineV5Operation, preprocess OfflineV5OperationPreprocessor) (domain.OfflineV5OperationResult, error) {
+	receiptOperation := operation
+	effectiveBaseVersion := operation.BaseVersion
 	result := domain.OfflineV5OperationResult{OperationID: operation.OperationID, ResourceID: operation.ResourceID, Status: "rejected"}
 	if !offlineV5OperationBinding(record, manifest, operation, time.Now().UTC()) {
 		return result, ErrOfflineV3Invalid
@@ -1968,9 +2025,9 @@ func (r *OfflineV5Repository) applyV5OperationTx(ctx context.Context, tx pgx.Tx,
 			result.ErrorCode = "invalid_operation_dependency"
 			return result, r.storeV5ReceiptTx(ctx, tx, record, operation, requestHash, result, nil)
 		}
-		var status string
-		err := tx.QueryRow(ctx, `SELECT status FROM offline_v5_receipts WHERE grant_id=$1 AND account_id=$2 AND operation_id=$3`,
-			record.GrantID, record.AccountID, *operation.DependsOnOperationID).Scan(&status)
+		var predecessor offlineV5StoredReceipt
+		err := tx.QueryRow(ctx, `SELECT status,action_code,selection_id,resource_id,server_version,result FROM offline_v5_receipts WHERE grant_id=$1 AND account_id=$2 AND operation_id=$3`,
+			record.GrantID, record.AccountID, *operation.DependsOnOperationID).Scan(&predecessor.Status, &predecessor.Action, &predecessor.SelectionID, &predecessor.ResourceID, &predecessor.ServerVersion, &predecessor.Result)
 		if errors.Is(err, pgx.ErrNoRows) {
 			result.Status, result.ErrorCode = "pending", "operation_dependency_pending"
 			return result, r.storeV5ReceiptTx(ctx, tx, record, operation, requestHash, result, nil)
@@ -1978,14 +2035,15 @@ func (r *OfflineV5Repository) applyV5OperationTx(ctx context.Context, tx pgx.Tx,
 		if err != nil {
 			return result, err
 		}
-		if status == "pending" {
+		if predecessor.Status == "pending" {
 			result.Status, result.ErrorCode = "pending", "operation_dependency_pending"
 			return result, r.storeV5ReceiptTx(ctx, tx, record, operation, requestHash, result, nil)
 		}
-		if status != "applied" && status != "merged" && status != "noop" {
+		if predecessor.Status != "applied" && predecessor.Status != "merged" && predecessor.Status != "noop" {
 			result.ErrorCode = "operation_dependency_rejected"
 			return result, r.storeV5ReceiptTx(ctx, tx, record, operation, requestHash, result, nil)
 		}
+		effectiveBaseVersion = offlineV5DependencyBaseVersion(operation, predecessor)
 	}
 	module, known := OfflineV5ActionModule(operation.Action)
 	if !known || !offlineV5ModuleAllowed(record.Modules, module) || !record.WritesEnabled {
@@ -2047,6 +2105,10 @@ func (r *OfflineV5Repository) applyV5OperationTx(ctx context.Context, tx pgx.Tx,
 	// Parse/materialize expensive module payloads only after the active grant,
 	// current manifest, signed capability and live resource ACL are proven.
 	// Receipt recovery returns above and must never replay this preprocessing.
+	operation, err = offlineV5DispatchAfterDependency(operation, effectiveBaseVersion)
+	if err != nil {
+		return result, err
+	}
 	if preprocess != nil {
 		if err := preprocess(ctx, record, &operation); err != nil {
 			return result, err
@@ -2062,7 +2124,13 @@ func (r *OfflineV5Repository) applyV5OperationTx(ctx context.Context, tx pgx.Tx,
 	}
 	var taskEffect *OfflineV3TaskEffect
 	switch operation.Action {
-	case domain.OfflineV5ActionTasksCreate, domain.OfflineV5ActionTasksComplete:
+	case domain.OfflineV5ActionTasksCreate:
+		var task *domain.Task
+		result, task, err = r.applyTaskCreateV5Tx(ctx, mutation, record, operation, selection)
+		if task != nil && result.Status == "applied" {
+			taskEffect = &OfflineV3TaskEffect{TaskID: task.ID, TaskVersion: task.Version}
+		}
+	case domain.OfflineV5ActionTasksComplete:
 		v3Operation := domain.OfflineV3Operation{ProtocolVersion: 4, GrantID: operation.GrantID, UserID: operation.UserID,
 			AccountID: operation.AccountID, BrowserProfileID: operation.BrowserProfileID, OperationID: operation.OperationID,
 			Action: operation.Action, SelectionID: operation.SelectionID, ResourceID: operation.ResourceID,
@@ -2133,7 +2201,7 @@ func (r *OfflineV5Repository) applyV5OperationTx(ctx context.Context, tx pgx.Tx,
 	} else if err := mutation.Commit(ctx); err != nil {
 		return result, err
 	}
-	return result, r.storeV5ReceiptTx(ctx, tx, record, operation, requestHash, result, taskEffect)
+	return result, r.storeV5ReceiptTx(ctx, tx, record, receiptOperation, requestHash, result, taskEffect)
 }
 
 func (r *OfflineV5Repository) Sync(ctx context.Context, input OfflineV5SyncInput, expected *OfflineV5AuthRecord, writes bool) (*OfflineV5SyncResult, error) {

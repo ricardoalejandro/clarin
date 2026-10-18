@@ -9,7 +9,7 @@ import { OfflineV5SessionRegistry, type OfflineV5ActiveSession } from '@/offline
 import { MemoryOfflineV5Storage, rotateOfflineV5StoredSessionEpoch } from '@/offline-v5/storage'
 import { clearOfflineV5BootMarker, markOfflineV5Boot, readOfflineV5BootMarker, type OfflineV5BootStorage } from '@/lib/offlineV5Boot'
 import { beginOfflineV5OnlineTransition, bootstrapOfflineV5Runtime, cancelOfflineV5OnlineTransition, getOfflineV5RuntimeSnapshot, offlineV5RuntimeAtBoot, offlineV5ShouldBlockEgress, refreshOfflineV5FallbackOffer, refreshOfflineV5FallbackState, replaceStaleOfflineLoginWithOnline, runtimeAfterOfflineV5Bootstrap, setOfflineV5RuntimeClientForTests, shouldCloseOfflineV5OnlineTransition, shouldOfferOfflineV5, type RuntimeSnapshot } from '@/lib/offlineV5Runtime'
-import { OfflineV5Error, type OfflineV5Identity, type OfflineV5Manifest, type OfflineV5Operation, type OfflineV5VaultEnvelope, type OfflineV5VaultMetadata } from '@/offline-v5/types'
+import { OfflineV5Error, type OfflineV5Conflict, type OfflineV5Identity, type OfflineV5Manifest, type OfflineV5Operation, type OfflineV5StoredCipher, type OfflineV5VaultEnvelope, type OfflineV5VaultMetadata } from '@/offline-v5/types'
 
 const origin = 'https://clarin.test'
 
@@ -436,10 +436,97 @@ describe('Offline v5 encrypted browser engine', () => {
     await engine.applyReceipts('port', session.generation, [{ operation_id: 'operation-1', status: 'conflict', resource_id: 'task-1', conflict: { fields: ['title'], base: { title: 'Antes' }, local: { title: 'Nuevo' }, server: { title: 'Servidor' } } }])
     expect(await engine.outbox('port', session.generation)).toHaveLength(0)
     expect(await engine.conflicts('port', session.generation)).toMatchObject([{ operation_id: 'operation-1', fields: ['title'], status: 'conflict' }])
-    expect(await engine.overlays('port', session.generation, 'task')).toHaveLength(0)
+    expect(await engine.overlays('port', session.generation, 'task')).toMatchObject([{ value: { title: 'Nuevo' } }])
     const acknowledged = await engine.acknowledgeServerWinsConflicts('port', session.generation)
     expect(acknowledged).toMatchObject({ mode: 'offline', conflictCount: 0 })
     expect(await engine.conflicts('port', session.generation)).toHaveLength(0)
+    expect(await engine.overlays('port', session.generation, 'task')).toHaveLength(0)
+  })
+
+  it('chains repeated edits and keeps a newer local edit when an earlier receipt arrives', async () => {
+    const storage = new MemoryOfflineV5Storage(), engine = new OfflineV5Engine(origin, storage)
+    await storage.commit([{ store: 'schema', key: 'auth:browser-1', value: 'epoch' }])
+    const session = engine.sessions.open('port', await active(identity('user', 'account')))
+    const input = { action: 'tasks.update' as const, selection_id: 'selection-grant-user-account', resource_id: 'task-1', entity_type: 'task', entity_id: 'task-1', base_version: 2,
+      base: { title: 'Before' }, payload: { title: 'First' }, optimistic_value: { id: 'task-1', account_id: 'account', list_id: 'list-account', title: 'First' } }
+    await engine.queueMutation('port', session.generation, { ...input, operation_id: 'first' })
+    await engine.queueMutation('port', session.generation, { ...input, operation_id: 'second', base: { title: 'First' }, payload: { title: 'Second' }, optimistic_value: { ...input.optimistic_value, title: 'Second' } })
+    expect(await engine.queueMutation('port', session.generation, { ...input, operation_id: 'first' })).toMatchObject({ state: 'duplicate' })
+    expect(await engine.outbox('port', session.generation)).toMatchObject([{ operation_id: 'first' }, { operation_id: 'second', depends_on_operation_id: 'first', base: { title: 'First' } }])
+    await engine.applyReceipts('port', session.generation, [{ operation_id: 'first', status: 'applied', resource_id: 'task-1', server_version: 3 }])
+    expect(await engine.overlays('port', session.generation, 'task')).toMatchObject([{ value: { title: 'Second' } }])
+    expect(await engine.outbox('port', session.generation)).toMatchObject([{ operation_id: 'second', base_version: 2 }])
+  })
+
+  it('serializes simultaneous tabs for the same vault and never replaces the latest pending edit with an earlier receipt', async () => {
+    const storage = new MemoryOfflineV5Storage(), now = Date.now(), engine = new OfflineV5Engine(origin, storage, undefined, () => now)
+    await storage.commit([{ store: 'schema', key: 'auth:browser-1', value: 'epoch' }])
+    const candidate = await active(identity('user', 'account'))
+    const a = engine.sessions.open('port-a', candidate), b = engine.sessions.open('port-b', candidate)
+    const input = { action: 'tasks.update' as const, selection_id: candidate.manifest.roots[0].selection_id, resource_id: 'task-1', entity_type: 'task', entity_id: 'task-1', base_version: 2,
+      base: { title: 'Before' }, payload: { title: 'First' }, optimistic_value: { id: 'task-1', account_id: 'account', list_id: 'list-account', title: 'First', version: 2 } }
+    await Promise.all([
+      engine.queueMutation('port-a', a.generation, { ...input, operation_id: 'first' }),
+      engine.queueMutation('port-b', b.generation, { ...input, operation_id: 'second', payload: { title: 'Second' }, optimistic_value: { ...input.optimistic_value, title: 'Second' } }),
+      engine.applyReceipts('port-a', a.generation, [{ operation_id: 'first', status: 'applied', resource_id: 'task-1', server_version: 3 }]),
+    ])
+    expect(await engine.outbox('port-b', b.generation)).toMatchObject([{ operation_id: 'second', depends_on_operation_id: 'first' }])
+    expect(await engine.overlays('port-a', a.generation, 'task')).toMatchObject([{ value: { title: 'Second', version: 2 } }])
+    await engine.applyReceipts('port-b', b.generation, [{ operation_id: 'second', status: 'applied', resource_id: 'task-1', server_version: 4 }])
+    expect(await engine.overlays('port-a', a.generation, 'task')).toMatchObject([{ version: 4, value: { title: 'Second', version: 4, offline_pending: false } }])
+  })
+
+  it('advances a confirmed whiteboard scene and canonical content before a bundle refresh can succeed', async () => {
+    const storage = new MemoryOfflineV5Storage(), engine = new OfflineV5Engine(origin, storage)
+    await storage.commit([{ store: 'schema', key: 'auth:browser-1', value: 'epoch' }])
+    const candidate = await active(identity('user', 'account')), selection_id = 'whiteboard-selection'
+    candidate.manifest.roots = [{ selection_id, module: 'whiteboards', resource_type: 'whiteboard', resource_id: 'board' }]
+    candidate.manifest.capabilities = [{ action: 'whiteboards.scene.update', selection_id, root_resource_id: 'board', resource_type: 'whiteboard', resource_id: 'board' }]
+    const session = engine.sessions.open('port', candidate)
+    await engine.queueMutation('port', session.generation, { operation_id: 'scene-edit', action: 'whiteboards.scene.update', selection_id, resource_id: 'board', entity_type: 'whiteboard', entity_id: 'board', base_version: 2,
+      payload: { expected_sequence: 2, scene: { elements: [] } }, optimistic_value: { id: 'board', account_id: 'account', sequence: 2, scene: { elements: [] } } })
+    await engine.applyReceipts('port', session.generation, [{ operation_id: 'scene-edit', status: 'applied', resource_id: 'board', server_version: 3,
+      result: { scene: { board_id: 'board', sequence: 3, scene: { elements: [{ id: 'canonical' }] } } } }])
+    expect(await engine.overlays('port', session.generation, 'whiteboard')).toMatchObject([{ version: 3, value: { sequence: 3, scene_sequence: 3, scene: { elements: [{ id: 'canonical' }] }, offline_pending: false } }])
+  })
+
+  it('orders edits, subtasks and comments after a task created in the same prepared list', async () => {
+    const storage = new MemoryOfflineV5Storage(), engine = new OfflineV5Engine(origin, storage)
+    await storage.commit([{ store: 'schema', key: 'auth:browser-1', value: 'epoch' }])
+    const candidate = await active(identity('user', 'account'))
+    const capability = candidate.manifest.capabilities[0]
+    candidate.manifest.capabilities.push({ ...capability, action: 'tasks.create' }, { ...capability, action: 'tasks.comments.create' })
+    const session = engine.sessions.open('port', candidate)
+    const task = { id: 'created-task', account_id: 'account', list_id: 'list-account', title: 'New task' }
+    const selection_id = candidate.manifest.roots[0].selection_id
+    await engine.queueMutation('port', session.generation, { operation_id: 'create', action: 'tasks.create', selection_id, resource_id: task.id, entity_type: 'task', entity_id: task.id, base_version: 0, payload: { list_id: task.list_id, title: task.title }, optimistic_value: task })
+    await engine.queueMutation('port', session.generation, { operation_id: 'edit', action: 'tasks.update', selection_id, resource_id: task.id, entity_type: 'task', entity_id: task.id, base_version: 0, base: task, payload: { title: 'Edited' }, optimistic_value: { ...task, title: 'Edited' } })
+    await engine.queueMutation('port', session.generation, { operation_id: 'comment', action: 'tasks.comments.create', selection_id, resource_id: 'comment-new', entity_type: 'task_comment', entity_id: 'comment-new', base_version: 0, payload: { task_id: task.id, body: 'A note' }, optimistic_value: { id: 'comment-new', account_id: 'account', task_id: task.id, root_resource_id: task.list_id, body: 'A note' } })
+    await engine.queueMutation('port', session.generation, { operation_id: 'subtask', action: 'tasks.create', selection_id, resource_id: 'child', entity_type: 'task', entity_id: 'child', base_version: 0, payload: { list_id: task.list_id, parent_task_id: task.id, title: 'Child' }, optimistic_value: { ...task, id: 'child', parent_task_id: task.id, title: 'Child' } })
+    expect(await engine.outbox('port', session.generation)).toMatchObject([
+      { operation_id: 'create' }, { operation_id: 'edit', depends_on_operation_id: 'create' },
+      { operation_id: 'comment', depends_on_operation_id: 'create' }, { operation_id: 'subtask', depends_on_operation_id: 'create' },
+    ])
+    await expect(engine.queueMutation('port', session.generation, { operation_id: 'foreign', action: 'tasks.comments.create', selection_id, resource_id: 'foreign-comment', entity_type: 'task_comment', entity_id: 'foreign-comment', base_version: 0, payload: { task_id: 'not-prepared', body: 'No' }, optimistic_value: { id: 'foreign-comment', account_id: 'account', task_id: 'not-prepared', root_resource_id: task.list_id } })).rejects.toMatchObject({ code: 'outside_selection' })
+  })
+
+  it('resolves one field conflict atomically into a new intent while retaining independent local fields', async () => {
+    const storage = new MemoryOfflineV5Storage(), engine = new OfflineV5Engine(origin, storage)
+    await storage.commit([{ store: 'schema', key: 'auth:browser-1', value: 'epoch' }])
+    const candidate = await active(identity('user', 'account'))
+    candidate.manifest.max_storage_bytes = 8 * 1024 * 1024
+    const session = engine.sessions.open('port', candidate)
+    await engine.queueMutation('port', session.generation, { operation_id: 'conflicted', action: 'tasks.update', selection_id: 'selection-grant-user-account', resource_id: 'task-1', entity_type: 'task', entity_id: 'task-1', base_version: 2,
+      base: { title: 'Before', description: 'Before' }, payload: { title: 'Mine', description: 'Local note' }, optimistic_value: { id: 'task-1', account_id: 'account', list_id: 'list-account', title: 'Mine', description: 'Local note' } })
+    await engine.applyReceipts('port', session.generation, [{ operation_id: 'conflicted', status: 'conflict', resource_id: 'task-1', server_version: 3, conflict: { fields: ['title'], server: { title: 'Theirs', description: 'Before' } } }])
+    await expect(engine.resolveConflict('port', session.generation, { operation_id: 'conflicted', choice: 'fields', fields: {} })).rejects.toMatchObject({ code: 'conflict_choice_required' })
+    expect(await engine.conflicts('port', session.generation)).toHaveLength(1)
+    await engine.resolveConflict('port', session.generation, { operation_id: 'conflicted', choice: 'fields', fields: { title: 'server' } })
+    expect(await engine.conflicts('port', session.generation)).toHaveLength(0)
+    const [retry] = await engine.outbox('port', session.generation)
+    expect(retry.operation_id).not.toBe('conflicted')
+    expect(retry).toMatchObject({ base_version: 3, payload: { description: 'Local note' }, base: { description: 'Before' } })
+    expect(await engine.overlays('port', session.generation, 'task')).toMatchObject([{ value: { title: 'Theirs', description: 'Local note' } }])
   })
 
   it('treats a canonical noop receipt as confirmed and removes it from the outbox', async () => {
@@ -453,6 +540,77 @@ describe('Offline v5 encrypted browser engine', () => {
     await engine.applyReceipts('port', session.generation, [{ operation_id: 'operation-noop', status: 'noop', resource_id: 'task-1', server_version: 2 }])
     expect(await engine.outbox('port', session.generation)).toHaveLength(0)
     expect(await engine.conflicts('port', session.generation)).toHaveLength(0)
+  })
+
+  it('shows the selected server fields immediately even when the bundle refresh failed', async () => {
+    const storage = new MemoryOfflineV5Storage(), engine = new OfflineV5Engine(origin, storage)
+    await storage.commit([{ store: 'schema', key: 'auth:browser-1', value: 'epoch' }])
+    const session = engine.sessions.open('port', await active(identity('user', 'account')))
+    await engine.queueMutation('port', session.generation, { operation_id: 'accept-server', action: 'tasks.update', selection_id: 'selection-grant-user-account', resource_id: 'task-1', entity_type: 'task', entity_id: 'task-1', base_version: 2,
+      base: { title: 'Before' }, payload: { title: 'Mine' }, optimistic_value: { id: 'task-1', account_id: 'account', list_id: 'list-account', title: 'Mine', version: 2 } })
+    await engine.applyReceipts('port', session.generation, [{ operation_id: 'accept-server', status: 'conflict', resource_id: 'task-1', server_version: 3, conflict: { fields: ['title'], server: { title: 'Theirs' } } }])
+    await engine.resolveConflict('port', session.generation, { operation_id: 'accept-server', choice: 'server' })
+    expect(await engine.overlays('port', session.generation, 'task')).toMatchObject([{ version: 3, value: { title: 'Theirs', version: 3, offline_pending: false } }])
+    expect(await engine.conflicts('port', session.generation)).toEqual([])
+  })
+
+  it('materializes and resolves a conflict at the reserved quota without changing the original command', async () => {
+    const storage = new MemoryOfflineV5Storage(), engine = new OfflineV5Engine(origin, storage)
+    await storage.commit([{ store: 'schema', key: 'auth:browser-1', value: 'epoch' }])
+    const candidate = await active(identity('user', 'account'))
+    const session = engine.sessions.open('port', candidate)
+    const input = { operation_id: 'quota-conflict', action: 'tasks.update' as const, selection_id: 'selection-grant-user-account', resource_id: 'task-1', entity_type: 'task', entity_id: 'task-1', base_version: 2,
+      base: { title: 'Before' }, payload: { title: 'Mine' }, optimistic_value: { id: 'task-1', account_id: 'account', list_id: 'list-account', title: 'Mine', version: 2 } }
+    await engine.queueMutation('port', session.generation, input)
+    const [original] = await engine.outbox('port', session.generation)
+    const quota = await storage.totalBytes(candidate.envelope.namespace)
+    expect(quota).toBeLessThan(20_000)
+    candidate.manifest.max_storage_bytes = quota
+    expect(await engine.queueMutation('port', session.generation, input)).toMatchObject({ state: 'duplicate' })
+    await expect(engine.queueMutation('port', session.generation, { ...input, operation_id: 'one-too-many' })).rejects.toMatchObject({ code: 'storage_quota' })
+    expect(await engine.outbox('port', session.generation)).toEqual([original])
+    const receipt = { operation_id: input.operation_id, status: 'conflict' as const, resource_id: input.resource_id, server_version: 3,
+      conflict: { fields: ['title'], base: input.base, local: input.payload, server: { title: '\u0000'.repeat(499) + '😀', description: 'Server text unrelated to this edit'.repeat(6000) } } }
+    await engine.applyReceipts('port', session.generation, [receipt])
+    const [conflict] = await engine.conflicts('port', session.generation)
+    expect(conflict).toMatchObject({ operation: original, base: input.base, local: input.payload, server_version: 3, server: { title: receipt.conflict.server.title } })
+    expect(conflict.server).not.toHaveProperty('description')
+    const [cipher] = await storage.scan<OfflineV5StoredCipher>('conflicts', { index: 'namespace', key: candidate.envelope.namespace })
+    const persisted = await decryptOfflineV5Value<{ conflict: OfflineV5Conflict }>(candidate.keys.content, candidate.identity, 'conflicts', cipher.storage_key, cipher.ciphertext)
+    expect(persisted.conflict).not.toHaveProperty('base')
+    expect(persisted.conflict).not.toHaveProperty('local')
+    expect(persisted.conflict.operation).toEqual(original)
+    expect(await engine.outbox('port', session.generation)).toEqual([])
+    expect(await storage.totalBytes(candidate.envelope.namespace)).toBeLessThanOrEqual(quota)
+    await engine.applyReceipts('port', session.generation, [receipt])
+    expect(await engine.conflicts('port', session.generation)).toHaveLength(1)
+    // A new retry needs its own reservation. If no space remains, the explicit
+    // choice fails without removing the reviewable original or its variants.
+    await expect(engine.resolveConflict('port', session.generation, { operation_id: input.operation_id, choice: 'fields', fields: { title: 'local' } })).rejects.toMatchObject({ code: 'storage_quota' })
+    expect(await engine.conflicts('port', session.generation)).toEqual([conflict])
+    await engine.resolveConflict('port', session.generation, { operation_id: input.operation_id, choice: 'server' })
+    expect(await engine.overlays('port', session.generation, 'task')).toMatchObject([{ value: { title: receipt.conflict.server.title, version: 3 } }])
+    expect(await engine.conflicts('port', session.generation)).toEqual([])
+    expect(await storage.totalBytes(candidate.envelope.namespace)).toBeLessThanOrEqual(quota)
+  })
+
+  it('keeps an unbounded scene conflict pending without truncating its immutable command when quota is exhausted', async () => {
+    const storage = new MemoryOfflineV5Storage(), engine = new OfflineV5Engine(origin, storage)
+    await storage.commit([{ store: 'schema', key: 'auth:browser-1', value: 'epoch' }])
+    const candidate = await active(identity('user', 'account')), selection_id = 'whiteboard-selection'
+    candidate.manifest.roots = [{ selection_id, module: 'whiteboards', resource_type: 'whiteboard', resource_id: 'board' }]
+    candidate.manifest.capabilities = [{ action: 'whiteboards.scene.update', selection_id, root_resource_id: 'board', resource_type: 'whiteboard', resource_id: 'board' }]
+    const session = engine.sessions.open('port', candidate)
+    await engine.queueMutation('port', session.generation, { operation_id: 'scene-edit', action: 'whiteboards.scene.update', selection_id, resource_id: 'board', entity_type: 'whiteboard', entity_id: 'board', base_version: 2,
+      base: { scene: { elements: [] } }, payload: { expected_sequence: 2, scene: { elements: [{ id: 'local' }] } }, optimistic_value: { id: 'board', account_id: 'account', sequence: 2, scene: { elements: [{ id: 'local' }] } } })
+    const before = await engine.outbox('port', session.generation)
+    const overlays = await engine.overlays('port', session.generation, 'whiteboard')
+    candidate.manifest.max_storage_bytes = await storage.totalBytes(candidate.envelope.namespace)
+    await expect(engine.applyReceipts('port', session.generation, [{ operation_id: 'scene-edit', status: 'conflict', server_version: 3,
+      conflict: { fields: ['scene'], server: { scene: { elements: [{ id: 'server', text: 'Unbounded scene'.repeat(1000) }] } } } }])).rejects.toMatchObject({ code: 'storage_quota' })
+    expect(await engine.outbox('port', session.generation)).toEqual(before)
+    expect(await engine.overlays('port', session.generation, 'whiteboard')).toEqual(overlays)
+    expect(await engine.conflicts('port', session.generation)).toEqual([])
   })
 
   it('never returns the same entity id from another account namespace', async () => {

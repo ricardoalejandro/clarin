@@ -1,7 +1,7 @@
 import type { JWK } from 'jose'
 import { createSigningKey, signClaims } from '../offline-v4/crypto'
 import type { BrowserProfile } from '../offline-v4/types'
-import { offlineV5WhiteboardAssetDescriptors } from './manifest'
+import { offlineV5PreparedAssetDescriptors } from './manifest'
 import { base64url, sha256HexBytes } from './crypto'
 import { OfflineV5Error, type OfflineV5Operation, type OfflineV5PrepareBundle, type OfflineV5PreparedAsset, type OfflineV5Root, type OfflineV5SyncRequest, type OfflineV5SyncResponse, type OfflineV5WhiteboardAssetDescriptor } from './types'
 
@@ -178,7 +178,7 @@ export class OfflineV5OnlineClient {
   }
 
   async downloadPreparedAssets(bundle: OfflineV5PrepareBundle, signal?: AbortSignal): Promise<OfflineV5PreparedAsset[]> {
-    const pending = bundle.snapshots.flatMap(snapshot => offlineV5WhiteboardAssetDescriptors(snapshot).map(descriptor => ({
+    const pending = bundle.snapshots.flatMap(snapshot => offlineV5PreparedAssetDescriptors(snapshot).map(descriptor => ({
       descriptor,
       root_selection_id: snapshot.root_selection_id,
     })))
@@ -196,8 +196,10 @@ export class OfflineV5OnlineClient {
     return result
   }
 
-  private async downloadPreparedAsset(descriptor: OfflineV5WhiteboardAssetDescriptor, signal?: AbortSignal): Promise<Blob> {
-    const path = `/api/whiteboards/${encodeURIComponent(descriptor.root_resource_id)}/assets/${encodeURIComponent(descriptor.id)}`
+  private async downloadPreparedAsset(descriptor: OfflineV5PreparedAsset['descriptor'], signal?: AbortSignal): Promise<Blob> {
+    const path = 'kind' in descriptor && descriptor.kind === 'task_attachment'
+      ? `/api/tasks/${encodeURIComponent(descriptor.task_id)}/attachments/${encodeURIComponent(descriptor.id)}/download`
+      : `/api/whiteboards/${encodeURIComponent(descriptor.root_resource_id)}/assets/${encodeURIComponent(descriptor.id)}`
     let response: Response
     try {
       response = await this.fetcher(new URL(path, this.origin), { method: 'GET', headers: { Accept: descriptor.content_type }, credentials: 'include', cache: 'no-store', redirect: 'error', signal })

@@ -2,6 +2,26 @@ import { describe, expect, it, vi } from 'vitest'
 import { GET } from './route'
 
 describe('offline v5 canonical application service worker', () => {
+  it('keeps a canonical prepared profile out of the parallel legacy application when its shell is missing', async () => {
+    const source = await GET().text()
+    const legacyRead = vi.fn(async () => new Response('LEGACY_PARALLEL_UI'))
+    const create = new Function('self', 'meta', 'legacyRead', source + `
+      readMeta = async kind => meta[kind];
+      offlineV5Route = async () => undefined;
+      matchBase = async () => new Response('PUBLIC_RECOVERY');
+      matchAcrossGenerations = legacyRead;
+      return offlineNavigation;
+    `)
+    const metas = { v5: { enabled: true }, v4: { enabled: true, mode: 'offline' } }
+    const navigate = create({ location: { origin: 'https://clarin.example' }, addEventListener: vi.fn() }, metas, legacyRead)
+    const response = await navigate(new Request('https://clarin.example/dashboard/tasks'), 'mode')
+    expect(await response.text()).toBe('PUBLIC_RECOVERY')
+    expect(legacyRead).not.toHaveBeenCalled()
+    expect(metas.v4.enabled).toBe(true)
+    expect(metas.v5.enabled).toBe(true)
+    metas.v5.enabled = false
+    expect(await (await navigate(new Request('https://clarin.example/dashboard/tasks'), 'mode')).text()).toBe('LEGACY_PARALLEL_UI')
+  })
   it('never caches API/private responses and preserves credentials for online navigation', async () => {
     const response = GET()
     const source = await response.text()

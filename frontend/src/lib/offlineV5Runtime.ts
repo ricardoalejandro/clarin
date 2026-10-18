@@ -1,5 +1,5 @@
 import { browserOfflineV5Client, type OfflineV5UnlockResult } from '@/offline-v5/client'
-import { OfflineV5Error, type OfflineV5RouteRequest, type OfflineV5RouteResponse, type OfflineV5SessionSnapshot } from '@/offline-v5/types'
+import { OfflineV5Error, type OfflineV5ConflictResolution, type OfflineV5RouteRequest, type OfflineV5RouteResponse, type OfflineV5SessionSnapshot } from '@/offline-v5/types'
 import { beginOfflineV5OnlineReauth, clearOfflineV5FallbackOffer, clearOfflineV5LocalAuthority, getOfflineV5ServiceWorkerStatus, setOfflineV5ServiceWorkerMode, type OfflineV5ServiceWorkerStatus } from './offlineV5ServiceWorker'
 import { clearOfflineV5BootMarker, markOfflineV5Boot, readOfflineV5BootMarker } from './offlineV5Boot'
 
@@ -204,6 +204,12 @@ export async function requestOfflineV5Sync(): Promise<RuntimeSnapshot> {
 export async function acknowledgeOfflineV5ServerWinsConflicts(): Promise<RuntimeSnapshot> {
   if (!current.active) throw new OfflineV5Error('locked', 'Desbloquea primero la copia offline.')
   const snapshot = await browserOfflineV5Client.acknowledgeServerWinsConflicts()
+  const next = fromWorker(snapshot); publish(next); return next
+}
+
+export async function resolveOfflineV5Conflict(resolution: OfflineV5ConflictResolution): Promise<RuntimeSnapshot> {
+  if (!current.active) throw new OfflineV5Error('locked', 'Desbloquea primero la copia offline.')
+  const snapshot = await browserOfflineV5Client.resolveConflict(resolution)
   const next = fromWorker(snapshot); publish(next); return next
 }
 

@@ -11,7 +11,7 @@ import { markTaskCreateUncertain, retainTaskCreateOperation, type TaskCreateOper
 import type { TaskInlineDraft } from './TaskBoard'
 import { TaskListPicker } from './TaskSelectPicker'
 import TaskUserCombobox from './TaskUserCombobox'
-import { calendarDefaultList, calendarPopoverPosition, calendarSlot, shouldCloseCalendarComposerOnEscape, TASK_CALENDAR_MODE_LABELS, type CalendarFloatingRect, type TaskCalendarMode } from './taskCalendarState'
+import { calendarDefaultList, calendarPopoverPosition, calendarRangeNotice, calendarSlot, shouldCloseCalendarComposerOnEscape, TASK_CALENDAR_MODE_LABELS, type CalendarFloatingRect, type TaskCalendarMode } from './taskCalendarState'
 import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 import { agendaItemInterval, agendaItemOverlapsDay, layoutTimedAgendaItems } from './calendarAgendaLayout'
 import { taskColorContrast } from './TaskContainerAppearance'
@@ -592,6 +592,7 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 		if (scopeListID) params.set('list_id', scopeListID)
 		const loaded: AgendaItem[] = []
 		let nextCursor = ''
+		let sourceNotice = ''
 		setRangeNotice('')
 		const seenCursors = new Set<string>()
 		for (;;) {
@@ -603,6 +604,7 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 				return
 			}
 			loaded.push(...result.data.items)
+			sourceNotice = result.data.offline_notice || sourceNotice
 			nextCursor = result.data.next_cursor || ''
 			if (!nextCursor) break
 			if (seenCursors.has(nextCursor)) {
@@ -610,9 +612,9 @@ export default function TaskCalendarView({ lists, folders, statuses, users, curr
 				return
 			}
 			seenCursors.add(nextCursor)
-			if (loaded.length >= 2000) setRangeNotice(`Cargando ${loaded.length} elementos del calendario…`)
+			setRangeNotice(calendarRangeNotice(sourceNotice, loaded.length, true))
 		}
-		setRangeNotice('')
+		setRangeNotice(calendarRangeNotice(sourceNotice, loaded.length, false))
 		const canonical = Array.from(new Map(loaded.map(item => [item.key, item])).values())
 		setItems(current => mergeCalendarInventory(current, canonical, taskProjectionsRef.current, pendingItemKeysRef.current)); setPhase('ready')
 	}, [environmentID, range.from.getTime(), range.to.getTime(), scopeFolderID, scopeListID, taskQueryString]) // eslint-disable-line react-hooks/exhaustive-deps

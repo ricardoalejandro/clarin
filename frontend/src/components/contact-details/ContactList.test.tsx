@@ -2,11 +2,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { StrictMode, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ reset: vi.fn(), width: 1200, leadsEnabled: true, virtualRows: false, listeners: new Set<(value: unknown) => void>() }))
+const mocks = vi.hoisted(() => ({ reset: vi.fn(), width: 1200, leadsEnabled: true, virtualRows: false, offline: false, listeners: new Set<(value: unknown) => void>() }))
 vi.mock('@/components/LeadPolicyProvider', () => ({ useLeadPolicy: () => ({ leadsEnabled: mocks.leadsEnabled }) }))
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }))
 vi.mock('@tanstack/react-virtual', () => ({ useVirtualizer: ({ count }: { count: number }) => ({ getVirtualItems: () => mocks.virtualRows ? Array.from({ length: count }, (_, index) => ({ index, key: index, start: index * 72, size: 72, end: (index + 1) * 72 })) : [], getTotalSize: () => count * 72, measureElement: () => {}, scrollToIndex: () => {} }) }))
-vi.mock('@/components/offline-v5/ClarinRuntimeProvider', () => ({ useClarinRuntime: () => ({ requireOnline: () => true }) }))
+vi.mock('@/components/offline-v5/ClarinRuntimeProvider', () => ({ useClarinRuntime: () => ({ requireOnline: () => !mocks.offline, snapshot: { mode: mocks.offline ? 'offline' : 'online', active: mocks.offline, authorizedModules: ['contacts'], capabilities: ['contacts.read'] } }) }))
 vi.mock('@/components/responsive/useContainerWidth', () => ({ useContainerWidth: () => ({ ref: { current: null }, width: mocks.width }) }))
 vi.mock('@/components/crm-detail/useCrmWindowStorageScope', () => ({ default: () => 'synthetic-scope' }))
 vi.mock('@/hooks/useWhatsAppChatLauncher', () => ({ default: () => ({ reset: mocks.reset, close: mocks.reset, chatOpen: false, showDeviceSelector: false, chat: null, device: null }) }))
@@ -33,6 +33,7 @@ beforeEach(() => {
   mocks.width = 1200
   mocks.leadsEnabled = true
   mocks.virtualRows = false
+  mocks.offline = false
   window.history.replaceState({}, '', '/dashboard/contacts')
   localStorage.clear()
   localStorage.setItem('token', 'synthetic-audit-token')
@@ -51,6 +52,15 @@ beforeEach(() => {
 })
 
 describe('Contact deep links and identity initialization', () => {
+  it('loads the canonical list from an unlocked offline copy without an online token', async () => {
+    mocks.offline = true
+    localStorage.removeItem('token')
+    render(<ContactsPage />)
+    await waitFor(() => expect(requestUrls.some(url => url.startsWith('/api/contacts?'))).toBe(true))
+    expect(localStorage.getItem('token')).toBeNull()
+    expect(requestUrls).not.toContain('/api/devices')
+    expect(requestUrls).not.toContain('/api/google/status')
+  })
   it('keeps the initial contact intent until the current request opens the canonical detail', async () => {
     window.history.replaceState({}, '', '/dashboard/contacts?contact_id=synthetic-contact&keep=1')
     const base = vi.mocked(fetch).getMockImplementation()!

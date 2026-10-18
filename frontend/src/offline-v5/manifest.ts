@@ -11,12 +11,47 @@ import {
   type OfflineV5PrepareBundle,
   type OfflineV5Snapshot,
   type OfflineV5WhiteboardAssetDescriptor,
+  type OfflineV5TaskAttachmentDescriptor,
 } from './types'
 
 const MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024
 const MAX_CAPABILITIES = 5000
 const HASH_HEX = /^[a-f0-9]{64}$/
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+const ATTACHMENT_TYPES = new Set([...IMAGE_TYPES, 'application/pdf', 'text/plain', 'application/octet-stream',
+  'application/zip', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'])
+
+/** Only immutable bytes bound to a task in this exact signed list may be downloaded. */
+export function offlineV5TaskAttachmentDescriptors(snapshot: OfflineV5Snapshot): OfflineV5TaskAttachmentDescriptor[] {
+  if (snapshot.module !== 'tasks' || snapshot.tombstone) return []
+  const tasks = new Set((Array.isArray(snapshot.payload.tasks) ? snapshot.payload.tasks : [])
+    .filter(value => value && typeof value === 'object').map(value => String((value as Record<string, unknown>).id || '')))
+  const rows = Array.isArray(snapshot.payload.attachments) ? snapshot.payload.attachments : []
+  const seen = new Set<string>()
+  return rows.filter(value => value && typeof value === 'object' && (value as Record<string, unknown>).available_offline === true).map(value => {
+    const item = value as Record<string, unknown>
+    const descriptor: OfflineV5TaskAttachmentDescriptor = {
+      kind: 'task_attachment', id: String(item.id || ''), root_resource_id: snapshot.root_resource_id,
+      task_id: String(item.task_id || ''), file_id: String(item.id || ''),
+      content_hash: String(item.content_hash || '').toLowerCase(), content_type: String(item.content_type || '').toLowerCase(),
+      size_bytes: Number(item.size_bytes),
+    }
+    if (!descriptor.id || !tasks.has(descriptor.task_id) || seen.has(descriptor.id) || !HASH_HEX.test(descriptor.content_hash)
+        || !ATTACHMENT_TYPES.has(descriptor.content_type) || !Number.isSafeInteger(descriptor.size_bytes)
+        || descriptor.size_bytes < 1 || descriptor.size_bytes > 50 * 1024 * 1024
+        || Object.hasOwn(item, 'object_key') || Object.hasOwn(item, 'data_base64')) {
+      throw new OfflineV5Error('invalid_attachment_manifest', 'Un adjunto no pertenece a las tareas preparadas o no tiene integridad verificable.')
+    }
+    seen.add(descriptor.id)
+    return descriptor
+  })
+}
+
+export function offlineV5PreparedAssetDescriptors(snapshot: OfflineV5Snapshot): Array<OfflineV5WhiteboardAssetDescriptor | OfflineV5TaskAttachmentDescriptor> {
+  return [...offlineV5WhiteboardAssetDescriptors(snapshot), ...offlineV5TaskAttachmentDescriptors(snapshot)]
+}
 
 export function offlineV5WhiteboardAssetDescriptors(snapshot: OfflineV5Snapshot): OfflineV5WhiteboardAssetDescriptor[] {
   if (snapshot.module !== 'whiteboards' || snapshot.tombstone) return []
@@ -172,7 +207,7 @@ export async function validateOfflineV5Bundle(origin: string, bundle: OfflineV5P
       validateRootPayload(snapshot)
     }
     totalPayloadBytes += bytes
-    for (const descriptor of offlineV5WhiteboardAssetDescriptors(snapshot)) totalPayloadBytes += descriptor.size_bytes
+    for (const descriptor of offlineV5PreparedAssetDescriptors(snapshot)) totalPayloadBytes += descriptor.size_bytes
     if (totalPayloadBytes > manifest.max_storage_bytes) throw new OfflineV5Error('snapshot_quota', 'La descarga supera el límite autorizado para esta copia.')
     seen.add(snapshot.selection_id)
   }

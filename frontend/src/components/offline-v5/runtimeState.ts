@@ -52,7 +52,7 @@ export function offlineRuntimeIndicatorState(snapshot: RuntimeSnapshot): Offline
     return { label: 'Sincronizando', detail: pending, tone: 'emerald', canSync: false }
   }
   if (snapshot.mode === 'conflict' || snapshot.conflictCount > 0) {
-    const conflicts = `${snapshot.conflictCount} cambio${snapshot.conflictCount === 1 ? '' : 's'} no se aplic${snapshot.conflictCount === 1 ? 'ó' : 'aron'}; se conservó la versión del servidor`
+    const conflicts = `${snapshot.conflictCount} cambio${snapshot.conflictCount === 1 ? '' : 's'} necesita${snapshot.conflictCount === 1 ? '' : 'n'} revisión; tu versión local sigue guardada`
     return { label: 'Revisión necesaria', detail: conflicts, tone: 'amber', canSync: true }
   }
   if (snapshot.error) {

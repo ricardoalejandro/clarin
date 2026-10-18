@@ -173,7 +173,7 @@ describe('Offline v5 canonical Program adapters', () => {
     const original = fake.aggregates
     fake.aggregates = async (port, generation, module) => (await original(port, generation, module)).map(snapshot => {
       if (snapshot.module !== 'programs') return snapshot
-      return { ...snapshot, payload: { ...snapshot.payload, health: { ...(snapshot.payload.health as object), attendance_rate: null, health: 'no_data' } } }
+      return { ...snapshot, payload: { ...snapshot.payload, eligible_attendance: [], health: { ...(snapshot.payload.health as object), attendance_rate: null, health: 'no_data' } } }
     })
     const dashboard = await adapter.request('port', 1, { method: 'GET', headers: [], url: 'https://clarin.test/api/programs/dashboard' })
     expect(parse(dashboard)).toMatchObject({ success: true, dashboard: { attendance_rate: null, groups_below_goal: 0, groups: [{ attendance_rate: null, health: 'no_data' }] } })

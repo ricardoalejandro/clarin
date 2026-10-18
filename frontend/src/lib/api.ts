@@ -500,7 +500,17 @@ export const apiDelete = <T>(endpoint: string, body?: unknown) =>
 
 export async function apiBlob(endpoint: string, options: { signal?: AbortSignal; method?: string; body?: BodyInit; headers?: HeadersInit } = {}): Promise<{ success: boolean; blob?: Blob; filename?: string; error?: string; status?: number }> {
   if (_offlineRuntimeActive) {
-    return { success: false, error: 'Este archivo no forma parte de la copia offline preparada.', status: 503 }
+    // Only prepared binary reads may reach the local adapter. Exports and
+    // uploads still need the server; the adapter verifies each selected asset.
+    let preparedRead = false
+    try {
+      const url = new URL(`${API_BASE}${endpoint}`, window.location.origin)
+      preparedRead = url.origin === window.location.origin
+        && (options.method || 'GET').toUpperCase() === 'GET' && options.body === undefined
+        && (/^\/api\/tasks\/[^/]+\/attachments\/[^/]+\/(?:download|preview\/download)$/.test(url.pathname)
+          || /^\/api\/whiteboards\/[^/]+\/assets\/[^/]+$/.test(url.pathname))
+    } catch { /* An invalid or foreign URL is never a prepared local read. */ }
+    if (!preparedRead) return { success: false, error: 'Este archivo no forma parte de la copia offline preparada.', status: 503 }
   }
   let requestScope = getAuthScope()
   const isCurrent = () => requestIsCurrent(requestScope, options.signal)
@@ -511,7 +521,7 @@ export async function apiBlob(endpoint: string, options: { signal?: AbortSignal;
   try {
     let response = await request()
     if (!isCurrent()) return cancelledRequest()
-    if (response.status === 401 && !options.signal?.aborted) {
+    if (response.status === 401 && !_offlineRuntimeActive && !options.signal?.aborted) {
       const refreshOutcome = await tryRefreshTokenOutcome()
       requestScope = scopeAfterRefresh(requestScope, refreshOutcome)
       if (!isCurrent()) return cancelledRequest()
@@ -534,7 +544,7 @@ export async function apiBlob(endpoint: string, options: { signal?: AbortSignal;
       if (!isCurrent()) return cancelledRequest()
       return { success: false, error: payload?.error || `No se pudo abrir el archivo (${response.status})`, status: response.status }
     }
-    markAuthActivity()
+    if (!_offlineRuntimeActive) markAuthActivity()
     const disposition = response.headers.get('content-disposition') || ''
     const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1]
     const blob = await response.blob()

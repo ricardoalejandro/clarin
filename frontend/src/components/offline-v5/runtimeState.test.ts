@@ -62,7 +62,7 @@ describe('canonical Clarin offline runtime UI state', () => {
     })
     expect(offlineRuntimeIndicatorState(snapshot({ mode: 'conflict', active: true, conflictCount: 1 }))).toMatchObject({
       label: 'Revisión necesaria',
-      detail: '1 cambio no se aplicó; se conservó la versión del servidor',
+      detail: '1 cambio necesita revisión; tu versión local sigue guardada',
     })
     expect(offlineRuntimeIndicatorState(snapshot({ mode: 'offline', active: true, error: 'Servidor temporalmente no disponible.' }))).toMatchObject({
       label: 'No se pudo sincronizar',

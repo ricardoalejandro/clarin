@@ -7,6 +7,7 @@ import {
   type WhiteboardFontPreloadProgress,
 } from '@/hooks/useWhiteboardFontPreload'
 import {
+  clarinFontPreloadTerminalPhase,
   selectClarinFontPreloadTargets,
   shouldResetClarinFontFace,
 } from '../../vendor/excalidraw-clarin/packages/excalidraw/fonts/clarinFontPreload'
@@ -25,6 +26,13 @@ const progress = (
 })
 
 describe('whiteboard font preloading', () => {
+  it('reports loaded cached fonts as complete offline and waits for connectivity only after failure', () => {
+    expect(clarinFontPreloadTerminalPhase({ failedCount: 0, online: false })).toBe('complete')
+    expect(clarinFontPreloadTerminalPhase({ failedCount: 0, online: true })).toBe('complete')
+    expect(clarinFontPreloadTerminalPhase({ failedCount: 1, online: false })).toBe('offline')
+    expect(clarinFontPreloadTerminalPhase({ failedCount: 1, online: true })).toBe('error')
+  })
+
   it('reports deterministic Spanish progress and terminal states', () => {
     expect(whiteboardFontPreloadMessage(progress('loading', 7))).toBe('Preparando fuentes 7 de 32…')
     expect(whiteboardFontPreloadMessage(progress('offline', 7))).toContain('Se reanudará')
