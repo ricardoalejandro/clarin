@@ -131,6 +131,52 @@ func TestChatGroupIntegration(t *testing.T) {
 	if err != nil || len(other) != 0 {
 		t.Fatal("receipt leaked across devices")
 	}
+	t.Run("group_media_size_limit_is_permanent", func(t *testing.T) {
+		caption, filename, document := "Caption retained", "large.pdf", "document"
+		size := int64(64<<20) + 1
+		declared := &domain.Message{AccountID: a, DeviceID: &d, ChatID: first.ID, MessageID: "large-declared", Body: &caption, MediaFilename: &filename, MediaSize: &size, MessageType: &document, Timestamp: now, MediaUnavailableReason: "group_media_too_large"}
+		actual := &domain.Message{AccountID: a, DeviceID: &d, ChatID: first.ID, MessageID: "large-actual-unknown", Body: &caption, MediaFilename: &filename, MessageType: &document, Timestamp: now}
+		for _, message := range []*domain.Message{declared, actual} {
+			if err := repos.Message.Create(ctx, message); err != nil {
+				t.Fatal(err)
+			}
+			if err := repos.Message.RememberGroupMedia(ctx, a, first.ID, message.MessageID, []byte("synthetic-metadata")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := repos.Message.HydrateMentions(ctx, a, first.ID, []*domain.Message{declared, actual}); err != nil || declared.MediaRecoverable || !actual.MediaRecoverable {
+			t.Fatal("declared limit must be terminal; unknown size remains recoverable", err)
+		}
+		if err := repos.Message.MarkGroupMediaTooLarge(ctx, b, first.ID, actual.ID); err == nil {
+			t.Fatal("cross-account media limit mutation accepted")
+		}
+		if err := repos.Message.MarkGroupMediaTooLarge(ctx, a, second.ID, actual.ID); err == nil {
+			t.Fatal("cross-device media limit mutation accepted")
+		}
+		if err := repos.Message.MarkGroupMediaTooLarge(ctx, a, first.ID, actual.ID); err != nil {
+			t.Fatal(err)
+		}
+		// A later history echo must not recreate the payload after actual-size rejection.
+		if err := repos.Message.RememberGroupMedia(ctx, a, first.ID, actual.MessageID, []byte("late-history-echo")); err != nil {
+			t.Fatal(err)
+		}
+		var payloads int
+		if err := db.QueryRow(ctx, `SELECT count(*) FROM chat_group_media_recovery WHERE account_id=$1 AND message_id=ANY($2::uuid[])`, a, []uuid.UUID{declared.ID, actual.ID}).Scan(&payloads); err != nil || payloads != 0 {
+			t.Fatal("terminal media retained a retry payload", err)
+		}
+		for _, original := range []*domain.Message{declared, actual} {
+			fresh, err := repos.Message.GetByReference(ctx, a, first.ID, original.ID.String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = repos.Message.HydrateMentions(ctx, a, first.ID, []*domain.Message{fresh}); err != nil {
+				t.Fatal(err)
+			}
+			if fresh.MediaUnavailableReason != "group_media_too_large" || fresh.MediaRecoverable || fresh.MediaDeleted || fresh.Body == nil || *fresh.Body != caption || fresh.MediaFilename == nil || *fresh.MediaFilename != filename {
+				t.Fatal("terminal media failed to retain caption/metadata/reason")
+			}
+		}
+	})
 	groups, total, err := repos.Chat.GetByAccountIDWithFilters(ctx, a, domain.ChatFilter{Kind: "group", Limit: 50})
 	if err != nil || total != 2 || len(groups) != 2 {
 		t.Fatal("group list missing", err)

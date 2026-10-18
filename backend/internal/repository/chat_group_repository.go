@@ -202,6 +202,41 @@ func (r *MessageRepository) GroupReceipts(ctx context.Context, accountID, chatID
 	}
 	return result, next, total, rows.Err()
 }
+
+func (r *MessageRepository) RememberGroupMedia(ctx context.Context, accountID, chatID uuid.UUID, messageID string, payload []byte) error {
+	// Lock the parent row so a concurrent terminal-size update cannot be followed
+	// by an INSERT based on an older snapshot that recreates its retry payload.
+	_, err := r.db.Exec(ctx, `INSERT INTO chat_group_media_recovery(account_id,chat_id,message_id,payload)
+ SELECT m.account_id,m.chat_id,m.id,$4 FROM messages m JOIN chats c ON c.account_id=m.account_id AND c.id=m.chat_id
+ WHERE m.account_id=$1 AND m.chat_id=$2 AND m.message_id=$3 AND c.jid LIKE '%@g.us'
+ AND m.media_unavailable_reason='' AND m.media_url IS NULL AND NOT m.media_deleted AND NOT COALESCE(m.is_revoked,FALSE)
+ FOR UPDATE OF m
+ ON CONFLICT(account_id,message_id) DO UPDATE SET payload=EXCLUDED.payload`, accountID, chatID, messageID, payload)
+	return err
+}
+
+// MarkGroupMediaTooLarge permanently removes only this message's retry payload.
+// Message contents, metadata and media_deleted remain unchanged.
+func (r *MessageRepository) MarkGroupMediaTooLarge(ctx context.Context, accountID, chatID, messageID uuid.UUID) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var id uuid.UUID
+	err = tx.QueryRow(ctx, `UPDATE messages m SET media_unavailable_reason='group_media_too_large'
+ FROM chats c WHERE m.account_id=$1 AND m.chat_id=$2 AND m.id=$3
+ AND c.account_id=m.account_id AND c.id=m.chat_id AND c.jid LIKE '%@g.us'
+ AND m.media_url IS NULL AND NOT m.media_deleted AND NOT COALESCE(m.is_revoked,FALSE) RETURNING m.id`, accountID, chatID, messageID).Scan(&id)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM chat_group_media_recovery WHERE account_id=$1 AND chat_id=$2 AND message_id=$3`, accountID, chatID, id); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (r *MessageRepository) HydrateMentions(ctx context.Context, accountID, chatID uuid.UUID, messages []*domain.Message) error {
 	ids := []uuid.UUID{}
 	byID := map[uuid.UUID]*domain.Message{}
@@ -214,7 +249,7 @@ func (r *MessageRepository) HydrateMentions(ctx context.Context, accountID, chat
 	if len(ids) == 0 {
 		return nil
 	}
-	rows, err := r.db.Query(ctx, `SELECT m.id,m.group_mentions,EXISTS(SELECT 1 FROM chat_group_media_recovery r WHERE r.account_id=m.account_id AND r.message_id=m.id) AND m.media_url IS NULL AND NOT m.media_deleted AND NOT COALESCE(m.is_revoked,FALSE) FROM messages m WHERE m.account_id=$1 AND m.chat_id=$2 AND m.id=ANY($3::uuid[])`, accountID, chatID, ids)
+	rows, err := r.db.Query(ctx, `SELECT m.id,m.group_mentions,m.media_unavailable_reason,EXISTS(SELECT 1 FROM chat_group_media_recovery r WHERE r.account_id=m.account_id AND r.message_id=m.id) AND m.media_unavailable_reason='' AND m.media_url IS NULL AND NOT m.media_deleted AND NOT COALESCE(m.is_revoked,FALSE) FROM messages m WHERE m.account_id=$1 AND m.chat_id=$2 AND m.id=ANY($3::uuid[])`, accountID, chatID, ids)
 	if err != nil {
 		return err
 	}
@@ -223,10 +258,12 @@ func (r *MessageRepository) HydrateMentions(ctx context.Context, accountID, chat
 		var id uuid.UUID
 		var raw []byte
 		var recoverable bool
-		if err = rows.Scan(&id, &raw, &recoverable); err != nil {
+		var unavailableReason string
+		if err = rows.Scan(&id, &raw, &unavailableReason, &recoverable); err != nil {
 			return err
 		}
 		byID[id].MediaRecoverable = recoverable
+		byID[id].MediaUnavailableReason = unavailableReason
 		if err = json.Unmarshal(raw, &byID[id].Mentions); err != nil {
 			return err
 		}

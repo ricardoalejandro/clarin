@@ -3002,8 +3002,11 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       const response = await chatRequest('/api/chats/' + encodeURIComponent(targetChatId) + '/messages/' + encodeURIComponent(message.id) + '/media/recover', { method: 'POST', credentials: 'include', signal: controller.signal })
       const data = await response.json()
       if (controller.signal.aborted || getAuthScope() !== requestScope) throw new DOMException('Solicitud cancelada', 'AbortError')
-      if (!response.ok || !data.success || !data.message) throw new Error(data.error || 'No se pudo recuperar el archivo. Reintenta.')
-      updateMessagesForChat(targetChatId, current => current.map(row => hasSameMessageIdentity(row, data.message) ? mergeCanonicalMessage(row, data.message) : row))
+      const canonicalMessage: Message | undefined = data.message?.id === message.id && data.message?.chat_id === targetChatId ? data.message : undefined
+      if (canonicalMessage) {
+        updateMessagesForChat(targetChatId, current => current.map(row => row.id === message.id ? mergeCanonicalMessage(row, canonicalMessage) : row))
+      }
+      if (!response.ok || !data.success || !canonicalMessage) throw new Error(data.error || 'No se pudo recuperar el archivo. Reintenta.')
     } finally { unsubscribe(); if (mediaRecoveryRequests.current.get(message.id) === controller) mediaRecoveryRequests.current.delete(message.id) }
   })
 

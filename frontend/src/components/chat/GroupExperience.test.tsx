@@ -46,3 +46,15 @@ it('recovers historical group media on demand with an honest retry state', async
   fireEvent.click(screen.getByRole('button', { name: 'Reintentar recuperación' }))
   await waitFor(() => expect(recover).toHaveBeenCalledTimes(2))
 })
+
+it('shows the group media limit and never offers recovery even if an older snapshot says recoverable', () => {
+  const recover = vi.fn()
+  const message = { id: 'large-media', message_id: 'provider-large', is_from_me: false, timestamp: '2026-10-18T12:00:00Z', message_type: 'document', media_recoverable: true, media_unavailable_reason: 'group_media_too_large', media_filename: 'Grabación.zip', body: 'Material de la reunión', media_size: 80 * 1024 * 1024, status: 'sent', is_read: false } as Message
+  render(<MessageBubble message={message} isGroup onRecoverMedia={recover} />)
+  expect(screen.getByText('Este archivo supera el límite de 64 MB de Clarin. Revísalo en WhatsApp.')).toBeInTheDocument()
+  expect(screen.getByText('Grabación.zip')).toBeInTheDocument()
+  expect(screen.getByText('Material de la reunión')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /Recuperar archivo|Reintentar recuperación/ })).not.toBeInTheDocument()
+  fireEvent.click(screen.getByText('Grabación.zip'))
+  expect(recover).not.toHaveBeenCalled()
+})

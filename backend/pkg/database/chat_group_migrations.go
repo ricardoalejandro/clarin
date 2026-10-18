@@ -2,6 +2,7 @@ package database
 
 func chatGroupMigrations() []string {
 	return []string{
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_unavailable_reason TEXT NOT NULL DEFAULT ''`,
 		`CREATE TABLE IF NOT EXISTS chat_group_message_state(account_id UUID NOT NULL,chat_id UUID NOT NULL,message_id TEXT NOT NULL,revoked BOOLEAN NOT NULL DEFAULT FALSE,edited_body TEXT,edited_mentions JSONB,edited_at TIMESTAMPTZ,PRIMARY KEY(account_id,chat_id,message_id),FOREIGN KEY(account_id,chat_id) REFERENCES chats(account_id,id) ON DELETE CASCADE)`,
 		`ALTER TABLE chat_group_message_state ADD COLUMN IF NOT EXISTS edited_mentions JSONB`,
 		`CREATE OR REPLACE FUNCTION clarin_apply_group_message_state() RETURNS trigger LANGUAGE plpgsql AS $$ DECLARE state RECORD; BEGIN

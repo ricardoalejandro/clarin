@@ -171,6 +171,10 @@ func (s *Server) handleRecoverGroupMedia(c *fiber.Ctx) error {
 	}
 	message, err = s.pool.RecoverGroupMedia(c.Context(), chat.AccountID, *chat.DeviceID, chat.ID, message.ID)
 	if err != nil {
+		if message != nil && message.MediaUnavailableReason == "group_media_too_large" {
+			_ = s.services.Chat.AttachReactions(c.Context(), chat.AccountID, chat.ID, []*domain.Message{message})
+			return c.Status(422).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "group_media_too_large", "message": message})
+		}
 		return c.Status(502).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "group_media_unavailable"})
 	}
 	_ = s.services.Chat.AttachReactions(c.Context(), chat.AccountID, chat.ID, []*domain.Message{message})

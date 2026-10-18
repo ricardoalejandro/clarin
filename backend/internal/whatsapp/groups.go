@@ -440,17 +440,14 @@ func (p *DevicePool) handleGroupMessage(ctx context.Context, instance *DeviceIns
 		p.applyGroupProtocol(ctx, instance, chat, protocol)
 		return
 	}
-	downloadInstance := instance
-	if evt.IsViewOnce {
-		downloadInstance = nil
-	}
-	content := p.extractMessageContent(ctx, downloadInstance, evt.Message, chat.JID, evt.Info.ID)
+	content, _ := p.extractGroupMessageContent(ctx, instance, evt.Message, chat.JID, evt.Info.ID, evt.IsViewOnce)
 	sender := groupSenderIdentity(evt.Info.MessageSource).String()
 	status := "received"
 	if evt.Info.IsFromMe {
 		status = "sent"
 	}
 	msg := &domain.Message{AccountID: instance.AccountID, DeviceID: &instance.ID, ChatID: chat.ID, MessageID: evt.Info.ID, FromJID: &sender, FromName: strPtr(evt.Info.PushName), Body: &content.Body, MessageType: &content.MessageType, MediaURL: content.MediaURL, MediaMimetype: content.MediaMimetype, MediaFilename: content.MediaFilename, MediaSize: content.MediaSize, MediaAssetID: content.MediaAssetID, IsFromMe: evt.Info.IsFromMe, Status: &status, Timestamp: evt.Info.Timestamp, Latitude: content.Latitude, Longitude: content.Longitude, ContactName: content.ContactName, ContactPhone: content.ContactPhone, ContactVCard: content.ContactVCard, IsViewOnce: content.IsViewOnce || evt.IsViewOnce, Mentions: groupMessageMentions(evt.Message)}
+	msg.MediaUnavailableReason = content.MediaUnavailableReason
 	quote := p.extractMessageQuote(ctx, instance, chat.ID, evt.Message)
 	quote.Apply(msg)
 	if msg.IsFromMe {

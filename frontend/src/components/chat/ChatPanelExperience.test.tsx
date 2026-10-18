@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Chat, Device } from '@/types/chat'
+import { beginAuthIdentityChange, completeAuthIdentityChange } from '@/lib/authScope'
 
 const websocket = vi.hoisted(() => ({ listeners: new Set<(data: unknown) => void>() }))
 const compression = vi.hoisted(() => ({ compress: vi.fn(async (file: File) => file) }))
@@ -25,10 +26,12 @@ vi.mock('../WhatsAppTextInput', async () => {
   }
 })
 vi.mock('./MessageBubble', () => ({
-  default: ({ message, onMediaClick, onDocumentClick, onReact, onSelect, onRetry }: { message: { media_url?: string; status?: string; body?: string; quoted_body?: string; reactions?: Array<{ emoji: string; is_from_me: boolean }> }; onMediaClick?: (url: string, type: string) => void; onDocumentClick?: (document: { sessionId: string; src: string; filename: string; mimeType: string; size: number }) => void; onReact?: (message: unknown, emoji: string) => void; onSelect?: (message: unknown) => void; onRetry?: (message: unknown) => void }) => (
+  default: ({ message, onMediaClick, onDocumentClick, onReact, onSelect, onRetry, onRecoverMedia }: { message: { media_url?: string; status?: string; body?: string; quoted_body?: string; media_filename?: string; media_recoverable?: boolean; media_unavailable_reason?: string; reactions?: Array<{ emoji: string; is_from_me: boolean }> }; onMediaClick?: (url: string, type: string) => void; onDocumentClick?: (document: { sessionId: string; src: string; filename: string; mimeType: string; size: number }) => void; onReact?: (message: unknown, emoji: string) => void; onSelect?: (message: unknown) => void; onRetry?: (message: unknown) => void; onRecoverMedia?: (message: unknown) => Promise<void> }) => (
     <div data-testid="message-bubble">
       {message.media_url && onMediaClick && <button onClick={() => onMediaClick(message.media_url!, 'image')}>Abrir imagen simulada</button>}
       <span>{message.body}</span>{message.status === 'failed' && <button onClick={() => onRetry?.(message)}>Reintentar envío</button>}<span>{message.quoted_body}</span>
+      <span>{message.media_filename}</span><span data-testid="media-unavailable-reason">{message.media_unavailable_reason}</span>
+      {message.media_recoverable && !message.media_unavailable_reason && onRecoverMedia && <button type="button" onClick={() => { void onRecoverMedia(message).catch(() => {}) }}>Recuperar archivo simulado</button>}
       <span data-testid="own-reaction">{message.reactions?.find(reaction => reaction.is_from_me)?.emoji || ''}</span>
       <span data-testid="contact-reaction">{message.reactions?.find(reaction => !reaction.is_from_me)?.emoji || ''}</span>
       <button type="button" onClick={() => onReact?.(message, '👍')} disabled={!onReact}>Reaccionar con 👍</button>
@@ -527,5 +530,59 @@ describe('group composer identities through drafts and retries', () => {
     await waitFor(() => expect(state.bodies).toHaveLength(2))
     expect(state.bodies[1]).toBe(state.bodies[0]); expect(state.uploads()).toBe(1)
     expect(JSON.parse(state.bodies[0])).toMatchObject({ body: 'Hola @51900000002 ', mentions: [{ jid: member.jid, name: member.name }], media_type: 'video' })
+  })
+})
+
+describe('group media recovery canonical responses', () => {
+  const groupChat: Chat = { ...chat, id: 'group-recovery', jid: '120009@g.us', kind: 'group', group: { subject: 'Archivos', participant_count: 2, membership_status: 'member', announce: false, can_send: true } }
+  const message = { id: 'media-recovery', chat_id: groupChat.id, message_id: 'wa-media-recovery', body: 'Material de la reunión', message_type: 'document', media_filename: 'Grabación.zip', media_recoverable: true, is_from_me: false, is_read: true, status: 'delivered', timestamp: '2026-10-18T12:00:00Z' }
+  const canonical = { ...message, media_recoverable: false, media_unavailable_reason: 'group_media_too_large' }
+  beforeEach(() => {
+    localStorage.setItem('token', 'test-token'); completeAuthIdentityChange(); websocket.listeners.clear()
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1200)
+  })
+  afterEach(() => { cleanup(); completeAuthIdentityChange(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
+  function install(recover: (init?: RequestInit) => Promise<Response>) {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/media/recover')) return recover(init)
+      if (url === `/api/chats/${groupChat.id}`) return Promise.resolve(jsonResponse({ success: true, chat: groupChat, device: device('connected') }))
+      if (url.includes('/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: [message] }))
+      return Promise.resolve(jsonResponse({ success: true, stickers: [], quick_replies: [] }))
+    }))
+  }
+  it('applies the terminal HTTP 422 message without a WebSocket event and retains its caption and filename', async () => {
+    const recover = vi.fn(() => Promise.resolve(jsonResponse({ code: 'group_media_too_large', message: canonical, error: 'Archivo demasiado grande' }, false, 422)))
+    install(recover)
+    render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Recuperar archivo simulado' }))
+    await waitFor(() => expect(screen.getByTestId('media-unavailable-reason')).toHaveTextContent('group_media_too_large'))
+    expect(screen.queryByRole('button', { name: 'Recuperar archivo simulado' })).not.toBeInTheDocument()
+    expect(screen.getByText('Material de la reunión')).toBeInTheDocument()
+    expect(screen.getByText('Grabación.zip')).toBeInTheDocument()
+    expect(recover).toHaveBeenCalledOnce()
+  })
+  it.each([{ id: 'other-message' }, { chat_id: 'other-chat' }])('rejects a canonical error message outside the requested identity: %j', async (replacement) => {
+    install(() => Promise.resolve(jsonResponse({ code: 'group_media_too_large', message: { ...canonical, ...replacement } }, false, 422)))
+    render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    const button = await screen.findByRole('button', { name: 'Recuperar archivo simulado' })
+    await act(async () => fireEvent.click(button))
+    expect(screen.getByTestId('media-unavailable-reason')).toBeEmptyDOMElement()
+    expect(button).toBeInTheDocument()
+  })
+  it('discards a delayed canonical error after an auth scope change', async () => {
+    let finish!: (response: Response) => void
+    let signal: AbortSignal | null | undefined
+    install(init => { signal = init?.signal; return new Promise(resolve => { finish = resolve }) })
+    render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Recuperar archivo simulado' }))
+    await waitFor(() => expect(finish).toBeTypeOf('function'))
+    await act(async () => {
+      beginAuthIdentityChange()
+      finish(jsonResponse({ code: 'group_media_too_large', message: canonical }, false, 422))
+    })
+    expect(signal?.aborted).toBe(true)
+    expect(screen.getByTestId('media-unavailable-reason')).toBeEmptyDOMElement()
   })
 })

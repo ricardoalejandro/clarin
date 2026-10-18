@@ -774,19 +774,20 @@ func (p *DevicePool) reconnectSupervisor(instance *DeviceInstance) {
 
 // messageContentResult holds extracted message content fields
 type messageContentResult struct {
-	Body          string
-	MessageType   string
-	MediaURL      *string
-	MediaMimetype *string
-	MediaFilename *string
-	MediaSize     *int64
-	MediaAssetID  *uuid.UUID
-	Latitude      *float64
-	Longitude     *float64
-	ContactName   *string
-	ContactPhone  *string
-	ContactVCard  *string
-	IsViewOnce    bool
+	MediaUnavailableReason string
+	Body                   string
+	MessageType            string
+	MediaURL               *string
+	MediaMimetype          *string
+	MediaFilename          *string
+	MediaSize              *int64
+	MediaAssetID           *uuid.UUID
+	Latitude               *float64
+	Longitude              *float64
+	ContactName            *string
+	ContactPhone           *string
+	ContactVCard           *string
+	IsViewOnce             bool
 }
 
 type storedMediaResult struct {
@@ -1653,8 +1654,23 @@ func (p *DevicePool) downloadAndStoreMediaWithSource(ctx context.Context, instan
 		return nil, fmt.Errorf("storage not configured")
 	}
 
-	// Download media
-	data, err := instance.Client.Download(ctx, msg)
+	// Group traffic shares a bounded live/recovery budget. Direct messages and
+	// own statuses retain their existing provider path.
+	var data []byte
+	var err error
+	if source == "chat" && domain.IsGroupJID(chatJID) {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 40*time.Second)
+		defer cancel()
+		release, slotErr := acquireGroupMediaSlot(ctx, groupMediaSlots)
+		if slotErr != nil {
+			return nil, slotErr
+		}
+		defer release() // Retain the slot through hash, upload and inventory work.
+		data, err = downloadGroupMedia(ctx, instance.Client, msg)
+	} else {
+		data, err = instance.Client.Download(ctx, msg)
+	}
 	if err != nil {
 		log.Printf("[Media] Failed to download: %v", err)
 		return nil, err
@@ -2164,6 +2180,9 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 			// Media downloads block the event handler for too long with hundreds of conversations.
 			// Messages will have type/mimetype metadata but no media URL.
 			content := p.extractMessageContent(ctx, nil, parsedEvt.Message, chatJID, parsedEvt.Info.ID)
+			if parsedEvt.Info.Chat.Server == types.GroupServer {
+				content, _ = p.extractGroupMessageContent(ctx, nil, parsedEvt.Message, chatJID, parsedEvt.Info.ID, parsedEvt.IsViewOnce)
+			}
 
 			// Skip empty text messages (media messages without URL are kept — they have type info)
 			if content.Body == "" && content.MessageType == domain.MessageTypeText {
@@ -2189,27 +2208,28 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 			}
 
 			msg := &domain.Message{
-				AccountID:     instance.AccountID,
-				DeviceID:      &instance.ID,
-				ChatID:        chat.ID,
-				MessageID:     parsedEvt.Info.ID,
-				FromJID:       strPtr(senderJID),
-				FromName:      strPtr(parsedEvt.Info.PushName),
-				Body:          strPtr(content.Body),
-				MessageType:   strPtr(content.MessageType),
-				MediaURL:      content.MediaURL,
-				MediaMimetype: content.MediaMimetype,
-				MediaFilename: content.MediaFilename,
-				MediaSize:     content.MediaSize,
-				IsFromMe:      isFromMe,
-				Status:        strPtr(status),
-				Timestamp:     parsedEvt.Info.Timestamp,
-				Latitude:      content.Latitude,
-				Longitude:     content.Longitude,
-				ContactName:   content.ContactName,
-				ContactPhone:  content.ContactPhone,
-				ContactVCard:  content.ContactVCard,
-				IsViewOnce:    content.IsViewOnce || parsedEvt.IsViewOnce,
+				AccountID:              instance.AccountID,
+				DeviceID:               &instance.ID,
+				ChatID:                 chat.ID,
+				MessageID:              parsedEvt.Info.ID,
+				FromJID:                strPtr(senderJID),
+				FromName:               strPtr(parsedEvt.Info.PushName),
+				Body:                   strPtr(content.Body),
+				MessageType:            strPtr(content.MessageType),
+				MediaURL:               content.MediaURL,
+				MediaMimetype:          content.MediaMimetype,
+				MediaFilename:          content.MediaFilename,
+				MediaSize:              content.MediaSize,
+				MediaUnavailableReason: content.MediaUnavailableReason,
+				IsFromMe:               isFromMe,
+				Status:                 strPtr(status),
+				Timestamp:              parsedEvt.Info.Timestamp,
+				Latitude:               content.Latitude,
+				Longitude:              content.Longitude,
+				ContactName:            content.ContactName,
+				ContactPhone:           content.ContactPhone,
+				ContactVCard:           content.ContactVCard,
+				IsViewOnce:             content.IsViewOnce || parsedEvt.IsViewOnce,
 			}
 
 			quote := p.extractMessageQuote(ctx, instance, chat.ID, parsedEvt.Message)

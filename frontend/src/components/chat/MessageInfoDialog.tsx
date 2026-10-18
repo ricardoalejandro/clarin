@@ -8,6 +8,7 @@ import { renderFormattedText } from '@/lib/whatsappFormat'
 import type { Message } from '@/types/chat'
 import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
 import { participantName } from '@/utils/chatGroups'
+import { subscribeWebSocket } from '@/lib/api'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
 interface MessageInfoDialogProps {
@@ -47,24 +48,83 @@ export default function MessageInfoDialog(props: MessageInfoDialogProps) {
   return isAuthIdentityChanging(scope) ? null : <MessageInfoSession key={scope + ':' + props.chatId + ':' + props.message.id} {...props} scope={scope} />
 }
 function MessageInfoSession({ message, onClose, chatId, isGroup = false, scope }: MessageInfoDialogProps & { scope: string }) {
-  const [receipts, setReceipts] = useState<Array<{ jid: string; name?: string; delivered_at?: string; read_at?: string }>>([])
+  type Receipt = { jid: string; name?: string; delivered_at?: string; read_at?: string }
+  type ReceiptMode = 'initial' | 'more' | 'refresh'
+  const [receipts, setReceipts] = useState<Receipt[]>([])
   const [receiptsLoading, setReceiptsLoading] = useState(false)
   const [receiptsError, setReceiptsError] = useState('')
-  const [receiptCursor, setReceiptCursor] = useState('')
   const [receiptNextCursor, setReceiptNextCursor] = useState('')
-  useEffect(() => { setReceiptCursor(''); setReceipts([]); setReceiptNextCursor('') }, [chatId, message.id])
-  const [receiptRetry, setReceiptRetry] = useState(0)
+  const receiptRows = useRef<Receipt[]>([]), receiptPages = useRef(0), nextReceiptCursor = useRef('')
+  const receiptActive = useRef(false), receiptSequence = useRef(0), receiptRequest = useRef<AbortController | null>(null)
+  const receiptRefreshQueued = useRef(false), receiptTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const failedReceiptMode = useRef<ReceiptMode>('initial')
+  const scheduleReceiptRefresh = useRef<() => void>(() => {})
+  const loadReceipts = useRef<(mode: ReceiptMode) => Promise<void>>(async () => {})
+  loadReceipts.current = async mode => {
+    if (!receiptActive.current || !isGroup || !chatId || getAuthScope() !== scope) return
+    if (receiptRequest.current) { if (mode === 'refresh') receiptRefreshQueued.current = true; return }
+    if (mode === 'more' && !nextReceiptCursor.current) return
+    const controller = new AbortController(), sequence = ++receiptSequence.current
+    receiptRequest.current = controller
+    const current = () => receiptActive.current && !controller.signal.aborted && receiptSequence.current === sequence && getAuthScope() === scope
+    setReceiptsLoading(true); setReceiptsError('')
+    try {
+      const pagesToLoad = mode === 'refresh' ? Math.max(1, receiptPages.current) : 1
+      let cursor = mode === 'more' ? nextReceiptCursor.current : '', loaded = 0
+      const rows = new Map<string, Receipt>()
+      for (let page = 0; page < pagesToLoad; page++) {
+        const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(message.id)}/receipts?limit=50&cursor=${encodeURIComponent(cursor)}`, { signal: controller.signal, credentials: 'include' })
+        const data = await response.json()
+        if (!current()) return
+        if (!response.ok || !data.success || !Array.isArray(data.receipts)) throw new Error(data.error || 'No se pudieron cargar los recibos.')
+        for (const row of data.receipts as Receipt[]) rows.set(row.jid, row)
+        cursor = typeof data.next_cursor === 'string' ? data.next_cursor : ''; loaded++
+        if (!cursor) break
+      }
+      if (!current()) return
+      if (mode === 'more') {
+        const combined = new Map(receiptRows.current.map(row => [row.jid, row]))
+        for (const [jid, row] of rows) combined.set(jid, row)
+        receiptRows.current = [...combined.values()]; receiptPages.current += loaded
+      } else { receiptRows.current = [...rows.values()]; receiptPages.current = loaded }
+      nextReceiptCursor.current = cursor; setReceipts(receiptRows.current); setReceiptNextCursor(cursor)
+    } catch (cause) {
+      if (current()) { failedReceiptMode.current = mode; setReceiptsError(cause instanceof Error ? cause.message : 'No se pudieron cargar los recibos.') }
+    } finally {
+      if (current()) {
+        receiptRequest.current = null; setReceiptsLoading(false)
+        if (receiptRefreshQueued.current) scheduleReceiptRefresh.current()
+      }
+    }
+  }
   useEffect(() => {
     if (!isGroup || !chatId) return
-    const controller = new AbortController()
-    if (!receiptCursor) setReceipts([]); setReceiptsLoading(true); setReceiptsError('')
-    void fetch(`/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(message.id)}/receipts?limit=50&cursor=${encodeURIComponent(receiptCursor)}`, { signal: controller.signal, credentials: 'include' }).then(async response => {
-      const data = await response.json()
-      if (!response.ok || !data.success || !Array.isArray(data.receipts)) throw new Error(data.error || 'No se pudieron cargar los recibos.')
-      if (!controller.signal.aborted && getAuthScope() === scope) { setReceipts(current => receiptCursor ? [...current, ...data.receipts.filter((row: { jid: string }) => !current.some(item => item.jid === row.jid))] : data.receipts); setReceiptNextCursor(data.next_cursor || '') }
-    }).catch(cause => { if (!controller.signal.aborted && getAuthScope() === scope) setReceiptsError(cause instanceof Error ? cause.message : 'No se pudieron cargar los recibos.') }).finally(() => { if (!controller.signal.aborted && getAuthScope() === scope) setReceiptsLoading(false) })
-    return () => controller.abort()
-  }, [chatId, isGroup, message.id, receiptRetry, receiptCursor])
+    receiptActive.current = true
+    scheduleReceiptRefresh.current = () => {
+      if (!receiptActive.current || getAuthScope() !== scope) return
+      receiptRefreshQueued.current = true
+      if (receiptTimer.current || receiptRequest.current) return
+      receiptTimer.current = setTimeout(() => {
+        receiptTimer.current = null; receiptRefreshQueued.current = false
+        void loadReceipts.current('refresh')
+      }, 200)
+    }
+    void loadReceipts.current('initial')
+    const unsubscribe = subscribeWebSocket(raw => {
+      if (!raw || typeof raw !== 'object') return
+      const event = raw as { event?: string; type?: string; data?: unknown }
+      if (!receiptActive.current || getAuthScope() !== scope || (event.event || event.type) !== 'group_message_receipt') return
+      const payload = event.data as { chat_id?: string; device_id?: string; message_ids?: unknown }
+      if (payload?.chat_id !== chatId || payload.device_id && message.device_id && payload.device_id !== message.device_id || !Array.isArray(payload.message_ids) || !payload.message_ids.includes(message.message_id || message.id)) return
+      scheduleReceiptRefresh.current()
+    })
+    return () => {
+      receiptActive.current = false; receiptSequence.current++; receiptRequest.current?.abort(); receiptRequest.current = null
+      if (receiptTimer.current) clearTimeout(receiptTimer.current)
+      receiptTimer.current = null; receiptRefreshQueued.current = false; unsubscribe()
+    }
+  }, [chatId, isGroup, message.id, message.message_id, message.device_id, scope])
+
   const dialogRef = useRef<HTMLDivElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
   const operationalPortal = useOperationalOverlayPortal()
@@ -146,7 +206,7 @@ function MessageInfoSession({ message, onClose, chatId, isGroup = false, scope }
             </div>
           </div>
           }
-          {isGroup && <section className="mt-4" aria-label="Recibos confirmados"><h3 className="text-sm font-semibold text-slate-800">Recibos confirmados</h3><p className="mt-1 text-xs leading-5 text-slate-500">Solo se muestran las confirmaciones recibidas de WhatsApp. Estos datos no prueban que todo el grupo haya leído el mensaje.</p>{receiptsLoading && <p role="status" className="py-4 text-xs text-slate-500">Cargando recibos…</p>}{receiptsError && <div role="alert" className="mt-3 rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{receiptsError}<button type="button" onClick={() => setReceiptRetry(value => value + 1)} className="block min-h-11 font-semibold underline">Reintentar</button></div>}<ul className="mt-3 divide-y divide-slate-100">{receipts.map(receipt => <li key={receipt.jid} className="py-3"><p className="text-sm font-medium text-slate-800">{participantName(receipt.jid, receipt.name)}</p><p className="mt-1 text-xs text-slate-500">{receipt.read_at ? 'Leído: ' + formatReceiptTime(receipt.read_at) : receipt.delivered_at ? 'Entregado: ' + formatReceiptTime(receipt.delivered_at) : 'Sin hora confirmada'}</p></li>)}</ul>{receiptNextCursor && <button type="button" disabled={receiptsLoading} onClick={() => setReceiptCursor(receiptNextCursor)} className="min-h-11 w-full rounded-xl border border-slate-200 text-sm font-semibold text-emerald-700 disabled:opacity-40">Mostrar más recibos</button>}{!receiptsLoading && !receiptsError && !receipts.length && <p className="py-5 text-xs text-slate-500">Todavía no hay recibos confirmados.</p>}</section>}
+          {isGroup && <section className="mt-4" aria-label="Recibos confirmados"><h3 className="text-sm font-semibold text-slate-800">Recibos confirmados</h3><p className="mt-1 text-xs leading-5 text-slate-500">Solo se muestran las confirmaciones recibidas de WhatsApp. Estos datos no prueban que todo el grupo haya leído el mensaje.</p>{receiptsLoading && !receipts.length && <p role="status" className="py-4 text-xs text-slate-500">Cargando recibos…</p>}{receiptsError && <div role="alert" className="mt-3 rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{receiptsError}<button type="button" onClick={() => void loadReceipts.current(failedReceiptMode.current)} className="block min-h-11 font-semibold underline">Reintentar</button></div>}<ul className="mt-3 divide-y divide-slate-100">{receipts.map(receipt => <li key={receipt.jid} className="py-3"><p className="text-sm font-medium text-slate-800">{participantName(receipt.jid, receipt.name)}</p><p className="mt-1 text-xs text-slate-500">{receipt.read_at ? 'Leído: ' + formatReceiptTime(receipt.read_at) : receipt.delivered_at ? 'Entregado: ' + formatReceiptTime(receipt.delivered_at) : 'Sin hora confirmada'}</p></li>)}</ul>{receiptNextCursor && <button type="button" disabled={receiptsLoading} onClick={() => void loadReceipts.current('more')} className="min-h-11 w-full rounded-xl border border-slate-200 text-sm font-semibold text-emerald-700 disabled:opacity-40">Mostrar más recibos</button>}{!receiptsLoading && !receiptsError && !receipts.length && <p className="py-5 text-xs text-slate-500">Todavía no hay recibos confirmados.</p>}</section>}
           {!isGroup && <p className="mt-3 text-xs leading-relaxed text-slate-400">Si la otra persona desactivó las confirmaciones de lectura, Clarin no puede afirmar cuándo abrió el mensaje.</p>}
         </div>
       </div>

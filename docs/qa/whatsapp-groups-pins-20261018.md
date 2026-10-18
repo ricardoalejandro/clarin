@@ -8,6 +8,8 @@
 - Las menciones contienen identidad estructurada, independiente del nombre mostrado. Autores y citas conservan la identidad del participante; PN y LID nunca se convierten en teléfonos inventados.
 - Las preferencias de fijación son privadas por cuenta/usuario/chat, con versión independiente de lectura/atención. Orden de fijación descendente; recibir mensajes no mueve los fijados. Pendientes individuales conserva FIFO.
 - Resolver un chat LID a su conversación telefónica transfiere las preferencias dentro de la misma transacción, antes de eliminar la fuente. La fijación toma el mismo bloqueo de chat.
+- Los medios grupales se descargan a un temporal acotado: máximo 64 MiB de contenido, dos operaciones simultáneas entre todos los dispositivos y recuperación histórica, con 40 segundos de plazo. El tamaño declarado no sustituye el límite real de escritura. Los archivos que exceden el límite conservan nombre, autor y texto, y se consultan en WhatsApp; no generan reintentos permanentes. Los temporales se eliminan al terminar o cancelar.
+- Los recibos grupales abiertos se actualizan con eventos reales del proveedor, agrupando ráfagas y conservando las páginas y filas visibles. La respuesta HTTP también reconcilia los límites permanentes de medios sin depender de WebSocket.
 
 ## Dependencia y reversión
 

@@ -2208,9 +2208,9 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 		                      quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
 		                      poll_question, poll_max_selections,
 		                      is_revoked, is_view_once, latitude, longitude,
-		                      contact_name, contact_phone, contact_vcard, provider, template_name, sender, attention_through_at, attention_through_id, defer_attention, send_operation_id, group_mentions)
+		                      contact_name, contact_phone, contact_vcard, provider, template_name, sender, attention_through_at, attention_through_id, defer_attention, send_operation_id, group_mentions, media_unavailable_reason)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-		        $22, $23, $24, $25, $26, $27, $28, $29, $30, COALESCE(NULLIF($31::text, ''), 'whatsapp_web'), $32, $33, $34, $35, $36, $37, $38::jsonb)
+		        $22, $23, $24, $25, $26, $27, $28, $29, $30, COALESCE(NULLIF($31::text, ''), 'whatsapp_web'), $32, $33, $34, $35, $36, $37, $38::jsonb, $39)
 		ON CONFLICT (chat_id, message_id) DO NOTHING
 		RETURNING id, created_at,body,is_revoked,is_edited
 	`, msg.AccountID, msg.DeviceID, msg.ChatID, msg.MessageID, msg.FromJID, msg.FromName, msg.Body,
@@ -2220,7 +2220,7 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 			msg.PollQuestion, msg.PollMaxSelections,
 			msg.IsRevoked, msg.IsViewOnce, msg.Latitude, msg.Longitude,
 			msg.ContactName, msg.ContactPhone, msg.ContactVCard, msg.Provider, msg.TemplateName,
-			msg.Sender, msg.AttentionThroughAt, msg.AttentionThroughID, msg.DeferAttention, msg.SendOperationID, msg.Mentions,
+			msg.Sender, msg.AttentionThroughAt, msg.AttentionThroughID, msg.DeferAttention, msg.SendOperationID, msg.Mentions, msg.MediaUnavailableReason,
 		).Scan(&msg.ID, &msg.CreatedAt, &msg.Body, &msg.IsRevoked, &msg.IsEdited)
 	}
 	tx, err := r.db.Begin(ctx)

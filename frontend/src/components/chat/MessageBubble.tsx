@@ -89,9 +89,10 @@ const formatQuotedSender = (sender?: string, isFromMe?: boolean): string => {
 function MessageBubble({ message, contactName, isGroup = false, onMediaClick, onDocumentClick, onRetry, onRecoverMedia, onReply, onQuotedMessageClick, onForward, onDelete, onEdit, onInfo, onCopy, compactSelection = false, selected = false, onSelect, onToggleStickerFavorite, onReact, reactionUnavailableReason, savedStickerUrls, savingStickerUrls, groupedWithPrevious = false }: MessageBubbleProps) {
   const [recoveringMedia, setRecoveringMedia] = useState(false)
   const [recoverMediaError, setRecoverMediaError] = useState('')
+  const mediaTooLarge = isGroup && message.media_unavailable_reason === 'group_media_too_large'
   const recoverInFlight = useRef(false)
   const recoverMedia = async () => {
-    if (!onRecoverMedia || recoverInFlight.current) return
+    if (!onRecoverMedia || mediaTooLarge || recoverInFlight.current) return
     recoverInFlight.current = true; setRecoveringMedia(true); setRecoverMediaError('')
     try { await onRecoverMedia(message) } catch (cause) { if (!(cause instanceof DOMException && cause.name === 'AbortError')) setRecoverMediaError(cause instanceof Error ? cause.message : 'No se pudo recuperar el archivo.') }
     finally { recoverInFlight.current = false; setRecoveringMedia(false) }
@@ -378,7 +379,7 @@ function MessageBubble({ message, contactName, isGroup = false, onMediaClick, on
     }
 
     if (!message.media_url) {
-      if (isGroup && ['image', 'video', 'gif', 'audio', 'document', 'sticker'].includes(message.message_type || '')) return <div className="mb-1 max-w-full rounded-xl border border-slate-200 bg-slate-50 p-3"><div className="flex items-center gap-2"><FileText className="h-5 w-5 shrink-0 text-slate-400" /><p className="break-words text-sm font-medium text-slate-600">{message.media_filename || 'Archivo del historial'}</p></div><p className="mt-1 text-xs text-slate-500">{message.media_recoverable ? 'Descarga este archivo cuando lo necesites.' : 'El archivo no está disponible en Clarin.'}</p>{message.media_recoverable && onRecoverMedia && <button type="button" disabled={recoveringMedia} onClick={() => void recoverMedia()} className="mt-2 inline-flex min-h-11 items-center gap-2 rounded-lg px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">{recoveringMedia ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}{recoveringMedia ? 'Recuperando archivo…' : recoverMediaError ? 'Reintentar recuperación' : 'Recuperar archivo'}</button>}{recoverMediaError && <p role="alert" className="mt-2 text-xs leading-5 text-rose-700">{recoverMediaError}</p>}</div>
+      if (isGroup && ['image', 'video', 'gif', 'audio', 'document', 'sticker'].includes(message.message_type || '')) return <div className="mb-1 max-w-full rounded-xl border border-slate-200 bg-slate-50 p-3"><div className="flex items-center gap-2"><FileText className="h-5 w-5 shrink-0 text-slate-400" /><p className="break-words text-sm font-medium text-slate-600">{message.media_filename || 'Archivo del historial'}</p></div><p className="mt-1 text-xs text-slate-500">{mediaTooLarge ? 'Este archivo supera el límite de 64 MB de Clarin. Revísalo en WhatsApp.' : message.media_recoverable ? 'Descarga este archivo cuando lo necesites.' : 'El archivo no está disponible en Clarin.'}</p>{!mediaTooLarge && message.media_recoverable && onRecoverMedia && <button type="button" disabled={recoveringMedia} onClick={() => void recoverMedia()} className="mt-2 inline-flex min-h-11 items-center gap-2 rounded-lg px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">{recoveringMedia ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}{recoveringMedia ? 'Recuperando archivo…' : recoverMediaError ? 'Reintentar recuperación' : 'Recuperar archivo'}</button>}{!mediaTooLarge && recoverMediaError && <p role="alert" className="mt-2 text-xs leading-5 text-rose-700">{recoverMediaError}</p>}</div>
 
       // Sticker without downloaded media — show placeholder
       if (message.message_type === 'sticker') {

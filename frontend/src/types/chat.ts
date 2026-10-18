@@ -68,6 +68,7 @@ export interface PollVote {
 
 export interface Message {
   media_recoverable?: boolean
+  media_unavailable_reason?: 'group_media_too_large'
   mentions?: ChatMention[]
   quoted_sender_name?: string
   send_phase?: 'uploading' | 'sending'

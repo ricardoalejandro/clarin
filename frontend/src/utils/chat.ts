@@ -59,8 +59,11 @@ export const mergeReconciledChatIdentity = (current: Chat[], reconciliation: Cha
   const pinned = local.filter(chat => chat.is_pinned)
   const pinnedAt = pinned.map(chat => chat.pinned_at).filter((value): value is string => Boolean(value))
     .sort((a, b) => Date.parse(b) - Date.parse(a))[0] || null
+  const isPinned = pinned.length > 0, pinVersion = Math.max(0, ...local.map(chat => chat.pin_version || 0))
+  const canonical = reconciliation.canonical_chat
+  if (Boolean(canonical.is_pinned) === isPinned && (canonical.pinned_at || null) === pinnedAt && (canonical.pin_version || 0) === pinVersion) return canonical
   // Identity broadcasts contain account-level identity, never the current actor's pin projection.
-  return { ...reconciliation.canonical_chat, is_pinned: pinned.length > 0, pinned_at: pinnedAt, pin_version: Math.max(0, ...local.map(chat => chat.pin_version || 0)) }
+  return { ...canonical, is_pinned: isPinned, pinned_at: pinnedAt, pin_version: pinVersion }
 }
 
 export const reconcileChatIdentity = (current: Chat[], reconciliation: ChatIdentityReconciliation): Chat[] => {
