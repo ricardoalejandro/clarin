@@ -135,9 +135,30 @@ func TestChatGroupIntegration(t *testing.T) {
 	if err != nil || total != 2 || len(groups) != 2 {
 		t.Fatal("group list missing", err)
 	}
-	_, total, err = repos.Chat.GetByAccountIDWithFilters(ctx, a, domain.ChatFilter{PendingOnly: true, Limit: 50})
-	if err != nil || total != 0 {
-		t.Fatal("groups in pending", err)
+	// The group/pending intersection remains empty even when a direct chat is
+	// pending. Without this fixture, replacing the kind predicate could pass.
+	directContact, directChat := uuid.New(), uuid.New()
+	directJID := "51999000999@s.whatsapp.net"
+	exec(`INSERT INTO contacts(id,account_id,jid,name) VALUES($1,$2,$3,'Direct QA')`, directContact, a, directJID)
+	exec(`INSERT INTO chats(id,account_id,device_id,contact_id,jid,name,channel_key) VALUES($1,$2,$3,$4,$5,'Direct QA','whatsapp_web')`, directChat, a, d, directContact, directJID)
+	directIncoming := &domain.Message{AccountID: a, DeviceID: &d, ChatID: directChat, MessageID: "direct-incoming", FromJID: &directJID, Body: &body, Timestamp: now, Status: &status, MessageType: &kind}
+	if err = repos.Message.Create(ctx, directIncoming); err != nil {
+		t.Fatal(err)
+	}
+	for _, chatKind := range []string{"", "all", "direct", "group"} {
+		t.Run("pending_kind_"+chatKind, func(t *testing.T) {
+			pendingChats, count, queryErr := repos.Chat.GetByAccountIDWithFilters(ctx, a, domain.ChatFilter{Kind: chatKind, PendingOnly: true, Limit: 50})
+			expected := 1
+			if chatKind == "group" {
+				expected = 0
+			}
+			if queryErr != nil || count != expected || len(pendingChats) != expected {
+				t.Fatalf("pending/kind intersection: got rows=%d total=%d want=%d error=%v", len(pendingChats), count, expected, queryErr)
+			}
+			if expected == 1 && pendingChats[0].ID != directChat {
+				t.Fatal("pending list returned a group")
+			}
+		})
 	}
 	exec(`DELETE FROM chats WHERE account_id=$1 AND id=$2`, a, first.ID)
 	hidden, err := repos.Chat.GroupHidden(ctx, a, d, jid)

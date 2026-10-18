@@ -1865,7 +1865,7 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 		baseQuery += " AND (c.channel_key = 'whatsapp_web' OR c.channel_key LIKE 'whatsapp_web_group:%')"
 	}
 
-	if filter.Kind == "direct" || filter.PendingOnly {
+	if filter.Kind == "direct" {
 		baseQuery += " AND c.jid NOT LIKE '%@g.us'"
 	} else if filter.Kind == "group" {
 		baseQuery += " AND c.jid LIKE '%@g.us'"
@@ -1891,7 +1891,9 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 	}
 
 	if filter.PendingOnly {
-		baseQuery += " AND c.waiting_since IS NOT NULL"
+		// Pending is a direct-chat constraint independent of the selected kind.
+		// Intersecting it with kind=group must be empty, never fall back to directs.
+		baseQuery += " AND c.jid NOT LIKE '%@g.us' AND c.waiting_since IS NOT NULL"
 	}
 	// Archived filter
 	if !filter.Archived {
