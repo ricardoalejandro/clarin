@@ -37,5 +37,10 @@ export function useProgramWorkspacePolicy(workspaceWidth: number) {
     }
   }, [])
 
-  return programWorkspacePolicy(workspaceWidth, environment.coarsePointer, environment.viewport.height)
+  // Container measurements may wait for an animation frame after a resize.
+  // A stale desktop measurement must not keep administration available on mobile.
+  const availableWidth = environment.viewport.width > 0
+    ? Math.min(workspaceWidth, environment.viewport.width)
+    : workspaceWidth
+  return programWorkspacePolicy(availableWidth, environment.coarsePointer, environment.viewport.height)
 }

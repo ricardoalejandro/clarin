@@ -1,8 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { createPortal } from 'react-dom';
-import { AlertTriangle, Check, Loader2, LockKeyhole, RotateCcw, Settings2, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import OperationalWindowShell from '@/components/operational-window/OperationalWindowShell';
+import ProgramAvatarControl from './ProgramAvatarControl';
+import { OPERATIONAL_OVERLAY_LAYERS } from '@/components/operational-overlay/operationalOverlayLayers';
+import { AlertTriangle, Check, Loader2, LockKeyhole, RotateCcw, Settings2, ChevronDown } from 'lucide-react';
 import { api } from '@/lib/api';
 import type { Program, ProgramHealthViewColumn } from '@/types/program';
 import { useAccessibleDialog } from '@/components/pipelines/useAccessibleDialog';
@@ -57,6 +59,23 @@ function draftSignature(draft: ProgramDraft): string {
   });
 }
 
+/** Photo writes return the entire Program; merge untouched fields without overwriting a local draft. */
+export function mergeProgramSettingsAfterAvatar(draft: ProgramDraft, previous: Program, next: Program) {
+  const before = draftFromProgram(previous);
+  const after = draftFromProgram(next);
+  const merged = { ...draft, status: after.status };
+  let conflict = false;
+  const same = (key: keyof ProgramDraft, left: unknown, right: unknown) => key === 'color'
+    ? String(left).toUpperCase() === String(right).toUpperCase() : JSON.stringify(left) === JSON.stringify(right);
+  for (const key of ['name', 'description', 'color', 'healthViewColumns'] as const) {
+    if (same(key, draft[key], before[key])) {
+      if (key === 'healthViewColumns') merged.healthViewColumns = after.healthViewColumns;
+      else merged[key] = after[key];
+    } else if (!same(key, after[key], before[key]) && !same(key, draft[key], after[key])) conflict = true;
+  }
+  return { draft: merged, conflict };
+}
+
 export function ProgramSettingsDialog({
   open,
   suspended = false,
@@ -78,7 +97,6 @@ export function ProgramSettingsDialog({
   const busyRef = useRef(false);
   const reloadRef = useRef<AbortController | null>(null);
   useEffect(() => () => { sessionRef.current += 1; reloadRef.current?.abort(); }, []);
-  const dialogRef = useRef<HTMLDivElement>(null);
   const discardDialogRef = useRef<HTMLDivElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
   const lastFocusRef = useRef<HTMLElement | null>(null);
@@ -90,6 +108,21 @@ export function ProgramSettingsDialog({
   const [error, setError] = useState('');
   const [conflict, setConflict] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
+  const [photoDirty, setPhotoDirty] = useState(false);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const photoStateRef = useRef({ dirty: false, busy: false });
+  const onPhotoDirty = useCallback((value: boolean) => { photoStateRef.current.dirty = value; setPhotoDirty(value); }, []);
+  const onPhotoBusy = useCallback((value: boolean) => { photoStateRef.current.busy = value; setPhotoBusy(value); }, []);
+  const [viewExpanded, setViewExpanded] = useState(false);
+  const [actorScope, setActorScope] = useState('pending');
+  useEffect(() => {
+    if (!open || !program?.account_id) return;
+    const controller = new AbortController();
+    void fetch('/api/me', { credentials: 'include', signal: controller.signal }).then(response => response.json()).then(payload => {
+      if (!controller.signal.aborted && payload?.user?.account_id === program.account_id && payload.user.id) setActorScope(`${program.account_id}:${payload.user.id}`);
+    }).catch(() => {});
+    return () => controller.abort();
+  }, [open, program?.account_id]);
   useEffect(() => { if (!visible) { reloadRef.current?.abort(); setReloading(false); } }, [visible]);
 
   useEffect(() => {
@@ -113,6 +146,7 @@ export function ProgramSettingsDialog({
     setError('');
     setConflict(false);
     setDiscardOpen(false);
+    if (initialize) { photoStateRef.current = { dirty: false, busy: false }; setPhotoDirty(false); setPhotoBusy(false); }
   }, [open, identity, program?.updated_at]);
   useEffect(() => { if (!open) previousOpenRef.current = false; }, [open]);
 
@@ -122,12 +156,14 @@ export function ProgramSettingsDialog({
   }, [canonicalProgram, draft]);
   const draftStateRef = useRef({ dirty, version: canonicalProgram?.updated_at });
   draftStateRef.current = { dirty, version: canonicalProgram?.updated_at };
-  useEffect(() => { onDirtyChange?.(open && dirty); }, [dirty, open, onDirtyChange]);
+  const currentDraftRef = useRef({ draft, canonicalProgram });
+  currentDraftRef.current = { draft, canonicalProgram };
+  useEffect(() => { onDirtyChange?.(open && (dirty || photoDirty)); }, [dirty, photoDirty, open, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   const requestClose = () => {
-    if (!visibleRef.current || saving || reloading) return;
-    if (dirty) {
+    if (!visibleRef.current || busyRef.current || saving || reloading || photoStateRef.current.busy) return;
+    if (dirty || photoStateRef.current.dirty) {
       setDiscardOpen(true);
       return;
     }
@@ -135,10 +171,6 @@ export function ProgramSettingsDialog({
   };
 
   useEffect(() => { if (visible && !lastFocusRef.current) lastFocusRef.current = nameRef.current; }, [visible, identity]);
-  useAccessibleDialog(visible, dialogRef, () => {
-    if (discardOpen) setDiscardOpen(false);
-    else requestClose();
-  }, lastFocusRef);
   useAccessibleDialog(visible && discardOpen, discardDialogRef, () => setDiscardOpen(false), discardCancelRef);
 
   if (!open || !program || !draft || !canonicalProgram || typeof document === 'undefined') return null;
@@ -162,8 +194,24 @@ export function ProgramSettingsDialog({
     onCanonicalReload?.(nextProgram);
   };
 
+  const reconcileAvatarProgram = (next: Program) => {
+    if (identity !== identityRef.current || next.id !== program.id || next.account_id !== program.account_id) return;
+    const snapshot = currentDraftRef.current;
+    if (!snapshot.draft || !snapshot.canonicalProgram || (next.avatar_revision ?? 0) < (snapshot.canonicalProgram.avatar_revision ?? 0)) return;
+    const merged = mergeProgramSettingsAfterAvatar(snapshot.draft, snapshot.canonicalProgram, next);
+    setCanonicalProgram(next);
+    setDraft(merged.draft);
+    draftStateRef.current = { dirty: draftSignature(merged.draft) !== draftSignature(draftFromProgram(next)), version: next.updated_at };
+    currentDraftRef.current = { draft: merged.draft, canonicalProgram: next };
+    if (merged.conflict) {
+      setConflict(true);
+      setError('La foto se actualizó, pero también cambiaron campos que estabas editando. Tu borrador se conservó.');
+    }
+    onCanonicalReload?.(next);
+  };
+
   const reloadCanonical = async () => {
-    if (!visibleRef.current || identityRef.current !== identity || busyRef.current) return;
+    if (!visibleRef.current || identityRef.current !== identity || busyRef.current || photoStateRef.current.busy || photoStateRef.current.dirty) return;
     const controller = new AbortController();
     reloadRef.current?.abort(); reloadRef.current = controller;
     const requestIdentity = identityRef.current;
@@ -181,7 +229,7 @@ export function ProgramSettingsDialog({
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
-    if (!visibleRef.current || identityRef.current !== identity || busyRef.current || !draft.name.trim() || saving || reloading || conflict) return;
+    if (!visibleRef.current || identityRef.current !== identity || busyRef.current || photoStateRef.current.dirty || photoStateRef.current.busy || !draft.name.trim() || saving || reloading || conflict) return;
     busyRef.current = true;
     const requestIdentity = identityRef.current;
     const requestSession = sessionRef.current;
@@ -218,51 +266,22 @@ export function ProgramSettingsDialog({
     setError(response.error || 'No se pudieron guardar los cambios. Puedes reintentar.');
   };
 
-  return createPortal(
-    <div
-      hidden={suspended}
-      inert={suspended || undefined}
-      style={suspended ? { display: 'none' } : undefined}
-      className="app-viewport fixed inset-0 z-[90] flex items-stretch justify-center bg-slate-950/50 p-0 backdrop-blur-[2px] sm:items-center sm:p-4"
-      onMouseDown={event => {
-        if (event.target === event.currentTarget) requestClose();
-      }}
-    >
-      <div
-        ref={dialogRef}
-        onFocusCapture={event => { if (visibleRef.current) lastFocusRef.current = event.target as HTMLElement; }}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="program-settings-title"
-        aria-describedby="program-settings-description"
-        tabIndex={-1}
-        className="flex h-[var(--app-height)] w-full max-w-2xl flex-col overflow-hidden rounded-none bg-white shadow-2xl sm:h-auto sm:max-h-[92vh] sm:rounded-2xl"
-      >
-        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-slate-200 px-4 py-4 sm:px-6">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-emerald-700">
-              <Settings2 className="h-4 w-4" aria-hidden="true" />
-              <span className="text-xs font-semibold uppercase tracking-[0.12em]">Configuración</span>
-            </div>
-            <h2 id="program-settings-title" className="mt-1 text-xl font-semibold text-slate-900">Editar programa</h2>
-            <p id="program-settings-description" className="mt-1 text-sm text-slate-500">Actualiza los datos y define qué columnas muestra la vista Salud.</p>
-          </div>
-          <button
-            type="button"
-            onClick={requestClose}
-            disabled={saving || reloading}
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 disabled:opacity-50"
-            aria-label="Cerrar edición del programa"
-          >
-            <X className="h-5 w-5" aria-hidden="true" />
-          </button>
-        </header>
-
+  return (
+    <OperationalWindowShell open={open} suspended={suspended} initialFocusRef={nameRef}
+      storageKey="clarin:program-settings" storageScope={`${program.account_id}:${actorScope}`}
+      title="Editar programa" eyebrow="Configuración" description={program.name} icon={Settings2}
+      defaultWidth={820} defaultHeight={720} minWidth={520} minHeight={440} dockedWidth={672}
+      busy={saving || reloading || photoBusy} onRequestClose={requestClose}
+      temporaryOverlaySelector='[data-operational-picker-backdrop], [data-operational-confirmation], [data-program-avatar-dialog]'
+      contentClassName="flex min-h-0 flex-1 flex-col" dataAttribute="program-settings">
         <form onSubmit={save} className="flex min-h-0 flex-1 flex-col">
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
             <div className="space-y-6">
               <section aria-labelledby="program-general-title">
                 <h3 id="program-general-title" className="text-sm font-semibold text-slate-900">Información general</h3>
+                <div className="mt-3 rounded-xl bg-slate-50 p-3">
+                  <ProgramAvatarControl program={canonicalProgram} suspended={suspended || saving || reloading || discardOpen} onDraftChange={onPhotoDirty} onBusyChange={onPhotoBusy} onChange={reconcileAvatarProgram} />
+                </div>
                 <div className="mt-3 grid gap-4 sm:grid-cols-2">
                   <label className="block sm:col-span-2">
                     <span className="mb-1.5 block text-sm font-medium text-slate-700">Nombre</span>
@@ -292,37 +311,33 @@ export function ProgramSettingsDialog({
                           key={color}
                           type="button"
                           onClick={() => setDraft(current => current ? { ...current, color } : current)}
-                          className={`flex h-9 w-9 items-center justify-center rounded-full transition ${draft.color === color ? 'ring-2 ring-slate-500 ring-offset-2' : 'hover:scale-105'}`}
+                          className={`flex h-9 w-9 items-center justify-center rounded-full transition ${draft.color.toLowerCase() === color ? 'ring-2 ring-slate-500 ring-offset-2' : 'hover:scale-105'}`}
                           style={{ backgroundColor: color }}
                           aria-label={`Usar color ${color}`}
-                          aria-pressed={draft.color === color}
+                          aria-pressed={draft.color.toLowerCase() === color}
                         >
-                          {draft.color === color && <Check className="h-4 w-4 text-white drop-shadow" aria-hidden="true" />}
+                          {draft.color.toLowerCase() === color && <Check className="h-4 w-4 text-white drop-shadow" aria-hidden="true" />}
                         </button>
                       ))}
                     </div>
                   </fieldset>
-                  <label className="block">
+                  <div className="block">
                     <span className="mb-1.5 block text-sm font-medium text-slate-700">Estado</span>
-                    <select
-                      value={draft.status}
-                      onChange={event => setDraft(current => current ? { ...current, status: event.target.value as Program['status'] } : current)}
-                      className="min-h-11 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-slate-900 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
-                    >
-                      <option value="active">Activo</option>
-                      <option value="archived">Archivado</option>
-                      <option value="completed">Completado</option>
-                    </select>
-                  </label>
+                    <p className="inline-flex rounded-full bg-slate-100 px-3 py-1.5 text-sm font-medium text-slate-700">{{ active: 'Activo', completed: 'Completado', archived: 'Archivado' }[draft.status]}</p>
+                    <p className="mt-2 text-xs text-slate-500">Concluye, reabre o archiva desde las acciones del programa.</p>
+                  </div>
                 </div>
               </section>
 
               <section aria-labelledby="program-view-title" className="border-t border-slate-200 pt-5">
+                <button type="button" aria-expanded={viewExpanded} aria-controls="program-view-options" onClick={() => setViewExpanded(value => !value)} className="flex min-h-11 w-full items-center justify-between gap-3 text-left">
                 <div>
                   <h3 id="program-view-title" className="text-sm font-semibold text-slate-900">Vista de participantes</h3>
                   <p className="mt-1 text-sm text-slate-500">Selecciona las columnas de la tabla Salud. El orden visual se mantiene estable.</p>
                 </div>
-                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${viewExpanded ? 'rotate-180' : ''}`} />
+                </button>
+                <div id="program-view-options" hidden={!viewExpanded} className={viewExpanded ? 'mt-3 grid gap-2 sm:grid-cols-2' : 'hidden'}>
                   <div className="flex min-h-[68px] items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 opacity-80" aria-disabled="true">
                     <input type="checkbox" checked disabled readOnly aria-label="Participante siempre visible" className="h-4 w-4 shrink-0 rounded border-slate-300 text-slate-500" />
                     <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-white text-slate-500 shadow-sm"><LockKeyhole className="h-4 w-4" aria-hidden="true" /></span>
@@ -370,29 +385,27 @@ export function ProgramSettingsDialog({
           </div>
 
           <footer className="flex shrink-0 gap-3 border-t border-slate-200 bg-white px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-4 sm:justify-end sm:px-6 sm:pb-4">
-            <button type="button" onClick={requestClose} disabled={saving || reloading} className="min-h-11 flex-1 rounded-xl px-4 font-medium text-slate-700 transition hover:bg-slate-100 disabled:opacity-50 sm:flex-none">Cancelar</button>
-            <button type="submit" disabled={saving || reloading || conflict || !draft.name.trim() || !dirty} className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 font-medium text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none">
+            <button type="button" onClick={requestClose} disabled={saving || reloading || photoBusy} className="min-h-11 flex-1 rounded-xl px-4 font-medium text-slate-700 transition hover:bg-slate-100 disabled:opacity-50 sm:flex-none">Cancelar</button>
+            <button type="submit" disabled={saving || reloading || photoBusy || photoDirty || conflict || !draft.name.trim() || !dirty} className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 font-medium text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none">
               {saving && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
               {saving ? 'Guardando…' : 'Guardar cambios'}
             </button>
           </footer>
         </form>
-      </div>
 
       {discardOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/40 p-4" onMouseDown={event => event.stopPropagation()}>
+        <div data-operational-confirmation style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.confirmation }} className="fixed inset-0 flex items-center justify-center bg-slate-950/40 p-4" onMouseDown={event => event.stopPropagation()}>
           <div ref={discardDialogRef} role="alertdialog" aria-modal="true" aria-labelledby="discard-program-title" aria-describedby="discard-program-description" tabIndex={-1} className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-2xl">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-100 text-amber-700"><AlertTriangle className="h-5 w-5" aria-hidden="true" /></div>
             <h3 id="discard-program-title" className="mt-3 text-lg font-semibold text-slate-900">¿Descartar los cambios?</h3>
-            <p id="discard-program-description" className="mt-1.5 text-sm text-slate-600">La configuración todavía no se guardó.</p>
+            <p id="discard-program-description" className="mt-1.5 text-sm text-slate-600">{photoDirty ? 'Los cambios sin guardar, incluido el recorte de foto, se perderán.' : 'La configuración todavía no se guardó.'}</p>
             <div className="mt-5 flex gap-3 justify-end">
               <button ref={discardCancelRef} type="button" onClick={() => setDiscardOpen(false)} className="min-h-11 rounded-xl px-4 font-medium text-slate-700 hover:bg-slate-100">Seguir editando</button>
-              <button type="button" onClick={onClose} className="min-h-11 rounded-xl bg-rose-600 px-4 font-medium text-white hover:bg-rose-700">Descartar</button>
+              <button type="button" onClick={() => { if (visibleRef.current) onClose(); }} className="min-h-11 rounded-xl bg-rose-600 px-4 font-medium text-white hover:bg-rose-700">Descartar</button>
             </div>
           </div>
         </div>
       )}
-    </div>,
-    document.body,
+    </OperationalWindowShell>
   );
 }

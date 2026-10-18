@@ -70,9 +70,9 @@ describe('ProgramAttendanceRoster', () => {
     const onOpenObservations = vi.fn()
     const onStatusChange = vi.fn()
     render(<ProgramAttendanceRoster {...props({ onOpenObservations, onStatusChange })} />)
-    const button = screen.getAllByRole('button', { name: 'Abrir observaciones de asistencia de Ana Torres' })[0]
+    const button = screen.getAllByRole('button', { name: 'Añadir observación de asistencia de Ana Torres' })[0]
     fireEvent.click(button)
-    expect(onOpenObservations).toHaveBeenCalledWith(participants[0], button)
+    expect(onOpenObservations).toHaveBeenCalledWith(participants[0], button, 'add')
     expect(onStatusChange).not.toHaveBeenCalled()
   })
 
@@ -81,7 +81,7 @@ describe('ProgramAttendanceRoster', () => {
     expect(screen.getByRole('button', { name: 'Lista' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Tablero' })).toBeDisabled()
     expect(screen.getAllByRole('button', { name: 'Confirmado: Ana Torres' })[0]).toBeDisabled()
-    expect(screen.getAllByRole('button', { name: 'Abrir observaciones de asistencia de Ana Torres' })[0]).toBeDisabled()
+    expect(screen.getAllByRole('button', { name: 'Añadir observación de asistencia de Ana Torres' })[0]).toBeDisabled()
   })
 
   it('explains an applied search with no matches and offers an immediate clear action', () => {

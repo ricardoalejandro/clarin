@@ -22,6 +22,7 @@ export type OperationalWindowOptions = {
   mobileBreakpoint?: number
   /** Ephemeral mode used by focused child workflows such as CRM chat. Never persisted. */
   temporaryMode?: OperationalWindowMode
+  suspended?: boolean
 }
 
 export interface OperationalWindowPreference {
@@ -137,7 +138,11 @@ export default function useOperationalWindow({
   align = 'right',
   mobileBreakpoint = 768,
   temporaryMode,
+  suspended = false,
 }: OperationalWindowOptions) {
+  const suspendedRef = useRef(suspended)
+  suspendedRef.current = suspended
+  const endInteractionRef = useRef<(() => void) | null>(null)
   const scopedStorageKey = useMemo(() => operationalWindowScopedStorageKey(storageKey, storageScope), [storageKey, storageScope])
   const defaults = useCallback(() => defaultOperationalWindowGeometry({ defaultWidth, defaultHeight, align, viewport: currentViewport() }), [align, defaultHeight, defaultWidth])
   const [mode, setModeState] = useState<OperationalWindowMode>(defaultMode)
@@ -190,41 +195,56 @@ export default function useOperationalWindow({
 
   const isMobile = viewport.width < mobileBreakpoint
   const effectiveMode = resolveOperationalWindowMode(isMobile, mode, temporaryMode)
+  const effectiveModeRef = useRef(effectiveMode)
+  effectiveModeRef.current = effectiveMode
   const isModal = effectiveMode === 'maximized'
   const setMode = useCallback((next: OperationalWindowMode) => {
+    if (suspendedRef.current) return
     if (next !== 'maximized') restoreModeRef.current = next
     setModeState(next)
   }, [])
   const toggleMaximized = useCallback(() => setModeState(current => {
+    if (suspendedRef.current) return current
     if (current === 'maximized') return restoreModeRef.current
     restoreModeRef.current = current
     return 'maximized'
   }), [])
-  const resetGeometry = useCallback(() => setPreferredGeometry(defaults()), [defaults])
+  const resetGeometry = useCallback(() => { if (!suspendedRef.current) setPreferredGeometry(defaults()) }, [defaults])
+
+  // A pending pointer gesture belongs to its original visible mode and scope.
+  useEffect(() => { endInteractionRef.current?.() }, [suspended, effectiveMode, scopedStorageKey, viewport.width, viewport.height])
+  useEffect(() => () => endInteractionRef.current?.(), [])
 
   const pointerSession = useCallback((event: ReactPointerEvent, moveValue: (dx: number, dy: number) => void) => {
-    if (event.button !== 0) return
+    if (event.button !== 0 || suspendedRef.current || effectiveModeRef.current !== 'floating') return
+    endInteractionRef.current?.()
     event.preventDefault()
     const startX = event.clientX
     const startY = event.clientY
+    const pointerId = event.pointerId
     setIsInteracting(true)
     const move = (pointer: PointerEvent) => {
+      if (suspendedRef.current || endInteractionRef.current !== end || effectiveModeRef.current !== 'floating' || (typeof pointerId === 'number' && typeof pointer.pointerId === 'number' && pointer.pointerId !== pointerId)) return
       pointer.preventDefault()
       moveValue(pointer.clientX - startX, pointer.clientY - startY)
     }
-    const end = () => {
+    const end = (pointer?: PointerEvent) => {
+      if (endInteractionRef.current !== end) return
+      if (pointer && typeof pointerId === 'number' && typeof pointer.pointerId === 'number' && pointer.pointerId !== pointerId) return
       setIsInteracting(false)
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', end)
       window.removeEventListener('pointercancel', end)
+      if (endInteractionRef.current === end) endInteractionRef.current = null
     }
     window.addEventListener('pointermove', move, { passive: false })
-    window.addEventListener('pointerup', end, { once: true })
-    window.addEventListener('pointercancel', end, { once: true })
+    window.addEventListener('pointerup', end)
+    window.addEventListener('pointercancel', end)
+    endInteractionRef.current = end
   }, [])
 
   const beginDrag = useCallback((event: ReactPointerEvent) => {
-    if (effectiveMode !== 'floating' || (event.target as HTMLElement).closest('button,a,input,textarea,select,[data-no-window-drag]')) return
+    if (effectiveModeRef.current !== 'floating' || (event.target as HTMLElement).closest('button,a,input,textarea,select,[data-no-window-drag]')) return
     const start = effectiveGeometryRef.current
     pointerSession(event, (dx, dy) => setPreferredGeometry(
       clampOperationalWindowGeometry({ ...start, x: start.x + dx, y: start.y + dy }, currentViewport(), minWidth, minHeight),
@@ -232,7 +252,7 @@ export default function useOperationalWindow({
   }, [effectiveMode, minHeight, minWidth, pointerSession])
 
   const beginResize = useCallback((edge: OperationalWindowResizeEdge, event: ReactPointerEvent) => {
-    if (effectiveMode !== 'floating') return
+    if (effectiveModeRef.current !== 'floating') return
     const start = effectiveGeometryRef.current
     const size = currentViewport()
     pointerSession(event, (dx, dy) => {

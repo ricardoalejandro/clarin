@@ -16,6 +16,9 @@ func storageSelfServiceHasAuthorizedPrivateUse(accountID uuid.UUID, key string, 
 		if use.Adapter == "private_work" || use.Adapter == "private_whiteboards" {
 			return true
 		}
+		if use.Type == "programs" && use.Adapter == "protected" && storage.IsAccountPrivateProgramAvatarObjectKey(accountID, key) {
+			return true
+		}
 		if use.Type == "contacts" && use.Adapter == "ordinary" && storage.IsAccountPrivateAvatarObjectKey(accountID, key) {
 			return true
 		}

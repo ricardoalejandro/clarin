@@ -226,6 +226,8 @@ func (s *Server) handleReplaceProgramInstructors(c *fiber.Ctx) error {
 
 func writeAcademicAPIError(c *fiber.Ctx, err error) error {
 	switch {
+	case errors.Is(err, repository.ErrProgramInactive):
+		return programInactiveAPIError(c)
 	case errors.Is(err, repository.ErrCourseNotFound), errors.Is(err, repository.ErrProgramNotFound), errors.Is(err, repository.ErrSessionNotFound):
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, repository.ErrProgramNotCourse),

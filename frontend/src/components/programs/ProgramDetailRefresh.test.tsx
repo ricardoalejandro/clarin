@@ -57,7 +57,7 @@ if(endpoint.endsWith('/academic-config'))return {success:true,data:{courses:[],i
 return {success:true,data:{id,account_id:fixture.account,type:'course',status:'active',name:'Group '+id,updated_at:'2026-10-08T10:00:00Z',health_view_columns:['attendance','health']}}
 })
 })
-afterEach(()=>{cleanup();vi.unstubAllGlobals()})
+afterEach(()=>{cleanup();vi.unstubAllGlobals();vi.useRealTimers()})
 describe('program canonical refresh',()=>{
 it('refreshes enrollment counts and outcome controls together with the health roster',async()=>{
 const normalAPI=fixture.api.getMockImplementation()!
@@ -191,6 +191,45 @@ it.each(['failed health', 'concurrent enrollment'])('keeps roster, metrics and a
 
 
 describe('Program mobile workspace',()=>{
+  it('keeps scope totals independent from the 500 ms search and clears results immediately', async () => {
+    fixture.width=522
+    const normalAPI=fixture.api.getMockImplementation()!
+    fixture.api.mockImplementation(async(endpoint:string)=>{
+      const response=await normalAPI(endpoint)
+      if(endpoint.endsWith('/participants'))return {...response,data:[
+        {...response.data[0],contact_name:'Ana activa'},
+        {...response.data[0],id:'participant-b',contact_id:'contact-b',contact_name:'Bruno activo'},
+        {...response.data[0],id:'participant-c',contact_id:'contact-c',contact_name:'Celia retirada',status:'dropped',dropped_at:'2026-10-01'},
+      ]}
+      if(endpoint.endsWith('/health'))return {...response,data:{success:true,health:{...health('program-A'),active_count:2,participants:[
+        {...health('program-A').participants[0],name:'Ana activa'},
+        {...health('program-A').participants[0],participant_id:'participant-b',contact_id:'contact-b',name:'Bruno activo'},
+      ]}}}
+      return response
+    })
+    render(<ProgramDetailPage/> )
+    await screen.findByText('Ana activa')
+    expect(screen.getByText('Bruno activo')).toBeVisible()
+    expect(screen.queryByText('Celia retirada')).not.toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'Estado de participantes: Activos 2'})).toHaveTextContent('2')
+    const search=screen.getByRole('textbox',{name:'Buscar participante por nombre o teléfono'})
+    vi.useFakeTimers()
+    fireEvent.change(search,{target:{value:'Ana'}})
+    act(()=>vi.advanceTimersByTime(499))
+    expect(screen.getByText('Bruno activo')).toBeVisible()
+    act(()=>vi.advanceTimersByTime(1))
+    expect(screen.queryByText('Bruno activo')).not.toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'Estado de participantes: Activos 2'})).toHaveTextContent('1/2')
+    fireEvent.change(search,{target:{value:''}})
+    expect(screen.getByText('Bruno activo')).toBeVisible()
+    expect(screen.getByRole('button',{name:'Estado de participantes: Activos 2'})).toHaveTextContent('Activos2')
+    fireEvent.click(screen.getByRole('button',{name:'Estado de participantes: Activos 2'}))
+    fireEvent.click(screen.getByRole('option',{name:'Historial 1'}))
+    expect(screen.getByText('Celia retirada')).toBeVisible()
+    expect(screen.queryByText('Ana activa')).not.toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'Estado de participantes: Historial 1'})).toHaveTextContent('Historial1')
+  })
+
   const allowContactProfile = () => {
     const normalFetch=vi.mocked(fetch).getMockImplementation()!
     vi.mocked(fetch).mockImplementation(async(input,options)=>String(input).startsWith('/api/contact-profiles/')
@@ -500,6 +539,22 @@ describe('Program suspended statistics',()=>{
 
 
 describe('Program responsive compatibility',()=>{
+  it.each(['completed', 'archived'])('does not offer session creation in a %s program, including its empty state', async status => {
+    const normalAPI = fixture.api.getMockImplementation()!
+    fixture.api.mockImplementation(async (endpoint: string) => {
+      const response = await normalAPI(endpoint)
+      return endpoint === '/api/programs/program-A' ? { ...response, data: { ...response.data, status } } : response
+    })
+    render(<ProgramDetailPage />)
+    expect(await screen.findByText('Group program-A')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Sesiones (0)' }))
+    expect(screen.getByText(/Este programa está cerrado a nuevas sesiones/)).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Nueva Sesión' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Generar Horario' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Sesión Individual' })).not.toBeInTheDocument()
+    expect(fixture.api.mock.calls.some(([, options]) => options?.method === 'POST')).toBe(false)
+  })
+
   it('applies operational mobile restrictions to empty legacy Program records too',async()=>{
     const normalAPI=fixture.api.getMockImplementation()!
     fixture.api.mockImplementation(async(endpoint:string)=>{

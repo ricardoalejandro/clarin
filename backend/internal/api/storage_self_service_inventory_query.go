@@ -49,7 +49,7 @@ func (s *Server) storageInventoryFreshness(ctx context.Context, accountID uuid.U
 
 func storageInventoryOrigins(claims *service.JWTClaims) []string {
 	origins := []string{}
-	for _, origin := range []string{"chats", "quick_replies", "stickers", "campaigns", "dynamics", "surveys", "documents", "contacts"} {
+	for _, origin := range []string{"chats", "quick_replies", "stickers", "campaigns", "dynamics", "surveys", "documents", "contacts", "programs"} {
 		if storageSelfServiceHasPermission(claims, storageSelfServiceOriginPermission(origin)) {
 			origins = append(origins, origin)
 		}
@@ -120,6 +120,7 @@ func storageInventoryCTE(claims *service.JWTClaims, includePrivateSources ...boo
 	   AND NOT(split_part(ir.object_key,'/',2)='tasks' AND split_part(ir.object_key,'/',3)='attachments')
 	   AND strpos(ir.object_key,'/whiteboards/')=0)
 	  OR (ir.source_kind='contacts' AND split_part(ir.object_key,'/',2)='_private' AND split_part(ir.object_key,'/',3)='avatars')
+	  OR (ir.source_kind='programs' AND split_part(ir.object_key,'/',2)='_private' AND split_part(ir.object_key,'/',3)='program-avatars')
 	 )) OR EXISTS(SELECT 1 FROM private_readable_refs allowed WHERE allowed.source_kind=ir.source_kind AND allowed.source_id=ir.source_id))
 	), mutable_refs AS NOT MATERIALIZED (
  SELECT ir.* FROM authorized_refs ir WHERE $5::boolean AND (

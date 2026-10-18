@@ -28,6 +28,7 @@ var storageReferenceGuardSpecs = []storageReferenceGuardSpec{
 	{"surveys", "direct", "branding"},
 	{"survey_templates", "direct", "branding"},
 	{"contacts", "direct", "avatar_url,avatar_media_asset_id"},
+	{"programs", "direct", "avatar_media_asset_id"},
 	{"whatsapp_statuses", "direct", "media_url,media_asset_id"},
 	{"task_attachments", "direct", "media_asset_id,storage_removed_at,storage_removal_id"},
 	{"task_attachment_previews", "direct", "derivative_asset_id"},

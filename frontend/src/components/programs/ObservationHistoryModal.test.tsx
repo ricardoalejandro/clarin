@@ -20,6 +20,31 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('observation history mutation capabilities', () => {
+  it('preserves an attendance composer intention and draft through history refresh', () => {
+    const attendanceContext = { programId: 'program-1', sessionId: 'session-1', participantId: 'participant-1' }
+    const view = render(<ObservationHistoryModal {...props} attendanceContext={attendanceContext} initialComposerOpen />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Borrador de asistencia' } })
+    view.rerender(<ObservationHistoryModal {...props} attendanceContext={attendanceContext} initialComposerOpen={false} observations={[]} />)
+    expect(screen.getByRole('textbox')).toHaveValue('Borrador de asistencia')
+    view.rerender(<ObservationHistoryModal {...props} attendanceContext={{ ...attendanceContext, participantId: 'participant-2' }} initialComposerOpen={false} observations={[]} />)
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+  })
+
+  it('protects attendance drafts on close and resumes after cancelling discard', () => {
+    const onClose = vi.fn()
+    render(<ObservationHistoryModal {...props} onClose={onClose} protectDraftOnClose />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Todavía no enviada' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Cerrar observaciones' }))
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByRole('alertdialog', { name: 'Descartar observación pendiente' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Seguir escribiendo' }))
+    expect(screen.getByRole('textbox')).toHaveValue('Todavía no enviada')
+    fireEvent.keyDown(document, { key: 'Escape' })
+    fireEvent.click(screen.getByRole('button', { name: 'Descartar y cerrar' }))
+    expect(onClose).toHaveBeenCalledOnce()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('keeps desktop call drafts independent of note-only mobile drafts and rejects old callbacks', async () => {
     const onObservationChange = vi.fn()
     const view = render(<ObservationHistoryModal {...props} onObservationChange={onObservationChange} />)

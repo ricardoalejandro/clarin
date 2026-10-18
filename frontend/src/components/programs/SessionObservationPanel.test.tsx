@@ -22,6 +22,46 @@ function clickCallback(element: HTMLElement): () => Promise<void> {
 }
 
 describe('SessionObservationPanel', () => {
+  it('retains a collapsed draft, reports pending state, and blocks a callback captured before search', async () => {
+    const onStateChange = vi.fn()
+    const view = render(<SessionObservationPanel {...props} onStateChange={onStateChange} />)
+    await waitFor(() => expect(apiMock).toHaveBeenCalledTimes(1))
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: 'Comentario pendiente' } })
+    const create = clickCallback(screen.getByRole('button', { name: 'Añadir' }))
+    input.focus()
+    view.rerender(<SessionObservationPanel {...props} onStateChange={onStateChange} suspended />)
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    expect(input.closest('section')).toHaveAttribute('inert')
+    expect(input).not.toHaveFocus()
+    await act(async () => { await create() })
+    expect(apiMock).toHaveBeenCalledTimes(1)
+    expect(onStateChange).toHaveBeenLastCalledWith({ dirty: true, saving: false, error: '', count: 0 })
+    view.rerender(<SessionObservationPanel {...props} onStateChange={onStateChange} />)
+    expect(screen.getByRole('textbox')).toHaveValue('Comentario pendiente')
+  })
+
+  it('reconciles an already submitted comment exactly once while search hides the panel', async () => {
+    let resolve!: (result: unknown) => void
+    apiMock.mockResolvedValueOnce({ success: true, data: { success: true, observations: [] } })
+      .mockImplementationOnce(() => new Promise(done => { resolve = done }))
+    const onChanged = vi.fn()
+    const onStateChange = vi.fn()
+    const view = render(<SessionObservationPanel {...props} onChanged={onChanged} onStateChange={onStateChange}/>)
+    await waitFor(() => expect(apiMock).toHaveBeenCalledTimes(1))
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: observation.notes } })
+    const create = clickCallback(screen.getByRole('button', { name: 'Añadir' }))
+    await act(async () => { void create(); void create() })
+    view.rerender(<SessionObservationPanel {...props} suspended onChanged={onChanged} onStateChange={onStateChange}/>)
+    await act(async () => resolve({ success: true, data: { success: true, observation } }))
+    expect(onChanged).toHaveBeenCalledOnce()
+    expect(onStateChange).toHaveBeenLastCalledWith({ dirty: false, saving: false, error: '', count: 1 })
+    view.rerender(<SessionObservationPanel {...props} onChanged={onChanged} onStateChange={onStateChange}/>)
+    expect(screen.getByRole('textbox')).toHaveValue('')
+    expect(screen.getByText(observation.notes)).toBeInTheDocument()
+    expect(apiMock).toHaveBeenCalledTimes(2)
+  })
+
   it('keeps every mutation control disabled while attendance is saving', async () => {
     render(<SessionObservationPanel programId="program-1" sessionId="session-1" disabled />)
 
@@ -61,6 +101,7 @@ describe('SessionObservationPanel', () => {
     await act(async () => { await save(); await pin(); await remove() })
     expect(apiMock).toHaveBeenCalledTimes(1)
     expect(screen.queryByRole('textbox', { name: 'Editar comentario de sesión' })).not.toBeInTheDocument()
+    expect(screen.getByText('Tienes una edición de comentario pendiente. Vuelve a escritorio para continuar.')).toBeInTheDocument()
     view.rerender(<SessionObservationPanel {...props} />)
     expect(screen.getByRole('textbox', { name: 'Editar comentario de sesión' })).toHaveValue('Edición pendiente')
   })
@@ -119,5 +160,17 @@ describe('SessionObservationPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Añadir' }))
     await screen.findByText(observation.notes)
     expect(screen.getByRole('textbox')).toHaveValue('')
+  })
+
+  it('retries a failed history read without clearing the unsent comment', async () => {
+    apiMock.mockResolvedValueOnce({ success: false, error: 'Comentarios temporalmente no disponibles' })
+      .mockResolvedValueOnce({ success: true, data: { success: true, observations: [observation] } })
+    render(<SessionObservationPanel {...props}/>)
+    await screen.findByText('Comentarios temporalmente no disponibles')
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Borrador conservado' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar comentarios' }))
+    await screen.findByText(observation.notes)
+    expect(screen.getByRole('textbox')).toHaveValue('Borrador conservado')
+    expect(apiMock.mock.calls.every(([, options]) => !options?.method)).toBe(true)
   })
 })

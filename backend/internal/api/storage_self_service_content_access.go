@@ -97,7 +97,7 @@ func (s *Server) storageAuthorizeContent(ctx context.Context, actor storageUseAc
 	for _, ref := range refs {
 		permission := storageSelfServiceOriginPermission(ref.Origin)
 		if permission != "" && storageSelfServiceHasPermission(actor.Claims, permission) &&
-			(!storage.IsProtectedMediaObjectKey(key) || (ref.Origin == "contacts" && storage.IsAccountPrivateAvatarObjectKey(actor.AccountID, key))) {
+			(!storage.IsProtectedMediaObjectKey(key) || ((ref.Origin == "contacts" && storage.IsAccountPrivateAvatarObjectKey(actor.AccountID, key)) || (ref.Origin == "programs" && storage.IsAccountPrivateProgramAvatarObjectKey(actor.AccountID, key)))) {
 			return storageReadableFilename(ref.Filename, key), true, nil
 		}
 	}

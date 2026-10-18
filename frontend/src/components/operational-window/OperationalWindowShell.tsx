@@ -1,12 +1,13 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { Maximize2, Minimize2, Move, PanelRight, RotateCcw, X, type LucideIcon } from 'lucide-react'
 import ClarinBrandMark from '@/components/branding/ClarinBrandMark'
 import useOperationalWindow, { type OperationalWindowMode, type OperationalWindowResizeEdge } from './useOperationalWindow'
 import { operationalWindowVisualState } from './operationalWindowVisuals'
 import { OperationalOverlayProvider } from './OperationalOverlayContext'
+import { DIALOG_TAB_FOCUSABLE_SELECTOR, isDialogFocusableVisible, restoreDialogFocus } from '@/components/programs/useDialogTabTrap'
 
 const RESIZE_HANDLES: Record<OperationalWindowResizeEdge, string> = {
   n: 'left-3 right-3 top-0 h-2 cursor-n-resize',
@@ -19,8 +20,14 @@ const RESIZE_HANDLES: Record<OperationalWindowResizeEdge, string> = {
   sw: 'bottom-0 left-0 h-4 w-4 cursor-sw-resize',
 }
 
+function restoreWindowFocus(candidates: Array<HTMLElement | null | undefined>) {
+  return restoreDialogFocus(candidates.filter(candidate => candidate && !candidate.matches(':disabled')))
+}
+
 export interface OperationalWindowShellProps {
   open: boolean
+  suspended?: boolean
+  initialFocusRef?: RefObject<HTMLElement | null>
   storageKey: string
   storageScope?: string
   title: string
@@ -49,6 +56,8 @@ export interface OperationalWindowShellProps {
 
 export default function OperationalWindowShell({
   open,
+  suspended = false,
+  initialFocusRef,
   storageKey,
   storageScope,
   title,
@@ -74,7 +83,12 @@ export default function OperationalWindowShell({
   temporaryMode,
   motionProfile = 'standard',
 }: OperationalWindowShellProps) {
-  const windowState = useOperationalWindow({ storageKey, storageScope, defaultMode, defaultWidth, defaultHeight, minWidth, minHeight, dockedWidth, align, temporaryMode })
+  const windowState = useOperationalWindow({ storageKey, storageScope, defaultMode, defaultWidth, defaultHeight, minWidth, minHeight, dockedWidth, align, temporaryMode, suspended: suspended || !open })
+  const openRef = useRef(open)
+  openRef.current = open
+  const suspendedRef = useRef(suspended)
+  suspendedRef.current = suspended
+  const lastFocusedRef = useRef<HTMLElement | null>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const overlayHostRef = useRef<HTMLDivElement | null>(null)
   const [overlayHost, setOverlayHost] = useState<HTMLDivElement | null>(null)
@@ -100,24 +114,43 @@ export default function OperationalWindowShell({
   useEffect(() => {
     if (!open) return
     previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const frame = requestAnimationFrame(() => {
-      const panel = panelRef.current
-      if (!panel) return
-      const activeElement = document.activeElement
-      if (activeElement instanceof HTMLElement && panel.contains(activeElement)) return
-      panel.focus({ preventScroll: true })
-    })
     return () => {
-      cancelAnimationFrame(frame)
-      previousFocusRef.current?.focus({ preventScroll: true })
+      restoreWindowFocus([previousFocusRef.current])
       previousFocusRef.current = null
+      lastFocusedRef.current = null
     }
   }, [open])
 
   useEffect(() => {
     if (!open) return
-    const temporaryOverlayOpen = () => openOverlaysRef.current.size > 0 || Boolean(document.querySelector(temporaryOverlaySelector))
+    if (suspended) {
+      const active = document.activeElement
+      if (active instanceof HTMLElement && (panelRef.current?.contains(active) || overlayHostRef.current?.contains(active))) {
+        lastFocusedRef.current = active
+        active.blur()
+        restoreWindowFocus([previousFocusRef.current])
+      }
+      return
+    }
+    const frame = requestAnimationFrame(() => {
+      if (!openRef.current || suspendedRef.current) return
+      const panel = panelRef.current
+      if (!panel) return
+      const activeElement = document.activeElement
+      if (activeElement instanceof HTMLElement && (panel.contains(activeElement) || overlayHostRef.current?.contains(activeElement)) && isDialogFocusableVisible(activeElement)) return
+      restoreWindowFocus([lastFocusedRef.current, initialFocusRef?.current, panel])
+    })
+    return () => {
+      cancelAnimationFrame(frame)
+    }
+  }, [open, suspended, initialFocusRef])
+
+  useEffect(() => {
+    if (!open) return
+    if (suspended) return
+    const temporaryOverlayOpen = () => openOverlaysRef.current.size > 0 || Array.from(document.querySelectorAll<HTMLElement>(temporaryOverlaySelector)).some(element => isDialogFocusableVisible(element))
     const keyboard = (event: KeyboardEvent) => {
+      if (!openRef.current || suspendedRef.current) return
       if (event.key === 'Escape') {
         if (event.defaultPrevented || busyRef.current || temporaryOverlayOpen()) return
         event.preventDefault()
@@ -125,11 +158,10 @@ export default function OperationalWindowShell({
         return
       }
       if (event.key !== 'Tab' || !modalRef.current || temporaryOverlayOpen() || !panelRef.current) return
-      const selector = 'button:not([disabled]),a[href],input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])'
       const focusable = [
-        ...Array.from(panelRef.current.querySelectorAll<HTMLElement>(selector)),
-        ...Array.from(overlayHostRef.current?.querySelectorAll<HTMLElement>(selector) || []),
-      ]
+        ...Array.from(panelRef.current.querySelectorAll<HTMLElement>(DIALOG_TAB_FOCUSABLE_SELECTOR)),
+        ...Array.from(overlayHostRef.current?.querySelectorAll<HTMLElement>(DIALOG_TAB_FOCUSABLE_SELECTOR) || []),
+      ].filter(element => isDialogFocusableVisible(element))
       if (!focusable.length) {
         event.preventDefault()
         panelRef.current.focus()
@@ -137,10 +169,14 @@ export default function OperationalWindowShell({
       }
       const first = focusable[0]
       const last = focusable[focusable.length - 1]
-      if (event.shiftKey && document.activeElement === first) {
+      const active = document.activeElement
+      if ((!panelRef.current.contains(active) && !overlayHostRef.current?.contains(active)) || active === panelRef.current) {
+        event.preventDefault()
+        ;(event.shiftKey ? last : first).focus()
+      } else if (event.shiftKey && active === first) {
         event.preventDefault()
         last.focus()
-      } else if (!event.shiftKey && document.activeElement === last) {
+      } else if (!event.shiftKey && active === last) {
         event.preventDefault()
         first.focus()
       }
@@ -149,7 +185,7 @@ export default function OperationalWindowShell({
     return () => {
       window.removeEventListener('keydown', keyboard)
     }
-  }, [open, temporaryOverlaySelector])
+  }, [open, suspended, temporaryOverlaySelector])
 
   if (!open || typeof document === 'undefined') return null
   const visual = operationalWindowVisualState(windowState.effectiveMode, windowState.isMobile)
@@ -164,13 +200,16 @@ export default function OperationalWindowShell({
     <OperationalOverlayProvider portalTarget={overlayHost} registerOverlay={registerOverlay}>
       <div
         data-operational-window-shell
+        onFocusCapture={event => { if (!suspendedRef.current) lastFocusedRef.current = event.target as HTMLElement }}
+        hidden={suspended}
+        inert={suspended || undefined}
         data-task-work-window-shell={dataAttribute === 'task-work-window' ? '' : undefined}
         data-window-kind={dataAttribute}
         data-window-mode={windowState.effectiveMode}
         data-backdrop-mode={visual.blocksWorkspace ? 'modal' : windowState.effectiveMode}
-        style={{ ...visual.backdropStyle, zIndex: overlayZIndex }}
+        style={{ ...visual.backdropStyle, zIndex: overlayZIndex, ...(suspended ? { display: 'none' } : {}) }}
         className={`fixed inset-0 isolate transition-[background-color,backdrop-filter] duration-200 motion-reduce:transition-none ${visual.blocksWorkspace ? '' : 'pointer-events-none'}`}
-        onMouseDown={event => { if (visual.blocksWorkspace && event.target === event.currentTarget && !busy) onRequestClose() }}
+        onMouseDown={event => { if (openRef.current && !suspendedRef.current && modalRef.current && event.target === event.currentTarget && !busyRef.current) closeRef.current() }}
       >
       <section
         ref={panelRef}
@@ -207,7 +246,7 @@ export default function OperationalWindowShell({
               {windowState.effectiveMode === 'floating' && <button type="button" title="Restablecer tamaño" aria-label="Restablecer tamaño" onClick={windowState.resetGeometry} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"><RotateCcw className="h-4 w-4" /></button>}
               <button type="button" title={windowState.effectiveMode === 'maximized' ? 'Restaurar' : 'Maximizar'} aria-label={windowState.effectiveMode === 'maximized' ? 'Restaurar' : 'Maximizar'} onClick={windowState.toggleMaximized} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700">{windowState.effectiveMode === 'maximized' ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}</button>
             </>}
-            <button type="button" disabled={busy} aria-label={`Cerrar ${title}`} onClick={onRequestClose} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40"><X className="h-5 w-5" /></button>
+            <button type="button" disabled={busy} aria-label={`Cerrar ${title}`} onClick={() => { if (openRef.current && !suspendedRef.current && !busyRef.current) closeRef.current() }} className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40"><X className="h-5 w-5" /></button>
           </div>
         </header>
         <div className={contentClassName}>{children}</div>

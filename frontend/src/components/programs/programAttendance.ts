@@ -207,6 +207,15 @@ export function acceptProgramAttendanceConflicts(
   return next
 }
 
+/** Accept only the sent statuses; filtered participants and newer local drafts survive. */
+export function acceptSavedProgramAttendance(draft: ProgramAttendanceDraft, records: ProgramAttendanceBatchRecord[]): ProgramAttendanceDraft {
+  const next = { ...draft }
+  for (const record of records) {
+    if (next[record.participant_id]) next[record.participant_id] = { ...next[record.participant_id], original_status: record.status }
+  }
+  return next
+}
+
 export function programAttendanceConflictExpectedStatuses(conflicts: ProgramAttendanceConflict[]) {
   return Object.fromEntries(conflicts.map(conflict => [
     conflict.participant_id,

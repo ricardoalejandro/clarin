@@ -2155,17 +2155,22 @@ type ProgramFolder struct {
 
 // Program represents an educational program, course, or workshop
 type Program struct {
-	ID          uuid.UUID  `json:"id"`
-	AccountID   uuid.UUID  `json:"account_id"`
-	FolderID    *uuid.UUID `json:"folder_id,omitempty"`
-	Type        string     `json:"type"` // course; event is read-only legacy compatibility
-	Name        string     `json:"name"`
-	Description *string    `json:"description,omitempty"`
-	Status      string     `json:"status"` // active, completed, archived
-	Color       string     `json:"color"`
-	CreatedBy   *uuid.UUID `json:"created_by,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	AvatarMediaAssetID *uuid.UUID `json:"avatar_media_asset_id,omitempty"`
+	AvatarURL          *string    `json:"avatar_url,omitempty"`
+	AvatarRevision     int64      `json:"avatar_revision"`
+	AvatarUpdatedAt    *time.Time `json:"avatar_updated_at,omitempty"`
+	ArchivedFromStatus *string    `json:"archived_from_status,omitempty"`
+	ID                 uuid.UUID  `json:"id"`
+	AccountID          uuid.UUID  `json:"account_id"`
+	FolderID           *uuid.UUID `json:"folder_id,omitempty"`
+	Type               string     `json:"type"` // course; event is read-only legacy compatibility
+	Name               string     `json:"name"`
+	Description        *string    `json:"description,omitempty"`
+	Status             string     `json:"status"` // active, completed, archived
+	Color              string     `json:"color"`
+	CreatedBy          *uuid.UUID `json:"created_by,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 	// HealthViewColumns stores the configurable columns shown in the Program
 	// health roster. Participant identity and actions are intentionally fixed.
 	HealthViewColumns []string   `json:"health_view_columns"`

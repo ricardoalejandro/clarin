@@ -34,6 +34,8 @@ var (
 	ErrProgramParticipantNotEnded            = errors.New("program participant has no editable outcome date")
 	ErrProgramParticipantEndBeforeEnrollment = errors.New("program participant end date is before enrollment")
 	ErrProgramParticipantStageInvalid        = errors.New("program participant stage does not belong to the program pipeline and account")
+	ErrProgramInactive                       = errors.New("program is not active")
+	ErrProgramLifecycleVersionRequired       = errors.New("expected_updated_at is required for status changes")
 	ErrProgramConflict                       = errors.New("program was modified by another user")
 	ErrProgramSessionObservationNotFound     = errors.New("program session observation not found")
 	ErrProgramSessionObservationForbidden    = errors.New("program session observation forbidden")
@@ -106,6 +108,8 @@ func (r *ProgramRepository) GetByID(ctx context.Context, accountID, id uuid.UUID
 	p := &domain.Program{}
 	err := r.db.QueryRow(ctx, `
 	SELECT p.id, p.account_id, p.type, p.name, p.description, p.status, p.color, p.created_by, p.folder_id, p.created_at, p.updated_at, p.health_view_columns,
+p.avatar_media_asset_id,p.avatar_revision,p.avatar_updated_at,p.archived_from_status,
+CASE WHEN p.avatar_media_asset_id IS NOT NULL THEN '/api/programs/' || p.id::text || '/avatar/content?v=' || p.avatar_revision::text END,
 p.schedule_start_date, p.schedule_end_date, p.schedule_days, p.schedule_start_time, p.schedule_end_time,
 p.pipeline_id, COALESCE(p.tag_formula, ''), COALESCE(p.tag_formula_mode, 'OR'), COALESCE(p.tag_formula_type, 'simple'),
 p.event_date, p.event_end, p.location, ep.name as pipeline_name,
@@ -118,6 +122,7 @@ LEFT JOIN program_event_retirements retirement ON retirement.account_id = p.acco
 WHERE p.id = $1 AND p.account_id = $2
 `, id, accountID).Scan(
 		&p.ID, &p.AccountID, &p.Type, &p.Name, &p.Description, &p.Status, &p.Color, &p.CreatedBy, &p.FolderID, &p.CreatedAt, &p.UpdatedAt, &p.HealthViewColumns,
+		&p.AvatarMediaAssetID, &p.AvatarRevision, &p.AvatarUpdatedAt, &p.ArchivedFromStatus, &p.AvatarURL,
 		&p.ScheduleStartDate, &p.ScheduleEndDate, &p.ScheduleDays, &p.ScheduleStartTime, &p.ScheduleEndTime,
 		&p.PipelineID, &p.TagFormula, &p.TagFormulaMode, &p.TagFormulaType,
 		&p.EventDate, &p.EventEnd, &p.Location, &p.PipelineName,
@@ -168,6 +173,8 @@ func (r *ProgramRepository) LegacyEventPipelineBelongsToAccount(ctx context.Cont
 func (r *ProgramRepository) List(ctx context.Context, accountID uuid.UUID, status string) ([]*domain.Program, error) {
 	query := `
 	SELECT p.id, p.account_id, p.type, p.name, p.description, p.status, p.color, p.created_by, p.folder_id, p.created_at, p.updated_at, p.health_view_columns,
+p.avatar_media_asset_id,p.avatar_revision,p.avatar_updated_at,p.archived_from_status,
+CASE WHEN p.avatar_media_asset_id IS NOT NULL THEN '/api/programs/' || p.id::text || '/avatar/content?v=' || p.avatar_revision::text END,
 p.schedule_start_date, p.schedule_end_date, p.schedule_days, p.schedule_start_time, p.schedule_end_time,
 p.pipeline_id, COALESCE(p.tag_formula, ''), COALESCE(p.tag_formula_mode, 'OR'), COALESCE(p.tag_formula_type, 'simple'),
 p.event_date, p.event_end, p.location, ep.name as pipeline_name,
@@ -205,6 +212,7 @@ func scanProgramList(rows programListRows) ([]*domain.Program, error) {
 		p := &domain.Program{}
 		err := rows.Scan(
 			&p.ID, &p.AccountID, &p.Type, &p.Name, &p.Description, &p.Status, &p.Color, &p.CreatedBy, &p.FolderID, &p.CreatedAt, &p.UpdatedAt, &p.HealthViewColumns,
+			&p.AvatarMediaAssetID, &p.AvatarRevision, &p.AvatarUpdatedAt, &p.ArchivedFromStatus, &p.AvatarURL,
 			&p.ScheduleStartDate, &p.ScheduleEndDate, &p.ScheduleDays, &p.ScheduleStartTime, &p.ScheduleEndTime,
 			&p.PipelineID, &p.TagFormula, &p.TagFormulaMode, &p.TagFormulaType,
 			&p.EventDate, &p.EventEnd, &p.Location, &p.PipelineName,
@@ -224,14 +232,16 @@ func scanProgramList(rows programListRows) ([]*domain.Program, error) {
 
 const updateProgramQuery = `
 	UPDATE programs
-	SET name = $1, description = $2, status = $3, color = $4, folder_id = $5,
+	SET name = $1, description = $2, status = CASE WHEN status='archived' AND $3::varchar IN ('active','completed') THEN COALESCE(archived_from_status,'active') ELSE $3::varchar END,
+	archived_from_status = CASE WHEN status<>'archived' AND $3::varchar='archived' THEN status WHEN status='archived' AND $3::varchar='archived' THEN archived_from_status ELSE NULL END, color = $4, folder_id = $5,
 	schedule_start_date = $6, schedule_end_date = $7, schedule_days = $8, schedule_start_time = $9, schedule_end_time = $10,
 	pipeline_id = $11, tag_formula = $12, tag_formula_mode = $13, tag_formula_type = $14,
 	event_date = $15, event_end = $16, location = $17, health_view_columns = $18,
 	updated_at = NOW()
 	WHERE id = $19 AND account_id = $20
 	  AND ($21::timestamptz IS NULL OR updated_at = $21::timestamptz)
-	RETURNING updated_at
+	  AND (status=$3::varchar OR $21::timestamptz IS NOT NULL)
+	RETURNING updated_at,status,archived_from_status
 `
 
 func (r *ProgramRepository) Update(ctx context.Context, p *domain.Program) error {
@@ -254,10 +264,17 @@ func (r *ProgramRepository) updateWith(ctx context.Context, q interface {
 		p.ScheduleStartDate, p.ScheduleEndDate, p.ScheduleDays, p.ScheduleStartTime, p.ScheduleEndTime,
 		p.PipelineID, p.TagFormula, p.TagFormulaMode, p.TagFormulaType,
 		p.EventDate, p.EventEnd, p.Location, p.HealthViewColumns,
-		p.ID, p.AccountID, p.ExpectedUpdatedAt).Scan(&p.UpdatedAt)
+		p.ID, p.AccountID, p.ExpectedUpdatedAt).Scan(&p.UpdatedAt, &p.Status, &p.ArchivedFromStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if p.ExpectedUpdatedAt != nil {
 			return ErrProgramConflict
+		}
+		var exists bool
+		if lookupErr := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM programs WHERE account_id=$1 AND id=$2)`, p.AccountID, p.ID).Scan(&exists); lookupErr != nil {
+			return lookupErr
+		}
+		if exists {
+			return ErrProgramLifecycleVersionRequired
 		}
 		return ErrProgramNotFound
 	}
@@ -343,10 +360,18 @@ const addProgramParticipantQuery = `
 `
 
 func (r *ProgramRepository) AddParticipant(ctx context.Context, accountID uuid.UUID, pp *domain.ProgramParticipant) error {
-	err := r.db.QueryRow(ctx, addProgramParticipantQuery, accountID, pp.ProgramID, pp.ContactID, pp.StageID, pp.Status, pp.AutoTagSync).Scan(&pp.ID, &pp.EnrolledAt)
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = lockActiveProgram(ctx, tx, accountID, pp.ProgramID); err != nil {
+		return err
+	}
+	err = tx.QueryRow(ctx, addProgramParticipantQuery, accountID, pp.ProgramID, pp.ContactID, pp.StageID, pp.Status, pp.AutoTagSync).Scan(&pp.ID, &pp.EnrolledAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var alreadyExists bool
-		if lookupErr := r.db.QueryRow(ctx, `
+		if lookupErr := tx.QueryRow(ctx, `
 			SELECT EXISTS(
 				SELECT 1
 				FROM program_participants participant
@@ -361,7 +386,10 @@ func (r *ProgramRepository) AddParticipant(ctx context.Context, accountID uuid.U
 		}
 		return ErrProgramParticipantStageInvalid
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *ProgramRepository) AddParticipantsByContactIDs(ctx context.Context, accountID, programID uuid.UUID, contactIDs []uuid.UUID) (ProgramParticipantBulkResult, error) {
@@ -389,17 +417,8 @@ func (r *ProgramRepository) AddParticipantsByContactIDs(ctx context.Context, acc
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var active bool
-	if err := tx.QueryRow(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM programs
-			WHERE id=$1 AND account_id=$2 AND status='active'
-		)
-	`, programID, accountID).Scan(&active); err != nil {
+	if _, err := lockActiveProgram(ctx, tx, accountID, programID); err != nil {
 		return result, err
-	}
-	if !active {
-		return result, pgx.ErrNoRows
 	}
 
 	if err := tx.QueryRow(ctx, `
@@ -657,13 +676,8 @@ func (r *ProgramRepository) CreateSession(ctx context.Context, accountID uuid.UU
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var programType string
-	if err := tx.QueryRow(ctx, `
-		SELECT type FROM programs WHERE account_id = $1 AND id = $2 FOR SHARE
-	`, accountID, s.ProgramID).Scan(&programType); err != nil {
-		if err == pgx.ErrNoRows {
-			return ErrProgramNotFound
-		}
+	programType, err := lockActiveProgram(ctx, tx, accountID, s.ProgramID)
+	if err != nil {
 		return err
 	}
 	if programType != "course" {
@@ -1926,13 +1940,8 @@ func (r *ProgramRepository) GenerateSessions(ctx context.Context, accountID, pro
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var programType string
-	if err := tx.QueryRow(ctx, `
-		SELECT type FROM programs WHERE account_id = $1 AND id = $2 FOR UPDATE
-	`, accountID, programID).Scan(&programType); err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, 0, ErrProgramNotFound
-		}
+	programType, err := lockActiveProgram(ctx, tx, accountID, programID)
+	if err != nil {
 		return nil, 0, err
 	}
 	if assignCourseTopics && programType != "course" {

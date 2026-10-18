@@ -35,7 +35,7 @@ describe('ProgramsPage mobile consultation policy', () => {
     expect(screen.getByRole('link', { name: /Legacy group/ })).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Administrar cursos' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Nuevo|Crear|Editar|Eliminar|Acciones|Carpeta|Metas/ })).not.toBeInTheDocument()
-    expect(screen.getByPlaceholderText('Buscar programas...')).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Buscar programas' })).toBeInTheDocument()
     expect(fixture.api.mock.calls.every(([, options]) => !options?.method || options.method === 'GET')).toBe(true)
   })
 
@@ -74,7 +74,7 @@ describe('ProgramsPage mobile consultation policy', () => {
     const view = render(<ProgramsPage />)
     await screen.findByText('Retained group')
     fireEvent.click(screen.getByRole('button', { name: 'Acciones de Retained group' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Eliminar' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Eliminar' }))
     const confirm = screen.getByRole('button', { name: 'Confirmar' })
     fixture.width = 522
     view.rerender(<ProgramsPage />)
@@ -138,6 +138,53 @@ describe('ProgramsPage mobile consultation policy', () => {
 afterEach(cleanup)
 
 describe('ProgramsPage lifecycle scopes and preservation', () => {
+  it.each(['Lista', 'Compacta'])('offers the complete lifecycle menu from %s without navigating or writing before confirmation', async viewName => {
+    const source = { ...program('Managed group'), updated_at: '2026-10-18T12:00:00Z' }
+    const baseMock = fixture.api.getMockImplementation()!
+    fixture.api.mockImplementation(async (endpoint: string, options?: RequestInit) => {
+      if (options?.method === 'PUT') return { success: true, data: { ...source, status: 'completed', updated_at: '2026-10-18T12:01:00Z' } }
+      if (endpoint === '/api/programs?status=active') return { success: true, data: [source] }
+      return baseMock(endpoint, options)
+    })
+    render(<ProgramsPage />)
+    await screen.findByText('Managed group')
+    fireEvent.click(screen.getByRole('button', { name: viewName }))
+    const trigger = screen.getByRole('button', { name: 'Acciones de Managed group' })
+    expect(trigger).toHaveAttribute('aria-haspopup', 'menu')
+    expect(trigger.className).toContain('h-11 w-11')
+    fireEvent.click(trigger)
+    const menu = screen.getByRole('menu', { name: 'Acciones de Managed group' })
+    expect(menu.parentElement).toBe(document.body)
+    expect(trigger).toHaveAttribute('aria-controls', menu.id)
+    expect(screen.getByRole('menuitem', { name: 'Editar' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Archivar programa' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Concluir programa' }))
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    expect(screen.getByRole('alertdialog', { name: 'Concluir programa' })).toBeInTheDocument()
+    expect(fixture.api.mock.calls.filter(([, options]) => options?.method === 'PUT')).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Concluir programa' }))
+    await waitFor(() => expect(fixture.api.mock.calls.filter(([, options]) => options?.method === 'PUT')).toHaveLength(1))
+    const [, request] = fixture.api.mock.calls.find(([, options]) => options?.method === 'PUT')!
+    expect(JSON.parse(request.body)).toMatchObject({ status: 'completed', expected_updated_at: source.updated_at })
+    await waitFor(() => expect(screen.queryByText('Managed group')).not.toBeInTheDocument())
+  })
+
+  it('closes the portaled menu on Escape, restores its trigger focus and drops it when mobile begins', async () => {
+    const view = render(<ProgramsPage />)
+    await screen.findByText('Retained group')
+    const trigger = screen.getByRole('button', { name: 'Acciones de Retained group' })
+    fireEvent.click(trigger)
+    await waitFor(() => expect(screen.getByRole('menuitem', { name: 'Editar' })).toHaveFocus())
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    expect(trigger).toHaveFocus()
+    fireEvent.click(trigger)
+    fixture.width = 560
+    view.rerender(<ProgramsPage />)
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Acciones de Retained group' })).not.toBeInTheDocument()
+  })
+
   it('shows the real empty state only for a successful array response', async () => {
     fixture.api.mockImplementation(async (endpoint: string) => endpoint.startsWith('/api/programs/folders') ? folders
       : endpoint.startsWith('/api/programs/dashboard') ? { success: false }
@@ -216,7 +263,7 @@ describe('ProgramsPage lifecycle scopes and preservation', () => {
     render(<ProgramsPage />)
     expect(await screen.findByText('Retained group')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Acciones de Retained group' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Eliminar' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Eliminar' }))
     expect(screen.getByText(/¿Eliminar este programa vacío/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Confirmar' }))
     expect(await screen.findByText('Este programa contiene datos o actividad. Archívalo para conservar su historial.')).toBeInTheDocument()

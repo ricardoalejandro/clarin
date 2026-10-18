@@ -1,6 +1,11 @@
 export type ProgramHealthViewColumn = 'health' | 'attendance' | 'signals' | 'enrolled_at' | 'tenure';
 
 export interface Program {
+  avatar_media_asset_id?: string | null;
+  avatar_url?: string | null;
+  avatar_revision?: number;
+  avatar_updated_at?: string | null;
+  archived_from_status?: 'active' | 'completed' | null;
   id: string;
   account_id: string;
   folder_id?: string;

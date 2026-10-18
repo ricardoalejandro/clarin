@@ -94,18 +94,18 @@ describe('ProgramAttendanceBoard', () => {
     }]
     render(<ProgramAttendanceBoard participants={participants.slice(0, 1)} draft={createProgramAttendanceDraft(denseObservationRoster)} onStatusChange={onStatusChange} onOpenObservations={onOpenObservations} />)
     expect(screen.getByRole('button', { name: 'Mover a Zoé' })).toHaveAttribute('title', 'Arrastrar participante')
-    const observation = screen.getByRole('button', { name: 'Abrir observaciones de asistencia de Zoé' })
-    expect(observation).toHaveTextContent(/Observaciones\s*·\s*50/)
+    const observation = screen.getByRole('button', { name: 'Ver 50 observaciones de asistencia de Zoé' })
+    expect(observation).toHaveTextContent('Ver 50')
     expect(screen.queryByText('Esta observación extensa no debe ocupar espacio dentro de la ficha del tablero.')).not.toBeInTheDocument()
     expect(screen.queryByText('Responsive QA')).not.toBeInTheDocument()
     fireEvent.click(observation)
-    expect(onOpenObservations).toHaveBeenCalledWith(participants[0], observation)
+    expect(onOpenObservations).toHaveBeenCalledWith(participants[0], observation, 'view')
     expect(onStatusChange).not.toHaveBeenCalled()
   })
 
   it('disables pickup and observation history while a save is pending', () => {
     render(<ProgramAttendanceBoard disabled participants={participants.slice(0, 1)} draft={createProgramAttendanceDraft(roster.slice(2))} onStatusChange={vi.fn()} onOpenObservations={vi.fn()} />)
     expect(screen.getByRole('button', { name: 'Mover a Zoé' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Abrir observaciones de asistencia de Zoé' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Añadir observación de asistencia de Zoé' })).toBeDisabled()
   })
 })

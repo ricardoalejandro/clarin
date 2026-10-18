@@ -97,6 +97,8 @@ func storageSelfServiceOriginPermission(origin string) string {
 		return domain.PermDocuments
 	case "contacts":
 		return domain.PermContacts
+	case "programs":
+		return domain.PermPrograms
 	}
 	return ""
 }
@@ -229,6 +231,7 @@ var storageSelfServiceReferenceQueries = []struct{ origin, sql string }{
 	{"surveys", `SELECT r.id::text,'Imagen de encuesta','/dashboard/surveys',ma.filename,jsonb_build_array(ma.object_key)::text FROM survey_branding_asset_refs r JOIN media_assets ma ON ma.id=r.media_asset_id AND ma.account_id=r.account_id WHERE r.account_id=$1`},
 	{"surveys", `SELECT id::text,name,'/dashboard/surveys','',jsonb_build_array(branding)::text FROM surveys WHERE account_id=$1`},
 	{"surveys", `SELECT id::text,name,'/dashboard/surveys','',jsonb_build_array(branding)::text FROM survey_templates WHERE account_id=$1`},
+	{"programs", `SELECT p.id::text,p.name,'/dashboard/programs/'||p.id::text,'',jsonb_build_array(ma.object_key)::text FROM programs p JOIN media_assets ma ON ma.id=p.avatar_media_asset_id AND ma.account_id=p.account_id WHERE p.account_id=$1`},
 	{"contacts", `SELECT c.id::text,COALESCE(NULLIF(c.name,''),'Foto de contacto'),'/dashboard/contacts','',jsonb_build_array(c.avatar_url,ma.object_key)::text FROM contacts c LEFT JOIN media_assets ma ON ma.id=c.avatar_media_asset_id AND ma.account_id=c.account_id WHERE c.account_id=$1 AND ((c.avatar_url IS NOT NULL AND c.avatar_url<>'') OR c.avatar_media_asset_id IS NOT NULL)`},
 	{"private_status", `SELECT s.id::text,'','','',jsonb_build_array(s.media_url,ma.object_key)::text FROM whatsapp_statuses s LEFT JOIN media_assets ma ON ma.id=s.media_asset_id AND ma.account_id=s.account_id WHERE s.account_id=$1`},
 	{"private_work", `SELECT a.id::text,t.title,'/dashboard/tasks?task='||t.id::text,ma.filename,jsonb_build_array(ma.object_key)::text FROM task_attachments a JOIN tasks t ON t.id=a.task_id AND t.account_id=a.account_id JOIN media_assets ma ON ma.id=a.media_asset_id AND ma.account_id=a.account_id WHERE a.account_id=$1 AND a.storage_removed_at IS NULL`},

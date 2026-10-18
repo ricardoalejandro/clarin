@@ -19,6 +19,8 @@ describe('ProgramAttendanceSearchBar', () => {
     expect(onChange).toHaveBeenCalledWith('Ana T')
     fireEvent.click(screen.getByRole('button', { name: 'Limpiar búsqueda de asistencia' }))
     expect(onClear).toHaveBeenCalledOnce()
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: '' } })
+    expect(onClear).toHaveBeenCalledTimes(2)
 
     rerender(
       <ProgramAttendanceSearchBar value="Ana T" pending resultCount={1} totalCount={24} onChange={onChange} onClear={onClear} />,

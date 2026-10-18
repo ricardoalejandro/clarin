@@ -679,6 +679,9 @@ func (s *Server) setupRoutes() {
 	programs.Get("/:id", s.handleGetProgram)
 	programs.Put("/:id", s.handleUpdateProgram)
 	programs.Delete("/:id", s.handleDeleteProgram)
+	programs.Post("/:id/avatar", s.handleUploadProgramAvatar)
+	programs.Delete("/:id/avatar", s.handleDeleteProgramAvatar)
+	programs.Get("/:id/avatar/content", s.handleGetProgramAvatarContent)
 	programs.Patch("/:id/move-folder", s.handleMoveProgramToFolder)
 	programs.Get("/:id/health", s.handleGetProgramHealth)
 	programs.Get("/:id/goals", s.handleGetProgramGoals)
@@ -15902,6 +15905,7 @@ func (s *Server) storageReferencedObjectKeysWithInventory(ctx context.Context, i
 		FROM contacts c JOIN media_assets ma
 		  ON ma.id=c.avatar_media_asset_id AND ma.account_id=c.account_id
 		WHERE ma.status='active' AND ma.object_key<>''
+		UNION SELECT ma.object_key FROM programs p JOIN media_assets ma ON ma.id=p.avatar_media_asset_id AND ma.account_id=p.account_id WHERE ma.status='active' AND ma.object_key<>''
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("scan contact avatar references: %w", err)

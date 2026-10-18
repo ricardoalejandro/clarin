@@ -201,6 +201,13 @@ const contactAvatarUpdateSQL = `
 `
 
 func (r *ContactAvatarRepository) ensureAsset(ctx context.Context, tx pgx.Tx, store *storage.Storage, accountID, contactID uuid.UUID, contentHash string, data []byte) (uuid.UUID, string, string, bool, error) {
+	source, folder := "contact_avatar", "avatars"
+	if strings.HasPrefix(contentHash, programAvatarHashPrefix) {
+		source, folder = "program_avatar", "program-avatars"
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('avatar-quota:' || $1::text,0))`, accountID); err != nil {
+		return uuid.Nil, "", "", false, err
+	}
 	// Serialize new rows for this content; existing rows also stay locked while
 	// the file is restored and attached. GC holds this same row during deletion.
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, accountID.String()+":"+contentHash); err != nil {
@@ -246,7 +253,7 @@ func (r *ContactAvatarRepository) ensureAsset(ctx context.Context, tx pgx.Tx, st
 		}
 		if newAsset || existingStatus == "deleted" {
 			filename = uuid.NewString() + ".jpg"
-			objectKey = storage.PrivateObjectKey(accountID, "avatars", contactID.String(), filename)
+			objectKey = storage.PrivateObjectKey(accountID, folder, contactID.String(), filename)
 		}
 		// Pending content may reuse its key before deletion intent is committed.
 		// A deleted key is permanently retired; the same photo gets a fresh key.
@@ -271,13 +278,13 @@ func (r *ContactAvatarRepository) ensureAsset(ctx context.Context, tx pgx.Tx, st
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO storage_objects (account_id,object_key,media_type,content_type,filename,size_bytes,source,status,updated_at)
-		SELECT account_id,object_key,'avatar',content_type,filename,size_bytes,'contact_avatar','active',NOW()
+		SELECT account_id,object_key,'avatar',content_type,filename,size_bytes,$3::text,'active',NOW()
 		FROM media_assets WHERE id=$1 AND account_id=$2
 		ON CONFLICT (account_id,object_key) DO UPDATE
 		SET media_type='avatar',content_type=EXCLUDED.content_type,filename=EXCLUDED.filename,
-		    size_bytes=EXCLUDED.size_bytes,source='contact_avatar',status='active',deleted_at=NULL,
+		    size_bytes=EXCLUDED.size_bytes,source=EXCLUDED.source,status='active',deleted_at=NULL,
 		    delete_error='',next_delete_at=NULL,updated_at=NOW()
-	`, existingID, accountID); err != nil {
+	`, existingID, accountID, source); err != nil {
 		return existingID, objectKey, uploadedKey, false, err
 	}
 	return existingID, objectKey, uploadedKey, !newAsset && existingStatus != "active", nil
@@ -361,7 +368,7 @@ func (r *ContactAvatarRepository) ScheduleAssetGC(ctx context.Context, accountID
 
 	var key string
 	err = tx.QueryRow(ctx, `SELECT object_key FROM media_assets
-		WHERE account_id=$1 AND id=$2 AND content_hash LIKE $3 || '%'
+		WHERE account_id=$1 AND id=$2 AND (content_hash LIKE $3 || '%' OR content_hash LIKE 'program_avatar:%')
 		AND status NOT IN ('deleted','avatar_gc_deleting') FOR UPDATE`, accountID, assetID, contactAvatarHashPrefix).Scan(&key)
 	if err == pgx.ErrNoRows {
 		return nil
@@ -395,7 +402,7 @@ func scheduleLockedAvatarGC(ctx context.Context, tx pgx.Tx, accountID, assetID u
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO storage_objects
 		(account_id,object_key,media_type,content_type,filename,size_bytes,source,status,next_delete_at,updated_at)
-		SELECT account_id,object_key,'avatar',content_type,filename,size_bytes,'contact_avatar','avatar_gc_pending',NOW(),NOW()
+		SELECT account_id,object_key,'avatar',content_type,filename,size_bytes,CASE WHEN content_hash LIKE 'program_avatar:%' THEN 'program_avatar' ELSE 'contact_avatar' END,'avatar_gc_pending',NOW(),NOW()
 		FROM media_assets WHERE id=$1 AND account_id=$2 AND object_key=$3
 		ON CONFLICT(account_id,object_key) DO UPDATE SET status='avatar_gc_pending',next_delete_at=NOW(),delete_error='',updated_at=NOW()`, assetID, accountID, key)
 	return err
