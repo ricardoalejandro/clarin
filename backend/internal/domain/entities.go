@@ -617,6 +617,7 @@ type OpportunitySummary struct {
 
 // Message represents a WhatsApp message
 type Message struct {
+	RepairedPlaceholder    bool             `json:"-"`
 	MediaRecoverable       bool             `json:"media_recoverable,omitempty"`
 	MediaUnavailableReason string           `json:"media_unavailable_reason,omitempty"`
 	Mentions               []MessageMention `json:"mentions,omitempty"`

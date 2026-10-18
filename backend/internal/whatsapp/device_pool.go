@@ -2041,6 +2041,7 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 	totalSaved := 0
 	totalDuplicates := 0
 	totalQuotesHydrated := 0
+	totalContentHydrated := 0
 	totalGroups := 0
 	totalLIDFail := 0
 	totalEmpty := 0
@@ -2258,6 +2259,12 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 			if parsed.Server == types.GroupServer {
 				p.rememberGroupMedia(ctx, instance.AccountID, chat.ID, parsedEvt)
 			}
+			if msg.RepairedPlaceholder {
+				totalContentHydrated++
+				_ = p.repos.Message.HydrateMentions(ctx, instance.AccountID, chat.ID, []*domain.Message{msg})
+				p.broadcastGroupMessageRepair(ctx, instance, msg)
+				continue
+			}
 			convSaved++
 			totalSaved++
 			if totalConversations <= 5 {
@@ -2279,7 +2286,7 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 	log.Printf("[HistorySync] Complete: saved=%d duplicates=%d groups=%d lidFail=%d empty=%d protocol=%d parseErr=%d conversations=%d",
 		totalSaved, totalDuplicates, totalGroups, totalLIDFail, totalEmpty, totalProtocol, totalParseErr, totalConversations)
 
-	if totalSaved > 0 || totalQuotesHydrated > 0 {
+	if totalSaved > 0 || totalQuotesHydrated > 0 || totalContentHydrated > 0 {
 		if p.cache != nil {
 			_ = p.cache.DelPattern(context.Background(), "chats:"+instance.AccountID.String()+":*")
 		}
@@ -2315,15 +2322,16 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 			}
 			finished := !progressed
 			p.hub.BroadcastToAccountWithPermission(target.AccountID, domain.PermChats, ws.EventHistorySyncComplete, map[string]interface{}{
-				"account_id":      target.AccountID.String(),
-				"device_id":       target.DeviceID.String(),
-				"chat_id":         target.ChatID.String(),
-				"request_id":      target.RequestID.String(),
-				"messages_saved":  target.Saved,
-				"batch_saved":     totalSaved,
-				"duplicates":      totalDuplicates,
-				"quotes_hydrated": totalQuotesHydrated,
-				"finished":        finished,
+				"account_id":        target.AccountID.String(),
+				"device_id":         target.DeviceID.String(),
+				"chat_id":           target.ChatID.String(),
+				"request_id":        target.RequestID.String(),
+				"messages_saved":    target.Saved,
+				"batch_saved":       totalSaved,
+				"duplicates":        totalDuplicates,
+				"quotes_hydrated":   totalQuotesHydrated,
+				"messages_repaired": totalContentHydrated,
+				"finished":          finished,
 			})
 			if progressed {
 				log.Printf("[HistorySync] Auto-chaining: requesting more messages for %s (saved %d in this batch)", target.ChatJID, totalSaved)
@@ -2432,6 +2440,18 @@ func (p *DevicePool) RequestHistorySync(ctx context.Context, accountID uuid.UUID
 
 	// Find the oldest message in this chat to paginate before it
 	oldestMsg, err := p.repos.Message.GetOldestByChatID(ctx, chatID)
+	if targetJID.Server == types.GroupServer && !isChain {
+		// A known empty transport placeholder needs an authoritative page that
+		// includes it. Subsequent batches still advance through normal anchors.
+		recoveryAnchor, anchorErr := p.repos.Message.GetGroupHistoryRecoveryAnchor(ctx, accountID, deviceID, chatID)
+		if anchorErr != nil {
+			cleanupReservation()
+			return fmt.Errorf("resolve group history anchor: %w", anchorErr)
+		}
+		if recoveryAnchor != nil {
+			oldestMsg, err = recoveryAnchor, nil
+		}
+	}
 
 	var msgInfo *types.MessageInfo
 	if err == nil && oldestMsg != nil {
@@ -2641,6 +2661,10 @@ func (p *DevicePool) handlePollCreation(ctx context.Context, instance *DeviceIns
 
 	// Load options for response
 	msg.PollOptions, _ = p.repos.Poll.GetOptions(ctx, msg.ID)
+	if msg.RepairedPlaceholder {
+		p.broadcastGroupMessageRepair(ctx, instance, msg)
+		return
+	}
 
 	_ = p.repos.Chat.UpdateLastMessage(ctx, instance.AccountID, chat.ID, "📊 "+question, evt.Info.Timestamp, !isFromMe)
 

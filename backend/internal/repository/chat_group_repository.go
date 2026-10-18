@@ -237,15 +237,24 @@ func (r *MessageRepository) MarkGroupMediaTooLarge(ctx context.Context, accountI
 	return tx.Commit(ctx)
 }
 
-func (r *MessageRepository) HydrateMentions(ctx context.Context, accountID, chatID uuid.UUID, messages []*domain.Message) error {
+// Context responses contain separate target and window objects for the same
+// persisted message. Keep every scoped projection while querying each ID once.
+func groupMessageProjections(accountID, chatID uuid.UUID, messages []*domain.Message) ([]uuid.UUID, map[uuid.UUID][]*domain.Message) {
 	ids := []uuid.UUID{}
-	byID := map[uuid.UUID]*domain.Message{}
+	byID := map[uuid.UUID][]*domain.Message{}
 	for _, m := range messages {
 		if m != nil && m.AccountID == accountID && m.ChatID == chatID {
-			ids = append(ids, m.ID)
-			byID[m.ID] = m
+			if _, exists := byID[m.ID]; !exists {
+				ids = append(ids, m.ID)
+			}
+			byID[m.ID] = append(byID[m.ID], m)
 		}
 	}
+	return ids, byID
+}
+
+func (r *MessageRepository) HydrateMentions(ctx context.Context, accountID, chatID uuid.UUID, messages []*domain.Message) error {
+	ids, byID := groupMessageProjections(accountID, chatID, messages)
 	if len(ids) == 0 {
 		return nil
 	}
@@ -262,10 +271,14 @@ func (r *MessageRepository) HydrateMentions(ctx context.Context, accountID, chat
 		if err = rows.Scan(&id, &raw, &unavailableReason, &recoverable); err != nil {
 			return err
 		}
-		byID[id].MediaRecoverable = recoverable
-		byID[id].MediaUnavailableReason = unavailableReason
-		if err = json.Unmarshal(raw, &byID[id].Mentions); err != nil {
+		var mentions []domain.MessageMention
+		if err = json.Unmarshal(raw, &mentions); err != nil {
 			return err
+		}
+		for _, message := range byID[id] {
+			message.MediaRecoverable = recoverable
+			message.MediaUnavailableReason = unavailableReason
+			message.Mentions = append([]domain.MessageMention{}, mentions...)
 		}
 	}
 	if err = rows.Err(); err != nil {
@@ -323,7 +336,7 @@ func (r *MessageRepository) hydrateGroupSenderLabels(ctx context.Context, accoun
 		}
 	}
 	for _, message := range messages {
-		if message == nil {
+		if message == nil || message.AccountID != accountID || message.ChatID != chatID {
 			continue
 		}
 		for i := range message.Mentions {

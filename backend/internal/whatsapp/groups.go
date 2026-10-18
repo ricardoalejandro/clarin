@@ -406,8 +406,25 @@ func groupMessageMentions(message *waE2E.Message) []domain.MessageMention {
 	return out
 }
 
+// A sender-key distribution and the user payload can be separate events with
+// the same WhatsApp ID. Technical empty-text events must not consume that ID.
+// Media without captions remains content, even before its download succeeds.
+func (p *DevicePool) groupMessageHasContent(ctx context.Context, evt *events.Message) bool {
+	if evt == nil || evt.Message == nil {
+		return false
+	}
+	if evt.Message.GetReactionMessage() != nil || groupPollCreation(evt.Message) != nil || evt.Message.GetPollUpdateMessage() != nil || groupEventProtocol(evt) != nil {
+		return true
+	}
+	content, _ := p.extractGroupMessageContent(ctx, nil, evt.Message, evt.Info.Chat.String(), evt.Info.ID, evt.IsViewOnce)
+	return content.Body != "" || content.MessageType != domain.MessageTypeText
+}
+
 func (p *DevicePool) handleGroupMessage(ctx context.Context, instance *DeviceInstance, evt *events.Message) {
 	if !p.GroupsEnabledForAccount(instance.AccountID) {
+		return
+	}
+	if !p.groupMessageHasContent(ctx, evt) {
 		return
 	}
 	instance.mu.RLock()
@@ -464,6 +481,10 @@ func (p *DevicePool) handleGroupMessage(ctx context.Context, instance *DeviceIns
 	}
 	_ = p.repos.Message.HydrateMentions(ctx, instance.AccountID, chat.ID, []*domain.Message{msg})
 	p.invalidateChatCaches(instance.AccountID, chat.ID)
+	if msg.RepairedPlaceholder {
+		p.broadcastGroupMessageRepair(ctx, instance, msg)
+		return
+	}
 	if chat.ContactCreated {
 		p.queueInitialGroupAvatar(instance, chat)
 		go func() {
@@ -473,6 +494,17 @@ func (p *DevicePool) handleGroupMessage(ctx context.Context, instance *DeviceIns
 		}()
 	}
 	p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventNewMessage, map[string]interface{}{"chat_id": chat.ID, "device_id": instance.ID, "chat_jid": chat.JID, "message": msg, "sender_name": evt.Info.PushName, "is_from_me": evt.Info.IsFromMe})
+}
+
+func (p *DevicePool) broadcastGroupMessageRepair(ctx context.Context, instance *DeviceInstance, message *domain.Message) {
+	data := map[string]interface{}{"chat_id": message.ChatID, "device_id": instance.ID, "message": message}
+	if state, err := p.repos.Chat.State(ctx, instance.AccountID, message.ChatID); err == nil {
+		data["chat_state"] = state
+	}
+	p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, "message_media_updated", data)
+	// The list's established legacy invalidation refreshes its preview silently;
+	// a state-only versioned event intentionally changes attention counters only.
+	p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventChatUpdate, map[string]interface{}{"chat_id": message.ChatID, "device_id": instance.ID})
 }
 
 func (p *DevicePool) applyGroupProtocol(ctx context.Context, instance *DeviceInstance, chat *domain.Chat, protocol *waE2E.ProtocolMessage) {

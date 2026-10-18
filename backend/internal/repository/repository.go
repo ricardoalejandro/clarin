@@ -2191,6 +2191,7 @@ func (r *MediaAssetRepository) Upsert(ctx context.Context, input MediaAssetUpser
 }
 
 func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) error {
+	msg.RepairedPlaceholder = false
 	applyMessageSendContext(ctx, msg)
 	if len(msg.Mentions) == 0 {
 		msg.Mentions = domain.MessageMentionsFrom(ctx)
@@ -2229,7 +2230,8 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var lockedChat uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT id FROM chats WHERE account_id=$1 AND id=$2 FOR UPDATE`, msg.AccountID, msg.ChatID).Scan(&lockedChat); err != nil {
+	var lockedChatJID string
+	if err := tx.QueryRow(ctx, `SELECT id,jid FROM chats WHERE account_id=$1 AND id=$2 FOR UPDATE`, msg.AccountID, msg.ChatID).Scan(&lockedChat, &lockedChatJID); err != nil {
 		return err
 	}
 	if msg.MediaAssetID != nil {
@@ -2248,6 +2250,16 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 		}
 	}
 	if err := insert(tx); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) && domain.IsGroupJID(lockedChatJID) {
+			repaired, repairErr := repairGroupPlaceholderTx(ctx, tx, msg)
+			if repairErr != nil {
+				return repairErr
+			}
+			if repaired {
+				msg.RepairedPlaceholder = true
+				return tx.Commit(ctx)
+			}
+		}
 		if !errors.Is(err, pgx.ErrNoRows) || msg.Sender == nil || msg.Sender.UserID == nil {
 			return err
 		}
