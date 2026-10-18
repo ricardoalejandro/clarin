@@ -34,4 +34,28 @@ describe('Program workspace viewport', () => {
     expect(removeWindow).toHaveBeenCalledWith('resize', expect.any(Function))
     expect(removeMedia).toHaveBeenCalledWith('change', expect.any(Function))
   })
+
+  it('blocks administration on viewport shrink before the container measurement catches up', () => {
+    const media = Object.assign(new EventTarget(), { matches: false })
+    vi.stubGlobal('matchMedia', () => media)
+    vi.stubGlobal('innerWidth', 1440)
+    vi.stubGlobal('innerHeight', 900)
+    const hook = renderHook(({ width }) => useProgramWorkspacePolicy(width), { initialProps: { width: 1200 } })
+    expect(hook.result.current.desktopActions).toBe(true)
+
+    act(() => { vi.stubGlobal('innerWidth', 536); window.dispatchEvent(new Event('resize')) })
+    expect(hook.result.current.desktopActions).toBe(false)
+
+    hook.rerender({ width: 512 })
+    act(() => { vi.stubGlobal('innerWidth', 1440); window.dispatchEvent(new Event('resize')) })
+    expect(hook.result.current.desktopActions).toBe(false)
+    hook.rerender({ width: 1200 })
+    expect(hook.result.current.desktopActions).toBe(true)
+
+    // A narrow workspace (for example beside navigation) still controls the mode.
+    hook.rerender({ width: 640 })
+    expect(hook.result.current.mobile).toBe(true)
+    hook.rerender({ width: 0 })
+    expect(hook.result.current.desktopActions).toBe(false)
+  })
 })

@@ -57,7 +57,7 @@ func (s *Server) storageSelfServiceListUses(ctx context.Context, q storageSelfSe
 		return nil, err
 	}
 	for _, ref := range refs {
-		if storage.IsProtectedMediaObjectKey(key) && !(ref.Origin == "contacts" && storage.IsAccountPrivateAvatarObjectKey(actor.AccountID, key)) {
+		if storage.IsProtectedMediaObjectKey(key) && !((ref.Origin == "contacts" && storage.IsAccountPrivateAvatarObjectKey(actor.AccountID, key)) || (ref.Origin == "programs" && storage.IsAccountPrivateProgramAvatarObjectKey(actor.AccountID, key))) {
 			continue
 		}
 		if covered[ref.Origin+"|"+ref.ID] {

@@ -24,7 +24,9 @@ import CrmDetailWorkspace from '@/components/crm-detail/CrmDetailWorkspace';
 import OperationalOverlayBoundary from '@/components/operational-window/OperationalOverlayBoundary';
 import useWhatsAppChatLauncher from '@/hooks/useWhatsAppChatLauncher';
 import ProgramParticipantAttendanceSection from '@/components/programs/ProgramParticipantAttendanceSection';
-import { programArchivePayload, PROGRAM_DELETE_CONFIRMATION } from '@/lib/programLifecycle';
+import { PROGRAM_DELETE_CONFIRMATION, type ProgramLifecycleAction } from '@/lib/programLifecycle';
+import { ProgramAvatar } from '@/components/programs/ProgramAvatarControl';
+import { ProgramLifecycleDialog } from '@/components/programs/ProgramLifecycleDialog';
 import ProgramParticipantEnrollmentDate from '@/components/programs/ProgramParticipantEnrollmentDate';
 import ProgramParticipantOutcomeDate from '@/components/programs/ProgramParticipantOutcomeDate';
 import type { ContactProfileContact, ContactProfileResponse } from '@/types/contact-profile';
@@ -37,7 +39,11 @@ import ProgramAcademicConfigPanel from '@/components/programs/ProgramAcademicCon
 import ProgramSurveyPanel from '@/components/programs/ProgramSurveyPanel';
 import SessionTopicField, { normalizedSessionTopics, pendingActiveCourseTopics } from '@/components/programs/SessionTopicField';
 import SessionObservationPanel from '@/components/programs/SessionObservationPanel';
+import { attendanceCloseDecision, EMPTY_SESSION_OBSERVATION_STATE, programAttendanceDetailsVisible, type SessionObservationState } from '@/components/programs/programAttendanceDetails';
+import { acceptSavedProgramAttendance } from '@/components/programs/programAttendance';
+import type { AttendanceObservationIntent } from '@/components/programs/ProgramAttendanceObservationSummary';
 import { ProgramSettingsDialog } from '@/components/programs/ProgramSettingsDialog';
+import { ProgramScopePicker } from '@/components/programs/ProgramScopePicker';
 import ProgramAttendanceRoster from '@/components/programs/ProgramAttendanceRoster';
 import ProgramAttendanceSearchBar from '@/components/programs/ProgramAttendanceSearchBar';
 import { isDialogFocusableVisible, restoreDialogFocus, useDialogTabTrap } from '@/components/programs/useDialogTabTrap';
@@ -202,6 +208,8 @@ export default function ProgramDetailPage() {
   adminAllowedRef.current = desktopActions;
 
   const [program, setProgram] = useState<Program | null>(null);
+  const programActiveRef = useRef(false);
+  programActiveRef.current = program?.status === 'active';
   const [participants, setParticipants] = useState<ProgramParticipant[]>([]);
   const [sessions, setSessions] = useState<ProgramSession[]>([]);
   const [academicConfig, setAcademicConfig] = useState<ProgramAcademicConfig | null>(null);
@@ -223,6 +231,7 @@ export default function ProgramDetailPage() {
   const mobileTabRef = useRef<HTMLButtonElement | null>(null);
   const [canUseSurveys, setCanUseSurveys] = useState(false);
   const [currentActorID, setCurrentActorID] = useState('');
+  const [lifecycleAction, setLifecycleAction] = useState<ProgramLifecycleAction | null>(null);
   const [currentAccountID, setCurrentAccountID] = useState('');
   const effectiveAccountID = runtimeSnapshot?.accountId || currentAccountID;
   const programIdentityRef = useRef('');
@@ -232,6 +241,7 @@ export default function ProgramDetailPage() {
   const adminMountedRef = useRef(true);
   useEffect(() => { adminMountedRef.current = true; return () => { adminMountedRef.current = false; adminRequestsRef.current.clear(); } }, []);
   const beginAdminRequest = (key: string) => {
+    if (['create-session', 'generate-sessions'].includes(key) && !programActiveRef.current) return null;
     if (!adminAllowedRef.current || (key !== 'participant-outcome' && !rootAdminAllowedRef.current) || programIdentityRef.current !== programIdentity || adminRequestsRef.current.has(key)) return null;
     const request = { key, identity: programIdentityRef.current };
     adminRequestsRef.current.set(key, request);
@@ -302,6 +312,17 @@ export default function ProgramDetailPage() {
   const [attendanceData, setAttendanceData] = useState<ProgramAttendanceDraft>({});
   const [attendanceParticipants, setAttendanceParticipants] = useState<ProgramParticipant[]>([]);
   const [attendanceSearch, setAttendanceSearch] = useState('');
+  const [attendanceDetailsExpanded, setAttendanceDetailsExpanded] = useState(false);
+  const [sessionObservationState, setSessionObservationState] = useState(EMPTY_SESSION_OBSERVATION_STATE);
+  const sessionObservationStateRef = useRef(EMPTY_SESSION_OBSERVATION_STATE);
+  const [attendanceSavedWithComment, setAttendanceSavedWithComment] = useState(false);
+  const attendanceDetailsRef = useRef<HTMLDivElement>(null);
+  const attendanceDetailsToggleRef = useRef<HTMLButtonElement>(null);
+  const attendanceDetailsVisible = programAttendanceDetailsVisible(attendanceSearch, attendanceDetailsExpanded);
+  const onSessionObservationStateChange = useCallback((state: SessionObservationState) => {
+    sessionObservationStateRef.current = state;
+    setSessionObservationState(state);
+  }, []);
   const [debouncedAttendanceSearch, setDebouncedAttendanceSearch] = useDebouncedValue(attendanceSearch, SEARCH_DEBOUNCE_MS);
   const [attendanceLoadState, setAttendanceLoadState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [attendanceLoadError, setAttendanceLoadError] = useState('');
@@ -352,6 +373,14 @@ export default function ProgramDetailPage() {
     [attendanceParticipants, debouncedAttendanceSearch],
   );
   const attendanceSearchPending = attendanceSearch !== debouncedAttendanceSearch;
+
+  useEffect(() => {
+    if (!attendanceDetailsVisible && document.activeElement instanceof HTMLElement && attendanceDetailsRef.current?.contains(document.activeElement)) {
+      document.activeElement.blur();
+      const target = attendanceSearch.trim() ? document.getElementById('program-attendance-search') : attendanceDetailsToggleRef.current;
+      target?.focus({ preventScroll: true });
+    }
+  }, [attendanceDetailsVisible, attendanceSearch]);
 
   useEffect(() => {
     if (!attendanceViewStorageKey) {
@@ -656,6 +685,10 @@ export default function ProgramDetailPage() {
     setAttendanceParticipants([]);
     setAttendanceSearch('');
     setDebouncedAttendanceSearch('');
+    setAttendanceDetailsExpanded(false);
+    sessionObservationStateRef.current = EMPTY_SESSION_OBSERVATION_STATE;
+    setSessionObservationState(EMPTY_SESSION_OBSERVATION_STATE);
+    setAttendanceSavedWithComment(false);
     setAttendanceLoadState('idle');
     setAttendanceLoadError('');
     setSavingAttendance(false);
@@ -1106,7 +1139,8 @@ export default function ProgramDetailPage() {
 
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      if (isEditModalOpen || lifecycleAction) return;
       if (confirmAction) { setConfirmAction(null); return; }
       if (adminConfirmAction && !adminConfirmationSuspended) { setAdminConfirmAction(null); return; }
       if (showSectionPicker) { setShowSectionPicker(false); return; }
@@ -1118,22 +1152,19 @@ export default function ProgramDetailPage() {
       if (attendanceDragging) return;
       if (isAttendanceOpen) {
         if (attendanceSaveRequestRef.current) return;
-        if (dirtyAttendanceParticipantIDs.length > 0) {
-          setConfirmAction({ message: 'Hay cambios de asistencia sin guardar. ¿Deseas descartarlos?', onConfirm: () => { setConfirmAction(null); closeAttendanceModal(); } });
-        } else closeAttendanceModal();
+        requestCloseAttendance();
         return;
       }
       if (isGenerateSessionsOpen && rootAdminAllowedRef.current) { requestCloseAdminSurface(() => { setIsGenerateSessionsOpen(false); setMaximizedSessionDialog(null); }, generating); return; }
       if (isCreateSessionOpen && rootAdminAllowedRef.current) { requestCloseAdminSurface(() => { setIsCreateSessionOpen(false); setMaximizedSessionDialog(null); }, creatingSession); return; }
       if (editingSession && rootAdminAllowedRef.current) { requestCloseAdminSurface(() => { setEditingSession(null); setMaximizedSessionDialog(null); }, savingSession); return; }
       if (isAddParticipantOpen && rootAdminAllowedRef.current) { if (!addingParticipants) setIsAddParticipantOpen(false); return; }
-      if (isEditModalOpen && rootAdminAllowedRef.current) { setIsEditModalOpen(false); return; }
       if (showCampaignModal && rootAdminAllowedRef.current) { setShowCampaignModal(false); return; }
       if (participantDetailOpen) { closeParticipantDetail(); return; }
     };
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
-  }, [desktopActions, mobileWorkspace, addingParticipants, adminConfirmAction, adminConfirmationSuspended, confirmAction, showSectionPicker, showDeviceSelector, showInlineChat, attendanceConflicts.length, attendanceObservationParticipant, observationParticipant, outcomeParticipant, attendanceDragging, isAttendanceOpen, dirtyAttendanceParticipantIDs.length, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, showCampaignModal, participantDetailOpen, closeParticipantDetail, closeAttendanceConflicts, closeAttendanceModal, closeAttendanceObservationHistory, closeObservationHistory, closeWhatsAppChat]);
+  }, [desktopActions, mobileWorkspace, addingParticipants, adminConfirmAction, adminConfirmationSuspended, confirmAction, showSectionPicker, showDeviceSelector, showInlineChat, attendanceConflicts.length, attendanceObservationParticipant, observationParticipant, outcomeParticipant, attendanceDragging, isAttendanceOpen, dirtyAttendanceParticipantIDs.length, isGenerateSessionsOpen, isCreateSessionOpen, editingSession, isAddParticipantOpen, isEditModalOpen, lifecycleAction, showCampaignModal, participantDetailOpen, closeParticipantDetail, closeAttendanceConflicts, closeAttendanceModal, closeAttendanceObservationHistory, closeObservationHistory, closeWhatsAppChat]);
 
   const fetchHealth = useCallback(() => fetchProgramData(), [fetchProgramData]);
 
@@ -1304,6 +1335,7 @@ export default function ProgramDetailPage() {
   }, [visibleTab, fetchStats, selectedMonthsKey]);
 
   const handleAddParticipants = async (selected: SelectedPerson[]) => {
+    if (!programActiveRef.current) return;
     if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity || selected.length === 0 || addingParticipants) return;
     if (!program || program.status !== 'active') {
       setAddParticipantError('Solo puedes agregar participantes a un programa activo.');
@@ -1397,37 +1429,6 @@ export default function ProgramDetailPage() {
         }
       },
     });
-  };
-
-  const handleArchiveProgram = async () => {
-    if (!program || programLifecycleRequest.current) return;
-    const request = beginAdminRequest('program-lifecycle');
-    if (!request) return;
-    programLifecycleRequest.current = true;
-    setProgramLifecyclePending(true);
-    const newStatus = program.status === 'archived' ? 'active' : 'archived';
-    try {
-      const res = await api(`/api/programs/${programId}`, {
-        method: 'PUT',
-        body: JSON.stringify(programArchivePayload(program))
-      });
-      if (!adminRequestIsCurrent(request)) return;
-      if (res.success) {
-        showToast(newStatus === 'archived' ? 'Programa archivado' : 'Programa desarchivado', 'success');
-        await fetchProgramData();
-      } else {
-        showToast(res.error || 'Error al cambiar estado del programa', 'error');
-        if (res.status === 409) await fetchProgramData();
-      }
-      setShowHeaderMenu(false);
-    } catch (error) {
-      if (!adminRequestIsCurrent(request)) return;
-      console.error('Error archiving program:', error);
-      showToast('Error al cambiar estado del programa', 'error');
-    } finally {
-      if (adminRequestIsCurrent(request)) { programLifecycleRequest.current = false; setProgramLifecyclePending(false); }
-      finishAdminRequest(request);
-    }
   };
 
   // Participant detail — programs are contact-only by spec (001-program-contacts-only)
@@ -1566,6 +1567,7 @@ export default function ProgramDetailPage() {
   };
 
   const openCreateSession = (sessionType: 'regular' | 'recovery' = 'regular') => {
+    if (!programActiveRef.current) return;
     if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     const topics: ProgramSessionTopic[] = sessionType === 'recovery' ? [{ kind: 'free', title: 'Clase de recuperación' }] : [];
     const fallbackTitle = `Sesión ${sessions.length + 1}`;
@@ -1583,8 +1585,9 @@ export default function ProgramDetailPage() {
   };
 
   const handleCreateSession = async (e: React.FormEvent) => {
-    if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     e.preventDefault();
+    if (!programActiveRef.current) return;
+    if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     if (creatingSession) return;
     if (!newSession.title.trim()) {
       showToast('Escribe un título para la sesión.', 'error', true);
@@ -1744,6 +1747,12 @@ export default function ProgramDetailPage() {
     attendanceSessionGenerationRef.current += 1;
     attendanceSessionIDRef.current = session.id;
     attendanceReturnFocusRef.current = trigger || attendanceReturnFocusRef.current;
+    if (trigger || selectedSession?.id !== session.id) {
+      setAttendanceDetailsExpanded(!mobileWorkspace);
+      sessionObservationStateRef.current = EMPTY_SESSION_OBSERVATION_STATE;
+      setSessionObservationState(EMPTY_SESSION_OBSERVATION_STATE);
+      setAttendanceSavedWithComment(false);
+    }
     setSelectedSession(session);
     setAttendanceData({});
     setAttendanceParticipants([]);
@@ -1783,17 +1792,20 @@ export default function ProgramDetailPage() {
 
   const requestCloseAttendance = () => {
     if (attendanceSaveRequestRef.current) return;
-    if (dirtyAttendanceParticipantIDs.length === 0) {
+    const decision = attendanceCloseDecision(dirtyAttendanceParticipantIDs.length, sessionObservationStateRef.current);
+    if (decision === 'wait') return;
+    if (decision === 'close') {
       closeAttendanceModal();
       return;
     }
+    const generation = attendanceSessionGenerationRef.current;
     setConfirmAction({
-      message: 'Hay cambios de asistencia sin guardar. ¿Deseas descartarlos?',
-      onConfirm: () => { setConfirmAction(null); closeAttendanceModal(); },
+      message: sessionObservationStateRef.current.dirty ? 'Hay un comentario de sesión sin guardar y puede haber cambios de asistencia. ¿Deseas descartar los cambios pendientes?' : 'Hay cambios de asistencia sin guardar. ¿Deseas descartarlos?',
+      onConfirm: () => { if (generation !== attendanceSessionGenerationRef.current || attendanceSaveRequestRef.current || sessionObservationStateRef.current.saving) return; setConfirmAction(null); closeAttendanceModal(); },
     });
   };
 
-  const loadAttendanceObservationHistory = async (participant: ProgramParticipant, trigger?: HTMLElement | null) => {
+  const loadAttendanceObservationHistory = async (participant: ProgramParticipant, trigger?: HTMLElement | null, intent?: AttendanceObservationIntent) => {
     if (!selectedSession || attendanceSaveRequestRef.current) return;
     attendanceObservationRequestRef.current?.abort();
     const controller = new AbortController();
@@ -1802,7 +1814,11 @@ export default function ProgramDetailPage() {
     const sessionID = selectedSession.id;
     attendanceObservationReturnFocusRef.current = trigger || attendanceObservationReturnFocusRef.current;
     setAttendanceObservationParticipant(participant);
-    setAttendanceObservationComposerOpen(false);
+    // Refresh/retry must preserve an already open composer and its draft.
+    if (intent || attendanceObservationParticipant?.id !== participant.id) {
+      setAttendanceObservationComposerOpen(intent === 'add');
+      setAttendanceObservationHistory([]);
+    }
     setAttendanceObservationLoading(true);
     setAttendanceObservationError('');
     try {
@@ -1890,8 +1906,11 @@ export default function ProgramDetailPage() {
         }
         if (!result.success) throw new Error(result.error || result.data?.message || 'No se pudo guardar la asistencia');
       }
-      closeAttendanceModal();
-      fetchProgramData();
+      setAttendanceData(current => acceptSavedProgramAttendance(current, records));
+      setAttendanceRetryExpectedStatuses({});
+      if (sessionObservationStateRef.current.dirty || sessionObservationStateRef.current.saving) setAttendanceSavedWithComment(true);
+      else closeAttendanceModal();
+      void fetchProgramData();
     } catch (error) {
       if (!requestIsCurrent()) return;
       console.error('Error saving attendance:', error);
@@ -1922,6 +1941,7 @@ export default function ProgramDetailPage() {
 
   const changeAttendanceStatus = useCallback((participantID: string, status: ProgramAttendanceStatus) => {
     if (attendanceSaveRequestRef.current) return;
+    setAttendanceSavedWithComment(false);
     setAttendanceSaveError('');
     setAttendanceData(current => setProgramAttendanceDraftStatus(current, participantID, status));
   }, []);
@@ -1996,6 +2016,7 @@ export default function ProgramDetailPage() {
 
   // Generate Sessions
   const handleGenerateSessions = async () => {
+    if (!programActiveRef.current) return;
     if (!rootAdminAllowedRef.current || programIdentityRef.current !== programIdentity) return;
     if (!genForm.start_date || !genForm.end_date || genForm.days_of_week.length === 0) {
       showToast('Completa la fecha de inicio, fin y al menos un día de la semana.', 'error', true);
@@ -2372,20 +2393,17 @@ export default function ProgramDetailPage() {
         >
           <ArrowLeft className="w-5 h-5 text-slate-600" />
         </button>
-        <div
-          className="w-9 h-9 rounded-xl flex items-center justify-center text-white font-bold text-base shadow-sm shrink-0"
-          style={{ backgroundColor: program.color || '#10b981' }}
-        >
-          {program.name.charAt(0).toUpperCase()}
-        </div>
+        <ProgramAvatar program={program} className="h-10 w-10 shadow-sm" interactive />
         <div className="flex-1 min-w-0">
           <div className="flex min-w-0 items-center gap-2">
             <h1 className="min-w-0 truncate text-lg font-bold leading-tight text-slate-800">{program.name}</h1>
+            {program.status !== 'active' && <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${program.status === 'completed' ? 'bg-blue-50 text-blue-700' : 'bg-slate-100 text-slate-600'}`}>{program.status === 'completed' ? 'Completado' : 'Archivado'}</span>}
             {mobileWorkspace && <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700" aria-label={`${activeParticipants.length} participantes`}><Users className="h-3 w-3" />{activeParticipants.length}</span>}
           </div>
           <p className="text-slate-500 text-xs truncate">{program.description || 'Sin descripción'}</p>
         </div>
         {!mobileWorkspace && <div className="flex items-center gap-2">
+          {program.status !== 'archived' && <button type="button" onClick={() => { if (rootAdminAllowedRef.current && requireOnline('Cambiar el estado del programa')) setLifecycleAction(program.status === 'active' ? 'complete' : 'reopen'); }} className="min-h-11 shrink-0 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-50">{program.status === 'active' ? 'Concluir programa' : 'Reabrir programa'}</button>}
           <button
             onClick={() => { if (requireOnline('Crear una campaña masiva')) setShowCampaignModal(true); }}
             title={isOffline ? 'El envío masivo necesita conexión' : undefined}
@@ -2421,7 +2439,7 @@ export default function ProgramDetailPage() {
                   Envío Masivo
                 </button>
                 <button
-                  onClick={handleArchiveProgram}
+                  onClick={() => { if (!rootAdminAllowedRef.current || !requireOnline('Cambiar el estado del programa')) return; setShowHeaderMenu(false); setLifecycleAction(program.status === 'archived' ? 'restore' : 'archive'); }}
                   disabled={programLifecyclePending}
                   className="flex min-h-11 w-full items-center gap-2.5 px-4 py-2.5 text-sm text-slate-700 transition-colors hover:bg-slate-50"
                 >
@@ -2546,29 +2564,32 @@ export default function ProgramDetailPage() {
       </div>}
 
       {(visibleTab === 'health' || visibleTab === 'participants') && <div className="flex shrink-0 items-center gap-2">
+        <div className={`flex min-w-0 flex-1 items-center ${mobileWorkspace ? 'rounded-xl border border-slate-200 bg-white shadow-sm focus-within:border-emerald-400' : ''}`}>
         <div className="relative min-w-0 flex-1">
           <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
           <input
             type="text"
             value={participantSearch}
-            onChange={event => setParticipantSearch(event.target.value)}
+            onChange={event => { setParticipantSearch(event.target.value); if (!event.target.value) setDebouncedParticipantSearch(''); }}
             onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }}
             enterKeyHint="search"
-            placeholder="Buscar participante por nombre o teléfono"
+            placeholder={mobileWorkspace ? 'Buscar…' : 'Buscar participante por nombre o teléfono'}
             aria-label="Buscar participante por nombre o teléfono"
-            className="h-11 w-full rounded-xl border border-slate-200 bg-white pl-10 pr-24 text-sm text-slate-800 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-500/20"
+            className={`h-11 w-full rounded-xl bg-white pl-9 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-emerald-500/20 ${mobileWorkspace ? 'pr-12' : 'border border-slate-200 pr-24 shadow-sm focus:border-emerald-400'}`}
           />
           <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center">
-            {participantSearchPending
+            {!mobileWorkspace && (participantSearchPending
               ? <span className="flex items-center gap-1 px-2 text-[11px] font-semibold text-slate-400" aria-live="polite"><Loader2 className="h-3.5 w-3.5 animate-spin" /><span className="sr-only">Buscando participantes</span><span className="hidden min-[380px]:inline" aria-hidden="true">Buscando</span></span>
-              : <span className="px-2 text-[11px] font-semibold text-slate-400" aria-live="polite">{filteredProgramParticipants.length}/{lifecycleParticipants.length}</span>}
-            {participantSearch && <button type="button" onClick={() => { setParticipantSearch(''); setDebouncedParticipantSearch(''); }} className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Limpiar búsqueda"><X className="h-4 w-4" /></button>}
+              : <span className="px-2 text-[11px] font-semibold text-slate-400" aria-live="polite">{filteredProgramParticipants.length}/{lifecycleParticipants.length}</span>)}
+            {participantSearch && <button type="button" onClick={() => { setParticipantSearch(''); setDebouncedParticipantSearch(''); }} className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Limpiar búsqueda">{mobileWorkspace && participantSearchPending ? <Loader2 className="h-4 w-4 animate-spin" aria-label="Buscando participantes" /> : <X className="h-4 w-4" />}</button>}
           </div>
+        </div>
+        {mobileWorkspace && <ProgramScopePicker value={participantLifecycleView} options={[{ value: 'active', label: 'Activos', count: activeParticipants.length }, { value: 'history', label: 'Historial', count: historicalParticipants.length }]} onChange={setParticipantLifecycleView} label="Estado de participantes" resultCount={debouncedParticipantSearch.trim() ? filteredProgramParticipants.length : undefined} />}
         </div>
         {desktopActions && <button type="button" onClick={() => { void handleExportParticipants(); }} disabled={participantSearchPending || exportingParticipants || filteredProgramParticipants.length === 0} className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-white px-3 text-sm font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40" title="Exportar exactamente la lista filtrada a Excel" aria-label="Exportar participantes filtrados a Excel">{exportingParticipants ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}<span className={program.type === 'event' ? 'hidden sm:inline' : undefined}>Exportar Excel</span></button>}
       </div>}
 
-      {(visibleTab === 'health' || visibleTab === 'participants') && <div className="grid shrink-0 grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1" role="tablist" aria-label="Estado de participantes">
+      {!mobileWorkspace && (visibleTab === 'health' || visibleTab === 'participants') && <div className="grid shrink-0 grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1" role="tablist" aria-label="Estado de participantes">
         <button type="button" role="tab" aria-selected={participantLifecycleView === 'active'} onClick={() => setParticipantLifecycleView('active')} className={`min-h-11 rounded-lg px-3 text-sm font-semibold transition-colors ${participantLifecycleView === 'active' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Activos <span className="ml-1 tabular-nums text-xs">{activeParticipants.length}</span></button>
         <button type="button" role="tab" aria-selected={participantLifecycleView === 'history'} onClick={() => setParticipantLifecycleView('history')} className={`min-h-11 rounded-lg px-3 text-sm font-semibold transition-colors ${participantLifecycleView === 'history' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Historial <span className="ml-1 tabular-nums text-xs">{historicalParticipants.length}</span></button>
       </div>}
@@ -2602,7 +2623,7 @@ export default function ProgramDetailPage() {
                       <label className="text-xs text-slate-500">Meta asistencia<input type="number" min={1} max={100} value={programGoals.attendance_goal_percent} onChange={(e) => setProgramGoals(prev => ({ ...prev, attendance_goal_percent: Number(e.target.value) }))} className="mt-1 w-28 px-2.5 py-1.5 border border-slate-200 rounded-lg text-sm" /></label>
                       <label className="text-xs text-slate-500">Meta traspaso<input type="number" min={1} max={100} value={programGoals.transfer_goal_percent} onChange={(e) => setProgramGoals(prev => ({ ...prev, transfer_goal_percent: Number(e.target.value) }))} className="mt-1 w-28 px-2.5 py-1.5 border border-slate-200 rounded-lg text-sm" /></label>
                       <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} onClick={saveProgramGoals} disabled={savingGoals} className="min-h-11 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50">{savingGoals ? 'Guardando...' : 'Guardar metas'}</button>
-                      <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} onClick={() => openCreateSession('recovery')} className="min-h-11 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100">Recuperación</button>
+                      <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined} onClick={() => openCreateSession('recovery')} disabled={program.status !== 'active'} className="min-h-11 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100">Recuperación</button>
                     </div>
                   </div>
                 )}
@@ -3092,16 +3113,16 @@ export default function ProgramDetailPage() {
         <div className="h-full flex flex-col gap-3">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 shrink-0">
             <h2 className="text-base font-semibold text-slate-800">Sesiones y Asistencia</h2>
-            <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:flex-nowrap">
+            <div hidden={!desktopActions || program.status !== 'active'} style={!desktopActions || program.status !== 'active' ? { display: 'none' } : undefined} className="flex w-full flex-wrap gap-2 sm:w-auto sm:flex-nowrap">
               <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined}
-                onClick={() => setIsGenerateSessionsOpen(true)}
+                onClick={() => { if (rootAdminAllowedRef.current && programActiveRef.current) setIsGenerateSessionsOpen(true); }} disabled={program.status !== 'active'}
                 className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition-all hover:bg-emerald-100 sm:flex-none"
               >
                 <Repeat className="w-4 h-4" />
                 Generar Horario
               </button>
               <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined}
-                onClick={() => openCreateSession()}
+                onClick={() => openCreateSession()} disabled={program.status !== 'active'}
                 className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-emerald-700 sm:flex-none"
               >
                 <Plus className="w-4 h-4" />
@@ -3118,18 +3139,18 @@ export default function ProgramDetailPage() {
               </div>
               <h3 className="text-lg font-semibold text-slate-800 mb-2">Sin sesiones programadas</h3>
               <p className="text-slate-500 mb-5 max-w-md mx-auto text-sm">
-                {desktopActions ? 'Crea sesiones individuales o genera un horario recurrente. El plan de clases siempre será una sugerencia editable.' : 'Las sesiones se programan desde la vista de escritorio. Cuando estén disponibles podrás consultar y registrar su asistencia aquí.'}
+                {program.status !== 'active' ? 'Este programa está cerrado a nuevas sesiones. Puedes consultar su historial o reabrirlo desde escritorio.' : desktopActions ? 'Crea sesiones individuales o genera un horario recurrente. El plan de clases siempre será una sugerencia editable.' : 'Las sesiones se programan desde la vista de escritorio. Cuando estén disponibles podrás consultar y registrar su asistencia aquí.'}
               </p>
-              <div className="flex flex-wrap justify-center gap-3">
+              <div hidden={!desktopActions || program.status !== 'active'} style={!desktopActions || program.status !== 'active' ? { display: 'none' } : undefined} className="flex flex-wrap justify-center gap-3">
                 <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined}
-                  onClick={() => setIsGenerateSessionsOpen(true)}
+                  onClick={() => { if (rootAdminAllowedRef.current && programActiveRef.current) setIsGenerateSessionsOpen(true); }} disabled={program.status !== 'active'}
                   className="flex min-h-11 items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition-all hover:bg-emerald-100"
                 >
                   <Repeat className="w-4 h-4" />
                   Generar Horario
                 </button>
                 <button hidden={!desktopActions} style={!desktopActions ? { display: 'none' } : undefined}
-                  onClick={() => openCreateSession()}
+                  onClick={() => openCreateSession()} disabled={program.status !== 'active'}
                   className="flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-emerald-700"
                 >
                   <Plus className="w-4 h-4" />
@@ -3514,6 +3535,7 @@ export default function ProgramDetailPage() {
               <div className="flex items-center gap-1"><button type="button" onClick={() => setMaximizedSessionDialog(value => value === 'create' ? null : 'create')} className="hidden sm:inline-flex p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title={maximizedSessionDialog === 'create' ? 'Restaurar' : 'Maximizar'}>{maximizedSessionDialog === 'create' ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}</button><button type="button" onClick={() => { requestCloseAdminSurface(() => { setIsCreateSessionOpen(false); setMaximizedSessionDialog(null); }, creatingSession); }} className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" aria-label="Cerrar nueva sesión"><X className="w-5 h-5" /></button></div>
             </div>
             <form inert={creatingSession} onSubmit={handleCreateSession} className="flex flex-1 min-h-0 flex-col">
+              {program.status !== 'active' && <p role="status" className="mx-5 mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-800">Reabre el programa para crear sesiones. Tu borrador se conserva.</p>}
               <div className="overflow-y-auto p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="sm:col-span-2">
                   <label className="block text-sm font-medium text-slate-700 mb-1.5">Fecha</label>
@@ -3606,7 +3628,7 @@ export default function ProgramDetailPage() {
                 </button>
                 <button
                   type="submit"
-                  disabled={creatingSession}
+                  disabled={creatingSession || program.status !== 'active'}
                   className="min-h-11 flex-1 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 disabled:cursor-wait disabled:opacity-60 sm:flex-none"
                 >
                   {creatingSession ? 'Creando…' : 'Crear Sesión'}
@@ -3886,7 +3908,7 @@ export default function ProgramDetailPage() {
               </button>
               <button
                 onClick={handleGenerateSessions}
-                disabled={generating || previewSessionCount === 0 || Boolean(schedulePreview.error)}
+                disabled={program.status !== 'active' || generating || previewSessionCount === 0 || Boolean(schedulePreview.error)}
                 className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
               >
                 {generating ? (
@@ -3910,41 +3932,44 @@ export default function ProgramDetailPage() {
       {isAttendanceOpen && selectedSession && (
         <div className={`app-viewport fixed inset-0 z-[70] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm sm:items-center ${attendanceMaximized ? 'sm:p-0' : 'sm:p-4'}`}>
           <div ref={attendanceDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="attendance-title" className={`flex h-[var(--app-height)] w-full flex-col overflow-hidden rounded-none bg-white shadow-2xl outline-none ${attendanceMaximized ? 'sm:h-[var(--app-height)] sm:max-h-none sm:max-w-none sm:rounded-none' : 'sm:h-auto sm:max-h-[92vh] sm:max-w-5xl sm:rounded-2xl'}`}>
-            <header className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-100 px-4 py-4 sm:px-6">
-              <div className="min-w-0">
-                <h2 id="attendance-title" className="text-xl font-bold text-slate-800">Tomar asistencia</h2>
-                <p className="mt-1 truncate text-sm leading-snug text-slate-500">
+            <header className="shrink-0 border-b border-slate-100 px-4 py-3 sm:px-6">
+              <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 flex-1">
+                <h2 id="attendance-title" className="text-lg font-bold text-slate-800 sm:text-xl">Tomar asistencia</h2>
+                <p className="mt-1 line-clamp-2 text-xs leading-snug text-slate-500 sm:text-sm">
                   {sessionDisplayTitle(selectedSession, `Sesión ${Math.max(1, sessions.findIndex(session => session.id === selectedSession.id) + 1)}`)} — {formatCalendarDate(selectedSession.date, "EEEE, d 'de' MMMM", { locale: es })}
                   {selectedSession.start_time && ` · ${selectedSession.start_time}`}
                 </p>
-                <div className="mt-3 max-w-xl">
-                  <ProgramAttendanceSearchBar
-                    value={attendanceSearch}
-                    pending={attendanceSearchPending}
-                    resultCount={filteredAttendanceParticipants.length}
-                    totalCount={attendanceParticipants.length}
-                    disabled={savingAttendance}
-                    onChange={setAttendanceSearch}
-                    onClear={() => { setAttendanceSearch(''); setDebouncedAttendanceSearch(''); }}
-                  />
-                </div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
+                {!attendanceSearch.trim() && <button ref={attendanceDetailsToggleRef} type="button" onClick={() => setAttendanceDetailsExpanded(value => !value)} aria-label="Detalles" aria-describedby={sessionObservationState.dirty ? "attendance-comment-pending" : undefined} aria-expanded={attendanceDetailsVisible} aria-controls="program-attendance-session-details" className="inline-flex min-h-11 items-center justify-center gap-1 rounded-xl px-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">Detalles<ChevronDown className={`h-4 w-4 transition-transform ${attendanceDetailsVisible ? 'rotate-180' : ''}`}/>{sessionObservationState.dirty && <span className="h-1.5 w-1.5 rounded-full bg-amber-500" id="attendance-comment-pending" aria-label="Comentario pendiente" />}</button>}
                 {attendanceBoardAvailable && <button type="button" disabled={savingAttendance} onClick={() => { if (!attendanceSaveRequestRef.current) setAttendanceMaximized(value => !value); }} className="hidden h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40 md:inline-flex" aria-label={attendanceMaximized ? 'Restaurar ventana de asistencia' : 'Maximizar ventana de asistencia'} title={attendanceMaximized ? 'Restaurar' : 'Maximizar'}>
                   {attendanceMaximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
                 </button>}
-                <button type="button" disabled={savingAttendance} onClick={requestCloseAttendance} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40" aria-label="Cerrar asistencia">
+                <button type="button" disabled={savingAttendance || sessionObservationState.saving} onClick={requestCloseAttendance} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40" aria-label="Cerrar asistencia">
                   <X className="h-5 w-5" />
                 </button>
+              </div>
+              </div>
+              <div className="mt-3 w-full">
+                <ProgramAttendanceSearchBar value={attendanceSearch} pending={attendanceSearchPending} resultCount={filteredAttendanceParticipants.length} totalCount={attendanceParticipants.length} disabled={savingAttendance} onChange={setAttendanceSearch} onClear={() => { setAttendanceSearch(''); setDebouncedAttendanceSearch(''); }} />
               </div>
             </header>
 
             <div data-testid="program-attendance-scroll" className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
+              <div ref={attendanceDetailsRef} id="program-attendance-session-details" hidden={!attendanceDetailsVisible} inert={!attendanceDetailsVisible || undefined}>
+              <div className="mb-3 text-sm text-slate-600">
+                <p className="font-semibold text-slate-800">{sessionDisplayTitle(selectedSession, 'Sesión')}</p>
+                <p className="mt-1 text-xs">{formatCalendarDate(selectedSession.date, "EEEE, d 'de' MMMM", { locale: es })}{selectedSession.start_time && ` · ${selectedSession.start_time}`}{selectedSession.end_time && `–${selectedSession.end_time}`}</p>
+                {selectedSession.location && <p className="mt-1 break-words text-xs">{selectedSession.location}</p>}
+              </div>
               <section className="mb-4 rounded-2xl border border-emerald-100 bg-emerald-50/60 p-3 sm:p-4">
                 <h3 className="flex items-center gap-2 text-sm font-bold text-emerald-900"><BookOpen className="h-4 w-4"/>Temas programados</h3>
                 {normalizedSessionTopics(selectedSession).length === 0 ? <p className="mt-2 text-xs text-emerald-800/70">No hay temas programados para esta sesión.</p> : <div className="mt-2 flex flex-wrap gap-2">{normalizedSessionTopics(selectedSession).map(topic => <span key={topic.id || topic.course_topic_id || topic.title} className="rounded-lg border border-emerald-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-emerald-800">{topic.course_name ? `${topic.course_name} · ` : ''}{topic.title}</span>)}</div>}
               </section>
-              <SessionObservationPanel mutationMode={mobileWorkspace ? 'append-only' : 'manage'} programId={programId} sessionId={selectedSession.id} disabled={savingAttendance} onChanged={() => void fetchProgramData()} />
+              <SessionObservationPanel key={selectedSession.id} mutationMode={mobileWorkspace ? 'append-only' : 'manage'} programId={programId} sessionId={selectedSession.id} disabled={savingAttendance} suspended={!attendanceDetailsVisible} onStateChange={onSessionObservationStateChange} onChanged={() => void fetchProgramData()} />
+              </div>
+              {attendanceSavedWithComment && <div role="status" className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2"><p className="min-w-0 flex-1 text-sm text-emerald-900">{sessionObservationState.saving ? 'Asistencia guardada; el comentario se está guardando.' : sessionObservationState.dirty ? 'Asistencia guardada; tienes un comentario pendiente.' : 'Asistencia y comentario guardados.'}</p>{(sessionObservationState.dirty || sessionObservationState.saving) && <button type="button" onClick={() => { setAttendanceSearch(''); setDebouncedAttendanceSearch(''); setAttendanceDetailsExpanded(true); requestAnimationFrame(() => attendanceDetailsRef.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus()); }} className="min-h-11 rounded-lg px-3 text-xs font-bold text-emerald-800 hover:bg-emerald-100">Revisar comentario</button>}</div>}
               {attendanceSaveError && <div className="mb-4 flex flex-col gap-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 sm:flex-row sm:items-center" role="alert"><div className="min-w-0 flex-1"><p className="text-sm font-semibold text-red-800">No se pudo guardar la asistencia</p><p className="mt-0.5 text-xs leading-5 text-red-700">{attendanceSaveError} El borrador sigue disponible.</p></div><button type="button" disabled={savingAttendance} onClick={() => { void saveAttendance(attendanceRetryExpectedStatuses); }} className="min-h-11 shrink-0 rounded-xl border border-red-200 bg-white px-4 text-sm font-semibold text-red-700 hover:bg-red-100 disabled:opacity-40">Reintentar</button></div>}
               {attendanceLoadState === 'loading' ? (
                 <div className="flex min-h-64 items-center justify-center px-4 py-10 text-center" role="status">
@@ -3966,7 +3991,7 @@ export default function ProgramDetailPage() {
                   disabled={savingAttendance}
                   onPreferredViewChange={changePreferredAttendanceView}
                   onStatusChange={changeAttendanceStatus}
-                  onOpenObservations={(participant, trigger) => { void loadAttendanceObservationHistory(participant, trigger); }}
+                  onOpenObservations={(participant, trigger, intent) => { void loadAttendanceObservationHistory(participant, trigger, intent); }}
                   onClearSearch={() => { setAttendanceSearch(''); setDebouncedAttendanceSearch(''); }}
                   onDragStateChange={setAttendanceDragging}
                 />
@@ -3977,11 +4002,11 @@ export default function ProgramDetailPage() {
               {dirtyAttendanceParticipantIDs.length > 0 && <p className="mr-auto text-xs font-medium text-slate-500" role="status">{dirtyAttendanceParticipantIDs.length} cambio{dirtyAttendanceParticipantIDs.length === 1 ? '' : 's'} sin guardar</p>}
               <button
                 type="button"
-                disabled={savingAttendance}
+                disabled={savingAttendance || sessionObservationState.saving}
                 onClick={requestCloseAttendance}
                 className="min-h-11 flex-1 rounded-xl px-4 py-2.5 font-medium text-slate-600 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 sm:flex-none"
               >
-                Cancelar
+                {attendanceSavedWithComment ? 'Cerrar' : 'Cancelar'}
               </button>
               <button ref={attendanceSaveButtonRef} type="button" onClick={() => { void saveAttendance(); }} disabled={attendanceLoadState !== 'success' || savingAttendance || dirtyAttendanceParticipantIDs.length === 0} className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 font-medium text-white shadow-sm transition-all hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none">
                 {savingAttendance ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
@@ -4032,6 +4057,7 @@ export default function ProgramDetailPage() {
         onObservationChange={() => { if (attendanceObservationParticipant) void loadAttendanceObservationHistory(attendanceObservationParticipant); }}
         mutationMode={mobileWorkspace ? 'append-only' : 'manage'}
         initialComposerOpen={attendanceObservationComposerOpen}
+        protectDraftOnClose
       />
 
       <ObservationHistoryModal
@@ -4153,6 +4179,9 @@ export default function ProgramDetailPage() {
         }
       />
 
+      <ProgramLifecycleDialog program={program} action={lifecycleAction} suspended={rootAdministrationSuspended}
+        onClose={() => setLifecycleAction(null)} onCanonical={canonical => setProgram(canonical)}
+        onSaved={canonical => { setProgram(canonical); showToast('Estado del programa actualizado', 'success'); void fetchProgramData(); }} />
       <ProgramSettingsDialog
         key={`${effectiveAccountID}:${programId}:settings`}
         open={isEditModalOpen}

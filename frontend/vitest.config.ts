@@ -31,6 +31,8 @@ export default defineConfig({
       'src/lib/authCookieLock.test.ts',
       'src/lib/onlineLoginNavigation.test.ts',
       'src/lib/avatarImageExport.test.ts',
+      'src/lib/avatarImageEditor.test.ts',
+      'src/lib/programRoutePolicy.test.ts',
       'src/lib/mobileApp.test.ts',
       'src/lib/api.test.ts',
       'src/lib/leadPolicy.test.ts',

@@ -545,3 +545,10 @@ func GenerateAvatarPath(jid string) string {
 func GenerateBroadcastPath(extension string) string {
 	return path.Join("broadcast", uuid.New().String()+extension)
 }
+
+// Program avatars are private; storage may expose them only through a live,
+// account-authorized Program reference. Removal remains owned by Program.
+func IsAccountPrivateProgramAvatarObjectKey(accountID uuid.UUID, objectKey string) bool {
+	raw := strings.TrimSpace(objectKey)
+	return raw != "" && raw == objectKey && path.Clean(raw) == raw && !strings.ContainsAny(raw, "\\\x00\r\n") && strings.HasPrefix(raw, accountID.String()+"/"+privateObjectFolder+"/program-avatars/")
+}

@@ -3,12 +3,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  Camera, Check, ChevronDown, Contrast, FlipHorizontal2, FlipVertical2,
-  ImagePlus, Loader2, Maximize2, RefreshCw, RotateCw, SlidersHorizontal, Trash2, Undo2, X,
+  Camera, Check, ChevronDown, ImagePlus, Loader2, Maximize2, RefreshCw, Trash2, X,
 } from 'lucide-react'
 import { api, apiUpload } from '@/lib/api'
 import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
 import { encodeAvatarCanvas } from '@/lib/avatarImageExport'
+import AvatarImageEditor from '@/components/AvatarImageEditor'
+import { avatarCanvasDisplacement, drawAvatarImage, initialAvatarTransform as initialTransform, type AvatarImageTransform as ImageTransform } from '@/lib/avatarImageEditor'
 import {
   OPERATIONAL_OVERLAY_LAYERS,
   useOperationalOverlayPortal,
@@ -69,28 +70,6 @@ interface ContactAvatarControlProps {
 
 type DialogMode = 'none' | 'view' | 'device' | 'preview' | 'editor' | 'remove'
 
-interface ImageTransform {
-  zoom: number
-  offsetX: number
-  offsetY: number
-  rotation: number
-  flipX: boolean
-  flipY: boolean
-  brightness: number
-  contrast: number
-}
-
-const initialTransform: ImageTransform = {
-  zoom: 1,
-  offsetX: 0,
-  offsetY: 0,
-  rotation: 0,
-  flipX: false,
-  flipY: false,
-  brightness: 100,
-  contrast: 100,
-}
-
 const targetAvatarBytes = 250 * 1024
 const avatarMenuWidth = 256
 const avatarMenuMargin = 8
@@ -117,18 +96,7 @@ export interface ContactAvatarMenuPosition {
   maxHeight: number
 }
 
-export function contactAvatarCanvasDisplacement(
-  delta: { x: number; y: number },
-  canvas: { width: number; height: number },
-  displayed: { width: number; height: number },
-): { x: number; y: number } | null {
-  if (![delta.x, delta.y, canvas.width, canvas.height, displayed.width, displayed.height].every(Number.isFinite)
-    || canvas.width <= 0 || canvas.height <= 0 || displayed.width <= 0 || displayed.height <= 0) return null
-  return {
-    x: delta.x * canvas.width / displayed.width,
-    y: delta.y * canvas.height / displayed.height,
-  }
-}
+export const contactAvatarCanvasDisplacement = avatarCanvasDisplacement
 
 export function contactAvatarMenuPosition(
   anchor: ContactAvatarMenuAnchor,
@@ -619,25 +587,7 @@ export default function ContactAvatarControl({
   const drawEditor = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas || !editorImage) return
-    const context = canvas.getContext('2d')
-    if (!context) return
-    const size = canvas.width
-    context.clearRect(0, 0, size, size)
-    context.fillStyle = '#e2e8f0'
-    context.fillRect(0, 0, size, size)
-    context.save()
-    context.translate(size / 2 + transform.offsetX, size / 2 + transform.offsetY)
-    context.rotate(transform.rotation * Math.PI / 180)
-    context.scale(transform.flipX ? -1 : 1, transform.flipY ? -1 : 1)
-    context.filter = `brightness(${transform.brightness}%) contrast(${transform.contrast}%)`
-    const quarterTurn = Math.abs(transform.rotation / 90) % 2 === 1
-    const sourceWidth = quarterTurn ? editorImage.naturalHeight : editorImage.naturalWidth
-    const sourceHeight = quarterTurn ? editorImage.naturalWidth : editorImage.naturalHeight
-    const baseScale = Math.max(size / sourceWidth, size / sourceHeight)
-    const width = editorImage.naturalWidth * baseScale * transform.zoom
-    const height = editorImage.naturalHeight * baseScale * transform.zoom
-    context.drawImage(editorImage, -width / 2, -height / 2, width, height)
-    context.restore()
+    drawAvatarImage(canvas, editorImage, transform)
   }, [editorImage, transform])
 
   useEffect(() => { if (dialog === 'editor') drawEditor() }, [dialog, drawEditor])
@@ -933,45 +883,13 @@ export default function ContactAvatarControl({
                 </div>
               )}
 
-              {dialog === 'editor' && (
-                <div className="grid gap-6 md:grid-cols-[minmax(280px,1fr)_250px]">
-                  <div className="mx-auto w-full max-w-[480px]">
-                    <div className="relative aspect-square overflow-hidden rounded-2xl bg-slate-200 shadow-inner">
-                      <canvas
-                        ref={canvasRef}
-                        width={512}
-                        height={512}
-                        onPointerDown={handlePointerDown}
-                        onPointerMove={handlePointerMove}
-                        onPointerUp={() => setDragging(false)}
-                        onPointerCancel={() => setDragging(false)}
-                        className={`h-full w-full touch-none ${dragging ? 'cursor-grabbing' : 'cursor-grab'}`}
-                      />
-                      {editorLoading && <div role="status" className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 bg-slate-200 text-sm text-slate-600"><Loader2 className="h-5 w-5 animate-spin" /> Preparando imagen…</div>}
-                      <div className="pointer-events-none absolute inset-[7%] rounded-full border-2 border-white/90 shadow-[0_0_0_999px_rgba(15,23,42,0.32)]" />
-                    </div>
-                    <p className="mt-2 text-center text-xs text-slate-500">Arrastra para encuadrar. La guía circular muestra cómo se verá en las listas.</p>
-                  </div>
-
-                  <div className="space-y-4">
-                    <EditorSlider label="Zoom" value={transform.zoom} min={1} max={3} step={0.05} onChangeStart={rememberCurrentTransform} onChange={zoom => setTransform(previous => ({ ...previous, zoom }))} />
-                    <EditorSlider label="Brillo" value={transform.brightness} min={60} max={140} step={1} suffix="%" icon={<SlidersHorizontal className="h-4 w-4" />} onChangeStart={rememberCurrentTransform} onChange={brightness => setTransform(previous => ({ ...previous, brightness }))} />
-                    <EditorSlider label="Contraste" value={transform.contrast} min={60} max={140} step={1} suffix="%" icon={<Contrast className="h-4 w-4" />} onChangeStart={rememberCurrentTransform} onChange={contrast => setTransform(previous => ({ ...previous, contrast }))} />
-                    <div>
-                      <p className="mb-2 text-xs font-medium text-slate-600">Orientación</p>
-                      <div className="grid grid-cols-3 gap-2">
-                        <EditorButton label="Girar" onClick={() => rememberAndSet({ ...transform, rotation: (transform.rotation + 90) % 360 })}><RotateCw className="h-4 w-4" /></EditorButton>
-                        <EditorButton label="Horizontal" onClick={() => rememberAndSet({ ...transform, flipX: !transform.flipX })}><FlipHorizontal2 className="h-4 w-4" /></EditorButton>
-                        <EditorButton label="Vertical" onClick={() => rememberAndSet({ ...transform, flipY: !transform.flipY })}><FlipVertical2 className="h-4 w-4" /></EditorButton>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 border-t border-slate-100 pt-4">
-                      <EditorButton label="Deshacer" disabled={history.length === 0} onClick={undoTransform}><Undo2 className="h-4 w-4" /></EditorButton>
-                      <EditorButton label="Restablecer" onClick={() => rememberAndSet(initialTransform)}><RefreshCw className="h-4 w-4" /></EditorButton>
-                    </div>
-                  </div>
-                </div>
-              )}
+              {dialog === 'editor' && <AvatarImageEditor
+                canvasRef={canvasRef} transform={transform} loading={editorLoading} dragging={dragging}
+                canUndo={history.length > 0} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove}
+                onPointerEnd={() => setDragging(false)} onRemember={rememberCurrentTransform}
+                onChange={patch => setTransform(previous => ({ ...previous, ...patch }))}
+                onCommitTransform={rememberAndSet} onUndo={undoTransform}
+              />}
 
             </div>
 
@@ -997,29 +915,4 @@ function AvatarComparison({ label, url, initials, highlight = false }: { label: 
       {url ? <img src={url} alt={label} className="mx-auto aspect-square w-full max-w-44 rounded-full object-cover shadow-sm ring-2 ring-white" /> : <div className="mx-auto flex aspect-square w-full max-w-44 items-center justify-center rounded-full bg-white text-2xl font-bold text-slate-400 ring-1 ring-slate-200">{initials}</div>}
     </div>
   )
-}
-
-function EditorSlider({ label, value, min, max, step, suffix = '', icon, onChangeStart, onChange }: { label: string; value: number; min: number; max: number; step: number; suffix?: string; icon?: React.ReactNode; onChangeStart: () => void; onChange: (value: number) => void }) {
-  return (
-    <label className="block">
-      <span className="mb-1.5 flex items-center justify-between text-xs font-medium text-slate-600"><span className="flex items-center gap-1.5">{icon}{label}</span><span className="tabular-nums text-slate-400">{Math.round(value * 100) / 100}{suffix}</span></span>
-      <input
-        type="range"
-        value={value}
-        min={min}
-        max={max}
-        step={step}
-        onPointerDown={onChangeStart}
-        onKeyDown={event => {
-          if (!event.repeat && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) onChangeStart()
-        }}
-        onChange={event => onChange(Number(event.target.value))}
-        className="h-2 w-full cursor-pointer accent-emerald-600"
-      />
-    </label>
-  )
-}
-
-function EditorButton({ label, disabled = false, onClick, children }: { label: string; disabled?: boolean; onClick: () => void; children: React.ReactNode }) {
-  return <button type="button" disabled={disabled} onClick={onClick} className="flex min-h-11 flex-col items-center justify-center gap-1 rounded-xl border border-slate-200 bg-white px-2 text-[10px] font-medium text-slate-600 hover:border-emerald-300 hover:bg-emerald-50 disabled:opacity-35">{children}{label}</button>
 }

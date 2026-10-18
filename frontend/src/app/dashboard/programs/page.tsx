@@ -10,10 +10,15 @@ import { formatCalendarDate } from '@/utils/calendarDate';
 import { useContainerWidth } from '@/components/responsive/useContainerWidth';
 import { useDebouncedValue } from '@/lib/useDebouncedValue';
 import { ProgramSettingsDialog } from '@/components/programs/ProgramSettingsDialog';
+import { ProgramScopePicker } from '@/components/programs/ProgramScopePicker';
+import { ProgramAvatar } from '@/components/programs/ProgramAvatarControl';
+import { ProgramLifecycleDialog } from '@/components/programs/ProgramLifecycleDialog';
+import { programLifecycleAction, type ProgramLifecycleAction } from '@/lib/programLifecycle';
 import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider';
 import { programScopeUrls, PROGRAM_DELETE_CONFIRMATION, type ProgramStatusScope } from '@/lib/programLifecycle';
 import { useProgramWorkspacePolicy } from '@/components/programs/useProgramWorkspacePolicy';
 import { isDialogFocusableVisible, restoreDialogFocus } from '@/components/programs/useDialogTabTrap';
+import WorkspaceActionsMenu from '@/components/operational-overlay/WorkspaceActionsMenu';
 
 const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; icon: React.ReactNode }> = {
   active: { label: 'Activo', bg: 'bg-emerald-50', text: 'text-emerald-700', icon: <CheckCircle2 className="w-3 h-3" /> },
@@ -24,6 +29,7 @@ const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; i
 const COLORS = ['#10b981', '#3b82f6', '#8b5cf6', '#6366f1', '#ec4899', '#f43f5e', '#f97316', '#f59e0b'];
 const FOLDER_ICONS = ['📁', '📂', '🎓', '🎉', '🏋️', '📊', '📝', '🎯', '📌', '🗂️'];
 const FOLDER_COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#f97316', '#14b8a6', '#6366f1'];
+const PROGRAM_STATUS_OPTIONS = [{ value: 'active', label: 'Activos' }, { value: 'completed', label: 'Completados' }, { value: 'archived', label: 'Archivados' }] as const;
 
 export default function ProgramsPage() {
   const [statusScope, setStatusScope] = useState<ProgramStatusScope>('active');
@@ -68,6 +74,7 @@ export default function ProgramsPage() {
   goalsOpenRef.current = goalsOpen;
   const [deleting, setDeleting] = useState<string | null>(null);
   const [editingProgram, setEditingProgram] = useState<Program | null>(null);
+  const [lifecycleSelection, setLifecycleSelection] = useState<{ program: Program; action: ProgramLifecycleAction } | null>(null);
   const [editingProgramDirty, setEditingProgramDirty] = useState(false);
   const [creatingProgram, setCreatingProgram] = useState(false);
   const [savingFolder, setSavingFolder] = useState(false);
@@ -85,6 +92,7 @@ export default function ProgramsPage() {
   const [editFolder, setEditFolder] = useState<ProgramFolder | null>(null);
   const [folderForm, setFolderForm] = useState({ name: '', color: '#10b981', icon: '📁' });
   const [menuID, setMenuID] = useState<string | null>(null);
+  const programMenuAnchorRef = useRef<HTMLElement | null>(null);
 
   // View mode
   const [viewMode, setViewMode] = useState<'grid' | 'list' | 'compact'>('grid');
@@ -574,47 +582,48 @@ export default function ProgramsPage() {
       <button
         type="button"
         data-menu-toggle
-        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setMenuID(menuID === program.id ? null : program.id); }}
-        className={`flex items-center justify-center rounded-xl text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700 ${touchWorkspace ? 'h-11 w-11' : 'h-8 w-8'}`}
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); if (!desktopActionsRef.current) return; programMenuAnchorRef.current = e.currentTarget; setMenuID(menuID === program.id ? null : program.id); }}
+        className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700"
         title="Más opciones"
         aria-label={`Acciones de ${program.name}`}
         aria-expanded={menuID === program.id}
+        aria-haspopup="menu"
+        aria-controls={menuID === program.id ? `program-actions-${program.id}` : undefined}
       >
         <MoreHorizontal className="h-5 w-5 md:h-4 md:w-4" />
       </button>
       {menuID === program.id && (
-        <div
-          data-menu-dropdown
-          className={touchWorkspace
-            ? 'fixed inset-x-3 bottom-[calc(1rem+env(safe-area-inset-bottom))] z-[70] max-h-[min(70vh,24rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white py-2 shadow-2xl'
-            : 'absolute right-0 top-full z-30 mt-1 min-w-[200px] overflow-y-auto rounded-xl border border-slate-200 bg-white py-1 shadow-xl'}
-          onMouseDown={e => e.stopPropagation()}
-          onClick={e => e.stopPropagation()}
-        >
-          <button onClick={(e) => openEditProgram(program, e)} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">
+        <WorkspaceActionsMenu anchor={programMenuAnchorRef.current} id={`program-actions-${program.id}`} label={`Acciones de ${program.name}`} compact={touchWorkspace} onClose={() => setMenuID(null)}>
+          <div data-menu-dropdown>
+          <button type="button" role="menuitem" onClick={(e) => openEditProgram(program, e)} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">
             <Edit2 className="h-4 w-4" /> Editar
           </button>
+          {(program.status === 'archived' ? ['restore'] : [program.status === 'completed' ? 'reopen' : 'complete', 'archive']).map(value => {
+            const action = value as ProgramLifecycleAction;
+            return <button key={action} type="button" role="menuitem" onClick={event => { event.preventDefault(); event.stopPropagation(); if (!desktopActionsRef.current || !requireOnline('Cambiar el estado del programa')) return; setMenuID(null); setLifecycleSelection({ program, action }); }} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">{action === 'archive' || action === 'restore' ? <Archive className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}{programLifecycleAction(program, action).label}</button>;
+          })}
           {folders.length > 0 && (
             <>
               <div className="my-1 border-t border-slate-100" />
               <p className="px-4 py-1 text-xs font-medium text-slate-400">Mover a...</p>
               {program.folder_id && (
-                <button onClick={(e) => handleMoveToFolder(program.id, null, e)} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">
+                <button type="button" role="menuitem" onClick={(e) => handleMoveToFolder(program.id, null, e)} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">
                   <Home className="h-4 w-4" /> Raíz
                 </button>
               )}
               {folders.filter(f => f.id !== program.folder_id).map(f => (
-                <button key={f.id} onClick={(e) => handleMoveToFolder(program.id, f.id, e)} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">
+                <button key={f.id} type="button" role="menuitem" onClick={(e) => handleMoveToFolder(program.id, f.id, e)} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">
                   <span className="text-base">{f.icon}</span><span className="truncate">{f.name}</span>
                 </button>
               ))}
             </>
           )}
           <div className="my-1 border-t border-slate-100" />
-          <button disabled={deleting === program.id} onClick={(e) => handleDeleteProgram(program.id, e)} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-red-600 hover:bg-red-50 disabled:cursor-wait disabled:opacity-60">
+          <button type="button" role="menuitem" disabled={deleting === program.id} onClick={(e) => handleDeleteProgram(program.id, e)} className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-sm text-red-600 hover:bg-red-50 disabled:cursor-wait disabled:opacity-60">
             {deleting === program.id ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-red-200 border-t-red-600" /> : <Trash2 className="h-4 w-4" />} {deleting === program.id ? 'Eliminando…' : 'Eliminar'}
           </button>
-        </div>
+          </div>
+        </WorkspaceActionsMenu>
       )}
     </div>
   );
@@ -635,13 +644,8 @@ export default function ProgramsPage() {
 
           {/* Program header */}
           <div className="flex items-start gap-3 mb-2.5">
-            <div
-              className="w-10 h-10 rounded-xl flex items-center justify-center text-white font-bold text-base shrink-0 shadow-sm"
-              style={{ backgroundColor: program.color || '#10b981' }}
-            >
-              {program.name.charAt(0).toUpperCase()}
-            </div>
-            <div className="min-w-0 flex-1 pr-6">
+            <ProgramAvatar program={program} className="h-10 w-10 shadow-sm" />
+            <div className={`min-w-0 flex-1 ${desktopActions ? 'pr-10' : ''}`}>
               <h3 className="font-semibold text-slate-800 truncate group-hover:text-emerald-700 transition-colors text-sm">
                 {program.name}
               </h3>
@@ -702,12 +706,7 @@ export default function ProgramsPage() {
         onDragStart={e => handleProgramDragStart(e, program.id)}
         onDragEnd={handleProgramDragEnd}>
         <div className="group flex items-center gap-4 bg-white border border-slate-200 rounded-xl px-4 py-3 hover:shadow-sm hover:border-slate-300 transition-all cursor-pointer">
-          <div
-            className="w-9 h-9 rounded-lg flex items-center justify-center text-white font-bold text-sm shrink-0"
-            style={{ backgroundColor: program.color || '#10b981' }}
-          >
-            {program.name.charAt(0).toUpperCase()}
-          </div>
+          <ProgramAvatar program={program} className="h-9 w-9 text-sm" />
           <div className="min-w-0 flex-1">
             <h3 className="font-semibold text-slate-800 truncate text-sm group-hover:text-emerald-700 transition-colors">{program.name}</h3>
             <p className="text-xs text-slate-500 truncate">{program.description || 'Sin descripción'}</p>
@@ -720,15 +719,7 @@ export default function ProgramsPage() {
             <span className="flex items-center gap-1"><Users className="w-3.5 h-3.5" />{program.participant_count || 0}</span>
             <span className="flex items-center gap-1"><Calendar className="w-3.5 h-3.5" />{program.session_count || 0}</span>
           </div>
-          {!touchWorkspace && <div className="flex shrink-0 items-center gap-1 opacity-0 transition-all group-hover:opacity-100 group-focus-within:opacity-100">
-            <button onClick={(e) => openEditProgram(program, e)} className="rounded-lg p-1.5 text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600" title="Editar" aria-label={`Editar ${program.name}`}>
-              <Edit2 className="h-3.5 w-3.5" />
-            </button>
-            <button disabled={deleting === program.id} onClick={(e) => handleDeleteProgram(program.id, e)} className="rounded-lg p-1.5 text-slate-400 transition-all hover:bg-red-50 hover:text-red-500 disabled:cursor-wait" title="Eliminar" aria-label={`Eliminar ${program.name}`}>
-              {deleting === program.id ? <span className="block h-3.5 w-3.5 animate-spin rounded-full border-2 border-red-300 border-t-red-600" /> : <Trash2 className="h-3.5 w-3.5" />}
-            </button>
-          </div>}
-          {touchWorkspace && renderProgramMenu(program)}
+          {renderProgramMenu(program)}
         </div>
       </Link>
     );
@@ -743,18 +734,13 @@ export default function ProgramsPage() {
         onDragStart={e => handleProgramDragStart(e, program.id)}
         onDragEnd={handleProgramDragEnd}>
         <div className="group flex items-center gap-3 px-3 py-2 hover:bg-slate-50 rounded-lg transition-all cursor-pointer border-b border-slate-100 last:border-b-0">
-          <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: program.color || '#10b981' }} />
+          <ProgramAvatar program={program} className="h-8 w-8 text-xs" />
           <span className="font-medium text-slate-800 text-sm truncate flex-1 group-hover:text-emerald-700 transition-colors">{program.name}</span>
           <div className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full ${status.bg} ${status.text} shrink-0`}>
             {status.label}
           </div>
           <span className="text-xs text-slate-400 shrink-0 hidden sm:inline">{program.participant_count || 0}p · {program.session_count || 0}s</span>
-          {!touchWorkspace && <button disabled={deleting === program.id} onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteProgram(program.id, e); }}
-            className="shrink-0 rounded p-1 text-slate-400 opacity-0 transition-all hover:bg-red-50 hover:text-red-500 group-hover:opacity-100 group-focus-within:opacity-100 disabled:cursor-wait"
-            aria-label={`Eliminar ${program.name}`}>
-            {deleting === program.id ? <span className="block h-3.5 w-3.5 animate-spin rounded-full border-2 border-red-300 border-t-red-600" /> : <Trash2 className="h-3.5 w-3.5" />}
-          </button>}
-          {touchWorkspace && renderProgramMenu(program)}
+          {renderProgramMenu(program)}
         </div>
       </Link>
     );
@@ -920,27 +906,31 @@ export default function ProgramsPage() {
       )}
 
       {/* Stats + Search + View Toggle */}
-      <div className="flex flex-col sm:flex-row gap-3 shrink-0">
-        <div className="flex-1 relative">
+      <div className="flex gap-3 shrink-0">
+        <div className="flex min-w-0 flex-1 items-center rounded-xl border border-slate-200 bg-white focus-within:border-emerald-500">
+        <div className="min-w-0 flex-1 relative">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
             ref={mobileSearchRef}
             type="text"
-            placeholder="Buscar programas..."
+            placeholder={mobileWorkspace ? 'Buscar…' : 'Buscar programas...'}
+            aria-label="Buscar programas"
             value={searchQuery}
             onChange={(e) => {
               const next = e.target.value;
               setSearchQuery(next);
               if (!next) setDebouncedSearchQuery('');
             }}
-            className="w-full pl-10 pr-10 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 bg-white text-sm transition-all"
+            className="h-11 w-full min-w-0 rounded-xl bg-transparent pl-9 pr-8 text-sm outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500/30"
           />
           {searchPending && <Loader2 aria-label="Buscando programas" className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" />}
         </div>
+        {mobileWorkspace && <ProgramScopePicker value={statusScope} options={PROGRAM_STATUS_OPTIONS} onChange={changeStatusScope} label="Estado de programas" />}
+        </div>
 
-        <select aria-label="Estado de programas" value={statusScope} onChange={event => changeStatusScope(event.target.value as ProgramStatusScope)} className="min-h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 outline-none focus:border-emerald-500">
+        {!mobileWorkspace && <select aria-label="Estado de programas" value={statusScope} onChange={event => changeStatusScope(event.target.value as ProgramStatusScope)} className="min-h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 outline-none focus:border-emerald-500">
           <option value="active">Activos</option><option value="completed">Completados</option><option value="archived">Archivados</option>
-        </select>
+        </select>}
         {/* View mode toggle */}
         {!mobileWorkspace && <div className="flex bg-slate-100 rounded-xl p-1 shrink-0">
           <button onClick={() => setViewMode('grid')} title="Cuadrícula" className={`flex h-11 flex-1 items-center justify-center rounded-lg transition-colors sm:h-8 sm:w-8 sm:flex-none ${viewMode === 'grid' ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>
@@ -1209,6 +1199,10 @@ export default function ProgramsPage() {
         </div>
       )}
 
+      <ProgramLifecycleDialog program={lifecycleSelection?.program || null} action={lifecycleSelection?.action || null} suspended={!desktopActions}
+        onClose={() => setLifecycleSelection(null)}
+        onCanonical={canonical => { setPrograms(current => current.map(item => item.id === canonical.id ? canonical : item)); void fetchPrograms(); }}
+        onSaved={canonical => { setPrograms(current => current.filter(item => item.id !== canonical.id || canonical.status === statusScope).map(item => item.id === canonical.id ? canonical : item)); showToast('Estado del programa actualizado', 'success'); void fetchFolders(); void fetchDashboard(); }} />
       <ProgramSettingsDialog
         open={Boolean(editingProgram)}
         suspended={!desktopActions}

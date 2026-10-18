@@ -3,6 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Program } from '@/types/program';
 import { api } from '@/lib/api';
 import { ProgramSettingsDialog } from './ProgramSettingsDialog';
+import type { ProgramAvatarControlProps } from './ProgramAvatarControl';
+
+const photoControl = vi.hoisted(() => ({ props: null as ProgramAvatarControlProps | null }));
+vi.mock('./ProgramAvatarControl', () => ({ default: (props: ProgramAvatarControlProps) => {
+  photoControl.props = props;
+  return <div data-testid="program-photo" />;
+} }));
 
 vi.mock('@/lib/api', () => ({ api: vi.fn() }));
 
@@ -21,7 +28,7 @@ const baseProgram: Program = {
 };
 
 afterEach(cleanup);
-beforeEach(() => mockedAPI.mockReset());
+beforeEach(() => { mockedAPI.mockReset(); photoControl.props = null; });
 
 it('restores the same settings field after mobile suspension', async () => {
   const props = { open: true, program: baseProgram, onClose: vi.fn(), onSaved: vi.fn() };
@@ -47,10 +54,76 @@ function renderDialog(program: Program = baseProgram) {
       onCanonicalReload={onCanonicalReload}
     />,
   );
+  fireEvent.click(screen.getByRole('button', { name: /Vista de participantes/ }));
   return { onClose, onSaved, onCanonicalReload };
 }
 
 describe('ProgramSettingsDialog', () => {
+  it('merges a photo response without losing dirty fields or reverting untouched concurrent changes', async () => {
+    const { onSaved, onCanonicalReload } = renderDialog();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Nombre' }), { target: { value: 'Mi nombre pendiente' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Antigüedad' }));
+    const next = { ...baseProgram, description: 'Descripción de otra ventana', color: '#3B82F6', avatar_revision: 2, updated_at: '2026-10-18T14:00:00Z' };
+    act(() => photoControl.props!.onChange!(next));
+    expect(screen.getByRole('textbox', { name: 'Nombre' })).toHaveValue('Mi nombre pendiente');
+    expect(screen.getByRole('textbox', { name: 'Descripción' })).toHaveValue(next.description);
+    expect(screen.getByRole('button', { name: 'Usar color #3b82f6' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('checkbox', { name: 'Antigüedad' })).toBeChecked();
+    expect(screen.queryByText('Hay una versión más reciente')).not.toBeInTheDocument();
+    expect(onCanonicalReload).toHaveBeenCalledExactlyOnceWith(next);
+    mockedAPI.mockResolvedValueOnce({ success: true, data: { ...next, name: 'Mi nombre pendiente' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    const body = JSON.parse(mockedAPI.mock.calls[0][1]!.body as string);
+    expect(body).toMatchObject({ name: 'Mi nombre pendiente', description: next.description, color: next.color, expected_updated_at: next.updated_at });
+    expect(body.health_view_columns).toContain('tenure');
+  });
+
+  it('keeps conflicting general drafts blocked when a photo response includes concurrent changes to the same field', () => {
+    renderDialog();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Nombre' }), { target: { value: 'Mi nombre pendiente' } });
+    act(() => photoControl.props!.onChange!({ ...baseProgram, name: 'Nombre de otra ventana', avatar_revision: 3, updated_at: '2026-10-18T14:00:00Z' }));
+    expect(screen.getByRole('textbox', { name: 'Nombre' })).toHaveValue('Mi nombre pendiente');
+    expect(screen.getByRole('alert')).toHaveTextContent('también cambiaron campos');
+    expect(screen.getByRole('button', { name: 'Guardar cambios' })).toBeDisabled();
+    fireEvent.submit(screen.getByRole('textbox', { name: 'Nombre' }).closest('form')!);
+    expect(mockedAPI).not.toHaveBeenCalled();
+  });
+
+  it('does not invent a general draft when only a photo and untouched fields change', () => {
+    renderDialog();
+    act(() => photoControl.props!.onChange!({ ...baseProgram, description: 'Actualizada por otra ventana', avatar_revision: 4, updated_at: '2026-10-18T14:00:00Z' }));
+    expect(screen.getByRole('textbox', { name: 'Descripción' })).toHaveValue('Actualizada por otra ventana');
+    expect(screen.getByRole('button', { name: 'Guardar cambios' })).toBeDisabled();
+  });
+
+  it('blocks retained settings submit callbacks and close while a photo removal is in flight', async () => {
+    const { onClose } = renderDialog();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Nombre' }), { target: { value: 'Mi borrador' } });
+    const form = screen.getByRole('textbox', { name: 'Nombre' }).closest('form')!;
+    const key = Object.keys(form).find(value => value.startsWith('__reactProps$'))!;
+    const staleSubmit = (form as any)[key].onSubmit;
+    act(() => photoControl.props!.onBusyChange!(true));
+    expect(screen.getByRole('button', { name: 'Guardar cambios' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Cancelar' })).toBeDisabled();
+    await act(async () => staleSubmit({ preventDefault() {} }));
+    expect(mockedAPI).not.toHaveBeenCalled();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+    act(() => photoControl.props!.onBusyChange!(false));
+    expect(screen.getByRole('button', { name: 'Guardar cambios' })).toBeEnabled();
+  });
+
+  it('protects a pending photo crop with the parent discard confirmation', () => {
+    const { onClose } = renderDialog();
+    act(() => photoControl.props!.onDraftChange!(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }));
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('incluido el recorte de foto');
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Seguir editando' }));
+    expect(screen.getByRole('button', { name: 'Guardar cambios' })).toBeDisabled();
+  });
+
   it('preserves a draft and discard confirmation while suspended and detects newer canonical data', () => {
     const props = { open: true, program: baseProgram, onClose: vi.fn(), onSaved: vi.fn(), onDirtyChange: vi.fn() };
     const view = render(<ProgramSettingsDialog {...props} />);

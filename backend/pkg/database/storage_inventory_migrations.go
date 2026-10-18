@@ -31,6 +31,7 @@ func storageInventorySourceSpecs() []storageInventorySourceSpec {
 		"surveys":                    "name",
 		"survey_templates":           "name",
 		"contacts":                   "name",
+		"programs":                   "name",
 		"whatsapp_statuses":          "device_id,status,expires_at",
 		"task_attachments":           "task_id,attachment_scope,draft_owner_id,draft_expires_at,storage_removed_at,storage_removed_id",
 		"task_attachment_previews":   "task_id,attachment_id,status",
@@ -271,6 +272,7 @@ func storageInventoryDependencyMigrations() []string {
 		     UNION ALL SELECT 'survey_file_uploads',id::text FROM survey_file_uploads WHERE account_id=owner AND media_asset_id=identity
 		     UNION ALL SELECT 'survey_branding_asset_refs',id::text FROM survey_branding_asset_refs WHERE account_id=owner AND media_asset_id=identity
 		     UNION ALL SELECT 'contacts',id::text FROM contacts WHERE account_id=owner AND avatar_media_asset_id=identity
+		     UNION ALL SELECT 'programs',id::text FROM programs WHERE account_id=owner AND avatar_media_asset_id=identity
 		     UNION ALL SELECT 'whatsapp_statuses',id::text FROM whatsapp_statuses WHERE account_id=owner AND media_asset_id=identity
 		     UNION ALL SELECT 'task_attachments',id::text FROM task_attachments WHERE account_id=owner AND media_asset_id=identity
 		     UNION ALL SELECT 'task_attachment_previews',id::text FROM task_attachment_previews WHERE account_id=owner AND derivative_asset_id=identity

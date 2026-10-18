@@ -1,10 +1,9 @@
 'use client'
 
-import { format } from 'date-fns'
-import { es } from 'date-fns/locale'
-import { Columns3, LayoutList, NotebookPen } from 'lucide-react'
+import { Columns3, LayoutList } from 'lucide-react'
 import type { ProgramParticipant } from '@/types/program'
 import ProgramAttendanceBoard from './ProgramAttendanceBoard'
+import ProgramAttendanceObservationSummary, { type OpenAttendanceObservations } from './ProgramAttendanceObservationSummary'
 import ProgramAttendanceParticipantAvatar from './ProgramAttendanceParticipantAvatar'
 import {
   PROGRAM_ATTENDANCE_STATUS_CATALOG,
@@ -24,7 +23,7 @@ interface ProgramAttendanceRosterProps {
   disabled?: boolean
   onPreferredViewChange: (view: ProgramAttendanceView) => void
   onStatusChange: (participantID: string, status: ProgramAttendanceStatus) => void
-  onOpenObservations: (participant: ProgramParticipant, trigger: HTMLElement | null) => void
+  onOpenObservations: OpenAttendanceObservations
   onClearSearch?: () => void
   onDragStateChange?: (dragging: boolean) => void
 }
@@ -33,46 +32,6 @@ const MARKED_STATUSES = PROGRAM_ATTENDANCE_STATUS_CATALOG.filter(item => item.st
 
 function participantName(participant: ProgramParticipant) {
   return participant.contact_name?.trim() || 'Participante sin nombre'
-}
-
-function ObservationSummary({
-  participant,
-  draft,
-  compact,
-  disabled,
-  onOpenObservations,
-}: {
-  participant: ProgramParticipant
-  draft: ProgramAttendanceDraft
-  compact: boolean
-  disabled: boolean
-  onOpenObservations: ProgramAttendanceRosterProps['onOpenObservations']
-}) {
-  const entry = draft[participant.id]
-  const preview = entry?.observation_preview?.[0]
-  const name = participantName(participant)
-  return (
-    <div className={compact ? 'rounded-xl border border-slate-200 bg-slate-50/60 p-3' : 'min-w-[260px]'}>
-      {preview ? (
-        <>
-          <p className={`leading-5 text-slate-700 ${compact ? 'line-clamp-2 text-sm' : 'line-clamp-2 text-xs'}`}>{preview.notes}</p>
-          <p className="mt-0.5 text-[10px] text-slate-400">{preview.created_by_name || 'Autor no registrado'} · {format(new Date(preview.created_at), 'dd MMM, HH:mm', { locale: es })}</p>
-        </>
-      ) : <p className="text-xs text-slate-400">Sin observaciones</p>}
-      <div className={compact ? 'mt-2 flex justify-end' : 'mt-1'}>
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={event => onOpenObservations(participant, event.currentTarget)}
-          aria-label={`Abrir observaciones de asistencia de ${name}`}
-          className={`inline-flex items-center gap-1.5 font-semibold text-emerald-700 transition hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40 ${compact ? 'min-h-11 rounded-xl bg-white px-3 text-xs ring-1 ring-inset ring-emerald-200' : 'min-h-9 rounded-lg px-2 text-[11px]'}`}
-        >
-          <NotebookPen className="h-3.5 w-3.5" />Observaciones
-          {(entry?.observation_count || 0) > 1 && <span>{compact ? `+${(entry?.observation_count || 0) - 1} más` : `· +${(entry?.observation_count || 0) - 1} más`}</span>}
-        </button>
-      </div>
-    </div>
-  )
 }
 
 function StatusButtons({
@@ -191,7 +150,7 @@ export default function ProgramAttendanceRoster({
                   <span className="min-w-0 truncate text-sm font-semibold text-slate-800">{participantName(participant)}</span>
                 </div>
                 <StatusButtons participant={participant} draft={draft} compact disabled={disabled} onStatusChange={onStatusChange} />
-                <div className="mt-3"><ObservationSummary participant={participant} draft={draft} compact disabled={disabled} onOpenObservations={onOpenObservations} /></div>
+                <div className="mt-3"><ProgramAttendanceObservationSummary participant={participant} draft={draft} disabled={disabled} onOpenObservations={onOpenObservations} /></div>
               </article>
             ))}
           </div>
@@ -210,7 +169,7 @@ export default function ProgramAttendanceRoster({
                     </div>
                   </td>
                   <td className="px-4 py-3"><StatusButtons participant={participant} draft={draft} compact={false} disabled={disabled} onStatusChange={onStatusChange} /></td>
-                  <td className="px-4 py-3"><ObservationSummary participant={participant} draft={draft} compact={false} disabled={disabled} onOpenObservations={onOpenObservations} /></td>
+                  <td className="px-4 py-3"><ProgramAttendanceObservationSummary participant={participant} draft={draft} disabled={disabled} onOpenObservations={onOpenObservations} /></td>
                 </tr>
               ))}
             </tbody>

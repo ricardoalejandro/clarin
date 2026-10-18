@@ -8,6 +8,7 @@ import NotificationProvider from '@/components/NotificationProvider'
 import { LeadPolicyProvider, LeadModuleUnavailable, useAccountLeadPolicy } from '@/components/LeadPolicyProvider'
 import { isLeadModulePath } from '@/lib/leadPolicy'
 import ErosAssistant from '@/components/ErosAssistant'
+import { erosAvailableForRoute } from '@/lib/programRoutePolicy'
 import TaskBadge from '@/components/TaskBadge'
 import AccountSwitcher from '@/components/AccountSwitcher'
 import ClarinBrandMark from '@/components/branding/ClarinBrandMark'
@@ -131,6 +132,7 @@ function DashboardLayoutContent({
 }) {
   const router = useRouter()
   const pathname = usePathname()
+  const erosAvailable = erosAvailableForRoute(pathname)
   const { snapshot: offlineRuntime, isOffline, activity: registerOfflineActivity, requireOnline } = useClarinRuntime()
   const { ready: pwaReady, mobileApp: mobileAppMode } = usePwaRuntime()
   const [user, setUser] = useState<User | null>(null)
@@ -144,6 +146,7 @@ function DashboardLayoutContent({
   const [showChangelog, setShowChangelog] = useState(false)
   const [changelogContent, setChangelogContent] = useState('')
   const [isErosOpen, setIsErosOpen] = useState(false)
+  useEffect(() => { if (!erosAvailable) setIsErosOpen(false) }, [erosAvailable])
   const [chatComposerKeyboardOpen, setChatComposerKeyboardOpen] = useState(false)
   const [chatComposerAccessoryOpen, setChatComposerAccessoryOpen] = useState(false)
   const [chatConversationActive, setChatConversationActive] = useState(false)
@@ -257,7 +260,7 @@ function DashboardLayoutContent({
 
   // Ctrl+I to toggle Eros in the complete dashboard only.
   useEffect(() => {
-    if (mobileAppMode || isOffline) return
+    if (mobileAppMode || isOffline || !erosAvailable) return
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!shouldToggleErosFromKeyboard(e)) return
       e.preventDefault()
@@ -265,7 +268,7 @@ function DashboardLayoutContent({
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [isOffline, mobileAppMode])
+  }, [isOffline, mobileAppMode, erosAvailable])
 
   useEffect(() => {
     if (!isOffline) return
@@ -751,7 +754,7 @@ function DashboardLayoutContent({
         {!isOffline && <PwaInstallMenuAction compact={isCollapsed} onInvoked={() => setSidebarOpen(false)} />}
 
         {/* Eros launcher stays visible without exposing the mascot while closed. */}
-        {!isOffline && <div className={`shrink-0 border-t border-slate-700/50 ${isCollapsed ? 'p-2' : 'px-2.5 py-2'}`}>
+        {!isOffline && erosAvailable && <div className={`shrink-0 border-t border-slate-700/50 ${isCollapsed ? 'p-2' : 'px-2.5 py-2'}`}>
           <button
             type="button"
             onClick={() => { if (requireOnline('Abrir Eros')) setIsErosOpen(true) }}
@@ -894,7 +897,7 @@ function DashboardLayoutContent({
               <ClarinBrandMark className="h-6 w-6 rounded-md" />
               <span className="font-semibold text-slate-800 text-sm">Clarin</span>
             </div>
-            {!isOffline && <button
+            {!isOffline && erosAvailable && <button
               type="button"
               onClick={() => { if (requireOnline('Abrir Eros')) setIsErosOpen(true) }}
               className="flex h-11 w-11 items-center justify-center rounded-lg text-emerald-600 transition-colors hover:bg-emerald-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
@@ -930,7 +933,7 @@ function DashboardLayoutContent({
       </div>
 
       {/* In docked mode Eros is a real flex sibling and the CRM yields space to it. */}
-      {!mobileAppMode && !isOffline && <ErosAssistant isOpenProp={isErosOpen} onClose={() => setIsErosOpen(false)} />}
+      {!mobileAppMode && !isOffline && <ErosAssistant isOpenProp={erosAvailable && isErosOpen} onClose={() => setIsErosOpen(false)} />}
 
     </div>
 

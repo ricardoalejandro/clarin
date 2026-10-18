@@ -20,12 +20,13 @@ import {
   type KeyboardCoordinateGetter,
 } from '@dnd-kit/core'
 import { createPortal } from 'react-dom'
-import { GripVertical, NotebookPen } from 'lucide-react'
+import { GripVertical } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import OperationalDragOverlay from '@/components/drag-interaction/OperationalDragOverlay'
 import { useKanbanPan } from '@/lib/useKanbanPan'
 import type { ProgramParticipant } from '@/types/program'
 import ProgramAttendanceParticipantAvatar from './ProgramAttendanceParticipantAvatar'
+import ProgramAttendanceObservationSummary, { type OpenAttendanceObservations } from './ProgramAttendanceObservationSummary'
 import {
   PROGRAM_ATTENDANCE_STATUS_CATALOG,
   groupProgramAttendanceParticipants,
@@ -39,7 +40,7 @@ interface ProgramAttendanceBoardProps {
   draft: ProgramAttendanceDraft
   disabled?: boolean
   onStatusChange: (participantID: string, status: ProgramAttendanceStatus) => void
-  onOpenObservations: (participant: ProgramParticipant, trigger: HTMLElement | null) => void
+  onOpenObservations: OpenAttendanceObservations
   onDragStateChange?: (dragging: boolean) => void
 }
 
@@ -119,15 +120,12 @@ function AttendanceParticipantCard({
   disabled: boolean
   onOpenObservations: ProgramAttendanceBoardProps['onOpenObservations']
 }) {
-  const entry = draft[participant.id]
   const name = participantName(participant)
   const { attributes, listeners, setActivatorNodeRef, setNodeRef, isDragging } = useDraggable({
     id: `attendance-participant:${participant.id}`,
     disabled,
     data: { kind: 'program-attendance-participant', participant, sourceStatus: status } satisfies AttendanceDragData,
   })
-  const observationCount = entry?.observation_count || 0
-  const observationCountID = `attendance-observation-count-${participant.id}`
 
   return (
     <article
@@ -156,17 +154,7 @@ function AttendanceParticipantCard({
       </div>
 
       <div className="mt-2.5 border-t border-slate-100 pt-2">
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={event => onOpenObservations(participant, event.currentTarget)}
-          className="flex min-h-11 w-full items-center justify-between gap-2 rounded-xl bg-slate-50/80 px-3 text-[11px] font-semibold text-emerald-700 transition hover:bg-emerald-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
-          aria-label={`Abrir observaciones de asistencia de ${name}`}
-          aria-describedby={observationCountID}
-        >
-          <span className="inline-flex min-w-0 items-center gap-1.5"><NotebookPen className="h-3.5 w-3.5 shrink-0" />Observaciones</span>
-          <span id={observationCountID} className="shrink-0 rounded-full bg-white px-2 py-0.5 text-[10px] font-bold tabular-nums text-slate-500 ring-1 ring-slate-200" aria-label={`${observationCount} observaciones registradas`}>· {observationCount}</span>
-        </button>
+        <ProgramAttendanceObservationSummary participant={participant} draft={draft} disabled={disabled} showPreview={false} onOpenObservations={onOpenObservations} />
       </div>
     </article>
   )

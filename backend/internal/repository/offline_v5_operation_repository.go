@@ -1070,6 +1070,13 @@ func (r *OfflineV5Repository) applyProgramParticipantAddTx(ctx context.Context, 
 		result.ErrorCode = "outside_selection"
 		return result, nil
 	}
+	if _, err := lockActiveProgram(ctx, tx, record.AccountID, programID); err != nil {
+		if errors.Is(err, ErrProgramInactive) || errors.Is(err, ErrProgramNotFound) {
+			result.ErrorCode = "program_not_active"
+			return result, nil
+		}
+		return result, err
+	}
 	participant := domain.ProgramParticipant{ID: operation.ResourceID, ProgramID: programID, ContactID: contactID, Status: "active"}
 	err = tx.QueryRow(ctx, `INSERT INTO program_participants(id,program_id,contact_id,status)
 		SELECT $1,program.id,contact.id,'active' FROM programs program

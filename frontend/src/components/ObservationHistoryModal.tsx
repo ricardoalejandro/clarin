@@ -55,6 +55,8 @@ interface ObservationHistoryModalProps {
   loading?: boolean
   errorMessage?: string
   onRetry?: () => void
+  /** Attendance callers retain unsent contextual notes before leaving the surface. */
+  protectDraftOnClose?: boolean
 }
 
 const PAGE_SIZE = 20
@@ -79,6 +81,7 @@ export default function ObservationHistoryModal({
   loading = false,
   errorMessage = '',
   onRetry,
+  protectDraftOnClose = false,
 }: ObservationHistoryModalProps) {
   const kommoEnabled = typeof window !== 'undefined' && localStorage.getItem('kommo_enabled') === 'true'
   const [observations, setObservations] = useState<HistoryObservation[]>(initialObservations)
@@ -102,6 +105,8 @@ export default function ObservationHistoryModal({
   const [saving, setSaving] = useState(false)
   const [actionError, setActionError] = useState('')
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
+  const [discardRequested, setDiscardRequested] = useState(false)
+  const discardDialogRef = useRef<HTMLDivElement>(null)
   const deleteDialogRef = useRef<HTMLDivElement>(null)
   const deleteReturnFocusRef = useRef<HTMLElement | null>(null)
 
@@ -112,7 +117,6 @@ export default function ObservationHistoryModal({
   const scrollRef = useRef<HTMLDivElement>(null)
   const modalRef = useRef<HTMLDivElement>(null)
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null)
-  const modalWasOpenRef = useRef(false)
   const isOpenRef = useRef(isOpen)
   const viewIdentityRef = useRef('')
   const viewGenerationRef = useRef(0)
@@ -144,9 +148,17 @@ export default function ObservationHistoryModal({
     && (!manage || policyRef.current.mutationMode === 'manage')
     && (!type || Boolean(attendanceContext) || policyRef.current.allowedNewTypes.includes(type))
   const deleteConfirmationVisible = Boolean(pendingDeleteId) && isOpen && mutationMode === 'manage'
-  useDialogTabTrap(isOpen && !deleteConfirmationVisible, modalRef)
+  const discardVisible = isOpen && discardRequested
+  useDialogTabTrap(isOpen && !deleteConfirmationVisible && !discardVisible, modalRef)
   useDialogTabTrap(deleteConfirmationVisible, deleteDialogRef)
+  useDialogTabTrap(discardVisible, discardDialogRef)
   useOperationalOverlayRegistration(deleteConfirmationVisible, `observation-history-delete:${viewIdentity}`)
+  useOperationalOverlayRegistration(discardVisible, `observation-history-discard:${viewIdentity}`)
+  const requestClose = () => {
+    if (protectDraftOnClose && mutationRef.current?.generation === viewGenerationRef.current) return
+    if (protectDraftOnClose && Object.values(textDrafts).some(text => text.trim())) { setDiscardRequested(true); return }
+    onClose()
+  }
   useEffect(() => {
     isOpenRef.current = isOpen
     return () => {
@@ -166,6 +178,9 @@ export default function ObservationHistoryModal({
     setSaving(false)
     setActionError('')
     setPendingDeleteId(null)
+    setDiscardRequested(false)
+    setFiltersOpen(false)
+    setComposerOpen(isOpen && initialComposerOpen)
     // Capability/viewport changes deliberately do not change this identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewIdentity])
@@ -177,14 +192,6 @@ export default function ObservationHistoryModal({
       setFiltersOpen(false); setComposerOpen(false); setVisibleCount(PAGE_SIZE); setActionError('')
     }
   }, [defaultNewType, isOpen])
-
-  useEffect(() => {
-    if (isOpen && !modalWasOpenRef.current) {
-      setFiltersOpen(false)
-      setComposerOpen(initialComposerOpen)
-    }
-    modalWasOpenRef.current = isOpen
-  }, [initialComposerOpen, isOpen])
 
   useEffect(() => {
     if (!composerOpen || mutationMode === 'read-only') return
@@ -204,13 +211,20 @@ export default function ObservationHistoryModal({
     const h = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopImmediatePropagation(); e.preventDefault()
-        if (deleteConfirmationVisible) { if (!mutationRef.current) setPendingDeleteId(null) }
-        else onClose()
+        if (discardVisible) setDiscardRequested(false)
+        else if (deleteConfirmationVisible) { if (!mutationRef.current) setPendingDeleteId(null) }
+        else requestClose()
       }
     }
     document.addEventListener('keydown', h, true)
     return () => document.removeEventListener('keydown', h, true)
-  }, [deleteConfirmationVisible, isOpen, onClose])
+  }, [deleteConfirmationVisible, discardVisible, isOpen, onClose, protectDraftOnClose, textDrafts])
+
+  useEffect(() => {
+    if (!discardVisible) return
+    const frame = requestAnimationFrame(() => discardDialogRef.current?.focus())
+    return () => { cancelAnimationFrame(frame); requestAnimationFrame(() => composerTextareaRef.current?.focus()) }
+  }, [discardVisible])
 
   useEffect(() => {
     if (!deleteConfirmationVisible) return
@@ -384,7 +398,7 @@ export default function ObservationHistoryModal({
     : 'bg-orange-50 text-orange-700 border-orange-200/60'
 
   return (
-    <div className="app-viewport fixed inset-0 z-[90] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm animate-in fade-in duration-150 sm:items-center sm:p-4" onClick={onClose}>
+    <div className="app-viewport fixed inset-0 z-[90] flex items-stretch justify-center bg-black/50 p-0 backdrop-blur-sm animate-in fade-in duration-150 sm:items-center sm:p-4" onClick={requestClose}>
       <div ref={modalRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="observation-history-modal-title" className="flex h-[var(--app-height)] w-full max-w-3xl flex-col overflow-hidden rounded-none border border-slate-200/60 bg-white shadow-2xl outline-none animate-in zoom-in-95 duration-200 sm:h-auto sm:max-h-[85vh] sm:rounded-2xl" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-white shrink-0">
@@ -409,7 +423,7 @@ export default function ObservationHistoryModal({
             >
               <SlidersHorizontal className="w-4 h-4" />
             </button>}
-            <button type="button" onClick={onClose} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 sm:h-9 sm:w-9" title="Cerrar (Esc)" aria-label="Cerrar observaciones">
+            <button type="button" onClick={requestClose} disabled={protectDraftOnClose && saving} className="inline-flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600 disabled:opacity-40 sm:h-9 sm:w-9" title="Cerrar (Esc)" aria-label="Cerrar observaciones">
               <X className="w-4.5 h-4.5" />
             </button>
           </div>
@@ -583,6 +597,15 @@ export default function ObservationHistoryModal({
           )}
         </div>
       </div>
+      {discardVisible && typeof document !== 'undefined' && createPortal(
+        <div className="fixed inset-0 flex items-center justify-center bg-slate-950/50 p-4" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.confirmation }} onClick={event => event.stopPropagation()}>
+          <div ref={discardDialogRef} tabIndex={-1} role="alertdialog" aria-modal="true" aria-label="Descartar observación pendiente" className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl outline-none">
+            <h3 className="text-base font-bold text-slate-900">Observación sin guardar</h3>
+            <p className="mt-2 text-sm text-slate-600">El texto todavía no se ha guardado. Puedes seguir escribiendo o descartarlo.</p>
+            <div className="mt-4 flex flex-wrap justify-end gap-2"><button type="button" onClick={() => setDiscardRequested(false)} className="min-h-11 rounded-xl px-3 text-sm font-semibold text-slate-600">Seguir escribiendo</button><button type="button" onClick={() => { if (mutationRef.current?.generation === viewGenerationRef.current) return; setDiscardRequested(false); onClose() }} className="min-h-11 rounded-xl bg-red-600 px-4 text-sm font-semibold text-white">Descartar y cerrar</button></div>
+          </div>
+        </div>, document.body,
+      )}
       {deleteConfirmationVisible && pendingDeleteId && typeof document !== 'undefined' && createPortal(
         <div className="fixed inset-0 flex items-center justify-center bg-slate-950/50 p-4" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.confirmation }} onClick={event => event.stopPropagation()}>
           <div ref={deleteDialogRef} tabIndex={-1} role="alertdialog" aria-modal="true" aria-label="Eliminar observación" className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl outline-none">

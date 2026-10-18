@@ -766,6 +766,84 @@ async function emulateInstalledMobileApp(page: Page) {
   })
 }
 
+async function installProgramIdentityMock(page: Page) {
+  let canonical: any = { id: 'program-1', account_id: 'account-responsive', name: 'Programa sin sesiones', description: '', status: 'active', color: '#10b981', created_by: 'user-responsive', created_at: mockNow, updated_at: mockNow, participant_count: 6, session_count: 0, type: 'course', health_view_columns: ['health', 'attendance', 'signals'], avatar_url: null, avatar_revision: 0 }
+  let version = 0
+  let failPhoto = 0
+  let photoBytes: Buffer | null = null
+  const avatarWrites: Array<{ method: string; revision: number; bytes?: Buffer }> = []
+  const pendingUploads: Array<{ revision: number; bytes: number[]; type: string }> = []
+  await page.exposeBinding('__captureProgramAvatarUpload', (_source, upload: { revision: number; bytes: number[]; type: string }) => { pendingUploads.push(upload) })
+  await page.addInitScript(() => {
+    const originalFetch = window.fetch
+    window.fetch = async (input, init) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, window.location.href)
+      if (url.pathname === '/api/programs/program-1/avatar' && init?.method?.toUpperCase() === 'POST' && init.body instanceof FormData) {
+        const file = init.body.get('file')
+        if (file instanceof Blob) {
+          // WebKit's request inspection may omit binary multipart file data.
+          // Inspect the actual File submitted, then execute the original fetch unchanged.
+          await (window as unknown as { __captureProgramAvatarUpload: (upload: { revision: number; bytes: number[]; type: string }) => Promise<void> }).__captureProgramAvatarUpload({
+            revision: Number(init.body.get('expected_revision')), bytes: Array.from(new Uint8Array(await file.arrayBuffer())), type: file.type,
+          })
+        }
+      }
+      return originalFetch(input, init)
+    }
+  })
+  const programWrites: any[] = []
+  const nextVersion = () => new Date(Date.parse(mockNow) + ++version * 1000).toISOString()
+  await page.route('**/api/programs/program-1', async route => {
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON(); programWrites.push(body)
+      const previousStatus = canonical.status
+      canonical = { ...canonical, ...body, updated_at: nextVersion() }
+      if (body.status === 'archived' && previousStatus !== 'archived') canonical.archived_from_status = previousStatus
+      else if (previousStatus === 'archived') canonical.archived_from_status = null
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(canonical) })
+  })
+  await page.route('**/api/programs/program-1/avatar/content*', route => route.fulfill({ status: photoBytes ? 200 : 404, contentType: photoBytes ? 'image/jpeg' : 'application/json', body: photoBytes || JSON.stringify({ error: 'Sin foto' }) }))
+  await page.route('**/api/programs/program-1/avatar', async route => {
+    const request = route.request()
+    if (request.method() === 'DELETE') {
+      avatarWrites.push({ method: 'DELETE', revision: request.postDataJSON().expected_revision })
+      canonical = { ...canonical, avatar_url: null, avatar_revision: canonical.avatar_revision + 1, updated_at: nextVersion() }
+      photoBytes = null
+    } else {
+      expect(request.headers()['content-type']).toMatch(/^multipart\/form-data; boundary=/)
+      const upload = pendingUploads.shift()!
+      expect(upload).toBeDefined()
+      expect(upload.type).toBe('image/jpeg')
+      const revision = upload.revision
+      const bytes = Buffer.from(upload.bytes)
+      avatarWrites.push({ method: 'POST', revision, bytes })
+      if (failPhoto) {
+        const status = failPhoto; failPhoto = 0
+        if (status === 409) canonical = { ...canonical, description: 'Descripción actualizada en otra ventana', avatar_revision: canonical.avatar_revision + 1, updated_at: nextVersion() }
+        await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify({ code: status === 409 ? 'PROGRAM_AVATAR_CONFLICT' : 'UPLOAD_UNAVAILABLE', error: status === 409 ? 'La foto cambió' : 'No se pudo guardar la foto. Reintenta.', program: canonical }) })
+        return
+      }
+      photoBytes = bytes
+      canonical = { ...canonical, avatar_revision: canonical.avatar_revision + 1, avatar_url: `/api/programs/program-1/avatar/content?v=${canonical.avatar_revision + 1}`, updated_at: nextVersion() }
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(canonical) })
+  })
+  return { avatarWrites, programWrites, failNextPhoto(status: number) { failPhoto = status }, current: () => canonical }
+}
+
+async function programPhotoFixture(page: Page) {
+  const dataURL = await page.evaluate(() => {
+    const canvas = document.createElement('canvas'); canvas.width = 1200; canvas.height = 800
+    const context = canvas.getContext('2d')!
+    context.fillStyle = '#10b981'; context.fillRect(0, 0, 1200, 800)
+    context.fillStyle = '#0f172a'; context.fillRect(100, 100, 400, 400)
+    context.fillStyle = '#fbbf24'; context.fillRect(700, 100, 400, 600)
+    return canvas.toDataURL('image/png')
+  })
+  return { name: 'programa-qa.png', mimeType: 'image/png', buffer: Buffer.from(dataURL.split(',')[1], 'base64') }
+}
+
 type GoogleStatusMockMode = 'connected' | 'disconnected' | 'forbidden' | 'error'
 
 async function installGoogleContactSyncMock(page: Page) {
@@ -1823,6 +1901,58 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expectToolbarOutsideEditor(page, toolbar, desktopComposer)
   })
 
+  test('Programas experiencia compacta integra filtros y retira Eros solamente de Programas', async ({ page }, testInfo) => {
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width: 539, height: 655 })
+    await authenticate(page)
+    await page.goto(`${baseURL}/dashboard/programs`, { waitUntil: 'domcontentloaded' })
+    const search = page.getByRole('textbox', { name: 'Buscar programas' })
+    const scope = page.getByRole('button', { name: 'Estado de programas: Activos' })
+    for (const width of [539, 375, 320]) {
+      await page.setViewportSize({ width, height: 655 })
+      await expect(scope).toBeVisible()
+      const inputBox = (await search.boundingBox())!
+      const scopeBox = (await scope.boundingBox())!
+      expect(Math.abs(inputBox.y - scopeBox.y)).toBeLessThanOrEqual(2)
+      expect(scopeBox.height).toBeGreaterThanOrEqual(44)
+      expect(inputBox.width).toBeGreaterThan(100)
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1)
+      if (captureVisuals) await page.screenshot({ path: testInfo.outputPath(`programas-filtro-${width}.png`) })
+    }
+    await scope.press('ArrowDown')
+    const menu = page.getByRole('listbox', { name: 'Estado de programas' })
+    await expectInsideVisualViewport(page, menu)
+    await menu.press('ArrowDown')
+    const completedRequest = page.waitForRequest(request => new URL(request.url()).pathname === '/api/programs' && new URL(request.url()).searchParams.get('status') === 'completed')
+    await menu.press('Enter')
+    await completedRequest
+    await expect(page.getByRole('button', { name: 'Estado de programas: Completados' })).toBeFocused()
+    for (const route of ['/dashboard/programs', '/dashboard/programs/program-1', '/dashboard/programs/courses']) {
+      await page.goto(`${baseURL}${route}`, { waitUntil: 'domcontentloaded' })
+      await expect(page.getByRole('button', { name: /Abrir Eros|Cerrar Eros/ })).toHaveCount(0)
+      await page.keyboard.press('Control+i')
+      await expect(page.getByRole('button', { name: /Cerrar Eros/ })).toHaveCount(0)
+    }
+    await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
+    for (const width of [539, 375, 320]) {
+      await page.setViewportSize({ width, height: 655 })
+      const participantSearch = page.getByRole('textbox', { name: 'Buscar participante por nombre o teléfono' })
+      const participantScope = page.getByRole('button', { name: 'Estado de participantes: Activos 6' })
+      await expect(participantScope).toBeVisible()
+      const inputBox = (await participantSearch.boundingBox())!
+      const scopeBox = (await participantScope.boundingBox())!
+      expect(Math.abs(inputBox.y - scopeBox.y)).toBeLessThanOrEqual(2)
+      expect(inputBox.width).toBeGreaterThan(80)
+      await expect(page.getByRole('tablist', { name: 'Estado de participantes' })).toHaveCount(0)
+      if (captureVisuals) await page.screenshot({ path: testInfo.outputPath(`participantes-filtro-${width}.png`) })
+    }
+    await page.setViewportSize({ width: 840, height: 655 })
+    await expect(page.getByRole('tablist', { name: 'Estado de participantes' })).toBeVisible()
+    await expect(page.getByRole('button', { name: /Abrir Eros/ })).toHaveCount(0)
+    await page.goto(`${baseURL}/dashboard/contacts`, { waitUntil: 'domcontentloaded' })
+    await expect(page.getByTestId('dashboard-mobile-header').getByRole('button', { name: 'Abrir Eros', exact: true })).toBeVisible()
+  })
+
   test('Programas móvil permite consultar grupos y conserva la administración en escritorio', async ({ page }) => {
     test.setTimeout(60_000)
     await page.setViewportSize({ width: 320, height: 568 })
@@ -2478,22 +2608,41 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expectInsideVisualViewport(page, attendanceDialog)
     const attendanceSearch = attendanceDialog.getByRole('searchbox', { name: 'Buscar participante por nombre o teléfono' })
     await expect(attendanceSearch).toBeVisible()
+    const detailsToggle = attendanceDialog.getByRole('button', { name: 'Detalles', exact: true })
+    await expect(detailsToggle).toHaveAttribute('aria-expanded', 'false')
+    const commentDraft = attendanceDialog.getByPlaceholder('Ej.: Se dictó el tema… Observaciones generales…')
+    await expect(commentDraft).not.toBeVisible()
+    await detailsToggle.click()
+    await commentDraft.fill('Borrador conservado durante la búsqueda')
     await attendanceSearch.fill('92300100')
+    await expect(commentDraft).not.toBeVisible()
+    await expect(attendanceDialog.getByText('Temas programados', { exact: true })).not.toBeVisible()
     await expect(attendanceDialog.getByTestId('program-attendance-search-bar').getByText('1 de 1', { exact: true })).toBeVisible()
+    for (const width of [536, 586]) {
+      await page.setViewportSize({ width, height: 655 })
+      await expect.poll(async () => (await attendanceDialog.boundingBox())?.width).toBeLessThanOrEqual(width + 1)
+      await expectInsideVisualViewport(page, attendanceDialog)
+      const searchBox = (await attendanceSearch.boundingBox())!
+      const headerBox = (await attendanceDialog.locator('header').boundingBox())!
+      expect(searchBox.width).toBeGreaterThan(headerBox.width * 0.65)
+      if (captureVisuals) await page.screenshot({ path: testInfo.outputPath(`asistencia-busqueda-${width}.png`) })
+    }
     await attendanceDialog.getByRole('button', { name: 'Limpiar búsqueda de asistencia' }).click()
+    await expect(commentDraft).toBeVisible()
+    await expect(commentDraft).toHaveValue('Borrador conservado durante la búsqueda')
     await expect(attendanceDialog.getByRole('button', { name: 'Presente: Álexis Tarillo Mejio' })).toBeVisible()
     await expect(attendanceDialog.getByRole('button', { name: 'Faltó: Álexis Tarillo Mejio' })).toBeVisible()
     await expect(attendanceDialog.getByRole('button', { name: 'Tarde: Álexis Tarillo Mejio' })).toBeVisible()
     await expect(attendanceDialog.getByRole('button', { name: /Justificada/ })).toHaveCount(0)
     await expect(attendanceDialog.getByText('Llegó con una incidencia informada').first()).toBeVisible()
-    await expect(attendanceDialog.getByRole('button', { name: 'Añadir observación' })).toHaveCount(0)
+    await expect(attendanceDialog.getByRole('button', { name: 'Añadir observación de asistencia de Álexis Tarillo Mejio', exact: true })).toBeVisible()
     await expect(attendanceDialog.getByRole('button', { name: /Ver todas/ })).toHaveCount(0)
     await attendanceDialog.getByPlaceholder('Ej.: Se dictó el tema… Observaciones generales…').fill('Comentario añadido desde móvil')
     await attendanceDialog.getByRole('button', { name: 'Añadir', exact: true }).click()
     await expect.poll(() => sessionCommentWrites.length).toBe(1)
     await expect(attendanceDialog.getByText('Comentario añadido desde móvil', { exact: true })).toBeVisible()
     for (const name of ['Editar', 'Eliminar', 'Fijar']) await expect(attendanceDialog.getByRole('button', { name, exact: true })).toHaveCount(0)
-    const observationsAccess = attendanceDialog.getByRole('button', { name: 'Abrir observaciones de asistencia de Álexis Tarillo Mejio' })
+    const observationsAccess = attendanceDialog.getByRole('button', { name: 'Ver 2 observaciones de asistencia de Álexis Tarillo Mejio' })
     await expect(observationsAccess).toBeVisible()
 
     await observationsAccess.click()
@@ -2634,8 +2783,8 @@ test.describe('Clarin responsive authenticated matrix', () => {
 
     const sourceCard = dialog.locator('[data-attendance-participant-card="board-participant-12"]')
     await sourceCard.scrollIntoViewIfNeeded()
-    const observationButton = sourceCard.getByRole('button', { name: 'Abrir observaciones de asistencia de Participante Kanban 12' })
-    await expect(observationButton).toContainText(/Observaciones\s*·\s*50/)
+    const observationButton = sourceCard.getByRole('button', { name: /Ver .* observaciones de asistencia de Participante Kanban 12/ })
+    await expect(observationButton).toHaveText('Ver 50')
     await expect(sourceCard.getByText(longObservation, { exact: true })).toHaveCount(0)
     await expect(sourceCard.getByText('Responsive QA', { exact: true })).toHaveCount(0)
     await observationButton.click()
@@ -2726,7 +2875,8 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expect(dialog).toBeVisible()
     await expect(dialog.getByText('No se pudo consultar la asistencia', { exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Reintentar' }).click()
-    await expect(dialog.getByText('Sin observaciones').first()).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Añadir observación de asistencia de Álexis Tarillo Mejio', exact: true })).toBeVisible()
+    await expect(dialog.getByRole('button', { name: /Ver .* observaciones de asistencia/ })).toHaveCount(0)
     const saveButton = dialog.getByRole('button', { name: 'Guardar Asistencia' })
     await expect(saveButton).toBeDisabled()
 
@@ -2746,6 +2896,165 @@ test.describe('Clarin responsive authenticated matrix', () => {
     expect(failedAttendanceBodies[1]).toEqual({ records: [{ participant_id: 'program-participant-1', status: 'late', expected_status: '' }] })
     await expect(dialog).toBeVisible()
     await expect(saveButton).toBeEnabled()
+  })
+
+  test('Programas foto: recorte JPEG, error, conflicto, reintento y eliminación conservan la configuración pendiente', async ({ page }, testInfo) => {
+    test.skip(!useMockSession, 'Esta prueba usa API simulada')
+    test.setTimeout(testInfo.project.name === 'responsive-mobile-safari' ? 180_000 : 120_000)
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await authenticate(page)
+    const state = await installProgramIdentityMock(page)
+    await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
+    await page.getByRole('button', { name: 'Editar programa' }).click()
+    const settings = page.getByRole('dialog', { name: 'Editar programa', exact: true })
+    await settings.getByRole('textbox', { name: 'Nombre' }).fill('Nombre local pendiente')
+    const source = await programPhotoFixture(page)
+    const fileChooser = page.waitForEvent('filechooser')
+    await settings.getByRole('button', { name: 'Subir foto' }).click()
+    await (await fileChooser).setFiles(source)
+    let editor = page.getByRole('dialog', { name: 'Editar foto del programa', exact: true })
+    await expectInsideVisualViewport(page, editor)
+    await expect(editor.getByRole('button', { name: 'Guardar foto' })).toBeEnabled()
+    const zoom = editor.getByRole('slider', { name: 'Zoom', exact: true })
+    await zoom.focus(); await zoom.press('Home')
+    for (let step = 0; step < 10; step++) await zoom.press('ArrowRight')
+    await editor.getByRole('button', { name: 'Girar', exact: true }).click()
+    state.failNextPhoto(503)
+    await editor.getByRole('button', { name: 'Guardar foto' }).click()
+    await expect(editor.getByRole('alert')).toContainText('Reintenta')
+    await expect(editor.getByRole('slider', { name: 'Zoom', exact: true })).toHaveValue('1.5')
+    await editor.getByRole('button', { name: 'Guardar foto' }).click()
+    await expect(editor).toBeHidden()
+    await expect(settings.getByRole('textbox', { name: 'Nombre' })).toHaveValue('Nombre local pendiente')
+    await expect(settings.getByRole('button', { name: 'Cambiar foto' })).toBeVisible()
+    expect(state.avatarWrites.map(write => write.revision)).toEqual([0, 0])
+    const encoded = state.avatarWrites[1].bytes!
+    expect(encoded.byteLength).toBeLessThanOrEqual(250 * 1024)
+    expect(encoded.subarray(0, 2).equals(Buffer.from([255, 216]))).toBe(true)
+    const dimensions = await page.evaluate(async dataURL => { const image = new Image(); image.src = dataURL; await image.decode(); return [image.naturalWidth, image.naturalHeight] }, `data:image/jpeg;base64,${encoded.toString('base64')}`)
+    expect(dimensions).toEqual([512, 512])
+
+    const replacementChooser = page.waitForEvent('filechooser')
+    await settings.getByRole('button', { name: 'Cambiar foto' }).click()
+    await (await replacementChooser).setFiles(source)
+    editor = page.getByRole('dialog', { name: 'Editar foto del programa', exact: true })
+    await expect(editor.getByRole('button', { name: 'Guardar foto' })).toBeEnabled()
+    state.failNextPhoto(409)
+    await editor.getByRole('button', { name: 'Guardar foto' }).click()
+    await expect(editor.getByRole('alert')).toContainText('otra ventana')
+    await editor.getByRole('button', { name: 'Actualizar versión' }).click()
+    await editor.getByRole('button', { name: 'Guardar foto' }).click()
+    await expect(editor).toBeHidden()
+    expect(state.avatarWrites.map(write => write.revision)).toEqual([0, 0, 1, 2])
+    await expect(settings.getByRole('textbox', { name: 'Nombre' })).toHaveValue('Nombre local pendiente')
+    await expect(settings.getByRole('textbox', { name: 'Descripción' })).toHaveValue('Descripción actualizada en otra ventana')
+    await settings.getByRole('button', { name: 'Quitar', exact: true }).click()
+    await page.getByRole('dialog', { name: 'Quitar foto del programa' }).getByRole('button', { name: 'Quitar foto', exact: true }).click()
+    await expect(settings.getByRole('button', { name: 'Subir foto' })).toBeVisible()
+    expect(state.avatarWrites.at(-1)).toEqual({ method: 'DELETE', revision: 3 })
+    if (captureVisuals) await page.screenshot({ path: testInfo.outputPath('programas-foto-antes-de-guardar.png') })
+    await settings.getByRole('button', { name: 'Guardar cambios' }).click()
+    await expect(settings).toBeHidden()
+    expect(state.programWrites).toHaveLength(1)
+    expect(state.programWrites[0]).toMatchObject({ name: 'Nombre local pendiente', description: 'Descripción actualizada en otra ventana' })
+  })
+
+  test('Programas configuración: ventana 840x655, geometría y recorte sobreviven escritorio móvil escritorio', async ({ page }, testInfo) => {
+    test.skip(!useMockSession, 'Esta prueba usa API simulada')
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width: 840, height: 655 })
+    await authenticate(page)
+    const state = await installProgramIdentityMock(page)
+    await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
+    await page.getByRole('button', { name: 'Editar programa' }).click()
+    const settings = page.getByRole('dialog', { name: 'Editar programa', exact: true })
+    await expectInsideVisualViewport(page, settings)
+    await expect(settings.getByRole('button', { name: 'Guardar cambios' })).toBeVisible()
+    await settings.getByRole('textbox', { name: 'Descripción' }).fill('Borrador protegido al cambiar de tamaño')
+    if (captureVisuals) await page.screenshot({ path: testInfo.outputPath('programas-configuracion-840x655.png'), fullPage: false, style: 'nextjs-portal { display: none !important; }' })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await settings.getByRole('button', { name: 'Ventana flotante' }).click()
+    const shell = page.locator('[data-window-kind="program-settings"]')
+    await expect(shell).toHaveAttribute('data-window-mode', 'floating')
+    const before = await settings.boundingBox()
+    const title = await settings.getByRole('heading', { name: 'Editar programa' }).boundingBox()
+    await page.mouse.move(title!.x + 15, title!.y + 10); await page.mouse.down(); await page.mouse.move(title!.x + 55, title!.y + 30, { steps: 5 }); await page.mouse.up()
+    await expect.poll(async () => (await settings.boundingBox())!.x).toBeGreaterThan(before!.x + 10)
+    const moved = await settings.boundingBox()
+    await page.mouse.move(moved!.x + moved!.width - 3, moved!.y + moved!.height - 3); await page.mouse.down(); await page.mouse.move(moved!.x + moved!.width + 25, moved!.y + moved!.height + 10, { steps: 5 }); await page.mouse.up()
+    await expect.poll(async () => (await settings.boundingBox())!.width).toBeGreaterThan(moved!.width)
+    await settings.getByRole('button', { name: 'Maximizar', exact: true }).click()
+    await expect(shell).toHaveAttribute('data-window-mode', 'maximized')
+    await settings.getByRole('button', { name: 'Restaurar', exact: true }).click()
+    await expect(shell).toHaveAttribute('data-window-mode', 'floating')
+    await settings.getByRole('button', { name: 'Acoplar a la derecha' }).click()
+    await expect(shell).toHaveAttribute('data-window-mode', 'docked')
+    await settings.getByRole('button', { name: 'Ventana flotante' }).click()
+    const restored = await settings.boundingBox()
+    const source = await programPhotoFixture(page)
+    const picker = page.waitForEvent('filechooser')
+    await settings.getByRole('button', { name: 'Subir foto' }).click()
+    await (await picker).setFiles(source)
+    const editor = page.getByRole('dialog', { name: 'Editar foto del programa', exact: true })
+    const zoom = editor.getByRole('slider', { name: 'Zoom', exact: true })
+    await expect(editor.getByRole('button', { name: 'Guardar foto' })).toBeEnabled()
+    await zoom.focus(); await zoom.press('Home')
+    for (let step = 0; step < 13; step++) await zoom.press('ArrowRight')
+    await page.setViewportSize({ width: 536, height: 655 })
+    await expect(settings).toBeHidden(); await expect(editor).toBeHidden()
+    await expect.poll(() => page.evaluate(() => Boolean(document.activeElement?.closest('[hidden],[inert]')))).toBe(false)
+    expect(state.avatarWrites).toHaveLength(0); expect(state.programWrites).toHaveLength(0)
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await expect(editor).toBeVisible(); await expect(zoom).toHaveValue('1.65'); await expect(zoom).toBeFocused()
+    await editor.getByRole('button', { name: 'Cancelar', exact: true }).click()
+    await page.getByRole('dialog', { name: '¿Descartar el recorte?' }).getByRole('button', { name: 'Descartar', exact: true }).click()
+    await expect(settings.getByRole('textbox', { name: 'Descripción' })).toHaveValue('Borrador protegido al cambiar de tamaño')
+    const after = await settings.boundingBox()
+    expect(Math.abs(after!.x - restored!.x)).toBeLessThan(2); expect(Math.abs(after!.width - restored!.width)).toBeLessThan(2)
+    await expectInsideVisualViewport(page, settings)
+    await settings.getByRole('button', { name: 'Cancelar', exact: true }).click()
+    await expect(page.getByRole('alertdialog', { name: '¿Descartar los cambios?' })).toBeVisible()
+    await page.getByRole('button', { name: 'Seguir editando', exact: true }).click()
+    expect(state.avatarWrites).toHaveLength(0); expect(state.programWrites).toHaveLength(0)
+  })
+
+  test('Programas ciclo de vida: concluir, archivar, restaurar Completado y reabrir conserva el padrón', async ({ page }, testInfo) => {
+    test.skip(!useMockSession, 'Esta prueba usa API simulada')
+    test.setTimeout(90_000)
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await authenticate(page)
+    const state = await installProgramIdentityMock(page)
+    await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
+    await page.getByRole('button', { name: 'Concluir programa', exact: true }).click()
+    const conclusion = page.getByRole('alertdialog', { name: 'Concluir programa' })
+    await expect(conclusion).toContainText('No se podrán añadir participantes ni crear sesiones')
+    await conclusion.getByRole('button', { name: 'Concluir programa', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Reabrir programa', exact: true })).toBeVisible()
+    expect(state.current().status).toBe('completed')
+    await page.getByRole('button', { name: /Sesiones/ }).first().click()
+    await expect(page.getByRole('button', { name: 'Nueva Sesión', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Generar Horario', exact: true })).toHaveCount(0)
+    if (captureVisuals) await page.screenshot({ path: testInfo.outputPath('programas-completado-escritorio.png') })
+    await page.getByRole('button', { name: 'Más opciones', exact: true }).click()
+    await page.getByRole('button', { name: 'Archivar', exact: true }).click()
+    await page.getByRole('alertdialog', { name: 'Archivar programa' }).getByRole('button', { name: 'Archivar programa', exact: true }).click()
+    await expect.poll(() => state.current().status).toBe('archived')
+    expect(state.current().archived_from_status).toBe('completed')
+    await page.getByRole('button', { name: 'Más opciones', exact: true }).click()
+    await page.getByRole('button', { name: 'Desarchivar', exact: true }).click()
+    const restoration = page.getByRole('alertdialog', { name: 'Desarchivar programa' })
+    await expect(restoration).toContainText('volverá a Completados')
+    await restoration.getByRole('button', { name: 'Desarchivar programa', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Reabrir programa', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Reabrir programa', exact: true }).click()
+    await page.getByRole('alertdialog', { name: 'Reabrir programa' }).getByRole('button', { name: 'Reabrir programa', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Concluir programa', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Nueva Sesión', exact: true })).toBeVisible()
+    expect(state.programWrites.map(write => write.status)).toEqual(['completed', 'archived', 'completed', 'active'])
+    expect(state.current().participant_count).toBe(6)
+    await page.setViewportSize({ width: 536, height: 655 })
+    await expect(page.getByRole('button', { name: 'Concluir programa', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Nueva Sesión', exact: true })).toHaveCount(0)
   })
 
   test('Programas configura, persiste y ordena las columnas de Salud con ratón y teclado', async ({ page }) => {
@@ -2778,6 +3087,7 @@ test.describe('Clarin responsive authenticated matrix', () => {
 
     await page.getByRole('button', { name: 'Editar programa' }).click()
     const dialog = page.getByRole('dialog', { name: 'Editar programa' })
+    await dialog.getByRole('button', { name: /Vista de participantes/ }).click()
     await expect(dialog.getByRole('checkbox', { name: 'Participante siempre visible' })).toBeDisabled()
     await expect(dialog.getByRole('checkbox', { name: 'Acciones siempre visible' })).toBeDisabled()
     await dialog.getByRole('checkbox', { name: 'Fecha de incorporación' }).check()
@@ -2834,12 +3144,13 @@ test.describe('Clarin responsive authenticated matrix', () => {
     }))
     await page.goto(`${baseURL}/dashboard/programs/program-1`, { waitUntil: 'domcontentloaded' })
 
-    await expect(page.getByRole('tab', { name: /Activos 6/ })).toHaveAttribute('aria-selected', 'true')
+    await expect(page.getByRole('button', { name: 'Estado de participantes: Activos 6' })).toBeVisible()
     await expect(page.getByTestId('mobile-program-participant-row')).toHaveCount(6)
     await expect(page.getByText('Participante retirado', { exact: true })).toHaveCount(0)
 
-    await page.getByRole('tab', { name: /Historial 2/ }).click()
-    await expect(page.getByRole('tab', { name: /Historial 2/ })).toHaveAttribute('aria-selected', 'true')
+    await page.getByRole('button', { name: 'Estado de participantes: Activos 6' }).click()
+    await page.getByRole('option', { name: /Historial 2/ }).click()
+    await expect(page.getByRole('button', { name: 'Estado de participantes: Historial 2' })).toBeVisible()
     await expect(page.getByTestId('mobile-program-participant-history-row')).toHaveCount(2)
     await expect(page.getByText('Participante retirado', { exact: true })).toBeVisible()
     await expect(page.getByText('Cambio de horario', { exact: true })).toBeVisible()
@@ -2867,7 +3178,10 @@ test.describe('Clarin responsive authenticated matrix', () => {
     await expect(page.getByRole('button', { name: /Cambiar sección/ })).toHaveCount(0)
     const search = page.getByRole('textbox', { name: 'Buscar participante por nombre o teléfono' })
     const searchBox = await search.boundingBox()
-    expect(searchBox?.width).toBeGreaterThan(450)
+    const scopeBox = await page.getByRole('button', { name: 'Estado de participantes: Activos 6' }).boundingBox()
+    expect(searchBox?.width).toBeGreaterThan(240)
+    expect(Math.abs(searchBox!.y - scopeBox!.y)).toBeLessThanOrEqual(2)
+    expect(scopeBox!.x + scopeBox!.width - searchBox!.x).toBeGreaterThan(450)
     await search.fill('sin coincidencias')
     await expect(page.getByTestId('mobile-program-participant-row')).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Agregar participantes' })).toHaveCount(0)

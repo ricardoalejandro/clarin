@@ -368,6 +368,8 @@ func (s *Server) handleUpdateProgram(c *fiber.Ctx) error {
 				"error":   "El programa cambió mientras lo editabas. Recarga sus datos antes de volver a guardar.",
 				"program": current,
 			})
+		case errors.Is(err, repository.ErrProgramLifecycleVersionRequired):
+			return c.Status(400).JSON(fiber.Map{"error": "Recarga el programa antes de cambiar su estado", "code": "PROGRAM_VERSION_REQUIRED"})
 		case errors.Is(err, repository.ErrProgramNotFound):
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
 		case errors.Is(err, service.ErrProgramInput):
@@ -469,7 +471,7 @@ func (s *Server) handleAddParticipant(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Program not found"})
 	}
 	if program.Status != "active" {
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "Solo puedes agregar participantes a un programa activo"})
+		return programInactiveAPIError(c)
 	}
 	if program.Type != "event" && req.StageID != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": "Las etapas solo corresponden a eventos heredados"})
@@ -490,6 +492,12 @@ func (s *Server) handleAddParticipant(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Program.AddParticipant(c.Context(), accountID, participant); err != nil {
+		if errors.Is(err, repository.ErrProgramNotFound) {
+			return c.SendStatus(fiber.StatusNotFound)
+		}
+		if errors.Is(err, repository.ErrProgramInactive) {
+			return programInactiveAPIError(c)
+		}
 		if errors.Is(err, repository.ErrProgramParticipantAlreadyExists) {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "El contacto ya pertenece a este programa. Una reincorporación debe registrarse de forma explícita."})
 		}
@@ -532,11 +540,17 @@ func (s *Server) handleAddProgramParticipantsBulk(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "Program not found"})
 	}
 	if program.Status != "active" {
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Solo puedes agregar participantes a un programa activo"})
+		return programInactiveAPIError(c)
 	}
 
 	result, err := s.services.Program.AddParticipantsByContactIDs(c.Context(), accountID, programID, req.ContactIDs)
 	if err != nil {
+		if errors.Is(err, repository.ErrProgramNotFound) {
+			return c.SendStatus(fiber.StatusNotFound)
+		}
+		if errors.Is(err, repository.ErrProgramInactive) {
+			return programInactiveAPIError(c)
+		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudieron agregar los contactos"})
 	}
 	s.invalidateProgramsCache(accountID)
