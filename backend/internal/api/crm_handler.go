@@ -914,6 +914,9 @@ func (s *Server) outboundContactBlocked(ctx context.Context, accountID uuid.UUID
 }
 
 func (s *Server) ensureOutboundContactAllowed(ctx context.Context, accountID uuid.UUID, destination string) error {
+	if domain.IsGroupJID(destination) {
+		return nil
+	} // Group permissions are verified separately; no commercial identity reads.
 	blocked, err := s.outboundContactBlocked(ctx, accountID, destination)
 	if err != nil {
 		return err

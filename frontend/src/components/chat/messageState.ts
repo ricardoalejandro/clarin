@@ -24,6 +24,8 @@ export function mergeCanonicalMessage(current: Message | undefined, canonical: M
     quoted_message_id: canonical.quoted_message_id ?? current.quoted_message_id,
     quoted_body: canonical.quoted_body ?? current.quoted_body,
     quoted_sender: canonical.quoted_sender ?? current.quoted_sender,
+    quoted_sender_name: canonical.quoted_sender_name ?? current.quoted_sender_name,
+    mentions: canonical.mentions ?? current.mentions,
     quoted_is_from_me: canonical.quoted_is_from_me ?? current.quoted_is_from_me,
     sender: mergeMessageSender(canonical.sender, current.sender),
     reactions: mergeCanonicalReactionSnapshot(current.reactions, canonical.reactions, pendingReaction),

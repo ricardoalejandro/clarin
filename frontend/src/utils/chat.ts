@@ -1,4 +1,6 @@
 import { Chat } from '@/types/chat'
+import { isGroupChat } from './chatGroups'
+import { compareChatPins } from './chatPins'
 
 // Clean synced names that start with dots/punctuation
 export const cleanName = (name?: string | null) => name?.replace(/^[\s.\u00b7\u2022\-]+/, '').trim() || ''
@@ -9,6 +11,8 @@ export const isPendingChatIdentity = (chat: Pick<Chat, 'jid' | 'identity_pending
 
 // Format JID or contact phone for human-readable display
 export const formatPhone = (jid: string, contactPhone?: string): string => {
+  if (jid.endsWith('@g.us')) return ''
+  if (jid.endsWith('@g.us')) return ''
   // For @lid JIDs, check if contactPhone is the real resolved phone or the meaningless lid number
   if (jid.endsWith('@lid')) {
     const lidUser = jid.replace('@lid', '')
@@ -34,6 +38,8 @@ export const formatPhone = (jid: string, contactPhone?: string): string => {
 // Get the best display name for a chat
 // Priority: custom_name (CRM) → contact_name (WhatsApp address book) → chat.name (push_name) → phone
 export const getChatDisplayName = (chat: Chat): string => {
+  if (isGroupChat(chat)) return cleanName(chat.group?.subject) || cleanName(chat.name) || 'Grupo de WhatsApp'
+  if (isGroupChat(chat)) return cleanName(chat.group?.subject) || cleanName(chat.name) || 'Grupo de WhatsApp'
   const cn = cleanName(chat.contact_custom_name)
   if (cn) return cn
   const nm = cleanName(chat.contact_name)
@@ -54,7 +60,7 @@ export const reconcileChatIdentity = (current: Chat[], reconciliation: ChatIdent
   const next = current.filter(chat => chat.id !== sourceChatId && chat.id !== canonicalChat.id)
   next.push(canonicalChat)
   next.sort((a, b) => {
-    const pinned = Number(Boolean(b.is_pinned)) - Number(Boolean(a.is_pinned))
+    const pinned = compareChatPins(a, b)
     if (pinned !== 0) return pinned
     return new Date(b.last_message_at || 0).getTime() - new Date(a.last_message_at || 0).getTime()
   })

@@ -15,6 +15,8 @@ export default defineConfig({
     include: [
       'src/proxy.test.ts',
       'src/utils/chatInbox.test.ts',
+      'src/utils/chatGroupsPins.test.ts',
+      'src/utils/chatMentions.test.ts',
       'src/utils/quickReplySend.test.ts',
       'src/lib/useDebouncedValue.test.tsx',
       'src/lib/searchRequestLifecycle.test.ts',
@@ -35,6 +37,7 @@ export default defineConfig({
       'src/lib/programRoutePolicy.test.ts',
       'src/lib/mobileApp.test.ts',
       'src/lib/api.test.ts',
+      'src/lib/sharedWebSocketScope.test.ts',
       'src/lib/leadPolicy.test.ts',
       'src/lib/whatsappChatLauncher.test.ts',
       'src/lib/securityDependencyRegression.test.ts',

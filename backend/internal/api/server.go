@@ -535,7 +535,13 @@ func (s *Server) setupRoutes() {
 	chats.Delete("/batch", s.handleDeleteChatsBatch)
 	chats.Post("/:id/contact", s.handleLinkChatContact)
 	chats.Get("/:id/opportunities/:opportunityId", s.handleGetChatOpportunity)
+	chats.Get("/:id/group", s.handleGetChatGroup)
+	chats.Get("/:id/group/participants", s.handleGetGroupParticipants)
+	chats.Get("/:id/messages/:messageId/receipts", s.handleGroupReceipts)
+	chats.Post("/:id/messages/:messageId/media/recover", s.handleRecoverGroupMedia)
+	protected.Post("/devices/:id/groups/sync", s.requirePermission(domain.PermChats), s.handleSyncGroups)
 	chats.Get("/:id", s.handleGetChatDetails)
+	chats.Put("/:id/pin", s.handleSetChatPin)
 	chats.Get("/:id/messages/search", s.handleSearchMessages)
 	chats.Get("/:id/messages/:messageId/context", s.handleGetMessageContext)
 	chats.Get("/:id/messages", s.handleGetMessages)
@@ -557,7 +563,7 @@ func (s *Server) setupRoutes() {
 	chatAPI.Post("/messages/send", s.messageActorMiddleware, s.handleSendWhatsAppCloudMessage)
 
 	// Message routes
-	messages := protected.Group("/messages", s.requirePermission(domain.PermChats))
+	messages := protected.Group("/messages", s.requirePermission(domain.PermChats), s.groupRequestMiddleware)
 	messages.Post("/send", s.messageActorMiddleware, s.handleSendMessage)
 	messages.Post("/send-contact", s.messageActorMiddleware, s.handleSendContact)
 	messages.Post("/forward", s.messageActorMiddleware, s.handleForwardMessage)
@@ -2130,6 +2136,8 @@ func (s *Server) applyDeviceRuntimePolicy(device *domain.Device) {
 	connected := device.Status != nil && *device.Status == domain.DeviceStatusConnected
 	manualWeb := connected && getDeviceProvider(device) == domain.DeviceProviderWhatsAppWeb
 	device.RuntimeCapabilities.CanStartChat = manualWeb
+	device.RuntimeCapabilities.CanListGroups = manualWeb && s.pool.GroupsEnabledForAccount(device.AccountID)
+	device.RuntimeCapabilities.CanSendGroupMessages = manualWeb && s.pool.GroupsEnabledForAccount(device.AccountID)
 	device.RuntimeCapabilities.CanCheckWhatsApp = manualWeb
 	device.RuntimeCapabilities.CanSendReaction = manualWeb
 	device.RuntimeCapabilities.CanSendSticker = manualWeb
@@ -2397,16 +2405,23 @@ func (s *Server) handleGetChatAPIChats(c *fiber.Ctx) error {
 
 func (s *Server) handleGetChatsForProvider(c *fiber.Ctx, provider string) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
+	userID, _ := c.Locals("user_id").(uuid.UUID)
 
 	// Parse filters
 	filter := domain.ChatFilter{
+		ActorID:     userID,
+		UseCursor:   c.Query("pagination") == "cursor",
 		Provider:    provider,
+		Kind:        c.Query("kind", "direct"),
 		UnreadOnly:  c.QueryBool("unread_only", false),
 		PendingOnly: c.QueryBool("pending_only", false),
 		Archived:    c.QueryBool("archived", false),
 		Search:      c.Query("search", ""),
 		Limit:       c.QueryInt("limit", 50),
 		Offset:      c.QueryInt("offset", 0),
+	}
+	if filter.Kind != "all" && filter.Kind != "direct" && filter.Kind != "group" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Tipo de conversación inválido"})
 	}
 
 	if filter.Limit <= 0 {
@@ -2433,6 +2448,15 @@ func (s *Server) handleGetChatsForProvider(c *fiber.Ctx, provider string) error 
 		}
 		filter.AfterWaitingAt = &at
 		filter.AfterID = id
+		filter.Offset = 0
+	}
+	cursorScope := chatCursorScope(accountID, userID, "channel="+provider+"&"+string(c.Context().QueryArgs().QueryString()))
+	if !filter.PendingOnly && filter.UseCursor && c.Query("cursor") != "" {
+		var cursorErr error
+		filter.ListCursor, cursorErr = decodeChatListCursor(c.Query("cursor"), cursorScope)
+		if cursorErr != nil {
+			return cursorErr
+		}
 		filter.Offset = 0
 	}
 	// Parse device_ids filter (supports both comma-separated and repeated params)
@@ -2498,10 +2522,10 @@ func (s *Server) handleGetChatsForProvider(c *fiber.Ctx, provider string) error 
 	}
 
 	// Redis cache for default load (no search/filters) — 15s TTL
-	isDefaultLoad := !filter.PendingOnly && filter.Search == "" && !filter.UnreadOnly && !filter.Archived && len(filter.DeviceIDs) == 0 && len(filter.TagIDs) == 0 && !filter.HasReaction && filter.Offset == 0
+	isDefaultLoad := !filter.UseCursor && !filter.PendingOnly && filter.Search == "" && !filter.UnreadOnly && !filter.Archived && len(filter.DeviceIDs) == 0 && len(filter.TagIDs) == 0 && !filter.HasReaction && filter.Offset == 0
 	cacheKey := ""
 	if isDefaultLoad && s.cache != nil {
-		cacheKey = fmt.Sprintf("chats:%s:%s:%d", accountID.String(), provider, filter.Limit)
+		cacheKey = fmt.Sprintf("chats:%s:%s:%s:%s:%d", accountID.String(), userID.String(), provider, filter.Kind, filter.Limit)
 		if cached, err := s.cache.Get(c.Context(), cacheKey); err == nil && cached != nil {
 			c.Set("Content-Type", "application/json")
 			return c.Send(cached)
@@ -2526,6 +2550,9 @@ func (s *Server) handleGetChatsForProvider(c *fiber.Ctx, provider string) error 
 		if last.WaitingSince != nil {
 			result["next_cursor"] = last.WaitingSince.Format(time.RFC3339Nano) + "|" + last.ID.String()
 		}
+	}
+	if !filter.PendingOnly && filter.UseCursor && len(chats) == filter.Limit {
+		result["next_cursor"] = encodeChatListCursor(chats[len(chats)-1], cursorScope)
 	}
 	// Cache default load result
 	if cacheKey != "" && s.cache != nil {
@@ -2595,6 +2622,10 @@ func (s *Server) handleGetChatDetails(c *fiber.Ctx) error {
 	if details == nil || !chatBelongsToAccount(details.Chat, accountID) {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
 	}
+	actorID, _ := c.Locals("user_id").(uuid.UUID)
+	if err := s.repos.Chat.ApplyUserPins(c.Context(), accountID, actorID, []*domain.Chat{details.Chat}); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo cargar la preferencia de la conversación"})
+	}
 	if details.Chat.DeviceID != nil {
 		device, deviceErr := s.services.Device.GetByID(c.Context(), *details.Chat.DeviceID)
 		if deviceErr != nil {
@@ -2604,6 +2635,14 @@ func (s *Server) handleGetChatDetails(c *fiber.Ctx) error {
 			s.applyDeviceRuntimePolicy(device)
 			details.Device = device
 		}
+	}
+
+	if domain.IsGroupJID(chat.JID) {
+		state, err := s.repos.Chat.State(c.Context(), accountID, chatID)
+		if err != nil {
+			return fiber.ErrInternalServerError
+		}
+		return c.JSON(fiber.Map{"success": true, "chat": details.Chat, "group": details.Chat.Group, "device": details.Device, "chat_state": state, "opportunities": []interface{}{}, "leads_enabled": false})
 	}
 
 	leadPolicy, policyErr := s.repos.Account.GetLeadPolicy(c.Context(), accountID)
@@ -2662,7 +2701,7 @@ func (s *Server) handleGetChatOpportunity(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	if details == nil || !chatBelongsToAccount(details.Chat, accountID) || details.Contact == nil {
+	if details == nil || !chatBelongsToAccount(details.Chat, accountID) || domain.IsGroupJID(details.Chat.JID) || details.Contact == nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Opportunity not found"})
 	}
 	opportunity, err := s.services.Lead.GetByID(c.Context(), opportunityID)
@@ -2848,7 +2887,7 @@ func (s *Server) handleLinkChatContact(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
-	if !chatBelongsToAccount(chat, accountID) || strings.HasSuffix(chat.JID, "@g.us") {
+	if !chatBelongsToAccount(chat, accountID) || domain.IsGroupJID(chat.JID) {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat no encontrado"})
 	}
 
@@ -4229,7 +4268,7 @@ func (s *Server) handleSendReadReceipt(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
-	if chat, _ := s.services.Chat.FindByJID(c.Context(), accountID, req.ChatJID); chat != nil {
+	if chat, _ := s.repos.Chat.FindByDeviceJID(c.Context(), accountID, deviceID, req.ChatJID); chat != nil {
 		s.invalidateMessagesCache(accountID, &chat.ID)
 	} else {
 		s.invalidateMessagesCache(accountID, nil)
@@ -4266,7 +4305,7 @@ func (s *Server) handleDeleteMessage(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Selecciona un mensaje válido", "code": "invalid_message"})
 	}
 
-	chat, err := s.services.Chat.FindByJID(c.Context(), accountID, req.ChatJID)
+	chat, err := s.repos.Chat.FindByDeviceJID(c.Context(), accountID, deviceID, req.ChatJID)
 	if err != nil || !chatBelongsToAccount(chat, accountID) {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Mensaje no encontrado", "code": "message_not_found"})
 	}
@@ -4295,7 +4334,7 @@ func (s *Server) handleDeleteMessage(c *fiber.Ctx) error {
 
 	persisted := true
 	warning := ""
-	if err := s.repos.Message.MarkAsRevoked(c.Context(), accountID, chat.JID, message.MessageID); err != nil {
+	if err := s.repos.Message.RevokeInChat(c.Context(), accountID, chat.ID, message.MessageID); err != nil {
 		persisted = false
 		warning = "WhatsApp eliminó el mensaje, pero Clarin todavía está reconciliando el cambio"
 		log.Printf("[MessageAction] revoke persistence failed account=%s chat=%s message=%s: %v", accountID, chat.ID, message.ID, err)
@@ -4303,8 +4342,10 @@ func (s *Server) handleDeleteMessage(c *fiber.Ctx) error {
 	s.invalidateMessagesCache(accountID, &chat.ID)
 
 	// Broadcast revocation to frontend
-	s.hub.BroadcastToAccount(accountID, ws.EventMessageRevoked, map[string]interface{}{
+	s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventMessageRevoked, map[string]interface{}{
 		"chat_jid":   chat.JID,
+		"chat_id":    chat.ID,
+		"device_id":  deviceID,
 		"message_id": message.MessageID,
 		"is_from_me": true,
 	})
@@ -4339,7 +4380,7 @@ func (s *Server) handleEditMessage(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Escribe un texto válido", "code": "invalid_message_edit"})
 	}
 
-	chat, err := s.services.Chat.FindByJID(c.Context(), accountID, req.ChatJID)
+	chat, err := s.repos.Chat.FindByDeviceJID(c.Context(), accountID, deviceID, req.ChatJID)
 	if err != nil || !chatBelongsToAccount(chat, accountID) {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Mensaje no encontrado", "code": "message_not_found"})
 	}
@@ -4368,7 +4409,7 @@ func (s *Server) handleEditMessage(c *fiber.Ctx) error {
 
 	persisted := true
 	warning := ""
-	if err := s.repos.Message.UpdateBody(c.Context(), accountID, chat.JID, message.MessageID, req.NewBody); err != nil {
+	if err := s.repos.Message.EditInChat(c.Context(), accountID, chat.ID, message.MessageID, req.NewBody); err != nil {
 		persisted = false
 		warning = "WhatsApp editó el mensaje, pero Clarin todavía está reconciliando el cambio"
 		log.Printf("[MessageAction] edit persistence failed account=%s chat=%s message=%s: %v", accountID, chat.ID, message.ID, err)
@@ -4376,10 +4417,13 @@ func (s *Server) handleEditMessage(c *fiber.Ctx) error {
 	s.invalidateMessagesCache(accountID, &chat.ID)
 
 	// Broadcast to frontend
-	s.hub.BroadcastToAccount(accountID, ws.EventMessageEdited, map[string]interface{}{
+	s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventMessageEdited, map[string]interface{}{
 		"chat_jid":   chat.JID,
+		"chat_id":    chat.ID,
+		"device_id":  deviceID,
 		"message_id": message.MessageID,
 		"new_body":   req.NewBody,
+		"mentions":   domain.MessageMentionsFrom(c.Context()),
 		"is_from_me": true,
 	})
 

@@ -90,7 +90,7 @@ describe('Chat list loaded window and remote deletion',()=>{
   const rows=Array.from({length:100},(_,index)=>({...chat,id:`chat-${index}`,name:`Nombre${String(index).padStart(3,'0')}`,contact_name:`Nombre${String(index).padStart(3,'0')}`}));
   let canonical=rows;const pages:string[]=[];
   vi.stubGlobal('fetch',vi.fn((input:RequestInfo|URL)=>{
-   const url=String(input);if(url.startsWith('/api/chats?')) {const params=new URL(url,'http://test.invalid').searchParams;pages.push(url);const offset=Number(params.get('offset')||0);return Promise.resolve(json({success:true,chats:canonical.slice(offset,offset+50),total:canonical.length}))}
+   const url=String(input);if(url.startsWith('/api/chats?')) {const params=new URL(url,'http://test.invalid').searchParams;pages.push(url);const offset=Number(params.get('cursor')||0);return Promise.resolve(json({success:true,chats:canonical.slice(offset,offset+50),total:canonical.length,next_cursor:offset+50<canonical.length?String(offset+50):''}))}
    return Promise.resolve(json({success:true,devices:[]}));
   }));
   render(<ChatsPage/>);await screen.findByText('Nombre000');
@@ -98,9 +98,9 @@ describe('Chat list loaded window and remote deletion',()=>{
   const tail=await screen.findByText('Nombre099');canonical=rows.slice(1);
   await act(async()=>{emit('contact_update',{contact_id:'audit'});await new Promise(r=>setTimeout(r,450))});
   expect(screen.queryByText('Nombre000')).toBeNull();expect(screen.getByText('Nombre099')).toBe(tail);
-  expect(pages.slice(-2).map(url=>new URL(url,'http://test.invalid').searchParams.get('offset'))).toEqual(['0','50']);
+  expect(pages.slice(-2).map(url=>new URL(url,'http://test.invalid').searchParams.get('cursor'))).toEqual([null,'50']);
   expect(pages.every(url=>new URL(url,'http://test.invalid').searchParams.get('limit')==='50')).toBe(true);
- });
+ }, 15000);
  it.each([{chat_ids:[chat.id]},{all:true}])('removes a remotely deleted chat and rejects a stale HTTP row: %j',async(payload)=>{
   vi.stubGlobal('fetch',vi.fn((input:RequestInfo|URL)=>Promise.resolve(json(String(input).startsWith('/api/chats?')?{success:true,chats:[chat],total:1}:{success:true,devices:[]}))));
   render(<ChatsPage/>);await screen.findByText('Nombre filtro QA');

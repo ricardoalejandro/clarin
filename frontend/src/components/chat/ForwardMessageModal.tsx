@@ -2,11 +2,12 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Search, Send, User, Image as ImageIcon, FileText, Video, Mic, Check, RefreshCw } from 'lucide-react'
+import { X, Search, Send, User, Users, Image as ImageIcon, FileText, Video, Mic, Check, RefreshCw } from 'lucide-react'
 import { Chat, Message } from '@/types/chat'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import { SearchRequestLifecycle, type SearchRequestLease } from '@/lib/searchRequestLifecycle'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
+import { chatAvatar, groupWriteRestriction, isGroupChat } from '@/utils/chatGroups'
 import { formatPhone, getChatDisplayName, isPendingChatIdentity } from '@/utils/chat'
 
 interface Props {
@@ -67,7 +68,7 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
     if (append) setLoadingMore(true)
     else setLoading(true)
     setLoadError('')
-    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset), device_ids: deviceId })
     if (query) params.set('search', query)
     try {
       const res = await fetch(`/api/chats?${params.toString()}`, {
@@ -92,7 +93,7 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
         setLoadingMore(false)
       }
     }
-  }, [])
+  }, [deviceId])
 
   const runSearch = useCallback((offset: number, append: boolean, query = settledSearch) => {
     if (suspendedRef.current) return
@@ -130,7 +131,7 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
   const searchPending = search.trim() !== settledSearch
 
   const toggleSelect = (chat: Chat) => {
-    if (suspendedRef.current) return
+    if (suspendedRef.current || chat.device_id !== deviceId || groupWriteRestriction(chat)) return
     setSelectedChats(previous => {
       if (previous.some(item => item.id === chat.id)) return previous.filter(item => item.id !== chat.id)
       if (previous.length >= MAX_FORWARD) return previous
@@ -152,6 +153,7 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
       if (!currentSource()) return
       if (suspendedRef.current) { failedTargets.push(...selectedChats.slice(index)); break }
       const target = selectedChats[index]
+      if (target.device_id !== deviceId || groupWriteRestriction(target)) { failedTargets.push(target); continue }
       try {
         const res = await fetch('/api/messages/forward', {
           method: 'POST',
@@ -287,12 +289,14 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
               const phone = formatPhone(c.jid, c.contact_phone)
               const pendingIdentity = isPendingChatIdentity(c)
               const isSelected = selectedIds.has(c.id)
+              const restriction = c.device_id !== deviceId ? 'Pertenece a otro número de WhatsApp.' : groupWriteRestriction(c)
               return (
                 <button
                   key={c.id}
                   type="button"
                   onClick={() => toggleSelect(c)}
-                  disabled={!isSelected && selectedChats.length >= MAX_FORWARD}
+                  disabled={Boolean(restriction) || (!isSelected && selectedChats.length >= MAX_FORWARD)}
+                  title={restriction || undefined}
                   className={`flex min-h-14 w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
                     isSelected ? 'bg-emerald-50' : 'hover:bg-slate-50'
                   } disabled:opacity-40`}
@@ -303,16 +307,16 @@ export default function ForwardMessageModal({ message, deviceId, chatId, onClose
                   }`}>
                     {isSelected && <Check className="w-3 h-3 text-white" />}
                   </div>
-                  {c.contact_avatar_url ? (
-                    <img src={c.contact_avatar_url} className="w-10 h-10 rounded-full object-cover shrink-0" alt="" />
+                  {chatAvatar(c) ? (
+                    <img src={chatAvatar(c)} className="w-10 h-10 rounded-full object-cover shrink-0" alt="" />
                   ) : (
                     <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center shrink-0">
-                      <User className="w-5 h-5 text-slate-500" />
+                      {isGroupChat(c) ? <Users className="w-5 h-5 text-slate-500" /> : <User className="w-5 h-5 text-slate-500" />}
                     </div>
                   )}
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-slate-800 truncate">{displayName}</p>
-                    <p className={`truncate text-xs ${pendingIdentity ? 'font-medium text-amber-700' : 'text-slate-400'}`}>{pendingIdentity ? 'Identidad pendiente' : (phone || 'Sin teléfono')}</p>
+                    <p className={`truncate text-xs ${pendingIdentity ? 'font-medium text-amber-700' : 'text-slate-400'}`}>{restriction || (isGroupChat(c) ? 'Grupo de WhatsApp' : pendingIdentity ? 'Identidad pendiente' : (phone || 'Sin teléfono'))}</p>
                   </div>
                 </button>
               )

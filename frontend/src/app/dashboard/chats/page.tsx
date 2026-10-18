@@ -3,13 +3,18 @@
 import { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { Search, Plus, X, Trash2, CheckSquare, MessageCircle, ShieldBan, Heart, ChevronDown, ChevronUp, MoreVertical, PanelRight, ListChecks, AlertTriangle, Loader2, RotateCcw, Sparkles, SlidersHorizontal } from 'lucide-react'
+import { Search, Plus, Pin, PinOff, Users, RefreshCw, X, Trash2, CheckSquare, MessageCircle, ShieldBan, Heart, ChevronDown, ChevronUp, MoreVertical, PanelRight, ListChecks, AlertTriangle, Loader2, RotateCcw, Sparkles, SlidersHorizontal } from 'lucide-react'
 import { formatTime } from '@/utils/format'
+import { getAuthScope, isAuthIdentityChanging } from '@/lib/authScope'
 import { subscribeWebSocket } from '@/lib/api'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import DeviceSelector from '@/components/chat/DeviceSelector'
 import NewChatModal from '@/components/chat/NewChatModal'
 import ChatPanel from '@/components/chat/ChatPanel'
+import GroupDetailsPanel from '@/components/chat/GroupDetailsPanel'
+import { usePersonalChatPins } from '@/components/chat/usePersonalChatPins'
+import { applyChatPin } from '@/utils/chatPins'
+import { chatAvatar, chatPreview, isGroupChat } from '@/utils/chatGroups'
 import ContactPanel, { type ContactPanelHandle } from '@/components/chat/ContactPanel'
 import OwnStatusesCenter from '@/components/chat/OwnStatusesCenter'
 import { useChatHistoryLayer } from '@/components/chat/useChatHistoryLayer'
@@ -31,7 +36,7 @@ const PANEL_SEPARATOR_WIDTH = 8
 const WIDE_PANEL_SEPARATORS_WIDTH = PANEL_SEPARATOR_WIDTH * 2
 const COMPACT_WORKSPACE_MAX = LEFT_PANEL_MIN + CHAT_PANEL_MIN + PANEL_SEPARATOR_WIDTH
 const ROW_MENU_WIDTH = 208
-const ROW_MENU_HEIGHT = 208
+const ROW_MENU_HEIGHT = 260
 const VIEWPORT_MARGIN = 8
 const CHAT_LIST_RECONCILE_DELAY = 280
 const CHAT_EVENT_DEDUPE_WINDOW = 30_000
@@ -115,6 +120,8 @@ export default function ChatsPage() {
 
   // Filters & UI State
   const [filterDevices, setFilterDevices] = useState<string[]>([])
+  const [chatKind, setChatKind] = useState<'all' | 'direct' | 'group'>('all')
+  const [syncingGroups, setSyncingGroups] = useState(false)
   const [inboxView, setInboxViewState] = useState<InboxView>('all')
   const viewStorageRef = useRef('')
   const viewTouchedRef = useRef(false)
@@ -137,6 +144,16 @@ export default function ChatsPage() {
   const deletedChatIdsRef = useRef(new Set<string>())
   const inboxRevisionRef = useRef(0)
   const queueAnchorRef = useRef<{ id: string; waiting_since: string } | undefined>(undefined)
+  const pinReconcileRef = useRef<() => void>(() => {})
+  const pins = usePersonalChatPins((state, rollback) => {
+    const patch = (chat: Chat) => chat.id !== state.chat_id ? chat : rollback ? { ...chat, is_pinned: state.is_pinned, pinned_at: state.pinned_at, pin_version: state.pin_version } : applyChatPin(chat, state)
+    setChats(rows => orderInbox(rows.map(patch), inboxView))
+    setSelectedChat(chat => chat ? patch(chat) : chat)
+    inboxRevisionRef.current++; cursorRef.current = ''
+    chatsRequestAbortRef.current?.abort(); chatsReconcileAbortRef.current?.abort()
+    chatsRequestSequenceRef.current++; chatsReconcileSequenceRef.current++; setLoadingMore(false)
+    pinReconcileRef.current()
+  })
   const cursorRef = useRef('')
   const chatsRef = useRef(chats)
   chatsRef.current = chats
@@ -182,7 +199,7 @@ export default function ChatsPage() {
   const applyFilterDraft = () => {
     setInboxView(filterDraft.view); setFilterHasReaction(filterDraft.reaction); setReactionFromMe(filterDraft.from); setReactionEmojis(filterDraft.emojis); setReactionRange(filterDraft.range); setReactionCustomFrom(filterDraft.customFrom); setReactionCustomTo(filterDraft.customTo); setShowMobileFilters(false)
   }
-  const chatQueryKey = JSON.stringify([filterDevices, filterUnread, filterPending, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
+  const chatQueryKey = JSON.stringify([pins.scope, chatKind, filterDevices, filterUnread, filterPending, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
   const activeChatQueryKeyRef = useRef(chatQueryKey)
   activeChatQueryKeyRef.current = chatQueryKey
 
@@ -505,6 +522,8 @@ export default function ChatsPage() {
   // Foreground requests may show loading UI. WebSocket reconciliation is silent
   // and uses its own sequence so it can never cancel a user-triggered query.
   const fetchChats = useCallback(async (reset: boolean = true, options: { silent?: boolean; after?: { id: string; waiting_since: string } } = {}) => {
+    const requestScope = pins.scope
+    if (getAuthScope() !== requestScope || isAuthIdentityChanging(requestScope)) return null
     const silent = Boolean(options.silent && reset)
     const sequenceRef = silent ? chatsReconcileSequenceRef : chatsRequestSequenceRef
     const abortRef = silent ? chatsReconcileAbortRef : chatsRequestAbortRef
@@ -524,7 +543,8 @@ export default function ChatsPage() {
       setLoadingMore(true)
     }
     try {
-      const params = new URLSearchParams()
+      const params = new URLSearchParams({ kind: chatKind, pagination: 'cursor' })
+      if (!filterPending && !reset && cursorRef.current) params.set('cursor', cursorRef.current)
       filterDevices.forEach(id => params.append('device_ids', id))
       if (filterUnread) params.append('unread_only', 'true')
       if (filterPending) { params.set('pending_only', 'true'); if (options.after) params.set('cursor', options.after.waiting_since + '|' + options.after.id); else if (!reset && cursorRef.current) params.set('cursor', cursorRef.current) }
@@ -556,10 +576,10 @@ export default function ChatsPage() {
       })
       const data = await res.json().catch(() => null)
       if (!res.ok || !data?.success) throw new Error(data?.error || 'No se pudieron cargar las conversaciones.')
-      if (controller.signal.aborted || requestSequence !== sequenceRef.current || requestQueryKey !== activeChatQueryKeyRef.current) return
+      if (controller.signal.aborted || requestSequence !== sequenceRef.current || requestQueryKey !== activeChatQueryKeyRef.current || getAuthScope() !== requestScope) return
       if (data.success) {
         setChatListError('')
-        let newChats: Chat[] = data.chats || []
+        let newChats: Chat[] = (data.chats || []).map(pins.project)
         const total: number = data.total ?? 0
         let serverOffset = offset + newChats.length
         let nextCursor = data.next_cursor || ''
@@ -567,19 +587,19 @@ export default function ChatsPage() {
         // rows blindly would retain chats that no longer match search/reactions.
         if (silent && !options.after) {
           const loadedCount = Math.max(CHATS_PAGE_SIZE, chatsRef.current.length)
-          while (newChats.length < loadedCount && serverOffset < total && (!filterPending || nextCursor)) {
+          while (newChats.length < loadedCount && serverOffset < total && nextCursor) {
             const pageParams = new URLSearchParams(params)
             pageParams.set('offset', String(filterPending ? 0 : serverOffset))
-            if (filterPending) pageParams.set('cursor', nextCursor)
+            pageParams.set('cursor', nextCursor)
             const pageResponse = await fetch(`/api/chats?${pageParams}`, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
             const page = await pageResponse.json().catch(() => null)
             if (!pageResponse.ok || !page?.success || !Array.isArray(page.chats)) throw new Error(page?.error || 'No se pudieron actualizar las conversaciones.')
-            if (controller.signal.aborted || requestSequence !== sequenceRef.current || requestQueryKey !== activeChatQueryKeyRef.current) return
+            if (controller.signal.aborted || requestSequence !== sequenceRef.current || requestQueryKey !== activeChatQueryKeyRef.current || getAuthScope() !== requestScope) return
             serverOffset += page.chats.length
             nextCursor = page.next_cursor || ''
             const known = new Set(newChats.map(chat => chat.id))
             const unique = (page.chats as Chat[]).filter(chat => !known.has(chat.id))
-            newChats = [...newChats, ...unique]
+            newChats = [...newChats, ...unique.map(pins.project)]
             if (!page.chats.length || !unique.length) break
           }
         }
@@ -605,12 +625,12 @@ export default function ChatsPage() {
         }
         if (!options.after) {
           cursorRef.current = nextCursor
-          setHasMore(filterPending ? Boolean(nextCursor) : serverOffset < total)
+          setHasMore(Boolean(nextCursor))
         }
         return reconcileInboxPage([], newChats, canonicalStatesRef.current, inboxView, false)
       }
     } catch (err) {
-      if (!controller.signal.aborted && requestSequence === sequenceRef.current && requestQueryKey === activeChatQueryKeyRef.current) {
+      if (!controller.signal.aborted && requestSequence === sequenceRef.current && requestQueryKey === activeChatQueryKeyRef.current && getAuthScope() === requestScope) {
         if (silent) console.warn('Silent chat reconciliation failed', err)
         else {
           console.error('Failed to fetch chats', err)
@@ -618,13 +638,13 @@ export default function ChatsPage() {
         }
       }
     } finally {
-      if (!controller.signal.aborted && requestSequence === sequenceRef.current && requestQueryKey === activeChatQueryKeyRef.current) {
+      if (!controller.signal.aborted && requestSequence === sequenceRef.current && requestQueryKey === activeChatQueryKeyRef.current && getAuthScope() === requestScope) {
         if (!silent) setLoading(false)
         if (!reset) setLoadingMore(false)
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterDevices, filterUnread, filterPending, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
+  }, [pins.project, chatKind, filterDevices, filterUnread, filterPending, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
 
   const loadMoreChats = useCallback(() => {
     if (loadingMore || !hasMore) return
@@ -692,7 +712,7 @@ export default function ChatsPage() {
     setSelectedChats(new Set())
     setSelectionMode(false)
     closeRowMenu()
-  }, [closeRowMenu, searchTerm, filterDevices, inboxView, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
+  }, [closeRowMenu, searchTerm, chatKind, filterDevices, inboxView, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
 
   // Direct links get a list entry beneath the conversation, even with an empty/filtered inbox.
   useEffect(() => {
@@ -791,6 +811,8 @@ export default function ChatsPage() {
       const updated: Chat = {
         ...existing,
         last_message: chatPreviewFromMessage(message),
+        last_message_from_name: message.from_name,
+        last_message_from_me: message.is_from_me,
         last_message_at: timestamp,
         unread_count: existing.unread_count,
       }
@@ -811,6 +833,8 @@ export default function ChatsPage() {
   useEffect(() => () => {
     if (reconcileTimerRef.current) clearTimeout(reconcileTimerRef.current)
   }, [])
+
+  pinReconcileRef.current = scheduleChatReconciliation
 
   // WebSocket for List Updates
   useEffect(() => {
@@ -874,6 +898,8 @@ export default function ChatsPage() {
           if (!known && (inboxView === 'all' || inboxView === 'unread' && payload.unread_count > 0 || inboxView === 'pending' && payload.needs_reply)) scheduleChatReconciliation()
         } else scheduleChatReconciliation()
       } else if (eventType === 'message_reaction' && filterHasReaction) {
+        scheduleChatReconciliation()
+      } else if (eventType === 'chat_group_updated' || eventType === 'groups_synced') {
         scheduleChatReconciliation()
       } else if (eventType === 'contact_update') {
         scheduleChatReconciliation()
@@ -1080,6 +1106,21 @@ export default function ChatsPage() {
       })
   }
 
+  const syncGroups = async () => {
+    if (syncingGroups) return
+    setSyncingGroups(true); setListFeedback('')
+    const targets = devices.filter(device => device.status === 'connected' && device.runtime_capabilities?.can_list_groups === true && (device.provider || 'whatsapp_web') === 'whatsapp_web' && (!filterDevices.length || filterDevices.includes(device.id)))
+    try {
+      if (!targets.length) throw new Error('Conecta un dispositivo de WhatsApp para actualizar tus grupos.')
+      for (const device of targets) {
+        const response = await fetch('/api/devices/' + device.id + '/groups/sync', { method: 'POST', headers: { Authorization: 'Bearer ' + localStorage.getItem('token') } })
+        const data = await response.json(); if (!response.ok || !data.success) throw new Error(data.error || 'No se pudieron actualizar los grupos.')
+      }
+      await fetchChats(true, { silent: true })
+    } catch (cause) { setListFeedback(cause instanceof Error ? cause.message : 'No se pudieron actualizar los grupos.') }
+    finally { setSyncingGroups(false) }
+  }
+
   const selectedDevice = selectedChat?.device_id ? devices.find(device => device.id === selectedChat.device_id) : undefined
   const selectedDeviceName = selectedChat?.device_name || selectedDevice?.name
   const selectedDevicePhone = selectedChat?.device_phone || selectedDevice?.phone
@@ -1154,6 +1195,8 @@ export default function ChatsPage() {
                 </div>
             ))}
 
+            {!selectionMode && !collapseMobileListToolbar && <div className="flex items-center gap-1"><div className="flex min-w-0 flex-1 rounded-xl bg-slate-100 p-1" role="group" aria-label="Tipo de conversación">{([['all', 'Todos'], ['direct', 'Individuales'], ['group', 'Grupos']] as const).map(([kind, label]) => <button key={kind} type="button" aria-pressed={chatKind === kind} onClick={() => setChatKind(kind)} className={'min-h-10 flex-1 rounded-lg px-1 text-xs font-semibold transition ' + (chatKind === kind ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500 hover:text-slate-800')}>{label}</button>)}</div><button type="button" onClick={() => void syncGroups()} disabled={syncingGroups} aria-label="Actualizar grupos de WhatsApp" title="Actualizar grupos de WhatsApp" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 disabled:opacity-40"><RefreshCw className={'h-4 w-4 ' + (syncingGroups ? 'animate-spin' : '')} /></button></div>}
+            {pins.error && <p role="alert" className="rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{pins.error}</p>}
             {listFeedback && (
               <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-xs font-medium text-red-700" role="alert">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -1303,11 +1346,11 @@ export default function ChatsPage() {
                         )}
 
                         <div className="relative shrink-0">
-                             {chat.contact_avatar_url ? (
-                              <img src={chat.contact_avatar_url} alt="" className="h-11 w-11 rounded-full object-cover ring-1 ring-slate-200 shadow-sm" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden') }} />
+                             {chatAvatar(chat) ? (
+                              <img src={chatAvatar(chat)} alt="" className="h-11 w-11 rounded-full object-cover ring-1 ring-slate-200 shadow-sm" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden') }} />
                              ) : null}
-                            <div className={`flex h-11 w-11 items-center justify-center rounded-full bg-emerald-50 ring-1 ring-emerald-100 shadow-sm ${chat.contact_avatar_url ? 'hidden' : ''}`}>
-                                <span className="text-base font-bold text-emerald-700">{getChatDisplayName(chat).charAt(0).toUpperCase()}</span>
+                            <div className={`flex h-11 w-11 items-center justify-center rounded-full bg-emerald-50 ring-1 ring-emerald-100 shadow-sm ${chatAvatar(chat) ? 'hidden' : ''}`}>
+                                <span className="text-base font-bold text-emerald-700">{isGroupChat(chat) ? <Users className="h-5 w-5" /> : getChatDisplayName(chat).charAt(0).toUpperCase()}</span>
                              </div>
                              {chat.unread_count > 0 && (
                               <div className="absolute -top-1 -right-1 bg-emerald-500 text-white text-[10px] font-bold h-5 min-w-5 px-1.5 rounded-full flex items-center justify-center shadow-sm ring-2 ring-white tabular-nums">
@@ -1321,7 +1364,7 @@ export default function ChatsPage() {
                                 <h3 className={`truncate pr-2 text-sm font-semibold leading-5 ${chat.unread_count > 0 ? 'text-slate-950' : 'text-slate-800'}`}>
                                     {getChatDisplayName(chat)}
                                 </h3>
-                                <div className="flex shrink-0 items-center">
+                                <div className="flex shrink-0 items-center gap-1">{chat.is_pinned && <Pin aria-label="Chat fijado para ti" className="h-3 w-3 text-slate-500" />}
                                   <span className={`whitespace-nowrap pt-0.5 text-[10px] ${chat.unread_count > 0 ? 'font-bold text-emerald-700' : 'text-slate-400'}`}>
                                       {formatTime(chat.last_message_at)}
                                   </span>
@@ -1329,7 +1372,7 @@ export default function ChatsPage() {
                             </div>
                             <div className="flex items-center gap-1.5 min-w-0">
                               <span className="text-xs text-slate-500 truncate block">
-                                    {chat.last_message || 'Sin mensajes'}
+                                    {chatPreview(chat)}
                                 </span>
                             </div>
                             {/* Device & Phone Labels */}
@@ -1386,6 +1429,7 @@ export default function ChatsPage() {
                                 onClick={event => event.stopPropagation()}
                               >
                                 <button data-chat-row-menu-first={chat.id} type="button" role="menuitem" onClick={() => openChat(chat)} className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><MessageCircle className="h-4 w-4 text-slate-400" /> Abrir conversación</button>
+                                <button type="button" role="menuitem" disabled={pins.pending.has(chat.id)} onClick={() => { closeRowMenu(true); void pins.toggle(chat) }} className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">{chat.is_pinned ? <PinOff className="h-4 w-4 text-slate-400" /> : <Pin className="h-4 w-4 text-slate-400" />}{chat.is_pinned ? 'Desfijar para mí' : 'Fijar para mí'}</button>
                                 <button type="button" role="menuitem" onClick={() => openChatDetails(chat)} className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><PanelRight className="h-4 w-4 text-slate-400" /> Ver detalles</button>
                                 <button type="button" role="menuitem" onClick={() => { setSelectionMode(true); setSelectedChats(new Set([chat.id])); closeRowMenu() }} className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><CheckSquare className="h-4 w-4 text-slate-400" /> Seleccionar</button>
                                 <div className="my-1 border-t border-slate-100" />
@@ -1444,6 +1488,8 @@ export default function ChatsPage() {
 	                deviceId={selectedChat.device_id || ''}
 	                device={selectedDevice}
 	                initialChat={selectedChat}
+                  onTogglePin={() => void pins.toggle(selectedChat)}
+                  pinPending={pins.pending.has(selectedChat.id)}
 	                readOnly={selectedChatReadOnly}
 	                onClose={() => returnFromCompactSurface('conversation')}
 	                onContactInfoToggle={show => {
@@ -1492,7 +1538,7 @@ export default function ChatsPage() {
             <span aria-hidden="true" className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-slate-200 transition-all group-hover:w-1 group-hover:bg-emerald-300 group-active:bg-emerald-500" />
           </div>
           <div className="shrink-0 overflow-hidden bg-white" style={{ width: rightPanelWidth }}>
-            <ContactPanel
+            {isGroupChat(selectedChat) ? <GroupDetailsPanel key={selectedChat.id} chat={selectedChat} onClose={() => returnFromCompactSurface('details')} /> : <ContactPanel
               ref={contactPanelRef}
               chatId={selectedChat.id}
               isOpen={true}
@@ -1502,7 +1548,7 @@ export default function ChatsPage() {
               deviceName={selectedDeviceName}
               devicePhone={selectedDevicePhone}
               chatPhone={formatPhone(selectedChat.jid, selectedChat.contact_phone)}
-            />
+            />}
           </div>
         </>
       )}
@@ -1515,7 +1561,7 @@ export default function ChatsPage() {
             className={`absolute inset-y-0 right-0 z-30 overflow-hidden bg-white shadow-2xl ${layoutMode === 'compact' ? 'left-0' : 'border-l border-slate-200'}`}
             style={layoutMode === 'compact' ? undefined : { width: 'clamp(360px, 38vw, 440px)', maxWidth: '92%' }}
           >
-            <ContactPanel
+            {isGroupChat(selectedChat) ? <GroupDetailsPanel key={selectedChat.id} chat={selectedChat} onClose={() => returnFromCompactSurface('details')} /> : <ContactPanel
               ref={contactPanelRef}
               chatId={selectedChat.id}
               isOpen={true}
@@ -1525,7 +1571,7 @@ export default function ChatsPage() {
               deviceName={selectedDeviceName}
               devicePhone={selectedDevicePhone}
               chatPhone={formatPhone(selectedChat.jid, selectedChat.contact_phone)}
-            />
+            />}
           </div>
         </>
       )}

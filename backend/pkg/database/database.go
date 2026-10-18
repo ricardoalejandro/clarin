@@ -3865,6 +3865,7 @@ func Migrate(db *pgxpool.Pool) error {
 		DECLARE
 			canonical_name TEXT;
 		BEGIN
+			IF COALESCE(NEW.is_group,FALSE) OR NEW.jid LIKE '%@g.us' THEN RETURN NEW; END IF;
 			canonical_name := COALESCE(
 				NULLIF(BTRIM(NEW.custom_name),''),
 				NULLIF(BTRIM(NEW.name),''),
@@ -3935,6 +3936,8 @@ func Migrate(db *pgxpool.Pool) error {
 	migrations = append(migrations, surveyTemplateInstanceMigrations()...)
 	migrations = append(migrations, surveyPublicSlugReservationMigrations()...)
 	migrations = append(migrations, chatAttentionMigrations()...)
+	migrations = append(migrations, chatGroupMigrations()...)
+	migrations = append(migrations, chatPreferencesMigrations()...)
 	migrations = append(migrations, documentTemplateRevisionMigrations()...)
 	migrations = append(migrations, programExperienceMigrations()...)
 	migrations = append(migrations, storageSelfServiceMigrations()...)

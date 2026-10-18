@@ -1,4 +1,6 @@
 export interface DeviceRuntimeCapabilities {
+  can_list_groups?: boolean
+  can_send_group_messages?: boolean
   can_start_chat: boolean
   can_check_whatsapp: boolean
   can_send_sticker: boolean
@@ -65,6 +67,9 @@ export interface PollVote {
 }
 
 export interface Message {
+  media_recoverable?: boolean
+  mentions?: ChatMention[]
+  quoted_sender_name?: string
   send_phase?: 'uploading' | 'sending'
   sender?: { user_id?: string; name?: string; origin: string }
   id: string
@@ -108,6 +113,12 @@ export interface Message {
 }
 
 export interface Chat {
+  kind?: 'direct' | 'group'
+  group?: WhatsAppGroup | null
+  pinned_at?: string | null
+  pin_version?: number
+  last_message_from_name?: string
+  last_message_from_me?: boolean
   last_incoming_message_id?: string | null
   last_incoming_at?: string | null
   state_version?: number
@@ -131,5 +142,21 @@ export interface Chat {
   lead_is_blocked?: boolean
   identity_pending?: boolean
 }
+
+export interface ChatMention { jid: string; name?: string }
+export interface WhatsAppGroup {
+  subject: string
+  description?: string
+  avatar_url?: string
+  participant_count: number
+  membership_status: 'member' | 'left' | 'unknown'
+  announce: boolean
+  can_send: boolean
+  send_disabled_reason?: string
+  synced_at?: string
+  kind?: 'group' | 'announcement' | 'community'
+}
+export interface GroupParticipant { jid: string; lid?: string; phone?: string; name: string; role: 'member' | 'admin' | 'super_admin'; is_self: boolean }
+export interface ChatPinState { chat_id: string; is_pinned: boolean; pinned_at: string | null; pin_version: number }
 
 export interface ChatState { last_incoming_message_id?: string | null; last_incoming_at?: string | null; chat_id: string; unread_count: number; needs_reply: boolean; waiting_since: string | null; state_version: number }

@@ -464,3 +464,68 @@ describe('ChatPanel experience invariants', () => {
     expect(editor).toHaveValue('Siguiente borrador')
   })
 })
+
+
+describe('group composer identities through drafts and retries', () => {
+  const groupChat: Chat = { ...chat, id: 'group-1', jid: '120000@g.us', kind: 'group', name: 'Equipo', group: { subject: 'Equipo', participant_count: 2, membership_status: 'member', announce: false, can_send: true } }
+  const member = { jid: '51900000002@s.whatsapp.net', name: 'María León', role: 'member', is_self: false }
+  beforeEach(() => { localStorage.setItem('token', 'test-token'); websocket.listeners.clear(); vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600); vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1200) })
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
+  function install() {
+    const bodies: string[] = []
+    let uploadCount = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/chats/group-1' || url === '/api/chats/chat-1') return Promise.resolve(jsonResponse({ success: true, chat: url.endsWith('group-1') ? groupChat : chat, device: { ...device('connected'), runtime_capabilities: { ...device('connected').runtime_capabilities, can_send_group_messages: true, can_list_groups: true } } }))
+      if (url.includes('/group/participants?')) return Promise.resolve(jsonResponse({ success: true, participants: [member] }))
+      if (url.includes('/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: [] }))
+      if (url === '/api/media/upload') { uploadCount++; return Promise.resolve(jsonResponse({ success: true, proxy_url: '/api/media/file/account/group-video.mp4' })) }
+      if (url === '/api/messages/send') {
+        bodies.push(String(init?.body)); const payload = JSON.parse(String(init?.body))
+        return Promise.resolve(jsonResponse(bodies.length === 1 ? { success: false, error: 'Fallo temporal' } : { success: true, message: { ...payload, id: 'sent-group', message_id: 'wa-group', is_from_me: true, is_read: false, status: 'sent', timestamp: '2026-10-18T12:00:00Z' } }, bodies.length !== 1))
+      }
+      return Promise.resolve(jsonResponse({ success: true, stickers: [], quick_replies: [] }))
+    }))
+    return { bodies, uploads: () => uploadCount }
+  }
+  async function mention() {
+    const editor = await screen.findByRole('textbox', { name: 'Draft test editor' })
+    await waitFor(() => expect(editor).not.toBeDisabled())
+    fireEvent.change(editor, { target: { value: 'Hola @Mar' } })
+    fireEvent.click(await screen.findByRole('option', { name: 'María León' }))
+    return editor
+  }
+  it('retains the exact mention identity across chat switches and frozen text retry', async () => {
+    const state = install()
+    const view = render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    await mention()
+    view.rerender(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue(''))
+    view.rerender(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    const editor = await screen.findByRole('textbox', { name: 'Draft test editor' })
+    await waitFor(() => expect(editor).toHaveValue('Hola @María León '))
+    expect(screen.getByLabelText('Personas mencionadas')).toHaveTextContent('María León')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Enviar mensaje' })).not.toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar mensaje' }))
+    await screen.findByRole('button', { name: 'Reintentar envío' })
+    fireEvent.change(editor, { target: { value: 'Próximo borrador' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar envío' }))
+    await waitFor(() => expect(state.bodies).toHaveLength(2))
+    expect(state.bodies[1]).toBe(state.bodies[0]); expect(JSON.parse(state.bodies[0])).toMatchObject({ body: 'Hola @51900000002', mentions: [{ jid: member.jid, name: member.name }] })
+    expect(editor).toHaveValue('Próximo borrador')
+  })
+  it('moves mention metadata into a media caption and preserves it without reupload on retry', async () => {
+    const OriginalURL = URL
+    vi.stubGlobal('URL', class extends OriginalURL { static createObjectURL = vi.fn(() => 'blob:group-video'); static revokeObjectURL = vi.fn() })
+    const state = install()
+    const view = render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    await mention()
+    fireEvent.change(view.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*"]')!, { target: { files: [new File(['video'], 'video.mp4', { type: 'video/mp4' })] } })
+    expect(await screen.findByLabelText('Personas mencionadas')).toHaveTextContent('María León')
+    fireEvent.click(await screen.findByRole('button', { name: 'Enviar adjunto' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Reintentar envío' }))
+    await waitFor(() => expect(state.bodies).toHaveLength(2))
+    expect(state.bodies[1]).toBe(state.bodies[0]); expect(state.uploads()).toBe(1)
+    expect(JSON.parse(state.bodies[0])).toMatchObject({ body: 'Hola @51900000002 ', mentions: [{ jid: member.jid, name: member.name }], media_type: 'video' })
+  })
+})

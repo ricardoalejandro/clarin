@@ -25,6 +25,9 @@ export function mergeChatSnapshot(current: Chat | null, snapshot: Chat, state?: 
   const incoming = applyChatState(snapshot, state)
   if (!current || current.id !== incoming.id) return incoming
   const merged = { ...current, ...incoming }
+  if ((incoming.pin_version ?? 0) < (current.pin_version ?? 0)) {
+    merged.is_pinned = current.is_pinned; merged.pinned_at = current.pinned_at; merged.pin_version = current.pin_version
+  }
   // List/device snapshots omit this full-history boundary. Omission preserves
   // it, while an explicit null from canonical state really clears it.
   if (incoming.last_incoming_message_id === undefined) {

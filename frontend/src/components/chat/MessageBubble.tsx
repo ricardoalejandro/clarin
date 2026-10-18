@@ -11,6 +11,7 @@ import { canonicalChatMediaUrl, chatMediaIdentity } from '@/utils/chatMediaUrl'
 import { chatDocumentDescriptor, isPdfChatDocument, type ChatDocumentDescriptor } from '@/utils/chatDocuments'
 import { dedupeReactions } from '@/utils/chatReactions'
 import styles from './MessageBubble.module.css'
+import { displayMentionText, groupMessageAuthor, participantName } from '@/utils/chatGroups'
 import ChatMessageMedia from './ChatMessageMedia'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
@@ -46,10 +47,12 @@ const EmojiPickerReact = dynamic(() => import('./LocalizedEmojiPicker'), {
 
 interface MessageBubbleProps {
   message: Message
+  isGroup?: boolean
   contactName?: string
   onMediaClick?: (url: string, type: string) => void
   onDocumentClick?: (document: ChatDocumentDescriptor) => void
   onRetry?: (message: Message) => void
+  onRecoverMedia?: (message: Message) => Promise<void>
   onReply?: (message: Message) => void
   onQuotedMessageClick?: (quotedMessageId: string) => void
   onForward?: (message: Message) => void
@@ -83,7 +86,16 @@ const formatQuotedSender = (sender?: string, isFromMe?: boolean): string => {
   return sender.replace(/@s\.whatsapp\.net$/, '').replace(/@lid$/, '')
 }
 
-function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, onRetry, onReply, onQuotedMessageClick, onForward, onDelete, onEdit, onInfo, onCopy, compactSelection = false, selected = false, onSelect, onToggleStickerFavorite, onReact, reactionUnavailableReason, savedStickerUrls, savingStickerUrls, groupedWithPrevious = false }: MessageBubbleProps) {
+function MessageBubble({ message, contactName, isGroup = false, onMediaClick, onDocumentClick, onRetry, onRecoverMedia, onReply, onQuotedMessageClick, onForward, onDelete, onEdit, onInfo, onCopy, compactSelection = false, selected = false, onSelect, onToggleStickerFavorite, onReact, reactionUnavailableReason, savedStickerUrls, savingStickerUrls, groupedWithPrevious = false }: MessageBubbleProps) {
+  const [recoveringMedia, setRecoveringMedia] = useState(false)
+  const [recoverMediaError, setRecoverMediaError] = useState('')
+  const recoverInFlight = useRef(false)
+  const recoverMedia = async () => {
+    if (!onRecoverMedia || recoverInFlight.current) return
+    recoverInFlight.current = true; setRecoveringMedia(true); setRecoverMediaError('')
+    try { await onRecoverMedia(message) } catch (cause) { if (!(cause instanceof DOMException && cause.name === 'AbortError')) setRecoverMediaError(cause instanceof Error ? cause.message : 'No se pudo recuperar el archivo.') }
+    finally { recoverInFlight.current = false; setRecoveringMedia(false) }
+  }
   const [stickerLoadError, setStickerLoadError] = useState(false)
   const [showEmojiPicker, setShowEmojiPicker] = useState(false)
   const [showFullPicker, setShowFullPicker] = useState(false)
@@ -292,7 +304,7 @@ function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, on
 
   // Use contactName (resolved by parent via getChatDisplayName) as the sender name for incoming messages
   const senderDisplayName = !message.is_from_me
-    ? (contactName || message.from_name)
+    ? (isGroup ? groupMessageAuthor(message) : contactName || message.from_name)
     : undefined
 
   const formatTime = (timestamp: string) => {
@@ -328,7 +340,7 @@ function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, on
           <p className="text-xs font-semibold text-emerald-700 truncate">
             {message.quoted_is_from_me || message.quoted_sender === 'Me'
               ? 'Tú'
-              : (contactName || formatQuotedSender(message.quoted_sender))}
+              : (isGroup ? participantName(message.quoted_sender, message.quoted_sender_name) : contactName || formatQuotedSender(message.quoted_sender))}
           </p>
         )}
         <p className="line-clamp-2 break-words text-xs leading-4 text-slate-600">
@@ -366,6 +378,8 @@ function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, on
     }
 
     if (!message.media_url) {
+      if (isGroup && ['image', 'video', 'gif', 'audio', 'document', 'sticker'].includes(message.message_type || '')) return <div className="mb-1 max-w-full rounded-xl border border-slate-200 bg-slate-50 p-3"><div className="flex items-center gap-2"><FileText className="h-5 w-5 shrink-0 text-slate-400" /><p className="break-words text-sm font-medium text-slate-600">{message.media_filename || 'Archivo del historial'}</p></div><p className="mt-1 text-xs text-slate-500">{message.media_recoverable ? 'Descarga este archivo cuando lo necesites.' : 'El archivo no está disponible en Clarin.'}</p>{message.media_recoverable && onRecoverMedia && <button type="button" disabled={recoveringMedia} onClick={() => void recoverMedia()} className="mt-2 inline-flex min-h-11 items-center gap-2 rounded-lg px-3 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">{recoveringMedia ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}{recoveringMedia ? 'Recuperando archivo…' : recoverMediaError ? 'Reintentar recuperación' : 'Recuperar archivo'}</button>}{recoverMediaError && <p role="alert" className="mt-2 text-xs leading-5 text-rose-700">{recoverMediaError}</p>}</div>
+
       // Sticker without downloaded media — show placeholder
       if (message.message_type === 'sticker') {
         return (
@@ -630,7 +644,7 @@ function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, on
 
     switch (message.status) {
       case 'read':
-        return <CheckCheck className="w-4 h-4 text-blue-500" aria-label="Leído en WhatsApp" role="img" />
+        return <CheckCheck className="w-4 h-4 text-blue-500" aria-label={isGroup ? 'Hay recibos de lectura confirmados' : 'Leído en WhatsApp'} role="img" />
       case 'delivered':
         return <CheckCheck className="w-4 h-4 text-gray-400" aria-label="Entregado" role="img" />
       case 'sending':
@@ -756,7 +770,7 @@ function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, on
         }`}
       >
         {/* Sender name for incoming messages (hidden for emoji-only like WhatsApp Web) */}
-        {!groupedWithPrevious && !message.is_from_me && !isEmojiOnly && (senderDisplayName || message.from_name) && (
+        {!groupedWithPrevious && !message.is_from_me && (isGroup || !isEmojiOnly) && (senderDisplayName || message.from_name) && (
           <p className={`text-xs text-emerald-700 font-medium mb-0.5 ${hasVisualMedia ? 'px-3 pt-1.5' : ''}`}>
             {senderDisplayName || message.from_name}
           </p>
@@ -809,7 +823,7 @@ function MessageBubble({ message, contactName, onMediaClick, onDocumentClick, on
                 }
               }}
             >
-              {renderFormattedText(message.body)}
+              {renderFormattedText(displayMentionText(message.body, message.mentions))}
             </p>
           )
         )}

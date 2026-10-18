@@ -730,7 +730,7 @@ func (s *MCPServer) toolListChats(ctx context.Context, req mcp.CallToolRequest) 
 		       ch.last_message, ch.last_message_at, ch.unread_count
 		FROM chats ch
 		LEFT JOIN contacts c ON c.id = ch.contact_id
-		WHERE ch.account_id = $1 AND ch.is_group = false
+		WHERE ch.account_id = $1 AND ch.jid NOT LIKE '%@g.us'
 		ORDER BY ch.last_message_at DESC NULLS LAST
 		LIMIT $2
 	`, accountID, limit)
@@ -807,7 +807,7 @@ func (s *MCPServer) toolSearchChatMessages(ctx context.Context, req mcp.CallTool
 		FROM messages m
 		JOIN chats ch ON ch.id = m.chat_id AND ch.account_id = $1
 		LEFT JOIN contacts c ON c.id = ch.contact_id
-		WHERE m.body ILIKE $2
+		WHERE m.body ILIKE $2 AND ch.jid NOT LIKE '%@g.us' AND m.account_id=ch.account_id
 		ORDER BY m.timestamp DESC
 		LIMIT $3
 	`, accountID, "%"+query+"%", limit)

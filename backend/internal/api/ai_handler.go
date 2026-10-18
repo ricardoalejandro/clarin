@@ -412,6 +412,8 @@ func (s *Server) toolSearchChatMessages(ctx context.Context, args map[string]int
 		JOIN chats ch ON ch.id = m.chat_id
 		LEFT JOIN contacts ct ON ct.id = ch.contact_id
 		WHERE ch.account_id = $1
+			AND ch.jid NOT LIKE '%@g.us'
+			AND m.account_id=ch.account_id
 			AND m.body ILIKE '%' || $2 || '%'
 			AND m.body IS NOT NULL AND m.body != ''
 		ORDER BY m.timestamp DESC

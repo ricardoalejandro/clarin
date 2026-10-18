@@ -1189,6 +1189,9 @@ var (
 )
 
 func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uuid.UUID, jid, name string) (*domain.Chat, error) {
+	if domain.IsGroupJID(jid) {
+		return r.GetOrCreateGroup(ctx, accountID, deviceID, jid, name)
+	}
 	if strings.TrimSpace(jid) == "" {
 		return nil, fmt.Errorf("chat jid is required")
 	}
@@ -1637,6 +1640,9 @@ func (r *ChatRepository) CreateAndLinkContact(ctx context.Context, accountID, ch
 }
 
 func phoneFromJID(jid string) string {
+	if domain.IsGroupJID(jid) {
+		return ""
+	}
 	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(jid)), "@lid") {
 		return ""
 	}
@@ -1656,6 +1662,13 @@ func phoneFromJID(jid string) string {
 func setChatIdentityState(chat *domain.Chat) {
 	if chat == nil {
 		return
+	}
+	chat.Kind = "direct"
+	if domain.IsGroupJID(chat.JID) {
+		chat.Kind = "group"
+		chat.ContactPhone = nil
+		chat.NeedsReply = false
+		chat.WaitingSince = nil
 	}
 	chat.IdentityPending = strings.HasSuffix(strings.ToLower(strings.TrimSpace(chat.JID)), "@lid")
 }
@@ -1833,13 +1846,14 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 	// Build dynamic query
 	baseQuery := `
 		FROM chats c
+		LEFT JOIN chat_user_preferences cp ON cp.account_id=c.account_id AND cp.chat_id=c.id AND cp.user_id=$2::uuid
 		LEFT JOIN devices d ON c.device_id = d.id
 		LEFT JOIN contacts ctc ON ctc.id = c.contact_id AND ctc.account_id = c.account_id
-		LEFT JOIN LATERAL (SELECT bool_or(is_blocked) AS is_blocked FROM leads WHERE account_id=c.account_id AND jid=c.jid) l ON TRUE
-		WHERE c.account_id = $1 AND c.jid NOT LIKE '%@g.us' AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast'
+		LEFT JOIN LATERAL (SELECT bool_or(is_blocked) AS is_blocked FROM leads WHERE c.jid NOT LIKE '%@g.us' AND account_id=c.account_id AND jid=c.jid) l ON TRUE
+		WHERE c.account_id = $1 AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast'
 	`
-	args := []interface{}{accountID}
-	argNum := 2
+	args := []interface{}{accountID, filter.ActorID}
+	argNum := 3
 
 	// Provider separation is based on the durable channel identity rather than
 	// the current device row, which keeps historical chats correctly scoped if
@@ -1848,7 +1862,13 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 	case domain.DeviceProviderWhatsAppCloudAPI:
 		baseQuery += " AND c.channel_key LIKE 'whatsapp_cloud_api:%'"
 	case domain.DeviceProviderWhatsAppWeb:
-		baseQuery += " AND c.channel_key = 'whatsapp_web'"
+		baseQuery += " AND (c.channel_key = 'whatsapp_web' OR c.channel_key LIKE 'whatsapp_web_group:%')"
+	}
+
+	if filter.Kind == "direct" || filter.PendingOnly {
+		baseQuery += " AND c.jid NOT LIKE '%@g.us'"
+	} else if filter.Kind == "group" {
+		baseQuery += " AND c.jid LIKE '%@g.us'"
 	}
 
 	// Device filter
@@ -1923,7 +1943,7 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 	selectQuery := `
 		SELECT
 		       c.id, c.account_id, c.device_id, c.contact_id, c.jid, c.name, c.last_message, c.last_message_at,
-		       c.unread_count, c.is_archived, c.is_pinned,
+		       c.unread_count, c.is_archived, COALESCE(cp.is_pinned,FALSE),cp.pinned_at,COALESCE(cp.version,0),
 		       c.last_inbound_at, c.last_outbound_at, c.customer_service_window_expires_at, c.last_message_provider,
 		       c.created_at, c.updated_at,
 		       d.name, d.phone,
@@ -1937,13 +1957,15 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 		}
 		selectQuery += " ORDER BY c.waiting_since,c.id"
 	} else {
-		selectQuery += " ORDER BY c.is_pinned DESC,c.last_message_at DESC NULLS LAST,c.id"
+		cursorSQL, cursorArgs := chatListCursorSQL(filter.ListCursor, argNum)
+		selectQuery += cursorSQL + " ORDER BY " + chatPinOrderSQL
+		args = append(args, cursorArgs...)
 	}
 
 	// Apply pagination
 	if filter.Limit > 0 {
 		selectQuery += fmt.Sprintf(" LIMIT %d", filter.Limit)
-		if filter.Offset > 0 {
+		if filter.Offset > 0 && !filter.UseCursor {
 			selectQuery += fmt.Sprintf(" OFFSET %d", filter.Offset)
 		}
 	}
@@ -1960,7 +1982,7 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 		if err := rows.Scan(
 			&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
 			&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
-			&chat.IsPinned, &chat.LastInboundAt, &chat.LastOutboundAt,
+			&chat.IsPinned, &chat.PinnedAt, &chat.PinVersion, &chat.LastInboundAt, &chat.LastOutboundAt,
 			&chat.CustomerServiceWindowExpiresAt, &chat.LastMessageProvider,
 			&chat.CreatedAt, &chat.UpdatedAt,
 			&chat.DeviceName, &chat.DevicePhone,
@@ -2168,6 +2190,12 @@ func (r *MediaAssetRepository) Upsert(ctx context.Context, input MediaAssetUpser
 
 func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) error {
 	applyMessageSendContext(ctx, msg)
+	if len(msg.Mentions) == 0 {
+		msg.Mentions = domain.MessageMentionsFrom(ctx)
+	}
+	if msg.Mentions == nil {
+		msg.Mentions = []domain.MessageMention{}
+	}
 	insert := func(queryer interface {
 		QueryRow(context.Context, string, ...any) pgx.Row
 	}) error {
@@ -2178,11 +2206,11 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 		                      quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
 		                      poll_question, poll_max_selections,
 		                      is_revoked, is_view_once, latitude, longitude,
-		                      contact_name, contact_phone, contact_vcard, provider, template_name, sender, attention_through_at, attention_through_id, defer_attention, send_operation_id)
+		                      contact_name, contact_phone, contact_vcard, provider, template_name, sender, attention_through_at, attention_through_id, defer_attention, send_operation_id, group_mentions)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-		        $22, $23, $24, $25, $26, $27, $28, $29, $30, COALESCE(NULLIF($31::text, ''), 'whatsapp_web'), $32, $33, $34, $35, $36, $37)
+		        $22, $23, $24, $25, $26, $27, $28, $29, $30, COALESCE(NULLIF($31::text, ''), 'whatsapp_web'), $32, $33, $34, $35, $36, $37, $38::jsonb)
 		ON CONFLICT (chat_id, message_id) DO NOTHING
-		RETURNING id, created_at
+		RETURNING id, created_at,body,is_revoked,is_edited
 	`, msg.AccountID, msg.DeviceID, msg.ChatID, msg.MessageID, msg.FromJID, msg.FromName, msg.Body,
 			msg.MessageType, msg.MediaURL, msg.MediaMimetype, msg.MediaFilename, msg.MediaSize, msg.MediaAssetID,
 			msg.IsFromMe, msg.IsRead, msg.Status, msg.Timestamp,
@@ -2190,8 +2218,8 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 			msg.PollQuestion, msg.PollMaxSelections,
 			msg.IsRevoked, msg.IsViewOnce, msg.Latitude, msg.Longitude,
 			msg.ContactName, msg.ContactPhone, msg.ContactVCard, msg.Provider, msg.TemplateName,
-			msg.Sender, msg.AttentionThroughAt, msg.AttentionThroughID, msg.DeferAttention, msg.SendOperationID,
-		).Scan(&msg.ID, &msg.CreatedAt)
+			msg.Sender, msg.AttentionThroughAt, msg.AttentionThroughID, msg.DeferAttention, msg.SendOperationID, msg.Mentions,
+		).Scan(&msg.ID, &msg.CreatedAt, &msg.Body, &msg.IsRevoked, &msg.IsEdited)
 	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -5989,6 +6017,9 @@ func (r *CampaignRepository) AddRecipients(ctx context.Context, recipients []*do
 		return err
 	}
 	for _, rec := range recipients {
+		if strings.HasSuffix(strings.ToLower(strings.TrimSpace(rec.JID)), "@g.us") {
+			return fmt.Errorf("los grupos no son destinatarios de campañas")
+		}
 		if rec.CampaignID != recipients[0].CampaignID || rec.ContactID == nil {
 			return fmt.Errorf("cada destinatario debe pertenecer a la campaña y tener un contacto")
 		}
@@ -5996,7 +6027,7 @@ func (r *CampaignRepository) AddRecipients(ctx context.Context, recipients []*do
 		if err := tx.QueryRow(ctx, `
 			SELECT EXISTS(
 				SELECT 1 FROM contacts c
-				WHERE c.id=$1 AND c.account_id=$2 AND c.do_not_contact=FALSE
+				WHERE c.id=$1 AND c.account_id=$2 AND c.do_not_contact=FALSE AND c.is_group=FALSE
 				  AND NOT EXISTS (
 					SELECT 1 FROM contact_suppressions cs
 					WHERE cs.account_id=c.account_id AND cs.active=TRUE

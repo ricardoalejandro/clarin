@@ -1,5 +1,5 @@
 // API helper for Clarin frontend
-import { beginAuthIdentityChange, completeAuthIdentityChange, getAuthScope, isAuthIdentityChanging, isAuthScopeSynchronized } from '@/lib/authScope'
+import { beginAuthIdentityChange, completeAuthIdentityChange, getAuthScope, isAuthIdentityChanging, isAuthScopeSynchronized, subscribeAuthScope } from '@/lib/authScope'
 import { fetchAuthCookie } from '@/lib/authCookieLock'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || ''
@@ -697,6 +697,7 @@ let _sharedReconnectAttempts = 0
 let _sharedIntentionallyClosed = false
 let _sharedOfflineSuppressed = false
 let _sharedRefCount = 0
+let _sharedAuthUnsubscribe: (() => void) | null = null
 const _sharedListeners = new Set<WSListener>()
 const _sharedConnectListeners = new Set<WSConnectListener>()
 const _sharedDisconnectListeners = new Set<WSDisconnectListener>()
@@ -711,6 +712,8 @@ function _sharedConnect() {
   if (typeof window === 'undefined') return
 
   if (_sharedOfflineSuppressed) return
+  const connectionScope = getAuthScope()
+  if (isAuthIdentityChanging(connectionScope)) return
 
   if (!localStorage.getItem('token')) return
 
@@ -722,9 +725,12 @@ function _sharedConnect() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const wsUrl = `${protocol}//${window.location.host}/ws`
 
-  _sharedWS = new WebSocket(wsUrl)
+  const connection = new WebSocket(wsUrl)
+  _sharedWS = connection
+  const current = () => _sharedWS === connection && getAuthScope() === connectionScope && !isAuthIdentityChanging(connectionScope)
 
-  _sharedWS.onopen = () => {
+  connection.onopen = () => {
+    if (!current()) return
     console.log('WebSocket connected')
     _sharedReconnectAttempts = 0
     _sharedConnectListeners.forEach(cb => {
@@ -732,7 +738,8 @@ function _sharedConnect() {
     })
   }
 
-  _sharedWS.onmessage = (event) => {
+  connection.onmessage = (event) => {
+    if (!current()) return
     try {
       const data = JSON.parse(event.data)
       _sharedListeners.forEach(cb => {
@@ -743,11 +750,12 @@ function _sharedConnect() {
     }
   }
 
-  _sharedWS.onerror = () => {
+  connection.onerror = () => {
     // Logged natively by the browser
   }
 
-  _sharedWS.onclose = (event) => {
+  connection.onclose = (event) => {
+    if (!current()) return
     _sharedWS = null
     if (_sharedIntentionallyClosed || _sharedRefCount <= 0) return
     _sharedDisconnectListeners.forEach(cb => {
@@ -775,6 +783,13 @@ export function subscribeWebSocket(
 
   _sharedRefCount++
   _sharedIntentionallyClosed = false
+  if (!_sharedAuthUnsubscribe) _sharedAuthUnsubscribe = subscribeAuthScope(() => {
+    if (_sharedReconnectTimer) { clearTimeout(_sharedReconnectTimer); _sharedReconnectTimer = null }
+    const previous = _sharedWS; _sharedWS = null
+    previous?.close()
+    _sharedReconnectAttempts = 0
+    if (_sharedRefCount > 0) _sharedConnect()
+  })
 
   // Ensure connection is alive
   _sharedConnect()
@@ -793,6 +808,7 @@ export function subscribeWebSocket(
 
     if (_sharedRefCount <= 0) {
       _sharedRefCount = 0
+      _sharedAuthUnsubscribe?.(); _sharedAuthUnsubscribe = null
       _sharedIntentionallyClosed = true
       if (_sharedReconnectTimer) {
         clearTimeout(_sharedReconnectTimer)
