@@ -51,6 +51,15 @@ func testLinkPreviewTransport(t *testing.T, ctx context.Context, pool *DevicePoo
 					}
 					return
 				}
+				// Cache invalidation publishes the canonical chat state before its
+				// content event. Count only content, without accepting another chat.
+				if event.Event == ws.EventChatUpdate {
+					var stateChatID uuid.UUID
+					if err := json.Unmarshal(event.Data["chat_id"], &stateChatID); err != nil || stateChatID != chat.ID {
+						t.Fatal("chat state event crossed the preview fixture scope", err)
+					}
+					continue
+				}
 				if event.Event != want {
 					t.Fatalf("unexpected event %s wanted %s", event.Event, want)
 				}

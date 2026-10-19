@@ -246,8 +246,8 @@ func TestChatLinkPreviewIntegration(t *testing.T) {
 			}
 			exec(`UPDATE `+table+` SET `+column+`=`+column+`-'thumbnail_url',`+assetColumn+`=NULL WHERE account_id=$1 AND id=$2`, account, id)
 			exec(`INSERT INTO storage_removed_references(account_id,actor_id,operation_id,object_key,use_id,adapter,origin_type,filename,media_type,size_bytes,snapshot)
-    SELECT $1,$3,$4,$5,$2::text||$4::text,'link_preview','chats','preview.jpg','image',12,
-    jsonb_build_object('source_id',$2::text,'slot',$6::text,'after',jsonb_build_object('body',$7::text,'preview',`+column+`)) FROM `+table+` WHERE account_id=$1 AND id=$2::uuid`, account, id, uuid.New(), uuid.New(), key, slot, body)
+    SELECT $1::uuid,$3::uuid,$4::uuid,$5::text,($2::uuid)::text||($4::uuid)::text,'link_preview','chats','preview.jpg','image',12,
+    jsonb_build_object('source_id',($2::uuid)::text,'slot',$6::text,'after',jsonb_build_object('body',$7::text,'preview',`+column+`)) FROM `+table+` WHERE account_id=$1::uuid AND id=$2::uuid`, account, id, uuid.New(), uuid.New(), key, slot, body)
 		}
 		var plain *domain.Message
 		for _, state := range []string{"removed", "purging", "purged"} {
