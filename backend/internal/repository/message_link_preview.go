@@ -63,7 +63,7 @@ const removedLinkPreviewReplaySQL = `SELECT EXISTS (
  ) source ON source.source_id=rr.snapshot->>'source_id' AND source.slot=rr.snapshot->>'slot'
  WHERE rr.account_id=$1 AND rr.adapter='link_preview' AND rr.state IN ('removed','purging','purged')
  AND rr.snapshot->'after'->>'body'=$4::text
- AND (rr.snapshot->'after'->'preview'-'thumbnail_url')=($5::jsonb-'thumbnail_url'))`
+ AND ((rr.snapshot->'after'->'preview')-'thumbnail_url')=($5::jsonb-'thumbnail_url'))`
 
 func removedLinkPreviewReplayTx(ctx context.Context, tx pgx.Tx, accountID, chatID uuid.UUID, messageID string, msg *domain.Message, includePending bool) (bool, error) {
 	if msg.LinkPreview == nil || msg.LinkPreview.ThumbnailURL == nil || msg.Body == nil {

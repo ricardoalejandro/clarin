@@ -229,7 +229,9 @@ func TestChatGroupContextIntegration(t *testing.T) {
 				}
 			}
 			if variant == "text" {
-				legacy := *message
+				// Cached history already contains hydrated mention/sender labels;
+				// simulate only the missing preview field of a legacy snapshot.
+				legacy := *copies[0]
 				legacy.LinkPreview = nil
 				cached, _ := json.Marshal(map[string]any{"success": true, "messages": []*domain.Message{&legacy}})
 				projected, err := server.projectCachedChatMedia(ctx, account, cached)

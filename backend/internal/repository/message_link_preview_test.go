@@ -37,7 +37,7 @@ func TestMessageLinkPreviewNeverEnrichesEditedSnapshots(t *testing.T) {
 }
 
 func TestMessageLinkPreviewRemovedReplayGuard(t *testing.T) {
-	for _, required := range []string{"rr.account_id=$1", "source.source_id=rr.snapshot->>'source_id'", "source.slot=rr.snapshot->>'slot'", "rr.adapter='link_preview'", "'removed','purging','purged'", "rr.snapshot->'after'->>'body'=$4", "rr.snapshot->'after'->'preview'-'thumbnail_url'"} {
+	for _, required := range []string{"rr.account_id=$1", "source.source_id=rr.snapshot->>'source_id'", "source.slot=rr.snapshot->>'slot'", "rr.adapter='link_preview'", "'removed','purging','purged'", "rr.snapshot->'after'->>'body'=$4", "(rr.snapshot->'after'->'preview')-'thumbnail_url'"} {
 		if !strings.Contains(removedLinkPreviewReplaySQL, required) {
 			t.Fatalf("removed preview replay lost guard %s", required)
 		}
