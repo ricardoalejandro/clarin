@@ -134,6 +134,10 @@ If a task touches multiple areas, read all matching skills before editing.
 
 ## Chat And WhatsApp Product Invariants
 
+- Group conversations are account- and device-scoped WhatsApp conversations, with a technical `Contact.is_group` parent and no fabricated phone. Their messages, members and metadata never create, update or link Leads, enter commercial automation/campaigns, or silently feed commercial AI/MCP analysis. A group-only participant is not automatically a personal Contact.
+- Group messages contribute to No leídos but never to Pendientes: preserve `waiting_since=NULL` and `needs_reply=false` across insertion, reading, replies, revocation, reconciliation and history. Keep conversation JID separate from participant PN/LID, cited author and mentions.
+- Group send capabilities derive from the rollout gate, account, connected device, current membership and group permissions. Preserve history after leaving/removal/device deletion, and never recover view-once media. Metadata refresh is not message activity and must not resurrect a locally deleted group chat.
+- Chat pins are private account/user/chat preferences, ordered by pin time independently of incoming activity, and never synchronize to WhatsApp. Keep their version separate from shared attention/read state, preserve them transactionally during PN/LID merging, and send preference events only to the owning actor with Chats permission.
 - Treat `Contact` as the single identity parent. Render identity, phone, avatar, notes, and contact tags once. Opportunities may add commercial data but must not duplicate or contradict Contact data.
 - Ship only controls that work end to end. A visible search, menu item, sync button, status action, sticker action, or delete action must have implemented success, loading, empty, and failure behavior; otherwise remove or explicitly disable it with an explanation.
 - Base responsive chat layout on measured available width after sidebar, Eros, and other chrome—not on browser zoom or screen width alone. Preserve at least 480 px for the conversation whenever three columns are shown.

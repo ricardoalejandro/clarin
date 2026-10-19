@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -168,6 +169,7 @@ type onDemandSyncTarget struct {
 	RequestID uuid.UUID
 	StartedAt time.Time
 	Saved     int
+	Anchor    *types.MessageInfo
 }
 
 type historySyncChainContextKey struct{}
@@ -184,6 +186,7 @@ type DevicePool struct {
 	startTime           time.Time
 	onDemandSyncTargets map[uuid.UUID]*onDemandSyncTarget // one active request per device
 	lifecycleLocks      sync.Map
+	groupSyncLocks      sync.Map
 	deletionOnce        sync.Once
 	deletionCancel      context.CancelFunc
 	deletionWG          sync.WaitGroup
@@ -563,6 +566,23 @@ func (p *DevicePool) handleEvent(ctx context.Context, instance *DeviceInstance, 
 	case *events.Contact:
 		p.handleContactEvent(ctx, instance, evt)
 
+	case *events.JoinedGroup:
+		if !p.GroupsEnabledForAccount(instance.AccountID) {
+			return
+		}
+		instance.mu.RLock()
+		receiveGroups := instance.ReceiveMessages
+		instance.mu.RUnlock()
+		if !receiveGroups {
+			return
+		}
+		if hidden, _ := p.repos.Chat.GroupHidden(ctx, instance.AccountID, instance.ID, evt.JID.String()); !hidden {
+			if chat, err := p.saveGroupInfo(ctx, instance, &evt.GroupInfo, true); err == nil {
+				p.broadcastGroup(chat)
+			}
+		}
+	case *events.GroupInfo:
+		p.handleGroupInfo(ctx, instance, evt)
 	case *events.HistorySync:
 		log.Printf("[HistorySync] EVENT RECEIVED: type=%v, conversations=%d, device=%s",
 			evt.Data.GetSyncType(), len(evt.Data.Conversations), instance.ID)
@@ -620,6 +640,9 @@ func (p *DevicePool) handleConnected(ctx context.Context, instance *DeviceInstan
 		backgroundCtx := context.Background()
 		p.reconcilePendingChatIdentities(backgroundCtx, instance)
 		p.syncContacts(backgroundCtx, instance)
+		if _, err := p.SyncGroups(backgroundCtx, instance.AccountID, instance.ID); err != nil {
+			log.Printf("[Groups] discovery unavailable device=%s: %v", instance.ID, err)
+		}
 	}()
 }
 
@@ -751,19 +774,20 @@ func (p *DevicePool) reconnectSupervisor(instance *DeviceInstance) {
 
 // messageContentResult holds extracted message content fields
 type messageContentResult struct {
-	Body          string
-	MessageType   string
-	MediaURL      *string
-	MediaMimetype *string
-	MediaFilename *string
-	MediaSize     *int64
-	MediaAssetID  *uuid.UUID
-	Latitude      *float64
-	Longitude     *float64
-	ContactName   *string
-	ContactPhone  *string
-	ContactVCard  *string
-	IsViewOnce    bool
+	MediaUnavailableReason string
+	Body                   string
+	MessageType            string
+	MediaURL               *string
+	MediaMimetype          *string
+	MediaFilename          *string
+	MediaSize              *int64
+	MediaAssetID           *uuid.UUID
+	Latitude               *float64
+	Longitude              *float64
+	ContactName            *string
+	ContactPhone           *string
+	ContactVCard           *string
+	IsViewOnce             bool
 }
 
 type storedMediaResult struct {
@@ -956,6 +980,10 @@ func (p *DevicePool) extractMessageContent(ctx context.Context, instance *Device
 
 // handleMessage processes incoming messages
 func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance, evt *events.Message) {
+	if evt.Info.Chat.Server == types.GroupServer {
+		p.handleGroupMessage(ctx, instance, evt)
+		return
+	}
 	leadPolicy, leadPolicyErr := p.repos.Account.GetLeadPolicy(ctx, instance.AccountID)
 	// Statuses are a separate domain. Persist only statuses sent by this
 	// account's own device and deliberately discard every contact status. A
@@ -1008,7 +1036,7 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 	}
 
 	// Handle protocol messages (revoke, edit, etc.)
-	if protocolMsg := evt.Message.GetProtocolMessage(); protocolMsg != nil {
+	if protocolMsg := groupEventProtocol(evt); protocolMsg != nil {
 		if protocolMsg.GetType() == waE2E.ProtocolMessage_REVOKE {
 			revokedID := protocolMsg.GetKey().GetID()
 			chatJID := evt.Info.Chat.ToNonAD().String()
@@ -1039,37 +1067,20 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 
 		if protocolMsg.GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT {
 			editedMsgID := protocolMsg.GetKey().GetID()
-			chatJID := evt.Info.Chat.ToNonAD().String()
-			if _, identity, identityErr := p.getOrCreateMessageChat(ctx, instance, evt.Info.MessageSource, ""); identityErr == nil && !identity.JID.IsEmpty() {
-				chatJID = identity.JID.ToNonAD().String()
+			chat, _, identityErr := p.getOrCreateMessageChat(ctx, instance, evt.Info.MessageSource, "")
+			if identityErr != nil || chat == nil {
+				return
 			}
-
-			newBody := ""
-			if editedMsg := protocolMsg.GetEditedMessage(); editedMsg != nil {
-				if editedMsg.GetConversation() != "" {
-					newBody = editedMsg.GetConversation()
-				} else if editedMsg.GetExtendedTextMessage() != nil {
-					newBody = editedMsg.GetExtendedTextMessage().GetText()
-				}
+			content := p.extractMessageContent(ctx, nil, protocolMsg.GetEditedMessage(), chat.JID, editedMsgID)
+			edited := &domain.Message{AccountID: instance.AccountID, Body: &content.Body}
+			p.attachReceivedLinkPreview(ctx, edited, protocolMsg.GetEditedMessage(), evt.IsViewOnce)
+			if err := p.repos.Message.EditInChatWithLinkPreview(ctx, instance.AccountID, chat.ID, editedMsgID, content.Body, edited.LinkPreview, edited.LinkPreviewMediaAssetID, edited); err != nil {
+				return
 			}
-
-			if err := p.repos.Message.UpdateBody(ctx, instance.AccountID, chatJID, editedMsgID, newBody); err != nil {
-				log.Printf("[Edit] Failed to update message %s: %v", editedMsgID, err)
-			}
-			if chat, err := p.repos.Chat.FindByJID(ctx, instance.AccountID, chatJID); err == nil && chat != nil {
-				p.invalidateChatCaches(instance.AccountID, chat.ID)
-			} else {
-				p.invalidateAccountMessageCaches(instance.AccountID)
-			}
-
-			p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageEdited, map[string]interface{}{
-				"chat_jid":   chatJID,
-				"message_id": editedMsgID,
-				"new_body":   newBody,
-				"is_from_me": evt.Info.IsFromMe,
+			p.invalidateChatCaches(instance.AccountID, chat.ID)
+			p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventMessageEdited, map[string]interface{}{
+				"chat_id": chat.ID, "device_id": instance.ID, "chat_jid": chat.JID, "message_id": editedMsgID, "new_body": content.Body, "link_preview": edited.LinkPreview, "link_preview_version": edited.LinkPreviewVersion, "is_from_me": evt.Info.IsFromMe,
 			})
-
-			log.Printf("[Edit] Message %s edited in chat %s", editedMsgID, chatJID)
 			return
 		}
 
@@ -1324,8 +1335,10 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 	if msg.IsFromMe && msg.Sender == nil {
 		msg.Sender = &domain.MessageSender{Origin: "whatsapp_external"}
 	}
+	p.attachReceivedLinkPreview(ctx, msg, evt.Message, evt.IsViewOnce)
 	if err := p.repos.Message.Create(ctx, msg); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			p.enrichReceivedLinkPreview(ctx, instance, msg)
 			p.hydrateMessageQuote(ctx, instance.AccountID, chat.ID, msg.MessageID, quote)
 		}
 		log.Printf("[Message] Failed to save message: %v", err)
@@ -1381,7 +1394,7 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 	}
 
 	// Broadcast to frontend
-	p.hub.BroadcastNewMessage(instance.AccountID, map[string]interface{}{
+	p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventNewMessage, map[string]interface{}{
 		"chat_id":     chat.ID.String(),
 		"message":     msg,
 		"chat_jid":    chatJID,
@@ -1626,8 +1639,23 @@ func (p *DevicePool) downloadAndStoreMediaWithSource(ctx context.Context, instan
 		return nil, fmt.Errorf("storage not configured")
 	}
 
-	// Download media
-	data, err := instance.Client.Download(ctx, msg)
+	// Group traffic shares a bounded live/recovery budget. Direct messages and
+	// own statuses retain their existing provider path.
+	var data []byte
+	var err error
+	if source == "chat" && domain.IsGroupJID(chatJID) {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 40*time.Second)
+		defer cancel()
+		release, slotErr := acquireGroupMediaSlot(ctx, groupMediaSlots)
+		if slotErr != nil {
+			return nil, slotErr
+		}
+		defer release() // Retain the slot through hash, upload and inventory work.
+		data, err = downloadGroupMedia(ctx, instance.Client, msg)
+	} else {
+		data, err = instance.Client.Download(ctx, msg)
+	}
 	if err != nil {
 		log.Printf("[Media] Failed to download: %v", err)
 		return nil, err
@@ -1771,6 +1799,10 @@ func (p *DevicePool) downloadAndStoreMediaWithSource(ctx context.Context, instan
 
 // handleReceipt processes delivery/read receipts
 func (p *DevicePool) handleReceipt(ctx context.Context, instance *DeviceInstance, evt *events.Receipt) {
+	if evt.Chat.Server == types.GroupServer {
+		p.handleGroupReceipt(ctx, instance, evt)
+		return
+	}
 	// Status read/played receipts identify viewers of the device owner's own
 	// status. They must never flow into chat message delivery state.
 	if evt != nil && evt.Chat.Server == types.BroadcastServer && evt.Chat.User == types.StatusBroadcastJID.User {
@@ -1846,7 +1878,8 @@ func (p *DevicePool) handleChatPresence(ctx context.Context, instance *DeviceIns
 		media = "audio"
 	}
 
-	p.hub.BroadcastToAccount(instance.AccountID, ws.EventTyping, map[string]interface{}{
+	p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventTyping, map[string]interface{}{
+		"device_id": instance.ID,
 		"jid":       jid,
 		"sender":    senderJID,
 		"composing": evt.State == types.ChatPresenceComposing,
@@ -1867,6 +1900,9 @@ func (p *DevicePool) handlePresence(ctx context.Context, instance *DeviceInstanc
 // events.Contact comes from app state sync and has Action (*waSyncAction.ContactAction)
 // with GetFullName() and GetFirstName() methods (no BusinessName/PushName here)
 func (p *DevicePool) handleContactEvent(ctx context.Context, instance *DeviceInstance, evt *events.Contact) {
+	if evt.JID.Server != types.DefaultUserServer && evt.JID.Server != types.HiddenUserServer {
+		return
+	}
 	jid := evt.JID.ToNonAD().String()
 	phone := evt.JID.User
 	lidJID := ""
@@ -1909,6 +1945,9 @@ func (p *DevicePool) handleContactEvent(ctx context.Context, instance *DeviceIns
 
 // handlePushName processes push name updates
 func (p *DevicePool) handlePushName(ctx context.Context, instance *DeviceInstance, evt *events.PushName) {
+	if evt.Message != nil && evt.Message.Chat.Server == types.GroupServer {
+		return
+	}
 	jid := evt.JID.ToNonAD().String()
 	log.Printf("[PushName] %s -> %s", jid, evt.NewPushName)
 
@@ -1987,11 +2026,13 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 	totalSaved := 0
 	totalDuplicates := 0
 	totalQuotesHydrated := 0
+	totalContentHydrated := 0
 	totalGroups := 0
 	totalLIDFail := 0
 	totalEmpty := 0
 	totalProtocol := 0
 	totalParseErr := 0
+	batchAnchors := map[uuid.UUID]*types.MessageInfo{}
 
 	for convIdx, conv := range evt.Data.Conversations {
 		convJID := conv.GetID()
@@ -2005,9 +2046,13 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 			log.Printf("[HistorySync] Failed to parse JID %s: %v", convJID, err)
 			continue
 		}
-		if parsed.Server != types.DefaultUserServer && parsed.Server != types.HiddenUserServer {
+		if parsed.Server != types.DefaultUserServer && parsed.Server != types.HiddenUserServer && parsed.Server != types.GroupServer {
 			totalGroups += len(conv.Messages)
 			continue // skip groups (g.us), broadcast, newsletter
+		}
+
+		if parsed.Server == types.GroupServer && !p.GroupsEnabledForAccount(instance.AccountID) {
+			continue
 		}
 
 		// Resolve LID when the durable provider map is available. Unresolved
@@ -2025,11 +2070,21 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 			continue
 		}
 
-		// Get or create chat
+		// Hidden groups stay deleted until new activity, not a history/catalog replay.
+		if parsed.Server == types.GroupServer {
+			hidden, e := p.repos.Chat.GroupHidden(ctx, instance.AccountID, instance.ID, chatJID)
+			if e != nil || hidden {
+				continue
+			}
+		}
 		chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, chatJID, "")
 		if err != nil {
 			log.Printf("[HistorySync] Failed to get/create chat for %s: %v", chatJID, err)
 			continue
+		}
+
+		if parsed.Server == types.GroupServer {
+			p.queueInitialGroupAvatar(instance, chat)
 		}
 
 		// Log details for small batches (ON_DEMAND, debug)
@@ -2041,6 +2096,11 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 		convSaved := 0
 		var oldestTimestamp time.Time
 
+		if parsed.Server == types.GroupServer {
+			sort.SliceStable(conv.Messages, func(i, j int) bool {
+				return conv.Messages[i].GetMessage().GetMessageTimestamp() < conv.Messages[j].GetMessage().GetMessageTimestamp()
+			})
+		}
 		for _, histMsg := range conv.Messages {
 			webMsg := histMsg.GetMessage()
 			if webMsg == nil {
@@ -2054,10 +2114,37 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 				continue
 			}
 
+			if old := batchAnchors[chat.ID]; old == nil || parsedEvt.Info.Timestamp.Before(old.Timestamp) {
+				anchor := parsedEvt.Info
+				if rawID := webMsg.GetKey().GetID(); rawID != "" {
+					anchor.ID = rawID
+				}
+				batchAnchors[chat.ID] = &anchor
+			}
+
 			// Skip reactions, polls, protocol messages — only regular content
 			if parsedEvt.Message == nil {
 				totalProtocol++
 				continue
+			}
+			if parsed.Server == types.GroupServer {
+				historyCtx := context.WithValue(ctx, groupHistoryContextKey{}, true)
+				if reaction := parsedEvt.Message.GetReactionMessage(); reaction != nil {
+					p.handleReaction(historyCtx, instance, parsedEvt, reaction)
+					continue
+				}
+				if poll := groupPollCreation(parsedEvt.Message); poll != nil {
+					p.handlePollCreation(historyCtx, instance, parsedEvt, poll)
+					continue
+				}
+				if vote := parsedEvt.Message.GetPollUpdateMessage(); vote != nil {
+					p.handlePollUpdate(historyCtx, instance, parsedEvt, vote)
+					continue
+				}
+				if protocol := groupEventProtocol(parsedEvt); protocol != nil {
+					p.applyGroupProtocol(historyCtx, instance, chat, protocol)
+					continue
+				}
 			}
 			if parsedEvt.Message.GetReactionMessage() != nil ||
 				parsedEvt.Message.GetPollCreationMessage() != nil ||
@@ -2079,6 +2166,9 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 			// Media downloads block the event handler for too long with hundreds of conversations.
 			// Messages will have type/mimetype metadata but no media URL.
 			content := p.extractMessageContent(ctx, nil, parsedEvt.Message, chatJID, parsedEvt.Info.ID)
+			if parsedEvt.Info.Chat.Server == types.GroupServer {
+				content, _ = p.extractGroupMessageContent(ctx, nil, parsedEvt.Message, chatJID, parsedEvt.Info.ID, parsedEvt.IsViewOnce)
+			}
 
 			// Skip empty text messages (media messages without URL are kept — they have type info)
 			if content.Body == "" && content.MessageType == domain.MessageTypeText {
@@ -2091,6 +2181,9 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 				resolvedIdentity := p.resolveMessagePeerIdentity(ctx, parsedEvt.Info.MessageSource)
 				if !resolvedIdentity.JID.IsEmpty() {
 					senderJID = resolvedIdentity.JID.ToNonAD().String()
+					if parsedEvt.Info.Chat.Server == types.GroupServer {
+						senderJID = groupSenderIdentity(parsedEvt.Info.MessageSource).String()
+					}
 				}
 			}
 
@@ -2101,35 +2194,48 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 			}
 
 			msg := &domain.Message{
-				AccountID:     instance.AccountID,
-				DeviceID:      &instance.ID,
-				ChatID:        chat.ID,
-				MessageID:     parsedEvt.Info.ID,
-				FromJID:       strPtr(senderJID),
-				FromName:      strPtr(parsedEvt.Info.PushName),
-				Body:          strPtr(content.Body),
-				MessageType:   strPtr(content.MessageType),
-				MediaURL:      content.MediaURL,
-				MediaMimetype: content.MediaMimetype,
-				MediaFilename: content.MediaFilename,
-				MediaSize:     content.MediaSize,
-				IsFromMe:      isFromMe,
-				Status:        strPtr(status),
-				Timestamp:     parsedEvt.Info.Timestamp,
-				Latitude:      content.Latitude,
-				Longitude:     content.Longitude,
-				ContactName:   content.ContactName,
-				ContactPhone:  content.ContactPhone,
-				ContactVCard:  content.ContactVCard,
-				IsViewOnce:    content.IsViewOnce,
+				AccountID:              instance.AccountID,
+				DeviceID:               &instance.ID,
+				ChatID:                 chat.ID,
+				MessageID:              parsedEvt.Info.ID,
+				FromJID:                strPtr(senderJID),
+				FromName:               strPtr(parsedEvt.Info.PushName),
+				Body:                   strPtr(content.Body),
+				MessageType:            strPtr(content.MessageType),
+				MediaURL:               content.MediaURL,
+				MediaMimetype:          content.MediaMimetype,
+				MediaFilename:          content.MediaFilename,
+				MediaSize:              content.MediaSize,
+				MediaUnavailableReason: content.MediaUnavailableReason,
+				IsFromMe:               isFromMe,
+				Status:                 strPtr(status),
+				Timestamp:              parsedEvt.Info.Timestamp,
+				Latitude:               content.Latitude,
+				Longitude:              content.Longitude,
+				ContactName:            content.ContactName,
+				ContactPhone:           content.ContactPhone,
+				ContactVCard:           content.ContactVCard,
+				IsViewOnce:             content.IsViewOnce || parsedEvt.IsViewOnce,
 			}
 
 			quote := p.extractMessageQuote(ctx, instance, chat.ID, parsedEvt.Message)
 			quote.Apply(msg)
+			if parsedEvt.Info.Chat.Server == types.GroupServer {
+				msg.Mentions = groupMessageMentions(parsedEvt.Message)
+			}
 			msg.IsRead = true
 			msg.Sender = &domain.MessageSender{Origin: "history"}
+			if historyLinkPreviewAllowed(parsedEvt) {
+				p.attachReceivedLinkPreview(ctx, msg, parsedEvt.Message, parsedEvt.IsViewOnce)
+			}
 			if err := p.repos.Message.Create(ctx, msg); err != nil {
 				totalDuplicates++
+				if errors.Is(err, pgx.ErrNoRows) {
+					p.enrichReceivedLinkPreview(ctx, instance, msg)
+				}
+				if parsed.Server == types.GroupServer {
+					p.rememberGroupMedia(ctx, instance.AccountID, chat.ID, parsedEvt)
+				}
 				if errors.Is(err, pgx.ErrNoRows) && p.hydrateMessageQuote(ctx, instance.AccountID, chat.ID, msg.MessageID, quote) {
 					totalQuotesHydrated++
 				}
@@ -2141,6 +2247,15 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 				continue
 			}
 
+			if parsed.Server == types.GroupServer {
+				p.rememberGroupMedia(ctx, instance.AccountID, chat.ID, parsedEvt)
+			}
+			if msg.RepairedPlaceholder {
+				totalContentHydrated++
+				_ = p.repos.Message.HydrateMentions(ctx, instance.AccountID, chat.ID, []*domain.Message{msg})
+				p.broadcastGroupMessageRepair(ctx, instance, msg)
+				continue
+			}
 			convSaved++
 			totalSaved++
 			if totalConversations <= 5 {
@@ -2162,7 +2277,7 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 	log.Printf("[HistorySync] Complete: saved=%d duplicates=%d groups=%d lidFail=%d empty=%d protocol=%d parseErr=%d conversations=%d",
 		totalSaved, totalDuplicates, totalGroups, totalLIDFail, totalEmpty, totalProtocol, totalParseErr, totalConversations)
 
-	if totalSaved > 0 || totalQuotesHydrated > 0 {
+	if totalSaved > 0 || totalQuotesHydrated > 0 || totalContentHydrated > 0 {
 		if p.cache != nil {
 			_ = p.cache.DelPattern(context.Background(), "chats:"+instance.AccountID.String()+":*")
 		}
@@ -2181,23 +2296,35 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 			p.mu.Lock()
 			if current := p.onDemandSyncTargets[instance.ID]; current != nil && current.RequestID == target.RequestID {
 				current.Saved += totalSaved
+				current.StartedAt = time.Now()
 				snapshot := *current
 				target = &snapshot
 			}
 			p.mu.Unlock()
-			finished := totalSaved == 0
+			candidate := batchAnchors[target.ChatID]
+			progressed := historyAnchorAdvances(target.Anchor, candidate)
+			if progressed {
+				p.mu.Lock()
+				if current := p.onDemandSyncTargets[instance.ID]; current != nil && current.RequestID == target.RequestID {
+					anchor := *candidate
+					current.Anchor = &anchor
+				}
+				p.mu.Unlock()
+			}
+			finished := !progressed
 			p.hub.BroadcastToAccountWithPermission(target.AccountID, domain.PermChats, ws.EventHistorySyncComplete, map[string]interface{}{
-				"account_id":      target.AccountID.String(),
-				"device_id":       target.DeviceID.String(),
-				"chat_id":         target.ChatID.String(),
-				"request_id":      target.RequestID.String(),
-				"messages_saved":  target.Saved,
-				"batch_saved":     totalSaved,
-				"duplicates":      totalDuplicates,
-				"quotes_hydrated": totalQuotesHydrated,
-				"finished":        finished,
+				"account_id":        target.AccountID.String(),
+				"device_id":         target.DeviceID.String(),
+				"chat_id":           target.ChatID.String(),
+				"request_id":        target.RequestID.String(),
+				"messages_saved":    target.Saved,
+				"batch_saved":       totalSaved,
+				"duplicates":        totalDuplicates,
+				"quotes_hydrated":   totalQuotesHydrated,
+				"messages_repaired": totalContentHydrated,
+				"finished":          finished,
 			})
-			if totalSaved > 0 {
+			if progressed {
 				log.Printf("[HistorySync] Auto-chaining: requesting more messages for %s (saved %d in this batch)", target.ChatJID, totalSaved)
 				// Small delay to avoid hammering the phone
 				go func() {
@@ -2236,6 +2363,9 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 // It finds the oldest message timestamp and requests messages before that point.
 // deviceID specifies which device to use (must be the device that owns the chat).
 func (p *DevicePool) RequestHistorySync(ctx context.Context, accountID uuid.UUID, deviceID uuid.UUID, chatID uuid.UUID, chatJID string) error {
+	if domain.IsGroupJID(chatJID) && !p.GroupsEnabledForAccount(accountID) {
+		return fmt.Errorf("los grupos todavía no están habilitados para esta cuenta")
+	}
 	release, lifecycleErr := p.acquireDeviceOperation(ctx, accountID, deviceID)
 	if lifecycleErr != nil {
 		return lifecycleErr
@@ -2301,6 +2431,18 @@ func (p *DevicePool) RequestHistorySync(ctx context.Context, accountID uuid.UUID
 
 	// Find the oldest message in this chat to paginate before it
 	oldestMsg, err := p.repos.Message.GetOldestByChatID(ctx, chatID)
+	if targetJID.Server == types.GroupServer && !isChain {
+		// A known empty transport placeholder needs an authoritative page that
+		// includes it. Subsequent batches still advance through normal anchors.
+		recoveryAnchor, anchorErr := p.repos.Message.GetGroupHistoryRecoveryAnchor(ctx, accountID, deviceID, chatID)
+		if anchorErr != nil {
+			cleanupReservation()
+			return fmt.Errorf("resolve group history anchor: %w", anchorErr)
+		}
+		if recoveryAnchor != nil {
+			oldestMsg, err = recoveryAnchor, nil
+		}
+	}
 
 	var msgInfo *types.MessageInfo
 	if err == nil && oldestMsg != nil {
@@ -2317,8 +2459,27 @@ func (p *DevicePool) RequestHistorySync(ctx context.Context, accountID uuid.UUID
 			msgInfo.Sender = instance.Client.Store.ID.ToNonAD()
 		} else {
 			msgInfo.Sender = targetJID
+			if targetJID.Server == types.GroupServer && oldestMsg.FromJID != nil {
+				if sender, parseErr := types.ParseJID(*oldestMsg.FromJID); parseErr == nil {
+					msgInfo.Sender = sender.ToNonAD()
+				}
+			}
 		}
 	}
+
+	if isChain && target.Anchor != nil {
+		anchor := *target.Anchor
+		msgInfo = &anchor
+	}
+	if msgInfo == nil {
+		msgInfo = &types.MessageInfo{MessageSource: types.MessageSource{Chat: targetJID, IsGroup: targetJID.Server == types.GroupServer}, Timestamp: time.Now()}
+	}
+	p.mu.Lock()
+	if current := p.onDemandSyncTargets[deviceID]; current != nil && current.RequestID == target.RequestID {
+		anchor := *msgInfo
+		current.Anchor = &anchor
+	}
+	p.mu.Unlock()
 
 	// Log exact details being sent
 	if msgInfo != nil {
@@ -2364,6 +2525,9 @@ func (p *DevicePool) handleReaction(ctx context.Context, instance *DeviceInstanc
 	}
 	if !isFromMe && !identity.JID.IsEmpty() {
 		senderJID = canonicalReactionSenderJID(identity.JID.ToNonAD().String())
+		if evt.Info.Chat.Server == types.GroupServer {
+			senderJID = groupSenderIdentity(evt.Info.MessageSource).String()
+		}
 	}
 
 	changed := false
@@ -2429,6 +2593,9 @@ func (p *DevicePool) handlePollCreation(ctx context.Context, instance *DeviceIns
 	chatJID := identity.JID.ToNonAD().String()
 	if !isFromMe && !identity.JID.IsEmpty() {
 		senderJID = identity.JID.ToNonAD().String()
+		if evt.Info.Chat.Server == types.GroupServer {
+			senderJID = groupSenderIdentity(evt.Info.MessageSource).String()
+		}
 	}
 
 	question := pollMsg.GetName()
@@ -2468,6 +2635,10 @@ func (p *DevicePool) handlePollCreation(ctx context.Context, instance *DeviceIns
 		PollMaxSelections: maxSelections,
 	}
 
+	if history, _ := ctx.Value(groupHistoryContextKey{}).(bool); history {
+		msg.IsRead = true
+		msg.Sender = &domain.MessageSender{Origin: "history"}
+	}
 	if err := p.repos.Message.Create(ctx, msg); err != nil {
 		log.Printf("[Poll] Failed to save message: %v", err)
 		return
@@ -2481,10 +2652,14 @@ func (p *DevicePool) handlePollCreation(ctx context.Context, instance *DeviceIns
 
 	// Load options for response
 	msg.PollOptions, _ = p.repos.Poll.GetOptions(ctx, msg.ID)
+	if msg.RepairedPlaceholder {
+		p.broadcastGroupMessageRepair(ctx, instance, msg)
+		return
+	}
 
 	_ = p.repos.Chat.UpdateLastMessage(ctx, instance.AccountID, chat.ID, "📊 "+question, evt.Info.Timestamp, !isFromMe)
 
-	p.hub.BroadcastNewMessage(instance.AccountID, map[string]interface{}{
+	p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventNewMessage, map[string]interface{}{
 		"chat_id":     chat.ID.String(),
 		"message":     msg,
 		"chat_jid":    chatJID,
@@ -2543,6 +2718,9 @@ func (p *DevicePool) handlePollUpdate(ctx context.Context, instance *DeviceInsta
 	voterJID := evt.Info.Sender.ToNonAD().String()
 	if !evt.Info.IsFromMe && !identity.JID.IsEmpty() {
 		voterJID = identity.JID.ToNonAD().String()
+		if evt.Info.Chat.Server == types.GroupServer {
+			voterJID = groupSenderIdentity(evt.Info.MessageSource).String()
+		}
 	}
 	vote := &domain.PollVote{
 		MessageID:     pollMsg.ID,
@@ -2563,7 +2741,7 @@ func (p *DevicePool) handlePollUpdate(ctx context.Context, instance *DeviceInsta
 	allVotes, _ := p.repos.Poll.GetVotes(ctx, pollMsg.ID)
 
 	// Broadcast to frontend
-	p.hub.BroadcastToAccount(instance.AccountID, ws.EventPollUpdate, map[string]interface{}{
+	p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventPollUpdate, map[string]interface{}{
 		"chat_id":    chat.ID.String(),
 		"message_id": pollMsg.MessageID,
 		"options":    updatedOptions,
@@ -2598,6 +2776,23 @@ func (p *DevicePool) syncContacts(ctx context.Context, instance *DeviceInstance)
 
 	log.Printf("[ContactSync] Device %s: syncing %d contacts", instance.ID, len(allContacts))
 
+	// Provider push names include group-only authors. Only address-book entries
+	// or an existing direct conversation may flow into personal CRM contacts.
+	directPeers := map[string]bool{}
+	rows, peerErr := p.repos.DB().Query(ctx, `SELECT jid FROM chats WHERE account_id=$1 AND channel_key='whatsapp_web' AND jid NOT LIKE '%@g.us'`, instance.AccountID)
+	if peerErr != nil {
+		return
+	}
+	for rows.Next() {
+		var peer string
+		if rows.Scan(&peer) == nil {
+			directPeers[peer] = true
+		}
+	}
+	rows.Close()
+	if rows.Err() != nil {
+		return
+	}
 	synced := 0
 	for jid, info := range allContacts {
 		// Skip non-user contacts (groups, broadcasts, etc.)
@@ -2618,6 +2813,10 @@ func (p *DevicePool) syncContacts(ctx context.Context, instance *DeviceInstance)
 			} else {
 				continue
 			}
+		}
+
+		if !shouldSyncProviderContact(info, directPeers[normalizedJID] || directPeers[lidJID]) {
+			continue
 		}
 
 		// Determine best name
@@ -2737,6 +2936,11 @@ func (p *DevicePool) SendChatPresence(ctx context.Context, deviceID uuid.UUID, t
 		mediaType = types.ChatPresenceMediaAudio
 	}
 
+	if jid.Server == types.GroupServer {
+		if err := p.requireGroupSend(ctx, instance, jid); err != nil {
+			return err
+		}
+	}
 	return instance.Client.SendChatPresence(ctx, jid, state, mediaType)
 }
 
@@ -2765,6 +2969,10 @@ func (p *DevicePool) SendReadReceipt(ctx context.Context, deviceID uuid.UUID, ch
 		}
 	} else {
 		chat = types.NewJID(chatJID, types.DefaultUserServer)
+	}
+
+	if chat.Server == types.GroupServer {
+		return p.sendGroupReadReceipt(ctx, instance, chat, messageIDs)
 	}
 
 	// Parse sender JID (empty for 1-on-1 chats)
@@ -2806,18 +3014,13 @@ func (p *DevicePool) IsOnWhatsApp(ctx context.Context, deviceID uuid.UUID, phone
 		return nil, fmt.Errorf("failed to check WhatsApp: %w", err)
 	}
 
-	var checkResults []domain.WhatsAppCheckResult
+	checkResults := make([]domain.WhatsAppCheckResult, 0, len(results))
 	for _, r := range results {
-		verifiedName := ""
-		if r.VerifiedName != nil && r.VerifiedName.Details != nil {
-			verifiedName = r.VerifiedName.Details.GetVerifiedName()
+		var mappedPhone types.JID
+		if r.JID.Server == types.HiddenUserServer && phoneIdentityJID(r.PhoneNumber).IsEmpty() && p.store != nil && p.store.LIDMap != nil {
+			mappedPhone, _ = p.store.LIDMap.GetPNForLID(ctx, r.JID.ToNonAD())
 		}
-		checkResults = append(checkResults, domain.WhatsAppCheckResult{
-			Phone:        r.Query,
-			IsOnWhatsApp: r.IsIn,
-			JID:          r.JID.String(),
-			VerifiedName: verifiedName,
-		})
+		checkResults = append(checkResults, whatsAppCheckResult(r, mappedPhone))
 	}
 
 	return checkResults, nil
@@ -2850,6 +3053,11 @@ func (p *DevicePool) RevokeMessage(ctx context.Context, deviceID uuid.UUID, chat
 		chat = types.NewJID(chatJID, types.DefaultUserServer)
 	}
 
+	if chat.Server == types.GroupServer {
+		if err := p.requireGroupSend(ctx, instance, chat); err != nil {
+			return err
+		}
+	}
 	_, err := instance.Client.RevokeMessage(ctx, chat, messageID)
 	if err != nil {
 		return fmt.Errorf("failed to revoke message: %w", err)
@@ -2888,9 +3096,9 @@ func (p *DevicePool) EditMessage(ctx context.Context, deviceID uuid.UUID, chatJI
 		return err
 	}
 
-	editedMsg := instance.Client.BuildEdit(chat, messageID, &waE2E.Message{
-		Conversation: proto.String(newBody),
-	})
+	editedContent := &waE2E.Message{Conversation: proto.String(newBody)}
+	applyOutboundGroupMentions(ctx, chat, editedContent)
+	editedMsg := instance.Client.BuildEdit(chat, messageID, editedContent)
 
 	_, err := instance.Client.SendMessage(ctx, chat, editedMsg)
 	if err != nil {
@@ -2985,7 +3193,7 @@ func (p *DevicePool) SendMessage(ctx context.Context, deviceID uuid.UUID, to, bo
 	_ = p.repos.Chat.UpdateLastMessage(ctx, instance.AccountID, chat.ID, body, resp.Timestamp, false)
 
 	// Broadcast to frontend
-	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageSent, map[string]interface{}{
+	p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventMessageSent, map[string]interface{}{
 		"chat_id": chat.ID.String(),
 		"message": message,
 	})
@@ -3002,12 +3210,14 @@ func (p *DevicePool) sendMessageWithLIDFallback(ctx context.Context, instance *D
 	if err := p.ensureOutboundAllowed(ctx, instance, jid); err != nil {
 		return whatsmeow.SendResponse{}, jid, err
 	}
-	resp, err := instance.Client.SendMessage(ctx, jid, msg)
+	applyOutboundGroupMentions(ctx, jid, msg)
+	request := whatsmeow.SendRequestExtra{ID: instance.Client.GenerateMessageID()}
+	resp, err := instance.Client.SendMessage(ctx, jid, msg, request)
 	if err == nil {
-		return resp, jid, nil
+		return resp, p.sentMessageChatIdentity(ctx, jid, resp), nil
 	}
 
-	if jid.Server != types.DefaultUserServer || !strings.Contains(err.Error(), "server returned error 463") {
+	if !shouldRetrySendViaLID(jid, resp, err) || p.store == nil || p.store.LIDMap == nil {
 		return resp, jid, err
 	}
 
@@ -3023,17 +3233,20 @@ func (p *DevicePool) sendMessageWithLIDFallback(ctx context.Context, instance *D
 	}
 
 	log.Printf("[%s] WhatsApp returned 463 for %s, retrying via LID %s", label, jid.ToNonAD().String(), lidJID.ToNonAD().String())
-	lidResp, retryErr := instance.Client.SendMessage(ctx, lidJID, msg)
+	lidResp, retryErr := instance.Client.SendMessage(ctx, lidJID, msg, request)
 	if retryErr != nil {
 		return resp, jid, fmt.Errorf("%w; LID retry to %s also failed: %v", err, lidJID.ToNonAD().String(), retryErr)
 	}
-	return lidResp, lidJID, nil
+	return lidResp, p.sentMessageChatIdentity(ctx, jid, lidResp), nil
 }
 
 // ensureOutboundAllowed is the final fail-closed guard shared by manual sends,
 // campaigns, automations and dynamic activities. Handler checks remain useful
 // for friendly UX, but no caller can bypass this point by invoking DevicePool.
 func (p *DevicePool) ensureOutboundAllowed(ctx context.Context, instance *DeviceInstance, recipient types.JID) error {
+	if recipient.Server == types.GroupServer {
+		return p.requireGroupSend(ctx, instance, recipient)
+	}
 	if instance == nil || instance.AccountID == uuid.Nil {
 		return fmt.Errorf("no se pudo validar la cuenta del dispositivo")
 	}
@@ -3156,7 +3369,7 @@ func (p *DevicePool) SendReplyMessage(ctx context.Context, deviceID uuid.UUID, t
 	_ = p.repos.Chat.UpdateLastMessage(ctx, instance.AccountID, chat.ID, body, resp.Timestamp, false)
 
 	// Broadcast to frontend
-	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageSent, map[string]interface{}{
+	p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventMessageSent, map[string]interface{}{
 		"chat_id": chat.ID.String(),
 		"message": message,
 	})
@@ -3374,7 +3587,7 @@ func (p *DevicePool) SendPoll(ctx context.Context, deviceID uuid.UUID, to, quest
 	_ = p.repos.Chat.UpdateLastMessage(ctx, instance.AccountID, chat.ID, "📊 "+question, resp.Timestamp, false)
 
 	// Broadcast
-	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageSent, map[string]interface{}{
+	p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventMessageSent, map[string]interface{}{
 		"chat_id": chat.ID.String(),
 		"message": message,
 	})
@@ -3923,7 +4136,7 @@ func (p *DevicePool) sendPreUploadedMediaMessage(ctx context.Context, deviceID u
 	}
 	_ = p.repos.Chat.UpdateLastMessage(ctx, instance.AccountID, chat.ID, lastMsg, sendResp.Timestamp, false)
 
-	p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageSent, map[string]interface{}{
+	p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventMessageSent, map[string]interface{}{
 		"chat_id": chat.ID.String(),
 		"message": message,
 	})
@@ -4053,7 +4266,7 @@ func (p *DevicePool) SendContactMessage(ctx context.Context, deviceID uuid.UUID,
 
 	// Broadcast via WebSocket
 	if p.hub != nil {
-		p.hub.BroadcastToAccount(instance.AccountID, "new_message", map[string]interface{}{
+		p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, "new_message", map[string]interface{}{
 			"chat_id": chat.ID.String(),
 			"message": dbMsg,
 		})

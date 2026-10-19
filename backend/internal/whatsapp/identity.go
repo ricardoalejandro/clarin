@@ -50,6 +50,9 @@ func explicitMessagePeerIdentity(source types.MessageSource) (types.JID, types.J
 }
 
 func (p *DevicePool) resolveMessagePeerIdentity(ctx context.Context, source types.MessageSource) peerIdentityResolution {
+	if source.Chat.Server == types.GroupServer {
+		return peerIdentityResolution{JID: source.Chat.ToNonAD()}
+	}
 	phoneJID, lidJID := explicitMessagePeerIdentity(source)
 	if !phoneJID.IsEmpty() {
 		if !lidJID.IsEmpty() && p.store != nil && p.store.LIDMap != nil {
@@ -86,6 +89,11 @@ func (p *DevicePool) getOrCreateMessageChat(
 	source types.MessageSource,
 	name string,
 ) (*domain.Chat, peerIdentityResolution, error) {
+	if source.Chat.Server == types.GroupServer {
+		identity := peerIdentityResolution{JID: source.Chat.ToNonAD()}
+		chat, err := p.repos.Chat.GetOrCreateGroup(ctx, instance.AccountID, instance.ID, identity.JID.String(), "")
+		return chat, identity, err
+	}
 	identity := p.resolveMessagePeerIdentity(ctx, source)
 	if instance == nil || identity.JID.IsEmpty() {
 		return nil, identity, fmt.Errorf("WhatsApp peer identity is unavailable")

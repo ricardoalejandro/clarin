@@ -109,7 +109,7 @@ func (p *DevicePool) FetchProfilePicture(ctx context.Context, accountID, deviceI
 			jid = pnJID.ToNonAD()
 		}
 	}
-	if jid.Server != types.DefaultUserServer {
+	if jid.Server != types.DefaultUserServer && jid.Server != types.GroupServer {
 		return nil, profilePictureError("contact_without_whatsapp", "La foto solo está disponible para contactos individuales de WhatsApp")
 	}
 
@@ -199,6 +199,10 @@ func (p *DevicePool) FetchInitialContactAvatar(instance *DeviceInstance, contact
 			"avatar_url":    record.AvatarURL,
 			"revision":      record.Revision,
 			"avatar_source": "whatsapp",
+		}
+		if domain.IsGroupJID(contactJID) {
+			p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventChatUpdate, payload)
+			return
 		}
 		p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermContacts, ws.EventContactUpdate, payload)
 		p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventChatUpdate, payload)

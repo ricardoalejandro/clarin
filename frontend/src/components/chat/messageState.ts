@@ -8,6 +8,28 @@ export function hasSameMessageIdentity(message: Message, candidate: Message): bo
 
 const deliveryLevel: Record<string, number> = { sending: 0, sent: 1, delivered: 2, read: 3 }
 
+export function linkPreviewVersion(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
+}
+
+type PreviewSnapshot = Pick<Message, 'link_preview' | 'link_preview_version'>
+
+/** A preview revision identifies one metadata snapshot, including a removal. */
+export function mergeMessageLinkPreview(current: PreviewSnapshot, snapshot: PreviewSnapshot, revoked = false): PreviewSnapshot {
+  const known = linkPreviewVersion(current.link_preview_version)
+  const incoming = linkPreviewVersion(snapshot.link_preview_version)
+  if (revoked) return {
+    link_preview: null,
+    link_preview_version: incoming === undefined ? known : Math.max(known ?? 0, incoming),
+  }
+  if (snapshot.link_preview === undefined
+    || (snapshot.link_preview_version !== undefined && incoming === undefined)
+    || (known !== undefined && (incoming === undefined || incoming <= known))) {
+    return { link_preview: current.link_preview, link_preview_version: known }
+  }
+  return { link_preview: snapshot.link_preview, link_preview_version: incoming }
+}
+
 /** A server snapshot owns content; already received delivery receipts cannot regress. */
 export function mergeCanonicalMessage(current: Message | undefined, canonical: Message, pendingReaction = false): Message {
   if (!current) return canonical
@@ -21,13 +43,26 @@ export function mergeCanonicalMessage(current: Message | undefined, canonical: M
     delivered_at: canonical.delivered_at ?? current.delivered_at,
     read_at: canonical.read_at ?? current.read_at,
     body: canonical.is_revoked ? undefined : Object.hasOwn(canonical, 'body') ? canonical.body : current.body,
+    ...mergeMessageLinkPreview(current, canonical, canonical.is_revoked || current.is_revoked),
     quoted_message_id: canonical.quoted_message_id ?? current.quoted_message_id,
     quoted_body: canonical.quoted_body ?? current.quoted_body,
     quoted_sender: canonical.quoted_sender ?? current.quoted_sender,
+    quoted_sender_name: canonical.quoted_sender_name ?? current.quoted_sender_name,
+    mentions: canonical.mentions ?? current.mentions,
     quoted_is_from_me: canonical.quoted_is_from_me ?? current.quoted_is_from_me,
     sender: mergeMessageSender(canonical.sender, current.sender),
     reactions: mergeCanonicalReactionSnapshot(current.reactions, canonical.reactions, pendingReaction),
   }
+}
+
+/** Patch only loaded rows; context windows must never extend the main history page. */
+export function mergeCanonicalMessageProjection(messages: Message[], canonical: Message, pendingReaction = false): Message[] {
+  if (!messages.some(message => message.id === canonical.id)) return messages
+  const mediaIsResolved = Boolean(canonical.media_url || canonical.media_deleted || canonical.is_revoked || canonical.media_unavailable_reason)
+  const snapshot = mediaIsResolved ? { ...canonical, media_recoverable: false } : canonical
+  return messages.map(message => message.id === canonical.id
+    ? mergeCanonicalMessage(message, snapshot, pendingReaction)
+    : message)
 }
 
 export function orderChatMessages(messages: Message[]): Message[] {

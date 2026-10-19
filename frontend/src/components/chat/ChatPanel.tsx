@@ -3,7 +3,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  Send, Paperclip, MoreVertical, Search, Phone, Video,
+  Send, Paperclip, Pin, PinOff, Users, MoreVertical, Search, Phone, Video,
   ArrowLeft, Smile, Image as ImageIcon, FileText, X,
   Mic, Trash2, Reply, Check, CheckCheck, Download,
   CornerUpRight, Play, Pause, AlertCircle, User, EyeOff, RefreshCw,
@@ -11,11 +11,13 @@ import {
 } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
-import { Chat, ChatState, Device, Message } from '@/types/chat'
+import { Chat, ChatState, Device, Message, ChatMention } from '@/types/chat'
 import { subscribeWebSocket } from '@/lib/api'
 import { messageBelongsToChat } from './chatEventScope'
 import { chatSenderPhone, validatePinnedChatSender, type ChatSenderSession } from './chatSenderSession'
-import { hasSameMessageIdentity, mergeCanonicalMessage, mergeFetchedMessages, orderChatMessages, reconcileOptimisticMessage } from './messageState'
+import { hasSameMessageIdentity, mergeCanonicalMessage, mergeCanonicalMessageProjection, mergeFetchedMessages, mergeMessageLinkPreview, orderChatMessages, reconcileOptimisticMessage } from './messageState'
+import { updateEditedMessageProjection, updateLinkPreviewProjection, updateRevokedMessageProjection, type LinkPreviewUpdate } from './linkPreviewState'
+import { chatReadError } from './chatReadError'
 import { applyDeviceDeletionResult, isDeviceDeleting } from '@/components/settings/deviceLifecycle'
 import type { DeviceDeletionResult } from '@/types/chat'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
@@ -31,6 +33,14 @@ import { latestReadBoundary, observedIncomingBoundary, mergeChatSnapshot, isConv
 import StickerPicker from './StickerPicker'
 import EmojiPicker from './EmojiPicker'
 import ContactPanel from './ContactPanel'
+import ConversationMenu from './ConversationMenu'
+import GroupDetailsPanel from './GroupDetailsPanel'
+import GroupMentionInput from './GroupMentionInput'
+import { isGroupChat, groupWriteRestriction, groupReactionsUnavailable, chatAvatar } from '@/utils/chatGroups'
+import { hydrateMentions, serializeMentions, type MentionRange } from '@/utils/chatMentions'
+import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
+import { usePersonalChatPins } from './usePersonalChatPins'
+import { applyChatPin } from '@/utils/chatPins'
 import ForwardMessageModal from './ForwardMessageModal'
 import MessageInfoDialog from './MessageInfoDialog'
 import QuickReplySequenceEditor from './QuickReplySequenceEditor'
@@ -84,6 +94,7 @@ type CachedChatMessages = {
 }
 
 type AttachmentDraft = {
+  mentions?: MentionRange[]
   file: File
   type: ChatMediaType
   previewUrl: string
@@ -93,6 +104,7 @@ type AttachmentDraft = {
 type OutgoingMediaType = ChatMediaType | 'sticker'
 
 type RetryableMedia = {
+  mentions?: ChatMention[]
   file: File
   type: OutgoingMediaType
   caption: string
@@ -103,6 +115,7 @@ type RetryableMedia = {
   attentionBoundary?: string
   quotedMessageId?: string
   quotedBody?: string
+  quotedSenderName?: string
   quotedSender?: string
   quotedIsFromMe?: boolean
 }
@@ -180,6 +193,8 @@ interface ChatPanelProps {
   readOnlyReason?: string
   onContactInfoToggle?: (show: boolean) => void
   contactInfoOpen?: boolean
+  onTogglePin?: () => void
+  pinPending?: boolean
   onRequestDelete?: () => void
   isActive?: boolean
   /** Keeps this mounted conversation and its drafts inert while another responsive surface is active. */
@@ -194,7 +209,7 @@ interface ChatPanelProps {
 
 type DeviceValidationState = 'validating' | 'ready' | 'error' | 'changed'
 
-export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, initialChat, onClose, className = '', readOnly = false, readOnlyReason: explicitReadOnlyReason, onContactInfoToggle, contactInfoOpen, onRequestDelete, isActive: requestedActive = true, suspended = false, onRead, onNext, attentionMode, focusRequest, explicitSenderSession = 0 }: ChatPanelProps) {
+export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, initialChat, onClose, className = '', readOnly = false, readOnlyReason: explicitReadOnlyReason, onContactInfoToggle, contactInfoOpen, onRequestDelete, onTogglePin, pinPending, isActive: requestedActive = true, suspended = false, onRead, onNext, attentionMode, focusRequest, explicitSenderSession = 0 }: ChatPanelProps) {
   const suspendedRef = useRef(suspended)
   suspendedRef.current = suspended
   const isActive = requestedActive && !suspended
@@ -252,12 +267,16 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     : deviceValidationState
   const deviceId = activeDeviceValidationState === 'ready' ? canonicalDevice?.id : undefined
   const deviceProvider = canonicalDevice?.provider || 'whatsapp_web'
+  const [chat, setChat] = useState<Chat | null>(initialChat || null)
+  const groupRestriction = groupWriteRestriction(chat) || (isGroupChat(chat) && activeDeviceValidationState === 'ready' && canonicalDevice?.runtime_capabilities?.can_send_group_messages !== true ? 'Este dispositivo no admite enviar mensajes a grupos.' : null)
+  const personalPins = usePersonalChatPins((state, rollback) => setChat(current => current?.id === state.chat_id ? rollback ? { ...current, is_pinned: state.is_pinned, pinned_at: state.pinned_at, pin_version: state.pin_version } : applyChatPin(current, state) : current))
+  const ComposerInput = isGroupChat(chat) ? GroupMentionInput : WhatsAppTextInput
   const deviceUnavailable = Boolean(canonicalDevice && (isDeviceDeleting(canonicalDevice) || canonicalDevice.status !== 'connected' || deviceProvider !== 'whatsapp_web'))
-  const effectiveReadOnly = suspended || readOnly || activeDeviceValidationState !== 'ready' || !deviceId || deviceUnavailable
+  const effectiveReadOnly = Boolean(groupRestriction) || suspended || readOnly || activeDeviceValidationState !== 'ready' || !deviceId || deviceUnavailable
   const canSendStickers = !effectiveReadOnly && (
     canonicalDevice?.runtime_capabilities?.can_send_sticker === true
   )
-  const readOnlyReason = readOnly
+  const readOnlyReason = groupRestriction || (readOnly
     ? explicitReadOnlyReason || 'Esta conversación está disponible en modo de solo lectura.'
     : activeDeviceValidationState === 'validating'
       ? 'Validando canal de WhatsApp…'
@@ -273,8 +292,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
             ? 'Este chat usa Cloud API y no admite acciones manuales desde esta vista.'
             : canonicalDevice && canonicalDevice.status !== 'connected'
               ? 'El dispositivo de WhatsApp no está conectado.'
-              : 'El dispositivo no está disponible para enviar mensajes.'
-  const [chat, setChat] = useState<Chat | null>(initialChat || null)
+              : 'El dispositivo no está disponible para enviar mensajes.')
   const [messages, setMessages] = useState<Message[]>([])
   const messagesCacheRef = useRef<Map<string, CachedChatMessages>>(new Map())
   const isNearBottomRef = useRef(true)
@@ -287,6 +305,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const loadingMoreRef = useRef(false)
   const [hasMoreMessages, setHasMoreMessages] = useState(true)
   const [messageText, setMessageText] = useState('')
+  const [messageMentions, setMessageMentions] = useState<MentionRange[]>([])
   const [sendingMessage, setSendingMessage] = useState(false)
   const messageSendSequenceRef = useRef(0)
   const activeMessageSendRef = useRef<number | null>(null)
@@ -373,22 +392,23 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   useChatHistoryLayer(quickReplyReviewOpen && !suspended, '__clarinQuickReplyReview', () => setQuickReplyReviewOpen(false))
   useChatHistoryLayer(Boolean(viewDocument) && !suspended, '__clarinDocumentViewer', () => setViewDocument(null))
   const [quickReplyDraft, setQuickReplyDraft] = useState<QuickReplyComposerDraft | null>(null)
-  const draftCacheRef = useRef(new Map<string, { text: string; quick: QuickReplyComposerDraft | null; quote: Message | null; attachment: AttachmentDraft | null }>())
+  const draftCacheRef = useRef(new Map<string, { text: string; mentions: MentionRange[]; quick: QuickReplyComposerDraft | null; quote: Message | null; attachment: AttachmentDraft | null }>())
   const draftOwnerRef = useRef(chatId)
   useLayoutEffect(() => {
-    const snapshot = { text: messageText, quick: quickReplyDraft, quote: replyingTo, attachment: attachmentDraft }
+    const snapshot = { text: messageText, mentions: messageMentions, quick: quickReplyDraft, quote: replyingTo, attachment: attachmentDraft }
     if (draftOwnerRef.current !== chatId) {
       if (draftOwnerRef.current) draftCacheRef.current.set(draftOwnerRef.current, snapshot)
       const restored = chatId ? draftCacheRef.current.get(chatId) : undefined
       draftOwnerRef.current = chatId
       setMessageText(restored?.text || '')
+      setMessageMentions(restored?.mentions || [])
       setQuickReplyDraft(restored?.quick || null)
       setReplyingTo(restored?.quote || null)
       setAttachmentDraft(restored?.attachment || null)
       return
     }
     if (chatId) draftCacheRef.current.set(chatId, snapshot)
-  }, [chatId, messageText, quickReplyDraft, replyingTo, attachmentDraft])
+  }, [chatId, messageText, messageMentions, quickReplyDraft, replyingTo, attachmentDraft])
   useOperationalOverlayRegistration(showQuickReply && !suspended, 'chat-quick-replies')
 
   // Typing indicator
@@ -453,14 +473,18 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const isActiveRef = useRef(isActive)
   const onReadRef = useRef(onRead)
   const readThroughRef = useRef(new Map<string, string>())
+  const pendingParentPinRef = useRef({ pinPending, initialChat }); pendingParentPinRef.current = { pinPending, initialChat }
   const chatSnapshotRef = useRef(chat)
   chatSnapshotRef.current = chat
   const reconcileChatSnapshot = useCallback((snapshot: Chat, state?: ChatState) => {
-    const canonical = mergeChatSnapshot(chatSnapshotRef.current, snapshot, state)
+    let projected = personalPins.project(snapshot)
+    const parentPin = pendingParentPinRef.current
+    if (parentPin.pinPending && parentPin.initialChat?.id === snapshot.id) projected = { ...projected, is_pinned: parentPin.initialChat.is_pinned, pinned_at: parentPin.initialChat.pinned_at, pin_version: parentPin.initialChat.pin_version }
+    const canonical = mergeChatSnapshot(chatSnapshotRef.current, projected, state)
     chatSnapshotRef.current = canonical
     setChat(current => mergeChatSnapshot(current, canonical))
     return canonical
-  }, [])
+  }, [personalPins.project])
   const historyContextRef = useRef(false)
   historyContextRef.current = Boolean(searchWindowMessages || quotedContextActive || showSearch)
   const returnAnchorRef = useRef<ConversationAnchor | null>(null)
@@ -602,12 +626,13 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     return incoming.map(normalizeAuthoritativeMessageReactions).map(canonical => {
       reconcileReactionSnapshotBaseline(targetChatId, canonical.message_id, canonical.reactions)
       const queue = reactionQueuesRef.current.get(reactionQueueKey(targetChatId, canonical.message_id))
-      if (!queue?.inFlight) return canonical
       const local = localProjection.find(message => hasSameMessageIdentity(message, canonical))
         || cached.find(message => hasSameMessageIdentity(message, canonical))
       if (!local) return canonical
+      const withPreview = { ...canonical, ...mergeMessageLinkPreview(local, canonical, canonical.is_revoked || local.is_revoked) }
+      if (!queue?.inFlight) return withPreview
       return {
-        ...canonical,
+        ...withPreview,
         reactions: mergeCanonicalReactionSnapshot(local.reactions, canonical.reactions, true),
       }
     })
@@ -1169,6 +1194,40 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     })
   }, [updateMessages])
 
+  const applyMessageProjectionToChat = useCallback((targetChatId: string, patch: (projection: Message[]) => Message[], requestScope: string) => {
+    const scopeIsCurrent = () => getAuthScope() === requestScope && !isAuthIdentityChanging(requestScope)
+    if (!scopeIsCurrent()) return
+    if (activeChatIdRef.current !== targetChatId) {
+      const cached = messagesCacheRef.current.get(targetChatId)
+      if (cached) {
+        const next = patch(cached.messages)
+        if (next !== cached.messages) messagesCacheRef.current.set(targetChatId, { ...cached, messages: orderChatMessages(next) })
+      }
+      return
+    }
+    const projectionIsCurrent = () => scopeIsCurrent() && activeChatIdRef.current === targetChatId
+    setMessages(previous => {
+      if (!projectionIsCurrent()) return previous
+      const patched = patch(previous)
+      if (patched === previous) return previous
+      const next = orderChatMessages(patched)
+      cacheMessages(targetChatId, next)
+      return next
+    })
+    setSearchWindowMessages(previous => projectionIsCurrent() && previous ? patch(previous) : previous)
+    setSearchResult(previous => projectionIsCurrent() && previous ? patch([previous])[0] : previous)
+  }, [cacheMessages])
+
+  const applyCanonicalMessageToChat = useCallback((targetChatId: string, canonical: Message, requestScope: string) => {
+    if (getAuthScope() !== requestScope || isAuthIdentityChanging(requestScope)) return
+    reconcileReactionSnapshotBaseline(targetChatId, canonical.message_id, canonical.reactions)
+    applyMessageProjectionToChat(targetChatId, projection => mergeCanonicalMessageProjection(
+      projection,
+      canonical,
+      Boolean(reactionQueuesRef.current.get(reactionQueueKey(targetChatId, canonical.message_id))?.inFlight),
+    ), requestScope)
+  }, [applyMessageProjectionToChat, reconcileReactionSnapshotBaseline])
+
   const updateReactionProjectionsForChat = useCallback((
     targetChatId: string,
     targetMessageId: string,
@@ -1549,6 +1608,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   useEffect(() => {
     if (!chatId) return
 
+    const eventScope = getAuthScope()
     const unsubscribe = subscribeWebSocket(
       (data: unknown) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1666,16 +1726,11 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
             if (shouldFollowMessage) scrollToBottom()
             else if (!alreadyKnown) setPendingLatestMessages(current => current + 1)
           }
-        } else if ((eventType === 'message_update' || eventType === 'message_updated') && payload) {
+        } else if ((eventType === 'message_update' || eventType === 'message_updated' || eventType === 'message_media_updated') && payload) {
           const actualMsg = payload.message || payload
           const canonicalMessage = actualMsg as Message
           if (!messageBelongsToChat({ chatId, jid: chat?.jid, deviceId, provider: canonicalDevice?.provider }, payload, canonicalMessage)) return
-          reconcileReactionSnapshotBaseline(chatId, canonicalMessage.message_id, canonicalMessage.reactions)
-          updateMessages(prev => prev.map(m => {
-            if (m.id !== actualMsg.id) return m
-            const pending = Boolean(reactionQueuesRef.current.get(reactionQueueKey(chatId, m.message_id))?.inFlight)
-            return mergeCanonicalMessage(m, canonicalMessage, pending)
-          }))
+          applyCanonicalMessageToChat(chatId, canonicalMessage, eventScope)
         } else if (eventType === 'message_status' && payload) {
           // Update message delivery/read status (only upgrade, never downgrade)
           const msgIds: string[] = payload.message_ids || []
@@ -1693,26 +1748,26 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
               return next
             }))
           }
+        } else if (eventType === 'message_link_preview_updated' && payload) {
+          const update = payload as LinkPreviewUpdate
+          if (update.chat_id === chatId && update.device_id === deviceId
+            && typeof update.body_snapshot === 'string' && typeof update.is_edited_snapshot === 'boolean') {
+            applyMessageProjectionToChat(chatId, projection => updateLinkPreviewProjection(projection, update), eventScope)
+          }
         } else if (eventType === 'message_revoked' && payload) {
           // Mark message as revoked
-          const revokedMsgId: string = payload.message_id
-          if (chat && payload.chat_jid === chat.jid) {
-            updateMessages(prev => prev.map(m =>
-              m.message_id === revokedMsgId ? { ...m, is_revoked: true, body: undefined } : m
-            ))
+          if (chat && payload.chat_jid === chat.jid && (!payload.chat_id || payload.chat_id === chatId) && (!payload.device_id || payload.device_id === deviceId)) {
+            applyMessageProjectionToChat(chatId, projection => updateRevokedMessageProjection(projection, payload), eventScope)
           }
         } else if (eventType === 'message_edited' && payload) {
-          // Update edited message body
-          const editedMsgId: string = payload.message_id
-          const newBody: string = payload.new_body
-          if (chat && payload.chat_jid === chat.jid) {
-            updateMessages(prev => prev.map(m =>
-              m.message_id === editedMsgId ? { ...m, body: newBody, is_edited: true } : m
-            ))
+          if (chat && payload.chat_jid === chat.jid && (!payload.chat_id || payload.chat_id === chatId) && (!payload.device_id || payload.device_id === deviceId)) {
+            applyMessageProjectionToChat(chatId, projection => updateEditedMessageProjection(projection, payload), eventScope)
           }
+        } else if (eventType === 'chat_group_updated' && payload?.chat_id === chatId) {
+          void fetchChatDetails()
         } else if ((eventType === 'typing' || eventType === 'presence') && payload) {
           // Typing/presence indicator from contact
-          if (chat && payload.jid === chat.jid) {
+          if (chat && payload.jid === chat.jid && payload.device_id === deviceId && !isGroupChat(chat)) {
             if (payload.composing || payload.available) {
               const media = payload.media === 'audio' ? 'recording' : 'composing'
               setContactTyping(media)
@@ -1809,7 +1864,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     return () => {
       unsubscribe()
     }
-  }, [chatId, deviceId, chat, canonicalDevice?.provider, markDisplayedIncomingRead, reconcileReactionSnapshotBaseline, updateReactionProjectionsForChat])
+  }, [chatId, deviceId, chat, canonicalDevice?.provider, markDisplayedIncomingRead, reconcileReactionSnapshotBaseline, updateReactionProjectionsForChat, applyCanonicalMessageToChat, applyMessageProjectionToChat])
 
   const fetchChatDetails = async (targetChatId: string | null = chatId) => {
     if (!targetChatId) return
@@ -1846,9 +1901,9 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 		headers: { Authorization: `Bearer ${token}` },
 		signal: controller.signal,
       })
-      const msgData = await msgRes.json()
+      const msgData = await msgRes.json().catch(() => null)
 	  if (controller.signal.aborted || requestSequence !== chatDetailsRequestSequenceRef.current || activeChatIdRef.current !== targetChatId) return
-      if (!msgRes.ok || !msgData.success || !Array.isArray(msgData.messages)) throw new Error(msgData.error || 'No se pudo cargar el historial de mensajes.')
+      if (!msgRes.ok || !msgData?.success || !Array.isArray(msgData.messages)) throw new Error(chatReadError(msgData?.error, 'No se pudo cargar el historial de mensajes.', msgRes.status))
       if (msgData.success && msgData.messages) {
         const authoritativeMessages = reconcileAuthoritativeMessages(targetChatId, msgData.messages as Message[])
         const nextHasMore = authoritativeMessages.length >= 50
@@ -1869,7 +1924,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     } catch (error) {
 	  if (!controller.signal.aborted) {
         console.error('Failed to fetch chat', error)
-        if (activeChatIdRef.current === targetChatId) setHistoryError(error instanceof Error ? error.message : 'No se pudo cargar el historial de mensajes.')
+        if (activeChatIdRef.current === targetChatId) setHistoryError(chatReadError(error, 'No se pudo cargar el historial de mensajes. Reintenta.'))
         if (!deviceWasValidated && activeChatIdRef.current === targetChatId) {
           setCanonicalDevice(null)
           setValidatedDeviceChatId(targetChatId)
@@ -1910,9 +1965,9 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       const res = await chatRequest(`/api/chats/${targetChatId}/messages?limit=50&offset=${offset}`, {
         headers: { Authorization: `Bearer ${token}` }
       })
-      const data = await res.json()
+      const data = await res.json().catch(() => null)
       if (activeChatIdRef.current !== targetChatId) return
-      if (!res.ok || !data.success || !Array.isArray(data.messages)) throw new Error(data.error || 'No se pudieron cargar los mensajes anteriores.')
+      if (!res.ok || !data?.success || !Array.isArray(data.messages)) throw new Error(chatReadError(data?.error, 'No se pudieron cargar los mensajes anteriores.', res.status))
       if (data.success && data.messages) {
         const authoritativeMessages = reconcileAuthoritativeMessages(targetChatId, data.messages as Message[])
         if (authoritativeMessages.length === 0) {
@@ -1943,7 +1998,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       }
     } catch (err) {
       console.error('Failed to load older messages', err)
-      if (activeChatIdRef.current === targetChatId) setHistoryError(err instanceof Error ? err.message : 'No se pudieron cargar los mensajes anteriores.')
+      if (activeChatIdRef.current === targetChatId) setHistoryError(chatReadError(err, 'No se pudieron cargar los mensajes anteriores. Reintenta.'))
     } finally {
       if (activeChatIdRef.current === targetChatId) {
         loadingMoreRef.current = false
@@ -1975,7 +2030,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     }
     if (effectiveReadOnly || (!messageText.trim() && !forwardingMsg) || !chat || !deviceId) return
 
-    const text = messageText.trim()
+    const serialized = serializeMentions(messageText, messageMentions)
+    const text = serialized.body.trim()
     if (editingMsg && !text) return
     if (activeMessageSendRef.current !== null || (chatId && sendingChatsRef.current.has(chatId))) return
 
@@ -2003,6 +2059,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
     // Handle edit mode
     if (editingMsg) {
+      const editScope = getAuthScope()
       const token = localStorage.getItem('token')
       let editSucceeded = false
       try {
@@ -2013,14 +2070,16 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
             device_id: deviceId,
             chat_jid: chat.jid,
             message_id: editingMsg.message_id,
-            new_body: text
+            new_body: text,
+            mentions: serialized.mentions
           })
         })
         const data = await res.json()
         if (res.ok && data.success) {
-          updateTargetMessages(prev => prev.map(m =>
-            m.message_id === editingMsg.message_id ? { ...m, body: text, is_edited: true } : m
-          ))
+          if (targetChatId) applyMessageProjectionToChat(targetChatId, projection => updateEditedMessageProjection(projection, {
+            message_id: editingMsg.message_id, new_body: text, mentions: serialized.mentions,
+            link_preview: null, link_preview_version: data.link_preview_version,
+          }), editScope)
           editSucceeded = true
           if (data.warning) setComposerFeedback({ kind: 'info', message: data.warning })
         } else {
@@ -2035,7 +2094,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       if (!editSucceeded) return
       if (activeChatIdRef.current !== targetChatId) return
       setEditingMsg(null)
-      setMessageText('')
+      setMessageText(''); setMessageMentions([])
       inputRef.current?.clear()
       requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() })
       return
@@ -2046,7 +2105,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     sendPresence(false)
     lastTypingSentRef.current = 0
 
-    setMessageText('')
+    setMessageText(''); setMessageMentions([])
     setReplyingTo(null)
     setShowQuickReply(false)
     setQuickReplyFilter('')
@@ -2065,6 +2124,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       from_jid: '',
       from_name: 'Me',
       body: text,
+      mentions: serialized.mentions,
       message_type: 'text',
       is_from_me: true,
       is_read: false,
@@ -2072,7 +2132,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       timestamp: new Date().toISOString(),
       quoted_message_id: replyingTo?.message_id || replyingTo?.id,
       quoted_body: replyingTo?.body || replyingTo?.media_filename || (replyingTo ? 'Mensaje citado' : undefined),
-      quoted_sender: replyingTo?.is_from_me ? 'Me' : (replyingTo?.from_name || replyingTo?.from_jid),
+      quoted_sender: replyingTo?.is_from_me ? 'Me' : (replyingTo?.from_jid || replyingTo?.from_name),
+      quoted_sender_name: replyingTo?.from_name,
       quoted_is_from_me: replyingTo?.is_from_me,
     }
 
@@ -2089,9 +2150,11 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                 chat_id: targetChatId,
                 to: chat.jid,
                 body: text,
+                mentions: serialized.mentions,
                 quoted_message_id: replyingTo?.message_id || replyingTo?.id,
                 quoted_body: replyingTo?.body || replyingTo?.media_filename || '',
-                quoted_sender: replyingTo?.is_from_me ? 'Me' : (replyingTo?.from_name || replyingTo?.from_jid || ''),
+                quoted_sender: replyingTo?.is_from_me ? 'Me' : (replyingTo?.from_jid || replyingTo?.from_name || ''),
+                quoted_sender_name: replyingTo?.from_name,
                 quoted_is_from_me: Boolean(replyingTo?.is_from_me),
             })
     textSendPayloadsRef.current.set(tempId, frozenPayload)
@@ -2162,12 +2225,14 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
           chat_id: targetChatId,
           to: targetChatJid,
           body: media.caption,
+          mentions: media.mentions,
           media_url: uploadedMediaUrl,
           media_type: media.type,
           media_filename: media.file.name,
           quoted_message_id: media.quotedMessageId,
           quoted_body: media.quotedBody,
           quoted_sender: media.quotedSender,
+          quoted_sender_name: media.quotedSenderName,
           quoted_is_from_me: media.quotedIsFromMe,
         })
       updateMessagesForChat(targetChatId, previous => previous.map(message => message.id === tempId ? { ...message, send_phase: 'sending' } : message))
@@ -2270,6 +2335,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
           quoted_message_id: failedMsg.quoted_message_id,
           quoted_body: failedMsg.quoted_body,
           quoted_sender: failedMsg.quoted_sender,
+          mentions: failedMsg.mentions,
           quoted_is_from_me: failedMsg.quoted_is_from_me,
         }),
       })
@@ -2288,7 +2354,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     }
   }
 
-  const handleSendMedia = async (file: File, mediaType: OutgoingMediaType, caption?: string): Promise<boolean> => {
+  const handleSendMedia = async (file: File, mediaType: OutgoingMediaType, caption?: string, mentionRanges: MentionRange[] = []): Promise<boolean> => {
     if (suspendedRef.current) return false
     if (effectiveReadOnly || (mediaType === 'sticker' && !canSendStickers) || !chat || !deviceId || !chatId) return false
     const targetChatId = chatId
@@ -2319,17 +2385,20 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
     const tempId = `optimistic-${++optimisticIdRef.current}`
     const previewUrl = URL.createObjectURL(fileToSend)
-    const finalCaption = caption ?? (mediaType === 'document' ? fileToSend.name : '')
+    const serializedCaption = serializeMentions(caption ?? (mediaType === 'document' ? fileToSend.name : ''), mentionRanges)
+    const finalCaption = serializedCaption.body
     const retryableMedia: RetryableMedia = {
       operationId: crypto.randomUUID(),
       attentionBoundary,
       file: fileToSend,
       type: mediaType,
       caption: finalCaption,
+      mentions: serializedCaption.mentions,
       previewUrl,
       quotedMessageId: quote?.message_id || quote?.id,
       quotedBody: quote?.body || quote?.media_filename || (quote ? 'Mensaje citado' : undefined),
-      quotedSender: quote?.is_from_me ? 'Me' : (quote?.from_name || quote?.from_jid),
+      quotedSenderName: quote?.from_name,
+      quotedSender: quote?.is_from_me ? 'Me' : (quote?.from_jid || quote?.from_name),
       quotedIsFromMe: quote?.is_from_me,
     }
 
@@ -2339,6 +2408,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       from_jid: '',
       from_name: 'Me',
       body: finalCaption,
+      mentions: serializedCaption.mentions,
       message_type: mediaType,
       media_url: previewUrl,
       media_filename: fileToSend.name,
@@ -2351,6 +2421,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       quoted_message_id: retryableMedia.quotedMessageId,
       quoted_body: retryableMedia.quotedBody,
       quoted_sender: retryableMedia.quotedSender,
+      quoted_sender_name: retryableMedia.quotedSenderName,
       quoted_is_from_me: retryableMedia.quotedIsFromMe,
     }
 
@@ -2386,12 +2457,12 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     setSendingMessage(true)
     const incomingBoundary = observedIncomingBoundary(messagesCacheRef.current.get(chatId)?.messages || messages, chat)
     let progress = freezeQuickReplySequence(quickReplyDraft, {
-      chatId, jid: chat.jid, deviceId, through: incomingBoundary || '', quote: replyingTo, trailingText: messageText,
+      chatId, jid: chat.jid, deviceId, through: incomingBoundary || '', quote: replyingTo, trailingText: serializeMentions(messageText, messageMentions).body, trailingMentions: serializeMentions(messageText, messageMentions).mentions,
     })
     const publish = (next: QuickReplyComposerDraft | null) => {
       const cached = draftCacheRef.current.get(targetChatId)
-      draftCacheRef.current.set(targetChatId, { text: '', quick: next, quote: null, attachment: cached?.attachment || null })
-      if (activeChatIdRef.current === targetChatId) { setQuickReplyDraft(next); setMessageText(''); setReplyingTo(null) }
+      draftCacheRef.current.set(targetChatId, { text: '', mentions: [], quick: next, quote: null, attachment: cached?.attachment || null })
+      if (activeChatIdRef.current === targetChatId) { setQuickReplyDraft(next); setMessageText(''); setMessageMentions([]); setReplyingTo(null) }
     }
     publish(progress)
     sendPresence(false)
@@ -2404,7 +2475,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         const tempId = item.sendTempId || `optimistic-${item.operationId}`
         progress = { ...progress, items: progress.items!.map(row => row.id === item.id ? { ...row, sendTempId: tempId } : row), error: undefined }
         publish(progress)
-        const optimistic: Message = { id: tempId, message_id: tempId, is_from_me: true, is_read: false, status: 'sending', timestamp: new Date().toISOString(), body: String(payload.body || ''), message_type: String(payload.media_type || 'text'), media_url: payload.media_url as string, media_filename: payload.media_filename as string, quoted_message_id: payload.quoted_message_id as string, quoted_body: payload.quoted_body as string, quoted_sender: payload.quoted_sender as string, quoted_is_from_me: payload.quoted_is_from_me as boolean }
+        const optimistic: Message = { id: tempId, message_id: tempId, is_from_me: true, is_read: false, status: 'sending', timestamp: new Date().toISOString(), body: String(payload.body || ''), mentions: payload.mentions as ChatMention[], message_type: String(payload.media_type || 'text'), media_url: payload.media_url as string, media_filename: payload.media_filename as string, quoted_message_id: payload.quoted_message_id as string, quoted_body: payload.quoted_body as string, quoted_sender: payload.quoted_sender as string, quoted_is_from_me: payload.quoted_is_from_me as boolean }
         updateMessagesForChat(targetChatId, current => current.some(row => row.id === tempId) ? current.map(row => row.id === tempId ? optimistic : row) : [...current, optimistic])
         const response = await chatRequest('/api/messages/send', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` }, body: JSON.stringify(payload) })
         const data = await response.json().catch(() => ({}))
@@ -2458,7 +2529,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
           timestamp: new Date().toISOString(),
           quoted_message_id: quote?.message_id || quote?.id,
           quoted_body: quote?.body || quote?.media_filename || (quote ? 'Mensaje citado' : undefined),
-          quoted_sender: quote?.is_from_me ? 'Me' : (quote?.from_name || quote?.from_jid),
+          quoted_sender: quote?.is_from_me ? 'Me' : (quote?.from_jid || quote?.from_name),
           quoted_is_from_me: quote?.is_from_me,
       }
       updateMessagesForChat(targetChatId, prev => [...prev, optimisticMsg])
@@ -2478,7 +2549,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
               media_type: 'sticker',
               quoted_message_id: quote?.message_id || quote?.id,
               quoted_body: quote?.body || quote?.media_filename,
-              quoted_sender: quote?.is_from_me ? 'Me' : (quote?.from_name || quote?.from_jid),
+              quoted_sender: quote?.is_from_me ? 'Me' : (quote?.from_jid || quote?.from_name),
               quoted_is_from_me: quote?.is_from_me,
           })
         })
@@ -2534,11 +2605,12 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       type: validation.mediaType,
       previewUrl,
       caption,
+      mentions: previousDraft?.mentions || messageMentions,
     }
 
     attachmentDraftRef.current = nextDraft
     setAttachmentDraft(nextDraft)
-    setMessageText('')
+    setMessageText(''); setMessageMentions([])
     inputRef.current?.clear()
     captionInputRef.current?.clear()
     setShowAttachments(false)
@@ -2618,7 +2690,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     attachmentSendingRef.current = true
     setSendingAttachment(true)
     try {
-      const queued = await handleSendMedia(draft.file, draft.type, draft.caption.trim())
+      const queued = await handleSendMedia(draft.file, draft.type, draft.caption, draft.mentions)
       if (!queued) return
 
       if (draft.previewUrl) URL.revokeObjectURL(draft.previewUrl)
@@ -2639,6 +2711,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     attachmentDraftRef.current = null
     setAttachmentDraft(null)
     setMessageText(draft.caption)
+    setMessageMentions(draft.mentions || [])
     captionInputRef.current?.clear()
     requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() })
   }
@@ -2688,7 +2761,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
      const prepared = createQuickReplyComposerDraft(normalized)
      const prefix = replaceQuickReplyCommand(messageText, '').trim()
      if (prepared && prefix) prepared.items!.unshift({ id: crypto.randomUUID(), operationId: crypto.randomUUID(), type: 'text', text: prefix })
-     setMessageText('')
+     setMessageText(''); setMessageMentions([])
      setQuickReplyDraft(prepared)
      setShowQuickReply(false)
      setQuickReplyFilter('')
@@ -2779,7 +2852,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     if (!canEditMessage(message)) return
     clearMessageSelection()
     setEditingMsg(message)
-    setMessageText(message.body || '')
+    const draft = hydrateMentions(message.body || '', message.mentions)
+    setMessageText(draft.text); setMessageMentions(draft.mentions)
     requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() })
   }
 
@@ -2916,7 +2990,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       message: latestMessage,
       device: canonicalDevice,
       deviceValidated: activeDeviceValidationState === 'ready',
-      chatReadOnly: readOnly || suspended,
+      chatReadOnly: readOnly || suspended || groupReactionsUnavailable(chat),
     })
     if (!availability.allowed) {
       if (availability.reason) setComposerFeedback({ kind: 'info', message: availability.reason })
@@ -2948,6 +3022,26 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     clearMessageSelection()
     if (enqueued.request) void transmitReactionOperation(targetChatId, enqueued.request)
   }
+
+  const mediaRecoveryRequests = useRef(new Map<string, AbortController>())
+  useEffect(() => () => { for (const controller of mediaRecoveryRequests.current.values()) controller.abort(); mediaRecoveryRequests.current.clear() }, [chatId])
+  const recoverMessageMedia = useStableCallback(async (message: Message) => {
+    if (!chatId || !isGroupChat(chat) || !message.media_recoverable || mediaRecoveryRequests.current.has(message.id)) return
+    const targetChatId = chatId, requestScope = getAuthScope()
+    if (isAuthIdentityChanging(requestScope)) return
+    const controller = new AbortController(); mediaRecoveryRequests.current.set(message.id, controller)
+    const unsubscribe = subscribeAuthScope(() => { if (getAuthScope() !== requestScope) controller.abort() })
+    try {
+      const response = await chatRequest('/api/chats/' + encodeURIComponent(targetChatId) + '/messages/' + encodeURIComponent(message.id) + '/media/recover', { method: 'POST', credentials: 'include', signal: controller.signal })
+      const data = await response.json()
+      if (controller.signal.aborted || getAuthScope() !== requestScope) throw new DOMException('Solicitud cancelada', 'AbortError')
+      const canonicalMessage: Message | undefined = data.message?.id === message.id && data.message?.chat_id === targetChatId ? data.message : undefined
+      if (canonicalMessage) {
+        applyCanonicalMessageToChat(targetChatId, normalizeAuthoritativeMessageReactions(canonicalMessage), requestScope)
+      }
+      if (!response.ok || !data.success || !canonicalMessage) throw new Error(data.error || 'No se pudo recuperar el archivo. Reintenta.')
+    } finally { unsubscribe(); if (mediaRecoveryRequests.current.get(message.id) === controller) mediaRecoveryRequests.current.delete(message.id) }
+  })
 
   const savedStickerUrls = useMemo(() => new Set(savedStickers), [savedStickers])
   const openMessageMedia = useCallback((url: string) => setViewImage(url), [])
@@ -2994,7 +3088,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         message: selectedMessage,
         device: canonicalDevice,
         deviceValidated: activeDeviceValidationState === 'ready',
-        chatReadOnly: readOnly || suspended,
+        chatReadOnly: readOnly || suspended || groupReactionsUnavailable(chat),
       })
     : null
 
@@ -3020,11 +3114,11 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                   aria-label="Ver detalles de la conversación"
                   aria-expanded={showContactInfo}
                 >
-                    {chat.contact_avatar_url ? (
-                        <img src={chat.contact_avatar_url} className="w-9 h-9 rounded-full object-cover" alt="" />
+                    {chatAvatar(chat) ? (
+                        <img src={chatAvatar(chat)} className="w-9 h-9 rounded-full object-cover" alt="" />
                     ) : (
                         <div className="w-9 h-9 rounded-full bg-slate-200 flex items-center justify-center">
-                            <User className="w-5 h-5 text-slate-500" />
+                            {isGroupChat(chat) ? <Users className="w-5 h-5 text-slate-500" /> : <User className="w-5 h-5 text-slate-500" />}
                         </div>
                     )}
                     <div className="min-w-0">
@@ -3052,7 +3146,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                         ) : chat.identity_pending ? (
                           <p className="truncate text-xs font-medium text-amber-700" title="WhatsApp aún no informó el número; puedes responder en esta conversación.">Identidad pendiente · puedes responder</p>
                         ) : (
-                          <p className="text-xs text-slate-500">Ver detalles</p>
+                          <p className="text-xs text-slate-500">{isGroupChat(chat) ? (chat.group ? chat.group.participant_count + ' participantes' : 'Grupo de WhatsApp') : 'Ver detalles'}</p>
                         )}
                     </div>
                 </button>
@@ -3067,11 +3161,12 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                          <MoreVertical className="w-5 h-5" />
                      </button>
 	                     {showHeaderMenu && (
-	                       <div data-chat-overlay="conversation-menu" role="menu" onPointerDown={event => event.stopPropagation()} className="fixed inset-x-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] z-[90] max-h-[min(70dvh,24rem)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-1.5 shadow-2xl shadow-slate-900/15 sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:top-12 sm:z-50 sm:w-56">
+	                       <ConversationMenu anchor={headerMenuTriggerRef}>
+                         <button type="button" role="menuitem" disabled={pinPending || personalPins.pending.has(chat.id)} onClick={() => { setShowHeaderMenu(false); if (onTogglePin) onTogglePin(); else void personalPins.toggle(chat); requestAnimationFrame(() => headerMenuTriggerRef.current?.focus()) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">{chat.is_pinned ? <PinOff className="h-4 w-4 text-slate-400" /> : <Pin className="h-4 w-4 text-slate-400" />}{chat.is_pinned ? 'Desfijar para mí' : 'Fijar para mí'}</button>
 	                         <button type="button" role="menuitem" onClick={() => { setShowContactInfo(true); setShowHeaderMenu(false) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><PanelRight className="h-4 w-4 text-slate-400" /> Ver detalles</button>
 	                         <button type="button" role="menuitem" onClick={() => { void handleRequestHistorySync(); setShowHeaderMenu(false) }} disabled={syncingHistory || effectiveReadOnly} title={effectiveReadOnly ? readOnlyReason : undefined} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-45"><RefreshCw className={`h-4 w-4 text-slate-400 ${syncingHistory ? 'animate-spin' : ''}`} /> {syncingHistory ? 'Recuperando historial…' : 'Recuperar mensajes anteriores'}</button>
 	                         {onRequestDelete && <><div className="my-1 border-t border-slate-100" /><button type="button" role="menuitem" onClick={() => { setShowHeaderMenu(false); onRequestDelete() }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"><Trash2 className="h-4 w-4" /> Eliminar del CRM</button></>}
-                       </div>
+                       </ConversationMenu>
                      )}
                    </div>
               </div>
@@ -3155,10 +3250,10 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 	         )}
 
          {historyError && (
-           <div role="alert" className="flex shrink-0 items-center gap-2 border-b border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-             <AlertCircle className="h-4 w-4 shrink-0" />
+           <div role="alert" className="flex shrink-0 items-center gap-2 border-b border-slate-200 bg-slate-50 pl-3 pr-1 text-xs text-slate-600">
+             <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
              <span className="min-w-0 flex-1">{historyError}</span>
-             <button type="button" disabled={loading || loadingMore} onClick={() => void (historyRetryMode === 'older' ? loadOlderMessages() : fetchChatDetails())} className="min-h-11 shrink-0 rounded-lg px-3 font-semibold hover:bg-red-100 disabled:opacity-50">Reintentar historial</button>
+             <button type="button" disabled={loading || loadingMore} onClick={() => void (historyRetryMode === 'older' ? loadOlderMessages() : fetchChatDetails())} className="min-h-11 shrink-0 rounded-lg px-3 font-semibold hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-50">Reintentar historial</button>
            </div>
          )}
 
@@ -3223,6 +3318,12 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                       <span className="text-xs text-slate-400 bg-white/80 px-3 py-1 rounded-full">Inicio de la conversación</span>
                     </div>
                   )}
+                  {!loading && !historyError && !searchWindowMessages && messages.length === 0 && isGroupChat(chat) && (
+                    <div role="status" className="mx-auto my-6 w-fit max-w-sm rounded-xl bg-white/85 px-4 py-3 text-center text-xs leading-5 text-slate-600">
+                      <p className="font-semibold text-slate-700">Aún no hay mensajes en Clarin</p>
+                      <p>Los mensajes nuevos de este grupo aparecerán aquí.</p>
+                    </div>
+                  )}
                   {visibleMessages.map((msg, idx) => {
                       // Date separator between different days
                       let showDateSep = false
@@ -3244,7 +3345,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                           message: msg,
                           device: canonicalDevice,
                           deviceValidated: activeDeviceValidationState === 'ready',
-                          chatReadOnly: readOnly || suspended,
+                          chatReadOnly: readOnly || suspended || groupReactionsUnavailable(chat),
                         })
 
                       return (
@@ -3259,7 +3360,9 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                               <MessageBubble
                                 message={msg}
                                 groupedWithPrevious={groupChatMessages(visibleMessages[idx - 1], msg)}
-                                contactName={contactName}
+                                contactName={isGroupChat(chat) ? undefined : contactName}
+                                isGroup={isGroupChat(chat)}
+                                onRecoverMedia={isGroupChat(chat) ? recoverMessageMedia : undefined}
 	                                onMediaClick={openMessageMedia}
 	                                onDocumentClick={openMessageDocument}
 	                                onRetry={effectiveReadOnly ? undefined : retryMessage}
@@ -3302,12 +3405,12 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                 <div
                    className="absolute inset-y-0 right-0 z-20 w-full border-l border-slate-200 bg-white shadow-xl md:w-[380px] md:max-w-[45%]"
                 >
-                     <ContactPanel
+                     {isGroupChat(chat) ? <GroupDetailsPanel key={chat.id} chat={chat} onClose={() => setShowContactInfo(false)} /> : <ContactPanel
                         chatId={chat.id}
                         isOpen={true}
                         onClose={() => setShowContactInfo(false)}
                         deviceName={deviceId ? 'Dispositivo actual' : undefined}
-                     />
+                     />}
                 </div>
              )}
          </div>
@@ -3361,7 +3464,10 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                  buttonClassName="p-2 text-slate-500 hover:text-emerald-600 transition"
                />
                <div className="flex-1">
-                 <WhatsAppTextInput
+                 <ComposerInput
+                   chatId={chat.id}
+                   mentions={attachmentDraft.mentions || []}
+                   onMentionsChange={mentions => setAttachmentDraft(previous => { if (!previous) return previous; const next = { ...previous, mentions }; attachmentDraftRef.current = next; return next })}
                    ref={captionInputRef}
                    value={attachmentDraft.caption}
                    onChange={caption => setAttachmentDraft(prev => {
@@ -3425,6 +3531,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
          )}
 
          {/* Footer / Input */}
+         {personalPins.error && <p role="alert" className="bg-rose-50 px-4 py-2 text-xs text-rose-700">{personalPins.error}</p>}
          {effectiveReadOnly ? (
            <div className="flex shrink-0 items-center justify-center gap-2 border-t border-amber-200 bg-amber-50 px-4 py-3 text-center" role="status">
              {activeDeviceValidationState === 'validating'
@@ -3444,7 +3551,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                         <p className="font-bold text-blue-700">Editando mensaje</p>
                         <p className="line-clamp-1 text-slate-600">{editingMsg.body}</p>
                       </div>
-                      <button type="button" onClick={() => { setEditingMsg(null); setMessageText(''); inputRef.current?.clear() }} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-white" aria-label="Cancelar edición"><X className="h-4 w-4" /></button>
+                      <button type="button" onClick={() => { setEditingMsg(null); setMessageText(''); setMessageMentions([]); inputRef.current?.clear() }} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-white" aria-label="Cancelar edición"><X className="h-4 w-4" /></button>
                     </div>
                   )}
                   {replyingTo && (
@@ -3575,7 +3682,10 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                       onLoadMore={() => void loadQuickReplies({ query: quickReplySettledQueryRef.current, cursor: quickReplyPage.nextCursor, append: true })}
                       onRetry={() => void loadQuickReplies({ query: quickReplySettledQueryRef.current })}
                     />
-                    <WhatsAppTextInput
+                    <ComposerInput
+                      chatId={chat.id}
+                      mentions={messageMentions}
+                      onMentionsChange={setMessageMentions}
                       ref={inputRef}
                       value={messageText}
                       onChange={handleMessageChange}
@@ -3665,7 +3775,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
          )}
 
          {!suspended && infoMessage && (
-           <MessageInfoDialog message={messages.find(message => message.id === infoMessage.id || message.message_id === infoMessage.message_id) || infoMessage} onClose={() => setInfoMessage(null)} />
+           <MessageInfoDialog chatId={chat.id} isGroup={isGroupChat(chat)} message={messages.find(message => message.id === infoMessage.id || message.message_id === infoMessage.message_id) || infoMessage} onClose={() => setInfoMessage(null)} />
          )}
 
          {/* Forward Modal */}

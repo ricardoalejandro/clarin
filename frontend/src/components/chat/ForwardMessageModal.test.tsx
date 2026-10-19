@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ForwardMessageModal from './ForwardMessageModal'
 import type { Chat, Message } from '@/types/chat'
 
-const destinations = [{ id: 'target-1', jid: '1001@s.whatsapp.net', name: 'Destino uno' }, { id: 'target-2', jid: '1002@s.whatsapp.net', name: 'Destino dos' }] as Chat[]
+const destinations = [{ id: 'target-1', device_id: 'device-1', jid: '1001@s.whatsapp.net', name: 'Destino uno' }, { id: 'target-2', device_id: 'device-1', jid: '1002@s.whatsapp.net', name: 'Destino dos' }] as Chat[]
 const message = { id: 'message-1', message_id: 'wa-1', body: 'Mensaje original', message_type: 'text' } as Message
 const props = { message, deviceId: 'device-1', chatId: 'source-1', onClose: vi.fn(), onSuccess: vi.fn() }
 const fetchMock = vi.fn()
@@ -61,4 +61,14 @@ describe('ForwardMessageModal retained suspension', () => {
     const writes = fetchMock.mock.calls.filter(([url]) => url === '/api/messages/forward')
     expect(writes.map(([, init]) => JSON.parse(init.body).to)).toEqual(destinations.map(chat => chat.jid))
   })
+})
+
+
+it('queries the source device and disables foreign or unwritable group destinations', async () => {
+  const rows = [...destinations, { id: 'foreign', device_id: 'device-2', jid: '999@s.whatsapp.net', name: 'Otro número' }, { id: 'group', kind: 'group', device_id: 'device-1', jid: '1@g.us', name: 'Anuncios', group: { subject: 'Anuncios', participant_count: 2, membership_status: 'member', announce: true, can_send: false } }]
+  fetchMock.mockResolvedValue(response({ success: true, chats: rows, total: 4 }))
+  render(<ForwardMessageModal {...props} />)
+  expect(await screen.findByRole('button', { name: /Otro número/ })).toBeDisabled()
+  expect(screen.getByRole('button', { name: /Anuncios/ })).toBeDisabled()
+  expect(String(fetchMock.mock.calls[0][0])).toContain('device_ids=device-1')
 })

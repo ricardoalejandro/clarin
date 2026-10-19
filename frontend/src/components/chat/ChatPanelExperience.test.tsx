@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Chat, Device } from '@/types/chat'
+import { beginAuthIdentityChange, completeAuthIdentityChange } from '@/lib/authScope'
 
 const websocket = vi.hoisted(() => ({ listeners: new Set<(data: unknown) => void>() }))
 const compression = vi.hoisted(() => ({ compress: vi.fn(async (file: File) => file) }))
@@ -25,10 +26,13 @@ vi.mock('../WhatsAppTextInput', async () => {
   }
 })
 vi.mock('./MessageBubble', () => ({
-  default: ({ message, onMediaClick, onDocumentClick, onReact, onSelect, onRetry }: { message: { media_url?: string; status?: string; body?: string; quoted_body?: string; reactions?: Array<{ emoji: string; is_from_me: boolean }> }; onMediaClick?: (url: string, type: string) => void; onDocumentClick?: (document: { sessionId: string; src: string; filename: string; mimeType: string; size: number }) => void; onReact?: (message: unknown, emoji: string) => void; onSelect?: (message: unknown) => void; onRetry?: (message: unknown) => void }) => (
+  default: ({ message, onMediaClick, onDocumentClick, onReact, onSelect, onRetry, onRecoverMedia, onQuotedMessageClick, onEdit }: { message: { link_preview?: { title: string; thumbnail_url?: string | null } | null; link_preview_version?: number; media_url?: string; status?: string; body?: string; quoted_body?: string; quoted_message_id?: string; media_filename?: string; media_recoverable?: boolean; media_unavailable_reason?: string; reactions?: Array<{ emoji: string; is_from_me: boolean }> }; onMediaClick?: (url: string, type: string) => void; onDocumentClick?: (document: { sessionId: string; src: string; filename: string; mimeType: string; size: number }) => void; onReact?: (message: unknown, emoji: string) => void; onSelect?: (message: unknown) => void; onRetry?: (message: unknown) => void; onRecoverMedia?: (message: unknown) => Promise<void>; onQuotedMessageClick?: (id: string) => void; onEdit?: (message: unknown) => void }) => (
     <div data-testid="message-bubble">
       {message.media_url && onMediaClick && <button onClick={() => onMediaClick(message.media_url!, 'image')}>Abrir imagen simulada</button>}
-      <span>{message.body}</span>{message.status === 'failed' && <button onClick={() => onRetry?.(message)}>Reintentar envío</button>}<span>{message.quoted_body}</span>
+      <span>{message.body}</span><span data-testid="link-preview-title" data-preview-version={message.link_preview_version} data-preview-thumbnail={message.link_preview?.thumbnail_url || ''}>{message.link_preview?.title}</span>{onEdit && <button onClick={() => onEdit(message)}>Editar mensaje simulado</button>}{message.status === 'failed' && <button onClick={() => onRetry?.(message)}>Reintentar envío</button>}<span>{message.quoted_body}</span>
+      <span>{message.media_filename}</span><span data-testid="media-unavailable-reason">{message.media_unavailable_reason}</span>
+      {message.quoted_message_id && onQuotedMessageClick && <button onClick={() => onQuotedMessageClick(message.quoted_message_id!)}>Abrir cita simulada</button>}
+      {message.media_recoverable && !message.media_unavailable_reason && onRecoverMedia && <button type="button" onClick={() => { void onRecoverMedia(message).catch(() => {}) }}>Recuperar archivo simulado</button>}
       <span data-testid="own-reaction">{message.reactions?.find(reaction => reaction.is_from_me)?.emoji || ''}</span>
       <span data-testid="contact-reaction">{message.reactions?.find(reaction => !reaction.is_from_me)?.emoji || ''}</span>
       <button type="button" onClick={() => onReact?.(message, '👍')} disabled={!onReact}>Reaccionar con 👍</button>
@@ -462,5 +466,384 @@ describe('ChatPanel experience invariants', () => {
     await waitFor(() => expect(bodies).toHaveLength(2))
     expect(bodies[0]).toBe(bodies[1]); expect(JSON.parse(bodies[0]).client_operation_id).toBeTruthy()
     expect(editor).toHaveValue('Siguiente borrador')
+  })
+})
+
+
+describe('group composer identities through drafts and retries', () => {
+  const groupChat: Chat = { ...chat, id: 'group-1', jid: '120000@g.us', kind: 'group', name: 'Equipo', group: { subject: 'Equipo', participant_count: 2, membership_status: 'member', announce: false, can_send: true } }
+  const member = { jid: '51900000002@s.whatsapp.net', name: 'María León', role: 'member', is_self: false }
+  beforeEach(() => { localStorage.setItem('token', 'test-token'); websocket.listeners.clear(); vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600); vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1200) })
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
+  function install() {
+    const bodies: string[] = []
+    let uploadCount = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/chats/group-1' || url === '/api/chats/chat-1') return Promise.resolve(jsonResponse({ success: true, chat: url.endsWith('group-1') ? groupChat : chat, device: { ...device('connected'), runtime_capabilities: { ...device('connected').runtime_capabilities, can_send_group_messages: true, can_list_groups: true } } }))
+      if (url.includes('/group/participants?')) return Promise.resolve(jsonResponse({ success: true, participants: [member] }))
+      if (url.includes('/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: [] }))
+      if (url === '/api/media/upload') { uploadCount++; return Promise.resolve(jsonResponse({ success: true, proxy_url: '/api/media/file/account/group-video.mp4' })) }
+      if (url === '/api/messages/send') {
+        bodies.push(String(init?.body)); const payload = JSON.parse(String(init?.body))
+        return Promise.resolve(jsonResponse(bodies.length === 1 ? { success: false, error: 'Fallo temporal' } : { success: true, message: { ...payload, id: 'sent-group', message_id: 'wa-group', is_from_me: true, is_read: false, status: 'sent', timestamp: '2026-10-18T12:00:00Z' } }, bodies.length !== 1))
+      }
+      return Promise.resolve(jsonResponse({ success: true, stickers: [], quick_replies: [] }))
+    }))
+    return { bodies, uploads: () => uploadCount }
+  }
+  async function mention() {
+    const editor = await screen.findByRole('textbox', { name: 'Draft test editor' })
+    await waitFor(() => expect(editor).not.toBeDisabled())
+    fireEvent.change(editor, { target: { value: 'Hola @Mar' } })
+    fireEvent.click(await screen.findByRole('option', { name: 'María León' }))
+    return editor
+  }
+  it('retains the exact mention identity across chat switches and frozen text retry', async () => {
+    const state = install()
+    const view = render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    await mention()
+    view.rerender(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue(''))
+    view.rerender(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    const editor = await screen.findByRole('textbox', { name: 'Draft test editor' })
+    await waitFor(() => expect(editor).toHaveValue('Hola @María León '))
+    expect(screen.getByLabelText('Personas mencionadas')).toHaveTextContent('María León')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Enviar mensaje' })).not.toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar mensaje' }))
+    await screen.findByRole('button', { name: 'Reintentar envío' })
+    fireEvent.change(editor, { target: { value: 'Próximo borrador' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar envío' }))
+    await waitFor(() => expect(state.bodies).toHaveLength(2))
+    expect(state.bodies[1]).toBe(state.bodies[0]); expect(JSON.parse(state.bodies[0])).toMatchObject({ body: 'Hola @51900000002', mentions: [{ jid: member.jid, name: member.name }] })
+    expect(editor).toHaveValue('Próximo borrador')
+  })
+  it('moves mention metadata into a media caption and preserves it without reupload on retry', async () => {
+    const OriginalURL = URL
+    vi.stubGlobal('URL', class extends OriginalURL { static createObjectURL = vi.fn(() => 'blob:group-video'); static revokeObjectURL = vi.fn() })
+    const state = install()
+    const view = render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    await mention()
+    fireEvent.change(view.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*"]')!, { target: { files: [new File(['video'], 'video.mp4', { type: 'video/mp4' })] } })
+    expect(await screen.findByLabelText('Personas mencionadas')).toHaveTextContent('María León')
+    fireEvent.click(await screen.findByRole('button', { name: 'Enviar adjunto' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Reintentar envío' }))
+    await waitFor(() => expect(state.bodies).toHaveLength(2))
+    expect(state.bodies[1]).toBe(state.bodies[0]); expect(state.uploads()).toBe(1)
+    expect(JSON.parse(state.bodies[0])).toMatchObject({ body: 'Hola @51900000002 ', mentions: [{ jid: member.jid, name: member.name }], media_type: 'video' })
+  })
+})
+
+describe('received link preview reconciliation', () => {
+  const preview = { url: 'https://example.com/a_b', title: 'Vista previa recibida', description: 'Descripción', thumbnail_url: null }
+  const linked = { id: 'preview-local', message_id: 'preview-provider', device_id: chat.device_id, body: 'Consulta https://example.com/a_b', is_from_me: true, is_read: true, status: 'read', timestamp: new Date().toISOString(), link_preview: preview, link_preview_version: 0 }
+  const recent = { ...linked, id: 'recent-local', message_id: 'recent-provider', body: 'Mensaje reciente', link_preview: null, quoted_message_id: linked.message_id }
+  beforeEach(() => {
+    localStorage.setItem('token', 'test-token'); completeAuthIdentityChange(); websocket.listeners.clear()
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1200)
+  })
+  afterEach(() => { cleanup(); completeAuthIdentityChange(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
+  function install(historical = false) {
+    const fetcher = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === `/api/chats/${chat.id}`) return Promise.resolve(jsonResponse({ success: true, chat, device: device('connected') }))
+      if (url === '/api/chats/other-chat') return Promise.resolve(jsonResponse({ success: true, chat: { ...chat, id: 'other-chat' }, device: device('connected') }))
+      if (url.includes('/other-chat/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: [{ ...recent, body: 'Otra conversación' }] }))
+      if (url.includes('/messages/search?')) return Promise.resolve(jsonResponse({ success: true, messages: [linked], total: 1, history_offset: 75 }))
+      if (url.includes('/context?')) return Promise.resolve(jsonResponse({ success: true, messages: [linked], message: linked }))
+      if (url.includes('/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: historical && !url.includes('offset=50') ? [recent] : [linked] }))
+      if (url === '/api/messages/edit') return Promise.resolve(jsonResponse({ success: true, link_preview_version: 5 }))
+      return Promise.resolve(jsonResponse({ success: true, stickers: [], quick_replies: [], link_preview: null }))
+    })
+    vi.stubGlobal('fetch', fetcher)
+    return fetcher
+  }
+  function emit(data: Record<string, unknown> = {}, event = 'message_link_preview_updated', listeners = Array.from(websocket.listeners)) {
+    const payload = event === 'message_link_preview_updated'
+      ? { chat_id: chat.id, device_id: chat.device_id, message_id: linked.id, body_snapshot: linked.body, is_edited_snapshot: false, link_preview: { ...preview, title: 'Metadatos enriquecidos' }, link_preview_version: 1, ...data }
+      : { chat_jid: chat.jid, device_id: chat.device_id, message_id: linked.message_id, ...data }
+    for (const listener of listeners) listener({ event, data: payload })
+  }
+  it('loads canonical metadata and ignores foreign/stale enrichment without changing the message', async () => {
+    install()
+    render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText(preview.title)
+    await act(async () => {
+      for (const invalid of [{ chat_id: 'other-chat' }, { device_id: 'other-device' }, { message_id: 'other-id' }, { body_snapshot: 'Anterior' }, { is_edited_snapshot: true }]) emit(invalid)
+      emit({ chat_id: 'other-chat', new_body: 'No aplicar', link_preview: null }, 'message_edited')
+      emit({ chat_id: 'other-chat' }, 'message_revoked')
+    })
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent(preview.title)
+    await act(async () => { emit(); emit() })
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent('Metadatos enriquecidos')
+    expect(screen.getByText(linked.body)).toBeInTheDocument()
+    expect(screen.getAllByTestId('message-bubble')).toHaveLength(1)
+    await act(async () => emit({ link_preview: null, link_preview_version: 2 }))
+    expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
+  })
+  it.each(['search', 'quote'] as const)('updates a historical %s projection and clears an edited preview without leaking it into the main page', async mode => {
+    install(true)
+    render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText(recent.body)
+    if (mode === 'search') {
+      fireEvent.click(screen.getByRole('button', { name: 'Buscar en la conversación' }))
+      fireEvent.change(screen.getByRole('searchbox', { name: 'Texto a buscar' }), { target: { value: 'Consulta' } })
+    } else fireEvent.click(screen.getByRole('button', { name: 'Abrir cita simulada' }))
+    await screen.findByText(preview.title)
+    await act(async () => emit())
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent('Metadatos enriquecidos')
+    await act(async () => emit({ new_body: 'Texto editado', mentions: [], link_preview: null, link_preview_version: 2 }, 'message_edited'))
+    expect(screen.getByText('Texto editado')).toBeInTheDocument()
+    expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
+    if (mode === 'search') expect(screen.getByText('Coincidencia: Texto editado')).toBeInTheDocument()
+    await act(async () => emit())
+    expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
+    fireEvent.click(screen.getByRole('button', { name: mode === 'search' ? 'Cerrar búsqueda' : 'Volver a donde estaba' }))
+    expect(screen.getByText(recent.body)).toBeInTheDocument()
+    expect(screen.queryByText('Texto editado')).not.toBeInTheDocument()
+  })
+  it('clears a preview on HTTP edit in an older context without depending on a WebSocket echo', async () => {
+    const fetcher = install(true)
+    render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Abrir cita simulada' }))
+    await screen.findByText(preview.title)
+    fireEvent.click(screen.getByRole('button', { name: 'Editar mensaje simulado' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Draft test editor' }), { target: { value: 'Texto editado desde Clarin' } })
+    fireEvent.click(screen.getByRole('button', { name: /Guardar cambios|Enviar mensaje/ }))
+    await screen.findByText('Texto editado desde Clarin')
+    expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-version', '5')
+    await act(async () => emit({ body_snapshot: 'Texto editado desde Clarin', is_edited_snapshot: true, link_preview_version: 4 }))
+    expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
+    expect(fetcher.mock.calls.filter(([url]) => String(url) === '/api/messages/edit')).toHaveLength(1)
+  })
+  it.each(['main', 'search', 'quote'] as const)('does not resurrect a detached thumbnail in the %s projection and accepts a newer restore', async mode => {
+    install(mode !== 'main')
+    render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    if (mode === 'search') {
+      await screen.findByText(recent.body)
+      fireEvent.click(screen.getByRole('button', { name: 'Buscar en la conversación' }))
+      fireEvent.change(screen.getByRole('searchbox', { name: 'Texto a buscar' }), { target: { value: 'Consulta' } })
+    } else if (mode === 'quote') fireEvent.click(await screen.findByRole('button', { name: 'Abrir cita simulada' }))
+    await screen.findByText(preview.title)
+    const withImage = { ...preview, thumbnail_url: '/api/media/file/test-thumbnail.jpg' }
+    await act(async () => emit({ link_preview: withImage }))
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-thumbnail', withImage.thumbnail_url)
+    await act(async () => emit({ chat_id: chat.id, message: { ...linked, link_preview_version: 2 } }, 'message_media_updated'))
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-thumbnail', '')
+    await act(async () => { emit({ link_preview: withImage }); emit({ link_preview: withImage, link_preview_version: 2 }) })
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-version', '2')
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-thumbnail', '')
+    await act(async () => emit({ link_preview: withImage, link_preview_version: 3 }))
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-thumbnail', withImage.thumbnail_url)
+    await act(async () => emit({ chat_id: chat.id, message: { ...linked, link_preview: null, link_preview_version: 2 } }, 'message_media_updated'))
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-version', '3')
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-thumbnail', withImage.thumbnail_url)
+  })
+  it.each(['search', 'quote'] as const)('retains a newer preview removal when a pending %s HTTP snapshot finishes late', async mode => {
+    const fetcher = install(mode === 'quote')
+    const original = fetcher.getMockImplementation()!
+    const quoted = { ...linked, quoted_message_id: linked.message_id }
+    if (mode === 'quote') fetcher.mockImplementation(input => String(input).includes('/context?')
+      ? Promise.resolve(jsonResponse({ success: true, messages: [quoted], message: quoted })) : original(input))
+    render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    if (mode === 'quote') fireEvent.click(await screen.findByRole('button', { name: 'Abrir cita simulada' }))
+    await screen.findByText(preview.title)
+    let complete: ((response: Response) => void) | undefined
+    fetcher.mockImplementation(input => String(input).includes(mode === 'search' ? '/messages/search?' : '/context?')
+      ? new Promise<Response>(resolve => { complete = resolve }) : original(input))
+    if (mode === 'search') {
+      fireEvent.click(screen.getByRole('button', { name: 'Buscar en la conversación' }))
+      fireEvent.change(screen.getByRole('searchbox', { name: 'Texto a buscar' }), { target: { value: 'Consulta' } })
+    } else fireEvent.click(screen.getByRole('button', { name: 'Abrir cita simulada' }))
+    await waitFor(() => expect(complete).toBeTypeOf('function'))
+    await act(async () => emit({ chat_id: chat.id, message: { ...linked, link_preview: null, link_preview_version: 2 } }, 'message_media_updated'))
+    expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
+    await act(async () => complete!(jsonResponse({ success: true, messages: [{ ...linked, link_preview_version: 1 }], message: linked, total: 1, history_offset: 0 })))
+    expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-version', '2')
+    expect(screen.getByText(linked.body)).toBeInTheDocument()
+  })
+  it('does not apply an old listener to another chat or a different authentication scope', async () => {
+    install()
+    const view = render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText(preview.title)
+    const previous = Array.from(websocket.listeners)
+    await act(async () => beginAuthIdentityChange())
+    await act(async () => emit({}, 'message_link_preview_updated', previous))
+    expect(screen.queryByText('Metadatos enriquecidos')).not.toBeInTheDocument()
+    await act(async () => completeAuthIdentityChange())
+    view.rerender(<ChatPanel chatId="other-chat" initialChat={{ ...chat, id: 'other-chat' }} />)
+    await screen.findByText('Otra conversación')
+    await act(async () => emit({}, 'message_link_preview_updated', previous))
+    expect(screen.getByText('Otra conversación')).toBeInTheDocument()
+    expect(screen.queryByText('Metadatos enriquecidos')).not.toBeInTheDocument()
+  })
+  it('keeps the enriched canonical row in the chat cache while a return refresh is pending', async () => {
+    const fetcher = install()
+    const view = render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText(preview.title)
+    await act(async () => emit())
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent('Metadatos enriquecidos')
+    view.rerender(<ChatPanel chatId="other-chat" initialChat={{ ...chat, id: 'other-chat' }} />)
+    await screen.findByText('Otra conversación')
+    const original = fetcher.getMockImplementation()!
+    fetcher.mockImplementation(input => String(input) === `/api/chats/${chat.id}` ? new Promise<Response>(() => {}) : original(input))
+    view.rerender(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText('Metadatos enriquecidos')
+    expect(screen.getByText(linked.body)).toBeInTheDocument()
+  })
+})
+
+describe('group media recovery canonical responses', () => {
+  const groupChat: Chat = { ...chat, id: 'group-recovery', jid: '120009@g.us', kind: 'group', group: { subject: 'Archivos', participant_count: 2, membership_status: 'member', announce: false, can_send: true } }
+  const message = { id: 'media-recovery', chat_id: groupChat.id, device_id: groupChat.device_id, message_id: 'wa-media-recovery', body: 'Material de la reunión', message_type: 'document', media_filename: 'Grabación.zip', media_recoverable: true, is_from_me: false, is_read: true, status: 'delivered', timestamp: '2026-10-18T12:00:00Z' }
+  const canonical = { ...message, media_recoverable: false, media_unavailable_reason: 'group_media_too_large' }
+  beforeEach(() => {
+    localStorage.setItem('token', 'test-token'); completeAuthIdentityChange(); websocket.listeners.clear()
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1200)
+  })
+  afterEach(() => { cleanup(); completeAuthIdentityChange(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
+  function install(recover: (init?: RequestInit) => Promise<Response>, historical = false, react?: () => Promise<Response>) {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/media/recover')) return recover(init)
+      if (url === '/api/messages/react' && react) return react()
+      if (url === `/api/chats/${chat.id}`) return Promise.resolve(jsonResponse({ success: true, chat, device: device('connected') }))
+      if (url.includes(`/api/chats/${chat.id}/messages?`)) return Promise.resolve(jsonResponse({ success: true, messages: [{ ...message, id: 'other-row', message_id: 'wa-other', body: 'Otra conversación', media_recoverable: false }] }))
+      if (url === `/api/chats/${groupChat.id}`) return Promise.resolve(jsonResponse({ success: true, chat: groupChat, device: device('connected') }))
+      if (url.includes('/messages/search?')) return Promise.resolve(jsonResponse({ success: true, messages: [message], total: 1, history_offset: 75 }))
+      if (url.includes('/context?')) return Promise.resolve(jsonResponse({ success: true, messages: [message], message }))
+      if (url.includes('/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: historical && !url.includes('offset=50') ? [{ ...message, id: 'recent', message_id: 'wa-recent', body: 'Último mensaje visible', media_filename: undefined, media_recoverable: false, message_type: 'text', quoted_message_id: message.message_id }] : [message] }))
+      return Promise.resolve(jsonResponse({ success: true, stickers: [], quick_replies: [] }))
+    }))
+  }
+  async function openHistoricalSearch() {
+    await screen.findByText('Último mensaje visible')
+    fireEvent.click(screen.getByRole('button', { name: 'Buscar en la conversación' }))
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Texto a buscar' }), { target: { value: 'Material' } })
+    return screen.findByRole('button', { name: 'Recuperar archivo simulado' })
+  }
+  function emit(snapshot: unknown, targetChat = groupChat.id) {
+    for (const listener of Array.from(websocket.listeners)) listener({ event: 'message_media_updated', data: { chat_id: targetChat, message: snapshot } })
+  }
+  it.each([200, 422])('reconciles recovery HTTP %i in a historical search window and its result', async status => {
+    const { media_recoverable: _recoverable, ...base } = message
+    const snapshot = { ...base, body: 'Archivo canónico', ...(status === 200 ? { media_url: '/api/media/file/account/recovered.zip' } : { media_unavailable_reason: 'group_media_too_large' }) }
+    install(() => Promise.resolve(jsonResponse({ success: status === 200, message: snapshot, code: status === 422 ? 'group_media_too_large' : undefined }, status === 200, status)), true)
+    render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    fireEvent.click(await openHistoricalSearch())
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Recuperar archivo simulado' })).not.toBeInTheDocument())
+    expect(screen.getByText('Archivo canónico')).toBeInTheDocument()
+    expect(screen.getByText('Coincidencia: Archivo canónico')).toBeInTheDocument()
+    if (status === 422) expect(screen.getByTestId('media-unavailable-reason')).toHaveTextContent('group_media_too_large')
+    else expect(screen.getByRole('button', { name: 'Abrir imagen simulada' })).toBeInTheDocument()
+  })
+  it('reconciles a historical search result and window through scoped WebSocket updates', async () => {
+    install(() => Promise.resolve(jsonResponse({})), true)
+    render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    await openHistoricalSearch()
+    await act(async () => {
+      emit({ ...canonical, body: 'Otro chat' }, 'other-chat')
+      emit({ ...canonical, id: 'unloaded', body: 'Otro mensaje' })
+    })
+    expect(screen.queryByText('Otro chat')).not.toBeInTheDocument()
+    expect(screen.queryByText('Otro mensaje')).not.toBeInTheDocument()
+    await act(async () => emit({ ...canonical, body: 'Contenido reparado' }))
+    expect(screen.getByText('Contenido reparado')).toBeInTheDocument()
+    expect(screen.getByText('Coincidencia: Contenido reparado')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Recuperar archivo simulado' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Cerrar búsqueda' }))
+    expect(screen.getByText('Último mensaje visible')).toBeInTheDocument()
+    expect(screen.queryByText('Contenido reparado')).not.toBeInTheDocument()
+  })
+  it.each(['http', 'websocket'] as const)('reconciles an older quoted context through %s without extending the main page', async source => {
+    const snapshot = { ...message, media_url: '/api/media/file/account/recovered.zip', body: 'Contexto recuperado' }
+    install(() => Promise.resolve(jsonResponse({ success: true, message: snapshot })), true)
+    render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Abrir cita simulada' }))
+    const recovery = await screen.findByRole('button', { name: 'Recuperar archivo simulado' })
+    if (source === 'http') fireEvent.click(recovery)
+    else await act(async () => emit(snapshot))
+    await screen.findByText('Contexto recuperado')
+    expect(screen.queryByRole('button', { name: 'Recuperar archivo simulado' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Volver a donde estaba' }))
+    expect(screen.getByText('Último mensaje visible')).toBeInTheDocument()
+    expect(screen.queryByText('Contexto recuperado')).not.toBeInTheDocument()
+  })
+  it.each(['http', 'websocket'] as const)('preserves a pending own reaction during %s historical recovery and uses its canonical rollback baseline', async source => {
+    let finishReaction!: (response: Response) => void
+    const reaction = { id: 'other-reaction', target_message_id: message.message_id, sender_jid: 'member', emoji: '❤️', is_from_me: false }
+    const snapshot = { ...canonical, reactions: [reaction] }
+    install(() => Promise.resolve(jsonResponse({ success: false, message: snapshot }, false, 422)), true, () => new Promise(resolve => { finishReaction = resolve }))
+    render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    const recover = await openHistoricalSearch()
+    fireEvent.click(screen.getByRole('button', { name: 'Reaccionar con 👍' }))
+    await waitFor(() => expect(finishReaction).toBeTypeOf('function'))
+    expect(screen.getByTestId('own-reaction')).toHaveTextContent('👍')
+    if (source === 'http') fireEvent.click(recover)
+    else await act(async () => emit(snapshot))
+    await waitFor(() => expect(screen.getByTestId('contact-reaction')).toHaveTextContent('❤️'))
+    expect(screen.getByTestId('own-reaction')).toHaveTextContent('👍')
+    await act(async () => finishReaction(jsonResponse({ success: false, error: 'Reacción rechazada' }, false)))
+    expect(screen.getByTestId('own-reaction')).toBeEmptyDOMElement()
+    expect(screen.getByTestId('contact-reaction')).toHaveTextContent('❤️')
+  })
+  it('aborts historical recovery on chat switch and ignores the late HTTP and old WebSocket callback', async () => {
+    let finish!: (response: Response) => void
+    let signal: AbortSignal | null | undefined
+    install(init => { signal = init?.signal; return new Promise(resolve => { finish = resolve }) }, true)
+    const view = render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    fireEvent.click(await openHistoricalSearch())
+    await waitFor(() => expect(finish).toBeTypeOf('function'))
+    const oldListeners = Array.from(websocket.listeners)
+    view.rerender(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText('Otra conversación')
+    await act(async () => {
+      finish(jsonResponse({ success: true, message: { ...canonical, body: 'Respuesta obsoleta' } }))
+      for (const listener of oldListeners) listener({ event: 'message_media_updated', data: { chat_id: groupChat.id, message: { ...canonical, body: 'Evento obsoleto' } } })
+    })
+    expect(signal?.aborted).toBe(true)
+    expect(screen.getByText('Otra conversación')).toBeInTheDocument()
+    expect(screen.queryByText('Respuesta obsoleta')).not.toBeInTheDocument()
+    expect(screen.queryByText('Evento obsoleto')).not.toBeInTheDocument()
+  })
+  it('applies the terminal HTTP 422 message without a WebSocket event and retains its caption and filename', async () => {
+    const recover = vi.fn(() => Promise.resolve(jsonResponse({ code: 'group_media_too_large', message: canonical, error: 'Archivo demasiado grande' }, false, 422)))
+    install(recover)
+    render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Recuperar archivo simulado' }))
+    await waitFor(() => expect(screen.getByTestId('media-unavailable-reason')).toHaveTextContent('group_media_too_large'))
+    expect(screen.queryByRole('button', { name: 'Recuperar archivo simulado' })).not.toBeInTheDocument()
+    expect(screen.getByText('Material de la reunión')).toBeInTheDocument()
+    expect(screen.getByText('Grabación.zip')).toBeInTheDocument()
+    expect(recover).toHaveBeenCalledOnce()
+  })
+  it.each([{ id: 'other-message' }, { chat_id: 'other-chat' }])('rejects a canonical error message outside the requested identity: %j', async (replacement) => {
+    install(() => Promise.resolve(jsonResponse({ code: 'group_media_too_large', message: { ...canonical, ...replacement } }, false, 422)))
+    render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    const button = await screen.findByRole('button', { name: 'Recuperar archivo simulado' })
+    await act(async () => fireEvent.click(button))
+    expect(screen.getByTestId('media-unavailable-reason')).toBeEmptyDOMElement()
+    expect(button).toBeInTheDocument()
+  })
+  it('discards a delayed canonical error after an auth scope change', async () => {
+    let finish!: (response: Response) => void
+    let signal: AbortSignal | null | undefined
+    install(init => { signal = init?.signal; return new Promise(resolve => { finish = resolve }) }, true)
+    render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    fireEvent.click(await openHistoricalSearch())
+    await waitFor(() => expect(finish).toBeTypeOf('function'))
+    await act(async () => {
+      beginAuthIdentityChange()
+      finish(jsonResponse({ code: 'group_media_too_large', message: canonical }, false, 422))
+      emit({ ...canonical, body: 'Otra sesión' })
+    })
+    expect(signal?.aborted).toBe(true)
+    expect(screen.getByTestId('media-unavailable-reason')).toBeEmptyDOMElement()
+    expect(screen.queryByText('Otra sesión')).not.toBeInTheDocument()
+    expect(screen.getByText('Coincidencia: Material de la reunión')).toBeInTheDocument()
   })
 })

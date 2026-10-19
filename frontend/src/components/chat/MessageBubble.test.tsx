@@ -18,6 +18,45 @@ const baseMessage: Message = {
 }
 
 describe('MessageBubble message actions', () => {
+  it('lets nested links own keyboard activation and their native context menu in compact and desktop modes', () => {
+    const onSelect = vi.fn()
+    const linked = { ...baseMessage, body: 'https://example.com/a_b' }
+    const { rerender } = render(<MessageBubble message={linked} compactSelection onSelect={onSelect} onReply={vi.fn()} />)
+    const link = screen.getByRole('link')
+    expect(fireEvent.keyDown(link, { key: 'Enter' })).toBe(true)
+    expect(fireEvent.contextMenu(link)).toBe(true)
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    rerender(<MessageBubble message={linked} onReply={vi.fn()} />)
+    expect(fireEvent.contextMenu(screen.getByRole('link'))).toBe(true)
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  })
+
+  it('renders one compact received card, original text and a fixed local thumbnail that fails quietly', () => {
+    const thumbnail = `/api/media/file/00000000-0000-4000-8000-000000000000/link-previews/${'a'.repeat(64)}.jpg`
+    const linked = { ...baseMessage, body: 'Ver https://example.com/a_b', link_preview: { url: 'https://example.com/a_b', title: 'Título recibido', description: 'Descripción recibida', thumbnail_url: thumbnail } }
+    const { container, rerender } = render(<MessageBubble message={linked} />)
+    expect(container.querySelectorAll('[data-link-preview]')).toHaveLength(1)
+    expect(screen.getByRole('link', { name: 'https://example.com/a_b' })).toBeInTheDocument()
+    expect(screen.getByText('Título recibido')).toHaveClass('line-clamp-2')
+    const image = container.querySelector('[data-link-preview] img')!
+    expect(image).toHaveAttribute('src', thumbnail)
+    expect(image).toHaveAttribute('width', '72')
+    expect(image).toHaveAttribute('height', '72')
+    const frame = image.parentElement
+    fireEvent.error(image)
+    expect(container.querySelector('[data-link-preview] img')).toBeNull()
+    expect(frame).toHaveClass('h-[72px]', 'w-[72px]')
+    expect(screen.getByText('Título recibido')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    rerender(<MessageBubble message={{ ...linked, link_preview: { ...linked.link_preview, thumbnail_url: 'https://external.example/track.jpg' } }} />)
+    expect(container.querySelector('[data-link-preview] img')).toBeNull()
+    rerender(<MessageBubble message={{ ...linked, link_preview: null }} />)
+    expect(container.querySelector('[data-link-preview]')).toBeNull()
+    expect(screen.getByRole('link', { name: 'https://example.com/a_b' })).toBeInTheDocument()
+    rerender(<MessageBubble message={{ ...linked, is_revoked: true }} />)
+    expect(container.querySelector('[data-link-preview]')).toBeNull()
+  })
   it('keeps unavailable media from issuing a request or offering playback', () => {
     const { container } = render(<MessageBubble message={{ ...baseMessage, message_type: 'video', media_url: '/missing.mp4', media_deleted: true }} />)
     expect(screen.getByText('Archivo eliminado')).toBeInTheDocument()

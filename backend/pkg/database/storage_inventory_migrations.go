@@ -15,6 +15,7 @@ type storageInventorySourceSpec struct {
 func storageInventorySourceSpecs() []storageInventorySourceSpec {
 	metadata := map[string]string{
 		"messages":                   "chat_id,media_filename",
+		"chat_group_message_state":   "chat_id",
 		"campaigns":                  "name",
 		"campaign_attachments":       "campaign_id,file_name",
 		"quick_replies":              "title,media_filename",
@@ -45,7 +46,7 @@ func storageInventorySourceSpecs() []storageInventorySourceSpec {
 	for _, guard := range storageReferenceGuardSpecs {
 		var mediaFields []string
 		for _, field := range strings.Split(guard.fields, ",") {
-			if field != "status" && field != "state" && field != "media_deleted" && field != "storage_removed_at" && field != "storage_removal_id" {
+			if field != "status" && field != "state" && field != "revoked" && field != "media_deleted" && field != "storage_removed_at" && field != "storage_removal_id" {
 				mediaFields = append(mediaFields, field)
 			}
 		}
@@ -188,7 +189,8 @@ func StorageInventoryMigrations() []string {
 		`CREATE OR REPLACE FUNCTION clarin_storage_inventory_has_media(item JSONB,fields TEXT) RETURNS BOOLEAN
 		 LANGUAGE SQL IMMUTABLE AS $$
 		 SELECT EXISTS(SELECT 1 FROM unnest(string_to_array(fields,',')) field
-		   WHERE item->field IS NOT NULL AND item->field NOT IN ('null'::jsonb,'""'::jsonb,'{}'::jsonb,'[]'::jsonb))
+		   WHERE CASE WHEN field IN ('link_preview','edited_link_preview') THEN NULLIF(item->field->>'thumbnail_url','') IS NOT NULL
+		   ELSE item->field IS NOT NULL AND item->field NOT IN ('null'::jsonb,'""'::jsonb,'{}'::jsonb,'[]'::jsonb) END)
 		 $$`,
 		`CREATE OR REPLACE FUNCTION clarin_storage_inventory_enqueue(owner UUID,kind TEXT,identity TEXT) RETURNS void
 		 LANGUAGE plpgsql AS $$ BEGIN
@@ -267,7 +269,8 @@ func storageInventoryDependencyMigrations() []string {
 		   -- authorized while its asynchronous projection is waiting for repair.
 		   UPDATE storage_inventory_sources src SET generation=nextval('storage_inventory_generation_seq'),changed_at=clock_timestamp(),next_attempt_at=NOW(),attempts=0,last_error=''
 		   FROM (
-		     SELECT 'messages'::text AS source_kind,id::text AS source_id FROM messages WHERE account_id=owner AND media_asset_id=identity
+		     SELECT 'messages'::text AS source_kind,id::text AS source_id FROM messages WHERE account_id=owner AND (media_asset_id=identity OR link_preview_media_asset_id=identity)
+		     UNION SELECT 'chat_group_message_state',id::text FROM chat_group_message_state WHERE account_id=owner AND edited_link_preview_media_asset_id=identity
 		     UNION ALL SELECT 'quick_reply_attachments',id::text FROM quick_reply_attachments WHERE account_id=owner AND media_asset_id=identity
 		     UNION ALL SELECT 'survey_file_uploads',id::text FROM survey_file_uploads WHERE account_id=owner AND media_asset_id=identity
 		     UNION ALL SELECT 'survey_branding_asset_refs',id::text FROM survey_branding_asset_refs WHERE account_id=owner AND media_asset_id=identity
@@ -295,7 +298,8 @@ func storageInventoryDependencyMigrations() []string {
 		       WHERE clarin_storage_inventory_invalidate_dependents.kind='surveys' AND s.account_id=owner AND s.id=identity
 		     UNION ALL SELECT 'survey_branding_asset_refs',id::text FROM survey_branding_asset_refs
 		       WHERE account_id=owner AND ((clarin_storage_inventory_invalidate_dependents.kind='surveys' AND survey_id=identity) OR (clarin_storage_inventory_invalidate_dependents.kind='survey_templates' AND template_id=identity))
-		     UNION ALL SELECT 'messages',id::text FROM messages WHERE clarin_storage_inventory_invalidate_dependents.kind='chats' AND account_id=owner AND chat_id=identity AND (NULLIF(media_url,'') IS NOT NULL OR media_asset_id IS NOT NULL)
+		     UNION ALL SELECT 'messages',id::text FROM messages WHERE clarin_storage_inventory_invalidate_dependents.kind='chats' AND account_id=owner AND chat_id=identity AND (NULLIF(media_url,'') IS NOT NULL OR media_asset_id IS NOT NULL OR link_preview_media_asset_id IS NOT NULL OR NULLIF(link_preview->>'thumbnail_url','') IS NOT NULL)
+		     UNION ALL SELECT 'chat_group_message_state',id::text FROM chat_group_message_state WHERE clarin_storage_inventory_invalidate_dependents.kind='chats' AND account_id=owner AND chat_id=identity AND NOT revoked AND (edited_link_preview_media_asset_id IS NOT NULL OR NULLIF(edited_link_preview->>'thumbnail_url','') IS NOT NULL)
 		     UNION ALL SELECT 'whiteboard_revision_assets',id::text FROM whiteboard_revision_assets WHERE clarin_storage_inventory_invalidate_dependents.kind='whiteboard_revisions' AND account_id=owner AND revision_id=identity
        UNION ALL SELECT 'task_attachments',id::text FROM task_attachments WHERE clarin_storage_inventory_invalidate_dependents.kind='tasks' AND account_id=owner AND task_id=identity
        UNION ALL SELECT 'whiteboard_assets',id::text FROM whiteboard_assets WHERE clarin_storage_inventory_invalidate_dependents.kind='whiteboards' AND account_id=owner AND board_id=identity

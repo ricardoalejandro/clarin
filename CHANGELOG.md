@@ -1,5 +1,15 @@
 # Changelog — Clarin CRM
 
+## 2026-10-18
+
+### WhatsApp: grupos y fijados personales
+
+- Conversaciones grupales integradas en la bandeja con filtros, autores y citas identificados, menciones, participantes, permisos reales y recibos por integrante.
+- Los grupos conservan No leídos y su historial, completamente separados de Leads, campañas y Pendientes comerciales.
+- Fijar y desfijar conversaciones para cada usuario, con orden estable y sincronización entre sus sesiones.
+- Recuperación de medios históricos disponibles bajo demanda, conservando restricciones de visualización única.
+- Actualización controlada de whatsmeow, adaptación de identidades telefónicas/LID y compilación fijada con Go 1.27.2.
+
 ## 2026-10-12
 
 ### Eventos: configuración, contactos y bitácoras

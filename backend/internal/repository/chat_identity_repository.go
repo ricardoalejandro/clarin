@@ -321,6 +321,9 @@ func (r *ChatRepository) ReconcileLIDChat(
 	`, canonicalChatID, accountID, sourceChatID, attentionAt, attentionID); err != nil {
 		return nil, err
 	}
+	if err := mergeChatUserPreferencesTx(ctx, tx, accountID, sourceChatID, canonicalChatID); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM chats WHERE id=$1 AND account_id=$2`, sourceChatID, accountID); err != nil {
 		return nil, err
 	}

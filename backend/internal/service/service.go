@@ -1083,6 +1083,8 @@ func (s *DeviceService) GetByAccountID(ctx context.Context, accountID uuid.UUID)
 		connected := status == domain.DeviceStatusConnected
 		device.RuntimeCapabilities = &domain.DeviceRuntimeCapabilities{
 			CanStartChat:           connected,
+			CanListGroups:          connected && s.pool.GroupsEnabledForAccount(device.AccountID),
+			CanSendGroupMessages:   connected && s.pool.GroupsEnabledForAccount(device.AccountID),
 			CanCheckWhatsApp:       connected,
 			CanSendReaction:        connected,
 			CanSendSticker:         connected,
@@ -1118,6 +1120,8 @@ func (s *DeviceService) GetByID(ctx context.Context, deviceID uuid.UUID) (*domai
 	connected := status == domain.DeviceStatusConnected
 	device.RuntimeCapabilities = &domain.DeviceRuntimeCapabilities{
 		CanStartChat:           connected,
+		CanListGroups:          connected && s.pool.GroupsEnabledForAccount(device.AccountID),
+		CanSendGroupMessages:   connected && s.pool.GroupsEnabledForAccount(device.AccountID),
 		CanCheckWhatsApp:       connected,
 		CanSendReaction:        connected,
 		CanSendSticker:         connected,
@@ -1154,7 +1158,17 @@ func (s *ChatService) GetByAccountID(ctx context.Context, accountID uuid.UUID) (
 }
 
 func (s *ChatService) GetByAccountIDWithFilters(ctx context.Context, accountID uuid.UUID, filter domain.ChatFilter) ([]*domain.Chat, int, error) {
-	return s.repos.Chat.GetByAccountIDWithFilters(ctx, accountID, filter)
+	if !s.pool.GroupsEnabledForAccount(accountID) {
+		if filter.Kind == "group" {
+			return []*domain.Chat{}, 0, nil
+		}
+		filter.Kind = "direct"
+	}
+	chats, total, err := s.repos.Chat.GetByAccountIDWithFilters(ctx, accountID, filter)
+	if err == nil {
+		err = s.repos.Chat.HydrateGroups(ctx, accountID, chats)
+	}
+	return chats, total, err
 }
 
 func (s *ChatService) GetByID(ctx context.Context, chatID uuid.UUID) (*domain.Chat, error) {
@@ -1169,6 +1183,20 @@ func (s *ChatService) GetChatDetails(ctx context.Context, chatID uuid.UUID) (*do
 
 	details := &domain.ChatDetails{
 		Chat: chat,
+	}
+
+	if domain.IsGroupJID(chat.JID) {
+		if !s.pool.GroupsEnabledForAccount(chat.AccountID) {
+			return nil, nil
+		}
+		if err := s.repos.Chat.HydrateGroups(ctx, chat.AccountID, []*domain.Chat{chat}); err != nil {
+			return nil, err
+		}
+		details.Opportunities = []*domain.OpportunitySummary{}
+		if chat.DeviceID != nil {
+			details.Device, _ = s.repos.Device.GetByID(ctx, *chat.DeviceID)
+		}
+		return details, nil
 	}
 
 	// Contact is the parent entity. Resolve the explicit relationship first;
@@ -1358,6 +1386,9 @@ func (s *ChatService) GetReactions(ctx context.Context, accountID, chatID uuid.U
 // AttachReactions enriches any message projection (history, search or quoted
 // context) from the same account-scoped reaction source of truth.
 func (s *ChatService) AttachReactions(ctx context.Context, accountID, chatID uuid.UUID, messages []*domain.Message) error {
+	if err := s.repos.Message.HydrateMentions(ctx, accountID, chatID, messages); err != nil {
+		return err
+	}
 	messageIDs := make([]string, 0, len(messages))
 	seen := make(map[string]struct{}, len(messages))
 	for _, message := range messages {
@@ -1806,12 +1837,18 @@ type CampaignService struct {
 }
 
 func (s *CampaignService) validateRecipientPrivacy(ctx context.Context, campaign *domain.Campaign, rec *domain.CampaignRecipient) (*domain.Contact, error) {
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(rec.JID)), "@g.us") {
+		return nil, fmt.Errorf("destinatario omitido: los grupos no son destinatarios de campañas")
+	}
 	if rec.ContactID == nil {
 		return nil, fmt.Errorf("destinatario omitido: no está vinculado a un contacto vigente")
 	}
 	contact, err := s.repos.Contact.GetByID(ctx, *rec.ContactID)
 	if err != nil || contact == nil || contact.AccountID != campaign.AccountID {
 		return nil, fmt.Errorf("destinatario omitido: el contacto ya no existe en esta cuenta")
+	}
+	if contact.IsGroup {
+		return nil, fmt.Errorf("destinatario omitido: los grupos no son destinatarios de campañas")
 	}
 	blocked, err := s.repos.Contact.IsOutboundSuppressed(ctx, campaign.AccountID, []string{rec.JID, stringValue(rec.Phone), contact.JID, stringValue(contact.Phone)})
 	if err != nil {

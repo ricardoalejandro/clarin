@@ -73,6 +73,8 @@ type Config struct {
 	WhatsAppCloudTokenEncryptionKey string
 	// Experimental WhatsApp Web ephemeral status publishing. Keep disabled in
 	// production until a real-device smoke test has passed.
+	WhatsAppGroupChatsEnabled bool
+	WhatsAppGroupChatAccounts string
 	WhatsAppStatusEnabled     bool
 	WhatsAppStatusSyncEnabled bool
 	// Work whiteboard views are an additive rollout. The backend keeps the
@@ -171,6 +173,8 @@ func Load() *Config {
 		WhatsAppCloudGraphBaseURL:       strings.TrimRight(getEnv("WHATSAPP_CLOUD_GRAPH_BASE_URL", "https://graph.facebook.com"), "/"),
 		WhatsAppCloudVerifyToken:        getEnv("WHATSAPP_CLOUD_VERIFY_TOKEN", ""),
 		WhatsAppCloudTokenEncryptionKey: getEnv("WHATSAPP_CLOUD_TOKEN_ENCRYPTION_KEY", ""),
+		WhatsAppGroupChatsEnabled:       getEnvBool("WHATSAPP_GROUP_CHATS_ENABLED", false),
+		WhatsAppGroupChatAccounts:       getEnv("WHATSAPP_GROUP_CHAT_ACCOUNTS", ""),
 		WhatsAppStatusEnabled:           getEnvBool("WHATSAPP_STATUS_ENABLED", false),
 		WhatsAppStatusSyncEnabled:       getEnvBool("WHATSAPP_STATUS_SYNC_ENABLED", false),
 		WorkWhiteboardViewsEnabled:      getEnvBool("WORK_WHITEBOARD_VIEWS_ENABLED", false),

@@ -45,7 +45,9 @@ func (s *Server) messageActorMiddleware(c *fiber.Ctx) error {
 		value.Sender.Origin = "quick_reply"
 	}
 	var target *domain.Chat
-	if req.ChatID != "" {
+	if group, ok := c.Locals("group_chat").(*domain.Chat); ok {
+		target = group
+	} else if req.ChatID != "" {
 		id, parseErr := uuid.Parse(req.ChatID)
 		if parseErr != nil {
 			return fiber.ErrBadRequest
@@ -62,9 +64,11 @@ func (s *Server) messageActorMiddleware(c *fiber.Ctx) error {
 	}
 	if target != nil {
 		value.ChatID = target.ID
-		value.ThroughAt, value.ThroughID, err = s.repos.Chat.IncomingBoundary(c.Context(), accountID, target.ID, req.Through)
-		if err != nil {
-			return c.Status(422).JSON(fiber.Map{"success": false, "error": "El mensaje al que respondes ya no está disponible."})
+		if !domain.IsGroupJID(target.JID) {
+			value.ThroughAt, value.ThroughID, err = s.repos.Chat.IncomingBoundary(c.Context(), accountID, target.ID, req.Through)
+			if err != nil {
+				return c.Status(422).JSON(fiber.Map{"success": false, "error": "El mensaje al que respondes ya no está disponible."})
+			}
 		}
 	}
 	var operationID uuid.UUID

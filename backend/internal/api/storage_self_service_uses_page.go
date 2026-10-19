@@ -73,13 +73,16 @@ func (c storageUseCandidate) order() string {
 // The live authorization and generation predicate is applied before counting.
 const storageUseCandidatesSQL = `, mapped_uses AS (
  SELECT
- CASE WHEN vr.source_kind IN ('messages','campaigns','campaign_attachments','quick_replies','quick_reply_attachments','saved_stickers','contacts') THEN 'ordinary'
+ CASE WHEN (vr.source_kind='messages' AND vr.ref_id LIKE 'preview:%') OR vr.source_kind='chat_group_message_state' THEN 'link_preview'
+ WHEN vr.source_kind IN ('messages','campaigns','campaign_attachments','quick_replies','quick_reply_attachments','saved_stickers','contacts') THEN 'ordinary'
  WHEN vr.source_kind='task_attachments' THEN 'private_work'
  WHEN vr.source_kind IN ('whiteboard_assets','whiteboard_revision_assets') THEN 'private_whiteboards'
  ELSE 'protected' END AS adapter,
  CASE WHEN vr.source_kind='campaign_attachments' THEN ca.campaign_id::text
  WHEN vr.source_kind='quick_reply_attachments' THEN qa.quick_reply_id::text ELSE vr.source_id END AS source_id,
- CASE WHEN vr.source_kind IN ('task_attachments','whiteboard_assets','whiteboard_revision_assets') THEN vr.source_kind ELSE vr.origin END AS slot,
+ CASE WHEN vr.source_kind='messages' AND vr.ref_id LIKE 'preview:%' THEN 'message'
+ WHEN vr.source_kind='chat_group_message_state' THEN 'group_edit'
+ WHEN vr.source_kind IN ('task_attachments','whiteboard_assets','whiteboard_revision_assets') THEN vr.source_kind ELSE vr.origin END AS slot,
  vr.origin,vr.label,vr.href,vr.filename
  FROM authorized_refs vr
  LEFT JOIN campaign_attachments ca ON vr.source_kind='campaign_attachments' AND ca.id::text=vr.source_id
@@ -132,14 +135,19 @@ func (s *Server) storageReadUsesPage(ctx context.Context, actor storageUseActor,
 		page := all[start:end]
 		selection := storageReadUseSelection{IDs: map[string][]uuid.UUID{}}
 		for _, use := range page {
-			if use.Adapter == "ordinary" {
-				selection.IDs["ordinary"] = append(selection.IDs["ordinary"], use.SourceID)
+			if use.Adapter == "ordinary" || use.Adapter == "link_preview" {
+				selection.IDs[use.Adapter] = append(selection.IDs[use.Adapter], use.SourceID)
 			}
 		}
 		hydrated, err := (storageOrdinaryUseAdapter{}).List(context.WithValue(ctx, storageReadUseSelectionKey{}, selection), s, s.repos.DB(), actor, key)
 		if err != nil {
 			return nil, 0, "", err
 		}
+		previews, err := (storageLinkPreviewUseAdapter{}).List(context.WithValue(ctx, storageReadUseSelectionKey{}, selection), s, s.repos.DB(), actor, key)
+		if err != nil {
+			return nil, 0, "", err
+		}
+		hydrated = append(hydrated, previews...)
 		byOrder := make(map[string]storageSelfServiceUse, len(hydrated))
 		for _, use := range hydrated {
 			if !storageSelfServiceHasPermission(actor.Claims, domain.PermSettings) {
@@ -150,7 +158,7 @@ func (s *Server) storageReadUsesPage(ctx context.Context, actor storageUseActor,
 		}
 		result := make([]storageSelfServiceUse, 0, len(page))
 		for _, use := range page {
-			if use.Adapter == "ordinary" {
+			if use.Adapter == "ordinary" || use.Adapter == "link_preview" {
 				// A row deleted after candidate selection must not survive as an identity-only placeholder.
 				current, exists := byOrder[storageUseOrder(use)]
 				if !exists {
@@ -187,6 +195,9 @@ func (s *Server) storageReadUsesPage(ctx context.Context, actor storageUseActor,
 			return nil, 0, "", err
 		}
 		candidate.Ref.ID = candidate.SourceID.String()
+		if candidate.Adapter == "link_preview" {
+			candidate.Ref.ID = storagePreviewReferenceID(candidate.Slot, candidate.SourceID)
+		}
 		candidates = append(candidates, candidate)
 	}
 	err = rows.Err()

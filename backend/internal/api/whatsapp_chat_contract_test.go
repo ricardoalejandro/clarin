@@ -52,8 +52,18 @@ func TestDeviceRuntimeCapabilitiesSerializesReactionCapability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	if string(encoded) != `{"can_start_chat":false,"can_check_whatsapp":false,"can_send_reaction":true,"can_send_sticker":false,"can_send_animated_sticker":false,"can_publish_status":false,"can_publish_status_link":false,"can_sync_own_status":false}` {
-		t.Fatalf("runtime capabilities JSON = %s", encoded)
+	var capabilities map[string]bool
+	if err := json.Unmarshal(encoded, &capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if !capabilities["can_send_reaction"] {
+		t.Fatal("reaction capability was not serialized")
+	}
+	for _, key := range []string{"can_start_chat", "can_check_whatsapp", "can_send_sticker", "can_send_animated_sticker", "can_publish_status", "can_publish_status_link", "can_sync_own_status", "can_list_groups", "can_send_group_messages"} {
+		value, present := capabilities[key]
+		if !present || value {
+			t.Fatalf("capability %s must explicitly serialize false", key)
+		}
 	}
 }
 
