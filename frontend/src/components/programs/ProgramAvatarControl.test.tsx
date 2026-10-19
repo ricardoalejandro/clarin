@@ -239,6 +239,32 @@ describe('Program photo consultation', () => {
     await waitFor(() => expect(screen.getAllByAltText('Foto de Grupo Azul')[0]).toHaveAttribute('src', 'blob:photo-2'))
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:photo-1')
   })
+  it.each(['without-photo', 'retry'] as const)('does not let a stale %s surface invalidate a newer download', async operation => {
+    let finishNew!: (value: unknown) => void
+    mocks.apiBlob.mockImplementation((url: string) => url.endsWith('v=2')
+      ? new Promise(done => { finishNew = done })
+      : Promise.resolve({ success: true, blob: new Blob(['old-photo']) }))
+    render(<ProgramAvatar program={{ ...photo, name: 'Foto nueva', avatar_revision: 2 }} />)
+    render(<ProgramAvatar program={{ ...photo, name: 'Foto anterior', avatar_url: operation === 'without-photo' ? null : photo.avatar_url }} interactive />)
+    if (operation === 'retry') {
+      fireEvent.error(await screen.findByAltText('Foto de Foto anterior'))
+      fireEvent.click(screen.getByRole('button', { name: 'Ver foto de Foto anterior' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Reintentar' }))
+    }
+    expect(mocks.apiBlob.mock.calls[0][1].signal.aborted).toBe(false)
+    await act(async () => finishNew({ success: true, blob: new Blob(['new-photo']) }))
+    expect(screen.getByAltText('Foto de Foto nueva')).toBeInTheDocument()
+  })
+  it('invalidates an older pending photo when a canonical newer revision removes it', async () => {
+    let finish!: (value: unknown) => void
+    mocks.apiBlob.mockImplementationOnce(() => new Promise(done => { finish = done }))
+    render(<ProgramAvatar program={{ ...photo, avatar_revision: 2 }} />)
+    render(<ProgramAvatar program={{ ...photo, avatar_url: null, avatar_revision: 3 }} />)
+    expect(mocks.apiBlob.mock.calls[0][1].signal.aborted).toBe(true)
+    await act(async () => finish({ success: true, blob: new Blob(['obsolete-photo']) }))
+    expect(screen.queryByAltText('Foto de Grupo Azul')).not.toBeInTheDocument()
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
+  })
   it('pauses an open viewer without capturing keyboard events and restores its focus and image', async () => {
     const content = (suspended = false) => <><button>Fuera del visor</button><ProgramAvatarControl program={photo} readOnly suspended={suspended} /></>
     const view = render(content())

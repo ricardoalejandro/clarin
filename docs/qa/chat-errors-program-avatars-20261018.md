@@ -24,8 +24,11 @@ El recorrido Cuadrícula → Lista → Compacta → Cuadrícula → detalle → 
 
 - Backend: reproducción roja de caché `messages:null`; corrección y pruebas focalizadas PASS. El fixture HTTP PostgreSQL cubre grupo vacío, página agotada, otro dispositivo y otra cuenta; usa el gate de contexto existente.
 - Chats frontend: las tres reproducciones fallaban antes del cambio. Después pasaron 58 pruebas en seis archivos, incluidas respuestas tardías de recarga silenciosa y conservación de la ventana cargada durante eventos de WebSocket.
-- Fotos de Programas: 24 pruebas aprobadas. Incluyen descargas simultáneas, reutilización al remontar, expiración, límites de bytes/entradas, revisión, retirada, reintento, sesión tardía, cancelación, timeout y conservación de la revisión más reciente.
+- Fotos de Programas: 27 pruebas aprobadas. Incluyen descargas simultáneas, reutilización al remontar, expiración, límites de bytes/entradas, revisión, retirada, reintento, sesión tardía, cancelación, timeout y conservación de la revisión más reciente. Dos reproducciones adicionales demostraron que una vista antigua sin foto o reintentando podía cancelar una revisión nueva; la invalidación ahora recibe la revisión conocida y sólo afecta revisiones iguales o anteriores. La retirada canónica de una revisión más reciente sigue cancelando las anteriores.
 - Revisión independiente: aislamiento, recursos de fotos, paginación, Pendientes FIFO y honestidad de errores revisados. No hay cambios de esquema, dependencia WhatsApp, almacenamiento persistente, Leads ni permisos.
-- `npx tsc --noEmit`: PASS sobre la corrección frontend combinada. No se actualiza npm ni ninguna dependencia por el aviso informativo de su CLI.
+- `npx tsc --noEmit`: PASS sobre la corrección frontend combinada.
+- Suite completa Go 1.27.2: PASS, con los cinco gates PostgreSQL aislados activados, dos CPU lógicas y un paquete a la vez. Incluye el fixture HTTP de historia vacía. Árbol backend `15184c0b25e0c0a1a2f4cef5446c00e090404ff4`, idéntico en `ddc086cc150c` y en la corrección completa `0936f3815e2f`; artefacto LF SHA-256 `8bc3c7e76323f835865b2639bac0831d18b5403a6af08b9c8c682b55b308d244`.
 
 Los resultados de compilación, suite completa, despliegue y aceptación posterior se registran después de su ejecución.
+
+La compilación inicial se detuvo en el builder dedicado al detectar las dos carreras adicionales de invalidación, antes de sustituir servicios. Se verificó que los cinco contenedores de aplicación seguían ejecutando exactamente las imágenes previas respaldadas. Se conservó el log del intento cancelado y se preparó una reanudación que comprueba esa misma identidad antes de publicar el arreglo completo.

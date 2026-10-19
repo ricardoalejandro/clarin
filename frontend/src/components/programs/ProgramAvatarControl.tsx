@@ -34,10 +34,10 @@ function useProgramAvatarURL(program: AvatarProgram) {
         objectURL = URL.createObjectURL(response.blob)
         setResult({ key, url: objectURL })
       })
-    } else if (!program.avatar_url) invalidateProgramAvatarBlob(scope, program.id)
+    } else if (!program.avatar_url) invalidateProgramAvatarBlob(scope, program.id, program.avatar_revision ?? 0)
     return () => { active = false; release?.(); if (objectURL) URL.revokeObjectURL(objectURL) }
   }, [key, retry, program.id, program.avatar_url, program.avatar_revision, scope])
-  return { url: result.key === key ? result.url : '', failed: failed === key, retry: () => { invalidateProgramAvatarBlob(scope, program.id); setRetry(value => value + 1) } }
+  return { url: result.key === key ? result.url : '', failed: failed === key, retry: () => { invalidateProgramAvatarBlob(scope, program.id, program.avatar_revision ?? 0); setRetry(value => value + 1) } }
 }
 
 export function ProgramAvatar({ program, className = 'h-12 w-12', interactive = false, suspended = false }: { program: AvatarProgram; className?: string; interactive?: boolean; suspended?: boolean }) {

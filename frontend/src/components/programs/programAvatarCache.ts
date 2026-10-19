@@ -98,6 +98,6 @@ export function acquireProgramAvatarBlob(scope: string, programId: string, revis
   } }
 }
 
-export function invalidateProgramAvatarBlob(scope: string, programId: string) {
-  for (const [key, entry] of entries) if (entry.scope === scope && entry.programId === programId) remove(key, entry)
+export function invalidateProgramAvatarBlob(scope: string, programId: string, knownRevision: number) {
+  for (const [key, entry] of entries) if (entry.scope === scope && entry.programId === programId && entry.revision <= knownRevision) remove(key, entry)
 }
