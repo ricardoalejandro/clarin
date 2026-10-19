@@ -7,8 +7,7 @@ func messageLinkPreviewMigrations() []string {
 		`CREATE OR REPLACE FUNCTION clarin_bump_link_preview_version() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
  IF NEW.link_preview IS DISTINCT FROM OLD.link_preview OR NEW.link_preview_media_asset_id IS DISTINCT FROM OLD.link_preview_media_asset_id THEN NEW.link_preview_version=OLD.link_preview_version+1;
  ELSE NEW.link_preview_version=OLD.link_preview_version;END IF;RETURN NEW;END $$`,
-		`DROP TRIGGER IF EXISTS trg_messages_link_preview_version ON messages`,
-		`CREATE TRIGGER trg_messages_link_preview_version BEFORE UPDATE OF link_preview,link_preview_media_asset_id ON messages FOR EACH ROW EXECUTE FUNCTION clarin_bump_link_preview_version()`,
+		`CREATE OR REPLACE TRIGGER trg_messages_link_preview_version BEFORE UPDATE OF link_preview,link_preview_media_asset_id ON messages FOR EACH ROW EXECUTE FUNCTION clarin_bump_link_preview_version()`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_link_preview_asset ON messages(account_id,link_preview_media_asset_id) WHERE link_preview_media_asset_id IS NOT NULL`,
 		`DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='fk_messages_link_preview_asset_account') THEN ALTER TABLE messages ADD CONSTRAINT fk_messages_link_preview_asset_account FOREIGN KEY(account_id,link_preview_media_asset_id) REFERENCES media_assets(account_id,id); END IF; END $$`,
 		`ALTER TABLE chat_group_message_state ADD COLUMN IF NOT EXISTS edited_link_preview JSONB, ADD COLUMN IF NOT EXISTS edited_link_preview_media_asset_id UUID`,

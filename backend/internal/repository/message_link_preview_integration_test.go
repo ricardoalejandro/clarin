@@ -41,10 +41,22 @@ func TestChatLinkPreviewIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	var triggerOID uint32
 	for i := 0; i < 2; i++ {
 		if err = database.Migrate(db); err != nil {
 			t.Fatal(err)
 		}
+		// The worker repeats Migrate while the backend is already serving.
+		// Replacing the trigger must preserve its identity instead of leaving
+		// a committed DROP/CREATE gap without preview version increments.
+		var currentOID uint32
+		if err := db.QueryRow(ctx, `SELECT oid FROM pg_trigger WHERE tgrelid='messages'::regclass AND tgname='trg_messages_link_preview_version' AND NOT tgisinternal`).Scan(&currentOID); err != nil {
+			t.Fatalf("read preview version trigger after migration %d: %v", i+1, err)
+		}
+		if currentOID == 0 || (i > 0 && currentOID != triggerOID) {
+			t.Fatal("startup migration dropped/recreated the live preview version trigger")
+		}
+		triggerOID = currentOID
 	}
 	exec := func(q string, args ...any) {
 		t.Helper()
