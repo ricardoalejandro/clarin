@@ -214,7 +214,8 @@ func storageSelfServiceExtractKeys(accountID uuid.UUID, value string) []string {
 // account_id column. JSON payloads are inspected as well as normalized links.
 // A failed source query fails the whole catalog: it can never mean "unused".
 var storageSelfServiceReferenceQueries = []struct{ origin, sql string }{
-	{"chats", `SELECT m.id::text,COALESCE(NULLIF(c.name,''),'Conversación'),'/dashboard/chats?open='||c.id::text,COALESCE(m.media_filename,''),jsonb_build_array(m.media_url,ma.object_key)::text FROM messages m JOIN chats c ON c.id=m.chat_id AND c.account_id=m.account_id LEFT JOIN media_assets ma ON ma.id=m.media_asset_id AND ma.account_id=m.account_id WHERE m.account_id=$1 AND NOT COALESCE(m.media_deleted,false) AND ((m.media_url IS NOT NULL AND m.media_url<>'') OR m.media_asset_id IS NOT NULL)`},
+	{"chats", `SELECT ref.id,COALESCE(NULLIF(c.name,''),'Conversación'),'/dashboard/chats?open='||c.id::text,ref.filename,ref.payload::text FROM messages m JOIN chats c ON c.id=m.chat_id AND c.account_id=m.account_id LEFT JOIN media_assets ma ON ma.id=m.media_asset_id AND ma.account_id=m.account_id LEFT JOIN media_assets lp ON lp.id=m.link_preview_media_asset_id AND lp.account_id=m.account_id CROSS JOIN LATERAL (VALUES (m.id::text,COALESCE(m.media_filename,''),jsonb_build_array(m.media_url,ma.object_key),NOT COALESCE(m.media_deleted,false) AND (NULLIF(m.media_url,'') IS NOT NULL OR m.media_asset_id IS NOT NULL)),('preview:'||m.id::text,'Vista previa de enlace',jsonb_build_array(m.link_preview->>'thumbnail_url',lp.object_key),NULLIF(m.link_preview->>'thumbnail_url','') IS NOT NULL OR m.link_preview_media_asset_id IS NOT NULL)) ref(id,filename,payload,live) WHERE m.account_id=$1 AND ref.live`},
+	{"chats", `SELECT 'edit-preview:'||s.id::text,COALESCE(NULLIF(c.name,''),'Conversación'),'/dashboard/chats?open='||c.id::text,'Vista previa de edición',jsonb_build_array(s.edited_link_preview->>'thumbnail_url',ma.object_key)::text FROM chat_group_message_state s JOIN chats c ON c.id=s.chat_id AND c.account_id=s.account_id LEFT JOIN media_assets ma ON ma.id=s.edited_link_preview_media_asset_id AND ma.account_id=s.account_id WHERE s.account_id=$1 AND NOT s.revoked AND (NULLIF(s.edited_link_preview->>'thumbnail_url','') IS NOT NULL OR s.edited_link_preview_media_asset_id IS NOT NULL)`},
 	{"campaigns", `SELECT id::text,name,'/dashboard/broadcasts','',jsonb_build_array(media_url,settings)::text FROM campaigns WHERE account_id=$1`},
 	{"campaigns", `SELECT a.id::text,c.name,'/dashboard/broadcasts',COALESCE(a.file_name,''),jsonb_build_array(a.media_url)::text FROM campaign_attachments a JOIN campaigns c ON c.id=a.campaign_id WHERE c.account_id=$1`},
 	{"quick_replies", `SELECT id::text,title,'/dashboard/settings?tab=quick-replies',COALESCE(media_filename,''),jsonb_build_array(media_url,items)::text FROM quick_replies WHERE account_id=$1`},
@@ -425,7 +426,7 @@ func (s *Server) storageSelfServiceCatalog(ctx context.Context, q storageSelfSer
 		visible := make([]storageSelfServiceReference, 0)
 		chatOnly := len(allRefs) > 0
 		for _, ref := range allRefs {
-			if ref.Origin != "chats" {
+			if ref.Origin != "chats" || strings.Contains(ref.ID, ":") {
 				chatOnly = false
 			}
 			permission := storageSelfServiceOriginPermission(ref.Origin)

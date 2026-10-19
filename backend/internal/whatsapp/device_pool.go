@@ -1036,7 +1036,7 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 	}
 
 	// Handle protocol messages (revoke, edit, etc.)
-	if protocolMsg := evt.Message.GetProtocolMessage(); protocolMsg != nil {
+	if protocolMsg := groupEventProtocol(evt); protocolMsg != nil {
 		if protocolMsg.GetType() == waE2E.ProtocolMessage_REVOKE {
 			revokedID := protocolMsg.GetKey().GetID()
 			chatJID := evt.Info.Chat.ToNonAD().String()
@@ -1067,37 +1067,20 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 
 		if protocolMsg.GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT {
 			editedMsgID := protocolMsg.GetKey().GetID()
-			chatJID := evt.Info.Chat.ToNonAD().String()
-			if _, identity, identityErr := p.getOrCreateMessageChat(ctx, instance, evt.Info.MessageSource, ""); identityErr == nil && !identity.JID.IsEmpty() {
-				chatJID = identity.JID.ToNonAD().String()
+			chat, _, identityErr := p.getOrCreateMessageChat(ctx, instance, evt.Info.MessageSource, "")
+			if identityErr != nil || chat == nil {
+				return
 			}
-
-			newBody := ""
-			if editedMsg := protocolMsg.GetEditedMessage(); editedMsg != nil {
-				if editedMsg.GetConversation() != "" {
-					newBody = editedMsg.GetConversation()
-				} else if editedMsg.GetExtendedTextMessage() != nil {
-					newBody = editedMsg.GetExtendedTextMessage().GetText()
-				}
+			content := p.extractMessageContent(ctx, nil, protocolMsg.GetEditedMessage(), chat.JID, editedMsgID)
+			edited := &domain.Message{AccountID: instance.AccountID, Body: &content.Body}
+			p.attachReceivedLinkPreview(ctx, edited, protocolMsg.GetEditedMessage(), evt.IsViewOnce)
+			if err := p.repos.Message.EditInChatWithLinkPreview(ctx, instance.AccountID, chat.ID, editedMsgID, content.Body, edited.LinkPreview, edited.LinkPreviewMediaAssetID, edited); err != nil {
+				return
 			}
-
-			if err := p.repos.Message.UpdateBody(ctx, instance.AccountID, chatJID, editedMsgID, newBody); err != nil {
-				log.Printf("[Edit] Failed to update message %s: %v", editedMsgID, err)
-			}
-			if chat, err := p.repos.Chat.FindByJID(ctx, instance.AccountID, chatJID); err == nil && chat != nil {
-				p.invalidateChatCaches(instance.AccountID, chat.ID)
-			} else {
-				p.invalidateAccountMessageCaches(instance.AccountID)
-			}
-
-			p.hub.BroadcastToAccount(instance.AccountID, ws.EventMessageEdited, map[string]interface{}{
-				"chat_jid":   chatJID,
-				"message_id": editedMsgID,
-				"new_body":   newBody,
-				"is_from_me": evt.Info.IsFromMe,
+			p.invalidateChatCaches(instance.AccountID, chat.ID)
+			p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventMessageEdited, map[string]interface{}{
+				"chat_id": chat.ID, "device_id": instance.ID, "chat_jid": chat.JID, "message_id": editedMsgID, "new_body": content.Body, "link_preview": edited.LinkPreview, "link_preview_version": edited.LinkPreviewVersion, "is_from_me": evt.Info.IsFromMe,
 			})
-
-			log.Printf("[Edit] Message %s edited in chat %s", editedMsgID, chatJID)
 			return
 		}
 
@@ -1352,8 +1335,10 @@ func (p *DevicePool) handleMessage(ctx context.Context, instance *DeviceInstance
 	if msg.IsFromMe && msg.Sender == nil {
 		msg.Sender = &domain.MessageSender{Origin: "whatsapp_external"}
 	}
+	p.attachReceivedLinkPreview(ctx, msg, evt.Message, evt.IsViewOnce)
 	if err := p.repos.Message.Create(ctx, msg); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			p.enrichReceivedLinkPreview(ctx, instance, msg)
 			p.hydrateMessageQuote(ctx, instance.AccountID, chat.ID, msg.MessageID, quote)
 		}
 		log.Printf("[Message] Failed to save message: %v", err)
@@ -2240,8 +2225,14 @@ func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInst
 			}
 			msg.IsRead = true
 			msg.Sender = &domain.MessageSender{Origin: "history"}
+			if historyLinkPreviewAllowed(parsedEvt) {
+				p.attachReceivedLinkPreview(ctx, msg, parsedEvt.Message, parsedEvt.IsViewOnce)
+			}
 			if err := p.repos.Message.Create(ctx, msg); err != nil {
 				totalDuplicates++
+				if errors.Is(err, pgx.ErrNoRows) {
+					p.enrichReceivedLinkPreview(ctx, instance, msg)
+				}
 				if parsed.Server == types.GroupServer {
 					p.rememberGroupMedia(ctx, instance.AccountID, chat.ID, parsedEvt)
 				}

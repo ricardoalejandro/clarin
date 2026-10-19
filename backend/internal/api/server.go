@@ -4334,7 +4334,7 @@ func (s *Server) handleDeleteMessage(c *fiber.Ctx) error {
 
 	persisted := true
 	warning := ""
-	if err := s.repos.Message.RevokeInChat(c.Context(), accountID, chat.ID, message.MessageID); err != nil {
+	if err := s.repos.Message.RevokeInChat(c.Context(), accountID, chat.ID, message.MessageID, &message.LinkPreviewVersion); err != nil {
 		persisted = false
 		warning = "WhatsApp eliminó el mensaje, pero Clarin todavía está reconciliando el cambio"
 		log.Printf("[MessageAction] revoke persistence failed account=%s chat=%s message=%s: %v", accountID, chat.ID, message.ID, err)
@@ -4342,13 +4342,17 @@ func (s *Server) handleDeleteMessage(c *fiber.Ctx) error {
 	s.invalidateMessagesCache(accountID, &chat.ID)
 
 	// Broadcast revocation to frontend
-	s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventMessageRevoked, map[string]interface{}{
+	payload := map[string]interface{}{
 		"chat_jid":   chat.JID,
 		"chat_id":    chat.ID,
 		"device_id":  deviceID,
 		"message_id": message.MessageID,
 		"is_from_me": true,
-	})
+	}
+	if persisted {
+		payload["link_preview_version"] = message.LinkPreviewVersion
+	}
+	s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventMessageRevoked, payload)
 
 	return c.JSON(fiber.Map{"success": true, "persisted": persisted, "warning": warning})
 }
@@ -4409,7 +4413,7 @@ func (s *Server) handleEditMessage(c *fiber.Ctx) error {
 
 	persisted := true
 	warning := ""
-	if err := s.repos.Message.EditInChat(c.Context(), accountID, chat.ID, message.MessageID, req.NewBody); err != nil {
+	if err := s.repos.Message.EditInChatWithLinkPreview(c.Context(), accountID, chat.ID, message.MessageID, req.NewBody, nil, nil, message); err != nil {
 		persisted = false
 		warning = "WhatsApp editó el mensaje, pero Clarin todavía está reconciliando el cambio"
 		log.Printf("[MessageAction] edit persistence failed account=%s chat=%s message=%s: %v", accountID, chat.ID, message.ID, err)
@@ -4417,17 +4421,25 @@ func (s *Server) handleEditMessage(c *fiber.Ctx) error {
 	s.invalidateMessagesCache(accountID, &chat.ID)
 
 	// Broadcast to frontend
-	s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventMessageEdited, map[string]interface{}{
-		"chat_jid":   chat.JID,
-		"chat_id":    chat.ID,
-		"device_id":  deviceID,
-		"message_id": message.MessageID,
-		"new_body":   req.NewBody,
-		"mentions":   domain.MessageMentionsFrom(c.Context()),
-		"is_from_me": true,
-	})
-
-	return c.JSON(fiber.Map{"success": true, "persisted": persisted, "warning": warning})
+	payload := map[string]interface{}{
+		"chat_jid":     chat.JID,
+		"chat_id":      chat.ID,
+		"device_id":    deviceID,
+		"message_id":   message.MessageID,
+		"new_body":     req.NewBody,
+		"link_preview": nil,
+		"mentions":     domain.MessageMentionsFrom(c.Context()),
+		"is_from_me":   true,
+	}
+	if persisted {
+		payload["link_preview_version"] = message.LinkPreviewVersion
+	}
+	s.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, ws.EventMessageEdited, payload)
+	response := fiber.Map{"success": true, "persisted": persisted, "warning": warning, "link_preview": nil}
+	if persisted {
+		response["link_preview_version"] = message.LinkPreviewVersion
+	}
+	return c.JSON(response)
 }
 
 func (s *Server) handleCheckWhatsApp(c *fiber.Ctx) error {
@@ -15882,6 +15894,8 @@ func (s *Server) storageReferencedObjectKeysWithInventory(ctx context.Context, i
 		{"storage_removed_references", "object_key", "state IN ('removed','purging')", true},
 		{"storage_upload_ownership", "object_key", "state='active'", true},
 		{"messages", "media_url", "COALESCE(media_deleted, false) = false", false},
+		{"messages", "link_preview->>'thumbnail_url'", "", false},
+		{"chat_group_message_state", "edited_link_preview->>'thumbnail_url'", "NOT revoked", false},
 		{"contacts", "avatar_url", "", false},
 		{"campaigns", "media_url", "", false},
 		{"campaign_attachments", "media_url", "", false},
@@ -15899,7 +15913,7 @@ func (s *Server) storageReferencedObjectKeysWithInventory(ctx context.Context, i
 		{"whiteboard_revisions", "snapshot_object_key", "", true},
 	}
 	if includeInventory {
-		columns = append(columns, refColumn{"media_assets", "object_key", `status = 'active'
+		columns = append(columns, refColumn{"media_assets", "object_key", `(status = 'active' AND NOT (` + storageLinkPreviewAssetSQL + `) OR (` + storageLinkPreviewAssetLeaseSQL + `))
 			AND NOT EXISTS (
 				SELECT 1 FROM storage_objects draft_object
 				WHERE draft_object.account_id = media_assets.account_id
@@ -15950,6 +15964,8 @@ func (s *Server) storageReferencedObjectKeysWithInventory(ctx context.Context, i
 		  ON ma.id=c.avatar_media_asset_id AND ma.account_id=c.account_id
 		WHERE ma.status='active' AND ma.object_key<>''
 		UNION SELECT ma.object_key FROM programs p JOIN media_assets ma ON ma.id=p.avatar_media_asset_id AND ma.account_id=p.account_id WHERE ma.status='active' AND ma.object_key<>''
+		UNION SELECT ma.object_key FROM messages m JOIN media_assets ma ON ma.id=m.link_preview_media_asset_id AND ma.account_id=m.account_id WHERE ma.object_key<>''
+		UNION SELECT ma.object_key FROM chat_group_message_state st JOIN media_assets ma ON ma.id=st.edited_link_preview_media_asset_id AND ma.account_id=st.account_id WHERE NOT st.revoked AND ma.object_key<>''
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("scan contact avatar references: %w", err)

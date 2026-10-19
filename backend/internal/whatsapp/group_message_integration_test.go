@@ -171,4 +171,5 @@ func TestGroupMessageTransportIntegration(t *testing.T) {
 	t.Run("recovered media snapshot", func(t *testing.T) {
 		testGroupMediaSnapshot(t, ctx, pool, account, device, chat.ID)
 	})
+	t.Run("link preview lifecycle", func(t *testing.T) { testLinkPreviewTransport(t, ctx, pool, instance, client) })
 }

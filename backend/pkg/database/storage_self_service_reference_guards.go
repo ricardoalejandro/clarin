@@ -10,7 +10,8 @@ type storageReferenceGuardSpec struct {
 }
 
 var storageReferenceGuardSpecs = []storageReferenceGuardSpec{
-	{"messages", "direct", "media_url,media_asset_id,media_deleted"},
+	{"messages", "direct", "media_url,media_asset_id,media_deleted,link_preview,link_preview_media_asset_id"},
+	{"chat_group_message_state", "direct", "edited_link_preview,edited_link_preview_media_asset_id,revoked"},
 	{"campaigns", "direct", "media_url,settings"},
 	{"campaign_attachments", "campaign", "media_url"},
 	{"quick_replies", "direct", "media_url,items"},
@@ -132,12 +133,19 @@ func storageSelfServiceReferenceGuardMigrations() []string {
 		 DECLARE result JSONB := '{}'::jsonb; field TEXT;
 		 BEGIN
 		 IF item IS NULL THEN RETURN result; END IF;
-		 IF table_name='messages' AND COALESCE((item->>'media_deleted')::boolean,FALSE) THEN RETURN result; END IF;
+		 IF table_name='chat_group_message_state' AND COALESCE((item->>'revoked')::boolean,FALSE) THEN RETURN result; END IF;
 		 IF table_name='media_assets' AND COALESCE(item->>'status','active')<>'active' THEN RETURN result; END IF;
 		 IF table_name='survey_file_uploads' AND COALESCE(item->>'status','staged') IN ('deleted','deleting') THEN RETURN result; END IF;
 		 IF table_name='storage_upload_ownership' AND COALESCE(item->>'state','active')<>'active' THEN RETURN result; END IF;
 		 IF table_name='task_attachments' AND NULLIF(item->>'storage_removed_at','') IS NOT NULL THEN RETURN result; END IF;
 		 FOREACH field IN ARRAY string_to_array(fields,',') LOOP
+		   IF table_name='messages' AND field IN ('media_url','media_asset_id') AND COALESCE((item->>'media_deleted')::boolean,FALSE) THEN CONTINUE; END IF;
+		   -- A received link is metadata, never a storage dependency. Only its
+		   -- locally stored thumbnail participates in authorization/deletion.
+		   IF field IN ('link_preview','edited_link_preview') THEN
+		     IF NULLIF(item->field->>'thumbnail_url','') IS NOT NULL THEN result:=result||jsonb_build_object(field,jsonb_build_object('thumbnail_url',item->field->>'thumbnail_url')); END IF;
+		     CONTINUE;
+		   END IF;
 		   -- The canonical avatar endpoint names a Contact, not an object key.
 		   -- Its physical identity remains guarded through avatar_media_asset_id.
 		   IF table_name='contacts' AND field='avatar_url'
@@ -184,7 +192,7 @@ func storageSelfServiceReferenceGuardMigrations() []string {
 		 END IF;
 		 old_keys:=clarin_storage_reference_keys(old_payload);
 		 new_keys:=clarin_storage_reference_keys(new_payload);
-		 FOREACH field IN ARRAY ARRAY['media_asset_id','avatar_media_asset_id','derivative_asset_id'] LOOP
+		 FOREACH field IN ARRAY ARRAY['media_asset_id','avatar_media_asset_id','derivative_asset_id','link_preview_media_asset_id','edited_link_preview_media_asset_id'] LOOP
 		   IF NULLIF(new_payload->>field,'') IS NULL THEN CONTINUE; END IF;
 		   asset_id:=(new_payload->>field)::uuid;
 		   -- Domain upload transactions legitimately attach staged assets before

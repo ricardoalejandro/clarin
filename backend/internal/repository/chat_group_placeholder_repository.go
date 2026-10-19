@@ -68,7 +68,7 @@ func repairGroupPlaceholderTx(ctx context.Context, tx pgx.Tx, msg *domain.Messag
  body=$7,message_type=$8,media_url=$9,media_mimetype=$10,media_filename=$11,media_size=$12,media_asset_id=$13,
  quoted_message_id=$14,quoted_body=$15,quoted_sender=$16,quoted_is_from_me=$17,
  latitude=$18,longitude=$19,contact_name=$20,contact_phone=$21,contact_vcard=$22,
- poll_question=$23,poll_max_selections=$24,group_mentions=$25::jsonb,media_unavailable_reason=$26
+ poll_question=$23,poll_max_selections=$24,group_mentions=$25::jsonb,media_unavailable_reason=$26,link_preview=$27::jsonb,link_preview_media_asset_id=$28
  FROM chats c
  WHERE m.account_id=$1 AND m.chat_id=$2 AND m.message_id=$3 AND m.device_id=$4 AND m.is_from_me=$5
  AND c.account_id=m.account_id AND c.id=m.chat_id AND c.device_id=$4 AND c.jid LIKE '%@g.us'
@@ -93,7 +93,7 @@ func repairGroupPlaceholderTx(ctx context.Context, tx pgx.Tx, msg *domain.Messag
 		msg.Body, msg.MessageType, msg.MediaURL, msg.MediaMimetype, msg.MediaFilename, msg.MediaSize, msg.MediaAssetID,
 		msg.QuotedMessageID, msg.QuotedBody, msg.QuotedSender, msg.QuotedIsFromMe,
 		msg.Latitude, msg.Longitude, msg.ContactName, msg.ContactPhone, msg.ContactVCard,
-		msg.PollQuestion, msg.PollMaxSelections, mentions, msg.MediaUnavailableReason,
+		msg.PollQuestion, msg.PollMaxSelections, mentions, msg.MediaUnavailableReason, msg.LinkPreview, msg.LinkPreviewMediaAssetID,
 	).Scan(&raw, &canonical.AttentionThroughAt, &canonical.AttentionThroughID, &canonical.DeferAttention, &canonical.SendOperationID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil

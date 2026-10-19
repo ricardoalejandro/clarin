@@ -3938,6 +3938,7 @@ func Migrate(db *pgxpool.Pool) error {
 	migrations = append(migrations, chatAttentionMigrations()...)
 	migrations = append(migrations, chatGroupMigrations()...)
 	migrations = append(migrations, chatPreferencesMigrations()...)
+	migrations = append(migrations, messageLinkPreviewMigrations()...)
 	migrations = append(migrations, documentTemplateRevisionMigrations()...)
 	migrations = append(migrations, programExperienceMigrations()...)
 	migrations = append(migrations, storageSelfServiceMigrations()...)

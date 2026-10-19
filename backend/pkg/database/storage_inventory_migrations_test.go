@@ -33,7 +33,7 @@ func TestStorageInventorySourceSpecification(t *testing.T) {
 			}
 		}
 	}
-	if sources["messages"].mediaFields != "media_url,media_asset_id" || sources["contacts"].mediaFields != "avatar_url,avatar_media_asset_id" {
+	if sources["messages"].mediaFields != "media_url,media_asset_id,link_preview,link_preview_media_asset_id" || sources["contacts"].mediaFields != "avatar_url,avatar_media_asset_id" || sources["chat_group_message_state"].mediaFields != "edited_link_preview,edited_link_preview_media_asset_id" {
 		t.Fatal("plain messages or contacts must not be treated as media sources")
 	}
 	for table, field := range map[string]string{

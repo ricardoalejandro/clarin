@@ -470,8 +470,10 @@ func (p *DevicePool) handleGroupMessage(ctx context.Context, instance *DeviceIns
 	if msg.IsFromMe {
 		msg.Sender = &domain.MessageSender{Origin: "whatsapp_external"}
 	}
+	p.attachReceivedLinkPreview(ctx, msg, evt.Message, evt.IsViewOnce)
 	if err = p.repos.Message.Create(ctx, msg); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			p.enrichReceivedLinkPreview(ctx, instance, msg)
 			p.hydrateMessageQuote(ctx, instance.AccountID, chat.ID, msg.MessageID, quote)
 		}
 		return
@@ -511,12 +513,11 @@ func (p *DevicePool) applyGroupProtocol(ctx context.Context, instance *DeviceIns
 	id := protocol.GetKey().GetID()
 	event := ""
 	body := ""
+	var preview *domain.MessageLinkPreview
+	var previewVersion int64
 	switch protocol.GetType() {
 	case waE2E.ProtocolMessage_REVOKE:
-		if _, err := p.repos.DB().Exec(ctx, `INSERT INTO chat_group_message_state(account_id,chat_id,message_id,revoked) VALUES($1,$2,$3,TRUE) ON CONFLICT(account_id,chat_id,message_id) DO UPDATE SET revoked=TRUE`, instance.AccountID, chat.ID, id); err != nil {
-			return
-		}
-		if err := p.repos.Message.RevokeInChat(ctx, instance.AccountID, chat.ID, id); err != nil {
+		if err := p.repos.Message.RevokeInChat(ctx, instance.AccountID, chat.ID, id, &previewVersion); err != nil {
 			return
 		}
 		event = ws.EventMessageRevoked
@@ -524,22 +525,23 @@ func (p *DevicePool) applyGroupProtocol(ctx context.Context, instance *DeviceIns
 		edited := p.extractMessageContent(ctx, nil, protocol.GetEditedMessage(), chat.JID, id)
 		body = edited.Body
 		editedAt := time.UnixMilli(protocol.GetTimestampMS())
-		if editedAt.IsZero() || protocol.GetTimestampMS() <= 0 {
-			editedAt = time.Now()
+		if protocol.GetTimestampMS() <= 0 {
+			editedAt = time.Time{}
 		}
-		result, err := p.repos.DB().Exec(ctx, `INSERT INTO chat_group_message_state(account_id,chat_id,message_id,edited_body,edited_at,edited_mentions) VALUES($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT(account_id,chat_id,message_id) DO UPDATE SET edited_body=EXCLUDED.edited_body,edited_at=EXCLUDED.edited_at,edited_mentions=EXCLUDED.edited_mentions WHERE NOT chat_group_message_state.revoked AND (chat_group_message_state.edited_at IS NULL OR chat_group_message_state.edited_at<=EXCLUDED.edited_at)`, instance.AccountID, chat.ID, id, body, editedAt, groupMessageMentions(protocol.GetEditedMessage()))
-		if err != nil || result.RowsAffected() == 0 {
+		snapshot := &domain.Message{AccountID: instance.AccountID, Body: &body}
+		p.attachReceivedLinkPreview(ctx, snapshot, protocol.GetEditedMessage(), false)
+		applied, err := p.repos.Message.ApplyGroupMessageEdit(ctx, instance.AccountID, chat.ID, id, body, groupMessageMentions(protocol.GetEditedMessage()), editedAt, snapshot.LinkPreview, snapshot.LinkPreviewMediaAssetID, snapshot)
+		if err != nil || !applied {
 			return
 		}
-		if err := p.repos.Message.EditInChat(domain.WithMessageMentions(ctx, groupMessageMentions(protocol.GetEditedMessage())), instance.AccountID, chat.ID, id, body); err != nil {
-			return
-		}
+		preview = snapshot.LinkPreview
+		previewVersion = snapshot.LinkPreviewVersion
 		event = ws.EventMessageEdited
 	default:
 		return
 	}
 	p.invalidateChatCaches(instance.AccountID, chat.ID)
-	p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, event, map[string]interface{}{"chat_id": chat.ID, "device_id": instance.ID, "chat_jid": chat.JID, "message_id": id, "new_body": body, "mentions": groupMessageMentions(protocol.GetEditedMessage())})
+	p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, event, map[string]interface{}{"chat_id": chat.ID, "device_id": instance.ID, "chat_jid": chat.JID, "message_id": id, "new_body": body, "link_preview": preview, "link_preview_version": previewVersion, "mentions": groupMessageMentions(protocol.GetEditedMessage())})
 }
 
 func (p *DevicePool) handleGroupReceipt(ctx context.Context, instance *DeviceInstance, evt *events.Receipt) {

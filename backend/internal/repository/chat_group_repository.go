@@ -285,21 +285,36 @@ func (r *MessageRepository) HydrateMentions(ctx context.Context, accountID, chat
 		return err
 	}
 	rows.Close()
+	if err = r.HydrateLinkPreviews(ctx, accountID, chatID, messages); err != nil {
+		return err
+	}
 	return r.hydrateGroupSenderLabels(ctx, accountID, chatID, messages)
 }
 
 // RevokeInChat preserves device-specific group histories and attention state atomically.
-func (r *MessageRepository) RevokeInChat(ctx context.Context, accountID, chatID uuid.UUID, messageID string) error {
+func (r *MessageRepository) RevokeInChat(ctx context.Context, accountID, chatID uuid.UUID, messageID string, previewVersion ...*int64) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = lockLinkPreviewReferenceWrite(ctx, tx, accountID); err != nil {
+		return err
+	}
 	var id uuid.UUID
 	if err = tx.QueryRow(ctx, `SELECT id FROM chats WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, chatID).Scan(&id); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE messages SET is_revoked=TRUE,body=NULL WHERE account_id=$1 AND chat_id=$2 AND message_id=$3`, accountID, chatID, messageID); err != nil {
+	var version int64
+	if err = tx.QueryRow(ctx, `UPDATE messages SET is_revoked=TRUE,body=NULL,link_preview=NULL,link_preview_media_asset_id=NULL WHERE account_id=$1 AND chat_id=$2 AND message_id=$3 RETURNING link_preview_version`, accountID, chatID, messageID).Scan(&version); err != nil && err != pgx.ErrNoRows {
+		return err
+	}
+	if len(previewVersion) > 0 && previewVersion[0] != nil {
+		*previewVersion[0] = version
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO chat_group_message_state(account_id,chat_id,message_id,revoked)
+ SELECT $1,$2,$3,TRUE FROM chats WHERE account_id=$1 AND id=$2 AND jid LIKE '%@g.us'
+ ON CONFLICT(account_id,chat_id,message_id) DO UPDATE SET revoked=TRUE,edited_link_preview=NULL,edited_link_preview_media_asset_id=NULL`, accountID, chatID, messageID); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE chats c SET unread_count=(SELECT COUNT(*) FROM messages m WHERE m.account_id=c.account_id AND m.chat_id=c.id AND NOT m.is_from_me AND NOT m.is_read AND NOT COALESCE(m.is_revoked,FALSE)),
@@ -310,8 +325,7 @@ func (r *MessageRepository) RevokeInChat(ctx context.Context, accountID, chatID 
 	return tx.Commit(ctx)
 }
 func (r *MessageRepository) EditInChat(ctx context.Context, accountID, chatID uuid.UUID, messageID, body string) error {
-	_, err := r.db.Exec(ctx, `UPDATE messages SET body=$4,is_edited=TRUE,group_mentions=COALESCE($5::jsonb,group_mentions) WHERE account_id=$1 AND chat_id=$2 AND message_id=$3 AND NOT COALESCE(is_revoked,FALSE)`, accountID, chatID, messageID, body, domain.MessageMentionsFrom(ctx))
-	return err
+	return r.EditInChatWithLinkPreview(ctx, accountID, chatID, messageID, body, nil, nil)
 }
 
 // Sender labels are display-only snapshots; member identities never create or mutate CRM Contacts.

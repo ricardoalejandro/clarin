@@ -133,7 +133,7 @@ func TestChatGroupContextIntegration(t *testing.T) {
 	base := time.Now().UTC().Truncate(time.Second)
 	for index, variant := range []string{"text", "recoverable", "too_large"} {
 		t.Run(variant, func(t *testing.T) {
-			body := "contextqa @51999000111"
+			body := "contextqa @51999000111 https://example.test/context"
 			message := &domain.Message{
 				AccountID: account, ChatID: chat.ID, DeviceID: &device,
 				MessageID: "context-" + variant, MessageType: strPtr("text"), Body: &body,
@@ -146,6 +146,8 @@ func TestChatGroupContextIntegration(t *testing.T) {
 				message.MessageType = strPtr("document")
 				message.MediaFilename = strPtr("context.pdf")
 				message.MediaMimetype = strPtr("application/pdf")
+			} else {
+				message.LinkPreview = domain.ReceivedMessageLinkPreview(body, "https://example.test/context", "Context preview", "Provider metadata")
 			}
 			if variant == "too_large" {
 				message.MediaUnavailableReason = "group_media_too_large"
@@ -171,6 +173,12 @@ func TestChatGroupContextIntegration(t *testing.T) {
 				}
 				if got.MediaRecoverable != (variant == "recoverable") || got.MediaUnavailableReason != message.MediaUnavailableReason || got.MediaDeleted {
 					t.Fatal("canonical media availability missing from projection")
+				}
+				if variant == "text" && (got.LinkPreview == nil || got.LinkPreview.Title != "Context preview" || got.LinkPreview.URL != "https://example.test/context") {
+					t.Fatal("preview lost in history/search/context projection")
+				}
+				if variant != "text" && got.LinkPreview != nil {
+					t.Fatal("invented link preview for media")
 				}
 			}
 			assertContains := func(messages []*domain.Message) {
@@ -219,6 +227,48 @@ func TestChatGroupContextIntegration(t *testing.T) {
 				if foreignCopy.MediaUnavailableReason != "untouched" || foreignCopy.MediaRecoverable || foreignCopy.Mentions[0].Name != "" || foreignCopy.FromName != nil || foreignCopy.QuotedSenderName != nil {
 					t.Fatal("hydration altered a foreign account/chat projection")
 				}
+			}
+			if variant == "text" {
+				legacy := *message
+				legacy.LinkPreview = nil
+				cached, _ := json.Marshal(map[string]any{"success": true, "messages": []*domain.Message{&legacy}})
+				projected, err := server.projectCachedChatMedia(ctx, account, cached)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var envelope responseBody
+				if err = json.Unmarshal(projected, &envelope); err != nil {
+					t.Fatal(err)
+				}
+				assertContains(envelope.Messages)
+				if err = repos.Message.EditInChat(ctx, account, chat.ID, message.MessageID, "Edited without URL"); err != nil {
+					t.Fatal(err)
+				}
+				projected, err = server.projectCachedChatMedia(ctx, account, cached)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = json.Unmarshal(projected, &envelope); err != nil || len(envelope.Messages) != 1 || envelope.Messages[0].LinkPreview != nil || envelope.Messages[0].LinkPreviewVersion != 0 {
+					t.Fatal("old cache retained removed preview", err)
+				}
+				newBody := "Changed URL https://example.test/updated"
+				newPreview := domain.ReceivedMessageLinkPreview(newBody, "https://example.test/updated", "Updated card", "")
+				editedSnapshot := &domain.Message{}
+				if err = repos.Message.EditInChatWithLinkPreview(ctx, account, chat.ID, message.MessageID, newBody, newPreview, nil, editedSnapshot); err != nil || editedSnapshot.LinkPreviewVersion != 2 {
+					t.Fatal("edit did not return its committed preview version", err)
+				}
+				projected, err = server.projectCachedChatMedia(ctx, account, cached)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = json.Unmarshal(projected, &envelope); err != nil || envelope.Messages[0].LinkPreview != nil || envelope.Messages[0].LinkPreviewVersion != 0 {
+					t.Fatal("old-body cache borrowed a newer preview version", err)
+				}
+				canonical := get(t, path, false, http.StatusOK).Target
+				if canonical.LinkPreview == nil || canonical.LinkPreview.URL != newPreview.URL || canonical.LinkPreviewVersion != 2 {
+					t.Fatal("canonical edit snapshot lost preview/version pairing")
+				}
+
 			}
 		})
 	}
