@@ -296,8 +296,9 @@ func TestChatLinkPreviewIntegration(t *testing.T) {
 			t.Fatal("timestamp-free replay restored thumbnail", e)
 		}
 		var messageThumb, stateThumb *string
-		if err = db.QueryRow(ctx, `SELECT m.link_preview->>'thumbnail_url',s.edited_link_preview->>'thumbnail_url' FROM messages m JOIN chat_group_message_state s ON s.account_id=m.account_id AND s.chat_id=m.chat_id AND s.message_id=m.message_id WHERE m.account_id=$1 AND m.id=$2`, account, original.ID).Scan(&messageThumb, &stateThumb); err != nil || messageThumb != nil || stateThumb != nil {
-			t.Fatal("retired image was restored to a message or pending edit", err)
+		var messageMentions, stateMentions int
+		if err = db.QueryRow(ctx, `SELECT m.link_preview->>'thumbnail_url',s.edited_link_preview->>'thumbnail_url',jsonb_array_length(m.group_mentions),jsonb_array_length(s.edited_mentions) FROM messages m JOIN chat_group_message_state s ON s.account_id=m.account_id AND s.chat_id=m.chat_id AND s.message_id=m.message_id WHERE m.account_id=$1 AND m.id=$2`, account, original.ID).Scan(&messageThumb, &stateThumb, &messageMentions, &stateMentions); err != nil || messageThumb != nil || stateThumb != nil || messageMentions != 0 || stateMentions != 0 {
+			t.Fatal("retired image or empty mention collection was not preserved", err)
 		}
 		if applied, e := repos.Message.ApplyGroupMessageEdit(ctx, account, group.ID, providerID, body, nil, time.Now().Add(time.Second), preview(body), &asset); e != nil || !applied {
 			t.Fatal("newer authoritative group edit was blocked", e)

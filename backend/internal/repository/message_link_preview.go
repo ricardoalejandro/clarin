@@ -171,6 +171,10 @@ func (r *MessageRepository) EditInChatWithLinkPreview(ctx context.Context, accou
 // Group edits may arrive before the original history row. Preserve their
 // preview under the existing edited_at ordering and replay it on INSERT.
 func (r *MessageRepository) ApplyGroupMessageEdit(ctx context.Context, accountID, chatID uuid.UUID, messageID, body string, mentions []domain.MessageMention, editedAt time.Time, preview *domain.MessageLinkPreview, assetID *uuid.UUID, snapshot ...*domain.Message) (bool, error) {
+	// An edit without mentions is an explicit empty collection, never SQL NULL.
+	if mentions == nil {
+		mentions = []domain.MessageMention{}
+	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return false, err
