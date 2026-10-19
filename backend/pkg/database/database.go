@@ -61,6 +61,9 @@ func Migrate(db *pgxpool.Pool) error {
 		beginEventContactDataMigration = "__BEGIN_EVENT_CONTACT_DATA_MIGRATION_V1__"
 		endEventContactDataMigration   = "__END_EVENT_CONTACT_DATA_MIGRATION_V1__"
 		eventContactDataMigrationKey   = "crm_event_contact_v1"
+		beginContactProfileMigration   = "__BEGIN_CONTACT_PROFILE_DATA_MIGRATION_V1__"
+		endContactProfileMigration     = "__END_CONTACT_PROFILE_DATA_MIGRATION_V1__"
+		contactProfileMigrationKey     = "contact_profile_canonical_v1"
 	)
 
 	migrations := []string{
@@ -1726,13 +1729,20 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_source VARCHAR(20)`,
 		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_updated_at TIMESTAMPTZ`,
 		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_revision BIGINT NOT NULL DEFAULT 0`,
-		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_auto_fetched_at TIMESTAMPTZ`,
+		// Only contacts that predate this column need the legacy auto-fetch
+		// backfill. A later startup must preserve a current Contact's NULL value.
+		`DO $$ BEGIN
+		 PERFORM pg_advisory_xact_lock(hashtext('contact_avatar_auto_fetch_backfill_v1'));
+		 IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='contacts'::regclass AND attname='avatar_auto_fetched_at' AND NOT attisdropped) THEN
+		   ALTER TABLE contacts ADD COLUMN avatar_auto_fetched_at TIMESTAMPTZ;
+		   UPDATE contacts SET avatar_auto_fetched_at=COALESCE(avatar_checked_at,NOW())
+		   WHERE avatar_auto_fetched_at IS NULL AND created_at < NOW()-INTERVAL '5 minutes';
+		 END IF;
+		END $$`,
 		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_whatsapp_checked_at TIMESTAMPTZ`,
 		`ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_whatsapp_check_error TEXT`,
 		`UPDATE contacts SET avatar_source='legacy', avatar_updated_at=COALESCE(avatar_updated_at,updated_at)
 		 WHERE avatar_url IS NOT NULL AND BTRIM(avatar_url)<>'' AND avatar_source IS NULL`,
-		`UPDATE contacts SET avatar_auto_fetched_at=COALESCE(avatar_checked_at,NOW())
-		 WHERE avatar_auto_fetched_at IS NULL AND created_at < NOW()-INTERVAL '5 minutes'`,
 		`CREATE INDEX IF NOT EXISTS idx_contacts_account_avatar_asset ON contacts(account_id,avatar_media_asset_id)
 		 WHERE avatar_media_asset_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_storage_objects_avatar_gc
@@ -3712,6 +3722,7 @@ func Migrate(db *pgxpool.Pool) error {
 
 		// Contact is the canonical identity owner. Promote a historical value only
 		// when all same-account snapshots agree; never choose between conflicts.
+		beginContactProfileMigration,
 		`WITH historical AS (
 			SELECT l.account_id,l.contact_id,
 			       NULLIF(BTRIM(l.name::text),'') AS name,NULLIF(BTRIM(l.last_name::text),'') AS last_name,
@@ -3852,6 +3863,7 @@ func Migrate(db *pgxpool.Pool) error {
 			l.email IS NOT NULL OR l.company IS NOT NULL OR l.age IS NOT NULL OR l.dni IS NOT NULL OR
 			l.birth_date IS NOT NULL OR l.address IS NOT NULL OR l.distrito IS NOT NULL OR l.ocupacion IS NOT NULL
 		)`,
+		endContactProfileMigration,
 
 		// Keep compatibility projections synchronized after every canonical Contact
 		// identity mutation, including direct WhatsApp/Google repository writes.
@@ -3949,38 +3961,58 @@ func Migrate(db *pgxpool.Pool) error {
 	migrations = append(migrations, eventParticipantSelectionMigrations()...)
 
 	var dataTx pgx.Tx
+	var dataMigrationKey string
 	skipDataMigration := false
 	for _, migration := range migrations {
 		switch migration {
-		case beginEventContactDataMigration:
+		case beginEventContactDataMigration, beginContactProfileMigration:
+			dataMigrationKey = eventContactDataMigrationKey
+			if migration == beginContactProfileMigration {
+				dataMigrationKey = contactProfileMigrationKey
+			}
 			tx, err := db.Begin(ctx)
 			if err != nil {
-				return fmt.Errorf("begin event/contact data migration: %w", err)
+				return fmt.Errorf("begin %s data migration: %w", dataMigrationKey, err)
 			}
 			dataTx = tx
 			// Serialize startup across replicas and keep every destructive repair
 			// (including the temporary index drop) in one rollback-safe tx.
-			if _, err := dataTx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, eventContactDataMigrationKey); err != nil {
+			if _, err := dataTx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, dataMigrationKey); err != nil {
 				_ = dataTx.Rollback(ctx)
-				return fmt.Errorf("lock event/contact data migration: %w", err)
+				return fmt.Errorf("lock %s data migration: %w", dataMigrationKey, err)
 			}
-			if err := dataTx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM app_data_migrations WHERE key=$1)`, eventContactDataMigrationKey).Scan(&skipDataMigration); err != nil {
+			if err := dataTx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM app_data_migrations WHERE key=$1)`, dataMigrationKey).Scan(&skipDataMigration); err != nil {
 				_ = dataTx.Rollback(ctx)
-				return fmt.Errorf("check event/contact data migration: %w", err)
+				return fmt.Errorf("check %s data migration: %w", dataMigrationKey, err)
+			}
+			if !skipDataMigration && dataMigrationKey == contactProfileMigrationKey {
+				// Earlier releases installed this trigger only after the complete
+				// profile backfill. Record that completed installation without
+				// replaying historical values over current Contact-owned fields.
+				if err := dataTx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='contacts'::regclass AND tgname='trg_contacts_sync_identity_snapshots' AND NOT tgisinternal)`).Scan(&skipDataMigration); err != nil {
+					_ = dataTx.Rollback(ctx)
+					return fmt.Errorf("check completed contact profile installation: %w", err)
+				}
+				if skipDataMigration {
+					if _, err := dataTx.Exec(ctx, `INSERT INTO app_data_migrations (key) VALUES ($1)`, dataMigrationKey); err != nil {
+						_ = dataTx.Rollback(ctx)
+						return fmt.Errorf("record completed contact profile installation: %w", err)
+					}
+				}
 			}
 			continue
-		case endEventContactDataMigration:
+		case endEventContactDataMigration, endContactProfileMigration:
 			if dataTx == nil {
-				return fmt.Errorf("event/contact data migration end without begin")
+				return fmt.Errorf("data migration end without begin")
 			}
 			if !skipDataMigration {
-				if _, err := dataTx.Exec(ctx, `INSERT INTO app_data_migrations (key) VALUES ($1)`, eventContactDataMigrationKey); err != nil {
+				if _, err := dataTx.Exec(ctx, `INSERT INTO app_data_migrations (key) VALUES ($1)`, dataMigrationKey); err != nil {
 					_ = dataTx.Rollback(ctx)
-					return fmt.Errorf("record event/contact data migration: %w", err)
+					return fmt.Errorf("record %s data migration: %w", dataMigrationKey, err)
 				}
 			}
 			if err := dataTx.Commit(ctx); err != nil {
-				return fmt.Errorf("commit event/contact data migration: %w", err)
+				return fmt.Errorf("commit %s data migration: %w", dataMigrationKey, err)
 			}
 			dataTx = nil
 			skipDataMigration = false
@@ -3992,7 +4024,7 @@ func Migrate(db *pgxpool.Pool) error {
 			}
 			if _, err := dataTx.Exec(ctx, migration); err != nil {
 				_ = dataTx.Rollback(ctx)
-				return fmt.Errorf("event/contact data migration failed: %w\nSQL: %s", err, migration)
+				return fmt.Errorf("%s data migration failed: %w\nSQL: %s", dataMigrationKey, err, migration)
 			}
 			continue
 		}
@@ -4002,7 +4034,7 @@ func Migrate(db *pgxpool.Pool) error {
 	}
 	if dataTx != nil {
 		_ = dataTx.Rollback(ctx)
-		return fmt.Errorf("event/contact data migration was not closed")
+		return fmt.Errorf("%s data migration was not closed", dataMigrationKey)
 	}
 	if err := MigrateEventStageLayout(db); err != nil {
 		return err
