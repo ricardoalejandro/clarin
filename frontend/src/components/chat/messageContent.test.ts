@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Message } from '@/types/chat'
 import { hasUnavailableGroupText } from './messageContent'
 
-const message: Message = { id: 'message', message_id: 'provider', chat_id: 'group', message_type: 'text', is_from_me: false, is_read: true, status: 'read', timestamp: '2026-10-18T12:00:00Z' }
+const message: Message = { id: 'message', message_id: 'provider', message_type: 'text', is_from_me: false, is_read: true, status: 'read', timestamp: '2026-10-18T12:00:00Z' }
 
 describe('unavailable group text', () => {
   it.each([undefined, '', ' \n\t '])('identifies an empty group text body: %j', body => {
