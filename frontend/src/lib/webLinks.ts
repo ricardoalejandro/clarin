@@ -13,15 +13,25 @@ export function safeWebHref(value: unknown): string | null {
 }
 
 function trimEnd(value: string): string {
-  let result = value
-  while (result) {
-    const last = result.at(-1)!
-    if (/[.,;:!?…'’”]/u.test(last)) { result = result.slice(0, -1); continue }
-    const opening = ({ ')': '(', ']': '[', '}': '{' } as Record<string, string>)[last]
-    if (opening && result.split(last).length > result.split(opening).length) { result = result.slice(0, -1); continue }
+  let parentheses = 0, brackets = 0, braces = 0
+  for (const character of value) {
+    if (character === '(') parentheses++
+    else if (character === ')') parentheses--
+    else if (character === '[') brackets++
+    else if (character === ']') brackets--
+    else if (character === '{') braces++
+    else if (character === '}') braces--
+  }
+  let end = value.length
+  while (end) {
+    const last = value[end - 1]
+    if (/[.,;:!?…'’”]/u.test(last)) { end--; continue }
+    if (last === ')' && parentheses < 0) { parentheses++; end--; continue }
+    if (last === ']' && brackets < 0) { brackets++; end--; continue }
+    if (last === '}' && braces < 0) { braces++; end--; continue }
     break
   }
-  return result
+  return value.slice(0, end)
 }
 
 /** Offsets preserve original copy/whitespace while href uses the URL parser's canonical form. */

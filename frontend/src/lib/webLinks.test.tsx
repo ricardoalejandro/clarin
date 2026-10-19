@@ -16,6 +16,17 @@ describe('safe shared web links', () => {
     expect(links[1].href).toBe('https://www.ejemplo.com/ruta_(dos)')
   })
 
+  it('trims a long mixed closing suffix while preserving all balanced pairs and exact offsets', () => {
+    const url = 'https://example.com/' + '([{'.repeat(4000) + 'a_b' + '}])'.repeat(4000)
+    const suffix = ')]}.,;:!?…'.repeat(8000)
+    const source = 'Consulta ' + url + suffix
+    const links = findWebLinks(source)
+    expect(links).toHaveLength(1)
+    expect(links[0]).toEqual({ start: 9, end: 9 + url.length, text: url, href: new URL(url).href })
+    expect(source.slice(links[0].end)).toBe(suffix)
+    expect(findWebLinks(url)[0].text).toBe(url)
+  })
+
   it.each(['javascript:alert(1)', 'data:text/html,test', '//example.com', 'https://user:pass@example.com', 'https://example.com\\evil', 'https://example.com/\nsecret', 'https://', 'https://example.com/\u0000', 'https://example.com/\u202e'])('rejects an unsafe or invalid destination: %s', value => {
     expect(safeWebHref(value)).toBeNull()
   })
