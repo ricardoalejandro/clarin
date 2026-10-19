@@ -151,7 +151,7 @@ func (p *DevicePool) RecoverGroupMedia(ctx context.Context, accountID, deviceID,
 		}
 	}
 	_, _ = p.repos.DB().Exec(requestCtx, `DELETE FROM chat_group_media_recovery WHERE account_id=$1 AND message_id=$2 AND EXISTS(SELECT 1 FROM messages WHERE account_id=$1 AND id=$2 AND media_url IS NOT NULL)`, accountID, message.ID)
-	message, err = p.repos.Message.GetByReference(requestCtx, accountID, chatID, message.ID.String())
+	message, err = p.loadGroupMediaSnapshot(requestCtx, accountID, chatID, message.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -161,6 +161,19 @@ func (p *DevicePool) RecoverGroupMedia(ctx context.Context, accountID, deviceID,
 	p.invalidateChatCaches(accountID, chatID)
 	if p.hub != nil {
 		p.hub.BroadcastToAccountWithPermission(accountID, domain.PermChats, "message_media_updated", map[string]interface{}{"chat_id": chatID, "device_id": deviceID, "message": message})
+	}
+	return message, nil
+}
+
+// Recovery publishes this snapshot before the HTTP handler enriches its own
+// response, so the WebSocket payload must already own group identity and media state.
+func (p *DevicePool) loadGroupMediaSnapshot(ctx context.Context, accountID, chatID, messageID uuid.UUID) (*domain.Message, error) {
+	message, err := p.repos.Message.GetByReference(ctx, accountID, chatID, messageID.String())
+	if err != nil || message == nil {
+		return nil, err
+	}
+	if err = p.repos.Message.HydrateMentions(ctx, accountID, chatID, []*domain.Message{message}); err != nil {
+		return nil, err
 	}
 	return message, nil
 }

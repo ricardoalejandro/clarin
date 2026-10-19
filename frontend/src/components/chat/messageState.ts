@@ -32,6 +32,16 @@ export function mergeCanonicalMessage(current: Message | undefined, canonical: M
   }
 }
 
+/** Patch only loaded rows; context windows must never extend the main history page. */
+export function mergeCanonicalMessageProjection(messages: Message[], canonical: Message, pendingReaction = false): Message[] {
+  if (!messages.some(message => message.id === canonical.id)) return messages
+  const mediaIsResolved = Boolean(canonical.media_url || canonical.media_deleted || canonical.is_revoked || canonical.media_unavailable_reason)
+  const snapshot = mediaIsResolved ? { ...canonical, media_recoverable: false } : canonical
+  return messages.map(message => message.id === canonical.id
+    ? mergeCanonicalMessage(message, snapshot, pendingReaction)
+    : message)
+}
+
 export function orderChatMessages(messages: Message[]): Message[] {
   const time = (value: string) => Number.isFinite(Date.parse(value)) ? Date.parse(value) : 0
   return [...messages].sort((left, right) => time(left.timestamp) - time(right.timestamp) || left.id.localeCompare(right.id))

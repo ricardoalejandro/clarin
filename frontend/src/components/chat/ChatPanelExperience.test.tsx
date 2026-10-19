@@ -26,11 +26,12 @@ vi.mock('../WhatsAppTextInput', async () => {
   }
 })
 vi.mock('./MessageBubble', () => ({
-  default: ({ message, onMediaClick, onDocumentClick, onReact, onSelect, onRetry, onRecoverMedia }: { message: { media_url?: string; status?: string; body?: string; quoted_body?: string; media_filename?: string; media_recoverable?: boolean; media_unavailable_reason?: string; reactions?: Array<{ emoji: string; is_from_me: boolean }> }; onMediaClick?: (url: string, type: string) => void; onDocumentClick?: (document: { sessionId: string; src: string; filename: string; mimeType: string; size: number }) => void; onReact?: (message: unknown, emoji: string) => void; onSelect?: (message: unknown) => void; onRetry?: (message: unknown) => void; onRecoverMedia?: (message: unknown) => Promise<void> }) => (
+  default: ({ message, onMediaClick, onDocumentClick, onReact, onSelect, onRetry, onRecoverMedia, onQuotedMessageClick }: { message: { media_url?: string; status?: string; body?: string; quoted_body?: string; quoted_message_id?: string; media_filename?: string; media_recoverable?: boolean; media_unavailable_reason?: string; reactions?: Array<{ emoji: string; is_from_me: boolean }> }; onMediaClick?: (url: string, type: string) => void; onDocumentClick?: (document: { sessionId: string; src: string; filename: string; mimeType: string; size: number }) => void; onReact?: (message: unknown, emoji: string) => void; onSelect?: (message: unknown) => void; onRetry?: (message: unknown) => void; onRecoverMedia?: (message: unknown) => Promise<void>; onQuotedMessageClick?: (id: string) => void }) => (
     <div data-testid="message-bubble">
       {message.media_url && onMediaClick && <button onClick={() => onMediaClick(message.media_url!, 'image')}>Abrir imagen simulada</button>}
       <span>{message.body}</span>{message.status === 'failed' && <button onClick={() => onRetry?.(message)}>Reintentar envío</button>}<span>{message.quoted_body}</span>
       <span>{message.media_filename}</span><span data-testid="media-unavailable-reason">{message.media_unavailable_reason}</span>
+      {message.quoted_message_id && onQuotedMessageClick && <button onClick={() => onQuotedMessageClick(message.quoted_message_id!)}>Abrir cita simulada</button>}
       {message.media_recoverable && !message.media_unavailable_reason && onRecoverMedia && <button type="button" onClick={() => { void onRecoverMedia(message).catch(() => {}) }}>Recuperar archivo simulado</button>}
       <span data-testid="own-reaction">{message.reactions?.find(reaction => reaction.is_from_me)?.emoji || ''}</span>
       <span data-testid="contact-reaction">{message.reactions?.find(reaction => !reaction.is_from_me)?.emoji || ''}</span>
@@ -535,7 +536,7 @@ describe('group composer identities through drafts and retries', () => {
 
 describe('group media recovery canonical responses', () => {
   const groupChat: Chat = { ...chat, id: 'group-recovery', jid: '120009@g.us', kind: 'group', group: { subject: 'Archivos', participant_count: 2, membership_status: 'member', announce: false, can_send: true } }
-  const message = { id: 'media-recovery', chat_id: groupChat.id, message_id: 'wa-media-recovery', body: 'Material de la reunión', message_type: 'document', media_filename: 'Grabación.zip', media_recoverable: true, is_from_me: false, is_read: true, status: 'delivered', timestamp: '2026-10-18T12:00:00Z' }
+  const message = { id: 'media-recovery', chat_id: groupChat.id, device_id: groupChat.device_id, message_id: 'wa-media-recovery', body: 'Material de la reunión', message_type: 'document', media_filename: 'Grabación.zip', media_recoverable: true, is_from_me: false, is_read: true, status: 'delivered', timestamp: '2026-10-18T12:00:00Z' }
   const canonical = { ...message, media_recoverable: false, media_unavailable_reason: 'group_media_too_large' }
   beforeEach(() => {
     localStorage.setItem('token', 'test-token'); completeAuthIdentityChange(); websocket.listeners.clear()
@@ -543,15 +544,110 @@ describe('group media recovery canonical responses', () => {
     vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1200)
   })
   afterEach(() => { cleanup(); completeAuthIdentityChange(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
-  function install(recover: (init?: RequestInit) => Promise<Response>) {
+  function install(recover: (init?: RequestInit) => Promise<Response>, historical = false, react?: () => Promise<Response>) {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url.endsWith('/media/recover')) return recover(init)
+      if (url === '/api/messages/react' && react) return react()
+      if (url === `/api/chats/${chat.id}`) return Promise.resolve(jsonResponse({ success: true, chat, device: device('connected') }))
+      if (url.includes(`/api/chats/${chat.id}/messages?`)) return Promise.resolve(jsonResponse({ success: true, messages: [{ ...message, id: 'other-row', message_id: 'wa-other', body: 'Otra conversación', media_recoverable: false }] }))
       if (url === `/api/chats/${groupChat.id}`) return Promise.resolve(jsonResponse({ success: true, chat: groupChat, device: device('connected') }))
-      if (url.includes('/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: [message] }))
+      if (url.includes('/messages/search?')) return Promise.resolve(jsonResponse({ success: true, messages: [message], total: 1, history_offset: 75 }))
+      if (url.includes('/context?')) return Promise.resolve(jsonResponse({ success: true, messages: [message], message }))
+      if (url.includes('/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: historical && !url.includes('offset=50') ? [{ ...message, id: 'recent', message_id: 'wa-recent', body: 'Último mensaje visible', media_filename: undefined, media_recoverable: false, message_type: 'text', quoted_message_id: message.message_id }] : [message] }))
       return Promise.resolve(jsonResponse({ success: true, stickers: [], quick_replies: [] }))
     }))
   }
+  async function openHistoricalSearch() {
+    await screen.findByText('Último mensaje visible')
+    fireEvent.click(screen.getByRole('button', { name: 'Buscar en la conversación' }))
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Texto a buscar' }), { target: { value: 'Material' } })
+    return screen.findByRole('button', { name: 'Recuperar archivo simulado' })
+  }
+  function emit(snapshot: unknown, targetChat = groupChat.id) {
+    for (const listener of Array.from(websocket.listeners)) listener({ event: 'message_media_updated', data: { chat_id: targetChat, message: snapshot } })
+  }
+  it.each([200, 422])('reconciles recovery HTTP %i in a historical search window and its result', async status => {
+    const { media_recoverable: _recoverable, ...base } = message
+    const snapshot = { ...base, body: 'Archivo canónico', ...(status === 200 ? { media_url: '/api/media/file/account/recovered.zip' } : { media_unavailable_reason: 'group_media_too_large' }) }
+    install(() => Promise.resolve(jsonResponse({ success: status === 200, message: snapshot, code: status === 422 ? 'group_media_too_large' : undefined }, status === 200, status)), true)
+    render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    fireEvent.click(await openHistoricalSearch())
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Recuperar archivo simulado' })).not.toBeInTheDocument())
+    expect(screen.getByText('Archivo canónico')).toBeInTheDocument()
+    expect(screen.getByText('Coincidencia: Archivo canónico')).toBeInTheDocument()
+    if (status === 422) expect(screen.getByTestId('media-unavailable-reason')).toHaveTextContent('group_media_too_large')
+    else expect(screen.getByRole('button', { name: 'Abrir imagen simulada' })).toBeInTheDocument()
+  })
+  it('reconciles a historical search result and window through scoped WebSocket updates', async () => {
+    install(() => Promise.resolve(jsonResponse({})), true)
+    render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    await openHistoricalSearch()
+    await act(async () => {
+      emit({ ...canonical, body: 'Otro chat' }, 'other-chat')
+      emit({ ...canonical, id: 'unloaded', body: 'Otro mensaje' })
+    })
+    expect(screen.queryByText('Otro chat')).not.toBeInTheDocument()
+    expect(screen.queryByText('Otro mensaje')).not.toBeInTheDocument()
+    await act(async () => emit({ ...canonical, body: 'Contenido reparado' }))
+    expect(screen.getByText('Contenido reparado')).toBeInTheDocument()
+    expect(screen.getByText('Coincidencia: Contenido reparado')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Recuperar archivo simulado' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Cerrar búsqueda' }))
+    expect(screen.getByText('Último mensaje visible')).toBeInTheDocument()
+    expect(screen.queryByText('Contenido reparado')).not.toBeInTheDocument()
+  })
+  it.each(['http', 'websocket'] as const)('reconciles an older quoted context through %s without extending the main page', async source => {
+    const snapshot = { ...message, media_url: '/api/media/file/account/recovered.zip', body: 'Contexto recuperado' }
+    install(() => Promise.resolve(jsonResponse({ success: true, message: snapshot })), true)
+    render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Abrir cita simulada' }))
+    const recovery = await screen.findByRole('button', { name: 'Recuperar archivo simulado' })
+    if (source === 'http') fireEvent.click(recovery)
+    else await act(async () => emit(snapshot))
+    await screen.findByText('Contexto recuperado')
+    expect(screen.queryByRole('button', { name: 'Recuperar archivo simulado' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Volver a donde estaba' }))
+    expect(screen.getByText('Último mensaje visible')).toBeInTheDocument()
+    expect(screen.queryByText('Contexto recuperado')).not.toBeInTheDocument()
+  })
+  it.each(['http', 'websocket'] as const)('preserves a pending own reaction during %s historical recovery and uses its canonical rollback baseline', async source => {
+    let finishReaction!: (response: Response) => void
+    const reaction = { id: 'other-reaction', target_message_id: message.message_id, sender_jid: 'member', emoji: '❤️', is_from_me: false }
+    const snapshot = { ...canonical, reactions: [reaction] }
+    install(() => Promise.resolve(jsonResponse({ success: false, message: snapshot }, false, 422)), true, () => new Promise(resolve => { finishReaction = resolve }))
+    render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    const recover = await openHistoricalSearch()
+    fireEvent.click(screen.getByRole('button', { name: 'Reaccionar con 👍' }))
+    await waitFor(() => expect(finishReaction).toBeTypeOf('function'))
+    expect(screen.getByTestId('own-reaction')).toHaveTextContent('👍')
+    if (source === 'http') fireEvent.click(recover)
+    else await act(async () => emit(snapshot))
+    await waitFor(() => expect(screen.getByTestId('contact-reaction')).toHaveTextContent('❤️'))
+    expect(screen.getByTestId('own-reaction')).toHaveTextContent('👍')
+    await act(async () => finishReaction(jsonResponse({ success: false, error: 'Reacción rechazada' }, false)))
+    expect(screen.getByTestId('own-reaction')).toBeEmptyDOMElement()
+    expect(screen.getByTestId('contact-reaction')).toHaveTextContent('❤️')
+  })
+  it('aborts historical recovery on chat switch and ignores the late HTTP and old WebSocket callback', async () => {
+    let finish!: (response: Response) => void
+    let signal: AbortSignal | null | undefined
+    install(init => { signal = init?.signal; return new Promise(resolve => { finish = resolve }) }, true)
+    const view = render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    fireEvent.click(await openHistoricalSearch())
+    await waitFor(() => expect(finish).toBeTypeOf('function'))
+    const oldListeners = Array.from(websocket.listeners)
+    view.rerender(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText('Otra conversación')
+    await act(async () => {
+      finish(jsonResponse({ success: true, message: { ...canonical, body: 'Respuesta obsoleta' } }))
+      for (const listener of oldListeners) listener({ event: 'message_media_updated', data: { chat_id: groupChat.id, message: { ...canonical, body: 'Evento obsoleto' } } })
+    })
+    expect(signal?.aborted).toBe(true)
+    expect(screen.getByText('Otra conversación')).toBeInTheDocument()
+    expect(screen.queryByText('Respuesta obsoleta')).not.toBeInTheDocument()
+    expect(screen.queryByText('Evento obsoleto')).not.toBeInTheDocument()
+  })
   it('applies the terminal HTTP 422 message without a WebSocket event and retains its caption and filename', async () => {
     const recover = vi.fn(() => Promise.resolve(jsonResponse({ code: 'group_media_too_large', message: canonical, error: 'Archivo demasiado grande' }, false, 422)))
     install(recover)
@@ -574,15 +670,18 @@ describe('group media recovery canonical responses', () => {
   it('discards a delayed canonical error after an auth scope change', async () => {
     let finish!: (response: Response) => void
     let signal: AbortSignal | null | undefined
-    install(init => { signal = init?.signal; return new Promise(resolve => { finish = resolve }) })
+    install(init => { signal = init?.signal; return new Promise(resolve => { finish = resolve }) }, true)
     render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Recuperar archivo simulado' }))
+    fireEvent.click(await openHistoricalSearch())
     await waitFor(() => expect(finish).toBeTypeOf('function'))
     await act(async () => {
       beginAuthIdentityChange()
       finish(jsonResponse({ code: 'group_media_too_large', message: canonical }, false, 422))
+      emit({ ...canonical, body: 'Otra sesión' })
     })
     expect(signal?.aborted).toBe(true)
     expect(screen.getByTestId('media-unavailable-reason')).toBeEmptyDOMElement()
+    expect(screen.queryByText('Otra sesión')).not.toBeInTheDocument()
+    expect(screen.getByText('Coincidencia: Material de la reunión')).toBeInTheDocument()
   })
 })

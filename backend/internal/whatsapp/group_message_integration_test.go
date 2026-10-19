@@ -168,4 +168,7 @@ func TestGroupMessageTransportIntegration(t *testing.T) {
 	if err = db.QueryRow(ctx, `SELECT count(*),count(DISTINCT message_id) FROM messages WHERE account_id=$1 AND chat_id=$2 AND body=$3`, account, chat.ID, "Repeated visible payload").Scan(&repeatedRows, &distinctProviderIDs); err != nil || repeatedRows != 2 || distinctProviderIDs != 2 {
 		t.Fatal("same text with distinct provider IDs must remain two messages", err)
 	}
+	t.Run("recovered media snapshot", func(t *testing.T) {
+		testGroupMediaSnapshot(t, ctx, pool, account, device, chat.ID)
+	})
 }

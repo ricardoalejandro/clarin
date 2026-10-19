@@ -15,7 +15,7 @@ import { Chat, ChatState, Device, Message, ChatMention } from '@/types/chat'
 import { subscribeWebSocket } from '@/lib/api'
 import { messageBelongsToChat } from './chatEventScope'
 import { chatSenderPhone, validatePinnedChatSender, type ChatSenderSession } from './chatSenderSession'
-import { hasSameMessageIdentity, mergeCanonicalMessage, mergeFetchedMessages, orderChatMessages, reconcileOptimisticMessage } from './messageState'
+import { hasSameMessageIdentity, mergeCanonicalMessage, mergeCanonicalMessageProjection, mergeFetchedMessages, orderChatMessages, reconcileOptimisticMessage } from './messageState'
 import { applyDeviceDeletionResult, isDeviceDeleting } from '@/components/settings/deviceLifecycle'
 import type { DeviceDeletionResult } from '@/types/chat'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
@@ -1191,6 +1191,31 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     })
   }, [updateMessages])
 
+  const applyCanonicalMessageToChat = useCallback((targetChatId: string, canonical: Message, requestScope: string) => {
+    const scopeIsCurrent = () => getAuthScope() === requestScope && !isAuthIdentityChanging(requestScope)
+    if (!scopeIsCurrent()) return
+    reconcileReactionSnapshotBaseline(targetChatId, canonical.message_id, canonical.reactions)
+    const patch = (projection: Message[]) => mergeCanonicalMessageProjection(
+      projection,
+      canonical,
+      Boolean(reactionQueuesRef.current.get(reactionQueueKey(targetChatId, canonical.message_id))?.inFlight),
+    )
+    if (activeChatIdRef.current !== targetChatId) {
+      const cached = messagesCacheRef.current.get(targetChatId)
+      if (cached) messagesCacheRef.current.set(targetChatId, { ...cached, messages: orderChatMessages(patch(cached.messages)) })
+      return
+    }
+    const projectionIsCurrent = () => scopeIsCurrent() && activeChatIdRef.current === targetChatId
+    setMessages(previous => {
+      if (!projectionIsCurrent()) return previous
+      const next = orderChatMessages(patch(previous))
+      cacheMessages(targetChatId, next)
+      return next
+    })
+    setSearchWindowMessages(previous => projectionIsCurrent() && previous ? patch(previous) : previous)
+    setSearchResult(previous => projectionIsCurrent() && previous ? patch([previous])[0] : previous)
+  }, [cacheMessages, reconcileReactionSnapshotBaseline])
+
   const updateReactionProjectionsForChat = useCallback((
     targetChatId: string,
     targetMessageId: string,
@@ -1571,6 +1596,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   useEffect(() => {
     if (!chatId) return
 
+    const eventScope = getAuthScope()
     const unsubscribe = subscribeWebSocket(
       (data: unknown) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1692,12 +1718,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
           const actualMsg = payload.message || payload
           const canonicalMessage = actualMsg as Message
           if (!messageBelongsToChat({ chatId, jid: chat?.jid, deviceId, provider: canonicalDevice?.provider }, payload, canonicalMessage)) return
-          reconcileReactionSnapshotBaseline(chatId, canonicalMessage.message_id, canonicalMessage.reactions)
-          updateMessages(prev => prev.map(m => {
-            if (m.id !== actualMsg.id) return m
-            const pending = Boolean(reactionQueuesRef.current.get(reactionQueueKey(chatId, m.message_id))?.inFlight)
-            return mergeCanonicalMessage(m, canonicalMessage, pending)
-          }))
+          applyCanonicalMessageToChat(chatId, canonicalMessage, eventScope)
         } else if (eventType === 'message_status' && payload) {
           // Update message delivery/read status (only upgrade, never downgrade)
           const msgIds: string[] = payload.message_ids || []
@@ -1833,7 +1854,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     return () => {
       unsubscribe()
     }
-  }, [chatId, deviceId, chat, canonicalDevice?.provider, markDisplayedIncomingRead, reconcileReactionSnapshotBaseline, updateReactionProjectionsForChat])
+  }, [chatId, deviceId, chat, canonicalDevice?.provider, markDisplayedIncomingRead, reconcileReactionSnapshotBaseline, updateReactionProjectionsForChat, applyCanonicalMessageToChat])
 
   const fetchChatDetails = async (targetChatId: string | null = chatId) => {
     if (!targetChatId) return
@@ -3004,7 +3025,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       if (controller.signal.aborted || getAuthScope() !== requestScope) throw new DOMException('Solicitud cancelada', 'AbortError')
       const canonicalMessage: Message | undefined = data.message?.id === message.id && data.message?.chat_id === targetChatId ? data.message : undefined
       if (canonicalMessage) {
-        updateMessagesForChat(targetChatId, current => current.map(row => row.id === message.id ? mergeCanonicalMessage(row, canonicalMessage) : row))
+        applyCanonicalMessageToChat(targetChatId, normalizeAuthoritativeMessageReactions(canonicalMessage), requestScope)
       }
       if (!response.ok || !data.success || !canonicalMessage) throw new Error(data.error || 'No se pudo recuperar el archivo. Reintenta.')
     } finally { unsubscribe(); if (mediaRecoveryRequests.current.get(message.id) === controller) mediaRecoveryRequests.current.delete(message.id) }
