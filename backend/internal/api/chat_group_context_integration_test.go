@@ -118,6 +118,18 @@ func TestChatGroupContextIntegration(t *testing.T) {
 		}
 		return body
 	}
+	t.Run("empty group history", func(t *testing.T) {
+		for _, id := range []uuid.UUID{chat.ID, otherChat.ID} {
+			path := "/chats/" + id.String() + "/messages?limit=50"
+			for reload := 0; reload < 2; reload++ {
+				result := get(t, path, false, http.StatusOK)
+				if result.Messages == nil || len(result.Messages) != 0 {
+					t.Fatal("empty group history must serialize an empty array")
+				}
+			}
+			get(t, path, true, http.StatusNotFound)
+		}
+	})
 	base := time.Now().UTC().Truncate(time.Second)
 	for index, variant := range []string{"text", "recoverable", "too_large"} {
 		t.Run(variant, func(t *testing.T) {
@@ -210,4 +222,14 @@ func TestChatGroupContextIntegration(t *testing.T) {
 			}
 		})
 	}
+	t.Run("exhausted history page", func(t *testing.T) {
+		result := get(t, "/chats/"+chat.ID.String()+"/messages?limit=1&offset=100", false, http.StatusOK)
+		if result.Messages == nil || len(result.Messages) != 0 {
+			t.Fatal("history beyond the last page must serialize an empty array")
+		}
+		other := get(t, "/chats/"+otherChat.ID.String()+"/messages?limit=50", false, http.StatusOK)
+		if other.Messages == nil || len(other.Messages) != 0 {
+			t.Fatal("another device's group must remain an independent empty history")
+		}
+	})
 }

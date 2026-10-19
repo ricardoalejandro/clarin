@@ -81,6 +81,11 @@ func (s *Server) projectCachedChatMedia(ctx context.Context, accountID uuid.UUID
 	if err := json.Unmarshal(envelope["messages"], &messages); err != nil {
 		return nil, err
 	}
+	// Older cache entries may contain null for a valid empty history. Keep the
+	// collection contract identical to a fresh empty page.
+	if messages == nil {
+		messages = []*domain.Message{}
+	}
 	if err := s.projectChatMedia(ctx, accountID, messages); err != nil {
 		return nil, err
 	}

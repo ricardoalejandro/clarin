@@ -2297,7 +2297,7 @@ func (r *MessageRepository) GetByChatID(ctx context.Context, chatID uuid.UUID, l
 	}
 	defer rows.Close()
 
-	var messages []*domain.Message
+	messages := make([]*domain.Message, 0)
 	for rows.Next() {
 		msg := &domain.Message{}
 		if err := rows.Scan(
