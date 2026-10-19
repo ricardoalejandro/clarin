@@ -13,6 +13,7 @@ import { dedupeReactions } from '@/utils/chatReactions'
 import styles from './MessageBubble.module.css'
 import { displayMentionText, groupMessageAuthor, participantName } from '@/utils/chatGroups'
 import ChatMessageMedia from './ChatMessageMedia'
+import MessageLinkPreview from './MessageLinkPreview'
 import { hasUnavailableGroupText } from './messageContent'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
@@ -722,6 +723,7 @@ function MessageBubble({ message, contactName, isGroup = false, onMediaClick, on
       onPointerUp={finishLongPress}
       onPointerCancel={finishLongPress}
       onContextMenu={event => {
+        if ((event.target as HTMLElement).closest('a')) return
         if (compactSelection && onSelect) {
           event.preventDefault()
           cancelLongPress()
@@ -743,6 +745,7 @@ function MessageBubble({ message, contactName, isGroup = false, onMediaClick, on
         event.stopPropagation()
       }}
       onKeyDown={event => {
+        if (event.target !== event.currentTarget) return
         if (!compactSelection || !onSelect || (event.key !== 'Enter' && event.key !== ' ')) return
         event.preventDefault()
         onSelect(message)
@@ -799,6 +802,7 @@ function MessageBubble({ message, contactName, isGroup = false, onMediaClick, on
         {renderContactCard()}
 
         {/* Text body */}
+        {message.link_preview && <MessageLinkPreview message={message} />}
         {unavailableGroupText && <p className="text-sm italic text-slate-500">Mensaje no disponible</p>}
         {!unavailableGroupText && message.body && message.message_type !== 'sticker' && message.message_type !== 'poll' && (
           isEmojiOnly ? (

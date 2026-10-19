@@ -15,7 +15,8 @@ import { Chat, ChatState, Device, Message, ChatMention } from '@/types/chat'
 import { subscribeWebSocket } from '@/lib/api'
 import { messageBelongsToChat } from './chatEventScope'
 import { chatSenderPhone, validatePinnedChatSender, type ChatSenderSession } from './chatSenderSession'
-import { hasSameMessageIdentity, mergeCanonicalMessage, mergeCanonicalMessageProjection, mergeFetchedMessages, orderChatMessages, reconcileOptimisticMessage } from './messageState'
+import { hasSameMessageIdentity, mergeCanonicalMessage, mergeCanonicalMessageProjection, mergeFetchedMessages, mergeMessageLinkPreview, orderChatMessages, reconcileOptimisticMessage } from './messageState'
+import { updateEditedMessageProjection, updateLinkPreviewProjection, updateRevokedMessageProjection, type LinkPreviewUpdate } from './linkPreviewState'
 import { chatReadError } from './chatReadError'
 import { applyDeviceDeletionResult, isDeviceDeleting } from '@/components/settings/deviceLifecycle'
 import type { DeviceDeletionResult } from '@/types/chat'
@@ -625,12 +626,13 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     return incoming.map(normalizeAuthoritativeMessageReactions).map(canonical => {
       reconcileReactionSnapshotBaseline(targetChatId, canonical.message_id, canonical.reactions)
       const queue = reactionQueuesRef.current.get(reactionQueueKey(targetChatId, canonical.message_id))
-      if (!queue?.inFlight) return canonical
       const local = localProjection.find(message => hasSameMessageIdentity(message, canonical))
         || cached.find(message => hasSameMessageIdentity(message, canonical))
       if (!local) return canonical
+      const withPreview = { ...canonical, ...mergeMessageLinkPreview(local, canonical, canonical.is_revoked || local.is_revoked) }
+      if (!queue?.inFlight) return withPreview
       return {
-        ...canonical,
+        ...withPreview,
         reactions: mergeCanonicalReactionSnapshot(local.reactions, canonical.reactions, true),
       }
     })
@@ -1192,30 +1194,39 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     })
   }, [updateMessages])
 
-  const applyCanonicalMessageToChat = useCallback((targetChatId: string, canonical: Message, requestScope: string) => {
+  const applyMessageProjectionToChat = useCallback((targetChatId: string, patch: (projection: Message[]) => Message[], requestScope: string) => {
     const scopeIsCurrent = () => getAuthScope() === requestScope && !isAuthIdentityChanging(requestScope)
     if (!scopeIsCurrent()) return
-    reconcileReactionSnapshotBaseline(targetChatId, canonical.message_id, canonical.reactions)
-    const patch = (projection: Message[]) => mergeCanonicalMessageProjection(
-      projection,
-      canonical,
-      Boolean(reactionQueuesRef.current.get(reactionQueueKey(targetChatId, canonical.message_id))?.inFlight),
-    )
     if (activeChatIdRef.current !== targetChatId) {
       const cached = messagesCacheRef.current.get(targetChatId)
-      if (cached) messagesCacheRef.current.set(targetChatId, { ...cached, messages: orderChatMessages(patch(cached.messages)) })
+      if (cached) {
+        const next = patch(cached.messages)
+        if (next !== cached.messages) messagesCacheRef.current.set(targetChatId, { ...cached, messages: orderChatMessages(next) })
+      }
       return
     }
     const projectionIsCurrent = () => scopeIsCurrent() && activeChatIdRef.current === targetChatId
     setMessages(previous => {
       if (!projectionIsCurrent()) return previous
-      const next = orderChatMessages(patch(previous))
+      const patched = patch(previous)
+      if (patched === previous) return previous
+      const next = orderChatMessages(patched)
       cacheMessages(targetChatId, next)
       return next
     })
     setSearchWindowMessages(previous => projectionIsCurrent() && previous ? patch(previous) : previous)
     setSearchResult(previous => projectionIsCurrent() && previous ? patch([previous])[0] : previous)
-  }, [cacheMessages, reconcileReactionSnapshotBaseline])
+  }, [cacheMessages])
+
+  const applyCanonicalMessageToChat = useCallback((targetChatId: string, canonical: Message, requestScope: string) => {
+    if (getAuthScope() !== requestScope || isAuthIdentityChanging(requestScope)) return
+    reconcileReactionSnapshotBaseline(targetChatId, canonical.message_id, canonical.reactions)
+    applyMessageProjectionToChat(targetChatId, projection => mergeCanonicalMessageProjection(
+      projection,
+      canonical,
+      Boolean(reactionQueuesRef.current.get(reactionQueueKey(targetChatId, canonical.message_id))?.inFlight),
+    ), requestScope)
+  }, [applyMessageProjectionToChat, reconcileReactionSnapshotBaseline])
 
   const updateReactionProjectionsForChat = useCallback((
     targetChatId: string,
@@ -1737,22 +1748,20 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
               return next
             }))
           }
+        } else if (eventType === 'message_link_preview_updated' && payload) {
+          const update = payload as LinkPreviewUpdate
+          if (update.chat_id === chatId && update.device_id === deviceId
+            && typeof update.body_snapshot === 'string' && typeof update.is_edited_snapshot === 'boolean') {
+            applyMessageProjectionToChat(chatId, projection => updateLinkPreviewProjection(projection, update), eventScope)
+          }
         } else if (eventType === 'message_revoked' && payload) {
           // Mark message as revoked
-          const revokedMsgId: string = payload.message_id
-          if (chat && payload.chat_jid === chat.jid) {
-            updateMessages(prev => prev.map(m =>
-              m.message_id === revokedMsgId ? { ...m, is_revoked: true, body: undefined } : m
-            ))
+          if (chat && payload.chat_jid === chat.jid && (!payload.chat_id || payload.chat_id === chatId) && (!payload.device_id || payload.device_id === deviceId)) {
+            applyMessageProjectionToChat(chatId, projection => updateRevokedMessageProjection(projection, payload), eventScope)
           }
         } else if (eventType === 'message_edited' && payload) {
-          // Update edited message body
-          const editedMsgId: string = payload.message_id
-          const newBody: string = payload.new_body
-          if (chat && payload.chat_jid === chat.jid) {
-            updateMessages(prev => prev.map(m =>
-              m.message_id === editedMsgId ? { ...m, body: newBody, mentions: payload.mentions ?? m.mentions, is_edited: true } : m
-            ))
+          if (chat && payload.chat_jid === chat.jid && (!payload.chat_id || payload.chat_id === chatId) && (!payload.device_id || payload.device_id === deviceId)) {
+            applyMessageProjectionToChat(chatId, projection => updateEditedMessageProjection(projection, payload), eventScope)
           }
         } else if (eventType === 'chat_group_updated' && payload?.chat_id === chatId) {
           void fetchChatDetails()
@@ -1855,7 +1864,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     return () => {
       unsubscribe()
     }
-  }, [chatId, deviceId, chat, canonicalDevice?.provider, markDisplayedIncomingRead, reconcileReactionSnapshotBaseline, updateReactionProjectionsForChat, applyCanonicalMessageToChat])
+  }, [chatId, deviceId, chat, canonicalDevice?.provider, markDisplayedIncomingRead, reconcileReactionSnapshotBaseline, updateReactionProjectionsForChat, applyCanonicalMessageToChat, applyMessageProjectionToChat])
 
   const fetchChatDetails = async (targetChatId: string | null = chatId) => {
     if (!targetChatId) return
@@ -2050,6 +2059,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 
     // Handle edit mode
     if (editingMsg) {
+      const editScope = getAuthScope()
       const token = localStorage.getItem('token')
       let editSucceeded = false
       try {
@@ -2066,9 +2076,10 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
         })
         const data = await res.json()
         if (res.ok && data.success) {
-          updateTargetMessages(prev => prev.map(m =>
-            m.message_id === editingMsg.message_id ? { ...m, body: text, mentions: serialized.mentions, is_edited: true } : m
-          ))
+          if (targetChatId) applyMessageProjectionToChat(targetChatId, projection => updateEditedMessageProjection(projection, {
+            message_id: editingMsg.message_id, new_body: text, mentions: serialized.mentions,
+            link_preview: null, link_preview_version: data.link_preview_version,
+          }), editScope)
           editSucceeded = true
           if (data.warning) setComposerFeedback({ kind: 'info', message: data.warning })
         } else {

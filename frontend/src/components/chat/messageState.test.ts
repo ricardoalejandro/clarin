@@ -5,6 +5,28 @@ import { mergeCanonicalMessage, mergeCanonicalMessageProjection, mergeFetchedMes
 const message: Message = { id: 'row', message_id: 'provider', body: 'Antes', is_from_me: true, is_read: false, status: 'sent', timestamp: '2026-10-07T12:00:00Z' }
 
 describe('canonical chat message state', () => {
+  it('merges preview and revision together while retaining newer metadata over older or partial snapshots', () => {
+    const preview = { url: 'https://example.com/', title: 'Recibido', description: '', thumbnail_url: null }
+    const current = { ...message, link_preview: null, link_preview_version: 2, status: 'read', is_read: true }
+    for (const version of [undefined, 0, 1, 2]) {
+      expect(mergeCanonicalMessage(current, { ...message, link_preview: preview, link_preview_version: version })).toMatchObject({ link_preview: null, link_preview_version: 2, status: 'read', is_read: true })
+    }
+    const restored = mergeCanonicalMessage(current, { ...message, link_preview: preview, link_preview_version: 3 })
+    expect(restored).toMatchObject({ link_preview: preview, link_preview_version: 3 })
+    expect(mergeCanonicalMessage(restored, { ...message, link_preview_version: 4 })).toMatchObject({ link_preview: preview, link_preview_version: 3 })
+    expect(mergeFetchedMessages([current], [{ ...message, link_preview: preview, link_preview_version: 1 }])[0]).toMatchObject({ link_preview: null, link_preview_version: 2 })
+    expect(mergeCanonicalMessage(restored, { ...message, is_revoked: true, link_preview_version: 4 })).toMatchObject({ link_preview: null, link_preview_version: 4 })
+    expect(mergeCanonicalMessage(restored, { ...message, is_revoked: true, link_preview_version: 1 })).toMatchObject({ link_preview: null, link_preview_version: 3 })
+  })
+
+  it('preserves omitted link metadata but accepts explicit null across history, echoes and revocation', () => {
+    const preview = { url: 'https://example.com/', title: 'Recibido', description: '', thumbnail_url: null }
+    const current = { ...message, link_preview: preview }
+    expect(mergeCanonicalMessage(current, message).link_preview).toBe(preview)
+    expect(mergeCanonicalMessage(current, { ...message, link_preview: null }).link_preview).toBeNull()
+    expect(mergeFetchedMessages([current], [{ ...message, link_preview: null }])[0].link_preview).toBeNull()
+    expect(mergeCanonicalMessageProjection([current], { ...message, is_revoked: true })[0].link_preview).toBeNull()
+  })
   it('accepts edits and revocation from history rather than keeping cached content', () => {
     expect(mergeCanonicalMessage(message, { ...message, body: 'Después', is_edited: true })).toMatchObject({ body: 'Después', is_edited: true })
     expect(mergeCanonicalMessage(message, { ...message, is_revoked: true })).toMatchObject({ body: undefined, is_revoked: true })

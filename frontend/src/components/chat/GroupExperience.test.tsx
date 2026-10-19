@@ -9,6 +9,19 @@ const group: Chat = { id: 'group', kind: 'group', jid: '120000@g.us', name: 'Com
 const response = (body: unknown) => ({ ok: true, json: async () => body }) as Response
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers() })
 describe('group surfaces', () => {
+  it('links the group description without changing its plain text or making external requests', async () => {
+    const description = 'Reunión: HTTPS://example.com/sala_(dos).\n_Nota_ www.example.org/a_b'
+    const described = { ...group, group: { ...group.group!, description } }
+    const fetcher = vi.fn((input: RequestInfo | URL) => Promise.resolve(response(String(input).includes('/participants?') ? { success: true, participants: [] } : { success: true, group: described.group })))
+    vi.stubGlobal('fetch', fetcher)
+    render(<GroupDetailsPanel chat={described} onClose={() => {}} />)
+    const link = await screen.findByRole('link', { name: 'HTTPS://example.com/sala_(dos)' })
+    expect(link).toHaveAttribute('href', 'https://example.com/sala_(dos)')
+    expect(link.parentElement).toHaveTextContent('_Nota_')
+    expect(link.parentElement?.textContent).toBe(description)
+    expect(screen.getAllByRole('link')).toHaveLength(2)
+    expect(fetcher.mock.calls.every(([url]) => String(url).startsWith('/api/chats/group/group'))).toBe(true)
+  })
   it('labels unavailable group text while retaining its author, timestamp and quoted context', () => {
     const message = Object.freeze({ id: 'empty-text', message_id: 'provider-empty', from_jid: '51@s.whatsapp.net', from_name: 'María', is_from_me: false, is_read: true, status: 'read', body: ' \n ', message_type: 'text', timestamp: '2026-10-18T12:00:00Z', quoted_message_id: 'quote', quoted_sender: '52@s.whatsapp.net', quoted_sender_name: 'José', quoted_body: 'Mensaje anterior' } as Message)
     const { rerender } = render(<MessageBubble message={message} isGroup />)

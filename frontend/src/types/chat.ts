@@ -66,7 +66,18 @@ export interface PollVote {
   selected_names: string[]
 }
 
+export interface MessageLinkPreview {
+  url: string
+  title: string
+  description: string
+  thumbnail_url: string | null
+}
+
 export interface Message {
+  chat_id?: string
+  /** Omitted in partial events; explicit null removes a previously received preview. */
+  link_preview?: MessageLinkPreview | null
+  link_preview_version?: number
   media_recoverable?: boolean
   media_unavailable_reason?: 'group_media_too_large'
   mentions?: ChatMention[]

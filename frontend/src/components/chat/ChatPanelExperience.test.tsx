@@ -26,10 +26,10 @@ vi.mock('../WhatsAppTextInput', async () => {
   }
 })
 vi.mock('./MessageBubble', () => ({
-  default: ({ message, onMediaClick, onDocumentClick, onReact, onSelect, onRetry, onRecoverMedia, onQuotedMessageClick }: { message: { media_url?: string; status?: string; body?: string; quoted_body?: string; quoted_message_id?: string; media_filename?: string; media_recoverable?: boolean; media_unavailable_reason?: string; reactions?: Array<{ emoji: string; is_from_me: boolean }> }; onMediaClick?: (url: string, type: string) => void; onDocumentClick?: (document: { sessionId: string; src: string; filename: string; mimeType: string; size: number }) => void; onReact?: (message: unknown, emoji: string) => void; onSelect?: (message: unknown) => void; onRetry?: (message: unknown) => void; onRecoverMedia?: (message: unknown) => Promise<void>; onQuotedMessageClick?: (id: string) => void }) => (
+  default: ({ message, onMediaClick, onDocumentClick, onReact, onSelect, onRetry, onRecoverMedia, onQuotedMessageClick, onEdit }: { message: { link_preview?: { title: string; thumbnail_url?: string | null } | null; link_preview_version?: number; media_url?: string; status?: string; body?: string; quoted_body?: string; quoted_message_id?: string; media_filename?: string; media_recoverable?: boolean; media_unavailable_reason?: string; reactions?: Array<{ emoji: string; is_from_me: boolean }> }; onMediaClick?: (url: string, type: string) => void; onDocumentClick?: (document: { sessionId: string; src: string; filename: string; mimeType: string; size: number }) => void; onReact?: (message: unknown, emoji: string) => void; onSelect?: (message: unknown) => void; onRetry?: (message: unknown) => void; onRecoverMedia?: (message: unknown) => Promise<void>; onQuotedMessageClick?: (id: string) => void; onEdit?: (message: unknown) => void }) => (
     <div data-testid="message-bubble">
       {message.media_url && onMediaClick && <button onClick={() => onMediaClick(message.media_url!, 'image')}>Abrir imagen simulada</button>}
-      <span>{message.body}</span>{message.status === 'failed' && <button onClick={() => onRetry?.(message)}>Reintentar envío</button>}<span>{message.quoted_body}</span>
+      <span>{message.body}</span><span data-testid="link-preview-title" data-preview-version={message.link_preview_version} data-preview-thumbnail={message.link_preview?.thumbnail_url || ''}>{message.link_preview?.title}</span>{onEdit && <button onClick={() => onEdit(message)}>Editar mensaje simulado</button>}{message.status === 'failed' && <button onClick={() => onRetry?.(message)}>Reintentar envío</button>}<span>{message.quoted_body}</span>
       <span>{message.media_filename}</span><span data-testid="media-unavailable-reason">{message.media_unavailable_reason}</span>
       {message.quoted_message_id && onQuotedMessageClick && <button onClick={() => onQuotedMessageClick(message.quoted_message_id!)}>Abrir cita simulada</button>}
       {message.media_recoverable && !message.media_unavailable_reason && onRecoverMedia && <button type="button" onClick={() => { void onRecoverMedia(message).catch(() => {}) }}>Recuperar archivo simulado</button>}
@@ -531,6 +531,168 @@ describe('group composer identities through drafts and retries', () => {
     await waitFor(() => expect(state.bodies).toHaveLength(2))
     expect(state.bodies[1]).toBe(state.bodies[0]); expect(state.uploads()).toBe(1)
     expect(JSON.parse(state.bodies[0])).toMatchObject({ body: 'Hola @51900000002 ', mentions: [{ jid: member.jid, name: member.name }], media_type: 'video' })
+  })
+})
+
+describe('received link preview reconciliation', () => {
+  const preview = { url: 'https://example.com/a_b', title: 'Vista previa recibida', description: 'Descripción', thumbnail_url: null }
+  const linked = { id: 'preview-local', message_id: 'preview-provider', device_id: chat.device_id, body: 'Consulta https://example.com/a_b', is_from_me: true, is_read: true, status: 'read', timestamp: new Date().toISOString(), link_preview: preview, link_preview_version: 0 }
+  const recent = { ...linked, id: 'recent-local', message_id: 'recent-provider', body: 'Mensaje reciente', link_preview: null, quoted_message_id: linked.message_id }
+  beforeEach(() => {
+    localStorage.setItem('token', 'test-token'); completeAuthIdentityChange(); websocket.listeners.clear()
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1200)
+  })
+  afterEach(() => { cleanup(); completeAuthIdentityChange(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
+  function install(historical = false) {
+    const fetcher = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === `/api/chats/${chat.id}`) return Promise.resolve(jsonResponse({ success: true, chat, device: device('connected') }))
+      if (url === '/api/chats/other-chat') return Promise.resolve(jsonResponse({ success: true, chat: { ...chat, id: 'other-chat' }, device: device('connected') }))
+      if (url.includes('/other-chat/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: [{ ...recent, body: 'Otra conversación' }] }))
+      if (url.includes('/messages/search?')) return Promise.resolve(jsonResponse({ success: true, messages: [linked], total: 1, history_offset: 75 }))
+      if (url.includes('/context?')) return Promise.resolve(jsonResponse({ success: true, messages: [linked], message: linked }))
+      if (url.includes('/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: historical && !url.includes('offset=50') ? [recent] : [linked] }))
+      if (url === '/api/messages/edit') return Promise.resolve(jsonResponse({ success: true, link_preview_version: 5 }))
+      return Promise.resolve(jsonResponse({ success: true, stickers: [], quick_replies: [], link_preview: null }))
+    })
+    vi.stubGlobal('fetch', fetcher)
+    return fetcher
+  }
+  function emit(data: Record<string, unknown> = {}, event = 'message_link_preview_updated', listeners = Array.from(websocket.listeners)) {
+    const payload = event === 'message_link_preview_updated'
+      ? { chat_id: chat.id, device_id: chat.device_id, message_id: linked.id, body_snapshot: linked.body, is_edited_snapshot: false, link_preview: { ...preview, title: 'Metadatos enriquecidos' }, link_preview_version: 1, ...data }
+      : { chat_jid: chat.jid, device_id: chat.device_id, message_id: linked.message_id, ...data }
+    for (const listener of listeners) listener({ event, data: payload })
+  }
+  it('loads canonical metadata and ignores foreign/stale enrichment without changing the message', async () => {
+    install()
+    render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText(preview.title)
+    await act(async () => {
+      for (const invalid of [{ chat_id: 'other-chat' }, { device_id: 'other-device' }, { message_id: 'other-id' }, { body_snapshot: 'Anterior' }, { is_edited_snapshot: true }]) emit(invalid)
+      emit({ chat_id: 'other-chat', new_body: 'No aplicar', link_preview: null }, 'message_edited')
+      emit({ chat_id: 'other-chat' }, 'message_revoked')
+    })
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent(preview.title)
+    await act(async () => { emit(); emit() })
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent('Metadatos enriquecidos')
+    expect(screen.getByText(linked.body)).toBeInTheDocument()
+    expect(screen.getAllByTestId('message-bubble')).toHaveLength(1)
+    await act(async () => emit({ link_preview: null, link_preview_version: 2 }))
+    expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
+  })
+  it.each(['search', 'quote'] as const)('updates a historical %s projection and clears an edited preview without leaking it into the main page', async mode => {
+    install(true)
+    render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText(recent.body)
+    if (mode === 'search') {
+      fireEvent.click(screen.getByRole('button', { name: 'Buscar en la conversación' }))
+      fireEvent.change(screen.getByRole('searchbox', { name: 'Texto a buscar' }), { target: { value: 'Consulta' } })
+    } else fireEvent.click(screen.getByRole('button', { name: 'Abrir cita simulada' }))
+    await screen.findByText(preview.title)
+    await act(async () => emit())
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent('Metadatos enriquecidos')
+    await act(async () => emit({ new_body: 'Texto editado', mentions: [], link_preview: null, link_preview_version: 2 }, 'message_edited'))
+    expect(screen.getByText('Texto editado')).toBeInTheDocument()
+    expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
+    if (mode === 'search') expect(screen.getByText('Coincidencia: Texto editado')).toBeInTheDocument()
+    await act(async () => emit())
+    expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
+    fireEvent.click(screen.getByRole('button', { name: mode === 'search' ? 'Cerrar búsqueda' : 'Volver a donde estaba' }))
+    expect(screen.getByText(recent.body)).toBeInTheDocument()
+    expect(screen.queryByText('Texto editado')).not.toBeInTheDocument()
+  })
+  it('clears a preview on HTTP edit in an older context without depending on a WebSocket echo', async () => {
+    const fetcher = install(true)
+    render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Abrir cita simulada' }))
+    await screen.findByText(preview.title)
+    fireEvent.click(screen.getByRole('button', { name: 'Editar mensaje simulado' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Draft test editor' }), { target: { value: 'Texto editado desde Clarin' } })
+    fireEvent.click(screen.getByRole('button', { name: /Guardar cambios|Enviar mensaje/ }))
+    await screen.findByText('Texto editado desde Clarin')
+    expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-version', '5')
+    await act(async () => emit({ body_snapshot: 'Texto editado desde Clarin', is_edited_snapshot: true, link_preview_version: 4 }))
+    expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
+    expect(fetcher.mock.calls.filter(([url]) => String(url) === '/api/messages/edit')).toHaveLength(1)
+  })
+  it.each(['main', 'search', 'quote'] as const)('does not resurrect a detached thumbnail in the %s projection and accepts a newer restore', async mode => {
+    install(mode !== 'main')
+    render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    if (mode === 'search') {
+      await screen.findByText(recent.body)
+      fireEvent.click(screen.getByRole('button', { name: 'Buscar en la conversación' }))
+      fireEvent.change(screen.getByRole('searchbox', { name: 'Texto a buscar' }), { target: { value: 'Consulta' } })
+    } else if (mode === 'quote') fireEvent.click(await screen.findByRole('button', { name: 'Abrir cita simulada' }))
+    await screen.findByText(preview.title)
+    const withImage = { ...preview, thumbnail_url: '/api/media/file/test-thumbnail.jpg' }
+    await act(async () => emit({ link_preview: withImage }))
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-thumbnail', withImage.thumbnail_url)
+    await act(async () => emit({ chat_id: chat.id, message: { ...linked, link_preview_version: 2 } }, 'message_media_updated'))
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-thumbnail', '')
+    await act(async () => { emit({ link_preview: withImage }); emit({ link_preview: withImage, link_preview_version: 2 }) })
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-version', '2')
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-thumbnail', '')
+    await act(async () => emit({ link_preview: withImage, link_preview_version: 3 }))
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-thumbnail', withImage.thumbnail_url)
+    await act(async () => emit({ chat_id: chat.id, message: { ...linked, link_preview: null, link_preview_version: 2 } }, 'message_media_updated'))
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-version', '3')
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-thumbnail', withImage.thumbnail_url)
+  })
+  it.each(['search', 'quote'] as const)('retains a newer preview removal when a pending %s HTTP snapshot finishes late', async mode => {
+    const fetcher = install(mode === 'quote')
+    const original = fetcher.getMockImplementation()!
+    const quoted = { ...linked, quoted_message_id: linked.message_id }
+    if (mode === 'quote') fetcher.mockImplementation(input => String(input).includes('/context?')
+      ? Promise.resolve(jsonResponse({ success: true, messages: [quoted], message: quoted })) : original(input))
+    render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    if (mode === 'quote') fireEvent.click(await screen.findByRole('button', { name: 'Abrir cita simulada' }))
+    await screen.findByText(preview.title)
+    let complete: ((response: Response) => void) | undefined
+    fetcher.mockImplementation(input => String(input).includes(mode === 'search' ? '/messages/search?' : '/context?')
+      ? new Promise<Response>(resolve => { complete = resolve }) : original(input))
+    if (mode === 'search') {
+      fireEvent.click(screen.getByRole('button', { name: 'Buscar en la conversación' }))
+      fireEvent.change(screen.getByRole('searchbox', { name: 'Texto a buscar' }), { target: { value: 'Consulta' } })
+    } else fireEvent.click(screen.getByRole('button', { name: 'Abrir cita simulada' }))
+    await waitFor(() => expect(complete).toBeTypeOf('function'))
+    await act(async () => emit({ chat_id: chat.id, message: { ...linked, link_preview: null, link_preview_version: 2 } }, 'message_media_updated'))
+    expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
+    await act(async () => complete!(jsonResponse({ success: true, messages: [{ ...linked, link_preview_version: 1 }], message: linked, total: 1, history_offset: 0 })))
+    expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
+    expect(screen.getByTestId('link-preview-title')).toHaveAttribute('data-preview-version', '2')
+    expect(screen.getByText(linked.body)).toBeInTheDocument()
+  })
+  it('does not apply an old listener to another chat or a different authentication scope', async () => {
+    install()
+    const view = render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText(preview.title)
+    const previous = Array.from(websocket.listeners)
+    await act(async () => beginAuthIdentityChange())
+    await act(async () => emit({}, 'message_link_preview_updated', previous))
+    expect(screen.queryByText('Metadatos enriquecidos')).not.toBeInTheDocument()
+    await act(async () => completeAuthIdentityChange())
+    view.rerender(<ChatPanel chatId="other-chat" initialChat={{ ...chat, id: 'other-chat' }} />)
+    await screen.findByText('Otra conversación')
+    await act(async () => emit({}, 'message_link_preview_updated', previous))
+    expect(screen.getByText('Otra conversación')).toBeInTheDocument()
+    expect(screen.queryByText('Metadatos enriquecidos')).not.toBeInTheDocument()
+  })
+  it('keeps the enriched canonical row in the chat cache while a return refresh is pending', async () => {
+    const fetcher = install()
+    const view = render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText(preview.title)
+    await act(async () => emit())
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent('Metadatos enriquecidos')
+    view.rerender(<ChatPanel chatId="other-chat" initialChat={{ ...chat, id: 'other-chat' }} />)
+    await screen.findByText('Otra conversación')
+    const original = fetcher.getMockImplementation()!
+    fetcher.mockImplementation(input => String(input) === `/api/chats/${chat.id}` ? new Promise<Response>(() => {}) : original(input))
+    view.rerender(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText('Metadatos enriquecidos')
+    expect(screen.getByText(linked.body)).toBeInTheDocument()
   })
 })
 

@@ -8,6 +8,28 @@ export function hasSameMessageIdentity(message: Message, candidate: Message): bo
 
 const deliveryLevel: Record<string, number> = { sending: 0, sent: 1, delivered: 2, read: 3 }
 
+export function linkPreviewVersion(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
+}
+
+type PreviewSnapshot = Pick<Message, 'link_preview' | 'link_preview_version'>
+
+/** A preview revision identifies one metadata snapshot, including a removal. */
+export function mergeMessageLinkPreview(current: PreviewSnapshot, snapshot: PreviewSnapshot, revoked = false): PreviewSnapshot {
+  const known = linkPreviewVersion(current.link_preview_version)
+  const incoming = linkPreviewVersion(snapshot.link_preview_version)
+  if (revoked) return {
+    link_preview: null,
+    link_preview_version: incoming === undefined ? known : Math.max(known ?? 0, incoming),
+  }
+  if (snapshot.link_preview === undefined
+    || (snapshot.link_preview_version !== undefined && incoming === undefined)
+    || (known !== undefined && (incoming === undefined || incoming <= known))) {
+    return { link_preview: current.link_preview, link_preview_version: known }
+  }
+  return { link_preview: snapshot.link_preview, link_preview_version: incoming }
+}
+
 /** A server snapshot owns content; already received delivery receipts cannot regress. */
 export function mergeCanonicalMessage(current: Message | undefined, canonical: Message, pendingReaction = false): Message {
   if (!current) return canonical
@@ -21,6 +43,7 @@ export function mergeCanonicalMessage(current: Message | undefined, canonical: M
     delivered_at: canonical.delivered_at ?? current.delivered_at,
     read_at: canonical.read_at ?? current.read_at,
     body: canonical.is_revoked ? undefined : Object.hasOwn(canonical, 'body') ? canonical.body : current.body,
+    ...mergeMessageLinkPreview(current, canonical, canonical.is_revoked || current.is_revoked),
     quoted_message_id: canonical.quoted_message_id ?? current.quoted_message_id,
     quoted_body: canonical.quoted_body ?? current.quoted_body,
     quoted_sender: canonical.quoted_sender ?? current.quoted_sender,

@@ -23,6 +23,7 @@ export default defineConfig({
       'src/lib/cloudChatCapabilities.test.ts',
       'src/lib/chatReactions.test.ts',
       'src/lib/whatsappEditor.test.ts',
+      'src/lib/webLinks.test.tsx',
       'src/lib/whiteboard*.test.{ts,tsx}',
       'src/lib/useKanbanPan.test.tsx',
       'src/lib/dashboardSidebarState.test.ts',
