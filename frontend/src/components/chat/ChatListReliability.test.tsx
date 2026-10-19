@@ -138,6 +138,109 @@ describe('Chat list canonical membership',()=>{
 describe('Chat list loaded window and remote deletion',()=>{
  beforeEach(()=>{localStorage.clear();socket.listeners.clear();vi.spyOn(HTMLElement.prototype,'getBoundingClientRect').mockReturnValue({width:1440,height:900,top:0,bottom:900,left:0,right:1440,x:0,y:0,toJSON(){}})});
  afterEach(()=>{cleanup();vi.unstubAllGlobals();socket.listeners.clear()});
+ it('does not paginate a new kind with the previous cursor while its first page is pending',async()=>{
+  let finishGroup!:(response:Response)=>void;
+  const group={...chat,id:'group-page',jid:'120001@g.us',kind:'group',name:'Grupo correcto',contact_name:'Grupo correcto'};
+  const groupRequests:Array<{params:URLSearchParams;signal?:AbortSignal|null}>=[];
+  vi.stubGlobal('fetch',vi.fn((input:RequestInfo|URL,init?:RequestInit)=>{
+   const url=String(input);
+   if(url.startsWith('/api/chats?')) {
+    const params=new URL(url,'http://test.invalid').searchParams;
+    if(params.get('kind')==='group') {
+     groupRequests.push({params,signal:init?.signal});
+     if(params.has('cursor')) return Promise.resolve({...json({success:false,error:'Bad Request'}),ok:false,status:400});
+     return new Promise<Response>(resolve=>{finishGroup=resolve});
+    }
+    return Promise.resolve(json({success:true,chats:[chat],total:2,next_cursor:'all-only-cursor'}));
+   }
+   return Promise.resolve(json({success:true,devices:[]}));
+  }));
+  render(<ChatsPage/>);
+  const scroller=(await screen.findByText(chat.name)).closest('.overflow-y-auto')!;
+  fireEvent.click(screen.getByRole('button',{name:/^Tipo de conversación:/}));
+  fireEvent.click(screen.getByRole('menuitemradio',{name:'Grupos'}));
+  await waitFor(()=>expect(groupRequests).toHaveLength(1));
+  fireEvent.scroll(scroller);
+  expect(groupRequests).toHaveLength(1);
+  expect(groupRequests[0].params.has('cursor')).toBe(false);
+  expect(groupRequests[0].signal?.aborted).toBe(false);
+  await act(async()=>finishGroup(json({success:true,chats:[group],total:1,next_cursor:''})));
+  expect(await screen.findByText('Grupo correcto')).toBeInTheDocument();
+  expect(screen.queryByText(chat.name)).not.toBeInTheDocument();
+ });
+ it('does not show individual rows under Groups if the first page fails',async()=>{
+  vi.spyOn(console,'error').mockImplementation(()=>{});
+  vi.stubGlobal('fetch',vi.fn((input:RequestInfo|URL)=>{
+   const url=String(input);
+   if(url.startsWith('/api/chats?')) return Promise.resolve(new URL(url,'http://test.invalid').searchParams.get('kind')==='group'
+    ? {...json({success:false,error:'Bad Request'}),ok:false,status:400}
+    : json({success:true,chats:[chat],total:1}));
+   return Promise.resolve(json({success:true,devices:[]}));
+  }));
+  render(<ChatsPage/>);await screen.findByText(chat.name);
+  fireEvent.click(screen.getByRole('button',{name:/^Tipo de conversación:/}));
+  fireEvent.click(screen.getByRole('menuitemradio',{name:'Grupos'}));
+  await waitFor(()=>expect(screen.getByRole('button',{name:'Reintentar'})).toBeInTheDocument());
+  expect(screen.queryByText(chat.name)).not.toBeInTheDocument();
+  expect(screen.queryByText('Bad Request')).not.toBeInTheDocument();
+  expect(screen.getByText(/400/)).toBeInTheDocument();
+ });
+ it('aborts silent reconciliation from a previous kind and discards its late result',async()=>{
+  let allRequests=0;
+  let finishOld!:(response:Response)=>void;
+  let oldSignal:AbortSignal|null|undefined;
+  const group={...chat,id:'group-late',jid:'120002@g.us',kind:'group',name:'Grupo vigente',contact_name:'Grupo vigente'};
+  vi.stubGlobal('fetch',vi.fn((input:RequestInfo|URL,init?:RequestInit)=>{
+   const url=String(input);
+   if(url.startsWith('/api/chats?')) {
+    const params=new URL(url,'http://test.invalid').searchParams;
+    if(params.get('kind')==='group') return Promise.resolve(json({success:true,chats:[group],total:1,next_cursor:''}));
+    if(++allRequests===2) {oldSignal=init?.signal;return new Promise<Response>(resolve=>{finishOld=resolve})}
+    return Promise.resolve(json({success:true,chats:[chat],total:1,next_cursor:''}));
+   }
+   return Promise.resolve(json({success:true,devices:[]}));
+  }));
+  render(<ChatsPage/>);await screen.findByText(chat.name);
+  await act(async()=>{emit('contact_update',{contact_id:'synthetic'});await new Promise(resolve=>setTimeout(resolve,350))});
+  expect(finishOld).toBeTypeOf('function');
+  fireEvent.click(screen.getByRole('button',{name:/^Tipo de conversación:/}));
+  fireEvent.click(screen.getByRole('menuitemradio',{name:'Grupos'}));
+  const current=await screen.findByText(group.name);
+  expect(oldSignal?.aborted).toBe(true);
+  await act(async()=>finishOld(json({success:true,chats:[chat],total:1,next_cursor:'stale-all-cursor'})));
+  expect(screen.getByText(group.name)).toBe(current);
+  expect(screen.queryByText(chat.name)).not.toBeInTheDocument();
+ });
+ it('keeps the reaction date scope identical across cursor pages',async()=>{
+  vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(new Date('2026-10-18T12:00:00Z'));
+  const tail={...chat,id:'reaction-tail',name:'Segunda página de reacciones',contact_name:'Segunda página de reacciones'};
+  const reactionQueries:URLSearchParams[]=[];
+  vi.stubGlobal('fetch',vi.fn((input:RequestInfo|URL)=>{
+   const url=String(input);
+   if(url.startsWith('/api/chats?')) {
+    const params=new URL(url,'http://test.invalid').searchParams;
+    if(!params.has('has_reaction')) return Promise.resolve(json({success:true,chats:[chat],total:1}));
+    reactionQueries.push(params);
+    if(!params.has('cursor')) return Promise.resolve(json({success:true,chats:[chat],total:2,next_cursor:'reaction-page-2'}));
+    if(params.get('reaction_since')!==reactionQueries[0].get('reaction_since')) return Promise.resolve({...json({success:false,error:'Bad Request'}),ok:false,status:400});
+    return Promise.resolve(json({success:true,chats:[tail],total:2,next_cursor:''}));
+   }
+   return Promise.resolve(json({success:true,devices:[]}));
+  }));
+  try {
+   render(<ChatsPage/>);await screen.findByText(chat.name);
+   fireEvent.click(screen.getByRole('button',{name:'Abrir filtros de chats'}));
+   fireEvent.click(screen.getByTestId('mobile-filter-reaction-toggle'));
+   fireEvent.click(screen.getByRole('button',{name:'Aplicar'}));
+   await waitFor(()=>expect(reactionQueries).toHaveLength(1));
+   await screen.findByText(chat.name);
+   vi.setSystemTime(new Date('2026-10-18T12:01:00Z'));
+   fireEvent.scroll(screen.getByText(chat.name).closest('.overflow-y-auto')!);
+   await waitFor(()=>expect(reactionQueries).toHaveLength(2));
+   expect(reactionQueries[1].get('reaction_since')).toBe(reactionQueries[0].get('reaction_since'));
+   expect(await screen.findByText(tail.name)).toBeInTheDocument();
+  } finally { vi.useRealTimers() }
+ });
  it('revalidates all loaded pages in bounded requests and preserves retained row nodes',async()=>{
   const rows=Array.from({length:100},(_,index)=>({...chat,id:`chat-${index}`,name:`Nombre${String(index).padStart(3,'0')}`,contact_name:`Nombre${String(index).padStart(3,'0')}`}));
   let canonical=rows;const pages:string[]=[];

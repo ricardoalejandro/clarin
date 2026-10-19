@@ -26,6 +26,7 @@ import { applyChatState, matchesInbox, nextPendingChat, orderInbox, reconcileInb
 import { getChatDisplayName, formatPhone, isPendingChatIdentity, mergeReconciledChatIdentity, reconcileChatIdentity, type ChatIdentityReconciliation } from '@/utils/chat'
 import { announceChatConversationActive, useChatMobileChrome } from '@/components/chat/ChatMobileChromeContext'
 import { reconcileChatDeviceFilters } from '@/components/chat/deviceFilters'
+import { chatReadError } from '@/components/chat/chatReadError'
 
 const LEFT_PANEL_DEFAULT = 360
 const LEFT_PANEL_MIN = 320
@@ -232,6 +233,34 @@ export default function ChatsPage() {
   const processedMessageEventsRef = useRef(new Map<string, number>())
   const selectedChatIdRef = useRef<string | null>(null)
   const compactHistoryDepthRef = useRef(0)
+  const paginationQueryKeyRef = useRef(chatQueryKey)
+  const queryStartedAtRef = useRef(Date.now())
+
+  // A cursor and its rows belong to one filter/auth snapshot. Clear them before
+  // the new scope paints, so scrolling cannot cancel its first page with an old cursor.
+  useLayoutEffect(() => {
+    if (paginationQueryKeyRef.current === chatQueryKey) return
+    paginationQueryKeyRef.current = chatQueryKey
+    queryStartedAtRef.current = Date.now()
+    chatsRequestAbortRef.current?.abort()
+    chatsReconcileAbortRef.current?.abort()
+    chatsRequestAbortRef.current = null
+    chatsReconcileAbortRef.current = null
+    chatsRequestSequenceRef.current++
+    chatsReconcileSequenceRef.current++
+    cursorRef.current = ''
+    offsetRef.current = 0
+    queueAnchorRef.current = undefined
+    listAnchorRef.current = null
+    chatsRef.current = []
+    setChatRows([])
+    setHasMore(false)
+    setLoadingMore(false)
+    setTotalChats(0)
+    setChatListError('')
+    setLoading(true)
+    if (chatListRef.current) chatListRef.current.scrollTop = 0
+  }, [chatQueryKey])
 
   // Responsive, resizable workspace
   const [containerWidth, setContainerWidth] = useState(1440)
@@ -529,7 +558,8 @@ export default function ChatsPage() {
   // and uses its own sequence so it can never cancel a user-triggered query.
   const fetchChats = useCallback(async (reset: boolean = true, options: { silent?: boolean; after?: { id: string; waiting_since: string } } = {}) => {
     const requestScope = pins.scope
-    if (getAuthScope() !== requestScope || isAuthIdentityChanging(requestScope)) return null
+    if (getAuthScope() !== requestScope || isAuthIdentityChanging(requestScope) || chatQueryKey !== activeChatQueryKeyRef.current) return null
+    if (!reset && (paginationQueryKeyRef.current !== chatQueryKey || chatsRequestAbortRef.current || !cursorRef.current)) return null
     const silent = Boolean(options.silent && reset)
     const sequenceRef = silent ? chatsReconcileSequenceRef : chatsRequestSequenceRef
     const abortRef = silent ? chatsReconcileAbortRef : chatsRequestAbortRef
@@ -559,7 +589,9 @@ export default function ChatsPage() {
         params.append('has_reaction', 'true')
         if (reactionFromMe !== 'any') params.append('reaction_from_me', reactionFromMe === 'me' ? 'true' : 'false')
         reactionEmojis.forEach(e => params.append('reaction_emojis', e))
-        const now = new Date()
+        // Cursor scope hashes include these timestamps; they must not drift
+        // between pages or silent reconciliation of the same filter snapshot.
+        const now = new Date(queryStartedAtRef.current)
         let since: Date | null = null
         let until: Date | null = null
         if (reactionRange === '1d') since = new Date(now.getTime() - 24 * 60 * 60 * 1000)
@@ -581,7 +613,7 @@ export default function ChatsPage() {
         signal: controller.signal,
       })
       const data = await res.json().catch(() => null)
-      if (!res.ok || !data?.success) throw new Error(data?.error || 'No se pudieron cargar las conversaciones.')
+      if (!res.ok || !data?.success) throw new Error(chatReadError(data?.error, 'No se pudo cargar esta vista.', res.status))
       if (controller.signal.aborted || requestSequence !== sequenceRef.current || requestQueryKey !== activeChatQueryKeyRef.current || getAuthScope() !== requestScope) return
       if (data.success) {
         setChatListError('')
@@ -599,7 +631,7 @@ export default function ChatsPage() {
             pageParams.set('cursor', nextCursor)
             const pageResponse = await fetch(`/api/chats?${pageParams}`, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
             const page = await pageResponse.json().catch(() => null)
-            if (!pageResponse.ok || !page?.success || !Array.isArray(page.chats)) throw new Error(page?.error || 'No se pudieron actualizar las conversaciones.')
+            if (!pageResponse.ok || !page?.success || !Array.isArray(page.chats)) throw new Error(chatReadError(page?.error, 'No se pudieron actualizar las conversaciones.', pageResponse.status))
             if (controller.signal.aborted || requestSequence !== sequenceRef.current || requestQueryKey !== activeChatQueryKeyRef.current || getAuthScope() !== requestScope) return
             serverOffset += page.chats.length
             nextCursor = page.next_cursor || ''
@@ -640,30 +672,31 @@ export default function ChatsPage() {
         if (silent) console.warn('Silent chat reconciliation failed', err)
         else {
           console.error('Failed to fetch chats', err)
-          setChatListError(err instanceof Error ? err.message : 'No se pudieron cargar las conversaciones.')
+          setChatListError(chatReadError(err, 'No se pudieron cargar las conversaciones. Reintenta.'))
         }
       }
     } finally {
+      if (abortRef.current === controller) abortRef.current = null
       if (!controller.signal.aborted && requestSequence === sequenceRef.current && requestQueryKey === activeChatQueryKeyRef.current && getAuthScope() === requestScope) {
         if (!silent) setLoading(false)
         if (!reset) setLoadingMore(false)
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pins.project, chatKind, filterDevices, filterUnread, filterPending, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
+  }, [pins.project, chatQueryKey, chatKind, filterDevices, filterUnread, filterPending, debouncedSearch, filterHasReaction, reactionFromMe, reactionEmojis, reactionRange, reactionCustomFrom, reactionCustomTo])
 
   const loadMoreChats = useCallback(() => {
-    if (loadingMore || !hasMore) return
+    if (loading || loadingMore || !hasMore) return
     fetchChats(false)
-  }, [loadingMore, hasMore, fetchChats])
+  }, [loading, loadingMore, hasMore, fetchChats])
 
   const handleChatListScroll = useCallback(() => {
     const el = chatListRef.current
-    if (!el || !hasMore || loadingMore) return
+    if (!el || loading || !hasMore || loadingMore) return
     if (el.scrollHeight - el.scrollTop - el.clientHeight < 300) {
       loadMoreChats()
     }
-  }, [hasMore, loadingMore, loadMoreChats])
+  }, [loading, hasMore, loadingMore, loadMoreChats])
 
   const fetchDevices = useCallback(async () => {
     const requestSequence = ++devicesRequestSequenceRef.current
@@ -1195,10 +1228,10 @@ export default function ChatsPage() {
             )}
 
             {chatListError && chats.length > 0 && (
-              <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800" role="status">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 pl-3 pr-1 text-xs text-slate-600" role="alert">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
                 <span className="min-w-0 flex-1">{chatListError}</span>
-                <button type="button" onClick={() => void fetchChats()} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500" aria-label="Reintentar"><RotateCcw className="h-3.5 w-3.5" /></button>
+                <button type="button" onClick={() => void fetchChats()} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" aria-label="Reintentar"><RotateCcw className="h-3.5 w-3.5" /></button>
               </div>
             )}
 

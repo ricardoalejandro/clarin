@@ -16,6 +16,7 @@ import { subscribeWebSocket } from '@/lib/api'
 import { messageBelongsToChat } from './chatEventScope'
 import { chatSenderPhone, validatePinnedChatSender, type ChatSenderSession } from './chatSenderSession'
 import { hasSameMessageIdentity, mergeCanonicalMessage, mergeCanonicalMessageProjection, mergeFetchedMessages, orderChatMessages, reconcileOptimisticMessage } from './messageState'
+import { chatReadError } from './chatReadError'
 import { applyDeviceDeletionResult, isDeviceDeleting } from '@/components/settings/deviceLifecycle'
 import type { DeviceDeletionResult } from '@/types/chat'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
@@ -1891,9 +1892,9 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 		headers: { Authorization: `Bearer ${token}` },
 		signal: controller.signal,
       })
-      const msgData = await msgRes.json()
+      const msgData = await msgRes.json().catch(() => null)
 	  if (controller.signal.aborted || requestSequence !== chatDetailsRequestSequenceRef.current || activeChatIdRef.current !== targetChatId) return
-      if (!msgRes.ok || !msgData.success || !Array.isArray(msgData.messages)) throw new Error(msgData.error || 'No se pudo cargar el historial de mensajes.')
+      if (!msgRes.ok || !msgData?.success || !Array.isArray(msgData.messages)) throw new Error(chatReadError(msgData?.error, 'No se pudo cargar el historial de mensajes.', msgRes.status))
       if (msgData.success && msgData.messages) {
         const authoritativeMessages = reconcileAuthoritativeMessages(targetChatId, msgData.messages as Message[])
         const nextHasMore = authoritativeMessages.length >= 50
@@ -1914,7 +1915,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
     } catch (error) {
 	  if (!controller.signal.aborted) {
         console.error('Failed to fetch chat', error)
-        if (activeChatIdRef.current === targetChatId) setHistoryError(error instanceof Error ? error.message : 'No se pudo cargar el historial de mensajes.')
+        if (activeChatIdRef.current === targetChatId) setHistoryError(chatReadError(error, 'No se pudo cargar el historial de mensajes. Reintenta.'))
         if (!deviceWasValidated && activeChatIdRef.current === targetChatId) {
           setCanonicalDevice(null)
           setValidatedDeviceChatId(targetChatId)
@@ -1955,9 +1956,9 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       const res = await chatRequest(`/api/chats/${targetChatId}/messages?limit=50&offset=${offset}`, {
         headers: { Authorization: `Bearer ${token}` }
       })
-      const data = await res.json()
+      const data = await res.json().catch(() => null)
       if (activeChatIdRef.current !== targetChatId) return
-      if (!res.ok || !data.success || !Array.isArray(data.messages)) throw new Error(data.error || 'No se pudieron cargar los mensajes anteriores.')
+      if (!res.ok || !data?.success || !Array.isArray(data.messages)) throw new Error(chatReadError(data?.error, 'No se pudieron cargar los mensajes anteriores.', res.status))
       if (data.success && data.messages) {
         const authoritativeMessages = reconcileAuthoritativeMessages(targetChatId, data.messages as Message[])
         if (authoritativeMessages.length === 0) {
@@ -1988,7 +1989,7 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       }
     } catch (err) {
       console.error('Failed to load older messages', err)
-      if (activeChatIdRef.current === targetChatId) setHistoryError(err instanceof Error ? err.message : 'No se pudieron cargar los mensajes anteriores.')
+      if (activeChatIdRef.current === targetChatId) setHistoryError(chatReadError(err, 'No se pudieron cargar los mensajes anteriores. Reintenta.'))
     } finally {
       if (activeChatIdRef.current === targetChatId) {
         loadingMoreRef.current = false
@@ -3238,10 +3239,10 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
 	         )}
 
          {historyError && (
-           <div role="alert" className="flex shrink-0 items-center gap-2 border-b border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-             <AlertCircle className="h-4 w-4 shrink-0" />
+           <div role="alert" className="flex shrink-0 items-center gap-2 border-b border-slate-200 bg-slate-50 pl-3 pr-1 text-xs text-slate-600">
+             <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
              <span className="min-w-0 flex-1">{historyError}</span>
-             <button type="button" disabled={loading || loadingMore} onClick={() => void (historyRetryMode === 'older' ? loadOlderMessages() : fetchChatDetails())} className="min-h-11 shrink-0 rounded-lg px-3 font-semibold hover:bg-red-100 disabled:opacity-50">Reintentar historial</button>
+             <button type="button" disabled={loading || loadingMore} onClick={() => void (historyRetryMode === 'older' ? loadOlderMessages() : fetchChatDetails())} className="min-h-11 shrink-0 rounded-lg px-3 font-semibold hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-50">Reintentar historial</button>
            </div>
          )}
 
@@ -3304,6 +3305,12 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
                   {!searchWindowMessages && !hasMoreMessages && messages.length > 0 && (
                     <div className="flex justify-center py-2">
                       <span className="text-xs text-slate-400 bg-white/80 px-3 py-1 rounded-full">Inicio de la conversación</span>
+                    </div>
+                  )}
+                  {!loading && !historyError && !searchWindowMessages && messages.length === 0 && isGroupChat(chat) && (
+                    <div role="status" className="mx-auto my-6 w-fit max-w-sm rounded-xl bg-white/85 px-4 py-3 text-center text-xs leading-5 text-slate-600">
+                      <p className="font-semibold text-slate-700">Aún no hay mensajes en Clarin</p>
+                      <p>Los mensajes nuevos de este grupo aparecerán aquí.</p>
                     </div>
                   )}
                   {visibleMessages.map((msg, idx) => {

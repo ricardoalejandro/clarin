@@ -186,6 +186,59 @@ describe('Program photo editing and responsive ownership', () => {
 })
 
 describe('Program photo consultation', () => {
+  it('shares a pending download across program surfaces and reuses the same revision after remount', async () => {
+    let finish!: (value: unknown) => void
+    mocks.apiBlob.mockImplementationOnce(() => new Promise(done => { finish = done }))
+    const first = render(<ProgramAvatar program={photo} />)
+    const second = render(<ProgramAvatar program={photo} />)
+    expect(mocks.apiBlob).toHaveBeenCalledTimes(1)
+    await act(async () => finish({ success: true, blob: new Blob(['photo'], { type: 'image/jpeg' }) }))
+    expect(screen.getAllByAltText('Foto de Grupo Azul')).toHaveLength(2)
+    first.unmount(); second.unmount()
+    render(<ProgramAvatar program={photo} />)
+    await screen.findByAltText('Foto de Grupo Azul')
+    expect(mocks.apiBlob).toHaveBeenCalledTimes(1)
+  })
+  it('fetches new revisions, clears removed photos and drops cached bytes on account change', async () => {
+    const view = render(<ProgramAvatar program={photo} />)
+    await screen.findByAltText('Foto de Grupo Azul')
+    view.rerender(<ProgramAvatar program={{ ...photo, avatar_revision: 2 }} />)
+    await waitFor(() => expect(screen.getByAltText('Foto de Grupo Azul')).toHaveAttribute('src', 'blob:photo-2'))
+    expect(mocks.apiBlob).toHaveBeenCalledTimes(2)
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:photo-1')
+    view.rerender(<ProgramAvatar program={{ ...photo, avatar_url: null, avatar_revision: 3 }} />)
+    expect(screen.queryByAltText('Foto de Grupo Azul')).not.toBeInTheDocument()
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:photo-2')
+    view.rerender(<ProgramAvatar program={photo} />)
+    await screen.findByAltText('Foto de Grupo Azul')
+    act(() => { beginAuthIdentityChange() })
+    expect(screen.queryByAltText('Foto de Grupo Azul')).not.toBeInTheDocument()
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:photo-3')
+    act(() => { completeAuthIdentityChange() })
+    await waitFor(() => expect(screen.getByAltText('Foto de Grupo Azul')).toHaveAttribute('src', 'blob:photo-4'))
+    expect(mocks.apiBlob).toHaveBeenCalledTimes(4)
+  })
+  it('retains the fixed avatar box during downloading, success and failure', async () => {
+    let finish!: (value: unknown) => void
+    mocks.apiBlob.mockImplementationOnce(() => new Promise(done => { finish = done }))
+    const view = render(<ProgramAvatar program={photo} className="h-10 w-10 shadow-sm" />)
+    const box = view.container.firstElementChild
+    expect(box).toHaveClass('h-10', 'w-10', 'shrink-0', 'overflow-hidden')
+    await act(async () => finish({ success: true, blob: new Blob(['photo']) }))
+    expect(view.container.firstElementChild).toBe(box)
+    fireEvent.error(screen.getByAltText('Foto de Grupo Azul'))
+    expect(view.container.firstElementChild).toBe(box)
+    expect(box).toHaveClass('h-10', 'w-10')
+  })
+  it('retries a decoded image failure by invalidating cached bytes', async () => {
+    render(<ProgramAvatar program={photo} interactive />)
+    fireEvent.error(await screen.findByAltText('Foto de Grupo Azul'))
+    fireEvent.click(screen.getByRole('button', { name: 'Ver foto de Grupo Azul' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar' }))
+    await waitFor(() => expect(mocks.apiBlob).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.getAllByAltText('Foto de Grupo Azul')[0]).toHaveAttribute('src', 'blob:photo-2'))
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:photo-1')
+  })
   it('pauses an open viewer without capturing keyboard events and restores its focus and image', async () => {
     const content = (suspended = false) => <><button>Fuera del visor</button><ProgramAvatarControl program={photo} readOnly suspended={suspended} /></>
     const view = render(content())

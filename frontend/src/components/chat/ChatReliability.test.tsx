@@ -142,6 +142,26 @@ describe('Chat canonical reconciliation', () => {
 describe('Chat recoverable errors',()=>{
  beforeEach(()=>{localStorage.setItem('token','synthetic-audit-token');websocket.listeners.clear()});
  afterEach(()=>{cleanup();vi.unstubAllGlobals();websocket.listeners.clear()});
+ it('renders a successful empty group history without an error or a retry prompt',async()=>{
+  const group:Chat={...chat,jid:'120001@g.us',kind:'group',group:{subject:'Grupo vacío',participant_count:2,membership_status:'member',announce:false,can_send:true}};
+  vi.stubGlobal('fetch',vi.fn((input:RequestInfo|URL)=>Promise.resolve(jsonResponse(String(input)==='/api/chats/chat-1'
+   ? {success:true,chat:group,device:device('connected')}
+   : {success:true,messages:[],stickers:[],quick_replies:[]}))));
+  render(<ChatPanel chatId="chat-1" deviceId="device-1" initialChat={group}/>);
+  expect(await screen.findByText('Aún no hay mensajes en Clarin')).toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button',{name:'Reintentar historial'})).not.toBeInTheDocument();
+ });
+ it.each([null,{}])('keeps malformed history responses visible as failures rather than pretending they are empty: %j',async(messages)=>{
+  vi.spyOn(console,'error').mockImplementation(()=>{});
+  vi.stubGlobal('fetch',vi.fn((input:RequestInfo|URL)=>Promise.resolve(jsonResponse(String(input)==='/api/chats/chat-1'
+   ? {success:true,chat,device:device('connected')}
+   : {success:true,messages,stickers:[],quick_replies:[]}))));
+  render(panel());
+  expect(await screen.findByRole('alert')).toHaveTextContent('No se pudo cargar el historial de mensajes.');
+  expect(screen.getByRole('button',{name:'Reintentar historial'})).toBeInTheDocument();
+  expect(screen.queryByText('Aún no hay mensajes en Clarin')).not.toBeInTheDocument();
+ });
  it('retries a saved sticker using its existing URL',async()=>{
   let sends=0;
   const fetchMock=vi.fn((input:RequestInfo|URL)=>{
