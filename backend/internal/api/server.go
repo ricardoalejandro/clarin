@@ -914,6 +914,9 @@ func (s *Server) setupRoutes() {
 	tasks.Put("/folders/:folderId/structure", s.requireTaskContainerAccessParam("folderId", "folder", domain.TaskAccessFull), s.handleReorderTaskFolder)
 	tasks.Post("/folders/:folderId/archive", s.handleArchiveTaskFolderHistorical)
 	tasks.Post("/folders/:folderId/unarchive", s.handleUnarchiveTaskFolder)
+	tasks.Post("/folders/:folderId/removal-preview", s.handlePreviewTaskContainerRemoval)
+	tasks.Get("/folders/:folderId/removal-destinations", s.handleTaskRemovalDestinations)
+	tasks.Post("/folders/:folderId/remove", s.handleRemoveTaskContainer)
 	// Archived containers cannot pass the active-resource middleware. Restore and
 	// purge authorize again inside their locked repository transactions.
 	tasks.Post("/folders/:folderId/restore", s.handleRestoreTaskFolder)
@@ -934,6 +937,9 @@ func (s *Server) setupRoutes() {
 	tasks.Put("/lists/:listId", s.requireTaskContainerAccessParam("listId", "list", domain.TaskAccessFull), s.handleUpdateTaskList)
 	tasks.Post("/lists/:listId/archive", s.handleArchiveTaskList)
 	tasks.Post("/lists/:listId/unarchive", s.handleUnarchiveTaskList)
+	tasks.Post("/lists/:listId/removal-preview", s.handlePreviewTaskContainerRemoval)
+	tasks.Get("/lists/:listId/removal-destinations", s.handleTaskRemovalDestinations)
+	tasks.Post("/lists/:listId/remove", s.handleRemoveTaskContainer)
 	tasks.Post("/lists/:listId/restore", s.handleRestoreTaskList)
 	tasks.Delete("/lists/:listId/purge", s.handlePurgeTaskList)
 	tasks.Delete("/lists/:listId", s.handleDeleteTaskList)

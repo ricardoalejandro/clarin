@@ -227,7 +227,7 @@ func (r *TaskWorkRepository) BulkTrashTasks(ctx context.Context, accountID, acto
 	now := time.Now()
 	ids := make([]uuid.UUID, 0, len(items))
 	for _, item := range items {
-		if _, err := tx.Exec(ctx, `UPDATE tasks SET deleted_at=$3,deleted_by=$4,updated_at=$3,version=version+1 WHERE account_id=$1 AND (id=$2 OR parent_task_id=$2) AND deleted_at IS NULL`, accountID, item.ID, now, actorID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE tasks SET deleted_at=$3,deleted_by=$4,trash_operation_id=NULL,updated_at=$3,version=version+1 WHERE account_id=$1 AND (id=$2 OR parent_task_id=$2) AND deleted_at IS NULL`, accountID, item.ID, now, actorID); err != nil {
 			return nil, err
 		}
 		ids = append(ids, item.ID)

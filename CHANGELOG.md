@@ -1,5 +1,14 @@
 # Changelog — Clarin CRM
 
+## 2026-10-23
+
+### Build 1 — Eliminar listas y carpetas conservando su contenido
+
+- Eliminar una lista o carpeta permite enviar todo a Papelera o conservar el contenido dentro del mismo Entorno.
+- La confirmación muestra el inventario real, valida permisos y destinos, y contempla eventos, subtareas, pizarras e historial archivado.
+- La restauración recupera únicamente los elementos enviados por esa operación; lo eliminado anteriormente conserva su estado.
+- Los reintentos y la actualización en tiempo real evitan operaciones duplicadas y contenido obsoleto, también desde Configuración.
+
 ## 2026-10-18
 
 ### WhatsApp: grupos y fijados personales

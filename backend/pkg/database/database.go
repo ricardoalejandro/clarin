@@ -4084,6 +4084,9 @@ func Migrate(db *pgxpool.Pool) error {
 	if err := migrateTaskLocationViews(ctx, db); err != nil {
 		return err
 	}
+	if err := migrateTaskContainerRemoval(ctx, db); err != nil {
+		return err
+	}
 	if err := migrateOfflineV3(ctx, db); err != nil {
 		return err
 	}

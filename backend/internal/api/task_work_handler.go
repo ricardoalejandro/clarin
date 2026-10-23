@@ -57,6 +57,10 @@ func taskWorkError(c *fiber.Ctx, err error) error {
 		return c.Status(409).JSON(fiber.Map{"success": false, "code": "operation_payload_conflict", "error": "La operación ya existe con otro contenido. Recupera la creación pendiente antes de continuar."})
 	case errors.Is(err, repository.ErrTaskVersionConflict):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "La tarea cambió en otra sesión; recarga antes de guardar", "code": "version_conflict"})
+	case errors.Is(err, repository.ErrTaskRemovalPreviewChanged):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "El contenido o los permisos cambiaron. Revisa el resumen antes de confirmar otra vez.", "code": "removal_preview_changed"})
+	case errors.Is(err, repository.ErrTaskRemovalInvalid):
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "Revisa el destino y las confirmaciones de eliminación", "code": "invalid_removal_request"})
 	case errors.Is(err, repository.ErrTaskOrderInvalid):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "El orden debe contener todas las tareas activas de una sola lista", "code": "invalid_task_order"})
 	case errors.Is(err, repository.ErrTaskListOrderInvalid):
@@ -82,7 +86,7 @@ func taskWorkError(c *fiber.Ctx, err error) error {
 	case errors.Is(err, repository.ErrTaskContainerHasWorkEvents):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Mueve los eventos a Papelera antes de eliminar este contenedor", "code": "task_container_has_work_events"})
 	case errors.Is(err, repository.ErrTaskParentArchived):
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Restaura primero la tarea padre", "code": "task_parent_archived"})
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Restaura primero el elemento superior: tarea, carpeta o Entorno", "code": "task_parent_archived"})
 	case errors.Is(err, repository.ErrTaskBulkMoveInvalid):
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"success": false, "error": "La selección contiene tareas que no se pueden mover juntas", "code": "invalid_bulk_move"})
 	case errors.Is(err, repository.ErrTaskBulkUpdateInvalid), errors.Is(err, repository.ErrTaskBulkTrashInvalid):

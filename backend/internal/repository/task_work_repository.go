@@ -2976,7 +2976,7 @@ func (r *TaskWorkRepository) SoftDeleteTaskVersioned(ctx context.Context, accoun
 	if !taskUUIDPointersEqual(observedListID, lockedListID) || !taskUUIDPointersEqual(observedParentID, lockedParentID) || lockedVersion != observedVersion {
 		return ErrTaskVersionConflict
 	}
-	command, err := tx.Exec(ctx, `UPDATE tasks SET deleted_at=NOW(),deleted_by=$3,updated_at=NOW(),version=version+1
+	command, err := tx.Exec(ctx, `UPDATE tasks SET deleted_at=NOW(),deleted_by=$3,trash_operation_id=NULL,updated_at=NOW(),version=version+1
 		WHERE account_id=$1 AND (id=$2 OR parent_task_id=$2) AND deleted_at IS NULL`, accountID, taskID, userID)
 	if err == nil && command.RowsAffected() == 0 {
 		return ErrTaskWorkNotFound
@@ -3038,7 +3038,7 @@ func (r *TaskWorkRepository) RestoreTask(ctx context.Context, accountID, actorID
 	}
 	var originalArchivedAt *time.Time
 	var environmentID uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT archived_at,environment_id FROM task_lists WHERE account_id=$1 AND id=$2`, accountID, *listID).
+	if err := tx.QueryRow(ctx, `SELECT archived_at,environment_id FROM task_lists WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL`, accountID, *listID).
 		Scan(&originalArchivedAt, &environmentID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound

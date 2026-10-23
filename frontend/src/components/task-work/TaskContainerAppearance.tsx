@@ -7,9 +7,10 @@ import {
   Flag, Folder, GraduationCap, Inbox, Layers3, ListTodo, Megaphone,
   Check, ChevronDown, Gem, Gift, Globe2, Heart, Home, KeyRound, Laptop, Lightbulb, Link2, LockKeyhole, MapPin, MessageCircle, Package, Palette, Phone, Plane, Rocket, Search, Settings2, ShieldCheck, ShoppingCart, Sparkles, Star, Store, Tag, Target, ThumbsUp, Trophy, Truck, UserRound, Users, Video, Wallet, Wrench, X,
 } from 'lucide-react'
-import { apiDelete, apiPost, apiPut } from '@/lib/api'
+import { apiPost, apiPut } from '@/lib/api'
 import type { TaskFolder, TaskList } from '@/types/task'
 import TaskDestructiveConfirmDialog from './TaskDestructiveConfirmDialog'
+import TaskContainerRemovalDialog from './TaskContainerRemovalDialog'
 import TaskContainerAccessPanel from './TaskContainerAccessPanel'
 import { taskContainerLifecycleCapability } from './taskContainerCapabilities'
 import type { TaskContainerLifecycleMutation } from './taskHierarchyLazy'
@@ -323,10 +324,8 @@ export function TaskAppearanceDialog({ item, type, users = [], onClose, onSaved,
   const [archiveOpen, setArchiveOpen] = useState(false)
   const [trashOpen, setTrashOpen] = useState(false)
   const [archiveError, setArchiveError] = useState('')
-  const [trashError, setTrashError] = useState('')
   const archiveState = taskContainerArchiveState(item)
-  const trashState = taskContainerTrashState(item)
-  const archiveRecommended = archiveState.kind === 'ready' && trashState.kind === 'blocked' && (item.task_count || 0) > 0
+  const archiveRecommended = archiveState.kind === 'ready' && (item.task_count || 0) > 0
   useEffect(() => {
     const close = (event: KeyboardEvent) => event.key === 'Escape' && !saving && !document.querySelector('[data-task-destructive-dialog], [data-task-picker-backdrop]') && onClose()
     window.addEventListener('keydown', close)
@@ -370,19 +369,6 @@ export function TaskAppearanceDialog({ item, type, users = [], onClose, onSaved,
       setArchiveOpen(false); await onSaved({ type, id: item.id, action: 'archived', operationID }); onClose()
     } catch { setArchiveError('No se pudo archivar. Reintenta.') } finally { onOperation?.(operationID, false); setSaving(false) }
   }
-  const trash = async () => {
-    if (trashState.kind !== 'ready' || saving) return
-    setTrashError('')
-    const operationID = crypto.randomUUID()
-    setSaving(true)
-    onOperation?.(operationID, true)
-    try {
-      const path = type === 'folder' ? `/api/tasks/folders/${item.id}` : `/api/tasks/lists/${item.id}`
-      const result = await apiDelete(path, { confirmation_name: item.name, operation_id: operationID })
-      if (!result.success) { setTrashError(result.error || 'No se pudo mover a Papelera.'); return }
-      setTrashOpen(false); await onSaved({ type, id: item.id, action: 'trashed', operationID }); onClose()
-    } catch { setTrashError('No se pudo mover a Papelera. Reintenta.') } finally { onOperation?.(operationID, false); setSaving(false) }
-  }
   return createPortal(<div className="fixed inset-0 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm" style={{ zIndex: TASK_OVERLAY_LAYERS.dialog }} role="presentation" onMouseDown={event => event.target === event.currentTarget && !saving && onClose()}>
     <section role="dialog" aria-modal="true" aria-labelledby="task-appearance-title" className="flex max-h-[calc(100vh-32px)] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-white/70 bg-white shadow-2xl">
       <header className="flex items-center border-b border-slate-100 px-5 py-4"><div className="flex h-10 w-10 items-center justify-center rounded-2xl" style={{ color, backgroundColor: `${color}18` }}><TaskContainerIcon value={type === 'folder' ? 'folder' : icon} className="h-5 w-5" /></div><div className="ml-3 min-w-0 flex-1"><h2 id="task-appearance-title" className="text-base font-black text-slate-900">Personalizar {type === 'folder' ? 'carpeta' : 'lista'}</h2><p className="text-xs text-slate-400">{type === 'folder' ? 'Nombre y color visibles en todo Clarin Work. El icono de carpeta es fijo.' : 'Nombre, color e icono visibles en todo Clarin Work.'}</p></div><button type="button" disabled={saving} onClick={onClose} className="rounded-xl p-2 text-slate-400 hover:bg-slate-100"><X className="h-4 w-4" /></button></header>
@@ -392,10 +378,10 @@ export function TaskAppearanceDialog({ item, type, users = [], onClose, onSaved,
         {type === 'folder' ? <div><p className="mb-1.5 text-xs font-bold text-slate-600">Icono</p><div className="flex min-h-11 items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3" aria-label="Icono fijo de carpeta"><span className="flex h-8 w-8 items-center justify-center rounded-xl bg-white text-slate-600"><TaskContainerIcon value="folder" className="h-4 w-4" /></span><span><span className="block text-xs font-bold text-slate-700">Carpeta</span><span className="block text-[10px] text-slate-400">Icono estándar fijo</span></span></div></div> : <div><p className="mb-1.5 text-xs font-bold text-slate-600">Icono</p><TaskIconPicker value={icon} onChange={setIcon} label="Icono de lista" disabled={saving} /></div>}
         {item.permissions?.can_manage_access && <TaskContainerAccessPanel item={item} type={type} users={users} onChanged={onSaved} />}
       </div>
-      <footer className="flex flex-wrap items-center gap-2 border-t border-slate-100 bg-slate-50/70 px-5 py-4">{!isDefault && <div className="mr-auto flex flex-wrap gap-1"><button type="button" disabled={saving} title={archiveState.kind === 'blocked' ? 'Ver por qué todavía no se puede archivar' : 'Conservar las tareas cerradas como histórico'} onClick={() => { setArchiveError(''); setArchiveOpen(true) }} className={`min-h-11 rounded-xl border px-3 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-30 ${archiveRecommended ? 'border-amber-300 bg-amber-100 text-amber-900 shadow-sm hover:bg-amber-200' : 'border-transparent text-amber-700 hover:bg-amber-50'}`}>{archiveRecommended ? 'Archivar como histórico' : 'Archivar'}</button><button type="button" disabled={saving} title={trashState.kind === 'blocked' ? 'Ver por qué no se puede mover a Papelera' : 'Mover a Papelera'} onClick={() => { setTrashError(''); setTrashOpen(true) }} className="min-h-11 rounded-xl px-3 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-30">Mover a Papelera</button></div>}<button type="button" disabled={saving} onClick={onClose} className="min-h-11 rounded-xl px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-white">Cancelar</button><button type="button" disabled={saving || !name.trim()} onClick={() => void save()} className="min-h-11 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg disabled:opacity-40">{saving ? 'Guardando…' : 'Guardar cambios'}</button></footer>
+      <footer className="flex flex-wrap items-center gap-2 border-t border-slate-100 bg-slate-50/70 px-5 py-4">{!isDefault && <div className="mr-auto flex flex-wrap gap-1"><button type="button" disabled={saving} title={archiveState.kind === 'blocked' ? 'Ver por qué todavía no se puede archivar' : 'Conservar las tareas cerradas como histórico'} onClick={() => { setArchiveError(''); setArchiveOpen(true) }} className={`min-h-11 rounded-xl border px-3 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-30 ${archiveRecommended ? 'border-amber-300 bg-amber-100 text-amber-900 shadow-sm hover:bg-amber-200' : 'border-transparent text-amber-700 hover:bg-amber-50'}`}>{archiveRecommended ? 'Archivar como histórico' : 'Archivar'}</button><button type="button" disabled={saving} title="Eliminar carpeta o lista" onClick={() => setTrashOpen(true)} className="min-h-11 rounded-xl px-3 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-30">Eliminar…</button></div>}<button type="button" disabled={saving} onClick={onClose} className="min-h-11 rounded-xl px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-white">Cancelar</button><button type="button" disabled={saving || !name.trim()} onClick={() => void save()} className="min-h-11 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg disabled:opacity-40">{saving ? 'Guardando…' : 'Guardar cambios'}</button></footer>
     </section>
     <TaskDestructiveConfirmDialog open={archiveOpen} intent="archive" title={`Archivar ${type === 'folder' ? 'carpeta' : 'lista'}`} description={type === 'folder' ? 'La carpeta y sus listas activas pasarán al Archivo histórico. Las tareas cerradas seguirán disponibles en modo solo lectura.' : 'La lista y sus tareas cerradas seguirán disponibles en el Archivo histórico, en modo solo lectura.'} actionLabel={archiveRecommended ? 'Archivar como histórico' : 'Archivar'} blockedReason={archiveState.kind === 'blocked' ? archiveState.reason : undefined} busy={saving} error={archiveError} onClose={() => { if (!saving) { setArchiveOpen(false); setArchiveError('') } }} onConfirm={() => { void archive() }} />
-    <TaskDestructiveConfirmDialog open={trashOpen} intent="trash" title={trashState.kind === 'blocked' ? `${item.name} no se movió a Papelera` : `Mover ${type === 'folder' ? 'carpeta' : 'lista'} a Papelera`} description={trashState.kind === 'blocked' ? `Papelera solo admite ${type === 'folder' ? 'carpetas sin tareas conservadas en su árbol' : 'listas completamente vacías'}. Archivo conserva las tareas cerradas como historial consultable.` : type === 'folder' ? 'La carpeta y sus listas vacías iniciarán la retención. Podrás restaurarlas desde Papelera.' : 'La lista vacía conservará su ubicación original y podrá restaurarse durante la retención.'} actionLabel="Mover a Papelera" confirmationName={trashState.kind === 'ready' ? item.name : undefined} blockedReason={trashState.kind === 'blocked' ? trashState.reason : undefined} blockedActionLabel={trashState.kind === 'blocked' && archiveState.kind === 'ready' ? 'Archivar como histórico' : undefined} busy={saving} error={trashError} onClose={() => { if (!saving) { setTrashOpen(false); setTrashError('') } }} onConfirm={() => { void trash() }} onBlockedAction={() => { setTrashOpen(false); setTrashError(''); setArchiveError(''); setArchiveOpen(true) }} />
+    {trashOpen && <TaskContainerRemovalDialog key={`${type}:${item.id}`} item={item} type={type} onClose={() => setTrashOpen(false)} onSaved={async mutation => { await onSaved(mutation); onClose() }} onOperation={onOperation} />}
   </div>, document.body)
 }
 export function taskContainerArchiveState(item: TaskList | TaskFolder) {
@@ -407,15 +393,4 @@ export function taskContainerArchiveState(item: TaskList | TaskFolder) {
   }
   if (capability === false) return { kind: 'blocked' as const, reason: 'El servidor indica que este contenedor todavía no cumple las condiciones para Archivo. Actualiza la jerarquía y vuelve a intentarlo.' }
   return { kind: 'ready' as const, reason: '' }
-}
-
-export function taskContainerTrashState(item: TaskList | TaskFolder) {
-	if ('is_default' in item && item.is_default) return { kind: 'immutable' as const, reason: 'La Bandeja general debe permanecer activa.' }
-	const capability = taskContainerLifecycleCapability(item, 'can_trash')
-	if (capability !== true && item.task_count > 0) {
-		const details = `${item.open_task_count || 0} abiertas, ${item.completed_task_count || 0} completadas y ${item.cancelled_task_count || 0} canceladas`
-		return { kind: 'blocked' as const, reason: `Conserva ${item.task_count} tarea${item.task_count === 1 ? '' : 's'} (${details}). Todas deben moverse o enviarse a Papelera antes de eliminar el contenedor.` }
-	}
-	if (capability === false) return { kind: 'blocked' as const, reason: 'El servidor indica que este contenedor todavía conserva datos y no puede iniciar la retención.' }
-	return { kind: 'ready' as const, reason: '' }
 }
