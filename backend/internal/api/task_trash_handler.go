@@ -253,8 +253,7 @@ func (s *Server) handleRestoreTaskList(c *fiber.Ctx) error {
 	}
 	s.revokeTaskLocationWhiteboardSockets(accountID, boardIDs)
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(c.Context(), accountID, "list_restored", fiber.Map{"list_id": listID, "operation_id": operationID})
-	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
+	return s.taskContainerRestoredResponse(c, accountID, userID, listID, operationID, "list")
 }
 
 func (s *Server) handleRestoreTaskFolder(c *fiber.Ctx) error {
@@ -274,8 +273,7 @@ func (s *Server) handleRestoreTaskFolder(c *fiber.Ctx) error {
 	}
 	s.revokeTaskLocationWhiteboardSockets(accountID, boardIDs)
 	s.invalidateTasksCache(accountID)
-	s.broadcastTaskWork(c.Context(), accountID, "folder_restored", fiber.Map{"folder_id": folderID, "operation_id": operationID})
-	return c.JSON(fiber.Map{"success": true, "operation_id": operationID})
+	return s.taskContainerRestoredResponse(c, accountID, userID, folderID, operationID, "folder")
 }
 
 func (s *Server) requireTaskTrashAdmin(c *fiber.Ctx) error {

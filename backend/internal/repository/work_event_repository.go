@@ -1460,7 +1460,7 @@ func (r *WorkEventRepository) transition(ctx context.Context, accountID, eventID
 		if future && otherAttendees > 0 && status != domain.WorkEventStatusCancelled {
 			return ErrWorkEventCancelRequired
 		}
-		_, err = tx.Exec(ctx, `UPDATE work_events SET deleted_at=NOW(),deleted_by=$3,operation_id=$4,version=version+1,updated_at=NOW()
+		_, err = tx.Exec(ctx, `UPDATE work_events SET deleted_at=NOW(),deleted_by=$3,trash_operation_id=NULL,operation_id=$4,version=version+1,updated_at=NOW()
 			WHERE account_id=$1 AND id=$2`, accountID, eventID, actorID, operationID)
 	case "restore":
 		if deletedAt == nil {

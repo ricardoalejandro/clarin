@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs'
 const require = createRequire(import.meta.url)
 
 test('runtime pins the same official Node LTS image for build and execution', () => {
-  const dockerfile = readFileSync(new URL('../../deploy/Dockerfile.frontend', import.meta.url), 'utf8')
+  const dockerfile = readFileSync(new URL('../../deploy/Dockerfile.frontend', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   const images = [...dockerfile.matchAll(/^FROM (\S+) AS (?:builder|runner)$/gm)].map(match => match[1])
   assert.equal(images.length, 2)
   assert.equal(images[0], images[1])
@@ -16,7 +16,7 @@ test('runtime pins the same official Node LTS image for build and execution', ()
 })
 
 test('non-root runtime keeps private-mode public assets readable without granting ownership', () => {
-  const dockerfile = readFileSync(new URL('../../deploy/Dockerfile.frontend', import.meta.url), 'utf8')
+  const dockerfile = readFileSync(new URL('../../deploy/Dockerfile.frontend', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   assert.match(dockerfile, /^COPY --from=builder \/app\/public \.\/public$/m)
   assert.match(dockerfile, /^RUN chmod -R a\+rX \/app\/public/m)
   assert.match(dockerfile, /^USER node\nCMD \["node", "server\.js"\]/m)

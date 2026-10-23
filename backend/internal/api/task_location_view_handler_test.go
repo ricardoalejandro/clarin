@@ -335,8 +335,9 @@ func TestTaskContainerPurgePassesDynamicWorkWhiteboardKillSwitch(t *testing.T) {
 		if start < 0 {
 			t.Fatalf("missing %s handler call", call)
 		}
-		end := strings.Index(trash[start:], ")\n")
-		if end < 0 || !strings.Contains(trash[start:start+end], "s.workWhiteboardViewsEnabled()") {
+		callSource := strings.ReplaceAll(trash[start:], "\r\n", "\n")
+		end := strings.Index(callSource, ")\n")
+		if end < 0 || !strings.Contains(callSource[:end], "s.workWhiteboardViewsEnabled()") {
 			t.Fatalf("%s does not pass the live kill-switch policy into the purge transaction", call)
 		}
 	}
