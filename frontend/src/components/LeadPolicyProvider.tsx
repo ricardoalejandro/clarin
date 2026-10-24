@@ -34,7 +34,7 @@ export function useAccountLeadPolicy(accountId?: string, offline = false): LeadP
     if (!accountId || offline || isAuthIdentityChanging(authScope)) return () => controller.abort()
     const accept = (raw: unknown) => {
       const policy = parseLeadPolicy(raw)
-      if (!policy || (policy.account_id && policy.account_id !== accountId) || generation.current !== requestGeneration || controller.signal.aborted || getAuthScope() !== authScope || isAuthIdentityChanging()) return false
+      if (!policy || policy.account_id !== accountId || generation.current !== requestGeneration || controller.signal.aborted || getAuthScope() !== authScope || isAuthIdentityChanging()) return false
       setSnapshot(current => ({ scope, policy: reconcileLeadPolicy(current.scope === scope ? current.policy : null, policy, accountId), error: '' }))
       return true
     }

@@ -1,111 +1,53 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import Link from 'next/link'
-import { ArrowRight, BarChart3, Loader2, Search, ShieldAlert, Sparkles, UsersRound } from 'lucide-react'
-import { REPORT_CATALOG } from '@/lib/reportCatalog'
-import { useDebouncedValue } from '@/lib/useDebouncedValue'
-import { useLeadPolicy } from '@/components/LeadPolicyProvider'
-import { isLeadModulePath } from '@/lib/leadPolicy'
+import { useEffect, useState, useSyncExternalStore } from 'react'
+import { Loader2, RefreshCw, ShieldAlert } from 'lucide-react'
+import WhatsAppGroupCoverageReport from '@/components/reports/WhatsAppGroupCoverageReport'
+import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
 
-type AccessState = 'loading' | 'allowed' | 'denied'
+type AccessState = 'loading' | 'allowed' | 'denied' | 'error'
 
 export default function ReportsPage() {
-  const { leadsEnabled } = useLeadPolicy()
-  const [access, setAccess] = useState<AccessState>('loading')
-  const [search, setSearch] = useState('')
-  const [debouncedSearch, setDebouncedSearch] = useDebouncedValue(search)
-  const searchPending = search !== debouncedSearch
+  const scope = useSyncExternalStore(subscribeAuthScope, getAuthScope, () => 'server')
+  const [snapshot, setSnapshot] = useState<{ scope: string; access: AccessState }>({ scope: '', access: 'loading' })
+  const [retry, setRetry] = useState(0)
 
   useEffect(() => {
-    let active = true
-    const check = async () => {
+    const controller = new AbortController()
+    setSnapshot({ scope, access: 'loading' })
+    if (isAuthIdentityChanging(scope)) return () => controller.abort()
+    const accept = (access: AccessState) => {
+      if (!controller.signal.aborted && getAuthScope() === scope && !isAuthIdentityChanging()) setSnapshot({ scope, access })
+    }
+    void (async () => {
       try {
         const token = localStorage.getItem('token')
-        const response = await fetch('/api/me', { headers: token ? { Authorization: `Bearer ${token}` } : {}, credentials: 'include' })
+        const response = await fetch('/api/me', {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          credentials: 'include', cache: 'no-store', signal: controller.signal,
+        })
+        if (response.status === 401 || response.status === 403) { accept('denied'); return }
         const data = await response.json()
+        if (!response.ok || !data.user) throw new Error('access_unavailable')
         const user = data.user
-        const allowed = Boolean(user && (user.is_admin || user.is_super_admin || user.permissions?.includes('*') || user.permissions?.includes('reports')))
-        if (active) setAccess(allowed ? 'allowed' : 'denied')
+        const allowed = Boolean(user.is_admin || user.is_super_admin || user.permissions?.includes('*') || user.permissions?.includes('reports'))
+        accept(allowed ? 'allowed' : 'denied')
       } catch {
-        if (active) setAccess('denied')
+        accept('error')
       }
-    }
-    check()
-    return () => { active = false }
-  }, [])
+    })()
+    return () => controller.abort()
+  }, [scope, retry])
 
-  const reports = REPORT_CATALOG.filter(report => {
-    if (!leadsEnabled && isLeadModulePath(report.href)) return false
-    const term = debouncedSearch.trim().toLocaleLowerCase('es')
-    return !term || `${report.title} ${report.description} ${report.category}`.toLocaleLowerCase('es').includes(term)
-  })
-
-  if (access === 'loading') {
-    return <div className="flex h-full items-center justify-center"><div className="h-8 w-8 animate-spin rounded-full border-2 border-emerald-200 border-t-emerald-600" /></div>
-  }
-
-  if (access === 'denied') {
-    return (
-      <div className="flex h-full items-center justify-center p-6">
-        <div className="max-w-md rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm">
-          <ShieldAlert className="mx-auto h-10 w-10 text-amber-500" />
-          <h1 className="mt-4 text-xl font-bold text-slate-800">Acceso restringido</h1>
-          <p className="mt-2 text-sm text-slate-500">Necesitas el permiso de Reportería para consultar esta sección.</p>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <main className="h-full overflow-y-auto bg-slate-50 p-4 sm:p-6 lg:p-8">
-      <div className="mx-auto max-w-5xl">
-        <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-emerald-600"><BarChart3 className="h-4 w-4" /> Reportería</div>
-            <h1 className="text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">Centro de reportes</h1>
-            <p className="mt-2 text-sm text-slate-500">Selecciona un reporte, completa sus parámetros y genera información lista para analizar.</p>
-          </div>
-          <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 shadow-sm">
-            <Search className="h-4 w-4 text-slate-400" />
-            <input value={search} onChange={event => { const next = event.target.value; setSearch(next); if (!next) setDebouncedSearch('') }} placeholder="Buscar reporte…" className="h-10 w-56 bg-transparent text-sm outline-none placeholder:text-slate-400" />
-            {searchPending && <Loader2 aria-label="Buscando reportes" className="h-4 w-4 animate-spin text-emerald-500" />}
-          </div>
-        </div>
-
-        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
-          <div className="mb-4 flex items-center justify-between">
-            <div>
-              <h2 className="text-sm font-bold text-slate-800">Reportes disponibles</h2>
-              <p className="mt-0.5 text-xs text-slate-400">{reports.length} {reports.length === 1 ? 'reporte disponible' : 'reportes disponibles'}</p>
-            </div>
-          </div>
-          {reports.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-slate-200 py-14 text-center text-sm text-slate-400">No hay reportes que coincidan con tu búsqueda.</div>
-          ) : (
-            <div className="grid gap-4 md:grid-cols-2">
-              {reports.map(report => (
-                <Link key={report.id} href={report.href} className="group rounded-2xl border border-slate-200 bg-slate-50/60 p-5 transition hover:-translate-y-0.5 hover:border-emerald-300 hover:bg-white hover:shadow-lg hover:shadow-emerald-900/5">
-                  <div className="flex items-start gap-4">
-                    <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${report.usesAI ? 'bg-violet-100 text-violet-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                      {report.usesAI ? <Sparkles className="h-6 w-6" /> : <UsersRound className="h-6 w-6" />}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-700">{report.category}</span>
-                        {report.usesAI && <span className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-violet-700"><Sparkles className="h-3 w-3" /> Usa IA</span>}
-                      </div>
-                      <h3 className="mt-3 text-base font-bold text-slate-800 group-hover:text-emerald-700">{report.title}</h3>
-                      <p className="mt-1.5 text-sm leading-6 text-slate-500">{!leadsEnabled && report.id === 'whatsapp-group-coverage' ? 'Compara los integrantes de un grupo con los contactos de Clarin.' : report.description}</p>
-                      <div className="mt-4 flex items-center gap-1.5 text-xs font-bold text-emerald-600">Abrir reporte <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" /></div>
-                    </div>
-                  </div>
-                </Link>
-              ))}
-            </div>
-          )}
-        </section>
-      </div>
-    </main>
-  )
+  const access = !isAuthIdentityChanging(scope) && snapshot.scope === scope ? snapshot.access : 'loading'
+  if (access === 'allowed') return <WhatsAppGroupCoverageReport />
+  if (access === 'loading') return <div role="status" className="flex h-full items-center justify-center gap-2 text-sm text-slate-500"><Loader2 className="h-5 w-5 animate-spin" />Comprobando acceso a Reportería…</div>
+  return <main className="flex h-full items-center justify-center bg-slate-50 p-6">
+    <div className="max-w-md rounded-2xl border border-slate-200 bg-white p-6 text-center shadow-sm">
+      <ShieldAlert className="mx-auto h-9 w-9 text-amber-500" />
+      <h1 className="mt-4 text-xl font-bold text-slate-800">{access === 'denied' ? 'Acceso restringido' : 'No pudimos comprobar el acceso'}</h1>
+      <p className="mt-2 text-sm text-slate-500">{access === 'denied' ? 'Necesitas el permiso de Reportería para consultar esta sección.' : 'Vuelve a intentarlo para abrir el reporte de WhatsApp por grupos.'}</p>
+      {access === 'error' && <button type="button" onClick={() => setRetry(value => value + 1)} className="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl border border-slate-200 px-4 text-sm font-semibold text-slate-700"><RefreshCw className="h-4 w-4" />Reintentar</button>}
+    </div>
+  </main>
 }

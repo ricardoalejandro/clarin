@@ -6,9 +6,28 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/service"
 )
+
+func (s *Server) registerReportRoutes(protected fiber.Router) {
+	// Reporting access remains independent from the commercial Leads policy.
+	reports := protected.Group("/reports", s.requirePermission(domain.PermReports))
+	reports.Get("/whatsapp-group-coverage/groups", s.handleListWhatsAppReportGroups)
+	reports.Post("/whatsapp-group-coverage/generate", s.handleGenerateWhatsAppGroupCoverage)
+	reports.All("/lead-intelligence", s.handleLeadIntelligenceReportRetired)
+	reports.All("/lead-intelligence/*", s.handleLeadIntelligenceReportRetired)
+}
+
+func (s *Server) handleLeadIntelligenceReportRetired(c *fiber.Ctx) error {
+	c.Set(fiber.HeaderCacheControl, "no-store")
+	return c.Status(fiber.StatusGone).JSON(fiber.Map{
+		"success": false,
+		"code":    "report_retired",
+		"error":   "El reporte de análisis inteligente de leads fue retirado. Utiliza el reporte de WhatsApp por grupos.",
+	})
+}
 
 func (s *Server) handleListWhatsAppReportGroups(c *fiber.Ctx) error {
 	c.Set(fiber.HeaderCacheControl, "no-store")

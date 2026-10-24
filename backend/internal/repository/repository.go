@@ -73,7 +73,6 @@ type Repositories struct {
 	Integration        *IntegrationRepository
 	MediaAsset         *MediaAssetRepository
 	Report             *ReportRepository
-	LeadIntelligence   *LeadIntelligenceReportRepository
 	WhatsAppStatus     *WhatsAppStatusRepository
 	Offline            *OfflineRepository
 	OfflineV3          *OfflineV3Repository
@@ -137,7 +136,6 @@ func NewRepositories(db *pgxpool.Pool) *Repositories {
 		Integration:        &IntegrationRepository{db: db},
 		MediaAsset:         &MediaAssetRepository{db: db},
 		Report:             &ReportRepository{db: db},
-		LeadIntelligence:   &LeadIntelligenceReportRepository{db: db},
 		WhatsAppStatus:     &WhatsAppStatusRepository{db: db},
 		Offline:            &OfflineRepository{db: db},
 		OfflineV3:          &OfflineV3Repository{db: db},

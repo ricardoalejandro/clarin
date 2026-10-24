@@ -9,45 +9,47 @@ import (
 	"github.com/naperu/clarin/internal/domain"
 )
 
-func TestLeadReportsRejectDisabledAndStalePublication(t *testing.T) {
+func TestLeadPolicyCancelsHistoricalReportJobsWithoutDeletingHistory(t *testing.T) {
 	pool := programSurveyIntegrityPool(t)
 	f := integrityProgram(t, pool)
+	other := integrityProgram(t, pool)
 	ctx := context.Background()
 	accounts := &AccountRepository{db: pool}
-	reports := &LeadIntelligenceReportRepository{db: pool}
-	run, _, err := reports.CreateRun(ctx, &domain.LeadIntelligenceReportRun{AccountID: f.account, UserID: f.user, IdempotencyKey: uuid.New()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	integrityExec(t, pool, `UPDATE lead_intelligence_report_runs SET status='running' WHERE id=$1`, run.ID)
-	old := WithLeadPolicyVersion(ctx, 1)
-	if err := reports.ReplaceItems(old, run, nil); err != nil {
-		t.Fatal(err)
+	// The report API and worker are retired. Synthetic historical rows retain
+	// coverage of the existing account-policy cancellation and retention rules.
+	queued, running, completed, foreign := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	for _, row := range []struct {
+		id, account, user uuid.UUID
+		status            string
+	}{
+		{queued, f.account, f.user, "queued"},
+		{running, f.account, f.user, "running"},
+		{completed, f.account, f.user, "completed"},
+		{foreign, other.account, other.user, "running"},
+	} {
+		integrityExec(t, pool, `INSERT INTO lead_intelligence_report_runs(id,account_id,user_id,idempotency_key,status,summary) VALUES($1,$2,$3,$4,$5,'{"preserved":true}'::jsonb)`, row.id, row.account, row.user, uuid.New(), row.status)
+		integrityExec(t, pool, `INSERT INTO lead_intelligence_report_items(run_id,account_id,lead_id,position,row_data) VALUES($1,$2,$3,0,'{"preserved":true}'::jsonb)`, row.id, row.account, uuid.New())
 	}
 	if _, err := accounts.UpdateLeadPolicy(ctx, f.account, f.user, 1, false, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := reports.ReplaceItems(old, run, nil); !errors.Is(err, ErrLeadsDisabled) {
-		t.Fatalf("disabled rows: %v", err)
-	}
-	if err := reports.Complete(old, run.ID, nil, nil, false); !errors.Is(err, ErrLeadsDisabled) {
-		t.Fatalf("disabled completion: %v", err)
-	}
-	if _, _, err := reports.CreateRun(ctx, &domain.LeadIntelligenceReportRun{AccountID: f.account, UserID: f.user}); !errors.Is(err, ErrLeadsDisabled) {
-		t.Fatalf("disabled queue: %v", err)
-	}
-	if _, err := accounts.UpdateLeadPolicy(ctx, f.account, f.user, 2, true, true); err != nil {
-		t.Fatal(err)
-	}
-	if err := reports.Complete(old, run.ID, nil, nil, false); !errors.Is(err, ErrLeadPolicyConflict) {
-		t.Fatalf("stale completion: %v", err)
-	}
-	if err := reports.ReplaceItems(WithLeadPolicyVersion(ctx, 3), run, nil); !errors.Is(err, ErrLeadPolicyConflict) {
-		t.Fatalf("cancelled run revived: %v", err)
-	}
-	saved, err := reports.GetRun(ctx, f.account, f.user, run.ID)
-	if err != nil || saved.Status != "cancelled" {
-		t.Fatalf("cancelled history: %+v %v", saved, err)
+	for _, row := range []struct {
+		id     uuid.UUID
+		status string
+	}{
+		{queued, "cancelled"},
+		{running, "cancelled"},
+		{completed, "completed"},
+		{foreign, "running"},
+	} {
+		var status, preserved string
+		var items int
+		if err := pool.QueryRow(ctx, `SELECT status,summary->>'preserved',(SELECT COUNT(*) FROM lead_intelligence_report_items WHERE run_id=r.id AND account_id=r.account_id) FROM lead_intelligence_report_runs r WHERE id=$1`, row.id).Scan(&status, &preserved, &items); err != nil {
+			t.Fatal(err)
+		}
+		if status != row.status || preserved != "true" || items != 1 {
+			t.Fatalf("historical report changed: status=%s preserved=%s items=%d", status, preserved, items)
+		}
 	}
 }
 

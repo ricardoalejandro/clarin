@@ -574,7 +574,7 @@ function DashboardLayoutContent({
 
   const navItems = [
     { href: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', desc: 'Panel principal' },
-    { href: '/dashboard/reports', icon: BarChart3, label: 'Reportería', desc: 'Centro de reportes' },
+    { href: '/dashboard/reports', icon: BarChart3, label: 'Reportería', desc: 'WhatsApp por grupos' },
     { href: '/dashboard/chats', icon: MessageSquare, label: 'Chats', desc: 'Conversaciones WhatsApp' },
     { href: '/dashboard/chat-api', icon: CloudCog, label: 'Chat API', desc: 'Canal oficial de Meta' },
     { href: '/dashboard/contacts', icon: Contact, label: 'Contactos', desc: 'Directorio de contactos' },
