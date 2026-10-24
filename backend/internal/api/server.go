@@ -511,17 +511,7 @@ func (s *Server) setupRoutes() {
 	devices.Delete("/:id", s.handleDeleteDevice)
 	devices.Get("/health/all", s.handleDeviceHealth)
 
-	// Reporting routes — cross-functional read access is controlled independently.
-	reports := protected.Group("/reports", s.requirePermission(domain.PermReports))
-	reports.Get("/whatsapp-group-coverage/groups", s.handleListWhatsAppReportGroups)
-	reports.Post("/whatsapp-group-coverage/generate", s.handleGenerateWhatsAppGroupCoverage)
-	reports.Get("/lead-intelligence/options", s.handleLeadIntelligenceOptions)
-	reports.Post("/lead-intelligence/preview", s.handlePreviewLeadIntelligence)
-	reports.Post("/lead-intelligence/runs", s.handleCreateLeadIntelligenceRun)
-	reports.Get("/lead-intelligence/runs", s.handleListLeadIntelligenceRuns)
-	reports.Get("/lead-intelligence/runs/:id", s.handleGetLeadIntelligenceRun)
-	reports.Post("/lead-intelligence/runs/:id/cancel", s.handleCancelLeadIntelligenceRun)
-	reports.Get("/lead-intelligence/runs/:id/result", s.handleGetLeadIntelligenceResult)
+	s.registerReportRoutes(protected)
 
 	// Chat routes
 	chats := protected.Group("/chats", s.requirePermission(domain.PermChats))

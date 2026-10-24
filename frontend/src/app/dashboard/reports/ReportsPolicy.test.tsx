@@ -1,49 +1,76 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { LeadPolicyProvider, type LeadPolicyState } from '@/components/LeadPolicyProvider'
+import { beginAuthIdentityChange, completeAuthIdentityChange } from '@/lib/authScope'
 import ReportsPage from './page'
+import WhatsAppAlias from './whatsapp-group-coverage/page'
+import RetiredLeadAlias from './lead-intelligence/page'
 
-const fixture = vi.hoisted(() => ({ fetch: vi.fn() }))
-vi.mock('@/lib/api', () => ({ subscribeWebSocket: () => () => {} }))
-const state = (enabled: boolean): LeadPolicyState => ({ ready: true, policy: null, leadsEnabled: enabled, automationEnabled: enabled, error: '', refresh: vi.fn() })
-const view = (enabled: boolean) => <LeadPolicyProvider value={state(enabled)}><ReportsPage /></LeadPolicyProvider>
-const access = (user: Record<string, unknown>) => fixture.fetch.mockResolvedValue({ ok: true, json: async () => ({ user }) })
+const mocks = vi.hoisted(() => ({ redirect: vi.fn(() => { throw new Error('redirect') }) }))
+vi.mock('next/navigation', () => ({ redirect: mocks.redirect }))
+vi.mock('@/components/reports/WhatsAppGroupCoverageReport', () => ({ default: () => <h1>WhatsApp por grupos</h1> }))
+const response = (user: object, status = 200) => new Response(JSON.stringify({ user }), { status, headers: { 'Content-Type': 'application/json' } })
+let fetchMock: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
-  fixture.fetch.mockReset()
-  access({ permissions: ['reports'] })
-  vi.stubGlobal('fetch', fixture.fetch)
+  completeAuthIdentityChange()
+  mocks.redirect.mockClear()
+  fetchMock = vi.fn(async () => response({ permissions: ['reports'] }))
+  vi.stubGlobal('fetch', fetchMock)
 })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
-describe('Reports account Lead policy', () => {
-  it('removes the commercial report immediately on revocation and retains the independent report', async () => {
-    const { rerender } = render(view(true))
-    expect(await screen.findByRole('link', { name: /Análisis inteligente de leads/ })).toHaveAttribute('href', '/dashboard/reports/lead-intelligence')
-    const groupReport = screen.getByRole('link', { name: /Cobertura de integrantes de WhatsApp/ })
-    rerender(view(false))
-    expect(screen.queryByRole('link', { name: /Análisis inteligente de leads/ })).not.toBeInTheDocument()
-    expect(screen.getByText('1 reporte disponible')).toBeVisible()
-    expect(screen.getByRole('link', { name: /Cobertura de integrantes de WhatsApp/ })).toBe(groupReport)
-    expect(groupReport).toHaveAttribute('href', '/dashboard/reports/whatsapp-group-coverage')
-    expect(groupReport).toHaveTextContent('Compara los integrantes de un grupo con los contactos de Clarin.')
-    rerender(view(true))
-    expect(screen.getByRole('link', { name: /Análisis inteligente de leads/ })).toBeVisible()
-    expect(screen.getByText('2 reportes disponibles')).toBeVisible()
-    expect(fixture.fetch).toHaveBeenCalledTimes(1)
+describe('WhatsApp-only Reporteria', () => {
+  it.each([{ is_admin: true }, { is_super_admin: true }, { permissions: ['*'] }, { permissions: ['reports'] }])('opens the only report directly with reporting access: %j', async user => {
+    fetchMock.mockResolvedValue(response(user))
+    render(<ReportsPage />)
+    expect(await screen.findByRole('heading', { name: 'WhatsApp por grupos' })).toBeVisible()
+    expect(screen.queryByText('Centro de reportes')).not.toBeInTheDocument()
+    expect(screen.queryByText('Análisis inteligente de leads')).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledOnce()
   })
 
-  it.each([{ is_admin: true }, { is_super_admin: true }, { permissions: ['*'] }, { permissions: ['reports'] }])('preserves permitted independent reports with Leads disabled: %j', async user => {
-    access(user)
-    render(view(false))
-    expect(await screen.findByRole('link', { name: /Cobertura de integrantes de WhatsApp/ })).toBeVisible()
-    expect(screen.queryByRole('link', { name: /Análisis inteligente de leads/ })).not.toBeInTheDocument()
-  })
-
-  it.each([true, false])('still denies the catalog without reporting permission when Leads is %s', async enabled => {
-    access({ permissions: ['leads', 'chats'] })
-    render(view(enabled))
+  it.each([200, 401, 403])('preserves restricted access for status %s', async status => {
+    fetchMock.mockResolvedValue(response({ permissions: ['leads', 'chats'] }, status))
+    render(<ReportsPage />)
     expect(await screen.findByText('Acceso restringido')).toBeVisible()
-    expect(screen.queryByRole('link')).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'WhatsApp por grupos' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the report unmounted while access is loading', () => {
+    fetchMock.mockReturnValue(new Promise(() => {}))
+    render(<ReportsPage />)
+    expect(screen.getByRole('status')).toHaveTextContent('Comprobando acceso')
+    expect(screen.queryByRole('heading')).not.toBeInTheDocument()
+  })
+
+  it('offers retry after an unavailable permission check', async () => {
+    fetchMock.mockRejectedValueOnce(new Error('network'))
+    render(<ReportsPage />)
+    expect(await screen.findByText('No pudimos comprobar el acceso')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar' }))
+    expect(await screen.findByRole('heading', { name: 'WhatsApp por grupos' })).toBeVisible()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not reuse access or an old completion after authentication changes', async () => {
+    let finish!: (value: Response) => void
+    fetchMock.mockReturnValueOnce(new Promise<Response>(resolve => { finish = resolve }))
+    fetchMock.mockResolvedValue(response({ permissions: [] }))
+    render(<ReportsPage />)
+    const signal = fetchMock.mock.calls[0][1].signal as AbortSignal
+    act(() => { beginAuthIdentityChange() })
+    expect(signal.aborted).toBe(true)
+    expect(fetchMock).toHaveBeenCalledOnce()
+    act(() => { completeAuthIdentityChange() })
+    expect(await screen.findByText('Acceso restringido')).toBeVisible()
+    await act(async () => { finish(response({ permissions: ['reports'] })) })
+    await waitFor(() => expect(screen.getByText('Acceso restringido')).toBeVisible())
+    expect(screen.queryByRole('heading', { name: 'WhatsApp por grupos' })).not.toBeInTheDocument()
+  })
+
+  it.each([WhatsAppAlias, RetiredLeadAlias])('redirects an old report URL to the only report', alias => {
+    expect(() => alias()).toThrow('redirect')
+    expect(mocks.redirect).toHaveBeenCalledExactlyOnceWith('/dashboard/reports')
   })
 })
