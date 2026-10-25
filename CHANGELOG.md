@@ -2,6 +2,12 @@
 
 ## 2026-10-25
 
+### Zoom de fotografías y administradores primero
+
+- Ctrl + rueda y el pellizco con dos dedos amplían la imagen dentro de su visor, conservando las ventanas de Contactos, Leads, Eventos, Programas y Chats.
+- Las imágenes adjuntas mantienen sus comentarios y marcas; desplazar o pellizcar no crea anotaciones.
+- Los administradores aparecen primero en los integrantes del grupo, también al buscar y cargar más páginas, conservando el orden de los demás participantes.
+
 ### Recuperación de identidades de integrantes
 
 - Recuperación automática de nombres y relaciones de teléfono de los integrantes ya sincronizados, usando los dispositivos vinculados y sin crear Contactos ni enviar mensajes.

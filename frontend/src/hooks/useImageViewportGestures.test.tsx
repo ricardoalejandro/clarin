@@ -1,0 +1,160 @@
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useRef, useState } from 'react'
+import { useImageViewportGestures } from './useImageViewportGestures'
+
+class TestPointerEvent extends MouseEvent {
+  pointerId: number
+  pointerType: string
+  constructor(type: string, values: PointerEventInit = {}) { super(type, values); this.pointerId = values.pointerId ?? 1; this.pointerType = values.pointerType ?? 'touch' }
+}
+function Harness({ active = true, sourceKey = 'image-a', controlled = false, wheelMode = 'modifier' as 'modifier' | 'always', anchor = vi.fn() }) {
+  const viewportRef = useRef<HTMLDivElement>(null), contentRef = useRef<HTMLDivElement>(null)
+  const [scale, setScale] = useState(1)
+  const gestures = useImageViewportGestures({ sourceKey, active, viewportRef, contentRef, minScale: .5, maxScale: 4, wheelMode, scale: controlled ? scale : undefined, onScaleChange: controlled ? setScale : undefined })
+  return <><div ref={viewportRef} data-testid="viewport" {...gestures.viewportProps} data-scale={gestures.transform.scale} data-x={gestures.transform.x} data-y={gestures.transform.y} onClick={anchor}><div ref={contentRef} data-testid="content" style={gestures.transformStyle} /></div><output data-testid="controlled">{scale}</output><button onClick={() => controlled ? setScale(2) : gestures.zoomTo(2)}>Set two</button><button onClick={gestures.reset}>Reset</button><div data-testid="outside" /></>
+}
+function dimensions() {
+  const viewport = screen.getByTestId('viewport'), content = screen.getByTestId('content')
+  Object.defineProperties(viewport, { clientWidth: { configurable: true, value: 400 }, clientHeight: { configurable: true, value: 300 } })
+  viewport.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 300, right: 400, bottom: 300, x: 0, y: 0, toJSON() {} })
+  Object.defineProperties(content, { offsetWidth: { configurable: true, value: 400 }, offsetHeight: { configurable: true, value: 300 } })
+  return viewport
+}
+function wheel(target: HTMLElement, values: WheelEventInit = {}) {
+  const event = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -100, clientX: 300, clientY: 180, ...values })
+  fireEvent(target, event)
+  return event
+}
+function pointer(target: HTMLElement, kind: string, id: number, x: number, y = 150) {
+  fireEvent(target, new TestPointerEvent(kind, { bubbles: true, cancelable: true, pointerId: id, pointerType: 'touch', clientX: x, clientY: y }))
+}
+beforeEach(() => vi.stubGlobal('PointerEvent', TestPointerEvent))
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+describe('scoped image gestures', () => {
+  it('uses a non-passive native wheel listener and leaves ordinary/outside scrolling alone', () => {
+    const listener = vi.spyOn(HTMLElement.prototype, 'addEventListener')
+    render(<Harness />)
+    const viewport = dimensions()
+    expect(listener.mock.calls.some(([type,, options]) => type === 'wheel' && typeof options === 'object' && options?.passive === false)).toBe(true)
+    expect(wheel(viewport).defaultPrevented).toBe(false)
+    expect(wheel(screen.getByTestId('outside'), { ctrlKey: true }).defaultPrevented).toBe(false)
+    expect(wheel(viewport, { ctrlKey: true }).defaultPrevented).toBe(true)
+    expect(Number(viewport.dataset.scale)).toBeGreaterThan(1)
+    expect(Number(viewport.dataset.x)).toBeLessThan(0)
+  })
+  it('preserves ordinary chat wheel zoom with the requested limits', () => {
+    render(<Harness wheelMode="always" />)
+    const viewport = dimensions()
+    expect(wheel(viewport).defaultPrevented).toBe(true)
+    expect(Number(viewport.dataset.scale)).toBeCloseTo(1.15)
+    for (let count = 0; count < 40; count++) wheel(viewport)
+    expect(Number(viewport.dataset.scale)).toBe(4)
+  })
+  it('pinches at its moving midpoint, pans within bounds, and suppresses the resulting anchor click', () => {
+    const anchor = vi.fn()
+    render(<Harness anchor={anchor} />)
+    const viewport = dimensions()
+    pointer(viewport, 'pointerdown', 1, 150)
+    pointer(viewport, 'pointerdown', 2, 250)
+    pointer(viewport, 'pointermove', 2, 350)
+    expect(Number(viewport.dataset.scale)).toBe(2)
+    expect(Number(viewport.dataset.x)).toBe(50)
+    pointer(viewport, 'pointerup', 2, 350)
+    pointer(viewport, 'pointermove', 1, 1000, 1000)
+    expect(Math.abs(Number(viewport.dataset.x))).toBeLessThanOrEqual(200)
+    expect(Math.abs(Number(viewport.dataset.y))).toBeLessThanOrEqual(150)
+    pointer(viewport, 'pointerup', 1, 1000, 1000)
+    fireEvent.click(viewport)
+    expect(anchor).not.toHaveBeenCalled()
+    pointer(viewport, 'pointerdown', 3, 200)
+    pointer(viewport, 'pointerup', 3, 200)
+    fireEvent.click(viewport)
+    expect(anchor).toHaveBeenCalledOnce()
+  })
+  it('does not turn a drag into an anchor click when the image cannot pan past its edge', () => {
+    const anchor = vi.fn()
+    render(<Harness anchor={anchor} />)
+    const viewport = dimensions()
+    pointer(viewport, 'pointerdown', 1, 150)
+    pointer(viewport, 'pointermove', 1, 250)
+    pointer(viewport, 'pointerup', 1, 250)
+    expect(viewport).toHaveAttribute('data-x', '0')
+    fireEvent.click(viewport)
+    expect(anchor).not.toHaveBeenCalled()
+  })
+  it('resets a changed source and suspension, releases capture and removes old native listeners', () => {
+    const view = render(<Harness />)
+    const viewport = dimensions()
+    viewport.setPointerCapture = vi.fn()
+    viewport.hasPointerCapture = vi.fn(() => true)
+    viewport.releasePointerCapture = vi.fn()
+    wheel(viewport, { ctrlKey: true })
+    pointer(viewport, 'pointerdown', 1, 150)
+    pointer(viewport, 'pointerdown', 2, 250)
+    view.rerender(<Harness sourceKey="image-b" />)
+    expect(viewport).toHaveAttribute('data-scale', '1')
+    expect(viewport.releasePointerCapture).toHaveBeenCalled()
+    pointer(viewport, 'pointermove', 2, 600)
+    expect(viewport).toHaveAttribute('data-scale', '1')
+    view.rerender(<Harness sourceKey="image-b" active={false} />)
+    expect(wheel(viewport, { ctrlKey: true }).defaultPrevented).toBe(false)
+    view.unmount()
+    expect(wheel(viewport, { ctrlKey: true }).defaultPrevented).toBe(false)
+  })
+  it('keeps external toolbar scale and gesture scale in sync without resetting inactive PDF state', () => {
+    const view = render(<Harness controlled />)
+    const viewport = dimensions()
+    fireEvent.click(screen.getByRole('button', { name: 'Set two' }))
+    expect(viewport).toHaveAttribute('data-scale', '2')
+    wheel(viewport, { ctrlKey: true })
+    expect(Number(screen.getByTestId('controlled').textContent)).toBe(Number(viewport.dataset.scale))
+    view.rerender(<Harness controlled active={false} />)
+    expect(Number(screen.getByTestId('controlled').textContent)).toBeGreaterThan(2)
+    view.rerender(<Harness controlled sourceKey="next-image" />)
+    expect(viewport).toHaveAttribute('data-scale', '1')
+    expect(screen.getByTestId('controlled')).toHaveTextContent('1')
+  })
+  it('consumes Safari pinch events only over the image viewport and cleans a cancelled pointer', () => {
+    render(<Harness />)
+    const viewport = dimensions()
+    const start = new Event('gesturestart', { bubbles: true, cancelable: true })
+    fireEvent(viewport, start)
+    expect(start.defaultPrevented).toBe(true)
+    const change = new Event('gesturechange', { bubbles: true, cancelable: true })
+    Object.defineProperty(change, 'scale', { value: 2 })
+    fireEvent(viewport, change)
+    expect(change.defaultPrevented).toBe(true)
+    expect(viewport).toHaveAttribute('data-scale', '2')
+    pointer(viewport, 'pointerdown', 1, 100)
+    pointer(viewport, 'pointercancel', 1, 100)
+    pointer(viewport, 'pointermove', 1, 300)
+    expect(viewport).toHaveAttribute('data-scale', '2')
+    const outside = new Event('gesturestart', { bubbles: true, cancelable: true })
+    fireEvent(screen.getByTestId('outside'), outside)
+    expect(outside.defaultPrevented).toBe(false)
+  })
+  it('cancels native two-finger touch movement locally without intercepting outside gestures', () => {
+    render(<Harness />)
+    const viewport = dimensions()
+    const native = new Event('touchmove', { bubbles: true, cancelable: true })
+    Object.defineProperty(native, 'touches', { value: [{}, {}] })
+    fireEvent(viewport, native)
+    expect(native.defaultPrevented).toBe(true)
+    const outside = new Event('touchmove', { bubbles: true, cancelable: true })
+    Object.defineProperty(outside, 'touches', { value: [{}, {}] })
+    fireEvent(screen.getByTestId('outside'), outside)
+    expect(outside.defaultPrevented).toBe(false)
+  })
+  it('reclamps after resize instead of allowing stale pan outside the image', () => {
+    render(<Harness />)
+    const viewport = dimensions()
+    fireEvent.click(screen.getByRole('button', { name: 'Set two' }))
+    pointer(viewport, 'pointerdown', 1, 200)
+    pointer(viewport, 'pointermove', 1, 300)
+    expect(viewport).toHaveAttribute('data-x', '100')
+    Object.defineProperty(viewport, 'clientWidth', { value: 1000, configurable: true })
+    act(() => window.dispatchEvent(new Event('resize')))
+    expect(viewport).toHaveAttribute('data-x', '0')
+  })
+})

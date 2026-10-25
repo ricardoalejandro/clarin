@@ -1,5 +1,5 @@
 'use client'
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState, useSyncExternalStore, type ForwardedRef } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore, type ForwardedRef } from 'react'
 import { AlertCircle, Loader2, RefreshCw, Search, Shield, Users, X } from 'lucide-react'
 import type { Chat, GroupParticipant, WhatsAppGroup } from '@/types/chat'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
@@ -10,6 +10,8 @@ import { groupParticipantLabel, groupParticipantPhone, mergeParticipantPage, sam
 import { parseGroupIdentityRevisions, type GroupIdentityRevisions, type OpenParticipantChat } from './groupParticipantTypes'
 import GroupParticipantProfile, { type GroupParticipantProfileHandle } from './GroupParticipantProfile'
 import WebText from '@/components/WebText'
+
+class ParticipantsCursorResetError extends Error {}
 
 type Props = { chat: Chat; onClose: () => void; onOpenChat?: OpenParticipantChat; suspended?: boolean }
 
@@ -50,6 +52,10 @@ function GroupDetailsSession({ chat, onClose, onOpenChat, suspended = false, sco
   const lastQuery = useRef(settled)
   const listScroll = useRef<HTMLDivElement>(null)
   const savedScroll = useRef(0)
+  const selectedRef = useRef(selected)
+  selectedRef.current = selected
+  const pendingListScroll = useRef<number | null>(null)
+  const restoreListOnReturn = useRef(false)
   const invoker = useRef<HTMLButtonElement | null>(null)
   const active = useRef(!suspended)
   active.current = !suspended
@@ -84,7 +90,7 @@ function GroupDetailsSession({ chat, onClose, onOpenChat, suspended = false, sco
     lease.current?.abort()
     const controller = new AbortController(); lease.current = controller
     const generation = ++sequence.current
-    const preserveCount = !after && lastQuery.current === settled ? membersRef.current.length : 0
+    const preserveCount = lastQuery.current === settled ? membersRef.current.length : 0
     lastQuery.current = settled
     const isCurrent = () => active.current && !controller.signal.aborted && generation === sequence.current && getAuthScope() === scope && !isAuthIdentityChanging(scope)
     setLoading(true); setError('')
@@ -92,43 +98,59 @@ function GroupDetailsSession({ chat, onClose, onOpenChat, suspended = false, sco
       const request = async (url: string) => {
         const response = await fetch(url, { credentials: 'include', cache: 'no-store', signal: controller.signal })
         const data = await response.json()
-        if (!response.ok || !data.success) throw new Error(data.error || 'No se pudo consultar el grupo.')
+        if (!response.ok || !data.success) {
+          if (response.status === 409 && data.code === 'participants_cursor_reset') throw new ParticipantsCursorResetError(data.error || 'Los integrantes cambiaron durante la consulta.')
+          throw new Error(data.error || 'No se pudo consultar el grupo.')
+        }
         return data
       }
       const metadataRequest = request('/api/chats/' + chat.id + '/group' + (refresh ? '?refresh=true' : ''))
       const page = async (cursor: string) => {
-        const params = new URLSearchParams({ limit: '50', search: settled }); if (cursor) params.set('cursor', cursor)
+        const params = new URLSearchParams({ limit: '50', search: settled, order: 'admins_first' }); if (cursor) params.set('cursor', cursor)
         const data = await request('/api/chats/' + chat.id + '/group/participants?' + params)
         if (!Array.isArray(data.participants)) throw new Error('No se pudieron cargar los participantes.')
+        if (data.order !== 'admins_first') throw new Error('El servidor no confirmó el orden de participantes. Vuelve a intentarlo.')
         return data
       }
-      // A provider refresh must commit before reading the new participant snapshot.
-      const [metadata, first] = refresh ? [await metadataRequest, await page(after)] : await Promise.all([metadataRequest, page(after)])
-      const snapshot = parseGroupIdentityRevisions(first)
-      if (snapshot.identity_revision < minimumIdentityRevision.current || snapshot.group_revision < minimumGroupRevision.current) throw new Error('La respuesta del grupo está desactualizada. Vuelve a actualizarlo.')
-      const previous = identitySnapshot.current
-      if (previous && (snapshot.identity_revision < previous.identity_revision || snapshot.group_revision < previous.group_revision)) throw new Error('La respuesta del grupo está desactualizada. Vuelve a actualizarlo.')
-      if (after && previous && (snapshot.identity_revision !== previous.identity_revision || snapshot.group_revision !== previous.group_revision)) { controller.abort(); setLoading(false); setRevision(value => value + 1); return }
-      let rows = mergeParticipantPage([], first.participants)
-      let next = first.next_cursor || ''
-      const seen = new Set<string>()
-      while (!after && next && rows.length < preserveCount && !seen.has(next)) {
-        seen.add(next)
-        const extra = await page(next)
-        if (!isCurrent()) return
-        const extraSnapshot = parseGroupIdentityRevisions(extra)
-        if (extraSnapshot.identity_revision !== snapshot.identity_revision || extraSnapshot.group_revision !== snapshot.group_revision) { controller.abort(); setLoading(false); setRevision(value => value + 1); return }
-        rows = mergeParticipantPage(rows, extra.participants, true)
-        next = extra.next_cursor || ''
+      const readPages = async (pageCursor: string) => {
+        // A provider refresh must commit before reading its participant snapshot.
+        const [metadata, first] = refresh ? [await metadataRequest, await page(pageCursor)] : await Promise.all([metadataRequest, page(pageCursor)])
+        const snapshot = parseGroupIdentityRevisions(first)
+        if (snapshot.identity_revision < minimumIdentityRevision.current || snapshot.group_revision < minimumGroupRevision.current) throw new Error('La respuesta del grupo está desactualizada. Vuelve a actualizarlo.')
+        const previous = identitySnapshot.current
+        if (previous && (snapshot.identity_revision < previous.identity_revision || snapshot.group_revision < previous.group_revision)) throw new Error('La respuesta del grupo está desactualizada. Vuelve a actualizarlo.')
+        if (pageCursor && previous && (snapshot.identity_revision !== previous.identity_revision || snapshot.group_revision !== previous.group_revision)) throw new ParticipantsCursorResetError('Los integrantes cambiaron durante la consulta.')
+        let rows = mergeParticipantPage([], first.participants)
+        let next = first.next_cursor || ''
+        const seen = new Set<string>()
+        while (!pageCursor && next && rows.length < preserveCount && !seen.has(next)) {
+          seen.add(next)
+          const extra = await page(next)
+          if (!isCurrent()) return null
+          const extraSnapshot = parseGroupIdentityRevisions(extra)
+          if (extraSnapshot.identity_revision !== snapshot.identity_revision || extraSnapshot.group_revision !== snapshot.group_revision) throw new ParticipantsCursorResetError('Los integrantes cambiaron durante la consulta.')
+          rows = mergeParticipantPage(rows, extra.participants, true)
+          next = extra.next_cursor || ''
+        }
+        return { metadata, snapshot, rows, next, append: Boolean(pageCursor) }
       }
+      let accepted
+      try { accepted = await readPages(after) }
+      catch (cause) {
+        if (!(cause instanceof ParticipantsCursorResetError) || !isCurrent()) throw cause
+        // Restart once inside the same request lease; keep mounted rows and UI state.
+        accepted = await readPages('')
+      }
+      if (!accepted) return
+      const { metadata, snapshot, rows, next, append } = accepted
       if (!isCurrent()) return
-      const scroll = listScroll.current?.scrollTop || 0
+      if (!selectedRef.current) pendingListScroll.current = listScroll.current?.scrollTop || 0
       identitySnapshot.current = snapshot
       setGroup(metadata.group)
-      setMembers(current => mergeParticipantPage(current, rows, Boolean(after)))
+      setMembers(current => mergeParticipantPage(current, rows, append))
       setSelected(current => current ? rows.find(row => sameParticipant(row, current)) || current : null)
       setCursor(next)
-      requestAnimationFrame(() => { if (listScroll.current && isCurrent()) listScroll.current.scrollTop = scroll })
+
     } catch (cause) { if (isCurrent()) setError(cause instanceof Error ? cause.message : 'No se pudo cargar el grupo.') }
     finally { if (isCurrent()) setLoading(false) }
   }, [chat.id, settled, scope])
@@ -137,12 +159,20 @@ function GroupDetailsSession({ chat, onClose, onOpenChat, suspended = false, sco
     return () => { lease.current?.abort(); sequence.current++ }
   }, [load, revision, suspended])
   const pending = search !== settled
+  useLayoutEffect(() => {
+    if (selected) return
+    // Restore in the same visible commit; queued frames can sample a hidden list
+    // or overwrite the position restored by returning from a participant profile.
+    const returning = restoreListOnReturn.current
+    const top = returning ? savedScroll.current : pendingListScroll.current
+    if (top !== null && listScroll.current) listScroll.current.scrollTop = top
+    if (returning && !suspended) invoker.current?.focus({ preventScroll: true })
+    pendingListScroll.current = null
+    restoreListOnReturn.current = false
+  }, [members, selected, suspended])
   const backToList = () => {
+    restoreListOnReturn.current = true
     setSelected(null)
-    requestAnimationFrame(() => {
-      if (listScroll.current) listScroll.current.scrollTop = savedScroll.current
-      invoker.current?.focus({ preventScroll: true })
-    })
   }
   const backToListRef = useRef(backToList)
   backToListRef.current = backToList

@@ -7,6 +7,7 @@ import { api, apiUpload } from '@/lib/api'
 import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
 import { avatarCanvasDisplacement, drawAvatarImage, exportCompactAvatar, initialAvatarTransform, validateProgramAvatarFile, type AvatarImageTransform } from '@/lib/avatarImageEditor'
 import AvatarImageEditor from '@/components/AvatarImageEditor'
+import ZoomableImageSurface from '@/components/image-viewer/ZoomableImageSurface'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 import { OPERATIONAL_OVERLAY_LAYERS as GLOBAL_OVERLAY_LAYERS } from '@/components/operational-overlay/operationalOverlayLayers'
 import type { Program } from '@/types/program'
@@ -57,7 +58,7 @@ export function ProgramAvatar({ program, className = 'h-12 w-12', interactive = 
     {interactive && program.avatar_url ? <button type="button" disabled={suspended} aria-label={`Ver foto de ${program.name}`} onClick={event => { event.stopPropagation(); if (!suspendedRef.current) setView(true) }} className={`${classes} min-h-11 min-w-11 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2`} style={{ backgroundColor: color }}>{display}</button>
       : <span className={classes} style={{ backgroundColor: color }}>{display}</span>}
     {view && <PhotoDialog title="Foto del programa" subtitle={program.name} paused={suspended} onClose={() => setView(false)}>
-      {url && imageFailed !== url ? <img src={url} alt={`Foto de ${program.name}`} className="mx-auto max-h-[65vh] max-w-full rounded-2xl object-contain" />
+      {url && imageFailed !== url ? <ZoomableImageSurface src={url} alt={`Foto de ${program.name}`} sourceKey={`${scope}:${program.id}:${program.avatar_revision ?? 0}:${url}`} active={!suspended && scope === getAuthScope() && !isAuthIdentityChanging(scope)} onError={() => setImageFailed(url)} className="h-[min(65vh,32rem)] w-full rounded-2xl bg-slate-950" imageClassName="rounded-2xl" />
         : failed || (Boolean(url) && imageFailed === url) ? <div role="alert" className="space-y-3 text-sm text-slate-600"><p>No se pudo cargar la foto.</p><button type="button" className="min-h-11 rounded-xl border px-4" onClick={() => { setImageFailed(''); retry() }}>Reintentar</button></div>
           : <p role="status" className="flex items-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> Cargando foto…</p>}
     </PhotoDialog>}

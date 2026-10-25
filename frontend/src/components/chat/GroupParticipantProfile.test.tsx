@@ -21,7 +21,7 @@ function fetcher(overrides: Record<string, () => Response | Promise<Response>> =
     if (url.includes('/common-groups?')) return response({ success: true, groups: [], next_cursor: '', source: 'known_device_groups' })
     if (url.endsWith('/about')) return response({ success: true, about: { text: 'Información visible', state: 'available' } })
     if (url.endsWith('/chat') && init?.method === 'POST') return response({ success: true, chat: privateChat })
-    if (url.includes('/participants?')) return response({ success: true, identity_revision: 1, group_revision: 1, participants: [member], next_cursor: '' })
+    if (url.includes('/participants?')) return response({ success: true, identity_revision: 1, group_revision: 1, order: 'admins_first', participants: [member], next_cursor: '' })
     if (url.endsWith('/group')) return response({ success: true, group: chat.group })
     return response({ success: true, profile: profile() })
   })

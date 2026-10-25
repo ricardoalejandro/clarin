@@ -152,7 +152,7 @@ function ProgramParticipantHistoryList({
           const endedAt = participant.status === 'dropped' ? participant.dropped_at : participant.completed_at;
           return (
             <button key={participant.id} type="button" data-testid="mobile-program-participant-history-row" onClick={event => onOpen(participant, event.currentTarget)} className="flex min-h-[78px] w-full items-center gap-3 px-3 py-3 text-left transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500">
-              <ContactPhotoPreview url={participant.avatar_url} name={participant.contact_name || 'Sin nombre'} sizeClassName="h-11 w-11" />
+              <ContactPhotoPreview ownerKey={`contact:${participant.contact_id}`} url={participant.avatar_url} name={participant.contact_name || 'Sin nombre'} sizeClassName="h-11 w-11" />
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-sm font-semibold text-slate-800">{participant.contact_name || 'Sin nombre'}</span>
                 <span className="block truncate text-xs text-slate-400">{participant.contact_phone || 'Sin teléfono'}</span>
@@ -181,7 +181,7 @@ function ProgramParticipantHistoryList({
               const endedAt = participant.status === 'dropped' ? participant.dropped_at : participant.completed_at;
               return (
                 <tr key={participant.id} onClick={() => onOpen(participant)} className="cursor-pointer transition-colors hover:bg-slate-50">
-                  <td className="px-4 py-3"><div className="flex items-center gap-3"><ContactPhotoPreview url={participant.avatar_url} name={participant.contact_name || 'Sin nombre'} /><div className="min-w-0"><p className="truncate font-medium text-slate-800">{participant.contact_name || 'Sin nombre'}</p><p className="truncate text-xs text-slate-400">{participant.contact_phone || 'Sin teléfono'}</p></div></div></td>
+                  <td className="px-4 py-3"><div className="flex items-center gap-3"><ContactPhotoPreview ownerKey={`contact:${participant.contact_id}`} url={participant.avatar_url} name={participant.contact_name || 'Sin nombre'} /><div className="min-w-0"><p className="truncate font-medium text-slate-800">{participant.contact_name || 'Sin nombre'}</p><p className="truncate text-xs text-slate-400">{participant.contact_phone || 'Sin teléfono'}</p></div></div></td>
                   <td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-xs font-semibold ${participant.status === 'completed' ? 'bg-blue-50 text-blue-700' : 'bg-red-50 text-red-700'}`}>{participant.status === 'completed' ? 'Completado' : 'Retirado'}</span></td>
                   <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-500">{formatCalendarDate(participant.enrolled_at, 'dd MMM yyyy', { locale: es })} — {endedAt ? formatCalendarDate(endedAt, 'dd MMM yyyy', { locale: es }) : '—'}</td>
                   <td className="max-w-64 truncate px-4 py-3 text-xs text-slate-500">{participant.drop_reason || '—'}</td>
@@ -2681,7 +2681,7 @@ export default function ProgramDetailPage() {
                       ) : filteredHealthParticipants.map(p => mobileWorkspace ? (
                         <div key={p.participant_id} data-testid="mobile-program-participant-row" className="flex min-h-[78px] items-center gap-2 px-3 py-2 transition-colors hover:bg-slate-50">
                           <button type="button" onClick={event => { void openParticipantDetail(p.participant_id, p.contact_id, event.currentTarget); }} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
-                            <ContactPhotoPreview url={p.avatar_url} name={p.name || 'Sin nombre'} sizeClassName="h-11 w-11" />
+                            <ContactPhotoPreview ownerKey={`contact:${p.contact_id}`} url={p.avatar_url} name={p.name || 'Sin nombre'} sizeClassName="h-11 w-11" />
                             <span className="min-w-0 flex-1">
                               <span className="block truncate text-sm font-semibold text-slate-800">{p.name || 'Sin nombre'}</span>
                               <span className="block truncate text-xs text-slate-400">{p.phone || 'Sin teléfono'}</span>
@@ -2697,7 +2697,7 @@ export default function ProgramDetailPage() {
                       ) : (
                         <div key={p.participant_id} onClick={() => { void openParticipantDetail(p.participant_id, p.contact_id) }} className="cursor-pointer space-y-3 p-4 transition-colors hover:bg-slate-50">
                           <div className="flex items-start gap-3">
-                            <ContactPhotoPreview url={p.avatar_url} name={p.name || 'Sin nombre'} sizeClassName="h-12 w-12" />
+                            <ContactPhotoPreview ownerKey={`contact:${p.contact_id}`} url={p.avatar_url} name={p.name || 'Sin nombre'} sizeClassName="h-12 w-12" />
                             <button type="button" onClick={event => { event.stopPropagation(); void openParticipantDetail(p.participant_id, p.contact_id, event.currentTarget); }} className="min-w-0 flex-1 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
                               <span className="block truncate font-semibold text-slate-800">{p.name || 'Sin nombre'}</span>
                               <span className="block truncate text-xs text-slate-400">{p.phone || 'Sin teléfono'}</span>
@@ -2738,7 +2738,7 @@ export default function ProgramDetailPage() {
                           <tr key={p.participant_id} onClick={() => void openParticipantDetail(p.participant_id, p.contact_id)} className="cursor-pointer hover:bg-slate-50">
                             <td className="px-4 py-3">
                               <div className="flex items-center gap-3">
-                                <ContactPhotoPreview url={p.avatar_url} name={p.name || 'Sin nombre'} />
+                                <ContactPhotoPreview ownerKey={`contact:${p.contact_id}`} url={p.avatar_url} name={p.name || 'Sin nombre'} />
                                 <button type="button" onClick={event => { event.stopPropagation(); void openParticipantDetail(p.participant_id, p.contact_id, event.currentTarget); }} className="min-w-0 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500">
                                   <span className="block truncate font-medium text-slate-800">{p.name || 'Sin nombre'}</span>
                                   <span className="block text-xs text-slate-400">{p.phone || 'Sin teléfono'}</span>

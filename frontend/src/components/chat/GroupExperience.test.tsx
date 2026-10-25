@@ -12,7 +12,7 @@ describe('group surfaces', () => {
   it('links the group description without changing its plain text or making external requests', async () => {
     const description = 'Reunión: HTTPS://example.com/sala_(dos).\n_Nota_ www.example.org/a_b'
     const described = { ...group, group: { ...group.group!, description } }
-    const fetcher = vi.fn((input: RequestInfo | URL) => Promise.resolve(response(String(input).includes('/participants?') ? { success: true, identity_revision: 1, group_revision: 1, participants: [] } : { success: true, group: described.group })))
+    const fetcher = vi.fn((input: RequestInfo | URL) => Promise.resolve(response(String(input).includes('/participants?') ? { success: true, identity_revision: 1, group_revision: 1, order: 'admins_first', participants: [] } : { success: true, group: described.group })))
     vi.stubGlobal('fetch', fetcher)
     render(<GroupDetailsPanel chat={described} onClose={() => {}} />)
     const link = await screen.findByRole('link', { name: 'HTTPS://example.com/sala_(dos)' })
@@ -42,7 +42,7 @@ describe('group surfaces', () => {
     expect(screen.getByText('María')).toBeInTheDocument(); expect(screen.getByText('José')).toBeInTheDocument(); expect(screen.queryByText('No mostrar grupo')).toBeNull()
   })
   it('loads bounded member pages and exposes no CRM identity or opportunity actions', async () => {
-    const fetcher = vi.fn((input: RequestInfo | URL) => Promise.resolve(response(String(input).includes('/participants?') ? { success: true, identity_revision: 1, group_revision: 1, participants: [{ jid: '51@s.whatsapp.net', name: 'María', role: 'admin' }], next_cursor: '' } : { success: true, group: group.group })))
+    const fetcher = vi.fn((input: RequestInfo | URL) => Promise.resolve(response(String(input).includes('/participants?') ? { success: true, identity_revision: 1, group_revision: 1, order: 'admins_first', participants: [{ jid: '51@s.whatsapp.net', name: 'María', role: 'admin' }], next_cursor: '' } : { success: true, group: group.group })))
     vi.stubGlobal('fetch', fetcher)
     render(<GroupDetailsPanel chat={group} onClose={() => {}} />)
     await screen.findByText('María'); expect(screen.getByText('Admin')).toBeInTheDocument()
@@ -89,7 +89,7 @@ it('shows the group media limit and never offers recovery even if an older snaps
 
 it('keeps a username separate from the name, phone and technical LID', async () => {
   const unnamed = { jid: '123456789@lid', lid: '123456789@lid', name: 'Integrante', username: 'ale.test', role: 'member', is_self: false }
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => response(String(input).includes('/participants?') ? { success: true, identity_revision: 1, group_revision: 1, participants: [unnamed] } : { success: true, group: group.group })))
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => response(String(input).includes('/participants?') ? { success: true, identity_revision: 1, group_revision: 1, order: 'admins_first', participants: [unnamed] } : { success: true, group: group.group })))
   render(<GroupDetailsPanel chat={group} onClose={() => {}} />)
   expect(await screen.findByText('Nombre no disponible')).toBeInTheDocument()
   expect(screen.getByText('Usuario: @ale.test')).toBeInTheDocument()
@@ -99,7 +99,7 @@ it('keeps a username separate from the name, phone and technical LID', async () 
 
 
 it('waits exactly 500ms after typing and clearing participant search without changing the input feedback', async () => {
-  const fetcher = vi.fn(async (url: RequestInfo | URL) => response(String(url).includes('/participants?') ? { success: true, identity_revision: 1, group_revision: 1, participants: [{ jid: '7001@lid', name: 'Nombre disponible', role: 'member', is_self: false }], next_cursor: '' } : { success: true, group: group.group }))
+  const fetcher = vi.fn(async (url: RequestInfo | URL) => response(String(url).includes('/participants?') ? { success: true, identity_revision: 1, group_revision: 1, order: 'admins_first', participants: [{ jid: '7001@lid', name: 'Nombre disponible', role: 'member', is_self: false }], next_cursor: '' } : { success: true, group: group.group }))
   vi.stubGlobal('fetch', fetcher)
   render(<GroupDetailsPanel chat={group} onClose={() => {}} />)
   await screen.findByText('Nombre disponible')
