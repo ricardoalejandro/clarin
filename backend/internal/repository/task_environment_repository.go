@@ -300,6 +300,13 @@ func (r *TaskWorkRepository) UpdateEnvironment(ctx context.Context, accountID, a
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return nil, err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "environment", []uuid.UUID{environment.ID}, false); err != nil {
+		return nil, err
+	}
+
 	var previousVisibility, previousDefaultAccess string
 	var previousAccessRevision int64
 	if err := tx.QueryRow(ctx, `SELECT visibility,default_access_level,access_revision FROM task_environments
@@ -379,6 +386,10 @@ func (r *TaskWorkRepository) ArchiveEnvironment(ctx context.Context, accountID, 
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "environment", []uuid.UUID{environmentID}, true); err != nil {
+		return nil, err
+	}
+
 	var isDefault bool
 	var version int64
 	if err := tx.QueryRow(ctx, `SELECT is_default,version FROM task_environments
@@ -457,6 +468,10 @@ func (r *TaskWorkRepository) RestoreEnvironment(ctx context.Context, accountID, 
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "environment", []uuid.UUID{environmentID}, true); err != nil {
+		return nil, err
+	}
+
 	var version int64
 	if err := tx.QueryRow(ctx, `SELECT version FROM task_environments
 		WHERE account_id=$1 AND id=$2 AND archived_at IS NOT NULL AND deleted_at IS NULL FOR UPDATE`, accountID, environmentID).Scan(&version); err != nil {

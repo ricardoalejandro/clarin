@@ -66,6 +66,13 @@ func (r *TaskWorkRepository) MoveTaskToEnvironment(ctx context.Context, accountI
 		return nil, nil, ErrTaskAccessInvalid
 	}
 
+	var observedSourceListID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT list_id FROM tasks WHERE account_id=$1 AND id=$2`, accountID, taskID).Scan(&observedSourceListID); err != nil {
+		return nil, nil, ErrTaskWorkNotFound
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "list", []uuid.UUID{observedSourceListID, destinationListID}, false); err != nil {
+		return nil, nil, err
+	}
 	var sourceListID uuid.UUID
 	var version int64
 	var accessMode string
@@ -77,6 +84,9 @@ func (r *TaskWorkRepository) MoveTaskToEnvironment(ctx context.Context, accountI
 			return nil, nil, ErrTaskWorkNotFound
 		}
 		return nil, nil, err
+	}
+	if sourceListID != observedSourceListID {
+		return nil, nil, ErrTaskVersionConflict
 	}
 	if version != expectedVersion {
 		return nil, nil, ErrTaskVersionConflict

@@ -13,6 +13,7 @@ type TaskContainerRemovalRequest struct {
 }
 
 type TaskContainerRemovalCounts struct {
+	Folders        int `json:"folders"`
 	Lists          int `json:"lists"`
 	Tasks          int `json:"tasks"`
 	Subtasks       int `json:"subtasks"`
@@ -51,4 +52,5 @@ type TaskContainerRemovalResult struct {
 	Mode          string      `json:"mode"`
 	WhiteboardIDs []uuid.UUID `json:"-"`
 	Replayed      bool        `json:"-"`
+	ViewerUserIDs []uuid.UUID `json:"-"`
 }

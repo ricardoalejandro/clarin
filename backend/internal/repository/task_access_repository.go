@@ -616,6 +616,10 @@ func (r *TaskWorkRepository) ReplaceAccessGrants(ctx context.Context, accountID,
 	if err != nil {
 		return nil, "", 0, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, targetType, []uuid.UUID{targetID}, false); err != nil {
+		return nil, "", 0, err
+	}
+
 	for _, input := range inputs {
 		if _, recipientIsMember := lockedMemberships[input.UserID]; !recipientIsMember {
 			return nil, "", 0, ErrTaskAccessInvalid

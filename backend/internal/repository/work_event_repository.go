@@ -428,6 +428,13 @@ func (r *WorkEventRepository) Create(ctx context.Context, event *domain.WorkEven
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, event.AccountID, actorID, nil); err != nil {
+		return err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, event.AccountID, "list", []uuid.UUID{event.ListID}, false); err != nil {
+		return err
+	}
+
 	environmentID, err := r.requireListAccessWith(ctx, tx, event.AccountID, actorID, event.ListID, domain.TaskAccessEdit)
 	if err != nil {
 		return err
@@ -912,6 +919,13 @@ func (r *WorkEventRepository) Update(ctx context.Context, event *domain.WorkEven
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, event.AccountID, actorID, nil); err != nil {
+		return err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, event.AccountID, "event", []uuid.UUID{event.ID}, false); err != nil {
+		return err
+	}
+
 	var currentVersion int64
 	var currentListID, organizerID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT version,list_id,organizer_id FROM work_events
@@ -920,6 +934,10 @@ func (r *WorkEventRepository) Update(ctx context.Context, event *domain.WorkEven
 		return ErrWorkEventNotFound
 	} else if err != nil {
 		return err
+	}
+	var sourceEnvironmentID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT environment_id FROM task_lists WHERE account_id=$1 AND id=$2`, event.AccountID, currentListID).Scan(&sourceEnvironmentID); err != nil {
+		return ErrWorkEventNotFound
 	}
 	if currentVersion != event.Version {
 		return ErrWorkEventVersionConflict
@@ -937,6 +955,9 @@ func (r *WorkEventRepository) Update(ctx context.Context, event *domain.WorkEven
 	}
 	if err != nil {
 		return err
+	}
+	if environmentID != sourceEnvironmentID {
+		return ErrWorkEventInvalid
 	}
 	attendees := canonicalWorkEventAttendees(event)
 	if !event.AttendeesSet {
@@ -1104,6 +1125,13 @@ func (r *WorkEventRepository) UpdateOccurrence(ctx context.Context, base, change
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, base.AccountID, actorID, nil); err != nil {
+		return err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, base.AccountID, "event", []uuid.UUID{base.ID}, false); err != nil {
+		return err
+	}
+
 	var currentVersion int64
 	var listID, organizerID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT version,list_id,organizer_id FROM work_events
@@ -1195,6 +1223,13 @@ func (r *WorkEventRepository) SplitFollowing(ctx context.Context, base, changed 
 		return uuid.Nil, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, base.AccountID, actorID, nil); err != nil {
+		return uuid.Nil, err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, base.AccountID, "event", []uuid.UUID{base.ID}, false); err != nil {
+		return uuid.Nil, err
+	}
+
 	var currentVersion int64
 	var currentListID, organizerID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT version,list_id,organizer_id FROM work_events
@@ -1295,6 +1330,13 @@ func (r *WorkEventRepository) UpdateAppearance(ctx context.Context, accountID, e
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "event", []uuid.UUID{eventID}, false); err != nil {
+		return err
+	}
+
 	var currentVersion int64
 	var listID, organizerID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT version,list_id,organizer_id FROM work_events
@@ -1347,6 +1389,13 @@ func (r *WorkEventRepository) SetRSVP(ctx context.Context, accountID, eventID, a
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "event", []uuid.UUID{eventID}, false); err != nil {
+		return err
+	}
+
 	var organizerID uuid.UUID
 	var eventVersion int64
 	if err := tx.QueryRow(ctx, `SELECT organizer_id,version FROM work_events WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE`, accountID, eventID).
@@ -1385,6 +1434,13 @@ func (r *WorkEventRepository) SetOwnReminder(ctx context.Context, accountID, eve
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "event", []uuid.UUID{eventID}, false); err != nil {
+		return err
+	}
+
 	command, err := tx.Exec(ctx, `UPDATE work_event_attendees SET reminder_minutes=$4,version=version+1,updated_at=NOW()
 		WHERE account_id=$1 AND event_id=$2 AND user_id=$3 AND version=$5`, accountID, eventID, actorID, minutes, version)
 	if err != nil {
@@ -1421,6 +1477,13 @@ func (r *WorkEventRepository) transition(ctx context.Context, accountID, eventID
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "event", []uuid.UUID{eventID}, false); err != nil {
+		return err
+	}
+
 	var currentVersion int64
 	var listID, organizerID uuid.UUID
 	var status string
@@ -1505,6 +1568,13 @@ func (r *WorkEventRepository) Purge(ctx context.Context, accountID, eventID, act
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "event", []uuid.UUID{eventID}, false); err != nil {
+		return err
+	}
+
 	var title string
 	var eligible bool
 	var currentVersion int64

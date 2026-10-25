@@ -96,3 +96,12 @@ describe('TaskHierarchyTree permissions', () => {
     expect(onOpenStructure).toHaveBeenCalledTimes(1)
   })
 })
+
+it('keeps folder options available on touch with a 44px independent hit target', () => {
+  render(<TaskHierarchyTree folders={[folder(full)]} rootLists={[]} scope={{ type: 'environment', id: 'environment-1' }} collapsed={false} onSelect={vi.fn()} onChanged={vi.fn()} onError={vi.fn()} />)
+  const options = screen.getByRole('button', { name: 'Personalizar Carpeta visible' })
+  expect(options).toHaveClass('h-11', 'w-11', 'opacity-100')
+  expect(options).toHaveClass('sm:opacity-0')
+  fireEvent.click(options)
+  expect(screen.getByDisplayValue('Carpeta visible')).toBeVisible()
+})

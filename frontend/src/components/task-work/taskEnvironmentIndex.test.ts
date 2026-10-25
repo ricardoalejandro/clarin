@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { TaskEnvironment } from '@/types/task'
 import {
-  mergeTaskEnvironmentIndex,
+  mergeTaskEnvironmentIndex, taskEnvironmentCanRemove, taskEnvironmentInventoryChanged, taskEnvironmentStructureEvent,
   preferredTaskEnvironmentNeedsFetch,
   selectActiveTaskEnvironment,
   taskEnvironmentPreferenceKey,
@@ -54,4 +54,29 @@ describe('task environment index', () => {
   it('scopes preferences by account and actor', () => {
     expect(taskEnvironmentPreferenceKey('account-1', 'user-2')).toBe('clarin:tasks:account-1:user-2:active-environment:v1')
   })
+})
+
+it('allows Administrar to prepare a populated environment removal while protecting General and missing capabilities', () => {
+  expect(taskEnvironmentCanRemove(environment('populated', { task_count: 500, open_task_count: 400 }))).toBe(true)
+  expect(taskEnvironmentCanRemove(environment('general', { is_default: true }))).toBe(false)
+  expect(taskEnvironmentCanRemove(environment('deleted', { deleted_at: '2026-10-24' }))).toBe(false)
+  expect(taskEnvironmentCanRemove(environment('view', { permissions: undefined } as unknown as Partial<TaskEnvironment>))).toBe(false)
+})
+it('refreshes environment inventory after count-changing work and structure, without treating comments or a title edit as structural', () => {
+  const before = { id: 'task', environment_id: 'env', list_id: 'a', status: 'pending', status_id: 'active' } as import('@/types/task').Task
+  expect(taskEnvironmentInventoryChanged(before, { ...before, title: 'New title' })).toBe(false)
+  expect(taskEnvironmentInventoryChanged(before, { ...before, status_id: 'done' })).toBe(true)
+  expect(taskEnvironmentInventoryChanged(before, { ...before, list_id: 'b' })).toBe(true)
+  expect(taskEnvironmentInventoryChanged(null, before)).toBe(true)
+  expect(taskEnvironmentInventoryChanged(before, null)).toBe(true)
+  expect(taskEnvironmentStructureEvent('container_removed')).toBe(true)
+  expect(taskEnvironmentStructureEvent('environment_restored')).toBe(true)
+  expect(taskEnvironmentStructureEvent('comment_created')).toBe(false)
+})
+it('falls back to General, then another authorized active environment, then an honest empty index', () => {
+  const other = environment('other')
+  const general = environment('general', { is_default: true })
+  expect(selectActiveTaskEnvironment([other, general], 'removed')?.id).toBe('general')
+  expect(selectActiveTaskEnvironment([other], 'removed')?.id).toBe('other')
+  expect(selectActiveTaskEnvironment([], 'removed')).toBeUndefined()
 })

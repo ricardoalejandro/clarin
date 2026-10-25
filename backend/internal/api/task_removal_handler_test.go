@@ -1,12 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"github.com/naperu/clarin/internal/domain"
 )
 
 func TestTaskRemovalExecutionRequiresReviewedScopeAndStableOperation(t *testing.T) {
@@ -58,7 +60,8 @@ func TestTaskRemovalTargetRoutesRejectZeroAndInvalidIDs(t *testing.T) {
 	}
 	app.Post("/lists/:listId/remove", handler)
 	app.Post("/folders/:folderId/remove", handler)
-	for _, kind := range []string{"lists", "folders"} {
+	app.Post("/environments/:environmentId/remove", handler)
+	for _, kind := range []string{"lists", "folders", "environments"} {
 		for _, raw := range []string{"invalid", uuid.Nil.String(), uuid.NewString()} {
 			response, err := app.Test(httptest.NewRequest("POST", "/"+kind+"/"+raw+"/remove", nil))
 			if err != nil {
@@ -73,5 +76,17 @@ func TestTaskRemovalTargetRoutesRejectZeroAndInvalidIDs(t *testing.T) {
 				t.Fatalf("%s/%s status=%d want=%d", kind, raw, response.StatusCode, want)
 			}
 		}
+	}
+}
+
+func TestTaskEnvironmentTombstoneAndPurgeEffectsKeepAudiencePrivate(t *testing.T) {
+	environment, op, viewer, board := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	payload := taskEnvironmentTombstonePayload(environment, op, "environment_purged")
+	if len(payload) != 4 || payload["environment_id"] != environment || payload["operation_id"] != op || payload["structure_changed"] != true || payload["action"] != "environment_purged" {
+		t.Fatalf("unsafe tombstone fields: %v", payload)
+	}
+	raw, err := json.Marshal(domain.TaskTrashPurgeResult{Environments: 1, ViewerUserIDs: []uuid.UUID{viewer}, WhiteboardIDs: []uuid.UUID{board}})
+	if err != nil || bytes.Contains(raw, []byte(viewer.String())) || bytes.Contains(raw, []byte(board.String())) {
+		t.Fatal("internal audience/board effects leaked in HTTP JSON")
 	}
 }

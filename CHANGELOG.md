@@ -1,5 +1,15 @@
 # Changelog — Clarin CRM
 
+## 2026-10-24
+
+### Entornos recuperables e integrantes de WhatsApp
+
+- Opciones visibles para carpetas y Entornos, con inventario del servidor, confirmación y eliminación recuperable del Entorno completo. General permanece protegido.
+- Restauración por operación que conserva lo previamente archivado o eliminado, sin borrar adjuntos ni pizarras. Los cambios simultáneos se revalidan dentro de la transacción.
+- Identidad de integrantes resuelta mediante alias comprobados, con nombre disponible, teléfono confirmado y etiquetas de administrador y Tú.
+- Ficha del integrante con foto temporal, información de perfil y grupos sincronizados en común, sin crear contactos al consultarla.
+- Mensaje abre o reutiliza el privado desde el dispositivo del grupo, sin enviar automáticamente y conservando el borrador y el contexto del grupo.
+
 ## 2026-10-23
 
 ### Build 1 — Eliminar listas y carpetas conservando su contenido

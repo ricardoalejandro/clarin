@@ -53,6 +53,8 @@ func requireContainerAccessIncludingLifecycleTx(
 ) error {
 	var query string
 	switch resourceType {
+	case "environment":
+		return requireEnvironmentAccessIncludingArchiveTx(ctx, tx, accountID, actorID, resourceID, required, true)
 	case domain.TaskAccessTargetFolder:
 		query = `SELECT (` + taskActorFolderAccessRankSQL("folder", "$3") + `)
 			FROM task_folders folder WHERE folder.account_id=$1 AND folder.id=$2`
@@ -247,6 +249,9 @@ func revalidateContainerLifecycleAuthorityTx(
 	if err := lockWhiteboardAuthorityAccountTx(ctx, tx, accountID); err != nil {
 		return err
 	}
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return err
+	}
 	if err := requireContainerAccessIncludingLifecycleTx(
 		ctx, tx, accountID, actorID, resourceID, resourceType, domain.TaskAccessFull,
 	); err != nil {
@@ -268,6 +273,9 @@ func revalidateEnvironmentLifecycleAuthorityTx(
 	folderIDs, listIDs []uuid.UUID,
 ) error {
 	if err := lockWhiteboardAuthorityAccountTx(ctx, tx, accountID); err != nil {
+		return err
+	}
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return err
 	}
 	if err := requireEnvironmentAccessIncludingArchiveTx(
@@ -436,6 +444,9 @@ func (r *TaskWorkRepository) ArchiveList(ctx context.Context, accountID, actorID
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "list", []uuid.UUID{listID}, false); err != nil {
+		return nil, err
+	}
 	var environmentID uuid.UUID
 	var isDefault bool
 	if err := tx.QueryRow(ctx, `SELECT environment_id,is_default FROM task_lists
@@ -496,6 +507,9 @@ func (r *TaskWorkRepository) UnarchiveList(ctx context.Context, accountID, actor
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "list", []uuid.UUID{listID}, false); err != nil {
+		return nil, err
+	}
 	var environmentID uuid.UUID
 	var folderID *uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT environment_id,folder_id FROM task_lists
@@ -548,6 +562,9 @@ func (r *TaskWorkRepository) ArchiveFolder(ctx context.Context, accountID, actor
 	}
 	defer tx.Rollback(ctx)
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return nil, err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "folder", []uuid.UUID{folderID}, false); err != nil {
 		return nil, err
 	}
 	var environmentID uuid.UUID
@@ -630,6 +647,9 @@ func (r *TaskWorkRepository) UnarchiveFolder(ctx context.Context, accountID, act
 	}
 	defer tx.Rollback(ctx)
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+		return nil, err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "folder", []uuid.UUID{folderID}, false); err != nil {
 		return nil, err
 	}
 	var environmentID uuid.UUID

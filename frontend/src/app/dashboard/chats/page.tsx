@@ -1,11 +1,11 @@
 'use client'
 
-import { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useLayoutEffect, useState, useRef, useCallback, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { Search, Plus, Pin, PinOff, Users, RefreshCw, X, Trash2, CheckSquare, MessageCircle, ShieldBan, Heart, ChevronDown, ChevronUp, MoreVertical, PanelRight, ListChecks, AlertTriangle, Loader2, RotateCcw, Sparkles, SlidersHorizontal } from 'lucide-react'
 import { formatTime } from '@/utils/format'
-import { getAuthScope, isAuthIdentityChanging } from '@/lib/authScope'
+import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
 import { subscribeWebSocket } from '@/lib/api'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import DeviceSelector from '@/components/chat/DeviceSelector'
@@ -13,7 +13,9 @@ import ChatKindSelector from '@/components/chat/ChatKindSelector'
 import ConversationMenu from '@/components/chat/ConversationMenu'
 import NewChatModal from '@/components/chat/NewChatModal'
 import ChatPanel from '@/components/chat/ChatPanel'
-import GroupDetailsPanel from '@/components/chat/GroupDetailsPanel'
+import GroupDetailsPanel, { type GroupDetailsPanelHandle } from '@/components/chat/GroupDetailsPanel'
+import ChatDetailsSurface from '@/components/chat/ChatDetailsSurface'
+import { hasGroupMemberHistoryLayer } from '@/components/chat/groupParticipantIdentity'
 import { usePersonalChatPins } from '@/components/chat/usePersonalChatPins'
 import { applyChatPin } from '@/utils/chatPins'
 import { chatAvatar, chatPreview, isGroupChat } from '@/utils/chatGroups'
@@ -271,6 +273,24 @@ export default function ChatsPage() {
   // Contact info (3rd column)
   const [showContactInfo, setShowContactInfo] = useState(false)
   const contactPanelRef = useRef<ContactPanelHandle>(null)
+  const groupPanelRef = useRef<GroupDetailsPanelHandle>(null)
+  const participantCloseGuard = useRef<(() => boolean) | null>(null)
+  const bindParticipantCloseGuard = useCallback((guard: (() => boolean) | null) => { participantCloseGuard.current = guard }, [])
+  const participantScope = useSyncExternalStore(subscribeAuthScope, getAuthScope, () => 'server')
+  const [participantPrivate, setParticipantPrivate] = useState<{ source: string; sourceDevice?: string; scope: string; chat: Chat } | null>(null)
+  const participantChat = participantPrivate?.source === selectedChat?.id && participantPrivate?.sourceDevice === selectedChat?.device_id && participantPrivate?.scope === participantScope && !isAuthIdentityChanging(participantScope) ? participantPrivate.chat : null
+  const changeParticipantChat = useCallback((chat: Chat | null) => {
+    setParticipantPrivate(chat && selectedChat && chat.device_id === selectedChat.device_id ? { source: selectedChat.id, sourceDevice: selectedChat.device_id, scope: getAuthScope(), chat } : null)
+  }, [selectedChat?.id, selectedChat?.device_id])
+  useEffect(() => {
+    setParticipantPrivate(current => current && (current.source !== selectedChat?.id || current.sourceDevice !== selectedChat?.device_id || current.scope !== participantScope) ? null : current)
+  }, [selectedChat?.id, selectedChat?.device_id, participantScope])
+  const navigateFromDetails = useCallback((navigate: () => void) => {
+    if (participantCloseGuard.current?.() === false) return false
+    if (isGroupChat(selectedChat) && groupPanelRef.current) return groupPanelRef.current.requestClose(navigate)
+    if (contactPanelRef.current?.canClose() === false) return false
+    navigate(); return true
+  }, [selectedChat])
 
   // Virtualizer for chat list
   const chatVirtualizer = useVirtualizer({
@@ -358,8 +378,7 @@ export default function ChatsPage() {
     compactHistoryDepthRef.current = nextDepth
   }, [containerWidth])
 
-  const openChat = useCallback((chat: Chat, addHistory = true) => {
-    if (contactPanelRef.current?.canClose() === false) return false
+  const openChat = useCallback((chat: Chat, addHistory = true) => navigateFromDetails(() => {
     navigationGenerationRef.current++
     chatCacheRef.current.set(chat.id, chat)
     setSelectedChat(chat)
@@ -367,8 +386,7 @@ export default function ChatsPage() {
     setCompactSurface('conversation')
     closeRowMenu()
     if (addHistory) pushCompactHistory('conversation', chat.id)
-    return true
-  }, [closeRowMenu, pushCompactHistory])
+  }), [closeRowMenu, pushCompactHistory, navigateFromDetails])
 
   const openContactInfo = useCallback((addHistory = true) => {
     if (!selectedChat) return
@@ -378,8 +396,7 @@ export default function ChatsPage() {
     if (addHistory) pushCompactHistory('details', selectedChat.id)
   }, [pushCompactHistory, selectedChat])
 
-  const openChatDetails = useCallback((chat: Chat) => {
-    if (contactPanelRef.current?.canClose() === false) return
+  const openChatDetails = useCallback((chat: Chat) => navigateFromDetails(() => {
     navigationGenerationRef.current++
     chatCacheRef.current.set(chat.id, chat)
     setSelectedChat(chat)
@@ -390,7 +407,7 @@ export default function ChatsPage() {
       pushCompactHistory('conversation', chat.id)
       pushCompactHistory('details', chat.id)
     }
-  }, [closeRowMenu, layoutMode, pushCompactHistory])
+  }), [closeRowMenu, layoutMode, pushCompactHistory, navigateFromDetails])
 
   const returnFromCompactSurface = useCallback((surface: 'conversation' | 'details') => {
     navigationGenerationRef.current++
@@ -423,9 +440,10 @@ export default function ChatsPage() {
 
   useEffect(() => {
     const handlePopState = (event: PopStateEvent) => {
+      if (hasGroupMemberHistoryLayer(event.state)) return
       const generation = ++navigationGenerationRef.current
       const state = (event.state || {}) as CompactHistoryState
-      if (showContactInfo && state.clarinChatSurface !== 'details' && contactPanelRef.current?.canClose() === false) {
+      if (showContactInfo && state.clarinChatSurface !== 'details' && (isGroupChat(selectedChat) ? groupPanelRef.current : contactPanelRef.current)?.canClose() === false) {
         window.history.pushState({ ...window.history.state, clarinChatSurface: 'details', clarinChatId: selectedChat?.id, clarinChatDepth: compactHistoryDepthRef.current }, '')
         return
       }
@@ -456,6 +474,9 @@ export default function ChatsPage() {
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
   }, [layoutMode, showContactInfo, selectedChat?.id])
+
+  const closeDetails = useCallback(() => navigateFromDetails(() => returnFromCompactSurface('details')), [navigateFromDetails, returnFromCompactSurface])
+  const closeConversation = useCallback(() => navigateFromDetails(() => returnFromCompactSurface('conversation')), [navigateFromDetails, returnFromCompactSurface])
 
   const focusConversation = useCallback(() => {
     if (layoutMode !== 'wide') returnFromCompactSurface('details')
@@ -1459,17 +1480,20 @@ export default function ChatsPage() {
 	                deviceId={selectedChat.device_id || ''}
 	                device={selectedDevice}
 	                initialChat={selectedChat}
+                    participantChat={participantChat}
+                    onParticipantChatChange={changeParticipantChat}
+                    onParticipantCloseGuardChange={bindParticipantCloseGuard}
                   onTogglePin={() => void pins.toggle(selectedChat)}
                   pinPending={pins.pending.has(selectedChat.id)}
 	                readOnly={selectedChatReadOnly}
-	                onClose={() => returnFromCompactSurface('conversation')}
+	                onClose={closeConversation}
 	                onContactInfoToggle={show => {
 	                  if (show) openContactInfo()
-	                  else if (contactPanelRef.current?.canClose() !== false) returnFromCompactSurface('details')
+	                  else closeDetails()
 	                }}
 	                contactInfoOpen={showContactInfo}
 	                onRequestDelete={() => requestSingleChatDeletion(selectedChat)}
-	                isActive={compactSurface !== 'list' && (layoutMode !== 'compact' || compactSurface === 'conversation')}
+	                isActive={Boolean(participantChat) || (compactSurface !== 'list' && (layoutMode !== 'compact' || compactSurface === 'conversation'))}
 	                onRead={reconcileChatUnread}
                   focusRequest={composerFocusRequest}
                   attentionMode={filterPending}
@@ -1489,9 +1513,9 @@ export default function ChatsPage() {
       </div>
 
       {/* Right Resizer + Contact Panel (3rd column) */}
-      {layoutMode === 'wide' && showContactInfo && selectedChat && (
+      {showContactInfo && selectedChat && (
         <>
-          <div
+          {layoutMode === 'wide' && <div
             role="separator"
             aria-label="Cambiar ancho del panel de detalles"
             aria-orientation="vertical"
@@ -1507,43 +1531,24 @@ export default function ChatsPage() {
             title="Arrastra para ajustar. Doble clic para restablecer."
           >
             <span aria-hidden="true" className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-slate-200 transition-all group-hover:w-1 group-hover:bg-emerald-300 group-active:bg-emerald-500" />
-          </div>
-          <div className="shrink-0 overflow-hidden bg-white" style={{ width: rightPanelWidth }}>
-            {isGroupChat(selectedChat) ? <GroupDetailsPanel key={selectedChat.id} chat={selectedChat} onClose={() => returnFromCompactSurface('details')} /> : <ContactPanel
-              ref={contactPanelRef}
-              chatId={selectedChat.id}
-              isOpen={true}
-              onClose={() => returnFromCompactSurface('details')}
-              onFocusConversation={focusConversation}
-              focusConversationClosesDetails={false}
-              deviceName={selectedDeviceName}
-              devicePhone={selectedDevicePhone}
-              chatPhone={formatPhone(selectedChat.jid, selectedChat.contact_phone)}
-            />}
-          </div>
-        </>
-      )}
-
-      {/* Medium widths use a drawer; compact widths use a full workspace panel. */}
-      {layoutMode !== 'wide' && showContactInfo && selectedChat && (
-        <>
-          {layoutMode === 'medium' && <button type="button" className="absolute inset-0 z-20 bg-slate-950/20" onClick={() => { if (contactPanelRef.current?.canClose() !== false) setShowContactInfo(false) }} aria-label="Cerrar detalles" />}
-          <div
-            className={`absolute inset-y-0 right-0 z-30 overflow-hidden bg-white shadow-2xl ${layoutMode === 'compact' ? 'left-0' : 'border-l border-slate-200'}`}
-            style={layoutMode === 'compact' ? undefined : { width: 'clamp(360px, 38vw, 440px)', maxWidth: '92%' }}
+          </div>}
+          {layoutMode === 'medium' && !participantChat && <button type="button" className="absolute inset-0 z-20 bg-slate-950/20" onClick={() => closeDetails()} aria-label="Cerrar detalles" />}
+          <ChatDetailsSurface
+            key="conversation-details-surface"
+            mode={layoutMode} width={rightPanelWidth} suspended={Boolean(participantChat)}
           >
-            {isGroupChat(selectedChat) ? <GroupDetailsPanel key={selectedChat.id} chat={selectedChat} onClose={() => returnFromCompactSurface('details')} /> : <ContactPanel
+            {isGroupChat(selectedChat) ? <GroupDetailsPanel ref={groupPanelRef} key={selectedChat.id} chat={selectedChat} suspended={Boolean(participantChat)} onOpenChat={changeParticipantChat} onClose={() => returnFromCompactSurface('details')} /> : <ContactPanel
               ref={contactPanelRef}
               chatId={selectedChat.id}
               isOpen={true}
               onClose={() => returnFromCompactSurface('details')}
               onFocusConversation={focusConversation}
-              focusConversationClosesDetails
+              focusConversationClosesDetails={layoutMode !== 'wide'}
               deviceName={selectedDeviceName}
               devicePhone={selectedDevicePhone}
               chatPhone={formatPhone(selectedChat.jid, selectedChat.contact_phone)}
             />}
-          </div>
+          </ChatDetailsSurface>
         </>
       )}
 

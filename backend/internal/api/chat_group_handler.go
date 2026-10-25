@@ -5,6 +5,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/whatsapp"
 	"strings"
 	"time"
 )
@@ -48,9 +49,41 @@ func (s *Server) handleGetGroupParticipants(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	rows, next, err := s.repos.Chat.GroupParticipants(c.Context(), chat.AccountID, chat.ID, c.Query("search"), c.Query("cursor"), c.QueryInt("limit", 50))
+	search := strings.TrimSpace(c.Query("search"))
+	var identities *whatsapp.GroupParticipantIdentitySnapshot
+	if chat.DeviceID != nil {
+		identities = s.pool.GroupParticipantIdentities(c.Context(), chat.AccountID, *chat.DeviceID)
+	}
+	var matchingJIDs []string
+	var projectedByJID map[string]domain.GroupParticipant
+	if search != "" {
+		all, readErr := s.repos.Chat.GroupParticipantIdentitySnapshot(c.Context(), chat.AccountID, chat.ID)
+		if readErr != nil {
+			return fiber.ErrInternalServerError
+		}
+		all, _, _, err = s.projectGroupParticipantsWithSnapshot(c, chat, all, identities)
+		if err != nil {
+			return fiber.ErrInternalServerError
+		}
+		matchingJIDs = groupParticipantsMatchingSearch(all, search)
+		projectedByJID = make(map[string]domain.GroupParticipant, len(all))
+		for _, member := range all {
+			projectedByJID[member.JID] = member
+		}
+	}
+	rows, next, err := s.repos.Chat.GroupParticipantsMatching(c.Context(), chat.AccountID, chat.ID, search, c.Query("cursor"), c.QueryInt("limit", 50), matchingJIDs)
 	if err != nil {
 		return fiber.ErrInternalServerError
+	}
+	if projectedByJID != nil {
+		for i := range rows {
+			rows[i] = projectedByJID[rows[i].JID]
+		}
+	} else {
+		rows, _, _, err = s.projectGroupParticipantsWithSnapshot(c, chat, rows, identities)
+		if err != nil {
+			return fiber.ErrInternalServerError
+		}
 	}
 	return c.JSON(fiber.Map{"success": true, "participants": rows, "next_cursor": next})
 }

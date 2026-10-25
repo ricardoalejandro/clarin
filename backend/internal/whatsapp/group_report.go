@@ -129,40 +129,25 @@ func (p *DevicePool) LoadGroupSnapshot(ctx context.Context, accountID, deviceID 
 		Members:          make([]domain.WhatsAppGroupReportIdentity, 0, len(info.Participants)),
 	}
 	for idx, participant := range info.Participants {
-		phoneJID := participant.PhoneNumber.ToNonAD()
-		lid := participant.LID.ToNonAD()
+		resolvedMember := groupReportParticipantIdentity(ctx, instance, participant, contacts)
+		phoneJID := types.EmptyJID
+		if resolvedMember.Phone != "" {
+			phoneJID = types.NewJID(resolvedMember.Phone, types.DefaultUserServer)
+		}
 		primary := participant.JID.ToNonAD()
-		if phoneJID.IsEmpty() && primary.Server == types.DefaultUserServer {
-			phoneJID = primary
-		}
-		if lid.IsEmpty() && primary.Server == types.HiddenUserServer {
-			lid = primary
-		}
-		if phoneJID.IsEmpty() && !lid.IsEmpty() {
-			if resolved, resolveErr := instance.Client.Store.LIDs.GetPNForLID(ctx, lid); resolveErr == nil && !resolved.IsEmpty() {
-				phoneJID = resolved.ToNonAD()
-			}
-		}
 
 		var phone *string
 		phoneJIDString := ""
 		if !phoneJID.IsEmpty() {
-			digits := normalizeGroupReportPhone(phoneJID.User)
-			if digits != "" {
-				phone = &digits
-				phoneJIDString = digits + "@" + types.DefaultUserServer
-			}
-		}
-		lidString := ""
-		if !lid.IsEmpty() {
-			lidString = lid.String()
+			digits := resolvedMember.Phone
+			phone = &digits
+			phoneJIDString = phoneJID.String()
 		}
 
-		contactInfo := findGroupContactInfo(contacts, phoneJID, primary, lid)
-		whatsappName := bestGroupContactName(contactInfo)
+		whatsappName := resolvedMember.Name
 		redacted := strings.TrimSpace(participant.DisplayName)
 		if redacted == "" {
-			redacted = strings.TrimSpace(contactInfo.RedactedPhone)
+			redacted = resolvedMember.RedactedPhone
 		}
 		var redactedPtr *string
 		if redacted != "" {
@@ -178,20 +163,9 @@ func (p *DevicePool) LoadGroupSnapshot(ctx context.Context, accountID, deviceID 
 			}
 		}
 
-		role := "member"
+		role := resolvedMember.Role
 		if sameReportJID(primary, info.OwnerJID) || sameReportJID(phoneJID, info.OwnerPN) {
 			role = "owner"
-		} else if participant.IsSuperAdmin {
-			role = "super_admin"
-		} else if participant.IsAdmin {
-			role = "admin"
-		}
-		isSelf := false
-		if instance.Client.Store.ID != nil && sameReportJID(phoneJID, instance.Client.Store.ID.ToNonAD()) {
-			isSelf = true
-		}
-		if !instance.Client.Store.LID.IsEmpty() && sameReportJID(lid, instance.Client.Store.LID.ToNonAD()) {
-			isSelf = true
 		}
 
 		snapshot.Members = append(snapshot.Members, domain.WhatsAppGroupReportIdentity{
@@ -200,12 +174,21 @@ func (p *DevicePool) LoadGroupSnapshot(ctx context.Context, accountID, deviceID 
 			Phone:         phone,
 			RedactedPhone: redactedPtr,
 			PhoneJID:      phoneJIDString,
-			LID:           lidString,
+			LID:           resolvedMember.LID,
 			Role:          role,
-			IsSelf:        isSelf,
+			IsSelf:        resolvedMember.IsSelf,
 		})
 	}
 	return snapshot, nil
+}
+
+func groupReportParticipantIdentity(ctx context.Context, instance *DeviceInstance, participant types.GroupParticipant, contacts map[types.JID]types.ContactInfo) domain.GroupParticipant {
+	var ownPN types.JID
+	if instance.Client.Store.ID != nil {
+		ownPN = instance.Client.Store.ID.ToNonAD()
+	}
+	member := resolveGroupMemberIdentity(participant, ownPN, instance.Client.Store.LID, types.EmptyJID, nil)
+	return resolveCachedGroupParticipant(ctx, instance, member, contacts)
 }
 
 func sameReportJID(left, right types.JID) bool {
@@ -224,25 +207,4 @@ func normalizeGroupReportPhone(value string) string {
 		return "51" + result
 	}
 	return result
-}
-
-func findGroupContactInfo(contacts map[types.JID]types.ContactInfo, candidates ...types.JID) types.ContactInfo {
-	for _, candidate := range candidates {
-		if candidate.IsEmpty() {
-			continue
-		}
-		if info, ok := contacts[candidate.ToNonAD()]; ok {
-			return info
-		}
-	}
-	return types.ContactInfo{}
-}
-
-func bestGroupContactName(info types.ContactInfo) string {
-	for _, value := range []string{info.FullName, info.FirstName, info.BusinessName, info.PushName} {
-		if value = strings.TrimSpace(value); value != "" {
-			return value
-		}
-	}
-	return ""
 }

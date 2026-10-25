@@ -76,6 +76,13 @@ func (r *TaskWorkRepository) BulkUpdateTasks(ctx context.Context, accountID uuid
 			return nil, ErrTaskBulkUpdateInvalid
 		}
 	}
+	barrierIDs := make([]uuid.UUID, 0, len(items))
+	for _, item := range items {
+		barrierIDs = append(barrierIDs, item.ID)
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "task", barrierIDs, false); err != nil {
+		return nil, err
+	}
 	currentAssignees := make(map[uuid.UUID]uuid.UUID, len(items))
 	for _, item := range items {
 		var version int64
@@ -194,6 +201,13 @@ func (r *TaskWorkRepository) BulkTrashTasks(ctx context.Context, accountID, acto
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	barrierIDs := make([]uuid.UUID, 0, len(ordered))
+	for _, item := range ordered {
+		barrierIDs = append(barrierIDs, item.ID)
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "task", barrierIDs, false); err != nil {
+		return nil, err
+	}
 	for _, item := range ordered {
 		if _, duplicate := seen[item.ID]; duplicate {
 			return nil, ErrTaskBulkTrashInvalid
@@ -283,6 +297,9 @@ func (r *TaskWorkRepository) RescheduleTaskChain(ctx context.Context, accountID 
 			return nil, err
 		}
 		rows.Close()
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "task", ids, false); err != nil {
+		return nil, err
 	}
 	if err := lockAndRequireTaskAccessTx(ctx, tx, accountID, input.ActorID, ids, domain.TaskAccessEdit); err != nil {
 		return nil, err

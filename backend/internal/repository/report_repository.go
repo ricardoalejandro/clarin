@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/naperu/clarin/internal/domain"
 )
@@ -15,6 +16,16 @@ type ReportRepository struct {
 }
 
 func (r *ReportRepository) MatchWhatsAppGroupMembers(ctx context.Context, accountID uuid.UUID, identities []domain.WhatsAppGroupReportIdentity) (map[int][]uuid.UUID, error) {
+	return matchWhatsAppGroupMembers(ctx, r.db, accountID, identities)
+}
+
+type groupMemberIdentityQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+// Rendering and the recipient guard must use exactly the same PN/LID and
+// canonical-priority policy. The guard supplies its transaction as the querier.
+func matchWhatsAppGroupMembers(ctx context.Context, db groupMemberIdentityQuerier, accountID uuid.UUID, identities []domain.WhatsAppGroupReportIdentity) (map[int][]uuid.UUID, error) {
 	result := make(map[int][]uuid.UUID, len(identities))
 	if len(identities) == 0 {
 		return result, nil
@@ -34,7 +45,7 @@ func (r *ReportRepository) MatchWhatsAppGroupMembers(ctx context.Context, accoun
 		lids = append(lids, identity.LID)
 	}
 
-	rows, err := r.db.Query(ctx, `
+	rows, err := db.Query(ctx, `
 		WITH requested AS (
 			SELECT * FROM unnest($2::int4[], $3::text[], $4::text[], $5::text[])
 				AS r(ordinal, phone, phone_jid, lid)

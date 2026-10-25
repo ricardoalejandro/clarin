@@ -1,8 +1,9 @@
 import type { TaskHierarchyCounts } from './taskHierarchyCounts'
 
 export type TaskContainerRemovalMode = 'trash_all' | 'preserve_contents'
-export type TaskContainerRemovalType = 'list' | 'folder'
+export type TaskContainerRemovalType = 'list' | 'folder' | 'environment'
 export interface TaskContainerRemovalCounts {
+  folders?: number
   lists: number
   tasks: number
   subtasks: number
@@ -55,7 +56,7 @@ export interface TaskContainerRemovalDraft {
 }
 
 export function taskContainerRemovalEndpoint(type: TaskContainerRemovalType, id: string) {
-  return `/api/tasks/${type === 'folder' ? 'folders' : 'lists'}/${encodeURIComponent(id)}`
+  return `/api/tasks/${type === 'environment' ? 'environments' : type === 'folder' ? 'folders' : 'lists'}/${encodeURIComponent(id)}`
 }
 
 export function taskContainerRemovalPreparation(draft: Pick<TaskContainerRemovalDraft, 'mode' | 'destinationListID'>) {
@@ -66,13 +67,13 @@ export function taskContainerRemovalPreparation(draft: Pick<TaskContainerRemoval
 }
 
 export function taskContainerRemovalPreviewMatches(preview: TaskContainerRemovalPreview | null, type: TaskContainerRemovalType, id: string, draft: TaskContainerRemovalDraft) {
-  return Boolean(preview && preview.type === type && preview.id === id && preview.mode === draft.mode &&
+  return Boolean((type !== 'environment' || draft.mode === 'trash_all') && preview && preview.type === type && preview.id === id && preview.mode === draft.mode &&
     (preview.destination_list_id || '') === (draft.mode === 'preserve_contents' ? draft.destinationListID : ''))
 }
 
 export function canConfirmTaskContainerRemoval(preview: TaskContainerRemovalPreview | null, draft: TaskContainerRemovalDraft) {
-  return Boolean(preview?.can_execute && preview.preview_token && !preview.blockers?.length &&
-    (!preview.requires_name || draft.confirmationName === preview.name) &&
+  return Boolean(preview?.can_execute && (preview.type !== 'environment' || (preview.mode === 'trash_all' && draft.mode === 'trash_all')) && preview.preview_token && !preview.blockers?.length &&
+    (!(preview.requires_name || preview.type === 'environment') || draft.confirmationName === preview.name) &&
     (!preview.requires_destination || draft.destinationListID) &&
     (!preview.requires_event_cancellation || draft.cancelFutureEvents) &&
     (!preview.requires_access_confirmation || draft.confirmAccessChanges))
@@ -91,6 +92,7 @@ export function taskContainerRemovalPayload(preview: TaskContainerRemovalPreview
 
 export function taskContainerRemovalInventory(counts: TaskContainerRemovalCounts) {
   return [
+    ...(typeof counts.folders === 'number' ? [{ label: 'Carpetas', count: counts.folders }] : []),
     { label: 'Listas', count: counts.lists },
     { label: 'Tareas', count: counts.tasks },
     { label: 'Subtareas', count: counts.subtasks },
@@ -102,6 +104,10 @@ export function taskContainerRemovalInventory(counts: TaskContainerRemovalCounts
 export function taskRemovalInvalidatesMountedScope(action: string, status: number | undefined, current: { type: string; id?: string }, requested: { type: string; id?: string }) {
   return (action === 'container_removed' || action === 'container_restored') && status === 404 &&
     (requested.type === 'folder' || requested.type === 'list') && current.type === requested.type && current.id === requested.id
+}
+
+export function taskRemovalNeedsNewPreview(status?: number, code?: string) {
+  return status === 409 && (!code || code === 'removal_preview_changed')
 }
 
 /** A superseded read is neutral; an actual failed read must keep the saved-operation recovery surface open. */
