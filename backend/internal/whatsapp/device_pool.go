@@ -152,11 +152,25 @@ type DeviceInstance struct {
 	Status          string
 	QRCode          string
 	ReceiveMessages bool // when false, incoming messages are silently dropped
+	InitialPairing  bool // consumes contact import only for the first QR pairing, never a resumed session
 	Metrics         DeviceHealthMetrics
 	mu              sync.RWMutex
 	// reconnect control
 	reconnecting  bool
 	stopReconnect chan struct{}
+}
+
+// A stored companion session is a restart/reconnection, never a request to
+// import contacts or collapse CRM records based on newly learned identities.
+func deviceNeedsInitialContactSync(device *store.Device) bool {
+	return device != nil && device.ID == nil
+}
+func (instance *DeviceInstance) consumeInitialPairingContactSync() bool {
+	instance.mu.Lock()
+	defer instance.mu.Unlock()
+	initial := instance.InitialPairing
+	instance.InitialPairing = false
+	return initial
 }
 
 // DevicePool manages multiple WhatsApp connections
@@ -267,9 +281,6 @@ func (p *DevicePool) SetReceiveMessages(deviceID uuid.UUID, value bool) {
 // LoadExistingDevices loads all existing devices and connects them
 func (p *DevicePool) LoadExistingDevices(ctx context.Context) error {
 	p.startDeletionWorkers()
-	// Reconcile proven legacy LID Contact duplicates independently of device
-	// connectivity. This also covers dormant devices without reconnecting them.
-	go p.reconcileAllMappedLIDContacts(context.Background())
 
 	devices, err := p.repos.Device.GetAll(ctx)
 	if err != nil {
@@ -413,6 +424,7 @@ func (p *DevicePool) ConnectDevice(ctx context.Context, deviceID uuid.UUID) erro
 		Client:          client,
 		Status:          domain.DeviceStatusConnecting,
 		ReceiveMessages: device.ReceiveMessages,
+		InitialPairing:  deviceNeedsInitialContactSync(client.Store),
 	}
 	p.devices[deviceID] = instance
 
@@ -670,6 +682,7 @@ func (p *DevicePool) handleConnected(ctx context.Context, instance *DeviceInstan
 		log.Printf("[PeerIdentity] session initialization unavailable account=%s device=%s", instance.AccountID, instance.ID)
 		return
 	}
+	syncInitialContacts := instance.consumeInitialPairingContactSync()
 	p.mu.RUnlock()
 	if p.GroupsEnabledForAccount(instance.AccountID) {
 		if err := p.EnqueueIdentityRecovery(ctx, instance.AccountID, instance.ID, "connected"); err != nil {
@@ -681,11 +694,12 @@ func (p *DevicePool) handleConnected(ctx context.Context, instance *DeviceInstan
 
 	log.Printf("[Device %s] Connected as %s", instance.ID, jid)
 
-	// Reconcile already persisted pending chats before the general contact sync.
+	// Existing sessions resume without importing or merging CRM records.
 	go func() {
 		backgroundCtx := context.Background()
-		p.reconcilePendingChatIdentities(backgroundCtx, instance)
-		p.syncContacts(backgroundCtx, instance)
+		if syncInitialContacts {
+			p.syncContacts(backgroundCtx, instance)
+		}
 		if _, err := p.SyncGroups(backgroundCtx, instance.AccountID, instance.ID); err != nil {
 			log.Printf("[Groups] discovery unavailable device=%s: %v", instance.ID, err)
 		}
