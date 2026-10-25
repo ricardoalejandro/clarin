@@ -604,3 +604,25 @@ describe('ContactAvatarControl manual image session', () => {
     expect(image.src).toBe('')
   })
 })
+
+
+it('keeps the Contact view window and read-only photo zoom, then releases gestures on owner change', async () => {
+  const view = render(<ContactAvatarControl {...defaultProps} disabled />)
+  fireEvent.click(screen.getByRole('button', { name: 'Ampliar foto de Ana Prueba' }))
+  const dialog = screen.getByRole('dialog', { name: 'Gestionar foto del contacto' })
+  expect(screen.getByRole('heading', { name: 'Foto del contacto' })).toBeVisible()
+  const viewport = dialog.querySelector<HTMLElement>('[data-image-viewport]')!
+  fireEvent.load(viewport.querySelector('img')!)
+  const wheel = new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: -100 })
+  fireEvent(viewport, wheel)
+  expect(wheel.defaultPrevented).toBe(true)
+  expect(Number(viewport.dataset.imageScale)).toBeGreaterThan(1)
+  expect(screen.getByRole('dialog', { name: 'Gestionar foto del contacto' })).toBe(dialog)
+  expect(apiMocks.apiUpload).not.toHaveBeenCalled()
+  expect(apiMocks.api.mock.calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true)
+  view.rerender(<ContactAvatarControl {...defaultProps} contactId="contact-two" contextId="participant-two" disabled />)
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  const retained = new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: -100 })
+  fireEvent(viewport, retained)
+  expect(retained.defaultPrevented).toBe(false)
+})

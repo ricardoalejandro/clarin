@@ -1,14 +1,17 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Search, Send, User, Users, Image as ImageIcon, FileText, Video, Mic, Check, RefreshCw } from 'lucide-react'
-import { Chat, Message } from '@/types/chat'
+import { X, Search, Send, User, Users, Check, RefreshCw, Forward, AlertCircle } from 'lucide-react'
+import type { Chat, Message } from '@/types/chat'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import { SearchRequestLifecycle, type SearchRequestLease } from '@/lib/searchRequestLifecycle'
+import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
-import { chatAvatar, groupWriteRestriction, isGroupChat } from '@/utils/chatGroups'
+import { restoreDialogFocus, useDialogTabTrap } from '@/components/programs/useDialogTabTrap'
+import { chatAvatar, isGroupChat } from '@/utils/chatGroups'
 import { formatPhone, getChatDisplayName, isPendingChatIdentity } from '@/utils/chat'
+import { forwardValidationCodes, forwardDestinationIssue, forwardingLabel, forwardingSessionKey, forwardLimits, forwardSourceIssue, forwardActionIssue, parseForwardReceipt, rememberForwardBatch, restoreForwardBatch, type ForwardBatchRequest, type ForwardDestinationResult, type StoredForwardBatch, type ForwardMode, type ForwardContentVariant } from './messageForwarding'
 
 interface Props {
   message: Message
@@ -17,337 +20,234 @@ interface Props {
   onClose: () => void
   onSuccess: () => void
   suspended?: boolean
+  nativeForwardEnabled?: boolean
+  copyEnabled?: boolean
+}
+const PAGE_SIZE = 50
+const resultLabel: Record<ForwardDestinationResult['state'], string> = { pending: 'Pendiente', sending: 'Enviando', sent: 'Enviado', failed: 'No enviado', uncertain: 'Resultado por comprobar' }
+
+export default function ForwardMessageModal(props: Props) {
+  const scope = useSyncExternalStore(subscribeAuthScope, getAuthScope, () => 'server')
+  if (isAuthIdentityChanging(scope)) return null
+  return <ForwardMessageSession key={`${scope}:${props.deviceId}:${props.chatId}:${props.message.id}`} {...props} scope={scope} />
 }
 
-const MAX_FORWARD = 5
-const PAGE_SIZE = 50
+function ForwardMessageSession({ message, deviceId, chatId, onClose, onSuccess, suspended = false, nativeForwardEnabled = false, copyEnabled = true, scope }: Props & { scope: string }) {
+  const key = forwardingSessionKey(scope, chatId, message.id, deviceId)
+  const suspendedRef = useRef(suspended); suspendedRef.current = suspended
+  const mounted = useRef(true)
+  const inFlight = useRef(false)
+  const writeLease = useRef<AbortController | null>(null)
+  const searchLifecycle = useRef(new SearchRequestLifecycle())
+  const searchEdited = useRef(false)
+  const current = useCallback(() => mounted.current && getAuthScope() === scope && !isAuthIdentityChanging(scope), [scope])
+  const nativeCapabilityIssue = 'El reenvío nativo aún no está verificado para este dispositivo.'
+  const [capabilityRejected, setCapabilityRejected] = useState(false)
+  const initial = useRef<StoredForwardBatch | null | undefined>(undefined)
+  if (initial.current === undefined) {
+    const restored = restoreForwardBatch(key)
+    initial.current = restored?.request.source_chat_id === chatId && restored.request.source_message_id === message.id && restored.request.device_id === deviceId ? restored : null
+  }
+  const [batch, setBatch] = useState<StoredForwardBatch | null>(initial.current)
+  const batchRef = useRef(batch); batchRef.current = batch
+  const nativeIssue = forwardSourceIssue(message, deviceId) || (!nativeForwardEnabled || capabilityRejected ? nativeCapabilityIssue : null)
+  const copyIssue = forwardActionIssue(message, deviceId) || (!copyEnabled ? 'El dispositivo no está disponible para enviar una copia.' : null)
+  const [chosenMode, setChosenMode] = useState<ForwardMode>(() => initial.current?.request.mode ?? (initial.current ? 'native' : nativeIssue ? 'copy' : 'native'))
+  const [chosenVariant, setChosenVariant] = useState<ForwardContentVariant>(() => initial.current?.request.content_variant ?? 'original')
+  const mode = batch ? batch.request.mode ?? 'native' : chosenMode
+  const variant = batch ? batch.request.content_variant ?? 'original' : chosenVariant
+  const sourceIssue = mode === 'native' ? nativeIssue : copyIssue || forwardSourceIssue(message, deviceId, mode, variant)
+  const sourceIssueRef = useRef(sourceIssue); sourceIssueRef.current = sourceIssue
+  const optionsRef = useRef({ mode, variant }); optionsRef.current = { mode, variant }
+  const needsAudioDocument = message.message_type === 'audio' && typeof message.audio_ptt !== 'boolean'
+  const limits = forwardLimits(message)
 
-export default function ForwardMessageModal({ message, deviceId, chatId, onClose, onSuccess, suspended = false }: Props) {
-  const suspendedRef = useRef(suspended)
-  suspendedRef.current = suspended
-  const sendingRef = useRef(false)
-  const mountedRef = useRef(true)
-  const sourceKey = `${chatId}:${message.id}`
-  const sourceKeyRef = useRef(sourceKey)
-  sourceKeyRef.current = sourceKey
-  const currentSource = () => mountedRef.current && sourceKey === sourceKeyRef.current
   const [chats, setChats] = useState<Chat[]>([])
+  const [selected, setSelected] = useState<Chat[]>([])
   const [search, setSearch] = useState('')
   const [settledSearch, setSettledSearch] = useState('')
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [total, setTotal] = useState(0)
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState('')
-  const [selectedChats, setSelectedChats] = useState<Chat[]>([])
-  const searchRef = useRef<HTMLInputElement>(null)
-  const searchLifecycleRef = useRef(new SearchRequestLifecycle())
-  const operationalPortal = useOperationalOverlayPortal()
+  const [missingReceipt, setMissingReceipt] = useState(false)
+  const searchInput = useRef<HTMLInputElement>(null)
+  const dialog = useRef<HTMLDivElement>(null)
+  const portal = useOperationalOverlayPortal()
   useOperationalOverlayRegistration(!suspended, `forward-message:${message.id}`)
-
+  useDialogTabTrap(!suspended, dialog)
   useEffect(() => {
-    if (suspended) return
-    const focusTimer = window.setTimeout(() => searchRef.current?.focus(), 100)
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !sending) {
-        event.preventDefault()
-        event.stopPropagation()
-        onClose()
-      }
+    mounted.current = true
+    return () => { mounted.current = false; searchLifecycle.current.invalidate(); writeLease.current?.abort() }
+  }, [])
+  useEffect(() => {
+    if (suspended) { searchLifecycle.current.invalidate(); return }
+    const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const timer = window.setTimeout(() => (batchRef.current ? dialog.current : searchInput.current)?.focus({ preventScroll: true }), 0)
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !inFlight.current) { event.preventDefault(); event.stopPropagation(); onClose() }
     }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      window.clearTimeout(focusTimer)
-      document.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [onClose, sending, suspended])
+    document.addEventListener('keydown', escape)
+    return () => { window.clearTimeout(timer); document.removeEventListener('keydown', escape); if (current()) restoreDialogFocus([invoker]) }
+  }, [suspended, onClose, current])
 
   const fetchChats = useCallback(async (offset: number, append: boolean, query: string, lease: SearchRequestLease) => {
-    const token = localStorage.getItem('token')
-    if (append) setLoadingMore(true)
-    else setLoading(true)
+    if (!current() || suspendedRef.current) return
+    if (append) setLoadingMore(true); else setLoading(true)
     setLoadError('')
-    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset), device_ids: deviceId })
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset), device_ids: deviceId, kind: 'all' })
     if (query) params.set('search', query)
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    lease.signal.addEventListener('abort', abort, { once: true })
+    const timeout = window.setTimeout(abort, 20000)
     try {
-      const res = await fetch(`/api/chats?${params.toString()}`, {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: lease.signal,
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok || !data.success || !Array.isArray(data.chats)) throw new Error(data.error || 'No se pudieron cargar los chats.')
-      if (!searchLifecycleRef.current.isCurrent(lease)) return
-      setChats(current => append ? [...current, ...data.chats.filter((chat: Chat) => !current.some(item => item.id === chat.id))] : data.chats)
-      setTotal(Number(data.total) || data.chats.length)
-    } catch (error) {
-      if (!searchLifecycleRef.current.isCurrent(lease)) return
-      setLoadError(error instanceof Error ? error.message : 'No se pudieron cargar los chats.')
-      if (!append) {
-        setChats([])
-        setTotal(0)
-      }
+      const response = await fetch(`/api/chats?${params}`, { credentials: 'include', cache: 'no-store', signal: controller.signal })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok || !data.success || !Array.isArray(data.chats)) throw new Error(data.error || 'No se pudieron cargar los chats.')
+      if (!current() || !searchLifecycle.current.isCurrent(lease)) return
+      setChats(rows => append ? [...rows, ...data.chats.filter((chat: Chat) => !rows.some(row => row.id === chat.id))] : data.chats)
+      setTotal(typeof data.total === 'number' ? data.total : data.chats.length)
+    } catch (cause) {
+      if (!current() || !searchLifecycle.current.isCurrent(lease)) return
+      setLoadError(cause instanceof Error && cause.name !== 'AbortError' ? cause.message : 'La consulta tardó demasiado. Puedes reintentar.')
     } finally {
-      if (searchLifecycleRef.current.finish(lease)) {
-        setLoading(false)
-        setLoadingMore(false)
-      }
+      window.clearTimeout(timeout); lease.signal.removeEventListener('abort', abort)
+      if (current() && searchLifecycle.current.finish(lease)) { setLoading(false); setLoadingMore(false) }
     }
-  }, [deviceId])
-
-  const runSearch = useCallback((offset: number, append: boolean, query = settledSearch) => {
-    if (suspendedRef.current) return
-    const lease = searchLifecycleRef.current.begin()
-    void fetchChats(offset, append, query, lease)
-  }, [fetchChats, settledSearch])
-
-  const updateSearch = (value: string) => {
-    if (suspendedRef.current) return
-    searchLifecycleRef.current.invalidate()
-    setLoading(false)
-    setLoadingMore(false)
-    setSearch(value)
-    if (!value) setSettledSearch('')
-  }
-
+  }, [deviceId, current])
+  const runSearch = useCallback((offset = 0, append = false, query = settledSearch) => {
+    if (!current() || suspendedRef.current) return
+    void fetchChats(offset, append, query, searchLifecycle.current.begin())
+  }, [current, fetchChats, settledSearch])
   useEffect(() => {
-    if (suspended) { searchLifecycleRef.current.invalidate(); return }
+    if (suspended || batch || sourceIssue) return
     const timer = window.setTimeout(() => {
-      const query = search.trim()
-      setSettledSearch(query)
-      const lease = searchLifecycleRef.current.begin()
-      void fetchChats(0, false, query, lease)
-    }, search.trim() ? SEARCH_DEBOUNCE_MS : 0)
-    return () => {
-      window.clearTimeout(timer)
-    }
-  }, [fetchChats, search, suspended])
-
-  useEffect(() => {
-    mountedRef.current = true
-    return () => { mountedRef.current = false; searchLifecycleRef.current.invalidate() }
-  }, [])
-
-  const searchPending = search.trim() !== settledSearch
-
-  const toggleSelect = (chat: Chat) => {
-    if (suspendedRef.current || chat.device_id !== deviceId || groupWriteRestriction(chat)) return
-    setSelectedChats(previous => {
-      if (previous.some(item => item.id === chat.id)) return previous.filter(item => item.id !== chat.id)
-      if (previous.length >= MAX_FORWARD) return previous
-      return [...previous, chat]
-    })
+      setSettledSearch(search.trim())
+      void fetchChats(0, false, search.trim(), searchLifecycle.current.begin())
+    }, searchEdited.current ? SEARCH_DEBOUNCE_MS : 0)
+    return () => { window.clearTimeout(timer); searchLifecycle.current.invalidate() }
+  }, [suspended, batch, sourceIssue, search, fetchChats])
+  const updateSearch = (value: string) => {
+    searchEdited.current = true
+    searchLifecycle.current.invalidate(); setLoading(false); setLoadingMore(false); setSearch(value)
   }
-
-  const handleForwardAll = async () => {
-    if (!currentSource() || suspendedRef.current || selectedChats.length === 0 || sendingRef.current) return
-    sendingRef.current = true
-    setSending(true)
-    setSendError('')
-
-    const token = localStorage.getItem('token')
-    let successCount = 0
-    const failedTargets: Chat[] = []
-
-    for (let index = 0; index < selectedChats.length; index++) {
-      if (!currentSource()) return
-      if (suspendedRef.current) { failedTargets.push(...selectedChats.slice(index)); break }
-      const target = selectedChats[index]
-      if (target.device_id !== deviceId || groupWriteRestriction(target)) { failedTargets.push(target); continue }
-      try {
-        const res = await fetch('/api/messages/forward', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            device_id: deviceId,
-            to: target.jid,
-            chat_id: chatId,
-            message_id: message.message_id
-          })
-        })
-        const data = await res.json().catch(() => ({}))
-        if (res.ok && data.success) successCount++
-        else failedTargets.push(target)
-      } catch (err) {
-        console.error('Forward failed to', target.jid, err)
-        failedTargets.push(target)
+  const persist = (next: StoredForwardBatch | null) => { batchRef.current = next; setBatch(next); rememberForwardBatch(key, next) }
+  const reconcileResult = (data: unknown, operation: StoredForwardBatch) => {
+    const receipt = parseForwardReceipt(data, operation.request)
+    persist({ request: operation.request, receipt }); setMissingReceipt(false)
+    if (receipt.results.every(result => result.state === 'sent') && !suspendedRef.current) {
+      rememberForwardBatch(key, null); onSuccess(); onClose()
+    }
+  }
+  const postOperation = async (operation: StoredForwardBatch) => {
+    if (inFlight.current || suspendedRef.current || !current()) return
+    if ((operation.request.mode ?? 'native') !== optionsRef.current.mode || (operation.request.content_variant ?? 'original') !== optionsRef.current.variant) return
+    if (sourceIssueRef.current) { setSendError(sourceIssueRef.current); return }
+    inFlight.current = true; setSending(true); setSendError(''); setMissingReceipt(false)
+    persist(operation)
+    const controller = new AbortController(); writeLease.current = controller
+    const timeout = window.setTimeout(() => controller.abort(), 45000)
+    try {
+      const response = await fetch('/api/messages/forward/batch', { method: 'POST', credentials: 'include', cache: 'no-store', signal: controller.signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(operation.request) })
+      const data = await response.json().catch(() => ({}))
+      if (!current()) return
+      if (!response.ok || data.success !== true) {
+        // The canonical endpoint rejects validation before creating/sending an operation.
+        if (([400, 403, 404, 409, 422].includes(response.status) || data.code === 'forward_capability_unverified') && forwardValidationCodes.has(data.code)) persist(null)
+        if (data.code === 'forward_capability_unverified') setCapabilityRejected(true)
+        throw new Error(data.error || 'No pudimos confirmar el reenvío. Comprueba su estado antes de volver a enviar.')
       }
+      reconcileResult(data, operation)
+    } catch (cause) {
+      if (current()) setSendError(cause instanceof Error && cause.name !== 'AbortError' ? cause.message : 'El resultado está pendiente. Comprueba el estado; no enviaremos otra copia automáticamente.')
+    } finally {
+      window.clearTimeout(timeout)
+      inFlight.current = false
+      if (current()) setSending(false)
     }
-
-    if (!currentSource()) return
-    if (successCount === selectedChats.length) {
-      onSuccess()
-      onClose()
-    } else {
-      setSelectedChats(failedTargets)
-      setSendError(suspendedRef.current ? 'El reenvío está pausado. Confirma los destinos pendientes al volver a escritorio.' : successCount > 0
-        ? `Se reenvió a ${successCount}; quedan ${failedTargets.length} chat${failedTargets.length === 1 ? '' : 's'} por reintentar.`
-        : 'No se pudo reenviar el mensaje. Revisa la conexión e inténtalo otra vez.')
-    }
-    sendingRef.current = false
-    setSending(false)
   }
-
-  const getMessagePreview = () => {
-    const type = message.message_type || 'text'
-    if (type === 'image') return { icon: <ImageIcon className="w-4 h-4" />, text: message.body || '📷 Imagen' }
-    if (type === 'video') return { icon: <Video className="w-4 h-4" />, text: message.body || '🎥 Video' }
-    if (type === 'gif') return { icon: <Video className="w-4 h-4" />, text: message.body || 'GIF' }
-    if (type === 'audio') return { icon: <Mic className="w-4 h-4" />, text: '🎵 Audio' }
-    if (type === 'document') return { icon: <FileText className="w-4 h-4" />, text: message.media_filename || '📄 Documento' }
-    if (type === 'sticker') return { icon: <ImageIcon className="w-4 h-4" />, text: '🏷️ Sticker' }
-    return { icon: null, text: message.body || '' }
+  const beginForward = async (destinations = selected) => {
+    if (!current() || suspendedRef.current || inFlight.current || sourceIssueRef.current || mode !== optionsRef.current.mode || variant !== optionsRef.current.variant || destinations.length === 0 || destinations.some(chat => forwardDestinationIssue(chat, destinations.filter(row => row.id !== chat.id), message, deviceId))) return
+    const request: ForwardBatchRequest = { mode, content_variant: variant, source_chat_id: chatId, source_message_id: message.id, device_id: deviceId, destination_chat_ids: destinations.map(chat => chat.id), client_operation_id: crypto.randomUUID() }
+    await postOperation({ request })
   }
-
-  const preview = getMessagePreview()
-  const selectedIds = new Set(selectedChats.map(chat => chat.id))
-  const hasMore = chats.length < total
-
+  const checkStatus = async () => {
+    const operation = batchRef.current
+    if (!operation || inFlight.current || suspendedRef.current || !current()) return
+    inFlight.current = true; setSending(true); setSendError('')
+    const controller = new AbortController(); writeLease.current = controller
+    const timeout = window.setTimeout(() => controller.abort(), 20000)
+    try {
+      const response = await fetch(`/api/messages/forward/batch/${encodeURIComponent(operation.request.client_operation_id)}`, { credentials: 'include', cache: 'no-store', signal: controller.signal })
+      const data = await response.json().catch(() => ({}))
+      if (!current()) return
+      if (!response.ok || data.success !== true) {
+        if (response.status === 404) setMissingReceipt(true)
+        throw new Error(response.status === 404 ? 'La operación todavía no está registrada. Puedes confirmar de nuevo la misma operación sin cambiar sus destinos.' : data.error || 'No pudimos comprobar el estado. Puedes volver a consultarlo.')
+      }
+      reconcileResult(data, operation)
+    } catch (cause) { if (current()) setSendError(cause instanceof Error && cause.name !== 'AbortError' ? cause.message : 'La consulta tardó demasiado. Puedes volver a comprobar el estado.') }
+    finally { window.clearTimeout(timeout); inFlight.current = false; if (current()) setSending(false) }
+  }
+  const chooseMode = (next: ForwardMode) => {
+    if (!current() || suspendedRef.current || batchRef.current || inFlight.current || (next === 'native' ? nativeIssue : copyIssue)) return
+    setChosenMode(next)
+    if (next === 'native') setChosenVariant('original')
+    setSendError('')
+  }
+  const toggle = (chat: Chat) => {
+    if (batchRef.current || suspendedRef.current || !current()) return
+    setSelected(rows => rows.some(row => row.id === chat.id) ? rows.filter(row => row.id !== chat.id) : forwardDestinationIssue(chat, rows, message, deviceId) ? rows : [...rows, chat])
+  }
+  const results: ForwardDestinationResult[] = batch?.receipt?.results || batch?.request.destination_chat_ids.map(chat_id => ({ chat_id, state: 'uncertain' as const })) || []
+  const unfinished = results.some(result => ['pending', 'sending', 'uncertain'].includes(result.state))
+  const safeRetry = results.filter(result => result.state === 'failed' && result.can_retry)
+  const retryChats = safeRetry.map(result => selected.find(chat => chat.id === result.chat_id) || chats.find(chat => chat.id === result.chat_id)).filter((chat): chat is Chat => Boolean(chat))
+  const closeAndRefresh = () => {
+    if (!current() || suspendedRef.current || inFlight.current || !batchRef.current?.receipt || !results.some(result => result.state === 'failed') || unfinished) return
+    rememberForwardBatch(key, null); onSuccess(); onClose()
+  }
+  const nameFor = (id: string) => getChatDisplayName(selected.find(chat => chat.id === id) || chats.find(chat => chat.id === id) || { id, jid: '', name: 'Chat seleccionado' } as Chat)
   if (suspended) return null
-
   return createPortal(
     <div data-chat-overlay="forward-message" className="app-viewport pointer-events-auto fixed inset-0 flex items-end justify-center bg-black/50 sm:items-center sm:p-4" style={{ zIndex: OPERATIONAL_OVERLAY_LAYERS.dialog }} onMouseDown={event => { if (event.target === event.currentTarget && !sending) onClose() }}>
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="forward-message-title"
-        className="flex h-[var(--app-height,100dvh)] w-full flex-col overflow-hidden bg-white shadow-2xl sm:h-auto sm:max-h-[85dvh] sm:max-w-md sm:rounded-2xl"
-        onMouseDown={event => event.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 shrink-0">
-          <h3 id="forward-message-title" className="text-lg font-bold text-slate-800">Reenviar mensaje</h3>
-          <button type="button" onClick={onClose} disabled={sending} className="flex h-11 w-11 items-center justify-center rounded-xl transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-50" aria-label="Cerrar reenvío">
-            <X className="w-5 h-5 text-slate-500" />
-          </button>
-        </div>
-
-        {/* Message Preview */}
-        <div className="mx-5 mt-3 p-3 bg-slate-50 rounded-xl border border-slate-200 shrink-0">
-          <div className="flex items-center gap-2 text-sm text-slate-600">
-            {preview.icon}
-            <span className="line-clamp-2">{preview.text}</span>
+      <div ref={dialog} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="forward-message-title" aria-describedby="forward-message-rule" className="flex h-[var(--app-height,100dvh)] w-full flex-col overflow-hidden bg-white shadow-2xl outline-none sm:h-auto sm:max-h-[85dvh] sm:max-w-md sm:rounded-2xl">
+        <header className="flex shrink-0 items-center gap-3 border-b border-slate-100 px-4 py-2"><Forward className="h-5 w-5 shrink-0 text-emerald-600" /><h3 id="forward-message-title" className="min-w-0 flex-1 text-lg font-bold text-slate-800">Reenviar mensaje</h3><button type="button" onClick={onClose} disabled={sending} aria-label="Cerrar reenvío" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-40"><X className="h-5 w-5" /></button></header>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+          <div className="mx-4 mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3"><p className="mb-1 text-xs italic text-slate-500">{forwardingLabel(message.forwarding) || (message.is_from_me ? 'Mensaje propio' : 'Mensaje recibido')}</p><p className="line-clamp-3 break-words text-sm text-slate-700">{message.message_type === 'document' ? message.media_filename || 'Documento' : message.body || ({ image: 'Imagen', video: 'Video', gif: 'GIF', audio: message.audio_ptt ? 'Nota de voz' : 'Audio', sticker: 'Sticker' }[message.message_type || ''] || 'Mensaje')}</p></div>
+          <div role="group" aria-label="Modo de envío" className="grid grid-cols-2 gap-2 px-4 pt-3">
+            <button type="button" aria-pressed={mode === 'native'} disabled={Boolean(batch) || sending || Boolean(nativeIssue)} title={nativeIssue || undefined} onClick={() => chooseMode('native')} className={`min-h-11 rounded-xl border px-3 py-2 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-50 ${mode === 'native' ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : 'border-slate-200 text-slate-700 hover:bg-slate-50'}`}>Reenvío de WhatsApp</button>
+            <button type="button" aria-pressed={mode === 'copy'} disabled={Boolean(batch) || sending || Boolean(copyIssue)} title={copyIssue || undefined} onClick={() => chooseMode('copy')} className={`min-h-11 rounded-xl border px-3 py-2 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-50 ${mode === 'copy' ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : 'border-slate-200 text-slate-700 hover:bg-slate-50'}`}>Enviar una copia</button>
           </div>
-          {message.media_url && (message.message_type === 'image' || message.message_type === 'sticker') && (
-            <img src={message.media_url} className="w-16 h-16 rounded-lg mt-2 object-cover" alt="" />
-          )}
+          {mode === 'copy' && <p className="px-4 pt-3 text-xs leading-5 text-slate-600">Se enviará una copia del contenido, sin la etiqueta de reenvío de WhatsApp. Los límites conocidos se conservan en Clarin.</p>}
+          {nativeIssue && mode === 'copy' && <p className="px-4 pt-1 text-xs leading-5 text-slate-500">Reenvío de WhatsApp: {nativeIssue}</p>}
+          {needsAudioDocument && mode === 'copy' && !copyIssue && <label className="mx-4 mt-3 flex min-h-11 cursor-pointer items-center gap-3 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700"><input type="checkbox" checked={variant === 'audio_document'} disabled={Boolean(batch) || sending} onChange={event => { if (!batchRef.current && !inFlight.current && current() && !suspendedRef.current) { setChosenVariant(event.target.checked ? 'audio_document' : 'original'); setSendError('') } }} className="h-5 w-5 shrink-0 accent-emerald-600" /><span>Enviar como archivo adjunto<span className="block text-xs leading-5 text-slate-500">Conserva el archivo de audio sin suponer que sea una nota de voz.</span></span></label>}
+          <p id="forward-message-rule" className="px-4 py-3 text-xs leading-5 text-slate-500">{limits.maxChats === 1 ? 'Este mensaje permite seleccionar un solo chat.' : limits.maxGroups === 1 ? 'Selecciona hasta cinco chats, incluido un máximo de un grupo.' : 'Selecciona hasta cinco chats de este dispositivo.'} Los permisos y los límites se verifican otra vez al enviar.</p>
+          {sourceIssue && <p role="alert" className="mx-4 mb-3 rounded-xl bg-amber-50 p-3 text-xs leading-5 text-amber-800">{sourceIssue}</p>}
+          {!batch && !sourceIssue && <>
+            {selected.length > 0 && <div className="flex flex-wrap gap-1.5 px-4 pb-2">{selected.map(chat => <span key={chat.id} className="inline-flex max-w-full items-center gap-1 rounded-full bg-emerald-50 pl-3 text-xs font-semibold text-emerald-800"><span className="min-w-0 break-words">{getChatDisplayName(chat)}</span><button type="button" onClick={() => toggle(chat)} aria-label={`Quitar ${getChatDisplayName(chat)}`} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full hover:bg-emerald-100"><X className="h-3 w-3" /></button></span>)}</div>}
+            <div className="relative mx-4 mb-2"><Search className="absolute left-3 top-3.5 h-4 w-4 text-slate-400" /><input ref={searchInput} value={search} onChange={event => updateSearch(event.target.value)} placeholder="Buscar por nombre, teléfono..." aria-label="Buscar destino de reenvío" aria-busy={loading || search.trim() !== settledSearch} className="min-h-11 w-full rounded-xl border border-slate-200 bg-white pl-9 pr-20 text-sm text-slate-800 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100" />{search.trim() !== settledSearch && <RefreshCw aria-label="Esperando para buscar chats" className="absolute right-12 top-3.5 h-4 w-4 animate-spin text-emerald-500 motion-reduce:animate-none" />}{search && <button type="button" onClick={() => updateSearch('')} aria-label="Limpiar búsqueda de chats" className="absolute right-0 top-0 flex h-11 w-11 items-center justify-center rounded-xl text-slate-400"><X className="h-4 w-4" /></button>}</div>
+            {loadError && <div role="alert" className="mx-4 my-2 rounded-xl bg-rose-50 p-3 text-xs text-rose-700"><p>{loadError}</p><button type="button" onClick={() => runSearch()} className="min-h-11 font-semibold">Reintentar chats</button></div>}
+            {loading && !chats.length && <p role="status" className="px-4 py-8 text-center text-sm text-slate-500">Cargando chats…</p>}
+            {!loading && !loadError && !chats.length && <p className="px-4 py-8 text-center text-sm text-slate-500">No se encontraron chats</p>}
+            <ul className="px-2 pb-2">{chats.map(chat => {
+              const checked = selected.some(row => row.id === chat.id)
+              const reason = forwardDestinationIssue(chat, selected, message, deviceId)
+              const avatar = chatAvatar(chat)
+              return <li key={chat.id}><button type="button" aria-pressed={checked} disabled={Boolean(reason)} title={reason || undefined} onClick={() => toggle(chat)} className={`flex min-h-16 w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-50 ${checked ? 'bg-emerald-50' : 'hover:bg-slate-50'}`}><span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 ${checked ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-300'}`}>{checked && <Check className="h-3 w-3" />}</span>{avatar ? <img src={avatar} className="h-10 w-10 shrink-0 rounded-full object-cover" alt="" /> : <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500">{isGroupChat(chat) ? <Users className="h-5 w-5" /> : <User className="h-5 w-5" />}</span>}<span className="min-w-0 flex-1"><span className="block break-words text-sm font-medium text-slate-800">{getChatDisplayName(chat)}</span><span className="block break-words text-xs text-slate-500">{reason || (isGroupChat(chat) ? 'Grupo de WhatsApp' : isPendingChatIdentity(chat) ? 'Identidad pendiente' : formatPhone(chat.jid, chat.contact_phone) || 'Sin teléfono')}</span></span></button></li>
+            })}</ul>
+            {chats.length < total && <button type="button" onClick={() => runSearch(chats.length, true)} disabled={loadingMore || loading || search.trim() !== settledSearch} className="mx-auto flex min-h-11 items-center gap-2 rounded-xl px-4 text-sm font-semibold text-emerald-700 disabled:opacity-50">{loadingMore ? 'Cargando…' : 'Cargar más'}</button>}
+          </>}
+          {batch && <section className="px-4 pb-4" aria-label="Resultado del reenvío"><p role="status" className="mb-2 text-xs leading-5 text-slate-600">{unfinished ? 'Hay destinos cuyo resultado aún no está confirmado. Comprobar el estado conserva la misma operación.' : 'Estos son los resultados confirmados de la operación.'}</p><ul className="divide-y divide-slate-100">{results.map(result => <li key={result.chat_id} className="py-3"><p className="break-words text-sm font-semibold text-slate-800">{nameFor(result.chat_id)}</p><p className={`mt-1 text-xs ${result.state === 'sent' ? 'text-emerald-700' : result.state === 'failed' ? 'text-rose-700' : 'text-amber-800'}`}>{resultLabel[result.state]}</p>{result.error && <p className="mt-1 break-words text-xs leading-5 text-slate-500">{result.error}</p>}</li>)}</ul>{results.some(result => result.state === 'uncertain') && <p className="mt-2 text-xs leading-5 text-slate-500">No se reenviarán copias de los destinos con resultado incierto. Puedes cerrar y volver a consultar esta operación.</p>}</section>}
         </div>
-
-        {/* Selected chips */}
-        {selectedChats.length > 0 && (
-          <div className="mx-5 mt-3 flex flex-wrap gap-1.5 shrink-0">
-            {selectedChats.map(c => (
-              <span
-                key={c.id}
-                className="inline-flex items-center gap-1 bg-emerald-100 text-emerald-800 text-xs font-medium px-2.5 py-1 rounded-full"
-              >
-                {c.contact_custom_name || c.contact_name || c.name || c.jid.split('@')[0]}
-                <button type="button" onClick={() => toggleSelect(c)} className="flex h-6 w-6 items-center justify-center rounded-full hover:bg-emerald-200 hover:text-emerald-950" aria-label={`Quitar ${c.contact_custom_name || c.contact_name || c.name || 'chat'}`}>
-                  <X className="w-3 h-3" />
-                </button>
-              </span>
-            ))}
-            <span className="text-xs text-slate-400 self-center ml-1">{selectedChats.length}/{MAX_FORWARD}</span>
-          </div>
-        )}
-
-        {/* Search */}
-        <div className="px-5 pt-3 pb-2 shrink-0">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input
-              ref={searchRef}
-              type="text"
-              placeholder="Buscar por nombre, teléfono..."
-              value={search}
-              onChange={e => updateSearch(e.target.value)}
-              aria-busy={searchPending || loading}
-              className="w-full pl-10 pr-16 py-2.5 bg-slate-100 border-none rounded-xl text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
-            />
-            {searchPending && <RefreshCw aria-label="Esperando para buscar chats" className="absolute right-10 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-emerald-500" />}
-            {search && <button type="button" onClick={() => updateSearch('')} aria-label="Limpiar búsqueda de chats" className="absolute right-1 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-200"><X className="h-4 w-4" /></button>}
-          </div>
-        </div>
-
-        {/* Chat List */}
-        <div className="flex-1 overflow-y-auto px-2 pb-2 min-h-0">
-          {loading ? (
-            <div className="flex justify-center py-8">
-              <div className="animate-spin rounded-full h-6 w-6 border-2 border-emerald-200 border-t-emerald-600" />
-            </div>
-          ) : loadError ? (
-            <div className="px-4 py-8 text-center"><p className="text-sm text-red-600">{loadError}</p><button type="button" onClick={() => runSearch(0, false)} className="mt-3 inline-flex min-h-11 items-center gap-2 rounded-xl px-4 text-sm font-semibold text-red-700 hover:bg-red-50"><RefreshCw className="h-4 w-4" /> Reintentar</button></div>
-          ) : chats.length === 0 ? (
-            <p className="text-center py-8 text-sm text-slate-400">No se encontraron chats</p>
-          ) : (
-            <>
-            {chats.map(c => {
-              const displayName = getChatDisplayName(c)
-              const phone = formatPhone(c.jid, c.contact_phone)
-              const pendingIdentity = isPendingChatIdentity(c)
-              const isSelected = selectedIds.has(c.id)
-              const restriction = c.device_id !== deviceId ? 'Pertenece a otro número de WhatsApp.' : groupWriteRestriction(c)
-              return (
-                <button
-                  key={c.id}
-                  type="button"
-                  onClick={() => toggleSelect(c)}
-                  disabled={Boolean(restriction) || (!isSelected && selectedChats.length >= MAX_FORWARD)}
-                  title={restriction || undefined}
-                  className={`flex min-h-14 w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
-                    isSelected ? 'bg-emerald-50' : 'hover:bg-slate-50'
-                  } disabled:opacity-40`}
-                >
-                  {/* Checkbox */}
-                  <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 transition ${
-                    isSelected ? 'bg-emerald-600 border-emerald-600' : 'border-slate-300'
-                  }`}>
-                    {isSelected && <Check className="w-3 h-3 text-white" />}
-                  </div>
-                  {chatAvatar(c) ? (
-                    <img src={chatAvatar(c)} className="w-10 h-10 rounded-full object-cover shrink-0" alt="" />
-                  ) : (
-                    <div className="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center shrink-0">
-                      {isGroupChat(c) ? <Users className="w-5 h-5 text-slate-500" /> : <User className="w-5 h-5 text-slate-500" />}
-                    </div>
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-slate-800 truncate">{displayName}</p>
-                    <p className={`truncate text-xs ${pendingIdentity ? 'font-medium text-amber-700' : 'text-slate-400'}`}>{restriction || (isGroupChat(c) ? 'Grupo de WhatsApp' : pendingIdentity ? 'Identidad pendiente' : (phone || 'Sin teléfono'))}</p>
-                  </div>
-                </button>
-              )
-            })}
-            {hasMore && <button type="button" onClick={() => runSearch(chats.length, true)} disabled={loadingMore} className="mx-auto my-2 flex min-h-11 items-center gap-2 rounded-xl px-4 text-sm font-semibold text-emerald-700 hover:bg-emerald-50 disabled:cursor-wait disabled:opacity-50">{loadingMore && <RefreshCw className="h-4 w-4 animate-spin" />} {loadingMore ? 'Cargando…' : 'Cargar más'}</button>}
-            </>
-          )}
-        </div>
-
-        {/* Send Button */}
-        {selectedChats.length > 0 && (
-          <div className="shrink-0 border-t border-slate-100 px-5 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 sm:pb-3">
-            {sendError && <p className="mb-2 rounded-xl border border-red-100 bg-red-50 px-3 py-2 text-xs font-medium text-red-700" role="alert">{sendError}</p>}
-            <button
-              onClick={handleForwardAll}
-              disabled={sending}
-              className="w-full flex items-center justify-center gap-2 bg-emerald-600 text-white py-3 rounded-xl font-semibold hover:bg-emerald-700 disabled:opacity-60 transition shadow-md"
-            >
-              {sending ? (
-                <div className="animate-spin rounded-full h-5 w-5 border-2 border-white/30 border-t-white" />
-              ) : (
-                <>
-                  <Send className="w-4 h-4" />
-                  Reenviar a {selectedChats.length} {selectedChats.length === 1 ? 'chat' : 'chats'}
-                </>
-              )}
-            </button>
-          </div>
-        )}
+        <footer className="shrink-0 border-t border-slate-100 px-4 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 sm:pb-3">
+          {sendError && <p role="alert" className="mb-2 rounded-xl border border-rose-100 bg-rose-50 p-3 text-xs leading-5 text-rose-700"><AlertCircle className="mr-1 inline h-4 w-4" />{sendError}</p>}
+          {batch ? <><button type="button" onClick={() => void (missingReceipt ? postOperation(batch) : checkStatus())} disabled={sending || (missingReceipt && Boolean(sourceIssue))} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${sending ? 'animate-spin motion-reduce:animate-none' : ''}`} />{sending ? 'Comprobando…' : missingReceipt ? 'Confirmar la misma operación' : 'Comprobar estado'}</button>{!unfinished && safeRetry.length > 0 && retryChats.length === safeRetry.length && <button type="button" onClick={() => void beginForward(retryChats)} disabled={sending || Boolean(sourceIssue)} className="mt-2 min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold text-slate-700 disabled:opacity-50">Reintentar solo los destinos no enviados</button>}{!unfinished && results.some(result => result.state === 'failed') && <button type="button" onClick={closeAndRefresh} disabled={sending} className="mt-2 min-h-11 w-full rounded-xl px-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Cerrar y actualizar</button>}</> : <button type="button" onClick={() => void beginForward()} disabled={sending || Boolean(sourceIssue) || !selected.length} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-40"><Send className="h-4 w-4" />{sending ? 'Confirmando envío…' : `${mode === 'copy' ? 'Enviar copia' : 'Reenviar'} a ${selected.length} ${selected.length === 1 ? 'chat' : 'chats'}`}</button>}
+        </footer>
       </div>
-    </div>,
-    operationalPortal || document.body,
+    </div>, portal || document.body,
   )
 }

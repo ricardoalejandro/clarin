@@ -302,6 +302,7 @@ type Device struct {
 // alongside the legacy provider capabilities JSON to keep older API clients
 // compatible.
 type DeviceRuntimeCapabilities struct {
+	CanForwardNative       bool `json:"can_forward_native"`
 	CanListGroups          bool `json:"can_list_groups"`
 	CanSendGroupMessages   bool `json:"can_send_group_messages"`
 	CanStartChat           bool `json:"can_start_chat"`
@@ -617,45 +618,50 @@ type OpportunitySummary struct {
 
 // Message represents a WhatsApp message
 type Message struct {
-	LinkPreview             *MessageLinkPreview `json:"link_preview"`
-	LinkPreviewVersion      int64               `json:"link_preview_version"`
-	LinkPreviewMediaAssetID *uuid.UUID          `json:"-"`
-	RepairedPlaceholder     bool                `json:"-"`
-	MediaRecoverable        bool                `json:"media_recoverable,omitempty"`
-	MediaUnavailableReason  string              `json:"media_unavailable_reason,omitempty"`
-	Mentions                []MessageMention    `json:"mentions,omitempty"`
-	Sender                  *MessageSender      `json:"sender,omitempty"`
-	AttentionThroughAt      *time.Time          `json:"-"`
-	AttentionThroughID      *uuid.UUID          `json:"-"`
-	DeferAttention          bool                `json:"-"`
-	SendOperationID         *uuid.UUID          `json:"-"`
-	ID                      uuid.UUID           `json:"id"`
-	AccountID               uuid.UUID           `json:"account_id"`
-	DeviceID                *uuid.UUID          `json:"device_id,omitempty"`
-	ChatID                  uuid.UUID           `json:"chat_id"`
-	MessageID               string              `json:"message_id"`
-	FromJID                 *string             `json:"from_jid,omitempty"`
-	FromName                *string             `json:"from_name,omitempty"`
-	Body                    *string             `json:"body,omitempty"`
-	MessageType             *string             `json:"message_type,omitempty"` // text, image, video, gif, audio, document, sticker, location, contact
-	MediaURL                *string             `json:"media_url,omitempty"`
-	MediaMimetype           *string             `json:"media_mimetype,omitempty"`
-	MediaFilename           *string             `json:"media_filename,omitempty"`
-	MediaSize               *int64              `json:"media_size,omitempty"`
-	MediaAssetID            *uuid.UUID          `json:"media_asset_id,omitempty"`
-	MediaDeleted            bool                `json:"media_deleted"`
-	IsFromMe                bool                `json:"is_from_me"`
-	IsRead                  bool                `json:"is_read"`
-	IsRevoked               bool                `json:"is_revoked"`
-	IsEdited                bool                `json:"is_edited"`
-	IsViewOnce              bool                `json:"is_view_once"`
-	Status                  *string             `json:"status,omitempty"` // sent, delivered, read, failed
-	DeliveredAt             *time.Time          `json:"delivered_at,omitempty"`
-	ReadAt                  *time.Time          `json:"read_at,omitempty"`
-	Provider                *string             `json:"provider,omitempty"`
-	TemplateName            *string             `json:"template_name,omitempty"`
-	Timestamp               time.Time           `json:"timestamp"`
-	CreatedAt               time.Time           `json:"created_at"`
+	SharingLimits           *MessageSharingLimits `json:"sharing_limits,omitempty"`
+	Forwarding              MessageForwarding     `json:"forwarding"`
+	ForwardingSource        string                `json:"-"`
+	ForwardingHydrated      bool                  `json:"-"`
+	AudioPTT                *bool                 `json:"audio_ptt,omitempty"`
+	LinkPreview             *MessageLinkPreview   `json:"link_preview"`
+	LinkPreviewVersion      int64                 `json:"link_preview_version"`
+	LinkPreviewMediaAssetID *uuid.UUID            `json:"-"`
+	RepairedPlaceholder     bool                  `json:"-"`
+	MediaRecoverable        bool                  `json:"media_recoverable,omitempty"`
+	MediaUnavailableReason  string                `json:"media_unavailable_reason,omitempty"`
+	Mentions                []MessageMention      `json:"mentions,omitempty"`
+	Sender                  *MessageSender        `json:"sender,omitempty"`
+	AttentionThroughAt      *time.Time            `json:"-"`
+	AttentionThroughID      *uuid.UUID            `json:"-"`
+	DeferAttention          bool                  `json:"-"`
+	SendOperationID         *uuid.UUID            `json:"-"`
+	ID                      uuid.UUID             `json:"id"`
+	AccountID               uuid.UUID             `json:"account_id"`
+	DeviceID                *uuid.UUID            `json:"device_id,omitempty"`
+	ChatID                  uuid.UUID             `json:"chat_id"`
+	MessageID               string                `json:"message_id"`
+	FromJID                 *string               `json:"from_jid,omitempty"`
+	FromName                *string               `json:"from_name,omitempty"`
+	Body                    *string               `json:"body,omitempty"`
+	MessageType             *string               `json:"message_type,omitempty"` // text, image, video, gif, audio, document, sticker, location, contact
+	MediaURL                *string               `json:"media_url,omitempty"`
+	MediaMimetype           *string               `json:"media_mimetype,omitempty"`
+	MediaFilename           *string               `json:"media_filename,omitempty"`
+	MediaSize               *int64                `json:"media_size,omitempty"`
+	MediaAssetID            *uuid.UUID            `json:"media_asset_id,omitempty"`
+	MediaDeleted            bool                  `json:"media_deleted"`
+	IsFromMe                bool                  `json:"is_from_me"`
+	IsRead                  bool                  `json:"is_read"`
+	IsRevoked               bool                  `json:"is_revoked"`
+	IsEdited                bool                  `json:"is_edited"`
+	IsViewOnce              bool                  `json:"is_view_once"`
+	Status                  *string               `json:"status,omitempty"` // sent, delivered, read, failed
+	DeliveredAt             *time.Time            `json:"delivered_at,omitempty"`
+	ReadAt                  *time.Time            `json:"read_at,omitempty"`
+	Provider                *string               `json:"provider,omitempty"`
+	TemplateName            *string               `json:"template_name,omitempty"`
+	Timestamp               time.Time             `json:"timestamp"`
+	CreatedAt               time.Time             `json:"created_at"`
 
 	// Quoted/reply fields
 	QuotedMessageID  *string `json:"quoted_message_id,omitempty"`

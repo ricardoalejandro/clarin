@@ -117,6 +117,11 @@ func main() {
 		log.Printf("Warning: Failed to load existing devices: %v", err)
 	}
 
+	identityRecoveryCtx, identityRecoveryCancel := context.WithCancel(context.Background())
+	var identityRecoveryWG sync.WaitGroup
+	identityRecoveryWG.Add(1)
+	go func() { defer identityRecoveryWG.Done(); devicePool.RunIdentityRecovery(identityRecoveryCtx) }()
+
 	// Initialize services
 	services := service.NewServices(repos, devicePool, hub)
 
@@ -587,6 +592,8 @@ func main() {
 			kommoManager.Stop()
 		}
 
+		identityRecoveryCancel()
+		identityRecoveryWG.Wait()
 		// Close all WhatsApp connections
 		devicePool.Shutdown()
 

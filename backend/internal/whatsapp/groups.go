@@ -64,6 +64,10 @@ func groupProjection(info *types.GroupInfo, ownPN, ownLID types.JID, joined bool
 }
 
 func (p *DevicePool) saveGroupInfo(ctx context.Context, instance *DeviceInstance, info *types.GroupInfo, joined bool) (*domain.Chat, error) {
+	fingerprint := deviceSessionFingerprint(instance.Client.Store)
+	if err := p.requirePeerIdentitySession(instance, fingerprint); err != nil {
+		return nil, err
+	}
 	chat, err := p.repos.Chat.GetOrCreateGroup(ctx, instance.AccountID, instance.ID, info.JID.ToNonAD().String(), info.Name)
 	if err != nil {
 		return nil, err
@@ -80,15 +84,25 @@ func (p *DevicePool) saveGroupInfo(ctx context.Context, instance *DeviceInstance
 	if !ok {
 		contacts, contactErr = instance.Client.Store.Contacts.GetAllContacts(ctx)
 	}
-	if contactErr == nil {
+	if contactErr != nil {
+		return nil, fmt.Errorf("load group contact cache: %w", contactErr)
+	}
+	{
+		if err = p.observePeerGroupMetadata(ctx, instance, info, contacts); err != nil {
+			return nil, err
+		}
+		identities := &GroupParticipantIdentitySnapshot{pool: p, fingerprint: fingerprint, instance: instance, contacts: contacts, repo: p.repos.Chat, accountID: instance.AccountID, deviceID: instance.ID}
+		members, err = identities.Resolve(ctx, members)
+		if err != nil {
+			return nil, err
+		}
 		for i := range members {
-			members[i] = resolveCachedGroupParticipant(ctx, instance, members[i], contacts)
 			if members[i].Phone != "" {
 				members[i].JID = types.NewJID(members[i].Phone, types.DefaultUserServer).String()
 			}
 		}
 	}
-	if err = p.repos.Chat.SaveGroup(ctx, instance.AccountID, chat.ID, g, members); err != nil {
+	if err = p.repos.Chat.SaveGroupForIdentitySession(ctx, instance.AccountID, instance.ID, chat.ID, g, members, fingerprint); err != nil {
 		return nil, err
 	}
 	if err = p.repos.Chat.HydrateGroups(ctx, instance.AccountID, []*domain.Chat{chat}); err != nil {
@@ -116,6 +130,7 @@ func (p *DevicePool) SyncGroups(ctx context.Context, accountID, deviceID uuid.UU
 	if err != nil {
 		return 0, err
 	}
+	fingerprint := deviceSessionFingerprint(instance.Client.Store)
 	instance.mu.RLock()
 	receive := instance.ReceiveMessages
 	instance.mu.RUnlock()
@@ -128,7 +143,10 @@ func (p *DevicePool) SyncGroups(ctx context.Context, accountID, deviceID uuid.UU
 	if err != nil {
 		return 0, err
 	}
-	contacts, _ := instance.Client.Store.Contacts.GetAllContacts(requestCtx)
+	contacts, err := instance.Client.Store.Contacts.GetAllContacts(requestCtx)
+	if err != nil {
+		return 0, fmt.Errorf("load group contact cache: %w", err)
+	}
 	requestCtx = context.WithValue(requestCtx, groupContactsContextKey{}, contacts)
 	count := 0
 	joinedJIDs := []string{}
@@ -151,7 +169,7 @@ func (p *DevicePool) SyncGroups(ctx context.Context, accountID, deviceID uuid.UU
 		count++
 		p.broadcastGroup(chat)
 	}
-	if err := p.repos.Chat.ReconcileJoinedGroups(requestCtx, accountID, deviceID, joinedJIDs); err != nil {
+	if err := p.repos.Chat.ReconcileJoinedGroupsForIdentitySession(requestCtx, accountID, deviceID, joinedJIDs, fingerprint); err != nil {
 		return count, err
 	}
 	if p.hub != nil {
@@ -160,6 +178,9 @@ func (p *DevicePool) SyncGroups(ctx context.Context, accountID, deviceID uuid.UU
 	p.invalidateAccountMessageCaches(accountID)
 	if p.cache != nil {
 		_ = p.cache.DelPattern(ctx, "chats:"+accountID.String()+":*")
+	}
+	if err := p.EnqueueIdentityRecovery(ctx, accountID, deviceID, "sync"); err != nil {
+		return count, err
 	}
 	return count, nil
 }
@@ -432,6 +453,7 @@ func (p *DevicePool) handleGroupMessage(ctx context.Context, instance *DeviceIns
 		status = "sent"
 	}
 	msg := &domain.Message{AccountID: instance.AccountID, DeviceID: &instance.ID, ChatID: chat.ID, MessageID: evt.Info.ID, FromJID: &sender, FromName: strPtr(evt.Info.PushName), Body: &content.Body, MessageType: &content.MessageType, MediaURL: content.MediaURL, MediaMimetype: content.MediaMimetype, MediaFilename: content.MediaFilename, MediaSize: content.MediaSize, MediaAssetID: content.MediaAssetID, IsFromMe: evt.Info.IsFromMe, Status: &status, Timestamp: evt.Info.Timestamp, Latitude: content.Latitude, Longitude: content.Longitude, ContactName: content.ContactName, ContactPhone: content.ContactPhone, ContactVCard: content.ContactVCard, IsViewOnce: content.IsViewOnce || evt.IsViewOnce, Mentions: groupMessageMentions(evt.Message)}
+	applyProviderEventForwarding(msg, evt)
 	msg.MediaUnavailableReason = content.MediaUnavailableReason
 	quote := p.extractMessageQuote(ctx, instance, chat.ID, evt.Message)
 	quote.Apply(msg)
@@ -441,6 +463,7 @@ func (p *DevicePool) handleGroupMessage(ctx context.Context, instance *DeviceIns
 	p.attachReceivedLinkPreview(ctx, msg, evt.Message, evt.IsViewOnce)
 	if err = p.repos.Message.Create(ctx, msg); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			p.broadcastForwardingHydration(ctx, instance, msg)
 			p.enrichReceivedLinkPreview(ctx, instance, msg)
 			p.hydrateMessageQuote(ctx, instance.AccountID, chat.ID, msg.MessageID, quote)
 		}

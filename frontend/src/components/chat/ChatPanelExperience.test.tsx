@@ -517,7 +517,7 @@ describe('group composer identities through drafts and retries', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url === '/api/chats/group-1' || url === '/api/chats/chat-1') return Promise.resolve(jsonResponse({ success: true, chat: url.endsWith('group-1') ? groupChat : chat, device: { ...device('connected'), runtime_capabilities: { ...device('connected').runtime_capabilities, can_send_group_messages: true, can_list_groups: true } } }))
-      if (url.includes('/group/participants?')) return Promise.resolve(jsonResponse({ success: true, participants: [member] }))
+      if (url.includes('/group/participants?')) return Promise.resolve(jsonResponse({ success: true, order: 'admins_first', participants: [member] }))
       if (url.includes('/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: [] }))
       if (url === '/api/media/upload') { uploadCount++; return Promise.resolve(jsonResponse({ success: true, proxy_url: '/api/media/file/account/group-video.mp4' })) }
       if (url === '/api/messages/send') {

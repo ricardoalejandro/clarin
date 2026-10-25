@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"errors"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/whatsapp"
 	"strings"
 	"time"
@@ -49,6 +51,17 @@ func (s *Server) handleGetGroupParticipants(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	order := strings.TrimSpace(c.Query("order"))
+	if order != "" && order != repository.GroupParticipantsOrderAdminsFirst {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "code": "participants_order_invalid", "error": "El orden de integrantes no es válido."})
+	}
+	var beforeIdentity, beforeGroup int64
+	if chat.DeviceID != nil {
+		beforeIdentity, beforeGroup, err = s.repos.Chat.SnapshotVersionByGroupJID(c.Context(), chat.AccountID, *chat.DeviceID, chat.JID)
+		if err != nil {
+			return fiber.ErrInternalServerError
+		}
+	}
 	search := strings.TrimSpace(c.Query("search"))
 	var identities *whatsapp.GroupParticipantIdentitySnapshot
 	if chat.DeviceID != nil {
@@ -71,8 +84,17 @@ func (s *Server) handleGetGroupParticipants(c *fiber.Ctx) error {
 			projectedByJID[member.JID] = member
 		}
 	}
-	rows, next, err := s.repos.Chat.GroupParticipantsMatching(c.Context(), chat.AccountID, chat.ID, search, c.Query("cursor"), c.QueryInt("limit", 50), matchingJIDs)
+	var rows []domain.GroupParticipant
+	var next string
+	if order == repository.GroupParticipantsOrderAdminsFirst {
+		rows, next, err = s.repos.Chat.GroupParticipantsAdminFirst(c.Context(), chat.AccountID, chat.ID, search, c.Query("cursor"), c.QueryInt("limit", 50), matchingJIDs)
+	} else {
+		rows, next, err = s.repos.Chat.GroupParticipantsMatching(c.Context(), chat.AccountID, chat.ID, search, c.Query("cursor"), c.QueryInt("limit", 50), matchingJIDs)
+	}
 	if err != nil {
+		if errors.Is(err, repository.ErrGroupParticipantsCursorReset) {
+			return groupParticipantsCursorReset(c)
+		}
 		return fiber.ErrInternalServerError
 	}
 	if projectedByJID != nil {
@@ -85,7 +107,28 @@ func (s *Server) handleGetGroupParticipants(c *fiber.Ctx) error {
 			return fiber.ErrInternalServerError
 		}
 	}
-	return c.JSON(fiber.Map{"success": true, "participants": rows, "next_cursor": next})
+	var identityRevision, groupRevision int64
+	if chat.DeviceID != nil {
+		identityRevision, groupRevision, err = s.repos.Chat.SnapshotVersionByGroupJID(c.Context(), chat.AccountID, *chat.DeviceID, chat.JID)
+		if err != nil {
+			return fiber.ErrInternalServerError
+		}
+	}
+	if beforeIdentity != identityRevision || beforeGroup != groupRevision {
+		if order == repository.GroupParticipantsOrderAdminsFirst {
+			return groupParticipantsCursorReset(c)
+		}
+		return fiber.NewError(fiber.StatusConflict, "Los integrantes se actualizaron durante la consulta. Reintenta.")
+	}
+	response := fiber.Map{"success": true, "participants": rows, "next_cursor": next, "identity_revision": identityRevision, "group_revision": groupRevision}
+	if order != "" {
+		response["order"] = order
+	}
+	return c.JSON(response)
+}
+
+func groupParticipantsCursorReset(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "participants_cursor_reset", "error": "Los integrantes cambiaron. Actualiza el listado desde el inicio."})
 }
 func (s *Server) handleSyncGroups(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
@@ -103,7 +146,11 @@ func (s *Server) handleSyncGroups(c *fiber.Ctx) error {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "No se pudieron actualizar los grupos. Verifica la conexión y la recepción de mensajes.", "code": "group_sync_unavailable"})
 	}
 	s.invalidateChatsCache(accountID)
-	return c.JSON(fiber.Map{"success": true, "synced": count})
+	recovery, err := s.repos.Chat.IdentityRecoveryStatus(c.Context(), accountID, deviceID)
+	if err != nil {
+		return fiber.ErrInternalServerError
+	}
+	return c.JSON(fiber.Map{"success": true, "synced": count, "recovery": recovery})
 }
 func (s *Server) handleGroupReceipts(c *fiber.Ctx) error {
 	chat, err := s.groupChat(c)

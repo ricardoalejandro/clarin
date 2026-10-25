@@ -1,4 +1,5 @@
 import type { Message } from '@/types/chat'
+import { mergeMessageForwarding } from './messageForwarding'
 import { mergeMessageSender } from '@/utils/chatInbox'
 import { mergeCanonicalReactionSnapshot } from '@/utils/chatReactions'
 
@@ -32,7 +33,7 @@ export function mergeMessageLinkPreview(current: PreviewSnapshot, snapshot: Prev
 
 /** A server snapshot owns content; already received delivery receipts cannot regress. */
 export function mergeCanonicalMessage(current: Message | undefined, canonical: Message, pendingReaction = false): Message {
-  if (!current) return canonical
+  if (!current) return { ...canonical, ...mergeMessageForwarding({}, canonical) }
   const status = (deliveryLevel[current.status] ?? -1) > (deliveryLevel[canonical.status] ?? -1)
     ? current.status : canonical.status
   return {
@@ -44,6 +45,7 @@ export function mergeCanonicalMessage(current: Message | undefined, canonical: M
     read_at: canonical.read_at ?? current.read_at,
     body: canonical.is_revoked ? undefined : Object.hasOwn(canonical, 'body') ? canonical.body : current.body,
     ...mergeMessageLinkPreview(current, canonical, canonical.is_revoked || current.is_revoked),
+    ...mergeMessageForwarding(current, canonical),
     quoted_message_id: canonical.quoted_message_id ?? current.quoted_message_id,
     quoted_body: canonical.quoted_body ?? current.quoted_body,
     quoted_sender: canonical.quoted_sender ?? current.quoted_sender,

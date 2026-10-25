@@ -122,8 +122,25 @@ func (p *DevicePool) FreshGroupParticipant(ctx context.Context, accountID, devic
 	}
 	for _, m := range members {
 		if memberIdentityAliasesIntersect(m, expected) {
-			m = p.ResolveCachedGroupParticipant(ctx, accountID, deviceID, m)
-			m.JID = expected.JID
+			// Record only the matched participant's current remote aliases;
+			// cached legacy projections are not proof of a phone relationship.
+			for _, part := range info.Participants {
+				current := resolveGroupMemberIdentity(part, ownPN, instance.Client.Store.LID, types.EmptyJID, nil)
+				if memberIdentityAliasesIntersect(current, m) {
+					if err := p.observePeerGroupMetadata(ctx, instance, &types.GroupInfo{Participants: []types.GroupParticipant{part}}, nil); err != nil {
+						return domain.GroupParticipant{}, err
+					}
+					break
+				}
+			}
+			m, err = p.ResolveCachedGroupParticipant(ctx, accountID, deviceID, m)
+			if err != nil {
+				return domain.GroupParticipant{}, err
+			}
+			// An unverified legacy PN must not remain a usable address.
+			if m.Phone != "" || !strings.HasSuffix(expected.JID, "@s.whatsapp.net") {
+				m.JID = expected.JID
+			}
 			return m, nil
 		}
 	}
@@ -131,6 +148,18 @@ func (p *DevicePool) FreshGroupParticipant(ctx context.Context, accountID, devic
 }
 
 func memberIdentityAliasesIntersect(a, b domain.GroupParticipant) bool {
+	stableLID := func(m domain.GroupParticipant) string {
+		if m.LID != "" {
+			return m.LID
+		}
+		if strings.HasSuffix(m.JID, "@lid") {
+			return m.JID
+		}
+		return ""
+	}
+	if left, right := stableLID(a), stableLID(b); left != "" && right != "" {
+		return left == right
+	}
 	for _, x := range []string{a.JID, a.LID} {
 		if x != "" && (x == b.JID || x == b.LID) {
 			return true
@@ -150,11 +179,14 @@ func (p *DevicePool) GroupParticipantAbout(ctx context.Context, accountID, devic
 	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	jid := types.NewJID(member.Phone, types.DefaultUserServer)
-	info, err := instance.Client.GetUserInfo(requestCtx, []types.JID{jid})
+	info, err := p.getUserInfoWithIdentity(requestCtx, instance, []types.JID{jid}, deviceSessionFingerprint(instance.Client.Store))
 	if err != nil {
 		return "", "unavailable", err
 	}
 	item, ok := info[jid]
+	if ok && !groupParticipantProfileIdentityMatches(member, item) {
+		return "", "unavailable", ErrGroupReportGroupNotFound
+	}
 	if !ok {
 		return "", "unavailable", nil
 	}
@@ -167,6 +199,16 @@ func (p *DevicePool) GroupParticipantAbout(ctx context.Context, accountID, devic
 		text = string(runes[:2048])
 	}
 	return text, "available", nil
+}
+
+// A phone can be reassigned while a profile request is in flight. Do not show
+// the new owner's profile in a panel opened for a different stable LID.
+func groupParticipantProfileIdentityMatches(member domain.GroupParticipant, info types.UserInfo) bool {
+	expected := member.LID
+	if expected == "" && strings.HasSuffix(member.JID, "@lid") {
+		expected = member.JID
+	}
+	return expected == "" || info.LID.IsEmpty() || expected == info.LID.ToNonAD().String()
 }
 
 func (p *DevicePool) GroupParticipantPhoto(ctx context.Context, accountID, deviceID uuid.UUID, group string, member domain.GroupParticipant, preview bool) ([]byte, error) {

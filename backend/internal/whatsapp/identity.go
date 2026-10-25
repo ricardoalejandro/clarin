@@ -49,25 +49,56 @@ func explicitMessagePeerIdentity(source types.MessageSource) (types.JID, types.J
 	return phoneJID, lidJID
 }
 
-func (p *DevicePool) resolveMessagePeerIdentity(ctx context.Context, source types.MessageSource) peerIdentityResolution {
+// scopedPeerPhoneJID never treats the provider container's global LID cache
+// as proof that this account/device observed a phone number.
+func (p *DevicePool) scopedPeerPhoneJID(ctx context.Context, instance *DeviceInstance, lid types.JID) types.JID {
+	if p == nil || p.repos == nil || p.repos.Chat == nil || instance == nil || lid.Server != types.HiddenUserServer {
+		return types.EmptyJID
+	}
+	aliases, err := p.repos.Chat.WhatsAppPeerAliases(ctx, instance.AccountID, instance.ID, []string{lid.ToNonAD().String()})
+	if err != nil {
+		return types.EmptyJID
+	}
+	pn, _ := types.ParseJID(aliases.PNForLID[lid.ToNonAD().String()])
+	return phoneIdentityJID(pn)
+}
+
+// Incoming PN messages may have SenderAlt filled from whatsmeow's shared
+// encryption cache after wire parsing. It cannot establish a new local pair.
+func messageSourceWithVerifiedPNAlt(source types.MessageSource, verifiedLID types.JID) types.MessageSource {
+	if !source.IsFromMe && source.Sender.Server == types.DefaultUserServer && source.SenderAlt.Server == types.HiddenUserServer && source.SenderAlt.ToNonAD() != verifiedLID.ToNonAD() {
+		source.SenderAlt = types.EmptyJID
+	}
+	return source
+}
+
+func (p *DevicePool) messageSourceWithScopedPNAlt(ctx context.Context, instance *DeviceInstance, source types.MessageSource) types.MessageSource {
+	if source.IsFromMe || source.Sender.Server != types.DefaultUserServer || source.SenderAlt.Server != types.HiddenUserServer {
+		return source
+	}
+	var verified types.JID
+	if p != nil && p.repos != nil && p.repos.Chat != nil && instance != nil {
+		aliases, err := p.repos.Chat.WhatsAppPeerAliases(ctx, instance.AccountID, instance.ID, []string{source.Sender.ToNonAD().String()})
+		if err == nil {
+			verified, _ = types.ParseJID(aliases.LIDForPN[source.Sender.ToNonAD().String()])
+		}
+	}
+	return messageSourceWithVerifiedPNAlt(source, verified)
+}
+
+func (p *DevicePool) resolveMessagePeerIdentity(ctx context.Context, instance *DeviceInstance, source types.MessageSource) peerIdentityResolution {
 	if source.Chat.Server == types.GroupServer {
 		return peerIdentityResolution{JID: source.Chat.ToNonAD()}
 	}
+	source = p.messageSourceWithScopedPNAlt(ctx, instance, source)
 	phoneJID, lidJID := explicitMessagePeerIdentity(source)
 	if !phoneJID.IsEmpty() {
-		if !lidJID.IsEmpty() && p.store != nil && p.store.LIDMap != nil {
-			// Persist the explicit provider pair before any CRM write so future
-			// receipts/history events resolve even if their Alt field is absent.
-			_ = p.store.LIDMap.PutLIDMapping(ctx, lidJID, phoneJID)
-		}
 		return peerIdentityResolution{JID: phoneJID, LID: lidJID}
 	}
-	if !lidJID.IsEmpty() && p.store != nil && p.store.LIDMap != nil {
-		if mapped, err := p.store.LIDMap.GetPNForLID(ctx, lidJID); err == nil && !mapped.IsEmpty() && mapped.Server == types.DefaultUserServer {
-			return peerIdentityResolution{JID: mapped.ToNonAD(), LID: lidJID}
-		}
-	}
 	if !lidJID.IsEmpty() {
+		if mapped := p.scopedPeerPhoneJID(ctx, instance, lidJID); !mapped.IsEmpty() {
+			return peerIdentityResolution{JID: mapped, LID: lidJID}
+		}
 		return peerIdentityResolution{JID: lidJID, LID: lidJID, Pending: true}
 	}
 	chat := source.Chat.ToNonAD()
@@ -94,7 +125,7 @@ func (p *DevicePool) getOrCreateMessageChat(
 		chat, err := p.repos.Chat.GetOrCreateGroup(ctx, instance.AccountID, instance.ID, identity.JID.String(), "")
 		return chat, identity, err
 	}
-	identity := p.resolveMessagePeerIdentity(ctx, source)
+	identity := p.resolveMessagePeerIdentity(ctx, instance, source)
 	if instance == nil || identity.JID.IsEmpty() {
 		return nil, identity, fmt.Errorf("WhatsApp peer identity is unavailable")
 	}
@@ -159,7 +190,7 @@ func (p *DevicePool) getOrCreateMessageChat(
 }
 
 func (p *DevicePool) reconcilePendingChatIdentities(ctx context.Context, instance *DeviceInstance) {
-	if instance == nil || p.store == nil || p.store.LIDMap == nil {
+	if instance == nil || p.repos == nil || p.repos.Chat == nil {
 		return
 	}
 	pendingChats, err := p.repos.Chat.GetPendingIdentitiesByDevice(ctx, instance.AccountID, instance.ID)
@@ -172,8 +203,8 @@ func (p *DevicePool) reconcilePendingChatIdentities(ctx context.Context, instanc
 		if parseErr != nil || lidJID.Server != types.HiddenUserServer {
 			continue
 		}
-		phoneJID, mapErr := p.store.LIDMap.GetPNForLID(ctx, lidJID.ToNonAD())
-		if mapErr != nil || phoneJID.IsEmpty() || phoneJID.Server != types.DefaultUserServer {
+		phoneJID := p.scopedPeerPhoneJID(ctx, instance, lidJID)
+		if phoneJID.IsEmpty() {
 			continue
 		}
 		name := ""

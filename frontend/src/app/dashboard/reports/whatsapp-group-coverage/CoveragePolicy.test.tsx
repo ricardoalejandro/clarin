@@ -7,13 +7,14 @@ import { exportWhatsAppGroupReportCSV, exportWhatsAppGroupReportExcel, whatsappC
 import WhatsAppGroupCoveragePage from '@/components/reports/WhatsAppGroupCoverageReport'
 import { isCurrentCoverageReport } from '@/components/reports/whatsAppCoveragePolicy'
 
-vi.mock('@/lib/api', () => ({ subscribeWebSocket: () => () => {} }))
+const websocket = vi.hoisted(() => ({ listeners: new Set<(event: unknown) => void>() }))
+vi.mock('@/lib/api', () => ({ subscribeWebSocket: (listener: (event: unknown) => void) => { websocket.listeners.add(listener); return () => websocket.listeners.delete(listener) } }))
 vi.mock('@/components/reports/WhatsAppGroupSelector', () => ({ default: ({ groups, onChange }: any) => <button disabled={!groups.length} onClick={() => onChange(groups[0])}>Elegir grupo</button> }))
 vi.mock('@/utils/whatsappGroupReportExport', async importOriginal => ({ ...await importOriginal<typeof import('@/utils/whatsappGroupReportExport')>(), exportWhatsAppGroupReportCSV: vi.fn(), exportWhatsAppGroupReportExcel: vi.fn() }))
 
 const policy = (enabled = true, version = 1): LeadPolicy => ({ account_id: 'account', leads_enabled: enabled, leads_policy_version: version, lead_automation_enabled: true })
 const fixture = (enabled = true, version = 1): WhatsAppGroupCoverageReport => ({
-  account_id: 'account', leads_enabled: enabled, leads_policy_version: version, generated_at: '2026-10-12T10:00:00Z',
+  identity_revision: 1, group_revision: 2, crm_identity_revision: 3, account_id: 'account', leads_enabled: enabled, leads_policy_version: version, generated_at: '2026-10-12T10:00:00Z',
   device: { id: 'device', name: 'Synthetic device', phone: '51999999999' },
   group: { id: 'group', name: 'Synthetic group', participant_count: 1, kind: 'group', suspended: false },
   summary: { total_group_members: 1, evaluated_members: 1, eligible_members: 1, registered_members: 1, active_management_members: enabled ? 1 : 0, historical_only_members: 0, contact_only_members: enabled ? 0 : 1, not_registered_members: 0, unidentifiable_members: 0, ambiguous_members: 0, do_not_contact_members: 0, registration_coverage_percent: 100, management_coverage_percent: enabled ? 100 : null },
@@ -25,6 +26,8 @@ let reportResponse: () => Promise<unknown>
 let policyResponse: () => Promise<unknown>
 let devicesResponse: () => Promise<Response>
 let groupsResponse: () => Promise<Response>
+let validationResponse: () => Promise<Response>
+let recoveryResponse: () => Promise<Response>
 let fetchMock: ReturnType<typeof vi.fn>
 const refresh = vi.fn()
 const view = (p: LeadPolicy) => {
@@ -41,22 +44,26 @@ async function generate() {
   fireEvent.click(screen.getByRole('button', { name: 'Generar reporte' }))
 }
 beforeEach(() => {
-  vi.clearAllMocks()
+  vi.clearAllMocks(); websocket.listeners.clear()
   currentPolicy = policy()
   reportResponse = async () => response({ report: fixture(currentPolicy.leads_enabled, currentPolicy.leads_policy_version) })
   policyResponse = async () => response({ policy: currentPolicy })
   devicesResponse = async () => response({ devices: [{ id: 'device', name: 'Synthetic device', status: 'connected' }] })
+  validationResponse = async () => response({})
+  recoveryResponse = async () => response({ identity_revision: 1, recovery: null })
   groupsResponse = async () => response({ groups: [{ id: 'group', name: 'Synthetic group' }] })
   fetchMock = vi.fn((url: string) => {
     if (url === '/api/devices') return devicesResponse()
     if (url.includes('/groups?')) return groupsResponse()
     if (url.endsWith('/generate')) return reportResponse()
+    if (url.endsWith('/validate')) return validationResponse()
+    if (url.endsWith('/group-identities/recovery')) return recoveryResponse()
     if (url === '/api/settings/lead-policy') return policyResponse()
     throw new Error(`Unexpected URL ${url}`)
   })
   vi.stubGlobal('fetch', fetchMock)
 })
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals() })
 
 describe('WhatsApp coverage policy', () => {
   it.each([true, false])('uses the real account-policy hook and JSON contract to generate and export with Leads enabled=%s', async enabled => {
@@ -279,4 +286,150 @@ describe('WhatsApp coverage policy', () => {
     expect(isCurrentCoverageReport(fixture(), policy(false))).toBe(false)
     expect(isCurrentCoverageReport(null, policy())).toBe(false)
   })
+})
+
+
+describe('coverage identity snapshot', () => {
+  const changed = 'Los datos del grupo o sus contactos cambiaron. Genera nuevamente el reporte.'
+  const emit = (event: unknown) => act(() => { websocket.listeners.forEach(listener => listener(event)) })
+  it.each(['CSV', 'Excel'])('validates all revisions before exporting %s and removes an obsolete snapshot', async format => {
+    render(view(currentPolicy)); await generate(); await screen.findByRole('button', { name: format })
+    validationResponse = async () => response({ success: false, code: 'report_snapshot_changed' }, 409)
+    fireEvent.click(screen.getByRole('button', { name: format }))
+    expect(await screen.findByText(changed)).toBeVisible()
+    expect(screen.queryByRole('link', { name: 'Synthetic contact' })).not.toBeInTheDocument()
+    expect(exportWhatsAppGroupReportCSV).not.toHaveBeenCalled(); expect(exportWhatsAppGroupReportExcel).not.toHaveBeenCalled()
+    const validation = fetchMock.mock.calls.find(([url]) => url.endsWith('/validate'))!
+    expect(JSON.parse(validation[1].body)).toEqual({ device_id: 'device', group_id: 'group', identity_revision: 1, group_revision: 2, crm_identity_revision: 3, leads_policy_version: 1, leads_enabled: true })
+  })
+  it('discards a generation completed after a relevant identity notification even when fetch ignores abort', async () => {
+    let finish!: (value: unknown) => void
+    reportResponse = () => new Promise(resolve => { finish = resolve })
+    render(view(currentPolicy)); await generate()
+    const request = fetchMock.mock.calls.find(([url]) => url.endsWith('/generate'))!
+    emit({ event: 'whatsapp_identity_updated', data: { device_id: 'device', identity_revision: 2 } })
+    expect(request[1].signal.aborted).toBe(true)
+    await act(async () => finish(response({ report: fixture() })))
+    expect(screen.queryByRole('button', { name: 'CSV' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Synthetic contact' })).not.toBeInTheDocument()
+    expect(screen.getByText(changed)).toBeVisible()
+  })
+  it.each(['contact_update', 'whatsapp_crm_identity_updated'])('aborts export validation and never exports after %s changes identity', async event => {
+    render(view(currentPolicy)); await generate(); await screen.findByRole('button', { name: 'CSV' })
+    let finish!: (value: Response) => void
+    validationResponse = () => new Promise(resolve => { finish = resolve })
+    fireEvent.click(screen.getByRole('button', { name: 'CSV' }))
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/validate'))).toBe(true))
+    emit({ event, account_id: 'account', data: { contact_id: 'contact', crm_identity_revision: 4 } })
+    await act(async () => finish(response({})))
+    expect(exportWhatsAppGroupReportCSV).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'CSV' })).not.toBeInTheDocument()
+  })
+  it('keeps the snapshot for another account, another device and a duplicate revision', async () => {
+    render(view(currentPolicy)); await generate(); await screen.findByRole('button', { name: 'CSV' })
+    emit({ event: 'contact_update', account_id: 'other', data: { account_id: 'other' } })
+    emit({ event: 'whatsapp_identity_updated', data: { device_id: 'other-device', identity_revision: 100 } })
+    emit({ event: 'whatsapp_identity_updated', data: { device_id: 'device', identity_revision: 1 } })
+    emit({ event: 'whatsapp_crm_identity_updated', account_id: 'other', data: { crm_identity_revision: 100 } })
+    emit({ event: 'whatsapp_crm_identity_updated', account_id: 'account', data: { account_id: 'other', crm_identity_revision: 100 } })
+    emit({ event: 'whatsapp_crm_identity_updated', data: { crm_identity_revision: 100 } })
+    for (const revision of [3, 2, -1, 3.5, undefined]) emit({ event: 'whatsapp_crm_identity_updated', account_id: 'account', data: { crm_identity_revision: revision } })
+    expect(screen.getByRole('link', { name: 'Synthetic contact' })).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'CSV' }))
+    await waitFor(() => expect(exportWhatsAppGroupReportCSV).toHaveBeenCalledOnce())
+  })
+  it.each(['envelope', 'payload'])('invalidates all results for a newer CRM revision scoped by %s', async location => {
+    render(view(currentPolicy)); await generate(); await screen.findByRole('button', { name: 'CSV' })
+    emit(location === 'envelope' ? { event: 'whatsapp_crm_identity_updated', account_id: 'account', data: { crm_identity_revision: 4 } }
+      : { type: 'whatsapp_crm_identity_updated', data: { account_id: 'account', crm_identity_revision: 4 } })
+    expect(screen.getByText(changed)).toBeVisible()
+    expect(screen.queryByRole('link', { name: 'Synthetic contact' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'CSV' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/generate'))).toHaveLength(1)
+  })
+  it.each([4, undefined])('discards an inflight generation after a scoped CRM notification with revision %s', async revision => {
+    let finish!: (value: unknown) => void
+    reportResponse = () => new Promise(resolve => { finish = resolve })
+    render(view(currentPolicy)); await generate()
+    const request = fetchMock.mock.calls.find(([url]) => url.endsWith('/generate'))!
+    emit({ event: 'whatsapp_crm_identity_updated', account_id: 'account', data: { crm_identity_revision: revision } })
+    expect(request[1].signal.aborted).toBe(true)
+    await act(async () => finish(response({ report: fixture() })))
+    expect(screen.queryByRole('button', { name: 'CSV' })).not.toBeInTheDocument()
+    expect(screen.getByText(changed)).toBeVisible()
+  })
+  it('rechecks the full snapshot on focus after a missed update and requires regeneration', async () => {
+    render(view(currentPolicy)); await generate(); await screen.findByRole('button', { name: 'CSV' })
+    validationResponse = async () => response({ success: false, code: 'report_snapshot_changed' }, 409)
+    fireEvent(window, new Event('focus'))
+    expect(await screen.findByText(changed)).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Excel' })).not.toBeInTheDocument()
+    expect(exportWhatsAppGroupReportExcel).not.toHaveBeenCalled()
+  })
+  it.each(['identity_revision', 'group_revision', 'crm_identity_revision'])('rejects a generated report missing %s', async field => {
+    reportResponse = async () => response({ report: { ...fixture(), [field]: undefined } })
+    render(view(currentPolicy)); await generate()
+    expect(await screen.findByText('No pudimos verificar la versión de los datos. Genera nuevamente el reporte.')).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'CSV' })).not.toBeInTheDocument()
+  })
+  it('shows recovery progress using only the read-only status endpoint', async () => {
+    recoveryResponse = async () => response({ identity_revision: 1, recovery: { state: 'recovering', phase: 'contacts', processed: 10, resolved: 8, pending: 2, conflicts: 0, last_error_code: '', updated_at: '2026-10-25T12:00:00Z' } })
+    render(view(currentPolicy))
+    expect(await screen.findByText('Recuperando nombres: 10 candidatos revisados · 8 coincidencias verificadas · 2 verificaciones pendientes.')).toBeVisible()
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
+  })
+  it('keeps username separate in reporting and exports without inventing a phone', async () => {
+    const report = fixture(false)
+    report.members[0] = { ...report.members[0], whatsapp_name: 'Nombre no disponible', username: 'ana.prueba', phone: null, redacted_phone: null, exists_in_clarin: null, coverage_status: 'unidentifiable', contact: undefined }
+    currentPolicy = policy(false)
+    reportResponse = async () => response({ report })
+    render(view(currentPolicy)); await generate()
+    expect(await screen.findByText('Usuario: @ana.prueba')).toBeVisible()
+    expect(whatsappCoverageMemberRows(report)[0]).toMatchObject({ 'Usuario WhatsApp': '@ana.prueba', 'Teléfono': '', 'Existe en Clarin': 'No verificable' })
+  })
+})
+
+
+it('does not show a generated snapshot older than an already observed recovery revision', async () => {
+  recoveryResponse = async () => response({ identity_revision: 2, recovery: null })
+  render(view(currentPolicy)); await generate()
+  expect(await screen.findByText('Los datos del grupo o sus contactos cambiaron. Genera nuevamente el reporte.')).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'CSV' })).not.toBeInTheDocument()
+})
+
+it('bounds an export preflight and discards its delayed completion after timeout', async () => {
+  render(view(currentPolicy)); await generate(); await screen.findByRole('button', { name: 'CSV' })
+  let finish!: (value: Response) => void
+  validationResponse = () => new Promise(resolve => { finish = resolve })
+  vi.useFakeTimers()
+  fireEvent.click(screen.getByRole('button', { name: 'CSV' }))
+  await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+  expect(screen.getByRole('button', { name: 'CSV' })).toBeDisabled()
+  await act(async () => { await vi.advanceTimersByTimeAsync(20000) })
+  expect(screen.getByText('La verificación tardó demasiado. Vuelve a intentarlo.')).toBeVisible()
+  expect(screen.getByRole('button', { name: 'CSV' })).toBeEnabled()
+  await act(async () => finish(response({})))
+  expect(exportWhatsAppGroupReportCSV).not.toHaveBeenCalled()
+})
+
+
+it('filters report usernames locally only after 500ms, including a cleared query', async () => {
+  const report = fixture()
+  report.members[0].username = 'ana.prueba'
+  report.members.push({ ...report.members[0], whatsapp_name: 'Otra persona', username: 'otra', contact: undefined })
+  reportResponse = async () => response({ report })
+  render(view(currentPolicy)); await generate(); await screen.findByText('Otra persona')
+  vi.useFakeTimers()
+  const input = screen.getByPlaceholderText('Buscar nombre, teléfono o etiqueta…')
+  fireEvent.change(input, { target: { value: 'ana.prueba' } })
+  await act(async () => { await vi.advanceTimersByTimeAsync(499) })
+  expect(screen.getByText('Otra persona')).toBeVisible()
+  await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+  expect(screen.queryByText('Otra persona')).not.toBeInTheDocument()
+  fireEvent.change(input, { target: { value: '' } })
+  expect(input).toHaveValue('')
+  await act(async () => { await vi.advanceTimersByTimeAsync(499) })
+  expect(screen.queryByText('Otra persona')).not.toBeInTheDocument()
+  await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+  expect(screen.getByText('Otra persona')).toBeVisible()
 })

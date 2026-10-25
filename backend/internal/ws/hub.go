@@ -28,50 +28,53 @@ const (
 
 // Event types for WebSocket communication
 const (
-	EventNewMessage             = "new_message"
-	EventMessageSent            = "message_sent"
-	EventMessageStatus          = "message_status"
-	EventDeviceStatus           = "device_status"
-	EventQRCode                 = "qr_code"
-	EventChatUpdate             = "chat_update"
-	EventChatIdentityReconciled = "chat_identity_reconciled"
-	EventPresence               = "presence"
-	EventTyping                 = "typing"
-	EventLeadUpdate             = "lead_update"
-	EventNotification           = "notification"
-	EventMessageReaction        = "message_reaction"
-	EventPollUpdate             = "poll_update"
-	EventInteractionUpdate      = "interaction_update"
-	EventMessageRevoked         = "message_revoked"
-	EventMessageEdited          = "message_edited"
-	EventMessageUpdated         = "message_updated"
-	EventEventParticipantUpdate = "event_participant_update"
-	EventHistorySyncComplete    = "history_sync_complete"
-	EventLogbookUpdate          = "logbook_update"
-	EventDynamicRegistration    = "dynamic_registration"
-	EventContactUpdate          = "contact_update"
-	EventVersionUpdate          = "version_update"
-	EventTaskUpdate             = "task_update"
-	EventTaskReminder           = "task_reminder"
-	EventTaskOverdue            = "task_overdue"
-	EventTaskMention            = "task_mention"
-	EventWorkEventUpdate        = "work_event_update"
-	EventWorkEventInvitation    = "work_event_invitation"
-	EventWorkEventRSVP          = "work_event_rsvp"
-	EventWorkEventReminder      = "work_event_reminder"
-	EventCustomFieldDefUpdate   = "custom_field_def_update"
-	EventWhatsAppStatus         = "whatsapp_status"
-	EventQuickReplyUpdate       = "quick_reply_update"
+	EventNewMessage                 = "new_message"
+	EventMessageSent                = "message_sent"
+	EventMessageStatus              = "message_status"
+	EventDeviceStatus               = "device_status"
+	EventQRCode                     = "qr_code"
+	EventChatUpdate                 = "chat_update"
+	EventChatIdentityReconciled     = "chat_identity_reconciled"
+	EventPresence                   = "presence"
+	EventTyping                     = "typing"
+	EventLeadUpdate                 = "lead_update"
+	EventNotification               = "notification"
+	EventMessageReaction            = "message_reaction"
+	EventPollUpdate                 = "poll_update"
+	EventInteractionUpdate          = "interaction_update"
+	EventMessageRevoked             = "message_revoked"
+	EventMessageEdited              = "message_edited"
+	EventMessageUpdated             = "message_updated"
+	EventEventParticipantUpdate     = "event_participant_update"
+	EventHistorySyncComplete        = "history_sync_complete"
+	EventLogbookUpdate              = "logbook_update"
+	EventDynamicRegistration        = "dynamic_registration"
+	EventContactUpdate              = "contact_update"
+	EventVersionUpdate              = "version_update"
+	EventTaskUpdate                 = "task_update"
+	EventTaskReminder               = "task_reminder"
+	EventTaskOverdue                = "task_overdue"
+	EventTaskMention                = "task_mention"
+	EventWorkEventUpdate            = "work_event_update"
+	EventWorkEventInvitation        = "work_event_invitation"
+	EventWorkEventRSVP              = "work_event_rsvp"
+	EventWorkEventReminder          = "work_event_reminder"
+	EventCustomFieldDefUpdate       = "custom_field_def_update"
+	EventWhatsAppStatus             = "whatsapp_status"
+	EventWhatsAppIdentityUpdated    = "whatsapp_identity_updated"
+	EventWhatsAppCRMIdentityUpdated = "whatsapp_crm_identity_updated"
+	EventQuickReplyUpdate           = "quick_reply_update"
 )
 
 // Message represents a WebSocket message
 type Message struct {
-	Event              string      `json:"event"`
-	AccountID          string      `json:"account_id,omitempty"`
-	DeviceID           string      `json:"device_id,omitempty"`
-	Data               interface{} `json:"data"`
-	RequiredPermission string      `json:"-"`
-	TargetUserIDs      []uuid.UUID `json:"-"`
+	Event                  string      `json:"event"`
+	AccountID              string      `json:"account_id,omitempty"`
+	DeviceID               string      `json:"device_id,omitempty"`
+	Data                   interface{} `json:"data"`
+	RequiredPermission     string      `json:"-"`
+	RequiredAnyPermissions []string    `json:"-"`
+	TargetUserIDs          []uuid.UUID `json:"-"`
 }
 
 // Client represents a connected WebSocket client
@@ -114,6 +117,22 @@ func clientCanReceive(client *Client, msg *Message) bool {
 	}
 	if !client.HasPermission(required) {
 		return false
+	}
+	anyPermissions := msg.RequiredAnyPermissions
+	if msg.Event == EventWhatsAppIdentityUpdated || msg.Event == EventWhatsAppCRMIdentityUpdated {
+		anyPermissions = []string{domain.PermChats, domain.PermReports}
+	}
+	if len(anyPermissions) > 0 {
+		allowed := false
+		for _, permission := range anyPermissions {
+			if permission != "" && client.HasPermission(permission) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
 	}
 	if len(msg.TargetUserIDs) > 0 {
 		for _, userID := range msg.TargetUserIDs {
@@ -364,6 +383,11 @@ func (h *Hub) BroadcastToAccountWithPermission(accountID uuid.UUID, permission, 
 		Data:               data,
 		RequiredPermission: permission,
 	}
+}
+
+// BroadcastToAccountWithAnyPermission delivers one minimal cross-module notice.
+func (h *Hub) BroadcastToAccountWithAnyPermission(accountID uuid.UUID, permissions []string, event string, data interface{}) {
+	h.broadcast <- &Message{Event: event, AccountID: accountID.String(), Data: data, RequiredAnyPermissions: append([]string(nil), permissions...)}
 }
 
 // BroadcastToAccountUsersWithPermission targets only the selected users in an

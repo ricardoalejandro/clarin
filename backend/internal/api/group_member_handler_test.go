@@ -1,6 +1,7 @@
 package api
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/google/uuid"
@@ -62,7 +63,7 @@ func TestGroupMemberContactProjectionRequiresAuthorizedContext(t *testing.T) {
 		t.Fatal("Contacts permission ignored")
 	}
 	member := domain.GroupParticipant{Name: "WhatsApp identity", AvatarSource: "whatsapp", AvatarURL: "/temporary"}
-	if got := projectGroupMemberContact(member, nil); got != member {
+	if got := projectGroupMemberContact(member, nil); !reflect.DeepEqual(got, member) {
 		t.Fatal("unknown Contact changed visible identity")
 	}
 	got := projectGroupMemberContact(member, &repository.GroupMemberContact{Name: "Canonical Contact"})
@@ -83,8 +84,8 @@ func TestGroupMemberReferenceAcceptsEncodedUserJIDsOnly(t *testing.T) {
 }
 
 func TestGroupMemberSearchUsesVisibleResolvedIdentity(t *testing.T) {
-	member := domain.GroupParticipant{JID: "7001@lid", Name: "Saved LID identity", WhatsAppName: "Saved LID identity", Phone: "51900000001", RedactedPhone: "+51····01"}
-	for _, query := range []string{"saved lid", "51900000001", "+51··", "  SAVED  "} {
+	member := domain.GroupParticipant{JID: "7001@lid", Name: "Saved LID identity", WhatsAppName: "Saved LID identity", Phone: "51900000001", RedactedPhone: "+51····01", Username: "observed.profile"}
+	for _, query := range []string{"saved lid", "51900000001", "+51··", "  SAVED  ", "observed.profile", "@observed.profile"} {
 		if got := groupParticipantsMatchingSearch([]domain.GroupParticipant{member}, query); len(got) != 1 || got[0] != member.JID {
 			t.Fatalf("resolved identity not searchable with %q: %+v", query, got)
 		}

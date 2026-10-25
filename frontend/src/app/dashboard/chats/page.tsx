@@ -15,6 +15,8 @@ import NewChatModal from '@/components/chat/NewChatModal'
 import ChatPanel from '@/components/chat/ChatPanel'
 import GroupDetailsPanel, { type GroupDetailsPanelHandle } from '@/components/chat/GroupDetailsPanel'
 import ChatDetailsSurface from '@/components/chat/ChatDetailsSurface'
+import GroupIdentityRecoveryNotice from '@/components/chat/GroupIdentityRecoveryNotice'
+import { useGroupIdentityRecovery } from '@/components/chat/useGroupIdentityRecovery'
 import { hasGroupMemberHistoryLayer } from '@/components/chat/groupParticipantIdentity'
 import { usePersonalChatPins } from '@/components/chat/usePersonalChatPins'
 import { applyChatPin } from '@/utils/chatPins'
@@ -959,7 +961,7 @@ export default function ChatsPage() {
         } else scheduleChatReconciliation()
       } else if (eventType === 'message_reaction' && filterHasReaction) {
         scheduleChatReconciliation()
-      } else if (eventType === 'chat_group_updated' || eventType === 'groups_synced') {
+      } else if (eventType === 'chat_group_updated' || eventType === 'groups_synced' || eventType === 'whatsapp_identity_updated') {
         scheduleChatReconciliation()
       } else if (eventType === 'contact_update') {
         scheduleChatReconciliation()
@@ -1167,6 +1169,7 @@ export default function ChatsPage() {
   }
 
   const groupSyncDevices = devices.filter(device => !filterDevices.length || filterDevices.includes(device.id))
+  const identityRecovery = useGroupIdentityRecovery(chatKind === 'group' ? groupSyncDevices.filter(device => (device.provider || 'whatsapp_web') === 'whatsapp_web').map(device => device.id) : [], selectedChat?.account_id || chats[0]?.account_id)
   const groupSyncTargets = groupSyncDevices.filter(device => device.status === 'connected' && device.runtime_capabilities?.can_list_groups === true && (device.provider || 'whatsapp_web') === 'whatsapp_web')
   const groupSyncUnavailableReason = groupSyncDevices.some(device => device.runtime_capabilities?.can_list_groups === true && (device.provider || 'whatsapp_web') === 'whatsapp_web') ? 'Conecta un dispositivo de WhatsApp con soporte de grupos.' : 'La sincronización de grupos no está disponible para estos dispositivos.'
   const syncGroups = async () => {
@@ -1179,6 +1182,7 @@ export default function ChatsPage() {
         const response = await fetch('/api/devices/' + device.id + '/groups/sync', { method: 'POST', headers: { Authorization: 'Bearer ' + localStorage.getItem('token') } })
         const data = await response.json(); if (!response.ok || !data.success) throw new Error(data.error || 'No se pudieron actualizar los grupos.')
       }
+      identityRecovery.refresh()
       await fetchChats(true, { silent: true })
     } catch (cause) { setListFeedback(cause instanceof Error ? cause.message : 'No se pudieron actualizar los grupos.') }
     finally { setSyncingGroups(false) }
@@ -1240,6 +1244,7 @@ export default function ChatsPage() {
             </div>}
             {chatKind === 'group' && !collapseMobileListToolbar && <p id="group-pending-hint" className="text-[11px] leading-4 text-slate-400">Los grupos no generan pendientes.</p>}
                         {pins.error && <p role="alert" className="rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{pins.error}</p>}
+            {chatKind === 'group' && <GroupIdentityRecoveryNotice rows={identityRecovery.rows} devices={devices} retryHint />}
             {listFeedback && (
               <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-xs font-medium text-red-700" role="alert">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />

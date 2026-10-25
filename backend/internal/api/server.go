@@ -56,6 +56,9 @@ func strPtr(s string) *string {
 }
 
 type Server struct {
+	forwardTransport       forwardBatchTransport
+	forwardDeviceCheck     func(context.Context, uuid.UUID, uuid.UUID) (*domain.Device, error)
+	forwardCapabilityCheck func(uuid.UUID) bool
 	app                    *fiber.App
 	cfg                    *config.Config
 	services               *service.Services
@@ -535,6 +538,7 @@ func (s *Server) setupRoutes() {
 	chats.Get("/:id/messages/:messageId/receipts", s.handleGroupReceipts)
 	chats.Post("/:id/messages/:messageId/media/recover", s.handleRecoverGroupMedia)
 	protected.Post("/devices/:id/groups/sync", s.requirePermission(domain.PermChats), s.handleSyncGroups)
+	protected.Get("/devices/:id/group-identities/recovery", s.handleGetGroupIdentityRecovery)
 	chats.Get("/:id", s.handleGetChatDetails)
 	chats.Put("/:id/pin", s.handleSetChatPin)
 	chats.Get("/:id/messages/search", s.handleSearchMessages)
@@ -561,7 +565,9 @@ func (s *Server) setupRoutes() {
 	messages := protected.Group("/messages", s.requirePermission(domain.PermChats), s.groupRequestMiddleware)
 	messages.Post("/send", s.messageActorMiddleware, s.handleSendMessage)
 	messages.Post("/send-contact", s.messageActorMiddleware, s.handleSendContact)
-	messages.Post("/forward", s.messageActorMiddleware, s.handleForwardMessage)
+	messages.Post("/forward/batch", s.handleForwardBatch)
+	messages.Get("/forward/batch/:id", s.handleGetForwardBatch)
+	messages.Post("/forward", s.handleForwardMessage)
 	messages.Post("/react", s.handleSendReaction)
 	messages.Post("/poll", s.messageActorMiddleware, s.handleSendPoll)
 
@@ -4033,67 +4039,35 @@ func (s *Server) handleSendContact(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "message": message})
 }
 
+// Compatibility accepts one known-original source only. Old clients cannot
+// express an atomic batch and must never bypass forwarded group/count limits.
 func (s *Server) handleForwardMessage(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
 	var req struct {
-		DeviceID  string `json:"device_id"`
-		To        string `json:"to"`         // target chat JID
-		ChatID    string `json:"chat_id"`    // source chat UUID
-		MessageID string `json:"message_id"` // WhatsApp message_id of the original message
+		DeviceID    uuid.UUID `json:"device_id"`
+		To          string    `json:"to"`
+		ChatID      uuid.UUID `json:"chat_id"`
+		MessageID   string    `json:"message_id"`
+		OperationID uuid.UUID `json:"client_operation_id"`
 	}
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
+	if c.BodyParser(&req) != nil {
+		return writeForwardError(c, forwardFailure(400, "forward_invalid_request", "Solicitud de reenvío inválida."))
 	}
-
-	deviceID, err := uuid.Parse(req.DeviceID)
+	if req.OperationID == uuid.Nil {
+		return writeForwardError(c, forwardFailure(409, "forward_batch_required", "Actualiza o vuelve a abrir Clarin para reenviar este mensaje de forma segura."))
+	}
+	source, err := s.repos.Message.GetByReference(c.Context(), accountID, req.ChatID, req.MessageID)
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid device ID"})
+		return writeForwardError(c, forwardFailure(404, "forward_source_not_found", "El mensaje original ya no está disponible."))
 	}
-	if dev, _ := s.services.Device.GetByID(c.Context(), deviceID); dev == nil || dev.AccountID != accountID {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
+	if source.Forwarding.Normalize().State != domain.ForwardingNotForwarded {
+		return writeForwardError(c, forwardFailure(409, "forward_batch_required", "Actualiza o vuelve a abrir Clarin para reenviar este mensaje conservando su procedencia."))
 	}
-	if err := s.ensureOutboundContactAllowed(c.Context(), accountID, req.To); err != nil {
-		if apiErr, ok := err.(*fiber.Error); ok {
-			return c.Status(apiErr.Code).JSON(fiber.Map{"success": false, "error": apiErr.Message, "code": "do_not_contact"})
-		}
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	target, err := s.repos.Chat.FindByDeviceJID(c.Context(), accountID, req.DeviceID, req.To)
+	if err != nil || target == nil {
+		return writeForwardError(c, forwardFailure(404, "forward_destination_not_found", "El destino ya no está disponible en este dispositivo."))
 	}
-
-	chatID, err := uuid.Parse(req.ChatID)
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid chat ID"})
-	}
-
-	sourceChat, err := s.services.Chat.GetByID(c.Context(), chatID)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-	if !chatBelongsToAccount(sourceChat, accountID) {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Original message not found"})
-	}
-
-	// Get original message
-	originalMsg, err := s.services.Chat.GetMessageByID(c.Context(), chatID, req.MessageID)
-	if err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Original message not found"})
-	}
-	if !messageBelongsToChatAccount(originalMsg, chatID, accountID) {
-		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Original message not found"})
-	}
-
-	// Forward it
-	message, err := s.services.Chat.ForwardMessage(c.Context(), deviceID, req.To, originalMsg)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
-	}
-
-	if message != nil {
-		s.invalidateChatCaches(accountID, &message.ChatID)
-	} else {
-		s.invalidateChatCaches(accountID, nil)
-	}
-
-	return c.JSON(fiber.Map{"success": true, "message": message})
+	return s.runForwardBatch(c, forwardBatchRequest{SourceChatID: req.ChatID, SourceMessageID: source.ID, DeviceID: req.DeviceID, DestinationChatIDs: []uuid.UUID{target.ID}, ClientOperationID: req.OperationID})
 }
 
 func (s *Server) handleSendReaction(c *fiber.Ctx) error {

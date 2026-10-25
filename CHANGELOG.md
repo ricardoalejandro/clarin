@@ -1,6 +1,35 @@
 # Changelog — Clarin CRM
 
+## 2026-10-25
+
+### Zoom de fotografías y administradores primero
+
+- Ctrl + rueda y el pellizco con dos dedos amplían la imagen dentro de su visor, conservando las ventanas de Contactos, Leads, Eventos, Programas y Chats.
+- Las imágenes adjuntas mantienen sus comentarios y marcas; desplazar o pellizcar no crea anotaciones.
+- Los administradores aparecen primero en los integrantes del grupo, también al buscar y cargar más páginas, conservando el orden de los demás participantes.
+
+### Recuperación de identidades de integrantes
+
+- Recuperación automática de nombres y relaciones de teléfono de los integrantes ya sincronizados, usando los dispositivos vinculados y sin crear Contactos ni enviar mensajes.
+- Reanudar una sesión existente recupera identidad sin importar ni fusionar registros CRM.
+- Los datos comprobados aparecen durante la recuperación, aunque otros números sigan esperando un reintento. Los dispositivos desconectados continúan al volver.
+- Participantes, ficha y Reportería comparten la identidad comprobada. El usuario público se muestra separado del teléfono cuando WhatsApp lo entrega.
+- Las exportaciones comprueban que el reporte siga vigente; los cambios de identidad, grupo o datos CRM requieren regenerarlo.
+
+### Compartir mensajes sin bloqueos generales
+
+- Reenviar permite enviar una copia de textos y archivos compatibles, también del historial antiguo, aunque el reenvío nativo no esté habilitado.
+- El selector distingue la copia del reenvío de WhatsApp y conserva los límites conocidos y los resultados para evitar duplicados.
+- Los audios antiguos sin clasificación pueden compartirse como archivo adjunto mediante una elección explícita.
+- Los mensajes eliminados, de visualización única o sin contenido disponible permanecen protegidos individualmente.
+
 ## 2026-10-24
+
+### Identidad de participantes y procedencia de mensajes
+
+- Los integrantes aprovechan los nombres disponibles para su identidad de WhatsApp, incluso cuando no se conoce su teléfono; los usuarios públicos recibidos se muestran por separado.
+- Los mensajes conservan los indicadores de reenvío entregados por WhatsApp y muestran «Reenviado» o «Reenviado muchas veces» también después de recargar.
+- El nuevo envío nativo conserva la procedencia y registra los resultados para evitar copias por reintentos. Permanece deshabilitado hasta verificarlo con dispositivos reales.
 
 ### Entornos recuperables e integrantes de WhatsApp
 

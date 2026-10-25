@@ -26,12 +26,12 @@ export interface GroupParticipantProfileHandle {
   back: () => boolean
 }
 
-function GroupParticipantProfileImpl({ chat, member, scope, suspended = false, snapshotRevision = 0, onBack, onClose, onOpenChat }: {
-  chat: Chat; member: GroupParticipant; scope: string; suspended?: boolean; snapshotRevision?: number
+function GroupParticipantProfileImpl({ chat, member, scope, suspended = false, snapshotRevision = 0, identityRevision, groupRevision, onBack, onClose, onOpenChat }: {
+  chat: Chat; member: GroupParticipant; scope: string; suspended?: boolean; snapshotRevision?: number; identityRevision?: number; groupRevision?: number
   onBack: () => void; onClose: () => void; onOpenChat?: OpenParticipantChat
 }, forwardedRef: ForwardedRef<GroupParticipantProfileHandle>) {
   const path = groupParticipantPath(chat.id, member.jid)
-  const requestKey = `${scope}:${path}:${chat.device_id}:${snapshotRevision}`
+  const requestKey = `${scope}:${path}:${chat.device_id}:${snapshotRevision}:${identityRevision}:${groupRevision}`
   const requestKeyRef = useRef(requestKey)
   requestKeyRef.current = requestKey
   const [snapshot, setSnapshot] = useState<{ key: string; profile: Profile } | null>(null)
@@ -94,6 +94,7 @@ function GroupParticipantProfileImpl({ chat, member, scope, suspended = false, s
     void fetch(path, { credentials: 'include', cache: 'no-store', signal: controller.signal }).then(readJSON).then(data => {
       if (!current(controller)) return
       const parsed = parseGroupParticipantProfile(data.profile)
+      if (identityRevision !== undefined && parsed.identity_revision < identityRevision || groupRevision !== undefined && parsed.group_revision < groupRevision) throw new Error('La información del integrante cambió. Vuelve a consultar el perfil.')
       if (!sameParticipant(parsed.participant, member)) throw new Error('La identidad del integrante cambió. Vuelve a consultar el perfil.')
       if (parsed.device_id !== chat.device_id) throw new Error('El dispositivo del grupo cambió. Vuelve a consultar el integrante.')
       setSnapshot({ key: requestKey, profile: parsed }); setPhase('ready')
@@ -204,7 +205,7 @@ function GroupParticipantProfileImpl({ chat, member, scope, suspended = false, s
         {photo.url && <p className="mt-2 text-[11px] text-slate-500">Foto de WhatsApp · vista temporal</p>}
         {photo.phase === 'loading' && base.avatar_source !== 'contact' && <p role="status" className="mt-2 flex items-center justify-center gap-2 text-xs text-slate-500"><Loader2 className="h-3 w-3 animate-spin" />Consultando foto…</p>}
         <h3 className="mt-4 break-words text-xl font-semibold text-slate-900">{groupParticipantLabel(base)}{base.is_self && <span className="ml-1 text-sm font-normal text-slate-500">(Tú)</span>}</h3>
-        <p className="mt-2 break-words text-sm text-slate-500">{groupParticipantPhone(base)}</p>
+        <p className="mt-2 break-words text-sm text-slate-500">{groupParticipantPhone(base)}</p>{base.username && <p className="mt-2 break-words text-sm text-slate-600">Usuario: @{base.username.replace(/^@/, '')}</p>}
         {base.whatsapp_name && base.whatsapp_name !== base.name && <p className="mt-2 break-words text-xs text-slate-500">Nombre en WhatsApp: {base.whatsapp_name}</p>}
         {base.role !== 'member' && <p className="mt-2 inline-flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700"><Shield className="h-3 w-3" />Admin. del grupo</p>}
         {base.avatar_source === 'contact' && capabilities?.can_query_avatar && <button type="button" onClick={() => { setPhotoRequested(true); setPhotoRetry(value => value + 1) }} disabled={photo.phase === 'loading' || suspended} className="mt-3 block min-h-11 w-full text-xs font-semibold text-emerald-700 disabled:opacity-50">{photo.phase === 'loading' ? 'Consultando foto…' : 'Ver foto de WhatsApp'}</button>}

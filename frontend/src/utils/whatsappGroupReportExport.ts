@@ -33,6 +33,7 @@ export function whatsappCoverageMemberRows(report: WhatsAppGroupCoverageReport) 
   return report.members.map((member, index) => ({
     '#': index + 1,
     'Nombre WhatsApp': member.whatsapp_name,
+    'Usuario WhatsApp': member.username ? `@${member.username.replace(/^@/, '')}` : '',
     'Teléfono': member.phone ? `+${member.phone}` : member.redacted_phone || '',
     'Rol en grupo': member.is_self ? 'Este dispositivo' : roleLabels[member.role],
     'Existe en Clarin': existsLabel(member),
@@ -85,7 +86,7 @@ export function exportWhatsAppGroupReportExcel(report: WhatsAppGroupCoverageRepo
   summarySheet['!cols'] = [{ wch: 28 }, { wch: 42 }]
   const membersSheet = XLSX.utils.json_to_sheet(whatsappCoverageMemberRows(report))
   membersSheet['!cols'] = [
-    { wch: 5 }, { wch: 28 }, { wch: 18 }, { wch: 22 }, { wch: 20 }, { wch: 30 },
+    { wch: 5 }, { wch: 28 }, { wch: 24 }, { wch: 18 }, { wch: 22 }, { wch: 20 }, { wch: 30 },
     { wch: 28 }, { wch: 16 }, { wch: 32 }, { wch: 22 }, { wch: 35 }, { wch: 25 },
     { wch: 18 }, { wch: 24 }, { wch: 14 },
   ]

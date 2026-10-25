@@ -1,4 +1,5 @@
 export interface DeviceRuntimeCapabilities {
+  can_forward_native?: boolean
   can_list_groups?: boolean
   can_send_group_messages?: boolean
   can_start_chat: boolean
@@ -73,7 +74,21 @@ export interface MessageLinkPreview {
   thumbnail_url: string | null
 }
 
+export interface MessageForwarding {
+  state: 'unknown' | 'not_forwarded' | 'forwarded' | 'frequently_forwarded'
+  score: number | null
+}
+
+export interface MessageSharingLimits {
+  max_chats: 1 | 5
+  max_groups: 1 | 5
+}
+
 export interface Message {
+  forwarding?: MessageForwarding
+  sharing_limits?: MessageSharingLimits | null
+  /** Distinguishes voice notes from ordinary audio; absence means unknown. */
+  audio_ptt?: boolean
   chat_id?: string
   /** Omitted in partial events; explicit null removes a previously received preview. */
   link_preview?: MessageLinkPreview | null
@@ -174,6 +189,7 @@ export interface GroupParticipant {
   lid?: string
   phone?: string
   redacted_phone?: string
+  username?: string
   name: string
   name_source?: string
   whatsapp_name?: string

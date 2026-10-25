@@ -326,3 +326,33 @@ describe('Program photo consultation', () => {
     expect(mocks.apiBlob.mock.calls[0][0]).toBe('/api/programs/program-1/avatar/content?v=1')
   })
 })
+
+
+it('zooms inside the existing Program photo window and removes all gestures while suspended or closed', async () => {
+  const content = (suspended = false) => <ProgramAvatarControl program={photo} readOnly suspended={suspended} />
+  const view = render(content())
+  await screen.findByAltText('Foto de Grupo Azul')
+  fireEvent.click(screen.getByRole('button', { name: 'Ver foto de Grupo Azul' }))
+  const dialog = screen.getByRole('dialog', { name: 'Foto del programa' })
+  const viewport = dialog.querySelector<HTMLElement>('[data-image-viewport]')!
+  fireEvent.load(viewport.querySelector('img')!)
+  const wheel = new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: -100 })
+  fireEvent(viewport, wheel)
+  expect(wheel.defaultPrevented).toBe(true)
+  expect(Number(viewport.dataset.imageScale)).toBeGreaterThan(1)
+  view.rerender(content(true))
+  expect(dialog).toHaveAttribute('hidden')
+  const suspendedWheel = new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: -100 })
+  fireEvent(viewport, suspendedWheel)
+  expect(suspendedWheel.defaultPrevented).toBe(false)
+  expect(Number(viewport.dataset.imageScale)).toBe(1)
+  view.rerender(content())
+  expect(screen.getByRole('dialog', { name: 'Foto del programa' })).toBe(dialog)
+  expect(dialog.querySelector('[data-image-viewport]')).toBe(viewport)
+  fireEvent.click(screen.getByRole('button', { name: 'Cerrar foto' }))
+  const closedWheel = new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: -100 })
+  fireEvent(viewport, closedWheel)
+  expect(closedWheel.defaultPrevented).toBe(false)
+  expect(mocks.apiBlob).toHaveBeenCalledTimes(1)
+  expect(mocks.apiUpload).not.toHaveBeenCalled()
+})
