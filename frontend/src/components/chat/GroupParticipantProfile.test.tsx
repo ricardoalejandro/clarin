@@ -78,6 +78,7 @@ describe('WhatsApp participant profile', () => {
     render(<GroupParticipantProfile chat={chat} member={member} scope={getAuthScope()} onBack={vi.fn()} onClose={vi.fn()} onOpenChat={onOpen} />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Mensaje' })).toBeEnabled())
     fireEvent.click(screen.getByRole('button', { name: 'Mensaje' }))
+    expect(await screen.findByText('Número del dispositivo: +51911111111')).toBeInTheDocument()
     fireEvent.click(await screen.findByRole('button', { name: 'Confirmar este número' }))
     await waitFor(() => expect(onOpen).toHaveBeenCalledTimes(1))
     expect(JSON.parse(String(request.mock.calls.filter(([, init]) => init?.method === 'POST')[1][1]?.body)).sender_confirmation).toEqual(sender)
