@@ -127,13 +127,20 @@ func (r *ChatRepository) HydrateGroups(ctx context.Context, accountID uuid.UUID,
 	return rows.Err()
 }
 func (r *ChatRepository) GroupParticipants(ctx context.Context, accountID, chatID uuid.UUID, search, cursor string, limit int) ([]domain.GroupParticipant, string, error) {
+	return r.GroupParticipantsMatching(ctx, accountID, chatID, search, cursor, limit, nil)
+}
+
+// A non-nil identity match set was resolved from the group's provider/allowed
+// CRM projection by this read. Keep ordering and page boundaries in SQL.
+func (r *ChatRepository) GroupParticipantsMatching(ctx context.Context, accountID, chatID uuid.UUID, search, cursor string, limit int, matchingJIDs []string) ([]domain.GroupParticipant, string, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	result := []domain.GroupParticipant{}
 	rows, err := r.db.Query(ctx, `SELECT member::text FROM chat_groups g CROSS JOIN LATERAL jsonb_array_elements(g.participants) member
- WHERE account_id=$1 AND chat_id=$2 AND ($3::text='' OR member->>'name' ILIKE '%'||$3||'%' OR member->>'phone' ILIKE '%'||$3||'%')
- AND ($4::text='' OR member->>'jid'>$4) ORDER BY member->>'jid' LIMIT $5`, accountID, chatID, strings.TrimSpace(search), cursor, limit+1)
+	 WHERE account_id=$1 AND chat_id=$2
+	 AND (($6::bool AND member->>'jid'=ANY($7::text[])) OR (NOT $6::bool AND ($3::text='' OR member->>'name' ILIKE '%'||$3||'%' OR member->>'phone' ILIKE '%'||$3||'%')))
+	 AND ($4::text='' OR member->>'jid'>$4) ORDER BY member->>'jid' LIMIT $5`, accountID, chatID, strings.TrimSpace(search), cursor, limit+1, matchingJIDs != nil, matchingJIDs)
 	if err != nil {
 		return result, "", err
 	}

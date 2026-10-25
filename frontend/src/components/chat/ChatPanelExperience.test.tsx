@@ -102,6 +102,42 @@ function jsonResponse(body: unknown, ok = true, status = ok ? 200 : 400): Respon
 }
 
 
+describe('Group member private conversation', () => {
+  const group: Chat = { ...chat, id: 'source-group', jid: '120001@g.us', kind: 'group', name: 'Grupo de estudio', group: { subject: 'Grupo de estudio', participant_count: 2, membership_status: 'member', announce: false, can_send: true } }
+  beforeEach(() => {
+    localStorage.setItem('token', 'test-token'); completeAuthIdentityChange(); websocket.listeners.clear()
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1200)
+  })
+  afterEach(() => { cleanup(); completeAuthIdentityChange(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
+  it('keeps the group draft mounted and restores it after visiting the private chat without sending', async () => {
+    const onChange = vi.fn()
+    const sourceDevice = { ...device('connected'), runtime_capabilities: { ...device('connected').runtime_capabilities, can_list_groups: true, can_send_group_messages: true } }
+    const requests = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      return Promise.resolve(jsonResponse(url === `/api/chats/${group.id}`
+        ? { success: true, chat: group, device: sourceDevice }
+        : url === `/api/chats/${chat.id}` ? { success: true, chat, device: device('connected') }
+        : { success: true, messages: [], stickers: [], quick_replies: [] }))
+    })
+    vi.stubGlobal('fetch', requests)
+    const panel = (privateChat: Chat | null) => <ChatPanel chatId={group.id} initialChat={group} participantChat={privateChat} onParticipantChatChange={onChange} />
+    const view = render(panel(null))
+    const groupDraft = await screen.findByRole('textbox', { name: 'Draft test editor' })
+    fireEvent.change(groupDraft, { target: { value: 'Borrador pendiente para el grupo' } })
+    view.rerender(panel(chat))
+    const privateDraft = await screen.findByRole('textbox', { name: 'Draft test editor' })
+    expect(privateDraft).not.toBe(groupDraft)
+    expect(screen.getByRole('heading', { name: group.name, hidden: true }).closest('[hidden]')).toBeInTheDocument()
+    expect(privateDraft).toHaveValue('')
+    fireEvent.click(screen.getByRole('button', { name: 'Volver al integrante' }))
+    expect(onChange).toHaveBeenCalledWith(null)
+    view.rerender(panel(null))
+    expect(await screen.findByRole('textbox', { name: 'Draft test editor' })).toHaveValue('Borrador pendiente para el grupo')
+    expect(requests.mock.calls.some(([input]) => String(input).includes('/messages/send'))).toBe(false)
+  })
+})
+
 describe('ChatPanel experience invariants', () => {
   beforeEach(() => {
     localStorage.setItem('token', 'test-token'); websocket.listeners.clear()

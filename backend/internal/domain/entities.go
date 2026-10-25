@@ -1472,6 +1472,7 @@ type TaskEnvironment struct {
 	ArchivedAt           *time.Time           `json:"archived_at,omitempty"`
 	DeletedAt            *time.Time           `json:"deleted_at,omitempty"`
 	DeletedBy            *uuid.UUID           `json:"deleted_by,omitempty"`
+	TrashOperationID     *uuid.UUID           `json:"-"`
 	Lifecycle            string               `json:"lifecycle"`
 	Version              int64                `json:"version"`
 	AccessRevision       int64                `json:"access_revision"`
@@ -1614,6 +1615,7 @@ type TaskTrashPurgeResult struct {
 	// WhiteboardIDs is the exact transaction-locked purge set used only for
 	// post-commit room invalidation. Purged identifiers are never serialized.
 	WhiteboardIDs []uuid.UUID `json:"-"`
+	ViewerUserIDs []uuid.UUID `json:"-"`
 }
 
 type TaskMediaGCJob struct {

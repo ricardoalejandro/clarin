@@ -246,6 +246,10 @@ func (r *TaskWorkRepository) TrashListConfirmed(ctx context.Context, accountID, 
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "list", []uuid.UUID{listID}, false); err != nil {
+		return nil, err
+	}
+
 	var name string
 	var environmentID uuid.UUID
 	var isDefault bool
@@ -313,6 +317,10 @@ func (r *TaskWorkRepository) TrashFolderConfirmed(ctx context.Context, accountID
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "folder", []uuid.UUID{folderID}, false); err != nil {
+		return nil, err
+	}
+
 	var name string
 	var environmentID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT name,environment_id FROM task_folders WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL FOR UPDATE`, accountID, folderID).Scan(&name, &environmentID); err != nil {
@@ -405,6 +413,10 @@ func (r *TaskWorkRepository) RestoreList(ctx context.Context, accountID, actorID
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "list", []uuid.UUID{listID}, false); err != nil {
+		return nil, err
+	}
+
 	// Folder lifecycle writers lock the parent before its Lists. Observe the
 	// original parent, acquire it first, then prove it did not change while we
 	// waited instead of inverting that order during a concurrent folder removal.
@@ -491,6 +503,10 @@ func (r *TaskWorkRepository) RestoreFolder(ctx context.Context, accountID, actor
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "folder", []uuid.UUID{folderID}, false); err != nil {
+		return nil, err
+	}
+
 	var environmentID uuid.UUID
 	var archivedAt *time.Time
 	var removalOperationID *uuid.UUID
@@ -653,6 +669,10 @@ func (r *TaskWorkRepository) TrashEnvironment(ctx context.Context, accountID, ac
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "environment", []uuid.UUID{environmentID}, true); err != nil {
+		return nil, err
+	}
+
 	var name string
 	var isDefault bool
 	var version int64
@@ -737,9 +757,14 @@ func (r *TaskWorkRepository) RestoreEnvironmentFromTrash(ctx context.Context, ac
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "environment", []uuid.UUID{environmentID}, true); err != nil {
+		return nil, err
+	}
+
 	var version int64
-	if err := tx.QueryRow(ctx, `SELECT version FROM task_environments
-		WHERE account_id=$1 AND id=$2 AND deleted_at IS NOT NULL FOR UPDATE`, accountID, environmentID).Scan(&version); err != nil {
+	var removalOperationID *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT version,trash_operation_id FROM task_environments
+		WHERE account_id=$1 AND id=$2 AND deleted_at IS NOT NULL FOR UPDATE`, accountID, environmentID).Scan(&version, &removalOperationID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrTaskWorkNotFound
 		}
@@ -767,13 +792,19 @@ func (r *TaskWorkRepository) RestoreEnvironmentFromTrash(ctx context.Context, ac
 		WHERE account_id=$1 AND id=$2 AND deleted_at IS NOT NULL`, accountID, environmentID); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE task_folders SET deleted_at=NULL,deleted_by=NULL,deleted_with_environment=FALSE,updated_at=NOW()
+	if removalOperationID != nil {
+		if err := restoreTaskContainerRemovalContentsTx(ctx, tx, accountID, actorID, environmentID, "environment"); err != nil {
+			return nil, err
+		}
+	} else {
+		if _, err := tx.Exec(ctx, `UPDATE task_folders SET deleted_at=NULL,deleted_by=NULL,deleted_with_environment=FALSE,updated_at=NOW()
 		WHERE account_id=$1 AND environment_id=$2 AND deleted_with_environment`, accountID, environmentID); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE task_lists SET deleted_at=NULL,deleted_by=NULL,deleted_with_environment=FALSE,updated_at=NOW()
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE task_lists SET deleted_at=NULL,deleted_by=NULL,deleted_with_environment=FALSE,updated_at=NOW()
 		WHERE account_id=$1 AND environment_id=$2 AND deleted_with_environment`, accountID, environmentID); err != nil {
-		return nil, err
+			return nil, err
+		}
 	}
 	boardIDs, err := bumpTaskLocationWhiteboardAccessRevisionReturningIDsTx(ctx, tx, accountID, environmentID, nil, nil, true)
 	if err != nil {
@@ -890,6 +921,10 @@ func (r *TaskWorkRepository) PurgeTask(ctx context.Context, accountID, actorID, 
 	if err := lockAndRequireTaskAccountAdminTx(ctx, tx, accountID, actorID); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "task", []uuid.UUID{taskID}, false); err != nil {
+		return nil, err
+	}
+
 	days, err := lockTrashPolicy(ctx, tx, accountID)
 	if err != nil {
 		return nil, err
@@ -962,6 +997,10 @@ func (r *TaskWorkRepository) PurgeList(ctx context.Context, accountID, actorID, 
 	if err := lockAndRequireTaskAccountAdminTx(ctx, tx, accountID, actorID); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "list", []uuid.UUID{listID}, false); err != nil {
+		return nil, err
+	}
+
 	days, err := lockTrashPolicy(ctx, tx, accountID)
 	if err != nil {
 		return nil, err
@@ -1075,6 +1114,10 @@ func (r *TaskWorkRepository) PurgeFolder(ctx context.Context, accountID, actorID
 	if err := lockAndRequireTaskAccountAdminTx(ctx, tx, accountID, actorID); err != nil {
 		return nil, err
 	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "folder", []uuid.UUID{folderID}, false); err != nil {
+		return nil, err
+	}
+
 	days, err := lockTrashPolicy(ctx, tx, accountID)
 	if err != nil {
 		return nil, err
@@ -1211,10 +1254,14 @@ func (r *TaskWorkRepository) PurgeEnvironment(ctx context.Context, accountID, ac
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+
 	if err := lockTaskPurgeAccountTx(ctx, tx, accountID); err != nil {
 		return nil, err
 	}
 	if err := lockAndRequireTaskAccountAdminTx(ctx, tx, accountID, actorID); err != nil {
+		return nil, err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "environment", []uuid.UUID{environmentID}, true); err != nil {
 		return nil, err
 	}
 	days, err := lockTrashPolicy(ctx, tx, accountID)
@@ -1347,6 +1394,10 @@ func (r *TaskWorkRepository) PurgeEnvironment(ctx context.Context, accountID, ac
 	if whiteboards.EligibleAt.After(now) {
 		return nil, trashNotEligible(whiteboards.EligibleAt)
 	}
+	viewers, err := environmentViewerUserIDsWith(ctx, tx, accountID, environmentID)
+	if err != nil {
+		return nil, err
+	}
 	if err := enqueueTaskMediaForTasks(ctx, tx, accountID, taskIDs); err != nil {
 		return nil, err
 	}
@@ -1390,7 +1441,7 @@ func (r *TaskWorkRepository) PurgeEnvironment(ctx context.Context, accountID, ac
 	}
 	return &domain.TaskTrashPurgeResult{
 		Tasks: len(taskIDs), Lists: len(listIDs), Folders: len(folderIDs), Environments: 1,
-		Whiteboards: len(whiteboards.BoardIDs), WhiteboardIDs: append([]uuid.UUID(nil), whiteboards.BoardIDs...),
+		ViewerUserIDs: viewers, Whiteboards: len(whiteboards.BoardIDs), WhiteboardIDs: append([]uuid.UUID(nil), whiteboards.BoardIDs...),
 	}, nil
 }
 

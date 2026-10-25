@@ -23,6 +23,9 @@ func lockAndRequireDeletedTaskAccessTx(ctx context.Context, tx pgx.Tx, accountID
 }
 
 func lockAndRequireTaskAccessStateTx(ctx context.Context, tx pgx.Tx, accountID, actorID uuid.UUID, taskIDs []uuid.UUID, required string, includeDeleted bool) error {
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, "task", taskIDs, false); err != nil {
+		return err
+	}
 	unique := make(map[uuid.UUID]struct{}, len(taskIDs))
 	ids := make([]uuid.UUID, 0, len(taskIDs))
 	for _, id := range taskIDs {

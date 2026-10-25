@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"github.com/google/uuid"
 	"strings"
 	"time"
 )
@@ -26,12 +27,46 @@ type ChatGroup struct {
 }
 
 type GroupParticipant struct {
-	JID    string `json:"jid"`
-	LID    string `json:"lid,omitempty"`
-	Phone  string `json:"phone,omitempty"`
-	Name   string `json:"name"`
-	Role   string `json:"role"`
-	IsSelf bool   `json:"is_self"`
+	JID           string `json:"jid"`
+	LID           string `json:"lid,omitempty"`
+	Phone         string `json:"phone,omitempty"`
+	Name          string `json:"name"`
+	Role          string `json:"role"`
+	IsSelf        bool   `json:"is_self"`
+	RedactedPhone string `json:"redacted_phone,omitempty"`
+	NameSource    string `json:"name_source,omitempty"`
+	AvatarURL     string `json:"avatar_url,omitempty"`
+	AvatarSource  string `json:"avatar_source,omitempty"`
+	WhatsAppName  string `json:"whatsapp_name,omitempty"`
+}
+
+type GroupParticipantContactContext struct {
+	ContactID uuid.UUID  `json:"contact_id"`
+	Context   string     `json:"context"`
+	ChatID    *uuid.UUID `json:"chat_id,omitempty"`
+}
+
+type GroupParticipantCapabilities struct {
+	CanMessage            bool   `json:"can_message"`
+	MessageDisabledReason string `json:"message_disabled_reason,omitempty"`
+	CanQueryAvatar        bool   `json:"can_query_avatar"`
+	CanQueryAbout         bool   `json:"can_query_about"`
+	CanListCommonGroups   bool   `json:"can_list_common_groups"`
+}
+
+type GroupParticipantProfile struct {
+	Participant         GroupParticipant                `json:"participant"`
+	DeviceID            uuid.UUID                       `json:"device_id"`
+	IdentityFingerprint string                          `json:"identity_fingerprint"`
+	ContactContext      *GroupParticipantContactContext `json:"contact_context,omitempty"`
+	Capabilities        GroupParticipantCapabilities    `json:"capabilities"`
+}
+
+type GroupCommonGroup struct {
+	ChatID           uuid.UUID  `json:"chat_id"`
+	Subject          string     `json:"subject"`
+	ParticipantCount int        `json:"participant_count"`
+	SyncedAt         *time.Time `json:"synced_at,omitempty"`
 }
 
 type MessageMention struct {

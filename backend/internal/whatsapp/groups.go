@@ -48,41 +48,10 @@ func groupProjection(info *types.GroupInfo, ownPN, ownLID types.JID, joined bool
 	}
 	members := make([]domain.GroupParticipant, 0, len(info.Participants))
 	for _, part := range info.Participants {
-		jid := part.JID.ToNonAD()
-		pn := part.PhoneNumber.ToNonAD()
-		lid := part.LID.ToNonAD()
-		if pn.IsEmpty() && jid.Server == types.DefaultUserServer {
-			pn = jid
-		}
-		if lid.IsEmpty() && jid.Server == types.HiddenUserServer {
-			lid = jid
-		}
-		if !pn.IsEmpty() {
-			jid = pn
-		}
-		if jid.IsEmpty() {
+		member := resolveGroupMemberIdentity(part, ownPN, ownLID, types.EmptyJID, nil)
+		if member.JID == "" {
 			continue
 		}
-		member := domain.GroupParticipant{JID: jid.String(), Name: part.DisplayName, Role: "member"}
-		if !lid.IsEmpty() {
-			member.LID = lid.String()
-		}
-		if !pn.IsEmpty() {
-			member.Phone = pn.User
-		}
-		if member.Name == "" {
-			if member.Phone != "" {
-				member.Name = member.Phone
-			} else {
-				member.Name = "Integrante"
-			}
-		}
-		if part.IsSuperAdmin {
-			member.Role = "super_admin"
-		} else if part.IsAdmin {
-			member.Role = "admin"
-		}
-		member.IsSelf = sameReportJID(jid, ownPN) || sameReportJID(lid, ownLID) || sameReportJID(part.JID, ownLID)
 		if member.IsSelf {
 			g.MembershipStatus = "member"
 			g.IsAdmin = part.IsAdmin || part.IsSuperAdmin
@@ -113,10 +82,9 @@ func (p *DevicePool) saveGroupInfo(ctx context.Context, instance *DeviceInstance
 	}
 	if contactErr == nil {
 		for i := range members {
-			j, _ := types.ParseJID(members[i].JID)
-			l, _ := types.ParseJID(members[i].LID)
-			if name := bestGroupContactName(findGroupContactInfo(contacts, j, l)); name != "" {
-				members[i].Name = name
+			members[i] = resolveCachedGroupParticipant(ctx, instance, members[i], contacts)
+			if members[i].Phone != "" {
+				members[i].JID = types.NewJID(members[i].Phone, types.DefaultUserServer).String()
 			}
 		}
 	}

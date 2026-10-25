@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Send, Paperclip, Pin, PinOff, Users, MoreVertical, Search, Phone, Video,
@@ -32,9 +32,9 @@ import { groupChatMessages } from './messageGrouping'
 import { latestReadBoundary, observedIncomingBoundary, mergeChatSnapshot, isConversationAtLatest, followConversationLatest, sendOnEnter, captureConversationAnchor, restoreConversationAnchor, type ConversationAnchor } from './chatExperience'
 import StickerPicker from './StickerPicker'
 import EmojiPicker from './EmojiPicker'
-import ContactPanel from './ContactPanel'
+import ContactPanel, { type ContactPanelHandle } from './ContactPanel'
 import ConversationMenu from './ConversationMenu'
-import GroupDetailsPanel from './GroupDetailsPanel'
+import GroupDetailsPanel, { type GroupDetailsPanelHandle } from './GroupDetailsPanel'
 import GroupMentionInput from './GroupMentionInput'
 import { isGroupChat, groupWriteRestriction, groupReactionsUnavailable, chatAvatar } from '@/utils/chatGroups'
 import { hydrateMentions, serializeMentions, type MentionRange } from '@/utils/chatMentions'
@@ -205,11 +205,83 @@ interface ChatPanelProps {
   attentionMode?: boolean
   /** Changes only after this user explicitly confirms a new sender. */
   explicitSenderSession?: number
+  /** A group member opens a private conversation without replacing the source group. */
+  participantChat?: Chat | null
+  onParticipantChatChange?: (chat: Chat | null) => void
+  onParticipantCloseGuardChange?: (guard: (() => boolean) | null) => void
 }
+
+type ChatDetailsHandle = { canClose: () => boolean; hasDetails: () => boolean }
 
 type DeviceValidationState = 'validating' | 'ready' | 'error' | 'changed'
 
-export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, initialChat, onClose, className = '', readOnly = false, readOnlyReason: explicitReadOnlyReason, onContactInfoToggle, contactInfoOpen, onRequestDelete, onTogglePin, pinPending, isActive: requestedActive = true, suspended = false, onRead, onNext, attentionMode, focusRequest, explicitSenderSession = 0 }: ChatPanelProps) {
+export default function ChatPanel(props: ChatPanelProps) {
+  const scope = useSyncExternalStore(subscribeAuthScope, getAuthScope, () => 'server')
+  const [localPrivate, setLocalPrivate] = useState<{ source: string; sourceDevice?: string; scope: string; chat: Chat } | null>(null)
+  const invoker = useRef<HTMLElement | null>(null)
+  const privateDetails = useRef<ChatDetailsHandle | null>(null)
+  const privateBackApproved = useRef(false)
+  const bindPrivateDetails = useCallback((handle: ChatDetailsHandle | null) => { privateDetails.current = handle }, [])
+  const sourceDevice = props.initialChat?.device_id || props.deviceId
+  const privateChat = props.onParticipantChatChange ? props.participantChat : localPrivate?.source === props.chatId && localPrivate.sourceDevice === sourceDevice && localPrivate.scope === scope ? localPrivate.chat : null
+  useEffect(() => { setLocalPrivate(null) }, [props.chatId, sourceDevice, scope])
+  const privateOpen = Boolean(privateChat && props.chatId && !props.suspended && !isAuthIdentityChanging(scope))
+  const openPrivate = useCallback((chat: Chat) => {
+    if (!props.chatId || props.suspended || getAuthScope() !== scope || isAuthIdentityChanging(scope)) return
+    invoker.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    if (props.onParticipantChatChange) props.onParticipantChatChange(chat)
+    else setLocalPrivate({ source: props.chatId, sourceDevice, scope, chat })
+  }, [props.chatId, sourceDevice, props.suspended, props.onParticipantChatChange, scope])
+  const closePrivate = useCallback(() => {
+    const alreadyApproved = privateBackApproved.current
+    privateBackApproved.current = false
+    if (!alreadyApproved && privateDetails.current?.canClose() === false) return
+    if (props.onParticipantChatChange) props.onParticipantChatChange(null)
+    else setLocalPrivate(null)
+    requestAnimationFrame(() => { if (invoker.current?.isConnected) invoker.current.focus({ preventScroll: true }) })
+  }, [props.onParticipantChatChange])
+  useEffect(() => {
+    if (!privateOpen) return
+    const guard = () => privateDetails.current?.canClose() ?? true
+    props.onParticipantCloseGuardChange?.(guard)
+    return () => { props.onParticipantCloseGuardChange?.(null); privateBackApproved.current = false }
+  }, [privateOpen, props.onParticipantCloseGuardChange])
+  useEffect(() => {
+    if (!privateOpen) return
+    const protectBack = (event: PopStateEvent) => {
+      if (event.state?.__clarinGroupMemberChat) return
+      if (privateDetails.current?.canClose() === false) {
+        event.stopImmediatePropagation()
+        window.history.pushState({ ...(event.state || {}), __clarinGroupMemberChat: true }, '')
+        return
+      }
+      privateBackApproved.current = true
+    }
+    window.addEventListener('popstate', protectBack, true)
+    return () => window.removeEventListener('popstate', protectBack, true)
+  }, [privateOpen])
+  useChatHistoryLayer(privateOpen, '__clarinGroupMemberChat', closePrivate)
+  useEffect(() => {
+    if (!privateOpen) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented || privateDetails.current?.hasDetails()) return
+      const childOverlay = Array.from(document.querySelectorAll('[data-chat-overlay]:not([data-group-private-chat]), [data-operational-picker-backdrop], [data-operational-confirmation]')).some(element => !element.closest('[hidden], [inert]'))
+      if (childOverlay) return
+      queueMicrotask(() => { if (!event.defaultPrevented) closePrivate() })
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [privateOpen, closePrivate])
+  return <div className={'relative flex h-full min-h-0 min-w-0 flex-1 flex-col ' + (props.className || '')}>
+    <ChatPanelSession {...props} className="" suspended={Boolean(props.suspended || privateOpen)} participantChatActive={privateOpen} onOpenGroupParticipantChat={openPrivate} />
+    {privateOpen && privateChat && <section data-chat-overlay data-group-private-chat className="absolute inset-0 z-20 flex min-h-0 flex-col bg-white" aria-label="Conversación privada del integrante">
+      <div className="shrink-0 border-b border-slate-200 bg-white px-3 py-1"><button type="button" onClick={closePrivate} className="inline-flex min-h-11 items-center gap-2 rounded-xl px-3 text-xs font-semibold text-slate-700 hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-emerald-500"><ArrowLeft className="h-4 w-4" />Volver al integrante</button></div>
+      <ChatPanelSession chatId={privateChat.id} initialChat={privateChat} deviceId={privateChat.device_id || props.deviceId} device={props.device} onRead={props.onRead} isActive={props.isActive} onDetailsHandleChange={bindPrivateDetails} />
+    </section>}
+  </div>
+}
+
+function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialChat, onClose, className = '', readOnly = false, readOnlyReason: explicitReadOnlyReason, onContactInfoToggle, contactInfoOpen, onRequestDelete, onTogglePin, pinPending, isActive: requestedActive = true, suspended = false, onRead, onNext, attentionMode, focusRequest, explicitSenderSession = 0, participantChatActive = false, onOpenGroupParticipantChat, onDetailsHandleChange }: ChatPanelProps & { participantChatActive?: boolean; onOpenGroupParticipantChat?: (chat: Chat) => void; onDetailsHandleChange?: (handle: ChatDetailsHandle | null) => void }) {
   const suspendedRef = useRef(suspended)
   suspendedRef.current = suspended
   const isActive = requestedActive && !suspended
@@ -340,11 +412,21 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
   const restoreKeyboardAfterCloseRef = useRef(false)
 
   // Panels
+  const groupDetailsRef = useRef<GroupDetailsPanelHandle>(null)
+  const contactDetailsRef = useRef<ContactPanelHandle>(null)
+  useEffect(() => {
+    onDetailsHandleChange?.({
+      canClose: () => (groupDetailsRef.current || contactDetailsRef.current)?.canClose() ?? true,
+      hasDetails: () => Boolean(groupDetailsRef.current || contactDetailsRef.current),
+    })
+    return () => onDetailsHandleChange?.(null)
+  }, [onDetailsHandleChange])
   const [showContactInfoLocal, setShowContactInfoLocal] = useState(false)
   const showContactInfo = contactInfoOpen !== undefined ? contactInfoOpen : showContactInfoLocal
   const setShowContactInfo = (show: boolean) => {
     if (onContactInfoToggle) onContactInfoToggle(show)
-    else setShowContactInfoLocal(show)
+    else if (!show && groupDetailsRef.current) groupDetailsRef.current.requestClose(() => setShowContactInfoLocal(false))
+    else if (show || contactDetailsRef.current?.canClose() !== false) setShowContactInfoLocal(show)
   }
   const [showSearch, setShowSearch] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -1147,8 +1229,8 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
       const ownOverlays = showSelectionMenu
         ? new Set(['selection-backdrop', 'selection-menu'])
         : new Set(['conversation-menu'])
-      const nestedOverlayOpen = Array.from(document.querySelectorAll<HTMLElement>('[data-chat-overlay]'))
-        .some(element => !ownOverlays.has(element.dataset.chatOverlay || ''))
+      const nestedOverlayOpen = Array.from(document.querySelectorAll<HTMLElement>('[data-chat-overlay]:not([data-group-private-chat])'))
+        .some(element => !element.closest('[hidden], [inert]') && !ownOverlays.has(element.dataset.chatOverlay || ''))
       if (nestedOverlayOpen) return
       event.preventDefault()
       event.stopPropagation()
@@ -3401,14 +3483,15 @@ export default function ChatPanel({ chatId, deviceId: initialDeviceId, device, i
              )}
 
              {/* Right Panel (Contact/Search) - Overlay/Sidebar — only when NOT parent-controlled */}
-             {!suspended && showContactInfo && !onContactInfoToggle && (
+             {(!suspended || participantChatActive) && showContactInfo && !onContactInfoToggle && (
                 <div
                    className="absolute inset-y-0 right-0 z-20 w-full border-l border-slate-200 bg-white shadow-xl md:w-[380px] md:max-w-[45%]"
                 >
-                     {isGroupChat(chat) ? <GroupDetailsPanel key={chat.id} chat={chat} onClose={() => setShowContactInfo(false)} /> : <ContactPanel
+                     {isGroupChat(chat) ? <GroupDetailsPanel ref={groupDetailsRef} key={chat.id} chat={chat} suspended={suspended} onOpenChat={onOpenGroupParticipantChat} onClose={() => setShowContactInfoLocal(false)} /> : <ContactPanel
+                        ref={contactDetailsRef}
                         chatId={chat.id}
                         isOpen={true}
-                        onClose={() => setShowContactInfo(false)}
+                        onClose={() => setShowContactInfoLocal(false)}
                         deviceName={deviceId ? 'Dispositivo actual' : undefined}
                      />}
                 </div>

@@ -66,7 +66,9 @@ func TestTaskRemovalInputLimitsModesAndExplicitDestination(t *testing.T) {
 	}{
 		{"list", domain.TaskContainerRemovalRequest{Mode: "trash_all"}, true},
 		{"folder", domain.TaskContainerRemovalRequest{Mode: "preserve_contents"}, true},
-		{"environment", domain.TaskContainerRemovalRequest{Mode: "trash_all"}, false},
+		{"environment", domain.TaskContainerRemovalRequest{Mode: "trash_all"}, true},
+		{"environment", domain.TaskContainerRemovalRequest{Mode: "preserve_contents"}, false},
+		{"environment", domain.TaskContainerRemovalRequest{Mode: "trash_all", DestinationListID: &id}, false},
 		{"list", domain.TaskContainerRemovalRequest{Mode: "delete"}, false},
 		{"list", domain.TaskContainerRemovalRequest{Mode: "trash_all", DestinationListID: &id}, false},
 		{"list", domain.TaskContainerRemovalRequest{Mode: "preserve_contents", DestinationListID: &nilID}, false},

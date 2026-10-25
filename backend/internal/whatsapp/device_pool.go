@@ -1945,6 +1945,7 @@ func (p *DevicePool) handleContactEvent(ctx context.Context, instance *DeviceIns
 
 // handlePushName processes push name updates
 func (p *DevicePool) handlePushName(ctx context.Context, instance *DeviceInstance, evt *events.PushName) {
+	p.updateGroupParticipantNames(ctx, instance, evt.JID, evt.JIDAlt)
 	if evt.Message != nil && evt.Message.Chat.Server == types.GroupServer {
 		return
 	}
@@ -1966,6 +1967,7 @@ func (p *DevicePool) handlePushName(ctx context.Context, instance *DeviceInstanc
 
 // handleHistorySync processes history sync events
 func (p *DevicePool) handleHistorySync(ctx context.Context, instance *DeviceInstance, evt *events.HistorySync) {
+	p.updateHistoricalGroupParticipantNames(ctx, instance, evt.Data.GetPushnames())
 	// StatusV3Messages may contain statuses from many contacts. Parse and
 	// persist only the device owner's active statuses; every other status is
 	// intentionally ignored and no CRM entity is created. This runs before the

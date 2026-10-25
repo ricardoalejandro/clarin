@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canConfirmTaskContainerRemoval, taskContainerRemovalInventory, taskContainerRemovalPayload, taskContainerRemovalPreparation, taskContainerRemovalPreviewMatches, taskRemovalInvalidatesMountedScope, taskRemovalRefreshResult, type TaskContainerRemovalDraft, type TaskContainerRemovalPreview } from './taskContainerRemoval'
+import { canConfirmTaskContainerRemoval, taskContainerRemovalEndpoint, taskContainerRemovalInventory, taskRemovalNeedsNewPreview, taskContainerRemovalPayload, taskContainerRemovalPreparation, taskContainerRemovalPreviewMatches, taskRemovalInvalidatesMountedScope, taskRemovalRefreshResult, type TaskContainerRemovalDraft, type TaskContainerRemovalPreview } from './taskContainerRemoval'
 
 export const emptyRemovalCounts = { lists: 0, tasks: 0, subtasks: 0, open_tasks: 0, completed_tasks: 0, cancelled_tasks: 0, events: 0, whiteboards: 0 }
 export const removalPreview = (overrides: Partial<TaskContainerRemovalPreview> = {}): TaskContainerRemovalPreview => ({ type: 'list', id: 'list-1', name: 'Proyecto', environment_id: 'env-1', lifecycle: 'active', mode: 'trash_all', preview_token: 'preview-1', counts: emptyRemovalCounts, requires_name: false, requires_destination: false, requires_event_cancellation: false, requires_access_confirmation: false, can_execute: true, blockers: [], ...overrides })
@@ -49,4 +49,20 @@ describe('container removal preparation and confirmation', () => {
     expect(taskRemovalRefreshResult(true, undefined)).toBeUndefined()
     expect(taskRemovalRefreshResult(true, true)).toBe(true)
   })
+})
+
+it('prepares environment removal only for trash-all and always requires its exact name', () => {
+  const environment = removalPreview({ type: 'environment', id: 'env-1', requires_name: false, counts: { ...emptyRemovalCounts, folders: 4, lists: 8 } })
+  expect(taskContainerRemovalEndpoint('environment', 'env-1')).toBe('/api/tasks/environments/env-1')
+  expect(taskContainerRemovalPreviewMatches(environment, 'environment', 'env-1', draft)).toBe(true)
+  expect(canConfirmTaskContainerRemoval(environment, draft)).toBe(false)
+  expect(canConfirmTaskContainerRemoval(environment, { ...draft, confirmationName: 'Proyecto' })).toBe(true)
+  expect(taskContainerRemovalPreviewMatches(environment, 'environment', 'env-1', { ...draft, mode: 'preserve_contents' })).toBe(false)
+  expect(taskContainerRemovalInventory(environment.counts)).toContainEqual({ label: 'Carpetas', count: 4 })
+})
+it('requires a new preview only for its conflict, preserving distinct lifecycle and permission errors', () => {
+  expect(taskRemovalNeedsNewPreview(409, 'removal_preview_changed')).toBe(true)
+  expect(taskRemovalNeedsNewPreview(409)).toBe(true)
+  expect(taskRemovalNeedsNewPreview(409, 'environment_general_protected')).toBe(false)
+  expect(taskRemovalNeedsNewPreview(403, 'forbidden')).toBe(false)
 })

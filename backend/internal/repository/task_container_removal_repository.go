@@ -21,6 +21,7 @@ var (
 
 type taskRemovalScope struct {
 	preview              *domain.TaskContainerRemovalPreview
+	folderIDs            []uuid.UUID
 	listIDs              []uuid.UUID
 	retainedListIDs      []uuid.UUID
 	futureSharedEventIDs []uuid.UUID
@@ -38,7 +39,10 @@ func taskRemovalHash(value any) string {
 }
 
 func validateTaskRemovalRequest(targetType string, req domain.TaskContainerRemovalRequest) error {
-	if (targetType != "list" && targetType != "folder") || (req.Mode != "trash_all" && req.Mode != "preserve_contents") {
+	if (targetType != "list" && targetType != "folder" && targetType != "environment") || (req.Mode != "trash_all" && req.Mode != "preserve_contents") {
+		return ErrTaskRemovalInvalid
+	}
+	if targetType == "environment" && (req.Mode != "trash_all" || req.DestinationListID != nil) {
 		return ErrTaskRemovalInvalid
 	}
 	if req.DestinationListID != nil && *req.DestinationListID == uuid.Nil {
@@ -56,6 +60,9 @@ func validateTaskRemovalRequest(targetType string, req domain.TaskContainerRemov
 func lockTaskRemovalParentsTx(ctx context.Context, tx pgx.Tx, accountID, actorID, targetID uuid.UUID, targetType string, req domain.TaskContainerRemovalRequest) error {
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return err
+	}
+	if targetType == "environment" {
+		return lockEnvironmentRemovalParentsTx(ctx, tx, accountID, actorID, targetID)
 	}
 	folderIDs := []uuid.UUID{}
 	listIDs := []uuid.UUID{}
@@ -117,10 +124,7 @@ func lockTaskRemovalParentsTx(ctx context.Context, tx pgx.Tx, accountID, actorID
 	}
 	rows.Close()
 	var environmentID uuid.UUID
-	table := "task_lists"
-	if targetType == "folder" {
-		table = "task_folders"
-	}
+	table := taskRemovalTargetTable(targetType)
 	if err := tx.QueryRow(ctx, `SELECT environment_id FROM `+table+` WHERE account_id=$1 AND id=$2`, accountID, targetID).Scan(&environmentID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTaskWorkNotFound
@@ -190,6 +194,9 @@ func loadTaskRemovalScopeTx(ctx context.Context, tx pgx.Tx, accountID, actorID, 
 	if targetType == "list" {
 		query = `SELECT item.name,item.environment_id,item.deleted_at,COALESCE(item.archived_at,(SELECT archived_at FROM task_folders WHERE account_id=item.account_id AND id=item.folder_id)),item.is_default,(` + taskActorListAccessRankSQL("item", "$3") + `),(` + taskActorListCanManageSQL("item", "$3") + `) FROM task_lists item WHERE item.account_id=$1 AND item.id=$2 AND NOT EXISTS(SELECT 1 FROM task_folders parent WHERE parent.account_id=item.account_id AND parent.id=item.folder_id AND parent.deleted_at IS NOT NULL)`
 	}
+	if targetType == "environment" {
+		query = `SELECT item.name,item.id,item.deleted_at,item.archived_at,item.is_default,(` + environmentActorAccessRankSQL("item", "$3") + `),FALSE FROM task_environments item WHERE item.account_id=$1 AND item.id=$2`
+	}
 	if err := tx.QueryRow(ctx, query, accountID, targetID, actorID).Scan(&p.Name, &p.EnvironmentID, &deletedAt, &archivedAt, &isDefault, &rank, &s.sourceManage); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrTaskWorkNotFound
@@ -228,7 +235,11 @@ func loadTaskRemovalScopeTx(ctx context.Context, tx pgx.Tx, accountID, actorID, 
 	}
 	if isDefault {
 		p.CanExecute = false
-		p.Blockers = append(p.Blockers, "La bandeja predeterminada debe permanecer")
+		if targetType == "environment" {
+			p.Blockers = append(p.Blockers, "El entorno General debe permanecer")
+		} else {
+			p.Blockers = append(p.Blockers, "La bandeja predeterminada debe permanecer")
+		}
 	}
 	var environmentArchived bool
 	if err := tx.QueryRow(ctx, `SELECT archived_at IS NOT NULL FROM task_environments WHERE account_id=$1 AND id=$2`, accountID, p.EnvironmentID).Scan(&environmentArchived); err != nil {
@@ -239,7 +250,7 @@ func loadTaskRemovalScopeTx(ctx context.Context, tx pgx.Tx, accountID, actorID, 
 	if s.archived {
 		p.Lifecycle = domain.TaskLifecycleArchived
 	}
-	rows, err := tx.Query(ctx, `SELECT item.id,item.deleted_at,(`+taskActorListAccessRankSQL("item", "$4")+`) FROM task_lists item WHERE item.account_id=$1 AND (($3::text='list' AND item.id=$2) OR ($3::text='folder' AND item.folder_id=$2)) ORDER BY item.id`, accountID, targetID, targetType, actorID)
+	rows, err := tx.Query(ctx, `SELECT item.id,item.deleted_at,(`+taskActorListAccessRankSQL("item", "$4")+`) FROM task_lists item WHERE item.account_id=$1 AND (($3::text='list' AND item.id=$2) OR ($3::text='folder' AND item.folder_id=$2) OR ($3::text='environment' AND item.environment_id=$2)) ORDER BY item.id`, accountID, targetID, targetType, actorID)
 	if err != nil {
 		return nil, err
 	}
@@ -269,8 +280,40 @@ func loadTaskRemovalScopeTx(ctx context.Context, tx pgx.Tx, accountID, actorID, 
 		return nil, err
 	}
 	rows.Close()
-	if targetType == "folder" {
+	if targetType == "folder" || targetType == "environment" {
 		p.Counts.Lists = len(s.retainedListIDs)
+	}
+	if targetType == "environment" {
+		rows, err = tx.Query(ctx, `SELECT item.id,item.deleted_at,(`+taskActorFolderAccessRankSQL("item", "$3")+`) FROM task_folders item WHERE item.account_id=$1 AND item.environment_id=$2 ORDER BY item.id`, accountID, targetID, actorID)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id uuid.UUID
+			var deleted *time.Time
+			var access int
+			if err := rows.Scan(&id, &deleted, &access); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			s.folderIDs = append(s.folderIDs, id)
+			if deleted == nil {
+				if access < 1 {
+					rows.Close()
+					return nil, ErrTaskWorkNotFound
+				}
+				p.Counts.Folders++
+				if access < 4 {
+					p.CanExecute = false
+					p.Blockers = append(p.Blockers, "No puedes administrar todas las carpetas")
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
 	// Lock the complete task/event set before evaluating versions and eligibility.
 	if lock {
@@ -331,7 +374,7 @@ func loadTaskRemovalScopeTx(ctx context.Context, tx pgx.Tx, accountID, actorID, 
 	var boards, visibleBoards int
 	err = tx.QueryRow(ctx, `SELECT COUNT(*)::int,COUNT(*) FILTER(WHERE view_item.folder_id=$3)::int,
 		COUNT(*) FILTER(WHERE $6::boolean AND `+taskTrashLocationViewCanViewSQL("view_item", "$5")+`)::int
-		FROM task_location_views view_item JOIN task_location_whiteboard_views binding ON binding.account_id=view_item.account_id AND binding.task_view_id=view_item.id JOIN whiteboards board ON board.account_id=binding.account_id AND board.id=binding.whiteboard_id WHERE view_item.account_id=$1 AND (view_item.list_id=ANY($2::uuid[]) OR ($4::text='folder' AND view_item.folder_id=$3)) AND view_item.deleted_at IS NULL AND board.archived_at IS NULL`, accountID, s.retainedListIDs, targetID, targetType, actorID, whiteboardsEnabled && canUseViews).Scan(&boards, &s.directViews, &visibleBoards)
+		FROM task_location_views view_item JOIN task_location_whiteboard_views binding ON binding.account_id=view_item.account_id AND binding.task_view_id=view_item.id JOIN whiteboards board ON board.account_id=binding.account_id AND board.id=binding.whiteboard_id WHERE view_item.account_id=$1 AND (view_item.list_id=ANY($2::uuid[]) OR ($4::text='folder' AND view_item.folder_id=$3) OR ($4::text='environment' AND view_item.folder_id IN(SELECT id FROM task_folders WHERE account_id=$1 AND environment_id=$3 AND deleted_at IS NULL))) AND view_item.deleted_at IS NULL AND board.archived_at IS NULL`, accountID, s.retainedListIDs, targetID, targetType, actorID, whiteboardsEnabled && canUseViews).Scan(&boards, &s.directViews, &visibleBoards)
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +387,7 @@ func loadTaskRemovalScopeTx(ctx context.Context, tx pgx.Tx, accountID, actorID, 
 		p.CanExecute = false
 		p.Blockers = append(p.Blockers, "No tienes permisos suficientes para gestionar todo el contenido de esta ubicación")
 	}
-	p.RequiresName = p.Counts.Lists+p.Counts.Tasks+p.Counts.Subtasks+p.Counts.Events+p.Counts.Whiteboards > 0
+	p.RequiresName = targetType == "environment" || p.Counts.Folders+p.Counts.Lists+p.Counts.Tasks+p.Counts.Subtasks+p.Counts.Events+p.Counts.Whiteboards > 0
 	if req.Mode == "preserve_contents" {
 		if boards > 0 && !canUseViews {
 			return nil, ErrTaskAccessDenied
@@ -444,20 +487,20 @@ func loadTaskRemovalScopeTx(ctx context.Context, tx pgx.Tx, accountID, actorID, 
 	var canonical string
 	err = tx.QueryRow(ctx, `SELECT jsonb_build_object(
 		'lists',(SELECT jsonb_agg(to_jsonb(item) ORDER BY item.id) FROM task_lists item WHERE item.account_id=$1 AND (item.id=ANY($2::uuid[]) OR item.id=$3)),
-		'folders',(SELECT jsonb_agg(to_jsonb(item) ORDER BY item.id) FROM task_folders item WHERE item.account_id=$1 AND (item.id=$4 OR item.id IN(SELECT folder_id FROM task_lists WHERE account_id=$1 AND (id=$3 OR id=ANY($2::uuid[]))))),
+		'folders',(SELECT jsonb_agg(to_jsonb(item) ORDER BY item.id) FROM task_folders item WHERE item.account_id=$1 AND (item.id=$4 OR ($6::text='environment' AND item.environment_id=$5) OR item.id IN(SELECT folder_id FROM task_lists WHERE account_id=$1 AND (id=$3 OR id=ANY($2::uuid[]))))),
 		'tasks',(SELECT jsonb_agg(jsonb_build_array(id,version,list_id,status_id,parent_task_id,deleted_at,access_revision) ORDER BY id) FROM tasks WHERE account_id=$1 AND list_id=ANY($2::uuid[])),
 		'events',(SELECT jsonb_agg(to_jsonb(event) ORDER BY event.id) FROM work_events event WHERE event.account_id=$1 AND event.list_id=ANY($2::uuid[])),
 		'attendees',(SELECT jsonb_agg(to_jsonb(attendee) ORDER BY attendee.event_id,attendee.user_id) FROM work_event_attendees attendee WHERE attendee.account_id=$1 AND attendee.event_id IN(SELECT id FROM work_events WHERE account_id=$1 AND list_id=ANY($2::uuid[]))),
-		'views',(SELECT jsonb_agg(to_jsonb(view_item) ORDER BY view_item.id) FROM task_location_views view_item WHERE view_item.account_id=$1 AND (view_item.list_id=ANY($2::uuid[]) OR view_item.folder_id=$4)),
-		'boards',(SELECT jsonb_agg(jsonb_build_array(board.id,board.access_revision,board.archived_at) ORDER BY board.id) FROM whiteboards board JOIN task_location_whiteboard_views binding ON binding.account_id=board.account_id AND binding.whiteboard_id=board.id JOIN task_location_views view_item ON view_item.account_id=binding.account_id AND view_item.id=binding.task_view_id WHERE view_item.account_id=$1 AND (view_item.list_id=ANY($2::uuid[]) OR view_item.folder_id=$4)),
+		'views',(SELECT jsonb_agg(to_jsonb(view_item) ORDER BY view_item.id) FROM task_location_views view_item WHERE view_item.account_id=$1 AND (view_item.list_id=ANY($2::uuid[]) OR view_item.folder_id=$4 OR ($6::text='environment' AND view_item.environment_id=$5))),
+		'boards',(SELECT jsonb_agg(jsonb_build_array(board.id,board.access_revision,board.archived_at) ORDER BY board.id) FROM whiteboards board JOIN task_location_whiteboard_views binding ON binding.account_id=board.account_id AND binding.whiteboard_id=board.id JOIN task_location_views view_item ON view_item.account_id=binding.account_id AND view_item.id=binding.task_view_id WHERE view_item.account_id=$1 AND (view_item.list_id=ANY($2::uuid[]) OR view_item.folder_id=$4 OR ($6::text='environment' AND view_item.environment_id=$5))),
 		'env',(SELECT to_jsonb(item) FROM task_environments item WHERE item.account_id=$1 AND item.id=$5),
 		'eg',(SELECT jsonb_agg(to_jsonb(item) ORDER BY item.environment_id,item.user_id) FROM task_environment_grants item WHERE item.account_id=$1 AND item.environment_id=$5),
-		'fg',(SELECT jsonb_agg(to_jsonb(item) ORDER BY item.folder_id,item.user_id) FROM task_folder_access_grants item WHERE item.account_id=$1 AND (item.folder_id=$4 OR item.folder_id IN(SELECT folder_id FROM task_lists WHERE account_id=$1 AND (id=ANY($2::uuid[]) OR id=$3)))),
+		'fg',(SELECT jsonb_agg(to_jsonb(item) ORDER BY item.folder_id,item.user_id) FROM task_folder_access_grants item WHERE item.account_id=$1 AND (item.folder_id=$4 OR ($6::text='environment' AND item.folder_id IN(SELECT id FROM task_folders WHERE account_id=$1 AND environment_id=$5)) OR item.folder_id IN(SELECT folder_id FROM task_lists WHERE account_id=$1 AND (id=ANY($2::uuid[]) OR id=$3)))),
 		'lg',(SELECT jsonb_agg(to_jsonb(item) ORDER BY item.list_id,item.user_id) FROM task_list_access_grants item WHERE item.account_id=$1 AND (item.list_id=ANY($2::uuid[]) OR item.list_id=$3)),
 		'tg',(SELECT jsonb_agg(to_jsonb(item) ORDER BY item.task_id,item.user_id) FROM task_access_grants item WHERE item.account_id=$1 AND item.task_id IN(SELECT id FROM tasks WHERE account_id=$1 AND list_id=ANY($2::uuid[]))),
 		'statuses',(SELECT jsonb_agg(to_jsonb(item) ORDER BY item.id) FROM task_statuses item JOIN task_workflows workflow ON workflow.account_id=item.account_id AND workflow.id=item.workflow_id WHERE item.account_id=$1 AND workflow.environment_id=$5),
 		'overrides',(SELECT jsonb_agg(to_jsonb(item) ORDER BY item.event_id,item.occurrence_key) FROM work_event_occurrence_overrides item WHERE item.account_id=$1 AND item.event_id IN(SELECT id FROM work_events WHERE account_id=$1 AND list_id=ANY($2::uuid[]))),
-		'visibility',(SELECT jsonb_agg(to_jsonb(item) ORDER BY item.task_view_id,item.user_id) FROM task_location_view_visibility_members item WHERE item.account_id=$1 AND item.task_view_id IN(SELECT id FROM task_location_views WHERE account_id=$1 AND (list_id=ANY($2::uuid[]) OR folder_id=$4))))::text`, accountID, s.listIDs, req.DestinationListID, targetID, p.EnvironmentID).Scan(&canonical)
+		'visibility',(SELECT jsonb_agg(to_jsonb(item) ORDER BY item.task_view_id,item.user_id) FROM task_location_view_visibility_members item WHERE item.account_id=$1 AND item.task_view_id IN(SELECT id FROM task_location_views WHERE account_id=$1 AND (list_id=ANY($2::uuid[]) OR folder_id=$4 OR ($6::text='environment' AND environment_id=$5)))))::text`, accountID, s.listIDs, req.DestinationListID, targetID, p.EnvironmentID, targetType).Scan(&canonical)
 	if err != nil {
 		return nil, err
 	}
@@ -543,6 +586,9 @@ func (r *TaskWorkRepository) RemoveTaskContainer(ctx context.Context, accountID,
 	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return nil, err
 	}
+	if err := lockTaskRemovalEnvironmentBarrierTx(ctx, tx, accountID, targetID, targetType, req); err != nil {
+		return nil, err
+	}
 	requestHash := taskRemovalRequestHash(actorID, targetID, targetType, req)
 	var storedHash string
 	var resultRaw []byte
@@ -559,6 +605,12 @@ func (r *TaskWorkRepository) RemoveTaskContainer(ctx context.Context, accountID,
 		}
 		result.WhiteboardIDs = storedBoards
 		result.Replayed = true
+		if err := lockWhiteboardAuthorityAccountTx(ctx, tx, accountID); err != nil {
+			return nil, err
+		}
+		if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
+			return nil, err
+		}
 		if err := requireContainerAccessIncludingLifecycleTx(ctx, tx, accountID, actorID, targetID, targetType, domain.TaskAccessFull); err != nil {
 			return nil, err
 		}
@@ -574,6 +626,11 @@ func (r *TaskWorkRepository) RemoveTaskContainer(ctx context.Context, accountID,
 	// preview again after obtaining it so a confirmed token cannot survive a
 	// concurrent access downgrade or unseen content change.
 	if err := lockWhiteboardAuthorityAccountTx(ctx, tx, accountID); err != nil {
+		return nil, err
+	}
+	// A global role/module change may have won the authority barrier while
+	// this operation waited for child writers. Re-read actor authority now.
+	if _, err := lockTaskActorAndMembershipsTx(ctx, tx, accountID, actorID, nil); err != nil {
 		return nil, err
 	}
 	s, err := loadTaskRemovalScopeTx(ctx, tx, accountID, actorID, targetID, targetType, req, workWhiteboardViewsEnabled, true)
@@ -595,11 +652,17 @@ func (r *TaskWorkRepository) RemoveTaskContainer(ctx context.Context, accountID,
 	if targetType == "folder" {
 		folderIDs = append(folderIDs, targetID)
 	}
-	boards, err := bumpTaskLocationWhiteboardAccessRevisionReturningIDsTx(ctx, tx, accountID, s.preview.EnvironmentID, folderIDs, s.listIDs, false)
+	boards, err := bumpTaskLocationWhiteboardAccessRevisionReturningIDsTx(ctx, tx, accountID, s.preview.EnvironmentID, folderIDs, s.listIDs, targetType == "environment")
 	if err != nil {
 		return nil, err
 	}
 	result.WhiteboardIDs = boards
+	if targetType == "environment" {
+		result.ViewerUserIDs, err = environmentViewerUserIDsWith(ctx, tx, accountID, targetID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if req.Mode == "trash_all" {
 		err = trashTaskRemovalScopeTx(ctx, tx, accountID, actorID, targetID, targetType, operationID, s)
 	} else {
@@ -610,23 +673,13 @@ func (r *TaskWorkRepository) RemoveTaskContainer(ctx context.Context, accountID,
 	}
 	// The ordinary lifecycle invariant remains true at the commit boundary.
 	var retained int
-	if targetType == "list" {
-		err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE account_id=$1 AND list_id=$2 AND deleted_at IS NULL`, accountID, targetID).Scan(&retained)
-	} else {
-		err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM tasks task JOIN task_lists item ON item.account_id=task.account_id AND item.id=task.list_id WHERE task.account_id=$1 AND item.folder_id=$2 AND task.deleted_at IS NULL`, accountID, targetID).Scan(&retained)
-	}
-	if err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE account_id=$1 AND list_id=ANY($2::uuid[]) AND deleted_at IS NULL`, accountID, s.listIDs).Scan(&retained); err != nil {
 		return nil, err
 	}
 	if retained > 0 {
 		return nil, ErrTaskContainerNotEmpty
 	}
-	if targetType == "list" {
-		err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM work_events WHERE account_id=$1 AND list_id=$2 AND deleted_at IS NULL`, accountID, targetID).Scan(&retained)
-	} else {
-		err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM work_events event JOIN task_lists item ON item.account_id=event.account_id AND item.id=event.list_id WHERE event.account_id=$1 AND item.folder_id=$2 AND event.deleted_at IS NULL`, accountID, targetID).Scan(&retained)
-	}
-	if err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM work_events WHERE account_id=$1 AND list_id=ANY($2::uuid[]) AND deleted_at IS NULL`, accountID, s.listIDs).Scan(&retained); err != nil {
 		return nil, err
 	}
 	if retained > 0 {
@@ -645,7 +698,7 @@ func recordTaskRemovalRowsTx(ctx context.Context, tx pgx.Tx, accountID, operatio
 	// table, resourceType and predicate are private, constant call-site values.
 	parameters := []any{accountID, operationID, resourceType}
 	parameters = append(parameters, args...)
-	state := `jsonb_strip_nulls(jsonb_build_object('deleted_at',item.deleted_at,'deleted_by',to_jsonb(item)->'deleted_by','archived_at',to_jsonb(item)->'archived_at','folder_id',to_jsonb(item)->'folder_id','list_id',to_jsonb(item)->'list_id','workflow_id',to_jsonb(item)->'workflow_id','sort_order',to_jsonb(item)->'sort_order','archived_with_folder',to_jsonb(item)->'archived_with_folder'))`
+	state := `jsonb_strip_nulls(jsonb_build_object('deleted_at',item.deleted_at,'deleted_by',to_jsonb(item)->'deleted_by','archived_at',to_jsonb(item)->'archived_at','folder_id',to_jsonb(item)->'folder_id','list_id',to_jsonb(item)->'list_id','workflow_id',to_jsonb(item)->'workflow_id','sort_order',to_jsonb(item)->'sort_order','archived_with_folder',to_jsonb(item)->'archived_with_folder','deleted_with_folder',to_jsonb(item)->'deleted_with_folder','deleted_with_environment',to_jsonb(item)->'deleted_with_environment','trash_operation_id',to_jsonb(item)->'trash_operation_id'))`
 	if resourceType == "task_reminder" {
 		state = "to_jsonb(item)"
 	} else if table == "task_reminders" {
@@ -680,6 +733,11 @@ func trashTaskRemovalScopeTx(ctx context.Context, tx pgx.Tx, accountID, actorID,
 	if _, err := tx.Exec(ctx, `UPDATE work_event_reminder_jobs SET cancelled_at=NOW(),updated_at=NOW() WHERE account_id=$1 AND event_id IN(SELECT id FROM work_events WHERE account_id=$1 AND trash_operation_id=$2) AND delivered_at IS NULL AND cancelled_at IS NULL`, accountID, operationID); err != nil {
 		return err
 	}
+	if targetType == "environment" {
+		if err := trashEnvironmentRemovalDescendantsTx(ctx, tx, accountID, actorID, targetID, operationID); err != nil {
+			return err
+		}
+	}
 	if targetType == "folder" {
 		if err := recordTaskRemovalRowsTx(ctx, tx, accountID, operationID, "task_lists", "list", `item.folder_id=$4 AND item.deleted_at IS NULL`, targetID); err != nil {
 			return err
@@ -692,16 +750,16 @@ func trashTaskRemovalScopeTx(ctx context.Context, tx pgx.Tx, accountID, actorID,
 }
 
 func trashTaskRemovalTargetTx(ctx context.Context, tx pgx.Tx, accountID, actorID, targetID uuid.UUID, targetType string, operationID uuid.UUID) error {
-	table := "task_lists"
-	if targetType == "folder" {
-		table = "task_folders"
-	}
+	table := taskRemovalTargetTable(targetType)
 	if err := recordTaskRemovalRowsTx(ctx, tx, accountID, operationID, table, targetType, `item.id=$4 AND item.deleted_at IS NULL`, targetID); err != nil {
 		return err
 	}
 	extra := ""
 	if targetType == "list" {
 		extra = ",deleted_with_folder=FALSE"
+	}
+	if targetType == "environment" {
+		extra = ",version=version+1"
 	}
 	_, err := tx.Exec(ctx, `UPDATE `+table+` SET deleted_at=NOW(),deleted_by=$3,trash_operation_id=$4,updated_at=NOW()`+extra+` WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL`, accountID, targetID, actorID, operationID)
 	return err
@@ -762,10 +820,7 @@ func preserveTaskRemovalScopeTx(ctx context.Context, tx pgx.Tx, accountID, actor
 // has cleared deleted_at. Ownership, rather than timestamp coincidence, keeps
 // pre-existing Trash and individually archived history unchanged.
 func restoreTaskContainerRemovalContentsTx(ctx context.Context, tx pgx.Tx, accountID, actorID, targetID uuid.UUID, targetType string) error {
-	table := "task_lists"
-	if targetType == "folder" {
-		table = "task_folders"
-	}
+	table := taskRemovalTargetTable(targetType)
 	var operationID *uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT trash_operation_id FROM `+table+` WHERE account_id=$1 AND id=$2`, accountID, targetID).Scan(&operationID); err != nil {
 		return err
@@ -786,6 +841,11 @@ func restoreTaskContainerRemovalContentsTx(ctx context.Context, tx pgx.Tx, accou
 		}
 		_, err := tx.Exec(ctx, `UPDATE task_container_removal_operations SET restored_at=NOW() WHERE account_id=$1 AND operation_id=$2`, accountID, *operationID)
 		return err
+	}
+	if targetType == "environment" {
+		if err := restoreEnvironmentRemovalFoldersTx(ctx, tx, accountID, actorID, *operationID); err != nil {
+			return err
+		}
 	}
 	rows, err := tx.Query(ctx, `SELECT item.id FROM task_lists item JOIN task_container_removal_items provenance ON provenance.account_id=item.account_id AND provenance.resource_type='list' AND provenance.resource_id=item.id AND provenance.operation_id=$2 WHERE item.account_id=$1 AND item.trash_operation_id=$2 ORDER BY item.id FOR UPDATE OF item`, accountID, *operationID)
 	if err != nil {
@@ -815,7 +875,12 @@ func restoreTaskContainerRemovalContentsTx(ctx context.Context, tx pgx.Tx, accou
 	if forbidden > 0 {
 		return ErrTaskAccessDenied
 	}
-	if _, err := tx.Exec(ctx, `UPDATE task_lists SET deleted_at=NULL,deleted_by=NULL,deleted_with_folder=FALSE,trash_operation_id=NULL,updated_at=NOW() WHERE account_id=$1 AND trash_operation_id=$2`, accountID, *operationID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE task_lists item SET deleted_at=NULL,deleted_by=NULL,
+        deleted_with_folder=COALESCE((provenance.previous_state->>'deleted_with_folder')::boolean,FALSE),
+        deleted_with_environment=COALESCE((provenance.previous_state->>'deleted_with_environment')::boolean,FALSE),
+        trash_operation_id=(provenance.previous_state->>'trash_operation_id')::uuid,updated_at=NOW()
+        FROM task_container_removal_items provenance WHERE item.account_id=$1 AND item.trash_operation_id=$2
+        AND provenance.account_id=item.account_id AND provenance.operation_id=$2 AND provenance.resource_type='list' AND provenance.resource_id=item.id`, accountID, *operationID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE tasks SET deleted_at=NULL,deleted_by=NULL,trash_operation_id=NULL,version=COALESCE(version,1)+1,updated_at=NOW() WHERE account_id=$1 AND trash_operation_id=$2 AND deleted_at IS NOT NULL`, accountID, *operationID); err != nil {

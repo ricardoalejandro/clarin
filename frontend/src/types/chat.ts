@@ -125,6 +125,7 @@ export interface Message {
 }
 
 export interface Chat {
+  account_id?: string
   kind?: 'direct' | 'group'
   group?: WhatsAppGroup | null
   pinned_at?: string | null
@@ -168,7 +169,19 @@ export interface WhatsAppGroup {
   synced_at?: string
   kind?: 'group' | 'announcement' | 'community'
 }
-export interface GroupParticipant { jid: string; lid?: string; phone?: string; name: string; role: 'member' | 'admin' | 'super_admin'; is_self: boolean }
+export interface GroupParticipant {
+  jid: string
+  lid?: string
+  phone?: string
+  redacted_phone?: string
+  name: string
+  name_source?: string
+  whatsapp_name?: string
+  role: 'member' | 'admin' | 'super_admin' | 'owner'
+  is_self: boolean
+  avatar_url?: string
+  avatar_source?: 'contact' | 'whatsapp' | 'none'
+}
 export interface ChatPinState { chat_id: string; is_pinned: boolean; pinned_at: string | null; pin_version: number }
 
 export interface ChatState { last_incoming_message_id?: string | null; last_incoming_at?: string | null; chat_id: string; unread_count: number; needs_reply: boolean; waiting_since: string | null; state_version: number }

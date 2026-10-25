@@ -18,6 +18,9 @@ func taskRemovalTarget(c *fiber.Ctx) (string, uuid.UUID, error) {
 	if folder := c.Params("folderId"); folder != "" {
 		kind, raw = domain.TaskAccessTargetFolder, folder
 	}
+	if environment := c.Params("environmentId"); environment != "" {
+		kind, raw = "environment", environment
+	}
 	id, err := uuid.Parse(raw)
 	if err != nil || id == uuid.Nil {
 		return "", uuid.Nil, errors.New("invalid removal target")
@@ -94,13 +97,19 @@ func (s *Server) handleRemoveTaskContainer(c *fiber.Ctx) error {
 	if !result.Replayed {
 		s.revokeTaskLocationWhiteboardSockets(accountID, result.WhiteboardIDs)
 		s.invalidateTasksCache(accountID)
-		s.broadcastTaskContainerLifecycleInvalidation(c.Context(), accountID, result.EnvironmentID, operationID, "container_removed")
+		if result.Type == "environment" {
+			s.broadcastTaskEnvironmentTombstone(accountID, result.EnvironmentID, operationID, "environment_trashed", result.ViewerUserIDs)
+		} else {
+			s.broadcastTaskContainerLifecycleInvalidation(c.Context(), accountID, result.EnvironmentID, operationID, "container_removed")
+		}
 	}
 	response := fiber.Map{"success": true, "operation_id": operationID, "result": result}
 	// Counts belong to this actor. They must never be reused as the inventory
 	// sent to other viewers whose folder/list/task grants can differ.
-	if counts, countErr := s.repos.TaskWork.HierarchyCountsForActor(c.Context(), accountID, actorID, &result.EnvironmentID); countErr == nil {
-		response["hierarchy_counts"] = counts
+	if result.Type != "environment" {
+		if counts, countErr := s.repos.TaskWork.HierarchyCountsForActor(c.Context(), accountID, actorID, &result.EnvironmentID); countErr == nil {
+			response["hierarchy_counts"] = counts
+		}
 	}
 	return c.JSON(response)
 }
@@ -151,4 +160,16 @@ func (s *Server) taskContainerRestoredResponse(c *fiber.Ctx, accountID, actorID,
 		}
 	}
 	return c.JSON(response)
+}
+
+// Audiences are captured inside the mutation transaction. A physically removed
+// Entorno cannot be used as the source of a post-commit recipient lookup.
+func (s *Server) broadcastTaskEnvironmentTombstone(accountID, environmentID, operationID uuid.UUID, action string, viewers []uuid.UUID) {
+	if s.hub == nil || len(viewers) == 0 {
+		return
+	}
+	s.hub.BroadcastToAccountUsersWithPermission(accountID, viewers, domain.PermTasks, ws.EventTaskUpdate, taskEnvironmentTombstonePayload(environmentID, operationID, action))
+}
+func taskEnvironmentTombstonePayload(environmentID, operationID uuid.UUID, action string) fiber.Map {
+	return fiber.Map{"action": action, "environment_id": environmentID, "operation_id": operationID, "structure_changed": true}
 }

@@ -44,7 +44,7 @@ func taskWorkError(c *fiber.Ctx, err error) error {
 	case errors.Is(err, repository.ErrTaskLastAccessManager):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Debe permanecer al menos un gestor explícito", "code": "last_access_manager"})
 	case errors.Is(err, repository.ErrTaskEnvironmentDefault):
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "El entorno General no se puede archivar", "code": "default_environment_invariant"})
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "El entorno General debe permanecer", "code": "default_environment_invariant"})
 	case errors.Is(err, repository.ErrTaskEnvironmentNameConflict):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Ya existe un Entorno activo con ese nombre", "code": "environment_name_conflict"})
 	case errors.Is(err, repository.ErrTaskDependencyCycle):
@@ -991,7 +991,7 @@ func (s *Server) handleUpdateTaskFolder(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "operation_id inválido"})
 	}
-	if err := s.repos.TaskWork.UpdateFolder(c.Context(), accountID, folderID, req.Name, req.Description, req.Color, workflowID, workflowProvided); err != nil {
+	if err := s.repos.TaskWork.UpdateFolder(c.Context(), accountID, folderID, req.Name, req.Description, req.Color, workflowID, workflowProvided, c.Locals("user_id").(uuid.UUID)); err != nil {
 		return taskWorkError(c, err)
 	}
 	s.invalidateTasksCache(accountID)
@@ -1844,7 +1844,7 @@ func (s *Server) handleDeleteTaskAttachment(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Archivo inválido"})
 	}
-	if err := s.repos.TaskWork.DeleteAttachment(c.Context(), accountID, taskID, attachmentID); err != nil {
+	if err := s.repos.TaskWork.DeleteAttachment(c.Context(), accountID, taskID, attachmentID, userID); err != nil {
 		return taskWorkError(c, err)
 	}
 	_ = s.repos.TaskWork.LogActivity(c.Context(), accountID, taskID, &userID, "attachment_deleted", fiber.Map{"attachment_id": attachmentID})

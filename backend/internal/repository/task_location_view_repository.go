@@ -478,6 +478,9 @@ func insertTaskLocationViewOperationTx(ctx context.Context, tx pgx.Tx, accountID
 }
 
 func lockActiveTaskLocationTx(ctx context.Context, tx pgx.Tx, accountID, scopeID uuid.UUID, scopeType string) (uuid.UUID, error) {
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, scopeType, []uuid.UUID{scopeID}, false); err != nil {
+		return uuid.Nil, err
+	}
 	query := `SELECT folder.environment_id FROM task_folders folder
 		JOIN task_environments environment ON environment.account_id=folder.account_id AND environment.id=folder.environment_id
 		WHERE folder.account_id=$1 AND folder.id=$2 AND folder.archived_at IS NULL AND folder.deleted_at IS NULL
@@ -581,6 +584,9 @@ func requireHistoricalTaskLocationManageTx(ctx context.Context, tx pgx.Tx, accou
 	// Resolve once before locking so an actor without Ver cannot use mutation
 	// timing to discover a hidden Work location.
 	if _, err := resolveHistoricalTaskLocationAccessWith(ctx, tx, accountID, actorID, scopeID, scopeType, domain.TaskAccessFull); err != nil {
+		return err
+	}
+	if err := lockWorkResourceEnvironmentBarrierTx(ctx, tx, accountID, scopeType, []uuid.UUID{scopeID}, false); err != nil {
 		return err
 	}
 	query := `SELECT (` + taskActorFolderAccessRankSQL("folder", "$3") + `)
