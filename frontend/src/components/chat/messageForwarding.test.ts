@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Chat, Message } from '@/types/chat'
-import { forwardDestinationIssue, forwardingLabel, forwardLimits, forwardSourceIssue, mergeMessageForwarding, normalizeForwarding, parseForwardReceipt, rememberForwardBatch, restoreForwardBatch } from './messageForwarding'
+import { forwardDestinationIssue, forwardingLabel, forwardLimits, forwardSourceIssue, forwardActionIssue, mergeMessageForwarding, normalizeForwarding, parseForwardReceipt, rememberForwardBatch, restoreForwardBatch } from './messageForwarding'
 import { mergeCanonicalMessage, mergeCanonicalMessageProjection, mergeFetchedMessages, reconcileOptimisticMessage } from './messageState'
 
 const message: Message = { id: 'local', message_id: 'provider', device_id: 'device', body: 'Original', message_type: 'text', is_from_me: false, is_read: false, status: 'sent', timestamp: '2026-10-24T00:00:00Z', forwarding: { state: 'not_forwarded', score: 0 } }
@@ -61,5 +61,59 @@ describe('forwarding truth', () => {
     expect(restoreForwardBatch('different-account')).toBeNull()
     rememberForwardBatch('scope', null)
     expect(restoreForwardBatch('scope')).toBeNull()
+  })
+})
+
+
+describe('explicit copies and inherited sharing limits', () => {
+  it('allows safe historical text and media copies while keeping native forwarding strict', () => {
+    const historical = { ...message, forwarding: undefined }
+    expect(forwardActionIssue(historical, 'device')).toBeNull()
+    expect(forwardSourceIssue(historical, 'device', 'copy')).toBeNull()
+    expect(forwardSourceIssue(historical, 'device', 'native')).toMatch(/No conocemos/)
+    for (const message_type of ['image', 'video', 'gif', 'document', 'sticker']) {
+      const media = { ...historical, body: undefined, message_type, media_url: '/api/media/file/account/asset' }
+      expect(forwardSourceIssue(media, 'device', 'copy')).toBeNull()
+      expect(forwardSourceIssue({ ...media, media_deleted: true }, 'device', 'copy')).toMatch(/archivo/)
+      expect(forwardSourceIssue({ ...media, media_recoverable: true }, 'device', 'copy')).toMatch(/archivo/)
+    }
+    expect(forwardSourceIssue({ ...historical, forwarding: { state: 'forwarded', score: null } }, 'device', 'copy')).toBeNull()
+    for (const source of [{ ...historical, is_view_once: true }, { ...historical, is_revoked: true }, { ...historical, message_type: 'poll' }]) expect(forwardActionIssue(source)).not.toBeNull()
+  })
+  it('requires deliberate audio-as-document selection without inventing PTT', () => {
+    const audio = { ...message, message_type: 'audio', media_url: '/api/media/file/audio', forwarding: undefined }
+    expect(forwardActionIssue(audio)).toBeNull()
+    expect(forwardSourceIssue(audio, 'device', 'copy')).toMatch(/archivo adjunto/)
+    expect(forwardSourceIssue(audio, 'device', 'copy', 'audio_document')).toBeNull()
+    expect(forwardSourceIssue({ ...audio, audio_ptt: false }, 'device', 'copy')).toBeNull()
+    expect(forwardSourceIssue(message, 'device', 'copy', 'audio_document')).toMatch(/conversión/)
+    expect(forwardSourceIssue(message, 'device', 'native', 'audio_document')).not.toBeNull()
+  })
+  it('retains the strictest sharing limits through copies, partial events, history and own echoes', () => {
+    const inherited = { max_chats: 1 as const, max_groups: 1 as const }
+    const copy = { ...message, sharing_limits: inherited, is_from_me: true }
+    const echo = { ...message, is_from_me: true, sharing_limits: undefined }
+    for (const row of [mergeCanonicalMessage(copy, echo), mergeFetchedMessages([copy], [echo])[0], mergeCanonicalMessageProjection([copy], echo)[0], reconcileOptimisticMessage([copy], 'optimistic-1', echo)[0]]) {
+      expect(row.sharing_limits).toEqual(inherited)
+      expect(forwardLimits(row)).toEqual({ maxChats: 1, maxGroups: 1 })
+      expect(forwardDestinationIssue(direct, [group], row, 'device')).not.toBeNull()
+    }
+    expect(mergeMessageForwarding(copy, { sharing_limits: { max_chats: 5, max_groups: 5 } }).sharing_limits).toEqual(inherited)
+    expect(forwardLimits({ ...message, sharing_limits: { max_chats: 5, max_groups: 1 } })).toEqual({ maxChats: 5, maxGroups: 1 })
+    expect(forwardLimits({ ...message, sharing_limits: {} as any })).toEqual({ maxChats: 1, maxGroups: 1 })
+    expect(forwardLimits({ ...message, sharing_limits: null })).toEqual({ maxChats: 5, maxGroups: 5 })
+    expect(mergeMessageForwarding(copy, { sharing_limits: null }).sharing_limits).toEqual(inherited)
+  })
+  it('binds receipts to immutable mode and content variant, with native defaults for legacy operations', () => {
+    const request = { source_chat_id: 'source', source_message_id: 'local', device_id: 'device', destination_chat_ids: ['a'], client_operation_id: 'copy-operation', mode: 'copy' as const, content_variant: 'audio_document' as const }
+    const receipt = { success: true, operation_id: request.client_operation_id, complete: true, mode: 'copy', content_variant: 'audio_document', results: [{ chat_id: 'a', state: 'sent' }], sharing_limits: { max_chats: 5, max_groups: 1 } }
+    expect(parseForwardReceipt(receipt, request)).toMatchObject({ mode: 'copy', content_variant: 'audio_document', sharing_limits: { max_chats: 5, max_groups: 1 } })
+    expect(() => parseForwardReceipt({ ...receipt, mode: 'native' }, request)).toThrow(/modo/)
+    expect(() => parseForwardReceipt({ ...receipt, mode: null }, request)).toThrow(/modo/)
+    expect(() => parseForwardReceipt({ ...receipt, content_variant: null }, request)).toThrow(/modo/)
+    expect(() => parseForwardReceipt({ ...receipt, content_variant: 'original' }, request)).toThrow(/modo/)
+    expect(() => parseForwardReceipt({ ...receipt, sharing_limits: { max_chats: 0, max_groups: 100 } }, request)).toThrow(/límites/)
+    const { mode: _mode, content_variant: _variant, ...legacy } = request
+    expect(parseForwardReceipt({ success: true, operation_id: legacy.client_operation_id, complete: true, results: receipt.results }, legacy)).toMatchObject({ mode: 'native', content_variant: 'original' })
   })
 })

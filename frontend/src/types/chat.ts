@@ -79,8 +79,14 @@ export interface MessageForwarding {
   score: number | null
 }
 
+export interface MessageSharingLimits {
+  max_chats: 1 | 5
+  max_groups: 1 | 5
+}
+
 export interface Message {
   forwarding?: MessageForwarding
+  sharing_limits?: MessageSharingLimits | null
   /** Distinguishes voice notes from ordinary audio; absence means unknown. */
   audio_ptt?: boolean
   chat_id?: string

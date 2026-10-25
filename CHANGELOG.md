@@ -1,5 +1,14 @@
 # Changelog — Clarin CRM
 
+## 2026-10-25
+
+### Compartir mensajes sin bloqueos generales
+
+- Reenviar permite enviar una copia de textos y archivos compatibles, también del historial antiguo, aunque el reenvío nativo no esté habilitado.
+- El selector distingue la copia del reenvío de WhatsApp y conserva los límites conocidos y los resultados para evitar duplicados.
+- Los audios antiguos sin clasificación pueden compartirse como archivo adjunto mediante una elección explícita.
+- Los mensajes eliminados, de visualización única o sin contenido disponible permanecen protegidos individualmente.
+
 ## 2026-10-24
 
 ### Identidad de participantes y procedencia de mensajes

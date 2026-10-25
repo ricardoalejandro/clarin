@@ -83,6 +83,7 @@ func TestMessageForwardingIntegrity(t *testing.T) {
 	unrelated.FromJID = &authorB
 	unrelated.Forwarding = domain.MessageForwarding{State: domain.ForwardingFrequentlyForwarded, Score: &score}
 	unrelated.AudioPTT = &truePTT
+	unrelated.SharingLimits = &domain.MessageSharingLimits{MaxChats: 1, MaxGroups: 1}
 	if groupErr = repos.Message.Create(ctx, &unrelated); !errors.Is(groupErr, pgx.ErrNoRows) || unrelated.ForwardingHydrated {
 		t.Fatal("another participant hydrated the duplicate stanza", groupErr)
 	}
@@ -90,7 +91,7 @@ func TestMessageForwardingIntegrity(t *testing.T) {
 		t.Fatal("direct hydration bypassed the group author guard", groupErr)
 	}
 	untouched, groupErr := repos.Message.GetByReference(ctx, f.account, group.ID, originalGroup.MessageID)
-	if groupErr != nil || untouched.Forwarding.Normalize().State != domain.ForwardingUnknown || untouched.AudioPTT != nil || untouched.FromJID == nil || *untouched.FromJID != authorA {
+	if groupErr != nil || untouched.Forwarding.Normalize().State != domain.ForwardingUnknown || untouched.AudioPTT != nil || untouched.SharingLimits != nil || untouched.FromJID == nil || *untouched.FromJID != authorA {
 		t.Fatal("unrelated participant changed canonical provenance", groupErr)
 	}
 	one := uint32(1)
@@ -98,11 +99,12 @@ func TestMessageForwardingIntegrity(t *testing.T) {
 	verifiedAlias.FromJID = &aliasA
 	verifiedAlias.Forwarding = domain.MessageForwarding{State: domain.ForwardingForwarded, Score: &one}
 	verifiedAlias.AudioPTT = &falsePTT
+	verifiedAlias.SharingLimits = &domain.MessageSharingLimits{MaxChats: 5, MaxGroups: 1}
 	if groupErr = repos.Message.Create(ctx, &verifiedAlias); !errors.Is(groupErr, pgx.ErrNoRows) || !verifiedAlias.ForwardingHydrated {
 		t.Fatal("verified PN/LID author could not hydrate", groupErr)
 	}
 	canonicalGroup, groupErr := repos.Message.GetByReference(ctx, f.account, group.ID, originalGroup.MessageID)
-	if groupErr != nil || canonicalGroup.Forwarding.State != domain.ForwardingForwarded || canonicalGroup.Forwarding.Score == nil || *canonicalGroup.Forwarding.Score != 1 || canonicalGroup.AudioPTT == nil || *canonicalGroup.AudioPTT || canonicalGroup.FromJID == nil || *canonicalGroup.FromJID != authorA {
+	if groupErr != nil || canonicalGroup.Forwarding.State != domain.ForwardingForwarded || canonicalGroup.Forwarding.Score == nil || *canonicalGroup.Forwarding.Score != 1 || canonicalGroup.AudioPTT == nil || *canonicalGroup.AudioPTT || canonicalGroup.SharingLimits == nil || *canonicalGroup.SharingLimits != (domain.MessageSharingLimits{MaxChats: 5, MaxGroups: 1}) || canonicalGroup.FromJID == nil || *canonicalGroup.FromJID != authorA {
 		t.Fatal("verified alias metadata was not preserved without changing author", groupErr)
 	}
 	missingAuthor := *originalGroup

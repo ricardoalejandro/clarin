@@ -57,7 +57,7 @@ type forwardingFakeTransport struct {
 func (f *forwardingFakeTransport) NewWhatsAppMessageID(uuid.UUID) (string, error) {
 	return "QA" + strings.ReplaceAll(uuid.NewString(), "-", ""), nil
 }
-func (f *forwardingFakeTransport) ForwardMessageWithID(ctx context.Context, device uuid.UUID, to string, source *domain.Message, id string) (*domain.Message, error) {
+func (f *forwardingFakeTransport) ShareMessageWithID(ctx context.Context, device uuid.UUID, to string, source *domain.Message, id, mode, variant string) (*domain.Message, error) {
 	f.mu.Lock()
 	f.calls++
 	unknown, failed := f.failures[to]
@@ -69,12 +69,25 @@ func (f *forwardingFakeTransport) ForwardMessageWithID(ctx context.Context, devi
 	if err != nil || chat == nil {
 		return nil, errors.New("synthetic missing target")
 	}
-	next, err := domain.NextForwarding(*source)
+	next := domain.MessageForwarding{State: domain.ForwardingNotForwarded}
+	if mode == domain.MessageSharingNative {
+		next, err = domain.NextForwarding(*source)
+		if err != nil {
+			return nil, err
+		}
+	}
+	kind, audio := source.MessageType, source.AudioPTT
+	if variant == domain.MessageContentAudioDocument {
+		document := "document"
+		kind = &document
+		audio = nil
+	}
+	limits, err := domain.MessageSharingOutputLimits(source, mode)
 	if err != nil {
 		return nil, err
 	}
 	status := "sent"
-	message := &domain.Message{AccountID: f.account, ChatID: chat.ID, DeviceID: &device, MessageID: id, Body: source.Body, MessageType: source.MessageType, IsFromMe: true, Status: &status, Timestamp: time.Now().UTC(), Forwarding: next, ForwardingSource: "clarin"}
+	message := &domain.Message{AccountID: f.account, ChatID: chat.ID, DeviceID: &device, MessageID: id, Body: source.Body, MessageType: kind, AudioPTT: audio, SharingLimits: &limits, IsFromMe: true, Status: &status, Timestamp: time.Now().UTC(), Forwarding: next, ForwardingSource: "clarin"}
 	if err = f.repos.Message.Create(ctx, message); err != nil {
 		return nil, err
 	}
@@ -274,6 +287,87 @@ func TestForwardBatchHTTPIntegrity(t *testing.T) {
 		t.Fatal("changed recipient replay reached transport")
 	}
 	dropRaceTrigger()
+
+	// Copy is an explicit fresh envelope and works without native capability or
+	// legacy provenance. Its local restrictions still survive persistence/replay.
+	enabled = false
+	copySource := *source
+	copySource.ID = uuid.Nil
+	copySource.MessageID = uuid.NewString()
+	copySource.Forwarding = domain.MessageForwarding{}
+	copySource.SharingLimits = &domain.MessageSharingLimits{MaxChats: 1, MaxGroups: 1}
+	if err = repos.Message.Create(ctx, &copySource); err != nil {
+		t.Fatal(err)
+	}
+	copyRequest := forwardBatchRequest{SourceChatID: chats[0].ID, SourceMessageID: copySource.ID, DeviceID: device, DestinationChatIDs: []uuid.UUID{chats[1].ID}, ClientOperationID: uuid.New(), Mode: domain.MessageSharingCopy}
+	beforeCopy := fake.calls
+	code, receipt = send(copyRequest)
+	if code != 200 || fake.calls != beforeCopy+1 || receipt["mode"] != "copy" || receipt["content_variant"] != "original" {
+		t.Fatal("copy was gated by native capability", code, receipt)
+	}
+	copyResult := receipt["results"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	if copyResult["forwarding"].(map[string]any)["state"] != domain.ForwardingNotForwarded || copyResult["sharing_limits"].(map[string]any)["max_chats"] != float64(1) {
+		t.Fatal("copy lost distinct flags/policy", copyResult)
+	}
+	code, _ = send(copyRequest)
+	if code != 200 || fake.calls != beforeCopy+1 {
+		t.Fatal("copy replay resent")
+	}
+	changedMode := copyRequest
+	changedMode.Mode = domain.MessageSharingNative
+	code, receipt = send(changedMode)
+	if code != 409 || receipt["code"] != "forward_operation_conflict" || fake.calls != beforeCopy+1 {
+		t.Fatal("mode change reused reservation", code, receipt)
+	}
+	copyRequest.ClientOperationID = uuid.New()
+	copyRequest.DestinationChatIDs = []uuid.UUID{chats[1].ID, chats[2].ID}
+	code, receipt = send(copyRequest)
+	if code != 422 || receipt["code"] != "forward_frequent_limit" || fake.calls != beforeCopy+1 {
+		t.Fatal("copy laundered local limit", code, receipt)
+	}
+	// An uncertain copy cannot be retried as native or converted to another
+	// content variant under the same operation identity.
+	copyRequest.ClientOperationID = uuid.New()
+	copyRequest.DestinationChatIDs = []uuid.UUID{chats[2].ID}
+	code, receipt = send(copyRequest)
+	if code != 200 || receipt["results"].([]any)[0].(map[string]any)["state"] != "uncertain" {
+		t.Fatal("copy uncertainty absent", code, receipt)
+	}
+	callsAfterUncertain := fake.calls
+	code, _ = send(copyRequest)
+	if code != 200 || fake.calls != callsAfterUncertain {
+		t.Fatal("uncertain copy replay resent")
+	}
+	copyRequest.ContentVariant = domain.MessageContentAudioDocument
+	code, receipt = send(copyRequest)
+	if code != 409 || receipt["code"] != "forward_operation_conflict" || fake.calls != callsAfterUncertain {
+		t.Fatal("uncertain variant changed", code, receipt)
+	}
+	// audio_document is opt-in; an unknown voice-note kind is never guessed.
+	audioSource := copySource
+	audioSource.ID = uuid.Nil
+	audioSource.MessageID = uuid.NewString()
+	audioKind := "audio"
+	audioSource.MessageType = &audioKind
+	audioURL := "https://test.invalid/synthetic.wav"
+	audioSource.MediaURL = &audioURL
+	if err = repos.Message.Create(ctx, &audioSource); err != nil {
+		t.Fatal(err)
+	}
+	audioRequest := forwardBatchRequest{SourceChatID: chats[0].ID, SourceMessageID: audioSource.ID, DeviceID: device, DestinationChatIDs: []uuid.UUID{chats[1].ID}, ClientOperationID: uuid.New(), Mode: domain.MessageSharingCopy}
+	code, receipt = send(audioRequest)
+	if code != 409 || receipt["code"] != "forward_audio_kind_unknown" || fake.calls != callsAfterUncertain {
+		t.Fatal("unknown PTT guessed", code, receipt)
+	}
+	audioRequest.ContentVariant = domain.MessageContentAudioDocument
+	code, receipt = send(audioRequest)
+	if code != 200 || fake.calls != callsAfterUncertain+1 {
+		t.Fatal("explicit audio document rejected", code, receipt)
+	}
+	audioResult := receipt["results"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	if audioResult["message_type"] != "document" || audioResult["audio_ptt"] != nil {
+		t.Fatal("audio document fidelity misrepresented", audioResult)
+	}
 	// Another account cannot observe an operation even with the same actor UUID.
 	account = foreign
 	response, err = app.Test(httptest.NewRequest("GET", "/batch/"+request.ClientOperationID.String(), nil))

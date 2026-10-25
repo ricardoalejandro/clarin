@@ -1,6 +1,9 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
 	"testing"
@@ -95,5 +98,72 @@ func TestForwardingCapabilityDefaultsOff(t *testing.T) {
 	server := &Server{}
 	if server.forwardingEnabled(uuid.New()) {
 		t.Fatal("unconfigured provider advertises native forwarding")
+	}
+}
+
+func TestSharingRequestDefaultsPreserveLegacyHash(t *testing.T) {
+	req := forwardBatchRequest{SourceChatID: uuid.New(), SourceMessageID: uuid.New(), DeviceID: uuid.New(), DestinationChatIDs: []uuid.UUID{uuid.New()}, ClientOperationID: uuid.New()}
+	legacy := struct {
+		SourceChatID       uuid.UUID   `json:"source_chat_id"`
+		SourceMessageID    uuid.UUID   `json:"source_message_id"`
+		DeviceID           uuid.UUID   `json:"device_id"`
+		DestinationChatIDs []uuid.UUID `json:"destination_chat_ids"`
+		ClientOperationID  uuid.UUID   `json:"client_operation_id"`
+	}{req.SourceChatID, req.SourceMessageID, req.DeviceID, req.DestinationChatIDs, req.ClientOperationID}
+	raw, _ := json.Marshal(legacy)
+	sum := sha256.Sum256(raw)
+	expected := hex.EncodeToString(sum[:])
+	normalized, hash, err := canonicalForwardRequest(req)
+	if err != nil || hash != expected || normalized.Mode != domain.MessageSharingNative || normalized.ContentVariant != domain.MessageContentOriginal {
+		t.Fatal("legacy hash changed", hash, expected, err)
+	}
+	req.Mode = domain.MessageSharingNative
+	req.ContentVariant = domain.MessageContentOriginal
+	if _, hash, err = canonicalForwardRequest(req); err != nil || hash != expected {
+		t.Fatal("explicit defaults changed hash", err)
+	}
+	req.Mode = domain.MessageSharingCopy
+	if _, hash, err = canonicalForwardRequest(req); err != nil || hash == expected {
+		t.Fatal("copy reused native identity", err)
+	}
+	req.ContentVariant = domain.MessageContentAudioDocument
+	if _, other, err := canonicalForwardRequest(req); err != nil || other == hash {
+		t.Fatal("variant not bound to identity", err)
+	}
+	for _, bad := range []forwardBatchRequest{func() forwardBatchRequest { v := req; v.Mode = "automatic"; return v }(), func() forwardBatchRequest { v := req; v.ContentVariant = "guess"; return v }(), func() forwardBatchRequest { v := req; v.Mode = domain.MessageSharingNative; return v }()} {
+		if _, _, err := canonicalForwardRequest(bad); err == nil {
+			t.Fatal("invalid sharing preparation accepted")
+		}
+	}
+}
+func TestCopySourceRequiresExplicitAudioVariant(t *testing.T) {
+	body, media, kind := "Synthetic", "https://test.invalid/audio", "audio"
+	source := &domain.Message{Body: &body}
+	if err := validateMessageSharingSource(source, domain.MessageSharingCopy, domain.MessageContentOriginal); err != nil {
+		t.Fatal("legacy text cannot be copied", err)
+	}
+	if err := validateForwardSource(source); err == nil {
+		t.Fatal("legacy text can be natively forwarded")
+	}
+	if err := validateMessageSharingSource(source, domain.MessageSharingCopy, domain.MessageContentAudioDocument); err == nil {
+		t.Fatal("text converted to audio document")
+	}
+	source.MessageType = &kind
+	source.MediaURL = &media
+	if err := validateMessageSharingSource(source, domain.MessageSharingCopy, domain.MessageContentOriginal); err == nil {
+		t.Fatal("unknown PTT guessed")
+	}
+	if err := validateMessageSharingSource(source, domain.MessageSharingCopy, domain.MessageContentAudioDocument); err != nil {
+		t.Fatal(err)
+	}
+	source.IsRevoked = true
+	if err := validateMessageSharingSource(source, domain.MessageSharingCopy, domain.MessageContentAudioDocument); err == nil {
+		t.Fatal("revoked media copied")
+	}
+}
+func TestLocalSharingPolicySurvivesUnmarkedCopy(t *testing.T) {
+	source := &domain.Message{Forwarding: domain.MessageForwarding{State: domain.ForwardingNotForwarded}, SharingLimits: &domain.MessageSharingLimits{MaxChats: 1, MaxGroups: 1}}
+	if err := validateForwardDestinationLimits(source, []*domain.Chat{{JID: "1@s.whatsapp.net"}, {JID: "2@s.whatsapp.net"}}); err == nil {
+		t.Fatal("unmarked copy laundered limits")
 	}
 }

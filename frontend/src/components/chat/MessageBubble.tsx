@@ -14,7 +14,7 @@ import styles from './MessageBubble.module.css'
 import { displayMentionText, groupMessageAuthor, participantName } from '@/utils/chatGroups'
 import ChatMessageMedia from './ChatMessageMedia'
 import MessageLinkPreview from './MessageLinkPreview'
-import { forwardingLabel, forwardSourceIssue } from './messageForwarding'
+import { forwardingLabel, forwardActionIssue } from './messageForwarding'
 import { hasUnavailableGroupText } from './messageContent'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
@@ -93,7 +93,7 @@ function MessageBubble({ message, contactName, isGroup = false, onMediaClick, on
   const [recoveringMedia, setRecoveringMedia] = useState(false)
   const [recoverMediaError, setRecoverMediaError] = useState('')
   const forwardedLabel = forwardingLabel(message.forwarding)
-  const forwardingIssue = forwardSourceIssue(message)
+  const forwardingIssue = forwardActionIssue(message)
   const mediaTooLarge = isGroup && message.media_unavailable_reason === 'group_media_too_large'
   const unavailableGroupText = hasUnavailableGroupText(message, isGroup)
   const recoverInFlight = useRef(false)

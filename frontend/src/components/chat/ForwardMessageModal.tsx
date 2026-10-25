@@ -11,7 +11,7 @@ import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperational
 import { restoreDialogFocus, useDialogTabTrap } from '@/components/programs/useDialogTabTrap'
 import { chatAvatar, isGroupChat } from '@/utils/chatGroups'
 import { formatPhone, getChatDisplayName, isPendingChatIdentity } from '@/utils/chat'
-import { forwardValidationCodes, forwardDestinationIssue, forwardingLabel, forwardingSessionKey, forwardLimits, forwardSourceIssue, parseForwardReceipt, rememberForwardBatch, restoreForwardBatch, type ForwardBatchRequest, type ForwardDestinationResult, type StoredForwardBatch } from './messageForwarding'
+import { forwardValidationCodes, forwardDestinationIssue, forwardingLabel, forwardingSessionKey, forwardLimits, forwardSourceIssue, forwardActionIssue, parseForwardReceipt, rememberForwardBatch, restoreForwardBatch, type ForwardBatchRequest, type ForwardDestinationResult, type StoredForwardBatch, type ForwardMode, type ForwardContentVariant } from './messageForwarding'
 
 interface Props {
   message: Message
@@ -21,6 +21,7 @@ interface Props {
   onSuccess: () => void
   suspended?: boolean
   nativeForwardEnabled?: boolean
+  copyEnabled?: boolean
 }
 const PAGE_SIZE = 50
 const resultLabel: Record<ForwardDestinationResult['state'], string> = { pending: 'Pendiente', sending: 'Enviando', sent: 'Enviado', failed: 'No enviado', uncertain: 'Resultado por comprobar' }
@@ -31,7 +32,7 @@ export default function ForwardMessageModal(props: Props) {
   return <ForwardMessageSession key={`${scope}:${props.deviceId}:${props.chatId}:${props.message.id}`} {...props} scope={scope} />
 }
 
-function ForwardMessageSession({ message, deviceId, chatId, onClose, onSuccess, suspended = false, nativeForwardEnabled = false, scope }: Props & { scope: string }) {
+function ForwardMessageSession({ message, deviceId, chatId, onClose, onSuccess, suspended = false, nativeForwardEnabled = false, copyEnabled = true, scope }: Props & { scope: string }) {
   const key = forwardingSessionKey(scope, chatId, message.id, deviceId)
   const suspendedRef = useRef(suspended); suspendedRef.current = suspended
   const mounted = useRef(true)
@@ -42,9 +43,6 @@ function ForwardMessageSession({ message, deviceId, chatId, onClose, onSuccess, 
   const current = useCallback(() => mounted.current && getAuthScope() === scope && !isAuthIdentityChanging(scope), [scope])
   const nativeCapabilityIssue = 'El reenvío nativo aún no está verificado para este dispositivo.'
   const [capabilityRejected, setCapabilityRejected] = useState(false)
-  const sourceIssue = forwardSourceIssue(message, deviceId) || (!nativeForwardEnabled || capabilityRejected ? nativeCapabilityIssue : null)
-  const sourceIssueRef = useRef(sourceIssue); sourceIssueRef.current = sourceIssue
-  const limits = forwardLimits(message)
   const initial = useRef<StoredForwardBatch | null | undefined>(undefined)
   if (initial.current === undefined) {
     const restored = restoreForwardBatch(key)
@@ -52,6 +50,18 @@ function ForwardMessageSession({ message, deviceId, chatId, onClose, onSuccess, 
   }
   const [batch, setBatch] = useState<StoredForwardBatch | null>(initial.current)
   const batchRef = useRef(batch); batchRef.current = batch
+  const nativeIssue = forwardSourceIssue(message, deviceId) || (!nativeForwardEnabled || capabilityRejected ? nativeCapabilityIssue : null)
+  const copyIssue = forwardActionIssue(message, deviceId) || (!copyEnabled ? 'El dispositivo no está disponible para enviar una copia.' : null)
+  const [chosenMode, setChosenMode] = useState<ForwardMode>(() => initial.current?.request.mode ?? (initial.current ? 'native' : nativeIssue ? 'copy' : 'native'))
+  const [chosenVariant, setChosenVariant] = useState<ForwardContentVariant>(() => initial.current?.request.content_variant ?? 'original')
+  const mode = batch ? batch.request.mode ?? 'native' : chosenMode
+  const variant = batch ? batch.request.content_variant ?? 'original' : chosenVariant
+  const sourceIssue = mode === 'native' ? nativeIssue : copyIssue || forwardSourceIssue(message, deviceId, mode, variant)
+  const sourceIssueRef = useRef(sourceIssue); sourceIssueRef.current = sourceIssue
+  const optionsRef = useRef({ mode, variant }); optionsRef.current = { mode, variant }
+  const needsAudioDocument = message.message_type === 'audio' && typeof message.audio_ptt !== 'boolean'
+  const limits = forwardLimits(message)
+
   const [chats, setChats] = useState<Chat[]>([])
   const [selected, setSelected] = useState<Chat[]>([])
   const [search, setSearch] = useState('')
@@ -134,6 +144,7 @@ function ForwardMessageSession({ message, deviceId, chatId, onClose, onSuccess, 
   }
   const postOperation = async (operation: StoredForwardBatch) => {
     if (inFlight.current || suspendedRef.current || !current()) return
+    if ((operation.request.mode ?? 'native') !== optionsRef.current.mode || (operation.request.content_variant ?? 'original') !== optionsRef.current.variant) return
     if (sourceIssueRef.current) { setSendError(sourceIssueRef.current); return }
     inFlight.current = true; setSending(true); setSendError(''); setMissingReceipt(false)
     persist(operation)
@@ -159,8 +170,8 @@ function ForwardMessageSession({ message, deviceId, chatId, onClose, onSuccess, 
     }
   }
   const beginForward = async (destinations = selected) => {
-    if (!current() || suspendedRef.current || inFlight.current || sourceIssue || destinations.length === 0 || destinations.some(chat => forwardDestinationIssue(chat, destinations.filter(row => row.id !== chat.id), message, deviceId))) return
-    const request: ForwardBatchRequest = { source_chat_id: chatId, source_message_id: message.id, device_id: deviceId, destination_chat_ids: destinations.map(chat => chat.id), client_operation_id: crypto.randomUUID() }
+    if (!current() || suspendedRef.current || inFlight.current || sourceIssueRef.current || mode !== optionsRef.current.mode || variant !== optionsRef.current.variant || destinations.length === 0 || destinations.some(chat => forwardDestinationIssue(chat, destinations.filter(row => row.id !== chat.id), message, deviceId))) return
+    const request: ForwardBatchRequest = { mode, content_variant: variant, source_chat_id: chatId, source_message_id: message.id, device_id: deviceId, destination_chat_ids: destinations.map(chat => chat.id), client_operation_id: crypto.randomUUID() }
     await postOperation({ request })
   }
   const checkStatus = async () => {
@@ -180,6 +191,12 @@ function ForwardMessageSession({ message, deviceId, chatId, onClose, onSuccess, 
       reconcileResult(data, operation)
     } catch (cause) { if (current()) setSendError(cause instanceof Error && cause.name !== 'AbortError' ? cause.message : 'La consulta tardó demasiado. Puedes volver a comprobar el estado.') }
     finally { window.clearTimeout(timeout); inFlight.current = false; if (current()) setSending(false) }
+  }
+  const chooseMode = (next: ForwardMode) => {
+    if (!current() || suspendedRef.current || batchRef.current || inFlight.current || (next === 'native' ? nativeIssue : copyIssue)) return
+    setChosenMode(next)
+    if (next === 'native') setChosenVariant('original')
+    setSendError('')
   }
   const toggle = (chat: Chat) => {
     if (batchRef.current || suspendedRef.current || !current()) return
@@ -201,7 +218,14 @@ function ForwardMessageSession({ message, deviceId, chatId, onClose, onSuccess, 
         <header className="flex shrink-0 items-center gap-3 border-b border-slate-100 px-4 py-2"><Forward className="h-5 w-5 shrink-0 text-emerald-600" /><h3 id="forward-message-title" className="min-w-0 flex-1 text-lg font-bold text-slate-800">Reenviar mensaje</h3><button type="button" onClick={onClose} disabled={sending} aria-label="Cerrar reenvío" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-40"><X className="h-5 w-5" /></button></header>
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           <div className="mx-4 mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3"><p className="mb-1 text-xs italic text-slate-500">{forwardingLabel(message.forwarding) || (message.is_from_me ? 'Mensaje propio' : 'Mensaje recibido')}</p><p className="line-clamp-3 break-words text-sm text-slate-700">{message.message_type === 'document' ? message.media_filename || 'Documento' : message.body || ({ image: 'Imagen', video: 'Video', gif: 'GIF', audio: message.audio_ptt ? 'Nota de voz' : 'Audio', sticker: 'Sticker' }[message.message_type || ''] || 'Mensaje')}</p></div>
-          <p id="forward-message-rule" className="px-4 py-3 text-xs leading-5 text-slate-500">{limits.maxChats === 1 ? 'Reenviado muchas veces: selecciona un solo chat.' : limits.maxGroups === 1 ? 'Selecciona hasta cinco chats, incluido un máximo de un grupo.' : 'Selecciona hasta cinco chats de este dispositivo.'} Los permisos y los límites se verifican otra vez al enviar.</p>
+          <div role="group" aria-label="Modo de envío" className="grid grid-cols-2 gap-2 px-4 pt-3">
+            <button type="button" aria-pressed={mode === 'native'} disabled={Boolean(batch) || sending || Boolean(nativeIssue)} title={nativeIssue || undefined} onClick={() => chooseMode('native')} className={`min-h-11 rounded-xl border px-3 py-2 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-50 ${mode === 'native' ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : 'border-slate-200 text-slate-700 hover:bg-slate-50'}`}>Reenvío de WhatsApp</button>
+            <button type="button" aria-pressed={mode === 'copy'} disabled={Boolean(batch) || sending || Boolean(copyIssue)} title={copyIssue || undefined} onClick={() => chooseMode('copy')} className={`min-h-11 rounded-xl border px-3 py-2 text-sm font-semibold focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:opacity-50 ${mode === 'copy' ? 'border-emerald-500 bg-emerald-50 text-emerald-800' : 'border-slate-200 text-slate-700 hover:bg-slate-50'}`}>Enviar una copia</button>
+          </div>
+          {mode === 'copy' && <p className="px-4 pt-3 text-xs leading-5 text-slate-600">Se enviará una copia del contenido, sin la etiqueta de reenvío de WhatsApp. Los límites conocidos se conservan en Clarin.</p>}
+          {nativeIssue && mode === 'copy' && <p className="px-4 pt-1 text-xs leading-5 text-slate-500">Reenvío de WhatsApp: {nativeIssue}</p>}
+          {needsAudioDocument && mode === 'copy' && !copyIssue && <label className="mx-4 mt-3 flex min-h-11 cursor-pointer items-center gap-3 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700"><input type="checkbox" checked={variant === 'audio_document'} disabled={Boolean(batch) || sending} onChange={event => { if (!batchRef.current && !inFlight.current && current() && !suspendedRef.current) { setChosenVariant(event.target.checked ? 'audio_document' : 'original'); setSendError('') } }} className="h-5 w-5 shrink-0 accent-emerald-600" /><span>Enviar como archivo adjunto<span className="block text-xs leading-5 text-slate-500">Conserva el archivo de audio sin suponer que sea una nota de voz.</span></span></label>}
+          <p id="forward-message-rule" className="px-4 py-3 text-xs leading-5 text-slate-500">{limits.maxChats === 1 ? 'Este mensaje permite seleccionar un solo chat.' : limits.maxGroups === 1 ? 'Selecciona hasta cinco chats, incluido un máximo de un grupo.' : 'Selecciona hasta cinco chats de este dispositivo.'} Los permisos y los límites se verifican otra vez al enviar.</p>
           {sourceIssue && <p role="alert" className="mx-4 mb-3 rounded-xl bg-amber-50 p-3 text-xs leading-5 text-amber-800">{sourceIssue}</p>}
           {!batch && !sourceIssue && <>
             {selected.length > 0 && <div className="flex flex-wrap gap-1.5 px-4 pb-2">{selected.map(chat => <span key={chat.id} className="inline-flex max-w-full items-center gap-1 rounded-full bg-emerald-50 pl-3 text-xs font-semibold text-emerald-800"><span className="min-w-0 break-words">{getChatDisplayName(chat)}</span><button type="button" onClick={() => toggle(chat)} aria-label={`Quitar ${getChatDisplayName(chat)}`} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full hover:bg-emerald-100"><X className="h-3 w-3" /></button></span>)}</div>}
@@ -221,7 +245,7 @@ function ForwardMessageSession({ message, deviceId, chatId, onClose, onSuccess, 
         </div>
         <footer className="shrink-0 border-t border-slate-100 px-4 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 sm:pb-3">
           {sendError && <p role="alert" className="mb-2 rounded-xl border border-rose-100 bg-rose-50 p-3 text-xs leading-5 text-rose-700"><AlertCircle className="mr-1 inline h-4 w-4" />{sendError}</p>}
-          {batch ? <><button type="button" onClick={() => void (missingReceipt ? postOperation(batch) : checkStatus())} disabled={sending || (missingReceipt && Boolean(sourceIssue))} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${sending ? 'animate-spin motion-reduce:animate-none' : ''}`} />{sending ? 'Comprobando…' : missingReceipt ? 'Confirmar la misma operación' : 'Comprobar estado'}</button>{!unfinished && safeRetry.length > 0 && retryChats.length === safeRetry.length && <button type="button" onClick={() => void beginForward(retryChats)} disabled={sending || Boolean(sourceIssue)} className="mt-2 min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold text-slate-700 disabled:opacity-50">Reintentar solo los destinos no enviados</button>}{!unfinished && results.some(result => result.state === 'failed') && <button type="button" onClick={closeAndRefresh} disabled={sending} className="mt-2 min-h-11 w-full rounded-xl px-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Cerrar y actualizar</button>}</> : <button type="button" onClick={() => void beginForward()} disabled={sending || Boolean(sourceIssue) || !selected.length} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-40"><Send className="h-4 w-4" />{sending ? 'Confirmando reenvío…' : `Reenviar a ${selected.length} ${selected.length === 1 ? 'chat' : 'chats'}`}</button>}
+          {batch ? <><button type="button" onClick={() => void (missingReceipt ? postOperation(batch) : checkStatus())} disabled={sending || (missingReceipt && Boolean(sourceIssue))} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${sending ? 'animate-spin motion-reduce:animate-none' : ''}`} />{sending ? 'Comprobando…' : missingReceipt ? 'Confirmar la misma operación' : 'Comprobar estado'}</button>{!unfinished && safeRetry.length > 0 && retryChats.length === safeRetry.length && <button type="button" onClick={() => void beginForward(retryChats)} disabled={sending || Boolean(sourceIssue)} className="mt-2 min-h-11 w-full rounded-xl border border-slate-200 px-3 text-sm font-semibold text-slate-700 disabled:opacity-50">Reintentar solo los destinos no enviados</button>}{!unfinished && results.some(result => result.state === 'failed') && <button type="button" onClick={closeAndRefresh} disabled={sending} className="mt-2 min-h-11 w-full rounded-xl px-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Cerrar y actualizar</button>}</> : <button type="button" onClick={() => void beginForward()} disabled={sending || Boolean(sourceIssue) || !selected.length} className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-40"><Send className="h-4 w-4" />{sending ? 'Confirmando envío…' : `${mode === 'copy' ? 'Enviar copia' : 'Reenviar'} a ${selected.length} ${selected.length === 1 ? 'chat' : 'chats'}`}</button>}
         </footer>
       </div>
     </div>, portal || document.body,

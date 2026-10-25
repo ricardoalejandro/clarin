@@ -22,7 +22,7 @@ import (
 // external transport while exercising real authorization and durable receipts.
 type forwardBatchTransport interface {
 	NewWhatsAppMessageID(uuid.UUID) (string, error)
-	ForwardMessageWithID(context.Context, uuid.UUID, string, *domain.Message, string) (*domain.Message, error)
+	ShareMessageWithID(context.Context, uuid.UUID, string, *domain.Message, string, string, string) (*domain.Message, error)
 }
 
 // Only focused tests inject readiness while replacing the external transport.
@@ -45,7 +45,7 @@ func (s *Server) forwardingEnabled(deviceID uuid.UUID) bool {
 
 func forwardTypedFailureRetry(code string) bool {
 	switch code {
-	case "forward_source_changed", "forward_destination_changed", "forward_source_invalid", "recipient_invalid", "forward_content_unavailable", "forward_capability_unverified", "forwarding_source_unknown", "forwarding_score_unknown", "forward_type_unsupported", "forward_audio_kind_unknown":
+	case "forward_source_changed", "forward_destination_changed", "forward_source_invalid", "recipient_invalid", "forward_content_unavailable", "forward_capability_unverified", "forwarding_source_unknown", "forwarding_score_unknown", "forward_type_unsupported", "forward_audio_kind_unknown", "share_mode_invalid", "share_variant_invalid":
 		return false
 	default:
 		return true
@@ -65,6 +65,8 @@ type forwardBatchRequest struct {
 	DeviceID           uuid.UUID   `json:"device_id"`
 	DestinationChatIDs []uuid.UUID `json:"destination_chat_ids"`
 	ClientOperationID  uuid.UUID   `json:"client_operation_id"`
+	Mode               string      `json:"mode,omitempty"`
+	ContentVariant     string      `json:"content_variant,omitempty"`
 }
 
 type forwardBatchError struct {
@@ -91,6 +93,16 @@ func forwardReceipt(c *fiber.Ctx, op *repository.ForwardOperation) error {
 	}{true, op})
 }
 func canonicalForwardRequest(req forwardBatchRequest) (forwardBatchRequest, string, error) {
+	var err error
+	req.Mode, err = domain.NormalizeMessageSharingMode(req.Mode)
+	if err != nil {
+		return req, "", forwardFailure(422, "share_mode_invalid", "Selecciona Copiar o Reenviar para compartir este mensaje.")
+	}
+	req.ContentVariant, err = domain.NormalizeMessageContentVariant(req.ContentVariant)
+	if err != nil || (req.ContentVariant == domain.MessageContentAudioDocument && req.Mode != domain.MessageSharingCopy) {
+		return req, "", forwardFailure(422, "share_variant_invalid", "Enviar un audio como archivo requiere el modo Copiar.")
+	}
+
 	if req.SourceChatID == uuid.Nil || req.SourceMessageID == uuid.Nil || req.DeviceID == uuid.Nil || req.ClientOperationID == uuid.Nil {
 		return req, "", forwardFailure(400, "forward_invalid_request", "Selecciona el mensaje, dispositivo y destinos del reenvío.")
 	}
@@ -106,12 +118,22 @@ func canonicalForwardRequest(req forwardBatchRequest) (forwardBatchRequest, stri
 	}
 	req.DestinationChatIDs = append([]uuid.UUID{}, req.DestinationChatIDs...)
 	sort.Slice(req.DestinationChatIDs, func(i, j int) bool { return req.DestinationChatIDs[i].String() < req.DestinationChatIDs[j].String() })
-	raw, _ := json.Marshal(req)
+	// Default requests retain the exact pre-sharing hash, including field order.
+	// Explicit native/original and omitted defaults identify the same operation.
+	hashRequest := req
+	if req.Mode == domain.MessageSharingNative && req.ContentVariant == domain.MessageContentOriginal {
+		hashRequest.Mode, hashRequest.ContentVariant = "", ""
+	}
+	raw, _ := json.Marshal(hashRequest)
 	hash := sha256.Sum256(raw)
 	return req, hex.EncodeToString(hash[:]), nil
 }
 
 func validateForwardSource(message *domain.Message) error {
+	return validateMessageSharingSource(message, domain.MessageSharingNative, domain.MessageContentOriginal)
+}
+
+func validateMessageSharingSource(message *domain.Message, mode, variant string) error {
 	if message == nil {
 		return forwardFailure(404, "forward_source_not_found", "El mensaje original ya no está disponible.")
 	}
@@ -121,16 +143,21 @@ func validateForwardSource(message *domain.Message) error {
 	if message.Provider != nil && *message.Provider != "" && *message.Provider != domain.DeviceProviderWhatsAppWeb {
 		return forwardFailure(422, "forward_provider_unsupported", "El reenvío nativo está disponible para WhatsApp Web.")
 	}
-	if _, err := domain.NextForwarding(*message); err != nil {
-		var typed *domain.ForwardSendError
-		if errors.As(err, &typed) {
-			return forwardFailure(409, typed.Code, typed.Error())
+	if mode == domain.MessageSharingNative {
+		if _, err := domain.NextForwarding(*message); err != nil {
+			var typed *domain.ForwardSendError
+			if errors.As(err, &typed) {
+				return forwardFailure(409, typed.Code, typed.Error())
+			}
+			return err
 		}
-		return err
 	}
 	kind := "text"
 	if message.MessageType != nil {
 		kind = *message.MessageType
+	}
+	if variant == domain.MessageContentAudioDocument && (mode != domain.MessageSharingCopy || kind != "audio") {
+		return forwardFailure(422, "share_variant_invalid", "La opción Enviar como archivo solo está disponible para copiar un audio.")
 	}
 	switch kind {
 	case "text":
@@ -144,7 +171,7 @@ func validateForwardSource(message *domain.Message) error {
 		if message.MediaSize != nil && *message.MediaSize > 64<<20 {
 			return forwardFailure(422, "forward_media_too_large", "Este archivo supera el límite de 64 MB de Clarin.")
 		}
-		if kind == "audio" && message.AudioPTT == nil {
+		if kind == "audio" && message.AudioPTT == nil && !(mode == domain.MessageSharingCopy && variant == domain.MessageContentAudioDocument) {
 			return forwardFailure(409, "forward_audio_kind_unknown", "Sincroniza este audio para conservar si es una nota de voz o un archivo.")
 		}
 	default:
@@ -160,11 +187,11 @@ func validateForwardDestinationLimits(source *domain.Message, chats []*domain.Ch
 			groups++
 		}
 	}
-	state := source.Forwarding.Normalize().State
-	if state == domain.ForwardingFrequentlyForwarded && len(chats) > 1 {
+	limits := domain.EffectiveMessageSharingLimits(source)
+	if len(chats) > limits.MaxChats {
 		return forwardFailure(422, "forward_frequent_limit", "Un mensaje reenviado muchas veces solo se puede reenviar a un chat por vez.")
 	}
-	if (state == domain.ForwardingForwarded || state == domain.ForwardingFrequentlyForwarded) && groups > 1 {
+	if groups > limits.MaxGroups {
 		return forwardFailure(422, "forward_group_limit", "Un mensaje que ya fue reenviado solo se puede compartir con un grupo por vez.")
 	}
 	return nil
@@ -237,7 +264,7 @@ func (s *Server) runForwardBatch(c *fiber.Ctx, req forwardBatchRequest) error {
 		}
 		return writeForwardError(c, forwardFailure(409, "forward_device_unavailable", "Selecciona un dispositivo conectado de WhatsApp Web."))
 	}
-	if !s.forwardingEnabled(req.DeviceID) {
+	if req.Mode == domain.MessageSharingNative && !s.forwardingEnabled(req.DeviceID) {
 		return writeForwardError(c, forwardFailure(503, "forward_capability_unverified", "El reenvío nativo está pendiente de verificación con este dispositivo. Los mensajes y resultados anteriores siguen disponibles."))
 	}
 	sourceChat, err := s.repos.Chat.GetByID(c.Context(), req.SourceChatID)
@@ -251,7 +278,7 @@ func (s *Server) runForwardBatch(c *fiber.Ctx, req forwardBatchRequest) error {
 	if err != nil || source.ID != req.SourceMessageID || source.DeviceID == nil || *source.DeviceID != req.DeviceID {
 		return writeForwardError(c, forwardFailure(404, "forward_source_not_found", "El mensaje original ya no está disponible."))
 	}
-	if err = validateForwardSource(source); err != nil {
+	if err = validateMessageSharingSource(source, req.Mode, req.ContentVariant); err != nil {
 		return writeForwardError(c, err)
 	}
 	targets := make([]*domain.Chat, 0, len(req.DestinationChatIDs))
@@ -276,7 +303,11 @@ func (s *Server) runForwardBatch(c *fiber.Ctx, req forwardBatchRequest) error {
 	if name == "" {
 		name = actor.Username
 	}
-	op := &repository.ForwardOperation{ID: req.ClientOperationID, AccountID: accountID, UserID: userID, DeviceID: req.DeviceID, SourceChatID: req.SourceChatID, SourceMessageID: req.SourceMessageID, RequestHash: hash, SourceFingerprint: domain.MessageForwardFingerprint(source), Forwarding: source.Forwarding.Normalize(), Results: []repository.ForwardTarget{}}
+	limits, limitErr := domain.MessageSharingOutputLimits(source, req.Mode)
+	if limitErr != nil {
+		return writeForwardError(c, forwardFailure(409, "forward_source_changed", "El mensaje cambió. Prepara nuevamente el envío."))
+	}
+	op := &repository.ForwardOperation{Mode: req.Mode, ContentVariant: req.ContentVariant, SharingLimits: &limits, ID: req.ClientOperationID, AccountID: accountID, UserID: userID, DeviceID: req.DeviceID, SourceChatID: req.SourceChatID, SourceMessageID: req.SourceMessageID, RequestHash: hash, SourceFingerprint: domain.MessageForwardFingerprint(source), Forwarding: source.Forwarding.Normalize(), Results: []repository.ForwardTarget{}}
 	for _, target := range targets {
 		providerID, reserveErr := s.forwardingTransport().NewWhatsAppMessageID(req.DeviceID)
 		if reserveErr != nil {
@@ -311,7 +342,7 @@ func (s *Server) runForwardBatch(c *fiber.Ctx, req forwardBatchRequest) error {
 				if validationErr == nil && freshTarget.JID == target.JID {
 					sendCtx, cancel := context.WithTimeout(sendCtx, 90*time.Second)
 					sendCtx = domain.WithMessageSendContext(sendCtx, domain.MessageSendContext{AccountID: accountID, ChatID: target.ChatID, Sender: domain.MessageSender{UserID: &userID, Name: name, Origin: "manual"}, DeferAttention: true, OperationID: &op.ID})
-					message, sendErr := s.forwardingTransport().ForwardMessageWithID(sendCtx, op.DeviceID, target.JID, freshSource, target.ProviderMessageID)
+					message, sendErr := s.forwardingTransport().ShareMessageWithID(sendCtx, op.DeviceID, target.JID, freshSource, target.ProviderMessageID, op.Mode, op.ContentVariant)
 					cancel()
 					if sendErr == nil && message != nil {
 						state, code, safeError, canRetry = "sent", "", "", false

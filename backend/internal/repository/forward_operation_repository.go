@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
@@ -23,20 +24,36 @@ type ForwardTarget struct {
 	ProviderMessageID string          `json:"-"`
 }
 type ForwardOperation struct {
-	ID                uuid.UUID                `json:"operation_id"`
-	Complete          bool                     `json:"complete"`
-	Results           []ForwardTarget          `json:"results"`
-	Forwarding        domain.MessageForwarding `json:"forwarding"`
-	AccountID         uuid.UUID                `json:"-"`
-	UserID            uuid.UUID                `json:"-"`
-	DeviceID          uuid.UUID                `json:"-"`
-	SourceChatID      uuid.UUID                `json:"-"`
-	SourceMessageID   uuid.UUID                `json:"-"`
-	RequestHash       string                   `json:"-"`
-	SourceFingerprint string                   `json:"-"`
+	Mode              string                       `json:"mode"`
+	ContentVariant    string                       `json:"content_variant"`
+	SharingLimits     *domain.MessageSharingLimits `json:"sharing_limits,omitempty"`
+	ID                uuid.UUID                    `json:"operation_id"`
+	Complete          bool                         `json:"complete"`
+	Results           []ForwardTarget              `json:"results"`
+	Forwarding        domain.MessageForwarding     `json:"forwarding"`
+	AccountID         uuid.UUID                    `json:"-"`
+	UserID            uuid.UUID                    `json:"-"`
+	DeviceID          uuid.UUID                    `json:"-"`
+	SourceChatID      uuid.UUID                    `json:"-"`
+	SourceMessageID   uuid.UUID                    `json:"-"`
+	RequestHash       string                       `json:"-"`
+	SourceFingerprint string                       `json:"-"`
 }
 
 func (r *MessageRepository) CreateForwardOperation(ctx context.Context, op *ForwardOperation) (bool, error) {
+	mode, modeErr := domain.NormalizeMessageSharingMode(op.Mode)
+	if modeErr != nil {
+		return false, modeErr
+	}
+	op.Mode = mode
+	variant, variantErr := domain.NormalizeMessageContentVariant(op.ContentVariant)
+	if variantErr != nil {
+		return false, variantErr
+	}
+	op.ContentVariant = variant
+	if (variant != domain.MessageContentOriginal && mode != domain.MessageSharingCopy) || (op.SharingLimits != nil && !op.SharingLimits.Valid()) {
+		return false, fmt.Errorf("invalid sharing operation")
+	}
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -79,7 +96,7 @@ func (r *MessageRepository) CreateForwardOperation(ctx context.Context, op *Forw
 	if domain.MessageForwardFingerprint(&source) != op.SourceFingerprint {
 		return false, ErrForwardSourceChanged
 	}
-	inserted, err := tx.Exec(ctx, `INSERT INTO message_forward_operations(account_id,id,user_id,device_id,source_chat_id,source_message_id,request_hash,source_fingerprint,source_forwarding) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) ON CONFLICT(account_id,id) DO NOTHING`, op.AccountID, op.ID, op.UserID, op.DeviceID, op.SourceChatID, op.SourceMessageID, op.RequestHash, op.SourceFingerprint, op.Forwarding)
+	inserted, err := tx.Exec(ctx, `INSERT INTO message_forward_operations(account_id,id,user_id,device_id,source_chat_id,source_message_id,request_hash,source_fingerprint,source_forwarding,mode,content_variant,sharing_limits) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::text,$11::text,$12::jsonb) ON CONFLICT(account_id,id) DO NOTHING`, op.AccountID, op.ID, op.UserID, op.DeviceID, op.SourceChatID, op.SourceMessageID, op.RequestHash, op.SourceFingerprint, op.Forwarding, op.Mode, op.ContentVariant, op.SharingLimits)
 	if err != nil {
 		return false, err
 	}
@@ -108,7 +125,7 @@ func (r *MessageRepository) CreateForwardOperation(ctx context.Context, op *Forw
 
 func (r *MessageRepository) GetForwardOperation(ctx context.Context, accountID, userID, operationID uuid.UUID) (*ForwardOperation, error) {
 	op := &ForwardOperation{ID: operationID, AccountID: accountID, UserID: userID, Results: []ForwardTarget{}, Complete: true}
-	err := r.db.QueryRow(ctx, `SELECT device_id,source_chat_id,source_message_id,request_hash,source_fingerprint,source_forwarding FROM message_forward_operations WHERE account_id=$1 AND user_id=$2 AND id=$3`, accountID, userID, operationID).Scan(&op.DeviceID, &op.SourceChatID, &op.SourceMessageID, &op.RequestHash, &op.SourceFingerprint, &op.Forwarding)
+	err := r.db.QueryRow(ctx, `SELECT device_id,source_chat_id,source_message_id,request_hash,source_fingerprint,source_forwarding,mode,content_variant,sharing_limits FROM message_forward_operations WHERE account_id=$1 AND user_id=$2 AND id=$3`, accountID, userID, operationID).Scan(&op.DeviceID, &op.SourceChatID, &op.SourceMessageID, &op.RequestHash, &op.SourceFingerprint, &op.Forwarding, &op.Mode, &op.ContentVariant, &op.SharingLimits)
 	if err != nil {
 		return nil, err
 	}
@@ -139,6 +156,12 @@ func (r *MessageRepository) GetForwardOperation(ctx context.Context, accountID, 
 		if target.State == "sending" || target.State == "uncertain" || target.State == "sent" {
 			message, findErr := r.GetByReference(ctx, accountID, target.ChatID, target.ProviderMessageID)
 			if findErr == nil && message.DeviceID != nil && *message.DeviceID == op.DeviceID && message.IsFromMe {
+				if op.SharingLimits != nil {
+					message, findErr = r.MergeMessageSharingLimits(ctx, accountID, op.DeviceID, target.ChatID, target.ProviderMessageID, *op.SharingLimits)
+					if findErr != nil {
+						return nil, findErr
+					}
+				}
 				target.Message = message
 				target.State = "sent"
 				target.Code = ""

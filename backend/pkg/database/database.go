@@ -3951,6 +3951,7 @@ func Migrate(db *pgxpool.Pool) error {
 	migrations = append(migrations, chatGroupMigrations()...)
 	migrations = append(migrations, whatsappPeerIdentityMigration)
 	migrations = append(migrations, MessageForwardingMigrations()...)
+	migrations = append(migrations, MessageSharingMigrations()...)
 	migrations = append(migrations, chatPreferencesMigrations()...)
 	migrations = append(migrations, messageLinkPreviewMigrations()...)
 	migrations = append(migrations, documentTemplateRevisionMigrations()...)

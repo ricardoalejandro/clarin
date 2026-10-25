@@ -1,4 +1,4 @@
-# WhatsApp Web: identidad de participantes y reenvío nativo
+# WhatsApp Web: participantes, reenvío nativo y copias
 
 Esta entrega usa `go.mau.fi/whatsmeow` fijado en `v0.0.0-20261017175727-b2b1e71d45e2`. No implementa estas funciones mediante WhatsApp Cloud API.
 
@@ -16,11 +16,17 @@ El servidor construye un contexto nuevo: conserva el contador sin copiar citas, 
 
 POST /api/messages/forward/batch recibe source_chat_id, source_message_id (UUID local), device_id, destination_chat_ids y client_operation_id. El servidor valida el conjunto, reserva un ID de WhatsApp por destino y persiste los resultados. GET /api/messages/forward/batch/:id consulta el recibo del actor autenticado. Repetir una operación no reenvía. Un resultado incierto requiere reconciliación por el mismo ID, nunca una nueva copia automática. Los envíos múltiples pueden tener resultado parcial.
 
+El lote admite `mode: native | copy` y `content_variant: original | audio_document`. Omitirlos conserva `native/original` y el hash de las operaciones anteriores. Una operación existente nunca cambia de modo ni de destinos. La copia construye un mensaje nuevo con el contenido disponible y no promete la marca remota «Reenviado». La bandera experimental nativa no bloquea este envío normal.
+
+Los históricos `unknown` pueden enviarse como copia sin inventar su contador. Texto, imagen, vídeo, GIF, documento, audio con clasificación conocida y sticker verificado conservan su tipo y contenido. Un audio cuya clasificación falta solo se convierte en documento después de elegir explícitamente «Enviar como archivo adjunto». No hay conversión silenciosa de otros tipos.
+
+`Message.sharing_limits` conserva restricciones de compartición separadas del sobre observado en `Message.forwarding`. Los límites efectivos toman los valores más restrictivos de ambos; una copia y sus ecos nunca reinician los límites conocidos de la cadena. La política se calcula en servidor, se conserva también si el eco llega primero y no admite valores aportados por el cliente.
+
 Límites: cinco destinos; para un mensaje ya reenviado, un solo grupo; para reenvíos frecuentes, un destino. Un original propio no se etiqueta automáticamente. Un contador desconocido no se reinicia para permitir el envío.
 
 ## Activación
 
-La recepción y visualización de metadatos no necesitan habilitar envíos experimentales. El reenvío nativo permanece apagado por defecto:
+La recepción y visualización de metadatos y el envío de copias no necesitan habilitar envíos experimentales. El reenvío nativo permanece apagado por defecto:
 
 - WHATSAPP_NATIVE_FORWARDING_ENABLED=false
 - WHATSAPP_NATIVE_FORWARDING_DEVICE_IDS= (UUID separados por coma)
@@ -29,9 +35,9 @@ Con la bandera activa, una lista no vacía limita los dispositivos permitidos; v
 
 Publicar primero el backend compatible y después el frontend. Mantener las migraciones aditivas y los recibos al revertir la interfaz.
 
-## Verificación frontend
+## Verificación frontend previa a la corrección (62a6294)
 
-La pasada final ejecutó 145 pruebas de 11 archivos del chat, todas correctas. Cubren la conservación monotónica de metadatos en historial, búsqueda, ecos y respuestas parciales; autor real del grupo y etiquetas; fuente desconocida, contenido restringido, audio sin clasificación; límites de destinos y grupos; búsqueda y vaciado a 500 ms con texto y aborto inmediatos, cancelación y páginas obsoletas; cambio de cuenta/dispositivo; operación única, respuesta perdida, consulta del mismo ID, reintento explícito de destinos probados como no enviados y cierre de fallos definitivos. La capacidad ausente o revocada bloquea nuevas escrituras y mantiene legibles los recibos existentes.
+La pasada de esa versión ejecutó 145 pruebas de 11 archivos del chat, todas correctas. Cubren la conservación monotónica de metadatos en historial, búsqueda, ecos y respuestas parciales; autor real del grupo y etiquetas; fuente desconocida, contenido restringido, audio sin clasificación; límites de destinos y grupos; búsqueda y vaciado a 500 ms con texto y aborto inmediatos, cancelación y páginas obsoletas; cambio de cuenta/dispositivo; operación única, respuesta perdida, consulta del mismo ID, reintento explícito de destinos probados como no enviados y cierre de fallos definitivos. Esa versión bloqueaba todas las escrituras del selector cuando faltaba la capacidad nativa: fue la regresión de usabilidad corregida mediante la separación explícita de copias.
 
 TypeScript y compilación de producción pasaron. La revisión de navegador se ejecutó sobre esa compilación local con cuentas, identidades, mensajes y API totalmente sintéticos; no se enviaron mensajes reales a WhatsApp.
 
@@ -71,6 +77,20 @@ Registrar por separado pruebas automatizadas, integración PostgreSQL, navegador
 | Recepción real en el otro dispositivo y apariencia WhatsApp Web | Pendiente. No se han enviado mensajes reales en esta entrega. Aunque el usuario abrió una sesión, la herramienta de navegador de la tarea solo expone MCP Apps sin pestañas y devuelve Browser is not available: iab. No se eludió autenticación ni se abrió otro cliente de WhatsApp. |
 
 No se declararon fallidas transmisiones que no llegaron a ejecutarse. El bloqueo de acceso al navegador impide acreditar el recorrido real, no demuestra falta de soporte del protocolo.
+
+## Corrección del bloqueo general de envío
+
+La versión `62a6294` sustituyó el envío anterior de copias por un recorrido exclusivamente nativo. Con metadatos históricos desconocidos o la capacidad experimental apagada, el selector quedaba inutilizable. La corrección recupera las copias de contenido compatible, distingue ambos modos antes de confirmar y mantiene bloqueados solo los mensajes realmente no disponibles o sin constructor compatible.
+
+La pasada Go final en Linux con PostgreSQL aislado (`go test -count=1 ./...` y compilación del servidor) pasó después de corregir un fixture que reutilizaba el chat entre dispositivos. Incluye migraciones repetidas, compatibilidad exacta del hash anterior, copia con nativo apagado, audio como documento optativo, respuesta perdida, conflictos de modo/variante, aislamiento y mínimos concurrentes de política. Los ecos propios heredan las restricciones desde la reserva incluso cuando llegan a otro chat PN/LID; esto no cambia identidades ni confirma automáticamente el destino original. La reserva nativa también conserva los límites más estrictos del mensaje resultante antes de recibir su eco.
+
+La regresión frontend pasó 158 pruebas en 11 archivos; una pasada final de los dos archivos modificados por el tratamiento de límites nulos pasó 30 pruebas. Son pasadas solapadas y no se suman. TypeScript pasó con caché de pruebas separada. Las pruebas distinguen un límite ausente de uno confirmado y mantienen modo e identificador ante resultados inciertos.
+
+La compilación de producción y sus comprobaciones de activos locales pasaron. Sobre esa compilación se probaron 320, 375, 768, 1024 y 1440 px: imagen histórica con copia habilitada y nativo apagado, audio como documento tras elección explícita, límites de grupo y de copias heredadas, borrador conservado y recibo incierto consultado sin un segundo envío. A 375 px se recargó el documento y reabrió el grupo para recuperar la misma operación. Ocho combinaciones de sidebar/Eros conservaron diálogo y selección; Eros se probó acoplado a 1440 px y con cobertura temporal de pantalla completa a 1024. No hubo desbordamiento horizontal ni errores de página. Con capacidad nativa simulada también se comprobó la elección explícita entre los dos modos. Todos los datos y 17 POST de esa revisión fueron sintéticos e interceptados localmente.
+
+Evidencia local no versionada de la corrección: `C:/proyectos/001.CLARIN/tmp/forward-copy-qa/results.json` y `screenshots/` del mismo directorio. Se inspeccionaron visualmente la copia de imagen y la opción de audio a 320 px, además del diálogo a 1440 px con sidebar y Eros acoplado.
+
+La sesión real sigue fuera del alcance de la herramienta: al buscar la URL autenticada, el navegador disponible es MCP Apps y su lista de pestañas está vacía. No se enviaron mensajes reales ni se eludió autenticación para esta corrección.
 
 ## Verificación backend
 

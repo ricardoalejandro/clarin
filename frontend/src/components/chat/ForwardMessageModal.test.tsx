@@ -10,7 +10,7 @@ const props = { nativeForwardEnabled: true, message, deviceId: 'device-1', chatI
 const fetchMock = vi.fn()
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
 const writes = () => fetchMock.mock.calls.filter(([url, init]) => url === '/api/messages/forward/batch' && init?.method === 'POST')
-const receipt = (request: any, state = 'sent') => ({ success: true, operation_id: request.client_operation_id, complete: state === 'sent', results: request.destination_chat_ids.map((chat_id: string) => ({ chat_id, state })) })
+const receipt = (request: any, state = 'sent') => ({ success: true, mode: request.mode ?? 'native', content_variant: request.content_variant ?? 'original', operation_id: request.client_operation_id, complete: state === 'sent', results: request.destination_chat_ids.map((chat_id: string) => ({ chat_id, state })) })
 
 beforeEach(() => {
   sessionStorage.clear(); completeAuthIdentityChange()
@@ -31,7 +31,7 @@ describe('canonical forwarding batch', () => {
     fireEvent.click(button); fireEvent.click(button)
     await waitFor(() => expect(props.onSuccess).toHaveBeenCalledOnce())
     expect(writes()).toHaveLength(1)
-    expect(JSON.parse(writes()[0][1].body)).toEqual({ source_chat_id: 'source-1', source_message_id: 'message-1', device_id: 'device-1', destination_chat_ids: ['target-1', 'group'], client_operation_id: expect.any(String) })
+    expect(JSON.parse(writes()[0][1].body)).toEqual({ mode: 'native', content_variant: 'original', source_chat_id: 'source-1', source_message_id: 'message-1', device_id: 'device-1', destination_chat_ids: ['target-1', 'group'], client_operation_id: expect.any(String) })
   })
   it('does not send an old confirmation while suspended and retains selection on return', async () => {
     const view = render(<ForwardMessageModal {...props} />)
@@ -126,10 +126,20 @@ describe('canonical forwarding batch', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(writes()).toHaveLength(0)
   })
-  it('does not offer to copy unknown or view-once content as an ordinary message', async () => {
-    render(<ForwardMessageModal {...props} message={{ ...message, forwarding: { state: 'unknown', score: null } }} />)
-    expect(screen.getByRole('alert')).toHaveTextContent('No conocemos')
-    expect(screen.getByRole('button', { name: 'Reenviar a 0 chats' })).toBeDisabled()
+  it('offers an explicit copy for historical unknown content while still rejecting view-once content', async () => {
+    const view = render(<ForwardMessageModal {...props} message={{ ...message, forwarding: { state: 'unknown', score: null } }} />)
+    expect(screen.getByRole('button', { name: 'Reenvío de WhatsApp' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Enviar una copia' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByText(/sin la etiqueta de reenvío de WhatsApp/)).toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar copia a 1 chat' }))
+    await waitFor(() => expect(props.onSuccess).toHaveBeenCalledOnce())
+    expect(JSON.parse(writes()[0][1].body)).toMatchObject({ mode: 'copy', content_variant: 'original' })
+    view.unmount()
+    fetchMock.mockClear()
+    render(<ForwardMessageModal {...props} message={{ ...message, is_view_once: true }} />)
+    expect(screen.getByRole('alert')).toHaveTextContent('única')
+    expect(screen.getByRole('button', { name: 'Enviar copia a 0 chats' })).toBeDisabled()
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
@@ -231,10 +241,12 @@ it('clears only a terminal failed operation through an explicit close-and-refres
 })
 
 
-it('defaults to an unavailable native-forward capability and preserves read-only operation checks after revocation', async () => {
+it('offers copying when native is unavailable and preserves read-only native operation checks after revocation', async () => {
   const view = render(<ForwardMessageModal {...props} nativeForwardEnabled={undefined} />)
-  expect(screen.getByRole('alert')).toHaveTextContent('El reenvío nativo aún no está verificado para este dispositivo.')
-  expect(screen.getByRole('button', { name: 'Reenviar a 0 chats' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Reenvío de WhatsApp' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Enviar una copia' })).toHaveAttribute('aria-pressed', 'true')
+  fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))
+  expect(screen.getByRole('button', { name: 'Enviar copia a 1 chat' })).toBeEnabled()
   expect(writes()).toHaveLength(0)
   view.unmount()
   let request: any
@@ -273,4 +285,82 @@ it('locks native send after a canonical unverified-capability rejection without 
   await waitFor(() => expect(screen.getByRole('button', { name: 'Reenviar a 1 chat' })).toBeDisabled())
   expect(screen.queryByRole('button', { name: 'Comprobar estado' })).not.toBeInTheDocument()
   expect(writes()).toHaveLength(1)
+})
+
+
+describe('explicit content copies', () => {
+  it('sends a historical image copy with native off using only the canonical source identifiers', async () => {
+    render(<ForwardMessageModal {...props} nativeForwardEnabled={false} message={{ ...message, forwarding: undefined, message_type: 'image', media_url: '/api/media/file/account/image', body: 'Leyenda conservada' }} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))
+    expect(screen.getByText('Leyenda conservada')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar copia a 1 chat' }))
+    await waitFor(() => expect(props.onSuccess).toHaveBeenCalledOnce())
+    const request = JSON.parse(writes()[0][1].body)
+    expect(request).toMatchObject({ mode: 'copy', content_variant: 'original', source_chat_id: 'source-1', source_message_id: 'message-1', device_id: 'device-1' })
+    expect(request).not.toHaveProperty('body')
+    expect(request).not.toHaveProperty('media_url')
+    expect(writes()).toHaveLength(1)
+  })
+  it('requires an explicit attachment choice for audio whose PTT is unknown and restores the immutable variant', async () => {
+    let request: any
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input).startsWith('/api/chats?')) return response({ success: true, chats: destinations, total: 3 })
+      request = JSON.parse(init.body)
+      return response(receipt(request, 'uncertain'))
+    })
+    const audioProps = { ...props, nativeForwardEnabled: false, message: { ...message, forwarding: undefined, message_type: 'audio', media_url: '/api/media/file/account/audio', audio_ptt: undefined } }
+    const view = render(<ForwardMessageModal {...audioProps} />)
+    const attachment = screen.getByRole('checkbox', { name: /Enviar como archivo adjunto/ })
+    expect(attachment).not.toBeChecked()
+    expect(screen.getByRole('button', { name: 'Enviar copia a 0 chats' })).toBeDisabled()
+    expect(fetchMock).not.toHaveBeenCalled()
+    fireEvent.click(attachment)
+    fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar copia a 1 chat' }))
+    await screen.findByText('Resultado por comprobar')
+    expect(request).toMatchObject({ mode: 'copy', content_variant: 'audio_document' })
+    view.unmount()
+    render(<ForwardMessageModal {...audioProps} />)
+    expect(screen.getByRole('checkbox', { name: /Enviar como archivo adjunto/ })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: /Enviar como archivo adjunto/ })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Enviar una copia' })).toBeDisabled()
+    expect(writes()).toHaveLength(1)
+  })
+  it('permits a deliberate copy choice for a known original without performing an implicit fallback', async () => {
+    render(<ForwardMessageModal {...props} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar una copia' }))
+    expect(screen.getByRole('button', { name: 'Enviar una copia' })).toHaveAttribute('aria-pressed', 'true')
+    expect(writes()).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar copia a 1 chat' }))
+    await waitFor(() => expect(props.onSuccess).toHaveBeenCalledOnce())
+    expect(JSON.parse(writes()[0][1].body)).toMatchObject({ mode: 'copy', content_variant: 'original' })
+  })
+  it('does not change a pending native operation into a copy after capability revocation or reopen', async () => {
+    fetchMock.mockImplementation(async (input, init) => String(input).startsWith('/api/chats?') ? response({ success: true, chats: destinations, total: 3 }) : response(receipt(JSON.parse(init.body), 'uncertain')))
+    const view = render(<ForwardMessageModal {...props} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reenviar a 1 chat' }))
+    await screen.findByText('Resultado por comprobar')
+    view.unmount()
+    render(<ForwardMessageModal {...props} nativeForwardEnabled={false} />)
+    expect(screen.getByRole('button', { name: 'Reenvío de WhatsApp' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'Enviar una copia' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar una copia' }))
+    expect(screen.getByRole('button', { name: 'Comprobar estado' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Enviar copia a 1 chat' })).not.toBeInTheDocument()
+    expect(writes()).toHaveLength(1)
+  })
+  it('applies inherited one-chat restrictions to an unmarked copy and rejects stale copy confirmation when the device becomes unavailable', async () => {
+    const copyMessage = { ...message, is_from_me: true, sharing_limits: { max_chats: 1 as const, max_groups: 1 as const } }
+    const view = render(<ForwardMessageModal {...props} nativeForwardEnabled={false} message={copyMessage} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))
+    expect(screen.getByRole('button', { name: /Destino dos/ })).toBeDisabled()
+    const button = screen.getByRole('button', { name: 'Enviar copia a 1 chat' })
+    const confirm = (button as any)[Object.keys(button).find(key => key.startsWith('__reactProps$'))!].onClick
+    view.rerender(<ForwardMessageModal {...props} nativeForwardEnabled={false} copyEnabled={false} message={copyMessage} />)
+    await act(async () => { await confirm() })
+    expect(writes()).toHaveLength(0)
+    expect(screen.getByRole('button', { name: 'Enviar copia a 1 chat' })).toBeDisabled()
+  })
 })

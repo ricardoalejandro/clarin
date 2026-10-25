@@ -138,27 +138,28 @@ func MessageForwardFingerprint(m *Message) string {
 		return ""
 	}
 	value := struct {
-		ID          any
-		Account     any
-		Device      any
-		Chat        any
-		Provider    any
-		Body        any
-		Kind        any
-		Media       any
-		Mimetype    any
-		Filename    any
-		Size        any
-		Asset       any
-		Revoked     bool
-		ViewOnce    bool
-		Deleted     bool
-		Unavailable string
-		Recoverable bool
-		Own         bool
-		Audio       *bool
-		Forwarding  MessageForwarding
-	}{m.ID, m.AccountID, m.DeviceID, m.ChatID, m.Provider, m.Body, m.MessageType, m.MediaURL, m.MediaMimetype, m.MediaFilename, m.MediaSize, m.MediaAssetID, m.IsRevoked, m.IsViewOnce, m.MediaDeleted, m.MediaUnavailableReason, m.MediaRecoverable, m.IsFromMe, m.AudioPTT, m.Forwarding.Normalize()}
+		ID            any
+		Account       any
+		Device        any
+		Chat          any
+		Provider      any
+		Body          any
+		Kind          any
+		Media         any
+		Mimetype      any
+		Filename      any
+		Size          any
+		Asset         any
+		Revoked       bool
+		ViewOnce      bool
+		Deleted       bool
+		Unavailable   string
+		Recoverable   bool
+		Own           bool
+		Audio         *bool
+		Forwarding    MessageForwarding
+		SharingLimits *MessageSharingLimits `json:",omitempty"`
+	}{m.ID, m.AccountID, m.DeviceID, m.ChatID, m.Provider, m.Body, m.MessageType, m.MediaURL, m.MediaMimetype, m.MediaFilename, m.MediaSize, m.MediaAssetID, m.IsRevoked, m.IsViewOnce, m.MediaDeleted, m.MediaUnavailableReason, m.MediaRecoverable, m.IsFromMe, m.AudioPTT, m.Forwarding.Normalize(), m.SharingLimits}
 	raw, _ := json.Marshal(value)
 	hash := sha256.Sum256(raw)
 	return hex.EncodeToString(hash[:])

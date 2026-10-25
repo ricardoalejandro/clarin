@@ -2,12 +2,10 @@ package whatsapp
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/ws"
 	"go.mau.fi/whatsmeow"
@@ -133,64 +131,29 @@ func forwardFailure(code string, attempted bool, err error) error {
 	return &domain.ForwardSendError{Code: code, OutcomeUnknown: attempted, Err: err}
 }
 
-// buildNativeForward creates an allow-listed fresh envelope. No source quote,
-// participant, chat ID, mention, or encrypted media key is copied blindly.
+// buildNativeForward preserves the original native-only helper contract.
 func buildNativeForward(source *domain.Message, media *PreUploadedMedia) (*waE2E.Message, domain.MessageForwarding, error) {
-	if source == nil || source.IsRevoked || source.IsViewOnce || source.MediaDeleted || source.MediaUnavailableReason != "" {
-		return nil, domain.MessageForwarding{}, fmt.Errorf("el contenido no se puede reenviar")
-	}
-	forwarding, err := domain.NextForwarding(*source)
-	if err != nil {
-		return nil, forwarding, err
-	}
-	kind := domain.MessageTypeText
-	if source.MessageType != nil {
-		kind = *source.MessageType
-	}
-	body := ""
-	if source.Body != nil {
-		body = *source.Body
-	}
-	info := &waE2E.ContextInfo{}
-	if forwarding.State != domain.ForwardingNotForwarded {
-		info.IsForwarded = proto.Bool(true)
-		info.ForwardingScore = forwarding.Score
-	}
-	if kind == domain.MessageTypeText {
-		return &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(body), ContextInfo: info}}, forwarding, nil
-	}
-	if media == nil {
-		return nil, forwarding, fmt.Errorf("el archivo no está disponible")
-	}
-	var message *waE2E.Message
-	switch kind {
-	case domain.MessageTypeImage:
-		message = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{URL: &media.URL, DirectPath: &media.DirectPath, MediaKey: media.MediaKey, Mimetype: &media.Mimetype, FileEncSHA256: media.FileEncSHA256, FileSHA256: media.FileSHA256, FileLength: &media.FileLength, Caption: &body, ContextInfo: info}}
-	case domain.MessageTypeVideo, domain.MessageTypeGIF:
-		message = &waE2E.Message{VideoMessage: &waE2E.VideoMessage{URL: &media.URL, DirectPath: &media.DirectPath, MediaKey: media.MediaKey, Mimetype: &media.Mimetype, FileEncSHA256: media.FileEncSHA256, FileSHA256: media.FileSHA256, FileLength: &media.FileLength, Caption: &body, GifPlayback: proto.Bool(kind == domain.MessageTypeGIF), ContextInfo: info}}
-	case domain.MessageTypeAudio:
-		if source.AudioPTT == nil {
-			return nil, forwarding, fmt.Errorf("no se conoce si el audio original es una nota de voz")
-		}
-		message = &waE2E.Message{AudioMessage: &waE2E.AudioMessage{URL: &media.URL, DirectPath: &media.DirectPath, MediaKey: media.MediaKey, Mimetype: &media.Mimetype, FileEncSHA256: media.FileEncSHA256, FileSHA256: media.FileSHA256, FileLength: &media.FileLength, PTT: source.AudioPTT, ContextInfo: info}}
-	case domain.MessageTypeDocument:
-		filename := mediaDisplayFilename(media.OriginalFilename, media.OriginalURL)
-		message = &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{URL: &media.URL, DirectPath: &media.DirectPath, MediaKey: media.MediaKey, Mimetype: &media.Mimetype, FileEncSHA256: media.FileEncSHA256, FileSHA256: media.FileSHA256, FileLength: &media.FileLength, Caption: &body, FileName: &filename, ContextInfo: info}}
-	case domain.MessageTypeSticker:
-		if !media.StickerAnimationKnown {
-			return nil, forwarding, fmt.Errorf("no se pudo verificar si el sticker original es animado")
-		}
-		message = &waE2E.Message{StickerMessage: &waE2E.StickerMessage{URL: &media.URL, DirectPath: &media.DirectPath, MediaKey: media.MediaKey, Mimetype: proto.String("image/webp"), IsAnimated: proto.Bool(media.StickerAnimated), FileEncSHA256: media.FileEncSHA256, FileSHA256: media.FileSHA256, FileLength: &media.FileLength, ContextInfo: info}}
-	default:
-		return nil, forwarding, fmt.Errorf("este tipo de contenido todavía no admite reenvío nativo")
-	}
-	return message, forwarding, nil
+	return buildSharedMessage(source, media, domain.MessageSharingNative, domain.MessageContentOriginal)
 }
 
-// ForwardMessageWithID sends once with the pre-reserved provider ID. A failure
-// after calling WhatsApp is uncertain and must never result in an automatic copy.
+// ForwardMessageWithID retains the native/original compatibility entry point.
 func (p *DevicePool) ForwardMessageWithID(ctx context.Context, deviceID uuid.UUID, to string, source *domain.Message, providerID string) (*domain.Message, error) {
-	if !p.NativeForwardingEnabledForDevice(deviceID) {
+	return p.ShareMessageWithID(ctx, deviceID, to, source, providerID, domain.MessageSharingNative, domain.MessageContentOriginal)
+}
+
+// ShareMessageWithID sends once with a pre-reserved provider ID. Copy builds a
+// normal new message; native forwarding retains its verified capability gate.
+// A failure after the provider call is uncertain and never triggers a resend.
+func (p *DevicePool) ShareMessageWithID(ctx context.Context, deviceID uuid.UUID, to string, source *domain.Message, providerID, mode, variant string) (*domain.Message, error) {
+	mode, err := domain.NormalizeMessageSharingMode(mode)
+	if err != nil {
+		return nil, forwardFailure("share_mode_invalid", false, err)
+	}
+	variant, err = domain.NormalizeMessageContentVariant(variant)
+	if err != nil {
+		return nil, forwardFailure("share_variant_invalid", false, err)
+	}
+	if mode == domain.MessageSharingNative && !p.NativeForwardingEnabledForDevice(deviceID) {
 		return nil, forwardFailure("forward_capability_unverified", false, fmt.Errorf("el reenvío nativo aún no está verificado para este dispositivo"))
 	}
 	ctx, release, err := p.retainDeviceOperation(ctx, uuid.Nil, deviceID)
@@ -226,36 +189,33 @@ func (p *DevicePool) ForwardMessageWithID(ctx context.Context, deviceID uuid.UUI
 	if err != nil || !validNativeForwardTarget(target, instance.AccountID, deviceID, recipient.ToNonAD().String()) {
 		return nil, forwardFailure("forward_destination_changed", false, fmt.Errorf("el destino ya no está disponible en este dispositivo"))
 	}
-	if _, err = domain.NextForwarding(*source); err != nil {
-		return nil, err
+	kind, uploadKind, err := sharedContentKinds(source, mode, variant)
+	if err != nil {
+		return nil, forwardFailure("forward_content_unavailable", false, err)
 	}
-	kind := domain.MessageTypeText
-	if source.MessageType != nil {
-		kind = *source.MessageType
+	if mode == domain.MessageSharingNative {
+		if _, err = domain.NextForwarding(*source); err != nil {
+			return nil, err
+		}
 	}
 	var media *PreUploadedMedia
 	if kind != domain.MessageTypeText {
-		if source.MediaURL == nil || *source.MediaURL == "" {
+		if source.MediaURL == nil || strings.TrimSpace(*source.MediaURL) == "" {
 			return nil, forwardFailure("forward_media_unavailable", false, fmt.Errorf("el archivo no está disponible"))
 		}
-		// Reject unsupported content before any provider upload.
-		switch kind {
-		case domain.MessageTypeImage, domain.MessageTypeVideo, domain.MessageTypeGIF, domain.MessageTypeAudio, domain.MessageTypeDocument, domain.MessageTypeSticker:
-		default:
-			return nil, forwardFailure("forward_type_unsupported", false, fmt.Errorf("este tipo todavía no admite reenvío nativo"))
-		}
-		if source.IsRevoked || source.IsViewOnce || source.MediaDeleted || source.MediaUnavailableReason != "" || (kind == domain.MessageTypeAudio && source.AudioPTT == nil) {
-			return nil, forwardFailure("forward_media_unavailable", false, fmt.Errorf("no se puede conservar el contenido original"))
-		}
-		media, err = p.UploadMedia(ctx, deviceID, *source.MediaURL, kind)
+		media, err = p.UploadMedia(ctx, deviceID, *source.MediaURL, uploadKind)
 		if err != nil {
 			return nil, forwardFailure("forward_media_unavailable", false, err)
 		}
 		if source.MediaFilename != nil {
 			media.OriginalFilename = *source.MediaFilename
 		}
+		if variant == domain.MessageContentAudioDocument {
+			media.Mimetype = sharedAudioDocumentMimetype(source, media)
+			media.OriginalFilename = sharedAudioDocumentFilename(source, media)
+		}
 	}
-	raw, forwarding, err := buildNativeForward(source, media)
+	raw, forwarding, err := buildSharedMessage(source, media, mode, variant)
 	if err != nil {
 		return nil, forwardFailure("forward_content_unavailable", false, err)
 	}
@@ -280,28 +240,24 @@ func (p *DevicePool) ForwardMessageWithID(ctx context.Context, deviceID uuid.UUI
 	if err != nil {
 		return nil, forwardFailure("forward_outcome_unknown", true, err)
 	}
+	if response.ID != providerID {
+		return nil, forwardFailure("forward_outcome_unknown", true, fmt.Errorf("WhatsApp devolvió un identificador distinto del envío reservado"))
+	}
 	chat := currentTarget
-	message := &domain.Message{AccountID: instance.AccountID, DeviceID: &instance.ID, ChatID: chat.ID, MessageID: response.ID, FromJID: strPtr(instance.JID), FromName: strPtr("Me"), Body: source.Body, MessageType: source.MessageType, MediaURL: source.MediaURL, MediaMimetype: source.MediaMimetype, MediaFilename: source.MediaFilename, MediaSize: source.MediaSize, MediaAssetID: source.MediaAssetID, AudioPTT: source.AudioPTT, IsFromMe: true, Status: strPtr("sent"), Timestamp: response.Timestamp, Forwarding: forwarding, ForwardingSource: "clarin", Provider: strPtr(domain.DeviceProviderWhatsAppWeb)}
-	if err = p.repos.Message.Create(ctx, message); err != nil {
-		// Our own synchronized echo may have persisted first. A matching durable
-		// provider ID confirms the same physical send, not another outbound attempt.
-		if errors.Is(err, pgx.ErrNoRows) {
-			existing, lookupErr := p.repos.Message.GetByMessageID(ctx, chat.ID, response.ID)
-			if lookupErr == nil && existing.AccountID == instance.AccountID && existing.DeviceID != nil && *existing.DeviceID == deviceID && existing.IsFromMe {
-				message = existing
-				err = nil
-			}
-		}
-		if err != nil {
-			return nil, forwardFailure("forward_persistence_pending", true, err)
-		}
+	limits := sharedOutputLimits(source, forwarding)
+	message := sharedMessageForPersistence(instance, chat, source, media, response.ID, response.Timestamp, forwarding, variant, limits)
+	message, err = persistSharedMessage(ctx, p.repos.Message, message, limits)
+	if err != nil {
+		return nil, err
 	}
 	p.invalidateChatCaches(instance.AccountID, chat.ID)
 	body := ""
 	if message.Body != nil {
 		body = *message.Body
 	}
-	_ = p.repos.Chat.UpdateLastMessage(ctx, instance.AccountID, chat.ID, body, response.Timestamp, false)
+	if err = p.repos.Chat.UpdateLastMessage(ctx, instance.AccountID, chat.ID, body, response.Timestamp, false); err != nil {
+		return nil, forwardFailure("forward_persistence_pending", true, err)
+	}
 	if p.hub != nil {
 		p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, ws.EventMessageSent, map[string]interface{}{"chat_id": chat.ID.String(), "device_id": deviceID, "message": message})
 	}
