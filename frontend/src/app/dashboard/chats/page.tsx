@@ -12,6 +12,8 @@ import DeviceSelector from '@/components/chat/DeviceSelector'
 import ChatKindSelector from '@/components/chat/ChatKindSelector'
 import ConversationMenu from '@/components/chat/ConversationMenu'
 import NewChatModal from '@/components/chat/NewChatModal'
+import { bindingRevision, chatDeletionIssue, continuityChatIds, continuityDeviceMatches, parseChatContinuityEvent, reconcileContinuityRows, remapContinuityIds, remapContinuityDeviceFilter, restrictedChatContinuity, verifiedChatContinuity, type ChatContinuityEvent } from '@/components/chat/chatContinuity'
+import { mergeChatSnapshot } from '@/components/chat/chatExperience'
 import ChatPanel from '@/components/chat/ChatPanel'
 import GroupDetailsPanel, { type GroupDetailsPanelHandle } from '@/components/chat/GroupDetailsPanel'
 import ChatDetailsSurface from '@/components/chat/ChatDetailsSurface'
@@ -233,18 +235,38 @@ export default function ChatsPage() {
   const chatsRequestAbortRef = useRef<AbortController | null>(null)
   const chatsReconcileAbortRef = useRef<AbortController | null>(null)
   const devicesRequestSequenceRef = useRef(0)
+  const continuityAliasesRef = useRef(new Map<string, string>())
+  const continuitySeenRef = useRef(new Map<string, number>())
+  const continuityRequestsRef = useRef(new Map<string, AbortController>())
+  const continuityScopeRef = useRef(pins.scope)
+  if (continuityScopeRef.current !== pins.scope) {
+    continuityScopeRef.current = pins.scope
+    for (const request of continuityRequestsRef.current.values()) request.abort()
+    continuityRequestsRef.current.clear(); continuityAliasesRef.current.clear(); continuitySeenRef.current.clear()
+  }
+  useEffect(() => () => { for (const request of continuityRequestsRef.current.values()) request.abort() }, [])
   const reconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const processedMessageEventsRef = useRef(new Map<string, number>())
   const selectedChatIdRef = useRef<string | null>(null)
   const compactHistoryDepthRef = useRef(0)
   const paginationQueryKeyRef = useRef(chatQueryKey)
   const queryStartedAtRef = useRef(Date.now())
+  const preserveContinuityQueryRef = useRef(false)
+  const continuitySilentQueryRef = useRef('')
 
   // A cursor and its rows belong to one filter/auth snapshot. Clear them before
   // the new scope paints, so scrolling cannot cancel its first page with an old cursor.
   useLayoutEffect(() => {
     if (paginationQueryKeyRef.current === chatQueryKey) return
     paginationQueryKeyRef.current = chatQueryKey
+    if (preserveContinuityQueryRef.current) {
+      preserveContinuityQueryRef.current = false; continuitySilentQueryRef.current = chatQueryKey
+      chatsRequestAbortRef.current?.abort(); chatsReconcileAbortRef.current?.abort()
+      chatsRequestSequenceRef.current++; chatsReconcileSequenceRef.current++
+      cursorRef.current = ''; offsetRef.current = 0; setLoadingMore(false)
+      if (listAnchorRef.current) listAnchorRef.current.query = chatQueryKey
+      return
+    }
     queryStartedAtRef.current = Date.now()
     chatsRequestAbortRef.current?.abort()
     chatsReconcileAbortRef.current?.abort()
@@ -577,6 +599,43 @@ export default function ChatsPage() {
   // Auto-open logic
   const autoOpenProcessedRef = useRef(false)
 
+  function acceptContinuitySnapshot(snapshot: Chat, canonicalDevice?: Device | null, event?: ChatContinuityEvent) {
+    if (getAuthScope() !== pins.scope || isAuthIdentityChanging(pins.scope)) return false
+    const ids = continuityChatIds(snapshot)
+    const previous = [...chatCacheRef.current.values()].find(row => ids.has(row.id))
+      || { id: snapshot.id, jid: snapshot.jid, account_id: snapshot.account_id }
+    const verified = verifiedChatContinuity(snapshot, previous, event)
+    if (!(verified || restrictedChatContinuity(snapshot, previous, event)) || verified && event && !continuityDeviceMatches(snapshot, canonicalDevice)
+      || (continuitySeenRef.current.get(snapshot.id) || 0) > bindingRevision(snapshot)) return false
+    const known = [...chatCacheRef.current.values()].filter(row => ids.has(row.id))
+    const oldDevices = known.map(row => row.device_id || '').filter(id => id !== snapshot.device_id)
+    continuitySeenRef.current.set(snapshot.id, bindingRevision(snapshot))
+    if (canonicalDevice && continuityDeviceMatches(snapshot, canonicalDevice)) setDevices(rows => [...rows.filter(row => row.id !== canonicalDevice.id), canonicalDevice])
+    if (!known.length || known.every(row => row.id === snapshot.id && row.device_id === snapshot.device_id && bindingRevision(row) >= bindingRevision(snapshot))) return true
+    for (const id of ids) {
+      continuityAliasesRef.current.set(id, snapshot.id); chatCacheRef.current.set(id, snapshot)
+      canonicalStatesRef.current.delete(id)
+    }
+    pins.remapContinuity(snapshot)
+    if (listAnchorRef.current && ids.has(listAnchorRef.current.id)) listAnchorRef.current.id = snapshot.id
+    if (queueAnchorRef.current && ids.has(queueAnchorRef.current.id)) queueAnchorRef.current.id = snapshot.id
+    const state = window.history.state
+    if (state?.clarinChatId && ids.has(state.clarinChatId)) window.history.replaceState({ ...state, clarinChatId: snapshot.id }, '')
+    const removed = Math.max(0, chatsRef.current.filter(row => ids.has(row.id)).length - 1)
+    if (removed) setTotalChats(total => Math.max(0, total - removed))
+    setChats(rows => reconcileContinuityRows(rows, snapshot))
+    setSelectedChat(current => current && ids.has(current.id) && (verifiedChatContinuity(snapshot, current, event) || restrictedChatContinuity(snapshot, current, event)) ? snapshot : current)
+    setSelectedChats(current => remapContinuityIds(current, snapshot))
+    setParticipantPrivate(current => current && ids.has(current.source) ? { ...current, source: snapshot.id, sourceDevice: snapshot.device_id } : current)
+    setFilterDevices(current => {
+      const next = verified ? remapContinuityDeviceFilter(current, oldDevices, snapshot.device_id!) : current
+      if (next !== current) preserveContinuityQueryRef.current = true
+      return next
+    })
+    cursorRef.current = ''; inboxRevisionRef.current++
+    return true
+  }
+
   // Foreground requests may show loading UI. WebSocket reconciliation is silent
   // and uses its own sequence so it can never cancel a user-triggered query.
   const fetchChats = useCallback(async (reset: boolean = true, options: { silent?: boolean; after?: { id: string; waiting_since: string } } = {}) => {
@@ -640,7 +699,22 @@ export default function ChatsPage() {
       if (controller.signal.aborted || requestSequence !== sequenceRef.current || requestQueryKey !== activeChatQueryKeyRef.current || getAuthScope() !== requestScope) return
       if (data.success) {
         setChatListError('')
-        let newChats: Chat[] = (data.chats || []).map(pins.project)
+        let newChats: Chat[] = (data.chats || []).map((row: Chat) => {
+          const canonicalId = continuityAliasesRef.current.get(row.id)
+          const known = chatCacheRef.current.get(canonicalId || row.id)
+          if (canonicalId && canonicalId !== row.id && known) return pins.project(known)
+          if (known && bindingRevision(known) > bindingRevision(row)) return pins.project(known)
+          return pins.project(row)
+        })
+        newChats = [...new Map(newChats.map(row => [row.id, row])).values()]
+        for (const row of newChats) if (row.binding_state) acceptContinuitySnapshot(row)
+        setSelectedChat(current => {
+          if (!current) return current
+          const canonicalId = continuityAliasesRef.current.get(current.id) || current.id
+          const snapshot = newChats.find(row => row.id === canonicalId)
+          if (!snapshot || snapshot.id !== current.id && !(verifiedChatContinuity(snapshot, current) || restrictedChatContinuity(snapshot, current))) return current
+          return mergeChatSnapshot(current.id === snapshot.id ? current : null, snapshot)
+        })
         const total: number = data.total ?? 0
         let serverOffset = offset + newChats.length
         let nextCursor = data.next_cursor || ''
@@ -736,7 +810,8 @@ export default function ChatsPage() {
   }, [])
 
   useEffect(() => {
-    fetchChats()
+    fetchChats(true, { silent: continuitySilentQueryRef.current === chatQueryKey })
+    continuitySilentQueryRef.current = ''
     fetchDevices()
   }, [fetchChats, fetchDevices])
 
@@ -932,6 +1007,19 @@ export default function ChatsPage() {
         scheduleChatReconciliation()
       } else if (eventType === 'new_message' || eventType === 'message_sent') {
         applyMessageToChatList(msg.data || msg.message)
+      } else if (eventType === 'chat_continuity_reconciled') {
+        const continuity = parseChatContinuityEvent(msg.data)
+        if (!continuity || (continuitySeenRef.current.get(continuity.canonical_chat_id) || 0) > continuity.binding_revision) return
+        continuityRequestsRef.current.get(continuity.canonical_chat_id)?.abort()
+        const controller = new AbortController(), scope = pins.scope
+        continuityRequestsRef.current.set(continuity.canonical_chat_id, controller)
+        chatsRequestAbortRef.current?.abort(); chatsReconcileAbortRef.current?.abort(); chatsRequestSequenceRef.current++; chatsReconcileSequenceRef.current++
+        void fetch('/api/chats/' + encodeURIComponent(continuity.canonical_chat_id), { credentials: 'include', cache: 'no-store', signal: controller.signal, headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } })
+          .then(response => response.ok ? response.json() : Promise.reject(new Error('continuity_unavailable'))).then(data => {
+            if (controller.signal.aborted || getAuthScope() !== scope || isAuthIdentityChanging(scope) || !data.success || !data.chat) return
+            if (acceptContinuitySnapshot(data.chat, data.device, continuity)) { void fetchDevices(); scheduleChatReconciliation() }
+          }).catch(() => { if (!controller.signal.aborted && getAuthScope() === scope) scheduleChatReconciliation() })
+          .finally(() => { if (continuityRequestsRef.current.get(continuity.canonical_chat_id) === controller) continuityRequestsRef.current.delete(continuity.canonical_chat_id) })
       } else if (eventType === 'chat_identity_reconciled') {
         const reconciliation = msg.data as ChatIdentityReconciliation
         if (reconciliation?.source_chat_id && reconciliation?.canonical_chat?.id) {
@@ -1099,12 +1187,16 @@ export default function ChatsPage() {
 
   const requestSelectedChatsDeletion = () => {
     const ids = Array.from(selectedChats)
+    const issue = ids.map(id => chatDeletionIssue(chatCacheRef.current.get(id))).find(Boolean)
+    if (issue) { setListFeedback(issue); return }
     if (ids.length === 0) return
     setListFeedback('')
     setDeleteRequest({ ids, label: ids.length === 1 ? 'esta conversación' : `${ids.length} conversaciones` })
   }
 
   const requestSingleChatDeletion = (chat: Chat) => {
+    const issue = chatDeletionIssue(chat)
+    if (issue) { setListFeedback(issue); return }
     closeRowMenu()
     setListFeedback('')
     setDeleteRequest({ ids: [chat.id], label: `la conversación con ${getChatDisplayName(chat)}` })
@@ -1113,6 +1205,8 @@ export default function ChatsPage() {
   const confirmDeleteChats = async () => {
     if (!deleteRequest || deleting) return
     const ids = [...deleteRequest.ids]
+    const issue = ids.map(id => chatDeletionIssue(chatCacheRef.current.get(id))).find(Boolean)
+    if (issue) { setDeleteRequest(null); setListFeedback(issue); return }
     setDeleting(true)
     setListFeedback('')
     const token = localStorage.getItem('token')
@@ -1188,6 +1282,7 @@ export default function ChatsPage() {
     finally { setSyncingGroups(false) }
   }
 
+  const selectionDeleteIssue = [...selectedChats].map(id => chatDeletionIssue(chatCacheRef.current.get(id))).find(Boolean)
   const selectedDevice = selectedChat?.device_id ? devices.find(device => device.id === selectedChat.device_id) : undefined
   const selectedDeviceName = selectedChat?.device_name || selectedDevice?.name
   const selectedDevicePhone = selectedChat?.device_phone || selectedDevice?.phone
@@ -1212,7 +1307,7 @@ export default function ChatsPage() {
             {!collapseMobileListToolbar && (selectionMode ? (
               <div className="flex h-11 items-center justify-between gap-2 sm:h-10">
                 <div className="flex min-w-0 items-center gap-1"><button type="button" onClick={() => { setSelectionMode(false); setSelectedChats(new Set()) }} className="flex h-10 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100" aria-label="Salir de selección"><X className="h-4 w-4" /></button><span className="text-xs font-semibold text-slate-700">{selectedChats.size} seleccionados</span></div>
-                <div className="flex items-center gap-1"><button type="button" onClick={toggleSelectAll} disabled={chats.length === 0} className="flex h-10 w-10 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 disabled:opacity-40" aria-label={selectedChats.size === chats.length && chats.length > 0 ? 'Quitar selección de chats cargados' : 'Seleccionar todos los chats cargados'} title={'Solo chats cargados (' + chats.length + ')'}><CheckSquare className="h-4 w-4" /></button><button type="button" onClick={requestSelectedChatsDeletion} disabled={deleting || selectedChats.size === 0} className="flex h-10 w-10 items-center justify-center rounded-lg text-red-600 hover:bg-red-50 disabled:opacity-40" aria-label="Eliminar chats seleccionados"><Trash2 className="h-4 w-4" /></button></div>
+                <div className="flex items-center gap-1"><button type="button" onClick={toggleSelectAll} disabled={chats.length === 0} className="flex h-10 w-10 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 disabled:opacity-40" aria-label={selectedChats.size === chats.length && chats.length > 0 ? 'Quitar selección de chats cargados' : 'Seleccionar todos los chats cargados'} title={'Solo chats cargados (' + chats.length + ')'}><CheckSquare className="h-4 w-4" /></button><button type="button" onClick={requestSelectedChatsDeletion} disabled={deleting || selectedChats.size === 0 || Boolean(selectionDeleteIssue)} title={selectionDeleteIssue || undefined} aria-describedby={selectionDeleteIssue ? 'consolidated-delete-hint' : undefined} className="flex h-10 w-10 items-center justify-center rounded-lg text-red-600 hover:bg-red-50 disabled:opacity-40" aria-label="Eliminar chats seleccionados"><Trash2 className="h-4 w-4" /></button></div>
               </div>
             ) : (
               <div className="flex h-11 min-w-0 items-center gap-1.5 sm:h-10">
@@ -1243,7 +1338,8 @@ export default function ChatsPage() {
               <ChatKindSelector value={chatKind} onChange={selectChatKind} />
             </div>}
             {chatKind === 'group' && !collapseMobileListToolbar && <p id="group-pending-hint" className="text-[11px] leading-4 text-slate-400">Los grupos no generan pendientes.</p>}
-                        {pins.error && <p role="alert" className="rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{pins.error}</p>}
+                        {selectionMode && selectionDeleteIssue && <p id="consolidated-delete-hint" className="text-xs leading-5 text-slate-500">{selectionDeleteIssue}</p>}
+             {pins.error && <p role="alert" className="rounded-xl bg-rose-50 p-3 text-xs text-rose-700">{pins.error}</p>}
             {chatKind === 'group' && <GroupIdentityRecoveryNotice rows={identityRecovery.rows} devices={devices} retryHint />}
             {listFeedback && (
               <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-xs font-medium text-red-700" role="alert">
@@ -1430,7 +1526,7 @@ export default function ChatsPage() {
                                 <button type="button" role="menuitem" onClick={() => openChatDetails(chat)} className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><PanelRight className="h-4 w-4 text-slate-400" /> Ver detalles</button>
                                 <button type="button" role="menuitem" onClick={() => { setSelectionMode(true); setSelectedChats(new Set([chat.id])); closeRowMenu() }} className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><CheckSquare className="h-4 w-4 text-slate-400" /> Seleccionar</button>
                                 <div className="my-1 border-t border-slate-100" />
-                                <button type="button" role="menuitem" onClick={() => requestSingleChatDeletion(chat)} className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"><Trash2 className="h-4 w-4" /> Eliminar del CRM</button>
+                                <button type="button" role="menuitem" disabled={Boolean(chatDeletionIssue(chat))} title={chatDeletionIssue(chat) || undefined} onClick={() => requestSingleChatDeletion(chat)} className="flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-left text-xs font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"><Trash2 className="h-4 w-4" /> <span className="min-w-0"><span className="block">Eliminar del CRM</span>{chatDeletionIssue(chat) && <span className="block text-[10px] font-normal leading-4">{chatDeletionIssue(chat)}</span>}</span></button>
                               </div>
                             , document.body)}
                           </div>
@@ -1542,7 +1638,7 @@ export default function ChatsPage() {
             key="conversation-details-surface"
             mode={layoutMode} width={rightPanelWidth} suspended={Boolean(participantChat)}
           >
-            {isGroupChat(selectedChat) ? <GroupDetailsPanel ref={groupPanelRef} key={selectedChat.id} chat={selectedChat} suspended={Boolean(participantChat)} onOpenChat={changeParticipantChat} onClose={() => returnFromCompactSurface('details')} /> : <ContactPanel
+            {isGroupChat(selectedChat) ? <GroupDetailsPanel ref={groupPanelRef} chat={selectedChat} suspended={Boolean(participantChat)} onOpenChat={changeParticipantChat} onClose={() => returnFromCompactSurface('details')} /> : <ContactPanel
               ref={contactPanelRef}
               chatId={selectedChat.id}
               isOpen={true}

@@ -87,6 +87,102 @@ function jsonResponse(body: unknown, ok = true, status = ok ? 200 : 400): Respon
 }
 
 describe('ChatPanel canonical device truth', () => {
+  it('immediately invalidates an active verified channel when its canonical binding becomes conflicting', async () => {
+    const initial = { ...chat, account_id: 'account', canonical_chat_id: chat.id, binding_revision: 2, binding_state: 'verified_continuity' as const }
+    let conflicted = false
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => Promise.resolve(jsonResponse(String(input) === '/api/chats/chat-1' ? { success: true, chat: conflicted ? { ...initial, device_id: undefined, binding_state: 'conflict', binding_revision: 3 } : initial, device: conflicted ? null : device('connected') } : { success: true, messages: [], stickers: [], quick_replies: [] }))))
+    render(<ChatPanel chatId="chat-1" deviceId="device-1" device={device('connected')} initialChat={initial} />)
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Draft test editor' }), { target: { value: 'Borrador retenido' } })
+    conflicted = true
+    act(() => websocket.listeners.forEach(listener => listener({ event: 'chat_continuity_reconciled', data: { canonical_chat_id: 'chat-1', alias_chat_ids: [], device_id: null, binding_revision: 3 } })))
+    expect(await screen.findByText(/No se pudo confirmar que este historial pertenezca/)).toBeVisible()
+    expect(screen.queryByRole('textbox', { name: 'Draft test editor' })).not.toBeInTheDocument()
+  })
+
+  it.each(['pending', 'conflict'] as const)('clears the verified continuity notice when the canonical snapshot becomes %s', async state => {
+    const initial: Chat = { ...chat, account_id: 'account', canonical_chat_id: chat.id, binding_revision: 1, binding_state: 'verified_continuity' }
+    let currentChat: Chat = initial
+    let currentDevice: Device | null = device('connected')
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => Promise.resolve(jsonResponse(String(input) === '/api/chats/chat-1'
+      ? { success: true, chat: currentChat, device: currentDevice }
+      : { success: true, messages: [], stickers: [], quick_replies: [] }))))
+    render(<ChatPanel chatId={chat.id} initialChat={initial} />)
+    await screen.findByRole('textbox', { name: 'Draft test editor' })
+    currentChat = { ...initial, device_id: 'device-2', binding_revision: 2 }
+    currentDevice = { ...device('connected'), id: 'device-2' }
+    act(() => websocket.listeners.forEach(listener => listener({ event: 'chat_continuity_reconciled', data: { canonical_chat_id: chat.id, alias_chat_ids: [], device_id: 'device-2', binding_revision: 2 } })))
+    await screen.findByText(/El historial continúa con el mismo número verificado/)
+    currentChat = { ...currentChat, device_id: undefined, binding_state: state, binding_revision: 3 }
+    currentDevice = null
+    act(() => websocket.listeners.forEach(listener => listener({ event: 'chat_continuity_reconciled', data: { canonical_chat_id: chat.id, alias_chat_ids: [], device_id: null, binding_revision: 3 } })))
+    await screen.findByText(state === 'pending' ? /Comprobando la identidad propia/ : /No se pudo confirmar que este historial pertenezca/)
+    expect(screen.queryByText(/El historial continúa con el mismo número verificado/)).not.toBeInTheDocument()
+  })
+
+  it('freezes binding headers and aborts an in-flight send without sending again through the replacement', async () => {
+    const canonical = { ...chat, account_id: 'account', canonical_chat_id: chat.id, binding_revision: 2, binding_state: 'verified_continuity' as const }
+    let currentChat = canonical
+    let currentDevice = { ...device('connected'), phone: '51900000001' }
+    let finishSend!: (response: Response) => void
+    let prepared: RequestInit | undefined
+    const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/messages/send') { prepared = init; return new Promise<Response>(resolve => { finishSend = resolve }) }
+      return Promise.resolve(jsonResponse(String(input) === '/api/chats/chat-1' ? { success: true, chat: currentChat, device: currentDevice } : { success: true, messages: [], stickers: [], quick_replies: [] }))
+    })
+    vi.stubGlobal('fetch', fetcher)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    render(<ChatPanel chatId="chat-1" deviceId="device-1" device={currentDevice} initialChat={canonical} />)
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Draft test editor' }), { target: { value: 'Operación original' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar mensaje' }))
+    await waitFor(() => expect(prepared).toBeDefined())
+    expect(new Headers(prepared!.headers).get('X-Chat-ID')).toBe('chat-1')
+    expect(new Headers(prepared!.headers).get('X-Chat-Binding-Revision')).toBe('2')
+    currentChat = { ...canonical, binding_revision: 3, device_id: 'device-2' }
+    currentDevice = { ...currentDevice, id: 'device-2' }
+    act(() => websocket.listeners.forEach(listener => listener({ event: 'chat_continuity_reconciled', data: { canonical_chat_id: 'chat-1', alias_chat_ids: [], device_id: 'device-2', binding_revision: 3 } })))
+    expect(prepared!.signal?.aborted).toBe(true)
+    await act(async () => finishSend(jsonResponse({ success: true })))
+    await screen.findByRole('textbox', { name: 'Draft test editor' })
+    expect(fetcher.mock.calls.filter(([input]) => String(input) === '/api/messages/send')).toHaveLength(1)
+    expect(new Headers(prepared!.headers).get('X-Chat-Binding-Revision')).toBe('2')
+  })
+
+  it('automatically adopts only server-verified continuity and preserves the active draft without sending', async () => {
+    const oldChat = { ...chat, account_id: 'account', canonical_chat_id: chat.id, binding_revision: 1, binding_state: 'verified_continuity' as const }
+    let currentChat = oldChat
+    let currentDevice = { ...device('connected'), phone: '51900000001' }
+    const fetcher = vi.fn((input: RequestInfo | URL) => Promise.resolve(jsonResponse(String(input) === '/api/chats/chat-1'
+      ? { success: true, chat: currentChat, device: currentDevice }
+      : { success: true, messages: [], stickers: [], quick_replies: [] })))
+    vi.stubGlobal('fetch', fetcher)
+    render(<ChatPanel chatId="chat-1" deviceId="device-1" device={currentDevice} initialChat={oldChat} />)
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Draft test editor' }), { target: { value: 'Seguir con el mismo número' } })
+    currentChat = { ...oldChat, device_id: 'device-2', binding_revision: 2 }
+    currentDevice = { ...currentDevice, id: 'device-2' }
+    act(() => websocket.listeners.forEach(listener => listener({ event: 'chat_continuity_reconciled', data: { canonical_chat_id: 'chat-1', alias_chat_ids: [], device_id: 'device-2', binding_revision: 2 } })))
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue('Seguir con el mismo número'))
+    expect(screen.queryByText(/El canal de esta conversación cambió/)).not.toBeInTheDocument()
+    expect(fetcher.mock.calls.some(([input]) => String(input) === '/api/messages/send')).toBe(false)
+  })
+
+  it('retains both drafts when a duplicate chat is canonically redirected', async () => {
+    const canonicalChat = { ...chat, account_id: 'account', canonical_chat_id: chat.id, alias_chat_ids: ['duplicate'], binding_revision: 2, binding_state: 'verified_continuity' as const }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => Promise.resolve(jsonResponse(String(input).match(/^\/api\/chats\/(chat-1|duplicate)$/)
+      ? { success: true, chat: String(input).endsWith('duplicate') ? { ...chat, id: 'duplicate', account_id: 'account' } : canonicalChat, device: device('connected') }
+      : { success: true, messages: [], stickers: [], quick_replies: [] }))))
+    const view = render(<ChatPanel chatId="chat-1" deviceId="device-1" device={device('connected')} initialChat={chat} />)
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Draft test editor' }), { target: { value: 'Borrador histórico' } })
+    view.rerender(<ChatPanel chatId="duplicate" deviceId="device-1" device={device('connected')} initialChat={{ ...chat, id: 'duplicate', account_id: 'account' }} />)
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue(''))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Draft test editor' }), { target: { value: 'Borrador activo' } })
+    view.rerender(<ChatPanel chatId="chat-1" deviceId="device-1" device={device('connected')} initialChat={canonicalChat} />)
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue('Borrador activo'))
+    fireEvent.click(screen.getByRole('button', { name: 'Cambiar de borrador' }))
+    expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue('Borrador histórico')
+    fireEvent.click(screen.getByRole('button', { name: 'Cambiar de borrador' }))
+    expect(screen.getByRole('textbox', { name: 'Draft test editor' })).toHaveValue('Borrador activo')
+  })
+
   it('accepts a deliberately confirmed sender in the same chat only with a new explicit session and preserves its draft', async () => {
     let serverDevice = device('connected')
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => Promise.resolve(jsonResponse(String(input) === '/api/chats/chat-1'

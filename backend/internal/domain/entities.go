@@ -513,33 +513,38 @@ type ContactFilter struct {
 
 // Chat represents a conversation
 type Chat struct {
-	Kind                           string     `json:"kind"`
-	Group                          *ChatGroup `json:"group,omitempty"`
-	WaitingSince                   *time.Time `json:"waiting_since"`
-	NeedsReply                     bool       `json:"needs_reply"`
-	StateVersion                   int64      `json:"state_version"`
-	ID                             uuid.UUID  `json:"id"`
-	AccountID                      uuid.UUID  `json:"account_id"`
-	DeviceID                       *uuid.UUID `json:"device_id,omitempty"`
-	ContactID                      *uuid.UUID `json:"contact_id,omitempty"`
-	ContactCreated                 bool       `json:"-"`
-	JID                            string     `json:"jid"`
-	Name                           *string    `json:"name,omitempty"`
-	LastMessageFromName            *string    `json:"last_message_from_name,omitempty"`
-	LastMessageFromMe              *bool      `json:"last_message_from_me,omitempty"`
-	LastMessage                    *string    `json:"last_message,omitempty"`
-	LastMessageAt                  *time.Time `json:"last_message_at,omitempty"`
-	UnreadCount                    int        `json:"unread_count"`
-	IsArchived                     bool       `json:"is_archived"`
-	IsPinned                       bool       `json:"is_pinned"`
-	PinnedAt                       *time.Time `json:"pinned_at"`
-	PinVersion                     int64      `json:"pin_version"`
-	LastInboundAt                  *time.Time `json:"last_inbound_at,omitempty"`
-	LastOutboundAt                 *time.Time `json:"last_outbound_at,omitempty"`
-	CustomerServiceWindowExpiresAt *time.Time `json:"customer_service_window_expires_at,omitempty"`
-	LastMessageProvider            *string    `json:"last_message_provider,omitempty"`
-	CreatedAt                      time.Time  `json:"created_at"`
-	UpdatedAt                      time.Time  `json:"updated_at"`
+	CanonicalChatID                *uuid.UUID  `json:"canonical_chat_id,omitempty"`
+	AliasChatIDs                   []uuid.UUID `json:"alias_chat_ids,omitempty"`
+	WhatsAppOwnerID                *uuid.UUID  `json:"-"`
+	BindingRevision                int64       `json:"binding_revision,omitempty"`
+	BindingState                   string      `json:"binding_state,omitempty"`
+	Kind                           string      `json:"kind"`
+	Group                          *ChatGroup  `json:"group,omitempty"`
+	WaitingSince                   *time.Time  `json:"waiting_since"`
+	NeedsReply                     bool        `json:"needs_reply"`
+	StateVersion                   int64       `json:"state_version"`
+	ID                             uuid.UUID   `json:"id"`
+	AccountID                      uuid.UUID   `json:"account_id"`
+	DeviceID                       *uuid.UUID  `json:"device_id,omitempty"`
+	ContactID                      *uuid.UUID  `json:"contact_id,omitempty"`
+	ContactCreated                 bool        `json:"-"`
+	JID                            string      `json:"jid"`
+	Name                           *string     `json:"name,omitempty"`
+	LastMessageFromName            *string     `json:"last_message_from_name,omitempty"`
+	LastMessageFromMe              *bool       `json:"last_message_from_me,omitempty"`
+	LastMessage                    *string     `json:"last_message,omitempty"`
+	LastMessageAt                  *time.Time  `json:"last_message_at,omitempty"`
+	UnreadCount                    int         `json:"unread_count"`
+	IsArchived                     bool        `json:"is_archived"`
+	IsPinned                       bool        `json:"is_pinned"`
+	PinnedAt                       *time.Time  `json:"pinned_at"`
+	PinVersion                     int64       `json:"pin_version"`
+	LastInboundAt                  *time.Time  `json:"last_inbound_at,omitempty"`
+	LastOutboundAt                 *time.Time  `json:"last_outbound_at,omitempty"`
+	CustomerServiceWindowExpiresAt *time.Time  `json:"customer_service_window_expires_at,omitempty"`
+	LastMessageProvider            *string     `json:"last_message_provider,omitempty"`
+	CreatedAt                      time.Time   `json:"created_at"`
+	UpdatedAt                      time.Time   `json:"updated_at"`
 
 	// Device info (populated on demand)
 	DeviceName   *string `json:"device_name,omitempty"`

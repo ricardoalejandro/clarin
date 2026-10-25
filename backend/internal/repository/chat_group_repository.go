@@ -18,6 +18,16 @@ func (r *ChatRepository) GetOrCreateGroup(ctx context.Context, accountID, device
 	if !domain.IsGroupJID(jid) || deviceID == uuid.Nil {
 		return nil, fmt.Errorf("invalid group identity")
 	}
+	if id, owned, err := r.ownerGroup(ctx, accountID, deviceID, jid, subject, true); owned || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		chat, err := r.GetByID(ctx, id)
+		if err == nil && chat != nil {
+			err = r.db.QueryRow(ctx, `SELECT ct.created_at=c.created_at FROM chats c JOIN contacts ct ON ct.account_id=c.account_id AND ct.id=c.contact_id WHERE c.account_id=$1 AND c.id=$2`, accountID, id).Scan(&chat.ContactCreated)
+		}
+		return chat, err
+	}
 	var id uuid.UUID
 	var created bool
 	err := r.db.QueryRow(ctx, `WITH contact AS (
@@ -44,6 +54,19 @@ func (r *ChatRepository) FindByDeviceJID(ctx context.Context, accountID, deviceI
 	if !domain.IsGroupJID(jid) {
 		return r.FindByJID(ctx, accountID, jid)
 	}
+	if ownerID, err := r.deviceWhatsAppOwner(ctx, accountID, deviceID); err != nil {
+		return nil, err
+	} else if ownerID != uuid.Nil {
+		var id uuid.UUID
+		err = r.db.QueryRow(ctx, `SELECT id FROM chats WHERE account_id=$1 AND whatsapp_owner_id=$2 AND jid=$3 AND canonical_chat_id IS NULL`, accountID, ownerID, jid).Scan(&id)
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return r.GetByID(ctx, id)
+	}
 	var id uuid.UUID
 	err := r.db.QueryRow(ctx, `SELECT id FROM chats WHERE account_id=$1 AND channel_key=$2 AND jid=$3`, accountID, GroupChannelKey(deviceID), jid).Scan(&id)
 	if err == pgx.ErrNoRows {
@@ -56,11 +79,28 @@ func (r *ChatRepository) FindByDeviceJID(ctx context.Context, accountID, deviceI
 }
 
 func (r *ChatRepository) GroupHidden(ctx context.Context, accountID, deviceID uuid.UUID, jid string) (bool, error) {
+	if ownerID, err := r.deviceWhatsAppOwner(ctx, accountID, deviceID); err != nil {
+		return false, err
+	} else if ownerID != uuid.Nil {
+		var hidden bool
+		err = r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chat_group_hidden h WHERE h.account_id=$1 AND h.jid=$2 AND (h.channel_key=$3 OR h.channel_key IN(SELECT channel_key FROM chats WHERE account_id=$1 AND whatsapp_owner_id=$4 AND jid=$2)))`, accountID, jid, OwnerGroupChannelKey(ownerID), ownerID).Scan(&hidden)
+		return hidden, err
+	}
 	var hidden bool
 	err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chat_group_hidden WHERE account_id=$1 AND channel_key=$2 AND jid=$3)`, accountID, GroupChannelKey(deviceID), jid).Scan(&hidden)
 	return hidden, err
 }
 func (r *ChatRepository) RevealGroupActivity(ctx context.Context, accountID, deviceID uuid.UUID, jid string, at time.Time) (bool, error) {
+	if ownerID, err := r.deviceWhatsAppOwner(ctx, accountID, deviceID); err != nil {
+		return false, err
+	} else if ownerID != uuid.Nil {
+		_, err = r.db.Exec(ctx, `DELETE FROM chat_group_hidden h WHERE h.account_id=$1 AND h.jid=$2 AND h.hidden_at<$3 AND (h.channel_key=$4 OR h.channel_key IN(SELECT channel_key FROM chats WHERE account_id=$1 AND whatsapp_owner_id=$5 AND jid=$2))`, accountID, jid, at, OwnerGroupChannelKey(ownerID), ownerID)
+		if err != nil {
+			return false, err
+		}
+		hidden, err := r.GroupHidden(ctx, accountID, deviceID, jid)
+		return !hidden, err
+	}
 	_, err := r.db.Exec(ctx, `DELETE FROM chat_group_hidden WHERE account_id=$1 AND channel_key=$2 AND jid=$3 AND hidden_at<$4`, accountID, GroupChannelKey(deviceID), jid, at)
 	if err != nil {
 		return false, err
@@ -128,6 +168,9 @@ func (r *ChatRepository) HydrateGroups(ctx context.Context, accountID uuid.UUID,
 			}
 		}
 	}
+	if err := r.HydrateContinuity(ctx, accountID, chats); err != nil {
+		return err
+	}
 	if len(ids) == 0 {
 		return nil
 	}
@@ -194,22 +237,22 @@ func (r *ChatRepository) GroupParticipantsMatching(ctx context.Context, accountI
 	return result, next, rows.Err()
 }
 func (r *ChatRepository) MarkGroupLeft(ctx context.Context, accountID, deviceID uuid.UUID, jid string) error {
-	_, err := r.db.Exec(ctx, `UPDATE chat_groups g SET membership_status='left',synced_at=NOW() FROM chats c WHERE c.account_id=$1 AND c.channel_key=$2 AND c.jid=$3 AND g.account_id=c.account_id AND g.chat_id=c.id`, accountID, GroupChannelKey(deviceID), jid)
+	_, err := r.db.Exec(ctx, `UPDATE chat_groups g SET membership_status='left',synced_at=NOW() FROM chats c WHERE c.account_id=$1 AND (c.channel_key=$2 OR c.device_id=$4) AND c.jid=$3 AND c.canonical_chat_id IS NULL AND g.account_id=c.account_id AND g.chat_id=c.id`, accountID, GroupChannelKey(deviceID), jid, deviceID)
 	return err
 }
 func (r *MessageRepository) SaveGroupReceipt(ctx context.Context, accountID, chatID uuid.UUID, messageID, sender, status string, at time.Time) error {
 	_, err := r.db.Exec(ctx, `INSERT INTO chat_group_receipts(account_id,chat_id,message_id,sender_jid,delivered_at,read_at)
  SELECT $1,$2,$3,$4,$5::timestamptz,CASE WHEN $6::text='read' THEN $5::timestamptz ELSE NULL END
- WHERE EXISTS(SELECT 1 FROM messages WHERE account_id=$1 AND chat_id=$2 AND message_id=$3 AND is_from_me)
+ WHERE EXISTS(SELECT 1 FROM messages WHERE account_id=$1 AND chat_id IN(SELECT id FROM chats WHERE account_id=$1 AND (id=$2 OR canonical_chat_id=$2)) AND message_id=$3 AND is_from_me)
  ON CONFLICT(account_id,chat_id,message_id,sender_jid) DO UPDATE SET delivered_at=LEAST(chat_group_receipts.delivered_at,EXCLUDED.delivered_at),read_at=LEAST(chat_group_receipts.read_at,EXCLUDED.read_at)`, accountID, chatID, messageID, sender, at, status)
 	return err
 }
 
 const groupReceiptProjection = `WITH resolved AS (
  SELECT COALESCE(p.member->>'jid',r.sender_jid) jid,COALESCE(p.member->>'name','') name,r.delivered_at,r.read_at FROM chat_group_receipts r
- LEFT JOIN chat_groups g ON g.account_id=r.account_id AND g.chat_id=r.chat_id
+ LEFT JOIN chat_groups g ON g.account_id=r.account_id AND g.chat_id=$2
  LEFT JOIN LATERAL (SELECT member FROM jsonb_array_elements(g.participants) member WHERE member->>'jid'=r.sender_jid OR member->>'lid'=r.sender_jid LIMIT 1) p ON TRUE
- WHERE r.account_id=$1 AND r.chat_id=$2 AND r.message_id=$3), canonical AS (SELECT jid,MAX(name) name,MIN(delivered_at) delivered_at,MIN(read_at) read_at FROM resolved GROUP BY jid) `
+ WHERE r.account_id=$1 AND r.chat_id IN(SELECT id FROM chats WHERE account_id=$1 AND (id=$2 OR canonical_chat_id=$2)) AND r.message_id=$3), canonical AS (SELECT jid,MAX(name) name,MIN(delivered_at) delivered_at,MIN(read_at) read_at FROM resolved GROUP BY jid) `
 
 func (r *MessageRepository) GroupReceipts(ctx context.Context, accountID, chatID uuid.UUID, messageID, cursor string, limit int) ([]domain.GroupReceipt, string, int, error) {
 	if limit <= 0 || limit > 200 {
@@ -295,7 +338,7 @@ func (r *MessageRepository) HydrateMentions(ctx context.Context, accountID, chat
 	if len(ids) == 0 {
 		return nil
 	}
-	rows, err := r.db.Query(ctx, `SELECT m.id,m.group_mentions,m.media_unavailable_reason,EXISTS(SELECT 1 FROM chat_group_media_recovery r WHERE r.account_id=m.account_id AND r.message_id=m.id) AND m.media_unavailable_reason='' AND m.media_url IS NULL AND NOT m.media_deleted AND NOT COALESCE(m.is_revoked,FALSE) FROM messages m WHERE m.account_id=$1 AND m.chat_id=$2 AND m.id=ANY($3::uuid[])`, accountID, chatID, ids)
+	rows, err := r.db.Query(ctx, `SELECT m.id,m.group_mentions,m.media_unavailable_reason,EXISTS(SELECT 1 FROM chat_group_media_recovery r WHERE r.account_id=m.account_id AND r.message_id=m.id) AND m.media_unavailable_reason='' AND m.media_url IS NULL AND NOT m.media_deleted AND NOT COALESCE(m.is_revoked,FALSE) FROM messages m WHERE m.account_id=$1 AND m.chat_id IN(SELECT id FROM chats WHERE account_id=$1 AND (id=$2 OR canonical_chat_id=$2)) AND m.id=ANY($3::uuid[])`, accountID, chatID, ids)
 	if err != nil {
 		return err
 	}
@@ -342,8 +385,11 @@ func (r *MessageRepository) RevokeInChat(ctx context.Context, accountID, chatID 
 	if err = tx.QueryRow(ctx, `SELECT id FROM chats WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, chatID).Scan(&id); err != nil {
 		return err
 	}
+	if err = requireLogicalMessageReferenceTx(ctx, tx, accountID, chatID, messageID); err != nil {
+		return err
+	}
 	var version int64
-	if err = tx.QueryRow(ctx, `UPDATE messages SET is_revoked=TRUE,body=NULL,link_preview=NULL,link_preview_media_asset_id=NULL WHERE account_id=$1 AND chat_id=$2 AND message_id=$3 RETURNING link_preview_version`, accountID, chatID, messageID).Scan(&version); err != nil && err != pgx.ErrNoRows {
+	if err = tx.QueryRow(ctx, `WITH changed AS(UPDATE messages SET is_revoked=TRUE,body=NULL,link_preview=NULL,link_preview_media_asset_id=NULL WHERE account_id=$1 AND id IN(`+logicalMessageIDsSQL+`) RETURNING link_preview_version) SELECT COALESCE(MAX(link_preview_version),0) FROM changed`, accountID, chatID, messageID).Scan(&version); err != nil && err != pgx.ErrNoRows {
 		return err
 	}
 	if len(previewVersion) > 0 && previewVersion[0] != nil {
@@ -450,6 +496,6 @@ func (r *ChatRepository) ReconcileJoinedGroupsForIdentitySession(ctx context.Con
 }
 
 func reconcileJoinedGroups(ctx context.Context, db groupCommandExecutor, accountID, deviceID uuid.UUID, jids []string) error {
-	_, err := db.Exec(ctx, `UPDATE chat_groups g SET membership_status='left',synced_at=NOW() FROM chats c WHERE c.account_id=$1 AND c.channel_key=$2 AND c.device_id=$4 AND c.jid<>ALL($3::text[]) AND g.account_id=c.account_id AND g.chat_id=c.id AND g.membership_status<>'left'`, accountID, GroupChannelKey(deviceID), jids, deviceID)
+	_, err := db.Exec(ctx, `UPDATE chat_groups g SET membership_status='left',synced_at=NOW() FROM chats c WHERE c.account_id=$1 AND c.device_id=$2 AND c.canonical_chat_id IS NULL AND c.jid LIKE '%@g.us' AND c.jid<>ALL($3::text[]) AND g.account_id=c.account_id AND g.chat_id=c.id AND g.membership_status<>'left'`, accountID, deviceID, jids)
 	return err
 }

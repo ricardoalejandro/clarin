@@ -67,3 +67,28 @@ it('rejects a server that silently ignores the requested ordering', async () => 
   expect(await screen.findByRole('alert')).toHaveTextContent('El servidor no confirmó el orden')
   expect(screen.queryByText('Persona QA 1')).not.toBeInTheDocument()
 })
+
+
+it('keeps participant navigation and scroll while a verified binding invalidates the old device reads', async () => {
+  let latest = false
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = new URL(String(input), 'https://qa.example')
+    if (!url.pathname.endsWith('/participants')) return response({ success: true, group: chat.group })
+    return response({ success: true, order: 'admins_first', identity_revision: latest ? 1 : 10, group_revision: 1, participants: [member(1)], next_cursor: '' })
+  }))
+  const initial = { ...chat, account_id: 'account' }
+  const view = render(<GroupDetailsPanel chat={initial} onClose={vi.fn()} />)
+  await screen.findByText('Persona QA 1')
+  const search = screen.getByRole('textbox', { name: 'Buscar participante' })
+  fireEvent.change(search, { target: { value: 'Persona' } })
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes('search=Persona'))).toBe(true), { timeout: 2000 })
+  const scroll = document.querySelector<HTMLElement>('[aria-label="Detalles del grupo"] .overflow-y-auto')!
+  scroll.scrollTop = 151
+  latest = true
+  view.rerender(<GroupDetailsPanel chat={{ ...initial, device_id: 'replacement', canonical_chat_id: initial.id, alias_chat_ids: [], binding_state: 'verified_continuity', binding_revision: 2 }} onClose={vi.fn()} />)
+  await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
+  expect(screen.getByRole('textbox', { name: 'Buscar participante' })).toBe(search)
+  expect(search).toHaveValue('Persona')
+  await waitFor(() => expect(scroll.scrollTop).toBe(151))
+  expect(screen.getByText('Persona QA 1')).toBeInTheDocument()
+})

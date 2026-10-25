@@ -1187,6 +1187,12 @@ var (
 )
 
 func (r *ChatRepository) GetOrCreate(ctx context.Context, accountID, deviceID uuid.UUID, jid, name string) (*domain.Chat, error) {
+	if result, handled, err := createVerifiedPrivatePeer(ctx, r.db, accountID, deviceID, jid, name, name, true); handled {
+		if err != nil {
+			return nil, err
+		}
+		return result.chat, nil
+	}
 	if domain.IsGroupJID(jid) {
 		return r.GetOrCreateGroup(ctx, accountID, deviceID, jid, name)
 	}
@@ -1337,6 +1343,19 @@ func (r *ChatRepository) GetOrCreateForContact(ctx context.Context, accountID, d
 	channelKey := domain.DeviceProviderWhatsAppWeb
 	if provider == domain.DeviceProviderWhatsAppCloudAPI {
 		channelKey = domain.DeviceProviderWhatsAppCloudAPI + ":" + deviceID.String()
+	}
+
+	if chat, handled, err := reuseVerifiedPrivateChatForContact(ctx, tx, accountID, deviceID, contactID, jid, name); handled {
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		if err := r.HydratePrivatePeerIdentity(ctx, accountID, []*domain.Chat{chat}); err != nil {
+			return nil, err
+		}
+		return chat, nil
 	}
 
 	aliases := []struct {
@@ -1788,7 +1807,7 @@ func (r *ChatRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Cha
 		FROM chats c
 		LEFT JOIN devices d ON c.device_id = d.id
 		LEFT JOIN contacts ctc ON ctc.id = c.contact_id AND ctc.account_id = c.account_id
-		WHERE c.id = $1
+		WHERE c.id = (SELECT COALESCE(source.canonical_chat_id,source.id) FROM chats source WHERE source.id=$1)
 	`, id).Scan(
 		&chat.ID, &chat.AccountID, &chat.DeviceID, &chat.ContactID, &chat.JID, &chat.Name,
 		&chat.LastMessage, &chat.LastMessageAt, &chat.UnreadCount, &chat.IsArchived,
@@ -1801,6 +1820,7 @@ func (r *ChatRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Cha
 	}
 	if err == nil {
 		setChatIdentityState(chat)
+		err = r.HydrateContinuity(ctx, chat.AccountID, []*domain.Chat{chat})
 	}
 	return chat, err
 }
@@ -1844,11 +1864,11 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 	// Build dynamic query
 	baseQuery := `
 		FROM chats c
-		LEFT JOIN chat_user_preferences cp ON cp.account_id=c.account_id AND cp.chat_id=c.id AND cp.user_id=$2::uuid
+		` + effectiveChatUserPreferenceJoinSQL + `
 		LEFT JOIN devices d ON c.device_id = d.id
 		LEFT JOIN contacts ctc ON ctc.id = c.contact_id AND ctc.account_id = c.account_id
 		LEFT JOIN LATERAL (SELECT bool_or(is_blocked) AS is_blocked FROM leads WHERE c.jid NOT LIKE '%@g.us' AND account_id=c.account_id AND jid=c.jid) l ON TRUE
-		WHERE c.account_id = $1 AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast'
+		WHERE c.account_id = $1 AND c.canonical_chat_id IS NULL AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast'
 	`
 	args := []interface{}{accountID, filter.ActorID}
 	argNum := 3
@@ -1885,7 +1905,9 @@ func (r *ChatRepository) GetByAccountIDWithFilters(ctx context.Context, accountI
 
 	// Unread filter
 	if filter.UnreadOnly {
-		baseQuery += " AND c.unread_count > 0"
+		baseQuery += ` AND CASE WHEN EXISTS(SELECT 1 FROM chats aliases WHERE aliases.account_id=c.account_id AND aliases.canonical_chat_id=c.id)
+ THEN EXISTS(SELECT 1 FROM messages m JOIN chats source ON source.account_id=m.account_id AND source.id=m.chat_id WHERE m.account_id=c.account_id AND COALESCE(source.canonical_chat_id,source.id)=c.id AND NOT m.is_from_me AND NOT m.is_read AND NOT COALESCE(m.is_revoked,FALSE) AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases a WHERE a.account_id=m.account_id AND a.alias_message_id=m.id))
+ ELSE c.unread_count>0 END`
 	}
 
 	if filter.PendingOnly {
@@ -2006,63 +2028,7 @@ func (r *ChatRepository) UpdateLastMessage(ctx context.Context, accountID, chatI
 }
 
 func (r *ChatRepository) MarkAsRead(ctx context.Context, accountID, chatID uuid.UUID, throughMessageID string) (int, string, error) {
-	tx, err := r.db.Begin(ctx)
-	if err != nil {
-		return 0, "", err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	var lockedID uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT id FROM chats WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, chatID).Scan(&lockedID); err != nil {
-		return 0, "", err
-	}
-
-	var watermarkID uuid.UUID
-	var watermarkTime time.Time
-	var readThrough string
-	query := `
-		SELECT id, timestamp, message_id
-		FROM messages
-		WHERE account_id=$1 AND chat_id=$2
-	`
-	args := []any{accountID, chatID}
-	if strings.TrimSpace(throughMessageID) != "" {
-		query += ` AND (id::text=$3 OR message_id=$3) ORDER BY CASE WHEN id::text=$3 THEN 0 ELSE 1 END LIMIT 1`
-		args = append(args, strings.TrimSpace(throughMessageID))
-	} else {
-		query += ` AND is_from_me=FALSE ORDER BY timestamp DESC, id DESC LIMIT 1`
-	}
-	watermarkErr := tx.QueryRow(ctx, query, args...).Scan(&watermarkID, &watermarkTime, &readThrough)
-	if watermarkErr != nil && (strings.TrimSpace(throughMessageID) != "" || !errors.Is(watermarkErr, pgx.ErrNoRows)) {
-		return 0, "", watermarkErr
-	}
-	if watermarkErr == nil {
-		if _, err := tx.Exec(ctx, `
-			UPDATE messages
-			SET is_read=TRUE, read_at=COALESCE(read_at, NOW())
-			WHERE account_id=$1 AND chat_id=$2 AND is_from_me=FALSE AND is_read=FALSE
-			  AND (timestamp < $3 OR (timestamp = $3 AND id <= $4))
-		`, accountID, chatID, watermarkTime, watermarkID); err != nil {
-			return 0, "", err
-		}
-	}
-
-	var unreadCount int
-	if err := tx.QueryRow(ctx, `
-		SELECT COUNT(*)::int
-		FROM messages
-		WHERE account_id=$1 AND chat_id=$2 AND is_from_me=FALSE AND is_read=FALSE
-		  AND COALESCE(is_revoked, FALSE)=FALSE
-	`, accountID, chatID).Scan(&unreadCount); err != nil {
-		return 0, "", err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE chats SET unread_count=$3, state_version=state_version+1, updated_at=NOW() WHERE account_id=$1 AND id=$2`, accountID, chatID, unreadCount); err != nil {
-		return 0, "", err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return 0, "", err
-	}
-	return unreadCount, readThrough, nil
+	return r.markConversationAsRead(ctx, accountID, chatID, throughMessageID)
 }
 
 func (r *ChatRepository) Delete(ctx context.Context, accountID, id uuid.UUID) error {
@@ -2071,6 +2037,9 @@ func (r *ChatRepository) Delete(ctx context.Context, accountID, id uuid.UUID) er
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireUnlinkedChatDeletion(ctx, tx, accountID, []uuid.UUID{id}, false); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM messages WHERE account_id = $1 AND chat_id = $2`, accountID, id); err != nil {
 		return err
 	}
@@ -2090,6 +2059,9 @@ func (r *ChatRepository) DeleteBatch(ctx context.Context, accountID uuid.UUID, i
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireUnlinkedChatDeletion(ctx, tx, accountID, ids, false); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM messages WHERE account_id = $1 AND chat_id = ANY($2)`, accountID, ids); err != nil {
 		return err
 	}
@@ -2109,6 +2081,9 @@ func (r *ChatRepository) DeleteAll(ctx context.Context, accountID uuid.UUID) err
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireUnlinkedChatDeletion(ctx, tx, accountID, nil, true); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM messages WHERE account_id = $1`, accountID); err != nil {
 		return err
 	}
@@ -2243,9 +2218,12 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 	if err := lockLinkPreviewReferenceWrite(ctx, tx, msg.AccountID); err != nil {
 		return err
 	}
+	if err := LockMessageConversationTx(ctx, tx, msg.AccountID, msg.ChatID); err != nil {
+		return err
+	}
 	var lockedChat uuid.UUID
 	var lockedChatJID string
-	if err := tx.QueryRow(ctx, `SELECT id,jid FROM chats WHERE account_id=$1 AND id=$2 FOR UPDATE`, msg.AccountID, msg.ChatID).Scan(&lockedChat, &lockedChatJID); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT id,jid FROM chats WHERE account_id=$1 AND id=$2 AND canonical_chat_id IS NULL FOR UPDATE`, msg.AccountID, msg.ChatID).Scan(&lockedChat, &lockedChatJID); err != nil {
 		return err
 	}
 	if msg.MediaAssetID != nil {
@@ -2284,11 +2262,17 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 			}
 			if repaired {
 				msg.RepairedPlaceholder = true
+				if err := ReconcileConversationMessageTx(ctx, tx, msg.AccountID, msg.ChatID, msg.MessageID); err != nil {
+					return err
+				}
 				return tx.Commit(ctx)
 			}
 		}
 		if !errors.Is(err, pgx.ErrNoRows) || msg.Sender == nil || msg.Sender.UserID == nil {
 			if errors.Is(err, pgx.ErrNoRows) && msg.ForwardingHydrated {
+				if reconcileErr := ReconcileConversationMessageTx(ctx, tx, msg.AccountID, msg.ChatID, msg.MessageID); reconcileErr != nil {
+					return reconcileErr
+				}
 				if commitErr := tx.Commit(ctx); commitErr != nil {
 					return commitErr
 				}
@@ -2307,68 +2291,47 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 			}
 		}
 	}
+	if err := ReconcileConversationMessageTx(ctx, tx, msg.AccountID, msg.ChatID, msg.MessageID); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
 func (r *MessageRepository) GetByChatID(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*domain.Message, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
-		       message_type, media_url, media_mimetype, media_filename, media_size, media_asset_id,
-		       is_from_me, is_read, status, delivered_at, read_at, COALESCE(is_edited, false), provider, template_name, timestamp, created_at,
-		       quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
-		       COALESCE(is_revoked, false), COALESCE(is_view_once, false), COALESCE(media_deleted, false),
-		       latitude, longitude, contact_name, contact_phone, contact_vcard, sender,link_preview,link_preview_media_asset_id,link_preview_version,forwarding,audio_ptt,sharing_limits
-		FROM (
-			SELECT * FROM messages WHERE chat_id = $1
-			ORDER BY timestamp DESC, id DESC
-			LIMIT $2 OFFSET $3
-		) sub ORDER BY timestamp ASC, id ASC
-	`, chatID, limit, offset)
-	if err != nil {
+	var accountID uuid.UUID
+	if err := r.db.QueryRow(ctx, `SELECT account_id FROM chats WHERE id=$1`, chatID).Scan(&accountID); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	messages := make([]*domain.Message, 0)
-	for rows.Next() {
-		msg := &domain.Message{}
-		if err := rows.Scan(
-			&msg.ID, &msg.AccountID, &msg.DeviceID, &msg.ChatID, &msg.MessageID, &msg.FromJID,
-			&msg.FromName, &msg.Body, &msg.MessageType, &msg.MediaURL, &msg.MediaMimetype,
-			&msg.MediaFilename, &msg.MediaSize, &msg.MediaAssetID, &msg.IsFromMe, &msg.IsRead, &msg.Status,
-			&msg.DeliveredAt, &msg.ReadAt, &msg.IsEdited,
-			&msg.Provider, &msg.TemplateName, &msg.Timestamp, &msg.CreatedAt,
-			&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender, &msg.QuotedIsFromMe,
-			&msg.IsRevoked, &msg.IsViewOnce, &msg.MediaDeleted,
-			&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard, &msg.Sender, &msg.LinkPreview, &msg.LinkPreviewMediaAssetID, &msg.LinkPreviewVersion, &msg.Forwarding, &msg.AudioPTT, &msg.SharingLimits,
-		); err != nil {
-			return nil, err
-		}
-		messages = append(messages, msg)
-	}
-	return messages, nil
+	return r.GetWindowByChatID(ctx, accountID, chatID, limit, offset)
 }
 
 func (r *MessageRepository) GetHistoryOffset(ctx context.Context, accountID, chatID, messageID uuid.UUID) (int, error) {
+	_, ids, err := r.conversationScope(ctx, accountID, chatID)
+	if err != nil {
+		return 0, err
+	}
 	var offset int
-	err := r.db.QueryRow(ctx, `
-		SELECT COUNT(*)
-		FROM messages newer
-		JOIN messages target ON target.id=$3 AND target.account_id=$1 AND target.chat_id=$2
-		WHERE newer.account_id=$1 AND newer.chat_id=$2
-		  AND (newer.timestamp>target.timestamp OR (newer.timestamp=target.timestamp AND newer.id>target.id))
-	`, accountID, chatID, messageID).Scan(&offset)
+	err = r.db.QueryRow(ctx, `SELECT COUNT(*) FROM messages newer
+ JOIN messages target ON target.id=COALESCE((SELECT canonical_message_id FROM whatsapp_message_aliases WHERE account_id=$1 AND alias_message_id=$3),$3)
+ AND target.account_id=$1 AND target.chat_id=ANY($2::uuid[])
+ WHERE newer.account_id=$1 AND newer.chat_id=ANY($2::uuid[])
+ AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases aliases WHERE aliases.account_id=newer.account_id AND aliases.alias_message_id=newer.id)
+ AND (newer.timestamp,newer.id)>(target.timestamp,target.id)`, accountID, ids, messageID).Scan(&offset)
 	return offset, err
 }
 
 func (r *MessageRepository) SearchByChat(ctx context.Context, accountID, chatID uuid.UUID, query string, limit, offset int) ([]*domain.Message, int, error) {
+	canonical, ids, err := r.conversationScope(ctx, accountID, chatID)
+	if err != nil {
+		return nil, 0, err
+	}
 	pattern := "%" + strings.ToLower(strings.TrimSpace(query)) + "%"
 	var total int
 	if err := r.db.QueryRow(ctx, `
 		SELECT COUNT(*) FROM messages
-		WHERE account_id=$1 AND chat_id=$2 AND COALESCE(is_revoked,false)=false
+		WHERE account_id=$1 AND chat_id=ANY($2::uuid[]) AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases aliases WHERE aliases.account_id=messages.account_id AND aliases.alias_message_id=messages.id) AND COALESCE(is_revoked,false)=false
 		  AND (LOWER(COALESCE(body,'')) LIKE $3 OR LOWER(COALESCE(media_filename,'')) LIKE $3)
-	`, accountID, chatID, pattern).Scan(&total); err != nil {
+	`, accountID, ids, pattern).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	rows, err := r.db.Query(ctx, `
@@ -2379,10 +2342,10 @@ func (r *MessageRepository) SearchByChat(ctx context.Context, accountID, chatID 
 		       COALESCE(is_revoked,false), COALESCE(is_view_once,false), COALESCE(media_deleted,false),
 		       latitude, longitude, contact_name, contact_phone, contact_vcard, sender,link_preview,link_preview_media_asset_id,link_preview_version,forwarding,audio_ptt,sharing_limits
 		FROM messages
-		WHERE account_id=$1 AND chat_id=$2 AND COALESCE(is_revoked,false)=false
+		WHERE account_id=$1 AND chat_id=ANY($2::uuid[]) AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases aliases WHERE aliases.account_id=messages.account_id AND aliases.alias_message_id=messages.id) AND COALESCE(is_revoked,false)=false
 		  AND (LOWER(COALESCE(body,'')) LIKE $3 OR LOWER(COALESCE(media_filename,'')) LIKE $3)
 		ORDER BY timestamp DESC, id DESC LIMIT $4 OFFSET $5
-	`, accountID, chatID, pattern, limit, offset)
+	`, accountID, ids, pattern, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -2404,52 +2367,46 @@ func (r *MessageRepository) SearchByChat(ctx context.Context, accountID, chatID 
 		}
 		messages = append(messages, msg)
 	}
+	if err = r.hydrateConversationMediaRemoval(ctx, accountID, messages); err != nil {
+		return nil, 0, err
+	}
+	projectConversationMessages(messages, canonical)
 	return messages, total, rows.Err()
 }
 
 // GetByMessageID finds a message by its WhatsApp message_id within a chat
 func (r *MessageRepository) GetByMessageID(ctx context.Context, chatID uuid.UUID, messageID string) (*domain.Message, error) {
-	msg := &domain.Message{}
-	err := r.db.QueryRow(ctx, `
-		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
-		       message_type, media_url, media_mimetype, media_filename, media_size, media_asset_id,
-		       is_from_me, is_read, status, delivered_at, read_at, COALESCE(is_edited, false), provider, template_name, timestamp, created_at,
-		       quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
-		       COALESCE(is_revoked, false), COALESCE(is_view_once, false), COALESCE(media_deleted, false),
-		       latitude, longitude, contact_name, contact_phone, contact_vcard, sender,link_preview,link_preview_media_asset_id,link_preview_version,forwarding,audio_ptt,sharing_limits
-		FROM messages WHERE chat_id = $1 AND message_id = $2
-		LIMIT 1
-	`, chatID, messageID).Scan(
-		&msg.ID, &msg.AccountID, &msg.DeviceID, &msg.ChatID, &msg.MessageID, &msg.FromJID,
-		&msg.FromName, &msg.Body, &msg.MessageType, &msg.MediaURL, &msg.MediaMimetype,
-		&msg.MediaFilename, &msg.MediaSize, &msg.MediaAssetID, &msg.IsFromMe, &msg.IsRead, &msg.Status,
-		&msg.DeliveredAt, &msg.ReadAt, &msg.IsEdited,
-		&msg.Provider, &msg.TemplateName, &msg.Timestamp, &msg.CreatedAt,
-		&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender, &msg.QuotedIsFromMe,
-		&msg.IsRevoked, &msg.IsViewOnce, &msg.MediaDeleted,
-		&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard, &msg.Sender, &msg.LinkPreview, &msg.LinkPreviewMediaAssetID, &msg.LinkPreviewVersion, &msg.Forwarding, &msg.AudioPTT, &msg.SharingLimits,
-	)
+	account, canonical, _, err := r.conversationScopeByID(ctx, chatID)
 	if err != nil {
 		return nil, err
 	}
-	return msg, nil
+	message, err := r.GetVisibleByReference(ctx, account, canonical, messageID)
+	if err == nil {
+		message.ChatID = canonical
+	}
+	return message, err
 }
 
 // GetOldestByChatID returns the oldest message in a chat (for history sync pagination)
 func (r *MessageRepository) GetOldestByChatID(ctx context.Context, chatID uuid.UUID) (*domain.Message, error) {
+	_, canonical, ids, scopeErr := r.conversationScopeByID(ctx, chatID)
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
 	msg := &domain.Message{}
 	err := r.db.QueryRow(ctx, `
 		SELECT id, account_id, device_id, chat_id, message_id, from_jid, from_name, body,
 		       message_type, is_from_me, timestamp,sharing_limits
-		FROM messages WHERE chat_id = $1
+		FROM messages WHERE chat_id=ANY($1::uuid[]) AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases aliases WHERE aliases.account_id=messages.account_id AND aliases.alias_message_id=messages.id)
 		ORDER BY timestamp ASC LIMIT 1
-	`, chatID).Scan(
+	`, ids).Scan(
 		&msg.ID, &msg.AccountID, &msg.DeviceID, &msg.ChatID, &msg.MessageID, &msg.FromJID,
 		&msg.FromName, &msg.Body, &msg.MessageType, &msg.IsFromMe, &msg.Timestamp, &msg.SharingLimits,
 	)
 	if err != nil {
 		return nil, err
 	}
+	msg.ChatID = canonical
 	return msg, nil
 }
 
@@ -2570,6 +2527,14 @@ func (r *MessageRepository) GetRecentStickers(ctx context.Context, accountID uui
 }
 
 func (r *ContactRepository) GetOrCreate(ctx context.Context, accountID uuid.UUID, deviceID *uuid.UUID, jid, phone, name, pushName string, isGroup bool) (*domain.Contact, error) {
+	if !isGroup && deviceID != nil {
+		if result, handled, err := createVerifiedPrivatePeer(ctx, r.db, accountID, *deviceID, jid, name, pushName, false); handled {
+			if err != nil {
+				return nil, err
+			}
+			return r.GetByIDForAccount(ctx, accountID, result.contactID)
+		}
+	}
 	if !isGroup {
 		if aliasContactID, err := findContactAliasID(ctx, r.db, accountID, jid, phone); err != nil {
 			return nil, err
@@ -8707,7 +8672,7 @@ func (r *ReactionRepository) Delete(ctx context.Context, accountID, chatID uuid.
 	result, err := r.db.Exec(ctx, `
 		DELETE FROM message_reactions
 		WHERE account_id = $1
-		  AND chat_id = $2
+		  AND chat_id IN(SELECT id FROM chats WHERE account_id=$1 AND (id=$2 OR canonical_chat_id=$2))
 		  AND target_message_id = $3
 		  AND sender_jid = regexp_replace($4::text, '^([0-9]+)(\.[0-9]+)?:[0-9]+@(s\.whatsapp\.net)$', '\1@\3')
 		  AND timestamp <= $5
@@ -8722,7 +8687,8 @@ func (r *ReactionRepository) GetByChatID(ctx context.Context, accountID, chatID 
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, chat_id, target_message_id, sender_jid, sender_name, emoji, is_from_me, timestamp, created_at
 		FROM message_reactions
-		WHERE account_id = $1 AND chat_id = $2
+		WHERE account_id = $1 AND (chat_id = $2 OR (chat_id IN(SELECT id FROM chats WHERE account_id=$1 AND canonical_chat_id=$2)
+ AND EXISTS(SELECT 1 FROM messages m WHERE m.account_id=$1 AND m.chat_id=message_reactions.chat_id AND m.message_id=message_reactions.target_message_id AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases a WHERE a.account_id=m.account_id AND a.alias_message_id=m.id))))
 		ORDER BY timestamp ASC
 	`, accountID, chatID)
 	if err != nil {
@@ -8736,6 +8702,7 @@ func (r *ReactionRepository) GetByChatID(ctx context.Context, accountID, chatID 
 		if err := rows.Scan(&r.ID, &r.AccountID, &r.ChatID, &r.TargetMessageID, &r.SenderJID, &r.SenderName, &r.Emoji, &r.IsFromMe, &r.Timestamp, &r.CreatedAt); err != nil {
 			return nil, err
 		}
+		r.ChatID = chatID
 		reactions = append(reactions, r)
 	}
 	return reactions, rows.Err()
@@ -8750,7 +8717,8 @@ func (r *ReactionRepository) GetByChatMessageIDs(ctx context.Context, accountID,
 	rows, err := r.db.Query(ctx, `
 		SELECT id, account_id, chat_id, target_message_id, sender_jid, sender_name, emoji, is_from_me, timestamp, created_at
 		FROM message_reactions
-		WHERE account_id = $1 AND chat_id = $2 AND target_message_id = ANY($3)
+		WHERE account_id = $1 AND (chat_id = $2 OR (chat_id IN(SELECT id FROM chats WHERE account_id=$1 AND canonical_chat_id=$2)
+ AND EXISTS(SELECT 1 FROM messages m WHERE m.account_id=$1 AND m.chat_id=message_reactions.chat_id AND m.message_id=message_reactions.target_message_id AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases a WHERE a.account_id=m.account_id AND a.alias_message_id=m.id)))) AND target_message_id = ANY($3)
 		ORDER BY timestamp ASC
 	`, accountID, chatID, targetMessageIDs)
 	if err != nil {
@@ -8764,6 +8732,7 @@ func (r *ReactionRepository) GetByChatMessageIDs(ctx context.Context, accountID,
 		if err := rows.Scan(&reaction.ID, &reaction.AccountID, &reaction.ChatID, &reaction.TargetMessageID, &reaction.SenderJID, &reaction.SenderName, &reaction.Emoji, &reaction.IsFromMe, &reaction.Timestamp, &reaction.CreatedAt); err != nil {
 			return nil, err
 		}
+		reaction.ChatID = chatID
 		reactions = append(reactions, reaction)
 	}
 	return reactions, rows.Err()
@@ -8787,23 +8756,7 @@ func (r *PollRepository) CreateOptions(ctx context.Context, messageID uuid.UUID,
 }
 
 func (r *PollRepository) GetOptions(ctx context.Context, messageID uuid.UUID) ([]*domain.PollOption, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT id, message_id, name, vote_count FROM poll_options WHERE message_id = $1 ORDER BY id
-	`, messageID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var options []*domain.PollOption
-	for rows.Next() {
-		o := &domain.PollOption{}
-		if err := rows.Scan(&o.ID, &o.MessageID, &o.Name, &o.VoteCount); err != nil {
-			return nil, err
-		}
-		options = append(options, o)
-	}
-	return options, nil
+	return r.logicalOptions(ctx, messageID)
 }
 
 func (r *PollRepository) UpsertVote(ctx context.Context, vote *domain.PollVote) error {
@@ -8847,23 +8800,7 @@ func (r *PollRepository) RecalculateVoteCounts(ctx context.Context, messageID uu
 }
 
 func (r *PollRepository) GetVotes(ctx context.Context, messageID uuid.UUID) ([]*domain.PollVote, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT id, message_id, voter_jid, selected_names, timestamp FROM poll_votes WHERE message_id = $1 ORDER BY timestamp
-	`, messageID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var votes []*domain.PollVote
-	for rows.Next() {
-		v := &domain.PollVote{}
-		if err := rows.Scan(&v.ID, &v.MessageID, &v.VoterJID, &v.SelectedNames, &v.Timestamp); err != nil {
-			return nil, err
-		}
-		votes = append(votes, v)
-	}
-	return votes, nil
+	return r.logicalVotes(ctx, messageID)
 }
 
 // CampaignAttachmentRepository handles campaign attachment operations

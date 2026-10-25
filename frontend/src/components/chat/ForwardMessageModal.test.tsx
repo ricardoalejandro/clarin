@@ -21,6 +21,27 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('canonical forwarding batch', () => {
+  it('keeps the preparation binding revision when checking and reconfirming an uncertain operation', async () => {
+    const source: Chat = { id: 'guarded-source', account_id: 'account', jid: 'guarded@g.us', name: 'Grupo protegido', last_message: '', last_message_at: '2026-10-25T12:00:00Z', unread_count: 0, device_id: 'device-1', canonical_chat_id: 'guarded-source', alias_chat_ids: [], binding_state: 'verified_continuity', binding_revision: 7 }
+    const guarded = { ...props, chatId: source.id, sourceChat: source, message: { ...message, id: 'guarded-message', chat_id: source.id } }
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => String(input).startsWith('/api/chats?') ? response({ success: true, chats: destinations, total: destinations.length }) : init?.method === 'POST' ? response({ success: false, error: 'Resultado por comprobar' }, 503) : response({ success: false }, 404))
+    const view = render(<ForwardMessageModal {...guarded} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reenviar a 1 chat' }))
+    await screen.findByRole('button', { name: 'Comprobar estado' })
+    expect(new Headers(writes()[0][1].headers).get('X-Chat-Binding-Revision')).toBe('7')
+    const originalOperation = JSON.parse(writes()[0][1].body).client_operation_id
+    view.unmount()
+    render(<ForwardMessageModal {...guarded} sourceChat={{ ...source, binding_revision: 8 }} />)
+    expect(writes()).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Comprobar estado' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirmar la misma operación' }))
+    await waitFor(() => expect(writes()).toHaveLength(2))
+    expect(new Headers(writes()[1][1].headers).get('X-Chat-ID')).toBe(source.id)
+    expect(new Headers(writes()[1][1].headers).get('X-Chat-Binding-Revision')).toBe('7')
+    expect(JSON.parse(writes()[1][1].body).client_operation_id).toBe(originalOperation)
+  })
+
   it('queries both groups and private chats for the source device, then sends one canonical batch', async () => {
     render(<ForwardMessageModal {...props} />)
     fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))

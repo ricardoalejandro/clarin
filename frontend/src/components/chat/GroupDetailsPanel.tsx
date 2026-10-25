@@ -9,6 +9,7 @@ import { isIdentityRevision } from './groupIdentityRecovery'
 import { groupParticipantLabel, groupParticipantPhone, mergeParticipantPage, sameParticipant } from './groupParticipantIdentity'
 import { parseGroupIdentityRevisions, type GroupIdentityRevisions, type OpenParticipantChat } from './groupParticipantTypes'
 import GroupParticipantProfile, { type GroupParticipantProfileHandle } from './GroupParticipantProfile'
+import { bindingRevision, verifiedChatContinuity } from './chatContinuity'
 import WebText from '@/components/WebText'
 
 class ParticipantsCursorResetError extends Error {}
@@ -23,7 +24,12 @@ export interface GroupDetailsPanelHandle {
 
 function GroupDetailsPanelImpl(props: Props, forwardedRef: ForwardedRef<GroupDetailsPanelHandle>) {
   const scope = useSyncExternalStore(subscribeAuthScope, getAuthScope, () => 'server')
-  return isAuthIdentityChanging(scope) ? null : <GroupDetailsSession forwardedRef={forwardedRef} key={scope + ':' + props.chat.id + ':' + props.chat.device_id} {...props} scope={scope} />
+  const session = useRef({ scope, chat: props.chat, key: scope + ':' + props.chat.id + ':' + props.chat.device_id })
+  if (session.current.scope !== scope || session.current.chat.id !== props.chat.id && !verifiedChatContinuity(props.chat, session.current.chat)
+    || session.current.chat.device_id !== props.chat.device_id && !verifiedChatContinuity(props.chat, session.current.chat)) {
+    session.current = { scope, chat: props.chat, key: scope + ':' + props.chat.id + ':' + props.chat.device_id }
+  } else session.current.chat = props.chat
+  return isAuthIdentityChanging(scope) ? null : <GroupDetailsSession forwardedRef={forwardedRef} key={session.current.key} {...props} scope={scope} />
 }
 
 function GroupDetailsSession({ chat, onClose, onOpenChat, suspended = false, scope, forwardedRef }: Props & { scope: string; forwardedRef: ForwardedRef<GroupDetailsPanelHandle> }) {
@@ -41,13 +47,22 @@ function GroupDetailsSession({ chat, onClose, onOpenChat, suspended = false, sco
   const historySnapshot = useRef<Record<string, unknown> | null>(null)
   const pendingNavigation = useRef<(() => void) | null>(null)
   const historyMarker = '__clarinGroupParticipant'
-  const historyIdentity = `${scope}:${chat.id}`
+  const historyIdentity = useRef(`${scope}:${chat.id}`).current
   const lease = useRef<AbortController | null>(null)
   const sequence = useRef(0)
   const identitySnapshot = useRef<GroupIdentityRevisions | null>(null)
   const minimumIdentityRevision = useRef(0)
   const minimumGroupRevision = useRef(0)
   const observedCrmRevision = useRef<number | undefined>(undefined)
+  const binding = `${chat.device_id || ''}:${bindingRevision(chat)}`
+  const previousBinding = useRef(binding)
+  useLayoutEffect(() => {
+    if (previousBinding.current === binding) return
+    previousBinding.current = binding
+    lease.current?.abort(); sequence.current++
+    identitySnapshot.current = null; minimumIdentityRevision.current = 0; minimumGroupRevision.current = 0
+    setGroup(chat.group || null); setCursor(''); setRevision(value => value + 1)
+  }, [binding, chat.group])
   const membersRef = useRef(members)
   const lastQuery = useRef(settled)
   const listScroll = useRef<HTMLDivElement>(null)
@@ -153,7 +168,7 @@ function GroupDetailsSession({ chat, onClose, onOpenChat, suspended = false, sco
 
     } catch (cause) { if (isCurrent()) setError(cause instanceof Error ? cause.message : 'No se pudo cargar el grupo.') }
     finally { if (isCurrent()) setLoading(false) }
-  }, [chat.id, settled, scope])
+  }, [chat.id, chat.device_id, binding, settled, scope])
   useEffect(() => {
     if (!suspended) void load()
     return () => { lease.current?.abort(); sequence.current++ }

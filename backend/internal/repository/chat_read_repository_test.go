@@ -7,29 +7,21 @@ import (
 
 func TestMarkAsReadUsesAccountScopedDisplayedWatermark(t *testing.T) {
 	t.Parallel()
-	source := readRepositorySource(t, "repository.go")
-	start := strings.Index(source, "func (r *ChatRepository) MarkAsRead")
-	if start < 0 {
-		t.Fatal("MarkAsRead implementation not found")
-	}
-	end := strings.Index(source[start:], "func (r *ChatRepository) Delete")
-	if end < 0 {
-		t.Fatal("MarkAsRead implementation boundary not found")
-	}
-	method := source[start : start+end]
+	source := readRepositorySource(t, "conversation_action_repository.go")
 	for _, invariant := range []string{
-		"SELECT id FROM chats WHERE account_id=$1 AND id=$2 FOR UPDATE",
-		"AND (id::text=$3 OR message_id=$3)",
-		"WHERE account_id=$1 AND chat_id=$2 AND is_from_me=FALSE AND is_read=FALSE",
-		"AND is_from_me=FALSE ORDER BY timestamp DESC, id DESC LIMIT 1",
-		"timestamp < $3 OR (timestamp = $3 AND id <= $4)",
-		"COALESCE(is_revoked, FALSE)=FALSE",
-		"UPDATE chats SET unread_count=$3",
+		"WHERE account_id=$1 AND (id=$2 OR canonical_chat_id=$2) ORDER BY id FOR UPDATE",
+		"AND (source.id::text=$3 OR source.message_id=$3)",
+		"m.account_id=$1 AND m.chat_id=ANY($2::uuid[]) AND m.is_from_me=FALSE AND m.is_read=FALSE",
+		"AND source.is_from_me=FALSE ORDER BY visible.timestamp DESC,visible.id DESC LIMIT 1",
+		"(m.timestamp,m.id)<=($3::timestamptz,$4::uuid)",
+		"COALESCE(m.is_revoked,FALSE)=FALSE",
+		"UPDATE chats c SET unread_count=",
 	} {
-		if !strings.Contains(method, invariant) {
+		if !strings.Contains(source, invariant) {
 			t.Fatalf("read watermark lost invariant %q", invariant)
 		}
 	}
+
 }
 
 func TestLegacyLastMessageDoesNotIncrementUnread(t *testing.T) {

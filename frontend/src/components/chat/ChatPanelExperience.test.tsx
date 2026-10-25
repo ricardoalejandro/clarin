@@ -618,6 +618,35 @@ describe('received link preview reconciliation', () => {
     await act(async () => emit({ link_preview: null, link_preview_version: 2 }))
     expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
   })
+  it('updates read-only link metadata while canonical device readiness is still being revalidated', async () => {
+    const fetcher = install()
+    render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText(preview.title)
+    const original = fetcher.getMockImplementation()!
+    let finish!: (response: Response) => void
+    fetcher.mockImplementation(input => String(input) === `/api/chats/${chat.id}`
+      ? new Promise<Response>(resolve => { finish = resolve }) : original(input))
+    act(() => websocket.listeners.forEach(listener => listener({ event: 'device_status', data: { device_id: chat.device_id, status: 'connected' } })))
+    await waitFor(() => expect(finish).toBeTypeOf('function'))
+    await act(async () => emit())
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent('Metadatos enriquecidos')
+    await act(async () => finish(jsonResponse({ success: true, chat, device: device('connected') })))
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent('Metadatos enriquecidos')
+  })
+  it.each(['retired-device', null])('updates canonical history with its exact stored source device %s', async sourceDevice => {
+    const fetcher = install()
+    const original = fetcher.getMockImplementation()!
+    fetcher.mockImplementation(input => String(input).includes('/messages?')
+      ? Promise.resolve(jsonResponse({ success: true, messages: [{ ...linked, chat_id: chat.id, device_id: sourceDevice }] })) : original(input))
+    render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText(preview.title)
+    await act(async () => emit({ device_id: 'unrelated-device' }))
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent(preview.title)
+    await act(async () => emit({ chat_id: 'other-chat', device_id: sourceDevice }))
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent(preview.title)
+    await act(async () => emit({ device_id: sourceDevice }))
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent('Metadatos enriquecidos')
+  })
   it.each(['search', 'quote'] as const)('updates a historical %s projection and clears an edited preview without leaking it into the main page', async mode => {
     install(true)
     render(<ChatPanel chatId={chat.id} initialChat={chat} />)

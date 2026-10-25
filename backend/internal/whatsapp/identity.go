@@ -8,7 +8,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/naperu/clarin/internal/domain"
-	"github.com/naperu/clarin/internal/ws"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -129,64 +128,12 @@ func (p *DevicePool) getOrCreateMessageChat(
 	if instance == nil || identity.JID.IsEmpty() {
 		return nil, identity, fmt.Errorf("WhatsApp peer identity is unavailable")
 	}
-	canonicalJID := identity.JID.ToNonAD().String()
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, canonicalJID, name)
-	if err != nil {
-		return nil, identity, err
-	}
-	if identity.LID.IsEmpty() || identity.JID.Server != types.DefaultUserServer {
-		return chat, identity, nil
-	}
-
-	reconciled, reconcileErr := p.repos.Chat.ReconcileLIDChat(
-		ctx,
-		instance.AccountID,
-		instance.ID,
-		chat.ID,
-		identity.LID.ToNonAD().String(),
-		canonicalJID,
-	)
-	if reconcileErr != nil {
-		// The current message can still be safely persisted in the canonical
-		// chat. The unresolved source remains visible for a later retry.
-		log.Printf("[ChatIdentity] reconcile failed account=%s device=%s: %v", instance.AccountID, instance.ID, reconcileErr)
-		return chat, identity, nil
-	}
-	if reconciled.SourceChatID == nil {
-		return chat, identity, nil
-	}
-
-	if reconciled.SourceContactID != nil && reconciled.CanonicalContactID != nil && *reconciled.SourceContactID != *reconciled.CanonicalContactID {
-		if _, mergeErr := p.repos.Contact.MergeContacts(
-			ctx,
-			instance.AccountID,
-			*reconciled.CanonicalContactID,
-			[]uuid.UUID{*reconciled.SourceContactID},
-			nil,
-		); mergeErr != nil {
-			log.Printf("[ChatIdentity] contact merge failed account=%s device=%s source_chat=%s: %v", instance.AccountID, instance.ID, *reconciled.SourceChatID, mergeErr)
-		}
-	}
-
-	if refreshed, refreshErr := p.repos.Chat.GetByID(ctx, chat.ID); refreshErr == nil && refreshed != nil {
-		chat = refreshed
-	}
-	p.invalidateChatCaches(instance.AccountID, chat.ID)
-	p.invalidateAccountMessageCaches(instance.AccountID)
-	if p.cache != nil {
-		_ = p.cache.Del(context.Background(), "contacts:"+instance.AccountID.String())
-		_ = p.cache.Del(context.Background(), "leads:"+instance.AccountID.String())
-	}
-	operationID := uuid.NewString()
-	p.hub.BroadcastToAccount(instance.AccountID, ws.EventChatIdentityReconciled, map[string]interface{}{
-		"operation_id":        operationID,
-		"source_chat_id":      reconciled.SourceChatID.String(),
-		"canonical_chat":      chat,
-		"moved_message_count": reconciled.MovedMessageCount,
-	})
-	log.Printf("[ChatIdentity] reconciled account=%s device=%s source_chat=%s canonical_chat=%s moved_messages=%d operation=%s",
-		instance.AccountID, instance.ID, *reconciled.SourceChatID, chat.ID, reconciled.MovedMessageCount, operationID)
-	return chat, identity, nil
+	// Preserve the incoming representation when legacy PN/LID histories already
+	// diverge. The repository may reuse one verified representation, but may
+	// never merge Contacts or delete another history as a receive side effect.
+	chatJID := privateMessageChatJID(source, identity)
+	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, chatJID, name)
+	return chat, identity, err
 }
 
 func (p *DevicePool) reconcilePendingChatIdentities(ctx context.Context, instance *DeviceInstance) {
@@ -225,60 +172,25 @@ func (p *DevicePool) reconcilePendingChatIdentities(ctx context.Context, instanc
 	}
 }
 
-func shouldMergeMappedLIDContact(accountID uuid.UUID, lidJID string, canonical, source *domain.Contact) bool {
-	return accountID != uuid.Nil &&
-		strings.HasSuffix(strings.ToLower(strings.TrimSpace(lidJID)), "@lid") &&
-		canonical != nil && source != nil &&
-		canonical.AccountID == accountID && source.AccountID == accountID &&
-		canonical.ID != uuid.Nil && source.ID != uuid.Nil && canonical.ID != source.ID
-}
-
-// reconcileMappedLIDContact removes the legacy duplicate Contact projection
-// once WhatsApp has proven that its LID and phone JID are the same identity.
-// MergeContacts preserves aliases and relinks account-scoped CRM references.
+// Contact sync and initial history still call this compatibility hook. A
+// provider alias proves a transport address, not permission to merge CRM data.
+// Existing duplicate Contacts and all their children remain available for an
+// explicit, separately reviewed repair.
 func (p *DevicePool) reconcileMappedLIDContact(
-	ctx context.Context,
-	accountID uuid.UUID,
-	lidJID string,
+	_ context.Context,
+	_ uuid.UUID,
+	_ string,
 	canonical *domain.Contact,
 ) *domain.Contact {
-	if canonical == nil || strings.TrimSpace(lidJID) == "" {
-		return canonical
-	}
-	source, err := p.repos.Contact.GetByJID(ctx, accountID, lidJID)
-	if err != nil {
-		log.Printf("[ChatIdentity] mapped contact lookup failed account=%s lid=%s: %v", accountID, lidJID, err)
-		return canonical
-	}
-	if !shouldMergeMappedLIDContact(accountID, lidJID, canonical, source) {
-		return canonical
-	}
-	merged, err := p.repos.Contact.MergeContacts(ctx, accountID, canonical.ID, []uuid.UUID{source.ID}, nil)
-	if err != nil {
-		log.Printf("[ChatIdentity] mapped contact merge failed account=%s source_contact=%s canonical_contact=%s: %v", accountID, source.ID, canonical.ID, err)
-		return canonical
-	}
-	if merged != nil && merged.MergedContact != nil {
-		canonical = merged.MergedContact
-	}
-	log.Printf("[ChatIdentity] mapped contact reconciled account=%s source_contact=%s canonical_contact=%s", accountID, source.ID, canonical.ID)
 	return canonical
 }
 
-func (p *DevicePool) reconcileAllMappedLIDContacts(ctx context.Context) {
-	pairs, err := p.repos.Contact.GetMappedLIDContactPairs(ctx)
-	if err != nil {
-		log.Printf("[ChatIdentity] mapped contact scan failed: %v", err)
-		return
+func privateMessageChatJID(source types.MessageSource, identity peerIdentityResolution) string {
+	chat := source.Chat.ToNonAD()
+	if chat.Server == types.DefaultUserServer || chat.Server == types.HiddenUserServer {
+		return chat.String()
 	}
-	for _, pair := range pairs {
-		canonical, lookupErr := p.repos.Contact.GetByJID(ctx, pair.AccountID, pair.PhoneJID)
-		if lookupErr != nil {
-			log.Printf("[ChatIdentity] canonical contact lookup failed account=%s contact=%s: %v", pair.AccountID, pair.CanonicalContactID, lookupErr)
-			continue
-		}
-		p.reconcileMappedLIDContact(ctx, pair.AccountID, pair.LIDJID, canonical)
-	}
+	return identity.JID.ToNonAD().String()
 }
 
 func isPendingWhatsAppJID(jid types.JID) bool {

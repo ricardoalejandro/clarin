@@ -142,6 +142,9 @@ func (r *MessageRepository) EditInChatWithLinkPreview(ctx context.Context, accou
 	if err = tx.QueryRow(ctx, `SELECT id FROM chats WHERE account_id=$1 AND id=$2 FOR UPDATE`, accountID, chatID).Scan(&locked); err != nil {
 		return err
 	}
+	if err = requireLogicalMessageReferenceTx(ctx, tx, accountID, chatID, messageID); err != nil {
+		return err
+	}
 	msg := &domain.Message{AccountID: accountID, Body: &body, LinkPreview: preview, LinkPreviewMediaAssetID: assetID}
 	if err = validateMessageLinkPreviewTx(ctx, tx, msg); err != nil {
 		return err
@@ -156,7 +159,7 @@ func (r *MessageRepository) EditInChatWithLinkPreview(ctx context.Context, accou
 	if preview != nil && msg.LinkPreview != nil {
 		*preview = *msg.LinkPreview
 	}
-	err = tx.QueryRow(ctx, `UPDATE messages SET body=$4::text,is_edited=TRUE,group_mentions=COALESCE($5::jsonb,group_mentions),link_preview=$6::jsonb,link_preview_media_asset_id=$7 WHERE account_id=$1 AND chat_id=$2 AND message_id=$3 AND NOT COALESCE(is_revoked,FALSE) RETURNING link_preview_version`, accountID, chatID, messageID, body, domain.MessageMentionsFrom(ctx), msg.LinkPreview, msg.LinkPreviewMediaAssetID).Scan(&msg.LinkPreviewVersion)
+	err = tx.QueryRow(ctx, `UPDATE messages SET body=$4::text,is_edited=TRUE,group_mentions=COALESCE($5::jsonb,group_mentions),link_preview=$6::jsonb,link_preview_media_asset_id=$7 WHERE account_id=$1 AND id IN(`+logicalMessageIDsSQL+`) AND NOT COALESCE(is_revoked,FALSE) RETURNING link_preview_version`, accountID, chatID, messageID, body, domain.MessageMentionsFrom(ctx), msg.LinkPreview, msg.LinkPreviewMediaAssetID).Scan(&msg.LinkPreviewVersion)
 	if err != nil {
 		return err
 	}
@@ -187,6 +190,9 @@ func (r *MessageRepository) ApplyGroupMessageEdit(ctx context.Context, accountID
 	if err = tx.QueryRow(ctx, `SELECT id FROM chats WHERE account_id=$1 AND id=$2 AND jid LIKE '%@g.us' FOR UPDATE`, accountID, chatID).Scan(&locked); err != nil {
 		return false, err
 	}
+	if err = requireLogicalMessageReferenceTx(ctx, tx, accountID, chatID, messageID); err != nil {
+		return false, err
+	}
 	msg := &domain.Message{AccountID: accountID, Body: &body, LinkPreview: preview, LinkPreviewMediaAssetID: assetID}
 	if err = validateMessageLinkPreviewTx(ctx, tx, msg); err != nil {
 		return false, err
@@ -215,7 +221,7 @@ func (r *MessageRepository) ApplyGroupMessageEdit(ctx context.Context, accountID
 	if result.RowsAffected() == 0 {
 		return false, nil
 	}
-	err = tx.QueryRow(ctx, `UPDATE messages SET body=$4::text,is_edited=TRUE,group_mentions=$5::jsonb,link_preview=$6::jsonb,link_preview_media_asset_id=$7 WHERE account_id=$1 AND chat_id=$2 AND message_id=$3 AND NOT COALESCE(is_revoked,FALSE) RETURNING link_preview_version`, accountID, chatID, messageID, body, mentions, msg.LinkPreview, msg.LinkPreviewMediaAssetID).Scan(&msg.LinkPreviewVersion)
+	err = tx.QueryRow(ctx, `UPDATE messages SET body=$4::text,is_edited=TRUE,group_mentions=$5::jsonb,link_preview=$6::jsonb,link_preview_media_asset_id=$7 WHERE account_id=$1 AND id IN(`+logicalMessageIDsSQL+`) AND NOT COALESCE(is_revoked,FALSE) RETURNING link_preview_version`, accountID, chatID, messageID, body, mentions, msg.LinkPreview, msg.LinkPreviewMediaAssetID).Scan(&msg.LinkPreviewVersion)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return false, err
 	}
@@ -243,7 +249,7 @@ func (r *MessageRepository) HydrateLinkPreviews(ctx context.Context, accountID, 
 	rows, err := r.db.Query(ctx, `SELECT m.id,m.link_preview,m.link_preview_media_asset_id,COALESCE(m.is_revoked,FALSE),COALESCE(m.is_view_once,FALSE),m.body,m.link_preview_version,
  CASE WHEN a.status='active' AND a.content_hash LIKE 'link_preview:%' THEN a.object_key ELSE NULL END
  FROM messages m LEFT JOIN media_assets a ON a.account_id=m.account_id AND a.id=m.link_preview_media_asset_id
- WHERE m.account_id=$1 AND m.chat_id=$2 AND m.id=ANY($3::uuid[])`, accountID, chatID, ids)
+ WHERE m.account_id=$1 AND m.chat_id IN(SELECT id FROM chats WHERE account_id=$1 AND (id=$2 OR canonical_chat_id=$2)) AND m.id=ANY($3::uuid[])`, accountID, chatID, ids)
 	if err != nil {
 		return err
 	}

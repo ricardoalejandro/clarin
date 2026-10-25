@@ -222,8 +222,18 @@ func (s *Server) groupRequestMiddleware(c *fiber.Ctx) error {
 	if chat == nil || chat.AccountID != accountID {
 		return fiber.ErrNotFound
 	}
-	if req.ChatID != "" && !strings.HasSuffix(c.Path(), "/forward") && req.ChatID != chat.ID.String() {
-		return fiber.ErrConflict
+	if req.ChatID != "" && !strings.HasSuffix(c.Path(), "/forward") {
+		requested, parseErr := uuid.Parse(req.ChatID)
+		if parseErr != nil {
+			return fiber.ErrBadRequest
+		}
+		canonical, resolveErr := s.repos.Chat.ResolveCanonicalChatID(c.Context(), accountID, requested)
+		if resolveErr != nil || canonical != chat.ID {
+			return fiber.ErrConflict
+		}
+	}
+	if err := s.validatePreparedChat(c, accountID, deviceID, destination); err != nil {
+		return err
 	}
 	if _, err = s.requireManualDeviceForAccount(c.Context(), accountID, deviceID); err != nil {
 		return err

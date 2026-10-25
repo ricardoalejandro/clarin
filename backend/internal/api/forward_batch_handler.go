@@ -275,13 +275,31 @@ func (s *Server) runForwardBatch(c *fiber.Ctx, req forwardBatchRequest) error {
 		return writeForwardError(c, forwardFailure(404, "forward_source_not_found", "El mensaje original ya no está disponible."))
 	}
 	source, err := s.repos.Message.GetByReference(c.Context(), accountID, req.SourceChatID, req.SourceMessageID.String())
-	if err != nil || source.ID != req.SourceMessageID || source.DeviceID == nil || *source.DeviceID != req.DeviceID {
+	if err != nil || source.ID != req.SourceMessageID {
 		return writeForwardError(c, forwardFailure(404, "forward_source_not_found", "El mensaje original ya no está disponible."))
+	}
+	allowed, authErr := s.repos.Message.MessageDeviceAllowed(c.Context(), accountID, sourceChat.ID, req.DeviceID, source)
+	if authErr != nil {
+		return writeForwardError(c, authErr)
+	}
+	if !allowed {
+		return writeForwardError(c, forwardFailure(409, "forward_source_changed", "La conexión del mensaje cambió. Prepara nuevamente el envío."))
+	}
+	if err = s.validatePreparedChat(c, accountID, req.DeviceID, sourceChat.JID); err != nil {
+		return err
+	}
+	available, availabilityErr := s.repos.Message.SharingSourceAvailable(c.Context(), accountID, sourceChat.ID, source)
+	if availabilityErr != nil {
+		return writeForwardError(c, availabilityErr)
+	}
+	if !available {
+		return writeForwardError(c, forwardFailure(409, "forward_content_unavailable", "El contenido del mensaje ya no está disponible."))
 	}
 	if err = validateMessageSharingSource(source, req.Mode, req.ContentVariant); err != nil {
 		return writeForwardError(c, err)
 	}
 	targets := make([]*domain.Chat, 0, len(req.DestinationChatIDs))
+	seenTargets := map[uuid.UUID]bool{}
 	for _, id := range req.DestinationChatIDs {
 		target, getErr := s.repos.Chat.GetByID(c.Context(), id)
 		if getErr != nil {
@@ -290,7 +308,10 @@ func (s *Server) runForwardBatch(c *fiber.Ctx, req forwardBatchRequest) error {
 		if _, err = s.validateForwardTarget(c.Context(), accountID, req.DeviceID, target); err != nil {
 			return writeForwardError(c, err)
 		}
-		targets = append(targets, target)
+		if !seenTargets[target.ID] {
+			targets = append(targets, target)
+			seenTargets[target.ID] = true
+		}
 	}
 	if err = validateForwardDestinationLimits(source, targets); err != nil {
 		return writeForwardError(c, err)
@@ -337,7 +358,11 @@ func (s *Server) runForwardBatch(c *fiber.Ctx, req forwardBatchRequest) error {
 			state, code, safeError, canRetry := "failed", "forward_preflight_failed", "No se inició el envío. Revisa el mensaje y el destino.", true
 			freshSource, sourceErr := s.repos.Message.GetByReference(c.Context(), accountID, op.SourceChatID, op.SourceMessageID.String())
 			freshTarget, targetErr := s.repos.Chat.GetByID(c.Context(), target.ChatID)
-			if sourceErr == nil && targetErr == nil && domain.MessageForwardFingerprint(freshSource) == op.SourceFingerprint {
+			freshSourceAllowed := false
+			if sourceErr == nil {
+				freshSourceAllowed, sourceErr = s.repos.Message.MessageDeviceAllowed(c.Context(), accountID, op.SourceChatID, op.DeviceID, freshSource)
+			}
+			if sourceErr == nil && freshSourceAllowed && targetErr == nil && domain.MessageForwardFingerprint(freshSource) == op.SourceFingerprint {
 				sendCtx, validationErr := s.validateForwardTarget(c.Context(), accountID, op.DeviceID, freshTarget)
 				if validationErr == nil && freshTarget.JID == target.JID {
 					sendCtx, cancel := context.WithTimeout(sendCtx, 90*time.Second)

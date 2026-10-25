@@ -29,7 +29,7 @@ func (s *Server) resolveOutboundQuote(ctx context.Context, accountID, deviceID u
 	if strings.TrimSpace(recipient) != strings.TrimSpace(chat.JID) {
 		return "", "", "", false, fiber.NewError(fiber.StatusBadRequest, "El destinatario no corresponde a la conversación")
 	}
-	quoted, err := s.repos.Message.GetByReference(ctx, accountID, chatID, strings.TrimSpace(reference))
+	quoted, err := s.repos.Message.GetVisibleByReference(ctx, accountID, chat.ID, strings.TrimSpace(reference))
 	if err == pgx.ErrNoRows {
 		return "", "", "", false, fiber.NewError(fiber.StatusNotFound, "El mensaje original ya no está disponible")
 	}
@@ -71,7 +71,12 @@ func (s *Server) handleGetMessageContext(c *fiber.Ctx) error {
 	if reference == "" || len(reference) > 160 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Mensaje inválido"})
 	}
-	target, err := s.repos.Message.GetByReference(c.Context(), accountID, chatID, reference)
+	canonical, resolveErr := s.repos.Chat.ResolveCanonicalChatID(c.Context(), accountID, chatID)
+	if resolveErr != nil {
+		return fiber.ErrNotFound
+	}
+	chatID = canonical
+	target, err := s.repos.Message.GetVisibleByReference(c.Context(), accountID, chatID, reference)
 	if err == pgx.ErrNoRows {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"success": false, "error": "El mensaje original ya no está disponible"})
 	}
@@ -90,6 +95,7 @@ func (s *Server) handleGetMessageContext(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"success": false, "error": "No se pudo cargar el contexto del mensaje"})
 	}
+	target.ChatID = chatID
 	messagesToHydrate := make([]*domain.Message, 0, len(messages)+1)
 	messagesToHydrate = append(messagesToHydrate, target)
 	messagesToHydrate = append(messagesToHydrate, messages...)

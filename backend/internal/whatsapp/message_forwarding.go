@@ -165,8 +165,16 @@ func (p *DevicePool) ShareMessageWithID(ctx context.Context, deviceID uuid.UUID,
 	if instance == nil || instance.Client == nil || !instance.Client.IsConnected() {
 		return nil, forwardFailure("device_unavailable", false, fmt.Errorf("el dispositivo no está conectado"))
 	}
-	if source == nil || source.AccountID != instance.AccountID || source.DeviceID == nil || *source.DeviceID != deviceID || strings.TrimSpace(providerID) == "" {
+	if source == nil || source.AccountID != instance.AccountID || strings.TrimSpace(providerID) == "" {
 		return nil, forwardFailure("forward_source_invalid", false, fmt.Errorf("el origen del reenvío no pertenece al dispositivo"))
+	}
+	allowed, authorizationErr := p.repos.Message.MessageDeviceAllowed(ctx, instance.AccountID, source.ChatID, deviceID, source)
+	if authorizationErr != nil || !allowed {
+		return nil, forwardFailure("forward_source_invalid", false, fmt.Errorf("el origen no pertenece a la conexión verificada"))
+	}
+	available, availabilityErr := p.repos.Message.SharingSourceAvailable(ctx, instance.AccountID, source.ChatID, source)
+	if availabilityErr != nil || !available {
+		return nil, forwardFailure("forward_content_unavailable", false, fmt.Errorf("el contenido del mensaje ya no está disponible"))
 	}
 	recipient, err := types.ParseJID(to)
 	if err != nil || recipient.IsEmpty() || (recipient.Server != types.DefaultUserServer && recipient.Server != types.HiddenUserServer && recipient.Server != types.GroupServer) {
@@ -231,6 +239,14 @@ func (p *DevicePool) ShareMessageWithID(ctx context.Context, deviceID uuid.UUID,
 	freshSource, lookupErr := p.repos.Message.GetByReference(ctx, instance.AccountID, source.ChatID, source.ID.String())
 	if lookupErr != nil || !sameNativeForwardSource(source, freshSource) {
 		return nil, forwardFailure("forward_source_changed", false, fmt.Errorf("el mensaje original cambió durante la preparación; prepara el reenvío nuevamente"))
+	}
+	allowed, authorizationErr = p.repos.Message.MessageDeviceAllowed(ctx, instance.AccountID, source.ChatID, deviceID, freshSource)
+	if authorizationErr != nil || !allowed {
+		return nil, forwardFailure("forward_source_changed", false, fmt.Errorf("la conexión del origen cambió durante la preparación"))
+	}
+	available, availabilityErr = p.repos.Message.SharingSourceAvailable(ctx, instance.AccountID, source.ChatID, freshSource)
+	if availabilityErr != nil || !available {
+		return nil, forwardFailure("forward_content_unavailable", false, fmt.Errorf("el contenido del mensaje cambió durante la preparación"))
 	}
 	currentTarget, targetErr := p.repos.Chat.GetByID(ctx, target.ID)
 	if targetErr != nil || !sameNativeForwardTarget(target, currentTarget) {
@@ -304,7 +320,7 @@ func validNativeForwardTarget(target *domain.Chat, accountID, deviceID uuid.UUID
 	return target != nil && target.ID != uuid.Nil && target.AccountID == accountID && target.DeviceID != nil && *target.DeviceID == deviceID && target.ContactID != nil && *target.ContactID != uuid.Nil && target.JID == jid
 }
 func sameNativeForwardTarget(expected, current *domain.Chat) bool {
-	return expected != nil && current != nil && expected.DeviceID != nil && current.ContactID != nil && expected.ContactID != nil && current.ID == expected.ID && validNativeForwardTarget(current, expected.AccountID, *expected.DeviceID, expected.JID) && *current.ContactID == *expected.ContactID
+	return expected != nil && current != nil && expected.DeviceID != nil && current.ContactID != nil && expected.ContactID != nil && current.ID == expected.ID && current.BindingRevision == expected.BindingRevision && current.BindingState == expected.BindingState && validNativeForwardTarget(current, expected.AccountID, *expected.DeviceID, expected.JID) && *current.ContactID == *expected.ContactID
 }
 
 // Only group destinations need a renewed remote membership/admin snapshot;

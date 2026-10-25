@@ -435,6 +435,9 @@ func (p *DevicePool) ConnectDevice(ctx context.Context, deviceID uuid.UUID) erro
 
 	// Fence cached provider facts before this paired session can emit events.
 	if client.Store.ID != nil {
+		if _, err = p.repos.Chat.BindWhatsAppOwner(ctx, instance.AccountID, instance.ID, client.Store.ID.ToNonAD().String(), client.Store.LID.ToNonAD().String(), deviceSessionFingerprint(client.Store)); err != nil {
+			return fmt.Errorf("initialize conversation owner: %w", err)
+		}
 		if _, err = p.repos.Chat.EnsureWhatsAppIdentitySession(ctx, instance.AccountID, instance.ID, deviceSessionFingerprint(client.Store)); err != nil {
 			return fmt.Errorf("initialize scoped identity session: %w", err)
 		}
@@ -682,6 +685,11 @@ func (p *DevicePool) handleConnected(ctx context.Context, instance *DeviceInstan
 		log.Printf("[PeerIdentity] session initialization unavailable account=%s device=%s", instance.AccountID, instance.ID)
 		return
 	}
+	if _, err := p.repos.Chat.BindWhatsAppOwner(ctx, instance.AccountID, instance.ID, instance.Client.Store.ID.ToNonAD().String(), instance.Client.Store.LID.ToNonAD().String(), deviceSessionFingerprint(instance.Client.Store)); err != nil {
+		p.mu.RUnlock()
+		log.Printf("[ChatContinuity] owner initialization unavailable account=%s device=%s", instance.AccountID, instance.ID)
+		return
+	}
 	syncInitialContacts := instance.consumeInitialPairingContactSync()
 	p.mu.RUnlock()
 	if p.GroupsEnabledForAccount(instance.AccountID) {
@@ -697,6 +705,9 @@ func (p *DevicePool) handleConnected(ctx context.Context, instance *DeviceInstan
 	// Existing sessions resume without importing or merging CRM records.
 	go func() {
 		backgroundCtx := context.Background()
+		if err := p.reconcileDeviceChatContinuity(backgroundCtx, instance.AccountID, instance.ID); err != nil {
+			log.Printf("[ChatContinuity] historical proof reconciliation unavailable account=%s device=%s", instance.AccountID, instance.ID)
+		}
 		if syncInitialContacts {
 			p.syncContacts(backgroundCtx, instance)
 		}
@@ -3231,7 +3242,7 @@ func (p *DevicePool) SendMessage(ctx context.Context, deviceID uuid.UUID, to, bo
 	}
 
 	// Send message
-	resp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendMessage")
+	resp, _, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendMessage")
 	if err != nil {
 		instance.mu.Lock()
 		instance.Metrics.SendErrorCount++
@@ -3244,16 +3255,7 @@ func (p *DevicePool) SendMessage(ctx context.Context, deviceID uuid.UUID, to, bo
 	instance.Metrics.LastSendSuccess = time.Now()
 	instance.mu.Unlock()
 
-	// Get or create chat using normalized JID (without device suffix)
-	// Resolve @lid to @s.whatsapp.net for consistent chat identity
-	normalizedJID := sendJID.ToNonAD().String()
-	if sendJID.Server == types.HiddenUserServer {
-		if pnJID := p.scopedPeerPhoneJID(ctx, instance, sendJID); !pnJID.IsEmpty() {
-			normalizedJID = pnJID.User + "@s.whatsapp.net"
-			log.Printf("[SendMessage] Resolved LID %s -> %s", sendJID.ToNonAD().String(), normalizedJID)
-		}
-	}
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
+	chat, err := p.outgoingMessageChat(ctx, instance, jid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get/create chat: %w", err)
 	}
@@ -3298,6 +3300,9 @@ func (p *DevicePool) sendMessageWithLIDFallback(ctx context.Context, instance *D
 		return whatsmeow.SendResponse{}, types.EmptyJID, lifecycleErr
 	}
 	defer release()
+	if _, err := p.outgoingChatContext(ctx, instance, jid); err != nil {
+		return whatsmeow.SendResponse{}, jid, err
+	}
 	if err := p.ensureOutboundAllowed(ctx, instance, jid); err != nil {
 		return whatsmeow.SendResponse{}, jid, err
 	}
@@ -3415,19 +3420,12 @@ func (p *DevicePool) SendReplyMessage(ctx context.Context, deviceID uuid.UUID, t
 	}
 
 	// Send message
-	resp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendReplyMessage")
+	resp, _, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendReplyMessage")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send reply: %w", err)
 	}
 
-	// Get or create chat
-	normalizedJID := sendJID.ToNonAD().String()
-	if sendJID.Server == types.HiddenUserServer {
-		if pnJID := p.scopedPeerPhoneJID(ctx, instance, sendJID); !pnJID.IsEmpty() {
-			normalizedJID = pnJID.User + "@s.whatsapp.net"
-		}
-	}
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
+	chat, err := p.outgoingMessageChat(ctx, instance, jid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get/create chat: %w", err)
 	}
@@ -3614,7 +3612,7 @@ func (p *DevicePool) SendPoll(ctx context.Context, deviceID uuid.UUID, to, quest
 		},
 	}
 
-	resp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendPoll")
+	resp, _, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendPoll")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send poll: %w", err)
 	}
@@ -3625,14 +3623,7 @@ func (p *DevicePool) SendPoll(ctx context.Context, deviceID uuid.UUID, to, quest
 		body += fmt.Sprintf("\n%d. %s", i+1, opt)
 	}
 
-	// Get or create chat
-	normalizedJID := sendJID.ToNonAD().String()
-	if sendJID.Server == types.HiddenUserServer {
-		if pnJID := p.scopedPeerPhoneJID(ctx, instance, sendJID); !pnJID.IsEmpty() {
-			normalizedJID = pnJID.User + "@s.whatsapp.net"
-		}
-	}
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
+	chat, err := p.outgoingMessageChat(ctx, instance, jid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get/create chat: %w", err)
 	}
@@ -4172,20 +4163,12 @@ func (p *DevicePool) sendPreUploadedMediaMessage(ctx context.Context, deviceID u
 	}
 
 	// Send message
-	sendResp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendPreUploadedMedia")
+	sendResp, _, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendPreUploadedMedia")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send message: %w", err)
 	}
 
-	// Get or create chat using normalized JID
-	normalizedJID := sendJID.ToNonAD().String()
-	if sendJID.Server == types.HiddenUserServer {
-		if pnJID := p.scopedPeerPhoneJID(ctx, instance, sendJID); !pnJID.IsEmpty() {
-			normalizedJID = pnJID.User + "@s.whatsapp.net"
-			log.Printf("[SendPreUploadedMedia] Resolved LID %s -> %s", sendJID.ToNonAD().String(), normalizedJID)
-		}
-	}
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
+	chat, err := p.outgoingMessageChat(ctx, instance, jid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get/create chat: %w", err)
 	}
@@ -4325,19 +4308,12 @@ func (p *DevicePool) SendContactMessage(ctx context.Context, deviceID uuid.UUID,
 		},
 	}
 
-	sendResp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendContactMessage")
+	sendResp, _, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendContactMessage")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send contact message: %w", err)
 	}
 
-	// Get or create chat
-	normalizedJID := sendJID.ToNonAD().String()
-	if sendJID.Server == types.HiddenUserServer {
-		if pnJID := p.scopedPeerPhoneJID(ctx, instance, sendJID); !pnJID.IsEmpty() {
-			normalizedJID = pnJID.User + "@s.whatsapp.net"
-		}
-	}
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
+	chat, err := p.outgoingMessageChat(ctx, instance, jid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get/create chat: %w", err)
 	}
@@ -4469,6 +4445,13 @@ func (p *DevicePool) ResetDevice(ctx context.Context, deviceID uuid.UUID) error 
 	}
 
 	// Clear JID in database so next connect generates QR
+	device, err := p.repos.Device.GetByID(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	if err = p.repos.Chat.EndWhatsAppOwnerEpoch(ctx, device.AccountID, deviceID); err != nil {
+		return err
+	}
 	_ = p.repos.Device.UpdateJID(ctx, deviceID, "", "")
 	_ = p.repos.Device.UpdateStatus(ctx, deviceID, domain.DeviceStatusDisconnected)
 

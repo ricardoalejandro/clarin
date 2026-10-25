@@ -1,4 +1,5 @@
 import type { Chat, Message, MessageForwarding, MessageSharingLimits } from '@/types/chat'
+import { continuityChatIds } from './chatContinuity'
 import { groupWriteRestriction, isGroupChat } from '@/utils/chatGroups'
 
 const rank = { unknown: 0, not_forwarded: 1, forwarded: 2, frequently_forwarded: 3 }
@@ -46,11 +47,12 @@ export function forwardingLabel(value?: MessageForwarding): string | null {
   return state === 'frequently_forwarded' ? 'Reenviado muchas veces' : state === 'forwarded' ? 'Reenviado' : null
 }
 
-export function forwardSourceIssue(message: Message, deviceId?: string, mode: ForwardMode = 'native', variant: ForwardContentVariant = 'original'): string | null {
+export function forwardSourceIssue(message: Message, deviceId?: string, mode: ForwardMode = 'native', variant: ForwardContentVariant = 'original', sourceChat?: Chat | null): string | null {
   if (message.is_revoked) return 'Este mensaje fue eliminado y no se puede reenviar.'
   if (message.is_view_once) return 'Los mensajes de visualización única no se pueden reenviar.'
   if ((message.id || '').startsWith('optimistic-') || ['sending', 'failed'].includes(message.status)) return 'Solo puedes reenviar mensajes confirmados.'
-  if (deviceId && message.device_id && message.device_id !== deviceId) return 'El mensaje pertenece a otro dispositivo de WhatsApp.'
+  const verifiedHistory = sourceChat?.binding_state === 'verified_continuity' && sourceChat.canonical_chat_id === sourceChat.id && sourceChat.device_id === deviceId && Boolean(message.chat_id && continuityChatIds(sourceChat).has(message.chat_id))
+  if (deviceId && message.device_id && message.device_id !== deviceId && !verifiedHistory) return 'El mensaje pertenece a otro dispositivo de WhatsApp.'
   const forwarding = normalizeForwarding(message.forwarding)
   if (mode === 'native' && forwarding.state === 'unknown') return 'No conocemos si este mensaje fue reenviado. No se puede reenviar con fidelidad.'
   if (mode === 'native' && forwarding.score === null) return 'No conocemos el contador de reenvíos de este mensaje.'
@@ -64,8 +66,8 @@ export function forwardSourceIssue(message: Message, deviceId?: string, mode: Fo
 }
 
 /** Menu availability: audio conversion is a possibility, never an implicit selection. */
-export function forwardActionIssue(message: Message, deviceId?: string): string | null {
-  return forwardSourceIssue(message, deviceId, 'copy', message.message_type === 'audio' && typeof message.audio_ptt !== 'boolean' ? 'audio_document' : 'original')
+export function forwardActionIssue(message: Message, deviceId?: string, sourceChat?: Chat | null): string | null {
+  return forwardSourceIssue(message, deviceId, 'copy', message.message_type === 'audio' && typeof message.audio_ptt !== 'boolean' ? 'audio_document' : 'original', sourceChat)
 }
 
 export function forwardLimits(message: Message) {
@@ -115,7 +117,7 @@ export interface ForwardBatchReceipt {
   results: ForwardDestinationResult[]
   forwarding?: MessageForwarding
 }
-export interface StoredForwardBatch { request: ForwardBatchRequest; receipt?: ForwardBatchReceipt }
+export interface StoredForwardBatch { binding_revision?: number; request: ForwardBatchRequest; receipt?: ForwardBatchReceipt }
 export const forwardingSessionKey = (scope: string, chatId: string, messageId: string, deviceId: string) => `clarin:forward:${scope}:${deviceId}:${chatId}:${messageId}`
 
 export function parseForwardReceipt(data: unknown, request: ForwardBatchRequest): ForwardBatchReceipt {
@@ -137,7 +139,7 @@ export function parseForwardReceipt(data: unknown, request: ForwardBatchRequest)
 const pendingForwardBatches = new Map<string, StoredForwardBatch>()
 export function rememberForwardBatch(key: string, batch: StoredForwardBatch | null) {
   // Retain only operation/destination identities and delivery outcomes, never message content.
-  const clean = batch ? { request: batch.request, receipt: batch.receipt && { ...batch.receipt, results: batch.receipt.results.map(({ message: _message, ...result }) => result) } } : null
+  const clean = batch ? { request: batch.request, binding_revision: batch.binding_revision, receipt: batch.receipt && { ...batch.receipt, results: batch.receipt.results.map(({ message: _message, ...result }) => result) } } : null
   if (clean) pendingForwardBatches.set(key, clean); else pendingForwardBatches.delete(key)
   try {
     if (clean) sessionStorage.setItem(key, JSON.stringify(clean))
@@ -149,6 +151,7 @@ export function restoreForwardBatch(key: string): StoredForwardBatch | null {
   try {
     const raw = JSON.parse(sessionStorage.getItem(key) || 'null') as StoredForwardBatch | null
     if (!raw || !raw.request || !Array.isArray(raw.request.destination_chat_ids) || typeof raw.request.client_operation_id !== 'string' || raw.request.destination_chat_ids.length < 1 || raw.request.destination_chat_ids.length > 5) return null
+    if (raw.binding_revision !== undefined && (!Number.isSafeInteger(raw.binding_revision) || raw.binding_revision <= 0)) return null
     if (raw.request.mode !== undefined && raw.request.mode !== 'native' && raw.request.mode !== 'copy') return null
     if (raw.request.content_variant !== undefined && raw.request.content_variant !== 'original' && raw.request.content_variant !== 'audio_document') return null
     if (raw.receipt) parseForwardReceipt({ success: true, ...raw.receipt }, raw.request)

@@ -139,7 +139,12 @@ export interface Message {
   contact_vcard?: string
 }
 
+export type ChatBindingState = 'verified_continuity' | 'pending' | 'conflict'
 export interface Chat {
+  canonical_chat_id?: string
+  alias_chat_ids?: string[]
+  binding_revision?: number
+  binding_state?: ChatBindingState
   account_id?: string
   kind?: 'direct' | 'group'
   group?: WhatsAppGroup | null

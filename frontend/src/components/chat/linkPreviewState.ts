@@ -30,7 +30,7 @@ export function visibleLinkPreview(message: Message) {
 
 export interface LinkPreviewUpdate {
   chat_id: string
-  device_id: string
+  device_id: string | null
   /** Local UUID, not the provider message ID. */
   message_id: string
   body_snapshot: string
