@@ -14,7 +14,6 @@ import (
 	"github.com/naperu/clarin/pkg/database"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
-	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -67,14 +66,18 @@ func TestPeerIdentityScopedProviderHistoryIntegration(t *testing.T) {
 	pool := &DevicePool{repos: repos, store: shared, devices: map[uuid.UUID]*DeviceInstance{}}
 	makeInstance := func(account, device uuid.UUID) *DeviceInstance {
 		cache := &groupCountingContacts{contacts: map[types.JID]types.ContactInfo{pn: {FullName: "Unrelated phone name"}, lid: {PushName: "Observed LID name"}}}
-		instance := &DeviceInstance{ID: device, AccountID: account, Client: whatsmeow.NewClient(&store.Device{Contacts: cache, LIDs: shared.LIDMap}, nil)}
+		paired := deletionTestStore()
+		paired.Contacts, paired.LIDs = cache, shared.LIDMap
+		instance := &DeviceInstance{ID: device, AccountID: account, Client: whatsmeow.NewClient(paired, nil)}
 		pool.devices[device] = instance
 		return instance
 	}
 	instanceA, instanceB := makeInstance(accountA, deviceA), makeInstance(accountB, deviceB)
 	pnRaw, lidRaw := pn.String(), lid.String()
 	history := &waHistorySync.HistorySync{PhoneNumberToLidMappings: []*waHistorySync.PhoneNumberToLIDMapping{{PnJID: &pnRaw, LidJID: &lidRaw}}}
-	pool.observePeerIdentities(ctx, instanceA, peerHistoryObservations(history))
+	if err := pool.observePeerIdentities(ctx, instanceA, peerHistoryObservations(history)); err != nil {
+		t.Fatal(err)
+	}
 	source := types.MessageSource{Chat: lid, Sender: lid}
 	identityA := pool.resolveMessagePeerIdentity(ctx, instanceA, source)
 	identityB := pool.resolveMessagePeerIdentity(ctx, instanceB, source)
@@ -99,7 +102,10 @@ func TestPeerIdentityScopedProviderHistoryIntegration(t *testing.T) {
 	if got := pool.resolveMessagePeerIdentity(ctx, instanceB, phoneSource); got.JID != pn || !got.LID.IsEmpty() {
 		t.Fatalf("canonical PN message reconciled unproved LID: %+v", got)
 	}
-	pollutedView := pool.ResolveCachedGroupParticipant(ctx, accountB, deviceB, domain.GroupParticipant{JID: lidRaw, LID: lidRaw, Name: "Observed LID name", NameSource: "push_name"})
+	pollutedView, resolveErr := pool.ResolveCachedGroupParticipant(ctx, accountB, deviceB, domain.GroupParticipant{JID: lidRaw, LID: lidRaw, Name: "Observed LID name", NameSource: "push_name"})
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
 	if pollutedView.Name != "Nombre no disponible" || pollutedView.Phone != "" {
 		t.Fatalf("polluted alternate cache exposed a cross-identity name: %+v", pollutedView)
 	}
@@ -107,13 +113,22 @@ func TestPeerIdentityScopedProviderHistoryIntegration(t *testing.T) {
 	// though no phone relationship has been observed by this device.
 	pool.observePeerPushName(ctx, instanceB, &events.PushName{JID: lid, JIDAlt: pn, Message: &types.MessageInfo{Timestamp: time.Now().UTC()}, NewPushName: "Observed LID name"})
 	member := domain.GroupParticipant{JID: lidRaw, LID: lidRaw}
-	projectedB := pool.ResolveCachedGroupParticipant(ctx, accountB, deviceB, member)
-	addressB := pool.ResolveCachedGroupParticipantAddress(ctx, accountB, deviceB, member)
+	projectedB, resolveErr := pool.ResolveCachedGroupParticipant(ctx, accountB, deviceB, member)
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
+	addressB, resolveErr := pool.ResolveCachedGroupParticipantAddress(ctx, accountB, deviceB, member)
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
 	if projectedB.Phone != "" || projectedB.Name != "Observed LID name" || addressB.Phone != "" {
 		t.Fatalf("group/profile exposed unobserved phone: %+v %+v", projectedB, addressB)
 	}
 	legacyB := domain.GroupParticipant{JID: pnRaw, LID: lidRaw, Phone: pn.User, Name: "Unrelated phone name"}
-	legacyViewB := pool.ResolveCachedGroupParticipant(ctx, accountB, deviceB, legacyB)
+	legacyViewB, resolveErr := pool.ResolveCachedGroupParticipant(ctx, accountB, deviceB, legacyB)
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
 	if legacyViewB.Phone != "" || legacyViewB.JID != lidRaw || legacyViewB.Name != "Observed LID name" {
 		t.Fatalf("stored old global projection exposed foreign phone: %+v", legacyViewB)
 	}
@@ -160,9 +175,14 @@ func TestPeerIdentityScopedProviderHistoryIntegration(t *testing.T) {
 		t.Fatal("background reconciliation ignored scoped source-device proof")
 	}
 	// Only delivery of this device's actual history now makes the pair usable.
-	pool.observePeerIdentities(ctx, instanceB, peerHistoryObservations(history))
+	if err := pool.observePeerIdentities(ctx, instanceB, peerHistoryObservations(history)); err != nil {
+		t.Fatal(err)
+	}
 	identityB = pool.resolveMessagePeerIdentity(ctx, instanceB, source)
-	addressB = pool.ResolveCachedGroupParticipantAddress(ctx, accountB, deviceB, member)
+	addressB, resolveErr = pool.ResolveCachedGroupParticipantAddress(ctx, accountB, deviceB, member)
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
 	if identityB.JID != pn || identityB.Pending || addressB.Phone != pn.User {
 		t.Fatalf("actual device history did not establish scoped pair: %+v %+v", identityB, addressB)
 	}

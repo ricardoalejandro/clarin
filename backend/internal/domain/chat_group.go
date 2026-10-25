@@ -57,6 +57,8 @@ type GroupParticipantCapabilities struct {
 }
 
 type GroupParticipantProfile struct {
+	IdentityRevision    int64                           `json:"identity_revision"`
+	GroupRevision       int64                           `json:"group_revision"`
 	Participant         GroupParticipant                `json:"participant"`
 	DeviceID            uuid.UUID                       `json:"device_id"`
 	IdentityFingerprint string                          `json:"identity_fingerprint"`

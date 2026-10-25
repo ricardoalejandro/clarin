@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"context"
+	"fmt"
 	"github.com/naperu/clarin/internal/repository"
 	"strings"
 
@@ -94,13 +95,17 @@ func resolveGroupMemberIdentity(part types.GroupParticipant, ownPN, ownLID, mapp
 
 // ResolveCachedGroupParticipant reads only the selected device's provider cache.
 // It never creates or updates CRM identity records.
-func (p *DevicePool) ResolveCachedGroupParticipant(ctx context.Context, accountID, deviceID uuid.UUID, member domain.GroupParticipant) domain.GroupParticipant {
-	return p.ResolveCachedGroupParticipants(ctx, accountID, deviceID, []domain.GroupParticipant{member})[0]
+func (p *DevicePool) ResolveCachedGroupParticipant(ctx context.Context, accountID, deviceID uuid.UUID, member domain.GroupParticipant) (domain.GroupParticipant, error) {
+	rows, err := p.ResolveCachedGroupParticipants(ctx, accountID, deviceID, []domain.GroupParticipant{member})
+	if err != nil {
+		return domain.GroupParticipant{}, err
+	}
+	return rows[0], nil
 }
 
 // Secondary photo/about lookups need verified addressing, not an address-book
 // scan or CRM projection for every image request.
-func (p *DevicePool) ResolveCachedGroupParticipantAddress(ctx context.Context, accountID, deviceID uuid.UUID, member domain.GroupParticipant) domain.GroupParticipant {
+func (p *DevicePool) ResolveCachedGroupParticipantAddress(ctx context.Context, accountID, deviceID uuid.UUID, member domain.GroupParticipant) (domain.GroupParticipant, error) {
 	var instance *DeviceInstance
 	if p != nil {
 		instance = p.GetDevice(deviceID)
@@ -108,30 +113,46 @@ func (p *DevicePool) ResolveCachedGroupParticipantAddress(ctx context.Context, a
 			instance = nil
 		}
 	}
+	fingerprint := ""
+	if instance != nil && instance.Client != nil {
+		fingerprint = deviceSessionFingerprint(instance.Client.Store)
+	}
 	var aliases *domain.WhatsAppPeerIdentitySnapshot
 	if p != nil && p.repos != nil && p.repos.Chat != nil {
-		aliases, _ = p.repos.Chat.WhatsAppPeerAliases(ctx, accountID, deviceID, peerIdentityJIDs([]domain.GroupParticipant{member}))
+		var err error
+		aliases, err = p.repos.Chat.WhatsAppPeerAliases(ctx, accountID, deviceID, peerIdentityJIDs([]domain.GroupParticipant{member}))
+		if err != nil {
+			return domain.GroupParticipant{}, fmt.Errorf("load participant addressing: %w", err)
+		}
 	}
-	return projectDurablePeer(ctx, instance, member, nil, aliases)
+	if fingerprint != "" {
+		if err := p.requirePeerIdentitySession(instance, fingerprint); err != nil {
+			return domain.GroupParticipant{}, err
+		}
+	}
+	return projectDurablePeer(ctx, instance, member, nil, aliases), nil
 }
 
 // The provider has no bounded name-batch API. Prefetch its local contact cache
 // once per page/operation instead of issuing a lookup for every PN/LID alias.
-func (p *DevicePool) ResolveCachedGroupParticipants(ctx context.Context, accountID, deviceID uuid.UUID, members []domain.GroupParticipant) []domain.GroupParticipant {
+func (p *DevicePool) ResolveCachedGroupParticipants(ctx context.Context, accountID, deviceID uuid.UUID, members []domain.GroupParticipant) ([]domain.GroupParticipant, error) {
 	return p.GroupParticipantIdentities(ctx, accountID, deviceID).Resolve(ctx, members)
 }
 
 // One operation owns this provider-local snapshot, shared by search and its
 // returned page so filtering cannot miss a name that the page will display.
 type GroupParticipantIdentitySnapshot struct {
+	pool                *DevicePool
+	fingerprint         string
 	instance            *DeviceInstance
 	contacts            map[types.JID]types.ContactInfo
 	repo                *repository.ChatRepository
 	accountID, deviceID uuid.UUID
+	initErr             error
 }
 
 func (p *DevicePool) GroupParticipantIdentities(ctx context.Context, accountID, deviceID uuid.UUID) *GroupParticipantIdentitySnapshot {
-	snapshot := &GroupParticipantIdentitySnapshot{accountID: accountID, deviceID: deviceID}
+	snapshot := &GroupParticipantIdentitySnapshot{pool: p, accountID: accountID, deviceID: deviceID}
 	if p == nil {
 		return snapshot
 	}
@@ -143,13 +164,23 @@ func (p *DevicePool) GroupParticipantIdentities(ctx context.Context, accountID, 
 		return snapshot
 	}
 	snapshot.instance = instance
+	snapshot.fingerprint = deviceSessionFingerprint(instance.Client.Store)
 	if instance.Client.Store.Contacts != nil {
-		snapshot.contacts, _ = instance.Client.Store.Contacts.GetAllContacts(ctx)
+		snapshot.contacts, snapshot.initErr = instance.Client.Store.Contacts.GetAllContacts(ctx)
 	}
 	return snapshot
 }
 
-func (s *GroupParticipantIdentitySnapshot) Resolve(ctx context.Context, members []domain.GroupParticipant) []domain.GroupParticipant {
+func (s *GroupParticipantIdentitySnapshot) Resolve(ctx context.Context, members []domain.GroupParticipant) ([]domain.GroupParticipant, error) {
+	if s != nil && s.initErr != nil {
+		return nil, fmt.Errorf("load participant names: %w", s.initErr)
+	}
+	if s != nil && s.instance != nil && s.fingerprint != "" {
+		if err := s.pool.requirePeerIdentitySession(s.instance, s.fingerprint); err != nil {
+			return nil, err
+		}
+	}
+	members = append([]domain.GroupParticipant(nil), members...)
 	var instance *DeviceInstance
 	var contacts map[types.JID]types.ContactInfo
 	if s != nil {
@@ -160,12 +191,21 @@ func (s *GroupParticipantIdentitySnapshot) Resolve(ctx context.Context, members 
 	}
 	var durable *domain.WhatsAppPeerIdentitySnapshot
 	if s != nil && s.repo != nil {
-		durable, _ = s.repo.WhatsAppPeerIdentities(ctx, s.accountID, s.deviceID, peerIdentityJIDs(members))
+		var err error
+		durable, err = s.repo.WhatsAppPeerIdentities(ctx, s.accountID, s.deviceID, peerIdentityJIDs(members))
+		if err != nil {
+			return nil, fmt.Errorf("load participant identity: %w", err)
+		}
+	}
+	if s != nil && s.instance != nil && s.fingerprint != "" {
+		if err := s.pool.requirePeerIdentitySession(s.instance, s.fingerprint); err != nil {
+			return nil, err
+		}
 	}
 	for i := range members {
 		members[i] = projectDurablePeer(ctx, instance, members[i], contacts, durable)
 	}
-	return members
+	return members, nil
 }
 
 func resolveCachedGroupParticipant(ctx context.Context, instance *DeviceInstance, member domain.GroupParticipant, contacts map[types.JID]types.ContactInfo) domain.GroupParticipant {
@@ -245,7 +285,10 @@ func (p *DevicePool) updateGroupParticipantNames(ctx context.Context, instance *
 			member.Phone = pn.User
 		}
 	}
-	resolved := p.ResolveCachedGroupParticipant(ctx, instance.AccountID, instance.ID, member)
+	resolved, err := p.ResolveCachedGroupParticipant(ctx, instance.AccountID, instance.ID, member)
+	if err != nil {
+		return
+	}
 	if resolved.NameSource == "phone" || resolved.NameSource == "unavailable" {
 		return
 	}

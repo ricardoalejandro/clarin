@@ -5,8 +5,9 @@ import type { Chat, GroupParticipant, WhatsAppGroup } from '@/types/chat'
 import { SEARCH_DEBOUNCE_MS } from '@/lib/useDebouncedValue'
 import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
 import { subscribeWebSocket } from '@/lib/api'
+import { isIdentityRevision } from './groupIdentityRecovery'
 import { groupParticipantLabel, groupParticipantPhone, mergeParticipantPage, sameParticipant } from './groupParticipantIdentity'
-import type { OpenParticipantChat } from './groupParticipantTypes'
+import { parseGroupIdentityRevisions, type GroupIdentityRevisions, type OpenParticipantChat } from './groupParticipantTypes'
 import GroupParticipantProfile, { type GroupParticipantProfileHandle } from './GroupParticipantProfile'
 import WebText from '@/components/WebText'
 
@@ -41,6 +42,10 @@ function GroupDetailsSession({ chat, onClose, onOpenChat, suspended = false, sco
   const historyIdentity = `${scope}:${chat.id}`
   const lease = useRef<AbortController | null>(null)
   const sequence = useRef(0)
+  const identitySnapshot = useRef<GroupIdentityRevisions | null>(null)
+  const minimumIdentityRevision = useRef(0)
+  const minimumGroupRevision = useRef(0)
+  const observedCrmRevision = useRef<number | undefined>(undefined)
   const membersRef = useRef(members)
   const lastQuery = useRef(settled)
   const listScroll = useRef<HTMLDivElement>(null)
@@ -56,15 +61,23 @@ function GroupDetailsSession({ chat, onClose, onOpenChat, suspended = false, sco
   }, [search, settled])
   const updateSearch = (value: string) => {
     lease.current?.abort(); sequence.current++; setLoading(false); setSearch(value)
-    if (!value) { setSettled(''); setRevision(revision => revision + 1) }
   }
   useEffect(() => subscribeWebSocket((raw: unknown) => {
-    const event = raw as { event?: string; type?: string; account_id?: string; data?: { chat_id?: string; device_id?: string; account_id?: string } }
+    const event = raw as { event?: string; type?: string; account_id?: string; data?: { chat_id?: string; device_id?: string; account_id?: string; identity_revision?: number; group_revision?: number; crm_identity_revision?: number } }
     const type = event.event || event.type
     if (getAuthScope() !== scope || isAuthIdentityChanging(scope)) return
     if (chat.account_id && [event.account_id, event.data?.account_id].some(account => account && account !== chat.account_id)) return
-    if (type === 'contact_update' || type === 'chat_group_updated' && event.data?.chat_id === chat.id
-      || (type === 'device_status' || type === 'device_deletion') && event.data?.device_id === chat.device_id) setRevision(value => value + 1)
+    const crmRevision = event.data?.crm_identity_revision
+    const crmUpdate = type === 'whatsapp_crm_identity_updated' && Boolean(chat.account_id)
+      && [event.account_id, event.data?.account_id].includes(chat.account_id)
+      && (crmRevision === undefined || isIdentityRevision(crmRevision) && (observedCrmRevision.current === undefined || crmRevision > observedCrmRevision.current))
+    if (crmUpdate && isIdentityRevision(crmRevision)) observedCrmRevision.current = crmRevision
+    if (crmUpdate || type === 'contact_update' || type === 'chat_group_updated' && event.data?.chat_id === chat.id
+      || (type === 'whatsapp_identity_updated' || type === 'device_status' || type === 'device_deletion') && event.data?.device_id === chat.device_id) {
+      if (event.data?.device_id === chat.device_id && isIdentityRevision(event.data?.identity_revision)) minimumIdentityRevision.current = Math.max(minimumIdentityRevision.current, event.data.identity_revision)
+      if (event.data?.chat_id === chat.id && isIdentityRevision(event.data?.group_revision)) minimumGroupRevision.current = Math.max(minimumGroupRevision.current, event.data.group_revision)
+      lease.current?.abort(); sequence.current++; setLoading(false); setRevision(value => value + 1)
+    }
   }), [chat.id, chat.device_id, chat.account_id, scope])
   const load = useCallback(async (after = '', refresh = false) => {
     if (!active.current || getAuthScope() !== scope || isAuthIdentityChanging(scope)) return
@@ -91,6 +104,11 @@ function GroupDetailsSession({ chat, onClose, onOpenChat, suspended = false, sco
       }
       // A provider refresh must commit before reading the new participant snapshot.
       const [metadata, first] = refresh ? [await metadataRequest, await page(after)] : await Promise.all([metadataRequest, page(after)])
+      const snapshot = parseGroupIdentityRevisions(first)
+      if (snapshot.identity_revision < minimumIdentityRevision.current || snapshot.group_revision < minimumGroupRevision.current) throw new Error('La respuesta del grupo está desactualizada. Vuelve a actualizarlo.')
+      const previous = identitySnapshot.current
+      if (previous && (snapshot.identity_revision < previous.identity_revision || snapshot.group_revision < previous.group_revision)) throw new Error('La respuesta del grupo está desactualizada. Vuelve a actualizarlo.')
+      if (after && previous && (snapshot.identity_revision !== previous.identity_revision || snapshot.group_revision !== previous.group_revision)) { controller.abort(); setLoading(false); setRevision(value => value + 1); return }
       let rows = mergeParticipantPage([], first.participants)
       let next = first.next_cursor || ''
       const seen = new Set<string>()
@@ -98,11 +116,14 @@ function GroupDetailsSession({ chat, onClose, onOpenChat, suspended = false, sco
         seen.add(next)
         const extra = await page(next)
         if (!isCurrent()) return
+        const extraSnapshot = parseGroupIdentityRevisions(extra)
+        if (extraSnapshot.identity_revision !== snapshot.identity_revision || extraSnapshot.group_revision !== snapshot.group_revision) { controller.abort(); setLoading(false); setRevision(value => value + 1); return }
         rows = mergeParticipantPage(rows, extra.participants, true)
         next = extra.next_cursor || ''
       }
       if (!isCurrent()) return
       const scroll = listScroll.current?.scrollTop || 0
+      identitySnapshot.current = snapshot
       setGroup(metadata.group)
       setMembers(current => mergeParticipantPage(current, rows, Boolean(after)))
       setSelected(current => current ? rows.find(row => sameParticipant(row, current)) || current : null)
@@ -202,7 +223,7 @@ function GroupDetailsSession({ chat, onClose, onOpenChat, suspended = false, sco
         </div>
       </div>
     </section>
-    {selected && <GroupParticipantProfile ref={profileRef} snapshotRevision={revision} key={selected.lid || selected.jid} chat={chat} member={selected} scope={scope} suspended={suspended} onBack={back} onClose={() => requestClose()} onOpenChat={onOpenChat} />}
+    {selected && <GroupParticipantProfile ref={profileRef} snapshotRevision={revision} identityRevision={Math.max(identitySnapshot.current?.identity_revision || 0, minimumIdentityRevision.current)} groupRevision={Math.max(identitySnapshot.current?.group_revision || 0, minimumGroupRevision.current)} key={selected.lid || selected.jid} chat={chat} member={selected} scope={scope} suspended={suspended} onBack={back} onClose={() => requestClose()} onOpenChat={onOpenChat} />}
   </div>
 }
 

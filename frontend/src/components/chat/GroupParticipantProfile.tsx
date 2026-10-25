@@ -26,12 +26,12 @@ export interface GroupParticipantProfileHandle {
   back: () => boolean
 }
 
-function GroupParticipantProfileImpl({ chat, member, scope, suspended = false, snapshotRevision = 0, onBack, onClose, onOpenChat }: {
-  chat: Chat; member: GroupParticipant; scope: string; suspended?: boolean; snapshotRevision?: number
+function GroupParticipantProfileImpl({ chat, member, scope, suspended = false, snapshotRevision = 0, identityRevision, groupRevision, onBack, onClose, onOpenChat }: {
+  chat: Chat; member: GroupParticipant; scope: string; suspended?: boolean; snapshotRevision?: number; identityRevision?: number; groupRevision?: number
   onBack: () => void; onClose: () => void; onOpenChat?: OpenParticipantChat
 }, forwardedRef: ForwardedRef<GroupParticipantProfileHandle>) {
   const path = groupParticipantPath(chat.id, member.jid)
-  const requestKey = `${scope}:${path}:${chat.device_id}:${snapshotRevision}`
+  const requestKey = `${scope}:${path}:${chat.device_id}:${snapshotRevision}:${identityRevision}:${groupRevision}`
   const requestKeyRef = useRef(requestKey)
   requestKeyRef.current = requestKey
   const [snapshot, setSnapshot] = useState<{ key: string; profile: Profile } | null>(null)
@@ -94,6 +94,7 @@ function GroupParticipantProfileImpl({ chat, member, scope, suspended = false, s
     void fetch(path, { credentials: 'include', cache: 'no-store', signal: controller.signal }).then(readJSON).then(data => {
       if (!current(controller)) return
       const parsed = parseGroupParticipantProfile(data.profile)
+      if (identityRevision !== undefined && parsed.identity_revision < identityRevision || groupRevision !== undefined && parsed.group_revision < groupRevision) throw new Error('La información del integrante cambió. Vuelve a consultar el perfil.')
       if (!sameParticipant(parsed.participant, member)) throw new Error('La identidad del integrante cambió. Vuelve a consultar el perfil.')
       if (parsed.device_id !== chat.device_id) throw new Error('El dispositivo del grupo cambió. Vuelve a consultar el integrante.')
       setSnapshot({ key: requestKey, profile: parsed }); setPhase('ready')

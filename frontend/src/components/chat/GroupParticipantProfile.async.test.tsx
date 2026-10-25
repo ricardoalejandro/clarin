@@ -21,14 +21,14 @@ const member: GroupParticipant = { jid: '51999999999@s.whatsapp.net', phone: '51
 const chat: Chat = { id: 'group-async', kind: 'group', jid: 'group-async@g.us', name: 'Grupo de prueba', device_id: 'device', device_name: 'Dispositivo del grupo', unread_count: 0, last_message: '', last_message_at: '', group: { subject: 'Grupo de prueba', participant_count: 1, membership_status: 'member', announce: false, can_send: true } }
 const privateChat: Chat = { ...chat, id: 'private-async', kind: 'direct', jid: member.jid, group: undefined }
 const capabilities = { can_message: true, can_query_avatar: false, can_query_about: false, can_list_common_groups: false }
-const profile = (extra = {}) => ({ participant: member, device_id: chat.device_id, identity_fingerprint: 'fingerprint-current', capabilities, ...extra })
+const profile = (extra = {}) => ({ identity_revision: 1, group_revision: 1, participant: member, device_id: chat.device_id, identity_fingerprint: 'fingerprint-current', capabilities, ...extra })
 function response(data: unknown, status = 200): Response { return { ok: status >= 200 && status < 300, status, json: async () => data } as Response }
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done }); return { resolve, promise } }
 function install(overrides: (url: string, init?: RequestInit) => Response | Promise<Response> | undefined = () => undefined) {
   const request = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input), override = overrides(url, init)
     if (override) return override
-    if (url.includes('/participants?')) return response({ success: true, participants: [member], next_cursor: '' })
+    if (url.includes('/participants?')) return response({ success: true, identity_revision: 1, group_revision: 1, participants: [member], next_cursor: '' })
     if (url.endsWith('/group')) return response({ success: true, group: chat.group })
     if (url.includes('/common-groups?')) return response({ success: true, groups: [], next_cursor: '' })
     if (url.endsWith('/about')) return response({ success: true, about: { text: '', state: 'available' } })
@@ -163,25 +163,32 @@ describe('participant profile async identity and navigation', () => {
     expect(reads).toBe(before + 1)
   })
 
-  it.each(['envelope', 'payload'] as const)('refreshes canonical Contact identity without replacing rows and rejects another explicit %s account', async location => {
+  it.each([['envelope', 'contact_update'], ['payload', 'contact_update'], ['envelope', 'whatsapp_crm_identity_updated'], ['payload', 'whatsapp_crm_identity_updated']] as const)('refreshes Contact identity for %s %s without replacing rows or accepting another account', async (location, event) => {
     const scopedChat = { ...chat, account_id: 'account-current' }
     let name = 'Nombre CRM anterior', reads = 0
     const canonical = () => ({ ...member, name, name_source: 'contact', whatsapp_name: member.name })
-    install(url => url.includes('/participants?') ? response({ success: true, participants: [canonical()], next_cursor: '' }) : url.endsWith('/participants/' + encodeURIComponent(member.jid)) ? (reads++, response({ success: true, profile: profile({ participant: canonical(), contact_context: { contact_id: 'contact-current', context: 'contact' } }) })) : undefined)
+    install(url => url.includes('/participants?') ? response({ success: true, identity_revision: 1, group_revision: 1, participants: [canonical()], next_cursor: '' }) : url.endsWith('/participants/' + encodeURIComponent(member.jid)) ? (reads++, response({ success: true, profile: profile({ participant: canonical(), contact_context: { contact_id: 'contact-current', context: 'contact' } }) })) : undefined)
     render(<GroupDetailsPanel chat={scopedChat} onClose={vi.fn()} />)
     const row = await screen.findByRole('button', { name: 'Ver integrante: Nombre CRM anterior' })
+    const scroll = screen.getByRole('region', { name: 'Detalles del grupo' }).querySelector('.overflow-y-auto') as HTMLDivElement
+    scroll.scrollTop = 120
     fireEvent.click(row)
     await screen.findByRole('heading', { name: 'Nombre CRM anterior' })
     await waitFor(() => expect(window.history.state.__clarinGroupParticipant).toBeTruthy())
     const before = reads
-    await act(async () => { websocket.listeners.forEach(listener => listener(location === 'envelope' ? { event: 'contact_update', account_id: 'other-account', data: { id: 'contact-current' } } : { type: 'contact_update', data: { id: 'contact-current', account_id: 'other-account' } })) })
+    await act(async () => { websocket.listeners.forEach(listener => listener(location === 'envelope' ? { event, account_id: 'other-account', data: { id: 'contact-current', crm_identity_revision: 4 } } : { type: event, data: { id: 'contact-current', account_id: 'other-account', crm_identity_revision: 4 } })) })
     expect(reads).toBe(before)
     name = 'Nombre CRM actualizado'
-    await act(async () => { websocket.listeners.forEach(listener => listener({ event: 'contact_update', account_id: scopedChat.account_id, data: { id: 'contact-current' } })) })
+    await act(async () => { websocket.listeners.forEach(listener => listener({ event, account_id: scopedChat.account_id, data: { id: 'contact-current', crm_identity_revision: 4 } })) })
     await screen.findByRole('heading', { name: 'Nombre CRM actualizado' })
     expect(reads).toBe(before + 1)
+    if (event === 'whatsapp_crm_identity_updated') {
+      await act(async () => { for (const revision of [4, 3]) websocket.listeners.forEach(listener => listener({ event, account_id: scopedChat.account_id, data: { crm_identity_revision: revision } })) })
+      expect(reads).toBe(before + 1)
+    }
     fireEvent.click(screen.getByRole('button', { name: 'Volver a participantes' }))
     expect(await screen.findByRole('button', { name: 'Ver integrante: Nombre CRM actualizado' })).toBe(row)
+    expect(scroll.scrollTop).toBe(120)
   })
 
   it('uses Back for the nested Contact, then the profile, without replacing the participant list DOM', async () => {
@@ -260,5 +267,52 @@ it('shows an available username independently from the profile name and unavaila
   expect(await screen.findByText('Usuario: @ale.test')).toBeInTheDocument()
   expect(screen.getByRole('heading', { name: 'Nombre no disponible' })).toBeInTheDocument()
   expect(screen.getByText('Teléfono no disponible')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Mensaje' })).toBeDisabled()
+})
+
+
+it('discards an old participant response after identity recovery updates the device', async () => {
+  const old = deferred<Response>()
+  let calls = 0
+  let oldSignal: AbortSignal | null | undefined
+  install((url, init) => {
+    if (!url.includes('/participants?')) return
+    calls++
+    if (calls === 1) { oldSignal = init?.signal; return old.promise }
+    return response({ success: true, identity_revision: 2, group_revision: 2, participants: [{ ...member, name: 'Nombre recuperado' }], next_cursor: '' })
+  })
+  render(<GroupDetailsPanel chat={chat} onClose={() => {}} />)
+  await waitFor(() => expect(calls).toBe(1))
+  act(() => { websocket.listeners.forEach(listener => listener({ event: 'whatsapp_identity_updated', data: { device_id: chat.device_id, identity_revision: 2 } })) })
+  expect(oldSignal?.aborted).toBe(true)
+  expect(await screen.findByText('Nombre recuperado')).toBeInTheDocument()
+  await act(async () => old.resolve(response({ success: true, identity_revision: 1, group_revision: 1, participants: [{ ...member, name: 'Respuesta antigua' }], next_cursor: '' })))
+  expect(screen.queryByText('Respuesta antigua')).not.toBeInTheDocument()
+  expect(screen.getByText('Nombre recuperado')).toBeInTheDocument()
+})
+
+it('preserves the participant row and reading position while replacing revoked identity fields', async () => {
+  let version = 1
+  const oldMember = { ...member, lid: '7001@lid', username: 'usuario.anterior', avatar_url: '/old-avatar', avatar_source: 'whatsapp', role: 'admin' }
+  const canonical = { jid: '7001@lid', lid: '7001@lid', name: 'Nombre actualizado', role: 'member', is_self: false }
+  install(url => url.includes('/participants?') ? response({ success: true, identity_revision: version, group_revision: version, participants: [version === 1 ? oldMember : canonical], next_cursor: '' }) : undefined)
+  const { container } = render(<GroupDetailsPanel chat={chat} onClose={() => {}} />)
+  const row = await screen.findByRole('button', { name: 'Ver integrante: Nombre WhatsApp' })
+  const scroll = container.querySelector('.overflow-y-auto') as HTMLDivElement
+  scroll.scrollTop = 120
+  version = 2
+  act(() => { websocket.listeners.forEach(listener => listener({ event: 'whatsapp_identity_updated', data: { device_id: chat.device_id, identity_revision: 2 } })) })
+  const next = await screen.findByRole('button', { name: 'Ver integrante: Nombre actualizado' })
+  expect(next).toBe(row)
+  expect(scroll.scrollTop).toBe(120)
+  expect(screen.queryByText('Usuario: @usuario.anterior')).not.toBeInTheDocument()
+  expect(screen.getByText('Teléfono no disponible')).toBeInTheDocument()
+  expect(screen.queryByText('Admin')).not.toBeInTheDocument()
+})
+
+it('rejects a profile older than the participant snapshot before enabling Message', async () => {
+  install()
+  render(<GroupParticipantProfile chat={chat} member={member} scope={getAuthScope()} identityRevision={2} groupRevision={1} onBack={() => {}} onClose={() => {}} onOpenChat={() => {}} />)
+  expect(await screen.findByText('La información del integrante cambió. Vuelve a consultar el perfil.')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Mensaje' })).toBeDisabled()
 })

@@ -68,7 +68,7 @@ func groupMemberCapabilities(member domain.GroupParticipant, connected bool) dom
 	case !connected:
 		caps.MessageDisabledReason = "El dispositivo de este grupo no está conectado"
 	case !validWhatsAppPhone(member.Phone):
-		caps.MessageDisabledReason = "WhatsApp no proporciona un teléfono verificable para este integrante"
+		caps.MessageDisabledReason = "Aún no se ha podido comprobar el teléfono de este integrante"
 	default:
 		caps.CanMessage = true
 	}
@@ -98,7 +98,11 @@ func (s *Server) projectGroupParticipantsWithSnapshot(c *fiber.Ctx, chat *domain
 	if snapshot == nil {
 		snapshot = s.pool.GroupParticipantIdentities(c.Context(), chat.AccountID, *chat.DeviceID)
 	}
-	members = snapshot.Resolve(c.Context(), members)
+	var resolveErr error
+	members, resolveErr = snapshot.Resolve(c.Context(), members)
+	if resolveErr != nil {
+		return nil, nil, nil, resolveErr
+	}
 	for i := range members {
 		members[i].WhatsAppName = members[i].Name
 		members[i].AvatarSource = "whatsapp"
@@ -147,6 +151,10 @@ func (s *Server) loadGroupParticipantScope(c *fiber.Ctx, withProjection bool) (*
 	if chat.DeviceID == nil {
 		return nil, fiber.ErrNotFound
 	}
+	beforeIdentity, beforeGroup, err := s.repos.Chat.SnapshotVersionByGroupJID(c.Context(), chat.AccountID, *chat.DeviceID, chat.JID)
+	if err != nil {
+		return nil, fiber.ErrInternalServerError
+	}
 	if err = s.repos.Chat.HydrateGroups(c.Context(), chat.AccountID, []*domain.Chat{chat}); err != nil {
 		return nil, fiber.ErrInternalServerError
 	}
@@ -173,7 +181,10 @@ func (s *Server) loadGroupParticipantScope(c *fiber.Ctx, withProjection bool) (*
 			return nil, fiber.ErrInternalServerError
 		}
 	} else {
-		projected[0] = s.pool.ResolveCachedGroupParticipantAddress(c.Context(), chat.AccountID, *chat.DeviceID, *member)
+		projected[0], err = s.pool.ResolveCachedGroupParticipantAddress(c.Context(), chat.AccountID, *chat.DeviceID, *member)
+		if err != nil {
+			return nil, fiber.ErrInternalServerError
+		}
 	}
 	device, err := s.services.Device.GetByID(c.Context(), *chat.DeviceID)
 	if err != nil {
@@ -183,7 +194,14 @@ func (s *Server) loadGroupParticipantScope(c *fiber.Ctx, withProjection bool) (*
 		return nil, fiber.ErrNotFound
 	}
 	connected := deviceCanSendManual(device)
-	profile := domain.GroupParticipantProfile{Participant: projected[0], DeviceID: *chat.DeviceID, Capabilities: groupMemberCapabilities(projected[0], connected)}
+	identityRevision, groupRevision, err := s.repos.Chat.SnapshotVersionByGroupJID(c.Context(), chat.AccountID, *chat.DeviceID, chat.JID)
+	if err != nil {
+		return nil, fiber.ErrInternalServerError
+	}
+	if beforeIdentity != identityRevision || beforeGroup != groupRevision {
+		return nil, fiber.NewError(fiber.StatusConflict, "La identidad se actualizó durante la consulta. Reintenta.")
+	}
+	profile := domain.GroupParticipantProfile{IdentityRevision: identityRevision, GroupRevision: groupRevision, Participant: projected[0], DeviceID: *chat.DeviceID, Capabilities: groupMemberCapabilities(projected[0], connected)}
 	scope := &groupMemberScope{Chat: chat, RawMember: *member, Profile: profile}
 	if id, ok := canonical[0]; ok {
 		scope.CanonicalContactID = &id

@@ -51,7 +51,9 @@ func matchWhatsAppGroupMembers(ctx context.Context, db groupMemberIdentityQuerie
 				AS r(ordinal, phone, phone_jid, lid)
 		), contact_raw_identity AS (
 			SELECT c.id AS contact_id,
-			       REGEXP_REPLACE(COALESCE(NULLIF(c.phone, ''), SPLIT_PART(c.jid, '@', 1)), '[^0-9]', '', 'g') AS digits
+			       REGEXP_REPLACE(COALESCE(NULLIF(c.phone, ''),
+			           CASE WHEN LOWER(c.jid) ~ '^[0-9]+@(s[.]whatsapp[.]net|c[.]us)$'
+			                THEN SPLIT_PART(c.jid, '@', 1) ELSE '' END), '[^0-9]', '', 'g') AS digits
 			FROM contacts c
 			WHERE c.account_id = $1 AND c.is_group = FALSE
 		), contact_identity AS (

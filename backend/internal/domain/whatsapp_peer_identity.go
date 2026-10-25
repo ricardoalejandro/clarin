@@ -37,13 +37,15 @@ func WhatsAppIdentitySourcePriority(source string) int {
 		return 200
 	case "contact_action", "lid_contact_action":
 		return 100
+	case "user_info", "usync_check":
+		return 85
 	case "business_name_event":
 		return 90
 	case "push_name_event", "message":
 		return 80
 	case "history_account_deleted":
 		return 40
-	case "history_account", "history_contact":
+	case "history_account", "history_contact", "migration_sync":
 		return 30
 	case "history_message", "stored_message":
 		return 20
@@ -68,7 +70,7 @@ func WhatsAppIdentityFieldNewer(next, previous WhatsAppIdentityField) bool {
 	} else if previous.ObservedAt != nil {
 		return false
 	}
-	return WhatsAppIdentitySourcePriority(next.Source) > WhatsAppIdentitySourcePriority(previous.Source)
+	return next.ObservedAt != nil && WhatsAppIdentitySourcePriority(next.Source) > WhatsAppIdentitySourcePriority(previous.Source)
 }
 
 func ValidWhatsAppIdentityField(field string) bool {

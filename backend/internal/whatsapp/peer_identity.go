@@ -2,18 +2,26 @@ package whatsapp
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/naperu/clarin/internal/domain"
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/proto/waLidMigrationSyncPayload"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 )
 
 func peerObservation(jid, alt types.JID, source string, at *time.Time, fields map[string]string) domain.WhatsAppPeerObservation {
+	jid, alt = normalizePeerWireJID(jid), normalizePeerWireJID(alt)
+	if at != nil && at.IsZero() {
+		at = nil
+	}
 	out := domain.WhatsAppPeerObservation{JID: jid.ToNonAD().String(), Source: source, ObservedAt: at, ReceivedAt: time.Now().UTC(), Fields: fields}
 	for _, address := range []types.JID{jid, alt} {
 		address = address.ToNonAD()
@@ -26,9 +34,30 @@ func peerObservation(jid, alt types.JID, source string, at *time.Time, fields ma
 	return out
 }
 
-func (p *DevicePool) observePeerIdentities(ctx context.Context, instance *DeviceInstance, observations []domain.WhatsAppPeerObservation) {
-	if p == nil || p.repos == nil || p.repos.Chat == nil || instance == nil || len(observations) == 0 {
-		return
+// Persistence errors are observable by recovery epochs as well as direct callers.
+func (p *DevicePool) observePeerIdentities(ctx context.Context, instance *DeviceInstance, observations []domain.WhatsAppPeerObservation) error {
+	fingerprint := ""
+	if instance != nil && instance.Client != nil {
+		fingerprint = deviceSessionFingerprint(instance.Client.Store)
+	}
+	return p.observePeerIdentitiesForSession(ctx, instance, fingerprint, observations)
+}
+
+func (p *DevicePool) observePeerIdentitiesForSession(ctx context.Context, instance *DeviceInstance, fingerprint string, observations []domain.WhatsAppPeerObservation) (resultErr error) {
+	defer func() {
+		recordPeerIdentityPersistence(instance, resultErr)
+		if resultErr != nil && instance != nil {
+			log.Printf("[PeerIdentity] persistence failed account=%s device=%s: %v", instance.AccountID, instance.ID, resultErr)
+		}
+	}()
+	if len(observations) == 0 {
+		return nil
+	}
+	if p == nil || p.repos == nil || p.repos.Chat == nil || instance == nil || fingerprint == "" {
+		return fmt.Errorf("identity persistence unavailable")
+	}
+	if err := p.requirePeerIdentitySession(instance, fingerprint); err != nil {
+		return err
 	}
 	changed := map[string]bool{}
 	for start := 0; start < len(observations); start += 500 {
@@ -36,17 +65,23 @@ func (p *DevicePool) observePeerIdentities(ctx context.Context, instance *Device
 		if end > len(observations) {
 			end = len(observations)
 		}
-		aliases, err := p.repos.Chat.ObserveWhatsAppPeers(ctx, instance.AccountID, instance.ID, observations[start:end])
+		if err := p.requirePeerIdentitySession(instance, fingerprint); err != nil {
+			return err
+		}
+		aliases, err := p.repos.Chat.ObserveWhatsAppPeersForSession(ctx, instance.AccountID, instance.ID, fingerprint, observations[start:end])
 		if err != nil {
-			log.Printf("[PeerIdentity] persist failed account=%s device=%s: %v", instance.AccountID, instance.ID, err)
-			return
+			return fmt.Errorf("persist peer identity: %w", err)
 		}
 		for _, alias := range aliases {
 			changed[alias] = true
 		}
 	}
-	if len(changed) == 0 || p.hub == nil {
-		return
+	if len(changed) == 0 {
+		return nil
+	}
+	p.broadcastIdentityRevision(ctx, instance.AccountID, instance.ID)
+	if p.hub == nil {
+		return nil
 	}
 	aliases := make([]string, 0, len(changed))
 	for alias := range changed {
@@ -54,15 +89,23 @@ func (p *DevicePool) observePeerIdentities(ctx context.Context, instance *Device
 	}
 	ids, err := p.repos.Chat.WhatsAppPeerGroupIDs(ctx, instance.AccountID, instance.ID, aliases)
 	if err != nil {
-		return
+		return fmt.Errorf("load affected identity groups: %w", err)
 	}
 	for _, id := range ids {
 		p.hub.BroadcastToAccountWithPermission(instance.AccountID, domain.PermChats, "chat_group_updated", map[string]interface{}{"chat_id": id, "device_id": instance.ID})
 	}
+	return nil
 }
 
 func (p *DevicePool) observePeerMessage(ctx context.Context, instance *DeviceInstance, evt *events.Message) {
-	if evt == nil || evt.Info.IsFromMe || evt.Info.Sender.IsEmpty() {
+	if evt == nil {
+		return
+	}
+	if evt.Info.IsFromMe {
+		p.observePeerIdentities(ctx, instance, peerMigrationObservations(evt))
+		return
+	}
+	if evt.Info.Sender.IsEmpty() {
 		return
 	}
 	at := evt.Info.Timestamp
@@ -73,6 +116,37 @@ func (p *DevicePool) observePeerMessage(ctx context.Context, instance *DeviceIns
 	source := p.messageSourceWithScopedPNAlt(ctx, instance, evt.Info.MessageSource)
 	p.observePeerIdentities(ctx, instance, []domain.WhatsAppPeerObservation{peerObservation(source.Sender, source.SenderAlt, "message", &at, fields)})
 }
+
+// A decoded own-device migration payload is explicit session-local evidence.
+// Its mapping snapshot has no per-pair modification date, so it cannot replace
+// a newer observed relationship merely because it was received today.
+func peerMigrationObservations(evt *events.Message) []domain.WhatsAppPeerObservation {
+	if evt == nil || !evt.Info.IsFromMe || evt.Message == nil {
+		return nil
+	}
+	payload := evt.Message.GetProtocolMessage().GetLidMigrationMappingSyncMessage().GetEncodedMappingPayload()
+	if len(payload) == 0 || len(payload) > 4<<20 {
+		return nil
+	}
+	var decoded waLidMigrationSyncPayload.LIDMigrationMappingSyncPayload
+	if proto.Unmarshal(payload, &decoded) != nil {
+		return nil
+	}
+	out := make([]domain.WhatsAppPeerObservation, 0, len(decoded.PnToLidMappings))
+	for _, entry := range decoded.PnToLidMappings {
+		if entry == nil {
+			continue
+		}
+		pn := types.NewJID(strconv.FormatUint(entry.GetPn(), 10), types.DefaultUserServer)
+		lid := types.NewJID(strconv.FormatUint(entry.GetAssignedLid(), 10), types.HiddenUserServer)
+		if row, ok := peerAliasObservation(pn, lid, "migration_sync", time.Time{}); ok {
+			row.ObservedAt = nil
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
 func peerPushNameObservation(evt *events.PushName) []domain.WhatsAppPeerObservation {
 	if evt == nil {
 		return nil
@@ -119,7 +193,8 @@ func peerContactObservation(evt *events.Contact) []domain.WhatsAppPeerObservatio
 	alt := types.EmptyJID
 	for _, raw := range []string{action.GetLidJID(), action.GetPnJID()} {
 		jid, _ := types.ParseJID(raw)
-		if !jid.IsEmpty() && jid.Server != evt.JID.Server {
+		jid = normalizePeerWireJID(jid)
+		if !jid.IsEmpty() && jid.Server != normalizePeerWireJID(evt.JID).Server {
 			alt = jid
 			break
 		}
@@ -135,6 +210,7 @@ func peerAppStateObservations(evt *events.AppState) []domain.WhatsAppPeerObserva
 		return nil
 	}
 	jid, err := types.ParseJID(evt.Index[1])
+	jid = normalizePeerWireJID(jid)
 	if err != nil || (jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer) {
 		return nil
 	}
@@ -169,6 +245,7 @@ func peerHistoryObservations(data *waHistorySync.HistorySync) []domain.WhatsAppP
 	out := []domain.WhatsAppPeerObservation{}
 	add := func(raw, alternate, source string, fields map[string]string) {
 		jid, err := types.ParseJID(raw)
+		jid = normalizePeerWireJID(jid)
 		if err != nil || (jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer) {
 			return
 		}
@@ -257,11 +334,16 @@ func peerHistoryObservations(data *waHistorySync.HistorySync) []domain.WhatsAppP
 				raw = conv.GetID()
 			}
 			jid, err := types.ParseJID(raw)
+			jid = normalizePeerWireJID(jid)
 			if err != nil || (jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer) {
 				continue
 			}
-			at := time.Unix(int64(msg.GetMessageTimestamp()), 0).UTC()
-			out = append(out, peerObservation(jid, types.EmptyJID, "history_message", &at, map[string]string{"push_name": msg.GetPushName()}))
+			var at *time.Time
+			if msg.GetMessageTimestamp() > 0 {
+				value := time.Unix(int64(msg.GetMessageTimestamp()), 0).UTC()
+				at = &value
+			}
+			out = append(out, peerObservation(jid, types.EmptyJID, "history_message", at, map[string]string{"push_name": msg.GetPushName()}))
 		}
 	}
 	return out
@@ -432,9 +514,9 @@ func projectDurablePeer(ctx context.Context, instance *DeviceInstance, member do
 	return resolved
 }
 
-func (p *DevicePool) observePeerGroupMetadata(ctx context.Context, instance *DeviceInstance, info *types.GroupInfo, contacts map[types.JID]types.ContactInfo) {
+func (p *DevicePool) observePeerGroupMetadata(ctx context.Context, instance *DeviceInstance, info *types.GroupInfo, contacts map[types.JID]types.ContactInfo) error {
 	if info == nil {
-		return
+		return nil
 	}
 	at := time.Now().UTC()
 	observations := make([]domain.WhatsAppPeerObservation, 0, len(info.Participants)*2)
@@ -468,5 +550,5 @@ func (p *DevicePool) observePeerGroupMetadata(ctx context.Context, instance *Dev
 			}
 		}
 	}
-	p.observePeerIdentities(ctx, instance, observations)
+	return p.observePeerIdentities(ctx, instance, observations)
 }

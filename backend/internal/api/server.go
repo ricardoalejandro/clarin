@@ -538,6 +538,7 @@ func (s *Server) setupRoutes() {
 	chats.Get("/:id/messages/:messageId/receipts", s.handleGroupReceipts)
 	chats.Post("/:id/messages/:messageId/media/recover", s.handleRecoverGroupMedia)
 	protected.Post("/devices/:id/groups/sync", s.requirePermission(domain.PermChats), s.handleSyncGroups)
+	protected.Get("/devices/:id/group-identities/recovery", s.handleGetGroupIdentityRecovery)
 	chats.Get("/:id", s.handleGetChatDetails)
 	chats.Put("/:id/pin", s.handleSetChatPin)
 	chats.Get("/:id/messages/search", s.handleSearchMessages)

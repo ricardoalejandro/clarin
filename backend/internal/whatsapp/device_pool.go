@@ -373,6 +373,7 @@ func (p *DevicePool) ConnectDevice(ctx context.Context, deviceID uuid.UUID) erro
 	client := whatsmeow.NewClient(waDevice, clientLog)
 	client.EnableAutoReconnect = true
 	client.AutoTrustIdentity = true
+	client.EmitAppStateEventsOnFullSync = true
 
 	// Configure media HTTP client with SOCKS5 proxy to bypass CDN throttling.
 	// WhatsApp CDN rate-limits/blocks large uploads (>100KB) from certain IPs.
@@ -420,6 +421,19 @@ func (p *DevicePool) ConnectDevice(ctx context.Context, deviceID uuid.UUID) erro
 		p.handleEvent(ctx, instance, evt)
 	})
 
+	// Fence cached provider facts before this paired session can emit events.
+	if client.Store.ID != nil {
+		if _, err = p.repos.Chat.EnsureWhatsAppIdentitySession(ctx, instance.AccountID, instance.ID, deviceSessionFingerprint(client.Store)); err != nil {
+			return fmt.Errorf("initialize scoped identity session: %w", err)
+		}
+		// Keep an existing paired but offline device visible as waiting. No
+		// inventory/provider work runs until the current client connects.
+		if p.GroupsEnabledForAccount(instance.AccountID) && instance.ReceiveMessages {
+			if _, err = p.repos.Chat.EnqueueWhatsAppIdentityRecovery(ctx, instance.AccountID, instance.ID, deviceSessionFingerprint(client.Store), "paired", nil); err != nil {
+				log.Printf("[PeerIdentity] paired recovery enqueue unavailable account=%s device=%s", instance.AccountID, instance.ID)
+			}
+		}
+	}
 	// Connect
 	if client.Store.ID == nil {
 		// New device, need QR code
@@ -535,6 +549,7 @@ func (p *DevicePool) failUnsupportedPairing(ctx context.Context, instance *Devic
 func (p *DevicePool) handleEvent(ctx context.Context, instance *DeviceInstance, rawEvt interface{}) {
 	ctx, release, err := p.retainDeviceOperation(ctx, instance.AccountID, instance.ID)
 	if err != nil {
+		recordPeerIdentityPersistence(instance, err)
 		return
 	}
 	defer release()
@@ -569,9 +584,14 @@ func (p *DevicePool) handleEvent(ctx context.Context, instance *DeviceInstance, 
 		p.observePeerBusinessName(ctx, instance, evt)
 	case *events.AppState:
 		p.observePeerIdentities(ctx, instance, peerAppStateObservations(evt))
+	case *events.AppStateSyncComplete:
+		recordPeerIdentitySyncComplete(instance, evt.Name)
+	case *events.AppStateSyncError:
+		recordPeerIdentitySyncError(instance, evt.Name, evt.Error)
 	case *events.Contact:
-		p.observePeerIdentities(ctx, instance, peerContactObservation(evt))
-		p.handleContactEvent(ctx, instance, evt)
+		if err := p.observePeerIdentities(ctx, instance, peerContactObservation(evt)); err == nil {
+			p.handleContactEvent(ctx, instance, evt)
+		}
 
 	case *events.JoinedGroup:
 		if !p.GroupsEnabledForAccount(instance.AccountID) {
@@ -611,6 +631,13 @@ func (p *DevicePool) handleConnected(ctx context.Context, instance *DeviceInstan
 		return
 	}
 
+	// ConnectDevice replaces clients under the write lock. A late Connected
+	// callback must not restore an earlier pairing's database scope or JID.
+	p.mu.RLock()
+	if p.devices[instance.ID] != instance {
+		p.mu.RUnlock()
+		return
+	}
 	jid := instance.Client.Store.ID.String()
 	phone := strings.Split(instance.Client.Store.ID.User, "@")[0]
 
@@ -632,11 +659,23 @@ func (p *DevicePool) handleConnected(ctx context.Context, instance *DeviceInstan
 
 	// Update database
 	if err := p.repos.Device.UpdateJID(ctx, instance.ID, jid, phone); err != nil {
+		p.mu.RUnlock()
 		instance.Client.EnableAutoReconnect = false
 		instance.Client.Disconnect()
 		return
 	}
 
+	if _, err := p.repos.Chat.EnsureWhatsAppIdentitySession(ctx, instance.AccountID, instance.ID, deviceSessionFingerprint(instance.Client.Store)); err != nil {
+		p.mu.RUnlock()
+		log.Printf("[PeerIdentity] session initialization unavailable account=%s device=%s", instance.AccountID, instance.ID)
+		return
+	}
+	p.mu.RUnlock()
+	if p.GroupsEnabledForAccount(instance.AccountID) {
+		if err := p.EnqueueIdentityRecovery(ctx, instance.AccountID, instance.ID, "connected"); err != nil {
+			log.Printf("[PeerIdentity] recovery enqueue unavailable account=%s device=%s", instance.AccountID, instance.ID)
+		}
+	}
 	// Broadcast status
 	p.hub.BroadcastDeviceStatus(instance.AccountID, instance.ID, domain.DeviceStatusConnected, "")
 
@@ -1911,6 +1950,9 @@ func (p *DevicePool) handlePresence(ctx context.Context, instance *DeviceInstanc
 // events.Contact comes from app state sync and has Action (*waSyncAction.ContactAction)
 // with GetFullName() and GetFirstName() methods (no BusinessName/PushName here)
 func (p *DevicePool) handleContactEvent(ctx context.Context, instance *DeviceInstance, evt *events.Contact) {
+	if !contactEventMayMutateCRM(evt) {
+		return
+	}
 	if evt.JID.Server != types.DefaultUserServer && evt.JID.Server != types.HiddenUserServer {
 		return
 	}
@@ -3035,11 +3077,18 @@ func (p *DevicePool) IsOnWhatsApp(ctx context.Context, deviceID uuid.UUID, phone
 		return nil, fmt.Errorf("device not connected: %s", deviceID)
 	}
 
+	fingerprint := deviceSessionFingerprint(instance.Client.Store)
 	results, err := instance.Client.IsOnWhatsApp(ctx, phones)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check WhatsApp: %w", err)
 	}
 
+	if err := p.requirePeerIdentitySession(instance, fingerprint); err != nil {
+		return nil, err
+	}
+	if err := p.observePeerIdentitiesForSession(ctx, instance, fingerprint, peerIsOnWhatsAppObservations(results)); err != nil {
+		return nil, err
+	}
 	checkResults := make([]domain.WhatsAppCheckResult, 0, len(results))
 	for _, r := range results {
 		var mappedPhone types.JID

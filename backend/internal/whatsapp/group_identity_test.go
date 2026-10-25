@@ -54,7 +54,7 @@ func TestGroupIdentityExplicitAliasStillHonorsSavedLIDName(t *testing.T) {
 	contacts := &groupCountingContacts{contacts: map[types.JID]types.ContactInfo{pn: {PushName: "PN push"}, lid: {FullName: "Saved LID identity"}}}
 	client := whatsmeow.NewClient(&store.Device{Contacts: contacts, LIDs: &groupIdentityLIDMap{pn: pn, lid: lid}}, nil)
 	pool := &DevicePool{devices: map[uuid.UUID]*DeviceInstance{d: {ID: d, AccountID: a, Client: client}}}
-	got := pool.ResolveCachedGroupParticipant(context.Background(), a, d, domain.GroupParticipant{JID: pn.String(), LID: lid.String()})
+	got, _ := pool.ResolveCachedGroupParticipant(context.Background(), a, d, domain.GroupParticipant{JID: pn.String(), LID: lid.String()})
 	if got.Name != "Saved LID identity" || got.NameSource != "full_name" || got.LID != lid.String() || contacts.allCalls != 1 {
 		t.Fatalf("PN-only event ignored the saved alternate alias: %+v", got)
 	}
@@ -72,7 +72,7 @@ func TestGroupIdentityPagePrefetchesProviderContactsOnce(t *testing.T) {
 	client := whatsmeow.NewClient(&store.Device{Contacts: contacts, LIDs: &store.NoopStore{}}, nil)
 	pool := &DevicePool{devices: map[uuid.UUID]*DeviceInstance{d: {ID: d, AccountID: a, Client: client}}}
 	snapshot := pool.GroupParticipantIdentities(context.Background(), a, d)
-	rows := snapshot.Resolve(context.Background(), []domain.GroupParticipant{{JID: pn.String()}, {JID: lid.String(), LID: lid.String()}})
+	rows, _ := snapshot.Resolve(context.Background(), []domain.GroupParticipant{{JID: pn.String()}, {JID: lid.String(), LID: lid.String()}})
 	snapshot.Resolve(context.Background(), []domain.GroupParticipant{{JID: pn.String()}})
 	if contacts.allCalls != 1 || rows[0].Name != "Saved identity" || rows[1].Name != "Nombre no disponible" {
 		t.Fatalf("page was not resolved in one prefetch: calls=%d rows=%+v", contacts.allCalls, rows)
@@ -80,16 +80,16 @@ func TestGroupIdentityPagePrefetchesProviderContactsOnce(t *testing.T) {
 	if !isRedactedPhoneLabel("+51····80") || isRedactedPhoneLabel("A real name *") {
 		t.Fatal("legacy redacted label classification failed")
 	}
-	legacy := pool.ResolveCachedGroupParticipantAddress(context.Background(), a, d, domain.GroupParticipant{JID: "7002@lid", LID: "7002@lid", Name: "+51····80"})
+	legacy, _ := pool.ResolveCachedGroupParticipantAddress(context.Background(), a, d, domain.GroupParticipant{JID: "7002@lid", LID: "7002@lid", Name: "+51····80"})
 	if legacy.Name != "Nombre no disponible" || legacy.RedactedPhone != "+51····80" || legacy.Phone != "" {
 		t.Fatalf("legacy redacted DisplayName became a personal name: %+v", legacy)
 	}
-	phoneOnly := pool.ResolveCachedGroupParticipantAddress(context.Background(), a, d, domain.GroupParticipant{JID: "51900000002@s.whatsapp.net", Name: "51900000002"})
+	phoneOnly, _ := pool.ResolveCachedGroupParticipantAddress(context.Background(), a, d, domain.GroupParticipant{JID: "51900000002@s.whatsapp.net", Name: "51900000002"})
 	if phoneOnly.NameSource != "phone" || phoneOnly.Phone != "51900000002" {
 		t.Fatalf("a numeric fallback became a personal name: %+v", phoneOnly)
 	}
 	var disconnected *DevicePool
-	rows = disconnected.ResolveCachedGroupParticipants(context.Background(), a, d, []domain.GroupParticipant{{JID: "7002@lid", Name: "+51····80"}})
+	rows, _ = disconnected.ResolveCachedGroupParticipants(context.Background(), a, d, []domain.GroupParticipant{{JID: "7002@lid", Name: "+51····80"}})
 	if rows[0].Name != "Nombre no disponible" || rows[0].RedactedPhone != "+51····80" {
 		t.Fatalf("disconnected cache kept an obfuscated personal name: %+v", rows[0])
 	}
@@ -171,8 +171,8 @@ func TestGroupIdentityNeverUsesSharedProviderLIDMap(t *testing.T) {
 		instance := &DeviceInstance{ID: device, AccountID: account, Client: whatsmeow.NewClient(&store.Device{Contacts: cache, LIDs: shared}, nil)}
 		pool.devices[device] = instance
 		member := domain.GroupParticipant{JID: lid.String(), LID: lid.String()}
-		got := pool.ResolveCachedGroupParticipant(ctx, account, device, member)
-		address := pool.ResolveCachedGroupParticipantAddress(ctx, account, device, member)
+		got, _ := pool.ResolveCachedGroupParticipant(ctx, account, device, member)
+		address, _ := pool.ResolveCachedGroupParticipantAddress(ctx, account, device, member)
 		report := groupReportParticipantIdentity(ctx, instance, types.GroupParticipant{JID: lid}, cache.contacts)
 		if got.Phone != "" || address.Phone != "" || report.Phone != "" || got.Name != "Visible LID name" || report.Name != got.Name {
 			t.Fatalf("global alias crossed account/device scope: group=%+v address=%+v report=%+v", got, address, report)

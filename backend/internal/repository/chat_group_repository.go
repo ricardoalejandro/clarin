@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/naperu/clarin/internal/domain"
 	"strings"
 	"time"
@@ -67,7 +68,33 @@ func (r *ChatRepository) RevealGroupActivity(ctx context.Context, accountID, dev
 	hidden, err := r.GroupHidden(ctx, accountID, deviceID, jid)
 	return !hidden, err
 }
+
+type groupCommandExecutor interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
 func (r *ChatRepository) SaveGroup(ctx context.Context, accountID, chatID uuid.UUID, group *domain.ChatGroup, participants []domain.GroupParticipant) error {
+	return saveGroupProjection(ctx, r.db, accountID, chatID, nil, group, participants)
+}
+
+// Keep a response captured by an old companion from restoring its projection
+// after EnsureWhatsAppIdentitySession retired that companion's provider facts.
+func (r *ChatRepository) SaveGroupForIdentitySession(ctx context.Context, accountID, deviceID, chatID uuid.UUID, group *domain.ChatGroup, participants []domain.GroupParticipant, fingerprint string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = requireWhatsAppIdentitySessionTx(ctx, tx, accountID, deviceID, fingerprint); err != nil {
+		return err
+	}
+	if err = saveGroupProjection(ctx, tx, accountID, chatID, &deviceID, group, participants); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func saveGroupProjection(ctx context.Context, db groupCommandExecutor, accountID, chatID uuid.UUID, deviceID *uuid.UUID, group *domain.ChatGroup, participants []domain.GroupParticipant) error {
 	if participants == nil {
 		participants = []domain.GroupParticipant{}
 	}
@@ -75,10 +102,13 @@ func (r *ChatRepository) SaveGroup(ctx context.Context, accountID, chatID uuid.U
 	if err != nil {
 		return err
 	}
-	_, err = r.db.Exec(ctx, `INSERT INTO chat_groups(account_id,chat_id,subject,description,membership_status,announce,is_admin,suspended,kind,participants,synced_at)
- SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,NOW() FROM chats WHERE account_id=$1 AND id=$2 AND jid LIKE '%@g.us'
+	result, err := db.Exec(ctx, `INSERT INTO chat_groups(account_id,chat_id,subject,description,membership_status,announce,is_admin,suspended,kind,participants,synced_at)
+ SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,NOW() FROM chats WHERE account_id=$1 AND id=$2 AND jid LIKE '%@g.us' AND ($11::uuid IS NULL OR device_id=$11)
  ON CONFLICT(account_id,chat_id) DO UPDATE SET subject=EXCLUDED.subject,description=EXCLUDED.description,membership_status=EXCLUDED.membership_status,
- announce=EXCLUDED.announce,is_admin=EXCLUDED.is_admin,suspended=EXCLUDED.suspended,kind=EXCLUDED.kind,participants=EXCLUDED.participants,synced_at=EXCLUDED.synced_at`, accountID, chatID, group.Subject, group.Description, group.MembershipStatus, group.Announce, group.IsAdmin, group.Suspended, group.Kind, data)
+ announce=EXCLUDED.announce,is_admin=EXCLUDED.is_admin,suspended=EXCLUDED.suspended,kind=EXCLUDED.kind,participants=EXCLUDED.participants,synced_at=EXCLUDED.synced_at`, accountID, chatID, group.Subject, group.Description, group.MembershipStatus, group.Announce, group.IsAdmin, group.Suspended, group.Kind, data, deviceID)
+	if err == nil && deviceID != nil && result.RowsAffected() != 1 {
+		return pgx.ErrNoRows
+	}
 	return err
 }
 func (r *ChatRepository) HydrateGroups(ctx context.Context, accountID uuid.UUID, chats []*domain.Chat) error {
@@ -401,6 +431,25 @@ func (r *MessageRepository) MarkRecoveredMediaOrphan(ctx context.Context, accoun
 }
 
 func (r *ChatRepository) ReconcileJoinedGroups(ctx context.Context, accountID, deviceID uuid.UUID, jids []string) error {
-	_, err := r.db.Exec(ctx, `UPDATE chat_groups g SET membership_status='left',synced_at=NOW() FROM chats c WHERE c.account_id=$1 AND c.channel_key=$2 AND c.jid<>ALL($3::text[]) AND g.account_id=c.account_id AND g.chat_id=c.id AND g.membership_status<>'left'`, accountID, GroupChannelKey(deviceID), jids)
+	return reconcileJoinedGroups(ctx, r.db, accountID, deviceID, jids)
+}
+
+func (r *ChatRepository) ReconcileJoinedGroupsForIdentitySession(ctx context.Context, accountID, deviceID uuid.UUID, jids []string, fingerprint string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = requireWhatsAppIdentitySessionTx(ctx, tx, accountID, deviceID, fingerprint); err != nil {
+		return err
+	}
+	if err = reconcileJoinedGroups(ctx, tx, accountID, deviceID, jids); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func reconcileJoinedGroups(ctx context.Context, db groupCommandExecutor, accountID, deviceID uuid.UUID, jids []string) error {
+	_, err := db.Exec(ctx, `UPDATE chat_groups g SET membership_status='left',synced_at=NOW() FROM chats c WHERE c.account_id=$1 AND c.channel_key=$2 AND c.device_id=$4 AND c.jid<>ALL($3::text[]) AND g.account_id=c.account_id AND g.chat_id=c.id AND g.membership_status<>'left'`, accountID, GroupChannelKey(deviceID), jids, deviceID)
 	return err
 }

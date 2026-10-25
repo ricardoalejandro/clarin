@@ -49,6 +49,13 @@ func (s *Server) handleGetGroupParticipants(c *fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	var beforeIdentity, beforeGroup int64
+	if chat.DeviceID != nil {
+		beforeIdentity, beforeGroup, err = s.repos.Chat.SnapshotVersionByGroupJID(c.Context(), chat.AccountID, *chat.DeviceID, chat.JID)
+		if err != nil {
+			return fiber.ErrInternalServerError
+		}
+	}
 	search := strings.TrimSpace(c.Query("search"))
 	var identities *whatsapp.GroupParticipantIdentitySnapshot
 	if chat.DeviceID != nil {
@@ -85,7 +92,17 @@ func (s *Server) handleGetGroupParticipants(c *fiber.Ctx) error {
 			return fiber.ErrInternalServerError
 		}
 	}
-	return c.JSON(fiber.Map{"success": true, "participants": rows, "next_cursor": next})
+	var identityRevision, groupRevision int64
+	if chat.DeviceID != nil {
+		identityRevision, groupRevision, err = s.repos.Chat.SnapshotVersionByGroupJID(c.Context(), chat.AccountID, *chat.DeviceID, chat.JID)
+		if err != nil {
+			return fiber.ErrInternalServerError
+		}
+	}
+	if beforeIdentity != identityRevision || beforeGroup != groupRevision {
+		return fiber.NewError(fiber.StatusConflict, "Los integrantes se actualizaron durante la consulta. Reintenta.")
+	}
+	return c.JSON(fiber.Map{"success": true, "participants": rows, "next_cursor": next, "identity_revision": identityRevision, "group_revision": groupRevision})
 }
 func (s *Server) handleSyncGroups(c *fiber.Ctx) error {
 	accountID := c.Locals("account_id").(uuid.UUID)
@@ -103,7 +120,11 @@ func (s *Server) handleSyncGroups(c *fiber.Ctx) error {
 		return c.Status(503).JSON(fiber.Map{"success": false, "error": "No se pudieron actualizar los grupos. Verifica la conexión y la recepción de mensajes.", "code": "group_sync_unavailable"})
 	}
 	s.invalidateChatsCache(accountID)
-	return c.JSON(fiber.Map{"success": true, "synced": count})
+	recovery, err := s.repos.Chat.IdentityRecoveryStatus(c.Context(), accountID, deviceID)
+	if err != nil {
+		return fiber.ErrInternalServerError
+	}
+	return c.JSON(fiber.Map{"success": true, "synced": count, "recovery": recovery})
 }
 func (s *Server) handleGroupReceipts(c *fiber.Ctx) error {
 	chat, err := s.groupChat(c)

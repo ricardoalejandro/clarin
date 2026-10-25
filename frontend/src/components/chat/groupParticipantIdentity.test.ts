@@ -62,8 +62,10 @@ describe('participant identity', () => {
   })
   it('rejects incomplete identities or fabricated contact access contexts before enabling actions', () => {
     expect(() => parseGroupParticipantProfile({ participant: member })).toThrow()
-    const profile = { participant: member, device_id: 'device', identity_fingerprint: 'fingerprint', capabilities: { can_message: false, can_query_avatar: false, can_query_about: false, can_list_common_groups: true } }
+    const profile = { identity_revision: 1, group_revision: 1, participant: member, device_id: 'device', identity_fingerprint: 'fingerprint', capabilities: { can_message: false, can_query_avatar: false, can_query_about: false, can_list_common_groups: true } }
     expect(parseGroupParticipantProfile(profile)).toEqual(profile)
+    expect(() => parseGroupParticipantProfile({ ...profile, identity_revision: undefined })).toThrow(/versión/)
+    expect(() => parseGroupParticipantProfile({ ...profile, group_revision: -1 })).toThrow(/versión/)
     expect(() => parseGroupParticipantProfile({ ...profile, contact_context: { contact_id: 'contact', context: 'chat' } })).toThrow(/acceso/)
   })
 })

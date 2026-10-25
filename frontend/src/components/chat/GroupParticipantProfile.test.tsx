@@ -11,7 +11,7 @@ vi.mock('@/components/contact-details/ContactDetailSurface', () => ({ default: (
 const member: GroupParticipant = { jid: '51999999999@s.whatsapp.net', phone: '51999999999', name: 'Integrante de prueba', role: 'admin', is_self: false }
 const chat: Chat = { id: 'group', kind: 'group', jid: 'group@g.us', name: 'Grupo de prueba', device_id: 'device', device_name: 'Dispositivo del grupo', unread_count: 0, last_message: '', last_message_at: '', group: { subject: 'Grupo de prueba', participant_count: 1, membership_status: 'member', announce: true, can_send: false } }
 const privateChat: Chat = { ...chat, id: 'private', kind: 'direct', jid: member.jid, group: undefined }
-const profile = (extra = {}) => ({ participant: member, device_id: 'device', identity_fingerprint: 'verified-fingerprint', capabilities: { can_message: true, can_query_avatar: false, can_query_about: true, can_list_common_groups: true }, ...extra })
+const profile = (extra = {}) => ({ identity_revision: 1, group_revision: 1, participant: member, device_id: 'device', identity_fingerprint: 'verified-fingerprint', capabilities: { can_message: true, can_query_avatar: false, can_query_about: true, can_list_common_groups: true }, ...extra })
 function response(data: unknown, status = 200): Response { return { ok: status >= 200 && status < 300, status, json: async () => data } as Response }
 function fetcher(overrides: Record<string, () => Response | Promise<Response>> = {}) {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -21,7 +21,7 @@ function fetcher(overrides: Record<string, () => Response | Promise<Response>> =
     if (url.includes('/common-groups?')) return response({ success: true, groups: [], next_cursor: '', source: 'known_device_groups' })
     if (url.endsWith('/about')) return response({ success: true, about: { text: 'Información visible', state: 'available' } })
     if (url.endsWith('/chat') && init?.method === 'POST') return response({ success: true, chat: privateChat })
-    if (url.includes('/participants?')) return response({ success: true, participants: [member], next_cursor: '' })
+    if (url.includes('/participants?')) return response({ success: true, identity_revision: 1, group_revision: 1, participants: [member], next_cursor: '' })
     if (url.endsWith('/group')) return response({ success: true, group: chat.group })
     return response({ success: true, profile: profile() })
   })

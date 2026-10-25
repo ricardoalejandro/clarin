@@ -51,6 +51,7 @@ export interface WhatsAppReportContact {
 
 export interface WhatsAppGroupCoverageMember {
   whatsapp_name: string
+  username?: string
   phone: string | null
   redacted_phone: string | null
   role: 'owner' | 'super_admin' | 'admin' | 'member'
@@ -78,6 +79,9 @@ export interface WhatsAppGroupCoverageSummary {
 }
 
 export interface WhatsAppGroupCoverageReport {
+  identity_revision: number
+  group_revision: number
+  crm_identity_revision: number
   account_id: string
   leads_enabled: boolean
   leads_policy_version: number

@@ -83,18 +83,27 @@ func normalizePeerObservation(in domain.WhatsAppPeerObservation, now time.Time) 
 }
 
 const peerIdentityFieldUpsert = `INSERT INTO whatsapp_peer_identity_fields
- (account_id,device_id,jid,field,value,source,source_priority,observed_at,received_at)
- VALUES($1,$2,$3::text,$4::text,$5::text,$6::text,$7::int,$8::timestamptz,$9::timestamptz)
+ (account_id,device_id,jid,field,value,source,source_priority,observed_at,received_at,session_generation)
+ VALUES($1,$2,$3::text,$4::text,$5::text,$6::text,$7::int,$8::timestamptz,$9::timestamptz,$10::bigint)
  ON CONFLICT(account_id,device_id,jid,field) DO UPDATE SET
  value=EXCLUDED.value,source=EXCLUDED.source,source_priority=EXCLUDED.source_priority,
- observed_at=EXCLUDED.observed_at,received_at=EXCLUDED.received_at
- WHERE COALESCE(EXCLUDED.observed_at,'-infinity'::timestamptz)>COALESCE(whatsapp_peer_identity_fields.observed_at,'-infinity'::timestamptz)
+ observed_at=EXCLUDED.observed_at,received_at=EXCLUDED.received_at,session_generation=EXCLUDED.session_generation
+ WHERE (EXCLUDED.session_generation>whatsapp_peer_identity_fields.session_generation) OR (EXCLUDED.session_generation=whatsapp_peer_identity_fields.session_generation AND ( COALESCE(EXCLUDED.observed_at,'-infinity'::timestamptz)>COALESCE(whatsapp_peer_identity_fields.observed_at,'-infinity'::timestamptz)
  OR (COALESCE(EXCLUDED.observed_at,'-infinity'::timestamptz)=COALESCE(whatsapp_peer_identity_fields.observed_at,'-infinity'::timestamptz)
- AND EXCLUDED.source_priority>whatsapp_peer_identity_fields.source_priority)`
+ AND EXCLUDED.observed_at IS NOT NULL AND EXCLUDED.source_priority>whatsapp_peer_identity_fields.source_priority)))`
 
 // ObserveWhatsAppPeers persists provider facts only. It never imports CRM Contacts.
 // The account/device barrier makes PN reassignment and field writes one atomic fact.
 func (r *ChatRepository) ObserveWhatsAppPeers(ctx context.Context, accountID, deviceID uuid.UUID, observations []domain.WhatsAppPeerObservation) ([]string, error) {
+	return r.observeWhatsAppPeers(ctx, accountID, deviceID, "", observations)
+}
+func (r *ChatRepository) ObserveWhatsAppPeersForSession(ctx context.Context, accountID, deviceID uuid.UUID, fingerprint string, observations []domain.WhatsAppPeerObservation) ([]string, error) {
+	if fingerprint == "" {
+		return nil, ErrWhatsAppIdentitySessionChanged
+	}
+	return r.observeWhatsAppPeers(ctx, accountID, deviceID, fingerprint, observations)
+}
+func (r *ChatRepository) observeWhatsAppPeers(ctx context.Context, accountID, deviceID uuid.UUID, fingerprint string, observations []domain.WhatsAppPeerObservation) ([]string, error) {
 	if r == nil || r.db == nil || len(observations) == 0 {
 		return nil, nil
 	}
@@ -116,6 +125,34 @@ func (r *ChatRepository) ObserveWhatsAppPeers(ctx context.Context, accountID, de
 	if !authorized {
 		return nil, pgx.ErrNoRows
 	}
+	var generation int64
+	initialGeneration := int64(0)
+	if fingerprint != "" {
+		initialGeneration = 1
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO whatsapp_identity_scopes(account_id,device_id,session_fingerprint,session_generation) VALUES($1,$2,$3,$4) ON CONFLICT(account_id,device_id) DO NOTHING`, accountID, deviceID, fingerprint, initialGeneration); err != nil {
+		return nil, err
+	}
+	var currentFingerprint string
+	if err = tx.QueryRow(ctx, `SELECT session_generation,session_fingerprint FROM whatsapp_identity_scopes WHERE account_id=$1 AND device_id=$2`, accountID, deviceID).Scan(&generation, &currentFingerprint); err != nil {
+		return nil, err
+	}
+	if fingerprint != "" && currentFingerprint == "" {
+		generation++
+		if _, err = tx.Exec(ctx, `UPDATE whatsapp_identity_scopes SET session_fingerprint=$3,session_generation=$4 WHERE account_id=$1 AND device_id=$2 AND session_fingerprint=''`, accountID, deviceID, fingerprint, generation); err != nil {
+			return nil, err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE whatsapp_peer_identity_fields SET session_generation=$3 WHERE account_id=$1 AND device_id=$2`, accountID, deviceID, generation); err != nil {
+			return nil, err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE whatsapp_peer_identity_aliases SET session_generation=$3 WHERE account_id=$1 AND device_id=$2`, accountID, deviceID, generation); err != nil {
+			return nil, err
+		}
+		currentFingerprint = fingerprint
+	}
+	if fingerprint != currentFingerprint {
+		return nil, ErrWhatsAppIdentitySessionChanged
+	}
 	changed := map[string]bool{}
 	now := time.Now().UTC()
 	normalized := make([]domain.WhatsAppPeerObservation, 0, len(observations))
@@ -124,7 +161,7 @@ func (r *ChatRepository) ObserveWhatsAppPeers(ctx context.Context, accountID, de
 			normalized = append(normalized, in)
 		}
 	}
-	aliasChanged, err := observePeerAliases(ctx, tx, accountID, deviceID, normalized)
+	aliasChanged, err := observePeerAliases(ctx, tx, accountID, deviceID, generation, normalized)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +181,7 @@ func (r *ChatRepository) ObserveWhatsAppPeers(ctx context.Context, accountID, de
 		}
 		sort.Strings(fields)
 		for _, field := range fields {
-			batch.Queue(peerIdentityFieldUpsert, accountID, deviceID, jid, field, in.Fields[field], in.Source, domain.WhatsAppIdentitySourcePriority(in.Source), in.ObservedAt, in.ReceivedAt)
+			batch.Queue(peerIdentityFieldUpsert, accountID, deviceID, jid, field, in.Fields[field], in.Source, domain.WhatsAppIdentitySourcePriority(in.Source), in.ObservedAt, in.ReceivedAt, generation)
 			pending = append(pending, jid)
 		}
 	}
@@ -186,7 +223,7 @@ func (a peerAliasFact) fact() domain.WhatsAppIdentityField {
 	return domain.WhatsAppIdentityField{Source: a.Source, ObservedAt: a.ObservedAt, ReceivedAt: a.ReceivedAt}
 }
 
-func observePeerAliases(ctx context.Context, tx pgx.Tx, accountID, deviceID uuid.UUID, observations []domain.WhatsAppPeerObservation) ([]string, error) {
+func observePeerAliases(ctx context.Context, tx pgx.Tx, accountID, deviceID uuid.UUID, generation int64, observations []domain.WhatsAppPeerObservation) ([]string, error) {
 	wanted := []string{}
 	for _, in := range observations {
 		if in.PN != "" && in.LID != "" {
@@ -196,7 +233,7 @@ func observePeerAliases(ctx context.Context, tx pgx.Tx, accountID, deviceID uuid
 	if len(wanted) == 0 {
 		return nil, nil
 	}
-	rows, err := tx.Query(ctx, `SELECT pn_jid,lid_jid,source,source_priority,observed_at,received_at FROM whatsapp_peer_identity_aliases WHERE account_id=$1 AND device_id=$2 AND (pn_jid=ANY($3::text[]) OR lid_jid=ANY($3::text[])) FOR UPDATE`, accountID, deviceID, wanted)
+	rows, err := tx.Query(ctx, `SELECT pn_jid,lid_jid,source,source_priority,observed_at,received_at FROM whatsapp_peer_identity_aliases WHERE account_id=$1 AND device_id=$2 AND (pn_jid=ANY($3::text[]) OR lid_jid=ANY($3::text[])) AND session_generation=$4::bigint FOR UPDATE`, accountID, deviceID, wanted, generation)
 	if err != nil {
 		return nil, err
 	}
@@ -217,6 +254,7 @@ func observePeerAliases(ctx context.Context, tx pgx.Tx, accountID, deviceID uuid
 	changed := map[string]bool{}
 	changedPN := map[string]bool{}
 	retired := map[string]peerAliasFact{}
+	refreshed := []peerAliasFact{}
 	for _, in := range observations {
 		if in.PN == "" || in.LID == "" {
 			continue
@@ -225,6 +263,11 @@ func observePeerAliases(ctx context.Context, tx pgx.Tx, accountID, deviceID uuid
 		oldPN, hasPN := byPN[in.PN]
 		oldLID, hasLID := byLID[in.LID]
 		if (hasPN && !domain.WhatsAppIdentityFieldNewer(next.fact(), oldPN.fact())) || (hasLID && !domain.WhatsAppIdentityFieldNewer(next.fact(), oldLID.fact())) {
+			continue
+		}
+		if hasPN && hasLID && oldPN.PN == next.PN && oldPN.LID == next.LID && oldLID.PN == next.PN && oldLID.LID == next.LID {
+			refreshed = append(refreshed, next)
+			byPN[in.PN], byLID[in.LID] = next, next
 			continue
 		}
 		for _, old := range []peerAliasFact{oldPN, oldLID} {
@@ -244,6 +287,15 @@ func observePeerAliases(ctx context.Context, tx pgx.Tx, accountID, deviceID uuid
 		changedPN[in.PN] = true
 		changed[in.PN], changed[in.LID] = true, true
 	}
+	if len(refreshed) > 0 {
+		raw, marshalErr := json.Marshal(refreshed)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		if _, err = tx.Exec(ctx, `UPDATE whatsapp_peer_identity_aliases a SET source=x.source,source_priority=x.priority,observed_at=x.observed_at,received_at=x.received_at FROM jsonb_to_recordset($3::jsonb) x(pn text,lid text,source text,priority int,observed_at timestamptz,received_at timestamptz) WHERE a.account_id=$1 AND a.device_id=$2 AND a.pn_jid=x.pn AND a.lid_jid=x.lid AND a.session_generation=$4::bigint`, accountID, deviceID, raw, generation); err != nil {
+			return nil, err
+		}
+	}
 	if len(changedPN) == 0 {
 		return nil, nil
 	}
@@ -258,11 +310,11 @@ func observePeerAliases(ctx context.Context, tx pgx.Tx, accountID, deviceID uuid
 	if len(retired) > 0 {
 		batch := &pgx.Batch{}
 		for pn, a := range retired {
-			batch.Queue(`INSERT INTO whatsapp_peer_identity_fields(account_id,device_id,jid,field,value,source,source_priority,observed_at,received_at)
- SELECT $1,$2,$3::text,field,'','alias_reassigned',200,$4::timestamptz,$5::timestamptz
+			batch.Queue(`INSERT INTO whatsapp_peer_identity_fields(account_id,device_id,jid,field,value,source,source_priority,observed_at,received_at,session_generation)
+ SELECT $1,$2,$3::text,field,'','alias_reassigned',200,$4::timestamptz,$5::timestamptz,$6::bigint
  FROM unnest(ARRAY['full_name','first_name','business_name','push_name','username','redacted_phone']) AS field
  ON CONFLICT(account_id,device_id,jid,field) DO UPDATE SET value='',source='alias_reassigned',source_priority=200,
- observed_at=GREATEST(whatsapp_peer_identity_fields.observed_at,EXCLUDED.observed_at),received_at=EXCLUDED.received_at`, accountID, deviceID, pn, a.ObservedAt, a.ReceivedAt)
+ observed_at=GREATEST(whatsapp_peer_identity_fields.observed_at,EXCLUDED.observed_at),received_at=EXCLUDED.received_at,session_generation=EXCLUDED.session_generation`, accountID, deviceID, pn, a.ObservedAt, a.ReceivedAt, generation)
 		}
 		result := tx.SendBatch(ctx, batch)
 		for range retired {
@@ -283,8 +335,8 @@ func observePeerAliases(ctx context.Context, tx pgx.Tx, accountID, deviceID uuid
 		if err != nil {
 			return nil, err
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO whatsapp_peer_identity_aliases(account_id,device_id,pn_jid,lid_jid,source,source_priority,observed_at,received_at)
- SELECT $1,$2,x.pn,x.lid,x.source,x.priority,x.observed_at,x.received_at FROM jsonb_to_recordset($3::jsonb) AS x(pn text,lid text,source text,priority int,observed_at timestamptz,received_at timestamptz)`, accountID, deviceID, payload); err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO whatsapp_peer_identity_aliases(account_id,device_id,pn_jid,lid_jid,source,source_priority,observed_at,received_at,session_generation)
+ SELECT $1,$2,x.pn,x.lid,x.source,x.priority,x.observed_at,x.received_at,$4::bigint FROM jsonb_to_recordset($3::jsonb) AS x(pn text,lid text,source text,priority int,observed_at timestamptz,received_at timestamptz)`, accountID, deviceID, payload, generation); err != nil {
 			return nil, err
 		}
 	}
@@ -315,7 +367,7 @@ func (r *ChatRepository) WhatsAppPeerAliases(ctx context.Context, accountID, dev
 	if len(requested) == 0 {
 		return out, nil
 	}
-	rows, err := r.db.Query(ctx, `SELECT pn_jid,lid_jid,source,observed_at,received_at FROM whatsapp_peer_identity_aliases WHERE account_id=$1 AND device_id=$2 AND (pn_jid=ANY($3::text[]) OR lid_jid=ANY($3::text[]))`, accountID, deviceID, requested)
+	rows, err := r.db.Query(ctx, `SELECT pn_jid,lid_jid,source,observed_at,received_at FROM whatsapp_peer_identity_aliases WHERE account_id=$1 AND device_id=$2 AND (pn_jid=ANY($3::text[]) OR lid_jid=ANY($3::text[])) AND session_generation=COALESCE((SELECT session_generation FROM whatsapp_identity_scopes WHERE account_id=$1 AND device_id=$2),0)`, accountID, deviceID, requested)
 	if err != nil {
 		return out, err
 	}
@@ -343,6 +395,12 @@ func (r *ChatRepository) WhatsAppPeerAliases(ctx context.Context, accountID, dev
 // WhatsAppPeerIdentities loads only requested aliases and their proven counterpart.
 // Existing group message push names are a dated fallback, never CRM data.
 func (r *ChatRepository) WhatsAppPeerIdentities(ctx context.Context, accountID, deviceID uuid.UUID, jids []string) (*domain.WhatsAppPeerIdentitySnapshot, error) {
+	var initialGeneration int64
+	if r != nil && r.db != nil && len(jids) > 0 {
+		if generationErr := r.db.QueryRow(ctx, `SELECT COALESCE(MAX(session_generation),0) FROM whatsapp_identity_scopes WHERE account_id=$1 AND device_id=$2`, accountID, deviceID).Scan(&initialGeneration); generationErr != nil {
+			return nil, generationErr
+		}
+	}
 	out, err := r.WhatsAppPeerAliases(ctx, accountID, deviceID, jids)
 	if err != nil || r == nil || r.db == nil || len(jids) == 0 {
 		return out, err
@@ -363,7 +421,7 @@ func (r *ChatRepository) WhatsAppPeerIdentities(ctx context.Context, accountID, 
 	for jid := range unique {
 		aliases = append(aliases, jid)
 	}
-	rows, err := r.db.Query(ctx, `SELECT jid,field,value,source,observed_at,received_at FROM whatsapp_peer_identity_fields WHERE account_id=$1 AND device_id=$2 AND jid=ANY($3::text[])`, accountID, deviceID, aliases)
+	rows, err := r.db.Query(ctx, `SELECT jid,field,value,source,observed_at,received_at FROM whatsapp_peer_identity_fields WHERE account_id=$1 AND device_id=$2 AND jid=ANY($3::text[]) AND session_generation=COALESCE((SELECT session_generation FROM whatsapp_identity_scopes WHERE account_id=$1 AND device_id=$2),0)`, accountID, deviceID, aliases)
 	if err != nil {
 		return out, err
 	}
@@ -388,6 +446,7 @@ func (r *ChatRepository) WhatsAppPeerIdentities(ctx context.Context, accountID, 
  FROM messages m JOIN chats c ON c.account_id=m.account_id AND c.id=m.chat_id
  WHERE m.account_id=$1 AND m.device_id=$2 AND m.from_jid=ANY($3::text[]) AND m.is_from_me=FALSE
  AND c.jid LIKE '%@g.us' AND NULLIF(BTRIM(m.from_name),'') IS NOT NULL
+ AND m.created_at>=COALESCE((SELECT session_started_at FROM whatsapp_identity_scopes WHERE account_id=$1 AND device_id=$2),'-infinity'::timestamptz)
  ORDER BY m.from_jid,m.timestamp DESC,m.id DESC`, accountID, deviceID, aliases)
 	if err != nil {
 		return out, fmt.Errorf("load WhatsApp group name history: %w", err)
@@ -412,7 +471,17 @@ func (r *ChatRepository) WhatsAppPeerIdentities(ctx context.Context, accountID, 
 			out.Fields[jid]["push_name"] = fact
 		}
 	}
-	return out, rows.Err()
+	if err = rows.Err(); err != nil {
+		return out, err
+	}
+	var currentGeneration int64
+	if err = r.db.QueryRow(ctx, `SELECT COALESCE(MAX(session_generation),0) FROM whatsapp_identity_scopes WHERE account_id=$1 AND device_id=$2`, accountID, deviceID).Scan(&currentGeneration); err != nil {
+		return out, err
+	}
+	if currentGeneration != initialGeneration {
+		return nil, ErrWhatsAppIdentitySessionChanged
+	}
+	return out, nil
 }
 
 func (r *ChatRepository) WhatsAppPeerGroupIDs(ctx context.Context, accountID, deviceID uuid.UUID, aliases []string) ([]uuid.UUID, error) {

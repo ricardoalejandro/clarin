@@ -16,6 +16,7 @@ func (s *Server) registerReportRoutes(protected fiber.Router) {
 	reports := protected.Group("/reports", s.requirePermission(domain.PermReports))
 	reports.Get("/whatsapp-group-coverage/groups", s.handleListWhatsAppReportGroups)
 	reports.Post("/whatsapp-group-coverage/generate", s.handleGenerateWhatsAppGroupCoverage)
+	reports.Post("/whatsapp-group-coverage/validate", s.handleValidateWhatsAppCoverageSnapshot)
 	reports.All("/lead-intelligence", s.handleLeadIntelligenceReportRetired)
 	reports.All("/lead-intelligence/*", s.handleLeadIntelligenceReportRetired)
 }
@@ -77,11 +78,16 @@ func (s *Server) handleGenerateWhatsAppGroupCoverage(c *fiber.Ctx) error {
 		return writeWhatsAppReportError(c, err)
 	}
 	defer release()
+	if err = s.services.Report.ValidateWhatsAppCoverageSnapshot(c.Context(), accountID, service.CoverageSnapshotCheckFromReport(report)); err != nil {
+		return writeWhatsAppReportError(c, err)
+	}
 	return c.JSON(fiber.Map{"success": true, "report": report})
 }
 
 func writeWhatsAppReportError(c *fiber.Ctx, err error) error {
 	switch {
+	case errors.Is(err, service.ErrReportSnapshotChanged):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "report_snapshot_changed", "error": "Los datos del grupo o de sus integrantes cambiaron. Genera nuevamente el reporte."})
 	case errors.Is(err, repository.ErrLeadPolicyConflict):
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "code": "lead_policy_conflict", "error": "La configuración de la cuenta cambió. Genera nuevamente el reporte."})
 	case errors.Is(err, service.ErrReportDeviceNotFound):
