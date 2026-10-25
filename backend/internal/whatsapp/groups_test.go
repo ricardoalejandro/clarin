@@ -24,7 +24,7 @@ func TestGroupSenderIdentityKeepsAuthorSeparateFromConversation(t *testing.T) {
 		t.Fatalf("author identity %v", actual)
 	}
 	pool := &DevicePool{}
-	if actual := pool.resolveMessagePeerIdentity(context.Background(), source); actual.JID != group {
+	if actual := pool.resolveMessagePeerIdentity(context.Background(), nil, source); actual.JID != group {
 		t.Fatalf("conversation was replaced by member: %v", actual)
 	}
 }

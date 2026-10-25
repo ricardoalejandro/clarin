@@ -251,3 +251,14 @@ describe('participant profile async identity and navigation', () => {
     expect(screen.getByRole('button', { name: 'Ver integrante: Nombre WhatsApp' })).toBeInTheDocument()
   })
 })
+
+
+it('shows an available username independently from the profile name and unavailable telephone', async () => {
+  const unnamed = { ...member, jid: 'private@lid', lid: 'private@lid', phone: undefined, name: '', username: 'ale.test' }
+  install(() => response({ success: true, profile: profile({ participant: unnamed, capabilities: { ...capabilities, can_message: false } }) }))
+  render(<GroupParticipantProfile {...props()} member={unnamed} />)
+  expect(await screen.findByText('Usuario: @ale.test')).toBeInTheDocument()
+  expect(screen.getByRole('heading', { name: 'Nombre no disponible' })).toBeInTheDocument()
+  expect(screen.getByText('Teléfono no disponible')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Mensaje' })).toBeDisabled()
+})

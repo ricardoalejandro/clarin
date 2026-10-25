@@ -204,7 +204,7 @@ function GroupParticipantProfileImpl({ chat, member, scope, suspended = false, s
         {photo.url && <p className="mt-2 text-[11px] text-slate-500">Foto de WhatsApp · vista temporal</p>}
         {photo.phase === 'loading' && base.avatar_source !== 'contact' && <p role="status" className="mt-2 flex items-center justify-center gap-2 text-xs text-slate-500"><Loader2 className="h-3 w-3 animate-spin" />Consultando foto…</p>}
         <h3 className="mt-4 break-words text-xl font-semibold text-slate-900">{groupParticipantLabel(base)}{base.is_self && <span className="ml-1 text-sm font-normal text-slate-500">(Tú)</span>}</h3>
-        <p className="mt-2 break-words text-sm text-slate-500">{groupParticipantPhone(base)}</p>
+        <p className="mt-2 break-words text-sm text-slate-500">{groupParticipantPhone(base)}</p>{base.username && <p className="mt-2 break-words text-sm text-slate-600">Usuario: @{base.username.replace(/^@/, '')}</p>}
         {base.whatsapp_name && base.whatsapp_name !== base.name && <p className="mt-2 break-words text-xs text-slate-500">Nombre en WhatsApp: {base.whatsapp_name}</p>}
         {base.role !== 'member' && <p className="mt-2 inline-flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700"><Shield className="h-3 w-3" />Admin. del grupo</p>}
         {base.avatar_source === 'contact' && capabilities?.can_query_avatar && <button type="button" onClick={() => { setPhotoRequested(true); setPhotoRetry(value => value + 1) }} disabled={photo.phase === 'loading' || suspended} className="mt-3 block min-h-11 w-full text-xs font-semibold text-emerald-700 disabled:opacity-50">{photo.phase === 'loading' ? 'Consultando foto…' : 'Ver foto de WhatsApp'}</button>}

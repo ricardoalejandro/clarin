@@ -85,3 +85,14 @@ it('shows the group media limit and never offers recovery even if an older snaps
   fireEvent.click(screen.getByText('Grabación.zip'))
   expect(recover).not.toHaveBeenCalled()
 })
+
+
+it('keeps a username separate from the name, phone and technical LID', async () => {
+  const unnamed = { jid: '123456789@lid', lid: '123456789@lid', name: 'Integrante', username: 'ale.test', role: 'member', is_self: false }
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => response(String(input).includes('/participants?') ? { success: true, participants: [unnamed] } : { success: true, group: group.group })))
+  render(<GroupDetailsPanel chat={group} onClose={() => {}} />)
+  expect(await screen.findByText('Nombre no disponible')).toBeInTheDocument()
+  expect(screen.getByText('Usuario: @ale.test')).toBeInTheDocument()
+  expect(screen.getByText('Teléfono no disponible')).toBeInTheDocument()
+  expect(screen.queryByText(/123456789/)).not.toBeInTheDocument()
+})

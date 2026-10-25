@@ -66,14 +66,14 @@ func sentChatIdentity(requested, actual, mappedPhone types.JID) types.JID {
 	return actual
 }
 
-func (p *DevicePool) sentMessageChatIdentity(ctx context.Context, requested types.JID, response whatsmeow.SendResponse) types.JID {
+func (p *DevicePool) sentMessageChatIdentity(ctx context.Context, instance *DeviceInstance, requested types.JID, response whatsmeow.SendResponse) types.JID {
 	actual := response.Chat.ToNonAD()
 	if actual.IsEmpty() {
 		actual = requested.ToNonAD()
 	}
 	var mappedPhone types.JID
-	if actual.Server == types.HiddenUserServer && phoneIdentityJID(requested).IsEmpty() && p.store != nil && p.store.LIDMap != nil {
-		mappedPhone, _ = p.store.LIDMap.GetPNForLID(ctx, actual)
+	if actual.Server == types.HiddenUserServer && phoneIdentityJID(requested).IsEmpty() {
+		mappedPhone = p.scopedPeerPhoneJID(ctx, instance, actual)
 	}
 	return sentChatIdentity(requested, actual, mappedPhone)
 }

@@ -27,17 +27,19 @@ type ChatGroup struct {
 }
 
 type GroupParticipant struct {
-	JID           string `json:"jid"`
-	LID           string `json:"lid,omitempty"`
-	Phone         string `json:"phone,omitempty"`
-	Name          string `json:"name"`
-	Role          string `json:"role"`
-	IsSelf        bool   `json:"is_self"`
-	RedactedPhone string `json:"redacted_phone,omitempty"`
-	NameSource    string `json:"name_source,omitempty"`
-	AvatarURL     string `json:"avatar_url,omitempty"`
-	AvatarSource  string `json:"avatar_source,omitempty"`
-	WhatsAppName  string `json:"whatsapp_name,omitempty"`
+	JID            string                           `json:"jid"`
+	LID            string                           `json:"lid,omitempty"`
+	Phone          string                           `json:"phone,omitempty"`
+	Name           string                           `json:"name"`
+	Role           string                           `json:"role"`
+	IsSelf         bool                             `json:"is_self"`
+	RedactedPhone  string                           `json:"redacted_phone,omitempty"`
+	NameSource     string                           `json:"name_source,omitempty"`
+	AvatarURL      string                           `json:"avatar_url,omitempty"`
+	AvatarSource   string                           `json:"avatar_source,omitempty"`
+	WhatsAppName   string                           `json:"whatsapp_name,omitempty"`
+	Username       string                           `json:"username,omitempty"`
+	IdentityFields map[string]WhatsAppIdentityField `json:"identity_fields,omitempty"`
 }
 
 type GroupParticipantContactContext struct {

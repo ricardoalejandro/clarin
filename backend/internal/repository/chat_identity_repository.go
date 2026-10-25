@@ -22,7 +22,7 @@ type ChatIdentityReconcileResult struct {
 }
 
 // MappedLIDContactPair is an account-scoped duplicate Contact identity proven
-// by WhatsApp's durable LID-to-phone mapping table.
+// by the source Contact device's account-isolated provider mapping.
 type MappedLIDContactPair struct {
 	AccountID          uuid.UUID
 	SourceContactID    uuid.UUID
@@ -36,11 +36,16 @@ func (r *ContactRepository) GetMappedLIDContactPairs(ctx context.Context) ([]Map
 		SELECT lid_contact.account_id,lid_contact.id,phone_contact.id,
 		       lid_contact.jid,phone_contact.jid
 		FROM contacts lid_contact
-		JOIN whatsmeow_lid_map mapping
-		  ON LOWER(lid_contact.jid)=LOWER(mapping.lid || '@lid')
+		JOIN whatsapp_peer_identity_aliases mapping
+		  ON mapping.account_id=lid_contact.account_id
+		 AND mapping.device_id=lid_contact.device_id
+		 AND LOWER(lid_contact.jid)=LOWER(mapping.lid_jid)
+		JOIN devices source_device
+		  ON source_device.account_id=mapping.account_id AND source_device.id=mapping.device_id
+		 AND source_device.delete_operation_id IS NULL
 		JOIN contacts phone_contact
 		  ON phone_contact.account_id=lid_contact.account_id
-		 AND LOWER(phone_contact.jid)=LOWER(mapping.pn || '@s.whatsapp.net')
+		 AND LOWER(phone_contact.jid)=LOWER(mapping.pn_jid)
 		WHERE lid_contact.id<>phone_contact.id
 		ORDER BY lid_contact.account_id,lid_contact.id
 	`)

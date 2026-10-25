@@ -2,6 +2,12 @@
 
 ## 2026-10-24
 
+### Identidad de participantes y procedencia de mensajes
+
+- Los integrantes aprovechan los nombres disponibles para su identidad de WhatsApp, incluso cuando no se conoce su teléfono; los usuarios públicos recibidos se muestran por separado.
+- Los mensajes conservan los indicadores de reenvío entregados por WhatsApp y muestran «Reenviado» o «Reenviado muchas veces» también después de recargar.
+- El nuevo envío nativo conserva la procedencia y registra los resultados para evitar copias por reintentos. Permanece deshabilitado hasta verificarlo con dispositivos reales.
+
 ### Entornos recuperables e integrantes de WhatsApp
 
 - Opciones visibles para carpetas y Entornos, con inventario del servidor, confirmación y eliminación recuperable del Entorno completo. General permanece protegido.

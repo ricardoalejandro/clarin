@@ -122,8 +122,20 @@ func (p *DevicePool) FreshGroupParticipant(ctx context.Context, accountID, devic
 	}
 	for _, m := range members {
 		if memberIdentityAliasesIntersect(m, expected) {
+			// Record only the matched participant's current remote aliases;
+			// cached legacy projections are not proof of a phone relationship.
+			for _, part := range info.Participants {
+				current := resolveGroupMemberIdentity(part, ownPN, instance.Client.Store.LID, types.EmptyJID, nil)
+				if memberIdentityAliasesIntersect(current, m) {
+					p.observePeerGroupMetadata(ctx, instance, &types.GroupInfo{Participants: []types.GroupParticipant{part}}, nil)
+					break
+				}
+			}
 			m = p.ResolveCachedGroupParticipant(ctx, accountID, deviceID, m)
-			m.JID = expected.JID
+			// An unverified legacy PN must not remain a usable address.
+			if m.Phone != "" || !strings.HasSuffix(expected.JID, "@s.whatsapp.net") {
+				m.JID = expected.JID
+			}
 			return m, nil
 		}
 	}
@@ -131,6 +143,18 @@ func (p *DevicePool) FreshGroupParticipant(ctx context.Context, accountID, devic
 }
 
 func memberIdentityAliasesIntersect(a, b domain.GroupParticipant) bool {
+	stableLID := func(m domain.GroupParticipant) string {
+		if m.LID != "" {
+			return m.LID
+		}
+		if strings.HasSuffix(m.JID, "@lid") {
+			return m.JID
+		}
+		return ""
+	}
+	if left, right := stableLID(a), stableLID(b); left != "" && right != "" {
+		return left == right
+	}
 	for _, x := range []string{a.JID, a.LID} {
 		if x != "" && (x == b.JID || x == b.LID) {
 			return true

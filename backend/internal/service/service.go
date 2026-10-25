@@ -1083,6 +1083,7 @@ func (s *DeviceService) GetByAccountID(ctx context.Context, accountID uuid.UUID)
 		connected := status == domain.DeviceStatusConnected
 		device.RuntimeCapabilities = &domain.DeviceRuntimeCapabilities{
 			CanStartChat:           connected,
+			CanForwardNative:       connected && s.pool.NativeForwardingEnabledForDevice(device.ID),
 			CanListGroups:          connected && s.pool.GroupsEnabledForAccount(device.AccountID),
 			CanSendGroupMessages:   connected && s.pool.GroupsEnabledForAccount(device.AccountID),
 			CanCheckWhatsApp:       connected,
@@ -1120,6 +1121,7 @@ func (s *DeviceService) GetByID(ctx context.Context, deviceID uuid.UUID) (*domai
 	connected := status == domain.DeviceStatusConnected
 	device.RuntimeCapabilities = &domain.DeviceRuntimeCapabilities{
 		CanStartChat:           connected,
+		CanForwardNative:       connected && s.pool.NativeForwardingEnabledForDevice(device.ID),
 		CanListGroups:          connected && s.pool.GroupsEnabledForAccount(device.AccountID),
 		CanSendGroupMessages:   connected && s.pool.GroupsEnabledForAccount(device.AccountID),
 		CanCheckWhatsApp:       connected,

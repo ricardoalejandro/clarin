@@ -48,7 +48,9 @@ func TestMappedLIDContactScanKeepsCanonicalJoinAccountScoped(t *testing.T) {
 	query := string(source)
 	for _, invariant := range []string{
 		"phone_contact.account_id=lid_contact.account_id",
-		"LOWER(phone_contact.jid)=LOWER(mapping.pn || '@s.whatsapp.net')",
+		"LOWER(phone_contact.jid)=LOWER(mapping.pn_jid)",
+		"mapping.account_id=lid_contact.account_id",
+		"mapping.device_id=lid_contact.device_id",
 		"WHERE lid_contact.id<>phone_contact.id",
 	} {
 		if !strings.Contains(query, invariant) {

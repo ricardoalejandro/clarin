@@ -104,9 +104,9 @@ func (p *DevicePool) FetchProfilePicture(ctx context.Context, accountID, deviceI
 		return nil, profilePictureError("contact_without_whatsapp", "El contacto no tiene una identidad de WhatsApp válida")
 	}
 	jid = jid.ToNonAD()
-	if jid.Server == types.HiddenUserServer && p.store != nil && p.store.LIDMap != nil {
-		if pnJID, resolveErr := p.store.LIDMap.GetPNForLID(ctx, jid); resolveErr == nil && !pnJID.IsEmpty() {
-			jid = pnJID.ToNonAD()
+	if jid.Server == types.HiddenUserServer {
+		if pnJID := p.scopedPeerPhoneJID(ctx, instance, jid); !pnJID.IsEmpty() {
+			jid = pnJID
 		}
 	}
 	if jid.Server != types.DefaultUserServer && jid.Server != types.GroupServer {

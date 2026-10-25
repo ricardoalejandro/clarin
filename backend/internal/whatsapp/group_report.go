@@ -116,6 +116,9 @@ func (p *DevicePool) LoadGroupSnapshot(ctx context.Context, accountID, deviceID 
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrGroupReportUpstream, err)
 	}
+	// The pair is evidence from this device's current provider response,
+	// persisted before the conservative legacy-row projection runs.
+	p.observePeerGroupMetadata(ctx, instance, info, contacts)
 	name := strings.TrimSpace(info.Name)
 	if name == "" {
 		name = "Grupo sin nombre"
@@ -128,8 +131,17 @@ func (p *DevicePool) LoadGroupSnapshot(ctx context.Context, accountID, deviceID 
 		Suspended:        info.Suspended,
 		Members:          make([]domain.WhatsAppGroupReportIdentity, 0, len(info.Participants)),
 	}
+	identitySnapshot := &GroupParticipantIdentitySnapshot{instance: instance, contacts: contacts, accountID: accountID, deviceID: deviceID}
+	if p.repos != nil {
+		identitySnapshot.repo = p.repos.Chat
+	}
+	identityMembers := make([]domain.GroupParticipant, 0, len(info.Participants))
+	for _, participant := range info.Participants {
+		identityMembers = append(identityMembers, groupReportParticipantIdentity(ctx, instance, participant, contacts))
+	}
+	identityMembers = identitySnapshot.Resolve(ctx, identityMembers)
 	for idx, participant := range info.Participants {
-		resolvedMember := groupReportParticipantIdentity(ctx, instance, participant, contacts)
+		resolvedMember := identityMembers[idx]
 		phoneJID := types.EmptyJID
 		if resolvedMember.Phone != "" {
 			phoneJID = types.NewJID(resolvedMember.Phone, types.DefaultUserServer)

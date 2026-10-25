@@ -302,6 +302,7 @@ type Device struct {
 // alongside the legacy provider capabilities JSON to keep older API clients
 // compatible.
 type DeviceRuntimeCapabilities struct {
+	CanForwardNative       bool `json:"can_forward_native"`
 	CanListGroups          bool `json:"can_list_groups"`
 	CanSendGroupMessages   bool `json:"can_send_group_messages"`
 	CanStartChat           bool `json:"can_start_chat"`
@@ -617,6 +618,10 @@ type OpportunitySummary struct {
 
 // Message represents a WhatsApp message
 type Message struct {
+	Forwarding              MessageForwarding   `json:"forwarding"`
+	ForwardingSource        string              `json:"-"`
+	ForwardingHydrated      bool                `json:"-"`
+	AudioPTT                *bool               `json:"audio_ptt,omitempty"`
 	LinkPreview             *MessageLinkPreview `json:"link_preview"`
 	LinkPreviewVersion      int64               `json:"link_preview_version"`
 	LinkPreviewMediaAssetID *uuid.UUID          `json:"-"`

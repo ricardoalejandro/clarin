@@ -15,7 +15,7 @@ func (r *MessageRepository) ListStorageCleanupMessages(ctx context.Context, acco
  m.is_from_me,m.is_read,m.status,m.delivered_at,m.read_at,COALESCE(m.is_edited,false),m.provider,m.template_name,m.timestamp,m.created_at,
  m.quoted_message_id,m.quoted_body,m.quoted_sender,m.quoted_is_from_me,
  COALESCE(m.is_revoked,false),COALESCE(m.is_view_once,false),COALESCE(m.media_deleted,false),
- m.latitude,m.longitude,m.contact_name,m.contact_phone,m.contact_vcard,m.sender,m.link_preview,m.link_preview_media_asset_id,m.link_preview_version
+ m.latitude,m.longitude,m.contact_name,m.contact_phone,m.contact_vcard,m.sender,m.link_preview,m.link_preview_media_asset_id,m.link_preview_version,m.forwarding,m.audio_ptt
  FROM messages m WHERE m.account_id=$1 AND m.id>$3 AND (EXISTS(
  SELECT 1 FROM storage_media_trash t CROSS JOIN LATERAL jsonb_array_elements(t.message_backups) b
  WHERE t.account_id=$1 AND t.object_key=ANY($2::text[]) AND b->>'id'=m.id::text AND b->>'chat_id'=m.chat_id::text) OR EXISTS(SELECT 1 FROM storage_removed_references r WHERE r.account_id=$1 AND r.object_key=ANY($2::text[]) AND (r.adapter='ordinary' OR (r.adapter='link_preview' AND r.snapshot->>'slot'='message')) AND r.origin_type='chats' AND r.snapshot->>'source_id'=m.id::text AND r.snapshot->>'parent_id'=m.chat_id::text))

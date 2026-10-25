@@ -2190,6 +2190,14 @@ func (r *MediaAssetRepository) Upsert(ctx context.Context, input MediaAssetUpser
 
 func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) error {
 	msg.RepairedPlaceholder = false
+	msg.ForwardingHydrated = false
+	msg.Forwarding = msg.Forwarding.Normalize()
+	if msg.ForwardingSource == "" {
+		msg.ForwardingSource = "legacy"
+		if msg.Forwarding.State != domain.ForwardingUnknown {
+			msg.ForwardingSource = "provider"
+		}
+	}
 	applyMessageSendContext(ctx, msg)
 	if len(msg.Mentions) == 0 {
 		msg.Mentions = domain.MessageMentionsFrom(ctx)
@@ -2207,9 +2215,9 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 		                      quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
 		                      poll_question, poll_max_selections,
 		                      is_revoked, is_view_once, latitude, longitude,
-		                      contact_name, contact_phone, contact_vcard, provider, template_name, sender, attention_through_at, attention_through_id, defer_attention, send_operation_id, group_mentions, media_unavailable_reason,link_preview,link_preview_media_asset_id)
+		                      contact_name, contact_phone, contact_vcard, provider, template_name, sender, attention_through_at, attention_through_id, defer_attention, send_operation_id, group_mentions, media_unavailable_reason,link_preview,link_preview_media_asset_id,forwarding,forwarding_source,audio_ptt)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-		        $22, $23, $24, $25, $26, $27, $28, $29, $30, COALESCE(NULLIF($31::text, ''), 'whatsapp_web'), $32, $33, $34, $35, $36, $37, $38::jsonb, $39,$40::jsonb,$41)
+		        $22, $23, $24, $25, $26, $27, $28, $29, $30, COALESCE(NULLIF($31::text, ''), 'whatsapp_web'), $32, $33, $34, $35, $36, $37, $38::jsonb, $39,$40::jsonb,$41,$42::jsonb,$43::text,$44::boolean)
 		ON CONFLICT (chat_id, message_id) DO NOTHING
 		RETURNING id, created_at,body,is_revoked,is_edited,link_preview,link_preview_media_asset_id,link_preview_version
 	`, msg.AccountID, msg.DeviceID, msg.ChatID, msg.MessageID, msg.FromJID, msg.FromName, msg.Body,
@@ -2219,7 +2227,7 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 			msg.PollQuestion, msg.PollMaxSelections,
 			msg.IsRevoked, msg.IsViewOnce, msg.Latitude, msg.Longitude,
 			msg.ContactName, msg.ContactPhone, msg.ContactVCard, msg.Provider, msg.TemplateName,
-			msg.Sender, msg.AttentionThroughAt, msg.AttentionThroughID, msg.DeferAttention, msg.SendOperationID, msg.Mentions, msg.MediaUnavailableReason, msg.LinkPreview, msg.LinkPreviewMediaAssetID,
+			msg.Sender, msg.AttentionThroughAt, msg.AttentionThroughID, msg.DeferAttention, msg.SendOperationID, msg.Mentions, msg.MediaUnavailableReason, msg.LinkPreview, msg.LinkPreviewMediaAssetID, msg.Forwarding, msg.ForwardingSource, msg.AudioPTT,
 		).Scan(&msg.ID, &msg.CreatedAt, &msg.Body, &msg.IsRevoked, &msg.IsEdited, &msg.LinkPreview, &msg.LinkPreviewMediaAssetID, &msg.LinkPreviewVersion)
 	}
 	tx, err := r.db.Begin(ctx)
@@ -2256,6 +2264,13 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 		return err
 	}
 	if err := insert(tx); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			changed, hydrateErr := hydrateMessageForwardingTx(ctx, tx, msg)
+			if hydrateErr != nil {
+				return hydrateErr
+			}
+			msg.ForwardingHydrated = changed
+		}
 		if errors.Is(err, pgx.ErrNoRows) && domain.IsGroupJID(lockedChatJID) {
 			repaired, repairErr := repairGroupPlaceholderTx(ctx, tx, msg)
 			if repairErr != nil {
@@ -2267,6 +2282,11 @@ func (r *MessageRepository) Create(ctx context.Context, msg *domain.Message) err
 			}
 		}
 		if !errors.Is(err, pgx.ErrNoRows) || msg.Sender == nil || msg.Sender.UserID == nil {
+			if errors.Is(err, pgx.ErrNoRows) && msg.ForwardingHydrated {
+				if commitErr := tx.Commit(ctx); commitErr != nil {
+					return commitErr
+				}
+			}
 			return err
 		}
 		// The provider echo can win the INSERT race. Attach verified attribution to that same message.
@@ -2291,7 +2311,7 @@ func (r *MessageRepository) GetByChatID(ctx context.Context, chatID uuid.UUID, l
 		       is_from_me, is_read, status, delivered_at, read_at, COALESCE(is_edited, false), provider, template_name, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
 		       COALESCE(is_revoked, false), COALESCE(is_view_once, false), COALESCE(media_deleted, false),
-		       latitude, longitude, contact_name, contact_phone, contact_vcard, sender,link_preview,link_preview_media_asset_id,link_preview_version
+		       latitude, longitude, contact_name, contact_phone, contact_vcard, sender,link_preview,link_preview_media_asset_id,link_preview_version,forwarding,audio_ptt
 		FROM (
 			SELECT * FROM messages WHERE chat_id = $1
 			ORDER BY timestamp DESC, id DESC
@@ -2314,7 +2334,7 @@ func (r *MessageRepository) GetByChatID(ctx context.Context, chatID uuid.UUID, l
 			&msg.Provider, &msg.TemplateName, &msg.Timestamp, &msg.CreatedAt,
 			&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender, &msg.QuotedIsFromMe,
 			&msg.IsRevoked, &msg.IsViewOnce, &msg.MediaDeleted,
-			&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard, &msg.Sender, &msg.LinkPreview, &msg.LinkPreviewMediaAssetID, &msg.LinkPreviewVersion,
+			&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard, &msg.Sender, &msg.LinkPreview, &msg.LinkPreviewMediaAssetID, &msg.LinkPreviewVersion, &msg.Forwarding, &msg.AudioPTT,
 		); err != nil {
 			return nil, err
 		}
@@ -2351,7 +2371,7 @@ func (r *MessageRepository) SearchByChat(ctx context.Context, accountID, chatID 
 		       is_from_me, is_read, status, delivered_at, read_at, COALESCE(is_edited, false), provider, template_name, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
 		       COALESCE(is_revoked,false), COALESCE(is_view_once,false), COALESCE(media_deleted,false),
-		       latitude, longitude, contact_name, contact_phone, contact_vcard, sender,link_preview,link_preview_media_asset_id,link_preview_version
+		       latitude, longitude, contact_name, contact_phone, contact_vcard, sender,link_preview,link_preview_media_asset_id,link_preview_version,forwarding,audio_ptt
 		FROM messages
 		WHERE account_id=$1 AND chat_id=$2 AND COALESCE(is_revoked,false)=false
 		  AND (LOWER(COALESCE(body,'')) LIKE $3 OR LOWER(COALESCE(media_filename,'')) LIKE $3)
@@ -2372,7 +2392,7 @@ func (r *MessageRepository) SearchByChat(ctx context.Context, accountID, chatID 
 			&msg.Provider, &msg.TemplateName, &msg.Timestamp, &msg.CreatedAt,
 			&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender, &msg.QuotedIsFromMe,
 			&msg.IsRevoked, &msg.IsViewOnce, &msg.MediaDeleted,
-			&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard, &msg.Sender, &msg.LinkPreview, &msg.LinkPreviewMediaAssetID, &msg.LinkPreviewVersion,
+			&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard, &msg.Sender, &msg.LinkPreview, &msg.LinkPreviewMediaAssetID, &msg.LinkPreviewVersion, &msg.Forwarding, &msg.AudioPTT,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -2390,7 +2410,7 @@ func (r *MessageRepository) GetByMessageID(ctx context.Context, chatID uuid.UUID
 		       is_from_me, is_read, status, delivered_at, read_at, COALESCE(is_edited, false), provider, template_name, timestamp, created_at,
 		       quoted_message_id, quoted_body, quoted_sender, quoted_is_from_me,
 		       COALESCE(is_revoked, false), COALESCE(is_view_once, false), COALESCE(media_deleted, false),
-		       latitude, longitude, contact_name, contact_phone, contact_vcard, sender,link_preview,link_preview_media_asset_id,link_preview_version
+		       latitude, longitude, contact_name, contact_phone, contact_vcard, sender,link_preview,link_preview_media_asset_id,link_preview_version,forwarding,audio_ptt
 		FROM messages WHERE chat_id = $1 AND message_id = $2
 		LIMIT 1
 	`, chatID, messageID).Scan(
@@ -2401,7 +2421,7 @@ func (r *MessageRepository) GetByMessageID(ctx context.Context, chatID uuid.UUID
 		&msg.Provider, &msg.TemplateName, &msg.Timestamp, &msg.CreatedAt,
 		&msg.QuotedMessageID, &msg.QuotedBody, &msg.QuotedSender, &msg.QuotedIsFromMe,
 		&msg.IsRevoked, &msg.IsViewOnce, &msg.MediaDeleted,
-		&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard, &msg.Sender, &msg.LinkPreview, &msg.LinkPreviewMediaAssetID, &msg.LinkPreviewVersion,
+		&msg.Latitude, &msg.Longitude, &msg.ContactName, &msg.ContactPhone, &msg.ContactVCard, &msg.Sender, &msg.LinkPreview, &msg.LinkPreviewMediaAssetID, &msg.LinkPreviewVersion, &msg.Forwarding, &msg.AudioPTT,
 	)
 	if err != nil {
 		return nil, err

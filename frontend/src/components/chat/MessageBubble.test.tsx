@@ -176,3 +176,26 @@ describe('MessageBubble message actions', () => {
     expect(picker).toHaveAttribute('data-skin-tones-enabled', 'true')
   })
 })
+
+
+describe('WhatsApp forwarding provenance', () => {
+  it('shows forwarding separately from the group sender and keeps it for media and own forwarded echoes', () => {
+    const forwarded = { ...baseMessage, from_jid: 'hidden@lid', from_name: 'Ale', forwarding: { state: 'forwarded' as const, score: 1 } }
+    const view = render(<MessageBubble message={forwarded} isGroup />)
+    expect(screen.getByText('Ale')).toBeInTheDocument()
+    expect(screen.getByLabelText('Reenviado')).toBeInTheDocument()
+    expect(screen.getByText('Hola')).toBeInTheDocument()
+    view.rerender(<MessageBubble message={{ ...forwarded, is_from_me: true, message_type: 'image', media_url: '/api/media/file/one/image.jpg', forwarding: { state: 'frequently_forwarded', score: 5 } }} isGroup />)
+    expect(screen.getByLabelText('Reenviado muchas veces')).toBeInTheDocument()
+    view.rerender(<MessageBubble message={{ ...forwarded, is_from_me: true, forwarding: { state: 'not_forwarded', score: 0 } }} />)
+    expect(screen.queryByLabelText('Reenviado')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Reenviado muchas veces')).not.toBeInTheDocument()
+  })
+  it('explains why legacy unknown and view-once messages cannot use native forwarding', async () => {
+    render(<MessageBubble message={baseMessage} onForward={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Más acciones del mensaje' }))
+    const action = await screen.findByRole('menuitem', { name: /Reenviar/ })
+    expect(action).toBeDisabled()
+    expect(action).toHaveTextContent('No conocemos')
+  })
+})

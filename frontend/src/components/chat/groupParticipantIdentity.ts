@@ -5,6 +5,10 @@ export function participantAliases(member: GroupParticipant): string[] {
 }
 
 export function sameParticipant(left: GroupParticipant, right: GroupParticipant): boolean {
+  const stableLID = (member: GroupParticipant) => member.lid || (member.jid.endsWith('@lid') ? member.jid : '')
+  const leftLID = stableLID(left)
+  const rightLID = stableLID(right)
+  if (leftLID && rightLID) return leftLID === rightLID
   const aliases = new Set(participantAliases(left))
   return participantAliases(right).some(alias => aliases.has(alias))
 }
@@ -14,14 +18,14 @@ export function mergeParticipantPage(current: GroupParticipant[], incoming: Grou
   for (const member of incoming) {
     const index = rows.findIndex(row => sameParticipant(row, member))
     if (index < 0) rows.push(member)
-    else rows[index] = { ...rows[index], ...member }
+    else rows[index] = member
   }
   return rows
 }
 
 export function groupParticipantLabel(member: GroupParticipant): string {
   const name = member.name?.trim()
-  if (name && !/^integrante(?: sin nombre)?$|^participante de whatsapp$/i.test(name)) return name
+  if (name && !/^integrante(?: sin nombre)?$|^participante de whatsapp$/i.test(name) && !/^[^\s]+@(lid|s\.whatsapp\.net|g\.us)$/i.test(name)) return name
   if (member.phone) return `+${member.phone.replace(/^\+/, '')}`
   return 'Nombre no disponible'
 }

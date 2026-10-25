@@ -15,6 +15,7 @@ import { Chat, ChatState, Device, Message, ChatMention } from '@/types/chat'
 import { subscribeWebSocket } from '@/lib/api'
 import { messageBelongsToChat } from './chatEventScope'
 import { chatSenderPhone, validatePinnedChatSender, type ChatSenderSession } from './chatSenderSession'
+import { mergeMessageForwarding, forwardSourceIssue } from './messageForwarding'
 import { hasSameMessageIdentity, mergeCanonicalMessage, mergeCanonicalMessageProjection, mergeFetchedMessages, mergeMessageLinkPreview, orderChatMessages, reconcileOptimisticMessage } from './messageState'
 import { updateEditedMessageProjection, updateLinkPreviewProjection, updateRevokedMessageProjection, type LinkPreviewUpdate } from './linkPreviewState'
 import { chatReadError } from './chatReadError'
@@ -711,7 +712,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
       const local = localProjection.find(message => hasSameMessageIdentity(message, canonical))
         || cached.find(message => hasSameMessageIdentity(message, canonical))
       if (!local) return canonical
-      const withPreview = { ...canonical, ...mergeMessageLinkPreview(local, canonical, canonical.is_revoked || local.is_revoked) }
+      const withPreview = { ...canonical, ...mergeMessageLinkPreview(local, canonical, canonical.is_revoked || local.is_revoked), ...mergeMessageForwarding(local, canonical) }
       if (!queue?.inFlight) return withPreview
       return {
         ...withPreview,
@@ -2925,6 +2926,8 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
 
   const handleBeginForward = (message: Message) => {
     if (suspendedRef.current) return
+    const issue = forwardSourceIssue(message, deviceId)
+    if (issue) { setComposerFeedback({ kind: 'error', message: issue }); return }
     clearMessageSelection()
     setForwardingMsg(message)
   }
@@ -3289,7 +3292,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
                </>}
                <div className="border-t border-slate-100 pt-1">
                  {!effectiveReadOnly && <button type="button" role="menuitem" onClick={() => handleBeginReply(selectedMessage)} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50"><Reply className="h-4 w-4" /> Responder</button>}
-                 {!effectiveReadOnly && <button type="button" role="menuitem" onClick={() => handleBeginForward(selectedMessage)} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50"><CornerUpRight className="h-4 w-4" /> Reenviar</button>}
+                 {!effectiveReadOnly && <button type="button" role="menuitem" disabled={Boolean(forwardSourceIssue(selectedMessage, deviceId))} title={forwardSourceIssue(selectedMessage, deviceId) || undefined} onClick={() => handleBeginForward(selectedMessage)} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50"><CornerUpRight className="h-4 w-4" /> Reenviar</button>}
                  {canDeleteMessage(selectedMessage) && <button type="button" role="menuitem" disabled={messageActionPending === 'delete'} onClick={() => void handleDeleteChatMessage(selectedMessage)} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-red-600 hover:bg-red-50 disabled:opacity-50"><Trash2 className="h-4 w-4" /> Eliminar para todos</button>}
 
                  {(selectedMessage.body || selectedMessage.media_filename) && <button type="button" role="menuitem" onClick={() => { setShowSelectionMenu(false); void handleCopyMessage(selectedMessage) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Copy className="h-4 w-4 text-slate-400" /> Copiar</button>}
@@ -3865,11 +3868,12 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
          {forwardingMsg && chat && (suspended || (!effectiveReadOnly && deviceId)) && (
              <ForwardMessageModal
                message={forwardingMsg}
+               nativeForwardEnabled={canonicalDevice?.runtime_capabilities?.can_forward_native === true && deviceValidationState === 'ready' && canonicalDevice?.id === deviceId}
                deviceId={deviceId || initialDeviceId || device?.id || ''}
                suspended={suspended}
                chatId={chat.id}
                onClose={() => setForwardingMsg(null)}
-               onSuccess={() => setForwardingMsg(null)}
+               onSuccess={() => { setForwardingMsg(null); void fetchChatDetails(chat.id) }}
              />
          )}
 

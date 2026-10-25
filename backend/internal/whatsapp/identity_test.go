@@ -72,3 +72,26 @@ func TestShouldMergeMappedLIDContactRequiresSameAccountAndDifferentContacts(t *t
 		t.Fatal("cross-account contacts must never be merged")
 	}
 }
+
+func TestIncomingPNAltCannotIntroduceAnUnverifiedLID(t *testing.T) {
+	pn, lid := types.NewJID("51900000001", types.DefaultUserServer), types.NewJID("7001", types.HiddenUserServer)
+	source := types.MessageSource{Chat: pn, Sender: pn, SenderAlt: lid}
+	got := messageSourceWithVerifiedPNAlt(source, types.EmptyJID)
+	if got.Sender != pn || !got.SenderAlt.IsEmpty() {
+		t.Fatalf("provider-global alt became pair evidence: %+v", got)
+	}
+	if got := messageSourceWithVerifiedPNAlt(source, lid); got.SenderAlt != lid {
+		t.Fatal("already-scoped pair was discarded")
+	}
+	if got := messageSourceWithVerifiedPNAlt(source, types.NewJID("7002", types.HiddenUserServer)); !got.SenderAlt.IsEmpty() {
+		t.Fatal("different scoped LID legitimized stale global alias")
+	}
+	actualLID := types.MessageSource{Chat: lid, Sender: lid, SenderAlt: pn}
+	if got := messageSourceWithVerifiedPNAlt(actualLID, types.EmptyJID); got.SenderAlt != pn {
+		t.Fatal("wire LID-to-PN evidence was discarded")
+	}
+	ownOutgoing := types.MessageSource{Chat: lid, Sender: pn, SenderAlt: lid, RecipientAlt: pn, IsFromMe: true}
+	if got := messageSourceWithVerifiedPNAlt(ownOutgoing, types.EmptyJID); got.RecipientAlt != pn {
+		t.Fatal("own outgoing wire recipient alt was discarded")
+	}
+}

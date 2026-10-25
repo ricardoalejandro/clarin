@@ -121,7 +121,11 @@ func groupParticipantsMatchingSearch(members []domain.GroupParticipant, search s
 	query := strings.ToLower(strings.TrimSpace(search))
 	matching := []string{}
 	for _, member := range members {
-		for _, value := range []string{member.Name, member.WhatsAppName, member.Phone, member.RedactedPhone} {
+		values := []string{member.Name, member.WhatsAppName, member.Phone, member.RedactedPhone}
+		if member.Username != "" {
+			values = append(values, member.Username, "@"+member.Username)
+		}
+		for _, value := range values {
 			if strings.Contains(strings.ToLower(value), query) {
 				matching = append(matching, member.JID)
 				break

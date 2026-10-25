@@ -14,6 +14,7 @@ import styles from './MessageBubble.module.css'
 import { displayMentionText, groupMessageAuthor, participantName } from '@/utils/chatGroups'
 import ChatMessageMedia from './ChatMessageMedia'
 import MessageLinkPreview from './MessageLinkPreview'
+import { forwardingLabel, forwardSourceIssue } from './messageForwarding'
 import { hasUnavailableGroupText } from './messageContent'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 
@@ -91,6 +92,8 @@ const formatQuotedSender = (sender?: string, isFromMe?: boolean): string => {
 function MessageBubble({ message, contactName, isGroup = false, onMediaClick, onDocumentClick, onRetry, onRecoverMedia, onReply, onQuotedMessageClick, onForward, onDelete, onEdit, onInfo, onCopy, compactSelection = false, selected = false, onSelect, onToggleStickerFavorite, onReact, reactionUnavailableReason, savedStickerUrls, savingStickerUrls, groupedWithPrevious = false }: MessageBubbleProps) {
   const [recoveringMedia, setRecoveringMedia] = useState(false)
   const [recoverMediaError, setRecoverMediaError] = useState('')
+  const forwardedLabel = forwardingLabel(message.forwarding)
+  const forwardingIssue = forwardSourceIssue(message)
   const mediaTooLarge = isGroup && message.media_unavailable_reason === 'group_media_too_large'
   const unavailableGroupText = hasUnavailableGroupText(message, isGroup)
   const recoverInFlight = useRef(false)
@@ -782,6 +785,8 @@ function MessageBubble({ message, contactName, isGroup = false, onMediaClick, on
           </p>
         )}
 
+        {forwardedLabel && <p data-whatsapp-ignore="true" className={`mb-1 flex items-start gap-1 break-words text-[12px] italic text-slate-500 ${hasVisualMedia ? 'px-3 pt-1' : message.message_type === 'sticker' ? 'rounded-md bg-white/90 px-2 py-1' : ''}`} aria-label={forwardedLabel}><Forward className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />{forwardedLabel}</p>}
+
         {/* Quoted message */}
         {message.quoted_message_id && (
           <div className={hasVisualMedia ? 'px-2 pt-1' : ''}>
@@ -939,11 +944,11 @@ function MessageBubble({ message, contactName, isGroup = false, onMediaClick, on
           {onForward && <button
             type="button"
             role="menuitem"
-            onClick={() => { onForward?.(message); closeAllPickers() }}
+            disabled={Boolean(forwardingIssue)} title={forwardingIssue || undefined} onClick={() => { onForward?.(message); closeAllPickers() }}
             className="flex min-h-11 w-full items-center gap-3 px-3 text-sm text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500"
           >
             <Forward className="w-4 h-4 text-slate-400" />
-            Reenviar
+            <span>Reenviar{forwardingIssue && <span className="block max-w-56 text-[11px] font-normal text-slate-500">{forwardingIssue}</span>}</span>
           </button>}
           {onCopy && (message.body || message.media_filename) && (
             <button
