@@ -2,6 +2,13 @@
 
 ## 2026-10-25
 
+### Recuperación de identidades de integrantes
+
+- Recuperación automática de nombres y relaciones de teléfono de los integrantes ya sincronizados, usando los dispositivos vinculados y sin crear Contactos ni enviar mensajes.
+- Los datos comprobados aparecen durante la recuperación, aunque otros números sigan esperando un reintento. Los dispositivos desconectados continúan al volver.
+- Participantes, ficha y Reportería comparten la identidad comprobada. El usuario público se muestra separado del teléfono cuando WhatsApp lo entrega.
+- Las exportaciones comprueban que el reporte siga vigente; los cambios de identidad, grupo o datos CRM requieren regenerarlo.
+
 ### Compartir mensajes sin bloqueos generales
 
 - Reenviar permite enviar una copia de textos y archivos compatibles, también del historial antiguo, aunque el reenvío nativo no esté habilitado.

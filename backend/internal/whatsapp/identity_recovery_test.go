@@ -2,12 +2,17 @@ package whatsapp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/naperu/clarin/internal/repository"
+	"go.mau.fi/whatsmeow"
+	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/types"
+	"io"
+	"strings"
 	"testing"
 	"time"
 )
@@ -83,3 +88,68 @@ func TestIdentityRecoveryFailureLabelsKeepActualCause(t *testing.T) {
 		t.Fatal("successful operation became an error")
 	}
 }
+
+func TestIdentityRecoveryLookupOutcomeOnlyConsumesProviderRetries(t *testing.T) {
+	providerFailure := errors.New("synthetic provider failure")
+	persistenceFailure := withIdentityRecoveryFailureCode("persistence_unavailable", io.EOF)
+	for _, tc := range []struct {
+		name           string
+		err            error
+		success, fatal bool
+	}{
+		{"success", nil, true, false},
+		{"provider", providerFailure, false, false},
+		{"provider request timeout", context.DeadlineExceeded, false, false},
+		{"persistence without pgconn type", persistenceFailure, false, true},
+		{"persistence SQL", &pgconn.PgError{Code: "08006"}, false, true},
+		{"changed session", repository.ErrWhatsAppIdentitySessionChanged, false, true},
+		{"cancelled operation", context.Canceled, false, true},
+		{"groups disabled", errIdentityRecoveryGroupsDisabled, false, true},
+		{"receive disabled", errIdentityRecoveryReceiveDisabled, false, true},
+		{"device disconnected", ErrDeviceDisconnected, false, true},
+		{"provider device disconnected", ErrGroupReportDeviceNotConnected, false, true},
+		{"SDK websocket disconnected", whatsmeow.ErrNotConnected, false, true},
+		{"SDK query disconnected", whatsmeow.ErrIQDisconnected, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			succeeded, err := identityRecoveryLookupOutcome(tc.err)
+			if succeeded != tc.success || (err != nil) != tc.fatal {
+				t.Fatalf("wrong provider retry outcome: success=%v fatal=%v", succeeded, err != nil)
+			}
+			if tc.fatal && !errors.Is(err, tc.err) {
+				t.Fatal("non-provider error lost its original cause")
+			}
+		})
+	}
+}
+
+func TestIdentityRecoveryLookupDiagnosticNeverSerializesProviderPayload(t *testing.T) {
+	secret := "synthetic_private_payload_must_not_be_logged"
+	iq := &whatsmeow.IQError{Code: 0, Text: secret, RawNode: &waBinary.Node{Tag: "user", Attrs: waBinary.Attrs{"private": secret}}}
+	diagnostic := identityRecoveryLookupDiagnosticFor(fmt.Errorf("private wrapper %s: %w", secret, iq), 17)
+	raw, err := json.Marshal(diagnostic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), secret) || diagnostic.BatchSize != 17 || diagnostic.IQCode != 0 {
+		t.Fatal("provider content entered safe diagnostic")
+	}
+	if got := identityRecoveryLookupDiagnosticFor(&whatsmeow.IQError{Code: 429, Text: secret}, 3); got.IQCode != 429 {
+		t.Fatal("safe IQ status lost")
+	}
+	if got := identityRecoveryLookupDiagnosticFor(context.DeadlineExceeded, 3); !got.ContextDeadline {
+		t.Fatal("context timeout not classified")
+	}
+	if got := identityRecoveryLookupDiagnosticFor(whatsmeow.ErrIQTimedOut, 3); !got.IQTimeout {
+		t.Fatal("SDK timeout not classified")
+	}
+	if got := identityRecoveryLookupDiagnosticFor(whatsmeow.ErrIQDisconnected, 3); !got.Disconnected {
+		t.Fatal("SDK disconnect not classified")
+	}
+	// Merely constructing the diagnostic must not invoke an arbitrary Error method.
+	_ = identityRecoveryLookupDiagnosticFor(identityRecoveryUnsafeStringError{}, 1)
+}
+
+type identityRecoveryUnsafeStringError struct{}
+
+func (identityRecoveryUnsafeStringError) Error() string { panic("raw Error method must not run") }

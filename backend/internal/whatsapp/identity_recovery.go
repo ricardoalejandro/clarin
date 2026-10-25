@@ -3,13 +3,16 @@ package whatsapp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/repository"
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 	"log"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -295,6 +298,10 @@ func (p *DevicePool) processIdentityRecovery(parent context.Context, run *domain
 			}
 			phase := identityRecoveryLookupNextPhase(run.Phase, run.AppStateAcknowledged, waiting)
 			if phase == "" {
+				if err = p.checkpointPartialIdentityRecovery(ctx, run); err != nil {
+					failure(err, run.Phase, "projection_unavailable")
+					return
+				}
 				finish("pending", run.Phase, "", delay)
 				return
 			}
@@ -412,11 +419,24 @@ func (p *DevicePool) lookupIdentityRecovery(ctx context.Context, run *domain.Wha
 			if err = p.identityRecoveryAllowed(run.AccountID, run.DeviceID); err != nil {
 				return false, 0, err
 			}
+			lookupStarted := time.Now()
 			lookupErr := p.RecoverDeviceIdentityPNs(ctx, run.AccountID, run.DeviceID, run.SessionFingerprint, pending)
-			if errors.Is(lookupErr, repository.ErrWhatsAppIdentitySessionChanged) {
-				return false, 0, lookupErr
+			if lookupErr != nil {
+				logIdentityRecoveryLookupFailure(run.AccountID, run.DeviceID, len(pending), time.Since(lookupStarted), lookupErr)
 			}
-			if err = p.repos.Chat.CompleteIdentityRecoveryBatch(ctx, run, pending, lookupErr == nil); err != nil {
+			if ctx.Err() != nil {
+				return false, 0, ctx.Err()
+			}
+			if lookupErr != nil {
+				if guardErr := p.identityRecoveryAllowed(run.AccountID, run.DeviceID); guardErr != nil {
+					return false, 0, guardErr
+				}
+			}
+			succeeded, outcomeErr := identityRecoveryLookupOutcome(lookupErr)
+			if outcomeErr != nil {
+				return false, 0, outcomeErr
+			}
+			if err = p.repos.Chat.CompleteIdentityRecoveryBatch(ctx, run, pending, succeeded); err != nil {
 				return false, 0, err
 			}
 		}
@@ -440,6 +460,18 @@ func (p *DevicePool) lookupIdentityRecovery(ctx context.Context, run *domain.Wha
 		return true, delay, nil
 	}
 	return false, 0, nil
+}
+
+// Publish already recovered identities before waiting on unrelated candidates.
+func (p *DevicePool) checkpointPartialIdentityRecovery(ctx context.Context, run *domain.WhatsAppIdentityRecoveryRun) error {
+	unresolved, err := p.projectIdentityRecovery(ctx, run)
+	if err != nil {
+		return withIdentityRecoveryFailureCode("projection_unavailable", err)
+	}
+	if err = p.repos.Chat.SetIdentityRecoveryUnresolved(ctx, run, unresolved); err != nil {
+		return withIdentityRecoveryFailureCode("persistence_unavailable", err)
+	}
+	return nil
 }
 
 func (p *DevicePool) projectIdentityRecovery(ctx context.Context, run *domain.WhatsAppIdentityRecoveryRun) (int, error) {
@@ -500,6 +532,52 @@ func identityRecoveryLookupNextPhase(phase string, acknowledged, waiting bool) s
 	return "projection"
 }
 
+// A safe diagnostic has no error message, response node, identity or request data.
+// IQError.Error() may serialize raw XML, so callers must log these fields only.
+type identityRecoveryLookupDiagnostic struct {
+	ErrorType        string `json:"error_type"`
+	BatchSize        int    `json:"batch_size"`
+	IQCode           int    `json:"iq_code"`
+	ContextDeadline  bool   `json:"context_deadline"`
+	ContextCancelled bool   `json:"context_cancelled"`
+	IQTimeout        bool   `json:"iq_timeout"`
+	Disconnected     bool   `json:"disconnected"`
+	NetworkTimeout   bool   `json:"network_timeout"`
+}
+
+func identityRecoveryLookupDiagnosticFor(err error, batchSize int) identityRecoveryLookupDiagnostic {
+	out := identityRecoveryLookupDiagnostic{ErrorType: fmt.Sprintf("%T", err), BatchSize: batchSize,
+		ContextDeadline: errors.Is(err, context.DeadlineExceeded), ContextCancelled: errors.Is(err, context.Canceled),
+		IQTimeout:    errors.Is(err, whatsmeow.ErrIQTimedOut),
+		Disconnected: errors.Is(err, whatsmeow.ErrNotConnected) || errors.Is(err, whatsmeow.ErrIQDisconnected) || errors.Is(err, whatsmeow.ErrNotLoggedIn) || errors.Is(err, ErrDeviceDisconnected) || errors.Is(err, ErrGroupReportDeviceNotConnected)}
+	var iq *whatsmeow.IQError
+	if errors.As(err, &iq) {
+		out.IQCode = iq.Code
+	}
+	var network net.Error
+	if errors.As(err, &network) {
+		out.NetworkTimeout = network.Timeout()
+	}
+	return out
+}
+func logIdentityRecoveryLookupFailure(accountID, deviceID uuid.UUID, batchSize int, elapsed time.Duration, err error) {
+	diagnostic := identityRecoveryLookupDiagnosticFor(err, batchSize)
+	log.Printf("[IdentityRecovery] lookup failed account=%s device=%s batch_size=%d elapsed_ms=%d error_type=%s iq_code=%d context_deadline=%t context_cancelled=%t iq_timeout=%t disconnected=%t network_timeout=%t",
+		accountID, deviceID, diagnostic.BatchSize, elapsed.Milliseconds(), diagnostic.ErrorType, diagnostic.IQCode, diagnostic.ContextDeadline, diagnostic.ContextCancelled, diagnostic.IQTimeout, diagnostic.Disconnected, diagnostic.NetworkTimeout)
+}
+
+// Only an actual provider failure consumes a PN item's provider retry budget.
+// Persistence, lifecycle and policy errors leave all candidate items untouched.
+func identityRecoveryLookupOutcome(err error) (succeeded bool, fatal error) {
+	if err == nil {
+		return true, nil
+	}
+	if identityRecoveryFailureCode(err, "provider_unavailable") == "provider_unavailable" {
+		return false, nil
+	}
+	return false, err
+}
+
 // Error provenance is explicit at the nearest boundary; a storage/checkpoint
 // failure must never be presented as a WhatsApp/provider outage.
 type identityRecoveryCodedFailure struct {
@@ -525,6 +603,8 @@ func identityRecoveryFailureCode(err error, fallback string) string {
 		return "receive_disabled"
 	case errors.Is(err, context.Canceled):
 		return "cancelled"
+	case errors.Is(err, ErrGroupReportDeviceNotConnected), errors.Is(err, ErrDeviceDisconnected), errors.Is(err, whatsmeow.ErrNotConnected), errors.Is(err, whatsmeow.ErrIQDisconnected), errors.Is(err, whatsmeow.ErrNotLoggedIn):
+		return "device_disconnected"
 	}
 	var coded *identityRecoveryCodedFailure
 	if errors.As(err, &coded) {
