@@ -85,6 +85,7 @@ export interface MessageSharingLimits {
 }
 
 export interface Message {
+  account_id?: string
   forwarding?: MessageForwarding
   sharing_limits?: MessageSharingLimits | null
   /** Distinguishes voice notes from ordinary audio; absence means unknown. */
@@ -97,10 +98,10 @@ export interface Message {
   media_unavailable_reason?: 'group_media_too_large'
   mentions?: ChatMention[]
   quoted_sender_name?: string
-  send_phase?: 'uploading' | 'sending'
+  send_phase?: 'uploading' | 'sending' | 'uncertain'
   sender?: { user_id?: string; name?: string; origin: string }
   id: string
-  device_id?: string
+  device_id?: string | null
   message_id: string
   from_jid?: string
   from_name?: string
@@ -139,7 +140,12 @@ export interface Message {
   contact_vcard?: string
 }
 
+export type ChatBindingState = 'verified_continuity' | 'pending' | 'conflict'
 export interface Chat {
+  canonical_chat_id?: string
+  alias_chat_ids?: string[]
+  binding_revision?: number
+  binding_state?: ChatBindingState
   account_id?: string
   kind?: 'direct' | 'group'
   group?: WhatsAppGroup | null

@@ -9,12 +9,14 @@ import { SearchRequestLifecycle, type SearchRequestLease } from '@/lib/searchReq
 import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
 import { OPERATIONAL_OVERLAY_LAYERS, useOperationalOverlayPortal, useOperationalOverlayRegistration } from '@/components/operational-window/OperationalOverlayContext'
 import { restoreDialogFocus, useDialogTabTrap } from '@/components/programs/useDialogTabTrap'
+import { bindingRevision } from './chatContinuity'
 import { chatAvatar, isGroupChat } from '@/utils/chatGroups'
 import { formatPhone, getChatDisplayName, isPendingChatIdentity } from '@/utils/chat'
 import { forwardValidationCodes, forwardDestinationIssue, forwardingLabel, forwardingSessionKey, forwardLimits, forwardSourceIssue, forwardActionIssue, parseForwardReceipt, rememberForwardBatch, restoreForwardBatch, type ForwardBatchRequest, type ForwardDestinationResult, type StoredForwardBatch, type ForwardMode, type ForwardContentVariant } from './messageForwarding'
 
 interface Props {
   message: Message
+  sourceChat?: Chat | null
   deviceId: string
   chatId: string
   onClose: () => void
@@ -32,7 +34,7 @@ export default function ForwardMessageModal(props: Props) {
   return <ForwardMessageSession key={`${scope}:${props.deviceId}:${props.chatId}:${props.message.id}`} {...props} scope={scope} />
 }
 
-function ForwardMessageSession({ message, deviceId, chatId, onClose, onSuccess, suspended = false, nativeForwardEnabled = false, copyEnabled = true, scope }: Props & { scope: string }) {
+function ForwardMessageSession({ message, sourceChat, deviceId, chatId, onClose, onSuccess, suspended = false, nativeForwardEnabled = false, copyEnabled = true, scope }: Props & { scope: string }) {
   const key = forwardingSessionKey(scope, chatId, message.id, deviceId)
   const suspendedRef = useRef(suspended); suspendedRef.current = suspended
   const mounted = useRef(true)
@@ -50,16 +52,16 @@ function ForwardMessageSession({ message, deviceId, chatId, onClose, onSuccess, 
   }
   const [batch, setBatch] = useState<StoredForwardBatch | null>(initial.current)
   const batchRef = useRef(batch); batchRef.current = batch
-  const nativeIssue = forwardSourceIssue(message, deviceId) || (!nativeForwardEnabled || capabilityRejected ? nativeCapabilityIssue : null)
-  const copyIssue = forwardActionIssue(message, deviceId) || (!copyEnabled ? 'El dispositivo no está disponible para enviar una copia.' : null)
+  const nativeIssue = forwardSourceIssue(message, deviceId, 'native', 'original', sourceChat) || (!nativeForwardEnabled || capabilityRejected ? nativeCapabilityIssue : null)
+  const copyIssue = forwardActionIssue(message, deviceId, sourceChat) || (!copyEnabled ? 'El dispositivo no está disponible para enviar una copia.' : null)
   const [chosenMode, setChosenMode] = useState<ForwardMode>(() => initial.current?.request.mode ?? (initial.current ? 'native' : nativeIssue ? 'copy' : 'native'))
   const [chosenVariant, setChosenVariant] = useState<ForwardContentVariant>(() => initial.current?.request.content_variant ?? 'original')
   const mode = batch ? batch.request.mode ?? 'native' : chosenMode
   const variant = batch ? batch.request.content_variant ?? 'original' : chosenVariant
-  const sourceIssue = mode === 'native' ? nativeIssue : copyIssue || forwardSourceIssue(message, deviceId, mode, variant)
+  const sourceIssue = mode === 'native' ? nativeIssue : copyIssue || forwardSourceIssue(message, deviceId, mode, variant, sourceChat)
   const sourceIssueRef = useRef(sourceIssue); sourceIssueRef.current = sourceIssue
   const optionsRef = useRef({ mode, variant }); optionsRef.current = { mode, variant }
-  const needsAudioDocument = message.message_type === 'audio' && typeof message.audio_ptt !== 'boolean'
+  const needsAudioDocument = message.message_type === 'audio'
   const limits = forwardLimits(message)
 
   const [chats, setChats] = useState<Chat[]>([])
@@ -137,7 +139,7 @@ function ForwardMessageSession({ message, deviceId, chatId, onClose, onSuccess, 
   const persist = (next: StoredForwardBatch | null) => { batchRef.current = next; setBatch(next); rememberForwardBatch(key, next) }
   const reconcileResult = (data: unknown, operation: StoredForwardBatch) => {
     const receipt = parseForwardReceipt(data, operation.request)
-    persist({ request: operation.request, receipt }); setMissingReceipt(false)
+    persist({ request: operation.request, binding_revision: operation.binding_revision, receipt }); setMissingReceipt(false)
     if (receipt.results.every(result => result.state === 'sent') && !suspendedRef.current) {
       rememberForwardBatch(key, null); onSuccess(); onClose()
     }
@@ -151,7 +153,7 @@ function ForwardMessageSession({ message, deviceId, chatId, onClose, onSuccess, 
     const controller = new AbortController(); writeLease.current = controller
     const timeout = window.setTimeout(() => controller.abort(), 45000)
     try {
-      const response = await fetch('/api/messages/forward/batch', { method: 'POST', credentials: 'include', cache: 'no-store', signal: controller.signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(operation.request) })
+      const response = await fetch('/api/messages/forward/batch', { method: 'POST', credentials: 'include', cache: 'no-store', signal: controller.signal, headers: { 'Content-Type': 'application/json', ...(operation.binding_revision ? { 'X-Chat-ID': operation.request.source_chat_id, 'X-Chat-Binding-Revision': String(operation.binding_revision) } : {}) }, body: JSON.stringify(operation.request) })
       const data = await response.json().catch(() => ({}))
       if (!current()) return
       if (!response.ok || data.success !== true) {
@@ -172,7 +174,7 @@ function ForwardMessageSession({ message, deviceId, chatId, onClose, onSuccess, 
   const beginForward = async (destinations = selected) => {
     if (!current() || suspendedRef.current || inFlight.current || sourceIssueRef.current || mode !== optionsRef.current.mode || variant !== optionsRef.current.variant || destinations.length === 0 || destinations.some(chat => forwardDestinationIssue(chat, destinations.filter(row => row.id !== chat.id), message, deviceId))) return
     const request: ForwardBatchRequest = { mode, content_variant: variant, source_chat_id: chatId, source_message_id: message.id, device_id: deviceId, destination_chat_ids: destinations.map(chat => chat.id), client_operation_id: crypto.randomUUID() }
-    await postOperation({ request })
+    await postOperation({ request, binding_revision: sourceChat?.binding_state === 'verified_continuity' ? bindingRevision(sourceChat) || undefined : undefined })
   }
   const checkStatus = async () => {
     const operation = batchRef.current

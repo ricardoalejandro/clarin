@@ -154,7 +154,7 @@ func TestReactionRepositoryGetByChatIDIsAccountScoped(t *testing.T) {
 	if err != wantErr {
 		t.Fatalf("GetByChatID() error = %v, want %v", err, wantErr)
 	}
-	if !strings.Contains(db.querySQL, "WHERE account_id = $1 AND chat_id = $2") {
+	if !strings.Contains(db.querySQL, "WHERE account_id = $1 AND (chat_id = $2 OR") || !strings.Contains(db.querySQL, "WHERE account_id=$1 AND canonical_chat_id=$2") {
 		t.Fatalf("GetByChatID() query is not account scoped: %s", db.querySQL)
 	}
 	if len(db.queryArgs) != 2 || db.queryArgs[0] != accountID || db.queryArgs[1] != chatID {
@@ -176,7 +176,7 @@ func TestReactionRepositoryGetByChatMessageIDsIsBoundedAndAccountScoped(t *testi
 	if err != wantErr {
 		t.Fatalf("GetByChatMessageIDs() error = %v, want %v", err, wantErr)
 	}
-	if !strings.Contains(db.querySQL, "account_id = $1 AND chat_id = $2 AND target_message_id = ANY($3)") {
+	if !strings.Contains(db.querySQL, "WHERE account_id = $1 AND (chat_id = $2 OR") || !strings.Contains(db.querySQL, "WHERE account_id=$1 AND canonical_chat_id=$2") || !strings.Contains(db.querySQL, "target_message_id = ANY($3)") {
 		t.Fatalf("GetByChatMessageIDs() query is not bounded/account scoped: %s", db.querySQL)
 	}
 	if len(db.queryArgs) != 3 || db.queryArgs[0] != accountID || db.queryArgs[1] != chatID {

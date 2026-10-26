@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from '
 import { subscribeWebSocket } from '@/lib/api'
 import { getAuthScope, isAuthIdentityChanging, subscribeAuthScope } from '@/lib/authScope'
 import type { Chat, ChatPinState } from '@/types/chat'
+import { continuityChatIds } from './chatContinuity'
 import { applyChatPin, pinSnapshot } from '@/utils/chatPins'
 
 export function usePersonalChatPins(onChange: (state: ChatPinState, rollback?: boolean) => void) {
@@ -71,5 +72,12 @@ export function usePersonalChatPins(onChange: (state: ChatPinState, rollback?: b
       }
     }
   }, [accept, project, current])
-  return { project, toggle, pending, error, scope }
+  const remapContinuity = useCallback((chat: Chat) => {
+    for (const id of continuityChatIds(chat)) {
+      requests.current.get(id)?.abort(); requests.current.delete(id)
+      optimistic.current.delete(id); canonical.current.delete(id)
+    }
+    canonical.current.set(chat.id, pinSnapshot(chat)); setPending(new Set(optimistic.current.keys()))
+  }, [])
+  return { project, toggle, pending, error, scope, remapContinuity }
 }

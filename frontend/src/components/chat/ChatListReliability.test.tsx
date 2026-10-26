@@ -16,6 +16,37 @@ function emit(event:string,data:unknown){socket.listeners.forEach(l=>l({event,da
 describe('Chat list canonical membership',()=>{
  beforeEach(()=>{localStorage.clear();localStorage.setItem('token','synthetic-audit-token');socket.listeners.clear();vi.spyOn(HTMLElement.prototype,'getBoundingClientRect').mockReturnValue({width:1440,height:900,top:0,bottom:900,left:0,right:1440,x:0,y:0,toJSON(){}})});
  afterEach(()=>{cleanup();vi.unstubAllGlobals();socket.listeners.clear()});
+ it('reconciles verified group aliases in place, keeping selection and rejecting an older continuity event',async()=>{
+  const historic={...chat,id:'history-group',account_id:'account-audit',kind:'group',jid:'qa@g.us',name:'Grupo histórico',device_id:undefined,group:{subject:'Grupo histórico',participant_count:2,can_send:true,membership_status:'member',announce:false}};
+  const duplicate={...historic,id:'duplicate-group',name:'Grupo duplicado',device_id:'device-new',group:{...historic.group,subject:'Grupo duplicado'}};
+  const canonical={...historic,device_id:'device-new',canonical_chat_id:'history-group',alias_chat_ids:['duplicate-group'],binding_state:'verified_continuity',binding_revision:2};
+  const connected={id:'device-new',name:'Canal reanudado',status:'connected',provider:'whatsapp_web',runtime_capabilities:{can_list_groups:true}};
+  let reconciled=false;
+  const fetcher=vi.fn((input:RequestInfo|URL)=>{
+   const url=String(input);
+   if(url==='/api/devices')return Promise.resolve(json({success:true,devices:[connected]}));
+   if(url==='/api/chats/history-group'){reconciled=true;return Promise.resolve(json({success:true,chat:canonical,device:connected}))}
+   if(url.startsWith('/api/chats?'))return Promise.resolve(json({success:true,chats:reconciled?[canonical]:[historic,duplicate],total:reconciled?1:2}));
+   return Promise.resolve(json({success:true}));
+  });
+  vi.stubGlobal('fetch',fetcher);render(<ChatsPage/>);
+  fireEvent.click(await screen.findByRole('button',{name:'Conversación con Grupo duplicado'}));
+  const scroll=document.querySelector<HTMLElement>('[data-chat-row-id="duplicate-group"]')!.closest<HTMLElement>('.overflow-y-auto')!;
+  scroll.scrollTop=148;
+  const payload={canonical_chat_id:'history-group',alias_chat_ids:['duplicate-group'],device_id:'device-new',binding_revision:2};
+  await act(async()=>emit('chat_continuity_reconciled',payload));
+  await waitFor(()=>expect(screen.queryByRole('button',{name:'Conversación con Grupo duplicado'})).not.toBeInTheDocument());
+  expect(screen.getByRole('button',{name:'Conversación con Grupo histórico'})).toHaveAttribute('aria-current','true');
+  expect(document.querySelectorAll('[data-chat-row-id="history-group"]')).toHaveLength(1);
+  expect(scroll.scrollTop).toBe(148);
+  fireEvent.click(screen.getByRole('button',{name:'Acciones para Grupo histórico'}));
+  const remove=screen.getByRole('menuitem',{name:/Eliminar del CRM/});
+  expect(remove).toBeDisabled();
+  expect(remove).toHaveTextContent('La eliminación de este historial consolidado requiere revisión.');
+  const reads=fetcher.mock.calls.filter(([url])=>String(url)==='/api/chats/history-group').length;
+  await act(async()=>emit('chat_continuity_reconciled',{...payload,binding_revision:1}));
+  expect(fetcher.mock.calls.filter(([url])=>String(url)==='/api/chats/history-group')).toHaveLength(reads);
+ });
  it('keeps unread counts and inbox filters without repeated pending labels on rows',async()=>{
   const rows=[
    {...chat,id:'pending-read',name:'Pendiente ya leído',contact_name:'Pendiente ya leído',needs_reply:true,waiting_since:'2026-10-01T12:00:00Z'},

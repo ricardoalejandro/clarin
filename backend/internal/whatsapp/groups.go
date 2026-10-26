@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/repository"
 	"github.com/naperu/clarin/internal/ws"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -27,6 +28,7 @@ type groupHistoryContextKey struct{}
 type groupSendAuthorization struct {
 	AccountID, DeviceID, ChatID uuid.UUID
 	JID                         string
+	BindingRevision             int64
 }
 
 func groupSenderIdentity(source types.MessageSource) types.JID {
@@ -71,6 +73,11 @@ func (p *DevicePool) saveGroupInfo(ctx context.Context, instance *DeviceInstance
 	chat, err := p.repos.Chat.GetOrCreateGroup(ctx, instance.AccountID, instance.ID, info.JID.ToNonAD().String(), info.Name)
 	if err != nil {
 		return nil, err
+	}
+	// Another connected companion of the same verified owner may already be
+	// the operational binding. Its group projection must not be overwritten.
+	if chat.DeviceID == nil || *chat.DeviceID != instance.ID {
+		return chat, nil
 	}
 	p.queueInitialGroupAvatar(instance, chat)
 	ownPN := types.EmptyJID
@@ -165,6 +172,13 @@ func (p *DevicePool) SyncGroups(ctx context.Context, accountID, deviceID uuid.UU
 		chat, e := p.saveGroupInfo(requestCtx, instance, info, true)
 		if e != nil {
 			return count, e
+		}
+		// Current group metadata can establish a PN/LID author pair that was
+		// unavailable when the historical perspectives first converged.
+		if len(chat.AliasChatIDs) > 0 {
+			if e = p.repos.Message.ReconcileConversationMessage(requestCtx, accountID, chat.ID, ""); e != nil {
+				return count, e
+			}
 		}
 		count++
 		p.broadcastGroup(chat)
@@ -271,11 +285,23 @@ func (p *DevicePool) PrepareGroupSend(ctx context.Context, accountID, deviceID, 
 	if err != nil {
 		return ctx, err
 	}
+	if chat.WhatsAppOwnerID != nil {
+		owner, ownerErr := p.repos.Chat.WhatsAppDeviceOwner(ctx, accountID, deviceID)
+		if ownerErr != nil {
+			return ctx, ownerErr
+		}
+		if owner != *chat.WhatsAppOwnerID || chat.BindingState != "verified_continuity" {
+			return ctx, fmt.Errorf("la identidad del dispositivo no corresponde al historial del grupo")
+		}
+	}
 	if requireSend || chat.Group == nil || chat.Group.SyncedAt == nil || time.Since(*chat.Group.SyncedAt) > time.Minute {
 		refreshed, err = p.RefreshGroup(ctx, accountID, deviceID, jid)
 	}
 	if err != nil {
 		return ctx, fmt.Errorf("no se pudo verificar la membresía del grupo: %w", err)
+	}
+	if !sameGroupSendConversation(chat, refreshed, accountID, deviceID, jid) {
+		return ctx, repository.ErrChatBindingChanged
 	}
 	if refreshed.Group == nil || refreshed.Group.MembershipStatus != "member" {
 		return ctx, fmt.Errorf("el dispositivo no pertenece al grupo")
@@ -307,7 +333,7 @@ func (p *DevicePool) PrepareGroupSend(ctx context.Context, accountID, deviceID, 
 			seen[member.JID] = true
 		}
 	}
-	auth := groupSendAuthorization{accountID, deviceID, chatID, jid}
+	auth := groupSendAuthorization{AccountID: accountID, DeviceID: deviceID, ChatID: refreshed.ID, JID: jid, BindingRevision: refreshed.BindingRevision}
 	if mutable, ok := ctx.(interface{ SetUserValue(any, any) }); ok {
 		mutable.SetUserValue(groupSendContextKey{}, auth)
 	} else {
@@ -324,7 +350,35 @@ func (p *DevicePool) requireGroupSend(ctx context.Context, instance *DeviceInsta
 	if !ok || auth.AccountID != instance.AccountID || auth.DeviceID != instance.ID || auth.JID != jid.ToNonAD().String() {
 		return fmt.Errorf("los grupos solo admiten operaciones manuales desde su conversación verificada")
 	}
+	if p.repos == nil || p.repos.Chat == nil {
+		return fmt.Errorf("no se pudo verificar el canal del grupo")
+	}
+	chat, err := p.repos.Chat.GetByID(ctx, auth.ChatID)
+	if err != nil {
+		return err
+	}
+	owner := uuid.Nil
+	if chat != nil && chat.WhatsAppOwnerID != nil {
+		owner, err = p.repos.Chat.WhatsAppDeviceOwner(ctx, auth.AccountID, auth.DeviceID)
+		if err != nil {
+			return err
+		}
+	}
+	if !validGroupSendBinding(auth, chat, owner) {
+		return repository.ErrChatBindingChanged
+	}
 	return nil
+}
+
+func validGroupSendBinding(auth groupSendAuthorization, chat *domain.Chat, deviceOwner uuid.UUID) bool {
+	if chat == nil || chat.ID != auth.ChatID || chat.AccountID != auth.AccountID || chat.DeviceID == nil || *chat.DeviceID != auth.DeviceID || chat.JID != auth.JID || chat.BindingRevision != auth.BindingRevision {
+		return false
+	}
+	return chat.WhatsAppOwnerID == nil || (chat.BindingState == "verified_continuity" && *chat.WhatsAppOwnerID == deviceOwner)
+}
+
+func sameGroupSendConversation(initial, refreshed *domain.Chat, accountID, deviceID uuid.UUID, jid string) bool {
+	return initial != nil && refreshed != nil && initial.ID == refreshed.ID && refreshed.AccountID == accountID && refreshed.DeviceID != nil && *refreshed.DeviceID == deviceID && refreshed.JID == jid
 }
 
 func applyOutboundGroupMentions(ctx context.Context, jid types.JID, message *waE2E.Message) {

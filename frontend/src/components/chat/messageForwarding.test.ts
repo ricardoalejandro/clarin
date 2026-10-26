@@ -32,7 +32,7 @@ describe('forwarding truth', () => {
     expect(forwardSourceIssue({ ...message, device_id: 'another' }, 'device')).toMatch(/otro dispositivo/)
     for (const message_type of ['poll', 'contact', 'location', 'protocol']) expect(forwardSourceIssue({ ...message, message_type })).toMatch(/tipo/)
     expect(forwardSourceIssue({ ...message, message_type: 'image' })).toMatch(/archivo/)
-    const audio = { ...message, message_type: 'audio', media_url: '/api/media/audio' }
+    const audio = { ...message, body: '', message_type: 'audio', media_url: '/api/media/audio' }
     expect(forwardSourceIssue(audio)).toMatch(/nota de voz/)
     expect(forwardSourceIssue({ ...audio, audio_ptt: false })).toBeNull()
   })
@@ -66,6 +66,39 @@ describe('forwarding truth', () => {
 
 
 describe('explicit copies and inherited sharing limits', () => {
+  it.each([false, true])('preserves explicit audio kind %s and requires a deliberate file copy for historical text', audioPTT => {
+    const source: Message = { ...message, message_type: 'audio', media_url: '/api/media/file/account/audio', audio_ptt: audioPTT, body: '' }
+    expect(forwardSourceIssue(source, 'device', 'copy')).toBeNull()
+    expect(forwardSourceIssue(source, 'device', 'native')).toBeNull()
+    expect(source.audio_ptt).toBe(audioPTT)
+    expect(forwardSourceIssue({ ...source, body: 'Texto del historial' }, 'device', 'copy')).toMatch(/no admite texto/)
+    expect(forwardSourceIssue({ ...source, body: 'Texto del historial' }, 'device', 'native')).toMatch(/no admite texto/)
+    expect(forwardSourceIssue({ ...source, body: 'Texto del historial' }, 'device', 'copy', 'audio_document')).toBeNull()
+    expect(forwardActionIssue({ ...source, body: 'Texto del historial' }, 'device')).toBeNull()
+  })
+  const privateChat: Chat = { id: 'private-history', account_id: 'account', jid: '51900000999@s.whatsapp.net', kind: 'direct', device_id: 'current-device', name: 'Historial privado', last_message: '', last_message_at: '2026-10-25T00:00:00Z', unread_count: 0 }
+  it.each([null, 'retired-device'])('copies private historical video with source device %s only in its exact current chat context', historicalDevice => {
+    const source: Message = { ...message, account_id: 'account', chat_id: privateChat.id, device_id: historicalDevice, message_type: 'video', media_url: '/api/media/file/account/video', is_from_me: true }
+    expect(forwardSourceIssue(source, 'current-device', 'copy', 'original', privateChat)).toBeNull()
+    expect(forwardActionIssue(source, 'current-device', privateChat)).toBeNull()
+    expect(forwardSourceIssue(source, 'current-device', 'native', 'original', privateChat)).toMatch(/otro dispositivo/)
+    expect(forwardSourceIssue(source, 'current-device', 'copy')).toMatch(/otro dispositivo/)
+    expect(forwardSourceIssue(source, 'current-device', 'copy', 'original', { ...privateChat, id: 'other-chat' })).not.toBeNull()
+    expect(forwardSourceIssue(source, 'other-device', 'copy', 'original', privateChat)).not.toBeNull()
+    expect(forwardSourceIssue(source, 'current-device', 'copy', 'original', { ...privateChat, account_id: 'other-account' })).toMatch(/otra cuenta/)
+    expect(forwardSourceIssue({ ...source, chat_id: undefined }, 'current-device', 'copy', 'original', privateChat)).not.toBeNull()
+    expect(source.device_id).toBe(historicalDevice)
+  })
+  it('does not use private-copy permission for an unverified group or broaden native private history', () => {
+    const source: Message = { ...message, account_id: 'account', chat_id: privateChat.id, device_id: null }
+    const groupChat: Chat = { ...privateChat, jid: '120099@g.us', kind: 'group' }
+    expect(forwardSourceIssue(source, 'current-device', 'copy', 'original', groupChat)).toMatch(/otro dispositivo/)
+    const verifiedPrivate: Chat = { ...privateChat, canonical_chat_id: privateChat.id, binding_state: 'verified_continuity', binding_revision: 2 }
+    expect(forwardSourceIssue(source, 'current-device', 'native', 'original', verifiedPrivate)).toMatch(/otro dispositivo/)
+    const verifiedGroup: Chat = { ...groupChat, canonical_chat_id: groupChat.id, binding_state: 'verified_continuity', binding_revision: 2 }
+    expect(forwardSourceIssue(source, 'current-device', 'native', 'original', verifiedGroup)).toBeNull()
+    expect(forwardSourceIssue({ ...source, account_id: 'other-account' }, 'current-device', 'copy', 'original', verifiedGroup)).toMatch(/otra cuenta/)
+  })
   it('allows safe historical text and media copies while keeping native forwarding strict', () => {
     const historical = { ...message, forwarding: undefined }
     expect(forwardActionIssue(historical, 'device')).toBeNull()
@@ -81,7 +114,7 @@ describe('explicit copies and inherited sharing limits', () => {
     for (const source of [{ ...historical, is_view_once: true }, { ...historical, is_revoked: true }, { ...historical, message_type: 'poll' }]) expect(forwardActionIssue(source)).not.toBeNull()
   })
   it('requires deliberate audio-as-document selection without inventing PTT', () => {
-    const audio = { ...message, message_type: 'audio', media_url: '/api/media/file/audio', forwarding: undefined }
+    const audio = { ...message, body: '', message_type: 'audio', media_url: '/api/media/file/audio', forwarding: undefined }
     expect(forwardActionIssue(audio)).toBeNull()
     expect(forwardSourceIssue(audio, 'device', 'copy')).toMatch(/archivo adjunto/)
     expect(forwardSourceIssue(audio, 'device', 'copy', 'audio_document')).toBeNull()

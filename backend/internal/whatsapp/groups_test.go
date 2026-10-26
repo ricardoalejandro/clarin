@@ -79,10 +79,46 @@ func TestGroupOutboundRequiresExactManualAuthorization(t *testing.T) {
 	if pool.requireGroupSend(context.Background(), instance, jid) == nil {
 		t.Fatal("automated group send accepted")
 	}
-	auth := groupSendAuthorization{AccountID: instance.AccountID, DeviceID: instance.ID, ChatID: uuid.New(), JID: jid.String()}
+	auth := groupSendAuthorization{AccountID: instance.AccountID, DeviceID: instance.ID, ChatID: uuid.New(), JID: jid.String(), BindingRevision: 4}
 	ctx := context.WithValue(context.Background(), groupSendContextKey{}, auth)
-	if err := pool.requireGroupSend(ctx, instance, jid); err != nil {
-		t.Fatal(err)
+	chat := &domain.Chat{ID: auth.ChatID, AccountID: auth.AccountID, DeviceID: &auth.DeviceID, JID: auth.JID, BindingRevision: 4}
+	if !validGroupSendBinding(auth, chat, uuid.Nil) {
+		t.Fatal("legacy bound group rejected")
+	}
+	if !sameGroupSendConversation(chat, chat, instance.AccountID, instance.ID, jid.String()) {
+		t.Fatal("same refreshed conversation rejected")
+	}
+	different := *chat
+	different.ID = uuid.New()
+	if sameGroupSendConversation(chat, &different, instance.AccountID, instance.ID, jid.String()) {
+		t.Fatal("refresh silently changed authorized conversation")
+	}
+	different = *chat
+	otherDevice := uuid.New()
+	different.DeviceID = &otherDevice
+	if sameGroupSendConversation(chat, &different, instance.AccountID, instance.ID, jid.String()) {
+		t.Fatal("refresh silently changed sender")
+	}
+	if pool.requireGroupSend(ctx, instance, jid) == nil {
+		t.Fatal("missing persistence validation accepted")
+	}
+	chat.BindingRevision++
+	if validGroupSendBinding(auth, chat, uuid.Nil) {
+		t.Fatal("binding change during upload accepted")
+	}
+	chat.BindingRevision = 4
+	owner := uuid.New()
+	chat.WhatsAppOwnerID = &owner
+	chat.BindingState = "verified_continuity"
+	if !validGroupSendBinding(auth, chat, owner) {
+		t.Fatal("current verified owner rejected")
+	}
+	if validGroupSendBinding(auth, chat, uuid.New()) {
+		t.Fatal("different own identity accepted")
+	}
+	chat.BindingState = "conflict"
+	if validGroupSendBinding(auth, chat, owner) {
+		t.Fatal("conflicting binding accepted")
 	}
 	if pool.requireGroupSend(ctx, instance, types.NewJID("120002", types.GroupServer)) == nil {
 		t.Fatal("authorization reused for another group")

@@ -13,6 +13,7 @@ import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { Chat, ChatState, Device, Message, ChatMention } from '@/types/chat'
 import { subscribeWebSocket } from '@/lib/api'
+import { bindingRevision, chatDeletionIssue, continuityChatIds, parseChatContinuityEvent, verifiedChatContinuity } from './chatContinuity'
 import { messageBelongsToChat } from './chatEventScope'
 import { chatSenderPhone, validatePinnedChatSender, type ChatSenderSession } from './chatSenderSession'
 import { mergeMessageForwarding, forwardActionIssue } from './messageForwarding'
@@ -70,6 +71,7 @@ import {
 import { getMessageReactionAvailability } from '@/utils/chatCapabilities'
 import { ChatMediaType, validateChatAttachment } from '@/utils/chatAttachments'
 import { chatMediaIdentity } from '@/utils/chatMediaUrl'
+import { isCanonicalMediaSendAck } from './chatMediaSendAck'
 import type { ChatDocumentDescriptor } from '@/utils/chatDocuments'
 import type { PendingQuickReplyAttachment, QuickReply, QuickReplyComposerDraft, QuickReplyPage, QuickReplyRealtimePayload } from '@/types/quick-reply'
 import {
@@ -100,6 +102,7 @@ type AttachmentDraft = {
   type: ChatMediaType
   previewUrl: string
   caption: string
+  audioAsDocument?: boolean
 }
 
 type OutgoingMediaType = ChatMediaType | 'sticker'
@@ -111,6 +114,7 @@ type RetryableMedia = {
   caption: string
   previewUrl: string
   uploadedMediaUrl?: string
+  uncertain?: boolean
   operationId: string
   frozenPayload?: string
   attentionBoundary?: string
@@ -120,6 +124,10 @@ type RetryableMedia = {
   quotedSender?: string
   quotedIsFromMe?: boolean
 }
+
+const MEDIA_SEND_UNCERTAIN_MESSAGE = 'El resultado del adjunto está sin confirmar. Conservamos el archivo y la misma operación; no se enviará otra copia automáticamente.'
+
+const CONTINUITY_ACCEPTED_MESSAGE = 'El historial continúa con el mismo número verificado. Las operaciones anteriores no se enviarán automáticamente.'
 
 type ComposerFeedback = {
   kind: 'error' | 'info'
@@ -287,13 +295,39 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
   suspendedRef.current = suspended
   const isActive = requestedActive && !suspended
   const suspendedFocusRef = useRef<HTMLElement | null>(null)
+  const [chat, setChat] = useState<Chat | null>(initialChat || null)
+  const senderEpochRef = useRef(0)
+  const continuityFocusRef = useRef(false)
+  const senderDeviceRef = useRef(initialDeviceId || device?.id)
+  const mutationLeases = useRef(new Set<AbortController>())
+  const cancelPreparedSends = useCallback(() => { senderEpochRef.current++; for (const lease of mutationLeases.current) lease.abort(); mutationLeases.current.clear() }, [])
+  useEffect(() => () => cancelPreparedSends(), [cancelPreparedSends])
   const chatRequest = useCallback((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const method = (init?.method || 'GET').toUpperCase()
     if (suspendedRef.current && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
       return Promise.reject(new Error('La conversación está pausada. Continúa desde la vista de escritorio.'))
     }
-    return fetch(input, init)
-  }, [])
+    if (['GET', 'HEAD', 'OPTIONS'].includes(method)) return fetch(input, init)
+    if (typeof init?.body === 'string') {
+      try {
+        const payload = JSON.parse(init.body)
+        if (payload.device_id && senderDeviceRef.current && payload.device_id !== senderDeviceRef.current) return Promise.reject(new Error('El canal cambió. La operación anterior no se enviará desde otro dispositivo.'))
+      } catch { /* Non-JSON request bodies keep their existing transport contract. */ }
+    }
+    const lease = new AbortController(), epoch = senderEpochRef.current
+    const abort = () => lease.abort()
+    if (init?.signal?.aborted) lease.abort()
+    init?.signal?.addEventListener('abort', abort, { once: true })
+    mutationLeases.current.add(lease)
+    const headers = new Headers(init?.headers)
+    if (chat?.binding_state === 'verified_continuity' && chat.canonical_chat_id === chat.id && bindingRevision(chat) > 0) {
+      headers.set('X-Chat-ID', chat.id); headers.set('X-Chat-Binding-Revision', String(bindingRevision(chat)))
+    }
+    return fetch(input, { ...init, headers, signal: lease.signal }).then(response => {
+      if (lease.signal.aborted || senderEpochRef.current !== epoch) throw new DOMException('El canal cambió durante la operación. Comprueba su resultado antes de reintentar.', 'AbortError')
+      return response
+    }).finally(() => { mutationLeases.current.delete(lease); init?.signal?.removeEventListener('abort', abort) })
+  }, [chat?.id, chat?.canonical_chat_id, chat?.binding_revision, chat?.binding_state])
   const { ref: panelRef, width: panelWidth } = useContainerWidth<HTMLDivElement>()
   const { setComposerAccessoryOpen } = useChatMobileChrome()
   useLayoutEffect(() => {
@@ -326,10 +360,17 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
   }, [])
   const operationalPortal = useOperationalOverlayPortal()
   const [canonicalDevice, setCanonicalDevice] = useState<Device | null>(device || null)
-  const pinnedSenderRef = useRef<ChatSenderSession>({ chatId: chatId || null, deviceId: initialDeviceId || device?.id || null, phone: chatSenderPhone(device) })
+  const pinnedSenderRef = useRef<ChatSenderSession>({ chatId: chatId || null, deviceId: initialDeviceId || device?.id || null, phone: chatSenderPhone(device), bindingRevision: bindingRevision(initialChat), accountId: initialChat?.account_id, jid: initialChat?.jid })
   const pinnedSenderSessionRef = useRef(explicitSenderSession)
-  if (pinnedSenderRef.current.chatId !== (chatId || null) || pinnedSenderSessionRef.current !== explicitSenderSession) {
-    pinnedSenderRef.current = { chatId: chatId || null, deviceId: initialDeviceId || device?.id || null, phone: chatSenderPhone(device) }
+  const continuitySourceRef = useRef<string | null>(null)
+  const renderedChatRef = useRef(chatId)
+  if (renderedChatRef.current !== chatId) {
+    if (verifiedChatContinuity(initialChat, { id: renderedChatRef.current || '', jid: pinnedSenderRef.current.jid || initialChat?.jid || '', account_id: pinnedSenderRef.current.accountId, binding_revision: pinnedSenderRef.current.bindingRevision })) continuitySourceRef.current = renderedChatRef.current || null
+    else continuitySourceRef.current = null
+    renderedChatRef.current = chatId
+  }
+  if ((!continuitySourceRef.current && pinnedSenderRef.current.chatId !== (chatId || null)) || pinnedSenderSessionRef.current !== explicitSenderSession) {
+    pinnedSenderRef.current = { chatId: chatId || null, deviceId: initialDeviceId || device?.id || null, phone: chatSenderPhone(device), bindingRevision: bindingRevision(initialChat), accountId: initialChat?.account_id, jid: initialChat?.jid }
     pinnedSenderSessionRef.current = explicitSenderSession
   }
   const [deviceValidationState, setDeviceValidationState] = useState<DeviceValidationState>(chatId ? 'validating' : 'ready')
@@ -340,8 +381,9 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
     : deviceValidationState
   const deviceId = activeDeviceValidationState === 'ready' ? canonicalDevice?.id : undefined
   const deviceProvider = canonicalDevice?.provider || 'whatsapp_web'
-  const [chat, setChat] = useState<Chat | null>(initialChat || null)
-  const groupRestriction = groupWriteRestriction(chat) || (isGroupChat(chat) && activeDeviceValidationState === 'ready' && canonicalDevice?.runtime_capabilities?.can_send_group_messages !== true ? 'Este dispositivo no admite enviar mensajes a grupos.' : null)
+  const activeBindingSnapshot = bindingRevision(initialChat) > bindingRevision(chat) ? initialChat : chat
+  const continuityRestriction = activeBindingSnapshot?.binding_state === 'pending' ? 'Comprobando la identidad propia de este historial…' : activeBindingSnapshot?.binding_state === 'conflict' ? 'No se pudo confirmar que este historial pertenezca al número conectado.' : null
+  const groupRestriction = continuityRestriction || groupWriteRestriction(chat) || (isGroupChat(chat) && activeDeviceValidationState === 'ready' && canonicalDevice?.runtime_capabilities?.can_send_group_messages !== true ? 'Este dispositivo no admite enviar mensajes a grupos.' : null)
   const personalPins = usePersonalChatPins((state, rollback) => setChat(current => current?.id === state.chat_id ? rollback ? { ...current, is_pinned: state.is_pinned, pinned_at: state.pinned_at, pin_version: state.pin_version } : applyChatPin(current, state) : current))
   const ComposerInput = isGroupChat(chat) ? GroupMentionInput : WhatsAppTextInput
   const deviceUnavailable = Boolean(canonicalDevice && (isDeviceDeleting(canonicalDevice) || canonicalDevice.status !== 'connected' || deviceProvider !== 'whatsapp_web'))
@@ -395,6 +437,11 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
   const [attachmentDraft, setAttachmentDraft] = useState<AttachmentDraft | null>(null)
   const [sendingAttachment, setSendingAttachment] = useState(false)
   const [composerFeedback, setComposerFeedback] = useState<ComposerFeedback | null>(null)
+  useEffect(() => {
+    if (activeBindingSnapshot?.binding_state === 'pending' || activeBindingSnapshot?.binding_state === 'conflict') {
+      setComposerFeedback(current => current?.message === CONTINUITY_ACCEPTED_MESSAGE ? null : current)
+    }
+  }, [activeBindingSnapshot?.binding_state])
 
   // Sticker favorites are account-scoped and come exclusively from the API.
   const [savedStickers, setSavedStickers] = useState<string[]>([])
@@ -477,11 +524,26 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
   const [quickReplyDraft, setQuickReplyDraft] = useState<QuickReplyComposerDraft | null>(null)
   const draftCacheRef = useRef(new Map<string, { text: string; mentions: MentionRange[]; quick: QuickReplyComposerDraft | null; quote: Message | null; attachment: AttachmentDraft | null }>())
   const draftOwnerRef = useRef(chatId)
+  const [otherContinuityDrafts, setOtherContinuityDrafts] = useState<Array<{ id: string; draft: { text: string; mentions: MentionRange[]; quick: QuickReplyComposerDraft | null; quote: Message | null; attachment: AttachmentDraft | null } }>>([])
+  const continuityAnchorRef = useRef<ConversationAnchor | null>(null)
+  const continuityAlternativesRef = useRef(new Map<string, typeof otherContinuityDrafts>())
+  const alternativesRef = useRef(otherContinuityDrafts); alternativesRef.current = otherContinuityDrafts
   useLayoutEffect(() => {
     const snapshot = { text: messageText, mentions: messageMentions, quick: quickReplyDraft, quote: replyingTo, attachment: attachmentDraft }
     if (draftOwnerRef.current !== chatId) {
-      if (draftOwnerRef.current) draftCacheRef.current.set(draftOwnerRef.current, snapshot)
+      if (draftOwnerRef.current) { draftCacheRef.current.set(draftOwnerRef.current, snapshot); continuityAlternativesRef.current.set(draftOwnerRef.current, alternativesRef.current) }
       const restored = chatId ? draftCacheRef.current.get(chatId) : undefined
+      if (chatId && continuitySourceRef.current === draftOwnerRef.current && verifiedChatContinuity(initialChat, { id: draftOwnerRef.current || '', jid: initialChat?.jid || '' })) {
+        if (restored && (restored.text || restored.quote || restored.quick || restored.attachment)) setOtherContinuityDrafts(rows => [...rows, { id: chatId + ':' + rows.length, draft: restored }])
+        draftCacheRef.current.set(chatId, snapshot)
+        const cached = messagesCacheRef.current.get(draftOwnerRef.current || '')
+        if (cached) messagesCacheRef.current.set(chatId, { ...cached, messages: cached.messages.map(message => ({ ...message, chat_id: chatId })) })
+        continuityAnchorRef.current = { ...captureConversationAnchor(messagesContainerRef.current, chatId), chatId }
+        draftOwnerRef.current = chatId
+        return
+      }
+      continuityAnchorRef.current = null
+      setOtherContinuityDrafts(chatId ? continuityAlternativesRef.current.get(chatId) || [] : [])
       draftOwnerRef.current = chatId
       setMessageText(restored?.text || '')
       setMessageMentions(restored?.mentions || [])
@@ -1261,6 +1323,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
       URL.revokeObjectURL(media.previewUrl)
     }
     mediaRetryRef.current.delete(tempId)
+    if (media?.uncertain) setComposerFeedback(current => current?.message === MEDIA_SEND_UNCERTAIN_MESSAGE ? null : current)
   }, [])
 
   const updateMessagesForChat = useCallback((targetChatId: string, updater: (prev: Message[]) => Message[]) => {
@@ -1439,7 +1502,8 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
     return () => {
       mediaMountedRef.current = false
       savedStickersRequestRef.current?.abort()
-      const draftURLs = new Set(Array.from(draftCacheRef.current.values()).map(draft => draft.attachment?.previewUrl).filter(Boolean))
+      const drafts = [...draftCacheRef.current.values(), ...[...continuityAlternativesRef.current.values(), alternativesRef.current].flat().map(row => row.draft)]
+      const draftURLs = new Set(drafts.map(draft => draft.attachment?.previewUrl).filter(Boolean))
       if (attachmentDraftRef.current?.previewUrl) draftURLs.add(attachmentDraftRef.current.previewUrl)
       draftURLs.forEach(url => URL.revokeObjectURL(url!))
       mediaRetryRef.current.forEach(media => {
@@ -1614,9 +1678,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
     }
     setSyncingHistory(false)
     setHistorySyncFeedback(null)
-    isNearBottomRef.current = true
-    setIsFollowingLatest(true)
-    setPendingLatestMessages(0)
+    if (!continuitySourceRef.current) { isNearBottomRef.current = true; setIsFollowingLatest(true); setPendingLatestMessages(0) }
     loadingMoreRef.current = false
     setLoadingMore(false)
     if (chatId) {
@@ -1624,7 +1686,8 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
       if (cached) {
         setMessages(cached.messages)
         setHasMoreMessages(cached.hasMore)
-        requestAnimationFrame(scrollToBottom)
+        if (continuityAnchorRef.current) { const anchor = continuityAnchorRef.current; continuityAnchorRef.current = null; requestAnimationFrame(() => restoreConversationAnchor(messagesContainerRef.current, anchor, chatId)) }
+        else requestAnimationFrame(scrollToBottom)
       } else {
         setChat(initialChat && initialChat.id === chatId ? initialChat : null)
         setMessages([])
@@ -1642,17 +1705,37 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
     // Draft ownership remains chat-scoped and survives this revalidation.
   }, [chatId, explicitSenderSession])
 
-  function acceptCanonicalSender(next: Device | null) {
+  useEffect(() => {
+    if (!chatId || !initialChat || !verifiedChatContinuity(initialChat, { id: pinnedSenderRef.current.chatId || chatId, account_id: pinnedSenderRef.current.accountId, jid: pinnedSenderRef.current.jid || initialChat.jid, binding_revision: pinnedSenderRef.current.bindingRevision })
+      || bindingRevision(initialChat) <= (pinnedSenderRef.current.bindingRevision || 0)) return
+    const focused = document.activeElement
+    continuityFocusRef.current = Boolean(focused instanceof HTMLElement && panelRef.current?.contains(focused) && focused.closest('textarea,input,[contenteditable="true"]'))
+    cancelPreparedSends(); setDeviceValidationState('validating'); void refreshCanonicalDevice(chatId)
+  }, [chatId, initialChat?.device_id, initialChat?.binding_revision, initialChat?.binding_state])
+
+  function acceptCanonicalSender(next: Device | null, snapshot: Chat = chatSnapshotRef.current!) {
+    if (bindingRevision(snapshot) < (pinnedSenderRef.current.bindingRevision || 0)) return
     setValidatedSenderSession(explicitSenderSession)
-    const validation = validatePinnedChatSender(pinnedSenderRef.current, next)
+    const validation = validatePinnedChatSender(pinnedSenderRef.current, next, snapshot)
     if (validation === 'changed') {
+      cancelPreparedSends()
       setDeviceValidationState('changed')
       return
     }
-    if (!pinnedSenderRef.current.deviceId && next?.id) pinnedSenderRef.current.deviceId = next.id
+    const continuityChanged = snapshot?.binding_state === 'verified_continuity' && (pinnedSenderRef.current.chatId !== snapshot.id || pinnedSenderRef.current.deviceId !== next?.id || bindingRevision(snapshot) > (pinnedSenderRef.current.bindingRevision || 0))
+    if (continuityChanged) {
+      cancelPreparedSends()
+      setForwardingMsg(null)
+      setComposerFeedback({ kind: 'info', message: CONTINUITY_ACCEPTED_MESSAGE })
+    }
+    if (next?.id) pinnedSenderRef.current.deviceId = next.id
+    if (snapshot) { pinnedSenderRef.current.chatId = snapshot.id; pinnedSenderRef.current.bindingRevision = bindingRevision(snapshot); pinnedSenderRef.current.accountId = snapshot.account_id; pinnedSenderRef.current.jid = snapshot.jid }
+    senderDeviceRef.current = next?.id
+    if (continuityChanged) personalPins.remapContinuity(snapshot)
     if (!pinnedSenderRef.current.phone && next?.phone) pinnedSenderRef.current.phone = chatSenderPhone(next)
     setCanonicalDevice(next)
     setDeviceValidationState('ready')
+    if (continuityFocusRef.current) { continuityFocusRef.current = false; requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() }) }
   }
 
   async function refreshCanonicalDevice(targetChatId: string) {
@@ -1675,7 +1758,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
       ) return
       if (!response.ok || !data.success) throw new Error('No se pudo validar el canal')
       reconcileChatSnapshot(data.chat, data.chat_state)
-      acceptCanonicalSender(data.device || null)
+      acceptCanonicalSender(data.device || null, data.chat)
       setValidatedDeviceChatId(targetChatId)
     } catch (error) {
       if (controller.signal.aborted || activeChatIdRef.current !== targetChatId) return
@@ -1733,6 +1816,13 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
             )
             return { ...previous, replies: reconciled.replies, total: reconciled.total }
           })
+        } else if (eventType === 'chat_continuity_reconciled') {
+          const continuity = parseChatContinuityEvent(payload)
+          if (continuity && (continuity.canonical_chat_id === chatId || continuity.alias_chat_ids.includes(chatId)) && continuity.binding_revision > bindingRevision(chat)) {
+            const focused = document.activeElement
+            continuityFocusRef.current = Boolean(focused instanceof HTMLElement && panelRef.current?.contains(focused) && focused.closest('textarea,input,[contenteditable="true"]'))
+            cancelPreparedSends(); setDeviceValidationState('validating'); void refreshCanonicalDevice(chatId)
+          }
         } else if (eventType === 'chat_sender_changed' && payload?.chat_id === chatId) {
           // A different session may reopen the shared chat through another channel.
           // Revalidate against this session's pinned sender; never adopt the event.
@@ -1833,9 +1923,13 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
           }
         } else if (eventType === 'message_link_preview_updated' && payload) {
           const update = payload as LinkPreviewUpdate
-          if (update.chat_id === chatId && update.device_id === deviceId
+          if (messageBelongsToChat({ chatId, jid: chat?.jid, deviceId, provider: canonicalDevice?.provider }, update, {})
             && typeof update.body_snapshot === 'string' && typeof update.is_edited_snapshot === 'boolean') {
-            applyMessageProjectionToChat(chatId, projection => updateLinkPreviewProjection(projection, update), eventScope)
+            applyMessageProjectionToChat(chatId, projection => {
+              const source = projection.find(message => message.id === update.message_id)
+              if (!source || (update.device_id !== chat?.device_id && (update.device_id ?? null) !== (source.device_id ?? null))) return projection
+              return updateLinkPreviewProjection(projection, update)
+            }, eventScope)
           }
         } else if (eventType === 'message_revoked' && payload) {
           // Mark message as revoked
@@ -1969,8 +2063,9 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
       const data = await res.json().catch(() => ({}))
 	  if (controller.signal.aborted || requestSequence !== chatDetailsRequestSequenceRef.current || activeChatIdRef.current !== targetChatId) return
       if (res.ok && data.success) {
+        if (data.chat?.id !== targetChatId && !verifiedChatContinuity(data.chat, { id: targetChatId, jid: chatSnapshotRef.current?.jid || data.chat?.jid || '', account_id: chatSnapshotRef.current?.account_id })) throw new Error('La conversación cambió sin continuidad verificada.')
         reconcileChatSnapshot(data.chat, data.chat_state)
-        acceptCanonicalSender(data.device || null)
+        acceptCanonicalSender(data.device || null, data.chat)
         setValidatedDeviceChatId(targetChatId)
         deviceWasValidated = true
       } else {
@@ -2324,19 +2419,20 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
 
       })
       const data = await res.json().catch(() => ({}))
-      if (!res.ok || !data.success) throw new Error(data.error || 'Error al enviar archivo')
-
-      if (data.message) {
-        updateMessagesForChat(targetChatId, prev => reconcileOptimisticMessage(prev, tempId, data.message as Message))
-        releaseRetryableMedia(tempId, data.message.media_url || uploadedMediaUrl)
-      } else {
-        updateMessagesForChat(targetChatId, prev => prev.map(message =>
-          message.id === tempId ? { ...message, status: 'sent', media_url: uploadedMediaUrl } : message
-        ))
-        releaseRetryableMedia(tempId, uploadedMediaUrl)
+      // An authoritative echo may have confirmed the operation before HTTP finishes.
+      if (mediaRetryRef.current.get(tempId) !== media) return true
+      if ((res.ok && (data.success !== true || !isCanonicalMediaSendAck(data.message, { chatId: targetChatId, deviceId: targetDeviceId, mediaType: media.type, mediaUrl: uploadedMediaUrl }))) || data.code === 'send_outcome_pending') {
+        media.uncertain = true
+        updateMessagesForChat(targetChatId, previous => previous.map(message => message.id === tempId && message.status === 'sending' ? { ...message, send_phase: 'uncertain' } : message))
+        if (activeChatIdRef.current === targetChatId) setComposerFeedback({ kind: 'info', message: MEDIA_SEND_UNCERTAIN_MESSAGE })
+        return false
       }
+      if (!res.ok || !data.success) throw new Error(data.error || 'Error al enviar archivo')
+      updateMessagesForChat(targetChatId, prev => reconcileOptimisticMessage(prev, tempId, data.message as Message))
+      releaseRetryableMedia(tempId, data.message.media_url)
       return true
     } catch (err) {
+      if (mediaRetryRef.current.get(tempId) !== media) return true
       console.error('[ChatMedia]', err)
       updateMessagesForChat(targetChatId, prev => prev.map(message =>
         message.id === tempId ? { ...message, status: 'failed' } : message
@@ -2385,6 +2481,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
 
     const retryableMedia = mediaRetryRef.current.get(failedMsg.id)
     if (retryableMedia) {
+      if (retryableMedia.uncertain) { setComposerFeedback({ kind: 'info', message: MEDIA_SEND_UNCERTAIN_MESSAGE }); return }
       if (sendingChatsRef.current.has(targetChatId)) return
       sendingChatsRef.current.add(targetChatId); setSendingMessage(true)
       updateMessagesForChat(targetChatId, prev => prev.map(message => message.id === failedMsg.id ? { ...message, status: 'sending' } : message))
@@ -2677,7 +2774,9 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
     }
 
     const previousDraft = attachmentDraftRef.current
-    const caption = previousDraft?.caption ?? messageText
+    const caption = previousDraft?.type === 'audio' ? messageText : previousDraft?.caption ?? messageText
+    const mentions = previousDraft?.type === 'audio' ? messageMentions : previousDraft?.mentions || messageMentions
+    const isAudio = validation.mediaType === 'audio'
     if (previousDraft?.previewUrl) URL.revokeObjectURL(previousDraft.previewUrl)
 
     const previewUrl = validation.mediaType === 'image' || validation.mediaType === 'video' || validation.mediaType === 'gif'
@@ -2687,14 +2786,14 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
       file,
       type: validation.mediaType,
       previewUrl,
-      caption,
-      mentions: previousDraft?.mentions || messageMentions,
+      caption: isAudio ? '' : caption,
+      mentions: isAudio ? [] : mentions,
     }
 
     attachmentDraftRef.current = nextDraft
     setAttachmentDraft(nextDraft)
-    setMessageText(''); setMessageMentions([])
-    inputRef.current?.clear()
+    if (isAudio) { setMessageText(caption); setMessageMentions(mentions) }
+    else { setMessageText(''); setMessageMentions([]); inputRef.current?.clear() }
     captionInputRef.current?.clear()
     setShowAttachments(false)
     setActivePopup(null)
@@ -2773,7 +2872,8 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
     attachmentSendingRef.current = true
     setSendingAttachment(true)
     try {
-      const queued = await handleSendMedia(draft.file, draft.type, draft.caption, draft.mentions)
+      const audio = draft.type === 'audio'
+      const queued = await handleSendMedia(draft.file, audio && draft.audioAsDocument ? 'document' : draft.type, audio ? '' : draft.caption, audio ? [] : draft.mentions)
       if (!queued) return
 
       if (draft.previewUrl) URL.revokeObjectURL(draft.previewUrl)
@@ -2793,8 +2893,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
     if (draft.previewUrl) URL.revokeObjectURL(draft.previewUrl)
     attachmentDraftRef.current = null
     setAttachmentDraft(null)
-    setMessageText(draft.caption)
-    setMessageMentions(draft.mentions || [])
+    if (draft.type !== 'audio') { setMessageText(draft.caption); setMessageMentions(draft.mentions || []) }
     captionInputRef.current?.clear()
     requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() })
   }
@@ -2868,11 +2967,12 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
     requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() })
   }
 
+  const belongsToVerifiedHistory = (message: Message) => Boolean(chat?.binding_state === 'verified_continuity' && chat.canonical_chat_id === chat.id && chat.device_id === deviceId && message.chat_id && continuityChatIds(chat).has(message.chat_id))
   const isCanonicalMessage = (message: Message) => Boolean(message.message_id) && !message.id.startsWith('optimistic-') && !message.is_revoked
 
   const canEditMessage = (message: Message) => {
     if (effectiveReadOnly || !deviceId || !isCanonicalMessage(message) || !message.is_from_me) return false
-    if ((message.message_type || 'text') !== 'text' || message.device_id !== deviceId) return false
+    if ((message.message_type || 'text') !== 'text' || message.device_id !== deviceId && !belongsToVerifiedHistory(message)) return false
     const sentAt = new Date(message.timestamp).getTime()
     return Number.isFinite(sentAt) && Date.now() - sentAt <= 15 * 60 * 1000
   }
@@ -2882,7 +2982,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
     && Boolean(deviceId)
     && isCanonicalMessage(message)
     && message.is_from_me
-    && message.device_id === deviceId
+    && (message.device_id === deviceId || belongsToVerifiedHistory(message))
   )
 
   const handleCopyMessage = async (message: Message) => {
@@ -2926,7 +3026,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
 
   const handleBeginForward = (message: Message) => {
     if (suspendedRef.current) return
-    const issue = forwardActionIssue(message, deviceId)
+    const issue = forwardActionIssue(message, deviceId, chat)
     if (issue) { setComposerFeedback({ kind: 'error', message: issue }); return }
     clearMessageSelection()
     setForwardingMsg(message)
@@ -3250,7 +3350,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
                          <button type="button" role="menuitem" disabled={pinPending || personalPins.pending.has(chat.id)} onClick={() => { setShowHeaderMenu(false); if (onTogglePin) onTogglePin(); else void personalPins.toggle(chat); requestAnimationFrame(() => headerMenuTriggerRef.current?.focus()) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">{chat.is_pinned ? <PinOff className="h-4 w-4 text-slate-400" /> : <Pin className="h-4 w-4 text-slate-400" />}{chat.is_pinned ? 'Desfijar para mí' : 'Fijar para mí'}</button>
 	                         <button type="button" role="menuitem" onClick={() => { setShowContactInfo(true); setShowHeaderMenu(false) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><PanelRight className="h-4 w-4 text-slate-400" /> Ver detalles</button>
 	                         <button type="button" role="menuitem" onClick={() => { void handleRequestHistorySync(); setShowHeaderMenu(false) }} disabled={syncingHistory || effectiveReadOnly} title={effectiveReadOnly ? readOnlyReason : undefined} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-45"><RefreshCw className={`h-4 w-4 text-slate-400 ${syncingHistory ? 'animate-spin' : ''}`} /> {syncingHistory ? 'Recuperando historial…' : 'Recuperar mensajes anteriores'}</button>
-	                         {onRequestDelete && <><div className="my-1 border-t border-slate-100" /><button type="button" role="menuitem" onClick={() => { setShowHeaderMenu(false); onRequestDelete() }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"><Trash2 className="h-4 w-4" /> Eliminar del CRM</button></>}
+	                         {onRequestDelete && <><div className="my-1 border-t border-slate-100" /><button type="button" role="menuitem" disabled={Boolean(chatDeletionIssue(chat))} title={chatDeletionIssue(chat) || undefined} onClick={() => { setShowHeaderMenu(false); if (!chatDeletionIssue(chat)) onRequestDelete() }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-red-700 hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"><Trash2 className="h-4 w-4" /> <span className="min-w-0"><span className="block">Eliminar del CRM</span>{chatDeletionIssue(chat) && <span className="block text-[10px] font-normal leading-4">{chatDeletionIssue(chat)}</span>}</span></button></>}
                        </ConversationMenu>
                      )}
                    </div>
@@ -3292,7 +3392,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
                </>}
                <div className="border-t border-slate-100 pt-1">
                  {!effectiveReadOnly && <button type="button" role="menuitem" onClick={() => handleBeginReply(selectedMessage)} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50"><Reply className="h-4 w-4" /> Responder</button>}
-                 {!effectiveReadOnly && <button type="button" role="menuitem" disabled={Boolean(forwardActionIssue(selectedMessage, deviceId))} title={forwardActionIssue(selectedMessage, deviceId) || undefined} onClick={() => handleBeginForward(selectedMessage)} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50"><CornerUpRight className="h-4 w-4" /> Reenviar</button>}
+                 {!effectiveReadOnly && <button type="button" role="menuitem" disabled={Boolean(forwardActionIssue(selectedMessage, deviceId, chat))} title={forwardActionIssue(selectedMessage, deviceId, chat) || undefined} onClick={() => handleBeginForward(selectedMessage)} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50"><CornerUpRight className="h-4 w-4" /> Reenviar</button>}
                  {canDeleteMessage(selectedMessage) && <button type="button" role="menuitem" disabled={messageActionPending === 'delete'} onClick={() => void handleDeleteChatMessage(selectedMessage)} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-red-600 hover:bg-red-50 disabled:opacity-50"><Trash2 className="h-4 w-4" /> Eliminar para todos</button>}
 
                  {(selectedMessage.body || selectedMessage.media_filename) && <button type="button" role="menuitem" onClick={() => { setShowSelectionMenu(false); void handleCopyMessage(selectedMessage) }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"><Copy className="h-4 w-4 text-slate-400" /> Copiar</button>}
@@ -3350,7 +3450,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
 	           </div>
 	         )}
 
-         {composerFeedback && (
+         {composerFeedback && !(continuityRestriction && composerFeedback.message === CONTINUITY_ACCEPTED_MESSAGE) && (
            <div
              role={composerFeedback.kind === 'error' ? 'alert' : 'status'}
              className={`absolute left-1/2 top-16 z-[70] flex w-[calc(100%_-_1.5rem)] max-w-lg -translate-x-1/2 items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs shadow-lg ${
@@ -3490,7 +3590,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
                 <div
                    className="absolute inset-y-0 right-0 z-20 w-full border-l border-slate-200 bg-white shadow-xl md:w-[380px] md:max-w-[45%]"
                 >
-                     {isGroupChat(chat) ? <GroupDetailsPanel ref={groupDetailsRef} key={chat.id} chat={chat} suspended={suspended} onOpenChat={onOpenGroupParticipantChat} onClose={() => setShowContactInfoLocal(false)} /> : <ContactPanel
+                     {isGroupChat(chat) ? <GroupDetailsPanel ref={groupDetailsRef} chat={chat} suspended={suspended} onOpenChat={onOpenGroupParticipantChat} onClose={() => setShowContactInfoLocal(false)} /> : <ContactPanel
                         ref={contactDetailsRef}
                         chatId={chat.id}
                         isOpen={true}
@@ -3539,6 +3639,13 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
              </div>
              {/* Caption + Send */}
              <div className="px-4 py-3 flex items-center gap-3 border-t border-slate-200 bg-white">
+               {attachmentDraft.type === 'audio' ? <div className="min-w-0 flex-1">
+                 <label className="flex min-h-11 cursor-pointer items-center gap-3 text-sm text-slate-700">
+                   <input type="checkbox" checked={attachmentDraft.audioAsDocument === true} disabled={sendingAttachment} onChange={event => { const audioAsDocument = event.target.checked; setAttachmentDraft(previous => { if (!previous) return previous; const next = { ...previous, audioAsDocument }; attachmentDraftRef.current = next; return next }) }} className="h-5 w-5 shrink-0 accent-emerald-600" />
+                   <span>Enviar como archivo adjunto</span>
+                 </label>
+                 <p className="text-xs leading-5 text-slate-500">{messageText.trim() ? 'El audio se enviará solo. Tu texto quedará como borrador para enviarlo después.' : 'El audio se enviará sin texto adjunto.'}</p>
+               </div> : <>
                <EmojiPicker
                  onEmojiSelect={(emoji) => {
                    if (captionInputRef.current) {
@@ -3569,6 +3676,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
                    disabled={sendingAttachment}
                  />
                </div>
+               </>}
                <button
                  onClick={() => void handleSendPendingMedia()}
                  disabled={sendingAttachment || sendingMessage}
@@ -3616,6 +3724,12 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
            </div>, operationalPortal || document.body,
          )}
 
+         {otherContinuityDrafts.length > 0 && <div role="status" className="flex shrink-0 items-center gap-2 border-t border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600"><span className="flex-1">Conservamos otro borrador de esta conversación.</span><button type="button" disabled={effectiveReadOnly || sendingMessage} className="min-h-11 rounded-lg px-3 font-semibold text-emerald-700 disabled:opacity-50" onClick={() => {
+           const alternative = otherContinuityDrafts[0]
+           const current = { text: messageText, mentions: messageMentions, quick: quickReplyDraft, quote: replyingTo, attachment: attachmentDraft }
+           setMessageText(alternative.draft.text); setMessageMentions(alternative.draft.mentions); setQuickReplyDraft(alternative.draft.quick); setReplyingTo(alternative.draft.quote); setAttachmentDraft(alternative.draft.attachment)
+           setOtherContinuityDrafts(rows => [...rows.slice(1), { id: alternative.id, draft: current }])
+         }}>Cambiar de borrador</button></div>}
          {/* Footer / Input */}
          {personalPins.error && <p role="alert" className="bg-rose-50 px-4 py-2 text-xs text-rose-700">{personalPins.error}</p>}
          {effectiveReadOnly ? (
@@ -3682,7 +3796,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
                   <button type="button" className="app-viewport fixed inset-0 z-[80] bg-slate-950/25 sm:hidden" onClick={() => setShowAttachments(false)} aria-label="Cerrar opciones de adjuntos" />
                   <div role="menu" className="absolute inset-x-2 bottom-full z-[90] mb-2 flex max-h-[min(calc(var(--app-height,100dvh)-8rem),28rem)] flex-col gap-1 overflow-y-auto rounded-2xl border border-slate-100 bg-white p-2 shadow-2xl animate-in slide-in-from-bottom-2 duration-200 sm:inset-x-auto sm:bottom-16 sm:left-4 sm:z-50 sm:mb-0 sm:w-56 sm:rounded-xl sm:shadow-xl">
                       <button type="button" role="menuitem" className="flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" onClick={() => { fileInputRef.current?.click(); setShowAttachments(false) }}>
-                          <ImageIcon className="w-5 h-5 text-purple-500" /> Foto/Video
+                          <ImageIcon className="w-5 h-5 text-purple-500" /> Fotos, videos y audio
                       </button>
                       <button type="button" role="menuitem" className="flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" onClick={() => { docFileInputRef.current?.click(); setShowAttachments(false) }}>
                           <FileText className="w-5 h-5 text-blue-500" /> Documento
@@ -3702,7 +3816,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
                   </div>
                 </>
               )}
-              <input type="file" ref={fileInputRef} className="hidden" accept="image/*,video/*" onChange={e => handleFileSelect(e, 'media')} />
+              <input type="file" ref={fileInputRef} className="hidden" accept="image/*,video/*,audio/*" onChange={e => handleFileSelect(e, 'media')} />
               <input type="file" ref={docFileInputRef} className="hidden" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,.rar" onChange={e => handleFileSelect(e, 'document')} />
               <input type="file" ref={cameraInputRef} className="hidden" accept="image/*" capture="environment" onChange={e => handleFileSelect(e, 'media')} />
 
@@ -3868,6 +3982,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
          {forwardingMsg && chat && (suspended || (!effectiveReadOnly && deviceId)) && (
              <ForwardMessageModal
                message={forwardingMsg}
+               sourceChat={chat}
                nativeForwardEnabled={canonicalDevice?.runtime_capabilities?.can_forward_native === true && deviceValidationState === 'ready' && canonicalDevice?.id === deviceId}
                copyEnabled={!deviceUnavailable && deviceValidationState === 'ready' && canonicalDevice?.id === deviceId}
                deviceId={deviceId || initialDeviceId || device?.id || ''}

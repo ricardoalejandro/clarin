@@ -435,6 +435,9 @@ func (p *DevicePool) ConnectDevice(ctx context.Context, deviceID uuid.UUID) erro
 
 	// Fence cached provider facts before this paired session can emit events.
 	if client.Store.ID != nil {
+		if _, err = p.repos.Chat.BindWhatsAppOwner(ctx, instance.AccountID, instance.ID, client.Store.ID.ToNonAD().String(), client.Store.LID.ToNonAD().String(), deviceSessionFingerprint(client.Store)); err != nil {
+			return fmt.Errorf("initialize conversation owner: %w", err)
+		}
 		if _, err = p.repos.Chat.EnsureWhatsAppIdentitySession(ctx, instance.AccountID, instance.ID, deviceSessionFingerprint(client.Store)); err != nil {
 			return fmt.Errorf("initialize scoped identity session: %w", err)
 		}
@@ -682,6 +685,11 @@ func (p *DevicePool) handleConnected(ctx context.Context, instance *DeviceInstan
 		log.Printf("[PeerIdentity] session initialization unavailable account=%s device=%s", instance.AccountID, instance.ID)
 		return
 	}
+	if _, err := p.repos.Chat.BindWhatsAppOwner(ctx, instance.AccountID, instance.ID, instance.Client.Store.ID.ToNonAD().String(), instance.Client.Store.LID.ToNonAD().String(), deviceSessionFingerprint(instance.Client.Store)); err != nil {
+		p.mu.RUnlock()
+		log.Printf("[ChatContinuity] owner initialization unavailable account=%s device=%s", instance.AccountID, instance.ID)
+		return
+	}
 	syncInitialContacts := instance.consumeInitialPairingContactSync()
 	p.mu.RUnlock()
 	if p.GroupsEnabledForAccount(instance.AccountID) {
@@ -697,6 +705,9 @@ func (p *DevicePool) handleConnected(ctx context.Context, instance *DeviceInstan
 	// Existing sessions resume without importing or merging CRM records.
 	go func() {
 		backgroundCtx := context.Background()
+		if err := p.reconcileDeviceChatContinuity(backgroundCtx, instance.AccountID, instance.ID); err != nil {
+			log.Printf("[ChatContinuity] historical proof reconciliation unavailable account=%s device=%s", instance.AccountID, instance.ID)
+		}
 		if syncInitialContacts {
 			p.syncContacts(backgroundCtx, instance)
 		}
@@ -3231,7 +3242,7 @@ func (p *DevicePool) SendMessage(ctx context.Context, deviceID uuid.UUID, to, bo
 	}
 
 	// Send message
-	resp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendMessage")
+	resp, _, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendMessage")
 	if err != nil {
 		instance.mu.Lock()
 		instance.Metrics.SendErrorCount++
@@ -3244,16 +3255,7 @@ func (p *DevicePool) SendMessage(ctx context.Context, deviceID uuid.UUID, to, bo
 	instance.Metrics.LastSendSuccess = time.Now()
 	instance.mu.Unlock()
 
-	// Get or create chat using normalized JID (without device suffix)
-	// Resolve @lid to @s.whatsapp.net for consistent chat identity
-	normalizedJID := sendJID.ToNonAD().String()
-	if sendJID.Server == types.HiddenUserServer {
-		if pnJID := p.scopedPeerPhoneJID(ctx, instance, sendJID); !pnJID.IsEmpty() {
-			normalizedJID = pnJID.User + "@s.whatsapp.net"
-			log.Printf("[SendMessage] Resolved LID %s -> %s", sendJID.ToNonAD().String(), normalizedJID)
-		}
-	}
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
+	chat, err := p.outgoingMessageChat(ctx, instance, jid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get/create chat: %w", err)
 	}
@@ -3298,6 +3300,9 @@ func (p *DevicePool) sendMessageWithLIDFallback(ctx context.Context, instance *D
 		return whatsmeow.SendResponse{}, types.EmptyJID, lifecycleErr
 	}
 	defer release()
+	if _, err := p.outgoingChatContext(ctx, instance, jid); err != nil {
+		return whatsmeow.SendResponse{}, jid, err
+	}
 	if err := p.ensureOutboundAllowed(ctx, instance, jid); err != nil {
 		return whatsmeow.SendResponse{}, jid, err
 	}
@@ -3415,19 +3420,12 @@ func (p *DevicePool) SendReplyMessage(ctx context.Context, deviceID uuid.UUID, t
 	}
 
 	// Send message
-	resp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendReplyMessage")
+	resp, _, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendReplyMessage")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send reply: %w", err)
 	}
 
-	// Get or create chat
-	normalizedJID := sendJID.ToNonAD().String()
-	if sendJID.Server == types.HiddenUserServer {
-		if pnJID := p.scopedPeerPhoneJID(ctx, instance, sendJID); !pnJID.IsEmpty() {
-			normalizedJID = pnJID.User + "@s.whatsapp.net"
-		}
-	}
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
+	chat, err := p.outgoingMessageChat(ctx, instance, jid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get/create chat: %w", err)
 	}
@@ -3614,7 +3612,7 @@ func (p *DevicePool) SendPoll(ctx context.Context, deviceID uuid.UUID, to, quest
 		},
 	}
 
-	resp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendPoll")
+	resp, _, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendPoll")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send poll: %w", err)
 	}
@@ -3625,14 +3623,7 @@ func (p *DevicePool) SendPoll(ctx context.Context, deviceID uuid.UUID, to, quest
 		body += fmt.Sprintf("\n%d. %s", i+1, opt)
 	}
 
-	// Get or create chat
-	normalizedJID := sendJID.ToNonAD().String()
-	if sendJID.Server == types.HiddenUserServer {
-		if pnJID := p.scopedPeerPhoneJID(ctx, instance, sendJID); !pnJID.IsEmpty() {
-			normalizedJID = pnJID.User + "@s.whatsapp.net"
-		}
-	}
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
+	chat, err := p.outgoingMessageChat(ctx, instance, jid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get/create chat: %w", err)
 	}
@@ -3715,6 +3706,7 @@ type PreUploadedMedia struct {
 	OriginalMimetype      string // MIME type of the stored source before WhatsApp conversion
 	StickerAnimated       bool
 	StickerAnimationKnown bool
+	Audio                 *preparedAudio // verified metadata of the unchanged uploaded bytes
 }
 
 // StatusPublishRequest describes an own ephemeral WhatsApp status. Statuses
@@ -3920,6 +3912,12 @@ func mediaDisplayFilename(preferred, rawURL string) string {
 // UploadMedia downloads a file from storage/URL and uploads it to WhatsApp ONCE.
 // Returns a PreUploadedMedia that can be reused with SendPreUploadedMediaMessage for many recipients.
 func (p *DevicePool) UploadMedia(ctx context.Context, deviceID uuid.UUID, mediaURL, mediaType string) (*PreUploadedMedia, error) {
+	return p.uploadMedia(ctx, deviceID, mediaURL, mediaType, nil)
+}
+
+// requiredPTT is supplied only by an original audio copy/forward. Ordinary
+// attachments do not acquire voice-note semantics from an extension or MIME.
+func (p *DevicePool) uploadMedia(ctx context.Context, deviceID uuid.UUID, mediaURL, mediaType string, requiredPTT *bool) (*PreUploadedMedia, error) {
 	release, lifecycleErr := p.acquireDeviceOperation(ctx, uuid.Nil, deviceID)
 	if lifecycleErr != nil {
 		return nil, lifecycleErr
@@ -3938,6 +3936,17 @@ func (p *DevicePool) UploadMedia(ctx context.Context, deviceID uuid.UUID, mediaU
 		return nil, fmt.Errorf("failed to load media: %w", err)
 	}
 	originalMimetype := mimetype
+	var audio *preparedAudio
+	if mediaType == domain.MessageTypeAudio {
+		audio, err = prepareAudioForUpload(ctx, data)
+		if err != nil {
+			return nil, err
+		}
+		if requiredPTT != nil && *requiredPTT && !audio.VoiceCompatible {
+			return nil, audioPreparationError("audio_voice_codec_unsupported", "Esta nota de voz no tiene un formato Opus compatible. Elige enviar una copia como archivo adjunto.")
+		}
+		mimetype, originalMimetype = audio.Mimetype, audio.Mimetype
+	}
 	stickerAnimated, stickerKnown := false, false
 	if mediaType == domain.MessageTypeSticker {
 		stickerAnimated, err = stickerWebPAnimation(data)
@@ -4019,6 +4028,7 @@ func (p *DevicePool) UploadMedia(ctx context.Context, deviceID uuid.UUID, mediaU
 		OriginalURL:      mediaURL,
 		OriginalMimetype: originalMimetype,
 		StickerAnimated:  stickerAnimated, StickerAnimationKnown: stickerKnown,
+		Audio: audio,
 	}, nil
 }
 
@@ -4047,6 +4057,12 @@ func (p *DevicePool) SendPreUploadedMediaReplyMessage(ctx context.Context, devic
 }
 
 func (p *DevicePool) sendPreUploadedMediaMessage(ctx context.Context, deviceID uuid.UUID, to, caption string, media *PreUploadedMedia, quote *outboundMediaQuote) (*domain.Message, error) {
+	if media == nil {
+		return nil, fmt.Errorf("el archivo no está disponible")
+	}
+	if err := ValidateAudioCaption(media.MediaType, caption); err != nil {
+		return nil, err
+	}
 	ctx, release, lifecycleErr := p.retainDeviceOperation(ctx, uuid.Nil, deviceID)
 	if lifecycleErr != nil {
 		return nil, lifecycleErr
@@ -4072,80 +4088,11 @@ func (p *DevicePool) sendPreUploadedMediaMessage(ctx context.Context, deviceID u
 		jid = types.NewJID(to, types.DefaultUserServer)
 	}
 
-	// Build message from pre-uploaded metadata
-	var msg *waE2E.Message
+	// Build one payload kind; audio attachments keep explicit PTT=false.
 	documentFilename := mediaDisplayFilename(media.OriginalFilename, media.OriginalURL)
-	switch media.MediaType {
-	case domain.MessageTypeImage:
-		msg = &waE2E.Message{
-			ImageMessage: &waE2E.ImageMessage{
-				URL:           proto.String(media.URL),
-				DirectPath:    proto.String(media.DirectPath),
-				MediaKey:      media.MediaKey,
-				Mimetype:      proto.String(media.Mimetype),
-				FileEncSHA256: media.FileEncSHA256,
-				FileSHA256:    media.FileSHA256,
-				FileLength:    proto.Uint64(media.FileLength),
-				Caption:       proto.String(caption),
-			},
-		}
-	case domain.MessageTypeVideo, domain.MessageTypeGIF:
-		msg = &waE2E.Message{
-			VideoMessage: &waE2E.VideoMessage{
-				URL:           proto.String(media.URL),
-				DirectPath:    proto.String(media.DirectPath),
-				MediaKey:      media.MediaKey,
-				Mimetype:      proto.String(media.Mimetype),
-				FileEncSHA256: media.FileEncSHA256,
-				FileSHA256:    media.FileSHA256,
-				FileLength:    proto.Uint64(media.FileLength),
-				Caption:       proto.String(caption),
-				GifPlayback:   proto.Bool(media.MediaType == domain.MessageTypeGIF),
-			},
-		}
-	case domain.MessageTypeAudio:
-		msg = &waE2E.Message{
-			AudioMessage: &waE2E.AudioMessage{
-				URL:           proto.String(media.URL),
-				DirectPath:    proto.String(media.DirectPath),
-				MediaKey:      media.MediaKey,
-				Mimetype:      proto.String(media.Mimetype),
-				FileEncSHA256: media.FileEncSHA256,
-				FileSHA256:    media.FileSHA256,
-				FileLength:    proto.Uint64(media.FileLength),
-				PTT:           proto.Bool(true),
-			},
-		}
-	case domain.MessageTypeDocument:
-		msg = &waE2E.Message{
-			DocumentMessage: &waE2E.DocumentMessage{
-				URL:           proto.String(media.URL),
-				DirectPath:    proto.String(media.DirectPath),
-				MediaKey:      media.MediaKey,
-				Mimetype:      proto.String(media.Mimetype),
-				FileEncSHA256: media.FileEncSHA256,
-				FileSHA256:    media.FileSHA256,
-				FileLength:    proto.Uint64(media.FileLength),
-				FileName:      proto.String(documentFilename),
-				Caption:       proto.String(caption),
-			},
-		}
-	case domain.MessageTypeSticker:
-		msg = &waE2E.Message{
-			StickerMessage: &waE2E.StickerMessage{
-				URL:           proto.String(media.URL),
-				DirectPath:    proto.String(media.DirectPath),
-				MediaKey:      media.MediaKey,
-				Mimetype:      proto.String("image/webp"),
-				IsAnimated:    proto.Bool(media.StickerAnimated),
-				FileEncSHA256: media.FileEncSHA256,
-				FileSHA256:    media.FileSHA256,
-				FileLength:    proto.Uint64(media.FileLength),
-			},
-		}
-	}
-	if msg == nil {
-		return nil, fmt.Errorf("unsupported media type: %s", media.MediaType)
+	msg, err := buildOutboundMediaMessage(caption, media)
+	if err != nil {
+		return nil, err
 	}
 	if quote != nil {
 		quotedParticipant := (*string)(nil)
@@ -4172,20 +4119,12 @@ func (p *DevicePool) sendPreUploadedMediaMessage(ctx context.Context, deviceID u
 	}
 
 	// Send message
-	sendResp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendPreUploadedMedia")
+	sendResp, _, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendPreUploadedMedia")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send message: %w", err)
 	}
 
-	// Get or create chat using normalized JID
-	normalizedJID := sendJID.ToNonAD().String()
-	if sendJID.Server == types.HiddenUserServer {
-		if pnJID := p.scopedPeerPhoneJID(ctx, instance, sendJID); !pnJID.IsEmpty() {
-			normalizedJID = pnJID.User + "@s.whatsapp.net"
-			log.Printf("[SendPreUploadedMedia] Resolved LID %s -> %s", sendJID.ToNonAD().String(), normalizedJID)
-		}
-	}
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
+	chat, err := p.outgoingMessageChat(ctx, instance, jid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get/create chat: %w", err)
 	}
@@ -4222,7 +4161,8 @@ func (p *DevicePool) sendPreUploadedMediaMessage(ctx context.Context, deviceID u
 	}
 
 	if media.MediaType == domain.MessageTypeAudio {
-		message.AudioPTT = proto.Bool(true)
+		message.AudioPTT = proto.Bool(false)
+		message.MediaMimetype = proto.String(media.Audio.Mimetype)
 	}
 
 	if err := p.repos.Message.Create(ctx, message); err != nil {
@@ -4254,23 +4194,23 @@ func (p *DevicePool) SendMediaMessage(ctx context.Context, deviceID uuid.UUID, t
 // SendMediaMessageWithFilename preserves the user-visible filename even though
 // Clarin stores uploads under content-addressed object keys.
 func (p *DevicePool) SendMediaMessageWithFilename(ctx context.Context, deviceID uuid.UUID, to, caption, mediaURL, mediaType, mediaFilename string) (*domain.Message, error) {
-	media, err := p.UploadMedia(ctx, deviceID, mediaURL, mediaType)
-	if err != nil {
-		return nil, err
-	}
-	media.OriginalFilename = mediaDisplayFilename(mediaFilename, mediaURL)
-	return p.SendPreUploadedMediaMessage(ctx, deviceID, to, caption, media)
+	return prepareAndSendMedia(mediaType, caption, mediaFilename, mediaURL,
+		func() (*PreUploadedMedia, error) { return p.UploadMedia(ctx, deviceID, mediaURL, mediaType) },
+		func(media *PreUploadedMedia) (*domain.Message, error) {
+			return p.SendPreUploadedMediaMessage(ctx, deviceID, to, caption, media)
+		},
+	)
 }
 
 // SendMediaReplyMessageWithFilename downloads/uploads the media once and then
 // sends it with an authoritative WhatsApp reply context.
 func (p *DevicePool) SendMediaReplyMessageWithFilename(ctx context.Context, deviceID uuid.UUID, to, caption, mediaURL, mediaType, mediaFilename, quotedID, quotedBody, quotedSender string, quotedIsFromMe bool) (*domain.Message, error) {
-	media, err := p.UploadMedia(ctx, deviceID, mediaURL, mediaType)
-	if err != nil {
-		return nil, err
-	}
-	media.OriginalFilename = mediaDisplayFilename(mediaFilename, mediaURL)
-	return p.SendPreUploadedMediaReplyMessage(ctx, deviceID, to, caption, media, quotedID, quotedBody, quotedSender, quotedIsFromMe)
+	return prepareAndSendMedia(mediaType, caption, mediaFilename, mediaURL,
+		func() (*PreUploadedMedia, error) { return p.UploadMedia(ctx, deviceID, mediaURL, mediaType) },
+		func(media *PreUploadedMedia) (*domain.Message, error) {
+			return p.SendPreUploadedMediaReplyMessage(ctx, deviceID, to, caption, media, quotedID, quotedBody, quotedSender, quotedIsFromMe)
+		},
+	)
 }
 
 // SendContactMessage sends a contact vCard message
@@ -4325,19 +4265,12 @@ func (p *DevicePool) SendContactMessage(ctx context.Context, deviceID uuid.UUID,
 		},
 	}
 
-	sendResp, sendJID, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendContactMessage")
+	sendResp, _, err := p.sendMessageWithLIDFallback(ctx, instance, jid, msg, "SendContactMessage")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send contact message: %w", err)
 	}
 
-	// Get or create chat
-	normalizedJID := sendJID.ToNonAD().String()
-	if sendJID.Server == types.HiddenUserServer {
-		if pnJID := p.scopedPeerPhoneJID(ctx, instance, sendJID); !pnJID.IsEmpty() {
-			normalizedJID = pnJID.User + "@s.whatsapp.net"
-		}
-	}
-	chat, err := p.repos.Chat.GetOrCreate(ctx, instance.AccountID, instance.ID, normalizedJID, "")
+	chat, err := p.outgoingMessageChat(ctx, instance, jid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get/create chat: %w", err)
 	}
@@ -4469,6 +4402,13 @@ func (p *DevicePool) ResetDevice(ctx context.Context, deviceID uuid.UUID) error 
 	}
 
 	// Clear JID in database so next connect generates QR
+	device, err := p.repos.Device.GetByID(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	if err = p.repos.Chat.EndWhatsAppOwnerEpoch(ctx, device.AccountID, deviceID); err != nil {
+		return err
+	}
 	_ = p.repos.Device.UpdateJID(ctx, deviceID, "", "")
 	_ = p.repos.Device.UpdateStatus(ctx, deviceID, domain.DeviceStatusDisconnected)
 

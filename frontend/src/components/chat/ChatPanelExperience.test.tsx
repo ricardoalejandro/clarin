@@ -26,8 +26,8 @@ vi.mock('../WhatsAppTextInput', async () => {
   }
 })
 vi.mock('./MessageBubble', () => ({
-  default: ({ message, onMediaClick, onDocumentClick, onReact, onSelect, onRetry, onRecoverMedia, onQuotedMessageClick, onEdit }: { message: { link_preview?: { title: string; thumbnail_url?: string | null } | null; link_preview_version?: number; media_url?: string; status?: string; body?: string; quoted_body?: string; quoted_message_id?: string; media_filename?: string; media_recoverable?: boolean; media_unavailable_reason?: string; reactions?: Array<{ emoji: string; is_from_me: boolean }> }; onMediaClick?: (url: string, type: string) => void; onDocumentClick?: (document: { sessionId: string; src: string; filename: string; mimeType: string; size: number }) => void; onReact?: (message: unknown, emoji: string) => void; onSelect?: (message: unknown) => void; onRetry?: (message: unknown) => void; onRecoverMedia?: (message: unknown) => Promise<void>; onQuotedMessageClick?: (id: string) => void; onEdit?: (message: unknown) => void }) => (
-    <div data-testid="message-bubble">
+  default: ({ message, onMediaClick, onDocumentClick, onReact, onSelect, onRetry, onRecoverMedia, onQuotedMessageClick, onEdit }: { message: { id?: string; send_phase?: string; message_type?: string; link_preview?: { title: string; thumbnail_url?: string | null } | null; link_preview_version?: number; media_url?: string; status?: string; body?: string; quoted_body?: string; quoted_message_id?: string; media_filename?: string; media_recoverable?: boolean; media_unavailable_reason?: string; reactions?: Array<{ emoji: string; is_from_me: boolean }> }; onMediaClick?: (url: string, type: string) => void; onDocumentClick?: (document: { sessionId: string; src: string; filename: string; mimeType: string; size: number }) => void; onReact?: (message: unknown, emoji: string) => void; onSelect?: (message: unknown) => void; onRetry?: (message: unknown) => void; onRecoverMedia?: (message: unknown) => Promise<void>; onQuotedMessageClick?: (id: string) => void; onEdit?: (message: unknown) => void }) => (
+    <div data-testid="message-bubble" data-message-id={message.id} data-status={message.status} data-send-phase={message.send_phase} data-media-type={message.message_type}>
       {message.media_url && onMediaClick && <button onClick={() => onMediaClick(message.media_url!, 'image')}>Abrir imagen simulada</button>}
       <span>{message.body}</span><span data-testid="link-preview-title" data-preview-version={message.link_preview_version} data-preview-thumbnail={message.link_preview?.thumbnail_url || ''}>{message.link_preview?.title}</span>{onEdit && <button onClick={() => onEdit(message)}>Editar mensaje simulado</button>}{message.status === 'failed' && <button onClick={() => onRetry?.(message)}>Reintentar envío</button>}<span>{message.quoted_body}</span>
       <span>{message.media_filename}</span><span data-testid="media-unavailable-reason">{message.media_unavailable_reason}</span>
@@ -146,7 +146,7 @@ describe('ChatPanel experience invariants', () => {
     vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1200)
   })
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
-  const message = { id: 'canonical-z', message_id: 'wa-z', body: 'Último saliente', is_from_me: true, is_read: false, status: 'sent', timestamp: '2026-10-11T12:00:00Z' }
+  const message = { id: 'canonical-z', chat_id: chat.id, device_id: chat.device_id, message_id: 'wa-z', body: 'Último saliente', is_from_me: true, is_read: false, status: 'sent', timestamp: '2026-10-11T12:00:00Z' }
   it('retains an opened contact selector instead of closing its selection on suspension', async () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => Promise.resolve(jsonResponse(String(input) === '/api/chats/chat-1'
       ? { success: true, chat, device: device('connected') }
@@ -207,7 +207,7 @@ describe('ChatPanel experience invariants', () => {
     const view = render(panel(false))
     await screen.findByRole('textbox', { name: 'Draft test editor' })
     const file = new File(['image'], 'foto.png', { type: 'image/png' })
-    fireEvent.change(view.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*"]')!, { target: { files: [file] } })
+    fireEvent.change(view.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*,audio/*"]')!, { target: { files: [file] } })
     fireEvent.change(screen.getAllByRole('textbox', { name: 'Draft test editor' })[0], { target: { value: 'Pie de foto pendiente' } })
     fireEvent.click(screen.getByRole('button', { name: 'Enviar adjunto' }))
     await waitFor(() => expect(finishCompression).toBeTypeOf('function'))
@@ -356,7 +356,7 @@ describe('ChatPanel experience invariants', () => {
     }))
     const panel = render(<ChatPanel chatId={chat.id} initialChat={chat} />)
     await screen.findByText('Antes de enviar')
-    const picker = panel.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*"]')!
+    const picker = panel.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*,audio/*"]')!
     const file = new File(['image'], 'image.jpg', { type: 'image/jpeg' })
     fireEvent.change(picker, { target: { files: [file] } })
     fireEvent.click(await screen.findByRole('button', { name: 'Enviar adjunto' }))
@@ -391,7 +391,7 @@ describe('ChatPanel experience invariants', () => {
     const panel = render(<ChatPanel chatId={chat.id} initialChat={chat} />)
     await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).not.toBeDisabled())
     const file = new File(['image'], 'image.jpg', { type: 'image/jpeg' })
-    fireEvent.change(panel.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*"]')!, { target: { files: [file] } })
+    fireEvent.change(panel.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*,audio/*"]')!, { target: { files: [file] } })
     fireEvent.click(await screen.findByRole('button', { name: 'Enviar adjunto' }))
     await waitFor(() => expect(finishCompression).toBeTypeOf('function'))
     expect(create).toHaveBeenCalledTimes(1)
@@ -423,7 +423,7 @@ describe('ChatPanel experience invariants', () => {
     const panel = render(<ChatPanel chatId={chat.id} initialChat={chat} />)
     await waitFor(() => expect(screen.getByRole('textbox', { name: 'Draft test editor' })).not.toBeDisabled())
     const file = new File(['image'], 'image.jpg', { type: 'image/jpeg' })
-    fireEvent.change(panel.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*"]')!, { target: { files: [file] } })
+    fireEvent.change(panel.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*,audio/*"]')!, { target: { files: [file] } })
     fireEvent.click(await screen.findByRole('button', { name: 'Enviar adjunto' }))
     await waitFor(() => expect(finishSend).toBeTypeOf('function'))
     expect(revoke).toHaveBeenCalledWith('blob:qa-viewer-1')
@@ -466,7 +466,7 @@ describe('ChatPanel experience invariants', () => {
     const panel = render(<ChatPanel chatId={chat.id} initialChat={chat} />)
     const editor = await screen.findByRole('textbox', { name: 'Draft test editor' })
     await waitFor(() => expect(editor).not.toBeDisabled())
-    const picker = panel.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*"]')!
+    const picker = panel.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*,audio/*"]')!
     fireEvent.change(picker, { target: { files: [new File(['video'], 'video.mp4', { type: 'video/mp4' })] } })
     fireEvent.click(await screen.findByRole('button', { name: 'Enviar adjunto' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
@@ -522,7 +522,7 @@ describe('group composer identities through drafts and retries', () => {
       if (url === '/api/media/upload') { uploadCount++; return Promise.resolve(jsonResponse({ success: true, proxy_url: '/api/media/file/account/group-video.mp4' })) }
       if (url === '/api/messages/send') {
         bodies.push(String(init?.body)); const payload = JSON.parse(String(init?.body))
-        return Promise.resolve(jsonResponse(bodies.length === 1 ? { success: false, error: 'Fallo temporal' } : { success: true, message: { ...payload, id: 'sent-group', message_id: 'wa-group', is_from_me: true, is_read: false, status: 'sent', timestamp: '2026-10-18T12:00:00Z' } }, bodies.length !== 1))
+        return Promise.resolve(jsonResponse(bodies.length === 1 ? { success: false, error: 'Fallo temporal' } : { success: true, message: { ...payload, message_type: payload.media_type || 'text', id: 'sent-group', message_id: 'wa-group', is_from_me: true, is_read: false, status: 'sent', timestamp: '2026-10-18T12:00:00Z' } }, bodies.length !== 1))
       }
       return Promise.resolve(jsonResponse({ success: true, stickers: [], quick_replies: [] }))
     }))
@@ -535,6 +535,20 @@ describe('group composer identities through drafts and retries', () => {
     fireEvent.click(await screen.findByRole('option', { name: 'María León' }))
     return editor
   }
+  it('preserves group text and exact mention ranges as a separate draft when sending audio', async () => {
+    const OriginalURL = URL
+    vi.stubGlobal('URL', class extends OriginalURL { static createObjectURL = vi.fn(() => 'blob:group-audio'); static revokeObjectURL = vi.fn() })
+    const state = install()
+    const panel = render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
+    const editor = await mention()
+    fireEvent.change(panel.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*,audio/*"]')!, { target: { files: [new File(['audio'], 'group.ogg', { type: 'audio/ogg' })] } })
+    expect(screen.getAllByRole('textbox', { name: 'Draft test editor' })).toHaveLength(1)
+    fireEvent.click(await screen.findByRole('button', { name: 'Enviar adjunto' }))
+    await waitFor(() => expect(state.bodies).toHaveLength(1))
+    expect(JSON.parse(state.bodies[0])).toMatchObject({ body: '', mentions: [], media_type: 'audio' })
+    expect(editor).toHaveValue('Hola @María León ')
+    expect(screen.getByLabelText('Personas mencionadas')).toHaveTextContent('María León')
+  })
   it('retains the exact mention identity across chat switches and frozen text retry', async () => {
     const state = install()
     const view = render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
@@ -560,7 +574,7 @@ describe('group composer identities through drafts and retries', () => {
     const state = install()
     const view = render(<ChatPanel chatId={groupChat.id} initialChat={groupChat} />)
     await mention()
-    fireEvent.change(view.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*"]')!, { target: { files: [new File(['video'], 'video.mp4', { type: 'video/mp4' })] } })
+    fireEvent.change(view.container.querySelector<HTMLInputElement>('input[type="file"][accept="image/*,video/*,audio/*"]')!, { target: { files: [new File(['video'], 'video.mp4', { type: 'video/mp4' })] } })
     expect(await screen.findByLabelText('Personas mencionadas')).toHaveTextContent('María León')
     fireEvent.click(await screen.findByRole('button', { name: 'Enviar adjunto' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Reintentar envío' }))
@@ -617,6 +631,35 @@ describe('received link preview reconciliation', () => {
     expect(screen.getAllByTestId('message-bubble')).toHaveLength(1)
     await act(async () => emit({ link_preview: null, link_preview_version: 2 }))
     expect(screen.getByTestId('link-preview-title')).toBeEmptyDOMElement()
+  })
+  it('updates read-only link metadata while canonical device readiness is still being revalidated', async () => {
+    const fetcher = install()
+    render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText(preview.title)
+    const original = fetcher.getMockImplementation()!
+    let finish!: (response: Response) => void
+    fetcher.mockImplementation(input => String(input) === `/api/chats/${chat.id}`
+      ? new Promise<Response>(resolve => { finish = resolve }) : original(input))
+    act(() => websocket.listeners.forEach(listener => listener({ event: 'device_status', data: { device_id: chat.device_id, status: 'connected' } })))
+    await waitFor(() => expect(finish).toBeTypeOf('function'))
+    await act(async () => emit())
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent('Metadatos enriquecidos')
+    await act(async () => finish(jsonResponse({ success: true, chat, device: device('connected') })))
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent('Metadatos enriquecidos')
+  })
+  it.each(['retired-device', null])('updates canonical history with its exact stored source device %s', async sourceDevice => {
+    const fetcher = install()
+    const original = fetcher.getMockImplementation()!
+    fetcher.mockImplementation(input => String(input).includes('/messages?')
+      ? Promise.resolve(jsonResponse({ success: true, messages: [{ ...linked, chat_id: chat.id, device_id: sourceDevice }] })) : original(input))
+    render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    await screen.findByText(preview.title)
+    await act(async () => emit({ device_id: 'unrelated-device' }))
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent(preview.title)
+    await act(async () => emit({ chat_id: 'other-chat', device_id: sourceDevice }))
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent(preview.title)
+    await act(async () => emit({ device_id: sourceDevice }))
+    expect(screen.getByTestId('link-preview-title')).toHaveTextContent('Metadatos enriquecidos')
   })
   it.each(['search', 'quote'] as const)('updates a historical %s projection and clears an edited preview without leaking it into the main page', async mode => {
     install(true)
@@ -881,5 +924,116 @@ describe('group media recovery canonical responses', () => {
     expect(screen.getByTestId('media-unavailable-reason')).toBeEmptyDOMElement()
     expect(screen.queryByText('Otra sesión')).not.toBeInTheDocument()
     expect(screen.getByText('Coincidencia: Material de la reunión')).toBeInTheDocument()
+  })
+})
+
+
+describe('audio attachment intent and canonical acknowledgement', () => {
+  const uploaded = '/api/media/file/account/attachment'
+  beforeEach(() => {
+    localStorage.setItem('token', 'test-token'); completeAuthIdentityChange(); websocket.listeners.clear()
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1200)
+    const OriginalURL = URL
+    vi.stubGlobal('URL', class extends OriginalURL { static createObjectURL = vi.fn(() => 'blob:audio-send'); static revokeObjectURL = vi.fn() })
+  })
+  afterEach(() => { cleanup(); completeAuthIdentityChange(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
+  function install(sendResult?: (canonical: Record<string, unknown>) => Response | Promise<Response>) {
+    const requests: Array<Record<string, unknown>> = []
+    const files: File[] = []
+    let canonical: Record<string, unknown> = {}
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === `/api/chats/${chat.id}`) return Promise.resolve(jsonResponse({ success: true, chat, device: device('connected') }))
+      if (url.includes('/messages?')) return Promise.resolve(jsonResponse({ success: true, messages: [] }))
+      if (url === '/api/media/upload') { files.push((init!.body as FormData).get('file') as File); return Promise.resolve(jsonResponse({ success: true, proxy_url: uploaded })) }
+      if (url === '/api/messages/send') {
+        const payload = JSON.parse(String(init?.body))
+        requests.push(payload)
+        canonical = { id: 'canonical-attachment', message_id: 'provider-attachment', chat_id: payload.chat_id, device_id: payload.device_id, body: payload.body, message_type: payload.media_type, media_url: payload.media_url, media_filename: payload.media_filename, audio_ptt: false, is_from_me: true, is_read: false, status: 'sent', timestamp: '2026-10-25T00:00:00Z' }
+        return Promise.resolve(sendResult ? sendResult(canonical) : jsonResponse({ success: true, message: canonical }))
+      }
+      return Promise.resolve(jsonResponse({ success: true, stickers: [], quick_replies: [] }))
+    }))
+    return { requests, files, canonical: () => canonical }
+  }
+  async function open(file: File, draft = '') {
+    const panel = render(<ChatPanel chatId={chat.id} initialChat={chat} />)
+    const editor = await screen.findByRole('textbox', { name: 'Draft test editor' })
+    await waitFor(() => expect(editor).not.toBeDisabled())
+    fireEvent.change(editor, { target: { value: draft } })
+    const selector = file.type === 'application/pdf' ? 'input[type="file"][accept*=".pdf"]' : 'input[type="file"][accept="image/*,video/*,audio/*"]'
+    fireEvent.change(panel.container.querySelector<HTMLInputElement>(selector)!, { target: { files: [file] } })
+    await screen.findByRole('button', { name: 'Enviar adjunto' })
+    return { panel, editor }
+  }
+  it.each([false, true])('sends audio as %s document only after an explicit choice and preserves the separate text draft', async asDocument => {
+    const state = install()
+    const file = new File(['unchanged audio bytes'], 'recording.wav', { type: 'audio/wav' })
+    const { editor } = await open(file, 'Texto para enviar después')
+    expect(screen.getAllByRole('textbox', { name: 'Draft test editor' })).toHaveLength(1)
+    expect(editor).toHaveValue('Texto para enviar después')
+    expect(screen.getByText(/Tu texto quedará como borrador/)).toBeVisible()
+    const checkbox = screen.getByRole('checkbox', { name: 'Enviar como archivo adjunto' })
+    expect(checkbox).not.toBeChecked()
+    if (asDocument) fireEvent.click(checkbox)
+    expect(state.requests).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar adjunto' }))
+    await waitFor(() => expect(state.requests).toHaveLength(1))
+    expect(state.requests[0]).toMatchObject({ body: '', mentions: [], media_type: asDocument ? 'document' : 'audio', media_filename: file.name, media_url: uploaded, device_id: chat.device_id, chat_id: chat.id })
+    expect(state.requests[0]).not.toHaveProperty('audio_ptt')
+    expect(state.files[0]).toMatchObject({ name: file.name, size: file.size, type: file.type })
+    expect(editor).toHaveValue('Texto para enviar después')
+    await waitFor(() => expect(screen.getByTestId('message-bubble')).toHaveAttribute('data-status', 'sent'))
+    expect(screen.getByTestId('message-bubble')).not.toHaveAttribute('data-status', 'delivered')
+    expect(state.requests).toHaveLength(1)
+  })
+  it('keeps the original text when cancelling an audio attachment without upload or send', async () => {
+    const state = install()
+    const { editor } = await open(new File(['audio'], 'voice.ogg', { type: 'audio/ogg' }), 'Borrador conservado')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancelar adjunto' }))
+    expect(editor).toHaveValue('Borrador conservado')
+    expect(state.files).toHaveLength(0)
+    expect(state.requests).toHaveLength(0)
+  })
+  it.each([{ name: 'photo.jpg', mime: 'image/jpeg', kind: 'image' }, { name: 'movie.mp4', mime: 'video/mp4', kind: 'video' }, { name: 'loop.gif', mime: 'image/gif', kind: 'gif' }, { name: 'report.pdf', mime: 'application/pdf', kind: 'document' }])('preserves the existing caption flow for $kind', async file => {
+    const state = install()
+    const { editor } = await open(new File(['file'], file.name, { type: file.mime }), 'Descripción original')
+    const editors = screen.getAllByRole('textbox', { name: 'Draft test editor' })
+    expect(editors).toHaveLength(2)
+    expect(editors.find(input => input !== editor)).toHaveValue('Descripción original')
+    expect(editor).toHaveValue('')
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar adjunto' }))
+    await waitFor(() => expect(state.requests).toHaveLength(1))
+    expect(state.requests[0]).toMatchObject({ body: 'Descripción original', media_type: file.kind, media_filename: file.name })
+    await waitFor(() => expect(screen.getByTestId('message-bubble')).toHaveAttribute('data-status', 'sent'))
+  })
+  it.each(['missing', 'text'] as const)('keeps the file and operation uncertain after a %s canonical response without another POST', async response => {
+    const state = install(canonical => jsonResponse({ success: true, message: response === 'missing' ? undefined : { ...canonical, message_type: 'text', media_url: undefined } }))
+    await open(new File(['audio'], 'voice.ogg', { type: 'audio/ogg' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar adjunto' }))
+    await screen.findByText(/El resultado del adjunto está sin confirmar/)
+    expect(screen.getByTestId('message-bubble')).toHaveAttribute('data-status', 'sending')
+    expect(screen.getByTestId('message-bubble')).toHaveAttribute('data-send-phase', 'uncertain')
+    expect(screen.queryByRole('button', { name: 'Reintentar envío' })).not.toBeInTheDocument()
+    expect(state.requests).toHaveLength(1)
+    expect(state.requests[0].client_operation_id).toBeTruthy()
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled()
+  })
+  it.each(['before', 'after'] as const)('keeps an authoritative WebSocket receipt %s incomplete HTTP without downgrade or extra send', async order => {
+    let finish!: (response: Response) => void
+    const state = install(() => new Promise<Response>(resolve => { finish = resolve }))
+    await open(new File(['audio'], 'voice.ogg', { type: 'audio/ogg' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar adjunto' }))
+    await waitFor(() => expect(finish).toBeTypeOf('function'))
+    if (order === 'after') { await act(async () => finish(jsonResponse({ success: true }))); await screen.findByText(/El resultado del adjunto está sin confirmar/) }
+    await act(async () => websocket.listeners.forEach(listener => listener({ event: 'message_sent', data: { chat_id: chat.id, message: { ...state.canonical(), status: 'delivered' } } })))
+    await waitFor(() => expect(screen.getByTestId('message-bubble')).toHaveAttribute('data-status', 'delivered'))
+    if (order === 'before') await act(async () => finish(jsonResponse({ success: true })))
+    expect(screen.getByTestId('message-bubble')).toHaveAttribute('data-status', 'delivered')
+    expect(screen.queryByText(/El resultado del adjunto está sin confirmar/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reintentar envío' })).not.toBeInTheDocument()
+    expect(state.requests).toHaveLength(1)
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1)
   })
 })

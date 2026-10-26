@@ -10,17 +10,7 @@ import (
 )
 
 func (r *ChatRepository) SetUserPin(ctx context.Context, accountID, userID, chatID uuid.UUID, pinned bool) (*domain.ChatPin, error) {
-	item := &domain.ChatPin{ChatID: chatID}
-	err := r.db.QueryRow(ctx, `WITH target AS (SELECT account_id,id FROM chats WHERE account_id=$1::uuid AND id=$3::uuid FOR UPDATE)
-	 INSERT INTO chat_user_preferences(account_id,user_id,chat_id,is_pinned,pinned_at)
-	 SELECT account_id,$2::uuid,id,$4::boolean,CASE WHEN $4::boolean THEN clock_timestamp() ELSE NULL END
-	 FROM target WHERE TRUE
-	 ON CONFLICT(account_id,user_id,chat_id) DO UPDATE SET
-	 is_pinned=EXCLUDED.is_pinned,
-	 pinned_at=CASE WHEN EXCLUDED.is_pinned=chat_user_preferences.is_pinned THEN chat_user_preferences.pinned_at ELSE EXCLUDED.pinned_at END,
-	 version=chat_user_preferences.version+CASE WHEN EXCLUDED.is_pinned=chat_user_preferences.is_pinned THEN 0 ELSE 1 END
-	 RETURNING is_pinned,pinned_at,version`, accountID, userID, chatID, pinned).Scan(&item.IsPinned, &item.PinnedAt, &item.PinVersion)
-	return item, err
+	return r.setConversationUserPin(ctx, accountID, userID, chatID, pinned)
 }
 
 // Identity resolution coalesces two views of one direct conversation. Keep
@@ -52,7 +42,7 @@ func (r *ChatRepository) ApplyUserPins(ctx context.Context, accountID, userID uu
 			ids = append(ids, chat.ID)
 		}
 	}
-	rows, err := r.db.Query(ctx, `SELECT chat_id,is_pinned,pinned_at,version FROM chat_user_preferences WHERE account_id=$1 AND user_id=$2 AND chat_id=ANY($3::uuid[])`, accountID, userID, ids)
+	rows, err := r.db.Query(ctx, `SELECT c.id,COALESCE(cp.is_pinned,FALSE),cp.pinned_at,COALESCE(cp.version,0) FROM chats c `+effectiveChatUserPreferenceJoinSQL+` WHERE c.account_id=$1 AND c.id=ANY($3::uuid[])`, accountID, userID, ids)
 	if err != nil {
 		return err
 	}

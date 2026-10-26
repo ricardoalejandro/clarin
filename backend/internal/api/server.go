@@ -93,6 +93,13 @@ func NewServer(cfg *config.Config, services *service.Services, repos *repository
 		BodyLimit:             52 * 1024 * 1024, // task files (50 MB) + multipart overhead
 		DisableStartupMessage: false,
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			if errors.Is(err, repository.ErrChatBindingChanged) {
+				return c.Status(409).JSON(fiber.Map{"success": false, "code": "chat_binding_changed", "error": (&chatBindingError{}).Error()})
+			}
+			var bindingError *chatBindingError
+			if errors.As(err, &bindingError) {
+				return c.Status(409).JSON(fiber.Map{"success": false, "code": "chat_binding_changed", "error": bindingError.Error()})
+			}
 			code := fiber.StatusInternalServerError
 			if e, ok := err.(*fiber.Error); ok {
 				code = e.Code
@@ -2624,6 +2631,7 @@ func (s *Server) handleGetChatDetails(c *fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
 	}
 
+	chatID = chat.ID
 	details, err := s.services.Chat.GetChatDetails(c.Context(), chatID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
@@ -3526,9 +3534,10 @@ func (s *Server) handleGetMessages(c *fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
 	}
 
+	chatID = chat.ID
 	cacheKey := ""
-	if s.cache != nil && offset == 0 && limit <= 50 {
-		cacheKey = fmt.Sprintf("messages:%s:%s:%d:%d", accountID.String(), chatID.String(), limit, offset)
+	if s.cache != nil && offset == 0 && limit <= 50 && len(chat.AliasChatIDs) == 0 {
+		cacheKey = fmt.Sprintf("messages:%s:%s:r%d:%d:%d", accountID.String(), chatID.String(), chat.BindingRevision, limit, offset)
 		if cached, err := s.cache.Get(c.Context(), cacheKey); err == nil && cached != nil {
 			projected, projectionErr := s.projectCachedChatMedia(c.Context(), accountID, cached)
 			if projectionErr == nil {
@@ -3586,6 +3595,7 @@ func (s *Server) handleSearchMessages(c *fiber.Ctx) error {
 	if !chatBelongsToAccount(chat, accountID) {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
 	}
+	chatID = chat.ID
 	limit := c.QueryInt("limit", 20)
 	offset := c.QueryInt("offset", 0)
 	if limit < 1 || limit > 50 {
@@ -3633,12 +3643,18 @@ func (s *Server) handleMarkAsRead(c *fiber.Ctx) error {
 	}
 	unreadCount, readThrough, err := s.services.Chat.MarkAsRead(c.Context(), accountID, chatID, body.ThroughMessageID)
 	if err != nil {
+		if errors.Is(err, repository.ErrChatBindingChanged) {
+			return &chatBindingError{}
+		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
 		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 	}
 
+	if canonical, err := s.repos.Chat.ResolveCanonicalChatID(c.Context(), accountID, chatID); err == nil {
+		chatID = canonical
+	}
 	s.invalidateChatsCache(accountID)
 	s.invalidateMessagesCache(accountID, &chatID)
 	state, err := s.repos.Chat.State(c.Context(), accountID, chatID)
@@ -3662,6 +3678,9 @@ func (s *Server) handleDeleteChat(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Chat.Delete(c.Context(), accountID, chatID); err != nil {
+		if errors.Is(err, repository.ErrChatContinuityDeleteRequiresReview) {
+			return c.Status(409).JSON(fiber.Map{"success": false, "code": "chat_continuity_delete_requires_review", "error": "La eliminación de este historial consolidado requiere revisión."})
+		}
 		if err == pgx.ErrNoRows {
 			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Chat not found"})
 		}
@@ -3718,6 +3737,9 @@ func (s *Server) handleDeleteChatsBatch(c *fiber.Ctx) error {
 
 	if req.DeleteAll {
 		if err := s.services.Chat.DeleteAll(c.Context(), accountID); err != nil {
+			if errors.Is(err, repository.ErrChatContinuityDeleteRequiresReview) {
+				return c.Status(409).JSON(fiber.Map{"success": false, "code": "chat_continuity_delete_requires_review", "error": "La eliminación de este historial consolidado requiere revisión."})
+			}
 			return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
 		}
 		s.invalidateChatCaches(accountID, nil)
@@ -3750,6 +3772,9 @@ func (s *Server) handleDeleteChatsBatch(c *fiber.Ctx) error {
 	}
 
 	if err := s.services.Chat.DeleteBatch(c.Context(), accountID, uuids); err != nil {
+		if errors.Is(err, repository.ErrChatContinuityDeleteRequiresReview) {
+			return c.Status(409).JSON(fiber.Map{"success": false, "code": "chat_continuity_delete_requires_review", "error": "La eliminación de este historial consolidado requiere revisión."})
+		}
 		if err == pgx.ErrNoRows {
 			return c.Status(404).JSON(fiber.Map{"success": false, "error": "Uno o más chats no existen o no pertenecen a esta cuenta"})
 		}
@@ -3781,6 +3806,9 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	if err := whatsapp.ValidateAudioCaption(req.MediaType, req.Body); err != nil {
+		return writeAudioSendError(c, err)
+	}
 	if err := s.authorizeMediaPublication(c, req.MediaURL); err != nil {
 		return mediaPublicationDenied(c, err)
 	}
@@ -3794,6 +3822,9 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 			return c.Status(e.Code).JSON(fiber.Map{"success": false, "error": e.Message})
 		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": err.Error()})
+	}
+	if err := s.validatePreparedChat(c, accountID, deviceID, req.To); err != nil {
+		return err
 	}
 	if err := s.ensureOutboundContactAllowed(c.Context(), accountID, req.To); err != nil {
 		if apiErr, ok := err.(*fiber.Error); ok {
@@ -3856,6 +3887,9 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 	}
 
 	if err != nil {
+		if _, _, _, audioFailure := audioSendError(err); audioFailure {
+			return writeAudioSendError(c, err)
+		}
 		log.Printf("[SendMessage] failed account=%s device=%s to=%s media=%t quoted=%t error=%v",
 			accountID, deviceID, req.To, req.MediaURL != "" && req.MediaType != "", req.QuotedMessageID != "", err)
 		if strings.Contains(err.Error(), "server returned error 463") {
@@ -4114,7 +4148,19 @@ func (s *Server) handleSendReaction(c *fiber.Ctx) error {
 	if err != nil || !messageBelongsToChatAccount(message, chat.ID, accountID) {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Mensaje no encontrado", "code": "message_not_found"})
 	}
-	if issue := reactionTargetIssue(message, accountID, chat.ID, deviceID); issue != "" {
+	allowed, authorizationErr := s.repos.Message.MessageDeviceAllowed(c.Context(), accountID, chat.ID, deviceID, message)
+	if authorizationErr != nil {
+		return fiber.ErrInternalServerError
+	}
+	if !allowed {
+		return c.Status(409).JSON(fiber.Map{"success": false, "code": "message_device_mismatch", "error": "El mensaje no pertenece a la conexión verificada."})
+	}
+	if err := s.validatePreparedChat(c, accountID, deviceID, chat.JID); err != nil {
+		return err
+	}
+	operationalMessage := *message
+	operationalMessage.DeviceID = &deviceID
+	if issue := reactionTargetIssue(&operationalMessage, accountID, chat.ID, deviceID); issue != "" {
 		status := fiber.StatusConflict
 		if issue == "message_not_found" {
 			status = fiber.StatusNotFound
@@ -4168,6 +4214,9 @@ func (s *Server) handleSendPoll(c *fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "error": "Device not found"})
 	}
 
+	if err := s.validatePreparedChat(c, accountID, deviceID, req.To); err != nil {
+		return err
+	}
 	if req.Question == "" || len(req.Options) < 2 {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Question and at least 2 options are required"})
 	}
@@ -4293,8 +4342,15 @@ func (s *Server) handleDeleteMessage(c *fiber.Ctx) error {
 	if !message.IsFromMe {
 		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Solo puedes eliminar para todos mensajes enviados desde esta cuenta", "code": "message_not_owned"})
 	}
-	if message.DeviceID == nil || *message.DeviceID != deviceID {
-		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Este mensaje se envió desde otro dispositivo", "code": "message_device_mismatch"})
+	allowed, authorizationErr := s.repos.Message.MessageDeviceAllowed(c.Context(), accountID, chat.ID, deviceID, message)
+	if authorizationErr != nil {
+		return fiber.ErrInternalServerError
+	}
+	if !allowed {
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "El mensaje no pertenece a la conexión verificada.", "code": "message_device_mismatch"})
+	}
+	if err := s.validatePreparedChat(c, accountID, deviceID, chat.JID); err != nil {
+		return err
 	}
 	if message.IsRevoked {
 		return c.JSON(fiber.Map{"success": true, "persisted": true})
@@ -4376,8 +4432,15 @@ func (s *Server) handleEditMessage(c *fiber.Ctx) error {
 	if !message.IsFromMe || messageType != domain.MessageTypeText || message.IsRevoked {
 		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Este mensaje no se puede editar", "code": "message_not_editable"})
 	}
-	if message.DeviceID == nil || *message.DeviceID != deviceID {
-		return c.Status(409).JSON(fiber.Map{"success": false, "error": "Este mensaje se envió desde otro dispositivo", "code": "message_device_mismatch"})
+	allowed, authorizationErr := s.repos.Message.MessageDeviceAllowed(c.Context(), accountID, chat.ID, deviceID, message)
+	if authorizationErr != nil {
+		return fiber.ErrInternalServerError
+	}
+	if !allowed {
+		return c.Status(409).JSON(fiber.Map{"success": false, "error": "El mensaje no pertenece a la conexión verificada.", "code": "message_device_mismatch"})
+	}
+	if err := s.validatePreparedChat(c, accountID, deviceID, chat.JID); err != nil {
+		return err
 	}
 	if time.Since(message.Timestamp) > 15*time.Minute {
 		return c.Status(409).JSON(fiber.Map{"success": false, "error": "WhatsApp solo permite editar durante los primeros 15 minutos", "code": "message_edit_window_expired"})

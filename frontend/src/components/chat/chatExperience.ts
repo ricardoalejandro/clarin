@@ -1,4 +1,5 @@
 import type { Chat, ChatState, Message } from '@/types/chat'
+import { bindingRevision } from './chatContinuity'
 import { applyChatState } from '@/utils/chatInbox'
 
 export function latestReadBoundary(messages: Message[]): Message | undefined {
@@ -25,6 +26,11 @@ export function mergeChatSnapshot(current: Chat | null, snapshot: Chat, state?: 
   const incoming = applyChatState(snapshot, state)
   if (!current || current.id !== incoming.id) return incoming
   const merged = { ...current, ...incoming }
+  if (bindingRevision(current) > bindingRevision(incoming)) {
+    merged.device_id = current.device_id; merged.device_name = current.device_name; merged.device_phone = current.device_phone
+    merged.canonical_chat_id = current.canonical_chat_id; merged.alias_chat_ids = current.alias_chat_ids
+    merged.binding_revision = current.binding_revision; merged.binding_state = current.binding_state; merged.group = current.group
+  }
   if ((incoming.pin_version ?? 0) < (current.pin_version ?? 0)) {
     merged.is_pinned = current.is_pinned; merged.pinned_at = current.pinned_at; merged.pin_version = current.pin_version
   }

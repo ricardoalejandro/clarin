@@ -69,7 +69,7 @@ func TestCopyAudioDocumentUsesDocumentUploadAndPreservesBytesMetadata(t *testing
 }
 
 func TestSharedAudioOriginalPreservesKnownPTTAndRejectsAmbiguousOriginal(t *testing.T) {
-	media := &PreUploadedMedia{Mimetype: "audio/ogg"}
+	media := &PreUploadedMedia{Mimetype: "audio/ogg; codecs=opus", Audio: &preparedAudio{Mimetype: "audio/ogg; codecs=opus", Seconds: 2, VoiceCompatible: true}}
 	source := &domain.Message{MessageType: proto.String(domain.MessageTypeAudio), Forwarding: originalForwarding()}
 	for _, mode := range []string{domain.MessageSharingCopy, domain.MessageSharingNative} {
 		source.AudioPTT = nil

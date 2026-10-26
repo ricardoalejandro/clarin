@@ -1,6 +1,7 @@
 package whatsapp
 
 import (
+	"context"
 	"testing"
 
 	"github.com/google/uuid"
@@ -56,20 +57,26 @@ func TestPendingJIDNormalizationNeverReturnsPhoneDigits(t *testing.T) {
 	}
 }
 
-func TestShouldMergeMappedLIDContactRequiresSameAccountAndDifferentContacts(t *testing.T) {
+func TestMappedLIDContactNeverMergesCRMOnProviderObservation(t *testing.T) {
 	t.Parallel()
 	accountID := uuid.New()
 	canonical := &domain.Contact{ID: uuid.New(), AccountID: accountID}
-	source := &domain.Contact{ID: uuid.New(), AccountID: accountID}
-	if !shouldMergeMappedLIDContact(accountID, "65657383165996@lid", canonical, source) {
-		t.Fatal("expected a proven same-account LID duplicate to be mergeable")
+	// No repositories are attached: the compatibility hook must not perform a
+	// lookup, merge, delete or rewrite even for a proven mapping.
+	pool := &DevicePool{}
+	if got := pool.reconcileMappedLIDContact(context.Background(), accountID, "7001@lid", canonical); got != canonical {
+		t.Fatal("provider mapping replaced the canonical CRM identity")
 	}
-	if shouldMergeMappedLIDContact(accountID, "51904806007@s.whatsapp.net", canonical, source) {
-		t.Fatal("phone JIDs must not be treated as legacy LID duplicates")
-	}
-	source.AccountID = uuid.New()
-	if shouldMergeMappedLIDContact(accountID, "65657383165996@lid", canonical, source) {
-		t.Fatal("cross-account contacts must never be merged")
+}
+
+func TestPrivateMessageChatJIDPreservesLegacyExactRoutes(t *testing.T) {
+	lid := types.NewJID("7001", types.HiddenUserServer)
+	pn := types.NewJID("51900000001", types.DefaultUserServer)
+	identity := peerIdentityResolution{JID: pn, LID: lid}
+	for _, chat := range []types.JID{lid, pn} {
+		if got := privateMessageChatJID(types.MessageSource{Chat: chat}, identity); got != chat.String() {
+			t.Fatalf("changed exact legacy route %s to %s", chat, got)
+		}
 	}
 }
 

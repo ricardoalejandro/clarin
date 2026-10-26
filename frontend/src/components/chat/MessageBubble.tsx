@@ -655,7 +655,7 @@ function MessageBubble({ message, contactName, isGroup = false, onMediaClick, on
       case 'delivered':
         return <CheckCheck className="w-4 h-4 text-gray-400" aria-label="Entregado" role="img" />
       case 'sending':
-        return <span className="inline-flex items-center gap-1 text-[10px] text-slate-500" role="status"><Clock className="w-4 h-4 text-gray-400 animate-pulse motion-reduce:animate-none" aria-hidden />{message.send_phase === 'uploading' ? 'Subiendo archivo…' : 'Enviando…'}</span>
+        return <span className="inline-flex items-center gap-1 text-[10px] text-slate-500" role="status"><Clock className={`w-4 h-4 text-gray-400 ${message.send_phase === 'uncertain' ? '' : 'animate-pulse motion-reduce:animate-none'}`} aria-hidden />{message.send_phase === 'uncertain' ? 'Sin confirmar' : message.send_phase === 'uploading' ? 'Subiendo archivo…' : 'Enviando…'}</span>
       case 'failed':
         return (
           onRetry ? <button type="button" onClick={() => onRetry(message)} className="inline-flex min-h-11 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-red-600 hover:bg-red-50 hover:text-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500" aria-label="No se envió el mensaje. Reintentar envío">

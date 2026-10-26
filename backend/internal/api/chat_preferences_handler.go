@@ -5,12 +5,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/url"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
+	"github.com/naperu/clarin/internal/repository"
 )
 
 func (s *Server) handleSetChatPin(c *fiber.Ctx) error {
@@ -37,6 +39,9 @@ func (s *Server) handleSetChatPin(c *fiber.Ctx) error {
 		return fiber.ErrNotFound
 	}
 	if err != nil {
+		if errors.Is(err, repository.ErrChatBindingChanged) {
+			return &chatBindingError{}
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "error": "No se pudo guardar la fijación. Intenta de nuevo."})
 	}
 	s.invalidateChatsCache(accountID)

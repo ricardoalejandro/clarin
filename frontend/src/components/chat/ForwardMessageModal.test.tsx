@@ -21,6 +21,27 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('canonical forwarding batch', () => {
+  it('keeps the preparation binding revision when checking and reconfirming an uncertain operation', async () => {
+    const source: Chat = { id: 'guarded-source', account_id: 'account', jid: 'guarded@g.us', name: 'Grupo protegido', last_message: '', last_message_at: '2026-10-25T12:00:00Z', unread_count: 0, device_id: 'device-1', canonical_chat_id: 'guarded-source', alias_chat_ids: [], binding_state: 'verified_continuity', binding_revision: 7 }
+    const guarded = { ...props, chatId: source.id, sourceChat: source, message: { ...message, id: 'guarded-message', chat_id: source.id } }
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => String(input).startsWith('/api/chats?') ? response({ success: true, chats: destinations, total: destinations.length }) : init?.method === 'POST' ? response({ success: false, error: 'Resultado por comprobar' }, 503) : response({ success: false }, 404))
+    const view = render(<ForwardMessageModal {...guarded} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reenviar a 1 chat' }))
+    await screen.findByRole('button', { name: 'Comprobar estado' })
+    expect(new Headers(writes()[0][1].headers).get('X-Chat-Binding-Revision')).toBe('7')
+    const originalOperation = JSON.parse(writes()[0][1].body).client_operation_id
+    view.unmount()
+    render(<ForwardMessageModal {...guarded} sourceChat={{ ...source, binding_revision: 8 }} />)
+    expect(writes()).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Comprobar estado' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirmar la misma operación' }))
+    await waitFor(() => expect(writes()).toHaveLength(2))
+    expect(new Headers(writes()[1][1].headers).get('X-Chat-ID')).toBe(source.id)
+    expect(new Headers(writes()[1][1].headers).get('X-Chat-Binding-Revision')).toBe('7')
+    expect(JSON.parse(writes()[1][1].body).client_operation_id).toBe(originalOperation)
+  })
+
   it('queries both groups and private chats for the source device, then sends one canonical batch', async () => {
     render(<ForwardMessageModal {...props} />)
     fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))
@@ -289,6 +310,39 @@ it('locks native send after a canonical unverified-capability rejection without 
 
 
 describe('explicit content copies', () => {
+  it.each([false, true])('offers a file copy for audio with known PTT %s without selecting it automatically', audioPTT => {
+    render(<ForwardMessageModal {...props} nativeForwardEnabled={false} message={{ ...message, body: '', message_type: 'audio', media_url: '/api/media/file/account/audio', audio_ptt: audioPTT }} />)
+    expect(screen.getByRole('checkbox', { name: /Enviar como archivo adjunto/ })).not.toBeChecked()
+    expect(writes()).toHaveLength(0)
+  })
+  it.each([false, true])('copies known PTT %s audio as an explicitly chosen document while retaining source text and identity', async audioPTT => {
+    const source: Message = { ...message, body: 'Texto conservado como descripción', message_type: 'audio', media_url: '/api/media/file/account/audio', audio_ptt: audioPTT }
+    render(<ForwardMessageModal {...props} nativeForwardEnabled={false} message={source} />)
+    expect(screen.getByRole('button', { name: 'Enviar copia a 0 chats' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('checkbox', { name: /Enviar como archivo adjunto/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar copia a 1 chat' }))
+    await waitFor(() => expect(props.onSuccess).toHaveBeenCalledOnce())
+    expect(JSON.parse(writes()[0][1].body)).toMatchObject({ mode: 'copy', content_variant: 'audio_document', source_message_id: source.id })
+    expect(source.audio_ptt).toBe(audioPTT)
+    expect(source.body).toBe('Texto conservado como descripción')
+    expect(writes()).toHaveLength(1)
+  })
+  it('copies a private historical video with a null source device through the current canonical device without rewriting its origin', async () => {
+    const sourceChat: Chat = { id: 'source-1', account_id: 'account', jid: '51900000999@s.whatsapp.net', device_id: 'device-1', name: 'Historial privado', last_message: '', last_message_at: '2026-10-25T00:00:00Z', unread_count: 0 }
+    const source: Message = { ...message, account_id: sourceChat.account_id, chat_id: sourceChat.id, device_id: null, message_type: 'video', media_url: '/api/media/file/account/video', forwarding: undefined, is_from_me: true }
+    render(<ForwardMessageModal {...props} nativeForwardEnabled={false} sourceChat={sourceChat} message={source} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar copia a 1 chat' }))
+    await waitFor(() => expect(props.onSuccess).toHaveBeenCalledOnce())
+    expect(writes()).toHaveLength(1)
+    const request = JSON.parse(writes()[0][1].body)
+    expect(request).toMatchObject({ mode: 'copy', content_variant: 'original', source_chat_id: sourceChat.id, source_message_id: source.id, device_id: 'device-1', destination_chat_ids: ['target-1'] })
+    expect(request).not.toHaveProperty('body')
+    expect(request).not.toHaveProperty('media_url')
+    expect(source.device_id).toBeNull()
+    expect(source.chat_id).toBe(sourceChat.id)
+  })
   it('sends a historical image copy with native off using only the canonical source identifiers', async () => {
     render(<ForwardMessageModal {...props} nativeForwardEnabled={false} message={{ ...message, forwarding: undefined, message_type: 'image', media_url: '/api/media/file/account/image', body: 'Leyenda conservada' }} />)
     fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))

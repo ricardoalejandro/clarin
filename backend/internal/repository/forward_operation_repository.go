@@ -60,8 +60,12 @@ func (r *MessageRepository) CreateForwardOperation(ctx context.Context, op *Forw
 	}
 	defer tx.Rollback(ctx)
 	// Lock parents before content, in the same order used by message mutations.
-	ids := []uuid.UUID{op.SourceChatID}
-	unique := map[uuid.UUID]bool{op.SourceChatID: true}
+	var sourceCanonical uuid.UUID
+	if err = tx.QueryRow(ctx, `SELECT COALESCE(canonical_chat_id,id) FROM chats WHERE account_id=$1 AND id=$2`, op.AccountID, op.SourceChatID).Scan(&sourceCanonical); err != nil {
+		return false, err
+	}
+	ids := []uuid.UUID{sourceCanonical}
+	unique := map[uuid.UUID]bool{sourceCanonical: true}
 	for _, target := range op.Results {
 		if !unique[target.ChatID] {
 			ids = append(ids, target.ChatID)
@@ -85,7 +89,15 @@ func (r *MessageRepository) CreateForwardOperation(ctx context.Context, op *Forw
 		return false, pgx.ErrNoRows
 	}
 	var raw []byte
-	err = tx.QueryRow(ctx, `SELECT to_jsonb(m) FROM messages m WHERE account_id=$1 AND chat_id=$2 AND id=$3 AND device_id=$4 FOR SHARE`, op.AccountID, op.SourceChatID, op.SourceMessageID, op.DeviceID).Scan(&raw)
+	err = tx.QueryRow(ctx, `SELECT to_jsonb(m) FROM messages m JOIN chats source ON source.account_id=m.account_id AND source.id=m.chat_id
+ JOIN chats current ON current.account_id=source.account_id AND current.id=COALESCE(source.canonical_chat_id,source.id)
+ JOIN devices d ON d.account_id=current.account_id AND d.id=current.device_id
+ WHERE d.status='connected' AND d.delete_operation_id IS NULL AND COALESCE(NULLIF(d.provider,''),'whatsapp_web')='whatsapp_web'
+ AND m.account_id=$1 AND current.id=$2 AND m.id=$3 AND current.device_id=$4
+ AND NOT EXISTS(SELECT 1 FROM messages tombstone WHERE tombstone.account_id=m.account_id AND tombstone.media_deleted AND (tombstone.id=COALESCE((SELECT canonical_message_id FROM whatsapp_message_aliases a WHERE a.account_id=m.account_id AND a.alias_message_id=m.id),m.id) OR tombstone.id IN(SELECT a.alias_message_id FROM whatsapp_message_aliases a WHERE a.account_id=m.account_id AND a.canonical_message_id=COALESCE((SELECT canonical_message_id FROM whatsapp_message_aliases own WHERE own.account_id=m.account_id AND own.alias_message_id=m.id),m.id))))
+ AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases alias JOIN messages keeper ON keeper.account_id=alias.account_id AND keeper.id=alias.canonical_message_id WHERE alias.account_id=m.account_id AND alias.alias_message_id=m.id AND (COALESCE(keeper.is_revoked,FALSE) OR COALESCE(keeper.is_view_once,FALSE) OR COALESCE(keeper.media_deleted,FALSE)))
+ AND `+messageSharingSourceDeviceSQL+`
+ FOR SHARE OF m`, op.AccountID, sourceCanonical, op.SourceMessageID, op.DeviceID, op.Mode).Scan(&raw)
 	if err != nil {
 		return false, err
 	}
@@ -154,7 +166,7 @@ func (r *MessageRepository) GetForwardOperation(ctx context.Context, accountID, 
 	for i := range op.Results {
 		target := &op.Results[i]
 		if target.State == "sending" || target.State == "uncertain" || target.State == "sent" {
-			message, findErr := r.GetByReference(ctx, accountID, target.ChatID, target.ProviderMessageID)
+			message, findErr := r.GetVisibleByReference(ctx, accountID, target.ChatID, target.ProviderMessageID)
 			if findErr == nil && message.DeviceID != nil && *message.DeviceID == op.DeviceID && message.IsFromMe {
 				if op.SharingLimits != nil {
 					message, findErr = r.MergeMessageSharingLimits(ctx, accountID, op.DeviceID, target.ChatID, target.ProviderMessageID, *op.SharingLimits)

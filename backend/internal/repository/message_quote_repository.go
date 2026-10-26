@@ -13,7 +13,7 @@ const hydrateMessageQuoteSQL = `UPDATE messages SET
  quoted_body=COALESCE(NULLIF(quoted_body,''),$5),
  quoted_sender=COALESCE(NULLIF(quoted_sender,''),$6),
  quoted_is_from_me=COALESCE(quoted_is_from_me,$7)
- WHERE account_id=$1 AND chat_id=$2 AND message_id=$3
+ WHERE account_id=$1 AND chat_id IN(SELECT id FROM chats WHERE account_id=$1 AND (id=$2 OR canonical_chat_id=$2)) AND message_id=$3
  AND (quoted_message_id IS NULL OR quoted_message_id='' OR quoted_message_id=$4)
  AND ((COALESCE(quoted_message_id,'')='' AND $4::text IS NOT NULL)
    OR (COALESCE(quoted_body,'')='' AND $5::text IS NOT NULL)

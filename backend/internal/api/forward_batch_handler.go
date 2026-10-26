@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/repository"
+	"github.com/naperu/clarin/internal/whatsapp"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -45,7 +46,7 @@ func (s *Server) forwardingEnabled(deviceID uuid.UUID) bool {
 
 func forwardTypedFailureRetry(code string) bool {
 	switch code {
-	case "forward_source_changed", "forward_destination_changed", "forward_source_invalid", "recipient_invalid", "forward_content_unavailable", "forward_capability_unverified", "forwarding_source_unknown", "forwarding_score_unknown", "forward_type_unsupported", "forward_audio_kind_unknown", "share_mode_invalid", "share_variant_invalid":
+	case "forward_source_changed", "forward_destination_changed", "forward_source_invalid", "recipient_invalid", "forward_content_unavailable", "forward_capability_unverified", "forwarding_source_unknown", "forwarding_score_unknown", "forward_type_unsupported", "forward_audio_kind_unknown", "share_mode_invalid", "share_variant_invalid", "audio_invalid", "audio_codec_unsupported", "audio_voice_codec_unsupported", "audio_caption_unsupported":
 		return false
 	default:
 		return true
@@ -174,6 +175,11 @@ func validateMessageSharingSource(message *domain.Message, mode, variant string)
 		if kind == "audio" && message.AudioPTT == nil && !(mode == domain.MessageSharingCopy && variant == domain.MessageContentAudioDocument) {
 			return forwardFailure(409, "forward_audio_kind_unknown", "Sincroniza este audio para conservar si es una nota de voz o un archivo.")
 		}
+		if kind == "audio" && variant == domain.MessageContentOriginal && message.Body != nil {
+			if err := whatsapp.ValidateAudioCaption(kind, *message.Body); err != nil {
+				return forwardFailure(422, "audio_caption_unsupported", err.Error())
+			}
+		}
 	default:
 		return forwardFailure(422, "forward_type_unsupported", "Este tipo de mensaje todavía no admite reenvío nativo en Clarin.")
 	}
@@ -275,13 +281,31 @@ func (s *Server) runForwardBatch(c *fiber.Ctx, req forwardBatchRequest) error {
 		return writeForwardError(c, forwardFailure(404, "forward_source_not_found", "El mensaje original ya no está disponible."))
 	}
 	source, err := s.repos.Message.GetByReference(c.Context(), accountID, req.SourceChatID, req.SourceMessageID.String())
-	if err != nil || source.ID != req.SourceMessageID || source.DeviceID == nil || *source.DeviceID != req.DeviceID {
+	if err != nil || source.ID != req.SourceMessageID {
 		return writeForwardError(c, forwardFailure(404, "forward_source_not_found", "El mensaje original ya no está disponible."))
+	}
+	allowed, authErr := s.repos.Message.MessageSharingDeviceAllowed(c.Context(), accountID, sourceChat.ID, req.DeviceID, source, req.Mode)
+	if authErr != nil {
+		return writeForwardError(c, authErr)
+	}
+	if !allowed {
+		return writeForwardError(c, forwardFailure(409, "forward_source_changed", "La conexión del mensaje cambió. Prepara nuevamente el envío."))
+	}
+	if err = s.validatePreparedChat(c, accountID, req.DeviceID, sourceChat.JID); err != nil {
+		return err
+	}
+	available, availabilityErr := s.repos.Message.SharingSourceAvailable(c.Context(), accountID, sourceChat.ID, source)
+	if availabilityErr != nil {
+		return writeForwardError(c, availabilityErr)
+	}
+	if !available {
+		return writeForwardError(c, forwardFailure(409, "forward_content_unavailable", "El contenido del mensaje ya no está disponible."))
 	}
 	if err = validateMessageSharingSource(source, req.Mode, req.ContentVariant); err != nil {
 		return writeForwardError(c, err)
 	}
 	targets := make([]*domain.Chat, 0, len(req.DestinationChatIDs))
+	seenTargets := map[uuid.UUID]bool{}
 	for _, id := range req.DestinationChatIDs {
 		target, getErr := s.repos.Chat.GetByID(c.Context(), id)
 		if getErr != nil {
@@ -290,7 +314,10 @@ func (s *Server) runForwardBatch(c *fiber.Ctx, req forwardBatchRequest) error {
 		if _, err = s.validateForwardTarget(c.Context(), accountID, req.DeviceID, target); err != nil {
 			return writeForwardError(c, err)
 		}
-		targets = append(targets, target)
+		if !seenTargets[target.ID] {
+			targets = append(targets, target)
+			seenTargets[target.ID] = true
+		}
 	}
 	if err = validateForwardDestinationLimits(source, targets); err != nil {
 		return writeForwardError(c, err)
@@ -337,7 +364,11 @@ func (s *Server) runForwardBatch(c *fiber.Ctx, req forwardBatchRequest) error {
 			state, code, safeError, canRetry := "failed", "forward_preflight_failed", "No se inició el envío. Revisa el mensaje y el destino.", true
 			freshSource, sourceErr := s.repos.Message.GetByReference(c.Context(), accountID, op.SourceChatID, op.SourceMessageID.String())
 			freshTarget, targetErr := s.repos.Chat.GetByID(c.Context(), target.ChatID)
-			if sourceErr == nil && targetErr == nil && domain.MessageForwardFingerprint(freshSource) == op.SourceFingerprint {
+			freshSourceAllowed := false
+			if sourceErr == nil {
+				freshSourceAllowed, sourceErr = s.repos.Message.MessageSharingDeviceAllowed(c.Context(), accountID, op.SourceChatID, op.DeviceID, freshSource, op.Mode)
+			}
+			if sourceErr == nil && freshSourceAllowed && targetErr == nil && domain.MessageForwardFingerprint(freshSource) == op.SourceFingerprint {
 				sendCtx, validationErr := s.validateForwardTarget(c.Context(), accountID, op.DeviceID, freshTarget)
 				if validationErr == nil && freshTarget.JID == target.JID {
 					sendCtx, cancel := context.WithTimeout(sendCtx, 90*time.Second)
