@@ -61,7 +61,7 @@ function ForwardMessageSession({ message, sourceChat, deviceId, chatId, onClose,
   const sourceIssue = mode === 'native' ? nativeIssue : copyIssue || forwardSourceIssue(message, deviceId, mode, variant, sourceChat)
   const sourceIssueRef = useRef(sourceIssue); sourceIssueRef.current = sourceIssue
   const optionsRef = useRef({ mode, variant }); optionsRef.current = { mode, variant }
-  const needsAudioDocument = message.message_type === 'audio' && typeof message.audio_ptt !== 'boolean'
+  const needsAudioDocument = message.message_type === 'audio'
   const limits = forwardLimits(message)
 
   const [chats, setChats] = useState<Chat[]>([])

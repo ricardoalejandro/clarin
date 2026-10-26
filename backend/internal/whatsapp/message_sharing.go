@@ -44,6 +44,11 @@ func sharedContentKinds(source *domain.Message, mode, variant string) (string, s
 		if source.AudioPTT == nil && variant != domain.MessageContentAudioDocument {
 			return "", "", fmt.Errorf("no se conoce si el audio original es una nota de voz; puedes enviarlo como archivo")
 		}
+		if variant == domain.MessageContentOriginal && source.Body != nil {
+			if err := ValidateAudioCaption(kind, *source.Body); err != nil {
+				return "", "", err
+			}
+		}
 	default:
 		return "", "", fmt.Errorf("este tipo de contenido todavía no admite compartir")
 	}
@@ -93,7 +98,11 @@ func buildSharedMessage(source *domain.Message, media *PreUploadedMedia, mode, v
 	case domain.MessageTypeVideo, domain.MessageTypeGIF:
 		message = &waE2E.Message{VideoMessage: &waE2E.VideoMessage{URL: &media.URL, DirectPath: &media.DirectPath, MediaKey: media.MediaKey, Mimetype: &media.Mimetype, FileEncSHA256: media.FileEncSHA256, FileSHA256: media.FileSHA256, FileLength: &media.FileLength, Caption: &body, GifPlayback: proto.Bool(kind == domain.MessageTypeGIF), ContextInfo: info}}
 	case domain.MessageTypeAudio:
-		message = &waE2E.Message{AudioMessage: &waE2E.AudioMessage{URL: &media.URL, DirectPath: &media.DirectPath, MediaKey: media.MediaKey, Mimetype: &media.Mimetype, FileEncSHA256: media.FileEncSHA256, FileSHA256: media.FileSHA256, FileLength: &media.FileLength, PTT: source.AudioPTT, ContextInfo: info}}
+		audio, audioErr := preparedAudioMessage(media, *source.AudioPTT, info)
+		if audioErr != nil {
+			return nil, forwarding, audioErr
+		}
+		message = &waE2E.Message{AudioMessage: audio}
 	case domain.MessageTypeDocument:
 		filename := mediaDisplayFilename(media.OriginalFilename, media.OriginalURL)
 		mimetype := media.Mimetype
@@ -169,6 +178,9 @@ func sharedOutputLimits(source *domain.Message, forwarding domain.MessageForward
 
 func sharedMessageForPersistence(instance *DeviceInstance, chat *domain.Chat, source *domain.Message, media *PreUploadedMedia, providerID string, sentAt time.Time, forwarding domain.MessageForwarding, variant string, limits domain.MessageSharingLimits) *domain.Message {
 	message := &domain.Message{AccountID: instance.AccountID, DeviceID: &instance.ID, ChatID: chat.ID, MessageID: providerID, FromJID: strPtr(instance.JID), FromName: strPtr("Me"), Body: source.Body, MessageType: source.MessageType, MediaURL: source.MediaURL, MediaMimetype: source.MediaMimetype, MediaFilename: source.MediaFilename, MediaSize: source.MediaSize, MediaAssetID: source.MediaAssetID, AudioPTT: source.AudioPTT, IsFromMe: true, Status: strPtr("sent"), Timestamp: sentAt, Forwarding: forwarding, ForwardingSource: "clarin", Provider: strPtr(domain.DeviceProviderWhatsAppWeb), SharingLimits: &limits}
+	if variant == domain.MessageContentOriginal && source.MessageType != nil && *source.MessageType == domain.MessageTypeAudio && media != nil && media.Audio != nil {
+		message.MediaMimetype = proto.String(media.Audio.Mimetype)
+	}
 	if variant == domain.MessageContentAudioDocument {
 		message.MessageType = strPtr(domain.MessageTypeDocument)
 		message.AudioPTT = nil

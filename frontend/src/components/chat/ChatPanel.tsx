@@ -71,6 +71,7 @@ import {
 import { getMessageReactionAvailability } from '@/utils/chatCapabilities'
 import { ChatMediaType, validateChatAttachment } from '@/utils/chatAttachments'
 import { chatMediaIdentity } from '@/utils/chatMediaUrl'
+import { isCanonicalMediaSendAck } from './chatMediaSendAck'
 import type { ChatDocumentDescriptor } from '@/utils/chatDocuments'
 import type { PendingQuickReplyAttachment, QuickReply, QuickReplyComposerDraft, QuickReplyPage, QuickReplyRealtimePayload } from '@/types/quick-reply'
 import {
@@ -101,6 +102,7 @@ type AttachmentDraft = {
   type: ChatMediaType
   previewUrl: string
   caption: string
+  audioAsDocument?: boolean
 }
 
 type OutgoingMediaType = ChatMediaType | 'sticker'
@@ -112,6 +114,7 @@ type RetryableMedia = {
   caption: string
   previewUrl: string
   uploadedMediaUrl?: string
+  uncertain?: boolean
   operationId: string
   frozenPayload?: string
   attentionBoundary?: string
@@ -121,6 +124,8 @@ type RetryableMedia = {
   quotedSender?: string
   quotedIsFromMe?: boolean
 }
+
+const MEDIA_SEND_UNCERTAIN_MESSAGE = 'El resultado del adjunto está sin confirmar. Conservamos el archivo y la misma operación; no se enviará otra copia automáticamente.'
 
 const CONTINUITY_ACCEPTED_MESSAGE = 'El historial continúa con el mismo número verificado. Las operaciones anteriores no se enviarán automáticamente.'
 
@@ -1318,6 +1323,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
       URL.revokeObjectURL(media.previewUrl)
     }
     mediaRetryRef.current.delete(tempId)
+    if (media?.uncertain) setComposerFeedback(current => current?.message === MEDIA_SEND_UNCERTAIN_MESSAGE ? null : current)
   }, [])
 
   const updateMessagesForChat = useCallback((targetChatId: string, updater: (prev: Message[]) => Message[]) => {
@@ -2413,19 +2419,20 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
 
       })
       const data = await res.json().catch(() => ({}))
-      if (!res.ok || !data.success) throw new Error(data.error || 'Error al enviar archivo')
-
-      if (data.message) {
-        updateMessagesForChat(targetChatId, prev => reconcileOptimisticMessage(prev, tempId, data.message as Message))
-        releaseRetryableMedia(tempId, data.message.media_url || uploadedMediaUrl)
-      } else {
-        updateMessagesForChat(targetChatId, prev => prev.map(message =>
-          message.id === tempId ? { ...message, status: 'sent', media_url: uploadedMediaUrl } : message
-        ))
-        releaseRetryableMedia(tempId, uploadedMediaUrl)
+      // An authoritative echo may have confirmed the operation before HTTP finishes.
+      if (mediaRetryRef.current.get(tempId) !== media) return true
+      if ((res.ok && (data.success !== true || !isCanonicalMediaSendAck(data.message, { chatId: targetChatId, deviceId: targetDeviceId, mediaType: media.type, mediaUrl: uploadedMediaUrl }))) || data.code === 'send_outcome_pending') {
+        media.uncertain = true
+        updateMessagesForChat(targetChatId, previous => previous.map(message => message.id === tempId && message.status === 'sending' ? { ...message, send_phase: 'uncertain' } : message))
+        if (activeChatIdRef.current === targetChatId) setComposerFeedback({ kind: 'info', message: MEDIA_SEND_UNCERTAIN_MESSAGE })
+        return false
       }
+      if (!res.ok || !data.success) throw new Error(data.error || 'Error al enviar archivo')
+      updateMessagesForChat(targetChatId, prev => reconcileOptimisticMessage(prev, tempId, data.message as Message))
+      releaseRetryableMedia(tempId, data.message.media_url)
       return true
     } catch (err) {
+      if (mediaRetryRef.current.get(tempId) !== media) return true
       console.error('[ChatMedia]', err)
       updateMessagesForChat(targetChatId, prev => prev.map(message =>
         message.id === tempId ? { ...message, status: 'failed' } : message
@@ -2474,6 +2481,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
 
     const retryableMedia = mediaRetryRef.current.get(failedMsg.id)
     if (retryableMedia) {
+      if (retryableMedia.uncertain) { setComposerFeedback({ kind: 'info', message: MEDIA_SEND_UNCERTAIN_MESSAGE }); return }
       if (sendingChatsRef.current.has(targetChatId)) return
       sendingChatsRef.current.add(targetChatId); setSendingMessage(true)
       updateMessagesForChat(targetChatId, prev => prev.map(message => message.id === failedMsg.id ? { ...message, status: 'sending' } : message))
@@ -2766,7 +2774,9 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
     }
 
     const previousDraft = attachmentDraftRef.current
-    const caption = previousDraft?.caption ?? messageText
+    const caption = previousDraft?.type === 'audio' ? messageText : previousDraft?.caption ?? messageText
+    const mentions = previousDraft?.type === 'audio' ? messageMentions : previousDraft?.mentions || messageMentions
+    const isAudio = validation.mediaType === 'audio'
     if (previousDraft?.previewUrl) URL.revokeObjectURL(previousDraft.previewUrl)
 
     const previewUrl = validation.mediaType === 'image' || validation.mediaType === 'video' || validation.mediaType === 'gif'
@@ -2776,14 +2786,14 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
       file,
       type: validation.mediaType,
       previewUrl,
-      caption,
-      mentions: previousDraft?.mentions || messageMentions,
+      caption: isAudio ? '' : caption,
+      mentions: isAudio ? [] : mentions,
     }
 
     attachmentDraftRef.current = nextDraft
     setAttachmentDraft(nextDraft)
-    setMessageText(''); setMessageMentions([])
-    inputRef.current?.clear()
+    if (isAudio) { setMessageText(caption); setMessageMentions(mentions) }
+    else { setMessageText(''); setMessageMentions([]); inputRef.current?.clear() }
     captionInputRef.current?.clear()
     setShowAttachments(false)
     setActivePopup(null)
@@ -2862,7 +2872,8 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
     attachmentSendingRef.current = true
     setSendingAttachment(true)
     try {
-      const queued = await handleSendMedia(draft.file, draft.type, draft.caption, draft.mentions)
+      const audio = draft.type === 'audio'
+      const queued = await handleSendMedia(draft.file, audio && draft.audioAsDocument ? 'document' : draft.type, audio ? '' : draft.caption, audio ? [] : draft.mentions)
       if (!queued) return
 
       if (draft.previewUrl) URL.revokeObjectURL(draft.previewUrl)
@@ -2882,8 +2893,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
     if (draft.previewUrl) URL.revokeObjectURL(draft.previewUrl)
     attachmentDraftRef.current = null
     setAttachmentDraft(null)
-    setMessageText(draft.caption)
-    setMessageMentions(draft.mentions || [])
+    if (draft.type !== 'audio') { setMessageText(draft.caption); setMessageMentions(draft.mentions || []) }
     captionInputRef.current?.clear()
     requestAnimationFrame(() => { if (!suspendedRef.current) inputRef.current?.focus() })
   }
@@ -3629,6 +3639,13 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
              </div>
              {/* Caption + Send */}
              <div className="px-4 py-3 flex items-center gap-3 border-t border-slate-200 bg-white">
+               {attachmentDraft.type === 'audio' ? <div className="min-w-0 flex-1">
+                 <label className="flex min-h-11 cursor-pointer items-center gap-3 text-sm text-slate-700">
+                   <input type="checkbox" checked={attachmentDraft.audioAsDocument === true} disabled={sendingAttachment} onChange={event => { const audioAsDocument = event.target.checked; setAttachmentDraft(previous => { if (!previous) return previous; const next = { ...previous, audioAsDocument }; attachmentDraftRef.current = next; return next }) }} className="h-5 w-5 shrink-0 accent-emerald-600" />
+                   <span>Enviar como archivo adjunto</span>
+                 </label>
+                 <p className="text-xs leading-5 text-slate-500">{messageText.trim() ? 'El audio se enviará solo. Tu texto quedará como borrador para enviarlo después.' : 'El audio se enviará sin texto adjunto.'}</p>
+               </div> : <>
                <EmojiPicker
                  onEmojiSelect={(emoji) => {
                    if (captionInputRef.current) {
@@ -3659,6 +3676,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
                    disabled={sendingAttachment}
                  />
                </div>
+               </>}
                <button
                  onClick={() => void handleSendPendingMedia()}
                  disabled={sendingAttachment || sendingMessage}
@@ -3778,7 +3796,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
                   <button type="button" className="app-viewport fixed inset-0 z-[80] bg-slate-950/25 sm:hidden" onClick={() => setShowAttachments(false)} aria-label="Cerrar opciones de adjuntos" />
                   <div role="menu" className="absolute inset-x-2 bottom-full z-[90] mb-2 flex max-h-[min(calc(var(--app-height,100dvh)-8rem),28rem)] flex-col gap-1 overflow-y-auto rounded-2xl border border-slate-100 bg-white p-2 shadow-2xl animate-in slide-in-from-bottom-2 duration-200 sm:inset-x-auto sm:bottom-16 sm:left-4 sm:z-50 sm:mb-0 sm:w-56 sm:rounded-xl sm:shadow-xl">
                       <button type="button" role="menuitem" className="flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" onClick={() => { fileInputRef.current?.click(); setShowAttachments(false) }}>
-                          <ImageIcon className="w-5 h-5 text-purple-500" /> Foto/Video
+                          <ImageIcon className="w-5 h-5 text-purple-500" /> Fotos, videos y audio
                       </button>
                       <button type="button" role="menuitem" className="flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500" onClick={() => { docFileInputRef.current?.click(); setShowAttachments(false) }}>
                           <FileText className="w-5 h-5 text-blue-500" /> Documento
@@ -3798,7 +3816,7 @@ function ChatPanelSession({ chatId, deviceId: initialDeviceId, device, initialCh
                   </div>
                 </>
               )}
-              <input type="file" ref={fileInputRef} className="hidden" accept="image/*,video/*" onChange={e => handleFileSelect(e, 'media')} />
+              <input type="file" ref={fileInputRef} className="hidden" accept="image/*,video/*,audio/*" onChange={e => handleFileSelect(e, 'media')} />
               <input type="file" ref={docFileInputRef} className="hidden" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,.rar" onChange={e => handleFileSelect(e, 'document')} />
               <input type="file" ref={cameraInputRef} className="hidden" accept="image/*" capture="environment" onChange={e => handleFileSelect(e, 'media')} />
 

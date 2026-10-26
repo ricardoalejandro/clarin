@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/naperu/clarin/internal/domain"
 	"github.com/naperu/clarin/internal/repository"
+	"github.com/naperu/clarin/internal/whatsapp"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -45,7 +46,7 @@ func (s *Server) forwardingEnabled(deviceID uuid.UUID) bool {
 
 func forwardTypedFailureRetry(code string) bool {
 	switch code {
-	case "forward_source_changed", "forward_destination_changed", "forward_source_invalid", "recipient_invalid", "forward_content_unavailable", "forward_capability_unverified", "forwarding_source_unknown", "forwarding_score_unknown", "forward_type_unsupported", "forward_audio_kind_unknown", "share_mode_invalid", "share_variant_invalid":
+	case "forward_source_changed", "forward_destination_changed", "forward_source_invalid", "recipient_invalid", "forward_content_unavailable", "forward_capability_unverified", "forwarding_source_unknown", "forwarding_score_unknown", "forward_type_unsupported", "forward_audio_kind_unknown", "share_mode_invalid", "share_variant_invalid", "audio_invalid", "audio_codec_unsupported", "audio_voice_codec_unsupported", "audio_caption_unsupported":
 		return false
 	default:
 		return true
@@ -173,6 +174,11 @@ func validateMessageSharingSource(message *domain.Message, mode, variant string)
 		}
 		if kind == "audio" && message.AudioPTT == nil && !(mode == domain.MessageSharingCopy && variant == domain.MessageContentAudioDocument) {
 			return forwardFailure(409, "forward_audio_kind_unknown", "Sincroniza este audio para conservar si es una nota de voz o un archivo.")
+		}
+		if kind == "audio" && variant == domain.MessageContentOriginal && message.Body != nil {
+			if err := whatsapp.ValidateAudioCaption(kind, *message.Body); err != nil {
+				return forwardFailure(422, "audio_caption_unsupported", err.Error())
+			}
 		}
 	default:
 		return forwardFailure(422, "forward_type_unsupported", "Este tipo de mensaje todavía no admite reenvío nativo en Clarin.")

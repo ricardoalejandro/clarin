@@ -64,12 +64,13 @@ export function forwardSourceIssue(message: Message, deviceId?: string, mode: Fo
   if (!['image', 'video', 'gif', 'audio', 'document', 'sticker'].includes(type)) return 'Este tipo de mensaje todavía no admite reenvío.'
   if (!message.media_url || message.media_deleted || message.media_recoverable || message.media_unavailable_reason) return 'El archivo no está disponible para reenviarlo.'
   if (type === 'audio' && typeof message.audio_ptt !== 'boolean' && variant !== 'audio_document') return mode === 'copy' ? 'No conocemos si este audio es una nota de voz. Elige enviarlo como archivo adjunto.' : 'No conocemos si este audio es una nota de voz.'
+  if (type === 'audio' && variant !== 'audio_document' && message.body?.trim()) return 'El audio no admite texto adjunto. Elige enviarlo como archivo adjunto para conservar ese texto.'
   return null
 }
 
 /** Menu availability: audio conversion is a possibility, never an implicit selection. */
 export function forwardActionIssue(message: Message, deviceId?: string, sourceChat?: Chat | null): string | null {
-  return forwardSourceIssue(message, deviceId, 'copy', message.message_type === 'audio' && typeof message.audio_ptt !== 'boolean' ? 'audio_document' : 'original', sourceChat)
+  return forwardSourceIssue(message, deviceId, 'copy', message.message_type === 'audio' ? 'audio_document' : 'original', sourceChat)
 }
 
 export function forwardLimits(message: Message) {
@@ -91,7 +92,7 @@ export function forwardDestinationIssue(chat: Chat, selected: Chat[], message: M
 }
 
 /** These codes are returned before an operation is recorded or any destination is sent. */
-export const forwardValidationCodes = new Set(['share_mode_invalid', 'share_variant_invalid', 'forward_capability_unverified', 'forward_invalid_request', 'forward_destination_limit', 'forward_duplicate_destination', 'forward_device_unavailable', 'forward_device_not_found', 'forward_source_not_found', 'forward_source_unavailable', 'forward_provider_unsupported', 'forwarding_source_unknown', 'forwarding_score_unknown', 'forward_media_unavailable', 'forward_media_too_large', 'forward_audio_kind_unknown', 'forward_type_unsupported', 'forward_destination_not_found', 'forward_destination_invalid', 'forward_group_unavailable', 'do_not_contact', 'forward_frequent_limit', 'forward_group_limit', 'forward_source_changed'])
+export const forwardValidationCodes = new Set(['audio_caption_unsupported', 'share_mode_invalid', 'share_variant_invalid', 'forward_capability_unverified', 'forward_invalid_request', 'forward_destination_limit', 'forward_duplicate_destination', 'forward_device_unavailable', 'forward_device_not_found', 'forward_source_not_found', 'forward_source_unavailable', 'forward_provider_unsupported', 'forwarding_source_unknown', 'forwarding_score_unknown', 'forward_media_unavailable', 'forward_media_too_large', 'forward_audio_kind_unknown', 'forward_type_unsupported', 'forward_destination_not_found', 'forward_destination_invalid', 'forward_group_unavailable', 'do_not_contact', 'forward_frequent_limit', 'forward_group_limit', 'forward_source_changed'])
 
 export interface ForwardBatchRequest {
   mode?: ForwardMode

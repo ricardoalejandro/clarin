@@ -59,6 +59,7 @@ func TestForwardBatchSourceHonestTypes(t *testing.T) {
 	}
 	ptt := false
 	m.AudioPTT = &ptt
+	m.Body = nil
 	if err := validateForwardSource(m); err != nil {
 		t.Fatal(err)
 	}

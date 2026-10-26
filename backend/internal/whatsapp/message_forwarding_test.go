@@ -72,8 +72,8 @@ func TestNativeForwardFreshEnvelopeAndRoundTrip(t *testing.T) {
 
 func TestNativeForwardMediaPreservesVoiceAndFilename(t *testing.T) {
 	caption, kind := "QA caption", domain.MessageTypeAudio
-	source := &domain.Message{Body: &caption, MessageType: &kind, Forwarding: originalForwarding(), AudioPTT: proto.Bool(false)}
-	media := &PreUploadedMedia{URL: "https://example.invalid/media", Mimetype: "audio/ogg", OriginalFilename: "QA.txt", OriginalURL: "/api/media/file/qa"}
+	source := &domain.Message{MessageType: &kind, Forwarding: originalForwarding(), AudioPTT: proto.Bool(false)}
+	media := &PreUploadedMedia{URL: "https://example.invalid/media", Mimetype: "audio/ogg; codecs=opus", Audio: &preparedAudio{Mimetype: "audio/ogg; codecs=opus", Seconds: 2, VoiceCompatible: true}, OriginalFilename: "QA.txt", OriginalURL: "/api/media/file/qa"}
 	raw, _, err := buildNativeForward(source, media)
 	if err != nil || raw.GetAudioMessage().GetPTT() {
 		t.Fatal("audio became voice note")
@@ -83,6 +83,7 @@ func TestNativeForwardMediaPreservesVoiceAndFilename(t *testing.T) {
 		t.Fatal("unknown audio semantics forwarded")
 	}
 	kind = domain.MessageTypeDocument
+	source.Body = &caption
 	raw, _, err = buildNativeForward(source, media)
 	if err != nil || raw.GetDocumentMessage().GetFileName() != "QA.txt" || raw.GetDocumentMessage().GetCaption() != caption {
 		t.Fatal("document metadata lost")

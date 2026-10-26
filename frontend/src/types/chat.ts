@@ -98,7 +98,7 @@ export interface Message {
   media_unavailable_reason?: 'group_media_too_large'
   mentions?: ChatMention[]
   quoted_sender_name?: string
-  send_phase?: 'uploading' | 'sending'
+  send_phase?: 'uploading' | 'sending' | 'uncertain'
   sender?: { user_id?: string; name?: string; origin: string }
   id: string
   device_id?: string | null

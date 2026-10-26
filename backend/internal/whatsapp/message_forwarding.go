@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -131,6 +132,14 @@ func forwardFailure(code string, attempted bool, err error) error {
 	return &domain.ForwardSendError{Code: code, OutcomeUnknown: attempted, Err: err}
 }
 
+func forwardPreparationFailure(code string, err error) error {
+	var audioError *AudioPreparationError
+	if errors.As(err, &audioError) {
+		code = audioError.Code
+	}
+	return forwardFailure(code, false, err)
+}
+
 // buildNativeForward preserves the original native-only helper contract.
 func buildNativeForward(source *domain.Message, media *PreUploadedMedia) (*waE2E.Message, domain.MessageForwarding, error) {
 	return buildSharedMessage(source, media, domain.MessageSharingNative, domain.MessageContentOriginal)
@@ -199,7 +208,7 @@ func (p *DevicePool) ShareMessageWithID(ctx context.Context, deviceID uuid.UUID,
 	}
 	kind, uploadKind, err := sharedContentKinds(source, mode, variant)
 	if err != nil {
-		return nil, forwardFailure("forward_content_unavailable", false, err)
+		return nil, forwardPreparationFailure("forward_content_unavailable", err)
 	}
 	if mode == domain.MessageSharingNative {
 		if _, err = domain.NextForwarding(*source); err != nil {
@@ -211,9 +220,13 @@ func (p *DevicePool) ShareMessageWithID(ctx context.Context, deviceID uuid.UUID,
 		if source.MediaURL == nil || strings.TrimSpace(*source.MediaURL) == "" {
 			return nil, forwardFailure("forward_media_unavailable", false, fmt.Errorf("el archivo no está disponible"))
 		}
-		media, err = p.UploadMedia(ctx, deviceID, *source.MediaURL, uploadKind)
+		var requiredPTT *bool
+		if uploadKind == domain.MessageTypeAudio {
+			requiredPTT = source.AudioPTT
+		}
+		media, err = p.uploadMedia(ctx, deviceID, *source.MediaURL, uploadKind, requiredPTT)
 		if err != nil {
-			return nil, forwardFailure("forward_media_unavailable", false, err)
+			return nil, forwardPreparationFailure("forward_media_unavailable", err)
 		}
 		if source.MediaFilename != nil {
 			media.OriginalFilename = *source.MediaFilename
@@ -225,7 +238,7 @@ func (p *DevicePool) ShareMessageWithID(ctx context.Context, deviceID uuid.UUID,
 	}
 	raw, forwarding, err := buildSharedMessage(source, media, mode, variant)
 	if err != nil {
-		return nil, forwardFailure("forward_content_unavailable", false, err)
+		return nil, forwardPreparationFailure("forward_content_unavailable", err)
 	}
 	// Media preparation may outlive the earlier group membership/admin check.
 	// Obtain fresh provider permission before the final source/target checks.

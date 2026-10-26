@@ -310,6 +310,24 @@ it('locks native send after a canonical unverified-capability rejection without 
 
 
 describe('explicit content copies', () => {
+  it.each([false, true])('offers a file copy for audio with known PTT %s without selecting it automatically', audioPTT => {
+    render(<ForwardMessageModal {...props} nativeForwardEnabled={false} message={{ ...message, body: '', message_type: 'audio', media_url: '/api/media/file/account/audio', audio_ptt: audioPTT }} />)
+    expect(screen.getByRole('checkbox', { name: /Enviar como archivo adjunto/ })).not.toBeChecked()
+    expect(writes()).toHaveLength(0)
+  })
+  it.each([false, true])('copies known PTT %s audio as an explicitly chosen document while retaining source text and identity', async audioPTT => {
+    const source: Message = { ...message, body: 'Texto conservado como descripción', message_type: 'audio', media_url: '/api/media/file/account/audio', audio_ptt: audioPTT }
+    render(<ForwardMessageModal {...props} nativeForwardEnabled={false} message={source} />)
+    expect(screen.getByRole('button', { name: 'Enviar copia a 0 chats' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('checkbox', { name: /Enviar como archivo adjunto/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar copia a 1 chat' }))
+    await waitFor(() => expect(props.onSuccess).toHaveBeenCalledOnce())
+    expect(JSON.parse(writes()[0][1].body)).toMatchObject({ mode: 'copy', content_variant: 'audio_document', source_message_id: source.id })
+    expect(source.audio_ptt).toBe(audioPTT)
+    expect(source.body).toBe('Texto conservado como descripción')
+    expect(writes()).toHaveLength(1)
+  })
   it('copies a private historical video with a null source device through the current canonical device without rewriting its origin', async () => {
     const sourceChat: Chat = { id: 'source-1', account_id: 'account', jid: '51900000999@s.whatsapp.net', device_id: 'device-1', name: 'Historial privado', last_message: '', last_message_at: '2026-10-25T00:00:00Z', unread_count: 0 }
     const source: Message = { ...message, account_id: sourceChat.account_id, chat_id: sourceChat.id, device_id: null, message_type: 'video', media_url: '/api/media/file/account/video', forwarding: undefined, is_from_me: true }

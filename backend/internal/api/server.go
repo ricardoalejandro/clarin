@@ -3806,6 +3806,9 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": "Invalid request"})
 	}
+	if err := whatsapp.ValidateAudioCaption(req.MediaType, req.Body); err != nil {
+		return writeAudioSendError(c, err)
+	}
 	if err := s.authorizeMediaPublication(c, req.MediaURL); err != nil {
 		return mediaPublicationDenied(c, err)
 	}
@@ -3884,6 +3887,9 @@ func (s *Server) handleSendMessage(c *fiber.Ctx) error {
 	}
 
 	if err != nil {
+		if _, _, _, audioFailure := audioSendError(err); audioFailure {
+			return writeAudioSendError(c, err)
+		}
 		log.Printf("[SendMessage] failed account=%s device=%s to=%s media=%t quoted=%t error=%v",
 			accountID, deviceID, req.To, req.MediaURL != "" && req.MediaType != "", req.QuotedMessageID != "", err)
 		if strings.Contains(err.Error(), "server returned error 463") {

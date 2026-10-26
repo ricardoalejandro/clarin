@@ -18,6 +18,13 @@ const baseMessage: Message = {
 }
 
 describe('MessageBubble message actions', () => {
+  it('labels an uncertain attachment without implying failure, delivery or offering a send retry', () => {
+    render(<MessageBubble message={{ ...baseMessage, is_from_me: true, status: 'sending', send_phase: 'uncertain', message_type: 'audio' }} onRetry={vi.fn()} />)
+    expect(screen.getByRole('status')).toHaveTextContent('Sin confirmar')
+    expect(screen.queryByLabelText('Enviado')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Entregado')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Reintentar envío/ })).not.toBeInTheDocument()
+  })
   it('lets nested links own keyboard activation and their native context menu in compact and desktop modes', () => {
     const onSelect = vi.fn()
     const linked = { ...baseMessage, body: 'https://example.com/a_b' }
