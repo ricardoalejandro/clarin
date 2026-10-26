@@ -278,7 +278,7 @@ func (s *Server) runForwardBatch(c *fiber.Ctx, req forwardBatchRequest) error {
 	if err != nil || source.ID != req.SourceMessageID {
 		return writeForwardError(c, forwardFailure(404, "forward_source_not_found", "El mensaje original ya no está disponible."))
 	}
-	allowed, authErr := s.repos.Message.MessageDeviceAllowed(c.Context(), accountID, sourceChat.ID, req.DeviceID, source)
+	allowed, authErr := s.repos.Message.MessageSharingDeviceAllowed(c.Context(), accountID, sourceChat.ID, req.DeviceID, source, req.Mode)
 	if authErr != nil {
 		return writeForwardError(c, authErr)
 	}
@@ -360,7 +360,7 @@ func (s *Server) runForwardBatch(c *fiber.Ctx, req forwardBatchRequest) error {
 			freshTarget, targetErr := s.repos.Chat.GetByID(c.Context(), target.ChatID)
 			freshSourceAllowed := false
 			if sourceErr == nil {
-				freshSourceAllowed, sourceErr = s.repos.Message.MessageDeviceAllowed(c.Context(), accountID, op.SourceChatID, op.DeviceID, freshSource)
+				freshSourceAllowed, sourceErr = s.repos.Message.MessageSharingDeviceAllowed(c.Context(), accountID, op.SourceChatID, op.DeviceID, freshSource, op.Mode)
 			}
 			if sourceErr == nil && freshSourceAllowed && targetErr == nil && domain.MessageForwardFingerprint(freshSource) == op.SourceFingerprint {
 				sendCtx, validationErr := s.validateForwardTarget(c.Context(), accountID, op.DeviceID, freshTarget)

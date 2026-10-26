@@ -85,6 +85,7 @@ export interface MessageSharingLimits {
 }
 
 export interface Message {
+  account_id?: string
   forwarding?: MessageForwarding
   sharing_limits?: MessageSharingLimits | null
   /** Distinguishes voice notes from ordinary audio; absence means unknown. */
@@ -100,7 +101,7 @@ export interface Message {
   send_phase?: 'uploading' | 'sending'
   sender?: { user_id?: string; name?: string; origin: string }
   id: string
-  device_id?: string
+  device_id?: string | null
   message_id: string
   from_jid?: string
   from_name?: string

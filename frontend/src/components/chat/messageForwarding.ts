@@ -51,8 +51,10 @@ export function forwardSourceIssue(message: Message, deviceId?: string, mode: Fo
   if (message.is_revoked) return 'Este mensaje fue eliminado y no se puede reenviar.'
   if (message.is_view_once) return 'Los mensajes de visualización única no se pueden reenviar.'
   if ((message.id || '').startsWith('optimistic-') || ['sending', 'failed'].includes(message.status)) return 'Solo puedes reenviar mensajes confirmados.'
-  const verifiedHistory = sourceChat?.binding_state === 'verified_continuity' && sourceChat.canonical_chat_id === sourceChat.id && sourceChat.device_id === deviceId && Boolean(message.chat_id && continuityChatIds(sourceChat).has(message.chat_id))
-  if (deviceId && message.device_id && message.device_id !== deviceId && !verifiedHistory) return 'El mensaje pertenece a otro dispositivo de WhatsApp.'
+  if (sourceChat?.account_id && message.account_id && sourceChat.account_id !== message.account_id) return 'El mensaje pertenece a otra cuenta.'
+  const verifiedHistory = sourceChat && isGroupChat(sourceChat) && sourceChat.binding_state === 'verified_continuity' && sourceChat.canonical_chat_id === sourceChat.id && sourceChat.device_id === deviceId && Boolean(message.chat_id && continuityChatIds(sourceChat).has(message.chat_id))
+  const privateCopy = mode === 'copy' && sourceChat && !isGroupChat(sourceChat) && message.chat_id === sourceChat.id && sourceChat.device_id === deviceId
+  if (deviceId && message.device_id !== deviceId && !verifiedHistory && !privateCopy) return 'El mensaje pertenece a otro dispositivo de WhatsApp.'
   const forwarding = normalizeForwarding(message.forwarding)
   if (mode === 'native' && forwarding.state === 'unknown') return 'No conocemos si este mensaje fue reenviado. No se puede reenviar con fidelidad.'
   if (mode === 'native' && forwarding.score === null) return 'No conocemos el contador de reenvíos de este mensaje.'

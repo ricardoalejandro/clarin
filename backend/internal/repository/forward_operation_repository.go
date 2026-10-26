@@ -91,11 +91,13 @@ func (r *MessageRepository) CreateForwardOperation(ctx context.Context, op *Forw
 	var raw []byte
 	err = tx.QueryRow(ctx, `SELECT to_jsonb(m) FROM messages m JOIN chats source ON source.account_id=m.account_id AND source.id=m.chat_id
  JOIN chats current ON current.account_id=source.account_id AND current.id=COALESCE(source.canonical_chat_id,source.id)
- WHERE m.account_id=$1 AND current.id=$2 AND m.id=$3 AND current.device_id=$4
+ JOIN devices d ON d.account_id=current.account_id AND d.id=current.device_id
+ WHERE d.status='connected' AND d.delete_operation_id IS NULL AND COALESCE(NULLIF(d.provider,''),'whatsapp_web')='whatsapp_web'
+ AND m.account_id=$1 AND current.id=$2 AND m.id=$3 AND current.device_id=$4
  AND NOT EXISTS(SELECT 1 FROM messages tombstone WHERE tombstone.account_id=m.account_id AND tombstone.media_deleted AND (tombstone.id=COALESCE((SELECT canonical_message_id FROM whatsapp_message_aliases a WHERE a.account_id=m.account_id AND a.alias_message_id=m.id),m.id) OR tombstone.id IN(SELECT a.alias_message_id FROM whatsapp_message_aliases a WHERE a.account_id=m.account_id AND a.canonical_message_id=COALESCE((SELECT canonical_message_id FROM whatsapp_message_aliases own WHERE own.account_id=m.account_id AND own.alias_message_id=m.id),m.id))))
  AND NOT EXISTS(SELECT 1 FROM whatsapp_message_aliases alias JOIN messages keeper ON keeper.account_id=alias.account_id AND keeper.id=alias.canonical_message_id WHERE alias.account_id=m.account_id AND alias.alias_message_id=m.id AND (COALESCE(keeper.is_revoked,FALSE) OR COALESCE(keeper.is_view_once,FALSE) OR COALESCE(keeper.media_deleted,FALSE)))
- AND ((current.jid NOT LIKE '%@g.us' AND m.device_id=$4) OR (current.jid LIKE '%@g.us' AND ((current.whatsapp_owner_id IS NULL AND source.id=current.id AND m.device_id=$4) OR (current.whatsapp_owner_id IS NOT NULL AND current.binding_state='verified_continuity' AND source.whatsapp_owner_id=current.whatsapp_owner_id))))
- FOR SHARE OF m`, op.AccountID, sourceCanonical, op.SourceMessageID, op.DeviceID).Scan(&raw)
+ AND `+messageSharingSourceDeviceSQL+`
+ FOR SHARE OF m`, op.AccountID, sourceCanonical, op.SourceMessageID, op.DeviceID, op.Mode).Scan(&raw)
 	if err != nil {
 		return false, err
 	}

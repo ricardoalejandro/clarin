@@ -310,6 +310,21 @@ it('locks native send after a canonical unverified-capability rejection without 
 
 
 describe('explicit content copies', () => {
+  it('copies a private historical video with a null source device through the current canonical device without rewriting its origin', async () => {
+    const sourceChat: Chat = { id: 'source-1', account_id: 'account', jid: '51900000999@s.whatsapp.net', device_id: 'device-1', name: 'Historial privado', last_message: '', last_message_at: '2026-10-25T00:00:00Z', unread_count: 0 }
+    const source: Message = { ...message, account_id: sourceChat.account_id, chat_id: sourceChat.id, device_id: null, message_type: 'video', media_url: '/api/media/file/account/video', forwarding: undefined, is_from_me: true }
+    render(<ForwardMessageModal {...props} nativeForwardEnabled={false} sourceChat={sourceChat} message={source} />)
+    fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar copia a 1 chat' }))
+    await waitFor(() => expect(props.onSuccess).toHaveBeenCalledOnce())
+    expect(writes()).toHaveLength(1)
+    const request = JSON.parse(writes()[0][1].body)
+    expect(request).toMatchObject({ mode: 'copy', content_variant: 'original', source_chat_id: sourceChat.id, source_message_id: source.id, device_id: 'device-1', destination_chat_ids: ['target-1'] })
+    expect(request).not.toHaveProperty('body')
+    expect(request).not.toHaveProperty('media_url')
+    expect(source.device_id).toBeNull()
+    expect(source.chat_id).toBe(sourceChat.id)
+  })
   it('sends a historical image copy with native off using only the canonical source identifiers', async () => {
     render(<ForwardMessageModal {...props} nativeForwardEnabled={false} message={{ ...message, forwarding: undefined, message_type: 'image', media_url: '/api/media/file/account/image', body: 'Leyenda conservada' }} />)
     fireEvent.click(await screen.findByRole('button', { name: /Destino uno/ }))

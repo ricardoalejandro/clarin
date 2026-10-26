@@ -168,7 +168,7 @@ func (p *DevicePool) ShareMessageWithID(ctx context.Context, deviceID uuid.UUID,
 	if source == nil || source.AccountID != instance.AccountID || strings.TrimSpace(providerID) == "" {
 		return nil, forwardFailure("forward_source_invalid", false, fmt.Errorf("el origen del reenvío no pertenece al dispositivo"))
 	}
-	allowed, authorizationErr := p.repos.Message.MessageDeviceAllowed(ctx, instance.AccountID, source.ChatID, deviceID, source)
+	allowed, authorizationErr := p.repos.Message.MessageSharingDeviceAllowed(ctx, instance.AccountID, source.ChatID, deviceID, source, mode)
 	if authorizationErr != nil || !allowed {
 		return nil, forwardFailure("forward_source_invalid", false, fmt.Errorf("el origen no pertenece a la conexión verificada"))
 	}
@@ -240,7 +240,7 @@ func (p *DevicePool) ShareMessageWithID(ctx context.Context, deviceID uuid.UUID,
 	if lookupErr != nil || !sameNativeForwardSource(source, freshSource) {
 		return nil, forwardFailure("forward_source_changed", false, fmt.Errorf("el mensaje original cambió durante la preparación; prepara el reenvío nuevamente"))
 	}
-	allowed, authorizationErr = p.repos.Message.MessageDeviceAllowed(ctx, instance.AccountID, source.ChatID, deviceID, freshSource)
+	allowed, authorizationErr = p.repos.Message.MessageSharingDeviceAllowed(ctx, instance.AccountID, source.ChatID, deviceID, freshSource, mode)
 	if authorizationErr != nil || !allowed {
 		return nil, forwardFailure("forward_source_changed", false, fmt.Errorf("la conexión del origen cambió durante la preparación"))
 	}
