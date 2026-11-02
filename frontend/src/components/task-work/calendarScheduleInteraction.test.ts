@@ -67,18 +67,18 @@ describe('calendar schedule interaction', () => {
   it('enforces timed and all-day minimum durations when resizing the end', () => {
     const timed = { start: new Date('2026-08-10T09:00:00Z'), end: new Date('2026-08-10T10:00:00Z'), allDay: false }
     expect(calendarScheduleAfterInteraction(timed, 'resize-end', { days: 0, minutes: -120 }).end.toISOString()).toBe('2026-08-10T09:15:00.000Z')
-    const allDay = { start: new Date('2026-08-10T00:00:00Z'), end: new Date('2026-08-12T00:00:00Z'), allDay: true }
-    expect(calendarScheduleAfterInteraction(allDay, 'resize-end', { days: -9, minutes: 0 }).end.toISOString()).toBe('2026-08-11T00:00:00.000Z')
+    const allDay = { start: new Date(2026, 7, 10), end: new Date(2026, 7, 12), allDay: true }
+    expect(calendarScheduleAfterInteraction(allDay, 'resize-end', { days: -9, minutes: 0 }).end).toEqual(new Date(2026, 7, 11))
   })
 
   it('normalizes task writes to start/due and clears the legacy due_end_at field', () => {
-    const item = taskItem('task-1', '2026-08-10T00:00:00Z', '2026-08-10T23:59:00Z', true)
+    const item = taskItem('task-1', new Date(2026, 7, 10).toISOString(), new Date(2026, 7, 10, 23, 59).toISOString(), true)
     const schedule = calendarItemSchedule(item)
-    expect(schedule?.end.toISOString()).toBe('2026-08-11T00:00:00.000Z')
+    expect(schedule?.end).toEqual(new Date(2026, 7, 11))
     const moved = calendarScheduleAfterInteraction(schedule!, 'move', { days: 2, minutes: 0 })
     expect(buildTaskSchedulePayload((item as Extract<AgendaItem, { kind: 'task' }>).task, moved, 'operation-1')).toMatchObject({
-      start_at: '2026-08-12T00:00:00.000Z',
-      due_at: '2026-08-12T23:59:00.000Z',
+      start_at: new Date(2026, 7, 12).toISOString(),
+      due_at: new Date(2026, 7, 12, 23, 59).toISOString(),
       due_end_at: '',
       is_all_day: true,
       version: 4,
@@ -90,8 +90,8 @@ describe('calendar schedule interaction', () => {
   it('keeps recurring event drag occurrence-scoped and uses exclusive all-day dates', () => {
     const event = occurrence(true)
     const payload = buildEventSchedulePayload(event, {
-      start: new Date('2026-08-17T00:00:00Z'),
-      end: new Date('2026-08-20T00:00:00Z'),
+      start: new Date(2026, 7, 17),
+      end: new Date(2026, 7, 20),
       allDay: true,
     }, 'operation-2')
     expect(payload).toMatchObject({

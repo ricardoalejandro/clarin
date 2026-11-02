@@ -1,5 +1,13 @@
 # Changelog — Clarin CRM
 
+## 2026-11-02
+
+### Build 1 — Calendarios de Clarin Work
+
+- El selector propone hoy como fecha de entrega y espera a Aplicar para guardarla; conserva las fechas existentes.
+- Entrar en Calendario muestra la agenda sin volver a abrir formularios anteriores.
+- La vista mensual ajusta todas las semanas al espacio disponible y ofrece el inventario completo de cada día mediante «+N más».
+
 ## 2026-10-25
 
 ### Zoom de fotografías y administradores primero

@@ -96,10 +96,6 @@ function preferredEndpoint(startValue: string, endValue: string): RangeEndpoint 
   return endValue || !startValue ? 'end' : 'start'
 }
 
-function draftAllDayMode(startValue: string, endValue: string, allDay: boolean) {
-  return startValue || endValue ? allDay : true
-}
-
 function localizedEndpoint(value: string, allDay: boolean) {
   const date = parsedDate(value)
   if (!date) return value ? 'Fecha no válida' : 'Sin fecha'
@@ -139,6 +135,11 @@ export function taskDueDateOnlyValue(dateKey: string) {
   const parsed = operationalDateValue(`${dateKey}T12:00`, 'datetime')
   if (!parsed || operationalDateDayKey(parsed) !== dateKey) return ''
   return taskAllDayBoundary(operationalDateLocalValue(parsed, 'datetime'), 'end')
+}
+
+export function taskDateRangeInitialDraft(startValue: string, endValue: string, allDay: boolean, now = new Date()): TaskDateRangeValue {
+  if (startValue || endValue) return { startAt: startValue, endAt: endValue, isAllDay: allDay }
+  return { startAt: '', endAt: taskDueDateOnlyValue(operationalDateDayKey(now)), isAllDay: true }
 }
 
 function invalidRangeMessage(startValue: string, endValue: string, allDay: boolean) {
@@ -201,12 +202,13 @@ export default function TaskDateRangePicker({
   const endEndpointRef = useRef<HTMLButtonElement>(null)
   const yearInputRef = useRef<HTMLInputElement>(null)
   const dayRefs = useRef(new Map<string, HTMLButtonElement>())
+  const initialDraft = useMemo(() => taskDateRangeInitialDraft(startValue, endValue, allDay), [startValue, endValue, allDay])
   const [open, setOpen] = useState(false)
   const [activeEndpoint, setActiveEndpoint] = useState<RangeEndpoint>(() => preferredEndpoint(startValue, endValue))
   const [showStart, setShowStart] = useState(Boolean(startValue))
-  const [draftStart, setDraftStart] = useState(startValue)
-  const [draftEnd, setDraftEnd] = useState(endValue)
-  const [draftAllDay, setDraftAllDay] = useState(() => draftAllDayMode(startValue, endValue, allDay))
+  const [draftStart, setDraftStart] = useState(initialDraft.startAt)
+  const [draftEnd, setDraftEnd] = useState(initialDraft.endAt)
+  const [draftAllDay, setDraftAllDay] = useState(initialDraft.isAllDay)
   const initialEndpoint = preferredEndpoint(startValue, endValue)
   const initialAnchor = rangeAnchor(initialEndpoint, startValue, endValue)
   const [cursor, setCursor] = useState(() => monthCursor(initialAnchor))
@@ -222,12 +224,13 @@ export default function TaskDateRangePicker({
   const endDayKey = parsedDate(draftEnd) ? operationalDateDayKey(parsedDate(draftEnd) as Date) : ''
 
   const resetDraft = useCallback(() => {
-    const endpoint = preferredEndpoint(startValue, endValue)
-    const anchor = rangeAnchor(endpoint, startValue, endValue)
-    setDraftStart(startValue)
-    setDraftEnd(endValue)
-    setDraftAllDay(draftAllDayMode(startValue, endValue, allDay))
-    setShowStart(Boolean(startValue))
+    const draft = taskDateRangeInitialDraft(startValue, endValue, allDay)
+    const endpoint = preferredEndpoint(draft.startAt, draft.endAt)
+    const anchor = rangeAnchor(endpoint, draft.startAt, draft.endAt)
+    setDraftStart(draft.startAt)
+    setDraftEnd(draft.endAt)
+    setDraftAllDay(draft.isAllDay)
+    setShowStart(Boolean(draft.startAt))
     setActiveEndpoint(endpoint)
     setFocusedDay(anchor)
     setCursor(monthCursor(anchor))
@@ -546,6 +549,7 @@ export default function TaskDateRangePicker({
                     const isEnd = key === endDayKey
                     const withinRange = Boolean(startDayKey && endDayKey && key > startDayKey && key < endDayKey)
                     const focused = operationalDateDayKey(focusedDay) === key
+                    const today = operationalDateDayKey(new Date()) === key
                     return <button
                       key={key}
                       ref={node => { if (node) dayRefs.current.set(key, node); else dayRefs.current.delete(key) }}
@@ -553,14 +557,14 @@ export default function TaskDateRangePicker({
                       role="gridcell"
                       aria-label={day.toLocaleDateString('es-PE', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
                       aria-pressed={activeSelected}
-                      aria-current={operationalDateDayKey(new Date()) === key ? 'date' : undefined}
+                      aria-current={today ? 'date' : undefined}
                       tabIndex={focused ? 0 : -1}
                       data-task-range-date={key}
                       data-range-boundary={isStart ? 'start' : isEnd ? 'end' : undefined}
                       onFocus={() => setFocusedDay(day)}
                       onKeyDown={event => handleDayKey(event, day)}
                       onClick={() => chooseDay(day)}
-                      className={`mx-auto my-0.5 flex h-9 w-9 items-center justify-center rounded-xl text-[11px] font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 focus-visible:ring-offset-1 motion-reduce:transition-none ${activeSelected ? 'bg-emerald-600 text-white shadow-md shadow-emerald-200' : isStart || isEnd ? 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300' : withinRange ? 'bg-emerald-50 text-emerald-700' : outside ? 'text-slate-300 hover:bg-slate-50' : 'text-slate-600 hover:bg-emerald-50 hover:text-emerald-700'}`}
+                      className={`mx-auto my-0.5 flex h-9 w-9 items-center justify-center rounded-xl text-[11px] font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 focus-visible:ring-offset-1 motion-reduce:transition-none ${today && !activeSelected ? 'underline decoration-2 underline-offset-4' : ''} ${activeSelected ? 'bg-emerald-600 text-white shadow-md shadow-emerald-200' : isStart || isEnd ? 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300' : withinRange ? 'bg-emerald-50 text-emerald-700' : outside ? 'text-slate-300 hover:bg-slate-50' : 'text-slate-600 hover:bg-emerald-50 hover:text-emerald-700'}`}
                     >{day.getDate()}</button>
                   })}
                 </div>
