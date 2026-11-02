@@ -169,6 +169,8 @@ import {
 import { WhiteboardPresentationOverlay } from './WhiteboardPresentationControls'
 import { useWhiteboardPresentation } from '@/hooks/useWhiteboardPresentation'
 import { useWhiteboardFocusMode } from '@/hooks/useWhiteboardFocusMode'
+import { useDashboardSpecializedFocusOwner } from '@/components/dashboard-focus/DashboardFocus'
+import WhiteboardFocusRestoreBar from './WhiteboardFocusRestoreBar'
 import { useClarinRuntime } from '@/components/offline-v5/ClarinRuntimeProvider'
 import { runWhiteboardWrite, whiteboardWriteTransportAvailable } from './whiteboardOfflineTransport'
 import {
@@ -420,6 +422,7 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
   onExit,
   onLeaveGuardReady,
 }, forwardedRef) {
+  useDashboardSpecializedFocusOwner()
   const router = useRouter()
   const { isOffline, requireOnline } = useClarinRuntime()
   const networkOrLocal = whiteboardWriteTransportAvailable(
@@ -2915,6 +2918,8 @@ const WhiteboardEditor = forwardRef<WhiteboardEditorHandle, WhiteboardEditorProp
     <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{focusModeAnnouncement}</span>
     <input ref={importInputRef} type="file" accept=".excalidraw,.json,application/json" className="hidden" onChange={importScene} />
     <input ref={libraryImportInputRef} type="file" accept=".excalidrawlib,application/json" className="hidden" onChange={importLibrary} />
+
+    <WhiteboardFocusRestoreBar active={focusModeActive} integratedTitle={showIntegratedTitle} onRestore={exitFocusMode} />
 
     <div
       ref={canvasHostRef}

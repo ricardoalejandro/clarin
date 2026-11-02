@@ -72,6 +72,7 @@ export default defineConfig({
       'src/components/LeadPolicyProvider.test.tsx',
       'src/components/ContactAvatarControl.test.tsx',
       'src/components/branding/**/*.test.{ts,tsx}',
+      'src/components/dashboard-focus/**/*.test.{ts,tsx}',
       'src/components/mobile-app/**/*.test.{ts,tsx}',
       'src/components/offline-v3/**/*.test.{ts,tsx}',
       'src/components/offline-v4/**/*.test.{ts,tsx}',

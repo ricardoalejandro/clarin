@@ -2,6 +2,12 @@
 
 ## 2026-11-02
 
+### Build 2 — Vista amplia en Clarin
+
+- Ctrl/Cmd + Shift + F permite ocultar por completo el menú principal en escritorio y recuperarlo con el mismo atajo o con «Mostrar menú».
+- La vista amplia conserva el estado de cada sección y la preferencia de menú compacto; al cambiar de sección, cuenta o tamaño móvil vuelve la navegación habitual.
+- Pizarras mantiene su maximización y ofrece una salida visible también cuando el editor es compacto.
+
 ### Build 1 — Calendarios de Clarin Work
 
 - El selector propone hoy como fecha de entrega y espera a Aplicar para guardarla; conserva las fechas existentes.

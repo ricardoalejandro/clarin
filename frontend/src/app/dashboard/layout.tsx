@@ -26,6 +26,13 @@ import {
 import { PwaInstallExperience, PwaInstallMenuAction, PwaRuntimeProvider, usePwaRuntime } from '@/components/mobile-app/PwaRuntime'
 import { subscribeWebSocket, onServerVersionChange, initIdleTimeout, clearIdleTimeout, tryRefreshTokenOutcome, clearAuthState, isAuthIdleExpired, logoutFromBrowser, markAuthSessionDetected, markAuthTokenRefreshed, invalidateOfflineBeforeIdentityChange } from '@/lib/api'
 import { dashboardSidebarHeaderState } from '@/lib/dashboardSidebarState'
+import {
+  DashboardFocusEnterButton,
+  DashboardFocusProvider,
+  DashboardFocusRestoreBar,
+  DashboardFocusSidebar,
+  useDashboardFocus,
+} from '@/components/dashboard-focus/DashboardFocus'
 import { completeAuthIdentityChange, getAuthScope } from '@/lib/authScope'
 import { fetchAuthCookie } from '@/lib/authCookieLock'
 import { browserOfflineV5Client } from '@/offline-v5/client'
@@ -109,6 +116,12 @@ function CollapsedSidebarExpandButton({ onExpand }: { onExpand: () => void }) {
     <button ref={buttonRef} type="button" onClick={onExpand} onMouseEnter={() => setTooltipOpen(true)} onMouseLeave={() => setTooltipOpen(false)} onFocus={() => setTooltipOpen(true)} onBlur={() => setTooltipOpen(false)} aria-label="Expandir menú" aria-expanded="false" aria-describedby={tooltipOpen ? 'dashboard-sidebar-expand-tooltip' : undefined} className="hidden h-10 w-10 items-center justify-center rounded-xl border border-slate-700/70 bg-slate-900/25 text-slate-300 shadow-sm outline-none transition hover:border-slate-600 hover:bg-slate-700/70 hover:text-white focus-visible:ring-2 focus-visible:ring-emerald-400 lg:flex"><PanelLeftOpen className="h-[18px] w-[18px]" /></button>
     {tooltipOpen && rect && typeof document !== 'undefined' && createPortal(<div id="dashboard-sidebar-expand-tooltip" role="tooltip" style={{ left: rect.right + 10, top: rect.top + rect.height / 2, transform: 'translateY(-50%)' }} className="pointer-events-none fixed z-[230] whitespace-nowrap rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-white shadow-xl">Expandir menú</div>, document.body)}
   </>
+}
+
+function CompactDashboardFocusEntry() {
+  const focus = useDashboardFocus()
+  if (!focus?.available || focus.hidden || focus.specializedOwnerActive) return null
+  return <div className="hidden shrink-0 justify-center border-b border-slate-700/50 py-1 lg:flex"><DashboardFocusEnterButton /></div>
 }
 
 export default function DashboardLayout({
@@ -683,6 +696,7 @@ function DashboardLayoutContent({
   }
 
   return (
+    <DashboardFocusProvider scopeKey={JSON.stringify([user.id, user.account_id, pathname])} enabled={!mobileAppMode}>
     <LeadPolicyProvider value={leadPolicy}>
     <NotificationProvider accountId={user.account_id} mobileAppMode={mobileAppMode}>
     <ChatMobileChromeProvider value={chatMobileChromeContextValue}>
@@ -696,7 +710,7 @@ function DashboardLayoutContent({
       )}
 
       {/* Sidebar */}
-      {!mobileAppMode && <aside data-dashboard-sidebar className={`
+      {!mobileAppMode && <DashboardFocusSidebar className={`
         fixed lg:static inset-y-0 left-0 z-40
         ${isCollapsed ? 'lg:w-[68px]' : 'lg:w-60'} w-64
         bg-slate-800/95 backdrop-blur-md border-r border-slate-700/50
@@ -712,8 +726,10 @@ function DashboardLayoutContent({
             <span className="font-bold text-lg text-white whitespace-nowrap tracking-tight">Clarin</span>
           </Link>}
           {sidebarHeader.showExpandControl && <CollapsedSidebarExpandButton onExpand={toggleSidebarCollapsed} />}
-          {sidebarHeader.showCollapseControl && <><button onClick={() => setSidebarOpen(false)} className="lg:hidden flex h-11 w-11 items-center justify-center hover:bg-slate-700 rounded-lg transition-colors" aria-label="Cerrar menú"><X className="w-5 h-5 text-slate-400" /></button><button onClick={toggleSidebarCollapsed} className="hidden rounded-lg p-1.5 text-slate-500 transition-all duration-200 hover:bg-slate-700/60 hover:text-slate-300 lg:flex" title="Colapsar menú" aria-label="Colapsar menú" aria-expanded="true"><PanelLeftClose className="h-[18px] w-[18px]" /></button></>}
+          {sidebarHeader.showCollapseControl && <div className="flex shrink-0 items-center gap-0.5"><DashboardFocusEnterButton /><button onClick={() => setSidebarOpen(false)} className="lg:hidden flex h-11 w-11 items-center justify-center hover:bg-slate-700 rounded-lg transition-colors" aria-label="Cerrar menú"><X className="w-5 h-5 text-slate-400" /></button><button onClick={toggleSidebarCollapsed} className="hidden rounded-lg p-1.5 text-slate-500 transition-all duration-200 hover:bg-slate-700/60 hover:text-slate-300 lg:flex" title="Colapsar menú" aria-label="Colapsar menú" aria-expanded="true"><PanelLeftClose className="h-[18px] w-[18px]" /></button></div>}
         </div>
+
+        {sidebarHeader.compact && <CompactDashboardFocusEntry />}
 
         {/* Navigation */}
         <nav className={`${isCollapsed ? 'px-2 py-3' : 'px-2.5 py-3'} space-y-0.5 flex-1 overflow-y-auto`}>
@@ -836,7 +852,7 @@ function DashboardLayoutContent({
             )}
           </button>
         </div>}
-      </aside>}
+      </DashboardFocusSidebar>}
 
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0 min-h-0">
@@ -911,6 +927,8 @@ function DashboardLayoutContent({
         {mobileAppMode && !isOffline && <MobileOfflineStatus />}
         {user && <OfflineConnectionBannerV5 key={`${user.id}:${user.account_id}`} userId={user.id} accountId={user.account_id} username={user.username} />}
         <OfflineRuntimeIndicator />
+
+        <DashboardFocusRestoreBar />
 
         {/* Page content */}
         <main className={`flex-1 flex flex-col overflow-hidden min-h-0 ${
@@ -1032,5 +1050,6 @@ function DashboardLayoutContent({
     </ChatMobileChromeProvider>
     </NotificationProvider>
     </LeadPolicyProvider>
+    </DashboardFocusProvider>
   )
 }
