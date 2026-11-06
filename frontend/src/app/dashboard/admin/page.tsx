@@ -12,6 +12,7 @@ import { getPasswordIssues } from '@/components/PasswordStrengthChecklist'
 import { AdminFormDialog, AdminPasswordFields } from '@/components/admin'
 import AccountLeadPolicyDialog from '@/components/admin/AccountLeadPolicyDialog'
 import OfflineAccessAdminV5 from '@/components/admin/OfflineAccessAdminV5'
+import { AccountSessionPolicy } from '@/components/admin/AccountSessionPolicy'
 import { apiDelete, apiGet, apiPost, logoutFromBrowser, tryRefreshToken } from '@/lib/api'
 import { SEARCH_DEBOUNCE_MS, useDebouncedValue } from '@/lib/useDebouncedValue'
 import {
@@ -35,6 +36,7 @@ interface Account {
   subscription_status?: string
   trial_ends_at?: string | null
   current_period_end?: string | null
+  session_idle_timeout_minutes?: number
   grace_ends_at?: string | null
   user_count: number
   device_count: number
@@ -324,6 +326,7 @@ const ALL_MODULES = [
   { key: 'tasks.environments.create', label: 'Crear Entornos de Work', color: 'lime' },
   { key: 'documents', label: 'Plantillas', color: 'purple' },
   { key: 'reports', label: 'Reportería', color: 'emerald' },
+  { key: 'utilities', label: 'Utilitarios', color: 'teal' },
   { key: 'quick_replies_manage', label: 'Administrar respuestas rápidas', color: 'emerald' },
 ]
 
@@ -429,6 +432,7 @@ export default function AdminPage() {
   // Modals
   const [showAccountModal, setShowAccountModal] = useState(false)
   const [editingAccount, setEditingAccount] = useState<Account | null>(null)
+  const [sessionPolicySaving, setSessionPolicySaving] = useState(false)
   const [accountFormError, setAccountFormError] = useState<AccountFormError | null>(null)
   const [accountSubmitting, setAccountSubmitting] = useState(false)
   const [accountAdvancedOpen, setAccountAdvancedOpen] = useState(false)
@@ -968,14 +972,14 @@ export default function AdminPage() {
   }
 
   function closeAccountModal() {
-    if (accountSubmitting) return
+    if (accountSubmitting || sessionPolicySaving) return
     setShowAccountModal(false)
     setAccountFormError(null)
     setAccountAdvancedOpen(false)
   }
 
   async function saveAccount() {
-    if (accountSubmitting) return
+    if (accountSubmitting || sessionPolicySaving) return
     const trimmedName = accountForm.name.trim()
     setAccountFormError(null)
     if (!trimmedName) {
@@ -3337,15 +3341,15 @@ export default function AdminPage() {
         title={editingAccount ? 'Editar cuenta' : 'Crear cuenta'}
         description={editingAccount ? 'Actualiza la identidad, límites y suscripción de la cuenta.' : 'Configura una nueva cuenta y su suscripción en una sola operación.'}
         icon={Building2}
-        busy={accountSubmitting}
+        busy={accountSubmitting || sessionPolicySaving}
         formNoValidate
         onClose={closeAccountModal}
         initialFocusRef={accountNameInputRef}
         onSubmit={event => { event.preventDefault(); void saveAccount() }}
         footer={(
           <>
-            <button type="button" onClick={closeAccountModal} disabled={accountSubmitting} className="min-h-11 rounded-xl px-4 text-sm font-medium text-slate-600 transition hover:bg-slate-200/70 disabled:cursor-not-allowed disabled:opacity-50">Cancelar</button>
-            <button type="submit" disabled={accountSubmitting} className="inline-flex min-h-11 min-w-28 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300">
+            <button type="button" onClick={closeAccountModal} disabled={accountSubmitting || sessionPolicySaving} className="min-h-11 rounded-xl px-4 text-sm font-medium text-slate-600 transition hover:bg-slate-200/70 disabled:cursor-not-allowed disabled:opacity-50">Cancelar</button>
+            <button type="submit" disabled={accountSubmitting || sessionPolicySaving} className="inline-flex min-h-11 min-w-28 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300">
               {accountSubmitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
               {accountSubmitting ? 'Guardando…' : editingAccount ? 'Guardar cambios' : 'Crear cuenta'}
             </button>
@@ -3466,6 +3470,18 @@ export default function AdminPage() {
               </div>
             )}
           </section>
+          {showAccountModal && editingAccount && <AccountSessionPolicy
+            key={editingAccount.id}
+            accountId={editingAccount.id}
+            minutes={editingAccount.session_idle_timeout_minutes ?? 30}
+            disabled={accountSubmitting}
+            onBusyChange={setSessionPolicySaving}
+            onSaved={minutes => {
+              const id = editingAccount.id
+              setAccounts(current => current.map(account => account.id === id ? { ...account, session_idle_timeout_minutes: minutes } : account))
+              setEditingAccount(current => current?.id === id ? { ...current, session_idle_timeout_minutes: minutes } : current)
+            }}
+          />}
         </div>
       </AdminFormDialog>
 

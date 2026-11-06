@@ -49,7 +49,7 @@ func (s *Server) handleRegister(c *fiber.Ctx) error {
 		}
 	}
 
-	token, refreshToken, user, accountCount, authorityEffect, err := s.services.Auth.Login(c.Context(), strings.TrimSpace(req.Email), req.Password, s.cfg.JWTSecret)
+	token, refreshToken, user, accountCount, session, authorityEffect, err := s.services.Auth.Login(c.Context(), strings.TrimSpace(req.Email), req.Password, s.cfg.JWTSecret)
 	s.notifyWhiteboardAuthorityEffect(authorityEffect)
 	if err != nil {
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": true, "account": result.Account, "requires_login": true})
@@ -76,6 +76,7 @@ func (s *Server) handleRegister(c *fiber.Ctx) error {
 			"permissions":         []string{domain.PermAll},
 		},
 		"account_count": accountCount,
+		"session":       session,
 	})
 }
 

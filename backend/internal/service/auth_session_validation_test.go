@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,19 +11,22 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/naperu/clarin/pkg/cache"
 )
 
 type authSessionFakeCache struct {
-	values    map[string][]byte
-	errors    map[string]error
-	setErrors map[string]error
-	delErrors map[string]error
-	getKeys   []string
-	setCalls  int
-	delCalls  int
-	setKeys   []string
-	delKeys   []string
-	setTTLs   []time.Duration
+	values          map[string][]byte
+	errors          map[string]error
+	setErrors       map[string]error
+	delErrors       map[string]error
+	getKeys         []string
+	setCalls        int
+	delCalls        int
+	setKeys         []string
+	delKeys         []string
+	setTTLs         []time.Duration
+	beforeAuthWrite func()
+	authWriteError  error
 }
 
 func (c *authSessionFakeCache) Get(_ context.Context, key string) ([]byte, error) {
@@ -57,6 +61,41 @@ func (c *authSessionFakeCache) Del(_ context.Context, keys ...string) error {
 		delete(c.values, key)
 	}
 	return nil
+}
+
+func (c *authSessionFakeCache) UpdateAuthSession(ctx context.Context, sessionKey, markerKey string, expected []byte, marker string, deadline time.Time, value []byte, expiresAt time.Time) (bool, error) {
+	if c.beforeAuthWrite != nil {
+		c.beforeAuthWrite()
+	}
+	if c.authWriteError != nil {
+		return false, c.authWriteError
+	}
+	if !bytes.Equal(c.values[sessionKey], expected) || (c.values[markerKey] != nil && string(c.values[markerKey]) != marker) || !time.Now().Before(deadline) {
+		return false, nil
+	}
+	return true, c.Set(ctx, sessionKey, value, time.Until(expiresAt))
+}
+
+func (c *authSessionFakeCache) RotateAuthCredential(ctx context.Context, rotation cache.AuthCredentialRotation) (bool, error) {
+	if c.beforeAuthWrite != nil {
+		c.beforeAuthWrite()
+	}
+	if c.authWriteError != nil {
+		return false, c.authWriteError
+	}
+	if !bytes.Equal(c.values[rotation.SessionKey], rotation.ExpectedSession) ||
+		!bytes.Equal(c.values[rotation.OldCredentialKey], rotation.ExpectedCredential) ||
+		(c.values[rotation.MarkerKey] != nil && string(c.values[rotation.MarkerKey]) != rotation.Marker) ||
+		!time.Now().Before(rotation.Deadline) {
+		return false, nil
+	}
+	c.values[rotation.NewCredentialKey] = rotation.Credential
+	c.values[rotation.OldCredentialKey] = []byte(rotation.ConsumedMarker)
+	if len(rotation.NewSession) != 0 {
+		c.values[rotation.NewSessionKey] = rotation.NewSession
+		delete(c.values, rotation.SessionKey)
+	}
+	return true, nil
 }
 
 func authSessionJSON(t *testing.T, userID uuid.UUID, accountID uuid.UUID, createdAt time.Time) []byte {
@@ -96,11 +135,11 @@ func TestValidateSessionReadOnlyDoesNotTouchSessionTTL(t *testing.T) {
 	userID := uuid.New()
 	sessionID := uuid.NewString()
 	cache := &authSessionFakeCache{values: map[string][]byte{
-		sessionKeyPrefix + sessionID: authSessionJSON(t, userID, uuid.New(), time.Now().Add(-time.Hour)),
+		sessionKeyPrefix + sessionID: authSessionJSON(t, userID, uuid.New(), time.Now().Add(-10*time.Minute)),
 	}}
 	service := &AuthService{cache: cache}
 
-	if err := service.ValidateSessionReadOnly(context.Background(), sessionID, userID); err != nil {
+	if err := service.ValidateSessionReadOnly(context.Background(), sessionID, userID, uuid.Nil); err != nil {
 		t.Fatalf("validate live session: %v", err)
 	}
 	if cache.setCalls != 0 || cache.delCalls != 0 {
@@ -156,7 +195,7 @@ func TestValidateTokenReadOnlyRemainsStrictForExpiredAndInvalidJWTs(t *testing.T
 			ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
 		},
 	}
-	liveSession := authSessionJSON(t, userID, accountID, now.Add(-time.Hour))
+	liveSession := authSessionJSON(t, userID, accountID, now.Add(-10*time.Minute))
 	tests := []struct {
 		name          string
 		claims        JWTClaims
@@ -215,7 +254,7 @@ func TestValidateRefreshTokenReadOnlyUsesCanonicalSessionWithoutTouchingTTL(t *t
 	accountID := uuid.New()
 	sessionID := uuid.NewString()
 	refreshToken := uuid.NewString()
-	createdAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	createdAt := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
 	cache := &authSessionFakeCache{values: map[string][]byte{
 		refreshTokenKeyPrefix + refreshToken: refreshCredentialJSON(t, userID, accountID, sessionID, createdAt),
 		sessionKeyPrefix + sessionID:         authSessionJSON(t, userID, uuid.New(), createdAt),
@@ -238,7 +277,7 @@ func TestWhiteboardReconnectFallsBackFromExpiredJWTToCurrentScopedCredential(t *
 	sessionID := uuid.NewString()
 	refreshToken := uuid.NewString()
 	secret := "test-only-secret"
-	createdAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	createdAt := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
 	claims := JWTClaims{
 		UserID: userID, AccountID: accountID, SessionID: sessionID, Username: "tester",
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -271,7 +310,7 @@ func TestValidateRefreshTokenReadOnlyClassifiesTerminalAndTransientStates(t *tes
 	accountID := uuid.New()
 	sessionID := uuid.NewString()
 	refreshToken := uuid.NewString()
-	createdAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	createdAt := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
 	validRefresh := refreshCredentialJSON(t, userID, accountID, sessionID, createdAt)
 	validSession := authSessionJSON(t, userID, accountID, createdAt)
 	tests := []struct {
@@ -347,7 +386,7 @@ func TestValidateSessionReadOnlyClassifiesTerminalStates(t *testing.T) {
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			cache := &authSessionFakeCache{values: testCase.values}
-			err := (&AuthService{cache: cache}).ValidateSessionReadOnly(context.Background(), sessionID, userID)
+			err := (&AuthService{cache: cache}).ValidateSessionReadOnly(context.Background(), sessionID, userID, uuid.Nil)
 			if !errors.Is(err, ErrAuthSessionExpired) {
 				t.Fatalf("error = %v, want ErrAuthSessionExpired", err)
 			}
@@ -375,7 +414,7 @@ func TestValidateSessionReadOnlyClassifiesCacheFailuresAsTransient(t *testing.T)
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			err := (&AuthService{cache: testCase.cache}).ValidateSessionReadOnly(context.Background(), sessionID, userID)
+			err := (&AuthService{cache: testCase.cache}).ValidateSessionReadOnly(context.Background(), sessionID, userID, uuid.Nil)
 			if !errors.Is(err, ErrAuthSessionUnavailable) {
 				t.Fatalf("error = %v, want ErrAuthSessionUnavailable", err)
 			}
@@ -407,7 +446,7 @@ func TestCreateSessionCopiesCurrentInvalidationGeneration(t *testing.T) {
 		userSessionInvalidatedPrefix + userID.String(): marker,
 	}}
 	service := &AuthService{cache: cache}
-	sessionID, _, err := service.createSession(context.Background(), userID, accountID, "tester")
+	sessionID, _, err := service.createSession(context.Background(), userID, accountID, "tester", 45)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -418,89 +457,86 @@ func TestCreateSessionCopiesCurrentInvalidationGeneration(t *testing.T) {
 	if stored.InvalidationMarker != string(marker) {
 		t.Fatalf("stored marker = %q, want %q", stored.InvalidationMarker, marker)
 	}
-	if err := service.ValidateSessionReadOnly(context.Background(), sessionID, userID); err != nil {
+	if err := service.ValidateSessionReadOnly(context.Background(), sessionID, userID, uuid.Nil); err != nil {
 		t.Fatalf("new session with current generation rejected: %v", err)
 	}
 }
 
-func TestTouchSessionChecksInvalidationGenerationBeforeExtendingTTL(t *testing.T) {
-	userID := uuid.New()
-	sessionID := uuid.NewString()
-	now := time.Now()
-	makeSession := func(marker string) []byte {
-		payload := authSessionJSON(t, userID, uuid.New(), now)
-		var session authSessionData
-		if err := json.Unmarshal(payload, &session); err != nil {
-			t.Fatal(err)
-		}
-		session.InvalidationMarker = marker
-		payload, err := json.Marshal(session)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return payload
+func TestSessionDeadlinesExpireAtTheExactBoundary(t *testing.T) {
+	now := time.Date(2026, 11, 5, 18, 0, 0, 0, time.UTC)
+	short := &authSessionData{CreatedAt: now.Unix(), LastSeen: now.Unix(), IdleTimeoutMinutes: 5}
+	long := &authSessionData{CreatedAt: now.Unix(), LastSeen: now.Unix(), IdleTimeoutMinutes: 1440}
+	legacy := &authSessionData{CreatedAt: now.Unix(), LastSeen: now.Unix()}
+	if err := short.validateTime(now.Add(5*time.Minute - time.Nanosecond)); err != nil {
+		t.Fatalf("session expired before deadline: %v", err)
 	}
+	if err := short.validateTime(now.Add(5 * time.Minute)); !errors.Is(err, ErrAuthSessionIdleExpired) {
+		t.Fatalf("short policy did not expire at deadline: %v", err)
+	}
+	if err := long.validateTime(now.Add(5 * time.Minute)); err != nil {
+		t.Fatalf("short policy leaked into the longer session: %v", err)
+	}
+	if err := legacy.validateTime(now.Add(30 * time.Minute)); !errors.Is(err, ErrAuthSessionIdleExpired) {
+		t.Fatalf("legacy session lost default policy: %v", err)
+	}
+	absolute := now.Add(AuthSessionAbsoluteLifetime)
+	long.LastSeen = absolute.Add(-time.Minute).Unix()
+	if err := long.validateTime(absolute); !errors.Is(err, ErrAuthSessionExpired) || errors.Is(err, ErrAuthSessionIdleExpired) {
+		t.Fatalf("activity bypassed absolute deadline: %v", err)
+	}
+}
 
-	t.Run("previous generation is terminal and not touched", func(t *testing.T) {
-		cache := &authSessionFakeCache{values: map[string][]byte{
-			sessionKeyPrefix + sessionID:                   makeSession("old-generation"),
-			userSessionInvalidatedPrefix + userID.String(): []byte("new-generation"),
-		}}
-		_, err := (&AuthService{cache: cache}).TouchSession(context.Background(), sessionID)
-		if err == nil {
-			t.Fatal("invalidated session was touched")
-		}
-		if cache.setCalls != 0 {
-			t.Fatalf("invalidated session extended TTL with %d SET calls", cache.setCalls)
-		}
-	})
+func TestRecordSessionActivityUsesCanonicalScopeAndNeverResurrectsSession(t *testing.T) {
+	userID, accountID := uuid.New(), uuid.New()
+	sessionID := uuid.NewString()
+	claims := &JWTClaims{SessionID: sessionID, UserID: userID, AccountID: accountID}
+	before := time.Now().Add(-time.Minute).Truncate(time.Second)
+	base := authSessionData{
+		UserID: userID.String(), AccountID: accountID.String(), IdleTimeoutMinutes: 45,
+		CreatedAt: before.Unix(), LastSeen: before.Unix(), InvalidationMarker: "generation",
+	}
+	raw, _ := json.Marshal(base)
+	scope := base.snapshot(sessionID, accountID).Scope
+	sessionKey, markerKey := sessionKeyPrefix+sessionID, userSessionInvalidatedPrefix+userID.String()
 
-	t.Run("current generation is touched", func(t *testing.T) {
-		cache := &authSessionFakeCache{values: map[string][]byte{
-			sessionKeyPrefix + sessionID:                   makeSession("current-generation"),
-			userSessionInvalidatedPrefix + userID.String(): []byte("current-generation"),
-		}}
-		if _, err := (&AuthService{cache: cache}).TouchSession(context.Background(), sessionID); err != nil {
-			t.Fatalf("touch current generation: %v", err)
-		}
-		if cache.setCalls != 1 || cache.setTTLs[0] != sessionIdleTTL {
-			t.Fatalf("current session touch mismatch: sets=%d ttls=%v", cache.setCalls, cache.setTTLs)
-		}
-	})
-
-	t.Run("missing marker keeps legacy session valid", func(t *testing.T) {
-		cache := &authSessionFakeCache{values: map[string][]byte{
-			sessionKeyPrefix + sessionID: makeSession(""),
-		}}
-		if _, err := (&AuthService{cache: cache}).TouchSession(context.Background(), sessionID); err != nil {
-			t.Fatalf("touch legacy session: %v", err)
-		}
-	})
-
-	t.Run("marker store failure is transient and not touched", func(t *testing.T) {
-		markerKey := userSessionInvalidatedPrefix + userID.String()
-		cache := &authSessionFakeCache{
-			values: map[string][]byte{sessionKeyPrefix + sessionID: makeSession("current-generation")},
-			errors: map[string]error{markerKey: errors.New("redis unavailable")},
-		}
-		_, err := (&AuthService{cache: cache}).TouchSession(context.Background(), sessionID)
-		if !errors.Is(err, ErrAuthSessionUnavailable) {
-			t.Fatalf("error = %v, want ErrAuthSessionUnavailable", err)
-		}
-		if cache.setCalls != 0 {
-			t.Fatalf("unavailable marker store extended TTL with %d SET calls", cache.setCalls)
-		}
-	})
-
-	t.Run("session store failure is transient", func(t *testing.T) {
-		cache := &authSessionFakeCache{errors: map[string]error{
-			sessionKeyPrefix + sessionID: errors.New("redis unavailable"),
-		}}
-		_, err := (&AuthService{cache: cache}).TouchSession(context.Background(), sessionID)
-		if !errors.Is(err, ErrAuthSessionUnavailable) {
-			t.Fatalf("error = %v, want ErrAuthSessionUnavailable", err)
-		}
-	})
+	for _, tc := range []struct {
+		name  string
+		scope string
+		race  string
+		want  error
+	}{
+		{name: "interaction renews the configured timeout", scope: scope},
+		{name: "stale tab cannot renew", scope: "previous", want: ErrAuthSessionScopeChanged},
+		{name: "revoked during compare-and-set", scope: scope, race: "revoked", want: ErrAuthSessionExpired},
+		{name: "logout during compare-and-set", scope: scope, race: "logout", want: ErrAuthSessionExpired},
+		{name: "store outage", scope: scope, race: "outage", want: ErrAuthSessionUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &authSessionFakeCache{values: map[string][]byte{sessionKey: raw, markerKey: []byte("generation")}}
+			switch tc.race {
+			case "revoked":
+				store.beforeAuthWrite = func() { store.values[markerKey] = []byte("new-generation") }
+			case "logout":
+				store.beforeAuthWrite = func() { delete(store.values, sessionKey) }
+			case "outage":
+				store.authWriteError = errors.New("redis unavailable")
+			}
+			snapshot, err := (&AuthService{cache: store}).RecordSessionActivity(context.Background(), claims, tc.scope)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("activity error = %v, want %v", err, tc.want)
+			}
+			if tc.want != nil {
+				if store.setCalls != 0 {
+					t.Fatal("failed activity changed the stored session")
+				}
+				return
+			}
+			if store.setCalls != 1 || snapshot.Scope != scope || snapshot.IdleTimeoutMinutes != 45 ||
+				!snapshot.IdleExpiresAt.After(base.idleDeadline()) || !snapshot.AbsoluteExpiresAt.Equal(base.absoluteDeadline()) {
+				t.Fatalf("unexpected renewal: sets=%d snapshot=%+v", store.setCalls, snapshot)
+			}
+		})
+	}
 }
 
 func TestRefreshTokenRejectsInvalidatedSessionBeforeRotation(t *testing.T) {
@@ -525,14 +561,14 @@ func TestRefreshTokenRejectsInvalidatedSessionBeforeRotation(t *testing.T) {
 		userSessionInvalidatedPrefix + userID.String(): []byte("new-generation"),
 	}}
 	service := &AuthService{cache: cache}
-	if _, _, err := service.RefreshToken(context.Background(), refreshToken, "unused-secret"); err == nil {
+	if _, _, _, err := service.RefreshToken(context.Background(), refreshToken, "unused-secret"); err == nil {
 		t.Fatal("refresh rotated an invalidated session")
 	}
 	if cache.setCalls != 0 {
 		t.Fatalf("invalidated refresh performed %d SET calls", cache.setCalls)
 	}
-	if cache.delCalls != 1 {
-		t.Fatalf("terminal refresh deleted %d tokens, want 1", cache.delCalls)
+	if cache.delCalls != 0 {
+		t.Fatalf("terminal refresh deleted %d tokens; it could erase a concurrent rotation marker", cache.delCalls)
 	}
 }
 
@@ -550,7 +586,7 @@ func TestRefreshTokenPreservesCredentialWhenSessionStoreIsUnavailable(t *testing
 		errors: map[string]error{sessionKeyPrefix + sessionID: errors.New("redis unavailable")},
 	}
 	service := &AuthService{cache: cache}
-	if _, _, err := service.RefreshToken(context.Background(), refreshToken, "unused-secret"); !errors.Is(err, ErrAuthSessionUnavailable) {
+	if _, _, _, err := service.RefreshToken(context.Background(), refreshToken, "unused-secret"); !errors.Is(err, ErrAuthSessionUnavailable) {
 		t.Fatalf("error = %v, want ErrAuthSessionUnavailable", err)
 	}
 	if cache.delCalls != 0 || cache.setCalls != 0 {
@@ -564,7 +600,7 @@ func TestRefreshTokenClassifiesCredentialStoreFailureAsUnavailable(t *testing.T)
 		refreshTokenKeyPrefix + refreshToken: errors.New("redis unavailable"),
 	}}
 	service := &AuthService{cache: cache}
-	if _, _, err := service.RefreshToken(context.Background(), refreshToken, "unused-secret"); !errors.Is(err, ErrAuthSessionUnavailable) {
+	if _, _, _, err := service.RefreshToken(context.Background(), refreshToken, "unused-secret"); !errors.Is(err, ErrAuthSessionUnavailable) {
 		t.Fatalf("error = %v, want ErrAuthSessionUnavailable", err)
 	}
 	if cache.delCalls != 0 || cache.setCalls != 0 {
@@ -572,48 +608,61 @@ func TestRefreshTokenClassifiesCredentialStoreFailureAsUnavailable(t *testing.T)
 	}
 }
 
-func TestRotateRefreshCredentialPreservesCurrentCredentialOnRedisFailure(t *testing.T) {
-	oldToken := uuid.NewString()
-	newToken := uuid.NewString()
-	oldKey := refreshTokenKeyPrefix + oldToken
-	newKey := refreshTokenKeyPrefix + newToken
-	payload := []byte(`{"session_id":"new"}`)
-
-	t.Run("new credential write failure", func(t *testing.T) {
-		cache := &authSessionFakeCache{
-			values:    map[string][]byte{oldKey: []byte("old")},
-			setErrors: map[string]error{newKey: errors.New("redis write unavailable")},
-		}
-		err := (&AuthService{cache: cache}).rotateRefreshCredential(context.Background(), oldToken, newToken, payload)
-		if !errors.Is(err, ErrAuthSessionUnavailable) {
-			t.Fatalf("error = %v, want ErrAuthSessionUnavailable", err)
-		}
-		if string(cache.values[oldKey]) != "old" || cache.values[newKey] != nil || cache.delCalls != 0 {
-			t.Fatalf("failed write changed current credential: values=%v del=%v", cache.values, cache.delKeys)
-		}
-	})
-
-	t.Run("previous credential removal failure", func(t *testing.T) {
-		cache := &authSessionFakeCache{
-			values:    map[string][]byte{oldKey: []byte("old")},
-			delErrors: map[string]error{oldKey: errors.New("redis delete unavailable")},
-		}
-		err := (&AuthService{cache: cache}).rotateRefreshCredential(context.Background(), oldToken, newToken, payload)
-		if !errors.Is(err, ErrAuthSessionUnavailable) {
-			t.Fatalf("error = %v, want ErrAuthSessionUnavailable", err)
-		}
-		if string(cache.values[oldKey]) != "old" || cache.values[newKey] != nil {
-			t.Fatalf("failed removal did not preserve current credential: values=%v", cache.values)
-		}
-	})
-
-	t.Run("successful rotation", func(t *testing.T) {
-		cache := &authSessionFakeCache{values: map[string][]byte{oldKey: []byte("old")}}
-		if err := (&AuthService{cache: cache}).rotateRefreshCredential(context.Background(), oldToken, newToken, payload); err != nil {
-			t.Fatalf("rotate refresh credential: %v", err)
-		}
-		if cache.values[oldKey] != nil || string(cache.values[newKey]) != string(payload) {
-			t.Fatalf("rotation did not replace credential: values=%v", cache.values)
-		}
-	})
+func TestReplaceRefreshCredentialKeepsDeadlineAndConsumesOldScope(t *testing.T) {
+	userID, accountID, targetID := uuid.New(), uuid.New(), uuid.New()
+	sourceID, targetSessionID := uuid.NewString(), uuid.NewString()
+	oldToken, newToken := uuid.NewString(), uuid.NewString()
+	created := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+	seen := created.Add(time.Minute)
+	source := authSessionData{UserID: userID.String(), AccountID: accountID.String(), CreatedAt: created.Unix(), LastSeen: seen.Unix(), IdleTimeoutMinutes: 60}
+	sourceRaw, _ := json.Marshal(source)
+	oldRaw := refreshCredentialJSON(t, userID, accountID, sourceID, created)
+	for _, tc := range []struct {
+		name          string
+		switchAccount bool
+		writeError    error
+	}{
+		{name: "refresh remains passive"},
+		{name: "switch replaces the scope and preserves original login time", switchAccount: true},
+		{name: "Redis failure preserves both prior credentials", switchAccount: true, writeError: errors.New("redis unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &authSessionFakeCache{
+				values:         map[string][]byte{sessionKeyPrefix + sourceID: sourceRaw, refreshTokenKeyPrefix + oldToken: oldRaw},
+				authWriteError: tc.writeError,
+			}
+			auth := &AuthService{cache: store}
+			next := refreshTokenData{UserID: userID.String(), AccountID: accountID.String(), SessionID: sourceID, CreatedAt: created.Unix()}
+			var replacement *authSessionData
+			if tc.switchAccount {
+				next.AccountID, next.SessionID = targetID.String(), targetSessionID
+				copy := source
+				copy.AccountID, copy.IdleTimeoutMinutes = targetID.String(), 5
+				replacement = &copy
+			}
+			snapshot, err := auth.replaceRefreshCredential(context.Background(), oldToken, newToken, oldRaw, next, sourceID, accountID, replacement)
+			if tc.writeError != nil {
+				if !errors.Is(err, ErrAuthSessionUnavailable) ||
+					!bytes.Equal(store.values[sessionKeyPrefix+sourceID], sourceRaw) ||
+					!bytes.Equal(store.values[refreshTokenKeyPrefix+oldToken], oldRaw) ||
+					store.values[refreshTokenKeyPrefix+newToken] != nil {
+					t.Fatalf("failed rotation mutated authority: %v", err)
+				}
+				return
+			}
+			if err != nil || !snapshot.AbsoluteExpiresAt.Equal(source.absoluteDeadline()) {
+				t.Fatalf("rotate refresh: snapshot=%+v err=%v", snapshot, err)
+			}
+			if _, _, err := auth.readRefreshCredential(context.Background(), oldToken); !errors.Is(err, ErrAuthSessionScopeChanged) {
+				t.Fatalf("old credential is not marked consumed: %v", err)
+			}
+			if tc.switchAccount {
+				if store.values[sessionKeyPrefix+sourceID] != nil || snapshot.AccountID != targetID || snapshot.IdleTimeoutMinutes != 5 {
+					t.Fatalf("old account scope survived switch: snapshot=%+v", snapshot)
+				}
+			} else if !bytes.Equal(store.values[sessionKeyPrefix+sourceID], sourceRaw) || !snapshot.IdleExpiresAt.Equal(source.idleDeadline()) {
+				t.Fatalf("passive refresh changed deadline: snapshot=%+v", snapshot)
+			}
+		})
+	}
 }

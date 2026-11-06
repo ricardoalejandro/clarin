@@ -474,6 +474,8 @@ func Migrate(db *pgxpool.Pool) error {
 		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE`,
 		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS slug VARCHAR(255)`,
 		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS max_users_override INT NULL`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS session_idle_timeout_minutes INT NOT NULL DEFAULT 30
+			CHECK (session_idle_timeout_minutes BETWEEN 5 AND 1440)`,
 		`UPDATE users SET is_super_admin = TRUE, role = 'super_admin' WHERE is_admin = TRUE AND account_id = (SELECT id FROM accounts ORDER BY created_at LIMIT 1) AND is_super_admin = FALSE`,
 
 		// Multi-account user assignments (user can belong to many accounts)

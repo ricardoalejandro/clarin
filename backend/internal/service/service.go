@@ -86,6 +86,8 @@ type authCache interface {
 	Get(ctx context.Context, key string) ([]byte, error)
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
 	Del(ctx context.Context, keys ...string) error
+	UpdateAuthSession(ctx context.Context, sessionKey, markerKey string, expected []byte, marker string, deadline time.Time, value []byte, expiresAt time.Time) (bool, error)
+	RotateAuthCredential(ctx context.Context, rotation cache.AuthCredentialRotation) (bool, error)
 }
 
 // AuthService handles authentication
@@ -102,7 +104,6 @@ func (s *AuthService) SetCache(c *cache.Cache) {
 const (
 	jwtAccessTTL                 = 1 * time.Hour      // Access token lives 1 hour
 	refreshTokenTTL              = 7 * 24 * time.Hour // Refresh token lives 7 days
-	sessionIdleTTL               = 30 * time.Minute   // Session expires after 30 minutes of inactivity
 	loginLockoutTTL              = 15 * time.Minute   // Lockout after max failed attempts
 	maxLoginAttempts             = 5                  // Failed attempts before lockout
 	refreshTokenKeyPrefix        = "refresh:"         // Redis key prefix for refresh tokens
@@ -145,6 +146,7 @@ type authSessionData struct {
 	Username           string `json:"username"`
 	CreatedAt          int64  `json:"created_at"`
 	LastSeen           int64  `json:"last_seen"`
+	IdleTimeoutMinutes int    `json:"idle_timeout_minutes,omitempty"`
 	InvalidationMarker string `json:"invalidation_marker,omitempty"`
 }
 
@@ -192,29 +194,12 @@ func (s *AuthService) storeRefreshCredential(ctx context.Context, refreshToken s
 	return nil
 }
 
-func (s *AuthService) rotateRefreshCredential(ctx context.Context, oldRefreshToken, newRefreshToken string, payload []byte) error {
-	if err := s.storeRefreshCredential(ctx, newRefreshToken, payload); err != nil {
-		return err
-	}
-	oldRefreshToken = strings.TrimSpace(oldRefreshToken)
-	if oldRefreshToken == "" || oldRefreshToken == newRefreshToken {
-		return nil
-	}
-	if err := s.cache.Del(ctx, refreshTokenKeyPrefix+oldRefreshToken); err != nil {
-		// Keep the caller's existing credential canonical. The new value is not
-		// exposed in cookies when rotation fails, so remove it best-effort.
-		_ = s.cache.Del(ctx, refreshTokenKeyPrefix+newRefreshToken)
-		return fmt.Errorf("%w: previous refresh credential removal failed: %v", ErrAuthSessionUnavailable, err)
-	}
-	return nil
-}
-
-func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret string, restrictions ...OfflineReauthIdentity) (string, string, *domain.User, int, *repository.WhiteboardAuthorityMutationEffect, error) {
+func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret string, restrictions ...OfflineReauthIdentity) (string, string, *domain.User, int, AuthSessionSnapshot, *repository.WhiteboardAuthorityMutationEffect, error) {
 	if len(restrictions) > 1 {
-		return "", "", nil, 0, nil, ErrOfflineIdentityMismatch
+		return "", "", nil, 0, AuthSessionSnapshot{}, nil, ErrOfflineIdentityMismatch
 	}
 	if s.cache == nil {
-		return "", "", nil, 0, nil, fmt.Errorf("session service unavailable")
+		return "", "", nil, 0, AuthSessionSnapshot{}, nil, fmt.Errorf("session service unavailable")
 	}
 
 	// Check login rate limiting
@@ -224,7 +209,7 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 		if data != nil {
 			var failures int
 			if err := json.Unmarshal(data, &failures); err == nil && failures >= maxLoginAttempts {
-				return "", "", nil, 0, nil, fmt.Errorf("cuenta bloqueada temporalmente, intente en 15 minutos")
+				return "", "", nil, 0, AuthSessionSnapshot{}, nil, fmt.Errorf("cuenta bloqueada temporalmente, intente en 15 minutos")
 			}
 		}
 	}
@@ -232,22 +217,22 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	user, err := s.repos.User.GetByUsername(ctx, username)
 	if err != nil {
 		s.recordLoginFailure(ctx, username)
-		return "", "", nil, 0, nil, fmt.Errorf("invalid credentials")
+		return "", "", nil, 0, AuthSessionSnapshot{}, nil, fmt.Errorf("invalid credentials")
 	}
 	if user == nil {
 		s.recordLoginFailure(ctx, username)
-		return "", "", nil, 0, nil, fmt.Errorf("invalid credentials")
+		return "", "", nil, 0, AuthSessionSnapshot{}, nil, fmt.Errorf("invalid credentials")
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
 		s.recordLoginFailure(ctx, username)
-		return "", "", nil, 0, nil, fmt.Errorf("invalid credentials")
+		return "", "", nil, 0, AuthSessionSnapshot{}, nil, fmt.Errorf("invalid credentials")
 	}
 	// Check the requested continuation only after verifying the real password,
 	// but before account normalization, session writes or token issuance.
 	if len(restrictions) == 1 {
 		if err := restrictions[0].validateUser(user); err != nil {
-			return "", "", nil, 0, nil, err
+			return "", "", nil, 0, AuthSessionSnapshot{}, nil, err
 		}
 	}
 
@@ -260,30 +245,30 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	// Get user's account assignments
 	authorityEffect, err := s.repos.UserAccount.NormalizeForUserWithAuthorityImpact(ctx, user.ID)
 	if err != nil {
-		return "", "", nil, 0, nil, fmt.Errorf("failed to normalize user accounts: %w", err)
+		return "", "", nil, 0, AuthSessionSnapshot{}, nil, fmt.Errorf("failed to normalize user accounts: %w", err)
 	}
 	// Normalization can repair legacy global role/admin mirrors. Reload before
 	// minting claims so this login cannot carry the pre-repair authority.
 	user, err = s.repos.User.GetByID(ctx, user.ID)
 	if err != nil || user == nil {
-		return "", "", nil, 0, authorityEffect, fmt.Errorf("failed to reload normalized user authority")
+		return "", "", nil, 0, AuthSessionSnapshot{}, authorityEffect, fmt.Errorf("failed to reload normalized user authority")
 	}
 	var membership *domain.UserAccount
 	if len(restrictions) == 1 {
 		if err := restrictions[0].validateUser(user); err != nil {
-			return "", "", nil, 0, authorityEffect, err
+			return "", "", nil, 0, AuthSessionSnapshot{}, authorityEffect, err
 		}
 		membership, err = s.repos.UserAccount.GetByUserAndAccount(ctx, user.ID, restrictions[0].AccountID)
 		if errors.Is(err, pgx.ErrNoRows) || err == nil && membership == nil {
-			return "", "", nil, 0, authorityEffect, ErrOfflineIdentityMismatch
+			return "", "", nil, 0, AuthSessionSnapshot{}, authorityEffect, ErrOfflineIdentityMismatch
 		}
 		if err == nil {
 			active, accountErr := s.repos.Account.IsActive(ctx, restrictions[0].AccountID)
 			if accountErr == nil && !active {
-				return "", "", nil, 0, authorityEffect, ErrOfflineIdentityMismatch
+				return "", "", nil, 0, AuthSessionSnapshot{}, authorityEffect, ErrOfflineIdentityMismatch
 			}
 			if accountErr != nil {
-				return "", "", nil, 0, authorityEffect, fmt.Errorf("%w: account validation failed", ErrAuthSessionUnavailable)
+				return "", "", nil, 0, AuthSessionSnapshot{}, authorityEffect, fmt.Errorf("%w: account validation failed", ErrAuthSessionUnavailable)
 			}
 		}
 	} else {
@@ -291,13 +276,13 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	}
 	if err != nil {
 		if len(restrictions) == 1 {
-			return "", "", nil, 0, authorityEffect, fmt.Errorf("%w: membership validation failed", ErrAuthSessionUnavailable)
+			return "", "", nil, 0, AuthSessionSnapshot{}, authorityEffect, fmt.Errorf("%w: membership validation failed", ErrAuthSessionUnavailable)
 		}
-		return "", "", nil, 0, authorityEffect, fmt.Errorf("no account assignment available: %w", err)
+		return "", "", nil, 0, AuthSessionSnapshot{}, authorityEffect, fmt.Errorf("no account assignment available: %w", err)
 	}
 	accountCount, err := s.repos.UserAccount.CountByUserID(ctx, user.ID)
 	if err != nil {
-		return "", "", nil, 0, authorityEffect, fmt.Errorf("failed to count account assignments: %w", err)
+		return "", "", nil, 0, AuthSessionSnapshot{}, authorityEffect, fmt.Errorf("failed to count account assignments: %w", err)
 	}
 	activeAccountID := membership.AccountID
 	activeRole := membership.Role
@@ -306,9 +291,13 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	// Admins/super_admins get wildcard; agents get their role's permissions
 	isAdmin, permissions := accountSessionAuthority(user, membership)
 
-	sessionID, sessionCreatedAt, err := s.createSession(ctx, user.ID, activeAccountID, user.Username)
+	minutes, err := s.repos.Account.SessionIdleTimeout(ctx, activeAccountID)
 	if err != nil {
-		return "", "", nil, 0, authorityEffect, err
+		return "", "", nil, 0, AuthSessionSnapshot{}, authorityEffect, fmt.Errorf("%w: account session policy lookup failed", ErrAuthSessionUnavailable)
+	}
+	sessionID, session, err := s.createSession(ctx, user.ID, activeAccountID, user.Username, minutes)
+	if err != nil {
+		return "", "", nil, 0, AuthSessionSnapshot{}, authorityEffect, err
 	}
 
 	jti := uuid.New().String()
@@ -332,7 +321,7 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := token.SignedString([]byte(jwtSecret))
 	if err != nil {
-		return "", "", nil, 0, authorityEffect, fmt.Errorf("failed to sign token: %w", err)
+		return "", "", nil, 0, AuthSessionSnapshot{}, authorityEffect, fmt.Errorf("failed to sign token: %w", err)
 	}
 
 	// Generate refresh token and store in Redis
@@ -342,12 +331,12 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 		AccountID: activeAccountID.String(),
 		Username:  user.Username,
 		SessionID: sessionID,
-		CreatedAt: sessionCreatedAt,
+		CreatedAt: session.CreatedAt,
 	}
 	rtJSON, _ := json.Marshal(rtData)
 	if err := s.storeRefreshCredential(ctx, refreshToken, rtJSON); err != nil {
 		_ = s.cache.Del(ctx, sessionKeyPrefix+sessionID)
-		return "", "", nil, 0, authorityEffect, err
+		return "", "", nil, 0, AuthSessionSnapshot{}, authorityEffect, err
 	}
 
 	// Update user fields to match active account
@@ -357,34 +346,62 @@ func (s *AuthService) Login(ctx context.Context, username, password, jwtSecret s
 	if err := s.repos.UserAccount.MarkSelected(ctx, user.ID, activeAccountID); err != nil {
 		_ = s.cache.Del(ctx, refreshTokenKeyPrefix+refreshToken)
 		_ = s.cache.Del(ctx, sessionKeyPrefix+sessionID)
-		return "", "", nil, 0, authorityEffect, fmt.Errorf("failed to remember selected account: %w", err)
+		return "", "", nil, 0, AuthSessionSnapshot{}, authorityEffect, fmt.Errorf("failed to remember selected account: %w", err)
 	}
 
-	return tokenString, refreshToken, user, accountCount, authorityEffect, nil
+	return tokenString, refreshToken, user, accountCount, session.snapshot(sessionID, activeAccountID), authorityEffect, nil
 }
 
-func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID uuid.UUID, sessionID, oldRefreshToken, jwtSecret string) (string, string, *domain.User, error) {
-	if sessionID == "" {
-		return "", "", nil, fmt.Errorf("session expired")
+func (s *AuthService) SwitchAccount(ctx context.Context, source *JWTClaims, targetAccountID uuid.UUID, oldRefreshToken, jwtSecret string) (string, string, *domain.User, AuthSessionSnapshot, error) {
+	if source == nil || source.SessionID == "" {
+		return "", "", nil, AuthSessionSnapshot{}, ErrAuthSessionExpired
 	}
-	sessionData, err := s.TouchSession(ctx, sessionID)
+	userID := source.UserID
+	oldRefreshToken = strings.TrimSpace(oldRefreshToken)
+	credential, raw, err := s.readRefreshCredential(ctx, oldRefreshToken)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", nil, AuthSessionSnapshot{}, err
+	}
+	if credential.UserID != userID.String() || credential.AccountID != source.AccountID.String() || credential.SessionID != source.SessionID {
+		return "", "", nil, AuthSessionSnapshot{}, ErrAuthSessionScopeChanged
+	}
+	previous, _, err := s.loadSession(ctx, source.SessionID, userID, source.AccountID)
+	if err != nil {
+		return "", "", nil, AuthSessionSnapshot{}, err
+	}
+	if credential.CreatedAt != previous.CreatedAt {
+		return "", "", nil, AuthSessionSnapshot{}, ErrAuthSessionExpired
 	}
 
 	// Verify user exists
 	user, err := s.repos.User.GetByID(ctx, userID)
-	if err != nil || user == nil {
-		return "", "", nil, fmt.Errorf("user not found")
+	if err != nil {
+		return "", "", nil, AuthSessionSnapshot{}, fmt.Errorf("%w: user lookup failed", ErrAuthSessionUnavailable)
+	}
+	if user == nil || !user.IsActive {
+		return "", "", nil, AuthSessionSnapshot{}, ErrAuthSessionExpired
 	}
 
 	// Resolve the exact membership instead of loading every assigned account.
 	membership, err := s.repos.UserAccount.GetByUserAndAccount(ctx, userID, targetAccountID)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("no tiene acceso a esta cuenta")
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", "", nil, AuthSessionSnapshot{}, fmt.Errorf("%w: membership lookup failed", ErrAuthSessionUnavailable)
+		}
+		return "", "", nil, AuthSessionSnapshot{}, fmt.Errorf("no tiene acceso a esta cuenta")
 	}
 	accountRole := membership.Role
 	accountName := membership.AccountName
+	minutes, err := s.repos.Account.SessionIdleTimeout(ctx, targetAccountID)
+	if err != nil || !domain.ValidSessionIdleTimeoutMinutes(minutes) {
+		return "", "", nil, AuthSessionSnapshot{}, fmt.Errorf("%w: account session policy lookup failed", ErrAuthSessionUnavailable)
+	}
+	sessionID := uuid.NewString()
+	session := &authSessionData{
+		UserID: userID.String(), AccountID: targetAccountID.String(), Username: user.Username,
+		CreatedAt: previous.CreatedAt, LastSeen: time.Now().Unix(), IdleTimeoutMinutes: minutes,
+		InvalidationMarker: previous.InvalidationMarker,
+	}
 
 	// Generate new JWT for the target account
 	isAdmin, permissions := accountSessionAuthority(user, membership)
@@ -410,7 +427,7 @@ func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := token.SignedString([]byte(jwtSecret))
 	if err != nil {
-		return "", "", nil, fmt.Errorf("failed to sign token: %w", err)
+		return "", "", nil, AuthSessionSnapshot{}, fmt.Errorf("failed to sign token: %w", err)
 	}
 
 	// Generate refresh token
@@ -420,22 +437,23 @@ func (s *AuthService) SwitchAccount(ctx context.Context, userID, targetAccountID
 		AccountID: targetAccountID.String(),
 		Username:  user.Username,
 		SessionID: sessionID,
-		CreatedAt: sessionData.CreatedAt,
+		CreatedAt: session.CreatedAt,
 	}
-	rtJSON, _ := json.Marshal(rtData)
 
 	// Update user object to reflect active account
 	user.AccountID = targetAccountID
 	user.Role = accountRole
 	user.AccountName = accountName
+	snapshot, err := s.replaceRefreshCredential(ctx, oldRefreshToken, refreshToken, raw, rtData, source.SessionID, source.AccountID, session)
+	if err != nil {
+		return "", "", nil, AuthSessionSnapshot{}, err
+	}
+	// Only the winning switch updates the recent-account preference. A failed
+	// preference write cannot undo the Redis credential swap.
 	if err := s.repos.UserAccount.MarkSelected(ctx, userID, targetAccountID); err != nil {
-		return "", "", nil, fmt.Errorf("failed to remember selected account: %w", err)
+		log.Printf("[Auth] failed to remember selected account %s: %v", targetAccountID, err)
 	}
-	if err := s.rotateRefreshCredential(ctx, oldRefreshToken, refreshToken, rtJSON); err != nil {
-		return "", "", nil, err
-	}
-
-	return tokenString, refreshToken, user, nil
+	return tokenString, refreshToken, user, snapshot, nil
 }
 
 func (s *AuthService) GetUserAccounts(ctx context.Context, userID uuid.UUID) ([]*domain.UserAccount, error) {
@@ -496,36 +514,33 @@ func (s *AuthService) validateTokenCredential(ctx context.Context, tokenString, 
 }
 
 func (s *AuthService) ValidateToken(tokenString, jwtSecret string) (*JWTClaims, error) {
-	claims, err := s.validateTokenCredential(context.Background(), tokenString, jwtSecret)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := s.TouchSession(context.Background(), claims.SessionID); err != nil {
-		return nil, err
-	}
-
-	return claims, nil
+	return s.ValidateTokenReadOnly(context.Background(), tokenString, jwtSecret)
 }
 
 // ValidateTokenReadOnly authenticates a signed access token and its canonical
-// session without updating LastSeen or extending the idle TTL. It is reserved
-// for long-lived transport reconnect credentials such as whiteboard tickets.
+// session without changing the idle deadline.
 func (s *AuthService) ValidateTokenReadOnly(ctx context.Context, tokenString, jwtSecret string) (*JWTClaims, error) {
+	claims, _, err := s.ValidateTokenWithSession(ctx, tokenString, jwtSecret)
+	return claims, err
+}
+
+func (s *AuthService) ValidateTokenWithSession(ctx context.Context, tokenString, jwtSecret string) (*JWTClaims, AuthSessionSnapshot, error) {
 	claims, err := s.validateTokenCredential(ctx, tokenString, jwtSecret)
 	if err != nil {
-		return nil, err
+		return nil, AuthSessionSnapshot{}, err
 	}
-	if err := s.ValidateSessionReadOnly(ctx, claims.SessionID, claims.UserID); err != nil {
-		return nil, err
+	snapshot, err := s.SessionSnapshot(ctx, claims.SessionID, claims.UserID, claims.AccountID)
+	if err != nil {
+		return nil, AuthSessionSnapshot{}, err
 	}
 	invalidated, err := s.checkUserSessionInvalidated(ctx, claims)
 	if err != nil {
-		return nil, err
+		return nil, AuthSessionSnapshot{}, err
 	}
 	if invalidated {
-		return nil, fmt.Errorf("%w: session invalidated", ErrAuthSessionExpired)
+		return nil, AuthSessionSnapshot{}, fmt.Errorf("%w: session invalidated", ErrAuthSessionExpired)
 	}
-	return claims, nil
+	return claims, snapshot, nil
 }
 
 // ValidateRefreshTokenReadOnly authenticates a path-limited whiteboard
@@ -563,7 +578,7 @@ func (s *AuthService) ValidateRefreshTokenReadOnly(ctx context.Context, refreshT
 	if credential.CreatedAt <= 0 || createdAt.After(now.Add(time.Minute)) || now.Sub(createdAt) > refreshTokenTTL {
 		return nil, fmt.Errorf("%w: refresh credential lifetime exceeded", ErrAuthSessionExpired)
 	}
-	session, err := s.validateSessionReadOnly(ctx, credential.SessionID, userID)
+	session, _, err := s.loadSession(ctx, credential.SessionID, userID, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -677,72 +692,49 @@ func (s *AuthService) checkUserSessionInvalidated(ctx context.Context, claims *J
 	return false, nil
 }
 
-// IsUserSessionInvalidated checks if a user's sessions have been invalidated after their token was issued.
-func (s *AuthService) IsUserSessionInvalidated(claims *JWTClaims) bool {
-	invalidated, err := s.checkUserSessionInvalidated(context.Background(), claims)
-	return err == nil && invalidated
-}
-
 // RefreshToken validates a refresh token and issues a new JWT + rotated refresh token
-func (s *AuthService) RefreshToken(ctx context.Context, oldRefreshToken, jwtSecret string) (string, string, error) {
-	if s.cache == nil {
-		return "", "", fmt.Errorf("%w: cache not configured", ErrAuthSessionUnavailable)
-	}
-
-	// Look up refresh token in Redis
-	data, err := s.cache.Get(ctx, refreshTokenKeyPrefix+oldRefreshToken)
+func (s *AuthService) RefreshToken(ctx context.Context, oldRefreshToken, jwtSecret string) (string, string, AuthSessionSnapshot, error) {
+	oldRefreshToken = strings.TrimSpace(oldRefreshToken)
+	rtData, raw, err := s.readRefreshCredential(ctx, oldRefreshToken)
 	if err != nil {
-		return "", "", fmt.Errorf("%w: refresh credential read failed: %v", ErrAuthSessionUnavailable, err)
+		return "", "", AuthSessionSnapshot{}, err
 	}
-	if data == nil {
-		return "", "", fmt.Errorf("invalid or expired refresh token")
+	userID, userErr := uuid.Parse(rtData.UserID)
+	accountID, accountErr := uuid.Parse(rtData.AccountID)
+	if userErr != nil || accountErr != nil || userID == uuid.Nil || accountID == uuid.Nil {
+		return "", "", AuthSessionSnapshot{}, ErrAuthSessionExpired
 	}
-
-	// Parse stored data
-	var rtData refreshTokenData
-	if err := json.Unmarshal(data, &rtData); err != nil {
-		return "", "", fmt.Errorf("corrupted refresh token data")
-	}
-
-	if rtData.SessionID == "" {
-		_ = s.cache.Del(ctx, refreshTokenKeyPrefix+oldRefreshToken)
-		return "", "", fmt.Errorf("session expired")
-	}
-	sessionData, err := s.TouchSession(ctx, rtData.SessionID)
+	sessionData, _, err := s.loadSession(ctx, rtData.SessionID, userID, accountID)
 	if err != nil {
 		if errors.Is(err, ErrAuthSessionExpired) {
-			_ = s.cache.Del(ctx, refreshTokenKeyPrefix+oldRefreshToken)
+			// A concurrent switch may have replaced the session after we read
+			// its refresh credential. Preserve the winning browser cookies.
+			if _, _, credentialErr := s.readRefreshCredential(ctx, oldRefreshToken); errors.Is(credentialErr, ErrAuthSessionScopeChanged) || errors.Is(credentialErr, ErrAuthSessionUnavailable) {
+				return "", "", AuthSessionSnapshot{}, credentialErr
+			}
 		}
-		return "", "", err
+		return "", "", AuthSessionSnapshot{}, err
 	}
-
-	userID, err := uuid.Parse(rtData.UserID)
-	if err != nil {
-		return "", "", fmt.Errorf("invalid user in refresh token")
-	}
-	accountID, err := uuid.Parse(rtData.AccountID)
-	if err != nil {
-		return "", "", fmt.Errorf("invalid account in refresh token")
+	if sessionData.CreatedAt != rtData.CreatedAt {
+		return "", "", AuthSessionSnapshot{}, ErrAuthSessionExpired
 	}
 
 	// Verify user still exists and is active
 	user, err := s.repos.User.GetByID(ctx, userID)
 	if err != nil {
-		return "", "", fmt.Errorf("%w: user lookup failed", ErrAuthSessionUnavailable)
+		return "", "", AuthSessionSnapshot{}, fmt.Errorf("%w: user lookup failed", ErrAuthSessionUnavailable)
 	}
 	if user == nil || !user.IsActive {
-		_ = s.cache.Del(ctx, refreshTokenKeyPrefix+oldRefreshToken)
-		return "", "", fmt.Errorf("user not found")
+		return "", "", AuthSessionSnapshot{}, fmt.Errorf("user not found")
 	}
 
 	// Resolve current role directly for the active account.
 	membership, err := s.repos.UserAccount.GetByUserAndAccount(ctx, userID, accountID)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
-			return "", "", fmt.Errorf("%w: membership lookup failed", ErrAuthSessionUnavailable)
+			return "", "", AuthSessionSnapshot{}, fmt.Errorf("%w: membership lookup failed", ErrAuthSessionUnavailable)
 		}
-		_ = s.cache.Del(ctx, refreshTokenKeyPrefix+oldRefreshToken)
-		return "", "", fmt.Errorf("account access revoked")
+		return "", "", AuthSessionSnapshot{}, fmt.Errorf("account access revoked")
 	}
 	accountRole := membership.Role
 
@@ -771,81 +763,41 @@ func (s *AuthService) RefreshToken(ctx context.Context, oldRefreshToken, jwtSecr
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := token.SignedString([]byte(jwtSecret))
 	if err != nil {
-		return "", "", fmt.Errorf("failed to sign token: %w", err)
+		return "", "", AuthSessionSnapshot{}, fmt.Errorf("failed to sign token: %w", err)
 	}
 
-	// Persist the replacement before retiring the credential still present in
-	// the browser. Any Redis failure remains retryable with the current cookie.
-	newRefreshToken := uuid.New().String()
+	newRefreshToken := uuid.NewString()
 	newRTData := refreshTokenData{
-		UserID:    user.ID.String(),
-		AccountID: accountID.String(),
-		Username:  user.Username,
-		SessionID: rtData.SessionID,
-		CreatedAt: sessionData.CreatedAt,
+		UserID: user.ID.String(), AccountID: accountID.String(), Username: user.Username,
+		SessionID: rtData.SessionID, CreatedAt: sessionData.CreatedAt,
 	}
-	rtJSON, _ := json.Marshal(newRTData)
-	if err := s.rotateRefreshCredential(ctx, oldRefreshToken, newRefreshToken, rtJSON); err != nil {
-		return "", "", err
+	snapshot, err := s.replaceRefreshCredential(ctx, oldRefreshToken, newRefreshToken, raw, newRTData, rtData.SessionID, accountID, nil)
+	if err != nil {
+		return "", "", AuthSessionSnapshot{}, err
 	}
-
-	return tokenString, newRefreshToken, nil
+	return tokenString, newRefreshToken, snapshot, nil
 }
 
-func (s *AuthService) createSession(ctx context.Context, userID, accountID uuid.UUID, username string) (string, int64, error) {
-	if s.cache == nil {
-		return "", 0, fmt.Errorf("session service unavailable")
+func (s *AuthService) createSession(ctx context.Context, userID, accountID uuid.UUID, username string, minutes int) (string, *authSessionData, error) {
+	if s.cache == nil || !domain.ValidSessionIdleTimeoutMinutes(minutes) {
+		return "", nil, fmt.Errorf("%w: session policy unavailable", ErrAuthSessionUnavailable)
 	}
-	now := time.Now().Unix()
-	sessionID := uuid.New().String()
+	now := time.Now()
+	sessionID := uuid.NewString()
 	invalidationMarker, err := s.cache.Get(ctx, userSessionInvalidatedPrefix+userID.String())
 	if err != nil {
-		return "", 0, fmt.Errorf("failed to read session invalidation state: %w", err)
+		return "", nil, fmt.Errorf("%w: failed to read session invalidation state", ErrAuthSessionUnavailable)
 	}
-	data := authSessionData{
-		UserID:             userID.String(),
-		AccountID:          accountID.String(),
-		Username:           username,
-		CreatedAt:          now,
-		LastSeen:           now,
+	data := &authSessionData{
+		UserID: userID.String(), AccountID: accountID.String(), Username: username,
+		CreatedAt: now.Unix(), LastSeen: now.Unix(), IdleTimeoutMinutes: minutes,
 		InvalidationMarker: string(invalidationMarker),
 	}
 	raw, _ := json.Marshal(data)
-	if err := s.cache.Set(ctx, sessionKeyPrefix+sessionID, raw, sessionIdleTTL); err != nil {
-		return "", 0, fmt.Errorf("failed to create session: %w", err)
+	if err := s.cache.Set(ctx, sessionKeyPrefix+sessionID, raw, data.deadline().Add(authSessionReasonRetention).Sub(now)); err != nil {
+		return "", nil, fmt.Errorf("%w: failed to create session", ErrAuthSessionUnavailable)
 	}
-	return sessionID, now, nil
-}
-
-func (s *AuthService) TouchSession(ctx context.Context, sessionID string) (*authSessionData, error) {
-	if s.cache == nil {
-		return nil, fmt.Errorf("%w: cache not configured", ErrAuthSessionUnavailable)
-	}
-	data, err := s.cache.Get(ctx, sessionKeyPrefix+sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("%w: session read failed: %v", ErrAuthSessionUnavailable, err)
-	}
-	if data == nil {
-		return nil, fmt.Errorf("%w: session missing", ErrAuthSessionExpired)
-	}
-	var session authSessionData
-	if err := json.Unmarshal(data, &session); err != nil {
-		_ = s.cache.Del(ctx, sessionKeyPrefix+sessionID)
-		return nil, fmt.Errorf("%w: malformed session", ErrAuthSessionExpired)
-	}
-	if time.Since(time.Unix(session.CreatedAt, 0)) > refreshTokenTTL {
-		_ = s.cache.Del(ctx, sessionKeyPrefix+sessionID)
-		return nil, fmt.Errorf("%w: absolute lifetime exceeded", ErrAuthSessionExpired)
-	}
-	if err := s.validateSessionInvalidationGeneration(ctx, &session); err != nil {
-		return nil, err
-	}
-	session.LastSeen = time.Now().Unix()
-	raw, _ := json.Marshal(session)
-	if err := s.cache.Set(ctx, sessionKeyPrefix+sessionID, raw, sessionIdleTTL); err != nil {
-		return nil, fmt.Errorf("%w: session refresh failed: %v", ErrAuthSessionUnavailable, err)
-	}
-	return &session, nil
+	return sessionID, data, nil
 }
 
 func (s *AuthService) validateSessionInvalidationGeneration(ctx context.Context, session *authSessionData) error {
@@ -871,49 +823,9 @@ func (s *AuthService) validateSessionInvalidationGeneration(ctx context.Context,
 	return nil
 }
 
-// ValidateSessionReadOnly checks the canonical Redis session without changing
-// LastSeen or extending its idle TTL. Long-lived transports use this method so
-// their own keepalives never turn into account activity.
-//
-// AccountID is intentionally not compared: a login session can switch its
-// active account while retaining the same SessionID. Every transport must
-// independently authorize its account context against current membership and
-// resource ACLs.
-func (s *AuthService) validateSessionReadOnly(ctx context.Context, sessionID string, expectedUserID uuid.UUID) (*authSessionData, error) {
-	if s.cache == nil {
-		return nil, fmt.Errorf("%w: cache not configured", ErrAuthSessionUnavailable)
-	}
-	if strings.TrimSpace(sessionID) == "" || expectedUserID == uuid.Nil {
-		return nil, fmt.Errorf("%w: missing session identity", ErrAuthSessionExpired)
-	}
-	data, err := s.cache.Get(ctx, sessionKeyPrefix+sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("%w: session read failed: %v", ErrAuthSessionUnavailable, err)
-	}
-	if data == nil {
-		return nil, fmt.Errorf("%w: session missing", ErrAuthSessionExpired)
-	}
-	var session authSessionData
-	if err := json.Unmarshal(data, &session); err != nil {
-		return nil, fmt.Errorf("%w: malformed session", ErrAuthSessionExpired)
-	}
-	userID, err := uuid.Parse(strings.TrimSpace(session.UserID))
-	if err != nil || userID != expectedUserID {
-		return nil, fmt.Errorf("%w: session user mismatch", ErrAuthSessionExpired)
-	}
-	now := time.Now()
-	createdAt := time.Unix(session.CreatedAt, 0)
-	if session.CreatedAt <= 0 || createdAt.After(now.Add(time.Minute)) || now.Sub(createdAt) > refreshTokenTTL {
-		return nil, fmt.Errorf("%w: session absolute lifetime exceeded", ErrAuthSessionExpired)
-	}
-	if err := s.validateSessionInvalidationGeneration(ctx, &session); err != nil {
-		return nil, err
-	}
-	return &session, nil
-}
-
-func (s *AuthService) ValidateSessionReadOnly(ctx context.Context, sessionID string, expectedUserID uuid.UUID) error {
-	_, err := s.validateSessionReadOnly(ctx, sessionID, expectedUserID)
+// ValidateSessionReadOnly checks Redis without extending the session.
+func (s *AuthService) ValidateSessionReadOnly(ctx context.Context, sessionID string, expectedUserID, expectedAccountID uuid.UUID) error {
+	_, _, err := s.loadSession(ctx, sessionID, expectedUserID, expectedAccountID)
 	return err
 }
 
