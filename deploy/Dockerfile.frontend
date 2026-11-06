@@ -55,6 +55,8 @@ COPY --from=builder /app/node_modules/monaco-editor/ThirdPartyNotices.txt ./THIR
 COPY --from=builder /app/node_modules/jsonc-parser/LICENSE.md ./THIRD_PARTY_JSONC_PARSER_LICENSE.md
 COPY --from=builder /app/node_modules/jsonrepair/LICENSE.md ./THIRD_PARTY_JSONREPAIR_LICENSE.md
 COPY --from=builder /app/node_modules/jsqr/LICENSE ./THIRD_PARTY_JSQR_LICENSE.txt
+COPY --from=builder /app/third_party/utilities/SAXES-LICENSE.txt ./THIRD_PARTY_SAXES_LICENSE.txt
+COPY --from=builder /app/node_modules/xmlchars/LICENSE ./THIRD_PARTY_XMLCHARS_LICENSE.txt
 # Vendored assets can originate in a private workspace (0600/0700). Keep
 # public files root-owned but readable/traversable by the non-root server.
 RUN chmod -R a+rX /app/public && \

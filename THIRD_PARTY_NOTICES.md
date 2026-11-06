@@ -77,6 +77,10 @@ Clarin uses `fabric@7.4.0`. The narrow legacy-gradient adapter derives from Fabr
 
 Clarin uses the unchanged official `xlsx@0.20.3` tarball, not the obsolete npm-registry release. Its Apache-2.0 license remains inside the vendored distribution. [Provenance and immutable SHA-256](frontend/vendor/sheetjs/README.md) identify the official CDN artifact; `frontend/package-lock.json` additionally fixes its SHA-512 integrity.
 
+## XML utility
+
+The browser XML editor uses `saxes@6.0.0` (ISC) and `xmlchars@2.2.0` (MIT). The npm package for saxes declares its license without including the full text, so Clarin distributes the [license from its published source commit](frontend/third_party/utilities/SAXES-LICENSE.txt), `211fa0ebec9b628affc09219199639887174bfc3`. The frontend image also includes the license shipped by xmlchars.
+
 ## Historical dependency patch evidence — 2026-10-11
 
 The current lock uses Next 16.3.8, sharp 0.35.5, DOMPurify 3.4.16 and source-map-js 1.2.2. The refreshed npm audit reports 9 aggregate findings (6 high, 3 low) in all dependencies and 6 (3 high, 3 low) with development dependencies omitted. Remaining direct advisories concern braces and KaTeX; the current baseline records them as in triage, not fixed or proven unreachable. September scan results cited above are historical evidence only. The editor source is unchanged by this patch; its hash was reproduced independently from the committed Git archive and installed source. The SBOM and notices are regenerated from this lock and exact installed legal texts. These checks do not assert production deployment or approve unresolved runtime risks.

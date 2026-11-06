@@ -29,7 +29,7 @@
       "total": 0
     },
     "evidence": "frontend/third_party/excalidraw/npm-audit-2026-11-05-katex.json",
-    "lockfileSha256": "f6e542934dc08070dbe24b05354dfad4df2305c36bd8885d6486d0956039b6c0",
+    "lockfileSha256": "67c1ff58b370bf904bbfaf889602441b56fbb694bc290f579386d7c850c44af9",
     "scope": "Production npm graph of the exact candidate lock. The official KaTeX 0.18.2 release (gitHead 93c362b0a57e1e87684f08eb628ef4288938af2f) is pinned under Mermaid to address GHSA-238p-pmpm-9mq7. The vendored editor and Mermaid entry point are unchanged."
   },
   "licenseOverrides": [

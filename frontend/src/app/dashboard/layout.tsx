@@ -977,7 +977,7 @@ function DashboardLayoutContent({
 
         {/* Page content */}
         <main className={`flex-1 flex flex-col overflow-hidden min-h-0 ${
-          mobileNoModules || mobilePathUnavailable || pathname === '/dashboard/chats' || pathname === '/dashboard/chat-api' || pathname === '/dashboard/tasks' || pathname?.startsWith('/dashboard/documents') || pathname?.startsWith('/dashboard/whiteboards') ? 'p-0' : mobileAppMode ? 'p-3 sm:p-4 lg:p-5' : 'p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-5'
+          mobileNoModules || mobilePathUnavailable || pathname === '/dashboard/chats' || pathname === '/dashboard/chat-api' || pathname === '/dashboard/tasks' || pathname === '/dashboard/utilities/json' || pathname?.startsWith('/dashboard/documents') || pathname?.startsWith('/dashboard/whiteboards') ? 'p-0' : mobileAppMode ? 'p-3 sm:p-4 lg:p-5' : 'p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4 lg:p-5'
         } ${(chatComposerKeyboardOpen || chatComposerAccessoryOpen) && !updateAvailable ? 'pt-[env(safe-area-inset-top)]' : ''}`}>
           {mobileNoModules ? (
             <MobileUnavailableSurface returnHref="" noModules />
