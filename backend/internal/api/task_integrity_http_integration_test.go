@@ -87,7 +87,7 @@ func TestTaskIntegrityHTTPResponseLossAndRepeatedStartupMigration(t *testing.T) 
 		exec(`INSERT INTO task_workflows(id,account_id,environment_id,name,is_default,created_by) VALUES($1,$2,$3,'HTTP flow',TRUE,$4)`, workflow, a.account, a.environment, a.user)
 		exec(`INSERT INTO task_statuses(id,account_id,workflow_id,name,color,category,sort_order,is_default) VALUES($1,$2,$3,'Open','#64748B','not_started',0,TRUE)`, a.status, a.account, workflow)
 		exec(`INSERT INTO task_lists(id,account_id,environment_id,workflow_id,name,created_by) VALUES($1,$2,$3,$4,'HTTP list',$5)`, a.list, a.account, a.environment, workflow, a.user)
-		token, refresh, _, _, _, err := s.services.Auth.Login(ctx, a.user.String(), password, s.cfg.JWTSecret,
+		token, refresh, _, _, _, _, err := s.services.Auth.Login(ctx, a.user.String(), password, s.cfg.JWTSecret,
 			service.OfflineReauthIdentity{UserID: a.user, AccountID: a.account})
 		if err != nil {
 			t.Fatalf("real password login: %v", err)
