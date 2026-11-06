@@ -58,6 +58,26 @@ test('Mermaid conversion stays on the patched Excalidraw release and compatible 
   assert.equal(require('mermaid/package.json').version, '11.16.1')
 })
 
+test('KaTeX used by Mermaid ignores inherited trust options', async () => {
+  const mermaidRequire = createRequire(require.resolve('mermaid'))
+  const katexManifest = mermaidRequire.resolve('katex/package.json')
+  assert.equal(mermaidRequire(katexManifest).version, '0.18.2')
+  const { default: katex } = await import(new URL('dist/katex.mjs', pathToFileURL(katexManifest)).href)
+  const formula = '\\href{https://example.invalid}{x}'
+  const options = { output: 'mathml' }
+  const inheritedTrust = Object.assign(Object.create({ trust: true }), options)
+  assert.match(katex.renderToString('x^2', options), /<msup>/)
+  assert.match(katex.renderToString(formula, { ...options, trust: true }), /href="https:\/\/example\.invalid"/)
+  assert.doesNotMatch(katex.renderToString(formula, inheritedTrust), /href="/)
+
+  Object.defineProperty(Object.prototype, 'trust', { value: true, configurable: true, writable: true })
+  try {
+    assert.doesNotMatch(katex.renderToString(formula, options), /href="/)
+  } finally {
+    delete Object.prototype.trust
+  }
+})
+
 for (const name of ['lodash', 'lodash-es']) {
   test(`${name}: blocks prototype traversal and template import injection`, async () => {
     const module = await import(name)

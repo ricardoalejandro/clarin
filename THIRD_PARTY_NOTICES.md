@@ -30,7 +30,7 @@ This notice covers the public MIT-licensed Excalidraw project only. It grants no
 
 ## Reproducible Excalidraw dependency inventory
 
-The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1-clarin.8` is defined by `frontend/package-lock.json` and the [current candidate baseline](frontend/third_party/excalidraw/supply-chain-2026-10-12.json). The [archived CycloneDX 1.6 SBOM](frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.8.cdx.json) contains 248 components and has SHA-256 `11dbd6b8a303cec9017237893fe4c715696e7c874f4325e3d158b1fc4da498ef`. It binds the vendored source to the exact upstream tag/commit plus the documented Clarin patches, including the `.7` Mermaid capability boundary and dependency fixes.
+The exact runtime/optional/peer closure rooted at `@excalidraw/excalidraw@0.18.1-clarin.8` is defined by `frontend/package-lock.json` and the [November 5 baseline](frontend/third_party/excalidraw/supply-chain-2026-11-05-katex.json). The [CycloneDX 1.6 SBOM](frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.8.cdx.json) contains 248 components and has SHA-256 `517e7e70e5fa6d6c0ff2fce77eaf647120317381ba956064ca441e4f95200e88`. It binds the vendored source to the exact upstream tag/commit and the documented Clarin patches.
 
 Generate and verify it without contacting a third-party service:
 
@@ -38,12 +38,12 @@ Generate and verify it without contacting a third-party service:
 node .codex/skills/clarin-excalidraw-development/scripts/generate-supply-chain-sbom.mjs \
   --manifest frontend/package.json \
   --lockfile frontend/package-lock.json \
-  --baseline frontend/third_party/excalidraw/supply-chain-2026-10-12.json \
+  --baseline frontend/third_party/excalidraw/supply-chain-2026-11-05-katex.json \
   --verify frontend/third_party/excalidraw/excalidraw-0.18.1-clarin.8.cdx.json \
   --output /tmp/clarin-excalidraw-engine.cdx.json
 ```
 
-The [historical September audit](docs/security-dependency-audit-after-2026-09-14.json) covered all exact public versions in that release lock, including development dependencies. npm reported zero findings in both scopes at that time; OSV's two SheetJS matches and GitHub's withdrawn esbuild record are preserved and individually explained. That historical engine closure had no active matched advisory. The current October baseline below retains the newly reported braces and KaTeX advisories; it does not inherit September clearance. Supply-chain evidence does not replace browser, deployment or runtime approval.
+Clarin pins [KaTeX 0.18.2](https://github.com/KaTeX/KaTeX/releases/tag/v0.18.2) under Mermaid to address [GHSA-238p-pmpm-9mq7](https://github.com/KaTeX/KaTeX/security/advisories/GHSA-238p-pmpm-9mq7). The package uses the MIT license, included in the [dependency license texts](frontend/third_party/excalidraw/DEPENDENCY-LICENSES.txt). The [November 5 npm audit](frontend/third_party/excalidraw/npm-audit-2026-11-05-katex.json) reports zero production findings for the lock. The [September audit](docs/security-dependency-audit-after-2026-09-14.json) remains historical evidence for the versions then installed, including the OSV and GitHub findings reviewed at the time.
 
 The npm lock omits license fields for `fuzzy@0.1.3` and `khroma@2.1.0`; the baseline records their MIT license-file paths and verified SHA-256 hashes. The SBOM does not replace the applicable copyright/license texts.
 
